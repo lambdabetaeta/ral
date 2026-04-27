@@ -3,6 +3,9 @@
 //! Truecolor ANSI, plain `eprintln!`/`println!` direct to the tty.  Each
 //! helper writes a self-contained block so the on-screen layout reads as
 //! a sequence of labelled frames rather than a flat log.
+//!
+//! Assistant text is rendered as Markdown via `termimad` before the
+//! per-line cyan-bar prefix is applied.
 
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
@@ -58,8 +61,21 @@ pub fn turn(n: usize) {
 }
 
 pub fn assistant_text(text: &str) {
+    use termimad::crossterm::style::Color;
+    use termimad::MadSkin;
+
+    let mut skin = MadSkin::default();
+    skin.bold.set_fg(Color::Rgb { r: 57, g: 255, b: 20 });
+    skin.italic.set_fg(Color::Rgb { r: 140, g: 150, b: 170 });
+    skin.inline_code.set_fg(Color::Rgb { r: 255, g: 95, b: 31 });
+    skin.code_block.compound_style.set_fg(Color::Rgb { r: 255, g: 95, b: 31 });
+    skin.headers[0].compound_style.set_fg(Color::Rgb { r: 255, g: 20, b: 147 });
+    skin.headers[1].compound_style.set_fg(Color::Rgb { r: 0, g: 240, b: 255 });
+    skin.headers[2].compound_style.set_fg(Color::Rgb { r: 255, g: 234, b: 0 });
+
+    let rendered = skin.text(text, Some(W - 2)).to_string();
     let c = cyan();
-    for line in text.lines() {
+    for line in rendered.lines() {
         println!("{c}┃{RESET} {line}");
     }
 }

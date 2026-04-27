@@ -4,24 +4,20 @@ A Docker container for running `exarch` in permissive mode
 (`EXARCH_DANGEROUS=1`).  The container is the trust boundary in place
 of bubblewrap; the per-call `grant` becomes a no-op.
 
-The default `Dockerfile` fetches a pre-built binary from a GitHub
-Release at build time.  No checkout, no `shell-dev`, no rust
-toolchain — just `docker compose build`.
+The `Dockerfile` fetches a pre-built binary from a GitHub Release at
+build time.  No checkout, no `shell-dev`, no rust toolchain.
 
 ## Layout
 
-- `Dockerfile`            — fetches `exarch-linux-${TARGETARCH}` from
-                             a GitHub Release, drops it into a hardened
-                             debian:bookworm-slim image.
-- `compose.yaml`          — read-only rootfs, all caps dropped,
-                             `no-new-privileges`, tmpfs for `/tmp` and
-                             `$HOME`, pids and memory capped.
-- `entrypoint.sh`         — refuses to start unless at least one of
-                             `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or
-                             `OPENROUTER_API_KEY` is set.
-- `Dockerfile.local`,
-  `compose.local.yaml`,
-  `build.sh`              — local-build variant; see below.
+- `Dockerfile`     — fetches `exarch-linux-${TARGETARCH}` from a GitHub
+                      Release, drops it into a hardened
+                      `debian:bookworm-slim` image.
+- `compose.yaml`   — read-only rootfs, all caps dropped,
+                      `no-new-privileges`, tmpfs for `/tmp` and `$HOME`,
+                      pids and memory capped.
+- `entrypoint.sh`  — refuses to start unless at least one provider key
+                      is set; forwards `EXARCH_PROVIDER`/`EXARCH_MODEL`
+                      to `exarch` as `--provider`/`--model`.
 
 ## Build
 
@@ -34,39 +30,67 @@ Pin a tag:
     EXARCH_VERSION=v0.1.0 \
         docker compose -f exarch/docker/compose.yaml build
 
+Bake a provider and model into the image:
+
+    EXARCH_PROVIDER=openai EXARCH_MODEL=gpt-4o \
+        docker compose -f exarch/docker/compose.yaml build
+
 The release artifacts come from `scripts/build-release.ral`, which
 publishes `exarch-linux-{x86_64,arm64}` to a rolling `latest`
-prerelease alongside the ral binaries.  `dev/deploy-public.ral`
-mirrors that release to the public `lambdabetaeta/ral` repo, which is
-the default `EXARCH_REPO` (no auth needed).  Override to fetch from
-`lambdabetaeta/ral-private` if you have access:
+prerelease alongside the ral binaries.  `dev/deploy-public.ral` mirrors
+that release to `lambdabetaeta/ral`, which is the default `EXARCH_REPO`
+(no auth needed).  Override to fetch from `lambdabetaeta/ral-private`:
 
     EXARCH_REPO=lambdabetaeta/ral-private \
     GITHUB_TOKEN=$(gh auth token) \
         docker compose -f exarch/docker/compose.yaml build
 
-For a no-clone, no-build path, pull the prebuilt image instead — see
+For a no-clone, no-build path, pull the prebuilt image — see
 `exarch/README.md` for the `ghcr.io/lambdabetaeta/exarch-box` one-liner.
 
 ## Run
 
     docker compose -f exarch/docker/compose.yaml run --rm exarch-box
 
-Pass arguments through to `exarch`:
+A REPL prompt (`▸`) opens.  Type a task and press Enter; EOF or `/quit`
+exits.
+
+## Passing flags
+
+Any argument after the service name is forwarded verbatim to `exarch`.
+Seed with a prompt string or a file instead of opening the REPL:
 
     docker compose -f exarch/docker/compose.yaml run --rm exarch-box \
-        --provider openai -p "do the thing"
+        --prompt "describe this repo"
 
-Override the workspace location (default: `./workspace` next to this
-file, gitignored):
+    docker compose -f exarch/docker/compose.yaml run --rm exarch-box \
+        --file task.md
 
-    EXARCH_WORKSPACE=~/scratch \
-        docker compose -f exarch/docker/compose.yaml run --rm exarch-box
+Same with the `docker run` one-liner:
 
-Override the memory cap (default: 4g):
+    docker run --rm -it -e ANTHROPIC_API_KEY -v "$PWD:/work" \
+        ghcr.io/lambdabetaeta/exarch-box --prompt "describe this repo"
 
-    EXARCH_MEMORY=8g \
-        docker compose -f exarch/docker/compose.yaml run --rm exarch-box
+To choose a provider or model, set `EXARCH_PROVIDER` and `EXARCH_MODEL` in
+the host environment — do **not** pass them as CLI flags.  The entrypoint
+prepends them and `clap` rejects duplicate flags:
+
+    EXARCH_PROVIDER=openai EXARCH_MODEL=gpt-4o \
+        docker compose -f exarch/docker/compose.yaml run --rm exarch-box \
+        --prompt "describe this repo"
+
+## Cleanup
+
+`--rm` removes the container automatically on exit; the image stays.  To
+remove it:
+
+    docker rmi exarch-box                          # if built locally
+    docker rmi ghcr.io/lambdabetaeta/exarch-box    # if pulled from the registry
+
+Remove the image and wipe the build cache in one step:
+
+    docker compose -f exarch/docker/compose.yaml down --rmi all
+    docker builder prune
 
 ## Provider keys
 
@@ -81,29 +105,33 @@ The entrypoint refuses to start otherwise, with a clear message.  Set
 them in your shell rc, a `.env` next to `compose.yaml`, or pass with
 `--env`.
 
-## Local-build variant (posterity)
+## Provider and model
 
-`Dockerfile.local` + `compose.local.yaml` + `build.sh` keep the
-build-from-this-checkout path around.  Use this when iterating on
-exarch sources and wanting to test the change inside the
-dangerous-mode container — the released image lags behind HEAD until
-you tag and publish.
+Set `EXARCH_PROVIDER` and `EXARCH_MODEL` in the host environment to
+forward them as `--provider` and `--model` at startup:
 
-`build.sh` does five things:
+    EXARCH_PROVIDER=openai EXARCH_MODEL=gpt-4o \
+        docker compose -f exarch/docker/compose.yaml run --rm exarch-box
 
-1. `cd` to the workspace root.
-2. Verify the `shell-dev` container is running.
-3. `docker exec shell-dev cargo build --release --locked -p exarch` —
-   produces a Linux ELF at `target/release/exarch`.  Building on the
-   host (macOS) would produce a Mach-O that the image can't run.
-4. `cp target/release/exarch exarch/docker/exarch-linux` — stages
-   the binary where `Dockerfile.local` expects it.
-5. `docker compose -f exarch/docker/compose.local.yaml build`.
+Alternatively, bake them into the image at build time (see Build above);
+the env var at runtime takes precedence over what was baked in.
 
-Then:
+Valid values for `EXARCH_PROVIDER` are whatever `exarch --help` lists
+under `--provider` (`anthropic`, `openai`, `openrouter`).  `EXARCH_MODEL`
+is passed verbatim as a string.
 
-    exarch/docker/build.sh
-    docker compose -f exarch/docker/compose.local.yaml run --rm exarch-box-local
+Do not set `EXARCH_PROVIDER`/`EXARCH_MODEL` and also pass `--provider`/
+`--model` as extra args to `docker compose run` — `clap` rejects
+duplicate flags.
 
-The local image and container are named `exarch-box-local` to avoid
-colliding with the released `exarch-box`.
+## Other overrides
+
+Override the workspace location (default: `./workspace`, gitignored):
+
+    EXARCH_WORKSPACE=~/scratch \
+        docker compose -f exarch/docker/compose.yaml run --rm exarch-box
+
+Override the memory cap (default: 4g):
+
+    EXARCH_MEMORY=8g \
+        docker compose -f exarch/docker/compose.yaml run --rm exarch-box

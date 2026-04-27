@@ -22,7 +22,29 @@ docker run --rm -it -e ANTHROPIC_API_KEY -v "$PWD:/work" ghcr.io/lambdabetaeta/e
 ```
 
 Pass `-e OPENAI_API_KEY` or `-e OPENROUTER_API_KEY` instead to switch
-providers.
+providers.  Set `EXARCH_PROVIDER` and `EXARCH_MODEL` to pick a non-default
+model:
+
+```
+docker run --rm -it \
+    -e ANTHROPIC_API_KEY \
+    -e EXARCH_PROVIDER=anthropic \
+    -e EXARCH_MODEL=claude-sonnet-4-6 \
+    -v "$PWD:/work" ghcr.io/lambdabetaeta/exarch-box
+```
+
+Append `--prompt` or `--file` to seed the first turn without opening the REPL:
+
+```
+docker run --rm -it -e ANTHROPIC_API_KEY -v "$PWD:/work" \
+    ghcr.io/lambdabetaeta/exarch-box --prompt "describe this repo"
+```
+
+Remove the image when done:
+
+```
+docker rmi ghcr.io/lambdabetaeta/exarch-box
+```
 
 From this repo (builds from the latest release binary):
 

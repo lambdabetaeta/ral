@@ -21,4 +21,10 @@ EOF
     exit 1
 fi
 
+# Prepend --provider / --model from env when set; they come before "$@" so
+# an explicit CLI flag passed to `docker compose run` is seen later by clap
+# and will conflict (clap rejects duplicates).  Don't set both.
+[ -n "${EXARCH_PROVIDER:-}" ] && set -- --provider "$EXARCH_PROVIDER" "$@"
+[ -n "${EXARCH_MODEL:-}"    ] && set -- --model    "$EXARCH_MODEL"    "$@"
+
 exec /usr/local/bin/exarch "$@"

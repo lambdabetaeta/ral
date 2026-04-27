@@ -11,7 +11,10 @@
 #   docker compose -f compose.yaml build \
 #       --build-arg GITHUB_TOKEN=$(gh auth token)
 #
-# For building from local sources instead, see Dockerfile.local.
+# Bake a default provider/model into the image:
+#   EXARCH_PROVIDER=openai EXARCH_MODEL=gpt-4o \
+#       docker compose -f compose.yaml build
+# Both can be overridden at runtime via env vars.
 
 FROM debian:bookworm-slim AS download
 ARG EXARCH_VERSION=latest
@@ -56,6 +59,11 @@ COPY entrypoint.sh /usr/local/bin/exarch-entrypoint
 RUN chmod +x /usr/local/bin/exarch-entrypoint
 
 ENV EXARCH_DANGEROUS=1
+
+ARG EXARCH_PROVIDER=
+ARG EXARCH_MODEL=
+ENV EXARCH_PROVIDER=${EXARCH_PROVIDER}
+ENV EXARCH_MODEL=${EXARCH_MODEL}
 
 USER exarch
 WORKDIR /work
