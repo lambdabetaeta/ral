@@ -92,7 +92,7 @@ fn eval_bind_rhs(m: &Comp, shell: &mut Shell) -> Result<Value, EvalSignal> {
         if mode == crate::ty::Mode::Bytes {
             let (inner, bytes) = with_capture(shell, |shell| eval_comp(m, shell));
             inner.and_then(|v| match v {
-                Value::Unit if !bytes.is_empty() => {
+                Value::Unit => {
                     let mut s = String::from_utf8(bytes).map_err(|e| {
                         EvalSignal::Error(
                             Error::new(
