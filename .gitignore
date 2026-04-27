@@ -9,6 +9,8 @@ tree-sitter-ral/node_modules/
 tree-sitter-ral/build/
 tree-sitter-ral/bindings/
 tree-sitter-ral/*.wasm
+tree-sitter-ral/*.dylib
+tree-sitter-ral/*.so
 *.swp
 *.swo
 *~
