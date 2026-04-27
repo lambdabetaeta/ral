@@ -26,22 +26,23 @@ fn main() {
     fs::write(out.join("prelude_schemes.bin"), scheme_bytes)
         .expect("failed to write prelude_schemes.bin");
 
-    // Authoritative `name : type` listing for every prelude binding,
-    // derived from the same `Scheme` table the exarch runs with.  We
-    // pair each scheme with its `## doc` comment from prelude.ral so
-    // the prompt carries types AND human-readable purpose.
+    // Authoritative `name — purpose` listing.  Types are dropped: they were
+    // expensive in tokens, and the universally-quantified shapes (∀α β γ δ)
+    // told the model almost nothing about argument order or composition.
+    // The cookbook in ral.md carries that load now; this listing is just
+    // the truth-source for which names exist.
     let docs = prelude_docs(&src);
-    let mut entries: Vec<(String, String)> = schemes
+    let mut names: Vec<&str> = schemes
         .iter()
-        .filter(|(n, _)| !n.starts_with('_'))
-        .map(|(n, s)| (n.clone(), ral_core::typecheck::fmt_scheme(s)))
+        .map(|(n, _)| n.as_str())
+        .filter(|n| !n.starts_with('_'))
         .collect();
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    names.sort_unstable();
     let mut listing = String::new();
-    for (name, ty) in &entries {
-        match docs.get(name.as_str()) {
-            Some(d) => listing.push_str(&format!("    {name} : {ty} — {d}\n")),
-            None => listing.push_str(&format!("    {name} : {ty}\n")),
+    for name in names {
+        match docs.get(name) {
+            Some(d) => listing.push_str(&format!("    {name} — {d}\n")),
+            None => listing.push_str(&format!("    {name}\n")),
         }
     }
     fs::write(out.join("prelude_signatures.txt"), listing)

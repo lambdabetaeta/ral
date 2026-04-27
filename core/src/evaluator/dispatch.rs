@@ -3,6 +3,7 @@
 use super::exec::{self, EvalRedirect};
 use super::{audit, eval_val, trampoline};
 use crate::ast::RedirectMode;
+use crate::io::Sink;
 use crate::ir::*;
 use crate::types::*;
 
@@ -73,6 +74,12 @@ pub(crate) fn eval_call_args(
 /// dropped on failure (so the tmp file is removed).  When redirects are
 /// non-empty, stdout/stderr are flushed before restoring fds so buffered
 /// bytes land at the redirect target rather than back at the terminal.
+///
+/// The fd-level `dup2` only catches writes that pass through the real fd, so
+/// for the redirect's lifetime we also point `shell.io.stdout` / `stderr` at
+/// the matching `Sink::Terminal` / `Sink::Stderr`.  Otherwise a `Sink::Buffer`
+/// (capture), `Sink::Pipe` (pipeline stage), or `Sink::External` (REPL
+/// printer) would absorb the builtin's bytes ahead of the redirect.
 fn with_redirects<F>(
     redirects: &[(u32, RedirectMode, EvalRedirect)],
     shell: &mut Shell,
@@ -85,11 +92,20 @@ where
         return body(shell);
     }
     let guard = exec::apply_redirects(redirects, shell)?;
+    let touches = |fd: u32| redirects.iter().any(|(f, ..)| *f == fd);
+    let prev_stdout = touches(1).then(|| std::mem::replace(&mut shell.io.stdout, Sink::Terminal));
+    let prev_stderr = touches(2).then(|| std::mem::replace(&mut shell.io.stderr, Sink::Stderr));
     let result = body(shell);
     use std::io::Write;
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
     let _ = shell.io.stdout.flush();
+    if let Some(s) = prev_stdout {
+        shell.io.stdout = s;
+    }
+    if let Some(s) = prev_stderr {
+        shell.io.stderr = s;
+    }
     let commits = exec::restore_redirects(guard);
     let v = result?;
     exec::commit_atomics(commits)?;

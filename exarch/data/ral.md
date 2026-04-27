@@ -13,10 +13,11 @@ Bind it directly with `let`:
     let body   = from-string < 'foo.txt'
     let nlines = wc -l < foo.txt
 
-There is **no parenthesised command-substitution** in ral.  `(cmd)` is
-a parse error; `(x)` does not group; `f(x)` is not a call.  The only
-place `(...)` appears is `$(name)` inside an interpolating string, to
-delimit a variable name from adjacent characters:
+**Rule of thumb: a command result must be `let`-bound before it can
+be passed as an argument.**  `(cmd)` is a parse error; `(x)` does not
+group; `f(x)` is not a call.  The only place `(...)` appears is
+`$(name)` inside an interpolating string, to delimit a variable name
+from adjacent characters:
 
     echo "$(prefix)_log.txt"
 
@@ -148,10 +149,59 @@ is **not** consistent across them; memorise:
 - "command X denied by active grant" often means X is not a builtin
   and doesn't exist as an external either — check the prelude
   reference below for the actual name (e.g. `length`, not `len`).
+- `seq A B` is **end-exclusive** like Python's `range`: `seq 1 11` is
+  `[1..10]`.  For an inclusive upper bound, `seq A $[$B + 1]`.
+- `let x = …` rebinds (shadows) within the same scope; `for`/block
+  bodies are fresh scopes, so loop-local bindings do not leak.
+- `spawn { … }` runs a block in the background; `await $h` joins and
+  returns `[value: α, stdout: Bytes, stderr: Bytes, status: Int]`.
+  A spawned failure **raises** at `await` (wrap in `try` to recover);
+  it does not surface as a non-zero `status` on a successful record.
+  No shared mutable state across spawned blocks.
 
-The full prelude is listed below as `name : type — purpose`.  These
-are the only user-facing names; do not invent others.  Underscore
-names like `_str`, `_fs`, `_path` are internal — call the wrappers.
+## Idioms
+
+Bind, don't nest:
+
+    let n = wc -l < foo.txt
+    echo "lines: $n"
+
+Edit a file in one call:
+
+    edit-file 'src/lib.rs' 'fn old(' 'fn new('
+
+Substitute on a string (regex):
+
+    let s2 = replace     $s '\bfoo\b' 'bar'   # exactly one match
+    let s3 = replace-all $s '\s+'     ' '     # every match
+
+Substring / regex search on a string:
+
+    if !{match 'error' $line} { echo $line }   # substring by default
+    if !{match '^WARN'  $line} { … }            # anchor for full-match
+
+Sort a list of records by a field:
+
+    let by-size = sort-list-by { |a b| $[$a[size] - $b[size]] } $files
+
+Read / write structured data:
+
+    let cfg = from-json < 'config.json'
+    to-json $cfg > 'config.json'                # atomic
+
+Background a slow command and join later (await raises on failure):
+
+    let h = spawn { rg -n 'TODO' . }
+    # … other work …
+    try { let r = await $h
+          echo $r[stdout] }
+        { |err| echo "rg failed: $err[message]" }
+
+The full prelude is listed below as `name — purpose`.  These are the
+only user-facing names; do not invent others.  Types are not shown —
+when an arity or argument order is unclear, prefer the idioms above
+or `which NAME`.  Underscore names like `_str`, `_fs`, `_path` are
+internal; call the wrappers.
 
 Big tool outputs are summarised in history per section: STDOUT,
 STDERR, VALUE, and AUDIT are capped independently, each with a
