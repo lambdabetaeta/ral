@@ -1,3 +1,11 @@
+//! Capture / dispatch primitives: `_try`, `try`, `_try-apply`, `guard`,
+//! `_par`, `_audit`.
+//!
+//! `try`-shaped builtins reify the body's result as a record so the
+//! caller can branch on success/failure without unwinding.  `guard`
+//! interposes a cleanup thunk; `_par` is a parallel `map` over a
+//! handle pool with optional concurrency limit.
+
 use crate::diagnostic;
 use crate::types::*;
 

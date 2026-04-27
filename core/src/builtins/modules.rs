@@ -1,6 +1,14 @@
+//! `source` and `use` — load and evaluate `.ral` files.
+//!
+//! `source` runs the file in the caller's scope (its bindings leak); `use`
+//! runs it in a fresh top scope and exports the resulting bindings as a
+//! Map (cached by canonical path so repeated uses share state).
+//! `ScriptContextGuard` swaps `shell.location.script` for the file's path
+//! and restores it on drop — the same primitive used by `_plugin 'load'`.
+
 use crate::types::*;
 
-use super::util::sig;
+use super::util::{arg0_str, sig};
 
 const MAX_SOURCE_DEPTH: usize = 100;
 
@@ -40,7 +48,7 @@ impl Drop for ScriptContextGuard<'_> {
 }
 
 pub(super) fn builtin_source(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
-    let path = args.first().map(|v| v.to_string()).unwrap_or_default();
+    let path = arg0_str(args);
     let resolved = resolve_relative_to_current_script(&path, shell);
     let abs_path = std::fs::canonicalize(&resolved)
         .map(|p| p.to_string_lossy().into_owned())
@@ -74,7 +82,7 @@ pub(super) fn builtin_source(args: &[Value], shell: &mut Shell) -> Result<Value,
 }
 
 pub(crate) fn builtin_use(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
-    let path = args.first().map(|v| v.to_string()).unwrap_or_default();
+    let path = arg0_str(args);
     let resolved = resolve_relative_to_current_script(&path, shell);
 
     let abs_path = std::fs::canonicalize(&resolved)

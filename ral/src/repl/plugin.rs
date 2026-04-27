@@ -1,3 +1,12 @@
+//! Plugin runtime: shared mutable state threaded between the REPL loop,
+//! rustyline callbacks, and plugin handler invocations.
+//!
+//! The `Arc<Mutex<PluginRuntime>>` lives across rustyline's `Hinter` and
+//! `Highlighter` (which require `Send + Sync`) and the REPL's own
+//! `dispatch_keybinding`.  Helpers here own the buffer-change hook
+//! engine, the keybinding bridge, the deferred-message buffer, and the
+//! lifecycle-hook fold operator.
+
 use ral_core::types::{Capabilities, EditorState, HighlightSpan, LoadedPlugin, PluginContext};
 use ral_core::{Shell, EvalSignal, Value};
 

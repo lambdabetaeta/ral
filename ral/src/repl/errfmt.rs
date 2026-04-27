@@ -1,3 +1,9 @@
+//! REPL-specific error formatting.
+//!
+//! Plugin diagnostics and the compact REPL parse-error path live here.
+//! The full ariadne-rendered errors come from `ral_core::diagnostic`;
+//! these helpers handle the shorter, REPL-styled cases.
+
 use ral_core::ansi::{self, BOLD_CYAN, BOLD_RED, BOLD_YELLOW, RESET};
 use ral_core::types::Error;
 

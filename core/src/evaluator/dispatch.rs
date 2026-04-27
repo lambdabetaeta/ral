@@ -68,6 +68,34 @@ pub(crate) fn eval_call_args(
 
 // ── Application dispatch ─────────────────────────────────────────────────
 
+/// Run `body` with `redirects` applied: open the targets, dup over fd 0/1/2,
+/// run, then always restore.  Atomic-write commits fire on success and are
+/// dropped on failure (so the tmp file is removed).  When redirects are
+/// non-empty, stdout/stderr are flushed before restoring fds so buffered
+/// bytes land at the redirect target rather than back at the terminal.
+fn with_redirects<F>(
+    redirects: &[(u32, RedirectMode, EvalRedirect)],
+    shell: &mut Shell,
+    body: F,
+) -> Result<Value, EvalSignal>
+where
+    F: FnOnce(&mut Shell) -> Result<Value, EvalSignal>,
+{
+    if redirects.is_empty() {
+        return body(shell);
+    }
+    let guard = exec::apply_redirects(redirects, shell)?;
+    let result = body(shell);
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    let _ = shell.io.stdout.flush();
+    let commits = exec::restore_redirects(guard);
+    let v = result?;
+    exec::commit_atomics(commits)?;
+    Ok(v)
+}
+
 pub(crate) fn eval_app(
     name: &Value,
     args: &[Value],
@@ -88,31 +116,9 @@ pub(crate) fn eval_app(
                 args: args.to_vec(),
             })
         }
-        Value::Thunk { .. } => {
-            // Redirects on a closure call apply to the body's fd context: open
-            // the targets, dup over fd 0/1/2, then evaluate.  Flush stdout/err
-            // before restoring fds so buffered bytes go to the redirect target,
-            // not back to the terminal.  Always restore; commit atomic writes
-            // only if the body succeeded.
-            if redirects.is_empty() {
-                trampoline(name.clone(), args.to_vec(), shell)
-            } else {
-                let guard = exec::apply_redirects(redirects, shell)?;
-                let result = trampoline(name.clone(), args.to_vec(), shell);
-                use std::io::Write;
-                let _ = std::io::stdout().flush();
-                let _ = std::io::stderr().flush();
-                let _ = shell.io.stdout.flush();
-                let commits = exec::restore_redirects(guard);
-                match result {
-                    Ok(v) => {
-                        exec::commit_atomics(commits)?;
-                        Ok(v)
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-        }
+        Value::Thunk { .. } => with_redirects(redirects, shell, |shell| {
+            trampoline(name.clone(), args.to_vec(), shell)
+        }),
         // No args, no redirects → identity (e.g. bare variable reference).
         _ if args.is_empty() && redirects.is_empty() => Ok(name.clone()),
         _ => Err(shell.err_hint(
@@ -186,19 +192,13 @@ pub(crate) fn dispatch_by_name(
         }
         (CommandHead::Builtin, Some(name)) => {
             let start_us = audit::start(shell);
-            let redir_state = exec::apply_redirects(redirects, shell)?;
-            let result = crate::builtins::call(name, args, shell);
-            // Always restore fds; commit atomic writes only if the builtin
-            // succeeded, otherwise drop the commits to remove tmp files.
-            let commits = exec::restore_redirects(redir_state);
-            match result? {
-                Some(v) => {
-                    exec::commit_atomics(commits)?;
-                    audit::record_exec(shell, name, args, &v, start_us);
-                    Ok(v)
-                }
-                None => Err(shell.err(format!("internal error: builtin not found: {name}"), 1)),
-            }
+            let v = with_redirects(redirects, shell, |shell| {
+                crate::builtins::call(name, args, shell)?.ok_or_else(|| {
+                    shell.err(format!("internal error: builtin not found: {name}"), 1)
+                })
+            })?;
+            audit::record_exec(shell, name, args, &v, start_us);
+            Ok(v)
         }
         (CommandHead::GrantDenied, Some(name)) => {
             audit::record_deny(shell, name, args);
@@ -244,7 +244,10 @@ fn invoke_handler(
 ) -> Result<Value, EvalSignal> {
     let len = shell.dynamic.handler_stack.len();
     let stripped = shell.dynamic.handler_stack.split_off(len - depth);
-    let is_lambda = matches!(&thunk, Value::Thunk { body, .. } if matches!(body.as_ref().kind, CompKind::Lam { .. }));
+    let is_lambda = matches!(
+        &thunk,
+        Value::Thunk { body, .. } if matches!(body.as_ref().kind, CompKind::Lam { .. })
+    );
     let call_args = if is_catch_all {
         vec![Value::String(name.into()), Value::List(args.to_vec())]
     } else if is_lambda {

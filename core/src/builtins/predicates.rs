@@ -1,21 +1,25 @@
+//! Map / value predicates: `keys`, `has`, `is-empty`, `equal`, `lt`, `gt`.
+//!
+//! Each comparison records its boolean outcome in `shell.last_status` so
+//! that pipeline `?` chaining and `if` see a familiar exit-code-shaped
+//! signal alongside the returned `Bool`.
+
 use crate::types::*;
 
-use super::util::{sig, str_cmp, values_equal};
+use super::util::{check_arity, sig, str_cmp, values_equal};
 
 pub(super) fn builtin_keys(args: &[Value]) -> Result<Value, EvalSignal> {
-    match args.first() {
-        Some(Value::Map(pairs)) => Ok(Value::List(
+    check_arity(args, 1, "keys")?;
+    match &args[0] {
+        Value::Map(pairs) => Ok(Value::List(
             pairs.iter().map(|(k, _)| Value::String(k.clone())).collect(),
         )),
-        Some(other) => Err(sig(format!("keys expects a Map, got {}", other.type_name()))),
-        None => Err(sig("keys requires 1 argument")),
+        other => Err(sig(format!("keys expects a Map, got {}", other.type_name()))),
     }
 }
 
 pub(super) fn builtin_has(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
-    if args.len() < 2 {
-        return Err(sig("has requires 2 arguments"));
-    }
+    check_arity(args, 2, "has")?;
     let key = args[1].to_string();
     let found = matches!(&args[0], Value::Map(pairs) if pairs.iter().any(|(k, _)| k == &key));
     shell.set_status_from_bool(found);
@@ -23,9 +27,8 @@ pub(super) fn builtin_has(args: &[Value], shell: &mut Shell) -> Result<Value, Ev
 }
 
 pub(super) fn builtin_is_empty(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
-    let val = args
-        .first()
-        .ok_or_else(|| sig("is-empty requires 1 argument"))?;
+    check_arity(args, 1, "is-empty")?;
+    let val = &args[0];
     let r = match val {
         Value::List(items) => items.is_empty(),
         Value::Map(pairs) => pairs.is_empty(),
@@ -49,9 +52,7 @@ pub(super) fn builtin_is_empty(args: &[Value], shell: &mut Shell) -> Result<Valu
 }
 
 pub(super) fn builtin_equal(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
-    if args.len() < 2 {
-        return Err(sig("equal requires 2 arguments"));
-    }
+    check_arity(args, 2, "equal")?;
     let r = values_equal(&args[0], &args[1]);
     shell.set_status_from_bool(r);
     Ok(Value::Bool(r))

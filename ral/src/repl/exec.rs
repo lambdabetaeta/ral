@@ -1,3 +1,10 @@
+//! Single-input parse / typecheck / evaluate cycle.
+//!
+//! [`step`] is the per-line entry point.  It first tries the job-control
+//! builtins, then falls through to [`execute_input`], which runs the
+//! parser, typechecker, evaluator, and lifecycle hooks (`pre-exec`,
+//! `chpwd`, `post-exec`) and prints the result.
+
 use ral_core::{Shell, EvalSignal, Value, builtins, diagnostic, elaborate, evaluate, parse};
 
 use super::errfmt::{format_repl_parse_error, should_use_compact_parse_error};

@@ -101,26 +101,28 @@ impl Inferencer<'_> {
         }
     }
 
-    fn comp_input_mode(&mut self, cty: &CompTy) -> PipeMode {
+    /// Project the I/O end (input or output) of a computation type, peering
+    /// past `Fun` arrows.  An unresolved comp var yields a fresh mode.
+    fn comp_end_mode(&mut self, cty: &CompTy, pick: fn(PipeSpec) -> PipeMode) -> PipeMode {
         match self.ctx.unifier.resolve_comp_ty(cty) {
-            CompTy::Return(spec, _) => spec.input,
-            CompTy::Fun(_, body) => self.comp_input_mode(&body),
+            CompTy::Return(spec, _) => pick(spec),
+            CompTy::Fun(_, body) => self.comp_end_mode(&body, pick),
             CompTy::Var(_) => self.ctx.unifier.fresh_mode(),
         }
     }
 
+    fn comp_input_mode(&mut self, cty: &CompTy) -> PipeMode {
+        self.comp_end_mode(cty, |s| s.input)
+    }
+
     fn comp_output_mode(&mut self, cty: &CompTy) -> PipeMode {
-        match self.ctx.unifier.resolve_comp_ty(cty) {
-            CompTy::Return(spec, _) => spec.output,
-            CompTy::Fun(_, body) => self.comp_output_mode(&body),
-            CompTy::Var(_) => self.ctx.unifier.fresh_mode(),
-        }
+        self.comp_end_mode(cty, |s| s.output)
     }
 
     fn autoderef_thunk_return(&mut self, mut cty: CompTy) -> CompTy {
         loop {
             match self.ctx.unifier.resolve_comp_ty(&cty) {
-                CompTy::Return(_, ref ty) => match self.ctx.unifier.resolve_ty(ty) {
+                CompTy::Return(_, ty) => match self.ctx.unifier.resolve_ty(&ty) {
                     Ty::Thunk(inner) => cty = *inner,
                     _ => return cty,
                 },
@@ -363,17 +365,7 @@ impl Inferencer<'_> {
                 }
                 self.infer_last_thunk(args)
             }
-            HeadKind::Bytes | HeadKind::External => {
-                self.infer_args(args);
-                let input = self.ctx.unifier.fresh_mode();
-                CompTy::Return(
-                    PipeSpec {
-                        input,
-                        output: PipeMode::Bytes,
-                    },
-                    Box::new(Ty::String),
-                )
-            }
+            HeadKind::Bytes | HeadKind::External => self.external_exec_comp_ty(args),
             HeadKind::StreamingReducer => {
                 self.infer_args(args);
                 CompTy::Return(
@@ -726,8 +718,7 @@ impl Inferencer<'_> {
                 ..
             } => match name {
                 ExecName::Bare(name) => self.exec_comp_ty(name, args, *external_only),
-                ExecName::Path(_) => self.external_exec_comp_ty(args),
-                ExecName::TildePath(_) => self.external_exec_comp_ty(args),
+                ExecName::Path(_) | ExecName::TildePath(_) => self.external_exec_comp_ty(args),
             },
             CompKind::Pipeline(stages) => self.infer_pipeline(stages),
             CompKind::Chain(parts) => {

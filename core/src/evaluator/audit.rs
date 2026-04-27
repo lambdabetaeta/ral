@@ -15,6 +15,17 @@ pub(crate) fn start(shell: &Shell) -> i64 {
     }
 }
 
+/// `$USER` from the shell's dynamic env, empty string if unset.  The
+/// principal that owns an audit-tree node.
+pub(crate) fn principal(shell: &Shell) -> String {
+    shell
+        .dynamic
+        .env_vars
+        .get("USER")
+        .cloned()
+        .unwrap_or_default()
+}
+
 /// Scope-introducing builtins that are dispatched by their bare names but
 /// record their own interior nodes via [`with_audited_scope`] (see
 /// SPEC §10.3).  The dispatch-side leaf would duplicate that, so it is
@@ -38,12 +49,7 @@ fn make_node(shell: &Shell, cmd: &str, args: &[Value], status: i32, start_us: i6
     );
     node.start = start_us;
     node.end = epoch_us();
-    node.principal = shell
-        .dynamic
-        .env_vars
-        .get("USER")
-        .cloned()
-        .unwrap_or_default();
+    node.principal = principal(shell);
     node
 }
 
@@ -115,13 +121,8 @@ pub(crate) fn record_deny(shell: &mut Shell, name: &str, args: &[Value]) {
     let line = shell.location.call_site.line;
     let col = shell.location.call_site.col;
     let mut node = ExecNode::capability_check("exec", "denied", &script, line, col);
-    node.principal = shell
-        .dynamic
-        .env_vars
-        .get("USER")
-        .cloned()
-        .unwrap_or_default();
-    if let Value::Map(ref mut pairs) = node.value {
+    node.principal = principal(shell);
+    if let Value::Map(pairs) = &mut node.value {
         let args_val: Vec<Value> = args.iter().map(|v| Value::String(v.to_string())).collect();
         pairs.push(("name".into(), Value::String(name.into())));
         pairs.push(("args".into(), Value::List(args_val)));

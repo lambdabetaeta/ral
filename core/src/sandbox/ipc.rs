@@ -141,7 +141,7 @@ pub(super) enum SandboxedBlockResponse {
 pub(super) enum ChildFrame {
     Audit {
         scope_table: Vec<Vec<(String, SerialValue)>>,
-        node: IpcExecNode,
+        node: Box<IpcExecNode>,
     },
     Final(SandboxedBlockResponse),
 }
@@ -202,8 +202,6 @@ impl IpcExecNode {
         })
     }
 }
-
-// ── IpcExecPolicy / IpcCapabilities conversions ───────────────────────────
 
 // ── Registry / Modules conversions ───────────────────────────────────────
 
@@ -384,7 +382,7 @@ impl IpcChannel {
         loop {
             match read_frame::<_, ChildFrame>(&mut self.reader).map_err(io_err)? {
                 Some(ChildFrame::Audit { scope_table, node }) => {
-                    audit.push(AuditFrame { scope_table, node });
+                    audit.push(AuditFrame { scope_table, node: *node });
                 }
                 Some(ChildFrame::Final(resp)) => return Ok((audit, resp)),
                 None => {
@@ -504,20 +502,7 @@ pub(super) fn run_request<W: Write>(
     let outcome = match eval_request(request) {
         Ok(outcome) => outcome,
         Err(err) => {
-            let response = match err {
-                EvalSignal::Exit(code) => SandboxedBlockResponse::Exit { code },
-                EvalSignal::Error(e) => SandboxedBlockResponse::Error {
-                    message: e.message,
-                    status: e.status,
-                    hint: e.hint,
-                },
-                EvalSignal::TailCall { .. } => SandboxedBlockResponse::Error {
-                    message: "sandboxed block returned unexpected tail call".into(),
-                    status: 1,
-                    hint: None,
-                },
-            };
-            return write_frame(&mut frames, &ChildFrame::Final(response));
+            return write_frame(&mut frames, &ChildFrame::Final(signal_to_response(err)));
         }
     };
     for node in outcome.exec_nodes {
@@ -528,7 +513,7 @@ pub(super) fn run_request<W: Write>(
             &mut frames,
             &ChildFrame::Audit {
                 scope_table: ctx.scope_table,
-                node: ipc_node,
+                node: Box::new(ipc_node),
             },
         )?;
     }
@@ -543,19 +528,28 @@ pub(super) fn run_request<W: Write>(
                 last_status: outcome.last_status,
             }
         }
-        Err(EvalSignal::Exit(code)) => SandboxedBlockResponse::Exit { code },
-        Err(EvalSignal::Error(e)) => SandboxedBlockResponse::Error {
+        Err(signal) => signal_to_response(signal),
+    };
+    write_frame(&mut frames, &ChildFrame::Final(response))
+}
+
+/// Map an `EvalSignal` back to the wire response.  A `TailCall` is a bug
+/// — the body must have returned to a normal value or an error before the
+/// IPC boundary — so we surface it as an `Error` rather than panic.
+fn signal_to_response(signal: EvalSignal) -> SandboxedBlockResponse {
+    match signal {
+        EvalSignal::Exit(code) => SandboxedBlockResponse::Exit { code },
+        EvalSignal::Error(e) => SandboxedBlockResponse::Error {
             message: e.message,
             status: e.status,
             hint: e.hint,
         },
-        Err(EvalSignal::TailCall { .. }) => SandboxedBlockResponse::Error {
+        EvalSignal::TailCall { .. } => SandboxedBlockResponse::Error {
             message: "sandboxed block returned unexpected tail call".into(),
             status: 1,
             hint: None,
         },
-    };
-    write_frame(&mut frames, &ChildFrame::Final(response))
+    }
 }
 
 /// Internal outcome of evaluation — audit nodes plus the body's Result

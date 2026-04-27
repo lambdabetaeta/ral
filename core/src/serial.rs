@@ -107,11 +107,13 @@ impl InternCtx {
 /// through closures captured in its entries) and builds a scope only
 /// once all of its dependencies have been built.  A cycle in the graph
 /// is reported rather than silently producing a dangling reference.
+type ScopeArcs = Vec<Option<Arc<HashMap<String, Value>>>>;
+
 pub(crate) fn build_arcs(
-    scope_table: &[Vec<(std::string::String, SerialValue)>],
-) -> Result<Vec<Option<Arc<HashMap<std::string::String, Value>>>>, EvalSignal> {
+    scope_table: &[Vec<(String, SerialValue)>],
+) -> Result<ScopeArcs, EvalSignal> {
     let n = scope_table.len();
-    let mut arcs: Vec<Option<Arc<HashMap<std::string::String, Value>>>> = vec![None; n];
+    let mut arcs: ScopeArcs = vec![None; n];
     let deps: Vec<HashSet<u32>> = scope_table
         .iter()
         .map(|entries| {

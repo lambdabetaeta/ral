@@ -92,6 +92,62 @@ fn render_messageless(code: Option<&str>, message: &str, hint: Option<&str>) -> 
     out
 }
 
+// ── Ariadne render core ──────────────────────────────────────────────────
+//
+// Every ariadne render is the same shape: clamp a char range to source,
+// build a single-label red report with code/message and optional help,
+// write it to a byte buffer, return the UTF-8 string.  `render_ariadne`
+// is that shape.  The three public entry points differ only in how they
+// derive the range and the label phrase.
+
+/// Source range plus the phrase placed next to its underline.
+struct LabelRange {
+    range: std::ops::Range<usize>,
+    label: String,
+}
+
+/// Render an ariadne report with one red label and an optional help line.
+fn render_ariadne(
+    file: &str,
+    source: &str,
+    code: &str,
+    message: &str,
+    label: LabelRange,
+    hint: Option<&str>,
+) -> String {
+    let file_owned: String = file.to_string();
+    let mut builder = ariadne::Report::<(String, std::ops::Range<usize>)>::build(
+        ariadne::ReportKind::Error,
+        (file_owned.clone(), label.range.clone()),
+    )
+    .with_config(ariadne::Config::default().with_color(use_color()))
+    .with_code(code)
+    .with_message(message)
+    .with_label(
+        ariadne::Label::new((file_owned.clone(), label.range))
+            .with_message(label.label)
+            .with_color(ariadne::Color::Red),
+    );
+    if let Some(h) = hint {
+        builder = builder.with_help(h);
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    let _ = builder.finish().write(
+        (file_owned, ariadne::Source::from(source.to_string())),
+        &mut buf,
+    );
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// Char range starting at `start` of the given char-width, clamped so the
+/// caret always points at *some* character even at end-of-source.
+fn caret_range(source: &str, start: usize, width: usize) -> std::ops::Range<usize> {
+    let char_len = source.chars().count();
+    let s = start.min(char_len);
+    let e = (s + width.max(1)).min(char_len.max(s + 1));
+    s..e
+}
+
 /// Render a parse error via ariadne.  Takes the same (line, col, message)
 /// the caller already has; computes the byte offset internally so the
 /// caret lines up under the offending token.
@@ -102,31 +158,15 @@ pub fn format_parse_error_ariadne(
     col: usize,
     message: &str,
 ) -> String {
-    let ch = line_col_to_char(source, line, col);
-    let char_len = source.chars().count();
-    let start = ch.min(char_len);
-    let end = (start + 1).min(char_len.max(start + 1));
-    let range = start..end;
-    let file_owned: String = file.to_string();
-    let report = ariadne::Report::<(String, std::ops::Range<usize>)>::build(
-        ariadne::ReportKind::Error,
-        (file_owned.clone(), start..start + 1),
+    let range = caret_range(source, line_col_to_char(source, line, col), 1);
+    render_ariadne(
+        file,
+        source,
+        "P0001",
+        message,
+        LabelRange { range, label: "here".into() },
+        None,
     )
-    .with_config(ariadne::Config::default().with_color(use_color()))
-    .with_code("P0001")
-    .with_message(message)
-    .with_label(
-        ariadne::Label::new((file_owned.clone(), range))
-            .with_message("here")
-            .with_color(ariadne::Color::Red),
-    )
-    .finish();
-    let mut buf: Vec<u8> = Vec::new();
-    let _ = report.write(
-        (file_owned, ariadne::Source::from(source.to_string())),
-        &mut buf,
-    );
-    String::from_utf8_lossy(&buf).into_owned()
 }
 
 /// Short phrase placed next to the primary label, describing the immediate
@@ -159,32 +199,18 @@ pub fn format_type_error_ariadne(file: &str, source: &str, err: &TypeError) -> S
     };
     let start = byte_to_char(source, sp.start as usize);
     let end = byte_to_char(source, sp.end.max(sp.start + 1) as usize);
-    let char_len = source.chars().count();
-    let range = start.min(char_len)..end.min(char_len).max(start + 1);
-    let file_owned: String = file.to_string();
-    let label_msg = label_message_for_kind(&err.kind);
-    let mut builder = ariadne::Report::<(String, std::ops::Range<usize>)>::build(
-        ariadne::ReportKind::Error,
-        (file_owned.clone(), range.clone()),
+    let range = caret_range(source, start, end.saturating_sub(start));
+    render_ariadne(
+        file,
+        source,
+        code,
+        &message,
+        LabelRange {
+            range,
+            label: label_message_for_kind(&err.kind),
+        },
+        err.hint.as_deref(),
     )
-    .with_config(ariadne::Config::default().with_color(use_color()))
-    .with_code(code)
-    .with_message(&message)
-    .with_label(
-        ariadne::Label::new((file_owned.clone(), range))
-            .with_message(label_msg)
-            .with_color(ariadne::Color::Red),
-    );
-    if let Some(h) = err.hint.as_deref() {
-        builder = builder.with_help(h);
-    }
-    let report = builder.finish();
-    let mut buf: Vec<u8> = Vec::new();
-    let _ = report.write(
-        (file_owned, ariadne::Source::from(source.to_string())),
-        &mut buf,
-    );
-    String::from_utf8_lossy(&buf).into_owned()
 }
 
 /// Render a runtime error via ariadne.  Uses the `SourceLoc`'s line/col
@@ -200,39 +226,20 @@ pub fn format_runtime_error_ariadne(
     let Some(loc) = loc else {
         return render_messageless(Some("R0001"), message, hint);
     };
-    let ch = line_col_to_char(source, loc.line, loc.col);
-    let char_len = source.chars().count();
-    let start = ch.min(char_len);
-    let end = (start + loc.len.max(1)).min(char_len.max(start + 1));
-    let range = start..end;
     let display_file = if loc.file.is_empty() {
         file
     } else {
         loc.file.as_str()
     };
-    let file_owned: String = display_file.to_string();
-    let mut builder = ariadne::Report::<(String, std::ops::Range<usize>)>::build(
-        ariadne::ReportKind::Error,
-        (file_owned.clone(), start..start + 1),
+    let range = caret_range(source, line_col_to_char(source, loc.line, loc.col), loc.len);
+    render_ariadne(
+        display_file,
+        source,
+        "R0001",
+        message,
+        LabelRange { range, label: "here".into() },
+        hint,
     )
-    .with_config(ariadne::Config::default().with_color(use_color()))
-    .with_code("R0001")
-    .with_message(message)
-    .with_label(
-        ariadne::Label::new((file_owned.clone(), range))
-            .with_message("here")
-            .with_color(ariadne::Color::Red),
-    );
-    if let Some(h) = hint {
-        builder = builder.with_help(h);
-    }
-    let report = builder.finish();
-    let mut buf: Vec<u8> = Vec::new();
-    let _ = report.write(
-        (file_owned, ariadne::Source::from(source.to_string())),
-        &mut buf,
-    );
-    String::from_utf8_lossy(&buf).into_owned()
 }
 
 /// Render a runtime error, choosing the compact or ariadne format automatically.

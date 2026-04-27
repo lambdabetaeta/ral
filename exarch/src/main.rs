@@ -69,6 +69,13 @@ fn real_main() -> Result<(), String> {
                     if matches!(m, "/quit" | "/exit") {
                         break;
                     }
+                    if m == "/clear" {
+                        provider.clear_history();
+                        shell = runtime::boot_shell();
+                        total = Usage::default();
+                        ui::banner(label, provider.model());
+                        continue;
+                    }
                     if m == "/compact" {
                         runtime::maybe_compact(&mut provider, &mut total);
                         continue;
@@ -83,7 +90,12 @@ fn real_main() -> Result<(), String> {
         };
         runtime::maybe_compact(&mut provider, &mut total);
         match runtime::run_task(&mut provider, &mut shell, &spec, &spill, &mut total, prompt) {
-            Ok(task) => ui::cost_summary(&task, &total),
+            Ok((task, hit_max_turns)) => {
+                ui::cost_summary(&task, &total);
+                if hit_max_turns {
+                    pending = Some("[max turns reached — please continue where you left off]".into());
+                }
+            }
             Err(e) => ui::error(&e),
         }
     }

@@ -1,3 +1,10 @@
+//! Line-editing frontends.
+//!
+//! [`RustylineFrontend`] is the full editor with completion, plugin keys,
+//! and history.  [`MinimalFrontend`] is a fall-back for dumb terminals
+//! and `RAL_INTERACTIVE_MODE=minimal`: canonical stdin, no termios, no
+//! escapes — just `read_line` with a `> ` continuation prompt.
+
 use ral_core::{Shell, diagnostic};
 use rustyline::config::{BellStyle, Builder, CompletionType, EditMode};
 use rustyline::error::ReadlineError;

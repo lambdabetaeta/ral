@@ -1,3 +1,21 @@
+//! Parser: token stream → AST.
+//!
+//! Recursive-descent over the [`crate::lexer`] output.  The grammar is
+//! statement-oriented: a *program* is a sequence of statements separated
+//! by newlines or `;`.  A *statement* is a `?`-chained list of pipelines;
+//! a *pipeline* is `|`-connected stages; a *stage* is a let-binding,
+//! `return`, `if`, or a *command* (head plus arguments).  `|`, `?`, `,`,
+//! and `=` are continuation tokens — newlines around them are absorbed.
+//!
+//! Source positions are interleaved into statement lists as [`Ast::Pos`]
+//! markers so the elaborator can re-thread them onto IR nodes without
+//! the parser having to thread a span through every constructor.
+//!
+//! Arithmetic inside `$[...]` is parsed by a small Pratt sub-parser
+//! ([`Parser::parse_expr_prec`]).  The outer lexer re-tokenises the raw
+//! body, so `&&` / `||` arrive as adjacent single-char tokens; they are
+//! fused back into bare-word operators before Pratt sees them.
+
 use crate::ast::*;
 use crate::lexer::{self, LexError, RedirectType, Span, StringPart, Token};
 use crate::types;
@@ -973,12 +991,10 @@ impl Parser {
                 self.expect(&Token::RParen)?;
                 Ok(expr)
             }
-            Token::Deref(ref part) => {
+            Token::Deref(part) => {
                 let result = match part {
-                    StringPart::Variable(name) => Ok(Expr::Var(name.clone())),
-                    StringPart::Index(name, keys) => {
-                        Ok(Expr::Index(name.clone(), parse_raw_keys(keys)?))
-                    }
+                    StringPart::Variable(name) => Ok(Expr::Var(name)),
+                    StringPart::Index(name, keys) => Ok(Expr::Index(name, parse_raw_keys(&keys)?)),
                     _ => Err(self.error("unexpected deref in expression")),
                 };
                 self.advance();
@@ -992,7 +1008,7 @@ impl Parser {
                     _ => Err(self.error("expected block or variable after ! in expression")),
                 }
             }
-            Token::Word(Word::Plain(ref s)) if s == "-" => {
+            Token::Word(Word::Plain(s)) if s == "-" => {
                 self.advance();
                 let inner = self.parse_expr_atom()?;
                 // Fold the negation into literal atoms so the unary-minus
@@ -1005,7 +1021,7 @@ impl Parser {
                     other => Expr::BinOp(Box::new(Expr::Integer(0)), ExprOp::Sub, Box::new(other)),
                 })
             }
-            Token::Word(Word::Plain(ref s)) if s == "not" => {
+            Token::Word(Word::Plain(s)) if s == "not" => {
                 self.advance();
                 // `not` is a prefix operator binding tighter than any binary
                 // op; recursing into `parse_expr_atom` would bind too loose
@@ -1014,11 +1030,11 @@ impl Parser {
                 let inner = self.parse_expr_atom()?;
                 Ok(Expr::Not(Box::new(inner)))
             }
-            Token::Word(Word::Plain(ref s)) if s == "true" => {
+            Token::Word(Word::Plain(s)) if s == "true" => {
                 self.advance();
                 Ok(Expr::Bool(true))
             }
-            Token::Word(Word::Plain(ref s)) if s == "false" => {
+            Token::Word(Word::Plain(s)) if s == "false" => {
                 self.advance();
                 Ok(Expr::Bool(false))
             }
@@ -1082,7 +1098,6 @@ enum InfixOp {
     Or,
 }
 
-/// Can this AST node be followed by [key] indexing?
 /// Parse raw key strings into Ast nodes (used for $name[key] index keys).
 fn parse_raw_keys(keys: &[String]) -> Result<Vec<Ast>, ParseError> {
     keys.iter()

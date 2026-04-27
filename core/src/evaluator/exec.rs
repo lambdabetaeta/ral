@@ -32,6 +32,15 @@ struct RedirectPlan {
     stderr_to_stdout: bool,
 }
 
+/// Coerce `>` to streaming for stderr — atomic semantics make no sense for
+/// diagnostic output.  All other modes pass through unchanged.
+fn stderr_mode(mode: &RedirectMode) -> RedirectMode {
+    match mode {
+        RedirectMode::Write => RedirectMode::StreamWrite,
+        other => *other,
+    }
+}
+
 fn classify_redirects(redirects: &[(u32, RedirectMode, EvalRedirect)]) -> RedirectPlan {
     let mut plan = RedirectPlan {
         stdin_file: None,
@@ -106,6 +115,21 @@ fn wire_stdin(command: &mut Command, plan: &RedirectPlan, shell: &mut Shell) -> 
     Ok(())
 }
 
+/// Wire the child's stdout to a redirect file when one is set.
+/// Returns the atomic-commit token (`Some` for `>` to a regular file).
+fn wire_stdout_file(
+    command: &mut Command,
+    plan: &RedirectPlan,
+    shell: &mut Shell,
+) -> Result<Option<AtomicCommit>, EvalSignal> {
+    let Some((path, mode)) = &plan.stdout_file else {
+        return Ok(None);
+    };
+    let (file, commit) = open_file(path, mode, shell)?;
+    command.stdout(Stdio::from(file));
+    Ok(commit)
+}
+
 /// Set up the child's stderr according to plan and audit mode.
 ///
 /// On Unix, `2>&1` is realised via `pre_exec` dup2 so the child inherits the
@@ -141,13 +165,7 @@ fn wire_stderr(
         command.stderr(Stdio::inherit());
         Ok(false)
     } else if let Some((path, mode)) = &plan.stderr_file {
-        // Stderr is for diagnostic streaming; atomic semantics make no sense.
-        // Coerce `>` to streaming for stderr.
-        let stream_mode = match mode {
-            RedirectMode::Write => RedirectMode::StreamWrite,
-            other => *other,
-        };
-        let (file, _) = open_file(path, &stream_mode, shell)?;
+        let (file, _) = open_file(path, &stderr_mode(mode), shell)?;
         command.stderr(Stdio::from(file));
         Ok(false)
     } else if auditing || !matches!(shell.io.stderr, crate::io::Sink::Stderr) {
@@ -335,12 +353,7 @@ pub(crate) fn exec_external(
 
     let plan = classify_redirects(redirects);
     wire_stdin(&mut command, &plan, shell)?;
-    let mut atomic_commit: Option<AtomicCommit> = None;
-    if let Some((path, mode)) = &plan.stdout_file {
-        let (file, commit) = open_file(path, mode, shell)?;
-        command.stdout(Stdio::from(file));
-        atomic_commit = commit;
-    }
+    let mut atomic_commit = wire_stdout_file(&mut command, &plan, shell)?;
 
     let auditing = shell.audit.tree.is_some();
     // When the shell's stdout is a real TTY, inherit it so the child can
@@ -539,16 +552,7 @@ pub(crate) fn apply_redirects(
     for (fd, mode, target) in redirects {
         match target {
             EvalRedirect::File(path) => {
-                // Stderr redirects are streaming regardless of operator (atomic
-                // semantics make no sense for diagnostic output).
-                let effective_mode = if *fd == 2 {
-                    match mode {
-                        RedirectMode::Write => RedirectMode::StreamWrite,
-                        other => *other,
-                    }
-                } else {
-                    *mode
-                };
+                let effective_mode = if *fd == 2 { stderr_mode(mode) } else { *mode };
                 let (file, commit) = open_file(path, &effective_mode, shell)?;
                 if let Some(c) = commit {
                     commits.push(c);

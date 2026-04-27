@@ -260,16 +260,11 @@ fn setup_panic_hook() {
 /// Probe terminal capabilities, wire up diagnostic color, and set the TERMINAL binding.
 /// Returns the resolved `InteractiveMode` (needed for frontend selection).
 fn setup_terminal(shell: &mut Shell) -> ral_core::io::InteractiveMode {
-    let raw_mode = std::env::var("RAL_INTERACTIVE_MODE").ok();
-    let (interactive_mode, mode_warn) = ral_core::io::InteractiveMode::parse(raw_mode.as_deref());
-    if let Some(msg) = mode_warn {
-        diagnostic::shell_warning(&msg);
-    }
-    shell.io.terminal = ral_core::io::TerminalState::probe_with_mode(interactive_mode);
+    let (mode, terminal) = super::probe_terminal(true);
+    shell.io.terminal = terminal;
     shell.io.interactive = true;
-    diagnostic::set_terminal(&shell.io.terminal);
     shell.set("TERMINAL".into(), terminal_capability_map(&shell.io.terminal));
-    interactive_mode
+    mode
 }
 
 /// Source login profiles (if login shell) and the user RC file.

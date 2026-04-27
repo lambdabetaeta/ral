@@ -1,6 +1,12 @@
+//! `_editor` — line editor interface exposed to plugin handlers.
+//!
+//! All operations require an active `PluginContext`, set up by the REPL
+//! before it dispatches into a plugin handler.  Outside a handler every
+//! op fails with a "no plugin context" error.
+
 use crate::types::*;
 
-use super::util::{as_list, as_map, sig};
+use super::util::{arg0_str, as_list, as_map, sig};
 
 /// Valid highlight style names.
 const STYLES: &[&str] = &[
@@ -25,10 +31,8 @@ pub fn builtin_editor(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSi
     if !shell.io.interactive {
         return Err(sig("_editor: not available outside interactive mode"));
     }
-    let (op, rest) = match args.split_first() {
-        Some((head, tail)) => (head.to_string(), tail),
-        None => (String::new(), &args[..]),
-    };
+    let op = arg0_str(args);
+    let rest = args.get(1..).unwrap_or(&[]);
     match op.as_str() {
         "get" => editor_get(shell),
         "set" => editor_set(rest, shell),
@@ -167,18 +171,10 @@ fn editor_tui(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
 /// `_editor 'history' <prefix> <limit>` — prefix search over history.
 fn editor_history(args: &[Value], shell: &Shell) -> Result<Value, EvalSignal> {
     shell.check_editor_read("history")?;
-    let prefix = if args.is_empty() {
-        String::new()
-    } else {
-        args[0].to_string()
-    };
-    let limit = if args.len() >= 2 {
-        match &args[1] {
-            Value::Int(n) => *n as usize,
-            _ => 0,
-        }
-    } else {
-        0
+    let prefix = arg0_str(args);
+    let limit = match args.get(1) {
+        Some(Value::Int(n)) => *n as usize,
+        _ => 0,
     };
     let pc = ctx(shell)?;
     let mut results: Vec<Value> = Vec::new();
@@ -307,17 +303,9 @@ fn editor_parse(shell: &Shell) -> Result<Value, EvalSignal> {
 /// `_editor 'ghost' <text>`
 fn editor_ghost(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
     shell.check_editor_write("ghost")?;
-    let text = if args.is_empty() {
-        String::new()
-    } else {
-        args[0].to_string()
-    };
+    let text = arg0_str(args);
     let pc = ctx_mut(shell)?;
-    if text.is_empty() {
-        pc.outputs.ghost_text = None;
-    } else {
-        pc.outputs.ghost_text = Some(text);
-    }
+    pc.outputs.ghost_text = (!text.is_empty()).then_some(text);
     Ok(Value::Unit)
 }
 
@@ -330,6 +318,10 @@ fn editor_highlight(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSign
     }
     let spans_val = as_list(&args[0], "_editor 'highlight'")?;
     let text_len = ctx(shell)?.editor_state.text.chars().count();
+    let int_field = |v: &Value, field: &'static str| match v {
+        Value::Int(n) => Ok(*n),
+        _ => Err(sig(format!("highlight span: {field} must be Int"))),
+    };
     let mut spans = Vec::with_capacity(spans_val.len());
     for sv in &spans_val {
         let m = as_map(sv, "_editor 'highlight' span")?;
@@ -338,18 +330,8 @@ fn editor_highlight(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSign
         let mut style = String::new();
         for (k, v) in &m {
             match k.as_str() {
-                "start" => {
-                    start = match v {
-                        Value::Int(n) => *n,
-                        _ => return Err(sig("highlight span: start must be Int")),
-                    }
-                }
-                "end" => {
-                    end = match v {
-                        Value::Int(n) => *n,
-                        _ => return Err(sig("highlight span: end must be Int")),
-                    }
-                }
+                "start" => start = int_field(v, "start")?,
+                "end" => end = int_field(v, "end")?,
                 "style" => style = v.to_string(),
                 _ => {} // row polymorphism
             }
@@ -357,11 +339,9 @@ fn editor_highlight(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSign
         if !STYLES.contains(&style.as_str()) {
             return Err(sig(format!("_editor 'highlight': unknown style '{style}'")));
         }
-        let s = start.clamp(0, text_len as i64) as usize;
-        let e = end.clamp(0, text_len as i64) as usize;
         spans.push(HighlightSpan {
-            start: s,
-            end: e,
+            start: start.clamp(0, text_len as i64) as usize,
+            end: end.clamp(0, text_len as i64) as usize,
             style,
         });
     }

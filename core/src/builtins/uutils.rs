@@ -363,7 +363,7 @@ pub(crate) fn uu_grep(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSi
                 String::new()
             };
             let mut count = 0u64;
-            let res = searcher.search_reader(
+            let _res = searcher.search_reader(
                 &matcher,
                 $reader,
                 UTF8(|lnum, line| {
@@ -386,7 +386,7 @@ pub(crate) fn uu_grep(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSi
                     Ok(true)
                 }),
             );
-            crate::dbg_trace!("uu_grep", "search_reader result={:?} count={count} matched={matched}", res);
+            crate::dbg_trace!("uu_grep", "search_reader result={:?} count={count} matched={matched}", _res);
             if count_only {
                 let s = format!("{prefix}{count}");
                 let _ = shell.write_stdout(format!("{s}\n").as_bytes());

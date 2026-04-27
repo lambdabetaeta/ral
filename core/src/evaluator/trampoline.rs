@@ -42,13 +42,11 @@ fn trampoline_inner(
     shell: &mut Shell,
 ) -> Result<Value, EvalSignal> {
     loop {
-        match callee {
+        match &callee {
             // thunk(λx. M) — apply if args available, return if not.
-            Value::Thunk {
-                ref body,
-                ref captured,
-                ..
-            } if matches!(body.as_ref().kind, CompKind::Lam { .. }) => {
+            Value::Thunk { body, captured, .. }
+                if matches!(body.as_ref().kind, CompKind::Lam { .. }) =>
+            {
                 if args.is_empty() {
                     return Ok(callee);
                 }
@@ -76,11 +74,7 @@ fn trampoline_inner(
                 }
             }
             // thunk(M) where M is not a lambda — force it.
-            Value::Thunk {
-                ref body,
-                ref captured,
-                ..
-            } => {
+            Value::Thunk { body, captured, .. } => {
                 let is_last = args.is_empty();
                 let result = shell.with_child(captured, |child| {
                     child.control.in_tail_position = is_last;

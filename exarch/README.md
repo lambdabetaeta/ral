@@ -12,6 +12,27 @@ The name is the role: in Byzantine usage, an *exarch* was a viceroy
 who acted on behalf of a distant sovereign within a bounded province.
 Here the sovereign is the LLM and the province is the `grant`.
 
+## Docker
+
+No checkout, no Rust toolchain.  Set at least one provider key and run
+from the directory you want exarch to work in:
+
+```
+docker run --rm -it -e ANTHROPIC_API_KEY -v "$PWD:/work" ghcr.io/lambdabetaeta/exarch-box
+```
+
+Pass `-e OPENAI_API_KEY` or `-e OPENROUTER_API_KEY` instead to switch
+providers.
+
+From this repo (builds from the latest release binary):
+
+```
+docker compose -f exarch/docker/compose.yaml run --rm --build exarch-box
+```
+
+See [`exarch/docker/`](docker/) for pinning a version, overriding the
+workspace mount, and the local-build variant.
+
 ## Run
 
 ```

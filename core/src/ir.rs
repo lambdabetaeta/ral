@@ -132,6 +132,13 @@ impl Comp {
         }
     }
 
+    /// Wrap a `CompKind`, attaching `span` if present.  The common case in
+    /// the elaborator: the current span is always optional, but the wrap
+    /// shape is identical either way.
+    pub fn with_span(span: Option<Span>, kind: CompKind) -> Self {
+        Comp { span, kind }
+    }
+
     /// True if this computation is a single external/builtin command call.
     /// Used to suppress the ariadne source-span arrow when the entire
     /// input is just one command.

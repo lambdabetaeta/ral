@@ -1,3 +1,10 @@
+//! Tab completion and syntax-highlighting hooks for rustyline.
+//!
+//! [`RalHelper`] implements rustyline's `Completer`, `Hinter`, and
+//! `Highlighter`.  Completion classifies the token under the cursor as
+//! variable / command / path; highlighting and ghost text come from
+//! plugin buffer-change hooks recorded in [`super::plugin::PluginRuntime`].
+
 use ral_core::Shell;
 use ral_core::ansi;
 use rustyline::completion::{Completer, Pair};

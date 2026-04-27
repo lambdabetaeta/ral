@@ -64,6 +64,10 @@ pub fn boot_shell() -> Shell {
 }
 
 /// Drive `provider` for one user message until it stops calling tools.
+///
+/// Returns `(usage, hit_max_turns)`.  When `hit_max_turns` is true the
+/// caller should re-queue a continuation prompt so the model can resume
+/// with its full prior context.
 pub fn run_task(
     provider: &mut Provider,
     shell: &mut Shell,
@@ -71,7 +75,7 @@ pub fn run_task(
     spill: &Spill,
     total: &mut Usage,
     prompt: String,
-) -> Result<Usage, String> {
+) -> Result<(Usage, bool), String> {
     let mut task = Usage::default();
     let mut input = Step::User(prompt);
     for n in 1..=MAX_TURNS {
@@ -83,7 +87,7 @@ pub fn run_task(
             ui::assistant_text(&text);
         }
         if tool_calls.is_empty() {
-            return Ok(task);
+            return Ok((task, false));
         }
         let mut results = Vec::with_capacity(tool_calls.len());
         for ToolCall { id, cmd, audit } in tool_calls {
@@ -102,12 +106,13 @@ pub fn run_task(
             }
         }
         if done {
-            return Ok(task);
+            return Ok((task, false));
         }
         input = Step::ToolResults(results);
     }
     ui::error("max turns reached for this task");
-    Ok(task)
+    provider.trim_last_if_tool_use();
+    Ok((task, true))
 }
 
 /// Per-session spill directory under `/tmp`, owning the dir and
@@ -167,7 +172,7 @@ impl Drop for Spill {
 /// within `MAX_TOOL_RESULT`.
 const STDOUT_CAP: usize = 5 * 1024;
 const STDERR_CAP: usize = 5 * 1024;
-const VALUE_CAP: usize = 1 * 1024;
+const VALUE_CAP: usize = 1024;
 const AUDIT_CAP: usize = 4 * 1024;
 
 /// Render `r` with the section layout `eval` historically emitted.

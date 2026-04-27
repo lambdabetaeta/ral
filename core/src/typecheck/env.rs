@@ -128,12 +128,7 @@ impl TyEnv {
     }
 
     pub fn lookup(&self, name: &str) -> Option<&Scheme> {
-        for scope in self.scopes.iter().rev() {
-            if let Some(s) = scope.get(name) {
-                return Some(s);
-            }
-        }
-        None
+        self.scopes.iter().rev().find_map(|scope| scope.get(name))
     }
 
     pub fn push(&mut self) {

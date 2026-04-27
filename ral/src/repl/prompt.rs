@@ -1,3 +1,9 @@
+//! Prompt construction.
+//!
+//! Per-prompt bindings (USER, CWD, STATUS) are computed once and pushed
+//! into both the live shell and any thunk-prompt child shell.  Plugins
+//! may transform the result via the `prompt` lifecycle hook.
+
 use ral_core::{Shell, EvalSignal, Value, diagnostic};
 
 use super::errfmt::plugin_error;

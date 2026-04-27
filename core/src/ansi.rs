@@ -1,11 +1,9 @@
-// ── ANSI styling ──────────────────────────────────────────────────────────
-//
-// Single source of truth for ANSI escape constants, color-gating predicates,
-// and the configurable OutputTheme used for REPL value output.
-//
-// Gating helpers (`use_color`, `use_ui_color`) consult a cached TerminalState
-// seeded once at REPL startup via `set_terminal`.  Batch runs and
-// early-startup errors fall back to inline probing.
+//! ANSI styling: escape constants, color-gating predicates, and the
+//! configurable [`OutputTheme`] used for REPL value output.
+//!
+//! Gating helpers ([`use_color`], [`use_ui_color`]) consult a cached
+//! [`TerminalState`] seeded once at REPL startup via [`set_terminal`].
+//! Batch runs and early-startup errors fall back to inline probing.
 
 use std::sync::{LazyLock, OnceLock, RwLock};
 

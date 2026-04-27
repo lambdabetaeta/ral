@@ -18,7 +18,7 @@ mod repl;
 #[cfg(unix)]
 mod jobs;
 
-pub(crate) use platform::{home_dir, seed_default_env, user_name};
+pub(crate) use platform::{home_dir, probe_terminal, seed_default_env, user_name};
 
 const USAGE: &str = include_str!("../../data/usage.txt");
 const HELP: &str = include_str!("../../data/help.txt");
@@ -268,10 +268,7 @@ fn run_batch(name: &str, source: String, script_args: Vec<String>, opts: BatchOp
     ral_core::signal::install_handlers();
     // Seed the ANSI color gate so `_ansi-ok` and the prelude ansi-* constants
     // work correctly in batch (script / -c) mode, not just the REPL.
-    let raw_mode = std::env::var("RAL_INTERACTIVE_MODE").ok();
-    let (interactive_mode, _) = ral_core::io::InteractiveMode::parse(raw_mode.as_deref());
-    let terminal = ral_core::io::TerminalState::probe_with_mode(interactive_mode);
-    diagnostic::set_terminal(&terminal);
+    let (_, terminal) = probe_terminal(false);
 
     let timing = std::env::var_os("RAL_TIMING").is_some();
     let t0 = std::time::Instant::now();

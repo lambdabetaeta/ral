@@ -1,0 +1,40 @@
+# Local-build variant.  Pre-built `exarch-linux` is dropped in next to
+# this Dockerfile (run `exarch/docker/build.sh` to populate it).  No
+# rust toolchain in the image; builds happen in `shell-dev`, this
+# container only runs.
+#
+# The container is the trust boundary in place of bwrap.  The image
+# itself is locked down: read-only rootfs, dropped capabilities, no
+# privilege escalation, tmpfs for $HOME and /tmp.  See compose.local.yaml.
+#
+# This is the secondary path — kept for iterating on exarch sources.
+# The default Dockerfile fetches a release binary instead.
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    git \
+    curl \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# /work is bind-mounted from the host; on Linux the UIDs may not match.
+# Letting git refuse to operate on a "dubious ownership" repo is a
+# foot-gun, not a security win — the container itself is the boundary.
+RUN git config --system --add safe.directory '*'
+
+RUN useradd --create-home --shell /bin/bash --uid 1000 exarch
+
+COPY exarch-linux           /usr/local/bin/exarch
+COPY entrypoint.sh          /usr/local/bin/exarch-entrypoint
+RUN chmod +x /usr/local/bin/exarch /usr/local/bin/exarch-entrypoint
+
+# Belt-and-braces: even if compose strips the env, the binary picks the
+# permissive grant.  The container has no ambient authority anyway.
+ENV EXARCH_DANGEROUS=1
+
+USER exarch
+WORKDIR /work
+# `init: true` in compose.yaml gives us a proper PID-1 reaper.
+ENTRYPOINT ["/usr/local/bin/exarch-entrypoint"]

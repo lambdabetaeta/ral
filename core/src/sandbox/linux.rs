@@ -165,7 +165,7 @@ fn apply_seccomp(cmd: &mut Command, filter: Vec<u8>) {
     const SECCOMP_FD: libc::c_int = 100;
     unsafe {
         cmd.pre_exec(move || {
-            let name = b"seccomp\0".as_ptr() as *const libc::c_char;
+            let name = c"seccomp".as_ptr();
             let fd = libc::syscall(libc::SYS_memfd_create, name, 0u32) as libc::c_int;
             if fd < 0 {
                 return Err(std::io::Error::last_os_error());

@@ -8,14 +8,12 @@
 use crate::types::*;
 
 use super::call_value;
-use super::util::{as_list, sig};
+use super::util::{as_list, check_arity, sig};
 
 /// `_each <list> <fn>` -- call `fn` on each element for side effects.
 /// Returns the result of the last application, or `Unit` for an empty list.
 pub(super) fn builtin_each(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
-    if args.len() < 2 {
-        return Err(sig("each requires 2 arguments"));
-    }
+    check_arity(args, 2, "each")?;
     shell.control.in_tail_position = false;
     let items = as_list(&args[0], "each")?;
     let func = &args[1];
@@ -33,9 +31,7 @@ pub(super) fn builtin_each(args: &[Value], shell: &mut Shell) -> Result<Value, E
 
 /// `_map <fn> <list>` -- apply `fn` to each element, return a new list.
 pub(super) fn builtin_map(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
-    if args.len() < 2 {
-        return Err(sig("map requires 2 arguments"));
-    }
+    check_arity(args, 2, "map")?;
     shell.control.in_tail_position = false;
     let func = &args[0];
     let items = as_list(&args[1], "map")?;
@@ -99,9 +95,7 @@ fn iterate_audited(
 
 /// `_filter <fn> <list>` -- keep elements where `fn` returns `true`.
 pub(super) fn builtin_filter(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
-    if args.len() < 2 {
-        return Err(sig("filter requires 2 arguments"));
-    }
+    check_arity(args, 2, "filter")?;
     shell.control.in_tail_position = false;
     let func = &args[0];
     let items = as_list(&args[1], "filter")?;
@@ -127,9 +121,7 @@ pub(super) fn builtin_filter(args: &[Value], shell: &mut Shell) -> Result<Value,
 
 /// `_sort-list <list>` -- sort a list by the string representation of each element.
 pub(super) fn builtin_sort(args: &[Value]) -> Result<Value, EvalSignal> {
-    if args.is_empty() {
-        return Err(sig("sort requires 1 argument"));
-    }
+    check_arity(args, 1, "sort")?;
     let mut items = as_list(&args[0], "sort")?;
     items.sort_by_key(|a| a.to_string());
     Ok(Value::List(items))
@@ -158,9 +150,7 @@ pub(super) fn builtin_sort_by(args: &[Value], shell: &mut Shell) -> Result<Value
 /// `_fold <list> <init> <fn>` -- left fold over a list.
 /// Calls `fn(acc, elem)` for each element, threading the accumulator.
 pub(super) fn builtin_fold(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
-    if args.len() < 3 {
-        return Err(sig("fold requires 3 arguments"));
-    }
+    check_arity(args, 3, "fold")?;
     shell.control.in_tail_position = false;
     let items = as_list(&args[0], "fold")?;
     let mut acc = args[1].clone();

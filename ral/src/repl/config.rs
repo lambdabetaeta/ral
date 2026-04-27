@@ -1,3 +1,11 @@
+//! RC file discovery, parsing, and application.
+//!
+//! An rc file is ral source whose return value is a map.  Recognised keys
+//! map to REPL state: `env`, `prompt`, `bindings`, `aliases`, `edit_mode`,
+//! `bell`, `recursion_limit`, `plugins`, `startup`, `theme`.  Unknown keys
+//! are silently ignored so future versions can add knobs without breaking
+//! older configs.
+
 use ral_core::ansi::{OutputTheme, named_color};
 use ral_core::io::InteractiveMode;
 use ral_core::{AliasEntry, Shell, EvalSignal, Value};

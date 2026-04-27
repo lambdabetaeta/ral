@@ -1,0 +1,64 @@
+name: Publish exarch-box
+# Builds a multi-arch exarch-box image and pushes it to GHCR.
+# Runs on version-tag pushes (same cadence as build-binaries.yml) and
+# on workflow_dispatch for rolling-latest updates.
+#
+# The Dockerfile fetches the exarch binary from the public
+# lambdabetaeta/ral GitHub Release — no local checkout, no rust
+# toolchain in the image.  Published at:
+#   ghcr.io/lambdabetaeta/exarch-box:latest
+#   ghcr.io/lambdabetaeta/exarch-box:<tag>  (on v* pushes)
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  IMAGE: ghcr.io/lambdabetaeta/exarch-box
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute image tags and version
+        id: meta
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "tags=${IMAGE}:latest,${IMAGE}:${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            echo "version=${{ github.ref_name }}"                        >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=${IMAGE}:latest"  >> "$GITHUB_OUTPUT"
+            echo "version=latest"        >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          IMAGE: ${{ env.IMAGE }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: exarch/docker
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            EXARCH_VERSION=${{ steps.meta.outputs.version }}
+            EXARCH_REPO=lambdabetaeta/ral
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

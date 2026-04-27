@@ -36,8 +36,8 @@ pub(super) fn builtin_len(args: &[Value]) -> Result<Value, EvalSignal> {
 }
 
 pub(super) fn builtin_str(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
-    let op = args.first().map(|v| v.to_string()).unwrap_or_default();
-    let rest = &args[1..];
+    let op = arg0_str(args);
+    let rest = args.get(1..).unwrap_or(&[]);
     match op.as_str() {
         "upper" => Ok(Value::String(arg0_str(rest).to_uppercase())),
         "lower" => Ok(Value::String(arg0_str(rest).to_lowercase())),
@@ -116,20 +116,12 @@ pub(super) fn builtin_str(args: &[Value], shell: &mut Shell) -> Result<Value, Ev
             Ok(Value::Bool(matched))
         }
         "shell-split" => {
-            let s = if rest.is_empty() {
-                String::new()
-            } else {
-                rest[0].to_string()
-            };
+            let s = arg0_str(rest);
             let parts = shell_words::split(&s).map_err(|e| sig(format!("shell-split: {e}")))?;
             Ok(Value::List(parts.into_iter().map(Value::String).collect()))
         }
         "shell-quote" => {
-            let s = if rest.is_empty() {
-                String::new()
-            } else {
-                rest[0].to_string()
-            };
+            let s = arg0_str(rest);
             let quoted = shlex::try_quote(&s).map_err(|e| sig(format!("shell-quote: {e}")))?;
             Ok(Value::String(quoted.into_owned()))
         }

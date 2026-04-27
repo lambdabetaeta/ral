@@ -1,3 +1,17 @@
+//! Lexer: source text → token stream.
+//!
+//! Produces a flat `Vec<(Token, Span)>` from raw source.  Spans carry
+//! line/column for legacy error paths and a byte-range [`ByteSpan`] for
+//! ariadne diagnostics.  Newlines are statement separators except inside
+//! `[...]` (lists/maps), where they are whitespace; this is decided by the
+//! innermost open delimiter so nested `{ [ ] }` and `[ { } ]` both behave.
+//!
+//! Bare-word recognition is broad: anything not in the metacharacter set
+//! is part of a word, including `:` and `=`.  `:` only splits when followed
+//! by space, newline, or `]` — so `host:5432` stays one token but `host:`
+//! splits.  `$`, `^`, `!`, `~` introduce structured forms (deref, expr
+//! block, force, tilde path) and never appear mid-word.
+
 use crate::ast::Word;
 use crate::source::FileId;
 use crate::span::Span as ByteSpan;

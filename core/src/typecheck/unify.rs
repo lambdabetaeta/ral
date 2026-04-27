@@ -219,17 +219,7 @@ impl Unifier {
 
     pub fn apply_comp_ty(&mut self, cty: &CompTy) -> CompTy {
         match self.resolve_comp_ty(cty) {
-            CompTy::Return(spec, a) => {
-                let i = self.apply_mode(&spec.input);
-                let o = self.apply_mode(&spec.output);
-                CompTy::Return(
-                    PipeSpec {
-                        input: i,
-                        output: o,
-                    },
-                    Box::new(self.apply_ty(&a)),
-                )
-            }
+            CompTy::Return(spec, a) => self.apply_return(&spec, &a),
             CompTy::Fun(a, b) => CompTy::Fun(
                 Box::new(self.apply_ty(&a)),
                 Box::new(self.apply_comp_ty(&b)),
@@ -458,23 +448,9 @@ impl Unifier {
                 if diffs.is_empty() {
                     Ok(())
                 } else {
-                    let ea = CompTy::Return(
-                        PipeSpec {
-                            input: self.apply_mode(&sa.input),
-                            output: self.apply_mode(&sa.output),
-                        },
-                        Box::new(self.apply_ty(&ta)),
-                    );
-                    let eb = CompTy::Return(
-                        PipeSpec {
-                            input: self.apply_mode(&sb.input),
-                            output: self.apply_mode(&sb.output),
-                        },
-                        Box::new(self.apply_ty(&tb)),
-                    );
                     Err(TypeErrorKind::CompTyMismatch {
-                        expected: ea,
-                        actual: eb,
+                        expected: self.apply_return(&sa, &ta),
+                        actual: self.apply_return(&sb, &tb),
                         diffs,
                     })
                 }
@@ -489,6 +465,18 @@ impl Unifier {
                 diffs: Vec::new(),
             }),
         }
+    }
+
+    /// Reconstruct a `CompTy::Return` after substitutions have been applied
+    /// — used to render the post-resolution form for mismatch diagnostics.
+    fn apply_return(&mut self, spec: &PipeSpec, ty: &Ty) -> CompTy {
+        CompTy::Return(
+            PipeSpec {
+                input: self.apply_mode(&spec.input),
+                output: self.apply_mode(&spec.output),
+            },
+            Box::new(self.apply_ty(ty)),
+        )
     }
 
     pub fn unify_mode(&mut self, a: &PipeMode, b: &PipeMode) -> Result<(), TypeErrorKind> {

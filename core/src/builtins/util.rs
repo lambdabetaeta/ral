@@ -175,9 +175,7 @@ pub(crate) fn str_cmp(
     name: &str,
     f: fn(&str, &str) -> bool,
 ) -> Result<Value, EvalSignal> {
-    if args.len() < 2 {
-        return Err(sig(format!("{name} requires 2 arguments")));
-    }
+    check_arity(args, 2, name)?;
     let r = f(&args[0].to_string(), &args[1].to_string());
     shell.set_status_from_bool(r);
     Ok(Value::Bool(r))

@@ -1,12 +1,27 @@
-// ── Platform helpers ─────────────────────────────────────────────────────
-//
-// Cross-platform utility functions for locating user directories and seeding
-// the shell environment.  Kept here so that both `main.rs` and all `repl/`
-// submodules can reach them via `crate::platform::*` without going through
-// the `super::super::` chain.
+//! Cross-platform helpers for user directories and environment seeding.
+//!
+//! Centralised here so `main.rs` and the `repl/` submodules can reach them
+//! through `crate::platform::*` without chaining `super::super::`.  Both
+//! Unix and Windows env-var fallbacks are encoded explicitly.
 
 use ral_core::exit_hints::ExitHints;
-use ral_core::{Shell, Value};
+use ral_core::io::{InteractiveMode, TerminalState};
+use ral_core::{Shell, Value, diagnostic};
+
+/// Probe the terminal under the active `RAL_INTERACTIVE_MODE`, plumb
+/// it into the diagnostic subsystem, and return both halves.  When
+/// `warn` is set, an unrecognised mode value emits a shell warning;
+/// callers in non-interactive modes pass `false` to stay quiet.
+pub(crate) fn probe_terminal(warn: bool) -> (InteractiveMode, TerminalState) {
+    let raw = std::env::var("RAL_INTERACTIVE_MODE").ok();
+    let (mode, mode_warn) = InteractiveMode::parse(raw.as_deref());
+    if warn && let Some(msg) = mode_warn {
+        diagnostic::shell_warning(&msg);
+    }
+    let terminal = TerminalState::probe_with_mode(mode);
+    diagnostic::set_terminal(&terminal);
+    (mode, terminal)
+}
 
 /// Home directory: `$HOME` on Unix, `%USERPROFILE%` on Windows.
 pub(crate) fn home_dir() -> String {

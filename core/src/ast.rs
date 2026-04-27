@@ -240,6 +240,20 @@ impl Pattern {
     }
 }
 
+/// Record `n` in `out` if it is a candidate and not shadowed by an enclosing
+/// lambda scope.  The same predicate fires from three traversals (Ast, Expr,
+/// Head); factoring keeps shadowing logic in one place.
+fn note_free(
+    n: &str,
+    candidates: &HashSet<String>,
+    scopes: &[HashSet<String>],
+    out: &mut HashSet<String>,
+) {
+    if candidates.contains(n) && !scopes.iter().any(|s| s.contains(n)) {
+        out.insert(n.to_string());
+    }
+}
+
 impl Ast {
     pub fn is_lambda(&self) -> bool {
         matches!(self, Ast::Lambda { .. } | Ast::Block(_))
@@ -260,11 +274,7 @@ impl Ast {
         out: &mut HashSet<String>,
     ) {
         match self {
-            Ast::Variable(n) => {
-                if candidates.contains(n) && !scopes.iter().any(|s| s.contains(n)) {
-                    out.insert(n.clone());
-                }
-            }
+            Ast::Variable(n) => note_free(n, candidates, scopes, out),
             Ast::Literal(_)
             | Ast::Word(Word::Plain(_))
             | Ast::Word(Word::Slash(_))
@@ -367,15 +377,9 @@ impl Expr {
     ) {
         match self {
             Expr::Integer(_) | Expr::Number(_) | Expr::Bool(_) => {}
-            Expr::Var(n) => {
-                if candidates.contains(n) && !scopes.iter().any(|s| s.contains(n)) {
-                    out.insert(n.clone());
-                }
-            }
+            Expr::Var(n) => note_free(n, candidates, scopes, out),
             Expr::Index(n, keys) => {
-                if candidates.contains(n) && !scopes.iter().any(|s| s.contains(n)) {
-                    out.insert(n.clone());
-                }
+                note_free(n, candidates, scopes, out);
                 for k in keys {
                     k.collect_free_refs(candidates, scopes, out);
                 }
@@ -402,11 +406,7 @@ impl Head {
         out: &mut HashSet<String>,
     ) {
         match self {
-            Head::Bare(n) => {
-                if candidates.contains(n) && !scopes.iter().any(|s| s.contains(n)) {
-                    out.insert(n.clone());
-                }
-            }
+            Head::Bare(n) => note_free(n, candidates, scopes, out),
             Head::Value(ast) => ast.collect_free_refs(candidates, scopes, out),
             Head::ExternalName(_) | Head::Path(_) | Head::TildePath(_) => {}
         }

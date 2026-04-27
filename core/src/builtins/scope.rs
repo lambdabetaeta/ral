@@ -1,3 +1,12 @@
+//! `within` and `grant` — scoped overrides and capability attenuation.
+//!
+//! `within [...] body` composes `with_env`, `with_cwd`, and `with_handlers`
+//! around a single call to `body`.  `grant [...] body` narrows the
+//! ambient `Capabilities` along the dimensions named (`exec`, `fs`,
+//! `net`, `editor`, `shell`, `audit`); unspecified dimensions inherit
+//! the caller's frame.  Both run the body inside an audit scope so the
+//! tree records the override.
+
 use crate::types::*;
 
 use super::call_value;

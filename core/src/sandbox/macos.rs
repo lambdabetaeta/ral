@@ -1,25 +1,25 @@
-// macOS sandbox using the Seatbelt (sandbox_init) API.
-//
-// Single mode of operation: a ral subprocess spawned by
-// `eval_grant_sandboxed` enters the Seatbelt profile once at startup via
-// `enter_current_process`, then evaluates the grant body in-process with
-// every external it spawns inheriting the confinement.  `process-exec` is
-// allowed without restriction; file and network access are limited by the
-// policy.
-//
-// We deliberately do *not* apply per-command Seatbelt profiles in the
-// parent ral process or inside plugin handlers: the overhead-vs-benefit
-// is upside-down for ralʼs use case (an external like fzf needs a sprawl
-// of Seatbelt rules — process-info, IOKit, mach-bootstrap, symlink
-// resolution for the binary itself — and authorising a binary via
-// `exec:` already shifts trust to that binary anyway).  Plugin handlers
-// run externals with the userʼs full authority; only `grant { fs: ... }
-// / net: ...} body` opts in to OS-level enforcement, via the
-// sandboxed-child path.
-//
-// Network filtering is all-or-nothing at the OS level: Seatbelt does not
-// support per-address rules.  `SandboxPolicy::net` is therefore a boolean
-// allow/deny bit, not an endpoint list.
+//! macOS sandbox using the Seatbelt (sandbox_init) API.
+//!
+//! Single mode of operation: a ral subprocess spawned by
+//! `eval_grant_sandboxed` enters the Seatbelt profile once at startup via
+//! `enter_current_process`, then evaluates the grant body in-process with
+//! every external it spawns inheriting the confinement.  `process-exec` is
+//! allowed without restriction; file and network access are limited by the
+//! policy.
+//!
+//! We deliberately do *not* apply per-command Seatbelt profiles in the
+//! parent ral process or inside plugin handlers: the overhead-vs-benefit
+//! is upside-down for ral's use case (an external like fzf needs a sprawl
+//! of Seatbelt rules — process-info, IOKit, mach-bootstrap, symlink
+//! resolution for the binary itself — and authorising a binary via
+//! `exec:` already shifts trust to that binary anyway).  Plugin handlers
+//! run externals with the user's full authority; only `grant { fs: ... }
+//! / net: ...} body` opts in to OS-level enforcement, via the
+//! sandboxed-child path.
+//!
+//! Network filtering is all-or-nothing at the OS level: Seatbelt does not
+//! support per-address rules.  `SandboxPolicy::net` is therefore a boolean
+//! allow/deny bit, not an endpoint list.
 
 use crate::types::SandboxPolicy;
 use std::ffi::{CStr, CString};
@@ -48,31 +48,22 @@ fn apply_profile<'a>(
     profile: &str,
     parameters: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> std::io::Result<()> {
-    let profile_cstr = CString::new(profile).map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "sandbox profile contains NUL byte",
-        )
-    })?;
+    fn cstr(s: &str, what: &str) -> std::io::Result<CString> {
+        CString::new(s).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{what} contains NUL byte"),
+            )
+        })
+    }
+    let profile_cstr = cstr(profile, "sandbox profile")?;
     let mut parameter_storage = Vec::new();
     for (key, value) in parameters {
-        parameter_storage.push(CString::new(key).map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "sandbox parameter key contains NUL byte",
-            )
-        })?);
-        parameter_storage.push(CString::new(value).map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "sandbox parameter value contains NUL byte",
-            )
-        })?);
+        parameter_storage.push(cstr(key, "sandbox parameter key")?);
+        parameter_storage.push(cstr(value, "sandbox parameter value")?);
     }
-    let mut parameter_ptrs: Vec<*const c_char> = parameter_storage
-        .iter()
-        .map(|value| value.as_ptr())
-        .collect();
+    let mut parameter_ptrs: Vec<*const c_char> =
+        parameter_storage.iter().map(|s| s.as_ptr()).collect();
     parameter_ptrs.push(std::ptr::null());
 
     let mut errorbuf: *mut c_char = std::ptr::null_mut();

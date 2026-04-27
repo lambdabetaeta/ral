@@ -67,10 +67,7 @@ struct Elaborator {
 /// Wrap a `CompKind` using the elaborator's current span.
 macro_rules! comp {
     ($self:expr, $kind:expr) => {
-        match $self.current_span {
-            Some(sp) => Comp::spanned(sp, $kind),
-            None => Comp::new($kind),
-        }
+        Comp::with_span($self.current_span, $kind)
     };
 }
 
@@ -664,15 +661,14 @@ fn wrap_binds(span: &Option<Span>, binds: Vec<(Pattern, Comp)>, inner: Comp) -> 
         .into_iter()
         .rev()
         .fold(inner, |rest, (pattern, comp)| {
-            let kind = CompKind::Bind {
-                comp: Box::new(comp),
-                pattern,
-                rest: Box::new(rest),
-            };
-            match span {
-                Some(sp) => Comp::spanned(*sp, kind),
-                None => Comp::new(kind),
-            }
+            Comp::with_span(
+                *span,
+                CompKind::Bind {
+                    comp: Box::new(comp),
+                    pattern,
+                    rest: Box::new(rest),
+                },
+            )
         })
 }
 
@@ -683,10 +679,7 @@ fn force_from_comp(span: Option<Span>, comp: Comp) -> Comp {
         CompKind::Return(v) => CompKind::Force(v),
         _ => CompKind::Force(Val::Thunk(Arc::new(comp))),
     };
-    match span {
-        Some(sp) => Comp::spanned(sp, kind),
-        None => Comp::new(kind),
-    }
+    Comp::with_span(span, kind)
 }
 
 /// Return the set of names exported by the prelude (cached after first call).

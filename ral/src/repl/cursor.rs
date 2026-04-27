@@ -1,3 +1,8 @@
+//! ANSI cursor-position queries (Unix only).
+//!
+//! Used to detect when the previous command left the cursor mid-line so
+//! the REPL can print a zsh-style `%` marker before the next prompt.
+
 /// Query the cursor column via ANSI CPR (ESC[6n → ESC[row;colR).
 /// Temporarily switches stdin to raw mode to read the response without
 /// waiting for a newline. Returns `None` on any error or timeout.

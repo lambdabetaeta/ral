@@ -1,10 +1,10 @@
-// ── Unified stream plumbing ───────────────────────────────────────────────
-//
-// Sink and Source carry the destination or origin for a pipeline stage's
-// byte I/O.  TerminalState caches the shell's entry-time isatty results
-// so downstream code can ask "is the user's terminal in the loop?" without
-// repeating the syscall.  Io groups these together with the other
-// pipeline-stage IO flags that used to live as loose fields on Shell.
+//! Unified stream plumbing.
+//!
+//! [`Sink`] and [`Source`] carry the destination or origin for a pipeline
+//! stage's byte I/O.  [`TerminalState`] caches the shell's entry-time isatty
+//! results so downstream code can ask "is the user's terminal in the loop?"
+//! without repeating the syscall.  [`Io`] groups these together with the
+//! other pipeline-stage IO flags that used to live as loose fields on Shell.
 
 use std::io::{self, Read, Write};
 use std::sync::{Arc, Mutex};

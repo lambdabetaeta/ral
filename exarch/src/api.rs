@@ -226,6 +226,39 @@ unexpected argv, or pipeline behaviour.  Skip for routine commands.",
         Ok(StepOut { text, tool_calls, done, usage: Usage { input, output, cache_creation, cache_read, dollars } })
     }
 
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Reset conversation history and cost counters; the system prompt
+    /// and provider configuration are preserved.
+    pub fn clear_history(&mut self) {
+        self.history.clear();
+        if self.kind != ProviderKind::Anthropic {
+            self.history.push(json!({ "role": "system", "content": self.system.clone() }));
+        }
+    }
+
+    /// Remove the last history entry if it is an assistant message whose
+    /// content contains `tool_use` blocks with no following `tool_result`.
+    ///
+    /// Call this when a turn loop is aborted mid-tool-call (e.g. max turns
+    /// reached).  Without it, the orphaned `tool_use` blocks cause the next
+    /// `step` to fail with an Anthropic 400.
+    pub fn trim_last_if_tool_use(&mut self) {
+        if let Some(last) = self.history.last() {
+            let is_assistant = last.get("role").and_then(|r| r.as_str()) == Some("assistant");
+            let has_tool_use = last.get("content")
+                .and_then(|c| c.as_array())
+                .is_some_and(|blocks| blocks.iter().any(|b| {
+                    b.get("type").and_then(|t| t.as_str()) == Some("tool_use")
+                }));
+            if is_assistant && has_tool_use {
+                self.history.pop();
+            }
+        }
+    }
+
     /// Total bytes of message JSON in the conversation history — used
     /// as a rough proxy for token count when deciding whether to
     /// compact (≈ 1 token per 3-4 bytes of mixed text/code).

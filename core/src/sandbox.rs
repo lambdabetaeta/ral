@@ -74,12 +74,12 @@ pub fn apply_child_limits(_child: &std::process::Child) {
 #[cfg(unix)]
 pub fn early_init(argv: &[String]) -> Result<(Vec<String>, Option<ExitCode>), String> {
     let (policy, stripped) = strip_policy_arg(argv)?;
-    if std::env::var_os(spawn::SANDBOX_SELF_ENV).is_none() {
-        if let Ok(exe) = std::env::current_exe() {
-            unsafe {
-                std::env::set_var(spawn::SANDBOX_SELF_ENV, exe);
-            }
-        }
+    if std::env::var_os(spawn::SANDBOX_SELF_ENV).is_none()
+        && let Ok(exe) = std::env::current_exe()
+    {
+        // Safety: `set_var` requires single-threaded access; `early_init`
+        // runs before any thread is spawned in main().
+        unsafe { std::env::set_var(spawn::SANDBOX_SELF_ENV, exe) };
     }
     if let Some(code) = spawn::maybe_enter_process_sandbox(&stripped, policy.as_ref())? {
         return Ok((stripped, Some(code)));
@@ -102,25 +102,21 @@ pub fn early_init(argv: &[String]) -> Result<(Vec<String>, Option<ExitCode>), St
 fn strip_policy_arg(raw: &[String]) -> Result<(Option<SandboxPolicy>, Vec<String>), String> {
     let mut args = Vec::new();
     let mut policy = None;
-    let mut i = 0;
-    while i < raw.len() {
-        if raw[i] == SANDBOX_POLICY_FLAG {
-            i += 1;
-            if i >= raw.len() {
-                return Err("ral: --sandbox-policy requires a JSON argument".into());
-            }
-            if policy.is_some() {
-                return Err("ral: --sandbox-policy may only be provided once".into());
-            }
-            policy = Some(
-                serde_json::from_str(&raw[i])
-                    .map_err(|e| format!("ral: invalid sandbox policy JSON: {e}"))?,
-            );
-            i += 1;
+    let mut iter = raw.iter();
+    while let Some(arg) = iter.next() {
+        if arg != SANDBOX_POLICY_FLAG {
+            args.push(arg.clone());
             continue;
         }
-        args.push(raw[i].clone());
-        i += 1;
+        let json = iter
+            .next()
+            .ok_or("ral: --sandbox-policy requires a JSON argument")?;
+        if policy.is_some() {
+            return Err("ral: --sandbox-policy may only be provided once".into());
+        }
+        policy = Some(
+            serde_json::from_str(json).map_err(|e| format!("ral: invalid sandbox policy JSON: {e}"))?,
+        );
     }
     Ok((policy, args))
 }

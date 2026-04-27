@@ -516,12 +516,8 @@ fn eval_map(entries: &[ValMapEntry], shell: &mut Shell) -> Result<Value, EvalSig
 /// `eval_block_body`; lambdas are evaluated directly (they bind their own
 /// parameter on application).  Non-thunk values produce an error.
 fn force(val: Value, shell: &mut Shell) -> Result<Value, EvalSignal> {
-    match val {
-        Value::Thunk {
-            ref body,
-            ref captured,
-            ..
-        } => with_tail(shell, false, |shell| {
+    match &val {
+        Value::Thunk { body, captured, .. } => with_tail(shell, false, |shell| {
             shell.with_child(captured, |child| {
                 if matches!(body.as_ref().kind, CompKind::Lam { .. }) {
                     eval_comp(body, child)

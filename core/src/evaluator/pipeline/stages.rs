@@ -15,6 +15,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
 use super::group::PipelineGroup;
+use super::super::{audit, dispatch, eval_comp, exec};
 use crate::io::{Sink, Source};
 use crate::ir::{Comp, CompKind, ExecName, Val};
 use crate::ty::InferCtx;
@@ -109,7 +110,7 @@ fn analyze_stage(stage: &Comp, shell: &mut Shell, ctx: &mut InferCtx) -> Result<
 
     let external = match (&stage.kind, name) {
         (CompKind::Exec { args, .. }, StageHead::Exec(name)) if !hit.internal => {
-            let vals = super::super::dispatch::eval_call_args(args, None, shell)?;
+            let vals = dispatch::eval_call_args(args, None, shell)?;
             Some(ExternalStage {
                 name: name.clone(),
                 args: vals.iter().map(|v| v.to_string()).collect(),
@@ -252,7 +253,7 @@ impl ProcessHandle {
             .child
             .wait()
             .map_err(|e| EvalSignal::Error(Error::new(format!("{}: {e}", self.name), 1)))?;
-        let code = super::super::exec::exit_code(status);
+        let code = exec::exit_code(status);
         let effective = if !is_last && code == super::SIGPIPE_STATUS {
             0
         } else {
@@ -268,6 +269,7 @@ impl ProcessHandle {
             stdout.pop();
         }
 
+        let principal = audit::principal(shell);
         if let Some(tree) = &mut shell.audit.tree {
             let mut node = ExecNode::leaf(
                 &self.name,
@@ -281,12 +283,7 @@ impl ProcessHandle {
             node.stderr = stderr;
             node.start = self.start_us;
             node.end = epoch_us();
-            node.principal = shell
-                .dynamic
-                .env_vars
-                .get("USER")
-                .cloned()
-                .unwrap_or_default();
+            node.principal = principal;
             tree.push(node);
         }
 
@@ -365,13 +362,13 @@ fn launch_external_stage(
         auditing,
     );
 
-    let shown = super::super::exec::render_exec_name(&external.name, shell);
-    let resolved = super::super::exec::resolve_in_path(&external.name, shell);
-    let policy_names = super::super::exec::exec_policy_names(&external.name, shell, &resolved);
+    let shown = exec::render_exec_name(&external.name, shell);
+    let resolved = exec::resolve_in_path(&external.name, shell);
+    let policy_names = exec::exec_policy_names(&external.name, shell, &resolved);
     let policy_name_refs: Vec<&str> = policy_names.iter().map(String::as_str).collect();
     shell.check_exec_args(&shown, &policy_name_refs, &external.args)?;
     let mut cmd = crate::sandbox::make_command(&resolved, &external.args, shell);
-    super::super::exec::apply_env(&mut cmd, shell);
+    exec::apply_env(&mut cmd, shell);
     cmd.stderr(if auditing {
         Stdio::piped()
     } else {
@@ -409,7 +406,7 @@ fn launch_external_stage(
 
     let mut child = cmd
         .spawn()
-        .map_err(|e| super::super::exec::spawn_error(&shown, e))?;
+        .map_err(|e| exec::spawn_error(&shown, e))?;
     group.register_child(&child);
     if shell.has_active_capabilities() {
         crate::sandbox::apply_child_limits(&child);
@@ -463,6 +460,9 @@ fn launch_external_stage(
     ))
 }
 
+type ThreadOutcome = (Result<Value, EvalSignal>, i32);
+type InternalStageResult = Result<(std::thread::JoinHandle<ThreadOutcome>, Channel), EvalSignal>;
+
 fn launch_internal_stage(
     stage: &Comp,
     comp_type: crate::ty::CompType,
@@ -470,7 +470,7 @@ fn launch_internal_stage(
     next_input: Option<crate::ty::Mode>,
     shell: &Shell,
     incoming: Channel,
-) -> Result<(std::thread::JoinHandle<(Result<Value, EvalSignal>, i32)>, Channel), EvalSignal> {
+) -> InternalStageResult {
     let needs_byte_output = matches!(next_input, Some(crate::ty::Mode::Bytes));
     let needs_value_output = matches!(next_input, Some(crate::ty::Mode::None));
 
@@ -529,7 +529,7 @@ fn launch_internal_stage(
             }
         }
 
-        let result = super::super::eval_comp(&stage_comp, child_env);
+        let result = eval_comp(&stage_comp, child_env);
         if let Some(tx) = val_tx {
             let _ = tx.send(result.clone());
         }
@@ -574,7 +574,7 @@ pub(super) fn launch_stage(
     } else {
         let (handle, outgoing) = launch_internal_stage(
             stage,
-            ctx.spec.comp_type.clone(),
+            ctx.spec.comp_type,
             is_last,
             next_input,
             shell,

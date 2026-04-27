@@ -1,9 +1,9 @@
-// Subprocess spawning for sandboxed grant blocks.
-//
-// make_command in mod.rs handles OS-level sandbox wrapping for individual
-// external commands.  This module handles the heavier operation: forking a
-// fresh ral process inside the OS sandbox so that ral builtins inside a
-// grant block also run under kernel enforcement.
+//! Subprocess spawning for sandboxed `grant` blocks.
+//!
+//! `make_command` in the parent module handles OS-level sandbox wrapping
+//! for individual external commands.  This module handles the heavier
+//! operation: forking a fresh ral process inside the OS sandbox so that
+//! ral builtins inside a `grant` block also run under kernel enforcement.
 
 use super::SANDBOX_ACTIVE_ENV;
 use super::ipc::{

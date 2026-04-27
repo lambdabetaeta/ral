@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 #[cfg(feature = "grep")]
 use super::util::{as_list, regex_err};
-use super::util::{check_arity, sig, value_to_json};
+use super::util::{arg0_str, check_arity, sig, value_to_json};
 
 struct DirEntryInfo {
     name: String,
@@ -175,8 +175,7 @@ pub(super) fn builtin_fs_pred(
     pred: impl Fn(&std::path::Path) -> bool,
     shell: &mut Shell,
 ) -> Result<Value, EvalSignal> {
-    let path_str = args.first().map(|v| v.to_string()).unwrap_or_default();
-    let path = checked_read_path(shell, &path_str)?;
+    let path = checked_read_path(shell, &arg0_str(args))?;
     let result = pred(&path);
     shell.set_status_from_bool(result);
     Ok(Value::Bool(result))
@@ -218,8 +217,7 @@ pub(super) fn builtin_grep_files(args: &[Value], shell: &mut Shell) -> Result<Va
 }
 
 pub(super) fn builtin_glob(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
-    let pattern = args.first().map(|v| v.to_string()).unwrap_or_default();
-    let pattern = checked_read_path(shell, &pattern)?
+    let pattern = checked_read_path(shell, &arg0_str(args))?
         .to_string_lossy()
         .into_owned();
     let mut results = Vec::new();
