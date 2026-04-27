@@ -1,0 +1,25 @@
+{
+  "release_repo": "lambdabetaeta/ral",
+  "targets": [
+    {
+      "os": "macOS arm64",
+      "primary": "ral-macos-arm64",
+      "allutils": "ral-macos-arm64-allutils"
+    },
+    {
+      "os": "Linux x86_64",
+      "primary": "ral-linux-x86_64",
+      "allutils": "ral-linux-x86_64-allutils"
+    },
+    {
+      "os": "Linux arm64",
+      "primary": "ral-linux-arm64",
+      "allutils": "ral-linux-arm64-allutils"
+    },
+    {
+      "os": "Windows",
+      "primary": "ral-windows.exe",
+      "allutils": "ral-windows-allutils.exe"
+    }
+  ]
+}

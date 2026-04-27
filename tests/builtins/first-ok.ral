@@ -1,0 +1,16 @@
+# Test: first_ok, collect_ok, for_ok
+
+# first_ok — find first item where f succeeds
+try {
+    let result = first_ok { |x| if $[$x <= 3] { fail [status: 1] } } [1, 2, 5, 4]
+    echo $result
+} { |_| echo 'unexpected failure' }
+# Expected: 5
+
+# first_ok — all fail
+try {
+    first_ok { |x| fail [status: 1] } [1, 2, 3]
+} { |_| echo 'all failed' }
+# Expected: all failed
+
+echo 'first_ok tests done'

@@ -1,0 +1,27 @@
+#!/usr/bin/env ral
+
+# Test: a practical script — convert m4a files to flac
+# This is the motivating example from the design process.
+
+# Find all m4a files
+let files = find . -name '*.m4a' | from-lines
+
+let count = length $files
+if $[$count == 0] {
+    echo 'no m4a files found'
+    exit 0
+}
+
+echo "found !{length $files} files"
+
+for $files { |f|
+    let out = replace $f '.m4a' '.flac'
+    echo "converting !{base $f}"
+    try {
+        ffmpeg -i $f $out 2> /dev/null ? echo "  done: !{base $out}"
+    } { |err|
+        echo "  failed: $err[message]"
+    }
+}
+
+echo 'all done'

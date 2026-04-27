@@ -1,0 +1,50 @@
+# Test: glob patterns — *, ?, [chars], **
+
+let dir = '/tmp/al-glob-test'
+mkdir -p "$dir/sub"
+
+# Create test files
+echo x > "$dir/hello.txt"
+echo x > "$dir/world.txt"
+echo x > "$dir/data.csv"
+echo x > "$dir/notes.md"
+echo x > "$dir/sub/deep.txt"
+
+# *.txt — match extension
+let txt = glob "$dir/*.txt"
+let ntxt = length $txt
+echo "txt files: $ntxt"
+# Expected: 2
+
+# * — match all in directory
+let all = glob "$dir/*"
+let nall = length $all
+echo "all entries: $nall"
+# Expected: 5 (4 files + 1 dir)
+
+# ? — single character wildcard
+let q = glob "$dir/?????.txt"
+let nq = length $q
+echo "5-char names: $nq"
+# Expected: 2 (hello.txt, world.txt)
+
+# [chars] — character class
+let bracket = glob "$dir/[hw]*.txt"
+let nb = length $bracket
+echo "h or w files: $nb"
+# Expected: 2
+
+# ** — recursive
+let deep = glob "$dir/**/*.txt"
+let nd = length $deep
+echo "recursive txt: $nd"
+# Expected: 3 (hello.txt, world.txt, sub/deep.txt)
+
+# No match returns empty list
+let empty = glob "$dir/*.xyz"
+echo "no match: !{length $empty}"
+# Expected: 0
+
+# Clean up
+rm -rf $dir
+echo 'glob tests done'

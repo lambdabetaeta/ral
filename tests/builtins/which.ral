@@ -1,0 +1,33 @@
+# Test: builtin which command resolution
+
+let assert_eq = { |name expected actual|
+    if $[not !{equal $expected $actual}] {
+        echo "FAIL:" $name "expected:" $expected "actual:" $actual 1>&2
+        fail [status: 1]
+    }
+}
+
+# Builtins resolve as builtins
+let w_echo = which echo
+assert_eq 'which builtin' 'echo: builtin' $w_echo
+
+# Prelude names resolve before builtins/externals
+let w_each = which each
+assert_eq 'which prelude' 'each: prelude' $w_each
+
+# Local bindings resolve first
+let local_fn = { |x| return $x }
+let w_local = which local_fn
+assert_eq 'which local' 'local_fn: local' $w_local
+
+# within handlers are discoverable
+within [handlers: [zz_test_mock: { return unit }]] {
+    let w_mock = which zz_test_mock
+    assert_eq 'which handler' 'zz_test_mock: handler' $w_mock
+}
+
+# Missing command should return status 1 (captured via _try)
+let err = _try { which __definitely_missing_command_for_ral_test__ }
+assert_eq 'which missing status' 1 $err[status]
+
+echo 'which tests done'

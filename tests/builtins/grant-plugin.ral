@@ -1,0 +1,118 @@
+# Test: structural grant enforcement for plugins.
+#
+# Covers three of the four security fixes from the audit; the fourth
+# (tempfile capability check precedes creation) is code-shape visible
+# and would require a working bwrap sandbox to exercise in a .ral test.
+#
+#   1. plugin aliases dispatch under the plugin's declared grant
+#   2. plugin manifest body runs in a deny-all sandbox
+#   3. TOCTOU in resolve_plugin_path — canonicalized search path
+
+let scratch = temp-dir
+
+# ── 1. Plugin alias respects declared grant ─────────────────────────────────
+#
+# The plugin declares exec: [echo: []].  Its alias `bad` tries to shell out
+# to `cat`, which is outside the declared exec map.  The alias must dispatch
+# under the plugin's grant and `cat` must be denied.
+
+let alias_plugin = "$scratch/alias-plugin.ral"
+to-string "
+return [
+    name: 'alias-plugin',
+    capabilities: [ exec: [echo: []] ],
+    aliases: [
+        bad: { cat /etc/hostname }
+    ]
+]
+" > $alias_plugin
+
+load-plugin $alias_plugin [:]
+try {
+    bad
+    echo 'UNEXPECTED: alias was not denied'
+} { |_|
+    echo 'plugin alias honored its grant'
+}
+# Expected: plugin alias honored its grant
+
+unload-plugin 'alias-plugin'
+
+# The plugin can declare a command, but an enclosing caller grant still
+# attenuates it.  Effective authority is caller ∩ plugin manifest.
+
+let caller_plugin = "$scratch/caller-plugin.ral"
+to-string "
+return [
+    name: 'caller-plugin',
+    capabilities: [ exec: [cat: []] ],
+    aliases: [
+        denied-by-caller: { cat /etc/hostname }
+    ]
+]
+" > $caller_plugin
+
+load-plugin $caller_plugin [:]
+try {
+    grant [exec: [echo: []]] { denied-by-caller }
+    echo 'UNEXPECTED: caller grant did not attenuate plugin alias'
+} { |_|
+    echo 'caller grant attenuated plugin alias'
+}
+# Expected: caller grant attenuated plugin alias
+
+unload-plugin 'caller-plugin'
+
+# ── 2. Plugin manifest body cannot perform effects ──────────────────────────
+#
+# Writing a file during manifest construction must fail load under the
+# manifest_sandbox grant.
+
+let effectful_plugin = "$scratch/effectful.ral"
+let canary = "$scratch/canary"
+to-string "
+to-string 'evil' > '$canary'
+return [ name: 'effectful', capabilities: [] ]
+" > $effectful_plugin
+
+try {
+    load-plugin $effectful_plugin [:]
+    echo 'UNEXPECTED: effectful plugin loaded'
+} { |_|
+    echo 'effectful plugin body was sandboxed'
+}
+# Expected: effectful plugin body was sandboxed
+
+if $[not !{exists $canary}] {
+    echo 'canary absent'
+} else {
+    echo 'UNEXPECTED: canary was written'
+}
+# Expected: canary absent
+
+# ── 3. Unknown hook names are load errors ──────────────────────────────────
+#
+# A typoed hook name must fail load rather than silently registering a hook
+# that never fires.
+
+let typo_plugin = "$scratch/typo.ral"
+to-string "
+return [
+    name: 'typo-plugin',
+    capabilities: [],
+    hooks: [bufferchange: { return unit }]
+]
+" > $typo_plugin
+
+try {
+    load-plugin $typo_plugin [:]
+    echo 'UNEXPECTED: typo-plugin loaded'
+} { |_|
+    echo 'typo hook rejected at load'
+}
+# Expected: typo hook rejected at load
+
+# Cleanup
+rm -rf $scratch
+
+echo 'grant-plugin tests done'

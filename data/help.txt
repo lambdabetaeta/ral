@@ -1,0 +1,62 @@
+ral — a typed, structured shell
+
+SYNOPSIS
+    ral [options] <script> [args...]
+    ral [options] -c <code> [args...]
+    ral [--login | -l]
+    ral
+
+DESCRIPTION
+    ral is a shell with a typed, structured value model.  Commands return
+    structured values — lists, records, strings, numbers — not raw bytes.
+    The type checker catches errors before execution.
+
+    With no arguments ral starts an interactive session.  With a script
+    path it runs the script.  With -c it executes inline code.
+
+OPTIONS
+    -c <code>               execute <code> as a ral program; remaining
+                            positional arguments become $args
+    --check, -n             parse and type-check; do not execute
+    --dump-ast              print the parsed AST to stderr; do not execute
+    --audit                 after execution, emit a JSON execution tree to
+                            stderr (requires a script or -c)
+    --pretty                pretty-print --audit output (requires --audit)
+    --no-typecheck          skip type inference before execution
+    --recursion-limit <n>   maximum function-call recursion depth
+                            (default 1024; overrides rc recursion_limit:)
+    --login, -l             start as a login shell; sources login profiles
+    --norc, --noprofile     skip rc and profile files
+    --sandbox-policy <json> set the sandbox policy as a JSON object;
+                            processed before all other flags
+    --version, -V           print version string and exit
+    --help, -h              print this message and exit
+
+SCRIPT ARGUMENTS
+    Arguments after <script> (or after <code> in -c mode) are available
+    inside the program as $args (a list of strings).  The script's own
+    path is in $script.  Under -c and in the REPL, $script is unbound.
+
+ENVIRONMENT
+    RAL_PROMPT              override the default prompt string
+    RAL_INTERACTIVE_MODE    line-editing mode: auto (default) or minimal
+    RAL_PATH                colon-separated directories searched for
+                            plugins and loaded modules
+    RAL_TIMING              if set, print phase timings on stderr
+                            (parse / elaborate / typecheck / evaluate)
+    RAL_DEBUG               if set, enable debug tracing in release builds
+
+FILES
+    ~/.ralrc                user rc file; sourced at interactive startup
+    $XDG_CONFIG_HOME/ral/rc preferred rc location when XDG_CONFIG_HOME is set
+    ~/.ral_profile          user login profile (login shells only)
+    /etc/ral/profile        system login profile (login shells only)
+
+DEBUGGING EXTERNAL COMMANDS
+    Use audit { ... } inside a script to record the exact argv and
+    environment handed to execve(2) for each external command.  Render
+    the result with to-json.
+
+SEE ALSO
+    TUTORIAL.md   — task-oriented introduction
+    RATIONALE.md  — design rationale and language overview

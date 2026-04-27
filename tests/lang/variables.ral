@@ -1,0 +1,14 @@
+# Test: basic variable binding and shadowing
+
+let x = 'hello'
+echo $x
+
+let x = 'world'
+echo $x
+
+# Shadowing — not mutation
+let y = 5
+let f = { |_| echo $y }
+let y = 10
+!{f unit}
+# Expected: prints 5, not 10 (lexical closure)

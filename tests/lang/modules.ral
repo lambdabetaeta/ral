@@ -1,0 +1,47 @@
+# Test: use and source (§8)
+
+# Create a module
+mkdir -p /tmp/ral-mod-test
+echo "let version = 1\nlet _private = 42" > /tmp/ral-mod-test/lib.ral
+
+# use returns a map excluding _ names
+let m = use '/tmp/ral-mod-test/lib.ral'
+echo !{has $m version}
+echo !{has $m _private}
+echo $m[version]
+# Expected: true, false, 1
+
+# use is cached — second call returns same map
+let m2 = use '/tmp/ral-mod-test/lib.ral'
+echo !{equal $m $m2}
+# Expected: true
+
+# source merges into current scope (including _ names)
+source '/tmp/ral-mod-test/lib.ral'
+echo $version
+# Expected: 1
+
+# caller-file-relative module loading
+mkdir -p /tmp/ral-mod-test/sub
+echo "let x = 9" > /tmp/ral-mod-test/sub/inner.ral
+echo 'let m = !{use ''sub/inner.ral''}
+let via_use = $m[x]
+source ''sub/inner.ral''
+let via_source = $x' > /tmp/ral-mod-test/entry.ral
+let entry = use '/tmp/ral-mod-test/entry.ral'
+if $[not !{equal $entry[via_use] 9}] { fail [status: 1] }
+if $[not !{equal $entry[via_source] 9}] { fail [status: 1] }
+
+# use is cached and cannot be invalidated from within the process: once a
+# module is loaded, subsequent `use` calls return the same bindings even if
+# the underlying file changes.  Restart the process to pick up changes.
+echo "let version = 1" > /tmp/ral-mod-test/reload.ral
+let m1 = use '/tmp/ral-mod-test/reload.ral'
+echo "let version = 2" > /tmp/ral-mod-test/reload.ral
+let mcached = use '/tmp/ral-mod-test/reload.ral'
+if $[not !{equal $mcached[version] 1}] { fail [status: 1] }
+
+# Cleanup
+rm -rf /tmp/ral-mod-test
+
+echo 'module tests done'

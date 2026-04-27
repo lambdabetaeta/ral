@@ -1,0 +1,33 @@
+# Test: literal strings, interpolated strings, escapes, multi-line
+
+let name = 'alice'
+
+# Literal — no interpolation
+echo 'hello $name'
+# Expected: hello $name
+
+# Interpolated
+echo "hello $name"
+# Expected: hello alice
+
+# Escapes in double quotes
+echo "line one\nline two"
+# Expected: line one (newline) line two
+
+# Multi-line literal
+let msg = 'first
+second
+third'
+echo $msg
+# Expected: first (newline) second (newline) third
+
+# Doubling quotes
+echo 'it''s working'
+# Expected: it's working
+
+echo "she said ""hello"""
+# Expected: she said "hello"
+
+# Literal dollar
+echo "price: \$5"
+# Expected: price: $5

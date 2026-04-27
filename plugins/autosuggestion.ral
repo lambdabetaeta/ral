@@ -1,0 +1,27 @@
+# autosuggestion — fish-style history hint after the cursor
+#
+# Registers a buffer-change hook that sets ghost text to the suffix of the
+# most recent history entry that starts with the current buffer contents.
+# The ghost text is a display artifact only; pressing the right-arrow key
+# at end-of-line accepts it.
+
+let _handler = { |_old buf _cursor|
+    if $[not !{is-empty $buf}] {
+        let hits = _editor 'history' $buf 1
+        if $[not !{is-empty $hits}] {
+            let suggestion = $hits[0]
+            let n = !{length $buf}
+            _editor 'ghost' !{slice $suggestion $n $[!{length $suggestion} - $n]}
+        } else {
+            _editor 'ghost' ''
+        }
+    } else {
+        _editor 'ghost' ''
+    }
+}
+
+return [
+    name: 'autosuggestion',
+    capabilities: [editor: [read: true, write: true]],
+    hooks: [buffer-change: $_handler],
+]

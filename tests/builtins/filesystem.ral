@@ -1,0 +1,82 @@
+# Test: §16.4 filesystem builtins
+
+# read file via from-string < path
+echo hello > /tmp/ral-fs-test.txt
+let content = !{from-string < /tmp/ral-fs-test.txt}
+echo $content
+# Expected: hello
+
+# file-size
+let size = file-size /tmp/ral-fs-test.txt
+echo $size
+# Expected: 6 (hello + newline)
+
+# line-count
+echo "a\nb\nc" > /tmp/ral-fs-lines.txt
+let count = line-count /tmp/ral-fs-lines.txt
+echo $count
+# Expected: 3
+
+# file-mtime returns an Int
+let mtime = file-mtime /tmp/ral-fs-test.txt
+if $[$mtime > 0] { echo 'mtime ok' }
+# Expected: mtime ok
+
+# Cleanup
+rm /tmp/ral-fs-test.txt /tmp/ral-fs-lines.txt
+
+# write file via to-string > path
+to-string 'hello from write' > /tmp/ral-write-test.txt
+let wc = !{from-string < /tmp/ral-write-test.txt}
+echo $wc
+
+# copy-file
+copy-file /tmp/ral-write-test.txt /tmp/ral-copy-test.txt
+let cc = !{from-string < /tmp/ral-copy-test.txt}
+echo $cc
+
+# move-file
+move-file /tmp/ral-copy-test.txt /tmp/ral-move-test.txt
+if $[not !{exists /tmp/ral-copy-test.txt}] { echo 'move-file ok' }
+let mc = !{from-string < /tmp/ral-move-test.txt}
+echo $mc
+
+# make-dir
+make-dir /tmp/ral-mkdir-test/sub
+if !{is-dir /tmp/ral-mkdir-test/sub} { echo 'make-dir ok' }
+
+# list-dir
+let entries = list-dir /tmp/ral-mkdir-test
+if $[!{length $entries} == 1] { echo 'list-dir ok' }
+let e = $entries[0]
+echo $e[name]
+echo $e[type]
+
+# remove-file
+remove-file /tmp/ral-write-test.txt
+remove-file /tmp/ral-move-test.txt
+if $[not !{exists /tmp/ral-write-test.txt}] { echo 'remove-file ok' }
+
+# remove-file dir (recursive)
+remove-file /tmp/ral-mkdir-test
+if $[not !{exists /tmp/ral-mkdir-test}] { echo 'remove-file dir ok' }
+
+# temp-dir
+let td = temp-dir
+if !{is-dir $td} { echo 'temp-dir ok' }
+remove-file $td
+
+# temp-file
+let tf = temp-file
+if !{is-file $tf} { echo 'temp-file ok' }
+remove-file $tf
+
+# resolve-path
+let rp = resolve-path /tmp
+if !{match 'tmp' $rp} { echo 'resolve-path ok' }
+
+# path-join
+let pj = path-join ['/usr', 'local', 'bin']
+echo $pj
+
+echo 'filesystem tests done'

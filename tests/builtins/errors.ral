@@ -1,0 +1,47 @@
+# Test: try, error maps, ? chaining with failure
+
+# return false is not an error — try does not catch it
+try {
+    return false
+} { |err|
+    return true
+}
+# Expected: (nothing — return false is success, handler not called)
+
+# ? chain stops on first success
+try {
+    fail [status: 1] ? fail [status: 2] ? echo 'recovered'
+} { |err|
+    echo "chain failed at $err[cmd]"
+}
+# Expected: recovered
+
+# Error map has structure
+try {
+    within [dir: /nonexistent] { echo hello }
+} { |err|
+    echo "cmd: $err[cmd]"
+    echo "status: $err[status]"
+}
+# Expected: cmd and status printed
+
+# Retry
+try {
+    retry 3 {
+        echo 'trying...'
+        fail [status: 1]
+    }
+} { |err|
+    echo 'retry exhausted'
+    return true
+}
+# Expected: prints 'trying...' three times, then 'retry exhausted'
+
+# Nested try
+try {
+    try { fail [status: 1] } { |err| echo 'inner caught'; return true }
+    echo 'continued after inner recovery'
+} { |err|
+    echo 'outer caught — should not happen'
+}
+# Expected: inner caught, continued after inner recovery

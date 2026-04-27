@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["core", "ral", "ral-sh", "exarch"]
+
+[workspace.lints.clippy]
+complexity = "warn"
+perf = "warn"
+correctness = "warn"
+suspicious = "warn"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = "z"
+panic = "abort"

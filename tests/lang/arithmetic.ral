@@ -1,0 +1,33 @@
+# Test: arithmetic substitution
+
+# Basic ops
+echo $[2 + 3]
+echo $[10 - 4]
+echo $[3 * 7]
+echo $[15 / 4]
+echo $[17 % 5]
+# Expected: 5, 6, 21, 3 (or 3.75 if floats), 2
+
+# Precedence
+echo $[2 + 3 * 4]
+echo $[(2 + 3) * 4]
+# Expected: 14, 20
+
+# Variables in arithmetic
+let x = 10
+let y = 3
+echo $[$x + $y]
+echo $[$x * $y - 1]
+# Expected: 13, 29
+
+# Comparisons
+echo $[5 == 5]
+echo $[5 != 3]
+echo $[3 < 5]
+echo $[10 >= 10]
+# Expected: 1, 1, 1, 1 (or true/false depending on representation)
+
+# Floats
+echo $[1.5 + 2.5]
+echo $[10.0 / 3.0]
+# Expected: 4.0, 3.333...

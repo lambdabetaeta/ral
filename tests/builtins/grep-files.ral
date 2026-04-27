@@ -1,0 +1,21 @@
+# Test: grep-files structured search
+
+to-string "alpha
+beta
+gamma
+alpha beta" > /tmp/ral-grep-test.txt
+
+let results = grep-files 'alpha' [/tmp/ral-grep-test.txt]
+let n = length $results
+echo $n
+
+let first = $results[0]
+echo $first[line]
+echo $first[text]
+
+let second = $results[1]
+echo $second[line]
+
+remove-file /tmp/ral-grep-test.txt
+
+echo 'grep-files tests done'

@@ -1,0 +1,32 @@
+# Test: §4 block semantics, forcing, return values
+
+# Force computation with !{}
+let result = !{return 42}
+echo $result
+# Expected: 42
+
+# Explicit unit return (no implicit value->command coercion)
+let result = !{return unit}
+echo !{equal $result unit}
+# Expected: true
+
+# Multi-statement force returns last explicit return
+let result = !{
+    let x = 10
+    let y = 20
+    return $[$x + $y]
+}
+echo $result
+# Expected: 30
+
+# Lambda in substitution
+let result = !{{ |x| return $[$x * 2] } 21}
+echo $result
+# Expected: 42
+
+# Block as argument to function (not forced)
+let run = { |_| echo 'deferred' }
+!{run unit}
+# Expected: deferred
+
+echo 'block tests done'

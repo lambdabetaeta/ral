@@ -1,0 +1,43 @@
+# Test: within [handlers:] command mocking
+
+# Basic override — cat is external, can be mocked
+within [handlers: [cat: { return 'mocked-cat' }]] {
+    let result = cat /dev/null
+    echo $result
+}
+# Expected: mocked-cat
+
+# Nesting: inner override wins for same name
+within [handlers: [cat: { return 'mock1' }]] {
+    within [handlers: [cat: { return 'mock2' }]] {
+        let r = cat /dev/null
+        echo $r
+    }
+}
+# Expected: mock2
+
+# Nesting: different names coexist
+within [handlers: [mycmd1: { return 'mock-a' }, mycmd2: { return 'mock-b' }]] {
+    let a = mycmd1
+    let b = mycmd2
+    echo $a
+    echo $b
+}
+# Expected: mock-a, mock-b
+
+# Scope: override gone after block
+within [handlers: [cat: { return gone }]] {
+    let x = cat /dev/null
+}
+echo 'still normal'
+# Expected: still normal
+
+# Builtin interception — within handlers fires before builtin dispatch
+within [handlers: [echo: { return 'intercepted' }]] {
+    let r = echo hello
+    echo $r
+}
+# Expected: intercepted
+# (outer echo here is not intercepted because handler_stack is popped)
+
+echo 'with mocking tests done'

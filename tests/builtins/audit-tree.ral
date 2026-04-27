@@ -1,0 +1,56 @@
+# Test: audit execution tree (§10.2)
+
+# Basic audit
+let report = audit { echo 'step one'; echo 'step two' }
+echo $report[status]
+echo !{length $report[children]}
+echo $report[children][0][cmd]
+echo $report[children][0][value]
+# Expected: 0, 2, echo, step one
+
+# Audit with failure inside try
+let report2 = audit {
+    try { fail [status: 1] } { |_| echo 'handled' }
+    echo 'continued'
+}
+echo $report2[status]
+# Expected: 0
+
+# For produces children
+let report3 = audit { for [a, b] { |x| echo $x } }
+echo $report3[status]
+# Expected: 0
+
+# Nested audit
+let outer = audit {
+    echo 'outer'
+    let inner = audit { echo 'inner' }
+}
+echo $outer[status]
+# Expected: 0
+
+# grant nests its body's audit events as children (§10.3)
+let g = audit { grant [exec: [echo: []], audit: true] { echo 'inside' } }
+let grant_node = $g[children][0]
+echo $grant_node[cmd]
+echo !{length $grant_node[children]}
+echo $grant_node[children][0][cmd]
+# Expected: grant, 1, echo
+
+# within nests its body's audit events as children
+let w = audit { within [dir: '/tmp'] { echo 'inside' } }
+let within_node = $w[children][0]
+echo $within_node[cmd]
+echo !{length $within_node[children]}
+# Expected: within, 1
+
+# guard records both body and cleanup as children
+let gr = audit { guard { echo 'body' } { echo 'cleanup' } }
+let guard_node = $gr[children][0]
+echo $guard_node[cmd]
+echo !{length $guard_node[children]}
+echo $guard_node[children][0][cmd]
+echo $guard_node[children][1][cmd]
+# Expected: guard, 2, echo, echo
+
+echo 'audit tree tests done'

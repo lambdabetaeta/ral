@@ -1,0 +1,66 @@
+# zoxide — directory jump integration
+#
+# Provides:
+#   z alias      jump to a directory by keyword query
+#   zi alias     open zoxide's interactive fzf picker
+#   alt-z        open interactive picker from the editor (keybinding)
+#   chpwd hook   record each directory change in the zoxide database
+#
+# Load in rc:
+#   plugins: [[plugin: 'zoxide', options: [key: 'alt-z']]]
+#
+# Options:
+#   key   keybinding for the interactive picker (default 'alt-z')
+
+return { |options|
+    let key = get $options key 'alt-z'
+    let _z = { |args|
+        if !{is-empty $args} {
+            cd ~
+        } else {
+            let cwd = $env[PWD]
+            let result = try {
+                return !{zoxide query --exclude $cwd -- ...$args | from-line}
+            } { |_| return '' }
+            if $[not !{is-empty $result}] { cd $result }
+        }
+    }
+
+    let _zi = {
+        let query = _ed-lbuffer
+        let r = _ed-tui {
+            zoxide query --interactive -- $query
+        }
+        if $[$r[status] == 0 && not !{is-empty $r[output]}] {
+            _editor 'push'
+            _editor 'set' [text: "cd !{shell-quote $r[output]}", cursor: 0]
+            _editor 'accept'
+        } elsif $[$r[status] != 0 && $r[status] != 1 && $r[status] != 130] {
+            fail [status: $r[status], message: "zoxide: $r[output]"]
+        }
+        return true
+    }
+
+    let _zi_cmd = { |args|
+        let result = try {
+            return !{zoxide query --interactive -- ...$args | from-line}
+        } { |_| return '' }
+        if !{is-empty $result} {} else { cd $result }
+    }
+
+    let _chpwd = { |_old new|
+        zoxide add -- $new 2>/dev/null
+    }
+
+    return [
+        name: 'zoxide',
+        capabilities: [
+            exec: [zoxide: []],
+            shell: [chdir: true],
+            editor: [read: true, write: true, tui: true],
+        ],
+        aliases: [z: $_z, zi: $_zi_cmd],
+        hooks: [chpwd: $_chpwd],
+        keybindings: [[key: $key, handler: $_zi]],
+    ]
+}

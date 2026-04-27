@@ -1,0 +1,4 @@
+usage: ral [options] <script> [args...]
+       ral [options] -c <code> [args...]
+       ral
+run 'ral --help' for details

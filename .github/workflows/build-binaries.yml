@@ -1,0 +1,131 @@
+name: Build Binaries
+# Builds the release matrix and publishes a GitHub release when a version
+# tag (v*) is pushed.  `latest` prereleases are produced locally by
+# `scripts/build-release.ral`; this workflow is for real, versioned cuts.
+# `workflow_dispatch` remains for manual re-runs.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: ral-linux-x86_64
+            target: x86_64-unknown-linux-musl
+            path: target/x86_64-unknown-linux-musl/release/ral
+            features: ""
+          - os: ubuntu-latest
+            artifact: ral-linux-x86_64-allutils
+            target: x86_64-unknown-linux-musl
+            path: target/x86_64-unknown-linux-musl/release/ral
+            features: --features coreutils,diffutils,grep
+          - os: ubuntu-24.04-arm
+            artifact: ral-linux-arm64
+            target: aarch64-unknown-linux-musl
+            path: target/aarch64-unknown-linux-musl/release/ral
+            features: ""
+          - os: ubuntu-24.04-arm
+            artifact: ral-linux-arm64-allutils
+            target: aarch64-unknown-linux-musl
+            path: target/aarch64-unknown-linux-musl/release/ral
+            features: --features coreutils,diffutils,grep
+          - os: macos-latest
+            artifact: ral-macos-arm64
+            path: target/release/ral
+            features: ""
+          - os: macos-latest
+            artifact: ral-macos-arm64-allutils
+            path: target/release/ral
+            features: --features coreutils,diffutils,grep
+          - os: windows-latest
+            artifact: ral-windows
+            path: target/release/ral.exe
+            features: ""
+          - os: windows-latest
+            artifact: ral-windows-allutils
+            path: target/release/ral.exe
+            features: --features coreutils,diffutils,grep
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install musl toolchain
+        if: runner.os == 'Linux'
+        run: |
+          rustup target add ${{ matrix.target }}
+          sudo apt-get install -y musl-tools
+      - name: Build Release Binary
+        run: >
+          cargo build --release -p ral
+          ${{ matrix.features }}
+          ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
+      - name: Upload Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.path }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    # Only publish on real tag pushes.  Manual dispatches just produce
+    # workflow artifacts without cutting a GitHub release.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Rename binaries
+        run: |
+          mv artifacts/ral-linux-x86_64/ral             artifacts/ral-linux-x86_64/ral-linux-x86_64
+          mv artifacts/ral-linux-x86_64-allutils/ral    artifacts/ral-linux-x86_64-allutils/ral-linux-x86_64-allutils
+          mv artifacts/ral-linux-arm64/ral              artifacts/ral-linux-arm64/ral-linux-arm64
+          mv artifacts/ral-linux-arm64-allutils/ral     artifacts/ral-linux-arm64-allutils/ral-linux-arm64-allutils
+          mv artifacts/ral-macos-arm64/ral              artifacts/ral-macos-arm64/ral-macos-arm64
+          mv artifacts/ral-macos-arm64-allutils/ral     artifacts/ral-macos-arm64-allutils/ral-macos-arm64-allutils
+          mv artifacts/ral-windows/ral.exe              artifacts/ral-windows/ral-windows.exe
+          mv artifacts/ral-windows-allutils/ral.exe     artifacts/ral-windows-allutils/ral-windows-allutils.exe
+
+      - name: Generate checksums
+        run: |
+          find artifacts -type f | while read f; do
+            sha256sum "$f" | awk '{print $1}' > "${f}.sha256"
+          done
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          prerelease: false
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/ral-linux-x86_64/ral-linux-x86_64
+            artifacts/ral-linux-x86_64/ral-linux-x86_64.sha256
+            artifacts/ral-linux-x86_64-allutils/ral-linux-x86_64-allutils
+            artifacts/ral-linux-x86_64-allutils/ral-linux-x86_64-allutils.sha256
+            artifacts/ral-linux-arm64/ral-linux-arm64
+            artifacts/ral-linux-arm64/ral-linux-arm64.sha256
+            artifacts/ral-linux-arm64-allutils/ral-linux-arm64-allutils
+            artifacts/ral-linux-arm64-allutils/ral-linux-arm64-allutils.sha256
+            artifacts/ral-macos-arm64/ral-macos-arm64
+            artifacts/ral-macos-arm64/ral-macos-arm64.sha256
+            artifacts/ral-macos-arm64-allutils/ral-macos-arm64-allutils
+            artifacts/ral-macos-arm64-allutils/ral-macos-arm64-allutils.sha256
+            artifacts/ral-windows/ral-windows.exe
+            artifacts/ral-windows/ral-windows.exe.sha256
+            artifacts/ral-windows-allutils/ral-windows-allutils.exe
+            artifacts/ral-windows-allutils/ral-windows-allutils.exe.sha256

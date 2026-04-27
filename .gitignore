@@ -1,0 +1,21 @@
+target/
+target-host/
+.build-cache/
+Cargo.lock
+
+# tree-sitter-ral build artefacts
+tree-sitter-ral/src/
+tree-sitter-ral/node_modules/
+tree-sitter-ral/build/
+tree-sitter-ral/bindings/
+tree-sitter-ral/*.wasm
+*.swp
+*.swo
+*~
+.DS_Store
+.codex/
+.claude/
+!.claude/settings.json
+dev/ral-public/
+.cargo/
+site/index.html

@@ -1,0 +1,49 @@
+# Test: §16.6 equal — structural equality
+
+# Same type comparisons
+echo !{equal 42 42}
+# Expected: true
+echo !{equal 42 43}
+# Expected: false
+echo !{equal 3.14 3.14}
+# Expected: true
+echo !{equal true true}
+# Expected: true
+echo !{equal true false}
+# Expected: false
+echo !{equal hello hello}
+# Expected: true
+echo !{equal hello world}
+# Expected: false
+
+# Cross-numeric
+echo !{equal 3 3.0}
+# Expected: true
+
+# Type mismatch is false, not error
+echo !{equal 42 hello}
+# Expected: false
+echo !{equal true 1}
+# Expected: false
+
+# Collections
+echo !{equal [1, 2, 3] [1, 2, 3]}
+# Expected: true
+echo !{equal [1, 2] [1, 3]}
+# Expected: false
+echo !{equal [a: 1, b: 2] [a: 1, b: 2]}
+# Expected: true
+echo !{equal [a: 1] [a: 2]}
+# Expected: false
+
+# Nested
+echo !{equal [a: [1, 2]] [a: [1, 2]]}
+# Expected: true
+
+# Empty collections
+echo !{equal [] []}
+# Expected: true
+echo !{equal [:] [:]}
+# Expected: true
+
+echo 'equal tests done'

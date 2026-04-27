@@ -1,0 +1,22 @@
+# Test: audit builtin — captures execution tree
+
+# Basic audit — success
+let report = audit { echo hello }
+echo "status: $report[status]"
+# Expected: status: 0
+
+# Audit captures children
+let report = audit { echo a; echo b; echo c }
+echo "children: !{length $report[children]}"
+# Expected: children: 3
+
+# Audit suppresses failure
+let report = audit { cat /nonexistent 2> /dev/null }
+echo "failed status: $report[status]"
+# Expected: failed status: 1
+
+# Audit with external command records cmd name
+let report = audit { ls /tmp > /dev/null }
+# The tree should have the ls command as a child
+
+echo 'audit tests done'

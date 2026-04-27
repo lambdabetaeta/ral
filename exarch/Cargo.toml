@@ -1,0 +1,25 @@
+[package]
+name = "exarch"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "exarch"
+path = "src/main.rs"
+
+[dependencies]
+ral-core   = { path = "../core" }
+ureq       = { version = "2", features = ["json"] }
+serde      = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+postcard   = { version = "1", features = ["alloc"] }
+clap       = { version = "4", features = ["derive"] }
+rustyline  = "=18.0.0"
+
+[build-dependencies]
+ral-core = { path = "../core" }
+postcard = { version = "1", features = ["alloc"] }
