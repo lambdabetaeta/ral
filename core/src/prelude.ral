@@ -3,28 +3,15 @@
 # Wrappers around _ primitives come first so they're in scope for
 # all subsequent lambdas (closures capture at definition time).
 
-# Strings (wrappers around _str)
-## Convert a string to uppercase.
-let upper = { |s| _str 'upper' $s }
-## Convert a string to lowercase.
-let lower = { |s| _str 'lower' $s }
-## Replace exactly one occurrence of `from` with `to` in `s`. Errors if `from` is missing or appears more than once — useful for safe edits where ambiguity is a bug.
-let replace = { |s from to| _str 'replace' $s $from $to }
-## Replace all occurrences of `from` in `s` with `to`. No error if `from` is absent.
-let replace-all = { |s from to| _str 'replace-all' $s $from $to }
-## Join a list of strings with a separator.
-let join = { |sep items| _str 'join' $sep $items }
-## Extract a substring: slice <str> <start> <count>.
-let slice = { |s start n| _str 'slice' $s $start $n }
-
-## Split a string by a pattern (regex).
-let split = { |pattern s| _str 'split' $pattern $s }
-## Match a string against a regex; return true/false. Data-last: match <pattern> <string>.
-let match = { |pattern s| _str 'match' $pattern $s }
+# Strings — direct builtins: upper, lower, split, match, replace,
+# replace-all, intercalate, slice, find-match, find-matches, dedent,
+# shell-quote, shell-split.  (`join` itself is the coreutils command
+# for joining lines from two files; ral's list-of-strings join is
+# `intercalate` — interpose a separator between every pair.)  Use
+# `$name` to obtain a first-class value (a synthesised thunk pinned
+# to the primitive).
 ## Split a string into lines.
 let lines = { |s| split '\n' $s }
-## Strip common leading whitespace from every non-empty line.
-let dedent = { |s| _str 'dedent' $s }
 ## Split a string into Unicode-whitespace-delimited words.
 let words = { |s| split '\s+' $s }
 
@@ -306,7 +293,7 @@ let read-file-numbered = { |p|
         let line = $x[item]
         return "$n  $line"
     } !{enumerate $xs}
-    join "\n" $formatted
+    intercalate "\n" $formatted
 }
 
 # Streaming (stdin, line by line).  `fold-lines` is a builtin; `map-lines`
@@ -350,17 +337,11 @@ let styled = { |code text| "$code$text$ansi-reset" }
 ## plain otherwise — the ansi-* constants collapse when not a tty).
 let edit-file = { |path from to|
     let body = !{from-string < $path}
-    to-string !{replace $body $from $to} > $path
+    to-string !{replace $from $to $body} > $path
     _warn $path
     for !{lines $from} { |l| _warn !{styled $ansi-red "- $l"} }
     for !{lines $to}   { |l| _warn !{styled $ansi-green "+ $l"} }
 }
-
-# String quoting
-## Shell-quote a string (wrap in single quotes, escape embedded quotes).
-let shell-quote = { |s| _str 'shell-quote' $s }
-## Split a shell-quoted string into a list of arguments (POSIX rules).
-let shell-split = { |s| _str 'shell-split' $s }
 
 # Editor state — wrappers around _editor 'get' / 'set' (plugin API)
 ## Get editor state record [text, cursor, keymap].

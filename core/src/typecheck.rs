@@ -26,7 +26,7 @@ mod unify;
 
 // Public re-exports: preserve the existing `typecheck::Ty`, `typecheck::CompTy`,
 // etc. paths consumed by main.rs and the test suite.
-pub use self::builtins::builtin_type_hint;
+pub use self::builtins::{builtin_arity, builtin_type_hint};
 pub use self::env::{InferCtx, TyEnv};
 pub use self::fmt::{fmt_comp_ty, fmt_mode, fmt_scheme, fmt_ty};
 pub use self::scheme::{CompDiff, Scheme, TypeError, TypeErrorKind};

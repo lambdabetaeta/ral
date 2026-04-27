@@ -134,13 +134,13 @@ let host_build = { |target pkg name feats sign|
     if $sign { attempt { codesign -s - $dst } }
 }
 let host_variants_ral = { |target os arch sign|
-    host_build $target 'ral' !{join '-' ['ral', $os, $arch]}             $plain $sign
-    host_build $target 'ral' !{join '-' ['ral', $os, $arch, 'allutils']} $all   $sign
+    host_build $target 'ral' !{intercalate '-' ['ral', $os, $arch]}             $plain $sign
+    host_build $target 'ral' !{intercalate '-' ['ral', $os, $arch, 'allutils']} $all   $sign
 }
 # exarch has no allutils variant — `coreutils,diffutils,grep` are ral
 # features.  Single binary per (os, arch).
 let host_variants_exarch = { |target os arch sign|
-    host_build $target 'exarch' !{join '-' ['exarch', $os, $arch]} $plain $sign
+    host_build $target 'exarch' !{intercalate '-' ['exarch', $os, $arch]} $plain $sign
 }
 
 # The script body as a thunk.  Written without dry-run awareness; the

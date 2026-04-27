@@ -185,6 +185,7 @@ pub(crate) fn arg0_str(args: &[Value]) -> String {
     args.first().map(|v| v.to_string()).unwrap_or_default()
 }
 
+#[cfg(feature = "grep")]
 pub(crate) fn regex_err(ctx: &str, pattern: &str, full: &str) -> String {
     let cause = full
         .lines()

@@ -128,8 +128,32 @@ builtin_registry! {
         doc: "fail <status>  — exit with error status.", },
     Len { names: ["length"], hint: Value,
         doc: "length <val>  — number of elements in a string, bytes, list, or map.", },
-    Str { names: ["_str"], hint: Value,
-        doc: "_str <op> ...  — string ops: upper lower replace replace-all join slice split match shell-quote shell-split dedent.", },
+    Upper { names: ["upper"], hint: Value,
+        doc: "upper <s>  — convert a string to uppercase.", },
+    Lower { names: ["lower"], hint: Value,
+        doc: "lower <s>  — convert a string to lowercase.", },
+    Dedent { names: ["dedent"], hint: Value,
+        doc: "dedent <s>  — strip common leading whitespace from every non-empty line.", },
+    Intercalate { names: ["intercalate"], hint: Value,
+        doc: "intercalate <sep> <items>  — interpose sep between every pair of items, concatenated as one string.", },
+    Slice { names: ["slice"], hint: Value,
+        doc: "slice <s> <start> <count>  — extract a substring by character offset.", },
+    Split { names: ["split"], hint: Value,
+        doc: "split <pattern> <s>  — split a string by a regex pattern.", },
+    Match { names: ["match"], hint: Value,
+        doc: "match <pattern> <s>  — true if regex pattern matches anywhere in s.", },
+    FindMatch { names: ["find-match"], hint: Value,
+        doc: "find-match <pattern> <s>  — first regex match, or fail if none.", },
+    FindMatches { names: ["find-matches"], hint: Value,
+        doc: "find-matches <pattern> <s>  — all non-overlapping regex matches as a list.", },
+    Replace { names: ["replace"], hint: Value,
+        doc: "replace <pattern> <repl> <s>  — replace first regex match; $1 etc. backreferences.", },
+    ReplaceAll { names: ["replace-all"], hint: Value,
+        doc: "replace-all <pattern> <repl> <s>  — replace every regex match.", },
+    ShellQuote { names: ["shell-quote"], hint: Value,
+        doc: "shell-quote <s>  — quote a string for safe shell-word use.", },
+    ShellSplit { names: ["shell-split"], hint: Value,
+        doc: "shell-split <s>  — split a shell-quoted string into a list of words.", },
     Keys { names: ["keys"], hint: Value,
         doc: "keys <map>  — list of map keys.", },
     Has { names: ["has"], hint: Value,
@@ -219,13 +243,9 @@ builtin_registry! {
         hint: Bytes,
         doc: "Coreutils-compatible command (see man pages).",
     },
-    #[cfg(feature = "grep")]
-    UuGrep { names: ["grep"], hint: Bytes,
-        doc: "Pattern search in files or stdin (coreutils grep).", },
     #[cfg(feature = "diffutils")]
     UuCmp { names: ["cmp"], hint: Bytes,
         doc: "Compare two files byte by byte (coreutils cmp).", },
-    #[cfg(feature = "grep")]
     GrepFiles { names: ["grep-files"], hint: Value,
         doc: "grep-files <pattern> <files>  — search files, return [{file, line, text}].", },
     TypeOf { names: ["_type"], hint: Value,
@@ -243,6 +263,43 @@ builtin_registry! {
 /// Check if a name is a builtin function.
 pub fn is_builtin(name: &str) -> bool {
     builtin_by_name(name).is_some()
+}
+
+/// Synthesise a first-class thunk for a registered builtin so `$name` can be
+/// used as a callable value.  The thunk shape is `U(λx₀…λxₙ. Builtin(name, x⃗))`
+/// where `n` is the builtin's typechecker-declared arity, so the resulting
+/// value plays the same role as any user-written closure.  Returns `None`
+/// for unknown names or builtins without a fixed arity (variadic ones like
+/// `echo` are command-only).
+pub fn synthesize_builtin_thunk(name: &str) -> Option<Value> {
+    use crate::ast::Pattern;
+    use crate::ir::{Comp, CompKind, Val};
+    use std::sync::Arc;
+
+    if !is_builtin(name) {
+        return None;
+    }
+    let arity = crate::typecheck::builtin_arity(name)?;
+
+    // Body: Builtin(name, [Variable("__b0"), …, Variable("__b{n-1}")]).
+    let arg_vars: Vec<Val> = (0..arity)
+        .map(|i| Val::Variable(format!("__b{i}")))
+        .collect();
+    let mut body = Comp::new(CompKind::Builtin {
+        name: name.to_string(),
+        args: arg_vars,
+    });
+    // Wrap in nested λ from innermost outward: λ__b{n-1}. … λ__b0. body.
+    for i in (0..arity).rev() {
+        body = Comp::new(CompKind::Lam {
+            param: Pattern::Name(format!("__b{i}")),
+            body: Box::new(body),
+        });
+    }
+    Some(Value::Thunk {
+        body: Arc::new(body),
+        captured: Arc::new(Env::default()),
+    })
 }
 
 /// Call a builtin function. Returns None if not a builtin.
@@ -267,7 +324,19 @@ pub fn call(name: &str, args: &[Value], shell: &mut Shell) -> Result<Option<Valu
         BuiltinName::Audit => Ok(Some(control::builtin_audit(args, shell)?)),
         BuiltinName::Fail => Err(misc::builtin_fail(args)),
         BuiltinName::Len => Ok(Some(strings::builtin_len(args)?)),
-        BuiltinName::Str => Ok(Some(strings::builtin_str(args, shell)?)),
+        BuiltinName::Upper => Ok(Some(strings::builtin_upper(args)?)),
+        BuiltinName::Lower => Ok(Some(strings::builtin_lower(args)?)),
+        BuiltinName::Dedent => Ok(Some(strings::builtin_dedent(args)?)),
+        BuiltinName::Intercalate => Ok(Some(strings::builtin_join(args)?)),
+        BuiltinName::Slice => Ok(Some(strings::builtin_slice(args)?)),
+        BuiltinName::Split => Ok(Some(strings::builtin_split(args)?)),
+        BuiltinName::Match => Ok(Some(strings::builtin_match(args, shell)?)),
+        BuiltinName::FindMatch => Ok(Some(strings::builtin_find_match(args)?)),
+        BuiltinName::FindMatches => Ok(Some(strings::builtin_find_matches(args)?)),
+        BuiltinName::Replace => Ok(Some(strings::builtin_replace(args)?)),
+        BuiltinName::ReplaceAll => Ok(Some(strings::builtin_replace_all(args)?)),
+        BuiltinName::ShellQuote => Ok(Some(strings::builtin_shell_quote(args)?)),
+        BuiltinName::ShellSplit => Ok(Some(strings::builtin_shell_split(args)?)),
         BuiltinName::Keys => Ok(Some(predicates::builtin_keys(args)?)),
         BuiltinName::Has => Ok(Some(predicates::builtin_has(args, shell)?)),
         BuiltinName::Path => Ok(Some(path::builtin_path(args, shell)?)),
@@ -339,12 +408,16 @@ pub fn call(name: &str, args: &[Value], shell: &mut Shell) -> Result<Option<Valu
         BuiltinName::Disown => Ok(Some(concurrency::builtin_disown(args, shell)?)),
         #[cfg(feature = "coreutils")]
         BuiltinName::Uutils => Ok(Some(uutils::uutils(name, args, shell)?)),
-        #[cfg(feature = "grep")]
-        BuiltinName::UuGrep => Ok(Some(uutils::uu_grep(args, shell)?)),
         #[cfg(feature = "diffutils")]
         BuiltinName::UuCmp => Ok(Some(uutils::uu_cmp(args, shell)?)),
-        #[cfg(feature = "grep")]
-        BuiltinName::GrepFiles => Ok(Some(fs::builtin_grep_files(args, shell)?)),
+        BuiltinName::GrepFiles => {
+            #[cfg(feature = "grep")]
+            return Ok(Some(fs::builtin_grep_files(args, shell)?));
+            #[cfg(not(feature = "grep"))]
+            return Err(util::sig(
+                "grep-files: grep feature not compiled in — rebuild with --features grep",
+            ));
+        }
         // At runtime _type is a passthrough; the type was already printed at check time.
         BuiltinName::TypeOf => Ok(Some(args.first().cloned().unwrap_or(Value::Unit))),
         BuiltinName::Help => Ok(Some(misc::builtin_help(args, shell))),

@@ -238,9 +238,53 @@ impl fmt::Display for Value {
                 }
                 write!(f, "]")
             }
-            Value::Thunk { .. } => write!(f, "<block>"),
+            Value::Thunk { body, .. } => write!(f, "{}", fmt_block(body)),
             Value::Handle(h) => write!(f, "<handle:{}>", h.cmd),
         }
+    }
+}
+
+/// Render one pattern as a compact param string.
+fn fmt_param(p: &crate::ast::Pattern) -> String {
+    match p {
+        crate::ast::Pattern::Wildcard => "_".into(),
+        crate::ast::Pattern::Name(s) => s.clone(),
+        crate::ast::Pattern::List { elems, rest } => {
+            let mut parts: Vec<String> = elems.iter().map(fmt_param).collect();
+            if let Some(r) = rest { parts.push(format!("...{r}")); }
+            format!("[{}]", parts.join(" "))
+        }
+        crate::ast::Pattern::Map(entries) => {
+            let parts: Vec<String> = entries.iter()
+                .map(|(k, pat, _)| {
+                    let v = fmt_param(pat);
+                    if matches!(pat, crate::ast::Pattern::Name(n) if n == k) { k.clone() }
+                    else { format!("{k}: {v}") }
+                })
+                .collect();
+            format!("[{}]", parts.join(" "))
+        }
+    }
+}
+
+/// Walk nested `Lam` nodes to collect parameter names, then format as
+/// `<block>` (nullary) or `<|a b| block>` (one or more params).
+pub fn fmt_block(body: &crate::ir::Comp) -> String {
+    let mut params: Vec<String> = Vec::new();
+    let mut comp = body;
+    loop {
+        match &comp.kind {
+            crate::ir::CompKind::Lam { param, body } => {
+                params.push(fmt_param(param));
+                comp = body;
+            }
+            _ => break,
+        }
+    }
+    if params.is_empty() {
+        "<block>".into()
+    } else {
+        format!("<|{}| block>", params.join(" "))
     }
 }
 
@@ -594,6 +638,12 @@ pub struct Shell {
     pub repl: ReplScratch,
     /// Exit-code hint table — loaded once at startup from the data directory.
     pub exit_hints: crate::exit_hints::ExitHints,
+    /// Structured-concurrency cancel scope.  `signal::check` consults
+    /// this between effectful steps; setting the scope's flag (e.g. via
+    /// `RunningPipeline::Drop` on the abort path) unwinds every thread
+    /// that inherited the scope at its next poll point.  Default is a
+    /// never-cancelled root scope, so non-pipeline code is unaffected.
+    pub cancel: crate::signal::CancelScope,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -767,6 +817,7 @@ impl Shell {
             registry: Registry::default(),
             modules: Modules::default(),
             audit: Audit::default(),
+            cancel: crate::signal::CancelScope::root(),
         }
     }
 
@@ -894,8 +945,11 @@ impl Shell {
         )
     }
 
-    /// Resolve pseudo-variables (`$env`, `$args`, `$script`, `$nproc`) that
-    /// have no lexical binding but are always available at value-position lookup.
+    /// Resolve pseudo-variables (`$env`, `$args`, `$script`, `$nproc`) and
+    /// names of registered builtins at value-position lookup.  A bare builtin
+    /// name `$foo` synthesises a thunk `U(λx₁…λxₙ. Builtin(foo, x⃗))` so the
+    /// reference is callable like any user thunk and pinned to the primitive
+    /// regardless of later aliasing.
     pub fn resolve_builtin(&self, name: &str) -> Option<Value> {
         match name {
             "env" => {
@@ -922,7 +976,7 @@ impl Shell {
                     .map(|n| n.get() as i64)
                     .unwrap_or(1),
             )),
-            _ => None,
+            _ => crate::builtins::synthesize_builtin_thunk(name),
         }
     }
 
@@ -1390,6 +1444,22 @@ impl Dynamic {
         crate::path::resolve_path(self.cwd.as_deref(), path)
     }
 
+    /// Resolve `path` for a capability check.  Inside the sandboxed
+    /// child the OS-level Seatbelt/bwrap profile is the real gate, and
+    /// `canonicalize` may fail on intermediate components or fall back
+    /// to lexical form on only one side of the comparison; both lead to
+    /// spurious denials.  We therefore use pure lexical resolution
+    /// there, leaning on `path_within`'s firmlink-alias awareness to
+    /// keep `/tmp` ↔ `/private/tmp` correct.  Outside the sandbox we
+    /// keep canonicalize-based resolution so grants follow symlinks.
+    fn resolve_for_check(&self, path: &str) -> PathBuf {
+        if std::env::var_os(crate::sandbox::SANDBOX_ACTIVE_ENV).is_some() {
+            self.resolve_path(path)
+        } else {
+            self.resolve_grant_path(path)
+        }
+    }
+
     /// Canonicalise a path under the scoped cwd, walking up to the
     /// nearest existing ancestor and re-appending the unresolved tail.
     /// Needed so grants written against e.g. `/tmp/` still match
@@ -1427,7 +1497,7 @@ impl Dynamic {
     fn path_allowed_by_prefixes(&self, path: &Path, prefixes: &[String]) -> bool {
         prefixes
             .iter()
-            .any(|prefix| crate::path::path_within(path, &self.resolve_grant_path(prefix)))
+            .any(|prefix| crate::path::path_within(path, &self.resolve_for_check(prefix)))
     }
 
     /// Emit a capability-check audit node into `audit`.  No-op unless
@@ -1547,7 +1617,7 @@ impl Dynamic {
         if path == "/dev/null" {
             return Ok(());
         }
-        let resolved = self.resolve_grant_path(path);
+        let resolved = self.resolve_for_check(path);
         let mut denied = false;
         let mut granted_prefix: Option<String> = None;
         let mut has_fs_policy = false;
@@ -1561,7 +1631,7 @@ impl Dynamic {
                     break;
                 } else {
                     for prefix in prefixes {
-                        if crate::path::path_within(&resolved, &self.resolve_grant_path(prefix)) {
+                        if crate::path::path_within(&resolved, &self.resolve_for_check(prefix)) {
                             granted_prefix = Some(prefix.clone());
                             break;
                         }

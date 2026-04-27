@@ -21,6 +21,69 @@ pub(crate) enum EvalRedirect {
     Fd(u32),
 }
 
+/// Capability witness that fd 0 of the parent process is safe to inherit
+/// into a spawned child's stdin in the current context.
+///
+/// Constructible only via the named issuers below.  Each issuer documents
+/// the discipline that justifies the inheritance: a standalone foreground
+/// external owns the tty itself; a pure-external pipeline pgid will own
+/// the tty via `claim_foreground`; a non-tty parent fd 0 cannot SIGTTIN
+/// anyone.
+///
+/// Mixed pipelines must NOT mint a permit — handing terminal stdin to an
+/// external in a backgrounded pgid would SIGTTIN the child the moment it
+/// reads, and ral's pump would then wait forever.  The audit's high #2.
+pub struct TtyInputPermit {
+    _private: (),
+}
+
+impl TtyInputPermit {
+    /// Issued for a standalone external job: the spawned process either
+    /// becomes the foreground pgid leader (and so owns the tty) or runs
+    /// non-interactively where SIGTTIN is moot.
+    pub(crate) fn for_standalone_external() -> Self {
+        Self { _private: () }
+    }
+
+    /// Issued for the first stage of a pure-external pipeline: the
+    /// pipeline's own pgid will be foregrounded, so its members can read
+    /// from the tty without SIGTTIN.
+    pub(crate) fn for_pure_external_pipeline() -> Self {
+        Self { _private: () }
+    }
+
+    /// Issued when fd 0 of the parent is not a controlling terminal —
+    /// inheritance cannot SIGTTIN anyone.  Caller must have just observed
+    /// `terminal.stdin_tty == false`.
+    pub(crate) fn for_non_tty_stdin() -> Self {
+        Self { _private: () }
+    }
+}
+
+/// How a spawned child's stdin will be wired.
+///
+/// `Inherit` requires a [`TtyInputPermit`] so that grep'ing for the route
+/// makes the discipline visible: the permit is the auditable place where
+/// "yes, I checked, this is safe to inherit" lives.  Mixed pipelines
+/// produce `Null` instead of `Inherit` for stages with no upstream pipe.
+pub enum StdinRoute {
+    Inherit(TtyInputPermit),
+    Pipe(os_pipe::PipeReader),
+    File(std::fs::File),
+    Null,
+}
+
+impl StdinRoute {
+    pub fn into_stdio(self) -> Stdio {
+        match self {
+            StdinRoute::Inherit(_) => Stdio::inherit(),
+            StdinRoute::Pipe(r) => Stdio::from(r),
+            StdinRoute::File(f) => Stdio::from(f),
+            StdinRoute::Null => Stdio::null(),
+        }
+    }
+}
+
 /// Routing decisions for a child process's standard streams, derived once
 /// from the call-site redirects.  `stderr_to_stdout` captures the `2>&1` fd
 /// dup; the file fields carry their `RedirectMode` so `open_file` can pick
@@ -103,16 +166,29 @@ fn reject_exec_arg(cmd: &str, arg: &Value, shell: &Shell) -> Option<EvalSignal> 
     }
 }
 
-fn wire_stdin(command: &mut Command, plan: &RedirectPlan, shell: &mut Shell) -> Result<(), EvalSignal> {
+/// Choose the stdin route for a single-command external job.
+///
+/// Precedence: explicit `<file` redirect, then any pipe handed to us by an
+/// outer pipeline stage, then inherit fd 0 from the parent process.  The
+/// inherit case is gated on a `TtyInputPermit`: inheriting fd 0 when the
+/// parent's fd 0 is the controlling tty is only safe when this child will
+/// hold the foreground itself (`for_standalone_external`) or when fd 0 is
+/// not actually a tty (`for_non_tty_stdin`).  Both are issued here.
+fn wire_stdin(plan: &RedirectPlan, shell: &mut Shell) -> Result<StdinRoute, EvalSignal> {
     if let Some((path, _)) = &plan.stdin_file {
         shell.check_fs_read(path)?;
         let f = std::fs::File::open(path).map_err(|e| io_error(path, e, 1, None))?;
-        command.stdin(Stdio::from(f));
-    } else if let Some(reader) = shell.io.stdin.take_pipe() {
-        // Pipeline stage: feed piped data as stdin.
-        command.stdin(Stdio::from(reader));
+        return Ok(StdinRoute::File(f));
     }
-    Ok(())
+    if let Some(reader) = shell.io.stdin.take_pipe() {
+        return Ok(StdinRoute::Pipe(reader));
+    }
+    let permit = if shell.io.terminal.stdin_tty {
+        TtyInputPermit::for_standalone_external()
+    } else {
+        TtyInputPermit::for_non_tty_stdin()
+    };
+    Ok(StdinRoute::Inherit(permit))
 }
 
 /// Wire the child's stdout to a redirect file when one is set.
@@ -246,9 +322,14 @@ pub(crate) fn build_pump_sink(
     }
 }
 
-/// Spawn an auxiliary thread that drains the child's stderr into a bounded
-/// buffer.  Only used under auditing; stderr is truncated at 64 KiB to keep
-/// the exec-tree JSON compact.
+/// Spawn an auxiliary thread that captures the leading 64 KiB of the child's
+/// stderr and drains the rest to `io::sink()`.
+///
+/// Capturing on a dedicated thread is what makes it safe to wait on `stdout`
+/// (or its pump) before reaping: a child that fills its stderr pipe before
+/// closing stdout would otherwise deadlock against the pump.  The bounded
+/// prefix keeps the exec-tree JSON compact regardless of how noisy the child
+/// is.
 pub(crate) fn spawn_stderr_reader(
     child: &mut std::process::Child,
 ) -> Option<std::thread::JoinHandle<Vec<u8>>> {
@@ -256,10 +337,8 @@ pub(crate) fn spawn_stderr_reader(
         std::thread::spawn(move || {
             use std::io::Read;
             let mut buf = Vec::new();
-            let _ = stderr.read_to_end(&mut buf);
-            if buf.len() > 65536 {
-                buf.truncate(65536);
-            }
+            let _ = stderr.by_ref().take(65536).read_to_end(&mut buf);
+            let _ = std::io::copy(&mut stderr, &mut std::io::sink());
             buf
         })
     })
@@ -315,6 +394,63 @@ pub(crate) fn exec_policy_names(name: &ExecName, shell: &Shell, resolved: &str) 
     names
 }
 
+/// A fully-resolved external command, ready to be turned into a `Command`.
+///
+/// Produced by [`resolve_command`].  Holds the display name, the PATH-
+/// resolved executable, and the stringified argv.  Both single-command exec
+/// and pipeline-stage launch consume this struct so the resolution rules
+/// (PATH lookup, grant policy names, `check_exec_args`, argv rejection of
+/// list/map/thunk/handle/Bytes) live in exactly one place.
+pub(crate) struct ResolvedCommand {
+    pub(crate) shown: String,
+    pub(crate) resolved: String,
+    pub(crate) args: Vec<String>,
+}
+
+/// Resolve a command name and pre-evaluated values into a [`ResolvedCommand`].
+///
+/// Performs every check that must precede `Command::new`:
+///   * tilde / PATH rendering for diagnostics;
+///   * `reject_exec_arg` rejection of list/map/thunk/handle/Bytes args;
+///   * stringification of the remaining values;
+///   * `resolve_in_path` against the shell-scoped PATH;
+///   * grant policy name expansion + `check_exec_args`.
+///
+/// Returns the same diagnostic shape both call sites used to produce
+/// independently — there is now one source of truth.
+pub(crate) fn resolve_command(
+    name: &ExecName,
+    args: &[Value],
+    shell: &mut Shell,
+) -> Result<ResolvedCommand, EvalSignal> {
+    let shown = render_exec_name(name, shell);
+    for arg in args {
+        if let Some(sig) = reject_exec_arg(&shown, arg, shell) {
+            return Err(sig);
+        }
+    }
+    let arg_strs: Vec<String> = args.iter().map(|v| v.to_string()).collect();
+    let resolved = resolve_in_path(name, shell);
+    let policy_names = exec_policy_names(name, shell, &resolved);
+    let policy_name_refs: Vec<&str> = policy_names.iter().map(String::as_str).collect();
+    shell.check_exec_args(&shown, &policy_name_refs, &arg_strs)?;
+    Ok(ResolvedCommand {
+        shown,
+        resolved,
+        args: arg_strs,
+    })
+}
+
+/// Build a `Command` from a `ResolvedCommand` and apply the shell's
+/// scoped env vars + cwd.  Stdio routing and `pre_exec` hooks remain the
+/// caller's responsibility — those vary between single-command and pipeline
+/// contexts.
+pub(crate) fn build_command(rc: &ResolvedCommand, shell: &Shell) -> Command {
+    let mut cmd = crate::sandbox::make_command(&rc.resolved, &rc.args, shell);
+    apply_env(&mut cmd, shell);
+    cmd
+}
+
 pub(crate) fn render_exec_name(name: &ExecName, shell: &Shell) -> String {
     let home = shell
         .dynamic
@@ -337,22 +473,13 @@ pub(crate) fn exec_external(
     redirects: &[(u32, RedirectMode, EvalRedirect)],
     shell: &mut Shell,
 ) -> Result<Value, EvalSignal> {
-    let cmd_name = render_exec_name(cmd, shell);
-    for arg in args {
-        if let Some(sig) = reject_exec_arg(&cmd_name, arg, shell) {
-            return Err(sig);
-        }
-    }
-    let arg_strs: Vec<String> = args.iter().map(|v| v.to_string()).collect();
-    let resolved = resolve_in_path(cmd, shell);
-    let policy_names = exec_policy_names(cmd, shell, &resolved);
-    let policy_name_refs: Vec<&str> = policy_names.iter().map(String::as_str).collect();
-    shell.check_exec_args(&cmd_name, &policy_name_refs, &arg_strs)?;
-    let mut command = crate::sandbox::make_command(&resolved, &arg_strs, shell);
-    apply_env(&mut command, shell);
+    let rc = resolve_command(cmd, args, shell)?;
+    let cmd_name = rc.shown.clone();
+    let resolved = rc.resolved.clone();
+    let mut command = build_command(&rc, shell);
 
     let plan = classify_redirects(redirects);
-    wire_stdin(&mut command, &plan, shell)?;
+    command.stdin(wire_stdin(&plan, shell)?.into_stdio());
     let mut atomic_commit = wire_stdout_file(&mut command, &plan, shell)?;
 
     let auditing = shell.audit.tree.is_some();
@@ -411,18 +538,46 @@ pub(crate) fn exec_external(
     // pipelines.  Without this a child shell that calls setpgid(0,0) at
     // startup (e.g. ral launching ral) would never receive the terminal and
     // would spin forever in claim_terminal().
+    // Only real terminal-output jobs become foreground.  An external invoked
+    // inside an internal pipeline stage has `shell.io.stdout = Sink::Pipe(...)`;
+    // capture buffers, line-framed `watch` blocks, audit tees, and stderr
+    // redirects also must not take the tty.  Without the positive whitelist,
+    // such a child would call `tcsetpgrp` from a thread, putting ral into a
+    // background pgroup whose next read of the tty raises EIO (SIGTTIN is
+    // ignored, see `repl.rs`).
+    // Foreground claim requires *both* the runtime conditions (interactive
+    // shell, tty stdin, terminal stdout, no shell pump) AND an explicit
+    // permit from the caller's `JobControl`.  An internal pipeline stage
+    // thread runs with `JobControl::pipeline_thread`, so even if its
+    // shell.io appears to satisfy the runtime conditions it cannot take
+    // foreground — the orchestrator owns that decision.
     #[cfg(unix)]
-    let fg_job = shell.io.interactive && shell.io.terminal.stdin_tty && !needs_pump;
+    let want_fg = shell.io.job_control.may_foreground()
+        && shell.io.interactive
+        && shell.io.terminal.stdin_tty
+        && !needs_pump
+        && matches!(
+            shell.io.stdout,
+            crate::io::Sink::Terminal | crate::io::Sink::External(_)
+        );
+    // Every spawned external child gets:
+    //   * default disposition for SIGINT / SIGQUIT / SIGTSTP / SIGTTIN /
+    //     SIGTTOU / SIGPIPE — universal, not foreground-only;
+    //   * a pgid policy: NewLeader if this child is taking foreground,
+    //     Inherit otherwise (it shares ral's pgid like any background
+    //     child).
     #[cfg(unix)]
-    if fg_job {
+    {
+        let pgid_policy = if want_fg {
+            crate::signal::PgidPolicy::NewLeader
+        } else {
+            crate::signal::PgidPolicy::Inherit
+        };
         use std::os::unix::process::CommandExt;
         unsafe {
-            command.pre_exec(|| {
-                libc::setpgid(0, 0);
-                libc::signal(libc::SIGINT, libc::SIG_DFL);
-                libc::signal(libc::SIGQUIT, libc::SIG_DFL);
-                libc::signal(libc::SIGTSTP, libc::SIG_DFL);
-                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+            command.pre_exec(move || {
+                pgid_policy.apply();
+                crate::signal::reset_child_signals();
                 Ok(())
             });
         }
@@ -440,15 +595,28 @@ pub(crate) fn exec_external(
         crate::sandbox::apply_child_limits(&child);
     }
 
-    // Give the terminal to the child's process group; reclaim after wait().
+    // Hand the terminal to the child via a `ForegroundGuard`: the guard's
+    // `Drop` restores ral's pgid no matter how this function returns.  The
+    // shell ignores SIGTTIN, so a missed restore would put the next REPL
+    // read into EIO — making the restore RAII-managed is the only reliable
+    // way to plug every early-return path between here and `child.wait()`.
+    //
+    // `wait_pgid` is the same value: a foreground job is its own pgid leader,
+    // and we need it later for `wait_handling_stop` to SIGKILL the group if
+    // the child gets SIGTSTP'd (Ctrl-Z).
     #[cfg(unix)]
-    if fg_job {
+    let (_fg_guard, wait_pgid) = if want_fg {
         let child_pid = child.id() as libc::pid_t;
-        unsafe {
-            libc::setpgid(child_pid, child_pid); // parent-side race guard
-            libc::tcsetpgrp(libc::STDIN_FILENO, child_pid);
-        }
-    }
+        unsafe { libc::setpgid(child_pid, child_pid) }; // parent-side race guard
+        (
+            crate::signal::ForegroundGuard::try_acquire(child_pid, shell),
+            Some(crate::signal::Pgid(child_pid)),
+        )
+    } else {
+        (None, None)
+    };
+    #[cfg(not(unix))]
+    let wait_pgid: Option<crate::signal::Pgid> = None;
 
     // Auditing captures stderr into a bounded reader for the exec tree.
     // Otherwise, if stderr is piped (because shell.io.stderr is non-default),
@@ -479,8 +647,7 @@ pub(crate) fn exec_external(
         (None, None)
     };
 
-    let status = child
-        .wait()
+    let status = crate::signal::wait_handling_stop(&mut child, wait_pgid)
         .map_err(|e| EvalSignal::Error(Error::new(format!("{cmd_name}: {e}"), 1)))?;
 
     // Atomic-redirect commit: child completed (any exit code, but not killed).
@@ -494,13 +661,8 @@ pub(crate) fn exec_external(
             .map_err(|e| EvalSignal::Error(Error::new(format!("atomic write: {e}"), 1)))?;
     }
 
-    // Restore terminal foreground to the shell's own process group.
-    #[cfg(unix)]
-    if fg_job {
-        unsafe {
-            libc::tcsetpgrp(libc::STDIN_FILENO, libc::getpgrp());
-        }
-    }
+    // Foreground is restored by `_fg_guard`'s `Drop` when this function
+    // returns — see the binding above.
 
     if let Some(reader) = stderr_reader
         && let Ok(buf) = reader.join()

@@ -694,17 +694,19 @@ fn upper_lower() {
     );
 }
 
+#[cfg(feature = "grep")]
 #[test]
 fn replace_basic() {
     assert_eq!(
-        must_succeed("!{replace 'hello world' world al}"),
+        must_succeed("!{replace 'world' 'al' 'hello world'}"),
         Value::String("hello al".into())
     );
 }
 
+#[cfg(feature = "grep")]
 #[test]
 fn split_and_join() {
-    must_succeed("let parts = split '/' '/usr/local/bin'\necho !{join '-' $parts}");
+    must_succeed("let parts = split '/' '/usr/local/bin'\necho !{intercalate '-' $parts}");
 }
 
 #[test]
@@ -1125,6 +1127,7 @@ fn spread_in_command() {
 
 // ── New prelude functions ───────────────────────────────────────────────
 
+#[cfg(feature = "grep")]
 #[test]
 fn words_splits_on_space() {
     assert_eq!(

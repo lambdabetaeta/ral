@@ -1,6 +1,6 @@
-#[cfg(any(feature = "coreutils", feature = "diffutils", feature = "grep"))]
+#[cfg(any(feature = "coreutils", feature = "diffutils"))]
 use crate::diagnostic;
-#[cfg(any(feature = "coreutils", feature = "diffutils", feature = "grep"))]
+#[cfg(any(feature = "coreutils", feature = "diffutils"))]
 use crate::types::*;
 
 #[cfg(feature = "diffutils")]
@@ -114,7 +114,12 @@ pub(crate) fn uutils(tool: &str, args: &[Value], shell: &mut Shell) -> Result<Va
             uutils_invoke(tool, uargs)
         }
     };
+    // dup2 of fd 0/1 mutates global state; serialize against any other thread
+    // doing the same.  Lock is held across the entire redirect/run/restore
+    // window (both stdout and the inner stdin redirect).
+    let _fd_lock = crate::compat::lock_stdio_redirect();
     let code = shell.io.stdout.with_child_stdout(|| invoke(uargs));
+    drop(_fd_lock);
     shell.control.last_status = code;
     if code == 0 {
         Ok(Value::Unit)
@@ -241,6 +246,7 @@ pub(crate) fn uu_cmp(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSig
     };
     let result: RefCell<Result<Cmp, String>> = RefCell::new(Ok(Cmp::Equal));
     if let Some(ref reader) = shell.io.stdin.take_pipe() {
+        let _fd_lock = crate::compat::lock_stdio_redirect();
         crate::compat::with_stdin_redirected(reader, || {
             *result.borrow_mut() = cmp::cmp(&params);
             0
@@ -265,155 +271,4 @@ pub(crate) fn uu_cmp(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSig
             code,
         )))
     }
-}
-
-#[cfg(feature = "grep")]
-pub(crate) fn uu_grep(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
-    use grep::regex::RegexMatcherBuilder;
-    use grep::searcher::{SearcherBuilder, sinks::UTF8};
-    let strs: Vec<String> = args.iter().map(|v| v.to_string()).collect();
-    let mut invert = false;
-    let mut ignore_case = false;
-    let mut fixed = false;
-    let mut count_only = false;
-    let mut line_numbers = false;
-    let mut quiet = false;
-    let mut pattern: Option<String> = None;
-    let mut files: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < strs.len() {
-        if strs[i].starts_with('-') && strs[i].len() > 1 && !strs[i].starts_with("--") {
-            // Walk the cluster; `-e` consumes the next argv and ends the cluster.
-            let mut consumed_e = false;
-            for ch in strs[i][1..].chars() {
-                match ch {
-                    'v' => invert = true,
-                    'i' => ignore_case = true,
-                    'F' => fixed = true,
-                    'c' => count_only = true,
-                    'n' => line_numbers = true,
-                    'q' => quiet = true,
-                    'E' | 'G' | 'P' => {}
-                    'e' => {
-                        consumed_e = true;
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-            if consumed_e {
-                i += 1;
-                if i < strs.len() {
-                    pattern = Some(strs[i].clone());
-                }
-            }
-        } else {
-            match strs[i].as_str() {
-                "--invert-match" => invert = true,
-                "--ignore-case" => ignore_case = true,
-                "--fixed-strings" => fixed = true,
-                "--count" => count_only = true,
-                "--line-number" => line_numbers = true,
-                "--quiet" | "--silent" => quiet = true,
-                "--extended-regexp" | "--basic-regexp" | "--perl-regexp" => {}
-                "--regexp" => {
-                    i += 1;
-                    if i < strs.len() {
-                        pattern = Some(strs[i].clone());
-                    }
-                }
-                _ if pattern.is_none() => pattern = Some(strs[i].clone()),
-                other => files.push(other.to_string()),
-            }
-        }
-        i += 1;
-    }
-    let Some(pattern) = pattern else {
-        diagnostic::cmd_error("grep", "no pattern given");
-        shell.control.last_status = 2;
-        return Err(EvalSignal::Error(Error::new("grep: no pattern given", 2)));
-    };
-    let matcher = match RegexMatcherBuilder::new()
-        .case_insensitive(ignore_case)
-        .fixed_strings(fixed)
-        .build(&pattern)
-    {
-        Ok(m) => m,
-        Err(e) => {
-            diagnostic::cmd_error("grep", &e.to_string());
-            shell.control.last_status = 2;
-            return Err(EvalSignal::Error(Error::new(format!("grep: {e}"), 2)));
-        }
-    };
-    // line_number(true) is mandatory: the UTF8 sink always invokes its
-    // closure with a line number, and `.search_reader(...)` returns
-    // `Err("line numbers not enabled")` otherwise.  The display of lnum
-    // is gated on the `line_numbers` flag below.
-    let mut searcher = SearcherBuilder::new()
-        .invert_match(invert)
-        .line_number(true)
-        .build();
-    let multi = files.len() > 1;
-    let mut matched = false;
-    macro_rules! search_one {
-        ($reader:expr, $name:expr) => {{
-            let prefix: String = if multi {
-                format!("{}:", $name)
-            } else {
-                String::new()
-            };
-            let mut count = 0u64;
-            let _res = searcher.search_reader(
-                &matcher,
-                $reader,
-                UTF8(|lnum, line| {
-                    count += 1;
-                    matched = true;
-                    if quiet {
-                        return Ok(false);
-                    }
-                    if !count_only {
-                        let l = line.trim_end_matches('\n');
-                        let s = if line_numbers {
-                            format!("{prefix}{lnum}:{l}")
-                        } else if prefix.is_empty() {
-                            l.to_string()
-                        } else {
-                            format!("{prefix}{l}")
-                        };
-                        let _ = shell.write_stdout(format!("{s}\n").as_bytes());
-                    }
-                    Ok(true)
-                }),
-            );
-            crate::dbg_trace!("uu_grep", "search_reader result={:?} count={count} matched={matched}", _res);
-            if count_only {
-                let s = format!("{prefix}{count}");
-                let _ = shell.write_stdout(format!("{s}\n").as_bytes());
-            }
-        }};
-    }
-    if files.is_empty() {
-        if let Some(r) = shell.io.stdin.take_pipe() {
-            crate::dbg_trace!("uu_grep", "stdin=Pipe");
-            search_one!(r, "<stdin>");
-        } else {
-            crate::dbg_trace!("uu_grep", "stdin=Terminal");
-            search_one!(std::io::stdin(), "<stdin>");
-        }
-    } else {
-        for path in &files {
-            if let Err(e) = shell.check_fs_read(path) {
-                diagnostic::cmd_error("grep", &e.to_string());
-                continue;
-            }
-            match std::fs::File::open(path) {
-                Ok(f) => search_one!(f, path.as_str()),
-                Err(e) => diagnostic::cmd_error("grep", &format!("{path}: {e}")),
-            }
-        }
-    }
-    let code = if matched { 0 } else { 1 };
-    shell.control.last_status = code;
-    Ok(Value::Unit)
 }

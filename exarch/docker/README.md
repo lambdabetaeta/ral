@@ -36,14 +36,17 @@ Pin a tag:
 
 The release artifacts come from `scripts/build-release.ral`, which
 publishes `exarch-linux-{x86_64,arm64}` to a rolling `latest`
-prerelease alongside the ral binaries.  `dev/deploy-public.sh` mirrors
-that release to the public `lambdabetaeta/ral` repo, which is the
-default `EXARCH_REPO` (no auth needed).  Override to fetch from
+prerelease alongside the ral binaries.  `dev/deploy-public.ral`
+mirrors that release to the public `lambdabetaeta/ral` repo, which is
+the default `EXARCH_REPO` (no auth needed).  Override to fetch from
 `lambdabetaeta/ral-private` if you have access:
 
     EXARCH_REPO=lambdabetaeta/ral-private \
     GITHUB_TOKEN=$(gh auth token) \
         docker compose -f exarch/docker/compose.yaml build
+
+For a no-clone, no-build path, pull the prebuilt image instead — see
+`exarch/README.md` for the `ghcr.io/lambdabetaeta/exarch-box` one-liner.
 
 ## Run
 

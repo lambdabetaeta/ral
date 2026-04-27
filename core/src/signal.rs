@@ -17,13 +17,28 @@ use std::sync::atomic::{AtomicU8, Ordering};
 /// 0 = normal, 1 = interrupted, 2 = second signal, >=3 = force exit.
 static SIGNAL_COUNT: AtomicU8 = AtomicU8::new(0);
 
-/// Check if a signal has been received. Returns Ok(()) normally,
-/// or Err(EvalSignal::Error) to begin unwinding.
+/// Check whether the current evaluation should unwind.
+///
+/// Two reasons can fire:
+///   * a process-level signal (SIGINT / SIGTERM / SIGHUP) — increments
+///     the global `SIGNAL_COUNT`;
+///   * a structured-concurrency cancel — the shell's `CancelScope` (or
+///     any of its ancestors) has been cancelled, e.g. by a
+///     `RunningPipeline::Drop` on the abort path.
+///
+/// Both unwind via the same `EvalSignal::Error` so callers don't need to
+/// distinguish them — the message is "interrupted" vs "cancelled".
 pub fn check(shell: &crate::types::Shell) -> Result<(), crate::types::EvalSignal> {
-    let count = SIGNAL_COUNT.load(Ordering::Relaxed);
-    if count >= 1 {
+    if SIGNAL_COUNT.load(Ordering::Relaxed) >= 1 {
         return Err(crate::types::EvalSignal::Error(
-            crate::types::Error::new("interrupted", 130).at(shell.location.line, shell.location.col),
+            crate::types::Error::new("interrupted", 130)
+                .at(shell.location.line, shell.location.col),
+        ));
+    }
+    if shell.cancel.is_cancelled() {
+        return Err(crate::types::EvalSignal::Error(
+            crate::types::Error::new("cancelled", 130)
+                .at(shell.location.line, shell.location.col),
         ));
     }
     Ok(())
@@ -163,6 +178,333 @@ impl Drop for PipelineRelay {
 /// Non-unix stub so callers can use `PipelineRelay` unconditionally.
 #[cfg(not(unix))]
 pub struct PipelineRelay;
+
+// ── Cooperative cancellation ────────────────────────────────────────────────
+//
+// `CancelScope` is the structured-concurrency primitive: a tree of Arc-shared
+// flags.  A worker checks `is_cancelled` at well-defined poll points (the same
+// places `signal::check` is already called); cancelling an outer scope
+// propagates to every inner scope, so a top-level Ctrl-C — or a
+// `RunningPipeline::Drop` on the abort path — unwinds every thread that
+// inherited the scope at its next poll point.
+//
+// The chain is walked, not flattened, so subscopes can carry their own
+// flag (cancelling only their subtree) while still observing parent
+// cancellation.  No mutex, no allocation in the hot path — just an
+// `AtomicBool::load` per ancestor.
+
+/// Internal node of the cancel-scope tree.  A scope is cancelled if its
+/// own flag is set OR any ancestor's flag is set.
+#[derive(Debug)]
+struct ScopeNode {
+    flag: AtomicU8,
+    parent: Option<std::sync::Arc<ScopeNode>>,
+}
+
+/// A handle into the cancel-scope tree.  Cheap to clone (one `Arc`
+/// bump); cheap to check (chain of atomic loads).
+///
+/// Construction:
+///   * `root()` — a fresh top-level scope with no parent.
+///   * `child()` — a new scope nested under `self`; cancelling `self` (or
+///     any of its ancestors) cancels the child too.
+///   * `share()` — clone the *same* scope (no new node); used when
+///     handing the current scope to a spawned thread.
+///
+/// Cancellation is one-way: once cancelled, a scope stays cancelled.
+#[derive(Debug, Clone)]
+pub struct CancelScope(std::sync::Arc<ScopeNode>);
+
+impl CancelScope {
+    /// A fresh root scope.  Used by the default `Shell` and by tests
+    /// that don't need cancellation.
+    pub fn root() -> Self {
+        Self(std::sync::Arc::new(ScopeNode {
+            flag: AtomicU8::new(0),
+            parent: None,
+        }))
+    }
+
+    /// A new scope nested under `self`.  Cancelling any ancestor (or
+    /// `self`) cancels the returned child.  `RunningPipeline` creates
+    /// one of these per pipeline so cancelling the pipeline doesn't
+    /// reach the parent shell.
+    pub fn child(&self) -> Self {
+        Self(std::sync::Arc::new(ScopeNode {
+            flag: AtomicU8::new(0),
+            parent: Some(self.0.clone()),
+        }))
+    }
+
+    /// Set this scope's flag.  Idempotent.  Visible to every share /
+    /// child of this scope at the next `is_cancelled` poll.
+    pub fn cancel(&self) {
+        self.0.flag.store(1, Ordering::Release);
+    }
+
+    /// Walk the parent chain, returning true if any node's flag is set.
+    pub fn is_cancelled(&self) -> bool {
+        let mut node: &std::sync::Arc<ScopeNode> = &self.0;
+        loop {
+            if node.flag.load(Ordering::Acquire) != 0 {
+                return true;
+            }
+            match &node.parent {
+                Some(p) => node = p,
+                None => return false,
+            }
+        }
+    }
+}
+
+impl Default for CancelScope {
+    fn default() -> Self {
+        Self::root()
+    }
+}
+
+// ── Process-group placement ──────────────────────────────────────────────────
+//
+// Every spawned external process makes one of three choices about its
+// process group: stay in the parent's group, become a leader of a fresh
+// group, or join an existing group as a non-leader.  `PgidPolicy` makes
+// that choice explicit at the type level — no `pid_t == 0` sentinel, no
+// "did the caller remember to setpgid?" comments.
+
+/// Newtype wrapping a Unix process-group ID.  Constructed from a real pid;
+/// no `0` sentinel encodes "no pgid" — the `Option<Pgid>` does.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pgid(pub libc::pid_t);
+
+#[cfg(not(unix))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pgid(pub i32);
+
+/// Process-group placement decision applied via `pre_exec` before `execve`.
+///
+/// Single-command foreground jobs and pipeline first stages use
+/// `NewLeader`; subsequent pipeline stages use `Join(leader_pgid)`;
+/// non-pipeline non-foreground children use `Inherit`.
+#[derive(Clone, Copy, Debug)]
+pub enum PgidPolicy {
+    /// Inherit the parent's pgid — no `setpgid` call.
+    Inherit,
+    /// Become the leader of a fresh process group (`setpgid(0, 0)`).
+    NewLeader,
+    /// Join an existing pgid as a non-leader (`setpgid(0, leader)`).
+    Join(Pgid),
+}
+
+#[cfg(unix)]
+impl PgidPolicy {
+    /// Apply this policy from inside a `pre_exec` closure.  Safe to call from
+    /// the post-fork pre-exec context; no allocation, no stdlib mutex use.
+    ///
+    /// This is the *only* place `setpgid` should be called from spawning
+    /// code.  Searching for `setpgid` should yield this single call site
+    /// plus a parent-side race-guard that mirrors it (see `exec_external`).
+    pub fn apply(self) {
+        unsafe {
+            match self {
+                PgidPolicy::Inherit => {}
+                PgidPolicy::NewLeader => {
+                    libc::setpgid(0, 0);
+                }
+                PgidPolicy::Join(Pgid(leader)) => {
+                    libc::setpgid(0, leader);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+impl PgidPolicy {
+    pub fn apply(self) {}
+}
+
+/// Restore default disposition for the signals that ral overrides or
+/// ignores in its own process.  Must run from the post-fork pre-exec
+/// closure of every external-child spawn — it is *not* a foreground-only
+/// concern.
+///
+/// ral installs handlers for SIGINT and ignores SIGTTIN / SIGTTOU /
+/// SIGPIPE at startup; without this reset, every spawned external
+/// inherits those dispositions and behaves unlike the same command run
+/// from a normal shell.  In particular SIGPIPE-IGN means a child that
+/// writes past a closed downstream stage gets EPIPE instead of dying —
+/// most utilities don't handle EPIPE and end up looping or producing
+/// confusing diagnostics on what should be a clean SIGPIPE death.
+///
+/// Universal — applies to standalone externals, pipeline external stages,
+/// foreground or backgrounded.
+#[cfg(unix)]
+pub fn reset_child_signals() {
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_DFL);
+        libc::signal(libc::SIGQUIT, libc::SIG_DFL);
+        libc::signal(libc::SIGTSTP, libc::SIG_DFL);
+        libc::signal(libc::SIGTTIN, libc::SIG_DFL);
+        libc::signal(libc::SIGTTOU, libc::SIG_DFL);
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+pub fn reset_child_signals() {}
+
+// ── Wait handling for stopped children ──────────────────────────────────────
+//
+// `Child::wait()` calls `waitpid(pid, &status, 0)` which only returns on
+// termination.  A child stopped by SIGTSTP (Ctrl-Z), SIGSTOP, or SIGTTIN
+// stays stopped indefinitely — the wait blocks, the controlling tty stays
+// owned by the stopped pgid, and ral hangs.
+//
+// `wait_handling_stop` uses `waitpid(pid, ..., WUNTRACED)` so the wait
+// returns on stop too.  ral has no job control yet, so the response is
+// to kill the entire pgid (so the rest of a pipeline dies together) and
+// loop to reap.  The eventual return is always an exited or signalled
+// status — never stopped.
+
+/// Wait for `child` to terminate, killing its pgid if it stops.
+///
+/// Why this exists: see the module-level commentary above.  Returning a
+/// stopped status would just push the deadlock up one level — the caller
+/// has no way to express "stopped" in the pipeline result type, and
+/// without job-control machinery there's nothing useful for it to do
+/// with such a status.
+#[cfg(unix)]
+pub fn wait_handling_stop(
+    child: &mut std::process::Child,
+    pgid: Option<Pgid>,
+) -> std::io::Result<std::process::ExitStatus> {
+    use std::os::unix::process::ExitStatusExt;
+    let pid = child.id() as libc::pid_t;
+    loop {
+        let mut status: libc::c_int = 0;
+        let r = unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED) };
+        if r < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(err);
+        }
+        if libc::WIFSTOPPED(status) {
+            crate::dbg_trace!(
+                "fg",
+                "pid {pid} stopped (signal {}); killing pgid {:?}",
+                libc::WSTOPSIG(status),
+                pgid
+            );
+            match pgid {
+                Some(Pgid(p)) => unsafe {
+                    libc::kill(-p, libc::SIGKILL);
+                },
+                None => {
+                    let _ = child.kill();
+                }
+            }
+            // Loop to reap the now-dying child.
+            continue;
+        }
+        return Ok(std::process::ExitStatus::from_raw(status));
+    }
+}
+
+#[cfg(not(unix))]
+pub fn wait_handling_stop(
+    child: &mut std::process::Child,
+    _pgid: Option<Pgid>,
+) -> std::io::Result<std::process::ExitStatus> {
+    child.wait()
+}
+
+// ── Foreground ownership ─────────────────────────────────────────────────────
+//
+// `tcsetpgrp` hands the controlling tty to a target process group; it must be
+// reversed before the next REPL read or that read returns EIO (ral ignores
+// SIGTTIN, see repl.rs).  `ForegroundGuard` makes the restoration unconditional
+// under any early return: acquiring the guard performs `tcsetpgrp(target)`,
+// dropping it performs `tcsetpgrp(saved)`.  Only the unix variant has fields;
+// non-unix is a zero-sized stub so callers compile unchanged.
+
+/// RAII guard for terminal foreground ownership.
+///
+/// `try_acquire` performs `tcsetpgrp(STDIN_FILENO, target)` and remembers the
+/// previous foreground pgid; `drop` restores it.  Returns `None` when the
+/// shell isn't interactive, stdin isn't a tty, or the syscall fails — in
+/// those cases there's nothing to restore.
+#[cfg(unix)]
+pub struct ForegroundGuard {
+    saved_pgid: libc::pid_t,
+}
+
+#[cfg(unix)]
+impl ForegroundGuard {
+    /// Hand the controlling tty to `target`, recording the prior pgid for
+    /// the eventual restore.  Returns `None` when no handoff is appropriate.
+    pub fn try_acquire(target: libc::pid_t, shell: &crate::types::Shell) -> Option<Self> {
+        if !shell.io.interactive || !shell.io.terminal.stdin_tty || target == 0 {
+            return None;
+        }
+        let saved = unsafe { libc::getpgrp() };
+        let rc = unsafe { libc::tcsetpgrp(libc::STDIN_FILENO, target) };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            crate::dbg_trace!("fg", "acquire: tcsetpgrp({target}) failed: {err}");
+            return None;
+        }
+        Some(Self { saved_pgid: saved })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ForegroundGuard {
+    /// Restore the foreground pgid recorded at acquisition.
+    ///
+    /// Critical: a missed restore puts ral into a background pgroup whose
+    /// next tty read returns EIO.  Retry on EINTR; on persistent failure
+    /// log via `dbg_trace` and verify with `tcgetpgrp` so the silent-loss
+    /// case is at least observable.
+    fn drop(&mut self) {
+        for _ in 0..3 {
+            let rc = unsafe { libc::tcsetpgrp(libc::STDIN_FILENO, self.saved_pgid) };
+            if rc == 0 {
+                return;
+            }
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::EINTR) {
+                crate::dbg_trace!(
+                    "fg",
+                    "release: tcsetpgrp({}) failed: {err}",
+                    self.saved_pgid
+                );
+                break;
+            }
+        }
+        let cur = unsafe { libc::tcgetpgrp(libc::STDIN_FILENO) };
+        if cur != self.saved_pgid {
+            crate::dbg_trace!(
+                "fg",
+                "release: tty fg is {cur}, want {} (next tty read may EIO)",
+                self.saved_pgid
+            );
+        }
+    }
+}
+
+/// Non-unix stub so callers can use `ForegroundGuard` unconditionally.
+#[cfg(not(unix))]
+pub struct ForegroundGuard;
+
+#[cfg(not(unix))]
+impl ForegroundGuard {
+    pub fn try_acquire(_target: i32, _shell: &crate::types::Shell) -> Option<Self> {
+        None
+    }
+}
 
 /// Count of currently occupied relay slots (for testing).
 #[cfg(all(unix, test))]

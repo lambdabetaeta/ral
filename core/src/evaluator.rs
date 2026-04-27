@@ -307,6 +307,14 @@ pub fn eval_comp(comp: &Comp, shell: &mut Shell) -> Result<Value, EvalSignal> {
             dispatch::dispatch_by_name(name, &arg_vals, &redir_eval, *external_only, shell)
         }
 
+        CompKind::Builtin { name, args } => {
+            let arg_vals = dispatch::eval_subcall(shell, |shell| {
+                args.iter().map(|v| eval_val(v, shell)).collect::<Result<Vec<_>, _>>()
+            })?;
+            crate::builtins::call(name, &arg_vals, shell)?
+                .ok_or_else(|| shell.err(format!("internal error: builtin '{name}' missing"), 1))
+        }
+
         CompKind::Pipeline(stages) => {
             if stages.len() == 1 {
                 return eval_comp(&stages[0], shell);
@@ -405,6 +413,7 @@ pub(crate) fn eval_val(val: &Val, shell: &mut Shell) -> Result<Value, EvalSignal
         Val::Float(f) => Ok(Value::Float(*f)),
         Val::Bool(b) => Ok(Value::Bool(*b)),
         Val::Literal(s) => Ok(parse_literal(s)),
+        Val::String(s) => Ok(Value::String(s.clone())),
         Val::Variable(name) => shell
             .get(name)
             .cloned()

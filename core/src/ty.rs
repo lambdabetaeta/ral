@@ -175,6 +175,7 @@ fn constrain_comp(comp: &Comp, unifier: &mut ModeUnifier) -> CompType {
             ExecName::Bare(name) => head_sig(name, args, unifier),
             ExecName::Path(_) | ExecName::TildePath(_) => CompType::ext(),
         },
+        CompKind::Builtin { name, args } => head_sig(name, args, unifier),
         CompKind::Return(_)
         | CompKind::PrimOp(..)
         | CompKind::Interpolation(_)

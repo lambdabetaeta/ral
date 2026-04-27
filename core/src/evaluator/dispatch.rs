@@ -129,6 +129,71 @@ pub(crate) fn eval_app(
     }
 }
 
+/// Classification of an `Exec` call to one of five terminal dispatch arms.
+///
+/// `Handler` carries the looked-up thunk so the caller can invoke it
+/// without redoing the lookup; the other arms are pure tags.  Both
+/// `dispatch_by_name` and the pipeline analyzer go through this function so
+/// the rules (handler priority, `^name` semantics, alias/builtin/grant
+/// classification) live in exactly one place.
+pub(crate) enum Dispatch {
+    /// An effect handler intercepts.  `is_catch_all` and `depth` are the
+    /// fields shallow-handler invocation needs.
+    Handler {
+        thunk: Value,
+        is_catch_all: bool,
+        depth: usize,
+    },
+    Alias,
+    Builtin,
+    GrantDenied,
+    External,
+}
+
+/// Classify a command head.  Handlers fire first (per-name unconditionally;
+/// catch-all unless dominated by a builtin or alias when `external_only`
+/// is false).  `^name` then short-circuits to External.  Otherwise the
+/// head classifier picks Alias / Builtin / GrantDenied / External.
+///
+/// Pure: takes `&Shell`, performs no I/O and no shell mutation.  Pipeline
+/// analysis can call it from `analyze_stage` without disturbing the
+/// surrounding evaluator state.
+pub(crate) fn classify_dispatch(name: &ExecName, external_only: bool, shell: &Shell) -> Dispatch {
+    let bare = name.bare();
+
+    if let Some(name) = bare
+        && let Some((thunk, is_catch_all, depth)) = shell.lookup_handler(name)
+    {
+        let dominated = is_catch_all
+            && !external_only
+            && matches!(
+                shell.classify_command_head(name),
+                CommandHead::Builtin | CommandHead::Alias
+            );
+        if !dominated {
+            return Dispatch::Handler {
+                thunk,
+                is_catch_all,
+                depth,
+            };
+        }
+    }
+
+    if external_only {
+        return Dispatch::External;
+    }
+
+    match bare
+        .map(|n| shell.classify_command_head(n))
+        .unwrap_or(CommandHead::External)
+    {
+        CommandHead::Alias => Dispatch::Alias,
+        CommandHead::Builtin => Dispatch::Builtin,
+        CommandHead::GrantDenied => Dispatch::GrantDenied,
+        CommandHead::External => Dispatch::External,
+    }
+}
+
 pub(crate) fn dispatch_by_name(
     name: &ExecName,
     args: &[Value],
@@ -142,44 +207,33 @@ pub(crate) fn dispatch_by_name(
         shell.location.call_site.col = shell.location.col;
     }
 
+    let dispatch = classify_dispatch(name, external_only, shell);
     let bare = name.bare();
 
-    // Step 1: effect handlers.  Per-name handlers fire unconditionally.
-    // Catch-all handlers skip builtins/aliases (they are language-internal);
-    // ^name (external_only) always fires the catch-all — nothing escapes.
-    if let Some(name) = bare
-        && let Some((thunk, is_catch_all, depth)) = shell.lookup_handler(name)
-    {
-        let dominated = is_catch_all
-            && !external_only
-            && matches!(
-                shell.classify_command_head(name),
-                CommandHead::Builtin | CommandHead::Alias
-            );
-        if !dominated {
-            return invoke_handler(thunk, is_catch_all, depth, name, args, shell);
-        }
-    }
-
-    // Step 2: ^name — resolve via PATH only, skip alias/builtin/prelude.
-    if external_only {
-        return run_external(name, args, redirects, shell);
-    }
-
-    // Step 3: normal command-head chain.
-    let head = bare
-        .map(|name| shell.classify_command_head(name))
-        .unwrap_or(CommandHead::External);
     #[cfg(debug_assertions)]
     if let Some(name) = bare {
         crate::dbg_trace!(
             "dispatch",
-            "name={name} head={head:?} aliases={:?}",
+            "name={name} arm={} aliases={:?}",
+            match &dispatch {
+                Dispatch::Handler { .. } => "Handler",
+                Dispatch::Alias => "Alias",
+                Dispatch::Builtin => "Builtin",
+                Dispatch::GrantDenied => "GrantDenied",
+                Dispatch::External => "External",
+            },
             shell.registry.aliases.keys().collect::<Vec<_>>()
         );
     }
-    match (head, bare) {
-        (CommandHead::Alias, Some(name)) => {
+
+    match dispatch {
+        Dispatch::Handler {
+            thunk,
+            is_catch_all,
+            depth,
+        } => invoke_handler(thunk, is_catch_all, depth, bare.unwrap(), args, shell),
+        Dispatch::Alias => {
+            let name = bare.unwrap();
             let alias = shell.registry.aliases.get(name).cloned().unwrap();
             let alias_args = vec![Value::List(args.to_vec())];
             match &alias.origin {
@@ -190,7 +244,8 @@ pub(crate) fn dispatch_by_name(
                     }),
             }
         }
-        (CommandHead::Builtin, Some(name)) => {
+        Dispatch::Builtin => {
+            let name = bare.unwrap();
             let start_us = audit::start(shell);
             let v = with_redirects(redirects, shell, |shell| {
                 crate::builtins::call(name, args, shell)?.ok_or_else(|| {
@@ -200,7 +255,8 @@ pub(crate) fn dispatch_by_name(
             audit::record_exec(shell, name, args, &v, start_us);
             Ok(v)
         }
-        (CommandHead::GrantDenied, Some(name)) => {
+        Dispatch::GrantDenied => {
+            let name = bare.unwrap();
             audit::record_deny(shell, name, args);
             Err(shell.err_hint(
                 format!("command '{name}' denied by active grant"),
@@ -208,7 +264,7 @@ pub(crate) fn dispatch_by_name(
                 1,
             ))
         }
-        _ => run_external(name, args, redirects, shell),
+        Dispatch::External => run_external(name, args, redirects, shell),
     }
 }
 

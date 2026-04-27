@@ -1288,8 +1288,8 @@ All return `Bool`; a `false` return is successful.
 `_sort-list-by`, `_fold-lines`; `_fork`, `_await`, `_race`, `_cancel`,
 `_disown`, `_par`; `_try`, `_try-apply`, `_audit`, `_guard`;
 `_decode`, `_encode` (used via the `from-X`/`to-X` wrappers, §15);
-families `_str` (`upper`, `lower`, `replace`, `replace-all`, `join`,
-`slice`, `split`, `match`, `shell-quote`, `shell-split`, `dedent`), `_path` (`stem`, `ext`, `dir`, `base`,
+families `_str` (`upper`, `lower`, `replace`, `replace-all`, `find-match`,
+`find-matches`, `join`, `slice`, `split`, `match`, `shell-quote`, `shell-split`, `dedent`), `_path` (`stem`, `ext`, `dir`, `base`,
 `resolve`, `join`), `_fs` (`read`, `lines`, `size`, `mtime`, `empty`, `write`,
 `copy`, `rename`, `remove`, `mkdir`, `list`, `tempdir`, `tempfile`),
 `_convert` (`int`, `float`, `string`), `_editor` (`get`, `set`,
@@ -1315,10 +1315,16 @@ commits to the first one that matches.
 
 With `--features coreutils`, ≈ 60 GNU-compatible utilities
 (`ls`, `cat`, `wc`, `head`, `tail`, `cp`, `mv`, `rm`, `sort`,
-`grep`, `tr`, `uniq`, …) are in-process byte-output builtins. On Unix
+`tr`, `uniq`, …) are in-process byte-output builtins. On Unix
 they are normally on `PATH` and the feature is unnecessary; on
-Windows it produces a self-contained binary. `diffutils` adds `diff`,
-`cmp`; `grep` adds in-process `grep`. All are byte-output commands.
+Windows it produces a self-contained binary. `diffutils` adds `diff`
+and `cmp`. All are byte-output commands.
+
+`--features grep` enables all regex-backed builtins using ripgrep's
+engine: `grep-files`, `match`, `split`, `replace`, `replace-all`,
+`find-match`, `find-matches`. Without this feature these builtins are
+present but raise an error at runtime. For byte-stream grep, use the
+system `grep` on `PATH`.
 
 ## 17  Prelude
 
@@ -1334,8 +1340,10 @@ application.
 # Strings (via _str)
 let upper   = { |s|          _str 'upper' $s }
 let lower   = { |s|          _str 'lower' $s }
-let replace     = { |s from to|  _str 'replace' $s $from $to }      # exactly one
-let replace-all = { |s from to|  _str 'replace-all' $s $from $to }  # every match
+let replace      = { |pattern repl s|  _str 'replace' $pattern $repl $s }
+let replace-all  = { |pattern repl s|  _str 'replace-all' $pattern $repl $s }
+let find-match   = { |pattern s|       _str 'find-match' $pattern $s }
+let find-matches = { |pattern s|       _str 'find-matches' $pattern $s }
 let join    = { |sep items|  _str 'join' $sep $items }
 let slice   = { |s start n|  _str 'slice' $s $start $n }
 let split   = { |pattern s|  _str 'split' $pattern $s }

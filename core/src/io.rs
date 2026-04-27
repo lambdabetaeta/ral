@@ -493,6 +493,49 @@ impl Source {
 
 // ── Io ────────────────────────────────────────────────────────────────────
 
+/// Whether the current shell context may hand the controlling terminal
+/// to a spawned external child.
+///
+/// Constructed only via the named methods so the discipline is grep-able:
+/// the orchestrator (top-level call, single-command exec) issues
+/// `Eligible`; pipeline-internal stage threads issue `Forbidden`.  An
+/// internal stage runs inside ral itself, so `tcsetpgrp` from the thread
+/// races with the orchestrator and can leave the tty handed to a child
+/// that the orchestrator's `claim_foreground` knows nothing about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JobControl {
+    foreground_eligible: bool,
+}
+
+impl JobControl {
+    /// The orchestrator (top-level eval, single-command exec).  May
+    /// foreground a spawned child when other conditions are met
+    /// (interactive shell, tty stdin, terminal stdout, no shell pump).
+    pub fn top_level() -> Self {
+        Self {
+            foreground_eligible: true,
+        }
+    }
+
+    /// Pipeline-internal stage thread.  Must NEVER take foreground —
+    /// the orchestrator owns that decision.
+    pub fn pipeline_thread() -> Self {
+        Self {
+            foreground_eligible: false,
+        }
+    }
+
+    pub fn may_foreground(&self) -> bool {
+        self.foreground_eligible
+    }
+}
+
+impl Default for JobControl {
+    fn default() -> Self {
+        Self::top_level()
+    }
+}
+
 /// All pipeline-stage IO state for a single Shell.
 pub struct Io {
     /// Byte source for this stage.
@@ -509,6 +552,12 @@ pub struct Io {
     pub interactive: bool,
     /// Cached isatty results from shell startup.
     pub terminal: TerminalState,
+    /// Whether this shell context may take terminal foreground.  `top_level`
+    /// for orchestrator paths; `pipeline_thread` inside an internal pipeline
+    /// stage thread (set by `launch_internal_stage`).  Independent of the
+    /// `interactive`/`terminal` checks: those describe the *capability*, this
+    /// describes whether *this caller* is permitted to use it.
+    pub job_control: JobControl,
     /// The stdout that was active before the current `with_capture` installed
     /// its buffer.  `Comp::Seq` flushes non-final commands' bytes here so
     /// side-effects remain visible rather than being silently discarded.
@@ -529,6 +578,7 @@ impl Io {
             value_in: self.value_in.clone(),
             interactive: self.interactive,
             terminal: self.terminal,
+            job_control: self.job_control,
             capture_outer: self
                 .capture_outer
                 .as_ref()
@@ -552,6 +602,7 @@ impl Io {
             .and_then(|s| s.try_clone().ok());
         self.terminal = parent.terminal;
         self.interactive = parent.interactive;
+        self.job_control = parent.job_control;
         self.stdin = match parent.stdin.take_pipe() {
             Some(r) => Source::Pipe(r),
             None => Source::Terminal,
@@ -580,6 +631,7 @@ impl Default for Io {
             value_in: None,
             interactive: false,
             terminal: TerminalState::default(),
+            job_control: JobControl::default(),
             capture_outer: None,
         }
     }

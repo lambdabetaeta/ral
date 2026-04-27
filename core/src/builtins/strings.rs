@@ -1,6 +1,12 @@
 use crate::types::*;
 
-use super::util::{arg0_str, as_list, check_arity, regex_err, sig, sig_hint};
+use super::util::{arg0_str, as_list, check_arity, sig, sig_hint};
+#[cfg(feature = "grep")]
+use super::util::regex_err;
+
+#[cfg(not(feature = "grep"))]
+const NO_GREP: &str =
+    "regex operations require the grep feature — rebuild with --features grep";
 
 /// Parse a `Value` as a non-negative `usize` index.  Errors descriptively
 /// rather than silently coercing junk to zero.
@@ -35,117 +41,150 @@ pub(super) fn builtin_len(args: &[Value]) -> Result<Value, EvalSignal> {
     Ok(Value::Int(n as i64))
 }
 
-pub(super) fn builtin_str(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
-    let op = arg0_str(args);
-    let rest = args.get(1..).unwrap_or(&[]);
-    match op.as_str() {
-        "upper" => Ok(Value::String(arg0_str(rest).to_uppercase())),
-        "lower" => Ok(Value::String(arg0_str(rest).to_lowercase())),
-        "replace" => {
-            check_arity(rest, 3, "replace")?;
-            let s = rest[0].to_string();
-            let from = rest[1].to_string();
-            let to = rest[2].to_string();
-            if from.is_empty() {
-                return Err(sig("replace: empty pattern"));
-            }
-            let positions: Vec<usize> =
-                s.match_indices(from.as_str()).map(|(i, _)| i).collect();
-            match positions.len() {
-                0 => Err(sig_hint(
-                    "replace: pattern not found",
-                    "the file may have changed, or the anchor's whitespace/newlines \
-                     differ from the file's — re-read the file and copy the exact bytes",
-                )),
-                1 => Ok(Value::String(s.replacen(&from, &to, 1))),
-                n => Err(sig_hint(
-                    format!(
-                        "replace: pattern matches {n} times ({}) — ambiguous",
-                        line_preview(&s, &positions),
-                    ),
-                    "widen the anchor with surrounding context (e.g. include the \
-                     previous line) so it identifies a single site",
-                )),
-            }
-        }
-        "replace-all" => {
-            check_arity(rest, 3, "replace-all")?;
-            Ok(Value::String(
-                rest[0]
-                    .to_string()
-                    .replace(&rest[1].to_string(), &rest[2].to_string()),
-            ))
-        }
-        "join" => {
-            check_arity(rest, 2, "join")?;
-            let sep = rest[0].to_string();
-            let items = as_list(&rest[1], "join")?;
-            Ok(Value::String(
-                items
-                    .iter()
-                    .map(|v| v.to_string())
-                    .collect::<Vec<_>>()
-                    .join(&sep),
-            ))
-        }
-        "slice" => {
-            check_arity(rest, 3, "slice")?;
-            let s = rest[0].to_string();
-            let start = as_index(&rest[1], "slice start")?;
-            let length = as_index(&rest[2], "slice length")?;
-            Ok(Value::String(s.chars().skip(start).take(length).collect()))
-        }
-        "split" => {
-            check_arity(rest, 2, "split")?;
-            let pattern = rest[0].to_string();
-            let input = rest[1].to_string();
-            let re = regex_lite::Regex::new(&pattern)
-                .map_err(|e| sig(regex_err("split", &pattern, &e.to_string())))?;
-            Ok(Value::List(
-                re.split(&input).map(|p| Value::String(p.into())).collect(),
-            ))
-        }
-        "match" => {
-            check_arity(rest, 2, "match")?;
-            let pattern = rest[0].to_string();
-            let input = rest[1].to_string();
-            let re = regex_lite::Regex::new(&pattern)
-                .map_err(|e| sig(regex_err("match", &pattern, &e.to_string())))?;
-            let matched = re.is_match(&input);
-            shell.set_status_from_bool(matched);
-            Ok(Value::Bool(matched))
-        }
-        "shell-split" => {
-            let s = arg0_str(rest);
-            let parts = shell_words::split(&s).map_err(|e| sig(format!("shell-split: {e}")))?;
-            Ok(Value::List(parts.into_iter().map(Value::String).collect()))
-        }
-        "shell-quote" => {
-            let s = arg0_str(rest);
-            let quoted = shlex::try_quote(&s).map_err(|e| sig(format!("shell-quote: {e}")))?;
-            Ok(Value::String(quoted.into_owned()))
-        }
-        "dedent" => {
-            let s = arg0_str(rest);
-            Ok(Value::String(dedent(&s)))
-        }
-        _ => Err(sig(format!("_str: unknown operation '{op}'"))),
+pub(super) fn builtin_upper(args: &[Value]) -> Result<Value, EvalSignal> {
+    Ok(Value::String(arg0_str(args).to_uppercase()))
+}
+
+pub(super) fn builtin_lower(args: &[Value]) -> Result<Value, EvalSignal> {
+    Ok(Value::String(arg0_str(args).to_lowercase()))
+}
+
+pub(super) fn builtin_dedent(args: &[Value]) -> Result<Value, EvalSignal> {
+    Ok(Value::String(dedent(&arg0_str(args))))
+}
+
+pub(super) fn builtin_join(args: &[Value]) -> Result<Value, EvalSignal> {
+    check_arity(args, 2, "join")?;
+    let sep = args[0].to_string();
+    let items = as_list(&args[1], "join")?;
+    Ok(Value::String(
+        items
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(&sep),
+    ))
+}
+
+pub(super) fn builtin_slice(args: &[Value]) -> Result<Value, EvalSignal> {
+    check_arity(args, 3, "slice")?;
+    let s = args[0].to_string();
+    let start = as_index(&args[1], "slice start")?;
+    let length = as_index(&args[2], "slice length")?;
+    Ok(Value::String(s.chars().skip(start).take(length).collect()))
+}
+
+pub(super) fn builtin_shell_split(args: &[Value]) -> Result<Value, EvalSignal> {
+    let s = arg0_str(args);
+    let parts = shell_words::split(&s).map_err(|e| sig(format!("shell-split: {e}")))?;
+    Ok(Value::List(parts.into_iter().map(Value::String).collect()))
+}
+
+pub(super) fn builtin_shell_quote(args: &[Value]) -> Result<Value, EvalSignal> {
+    let s = arg0_str(args);
+    let quoted = shlex::try_quote(&s).map_err(|e| sig(format!("shell-quote: {e}")))?;
+    Ok(Value::String(quoted.into_owned()))
+}
+
+#[cfg(feature = "grep")]
+fn compile_regex(ctx: &str, pattern: &str) -> Result<regex::Regex, EvalSignal> {
+    regex::Regex::new(pattern).map_err(|e| sig(regex_err(ctx, pattern, &e.to_string())))
+}
+
+pub(super) fn builtin_replace(args: &[Value]) -> Result<Value, EvalSignal> {
+    check_arity(args, 3, "replace")?;
+    #[cfg(feature = "grep")]
+    {
+        let pattern = args[0].to_string();
+        let repl = args[1].to_string();
+        let input = args[2].to_string();
+        let re = compile_regex("replace", &pattern)?;
+        Ok(Value::String(re.replace(&input, repl.as_str()).into_owned()))
+    }
+    #[cfg(not(feature = "grep"))]
+    Err(sig(NO_GREP))
+}
+
+pub(super) fn builtin_replace_all(args: &[Value]) -> Result<Value, EvalSignal> {
+    check_arity(args, 3, "replace-all")?;
+    #[cfg(feature = "grep")]
+    {
+        let pattern = args[0].to_string();
+        let repl = args[1].to_string();
+        let input = args[2].to_string();
+        let re = compile_regex("replace-all", &pattern)?;
+        Ok(Value::String(
+            re.replace_all(&input, repl.as_str()).into_owned(),
+        ))
+    }
+    #[cfg(not(feature = "grep"))]
+    Err(sig(NO_GREP))
+}
+
+pub(super) fn builtin_split(args: &[Value]) -> Result<Value, EvalSignal> {
+    check_arity(args, 2, "split")?;
+    #[cfg(feature = "grep")]
+    {
+        let pattern = args[0].to_string();
+        let input = args[1].to_string();
+        let re = compile_regex("split", &pattern)?;
+        Ok(Value::List(
+            re.split(&input).map(|p| Value::String(p.into())).collect(),
+        ))
+    }
+    #[cfg(not(feature = "grep"))]
+    Err(sig(NO_GREP))
+}
+
+pub(super) fn builtin_match(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
+    check_arity(args, 2, "match")?;
+    #[cfg(feature = "grep")]
+    {
+        let pattern = args[0].to_string();
+        let input = args[1].to_string();
+        let re = compile_regex("match", &pattern)?;
+        let matched = re.is_match(&input);
+        shell.set_status_from_bool(matched);
+        Ok(Value::Bool(matched))
+    }
+    #[cfg(not(feature = "grep"))]
+    {
+        let _ = shell;
+        Err(sig(NO_GREP))
     }
 }
 
-/// Render a 1-based line-number list for byte offsets into `s`, capped at
-/// five entries with `…` for the rest.  Used in `replace`'s ambiguity
-/// error so the caller can widen the anchor at the right site.
-fn line_preview(s: &str, positions: &[usize]) -> String {
-    const CAP: usize = 5;
-    let line_of = |off: usize| s.as_bytes()[..off].iter().filter(|&&b| b == b'\n').count() + 1;
-    let head: Vec<String> = positions
-        .iter()
-        .take(CAP)
-        .map(|&p| line_of(p).to_string())
-        .collect();
-    let suffix = if positions.len() > CAP { ", …" } else { "" };
-    format!("lines {}{}", head.join(", "), suffix)
+pub(super) fn builtin_find_match(args: &[Value]) -> Result<Value, EvalSignal> {
+    check_arity(args, 2, "find-match")?;
+    #[cfg(feature = "grep")]
+    {
+        let pattern = args[0].to_string();
+        let input = args[1].to_string();
+        let re = compile_regex("find-match", &pattern)?;
+        match re.find(&input) {
+            Some(m) => Ok(Value::String(m.as_str().to_owned())),
+            None => Err(sig(format!("find-match: no match for pattern '{pattern}'"))),
+        }
+    }
+    #[cfg(not(feature = "grep"))]
+    Err(sig(NO_GREP))
+}
+
+pub(super) fn builtin_find_matches(args: &[Value]) -> Result<Value, EvalSignal> {
+    check_arity(args, 2, "find-matches")?;
+    #[cfg(feature = "grep")]
+    {
+        let pattern = args[0].to_string();
+        let input = args[1].to_string();
+        let re = compile_regex("find-matches", &pattern)?;
+        Ok(Value::List(
+            re.find_iter(&input)
+                .map(|m| Value::String(m.as_str().to_owned()))
+                .collect(),
+        ))
+    }
+    #[cfg(not(feature = "grep"))]
+    Err(sig(NO_GREP))
 }
 
 /// Strip the common leading whitespace from every non-empty line of `s`.

@@ -21,7 +21,7 @@ pub const CORE_EXEC: &[&str] = &[
 /// Policy applied to the body of every tool call.
 ///
 /// `Default` is the safe spec: the cwd + temp dir on FS, coreutils on
-/// exec, no net.  `Dangerous` pushes ambient authority — every field on
+/// exec, net allowed.  `Dangerous` pushes ambient authority — every field on
 /// `Capabilities` is `None` (no attenuation).  Pick `Dangerous` only
 /// when something else is the trust boundary (e.g. a Docker container).
 pub enum GrantSpec {
@@ -31,7 +31,7 @@ pub enum GrantSpec {
 
 impl GrantSpec {
     /// Default: read/write the cwd and the platform temp dir(s); coreutils
-    /// on exec; net denied.  Both lexical and canonical forms go in.
+    /// on exec; net allowed.  Both lexical and canonical forms go in.
     pub fn default_for(cwd: &str) -> Self {
         let tmp = std::env::temp_dir().to_string_lossy().into_owned();
         let mut prefixes = Vec::new();
@@ -47,7 +47,7 @@ impl GrantSpec {
                 write_prefixes: prefixes,
             },
             exec: CORE_EXEC.iter().map(|s| (*s).into()).collect(),
-            net: false,
+            net: true,
         }
     }
 

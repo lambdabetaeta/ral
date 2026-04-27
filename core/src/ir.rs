@@ -52,8 +52,16 @@ impl ExecName {
 pub enum Val {
     /// The unit value — result of side-effect-only computations.
     Unit,
-    /// A string literal or bare word.
+    /// A bare word — a textual fragment whose type is inferred by
+    /// trying `true`/`false`/`unit` first, then `i64`, then `f64`,
+    /// falling back to `String`.  This is the command-line ergonomic
+    /// path: `add 2 3` lets `2` and `3` resolve to `Int`.
     Literal(String),
+    /// A forced string — produced by single- and double-quoted source.
+    /// Always typed `String`; never coerced to `Int`/`Float`/`Bool`.
+    /// Quoting is the user's explicit way to defeat the `Literal`
+    /// inference cascade (so `'1'` stays a string).
+    String(String),
     /// Integer literal from `$[...]` expressions.
     Int(i64),
     /// Floating-point literal from `$[...]` expressions.
@@ -197,6 +205,12 @@ pub enum CompKind {
         #[serde(default)]
         external_only: bool,
     },
+    /// Direct ral-primitive call.  The name is statically known to refer to
+    /// a registered builtin; no alias/PATH lookup is performed.  This is
+    /// distinct from `Exec`, which is the effect boundary to outer layers
+    /// (aliases, external programs).  Synthesised by `resolve_builtin` so
+    /// that `$builtin-name` produces a value pinned to the primitive.
+    Builtin { name: String, args: Vec<Val> },
     /// Pipeline: concurrent stages connected by Unix pipes.
     /// Each stage runs in parallel; stdout of stage N feeds stdin of stage N+1.
     Pipeline(Vec<Comp>),

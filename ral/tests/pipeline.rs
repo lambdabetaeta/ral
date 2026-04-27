@@ -218,6 +218,118 @@ fn redirect_stderr_to_stdout_flows_through_pipeline() {
     assert_eq!(o.stdout.trim(), "outerr");
 }
 
+// ── Stage dispatch parity (handlers, ^name, redirects) ─────────────────────
+//
+// These regressions cover the rule that pipeline-stage dispatch must match
+// `dispatch_by_name`: a `within [handlers: …]` interception of an external
+// name must fire even mid-pipeline, `^name` must skip aliases/builtins
+// (pipeline included), and stage-level redirects must be honored rather than
+// silently dropped.
+
+#[test]
+fn pipeline_stage_handler_intercepts_unknown_external() {
+    // `mycmd` is not a builtin and (assumedly) not on PATH.  Without the
+    // handler-match check in analyze_stage, the pipeline classifies the
+    // stage as External and the launcher tries to spawn `mycmd`, failing
+    // with ENOENT before the handler can run.
+    let o = run(
+        "within [handlers: [mycmd-pipeline-test: { /bin/echo handled }]] \
+            { mycmd-pipeline-test | cat }",
+    );
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "handled");
+}
+
+#[test]
+fn pipeline_stage_caret_external_only_bypasses_builtin() {
+    // `echo` is a ral builtin.  `^echo` must reach the external /bin/echo
+    // (or equivalent) via PATH, even when used as a pipeline stage.
+    let o = run("^echo HELLO | cat");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "HELLO");
+}
+
+#[test]
+fn pipeline_stage_caret_still_fires_per_name_handler() {
+    // dispatch_by_name's rule: per-name handlers fire unconditionally;
+    // ^name bypasses alias/builtin lookup but does NOT escape an explicit
+    // per-name handler frame.  Pipeline-stage classification must agree
+    // with the single-command path — otherwise `^echo X | cat` would
+    // bypass the handler when the same call outside a pipeline would
+    // honor it.  Locked in via the shared classify_dispatch.
+    let o = run(
+        "within [handlers: [echo: { /bin/echo via-handler }]] \
+            { ^echo IGNORED | cat }",
+    );
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "via-handler");
+}
+
+#[test]
+fn pipeline_external_stage_rejects_list_arg_with_hint() {
+    // Passing a List as a positional arg to an external stage must error
+    // with the same diagnostic exec_external produces — `...$xs` hint.
+    // Before the shared resolve_command path, the pipeline launcher would
+    // happily stringify the list and hand the (likely garbled) text to
+    // execve.
+    let o = run("let xs = [1, 2, 3]; /bin/echo hi | /usr/bin/printf $xs");
+    assert_ne!(o.status, 0);
+    assert!(
+        o.stderr.contains("cannot pass List"),
+        "stderr: {}",
+        o.stderr
+    );
+    assert!(o.stderr.contains("...$"), "hint missing: {}", o.stderr);
+}
+
+#[test]
+fn mixed_pipeline_first_external_stage_does_not_inherit_tty_stdin() {
+    // `cat | from-lines` is a mixed pipeline (cat is external, from-lines
+    // is internal).  In an interactive shell with a tty stdin, cat must
+    // *not* inherit fd 0 — its pgid is not foregrounded, so reading the
+    // tty would SIGTTIN it and ral's pump would hang.
+    //
+    // This batch-mode test exercises the same code path with non-tty
+    // stdin (Stdio::null fed into ral).  The mixed-pipeline stdin route
+    // should resolve to Null for the first external stage when there's
+    // no upstream pipe, and the pipeline should terminate promptly with
+    // an empty result rather than blocking on cat's read.
+    let o = run_with_timeout(
+        "let xs = !{cat | from-lines}; echo done; echo !{length $xs}",
+        Duration::from_secs(5),
+    )
+    .expect("mixed-pipeline first external stage hung — likely inherited stdin");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert!(o.stdout.contains("done"), "stdout: {}", o.stdout);
+}
+
+#[test]
+fn pipeline_stage_redirect_to_file_is_honored() {
+    // `cmd > file | next` must redirect cmd's stdout to file (not into the
+    // pipe).  Bash's behavior: the pipe gets EOF; the file gets the bytes.
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = std::env::temp_dir().join(format!("ral_pipe_redir_{pid}_{nanos}.txt"));
+    let path_str = path.display().to_string();
+    let _ = std::fs::remove_file(&path);
+
+    let o = run(&format!(
+        "/bin/echo redirected > '{path_str}' | cat\n/bin/echo done\n"
+    ));
+    let body = std::fs::read_to_string(&path).ok();
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(
+        body.as_deref().map(str::trim_end),
+        Some("redirected"),
+        "file did not receive redirected bytes"
+    );
+}
+
 // ── Broken pipe ──────────────────────────────────────────────────────────────
 
 #[test]
@@ -346,6 +458,44 @@ echo done
         .expect("sequential pipeline stress timed out");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert!(o.stdout.contains("done"));
+}
+
+// ── Stopped pipeline children ────────────────────────────────────────────────
+
+#[test]
+fn pipeline_self_stopping_child_does_not_hang_ral() {
+    // Without WUNTRACED, child.wait() only returns on termination — a
+    // SIGTSTP'd child leaves the pipeline stuck and the terminal owned by
+    // the stopped pgid.  wait_handling_stop must detect WIFSTOPPED, kill
+    // the pgid (no job control), and reap so ral can exit promptly.
+    //
+    // Drives this by having stage 1 SIGSTOP itself; the entire pipeline
+    // pgid then needs to be killed by ral's wait helper.
+    let o = run_with_timeout(
+        "/bin/sh -c 'kill -STOP $$' | cat",
+        Duration::from_secs(5),
+    )
+    .expect("pipeline hung after child stopped — wait_handling_stop did not fire");
+    // Child was SIGKILL'd by ral after SIGSTOP detection — exit is non-zero.
+    assert_ne!(o.status, 0, "expected non-zero exit");
+}
+
+#[test]
+fn pipeline_self_stopping_child_with_pumped_stdout_does_not_hang() {
+    // Same shape as the previous test, but here stage 1's stdout is
+    // routed through a *pump thread* (because stage 2 is internal —
+    // `from-string`).  If `join` waited for the pump before the child,
+    // the pump would block forever reading a pipe held open by the
+    // stopped child.  Reordering — wait first, then join the drainer —
+    // ensures the wait helper kills the pgid, the pipe closes, and the
+    // pump returns.
+    let o = run_with_timeout(
+        "let s = !{/bin/sh -c 'kill -STOP $$' | from-string}; echo done",
+        Duration::from_secs(5),
+    )
+    .expect("pumped-stdout stop hung — drainer joined before wait");
+    // Pipeline failure propagates as non-zero status.
+    assert_ne!(o.status, 0, "expected non-zero exit");
 }
 
 // ── SIGINT kills external child ──────────────────────────────────────────────

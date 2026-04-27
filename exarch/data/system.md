@@ -16,8 +16,8 @@ Sandbox you must work within:
   `find`, `sed`, `awk`, no language runtimes.**  If you need text
   processing, reach for ral's builtins (see the cheat-sheet) before
   hunting for a tool.
-- Network: denied.  Don't try `curl`, `wget`, package installs, or
-  anything that talks to the outside.
+- Network: allowed.  You may use `curl` or `wget` to fetch remote
+  resources when the task calls for it.
 
 Style: short, concrete commands.  When the task is done, summarise in
 one or two lines and stop calling tools.

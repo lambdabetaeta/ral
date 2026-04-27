@@ -32,9 +32,11 @@ assert_eq 'tabs'         [x, y, z]               !{shell-split "x\ty  z"}
 let fzf_expected = [--preview, 'bat --color=always {}', --preview-window=right:50%]
 assert_eq 'fzf-opts' $fzf_expected !{shell-split "--preview 'bat --color=always {}' --preview-window=right:50%"}
 
-# Unmatched quote → error, caught by try.
-try { shell-split "oops 'unterminated" } { |err|
+# Unmatched quote → error, caught by try.  Handler returns a list (matching
+# the body's `shell-split` return type) so the two branches unify.
+let _ = try { shell-split "oops 'unterminated" } { |err|
     echo 'unterminated rejected'
+    return []
 }
 # Expected: unterminated rejected
 

@@ -172,7 +172,7 @@ impl Drop for Spill {
 /// within `MAX_TOOL_RESULT`.
 const STDOUT_CAP: usize = 5 * 1024;
 const STDERR_CAP: usize = 5 * 1024;
-const VALUE_CAP: usize = 1024;
+const VALUE_CAP: usize = 8 * 1024;
 const AUDIT_CAP: usize = 4 * 1024;
 
 /// Render `r` with the section layout `eval` historically emitted.

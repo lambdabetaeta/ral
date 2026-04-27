@@ -5,8 +5,12 @@
 //! coreutils/diffutils shims.  On Unix the redirection uses `dup`/`dup2`;
 //! on Windows it swaps the Win32 standard-handle slots directly.
 //!
-//! All redirection helpers assume single-threaded evaluation -- ral
-//! executes pipeline stages sequentially, so no locking is needed.
+//! Pipeline stages may run on concurrent OS threads (see
+//! `evaluator/pipeline/stages.rs`), and the redirection helpers manipulate
+//! process-wide fd 0/1 — i.e. shared state.  Callers MUST hold the guard
+//! returned by [`lock_stdio_redirect`] across any sequence that touches fd
+//! 0 or fd 1, otherwise two concurrent redirects can interleave their
+//! save/restore and route bytes into the wrong pipe.
 
 /// Format a "command not found" message for `cmd`.
 pub(crate) fn not_found_hint(cmd: &str) -> String {
@@ -65,12 +69,39 @@ pub fn enable_virtual_terminal_processing() {
     }
 }
 
+// ── stdio redirect serialization ─────────────────────────────────────────
+//
+// dup2 of fd 0/1 mutates global process state.  When pipeline stages run on
+// concurrent threads, two stages each calling `with_*_redirected` would
+// interleave their save/restore and route writes into the wrong fd.  This
+// mutex is taken by `lock_stdio_redirect` and held across the
+// redirect/run/restore window.  The cost is that two in-process uutils
+// stages within the same pipeline run sequentially under the lock — that
+// is the price of dup2-based redirection.
+
+#[cfg(any(feature = "coreutils", feature = "diffutils"))]
+static STDIO_REDIRECT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire the global stdio-redirect lock.
+///
+/// Hold the returned guard across any sequence that calls
+/// [`with_stdout_redirected`] or [`with_stdin_redirected`].  The lock is
+/// non-reentrant: nested redirect calls under a single guard are fine, but
+/// nested calls to `lock_stdio_redirect` will deadlock.
+#[cfg(any(feature = "coreutils", feature = "diffutils"))]
+pub(crate) fn lock_stdio_redirect() -> std::sync::MutexGuard<'static, ()> {
+    STDIO_REDIRECT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 // ── Windows in-process stdout capture ────────────────────────────────────
 //
 // Redirects the Win32 stdout handle to a pipe, calls f(), then restores.
 // Rust's Windows stdio queries GetStdHandle on each write, so the redirect
 // is transparent to println! / uutils internals.
-// Single-threaded only; ral evaluates commands sequentially.
+//
+// Caller must hold `lock_stdio_redirect` across the call.
 //
 // Only compiled when a feature that uses uutils shims is enabled.
 
@@ -117,7 +148,8 @@ pub(crate) fn with_stdin_win(reader: &os_pipe::PipeReader, f: impl FnOnce() -> i
 //
 // On Unix we redirect fd 1 (stdout) or fd 0 (stdin) to a pipe using dup/dup2,
 // the same technique used in evaluator.rs apply_redirects.
-// Single-threaded only; ral evaluates commands sequentially.
+//
+// Caller must hold `lock_stdio_redirect` across the call.
 
 #[cfg(all(unix, any(feature = "coreutils", feature = "diffutils")))]
 pub(crate) fn with_stdout_unix(writer: &os_pipe::PipeWriter, f: impl FnOnce() -> i32) -> i32 {

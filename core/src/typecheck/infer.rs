@@ -197,7 +197,7 @@ impl Inferencer<'_> {
     fn check_map_entry_fields(&mut self, entries: &[ValMapEntry], ctx: &str, schema: FieldSchema) {
         for entry in entries {
             let (key, val) = match entry {
-                ValMapEntry::Entry(Val::Literal(k), v) => (Some(k.as_str()), v),
+                ValMapEntry::Entry(Val::Literal(k) | Val::String(k), v) => (Some(k.as_str()), v),
                 ValMapEntry::Entry(_, v) | ValMapEntry::Spread(v) => (None, v),
             };
             let expected = key.and_then(|k| schema(k, &mut self.ctx.unifier));
@@ -293,7 +293,7 @@ impl Inferencer<'_> {
                 args.first(),
                 Some(Val::Map(entries)) if entries.iter().any(|e| matches!(
                     e,
-                    crate::ir::ValMapEntry::Entry(Val::Literal(k), Val::Int(0))
+                    crate::ir::ValMapEntry::Entry(Val::Literal(k) | Val::String(k), Val::Int(0))
                         if k == "status"
                 )),
             );
@@ -306,7 +306,7 @@ impl Inferencer<'_> {
         }
 
         if name == "_fs"
-            && let Some(Val::Literal(op)) = args.first()
+            && let Some(Val::Literal(op) | Val::String(op)) = args.first()
             && op == "list"
         {
             if let Some(arg) = args.get(1) {
@@ -316,7 +316,7 @@ impl Inferencer<'_> {
         }
 
         if name == "_plugin"
-            && let Some(Val::Literal(op)) = args.first()
+            && let Some(Val::Literal(op) | Val::String(op)) = args.first()
             && let Some(spec) = plugin_op_arg_spec(op, &mut self.ctx.unifier)
         {
             self.check_positional_args(&args[1..], &spec);
@@ -431,7 +431,7 @@ impl Inferencer<'_> {
 
     fn infer_map_val(&mut self, entries: &[ValMapEntry]) -> Ty {
         let all_literal_keys = entries.iter().all(|entry| match entry {
-            ValMapEntry::Entry(Val::Literal(_), _) => true,
+            ValMapEntry::Entry(Val::Literal(_) | Val::String(_), _) => true,
             ValMapEntry::Entry(_, _) => false,
             ValMapEntry::Spread(_) => true,
         });
@@ -441,7 +441,7 @@ impl Inferencer<'_> {
             let mut field_entries = Vec::new();
             for entry in entries {
                 match entry {
-                    ValMapEntry::Entry(Val::Literal(key), value)
+                    ValMapEntry::Entry(Val::Literal(key) | Val::String(key), value)
                         if key == "plugins" && matches!(value, Val::List(_)) =>
                     {
                         let Val::List(elems) = value else {
@@ -450,7 +450,7 @@ impl Inferencer<'_> {
                         let ty = self.infer_plugins_list(elems);
                         field_entries.push((key.clone(), ty));
                     }
-                    ValMapEntry::Entry(Val::Literal(key), value) => {
+                    ValMapEntry::Entry(Val::Literal(key) | Val::String(key), value) => {
                         field_entries.push((key.clone(), self.infer_val(value)));
                     }
                     ValMapEntry::Spread(value) => {
@@ -499,6 +499,7 @@ impl Inferencer<'_> {
             Val::Unit => Ty::Unit,
             Val::TildePath(_) => Ty::String,
             Val::Literal(s) => literal_ty(s),
+            Val::String(_) => Ty::String,
             Val::Int(_) => Ty::Int,
             Val::Float(_) => Ty::Float,
             Val::Bool(_) => Ty::Bool,
@@ -598,6 +599,7 @@ impl Inferencer<'_> {
                         CompKind::Return(Val::Literal(label)) if label.parse::<i64>().is_err() => {
                             Some(label.clone())
                         }
+                        CompKind::Return(Val::String(label)) => Some(label.clone()),
                         _ => None,
                     };
                     if let Some(label) = record_label {
@@ -720,6 +722,7 @@ impl Inferencer<'_> {
                 ExecName::Bare(name) => self.exec_comp_ty(name, args, *external_only),
                 ExecName::Path(_) | ExecName::TildePath(_) => self.external_exec_comp_ty(args),
             },
+            CompKind::Builtin { name, args } => self.exec_comp_ty(name, args, false),
             CompKind::Pipeline(stages) => self.infer_pipeline(stages),
             CompKind::Chain(parts) => {
                 let empty = self.ctx.unifier.fresh_ty();

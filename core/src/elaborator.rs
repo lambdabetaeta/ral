@@ -261,7 +261,7 @@ impl Elaborator {
             Ast::Word(Word::Plain(s)) | Ast::Word(Word::Slash(s)) => {
                 comp!(self, CompKind::Return(Val::Literal(s.clone())))
             }
-            Ast::Literal(s) => comp!(self, CompKind::Return(Val::Literal(s.clone()))),
+            Ast::Literal(s) => comp!(self, CompKind::Return(Val::String(s.clone()))),
             Ast::Variable(s) => comp!(self, CompKind::Return(Val::Variable(s.clone()))),
             Ast::Word(Word::Tilde(path)) => {
                 comp!(self, CompKind::Return(Val::TildePath(path.clone())))
@@ -463,7 +463,7 @@ impl Elaborator {
                 comp!(
                     self,
                     CompKind::App {
-                        head: Box::new(comp!(self, CompKind::Return(Val::Literal(String::new())))),
+                        head: Box::new(comp!(self, CompKind::Return(Val::String(String::new())))),
                         args: Vec::new(),
                         redirects: vec![(*fd, *mode, t)],
                     }
@@ -794,7 +794,7 @@ mod tests {
             args,
             &vec![
                 Val::Variable("upper".into()),
-                Val::List(vec![ValListElem::Single(Val::Literal("a".into()))]),
+                Val::List(vec![ValListElem::Single(Val::String("a".into()))]),
             ]
         );
     }

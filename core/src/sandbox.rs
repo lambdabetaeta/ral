@@ -46,8 +46,10 @@ const SANDBOX_POLICY_FLAG: &str = "--sandbox-policy";
 /// Set in the environment of any ral process already running inside an
 /// OS sandbox.  Children inherit the flag and consult it to avoid nested
 /// initialization (which Seatbelt rejects on macOS, and which would just
-/// be redundant under bwrap on Linux).
-pub(super) const SANDBOX_ACTIVE_ENV: &str = "RAL_SANDBOX_ACTIVE";
+/// be redundant under bwrap on Linux).  Also read by `check_fs_op` to
+/// switch to lexical path resolution, since `canonicalize` can fail
+/// under Seatbelt and the OS profile is the real gate anyway.
+pub const SANDBOX_ACTIVE_ENV: &str = "RAL_SANDBOX_ACTIVE";
 
 /// Assign OS-level resource limits to an already-spawned child process.
 ///

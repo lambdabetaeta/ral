@@ -317,6 +317,93 @@ pub fn builtin_scheme(name: &str, u: &mut Unifier) -> Option<Scheme> {
                 thunk(fun(Ty::String, fun(a(), pure(b())))),
             )
         }
+        "upper" | "lower" | "dedent" | "shell-quote" =>
+        // Str → F Str
+        {
+            mk(&[], &[], &[], thunk(fun(Ty::String, pure(Ty::String))))
+        }
+        "shell-split" =>
+        // Str → F [Str]
+        {
+            mk(
+                &[],
+                &[],
+                &[],
+                thunk(fun(Ty::String, pure(Ty::List(Box::new(Ty::String))))),
+            )
+        }
+        "match" =>
+        // Str → Str → F Bool
+        {
+            mk(
+                &[],
+                &[],
+                &[],
+                thunk(fun(Ty::String, fun(Ty::String, pure(Ty::Bool)))),
+            )
+        }
+        "find-match" =>
+        // Str → Str → F Str
+        {
+            mk(
+                &[],
+                &[],
+                &[],
+                thunk(fun(Ty::String, fun(Ty::String, pure(Ty::String)))),
+            )
+        }
+        "split" | "find-matches" =>
+        // Str → Str → F [Str]
+        {
+            mk(
+                &[],
+                &[],
+                &[],
+                thunk(fun(
+                    Ty::String,
+                    fun(Ty::String, pure(Ty::List(Box::new(Ty::String)))),
+                )),
+            )
+        }
+        "replace" | "replace-all" =>
+        // Str → Str → Str → F Str
+        {
+            mk(
+                &[],
+                &[],
+                &[],
+                thunk(fun(
+                    Ty::String,
+                    fun(Ty::String, fun(Ty::String, pure(Ty::String))),
+                )),
+            )
+        }
+        "slice" =>
+        // Str → Int → Int → F Str
+        {
+            mk(
+                &[],
+                &[],
+                &[],
+                thunk(fun(
+                    Ty::String,
+                    fun(Ty::Int, fun(Ty::Int, pure(Ty::String))),
+                )),
+            )
+        }
+        "intercalate" =>
+        // ∀α. Str → [α] → F Str
+        {
+            mk(
+                &[av],
+                &[],
+                &[],
+                thunk(fun(
+                    Ty::String,
+                    fun(Ty::List(Box::new(a())), pure(Ty::String)),
+                )),
+            )
+        }
 
         // ── File system ──────────────────────────────────────────────────────
         "glob" =>
@@ -458,7 +545,6 @@ pub fn builtin_scheme(name: &str, u: &mut Unifier) -> Option<Scheme> {
         }
 
         // ── Content search ───────────────────────────────────────────────────
-        #[cfg(feature = "grep")]
         "grep-files" =>
         // Str → [Str] → F [[file:Str, line:Int, text:Str]]
         {
@@ -490,6 +576,25 @@ pub fn builtin_type_hint(name: &str) -> Option<String> {
     let mut u = Unifier::new();
     let scheme = builtin_scheme(name, &mut u)?;
     Some(fmt_scheme(&scheme))
+}
+
+/// Number of value arguments the builtin's scheme declares (count of nested
+/// `Fun` layers under the outer `Thunk`).  Used to η-expand first-class
+/// builtin references (`$upper`) into curried lambda thunks.  `None` for
+/// builtins without a scheme — typically variadic ones like `echo`.
+pub fn builtin_arity(name: &str) -> Option<usize> {
+    let mut u = Unifier::new();
+    let scheme = builtin_scheme(name, &mut u)?;
+    fn count(ct: &CompTy) -> usize {
+        match ct {
+            CompTy::Fun(_, body) => 1 + count(body),
+            _ => 0,
+        }
+    }
+    match &scheme.ty {
+        Ty::Thunk(inner) => Some(count(inner)),
+        _ => Some(0),
+    }
 }
 
 /// A per-key type schema — `fn(key, unifier) -> Option<Ty>`.

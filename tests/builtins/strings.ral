@@ -11,26 +11,26 @@ echo !{length [a, b, c]}
 # Expected: 5, 3
 
 # replace — unique-anchor; errors on 0 or >1 matches
-echo !{replace 'hello world' world al}
+echo !{replace world al 'hello world'}
 # Expected: hello al
 
 # replace-all — every occurrence
-echo !{replace-all 'a-a-a' a b}
+echo !{replace-all a b 'a-a-a'}
 # Expected: b-b-b
 
 # replace errors on ambiguous pattern (with line numbers)
-try { replace 'a-a' a b } { |e| echo $e[message] }
+try { replace a b 'a-a' } { |e| echo $e[message] }
 # Expected: replace: pattern matches 2 times (lines 1, 1) — ambiguous
 
 # replace errors on missing pattern
-try { replace 'hello' xyz q } { |e| echo $e[message] }
+try { replace xyz q 'hello' } { |e| echo $e[message] }
 # Expected: replace: pattern not found
 
-# split / join
+# split / intercalate
 let parts = split '/' '/usr/local/bin'
 echo $parts[0]
 echo $parts[2]
-let joined = join '-' $parts
+let joined = intercalate '-' $parts
 echo $joined
 # Expected: (empty), local, -usr-local-bin
 

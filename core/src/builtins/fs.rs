@@ -223,8 +223,11 @@ pub(super) fn builtin_glob(args: &[Value], shell: &mut Shell) -> Result<Value, E
     let mut results = Vec::new();
     match glob::glob(&pattern) {
         Ok(paths) => {
-            for entry in paths.flatten() {
-                results.push(Value::String(entry.to_string_lossy().into_owned()));
+            for entry in paths {
+                match entry {
+                    Ok(path) => results.push(Value::String(path.to_string_lossy().into_owned())),
+                    Err(e) => return Err(sig(format!("glob: {e}"))),
+                }
             }
         }
         Err(e) => return Err(sig(format!("glob: {e}"))),

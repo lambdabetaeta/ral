@@ -165,7 +165,7 @@ pub fn pretty_print(val: &Value, indent: usize) -> String {
         Value::Int(n) => n.to_string(),
         Value::Float(f) => format!("{f}"),
         Value::Handle(_) => "<handle>".into(),
-        Value::Thunk { .. } => "<block>".into(),
+        Value::Thunk { body, .. } => crate::types::fmt_block(body),
         Value::Bytes(b) => format!("<bytes: {}>", b.len()),
         Value::List(items) => {
             if items.is_empty() {

@@ -133,6 +133,30 @@ pub(super) fn build_profile(policy: &SandboxPolicy) -> String {
     ] {
         lines.push(format!("(allow file-read* (subpath \"{path}\"))"));
     }
+    // For each grant prefix, also allow file-read-metadata on its ancestor
+    // directories so that path-traversal tools (e.g. the `glob` crate) can
+    // stat intermediate path components without being granted full read access
+    // to their contents.  Without this, `glob "/a/b/c/*"` silently returns []
+    // when Seatbelt blocks `stat("/a")` even though `(subpath "/a/b/c")` is
+    // allowed.
+    let all_prefixes = bind_spec.read_prefixes.iter()
+        .chain(bind_spec.write_prefixes.iter());
+    let mut ancestor_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for prefix in all_prefixes {
+        for ancestor in std::path::Path::new(prefix).ancestors().skip(1) {
+            if ancestor == std::path::Path::new("/") || ancestor.as_os_str().is_empty() {
+                break;
+            }
+            ancestor_set.insert(ancestor.to_string_lossy().into_owned());
+        }
+    }
+    for ancestor in &ancestor_set {
+        lines.push(format!(
+            "(allow file-read-metadata (literal \"{}\"))",
+            escape_path(ancestor)
+        ));
+    }
+
     for prefix in &bind_spec.read_prefixes {
         lines.push(format!(
             "(allow file-read* (subpath \"{}\"))",

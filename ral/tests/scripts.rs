@@ -52,9 +52,22 @@ fn scripts() {
             skipped += 1;
             continue;
         }
-        // grep-files is only available with the `grep` Cargo feature.
+        // Scripts that exercise regex-backed builtins (split, match,
+        // replace, replace-all, find-match, find-matches, grep-files)
+        // need the `grep` Cargo feature; without it the builtins error
+        // at runtime.
         #[cfg(not(feature = "grep"))]
-        if name == "grep-files" {
+        if matches!(
+            name.as_ref(),
+            "grep-files"
+                | "dual-input-strings"
+                | "filesystem"
+                | "split-regex"
+                | "stdlib"
+                | "strings"
+                | "batch-convert"
+                | "log-processor"
+        ) {
             skipped += 1;
             continue;
         }
