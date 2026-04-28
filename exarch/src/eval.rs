@@ -82,18 +82,24 @@ pub enum Outcome {
     Static(String),
 }
 
-/// Evaluate `cmd` against `shell`, wrapped in `spec`'s grant, capturing
+/// Evaluate `cmd` against `shell`, wrapped in `caps`, capturing
 /// stdout and stderr into buffers.  Returns the result as named pieces
 /// so the caller can render it twice — once full for the terminal,
 /// once with per-section caps for the conversation history — without
 /// having to parse the rendered form back apart.
 pub fn run_shell(
     shell: &mut Shell,
-    spec: &crate::grant::GrantSpec,
+    caps: &ral_core::types::Capabilities,
     cmd: &str,
     audit: bool,
 ) -> Outcome {
     let name = "<tool>";
+
+    // Clear any stale interrupt from a prior tool call (e.g. a child
+    // process killed by SIGINT left SIGNAL_COUNT=1).  Without this the
+    // next tool call's first signal::check boundary would abort with
+    // "interrupted" — the REPL clears for the same reason.
+    ral_core::signal::clear();
 
     // Constitutional non-escape: the model's source is parsed, elaborated,
     // and wrapped in a Thunk *Value*.  The grant policy is pushed onto the
@@ -132,7 +138,7 @@ pub fn run_shell(
         body: Arc::new(comp.clone()),
         captured: shell.snapshot(),
     };
-    let caps = spec.to_capabilities(audit);
+    let caps = ral_core::types::Capabilities { audit, ..caps.clone() };
     let run = |sh: &mut Shell| sh.with_capabilities(caps.clone(), |s| sandbox::eval_grant(&thunk, s));
     let (audit_tree, result) = if audit {
         shell.with_audit_scope(run)

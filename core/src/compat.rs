@@ -130,7 +130,10 @@ pub(crate) fn with_stdout_win(writer: &os_pipe::PipeWriter, f: impl FnOnce() -> 
 /// value, swap in the pipe, swap the original back.  No duplication or
 /// closing — we do not own the original handle.
 #[cfg(all(windows, any(feature = "coreutils", feature = "diffutils")))]
-pub(crate) fn with_stdin_win(reader: &os_pipe::PipeReader, f: impl FnOnce() -> i32) -> i32 {
+pub(crate) fn with_stdin_win(
+    reader: &crate::io::SourceReader,
+    f: impl FnOnce() -> i32,
+) -> i32 {
     use std::os::windows::io::AsRawHandle;
 
     let saved = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
@@ -173,7 +176,10 @@ pub(crate) fn with_stdout_unix(writer: &os_pipe::PipeWriter, f: impl FnOnce() ->
 }
 
 #[cfg(all(unix, any(feature = "coreutils", feature = "diffutils")))]
-pub(crate) fn with_stdin_unix(reader: &os_pipe::PipeReader, f: impl FnOnce() -> i32) -> i32 {
+pub(crate) fn with_stdin_unix(
+    reader: &crate::io::SourceReader,
+    f: impl FnOnce() -> i32,
+) -> i32 {
     use std::os::unix::io::AsRawFd;
 
     let saved = unsafe { libc::dup(libc::STDIN_FILENO) };
@@ -208,7 +214,10 @@ pub(crate) fn with_stdout_redirected(writer: &os_pipe::PipeWriter, f: impl FnOnc
 }
 
 #[cfg(any(feature = "coreutils", feature = "diffutils"))]
-pub(crate) fn with_stdin_redirected(reader: &os_pipe::PipeReader, f: impl FnOnce() -> i32) -> i32 {
+pub(crate) fn with_stdin_redirected(
+    reader: &crate::io::SourceReader,
+    f: impl FnOnce() -> i32,
+) -> i32 {
     #[cfg(windows)]
     {
         with_stdin_win(reader, f)

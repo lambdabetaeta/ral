@@ -11,6 +11,12 @@
 //! by space, newline, or `]` — so `host:5432` stays one token but `host:`
 //! splits.  `$`, `^`, `!`, `~` introduce structured forms (deref, expr
 //! block, force, tilde path) and never appear mid-word.
+//!
+//! **Single-quoted strings** `'…'` are verbatim literals with no escapes
+//! and no interpolation.  Hash-bumping handles `'` in the body: the opener
+//! is `n` `#`s followed by `'` (n ≥ 0); the close is `'` followed by `n`
+//! `#`s.  A `'` in the body followed by fewer than `n` `#`s is literal.
+//! At top level, a run of `#`s not followed by `'` is a comment.
 
 use crate::ast::Word;
 use crate::source::FileId;
@@ -351,14 +357,22 @@ impl Lexer {
 
             return match ch {
                 '#' => {
-                    self.skip_comment();
-                    match self.peek() {
-                        Some('\n') if self.suppress_newline() => {
+                    let level = self.count_hash_run();
+                    if self.peek_n(level) == Some('\'') {
+                        for _ in 0..level {
                             self.bump();
-                            continue;
                         }
-                        Some('\n') => Ok(self.scan_separator(span)),
-                        _ => Ok((Token::Eof, span)),
+                        self.scan_quoted(span, level)
+                    } else {
+                        self.skip_comment();
+                        match self.peek() {
+                            Some('\n') if self.suppress_newline() => {
+                                self.bump();
+                                continue;
+                            }
+                            Some('\n') => Ok(self.scan_separator(span)),
+                            _ => Ok((Token::Eof, span)),
+                        }
                     }
                 }
                 '\n' | ';' => Ok(self.scan_separator(span)),
@@ -388,7 +402,7 @@ impl Lexer {
                 '!' => Ok(self.bump_simple(Token::Bang, span)),
                 '~' => Ok(self.scan_tilde(span)),
                 '?' => Ok(self.bump_simple(Token::Question, span)),
-                '\'' => self.scan_single_quoted(span),
+                '\'' => self.scan_quoted(span, 0),
                 '"' => self.scan_double_quoted(span),
                 '>' if self.peek_n(1) == Some('=') => {
                     self.bump();
@@ -506,30 +520,61 @@ impl Lexer {
         (Token::Word(Word::Tilde(path)), self.finish(span))
     }
 
-    fn scan_single_quoted(&mut self, span: Span) -> Result<(Token, Span), LexError> {
-        self.bump();
-        let mut value = String::new();
+    /// Count the run of `#`s starting at the current position without
+    /// consuming.  Used to disambiguate a hash-bumped string opener from
+    /// a comment.
+    fn count_hash_run(&self) -> usize {
+        let mut n = 0;
+        while self.peek_n(n) == Some('#') {
+            n += 1;
+        }
+        n
+    }
 
+    /// Scan the body of a hash-bumped literal at the given level, calling
+    /// `push` for each body char.  Consumes the closing `'` and its
+    /// `level` `#`s.  Errs on EOF before the close.
+    fn scan_quoted_body<F: FnMut(char)>(
+        &mut self,
+        span: Span,
+        level: usize,
+        mut push: F,
+    ) -> Result<(), LexError> {
         loop {
             match self.peek() {
                 None => return Err(self.error(span, "unterminated single-quoted string")),
                 Some('\'') => {
-                    self.bump();
-                    if self.peek() == Some('\'') {
-                        self.bump();
-                        value.push('\'');
-                    } else {
-                        break;
+                    let mut hashes = 0usize;
+                    while self.peek_n(1 + hashes) == Some('#') {
+                        hashes += 1;
                     }
+                    if hashes >= level {
+                        self.bump(); // '
+                        for _ in 0..level {
+                            self.bump(); // matching #s
+                        }
+                        return Ok(());
+                    }
+                    push('\'');
+                    self.bump();
                 }
                 Some(ch) => {
-                    value.push(ch);
+                    push(ch);
                     self.bump();
                 }
             }
         }
+    }
 
-        Ok((Token::SingleQuoted(value), self.finish(span)))
+    /// Scan a single-quoted string at the given hash level.  The leading
+    /// `#`s (if any) have already been consumed; the opening `'` is still
+    /// in the stream.  Body bytes are verbatim — no escapes, no
+    /// interpolation.
+    fn scan_quoted(&mut self, span: Span, level: usize) -> Result<(Token, Span), LexError> {
+        self.bump(); // opening '
+        let mut body = String::new();
+        self.scan_quoted_body(span, level, |c| body.push(c))?;
+        Ok((Token::SingleQuoted(body), self.finish(span)))
     }
 
     fn scan_double_quoted(&mut self, span: Span) -> Result<(Token, Span), LexError> {
@@ -542,16 +587,11 @@ impl Lexer {
                 None => return Err(self.error(span, "unterminated double-quoted string")),
                 Some('"') => {
                     self.bump();
-                    if self.peek() == Some('"') {
-                        self.bump();
-                        literal.push('"');
-                    } else {
-                        break;
-                    }
+                    break;
                 }
                 Some('\\') => {
                     self.bump();
-                    self.scan_double_quoted_escape(&mut literal);
+                    self.scan_double_quoted_escape(span, &mut literal)?;
                 }
                 Some('$') => {
                     self.bump();
@@ -591,7 +631,11 @@ impl Lexer {
         Ok((Token::DoubleQuoted(parts), self.finish(span)))
     }
 
-    fn scan_double_quoted_escape(&mut self, literal: &mut String) {
+    fn scan_double_quoted_escape(
+        &mut self,
+        span: Span,
+        literal: &mut String,
+    ) -> Result<(), LexError> {
         match self.peek() {
             Some('n') => {
                 self.bump();
@@ -634,13 +678,72 @@ impl Lexer {
                     self.bump();
                 }
             }
-            Some(ch) => {
-                literal.push('\\');
-                literal.push(ch);
+            Some('x') => {
                 self.bump();
+                let h1 = self
+                    .peek()
+                    .and_then(|c| c.to_digit(16))
+                    .ok_or_else(|| self.error(span, "\\x escape needs two hex digits"))?;
+                self.bump();
+                let h2 = self
+                    .peek()
+                    .and_then(|c| c.to_digit(16))
+                    .ok_or_else(|| self.error(span, "\\x escape needs two hex digits"))?;
+                self.bump();
+                let n = (h1 << 4) | h2;
+                if n >= 0x80 {
+                    return Err(self.error(
+                        span,
+                        "\\xNN must be \\x00..\\x7F (use Bytes for non-ASCII)",
+                    ));
+                }
+                literal.push(n as u8 as char);
             }
-            None => literal.push('\\'),
+            Some('u') => {
+                self.bump();
+                if self.peek() != Some('{') {
+                    return Err(self.error(span, "\\u escape must be \\u{X..}"));
+                }
+                self.bump();
+                let mut digits = String::new();
+                loop {
+                    match self.peek() {
+                        Some('}') => break,
+                        Some(c) if c.is_ascii_hexdigit() && digits.len() < 6 => {
+                            digits.push(c);
+                            self.bump();
+                        }
+                        _ => {
+                            return Err(
+                                self.error(span, "\\u{X..} expects 1–6 hex digits"),
+                            );
+                        }
+                    }
+                }
+                if digits.is_empty() {
+                    return Err(self.error(span, "\\u{X..} expects 1–6 hex digits"));
+                }
+                self.bump(); // '}'
+                let cp = u32::from_str_radix(&digits, 16).unwrap();
+                let ch = char::from_u32(cp).ok_or_else(|| {
+                    self.error(span, format!("\\u{{{digits}}} is not a Unicode scalar"))
+                })?;
+                literal.push(ch);
+            }
+            Some(ch) => {
+                self.bump();
+                return Err(self.error(
+                    span,
+                    format!("unknown escape `\\{ch}` in double-quoted string"),
+                ));
+            }
+            None => {
+                return Err(
+                    self.error(span, "unterminated double-quoted string after `\\`"),
+                );
+            }
         }
+        Ok(())
     }
 
     fn flush_literal(parts: &mut Vec<StringPart>, literal: &mut String) {
@@ -734,7 +837,10 @@ impl Lexer {
                     }
                     content.push(c);
                 }
-                '\'' => self.copy_single_quoted(&mut content),
+                '#' if self.peek_n(self.count_hash_run()) == Some('\'') => {
+                    self.copy_quoted(&mut content)
+                }
+                '\'' => self.copy_quoted(&mut content),
                 '"' => self.copy_double_quoted(&mut content),
                 _ => {
                     content.push(ch);
@@ -746,20 +852,25 @@ impl Lexer {
         Err(self.error(start, format!("unterminated '{open}...{close}'")))
     }
 
-    fn copy_single_quoted(&mut self, out: &mut String) {
-        out.push('\'');
-        self.bump();
-
-        while let Some(ch) = self.peek() {
-            out.push(ch);
+    /// Copy a (possibly hash-bumped) single-quoted string verbatim into
+    /// `out`, including its enclosing `#`s and quotes.  Used while scanning
+    /// balanced groups so that delimiters inside the string aren't counted.
+    /// EOF inside the body terminates silently — the surrounding scanner
+    /// reports its own unterminated-group error.
+    fn copy_quoted(&mut self, out: &mut String) {
+        let span = self.span();
+        let level = self.count_hash_run();
+        for _ in 0..level {
+            out.push('#');
             self.bump();
-            if ch == '\'' {
-                if self.peek() == Some('\'') {
-                    out.push('\'');
-                    self.bump();
-                } else {
-                    break;
-                }
+        }
+        out.push('\'');
+        self.bump(); // opening '
+        if self.scan_quoted_body(span, level, |c| out.push(c)).is_ok() {
+            // Body scanner has consumed the close; replicate it in the copy.
+            out.push('\'');
+            for _ in 0..level {
+                out.push('#');
             }
         }
     }
@@ -908,6 +1019,21 @@ mod tests {
         lex(source).unwrap().into_iter().map(|(t, _)| t).collect()
     }
 
+    fn lex_ok(source: &str) -> Vec<Token> {
+        lex(source)
+            .unwrap_or_else(|e| panic!("expected Ok: {source:?}\n  error: {}", e.message))
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect()
+    }
+
+    fn lex_err(source: &str) -> String {
+        match lex(source) {
+            Err(e) => e.message,
+            Ok(_) => panic!("expected Err: {source:?}"),
+        }
+    }
+
     #[test]
     fn bare_words() {
         let toks = tok_types("ls -la /tmp");
@@ -960,8 +1086,8 @@ mod tests {
     }
 
     #[test]
-    fn single_quoted_embedded() {
-        let toks = tok_types("echo 'it''s'");
+    fn single_quoted_embed_via_bump() {
+        let toks = tok_types("echo #'it's'#");
         assert_eq!(
             toks,
             vec![
@@ -1158,6 +1284,48 @@ mod tests {
     }
 
     #[test]
+    fn double_quoted_x_escape() {
+        // \x41 = 'A'; \x7F = DEL (upper ASCII boundary).
+        let t = |src: &str| match &lex_ok(src)[0] {
+            Token::DoubleQuoted(p) => match &p[0] {
+                StringPart::Literal(s) => s.clone(),
+                _ => panic!("expected Literal"),
+            },
+            _ => panic!("expected DoubleQuoted"),
+        };
+        assert_eq!(t(r#""\x41""#), "A");
+        assert_eq!(t(r#""\x7F""#), "\x7F");
+        assert_eq!(t(r#""\x00""#), "\x00");
+        // \x80 is rejected.
+        assert!(lex_err(r#""\x80""#).contains("\\xNN"));
+        // Non-hex digits rejected.
+        assert!(lex_err(r#""\xZZ""#).contains("two hex digits"));
+        // Only one hex digit (bare 'r' is unknown escape after that).
+        assert!(lex_err(r#""\x4""#).contains("two hex digits"));
+    }
+
+    #[test]
+    fn double_quoted_u_escape() {
+        let t = |src: &str| match &lex_ok(src)[0] {
+            Token::DoubleQuoted(p) => match &p[0] {
+                StringPart::Literal(s) => s.clone(),
+                _ => panic!("expected Literal"),
+            },
+            _ => panic!("expected DoubleQuoted"),
+        };
+        // Basic code points.
+        assert_eq!(t(r#""\u{41}""#), "A");
+        assert_eq!(t(r#""\u{0}""#), "\x00");
+        assert_eq!(t(r#""\u{1F600}""#), "😀");
+        // Surrogate, out-of-range, too many digits, no braces all rejected.
+        assert!(lex_err(r#""\u{D800}""#).contains("Unicode scalar"));
+        assert!(lex_err(r#""\u{110000}""#).contains("Unicode scalar"));
+        assert!(lex_err(r#""\u{1234567}""#).contains("1–6 hex digits"));
+        assert!(lex_err(r#""\u{}""#).contains("1–6 hex digits"));
+        assert!(lex_err(r#""\u41""#).contains("\\u escape must be"));
+    }
+
+    #[test]
     fn dollar_bracket_arithmetic() {
         let toks = tok_types("$[2 + 3]");
         assert_eq!(toks[0], Token::Expr("2 + 3".into()));
@@ -1335,6 +1503,112 @@ mod tests {
     fn redirect_dup_requires_target_fd() {
         let err = lex("cmd 2>&").expect_err("expected lex error");
         assert!(err.message.contains("expected file descriptor after '>&'"));
+    }
+
+    // ── hash-bumped single-quoted strings ────────────────────────────────────
+
+    #[test]
+    fn bumped_string_level1_empty() {
+        let toks = tok_types("#''#");
+        assert_eq!(toks, vec![Token::SingleQuoted("".into()), Token::Eof]);
+    }
+
+    #[test]
+    fn bumped_string_level1_contains_single_quote() {
+        let toks = tok_types("#'it's fine'#");
+        assert_eq!(
+            toks,
+            vec![Token::SingleQuoted("it's fine".into()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn bumped_string_level1_contains_double_quote() {
+        let toks = tok_types(r##"#'say "hi" please'#"##);
+        assert_eq!(
+            toks,
+            vec![Token::SingleQuoted(r#"say "hi" please"#.into()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn bumped_string_level2() {
+        let toks = tok_types("##'body with '# inside'##");
+        assert_eq!(
+            toks,
+            vec![
+                Token::SingleQuoted("body with '# inside".into()),
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn bumped_string_multiline() {
+        let toks = tok_types("#'line1\nline2'#");
+        assert_eq!(
+            toks,
+            vec![Token::SingleQuoted("line1\nline2".into()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn bumped_string_no_escape_processing() {
+        // \n inside a literal is two literal bytes, not a newline.
+        let toks = tok_types(r"#'\n\t\\'#");
+        assert_eq!(
+            toks,
+            vec![Token::SingleQuoted(r"\n\t\\".into()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn bumped_string_in_command() {
+        let toks = tok_types("echo #'hello'#");
+        assert_eq!(
+            toks,
+            vec![
+                plain("echo"),
+                Token::SingleQuoted("hello".into()),
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn hash_run_without_quote_is_comment() {
+        // # / ## / ### followed by anything other than ' is just a comment.
+        assert_eq!(tok_types("# foo"), vec![Token::Eof]);
+        assert_eq!(tok_types("## foo"), vec![Token::Eof]);
+        assert_eq!(tok_types("###foo"), vec![Token::Eof]);
+    }
+
+    #[test]
+    fn bumped_string_unterminated() {
+        let err = lex("#'unclosed").expect_err("should fail");
+        assert!(err.message.contains("unterminated"));
+    }
+
+    #[test]
+    fn bumped_string_unterminated_needs_hash() {
+        // Body has a bare ' but no '#, so never closes at level 1.
+        let err = lex("#'body with ' but no hash").expect_err("should fail");
+        assert!(err.message.contains("unterminated"));
+    }
+
+    #[test]
+    fn bumped_string_close_followed_by_comment() {
+        // #'foo'#  # comment — the trailing # after the close starts a comment.
+        let toks = tok_types("#'foo'# # comment");
+        assert_eq!(toks, vec![Token::SingleQuoted("foo".into()), Token::Eof]);
+    }
+
+    #[test]
+    fn bumped_string_byte_span() {
+        // Span should cover the full #'…'# token including the surrounding #s.
+        let src = "#'hi'#";
+        let toks = lex(src).unwrap();
+        assert_eq!(&src[toks[0].1.byte.range()], "#'hi'#");
     }
 
     // ── byte-range span sanity checks ─────────────────────────────────────

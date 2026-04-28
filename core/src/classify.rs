@@ -13,15 +13,6 @@ use crate::prelude_manifest;
 const PRELUDE_STREAMING_REDUCER_FNS: &[&str] = &["map-lines", "filter-lines", "each-line"];
 const PRELUDE_BRANCH_FNS: &[&str] = &["if", "cond"];
 const PRELUDE_LAST_THUNK_FNS: &[&str] = &["for"];
-const PRELUDE_DECODE_TO_VALUE_FNS: &[&str] = &[
-    "from-json",
-    "from-lines",
-    "from-string",
-    "from-bytes",
-    "from-line",
-];
-const PRELUDE_ENCODE_TO_BYTES_FNS: &[&str] =
-    &["to-json", "to-lines", "to-line", "to-string", "to-bytes"];
 
 /// Classification of a command head by name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,8 +42,6 @@ const PRELUDE_TABLE: &[(&[&str], HeadKind)] = &[
     (PRELUDE_STREAMING_REDUCER_FNS, HeadKind::StreamingReducer),
     (PRELUDE_BRANCH_FNS, HeadKind::Branches),
     (PRELUDE_LAST_THUNK_FNS, HeadKind::LastThunk),
-    (PRELUDE_DECODE_TO_VALUE_FNS, HeadKind::DecodeToValue),
-    (PRELUDE_ENCODE_TO_BYTES_FNS, HeadKind::EncodeToBytes),
     (&["within", "grant"], HeadKind::LastThunk),
 ];
 

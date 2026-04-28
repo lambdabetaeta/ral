@@ -60,10 +60,29 @@ Single-quoted strings are literal.  Double-quoted strings interpolate
     echo "hello, $name"               # hello, alice
     echo "cwd: !{pwd}"                # cwd: /work
 
-There is no `"${var}"` form.  If the variable name runs into following
-text, break the string:
+There is no `"${var}"` form.  A trailing `[…]` after `$name` is an
+index.  To keep the brackets literal, wrap the name:
 
-    echo "$prefix" "_suffix"
+    echo "$(prefix)[archived]"        # prefix_value[archived]
+
+Double-quoted strings support `\n`, `\t`, `\\`, `\0`, `\e`, `\"`,
+`\$`, `\!`, and numeric escapes `\xNN` (two hex digits, ASCII only)
+and `\u{X..}` (1–6 hex digits, any Unicode scalar):
+
+    echo "\u{1F600}"                  # 😀
+    echo "\x41\x42\x43"              # ABC
+
+**Embedding `'` — hash bumping.**  Single-quoted strings are fully
+literal — no escapes, no interpolation.  To embed a `'`, raise the
+hash level: `#'…'#` closes on `'#`, `##'…'##` closes on `'##`, and so
+on.  Pick the smallest level whose close does not appear in the body.
+
+    let py = #'print("hello, world")'#
+    let q  = #'say "hi" to 'alice''#
+    let r  = ##'embed level-1 close: 'foo'# inside'##
+
+This is the form to reach for when dumping a program or any other
+opaque blob into a file: the body is verbatim, no character is special.
 
 ## 4. Commands
 

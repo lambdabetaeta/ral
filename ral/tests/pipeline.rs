@@ -600,7 +600,7 @@ fn read_string_from_non_utf8_pipeline_fails() {
     assert_ne!(o.status, 0, "expected failure on non-UTF-8 input");
     assert!(
         o.stderr
-            .contains("_decode string: input is not valid UTF-8"),
+            .contains("from-string: input is not valid UTF-8"),
         "stderr: {}",
         o.stderr
     );
@@ -612,7 +612,7 @@ fn read_json_from_non_utf8_pipeline_fails() {
     let o = run_with_stdin("from-json", &[0xff, 0xfe, b'A']);
     assert_ne!(o.status, 0);
     assert!(
-        o.stderr.contains("_decode json: input is not valid UTF-8"),
+        o.stderr.contains("from-json: input is not valid UTF-8"),
         "stderr: {}",
         o.stderr
     );
@@ -1070,9 +1070,12 @@ fn to_bytes_non_utf8_succeeds() {
 }
 
 #[test]
-fn to_json_partial_application() {
-    // to-json is a prelude lambda: `to-json` alone is a first-class function.
-    let o = run("let f = to-json\nlet b = !{f [a: 42]}\nlet obj = !{to-bytes $b | from-json}\necho $obj[a]");
+fn to_json_via_user_wrapper() {
+    // to-json is a primitive; users who want a first-class handle wrap it
+    // in a block.  Roundtrip: encode → bytes → decode.
+    let o = run(
+        "let f = { |v| to-json $v }\nlet b = !{f [a: 42]}\nlet obj = !{to-bytes $b | from-json}\necho $obj[a]",
+    );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "42");
 }

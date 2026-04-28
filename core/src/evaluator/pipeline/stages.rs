@@ -531,7 +531,7 @@ fn launch_external_stage(
     let stdout_plan = plan_stdout(
         is_last,
         next_is_ext,
-        shell.io.terminal.stdout_tty
+        shell.io.terminal.startup_stdout_tty
             && matches!(shell.io.stdout, Sink::Terminal | Sink::External(_)),
         auditing,
     );
@@ -567,7 +567,7 @@ fn launch_external_stage(
     // would SIGTTIN it.  Pre-tty inputs (non-tty stdin) are always safe.
     let stdin_route = match incoming {
         Channel::Bytes(r) => exec::StdinRoute::Pipe(r),
-        _ if !shell.io.terminal.stdin_tty => {
+        _ if !shell.io.terminal.startup_stdin_tty => {
             exec::StdinRoute::Inherit(exec::TtyInputPermit::for_non_tty_stdin())
         }
         _ => match group.mode() {
@@ -706,7 +706,7 @@ fn launch_internal_stage(
         // The thread runs inside ral itself — any nested `exec_external`
         // call must NOT take terminal foreground.  Stamp the JobControl
         // permit so `want_fg` is structurally false regardless of the
-        // thread's stdin_tty / stdout-Terminal heuristics.
+        // thread's startup_stdin_tty / stdout-Terminal heuristics.
         child_env.io.job_control = crate::io::JobControl::pipeline_thread();
         // Inherit the pipeline's cancel scope so `signal::check` (called
         // between effectful steps) can unwind this thread when the
@@ -762,7 +762,6 @@ pub(super) fn launch_pipeline(
     shell: &mut Shell,
 ) -> Result<Channel, EvalSignal> {
     let mut channel = Channel::None;
-    let pure_external = plan.mode == super::group::PipelineMode::PureExternal;
 
     for (i, stage) in stages.iter().enumerate() {
         let incoming = mem::replace(&mut channel, Channel::None);
@@ -783,9 +782,12 @@ pub(super) fn launch_pipeline(
                 return Err(err);
             }
         }
-        if pure_external {
-            group.claim_foreground(shell);
-        }
+        // `claim_foreground` decides per-mode whether to acquire — see
+        // its docstring.  It is idempotent and a no-op until the leader
+        // pgid exists, so calling unconditionally on every iteration is
+        // both correct and the cheapest place to cover both
+        // `PureExternal` and `Mixed` (in `_ed-tui`) pipelines.
+        group.claim_foreground(shell);
     }
 
     Ok(channel)

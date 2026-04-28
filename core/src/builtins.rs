@@ -29,7 +29,7 @@ mod predicates;
 mod scope;
 mod shell;
 mod strings;
-pub use util::value_to_json_pub;
+pub use util::{value_to_json_audit, value_to_json_pub};
 mod util;
 mod uutils;
 
@@ -170,10 +170,26 @@ builtin_registry! {
         doc: "exit [status]  — exit the shell.", },
     FoldLines { names: ["fold-lines"], hint: DecodeToValue,
         doc: "fold-lines <fn> <init>  — fold over stdin lines.", },
-    Decode { names: ["_decode"], hint: DecodeToValue,
-        doc: "_decode <codec> [input]  — internal decoder; use from-json, from-lines, etc.", },
-    Encode { names: ["_encode"], hint: EncodeToBytes,
-        doc: "_encode <codec> <value>  — internal encoder; use to-json, to-lines, etc.", },
+    FromBytes { names: ["from-bytes"], hint: DecodeToValue,
+        doc: "from-bytes [input]  — read raw bytes from stdin (or arg) as Bytes.", },
+    FromString { names: ["from-string"], hint: DecodeToValue,
+        doc: "from-string [input]  — decode UTF-8 bytes from stdin (or arg) to a String.", },
+    FromLine { names: ["from-line"], hint: DecodeToValue,
+        doc: "from-line [input]  — decode UTF-8 bytes, stripping one trailing newline.", },
+    FromLines { names: ["from-lines"], hint: DecodeToValue,
+        doc: "from-lines [input]  — decode bytes to a list of lines (lossy on invalid UTF-8).", },
+    FromJson { names: ["from-json"], hint: DecodeToValue,
+        doc: "from-json [input]  — decode JSON bytes from stdin (or arg) to a value.", },
+    ToBytes { names: ["to-bytes"], hint: EncodeToBytes,
+        doc: "to-bytes <value>  — pass Bytes (or list of Ints) through to the byte channel.", },
+    ToString { names: ["to-string"], hint: EncodeToBytes,
+        doc: "to-string <value>  — encode a value's String form to the byte channel.", },
+    ToLine { names: ["to-line"], hint: EncodeToBytes,
+        doc: "to-line <value>  — encode value with a trailing newline (inverse of from-line).", },
+    ToLines { names: ["to-lines"], hint: EncodeToBytes,
+        doc: "to-lines <list>  — newline-join the list elements to the byte channel.", },
+    ToJson { names: ["to-json"], hint: EncodeToBytes,
+        doc: "to-json <value>  — encode a value as JSON bytes.", },
     Ask { names: ["ask"], hint: Value,
         doc: "ask <prompt>  — prompt for interactive input, return string.", },
     Source { names: ["source"], hint: Value,
@@ -345,8 +361,16 @@ pub fn call(name: &str, args: &[Value], shell: &mut Shell) -> Result<Option<Valu
         BuiltinName::Grant => Ok(Some(scope::builtin_grant(args, shell)?)),
         BuiltinName::Exit => misc::builtin_exit(args, shell),
         BuiltinName::FoldLines => Ok(Some(codecs::builtin_fold_lines(args, shell)?)),
-        BuiltinName::Decode => Ok(Some(codecs::builtin_decode(args, shell)?)),
-        BuiltinName::Encode => Ok(Some(codecs::builtin_encode(args, shell)?)),
+        BuiltinName::FromBytes => Ok(Some(codecs::builtin_from_bytes(args, shell)?)),
+        BuiltinName::FromString => Ok(Some(codecs::builtin_from_string(args, shell)?)),
+        BuiltinName::FromLine => Ok(Some(codecs::builtin_from_line(args, shell)?)),
+        BuiltinName::FromLines => Ok(Some(codecs::builtin_from_lines(args, shell)?)),
+        BuiltinName::FromJson => Ok(Some(codecs::builtin_from_json(args, shell)?)),
+        BuiltinName::ToBytes => Ok(Some(codecs::builtin_to_bytes(args, shell)?)),
+        BuiltinName::ToString => Ok(Some(codecs::builtin_to_string(args, shell)?)),
+        BuiltinName::ToLine => Ok(Some(codecs::builtin_to_line(args, shell)?)),
+        BuiltinName::ToLines => Ok(Some(codecs::builtin_to_lines(args, shell)?)),
+        BuiltinName::ToJson => Ok(Some(codecs::builtin_to_json(args, shell)?)),
         BuiltinName::Ask => Ok(Some(misc::builtin_ask(args)?)),
         BuiltinName::Source => Ok(Some(modules::builtin_source(args, shell)?)),
         BuiltinName::Use => Ok(Some(modules::builtin_use(args, shell)?)),

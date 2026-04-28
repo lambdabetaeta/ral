@@ -1,6 +1,6 @@
-# Hardened container that runs exarch in permissive mode
-# (EXARCH_DANGEROUS=1).  The binary is fetched from a GitHub Release
-# at build time — no `shell-dev`, no rust toolchain required.
+# Hardened container that runs exarch in permissive mode (entrypoint
+# defaults to `--base everything`).  The binary is fetched from a
+# GitHub Release at build time — no `shell-dev`, no rust toolchain.
 #
 # Build (rolling latest):
 #   docker compose -f exarch/docker/compose.yaml build

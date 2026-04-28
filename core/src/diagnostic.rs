@@ -179,6 +179,7 @@ fn label_message_for_kind(kind: &crate::typecheck::TypeErrorKind) -> String {
             format!("expected {}, got {}", fmt_ty(expected), fmt_ty(actual))
         }
         K::CompTyMismatch { .. } => "mismatch here".into(),
+        K::HeadNotCallable { ty } => format!("{} is not callable", fmt_ty(ty)),
         K::ModeMismatch { expected, actual } => {
             format!("expected {}, got {}", fmt_mode(expected), fmt_mode(actual))
         }

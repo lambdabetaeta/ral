@@ -1,0 +1,210 @@
+# `reasonable` bake-in.  Coreutils + a curated everyday-tooling set
+# (shells, version control, net fetch, search/inspect, scripting,
+# archives), plus directory-based allowance for the standard
+# system / package-manager binary dirs so build drivers (cargo,
+# make, cc, npm, …) work out of the box.
+#
+# In spirit similar to Claude Code's default tool set.  The OS
+# sandbox (Seatbelt fs/net rules) still does the real work — a
+# permissive exec list paired with a strict fs grant means the
+# agent can run cargo but can't write outside cwd / read your SSH
+# keys / open arbitrary network endpoints.
+#
+# Default base when `--base` is omitted.
+
+audit = false
+net = true
+
+[shell]
+chdir = true
+
+# Directory-based exec allowance.  Any command whose resolved
+# absolute path is under one of these prefixes is admitted (with
+# `Allow`).  Per-command `[exec]` entries below take precedence and
+# can still tighten via `Subcommands`.
+exec_dirs = [
+  "/usr/bin",
+  "/bin",
+  "/usr/local/bin",
+  "/opt/homebrew/bin",      # Apple-silicon Homebrew
+  "/opt/homebrew/sbin",
+  "/usr/local/sbin",
+  "/usr/sbin",
+  "/sbin",
+]
+
+# Build-toolchain caches and user-installed toolchains.  cwd, /tmp,
+# and the OS sandbox layer's system paths (CommandLineTools,
+# /opt/homebrew, /etc/alternatives, ...) are added separately; this
+# section covers the user-scope dirs that the OS layer can't bake
+# in because they live under $HOME.  Tildes are expanded by
+# `resolve_grant_path` at runtime.
+#
+# Paths are scoped to *cache* subdirectories rather than tool roots
+# (~/.cargo/registry, not ~/.cargo) to avoid co-located credential
+# files: ~/.cargo/credentials.toml holds the crates.io publish token,
+# ~/.gradle/gradle.properties and ~/.m2/settings.xml hold repository
+# credentials.  ~/.config is omitted entirely — too many tools store
+# OAuth tokens there (gh, op, gcloud, …); opt in per-project.
+[fs]
+read_prefixes = [
+  "~/.cargo/registry",
+  "~/.cargo/git",
+  "~/.rustup",
+  "~/.cache",
+  "~/Library/Caches",
+  "~/.local",
+  "~/go",
+  "~/.npm",
+  "~/.gem",
+  "~/.bundle",
+  "~/.gradle/caches",
+  "~/.m2/repository",
+  "~/.pyenv",
+  "~/.rbenv",
+  "~/.nvm",
+]
+write_prefixes = [
+  "~/.cargo/registry",
+  "~/.cargo/git",
+  "~/.cache",
+  "~/Library/Caches",
+  "~/.local",
+  "~/go/pkg",
+  "~/.npm",
+  "~/.gem",
+  "~/.bundle",
+  "~/.gradle/caches",
+  "~/.m2/repository",
+]
+
+[exec]
+# Coreutils
+arch         = "Allow"
+b2sum        = "Allow"
+base32       = "Allow"
+base64       = "Allow"
+basename     = "Allow"
+basenc       = "Allow"
+cat          = "Allow"
+cksum        = "Allow"
+comm         = "Allow"
+cp           = "Allow"
+csplit       = "Allow"
+cut          = "Allow"
+date         = "Allow"
+df           = "Allow"
+dir          = "Allow"
+dircolors    = "Allow"
+dirname      = "Allow"
+du           = "Allow"
+echo         = "Allow"
+env          = "Allow"
+expand       = "Allow"
+expr         = "Allow"
+factor       = "Allow"
+fmt          = "Allow"
+fold         = "Allow"
+head         = "Allow"
+hostname     = "Allow"
+join         = "Allow"
+link         = "Allow"
+ln           = "Allow"
+ls           = "Allow"
+md5sum       = "Allow"
+mkdir        = "Allow"
+mktemp       = "Allow"
+mv           = "Allow"
+nl           = "Allow"
+nproc        = "Allow"
+numfmt       = "Allow"
+od           = "Allow"
+paste        = "Allow"
+pr           = "Allow"
+printenv     = "Allow"
+printf       = "Allow"
+ptx          = "Allow"
+pwd          = "Allow"
+readlink     = "Allow"
+realpath     = "Allow"
+rm           = "Allow"
+rmdir        = "Allow"
+seq          = "Allow"
+sha1sum      = "Allow"
+sha224sum    = "Allow"
+sha256sum    = "Allow"
+sha384sum    = "Allow"
+sha512sum    = "Allow"
+shred        = "Allow"
+shuf         = "Allow"
+sleep        = "Allow"
+sort         = "Allow"
+sum          = "Allow"
+sync         = "Allow"
+tac          = "Allow"
+tail         = "Allow"
+tee          = "Allow"
+test         = "Allow"
+touch        = "Allow"
+tr           = "Allow"
+truncate     = "Allow"
+tsort        = "Allow"
+uname        = "Allow"
+unexpand     = "Allow"
+uniq         = "Allow"
+unlink       = "Allow"
+vdir         = "Allow"
+wc           = "Allow"
+whoami       = "Allow"
+yes          = "Allow"
+
+# Shells
+sh           = "Allow"
+bash         = "Allow"
+zsh          = "Allow"
+
+# Version control
+git          = "Allow"
+gh           = "Allow"
+
+# Net fetch
+curl         = "Allow"
+wget         = "Allow"
+
+# Search / inspect
+rg           = "Allow"
+fd           = "Allow"
+jq           = "Allow"
+yq           = "Allow"
+awk          = "Allow"
+gawk         = "Allow"
+find         = "Allow"
+xargs        = "Allow"
+file         = "Allow"
+which        = "Allow"
+
+# Scripting runtimes (one-off scripts, common as tooling)
+python       = "Allow"
+python3      = "Allow"
+
+# Archives
+tar          = "Allow"
+gzip         = "Allow"
+gunzip       = "Allow"
+bzip2        = "Allow"
+bunzip2      = "Allow"
+xz           = "Allow"
+zip          = "Allow"
+unzip        = "Allow"
+
+# Diff / patch / docs
+diff         = "Allow"
+patch        = "Allow"
+less         = "Allow"
+more         = "Allow"
+man          = "Allow"
+
+# Process inspection (read-only)
+ps           = "Allow"
+lsof         = "Allow"
+pgrep        = "Allow"

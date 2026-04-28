@@ -116,6 +116,13 @@ pub enum TypeErrorKind {
     RowMissingField {
         label: String,
     },
+    /// Command head is a non-callable value (e.g. a literal `String` in
+    /// command position with arguments).  Reported under the same code as
+    /// `CompTyMismatch` (T0011) — it is the same condition, framed in
+    /// surface terms instead of as a `Cmd a vs a → b` mismatch.
+    HeadNotCallable {
+        ty: Ty,
+    },
     /// Free-form message from the inferencer, not from the unifier.
     AdHoc {
         message: String,
@@ -131,6 +138,7 @@ impl TypeErrorKind {
             TypeErrorKind::RecursiveCompTy => "T0003",
             TypeErrorKind::TyMismatch { .. } => "T0010",
             TypeErrorKind::CompTyMismatch { .. } => "T0011",
+            TypeErrorKind::HeadNotCallable { .. } => "T0011",
             TypeErrorKind::ModeMismatch { .. } => "T0012",
             TypeErrorKind::RowExtraField { .. } => "T0020",
             TypeErrorKind::RowMissingField { .. } => "T0021",
@@ -188,6 +196,9 @@ impl TypeErrorKind {
             }
             TypeErrorKind::RowMissingField { label } => {
                 format!("record is missing field '{label}'")
+            }
+            TypeErrorKind::HeadNotCallable { ty } => {
+                format!("value of type {} cannot be used as a command head", fmt_ty(ty))
             }
             TypeErrorKind::AdHoc { message } => message.clone(),
         }

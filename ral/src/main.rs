@@ -240,7 +240,7 @@ fn emit_audit_tree(
         end: ral_core::types::epoch_us(),
         principal: user_name(),
     };
-    let json_val = ral_core::builtins::value_to_json_pub(&root.to_value());
+    let json_val = ral_core::builtins::value_to_json_audit(&root.to_value());
     let json_str = if pretty {
         serde_json::to_string_pretty(&json_val).unwrap_or_default()
     } else {

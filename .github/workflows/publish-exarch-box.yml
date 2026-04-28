@@ -1,14 +1,23 @@
 name: Publish exarch-box
 # Builds a multi-arch exarch-box image and pushes it to GHCR.
-# Runs on version-tag pushes (same cadence as build-binaries.yml) and
-# on workflow_dispatch for rolling-latest updates.
 #
 # The Dockerfile fetches the exarch binary from the public
 # lambdabetaeta/ral GitHub Release — no local checkout, no rust
 # toolchain in the image.  Published at:
 #   ghcr.io/lambdabetaeta/exarch-box:latest
 #   ghcr.io/lambdabetaeta/exarch-box:<tag>  (on v* pushes)
+#
+# Triggers:
+#   - workflow_run: auto-fires when "Transfer to public ral" succeeds,
+#     so the rolling `:latest` image always tracks the most recent
+#     binaries on the public repo.
+#   - push tags v*: cuts a versioned image alongside the upstream
+#     v-tag release.
+#   - workflow_dispatch: manual rebuild.
 on:
+  workflow_run:
+    workflows: ["Transfer to public ral"]
+    types: [completed]
   push:
     tags:
       - 'v*'
@@ -21,11 +30,17 @@ env:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # When chained from Transfer, only run if Transfer succeeded.
+    if: >-
+      ${{
+        github.event_name != 'workflow_run' ||
+        github.event.workflow_run.conclusion == 'success'
+      }}
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Log in to GHCR
         uses: docker/login-action@v3

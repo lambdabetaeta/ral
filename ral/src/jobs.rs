@@ -121,7 +121,7 @@ impl JobTable {
 
 /// Wait for a foreground process, handling SIGTSTP (Ctrl-Z).
 /// Returns (`exit_code`, `was_stopped`).
-/// `stdin_tty` should be `shell.io.terminal.stdin_tty` at the call site.
+/// `stdin_tty` should be `shell.io.terminal.startup_stdin_tty` at the call site.
 #[cfg(unix)]
 pub fn wait_foreground(pid: i32, stdin_tty: bool) -> (i32, bool) {
     let shell_pgid = unsafe { libc::getpgrp() };

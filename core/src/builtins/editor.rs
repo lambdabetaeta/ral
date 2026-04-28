@@ -220,23 +220,17 @@ fn editor_parse(shell: &Shell) -> Result<Value, EvalSignal> {
             continue;
         }
         let start = i;
-        // Handle single-quoted strings
+        // Handle single-quoted strings (no hash-bump support — completion
+        // tokenizer is intentionally minimal).
         if bytes[i] == b'\'' {
             i += 1;
             let mut word = String::new();
-            while i < bytes.len() {
-                if bytes[i] == b'\'' {
-                    i += 1;
-                    if i < bytes.len() && bytes[i] == b'\'' {
-                        word.push('\'');
-                        i += 1;
-                    } else {
-                        break;
-                    }
-                } else {
-                    word.push(bytes[i] as char);
-                    i += 1;
-                }
+            while i < bytes.len() && bytes[i] != b'\'' {
+                word.push(bytes[i] as char);
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1; // closing '
             }
             words.push((start, word));
         } else if bytes[i] == b'"' {

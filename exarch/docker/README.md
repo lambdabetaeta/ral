@@ -1,8 +1,9 @@
 # exarch-box
 
-A Docker container for running `exarch` in permissive mode
-(`EXARCH_DANGEROUS=1`).  The container is the trust boundary in place
-of bubblewrap; the per-call `grant` becomes a no-op.
+A Docker container for running `exarch` in permissive mode (`--base
+everything`, applied by the entrypoint when no `--base` is given).
+The container is the trust boundary in place of bubblewrap; the
+per-call `grant` becomes a no-op.
 
 The `Dockerfile` fetches a pre-built binary from a GitHub Release at
 build time.  No checkout, no `shell-dev`, no rust toolchain.

@@ -308,7 +308,11 @@ impl Elaborator {
                 force_from_comp(self.current_span, comp)
             }
 
-            Ast::App { head, args } => {
+            Ast::App { head, args, span } => {
+                // The App's span covers head + all args; stamp it as the
+                // current span so the resulting `Comp` (and any unification
+                // failures it provokes) underline the whole command.
+                self.current_span = Some(*span);
                 // Partition args into plain values and I/O redirects.
                 let mut arg_vals = Vec::new();
                 let mut redirects = Vec::new();
@@ -364,15 +368,29 @@ impl Elaborator {
                         self.exec(ExecName::TildePath(path.clone()), arg_vals, redirects, false)
                     }
                     Head::Value(value) => {
+                        // Warn on `{ … } < file` and friends: a literal block
+                        // is `Return(Thunk(…))` — a value, not a command.  The
+                        // block does still execute (eval_app trampolines a
+                        // Thunk in head position so users with bound
+                        // wrappers like `let f = { … }; f < file` keep
+                        // working), but the redirect lands on a value-form
+                        // and is almost always inert.  If the author meant
+                        // "run this block under the redirect", the right
+                        // forms are `let f = { … }; f < file` (bind first)
+                        // or `!{ … } < file` (force).
+                        if matches!(value.as_ref(), Ast::Block(_)) && !redirects.is_empty() {
+                            crate::diagnostic::shell_warning(
+                                "redirect on a `{ … }` literal: the block is a \
+                                 value, not a command — the redirect has no \
+                                 consumer.  Bind first (`let f = { … }; f < file`) \
+                                 or force (`!{ … } < file`).",
+                            );
+                        }
                         let head_comp = self.elab_expr(value, binds);
-                        let head = match &head_comp.kind {
-                            CompKind::Return(v) => comp!(self, CompKind::Force(v.clone())),
-                            _ => head_comp,
-                        };
                         comp!(
                             self,
                             CompKind::App {
-                                head: Box::new(head),
+                                head: Box::new(head_comp),
                                 args: arg_vals,
                                 redirects,
                             }
@@ -781,13 +799,18 @@ mod tests {
 
     #[test]
     fn explicit_value_head_elaborates_to_app() {
+        // Head::Value (`$map`) elaborates to App with the inner Comp directly,
+        // *without* a wrapping Force.  The autoforce happens at runtime when
+        // eval_app sees a Thunk in head position.  This keeps `<file`
+        // redirects on the App able to bracket the body — see the
+        // `with_redirects → install_stdin_redirect` path.
         let ast = parse("$map $upper ['a']").expect("parse");
         let comp = elaborate(&ast, HashSet::new());
         let CompKind::App { head, args, .. } = &comp.kind else {
             panic!("expected app, got {:?}", comp.kind);
         };
-        let CompKind::Force(Val::Variable(name)) = &head.kind else {
-            panic!("expected forced variable head, got {:?}", head.kind);
+        let CompKind::Return(Val::Variable(name)) = &head.kind else {
+            panic!("expected returned-variable head, got {:?}", head.kind);
         };
         assert_eq!(name, "map");
         assert_eq!(

@@ -296,8 +296,29 @@ fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> io::Result<Option<T>> 
     let len = u32::from_le_bytes(len_buf) as usize;
     let mut body = vec![0u8; len];
     r.read_exact(&mut body)?;
-    let value = serde_json::from_slice(&body).map_err(io::Error::other)?;
-    Ok(Some(value))
+    match serde_json::from_slice(&body) {
+        Ok(value) => Ok(Some(value)),
+        Err(e) => {
+            // Best-effort dump for diagnosing wire-format mismatches:
+            // write the raw bytes to a unique tmpfile and include the
+            // path in the error so the user can ship the slice that
+            // failed.  Silent on dump failure — we still want the
+            // serde error to surface.
+            let path = std::env::temp_dir().join(format!(
+                "ral-ipc-fail-{}-{}.json",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0),
+            ));
+            let _ = std::fs::write(&path, &body);
+            Err(io::Error::other(format!(
+                "{e} (raw frame written to {})",
+                path.display()
+            )))
+        }
+    }
 }
 
 // ── Channel ──────────────────────────────────────────────────────────────
@@ -445,7 +466,23 @@ pub(super) fn serve_from_env_fd() -> std::process::ExitCode {
             return ExitCode::from(1);
         }
         Err(e) => {
-            crate::diagnostic::cmd_error("ral", &format!("sandbox ipc read: {e}"));
+            // First-frame deserialise failure is almost always a
+            // wire-format mismatch: the child binary was built from
+            // different code than the parent (stale `~/.cargo/bin`
+            // shim vs. fresh `cargo build`, or vice versa).  Lead with
+            // the actionable diagnosis; carry the underlying serde
+            // text on a follow-up line for debugging.
+            crate::diagnostic::cmd_error(
+                "ral",
+                "sandbox subprocess: failed to decode request from parent — \
+                 the parent and sandbox child binaries appear to have \
+                 incompatible wire formats",
+            );
+            eprintln!("  cause: {e}");
+            eprintln!(
+                "  hint: rebuild ral/exarch from a clean checkout so parent \
+                 and child are the same binary"
+            );
             return ExitCode::from(1);
         }
     };

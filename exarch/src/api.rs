@@ -5,8 +5,10 @@
 //! requests, branching once on `kind` to choose Anthropic Messages
 //! or OpenAI/OpenRouter Chat Completions wire shapes.
 
+use crate::cancel;
 use clap::ValueEnum;
 use serde_json::{Value, json};
+use std::time::Duration;
 
 const MAX_TOKENS: u32 = 4096;
 const TOOL_NAME: &str = "shell";
@@ -78,6 +80,20 @@ pub struct Provider {
     model: String,
     system: String,
     history: Vec<Value>,
+    /// Single-threaded tokio runtime used to drive the cancel-aware HTTP
+    /// request; created once and reused across every `step` and
+    /// `compact` call.
+    runtime: tokio::runtime::Runtime,
+    client: reqwest::Client,
+}
+
+/// Sentinel embedded in the error string when a request was cancelled
+/// by Ctrl-C.  Callers use `is_cancelled` to distinguish a cancel from
+/// a transport / API error.
+pub const CANCEL_MARKER: &str = "[exarch-cancelled]";
+
+pub fn is_cancelled(err: &str) -> bool {
+    err.contains(CANCEL_MARKER)
 }
 
 impl Provider {
@@ -87,7 +103,14 @@ impl Provider {
         } else {
             vec![json!({ "role": "system", "content": system.clone() })]
         };
-        Self { kind, key, model, system, history }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio current-thread runtime");
+        let client = reqwest::Client::builder()
+            .build()
+            .expect("build reqwest client");
+        Self { kind, key, model, system, history, runtime, client }
     }
 
     pub fn step(&mut self, input: Step) -> Result<StepOut, String> {
@@ -157,7 +180,7 @@ unexpected argv, or pipeline behaviour.  Skip for routine commands.",
             )
         };
 
-        let resp = http_post(self.kind.info().3, &headers, body)?;
+        let resp = self.post(self.kind.info().3, &headers, body)?;
         let u = resp.get("usage");
         let g = |k: &str| u.and_then(|u| u.get(k)).and_then(|n| n.as_u64()).unwrap_or(0);
 
@@ -291,7 +314,7 @@ Return only the summary, no preamble.";
         } else {
             vec![("authorization", format!("Bearer {}", self.key))]
         };
-        let resp = http_post(self.kind.info().3, &headers, body)?;
+        let resp = self.post(self.kind.info().3, &headers, body)?;
         let summary = if anthropic {
             resp.get("content").and_then(|c| c.as_array())
                 .and_then(|a| a.iter().find_map(|b| b.get("text").and_then(|t| t.as_str())))
@@ -323,15 +346,53 @@ Return only the summary, no preamble.";
     }
 }
 
-fn http_post(url: &str, headers: &[(&str, String)], body: Value) -> Result<Value, String> {
-    let mut req = ureq::post(url).set("content-type", "application/json");
-    for (k, v) in headers {
-        req = req.set(k, v);
+impl Provider {
+    /// Blocking POST that races the request future against
+    /// `cancel::is_set` — Ctrl-C drops the in-flight connection and
+    /// returns a cancel-marked error within the poll interval.
+    fn post(&self, url: &str, headers: &[(&str, String)], body: Value) -> Result<Value, String> {
+        self.runtime.block_on(post_async(&self.client, url, headers, body))
     }
-    match req.send_json(body) {
-        Ok(r) => r.into_json::<Value>().map_err(|e| e.to_string()),
-        Err(ureq::Error::Status(code, r)) => Err(format!("api {code}: {}", r.into_string().unwrap_or_default())),
-        Err(e) => Err(e.to_string()),
+}
+
+async fn post_async(
+    client: &reqwest::Client,
+    url: &str,
+    headers: &[(&str, String)],
+    body: Value,
+) -> Result<Value, String> {
+    let mut req = client.post(url).header("content-type", "application/json");
+    for (k, v) in headers {
+        req = req.header(*k, v);
+    }
+    let send = req.json(&body).send();
+    tokio::pin!(send);
+    let resp = tokio::select! {
+        biased;
+        _ = wait_for_cancel() => return Err(format!("{CANCEL_MARKER} cancelled before response")),
+        r = &mut send => r.map_err(|e| e.to_string())?,
+    };
+    let status = resp.status();
+    let read = resp.bytes();
+    tokio::pin!(read);
+    let bytes = tokio::select! {
+        biased;
+        _ = wait_for_cancel() => return Err(format!("{CANCEL_MARKER} cancelled mid-response")),
+        r = &mut read => r.map_err(|e| e.to_string())?,
+    };
+    if !status.is_success() {
+        let body = String::from_utf8_lossy(&bytes).into_owned();
+        return Err(format!("api {}: {body}", status.as_u16()));
+    }
+    serde_json::from_slice::<Value>(&bytes).map_err(|e| e.to_string())
+}
+
+/// Resolves once the cancel flag is observed.  Polls on a 50ms cadence
+/// — the interval is the upper bound on Ctrl-C latency for an in-flight
+/// HTTP call, traded against the cost of waking the runtime.
+async fn wait_for_cancel() {
+    while !cancel::is_set() {
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 

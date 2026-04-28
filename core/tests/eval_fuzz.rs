@@ -2264,7 +2264,7 @@ fn audit_fs_write_denied_recorded() {
     // tree.  If a simple allowed fs read does not produce an audit child, the
     // denied-write assertion below is not observable here.
     let probe = must_succeed("audit { grant [fs: [read: ['/tmp']], audit: true] { _fs 'read' '/tmp' } }");
-    if children_of(&probe).is_empty() {
+    if !has_cap_check(&children_of(&probe), "fs", "allowed") {
         return;
     }
     let outside = format!(

@@ -25,6 +25,15 @@ pub use control::ControlState;
 mod repl;
 pub use repl::ReplScratch;
 
+// Capability layer: ExecPolicy, FsPolicy, EditorPolicy, ShellPolicy,
+// SandboxPolicy/BindSpec/CheckSpec, Capabilities + meet.  See
+// types/capability.rs.
+mod capability;
+pub use capability::{
+    Capabilities, EditorPolicy, ExecPolicy, FsPolicy, SandboxBindSpec, SandboxCheckSpec,
+    SandboxPolicy, ShellPolicy,
+};
+
 // ── Values ───────────────────────────────────────────────────────────────
 
 /// The runtime representation of every ral value.
@@ -211,7 +220,7 @@ impl fmt::Display for Value {
             Value::Int(n) => write!(f, "{n}"),
             Value::Float(n) => write!(f, "{n}"),
             Value::String(s) => write!(f, "{s}"),
-            Value::Bytes(b) => write!(f, "<bytes:{}>", b.len()),
+            Value::Bytes(b) => write!(f, "{}", String::from_utf8_lossy(b)),
             Value::List(items) => {
                 if items.is_empty() {
                     return write!(f, "[]");
@@ -288,17 +297,6 @@ pub fn fmt_block(body: &crate::ir::Comp) -> String {
     }
 }
 
-// ── Capability restriction ────────────────────────────────────────────────
-
-/// Exec policy value for a single command in a `grant` exec map.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ExecPolicy {
-    /// Allow the command with any arguments.
-    Allow,
-    /// Allow only when the first argument is in this list.
-    Subcommands(Vec<std::string::String>),
-}
-
 // ── Effect handler frames (for `within`) ─────────────────────────────────
 
 /// One `within [handlers: …, handler: …]` frame.
@@ -312,83 +310,6 @@ pub struct HandlerFrame {
     pub per_name: Vec<(std::string::String, Value)>,
     /// Catch-all handler: `within [handler: thunk]`.
     pub catch_all: Option<Value>,
-}
-
-/// Filesystem access policy within a `grant` block.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FsPolicy {
-    pub read_prefixes: Vec<std::string::String>,
-    pub write_prefixes: Vec<std::string::String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SandboxPolicy {
-    pub fs: FsPolicy,
-    /// Final network verdict after reducing the capability stack.
-    pub net: bool,
-}
-
-impl Default for SandboxPolicy {
-    fn default() -> Self {
-        Self {
-            fs: FsPolicy::default(),
-            net: true,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SandboxBindSpec {
-    pub read_prefixes: Vec<std::string::String>,
-    pub write_prefixes: Vec<std::string::String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SandboxCheckSpec {
-    pub read_prefixes: Vec<std::string::String>,
-    pub write_prefixes: Vec<std::string::String>,
-}
-
-impl SandboxPolicy {
-    pub fn bind_spec(&self) -> SandboxBindSpec {
-        SandboxBindSpec {
-            read_prefixes: unique_strings(self.fs.read_prefixes.iter().cloned()),
-            write_prefixes: unique_strings(self.fs.write_prefixes.iter().cloned()),
-        }
-    }
-
-    pub fn check_spec(&self, shell: &Shell) -> SandboxCheckSpec {
-        let resolve = |prefixes: &[String]| -> Vec<String> {
-            unique_strings(prefixes.iter().map(|p| {
-                shell.dynamic.resolve_grant_path(p)
-                    .to_string_lossy()
-                    .into_owned()
-            }))
-        };
-        SandboxCheckSpec {
-            read_prefixes: resolve(&self.fs.read_prefixes),
-            write_prefixes: resolve(&self.fs.write_prefixes),
-        }
-    }
-}
-
-/// Editor capability gate for `grant` blocks.
-///
-/// Controls access to `_editor` sub-commands:
-/// - `read`: `get`, `history`, `parse`
-/// - `write`: `set`, `push`, `accept`, `ghost`, `highlight`, `state`
-/// - `tui`: `tui`
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct EditorCapability {
-    pub read: bool,
-    pub write: bool,
-    pub tui: bool,
-}
-
-/// Shell capability restriction — controls what shell operations a plugin handler may perform.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ShellCapability {
-    pub chdir: bool,
 }
 
 /// Line editor state visible to plugins.
@@ -465,53 +386,6 @@ pub struct LoadedPlugin {
     /// Aliases registered by this plugin; removed from `Shell.aliases` on unload.
     pub aliases: Vec<(std::string::String, AliasEntry)>,
     pub state_cell: Option<Value>,
-}
-
-/// One layer in the dynamic capabilities stack.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Capabilities {
-    /// Per-command exec policy.  `None` means no exec restriction.
-    pub exec: Option<Vec<(std::string::String, ExecPolicy)>>,
-    pub fs: Option<FsPolicy>,
-    /// Network capability. `None` means inherit; `Some(false)` denies;
-    /// `Some(true)` explicitly allows.
-    pub net: Option<bool>,
-    pub audit: bool,
-    /// Editor capability restriction.  `None` means no restriction.
-    pub editor: Option<EditorCapability>,
-    /// Shell capability restriction.  `None` means no restriction.
-    pub shell: Option<ShellCapability>,
-}
-
-impl Capabilities {
-    /// Ambient authority — the root of every capabilities stack.  All fields
-    /// `None`: no attenuation. `Shell::new` pre-pushes this so the stack is
-    /// never empty.
-    pub fn root() -> Self {
-        Self::default()
-    }
-
-    /// Deny every effect capability.  Used as the base for explicit grants:
-    /// callers opt capabilities back in by replacing individual fields.
-    pub fn deny_all() -> Self {
-        Self {
-            exec: Some(Vec::new()),
-            fs: Some(FsPolicy::default()),
-            net: Some(false),
-            editor: Some(EditorCapability::default()),
-            shell: Some(ShellCapability::default()),
-            audit: false,
-        }
-    }
-
-    /// True for a real attenuation context, false for the ambient root.
-    pub fn is_restrictive(&self) -> bool {
-        self.exec.is_some()
-            || self.fs.is_some()
-            || self.net.is_some()
-            || self.editor.is_some()
-            || self.shell.is_some()
-    }
 }
 
 // ── Shell sub-structs ──────────────────────────────────────────────────────
@@ -770,14 +644,8 @@ impl ExecNode {
             ("script".into(), Value::String(self.script.clone())),
             ("line".into(), Value::Int(self.line as i64)),
             ("col".into(), Value::Int(self.col as i64)),
-            (
-                "stdout".into(),
-                Value::String(String::from_utf8_lossy(&self.stdout).into_owned()),
-            ),
-            (
-                "stderr".into(),
-                Value::String(String::from_utf8_lossy(&self.stderr).into_owned()),
-            ),
+            ("stdout".into(), Value::Bytes(self.stdout.clone())),
+            ("stderr".into(), Value::Bytes(self.stderr.clone())),
             ("value".into(), self.value.clone()),
             ("children".into(), Value::List(children_list)),
             ("start".into(), Value::Int(self.start)),
@@ -997,8 +865,22 @@ impl Shell {
         self.control.last_status = if ok { 0 } else { 1 };
     }
 
+    /// Write `bytes` to the current stdout sink.
+    ///
+    /// `BrokenPipe` is treated as a clean shutdown: the downstream reader has
+    /// closed its end of the pipe (e.g. `fzf` accepted a selection, `head`
+    /// took its quota), so further writes are pointless but not an error.
+    /// This matches traditional Unix tools, which exit silently on `SIGPIPE`,
+    /// and prevents the pipeline supervisor from interpreting an EPIPE on a
+    /// builtin writer as a failure that warrants tearing the pgid down with
+    /// `SIGKILL` — a teardown that would surface as exit status 137 on
+    /// sibling stages that had themselves exited cleanly.
     pub fn write_stdout(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        self.io.stdout.write_all(bytes)
+        match self.io.stdout.write_all(bytes) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     /// Look up the innermost handler for `name` across all active `within` frames.
@@ -1336,50 +1218,118 @@ impl Shell {
 // with diagnostic location passed as `&Location`.  `Shell::check_*` are
 // thin shims that bind the right borrows.
 
+/// One capability layer's vote on a candidate command.
+enum LayerExec {
+    /// Layer has no exec/exec_dirs opinion.
+    NoOpinion,
+    /// Layer has exec restrictions and the command matches none.
+    Denied,
+    /// Layer admits the command with this policy.
+    Allowed(ExecPolicy),
+}
+
+/// Folded verdict across the whole capability stack.
+enum ExecVerdict {
+    /// No layer has any exec opinion.
+    Unrestricted,
+    /// At least one layer denies; the call is rejected.
+    Denied,
+    /// Every opining layer allowed; effective policy is the
+    /// intersection of those layers' allowed policies.
+    Allowed(ExecPolicy),
+}
+
 impl Dynamic {
-    /// True if any exec-bearing capabilities layer does not list one of
-    /// `names`. Checks all layers; a command denied by any layer is
-    /// denied overall.
-    fn is_exec_denied_for(&self, names: &[&str]) -> bool {
-        for ctx in self.capabilities_stack.iter() {
-            if let Some(exec) = &ctx.exec
-                && !exec.iter().any(|(k, _)| names.iter().any(|name| k == name))
-            {
-                return true;
+    /// Decide a single layer's verdict on a command.  Two routes
+    /// match a layer: (a) name in the layer's `exec` map, (b)
+    /// resolved absolute path under one of the layer's `exec_dirs`.
+    /// Name match wins if both are present (takes the named policy).
+    ///
+    /// `None` on either field is "no opinion" for that route.  A
+    /// layer that declared only one route and missed it abstains,
+    /// letting another layer admit the command by a different route.
+    /// If no layer admits it, the stack-level fold denies rather than
+    /// treating a restrictive exec grant as ambient authority.
+    fn layer_exec_verdict(&self, ctx: &Capabilities, names: &[&str]) -> LayerExec {
+        let exec_set = ctx.exec.is_some();
+        let dirs_set = ctx.exec_dirs.is_some();
+        if !exec_set && !dirs_set {
+            return LayerExec::NoOpinion;
+        }
+        // Name match takes precedence.
+        if let Some(exec) = &ctx.exec {
+            let matched: Vec<&ExecPolicy> = exec
+                .iter()
+                .filter(|(k, _)| names.iter().any(|n| k == n))
+                .map(|(_, p)| p)
+                .collect();
+            if let Some(first) = matched.first() {
+                let policy = matched
+                    .iter()
+                    .skip(1)
+                    .fold((*first).clone(), |acc, p| {
+                        intersect_exec_policy(acc, (*p).clone())
+                    });
+                return LayerExec::Allowed(policy);
             }
         }
-        false
+        // Fall back to dir match against the resolved absolute path(s).
+        if let Some(dirs) = &ctx.exec_dirs
+            && dirs.iter().any(|d| {
+                names.iter().any(|n| {
+                    let p = std::path::Path::new(n);
+                    p.is_absolute()
+                        && crate::path::path_within(p, std::path::Path::new(d))
+                })
+            })
+        {
+            return LayerExec::Allowed(ExecPolicy::Allow);
+        }
+        // Both routes declared, neither matched → strict deny.  Otherwise
+        // abstain so an outer layer's opinion can decide.
+        if exec_set && dirs_set {
+            LayerExec::Denied
+        } else {
+            LayerExec::NoOpinion
+        }
     }
 
-    /// Effective exec policy for `names` after intersecting all active
-    /// capabilities layers from outermost to innermost.  Returns `None`
-    /// when no exec restriction is active or any context denies every
-    /// candidate name.
-    fn exec_policy_for(&self, names: &[&str]) -> Option<ExecPolicy> {
-        let mut result: Option<ExecPolicy> = None;
+    /// Walk the stack and combine per-layer verdicts.  Any layer that
+    /// denies → command denied.  Any allowed opinions intersect.  If
+    /// the stack declared exec policy but no layer admitted the command,
+    /// deny; only a stack with no exec policy at all is unrestricted.
+    fn evaluate_exec(&self, names: &[&str]) -> ExecVerdict {
+        let mut policy: Option<ExecPolicy> = None;
+        let mut any_opinion = false;
+        let mut saw_exec_policy = false;
         for ctx in self.capabilities_stack.iter() {
-            if let Some(exec) = &ctx.exec {
-                let mut matched: Option<ExecPolicy> = None;
-                for (_, policy) in exec
-                    .iter()
-                    .filter(|(k, _)| names.iter().any(|name| k == name))
-                {
-                    matched = Some(match matched.take() {
-                        None => policy.clone(),
-                        Some(current) => intersect_exec_policy(current, policy.clone()),
+            saw_exec_policy |= ctx.exec.is_some() || ctx.exec_dirs.is_some();
+            match self.layer_exec_verdict(ctx, names) {
+                LayerExec::NoOpinion => {}
+                LayerExec::Denied => return ExecVerdict::Denied,
+                LayerExec::Allowed(p) => {
+                    any_opinion = true;
+                    policy = Some(match policy.take() {
+                        None => p,
+                        Some(prev) => intersect_exec_policy(prev, p),
                     });
-                }
-                if let Some(policy) = matched {
-                    result = Some(match result.take() {
-                        None => policy,
-                        Some(outer) => intersect_exec_policy(outer, policy),
-                    });
-                } else {
-                    return None;
                 }
             }
         }
-        result
+        if any_opinion {
+            ExecVerdict::Allowed(policy.unwrap_or(ExecPolicy::Allow))
+        } else if saw_exec_policy {
+            ExecVerdict::Denied
+        } else {
+            ExecVerdict::Unrestricted
+        }
+    }
+
+    /// Whether the active stack denies every candidate name outright.
+    /// Used by `classify_command_head` to colour the dispatch site
+    /// before any args are parsed.
+    fn is_exec_denied_for(&self, names: &[&str]) -> bool {
+        matches!(self.evaluate_exec(names), ExecVerdict::Denied)
     }
 
     /// True when capability checks should emit events into the exec
@@ -1539,22 +1489,16 @@ impl Dynamic {
         audit: &mut Audit,
         location: &Location,
     ) -> Result<(), EvalSignal> {
-        let policy = self.exec_policy_for(policy_names);
-        let is_denied = self.is_exec_denied_for(policy_names);
+        let verdict = self.evaluate_exec(policy_names);
 
-        let result: Result<(), EvalSignal> = match policy {
-            None => {
-                if is_denied {
-                    Err(EvalSignal::Error(
-                        Error::new(format!("command '{display_name}' denied by active grant"), 1)
-                            .with_hint("add the command to the grant exec map to allow it"),
-                    ))
-                } else {
-                    Ok(())
-                }
-            }
-            Some(ExecPolicy::Allow) => Ok(()),
-            Some(ExecPolicy::Subcommands(allowed)) => match args.first() {
+        let result: Result<(), EvalSignal> = match verdict {
+            ExecVerdict::Unrestricted => Ok(()),
+            ExecVerdict::Denied => Err(EvalSignal::Error(
+                Error::new(format!("command '{display_name}' denied by active grant"), 1)
+                    .with_hint("add the command to the grant exec map (or its directory to exec_dirs) to allow it"),
+            )),
+            ExecVerdict::Allowed(ExecPolicy::Allow) => Ok(()),
+            ExecVerdict::Allowed(ExecPolicy::Subcommands(allowed)) => match args.first() {
                 None => Err(EvalSignal::Error(
                     Error::new(
                         format!(
@@ -1585,7 +1529,7 @@ impl Dynamic {
         let has_exec_policy = self
             .capabilities_stack
             .iter()
-            .any(|ctx| ctx.exec.is_some());
+            .any(|ctx| ctx.exec.is_some() || ctx.exec_dirs.is_some());
         if has_exec_policy {
             self.emit_capability_audit("exec", result.is_ok(), audit, location, |pairs| {
                 pairs.push(("name".into(), Value::String(display_name.into())));
@@ -1605,11 +1549,16 @@ impl Dynamic {
 
     /// Check whether a filesystem `op` (`"read"` or `"write"`) on
     /// `path` is permitted by the active capabilities stack.
+    ///
+    /// `consult_deny_paths` is true for write-style ops: any layer's
+    /// `deny_paths` overrides every other layer's allow.  Reads ignore
+    /// `deny_paths` — those are write-only denials.
     fn check_fs_op(
         &self,
         path: &str,
         op: &str,
         get_prefixes: impl Fn(&FsPolicy) -> &[String],
+        consult_deny_paths: bool,
         audit: &mut Audit,
         location: &Location,
     ) -> Result<(), EvalSignal> {
@@ -1625,6 +1574,18 @@ impl Dynamic {
         for ctx in self.capabilities_stack.iter() {
             if let Some(fs) = &ctx.fs {
                 has_fs_policy = true;
+                if consult_deny_paths {
+                    for deny in &fs.deny_paths {
+                        let deny_resolved = self.resolve_for_check(deny);
+                        if resolved == deny_resolved {
+                            denied = true;
+                            break;
+                        }
+                    }
+                    if denied {
+                        break;
+                    }
+                }
                 let prefixes = get_prefixes(fs);
                 if !self.path_allowed_by_prefixes(&resolved, prefixes) {
                     denied = true;
@@ -1666,7 +1627,7 @@ impl Dynamic {
         audit: &mut Audit,
         location: &Location,
     ) -> Result<(), EvalSignal> {
-        self.check_fs_op(path, "read", |fs| &fs.read_prefixes, audit, location)
+        self.check_fs_op(path, "read", |fs| &fs.read_prefixes, false, audit, location)
     }
 
     pub fn check_fs_write(
@@ -1675,15 +1636,17 @@ impl Dynamic {
         audit: &mut Audit,
         location: &Location,
     ) -> Result<(), EvalSignal> {
-        self.check_fs_op(path, "write", |fs| &fs.write_prefixes, audit, location)
+        self.check_fs_op(path, "write", |fs| &fs.write_prefixes, true, audit, location)
     }
 
     /// Compute the effective sandbox policy for the current capabilities
     /// stack, intersecting fs prefixes and ANDing net booleans across
-    /// layers.
+    /// layers.  `deny_paths` accumulate as a union: more denies = less
+    /// authority, monotone with stack depth.
     pub fn sandbox_policy(&self) -> Option<SandboxPolicy> {
         let mut read_prefixes: Option<Vec<PrefixPair>> = None;
         let mut write_prefixes: Option<Vec<PrefixPair>> = None;
+        let mut deny_paths: Vec<String> = Vec::new();
         let mut net_allowed = true;
         let mut saw_fs = false;
         let mut saw_net = false;
@@ -1701,6 +1664,14 @@ impl Dynamic {
                     Some(current) => intersect_prefix_pairs(&current, &write),
                     None => write,
                 });
+                for p in &fs.deny_paths {
+                    deny_paths.push(p.clone());
+                    let resolved = self
+                        .resolve_grant_path(p)
+                        .to_string_lossy()
+                        .into_owned();
+                    deny_paths.push(resolved);
+                }
             }
             if let Some(net) = ctx.net {
                 saw_net = true;
@@ -1718,6 +1689,7 @@ impl Dynamic {
             fs: FsPolicy {
                 read_prefixes: prefix_pair_raws(&read_prefixes),
                 write_prefixes: prefix_pair_raws(&write_prefixes),
+                deny_paths: unique_strings(deny_paths),
             },
             net: net_allowed,
         })
@@ -1847,6 +1819,112 @@ mod grant_policy_tests {
         assert_eq!(head, super::CommandHead::GrantDenied);
     }
 
+    /// `exec_dirs` admits a command whose resolved absolute path is
+    /// under one of the listed prefixes, even when the per-name
+    /// `exec` map has no entry.
+    #[test]
+    fn exec_dirs_allows_resolved_path_under_prefix() {
+        let mut shell = Shell::default();
+        let grant = Capabilities {
+            exec: Some(Vec::new()),
+            exec_dirs: Some(vec!["/usr/bin".into()]),
+            ..Capabilities::root()
+        };
+        shell
+            .with_capabilities(grant, |shell| {
+                shell.check_exec_args("ls", &["ls", "/usr/bin/ls"], &[])
+            })
+            .expect("ls under /usr/bin should be admitted by exec_dirs");
+    }
+
+    /// `exec_dirs` does not allow a binary outside any listed prefix.
+    #[test]
+    fn exec_dirs_denies_outside_prefixes() {
+        let mut shell = Shell::default();
+        let grant = Capabilities {
+            exec: Some(Vec::new()),
+            exec_dirs: Some(vec!["/usr/bin".into()]),
+            ..Capabilities::root()
+        };
+        let result = shell.with_capabilities(grant, |shell| {
+            shell.check_exec_args("evil", &["evil", "/tmp/evil"], &[])
+        });
+        assert!(result.is_err());
+    }
+
+    /// Per-name `exec` policy wins over `exec_dirs`: a `Subcommands`
+    /// restriction on a named entry must not be relaxed by a
+    /// directory match.
+    #[test]
+    fn exec_dirs_does_not_relax_named_subcommands() {
+        let mut shell = Shell::default();
+        let grant = Capabilities {
+            exec: Some(vec![(
+                "cargo".into(),
+                super::ExecPolicy::Subcommands(vec!["build".into()]),
+            )]),
+            exec_dirs: Some(vec!["/opt/homebrew/bin".into()]),
+            ..Capabilities::root()
+        };
+        let result = shell.with_capabilities(grant, |shell| {
+            shell.check_exec_args(
+                "cargo",
+                &["cargo", "/opt/homebrew/bin/cargo"],
+                &["install".into()],
+            )
+        });
+        assert!(
+            result.is_err(),
+            "named subcommand restriction should beat exec_dirs"
+        );
+    }
+
+    /// A layer that declares only `exec` and misses should abstain so an
+    /// enclosing `exec_dirs` layer can still allow the resolved path.
+    #[test]
+    fn exec_name_only_layer_abstains_and_outer_exec_dirs_allows() {
+        let mut shell = Shell::default();
+        let outer = Capabilities {
+            exec_dirs: Some(vec!["/usr/bin".into()]),
+            ..Capabilities::root()
+        };
+        let inner = Capabilities {
+            exec: Some(vec![("git".into(), super::ExecPolicy::Allow)]),
+            ..Capabilities::root()
+        };
+        shell.with_capabilities(outer, |shell| {
+            shell.with_capabilities(inner, |shell| {
+                shell.check_exec_args("ls", &["ls", "/usr/bin/ls"], &[])
+            })
+        })
+        .expect("inner name-only miss should not override outer exec_dirs allow");
+    }
+
+    /// `exec_dirs = []` is an explicit opinion that no directory match is
+    /// allowed, so a layer that also declares `exec` stays strict.
+    #[test]
+    fn explicit_empty_exec_dirs_keeps_single_layer_strict() {
+        let mut shell = Shell::default();
+        let outer = Capabilities {
+            exec_dirs: Some(vec!["/usr/bin".into()]),
+            ..Capabilities::root()
+        };
+        let inner = Capabilities {
+            exec: Some(vec![("git".into(), super::ExecPolicy::Allow)]),
+            exec_dirs: Some(Vec::new()),
+            ..Capabilities::root()
+        };
+        let result = shell.with_capabilities(outer, |shell| {
+            shell.with_capabilities(inner, |shell| {
+                shell.check_exec_args("ls", &["ls", "/usr/bin/ls"], &[])
+            })
+        });
+        assert!(
+            result.is_err(),
+            "explicit empty exec_dirs should keep the inner layer restrictive"
+        );
+    }
+
     #[test]
     fn exec_path_override_requires_resolved_path_authority() {
         let mut shell = Shell::default();
@@ -1882,6 +1960,7 @@ mod grant_policy_tests {
             fs: Some(FsPolicy {
                 read_prefixes: vec!["/tmp/ral-prefix-a".into()],
                 write_prefixes: Vec::new(),
+                deny_paths: Vec::new(),
             }),
             ..Capabilities::root()
         };
@@ -1889,6 +1968,7 @@ mod grant_policy_tests {
             fs: Some(FsPolicy {
                 read_prefixes: vec!["/tmp/ral-prefix-ab".into()],
                 write_prefixes: Vec::new(),
+                deny_paths: Vec::new(),
             }),
             ..Capabilities::root()
         };
@@ -1913,6 +1993,7 @@ mod grant_policy_tests {
             fs: Some(FsPolicy {
                 read_prefixes: vec![link.to_string_lossy().into_owned()],
                 write_prefixes: Vec::new(),
+                deny_paths: Vec::new(),
             }),
             ..Capabilities::root()
         };
@@ -1920,6 +2001,7 @@ mod grant_policy_tests {
             fs: Some(FsPolicy {
                 read_prefixes: vec![inner_dir.to_string_lossy().into_owned()],
                 write_prefixes: Vec::new(),
+                deny_paths: Vec::new(),
             }),
             ..Capabilities::root()
         };

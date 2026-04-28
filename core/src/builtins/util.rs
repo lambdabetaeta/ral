@@ -221,17 +221,33 @@ pub(crate) fn json_to_value(j: &serde_json::Value) -> Value {
 }
 
 pub(crate) fn value_to_json(v: &Value) -> serde_json::Value {
+    value_to_json_inner(v, false)
+}
+
+/// Variant of [`value_to_json`] used for the `--audit` JSON dump: byte
+/// fields render as lossy-UTF-8 strings rather than as integer arrays,
+/// so the human-readable execution tree stays readable.
+pub(crate) fn value_to_json_lossy_bytes(v: &Value) -> serde_json::Value {
+    value_to_json_inner(v, true)
+}
+
+fn value_to_json_inner(v: &Value, lossy_bytes: bool) -> serde_json::Value {
     match v {
         Value::Unit => serde_json::Value::Null,
         Value::Bool(b) => serde_json::Value::Bool(*b),
         Value::Int(n) => serde_json::json!(*n),
         Value::Float(f) => serde_json::json!(*f),
         Value::String(s) => serde_json::Value::String(s.clone()),
-        Value::List(items) => serde_json::Value::Array(items.iter().map(value_to_json).collect()),
+        Value::List(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .map(|x| value_to_json_inner(x, lossy_bytes))
+                .collect(),
+        ),
         Value::Map(pairs) => {
             let obj: serde_json::Map<String, serde_json::Value> = pairs
                 .iter()
-                .map(|(k, v)| (k.clone(), value_to_json(v)))
+                .map(|(k, v)| (k.clone(), value_to_json_inner(v, lossy_bytes)))
                 .collect();
             serde_json::Value::Object(obj)
         }
@@ -244,11 +260,19 @@ pub(crate) fn value_to_json(v: &Value) -> serde_json::Value {
         }
         Value::Handle(_) => serde_json::json!({"type": "Handle"}),
         Value::Bytes(b) => {
-            serde_json::Value::Array(b.iter().map(|byte| serde_json::json!(*byte)).collect())
+            if lossy_bytes {
+                serde_json::Value::String(String::from_utf8_lossy(b).into_owned())
+            } else {
+                serde_json::Value::Array(b.iter().map(|byte| serde_json::json!(*byte)).collect())
+            }
         }
     }
 }
 
 pub fn value_to_json_pub(v: &Value) -> serde_json::Value {
     value_to_json(v)
+}
+
+pub fn value_to_json_audit(v: &Value) -> serde_json::Value {
+    value_to_json_lossy_bytes(v)
 }

@@ -2,8 +2,8 @@
 //! turn loop.  Everything here is single-threaded and synchronous; the
 //! REPL above just calls `run_task` once per user line.
 
-use crate::api::{Provider, Step, StepOut, ToolCall, Usage};
-use crate::{eval, grant, ui};
+use crate::api::{self, Provider, Step, StepOut, ToolCall, Usage};
+use crate::{cancel, eval, ui};
 use ral_core::io::TerminalState;
 use ral_core::{Shell, builtins, diagnostic};
 use std::fs;
@@ -24,18 +24,6 @@ const MAX_TOOL_RESULT: usize = 16 * 1024;
 /// conversation between tasks.  ≈ 1 token / 3–4 bytes, so 200 KB
 /// ≈ 50–65k tokens — beyond this the per-turn replay cost dominates.
 const COMPACT_THRESHOLD: usize = 200 * 1024;
-
-/// Point `RAL_SANDBOX_SELF_BIN` at our own executable so ral's
-/// `eval_grant` re-execs us as a sandbox child.
-pub fn enable_os_sandbox() {
-    if std::env::var_os("RAL_SANDBOX_SELF_BIN").is_some() {
-        return;
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        // SAFETY: set before any thread that reads env is spawned.
-        unsafe { std::env::set_var("RAL_SANDBOX_SELF_BIN", &exe) };
-    }
-}
 
 /// If we were re-execed as a sandbox child, ral's `early_init` handles
 /// the IPC block and tells us to exit.  Otherwise it returns `None`.
@@ -71,16 +59,25 @@ pub fn boot_shell() -> Shell {
 pub fn run_task(
     provider: &mut Provider,
     shell: &mut Shell,
-    spec: &grant::GrantSpec,
+    caps: &ral_core::types::Capabilities,
     spill: &Spill,
     total: &mut Usage,
     prompt: String,
 ) -> Result<(Usage, bool), String> {
+    cancel::clear();
     let mut task = Usage::default();
     let mut input = Step::User(prompt);
     for n in 1..=MAX_TURNS {
         ui::turn(n);
-        let StepOut { text, tool_calls, done, usage } = provider.step(input)?;
+        let step_out = provider.step(input);
+        if cancel::is_set() {
+            return cancelled(provider, task);
+        }
+        let StepOut { text, tool_calls, done, usage } = match step_out {
+            Ok(s) => s,
+            Err(e) if api::is_cancelled(&e) => return cancelled(provider, task),
+            Err(e) => return Err(e),
+        };
         task += usage;
         *total += usage;
         if !text.is_empty() {
@@ -92,7 +89,7 @@ pub fn run_task(
         let mut results = Vec::with_capacity(tool_calls.len());
         for ToolCall { id, cmd, audit } in tool_calls {
             ui::tool_call(&cmd, audit);
-            match eval::run_shell(shell, spec, &cmd, audit) {
+            match eval::run_shell(shell, caps, &cmd, audit) {
                 eval::Outcome::Ran(r) => {
                     // Audit JSON is large; the user sees a one-line node-
                     // count summary while the model gets the (capped) JSON.
@@ -104,6 +101,9 @@ pub fn run_task(
                     results.push((id, opaque_truncate(s, spill)));
                 }
             }
+            if cancel::is_set() {
+                return cancelled(provider, task);
+            }
         }
         if done {
             return Ok((task, false));
@@ -113,6 +113,17 @@ pub fn run_task(
     ui::error("max turns reached for this task");
     provider.trim_last_if_tool_use();
     Ok((task, true))
+}
+
+/// Tidy a turn loop that was aborted by Ctrl-C: drop any orphaned
+/// `tool_use` block from history (otherwise the next call 400s on
+/// Anthropic), surface the abort to the user, and return without
+/// re-queueing — the REPL falls through to the prompt.
+fn cancelled(provider: &mut Provider, task: Usage) -> Result<(Usage, bool), String> {
+    provider.trim_last_if_tool_use();
+    cancel::clear();
+    ui::error("cancelled");
+    Ok((task, false))
 }
 
 /// Per-session spill directory under `/tmp`, owning the dir and

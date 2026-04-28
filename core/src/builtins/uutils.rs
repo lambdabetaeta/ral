@@ -106,7 +106,7 @@ pub(crate) fn uutils(tool: &str, args: &[Value], shell: &mut Shell) -> Result<Va
     use std::ffi::OsString;
     let mut uargs: Vec<OsString> = vec![OsString::from(tool)];
     uargs.extend(args.iter().map(|v| OsString::from(v.to_string())));
-    let pipe_stdin = shell.io.stdin.take_pipe();
+    let pipe_stdin = shell.io.stdin.take_reader();
     let invoke = |uargs: Vec<OsString>| {
         if let Some(ref reader) = pipe_stdin {
             crate::compat::with_stdin_redirected(reader, || uutils_invoke(tool, uargs))
@@ -146,9 +146,11 @@ pub(crate) fn uu_diff(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSi
             return Err(EvalSignal::Error(Error::new(format!("diff: {e}"), 2)));
         }
     };
-    let mut pipe = shell.io.stdin.take_pipe();
+    let mut pipe = shell.io.stdin.take_reader();
     let mut read_input =
-        |path: &OsString, pipe: &mut Option<os_pipe::PipeReader>| -> io::Result<Vec<u8>> {
+        |path: &OsString,
+         pipe: &mut Option<crate::io::SourceReader>|
+         -> io::Result<Vec<u8>> {
             if path == "-" {
                 let mut buf = Vec::new();
                 if let Some(r) = pipe.take() {
@@ -245,7 +247,7 @@ pub(crate) fn uu_cmp(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSig
         }
     };
     let result: RefCell<Result<Cmp, String>> = RefCell::new(Ok(Cmp::Equal));
-    if let Some(ref reader) = shell.io.stdin.take_pipe() {
+    if let Some(ref reader) = shell.io.stdin.take_reader() {
         let _fd_lock = crate::compat::lock_stdio_redirect();
         crate::compat::with_stdin_redirected(reader, || {
             *result.borrow_mut() = cmp::cmp(&params);

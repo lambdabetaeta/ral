@@ -24,10 +24,10 @@ echo $version
 # caller-file-relative module loading
 mkdir -p /tmp/ral-mod-test/sub
 echo "let x = 9" > /tmp/ral-mod-test/sub/inner.ral
-echo 'let m = !{use ''sub/inner.ral''}
+echo #'let m = !{use 'sub/inner.ral'}
 let via_use = $m[x]
-source ''sub/inner.ral''
-let via_source = $x' > /tmp/ral-mod-test/entry.ral
+source 'sub/inner.ral'
+let via_source = $x'# > /tmp/ral-mod-test/entry.ral
 let entry = use '/tmp/ral-mod-test/entry.ral'
 if $[not !{equal $entry[via_use] 9}] { fail [status: 1] }
 if $[not !{equal $entry[via_source] 9}] { fail [status: 1] }

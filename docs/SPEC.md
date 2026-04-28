@@ -20,7 +20,7 @@ let deploy   = { |h| echo $h }         # stores the parameterised block
 deploy 'prod'                          # applies it
 ```
 
-The formal model is call-by-push-value; see §20.9.
+The formal model is call-by-push-value; see §20.8.
 
 ## 1  Grammar
 
@@ -98,7 +98,7 @@ NAME       = [^ \t\n|{}[\]$<>"',();!~^/]+
 SLASH_WORD = NAME? ('/' NAME?)+
 TILDE_WORD = '~' NAME? ('/' NAME?)*
 WORD       = NAME | SLASH_WORD | TILDE_WORD
-QUOTED     = '\'' ( [^'] | '\'\'' )* '\''
+QUOTED     = '#'^n '\'' .* '\'' '#'^n   (n ≥ 0; close = '\'' followed by ≥ n '#'s)
 INTERP     = '"' (ICHAR | ESCAPE | deref ('[' word ']')* | force | expr)* '"'
 ICHAR      = [^"\\$!]
 ESCAPE     = '\' [nte\\0"$![\n]
@@ -116,21 +116,18 @@ single token family with three lexer-determined shapes:
 - `TILDE_WORD` — a tilde-shaped word such as `~`, `~user`, `~/path`,
   or `~user/path`.
 
-The lexer classifies the shape once; later phases use that structure
-directly and do not rediscover slash or tilde structure from raw text.
-`!`, `~`, and `^` are excluded so that `!{…}` (force), `TILDE_WORD`,
-and `^name` tokenise without lookahead — quote if you need either
-character inside a word (`'foo!bar'`). A literal `!` must be quoted
-(`'!'`): unquoted `!` is always the force prefix. `\` has no special
-meaning outside double-quoted strings: `C:\Users\foo` is one `NAME`
-token.
+The lexer classifies the shape once; later phases consume that
+structure directly rather than rediscover slash or tilde shape from
+raw text.  The characters `!`, `~`, and `^` are excluded so that
+`!{…}`, `TILDE_WORD`, and `^name` tokenise without lookahead, and a
+word that needs any of those literally must be quoted (`'foo!bar'`,
+`'!'`).  Backslash has no special meaning outside `"…"`, so
+`C:\Users\foo` is a single `NAME`.
 
-`#` starts a comment only when it appears at the start of a new token
-(after whitespace or a delimiter).  Mid-word, it is an ordinary
-character: `curl http://host:8080/foo#anchor` is a single
-`SLASH_WORD`.
-This matches the POSIX rule: "a word beginning with `#` causes that word
-and all subsequent characters up to the next newline to be ignored."
+`#` starts a comment only at the start of a new token, after
+whitespace or a delimiter; mid-word it is an ordinary character, so
+`curl http://host:8080/foo#anchor` remains one `SLASH_WORD`.  This
+mirrors the POSIX comment rule.
 
 `:` becomes its own token only when followed by EOF, whitespace, or
 `]`. Thus `host: val` tokenises as `NAME ':' NAME`, while
@@ -149,13 +146,17 @@ Value ::= Unit | Bytes | String | Int | Float | Bool
         | List Value | Map String Value | Block | Handle
 ```
 
-`String` is UTF-8 text. `Bytes` is an opaque finite byte sequence,
-possibly containing NUL; equality is bytewise, `length` counts bytes.
-There is no bytes literal. `Bytes` values arise from `from-bytes`
-(terminating a byte pipeline), from encoders (`to-X`, §15), and from
-I/O builtins whose declared return type is `Bytes`. External commands
-and byte-output builtins return `String`; to retain their output as
-`Bytes`, finish the pipeline with `| from-bytes`.
+`String` is UTF-8 text. `Bytes` is a finite byte sequence, possibly
+containing NUL; equality is bytewise and `length` counts bytes.
+`Bytes` is opaque to language operations — it has no literal form,
+and string operations refuse it — but a `Bytes` value renders as
+lossy UTF-8 when printed (in `echo`, the REPL, and the `ral --audit`
+JSON dump), so byte fields stay readable without an explicit decode.
+`Bytes` values arise from `from-bytes` (terminating a byte pipeline),
+from encoders (`to-X`, §15), and from I/O builtins whose declared
+return type is `Bytes`.  External commands and byte-output builtins
+return `String`; to retain their output as `Bytes`, finish the
+pipeline with `| from-bytes`.
 
 Expression blocks `$[…]` are a unified expression language over
 numbers, booleans, and comparisons.  Arithmetic operators `+ - * / %`
@@ -172,14 +173,14 @@ parenthesised sub-expressions.  `!` inside `$[…]` is always force —
 the `not` keyword is the logical negation.  String comparison is
 `lt`/`gt` (§16.2).
 
-Maps preserve insertion order. Sets are `Map String Unit` by
-convention; `has` and `diff` are builtins, `union` and `intersect`
-prelude functions. `Handle α` is opaque, parameterised by the
-return type of the spawned block: only `await`, `race`, `cancel`,
-`disown` apply; printed as `<handle:PID>`. Handles arise from trailing
-`&` on a pipeline (§13.1) and from `par` / `_fork`. `await` of a
-`Handle α` yields a record carrying `value: α` along with the block's
-captured stdout, stderr, and exit status (§13.3).
+Maps preserve insertion order, and sets are `Map String Unit` by
+convention with `has` and `diff` as builtins and `union` and
+`intersect` as prelude functions.  `Handle α` is opaque and
+parameterised by the return type of the spawned block: only `await`,
+`race`, `cancel`, and `disown` apply, and a handle prints as
+`<handle:PID>`.  Handles arise from a trailing `&` on a pipeline
+(§13.1) and from `par` and `_fork`; their await semantics are
+specified in §13.3.
 
 The literals `true`, `false`, `unit`, and numeric NAME tokens (matching
 `NUMBER`) are recognised as values before any name lookup. The words
@@ -209,21 +210,18 @@ implicitly only in head position (§4); elsewhere use `$name`. Tail
 calls reuse the current frame.
 
 **Recursion and generalisation.** A maximal run of consecutive named
-`let`s in the same scope forms a **group**. The elaborator builds a
-dependency graph on the group (edge `i → j` when `let_j`'s name appears
-free in `let_i`'s RHS) and partitions it into strongly connected
-components:
-
-- a singleton SCC with no self-edge emits as a plain `let`, in
-  topological order within the group — so forward references to a
-  later name are legal as long as they do not form a cycle;
-- a cyclic SCC whose members are **all lambdas** emits as `letrec`,
-  supporting self- and mutual recursion, monomorphic within the group
-  (§20.5);
-- a cyclic SCC containing any non-lambda falls back to plain `let` in
-  topological order: the runtime's letrec binding only meaningfully
-  applies to lambdas, so a non-lambda cycle would bind to an
-  uninitialised slot.
+`let`s in the same scope forms a **group**, on which the elaborator
+builds a dependency graph (with an edge `i → j` whenever `let_j`'s
+name appears free in `let_i`'s RHS) and partitions into strongly
+connected components.  An acyclic singleton emits as a plain `let`
+in topological order, so a forward reference to a later name in the
+group is legal as long as it does not close a cycle.  A cyclic SCC
+whose members are **all lambdas** emits as `letrec`, supporting self
+and mutual recursion and remaining monomorphic within the group
+(§20.5).  A cyclic SCC containing any non-lambda falls back to plain
+`let` in topological order, since the runtime's `letrec` binding
+applies only to lambdas and a non-lambda cycle would observe an
+uninitialised slot.
 
 ```
 let f = { |x| $[$x + 1] }
@@ -235,9 +233,9 @@ let odd  = { |n| if $[$n == 0] { return false } else { even $[$n - 1] } }
 -- even, odd form a lambda SCC → letrec
 ```
 
-A second `let` for an already-bound name in the same group **splits**
+A second `let` for a name already bound in the same group **splits**
 the group at the shadow point; each half is analysed independently,
-preserving source-order semantics across the split:
+preserving source-order semantics across the divide:
 
 ```
 let x = 1
@@ -355,21 +353,14 @@ not what is wanted.
 
 ### 4.1  Head-form lookup
 
-Head lookup is determined by head syntax:
-
-1. **Bare head** — local scope, then prelude; if found, the value is
-   applied/forced per the head rule above. Otherwise aliases
-   (interactive only), then builtins, then `$env[PATH]`.
-2. **Path head** — no lookup; execute the exact path after tilde
-   expansion (if any).
-3. **`^name`** — skip value, alias, and builtin lookup; resolve via
-   `$env[PATH]` only.
-4. **Explicit value head** — evaluate as a value and apply it; no
-   command-side lookup occurs.
-
-Under `grant`, external dispatch is filtered by `exec` (§11.1). `$name`
-uses only the value namespace. Bare non-head words do not consult
-either namespace; map-key positions are not head positions.
+A bare-head lookup walks local scope then the prelude before falling
+through to aliases (interactive only), builtins, and `$env[PATH]` in
+turn; `^name` is the same fall-through with the value, alias, and
+builtin steps skipped.  An external dispatch reached this way is
+further filtered by `exec` whenever a `grant` is in force (§11.1).
+The value namespace is consulted only through `$name` and through the
+implicit head step; bare non-head words and map-key positions never
+trigger either kind of lookup.
 
 ### 4.2  Pipelines and command results
 
@@ -451,64 +442,75 @@ keyword — is a parse error; write `else { … }` instead.
 
 ```
 if $ok { echo yes }                    # one-armed: type F Unit
-if $ok { echo yes } else { echo no }   # two-armed
 if $a { echo a } elsif $b { echo b } else { echo c }
-if $flag !{f 'x'} else !{f 'y'}
-if $is-mac                             # multiline
-    { /bin/ls -G ...$args }
-    else { /bin/ls --color=auto ...$args }
 ```
 
-`if` takes a `Bool`; `?` reacts to failure. They do not cross: `if`
-rejects non-Bool conditions (a type error). A predicate returning
-`false` is still a successful command. When success must be inspected
-as data, use `try`:
+`if` takes a `Bool` and `?` reacts to failure; the two never cross,
+since `if` rejects non-Bool conditions as a type error and a
+predicate returning `false` is still a successful command.  When
+success itself must be inspected as data, use `try`:
 
 ```
 let r = _try { grep -q p f }
 if $r[ok] { echo found } else { echo missing }
 ```
 
-| Need                    | Mechanism |
-|-------------------------|-----------|
-| fallback on failure     | `?`       |
-| two-branch on `Bool`    | `if`      |
-| inspect success/failure | `try`     |
-| multi-way pattern dispatch | `case`    |
+For multi-way pattern dispatch on a value, see `case` (§17).
 
 ### 4.5  Currying
 
-`{ |x y z| M }` is the same as `{ |x| { |y| { |z| M } } }`. Under-application returns
-the inner block; exact application runs `M`; over-application is an
-arity error. Outside head position, curried blocks are explicit
-with `$`. `_` discards a parameter. `{ || M }` is a syntax error; use
-`{}` for a zero-argument block. The linter warns when an
-under-applied block is discarded.
+`{ |x y z| M }` desugars to `{ |x| { |y| { |z| M } } }`, so
+under-application returns the inner block, exact application runs
+`M`, and over-application is an arity error.  Outside head position
+a curried block must be reached explicitly with `$`, and `_` discards
+a parameter; the linter warns when an under-applied block is
+discarded.  `{ || M }` is a syntax error — write `{}` for the
+zero-argument case.
 
 ### 4.6  `return`
 
-`return` is parsed before command dispatch; it evaluates at most one
-value argument, producing `unit` if absent. Inside a parameterised
-block it exits the enclosing block; at file scope it exits the file
-with status 0. There is no non-local control flow.
+`return` is parsed before command dispatch and evaluates at most one
+value argument, producing `unit` when none is given.  Inside a
+parameterised block it exits the enclosing block; at file scope it
+exits the file with status 0.  There is no non-local control flow.
 
 ### 4.7  Argument spreading
 
-`...$xs` spreads a list into positional arguments. When arguments are
-passed to an external command, `Int`/`Float` are formatted decimally
-and `Bool` as `"true"`/`"false"`; any non-scalar value (`Bytes`,
-`List`, `Map`, `Block`, `Handle`) is an error — argv is
-textual.
+`...$xs` spreads a list into positional arguments.  Because argv is
+textual, only scalars survive the boundary: `Int` and `Float` are
+formatted decimally, `Bool` as `"true"` or `"false"`, and any
+non-scalar value (`Bytes`, `List`, `Map`, `Block`, `Handle`) is an
+error.
 
 ## 5  Strings and bytes
 
-Single quotes are literal; embed `'` by doubling (`'it''s'`). Double
-quotes support `$`-interpolation, `!`-force, and the escapes
-`\n \t \\ \0 \e \" \$ \!`. A bare `!` not followed by `{` or `$` is
-literal (`\!` is explicit). To prevent `$name` from consuming a
-following `[` as an index, use `$(name)[…]` to delimit the variable. Both string forms may span lines; the REPL
-prompts for continuation when a quote is still open.  Use `dedent` to
-strip common leading indentation from a multiline literal:
+Quotation comes in two complementary forms.  Single quotes denote a
+literal: the body is taken verbatim, with no escape sequences and no
+interpolation.  Double quotes denote an interpolating string: `$name`
+substitutes a binding, `!{cmd}` substitutes the captured stdout of a
+command, and the escapes `\n \t \\ \0 \e \" \$ \! \xNN \u{X..}` produce
+their conventional characters.
+
+Within a literal, an embedded `'` is admitted by raising the hash
+level: `#'…'#` closes only on `'#`, `##'…'##` on `'##`, and in general
+the closing delimiter is a `'` followed by exactly the opening hash
+count.  A `'` in the body followed by fewer hashes than the opening
+level is itself part of the body.  At top level, a run of `#`s not
+followed by `'` is a comment, so the two uses of `#` do not collide.
+
+The numeric escapes inside `"…"` are constrained.  `\xNN` requires
+exactly two hex digits and must lie in `\x00..=\x7F`; for non-ASCII
+bytes, use `Bytes`.  `\u{X..}` admits 1 to 6 hex digits and must denote
+a valid Unicode scalar value.  Any other `\X` is a lex error rather
+than a silent literal, on the principle that an unfamiliar escape is
+more often a typo than a deliberate choice.  A bare `!` not followed by
+`{` or `$` remains literal, with `\!` available as the explicit form.
+Where `$name` would otherwise be followed by `[`, the form
+`$(name)[…]` delimits the variable from the index that follows.
+
+Both quoted forms may span multiple lines, and the REPL prompts for
+continuation while a quote remains open.  `dedent` strips the common
+leading indentation from a multiline literal:
 
 ```
 let msg = dedent '
@@ -518,36 +520,41 @@ let msg = dedent '
 '
 ```
 
-Interpolation coerces scalars: `Int`/`Float` decimally, `Bool`
-`"true"`/`"false"`, `Unit` `""`. Interpolating a non-scalar (`Bytes`,
-`List`, `Map`, `Block`, `Handle`) is a type error.
+Interpolation coerces only scalar values.  `Int` and `Float` are
+formatted decimally, `Bool` becomes `"true"` or `"false"`, and `Unit`
+becomes the empty string.  Interpolating any other value — `Bytes`,
+`List`, `Map`, `Block`, or `Handle` — is a type error, since these
+have no canonical textual rendering.
 
-Outside quotes, `$name` is a separate atom; concatenation is by
-interpolation: `"$dir/file.txt"`, `"$host:$port/api"`.
+Outside quotation, `$name` is a separate atom in its own right, and
+strings are concatenated by writing the parts inside an interpolating
+string, as in `"$dir/file.txt"` or `"$host:$port/api"`.
 
 ## 6  Collections
 
-`[a, b, c]` is a list; `[k: v, ...]` a map; `[]` empty list; `[:]`
-empty map. Commas required; trailing commas permitted; newlines
-inside `[…]` are insignificant.
+Lists and maps share one bracket form.  `[a, b, c]` is a list and
+`[k: v, …]` a map; the empty list is `[]` and the empty map `[:]`.
+Entries are separated by commas, a trailing comma is permitted, and
+newlines inside the brackets are not significant.
 
-`...` spreads. In a map, explicit entries take priority over spread
-entries **regardless of source order**:
+`...` spreads one collection into another.  In a map, explicit entries
+take priority over spread entries **regardless of source order**, so
+the textual position of the override does not matter:
 
 ```
 let cfg = [host: 'db', port: 5432]
 let r   = [...$cfg, port: 9090]    # r : [port: Int, host: String]
 ```
 
-The typing is scoped-label rows (§20.8).
+The typing follows the scoped-label row discipline of §20.7.
 
-Map keys may be bare words, quoted strings, or derefs; `[$k: $v]`
-computes. Computed keys must be `String` at runtime.
+Map keys may be bare words, quoted strings, or derefs.  The form
+`[$k: $v]` computes the key at runtime, where it must be a `String`.
 
 ## 7  Destructuring
 
 Patterns appear on the LHS of `let` and as parameters of parameterised
-blocks (including the blocks that make up `case` clauses, §17.1).
+blocks (including the blocks that make up `case` clauses, §17).
 Pattern forms:
 
 - `_` matches anything, binds nothing;
@@ -568,59 +575,65 @@ let [name: n, addr: [city: c]] = $p
 
 ## 8  Modules
 
-`use p` evaluates `p` and returns a map of its top-level bindings
-excluding `_`-prefixed names. Paths resolve relative to the containing
-file; `RAL_PATH` provides additional search paths.
-
+`use p` evaluates `p` and returns a map of its top-level bindings,
+excluding any `_`-prefixed names; paths resolve relative to the
+containing file, with `RAL_PATH` providing additional search paths.
 Results are cached per-process by canonical absolute path (symlinks
-resolved where available); the same file reached via different paths
-is one entry. The cache is not invalidated on file change; to pick up
-changes, restart the process. Module side effects run on first load
-only.
+resolved where the OS supplies them), so the same file reached via
+different paths is one entry.  The cache is not invalidated on file
+change — restart the process to pick up edits — and a module's side
+effects run only on first load.
 
-`source p` evaluates into the current scope (not a child), merging
-all bindings including `_`-prefixed ones; results are not cached.
-
-Both detect circular references and report an error.
+`source p` evaluates into the current scope rather than a child,
+merging every binding including `_`-prefixed ones, and is never
+cached.  Both forms detect and reject circular references.
 
 ## 9  Environment
 
-`$env` is a read-only map of environment variables; `$nproc` is CPU
-count (`Int`). `within [env: …]` scopes overrides (§3.2); there is
-no `setenv`.
+`$env` is a read-only map of environment variables and `$nproc` the
+CPU count as an `Int`.  Overrides are scoped through `within [env: …]`
+(§3.2); there is no `setenv`.
 
-`~/.ralrc` is a ral script whose last expression is a map with
-optional keys `env`, `prompt`, `bindings`, `aliases`, `edit_mode`
-(`"emacs"` | `"vi"`), `plugins`, `theme`. `bindings` populates the
-interactive value namespace; `aliases` the interactive command
-namespace; `plugins` is a list of plugin names loaded at startup
-(§18.1).
+`~/.ralrc` is a ral script whose last expression is a configuration
+map with optional keys `env`, `prompt`, `bindings`, `aliases`,
+`edit_mode` (`"emacs"` or `"vi"`), `plugins`, and `theme`.  Of these,
+`bindings` populates the interactive value namespace, `aliases`
+populates the interactive command namespace, and `plugins` lists
+the plugins to load at startup (§18.1).
 
-The `theme` key is a map with optional fields `value_prefix` (string
-prepended to every printed value; default `"=> "`) and `value_color`
-(one of `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`,
-`white`, `none`; default `yellow`).  Color is suppressed when stdout
-is not a tty, `NO_COLOR` is set, or `RAL_INTERACTIVE_MODE=minimal`.
+The `theme` key is a map with two optional fields.  `value_prefix` is
+a string prepended to every printed value, defaulting to `"=> "`.
+`value_color` is one of `black`, `red`, `green`, `yellow`, `blue`,
+`magenta`, `cyan`, `white`, or `none`, defaulting to `yellow`.  Colour
+is suppressed whenever stdout is not a tty, `NO_COLOR` is set, or
+`RAL_INTERACTIVE_MODE=minimal`.
 
 ## 10  Error handling
 
 ### 10.0  Failure propagation
 
-A nonzero exit or runtime error is a failure; propagation is always
-on.
+Any nonzero exit status or runtime error counts as a failure, and
+propagation is always on; the surrounding form decides what happens
+next.
 
-- sequential `a; b; c` — first failure halts;
-- `?` chain `a ? b ? c` — first success wins (all arms must have the same return type);
-- pipeline `a | b | c` — any non-SIGPIPE failure fails the pipeline;
-- `try` — catches; handler runs; on success the body value is
-  returned;
-- `for`/`map` body — failure stops iteration; `return` exits the
-  current iteration (the body is a parameterised block);
-- `spawn` — failure captured in the handle, surfaced on `await`;
-- top level — unhandled failure terminates with that status.
+- sequential `a; b; c` — the first failure halts the rest;
+- `?` chain `a ? b ? c` — the first success wins, and all arms must
+  have the same return type;
+- pipeline `a | b | c` — any non-SIGPIPE failure fails the whole
+  pipeline;
+- `try` — catches the failure and runs its handler; if the body
+  succeeds, its value is returned;
+- `for` and `map` — a failing body stops iteration, while `return`
+  exits the current iteration (the body is itself a parameterised
+  block);
+- `spawn` — failure is captured in the handle and surfaced on `await`;
+- top level — an unhandled failure terminates the process with that
+  status.
 
-`try` suppresses; `guard` runs cleanup but does not suppress; `attempt`
-(prelude) runs a thunk and discards both the result and any failure.
+The three forms that interact with cleanup are complementary.  `try`
+suppresses the failure entirely; `guard` runs cleanup but lets the
+original failure continue propagating; the prelude's `attempt` runs a
+thunk and discards both the result and any failure.
 
 ### 10.1  `_try`, `_audit`, `try`
 
@@ -631,18 +644,18 @@ on.
  stdout: Bytes, line: Int, col: Int]
 ```
 
-On success, `ok = true`, `status = 0`, `value` holds the result, `cmd`
-is `""`, `message` is empty, `stdout` carries every byte the body wrote
-to fd 1 during evaluation, and `line`/`col` point at the `_try` call
-site. On failure, `ok = false`, `status` carries the failing exit code,
-`cmd` names the failing command, `message` is the failure text (the
-runtime error's own message, or the failing external command's stderr
-decoded as UTF-8), `stdout` carries any bytes written before the
-failure, and `line`/`col` point at the failing command's position in
-source. The record's shape is the input shape `fail` accepts (modulo
-`stdout`, which `fail` ignores), so `try { ... } { |e| fail $e }`
-re-raises verbatim. A body that returns `false` is *successful* —
-`ok = true`, `value = false`. Only runtime errors count as failure.
+On success the body's result is in `value`, `ok` is true, `status` is
+zero, and `line`/`col` point at the `_try` call site.  On failure
+`ok` is false, `status` carries the exit code, `cmd` names the
+failing command, `message` is the failure text (the runtime error's
+own message, or the failing external command's stderr decoded as
+UTF-8), and `line`/`col` point at the failing command's position in
+source.  In either case `stdout` holds every byte the body wrote to
+fd 1 during evaluation.  The record's shape is the input shape `fail`
+accepts (modulo `stdout`, which `fail` ignores), so
+`try { ... } { |e| fail $e }` re-raises verbatim.  Only runtime
+errors count as failure: a body that returns `false` is still
+successful, with `ok = true` and `value = false`.
 
 `_try` is a *complete* capture: §4.3's non-final-flush rule is
 suppressed inside the body, so multi-stage bodies leave their full
@@ -668,7 +681,7 @@ to stderr (`ral: try caught error (line:col): message`). Release
 builds stay silent unless `RAL_DEBUG` is set in the environment.
 This surfaces errors that would otherwise be swallowed silently by
 probes like `try { return $env[X] } { |_| return '' }` and by
-library wrappers such as `_ed-tui` (§17) that use `try` to recover
+library wrappers such as `_ed-tui` (§18.1) that use `try` to recover
 from TUI failures.
 
 ### 10.2  `_guard`
@@ -679,62 +692,53 @@ logged and discarded. `guard` is the prelude wrapper.
 
 ### 10.3  Execution tree
 
-A recursive record with a common prefix
+Every node has the same shape, with a `kind` discriminator selecting
+how the remaining fields are read:
 
 ```
-Common = [kind: String, script: String, line: Int, col: Int,
-          children: [Node], start: Int, end: Int, principal: String]
+Node = [kind: String, cmd: String, args: [String], status: Int,
+        script: String, line: Int, col: Int,
+        stdout: Bytes, stderr: Bytes, value: α,
+        children: [Node], start: Int, end: Int, principal: String]
 ```
 
-and kind-specific extensions. `Node` is open in its fields: consumers
-read `kind` and `equal`-dispatch, accessing further fields through
-row polymorphism (§20.1). V1 defines three shapes.
+Two kinds are emitted.  A `command` node records the execution of a
+single command — external program, builtin, or user function — and
+populates `cmd`, `args`, `status`, `stdout`, `stderr`, and `value` in
+the obvious way.  A `capability-check` node records a `grant` decision
+and additionally carries `resource: String` (`"exec"` or `"fs"`) and
+`decision: String` (`"allowed"` or `"denied"`); for an allowed `fs`
+check, the matched prefix appears as `granted: String`, and the
+resource-specific fields (`name`, `args` for `exec`; `op`, `path` for
+`fs`) are spliced into the same map.  `Node` is therefore open: a
+consumer reads `kind`, dispatches with `equal`, and accesses the
+kind-specific fields through row polymorphism (§20.1).
 
-**Command** (`kind = 'command'`):
+`script` is the source path, `""` for stdin, and `"<prelude>"` for
+prelude internals; prelude wrappers record the user's call site rather
+than their own.  `stdout` and `stderr` carry the raw bytes the command
+emitted to fd 1 and fd 2; `ral --audit`'s JSON output decodes them as
+lossy UTF-8 strings so the tree stays readable.  `value` is the
+returned datum (§4.2), and for pure-value builtins `stdout` is empty.  The pair `start`/`end` are
+microseconds since the Unix epoch; `principal` records `$USER` at the
+moment the node was constructed, on every node, so an extracted
+subtree remains self-describing.
 
-```
-[cmd: String, args: [String], status: Int,
- stdout: Bytes, stderr: Bytes, value: α, …Common]
-```
-
-**Scope** (`kind = 'scope'`):
-
-```
-[scope: String, status: Int, value: α, …Common]
-```
-
-**Capability-check** (`kind = 'capability-check'`, emission rules
-§11.4):
-
-```
-[resource: String, decision: String, granted: String, …Common]
-```
-
-Resource-specific fields: `exec` — `name: String`, `args: [String]`;
-`fs` — `op: String`, `path: String`.
-
-`script` is the source path, `""` for stdin, `"<prelude>"` for
-prelude internals. Prelude wrappers record the user's call site.
-`stdout` is emitted bytes; `value` is the returned datum (§4.2). For
-pure-value builtins, `stdout` is empty. `start`/`end` are microseconds
-since epoch; `principal` is `$USER` at record time, per-node so
-extracted subtrees are self-describing.
-
-Leaves are typically `command` or `capability-check`; interiors are
-`scope` nodes for `spawn`, `grant`, `try`, `for`, `map`, `audit`,
-`within`, `guard`. Tail-recursive calls are flattened: a
-`while` of *N* iterations produces one node with *N* children.
-
-Construction is lazy: plain execution builds nothing; `_try` builds
-only the flat record; `_audit` builds its subtree; `ral --audit`
-builds for the whole script. Capability-check nodes appear only
-under `grant [… audit: true]`. Inside `_audit`, `stderr` per node is
-capped at 64 KB; outside, `stderr` flows to the terminal.
+Tail-recursive calls are flattened, so a `while` of *N* iterations
+produces one node with *N* children rather than a linear chain of
+depth *N*.  Construction is lazy: plain execution builds nothing,
+`_try` builds only the flat record for its body, `_audit` builds the
+subtree for its body, and `ral --audit` builds the tree for the whole
+script.  Capability-check nodes appear only when an enclosing `grant`
+sets `audit: true`.  Inside `_audit`, each node's `stderr` is capped
+at 64 KB; outside `_audit`, `stderr` flows to the terminal as usual.
 
 ### 10.4  Debugging
 
-`ral --audit script.ral` writes the tree as JSON to stdout and script
-output to stderr. No step-through debugger in v1.
+`ral --audit script.ral` runs the script and writes the resulting
+execution tree as JSON to stderr; the script's own output reaches
+its usual destinations on fd 1 and fd 2 underneath that.  Pass
+`--pretty` for an indented form.  There is no step-through debugger.
 
 ### 10.5  Error messages
 
@@ -749,26 +753,28 @@ boundaries surface it differently:
 - `try` / `_try` puts the failing command's stderr (decoded as UTF-8)
   into `message: String`.  No raw bytes — wrap the body in `&` if you
   need the bytes.
-- `audit` / `_audit` records each external command's stderr as `Bytes`
-  in its tree node, indexed by position.
+- `audit` / `_audit` records each command's stderr as `Bytes` in its
+  tree node, indexed by position; `ral --audit`'s JSON output renders
+  them as lossy UTF-8.
 - `await` of a `Handle α` (§13.3) returns the spawned block's full
   fd 2 capture as `stderr: Bytes` in the result record.
 
 ```
 try { make } { |err| echo $err[message] }
 let report = audit { make -j4 }
-let text   = to-bytes $report[children][0][stderr] | from-string
+echo $report[children][0][stderr]
 let r      = make -j4 &
 let r      = await $r
-echo !{to-bytes $r[stderr] | from-string}
+echo $r[stderr]
 ```
 
 ### 10.7  Signals
 
-SIGINT/SIGTERM/SIGHUP set a flag; the evaluator checks the flag
-between statements and begins unwinding. `guard` cleanup runs during
-unwinding. A second signal is deferred until cleanup completes; a
-third terminates immediately.
+SIGINT, SIGTERM, and SIGHUP set a flag that the evaluator checks
+between statements; once observed, the flag begins an unwinding
+during which `guard` cleanups run.  A second signal arriving in the
+unwinding window is deferred until cleanup completes, and a third
+terminates the process immediately.
 
 ## 11  Capabilities (`grant`)
 
@@ -797,44 +803,37 @@ Unlisted names are denied.
 
 ### 11.2  `fs`
 
-Governs ral builtins that touch the filesystem (`glob`, `list-dir`,
-redirects, the `_fs` family). Two
-sub-keys `read`, `write`, each a list of path prefixes. Paths are
-checked against canonical absolute paths after resolution against the
-active `within [dir: …]`; `.`/`..` are collapsed; symlinks are
-resolved when the OS supplies that information. A `within [dir: …]`
-inside `grant` cannot escape: only the resolved path matters.
+Governs the ral builtins that touch the filesystem — `glob`,
+`list-dir`, redirects, the `_fs` family — through two sub-keys
+`read` and `write`, each a list of path prefixes.  A path is
+canonicalised after resolution against the active `within [dir: …]`,
+with `.` and `..` collapsed and symlinks resolved when the OS
+exposes them, so a `within [dir: …]` inside a `grant` cannot escape
+its enclosing policy: only the resolved path matters.  An empty map
+`fs: [:]` denies filesystem access entirely; `/dev/null` is exempt
+from both checks as a discard device.
 
-`fs: [read: ['/data']]` is read-only. `fs: [:]` denies filesystem
-access for ral builtins. `/dev/null` is exempt from both checks: it is
-a discard device with no observable side effect.
-
-`fs` does not restrict external programs' own I/O — they need their
-binary, linker, and system libraries. Use `exec` and `within [handlers:]`
-to shape that surface. Where OS sandboxing is available, write policy and
-non-system read paths are enforced for externals as defence in depth.
+`fs` does not restrict an external program's own I/O — those need
+their binary, linker, and system libraries — so use `exec` together
+with `within [handlers:]` to shape that surface.  Where OS sandboxing
+is available, write policy and non-system read paths are also
+enforced for externals as defence in depth.
 
 ### 11.3  `net`
 
-Boolean. ral has no in-process network primitives, so `net` governs
-only the network access of external programs spawned inside the grant.
-Enforcement is OS-level: Seatbelt on macOS, a network-namespace unshare
-via bubblewrap on Linux. Both are all-or-nothing — there is no
-endpoint-level policy. On Windows there is no enforcement; `net: false`
-emits a one-time stderr warning that the restriction will not be
-applied.
+Boolean.  ral has no in-process network primitives, so `net` governs
+only the network access of external programs spawned inside the
+grant.  Enforcement is OS-level (§11.8) and all-or-nothing: there is
+no endpoint-level policy.
 
 ### 11.4  `audit`
 
 `audit: true` requests inclusion of capability-check events in any
-active execution tree. It is additive: once enabled, it remains
-enabled for nested grants. It does not itself build a tree. When an
-execution tree is being collected *and* an enclosing `grant` has
-`audit: true`, each `exec` and `fs` check emits a `capability-check`
-node immediately before the gated action (or alone on denial). `net`
-checks do not emit nodes. Field shape follows §10.3; `resource` is
-`"exec"` | `"fs"`; `decision` is `"allowed"` | `"denied"`; `granted`
-records the matched prefix on `fs` allows.
+execution tree that is already being collected; it does not itself
+build a tree, and once enabled it stays enabled across nested
+grants.  When such a tree is active, each `exec` or `fs` check emits
+a `capability-check` node (§10.3) just before the gated action — or
+alone if the action is denied — while `net` checks emit no nodes.
 
 ### 11.5  `editor`
 
@@ -871,9 +870,9 @@ grant [shell: [chdir: true]] {
 ```
 
 Omitting `shell` (or setting `shell: [chdir: false]`) denies `cd`.
-`cd` is an ordinary core builtin: it is parsed and evaluated like any
-other call, and obeys the capability gate uniformly in interactive,
-script, and agent contexts.  Bare `cd` (no argument) means `cd ~`.
+`cd` is an ordinary core builtin and obeys the gate uniformly across
+interactive, script, and agent contexts; bare `cd` with no argument
+means `cd ~`.
 
 ### 11.7  Attenuation
 
@@ -895,17 +894,19 @@ when available, not by ral head lookup.
 
 ### 11.8  Platform support
 
-In-process `exec`/`fs`/`net` checks apply everywhere. OS-level
-enforcement:
+In-process `exec`/`fs`/`net` checks apply on every platform.  OS-level
+enforcement varies:
 
 - **macOS** — Seatbelt (`sandbox_init_with_parameters`); ral
   re-executes itself inside Seatbelt when `fs:` is present or `net`
   is `false`, so builtins are also kernel-enforced.
-- **Linux** — bubblewrap + seccomp BPF (x86-64, AArch64); same
-  re-execution strategy.
-- **Windows** — no filesystem or network enforcement; in-process only.
-  Each external inside a `grant` is assigned to a Job Object capping
-  its process tree at 512.
+- **Linux** — bubblewrap with seccomp BPF (x86-64, AArch64), using
+  the same re-execution strategy.
+- **Windows** — no filesystem or network enforcement; only in-process
+  checks apply, and `net: false` emits a one-time stderr warning that
+  the restriction will not be applied.  Each external command inside
+  a `grant` is assigned to a Job Object capping its process tree at
+  512.
 
 ## 12  Testing
 
@@ -933,39 +934,37 @@ within [handlers: [deploy: { |args| echo ok }]] {
 ### 13.1  Model
 
 `spawn B` creates an isolated copy of the evaluator state and runs
-`B` concurrently. The child cannot affect the parent; communication
-is only through `await`. Immutability makes the copy safe without
-synchronisation. The implementation may use `fork(2)` or threads;
-both satisfy the isolation contract.
-
-The surface syntax is a trailing `&` on a pipeline:
+`B` concurrently; the child cannot affect the parent, and the only
+channel of communication is `await`.  Immutability makes the copy
+safe without synchronisation, so the implementation may use
+`fork(2)` or threads — both satisfy the isolation contract.  The
+surface syntax is a trailing `&` on a pipeline, which yields a
+`Handle α` immediately (where α is the pipeline's value-output
+type) without waiting:
 
 ```
 let h = long-task arg &           # spawns, binds Handle α to h
 grep pat file & ? echo fallback   # either arm of a ?-chain may be &
 ```
 
-`&` attaches to a pipeline (§1), returns a `Handle α` immediately
-(where α is the pipeline's value-output type), and does not wait;
-`await h` (§13.3) resolves the handle to a record. `par` and `_fork`
-produce the same kind of `Handle` programmatically.
+`par` and `_fork` produce the same kind of `Handle` programmatically.
 
 ### 13.2  `par` vs `map`
 
-`par` and `spawn` are for I/O-bound work; `map` for in-process
-transformation.
+`par` and `spawn` carry I/O-bound work, while `map` is for
+in-process transformation:
 
 ```
 par { |f| convert $f } !{glob '*.wav'} $nproc
 let results = map { |line| upper $line } $lines
 ```
 
-`par` is the one exception in the concurrency family: it is `map`
-parallelised, so it returns a list of *values* (with the await
-envelope stripped) rather than a list of records.  Workers' stdout
-and stderr are buffered per-task and discarded after the value is
-extracted.  If you need the bytes, build the parallelism out of
-`spawn`+`await` directly.
+Within the concurrency family, `par` is the one exception: it is
+`map` parallelised, returning a list of *values* with the await
+envelope stripped rather than a list of records.  Each worker's
+stdout and stderr are buffered per task and discarded once the value
+is extracted; for byte-level access, build the parallelism out of
+`spawn` + `await` directly.
 
 ### 13.3  `await` and `race`
 
@@ -979,35 +978,29 @@ extracted.  If you need the bytes, build the parallelism out of
 }
 ```
 
-`Handle` is parameterised: `spawn { B } : Handle α` where α is `B`'s
-return type, and `await : Handle α → { value: α, … }` ties the two
-together statically. A wrong-type consumer is a compile-time error.
+`Handle` is parameterised, with `spawn { B } : Handle α` for α equal
+to `B`'s return type and `await : Handle α → { value: α, … }` tying
+the two together statically, so a wrong-type consumer fails at
+compile time.
 
 `race [h₁,…]` returns the same record for the first completion and
-marks the rest cancelled; awaiting a cancelled handle fails (catch
-with `try`). Cancellation is handle-level; losers may continue in
-the background on some platforms.
+marks the rest cancelled — awaiting a cancelled handle fails, and
+must be caught with `try` if recovery is wanted.  Cancellation is
+handle-level only, so on some platforms the losing computations may
+continue in the background.
 
-Each handle owns independent stdout and stderr buffers. During
-execution, the spawned block's stdout and stderr write into these
-buffers; nothing reaches the caller's terminal or capture context.
-`await` does not auto-replay these bytes — they sit in `value.stdout`
-and `value.stderr` until the user reads them. To restore the
-bare-shell experience explicitly:
-
-```
-let h = make &
-let r = await $h
-echo !{to-bytes $r[stdout] | from-string}   # render bytes as a string and print
-```
-
-A redirect on the backgrounded pipeline (e.g. `cmd > log &`,
-`cmd 2> err &`) sends bytes to the redirect target and leaves the
-record's buffer empty. Buffers drain on first await; the record is
-cached so a second `await` returns the same fields. Each buffer is
-capped at 16 MiB; past the cap, a one-line truncation marker is
-appended and further bytes are dropped, so high-volume spawns should
-use an explicit redirect.
+Each handle owns independent stdout and stderr buffers; during
+execution the spawned block writes into them and nothing reaches the
+caller's terminal or capture context.  `await` does not auto-replay
+those bytes, so they sit in `value.stdout` and `value.stderr` until
+the user reads them — `echo $r[stdout]` suffices, since `Bytes`
+prints as lossy UTF-8 (§2).  Buffers drain on the first `await` and
+the record is cached, so a second `await` returns the same fields.
+Each buffer is capped at 16 MiB; past the cap, a one-line truncation
+marker is appended and further bytes are dropped, so high-volume
+spawns should use an explicit redirect.  A redirect on the
+backgrounded pipeline (`cmd > log &`, `cmd 2> err &`) sends bytes to
+the target instead and leaves the corresponding record buffer empty.
 
 If the block raised, `await` re-raises rather than producing a
 record. Wrap with `try` to recover:
@@ -1016,10 +1009,6 @@ record. Wrap with `try` to recover:
 let r = _try { await $h }
 if $r[ok] { use $r[value] } else { recover $r[status] }
 ```
-
-`par` is the exception in this family: it is `map` parallelised,
-returning a list of values (with the envelope stripped) rather than a
-list of records.
 
 ### 13.4  Child lifetime
 
@@ -1036,9 +1025,8 @@ for stdout and `[LABEL:err] ` for stderr. `watch` returns a
 `Handle`, so awaiting, racing, and cancelling apply as for `&`.
 
 The label is mandatory and may be any expression evaluating to a
-String: a literal (`"build"`), an interpolation (`"job-$i"`), or a
-variable deref (`$name`). The body is a `{ ... }` block passed as
-a thunk.
+String — a literal, an interpolation, or a deref — and the body is
+the usual `{ ... }` block:
 
 ```
 let h = watch "build" { cargo build }
@@ -1048,47 +1036,21 @@ watch "build-$target" { make }     # interpolation
 _await $h
 ```
 
-`watch` is a one-line prelude alias over the `_watch` builtin:
+In contrast to `&`, the streamed handle's buffers stay empty, so the
+awaited record's `stdout` and `stderr` fields contain nothing useful;
+the bytes have already gone to the caller's stdout, with stderr
+prefixed `[LABEL:err] ` rather than buffered separately.  Each
+prefixed line is emitted atomically through a shared framing sink, so
+sibling watchers interleave at line granularity but never tear, and
+under the interactive REPL the lines route through rustyline's
+external printer so they appear above the prompt rather than
+corrupting the editor.
 
-```
-let watch = { |label body| _watch $label $body }
-```
-
-Semantics relative to `&`:
-
-- `watch` streams live; the handle's buffers remain empty, so the
-  awaited record's `stdout`/`stderr` fields are empty. `&` buffers
-  in the handle and surfaces the bytes in the record on `await`
-  (§13.3).
-- Each line is emitted atomically to the caller's stdout — the
-  framing sink serialises complete `prefix + line + \n` writes
-  through a single underlying stdout, so sibling watchers' lines
-  interleave but never tear.
-- Stderr of a watched handle also streams to the caller's stdout
-  (prefixed `[LABEL:err] `); this differs from `&`, which buffers
-  stderr and surfaces it in the record's `stderr` field on `await`.
-- Under the interactive REPL the caller's stdout is routed through
-  rustyline's external printer, so lines from backgrounded watchers
-  appear above the active prompt rather than corrupting the line
-  editor.
-
-Caveats:
-
-- **Child-side line buffering.** When a child's stdout is a pipe,
-  most libcs block-buffer rather than line-buffer. `watch "py" { python … }`
-  arrives in chunks rather than live lines unless the child flushes;
-  `stdbuf -oL cmd` or the language's own line-buffer flag is the
-  escape hatch.
-- **Pipe backpressure.** The kernel pipe holds ~16–64 KiB; a slow
-  fd 1 consumer will eventually block the child. This is the same
-  behaviour as `cmd | slow-reader`.
-- **`_race` and cancellation.** A cancelled watched handle's thread
-  exits when the child's writes return; any partial line carried
-  inside the framing sink is flushed at thread teardown.
-- **`--audit` interaction.** Audit reserves fd 1 for structured
-  output. Under `--audit`, watched output is still written to
-  stdout; redirect the audit log with `--audit-file` if both are
-  wanted.
+The usual pipe-buffering caveats apply: a child that block-buffers
+stdout will arrive in chunks unless coaxed (`stdbuf -oL`, language
+line-buffer flag), a slow consumer can backpressure the child once
+the kernel pipe fills, and a cancellation flushes any partial line
+in the framing sink at teardown.
 
 ## 14  Scripts
 
@@ -1117,13 +1079,13 @@ let repo_root = resolve-path "$here/.."
 ## 15  Unix interface
 
 `ask "prompt"` reads one line from `/dev/tty` (not stdin) and returns
-it as a `String`. Fails on EOF; an empty line is the empty string
-`""`, distinct from EOF.
+it as a `String`, failing on EOF; an empty line is the empty string
+`""` and remains distinct from end-of-file.
 
-**Codecs.** A codec is a pair `from-X` (decoder) / `to-X` (encoder).
-Decoders read bytes from the pipeline and return a structured value;
-encoders take a value, emit those bytes on the pipe, and return them
-as `Bytes`.
+**Codecs.** A codec is a pair `from-X` (decoder) and `to-X` (encoder)
+covering one direction each.  A decoder reads bytes from the pipeline
+and returns a structured value; an encoder takes a value, emits the
+corresponding bytes on the pipe, and also returns them as `Bytes`.
 
 | Decoder        | In      | Out                              |
 |----------------|---------|----------------------------------|
@@ -1143,33 +1105,35 @@ fails on invalid JSON; `from-bytes` cannot fail.
 | `to-json`    | JSON-serialisable | `Bytes` |
 | `to-bytes`   | `Bytes`           | `Bytes` |
 
-`to-bytes` accepts only `Bytes`; encode a string with `to-string`.
-Encoders are first-class; partial application works (`map to-json
-$values`).  There is no explicit-argument decoder.  When a value is in
-hand, route it through the matching encoder and pipe into the
-decoder: `to-bytes $b | from-string`, `to-string $s | from-json`.
+`to-bytes` accepts only `Bytes` — encode a string with `to-string`
+first — and encoders are first-class, so partial application works
+(`map to-json $values`).  There is no explicit-argument decoder; to
+decode a value already in hand, route it through the matching
+encoder and pipe into the decoder, as in `to-bytes $b | from-string`
+or `to-string $s | from-json`.
 
 `split` and `match` take explicit arguments rather than reading from
-the pipeline. `glob` returns matching paths as a sorted list (empty
-on no match).
+the pipeline, and `glob` returns the matching paths as a sorted
+list, empty when nothing matches.
 
-**Redirects.** `>`, `>~`, `>>`, `2>`, `2>&1`, `<`. Stage modifiers, not
-values. `within [dir: …]` scopes directory changes (§3.2); `cd` exists only
-in the interactive layer. `cwd` returns the current directory as
-`String`.
+**Redirects.** The redirect operators are `>`, `>~`, `>>`, `2>`,
+`2>&1`, and `<`.  They are stage modifiers rather than values, and
+they apply only to the pipeline they decorate; persistent directory
+changes are scoped through `within [dir: …]` (§3.2) and `cd` exists
+only in the interactive layer, while the current directory is read by
+the `cwd` builtin as a `String`.
 
-`>` writes atomically to a regular file: the file appears in one step
-and a concurrent reader observes either the old contents or the new,
-never a partial write. Non-regular targets (TTYs, `/dev/null`, named
-pipes, sockets) cannot be replaced atomically; for those `>` falls
-back to streaming truncate-and-write.
-
-`>~` is the streaming truncate redirect — POSIX `>` semantics. Bytes
-land as they arrive; readers may observe a half-written file. Use
-`>~` when streaming visibility is needed (logs, FIFOs that should not
-be replaced) or when `>` would refuse the target.
-
-`>>` appends. `<` reads.
+The default write redirect `>` is atomic on regular files: the
+destination appears in one step, and a concurrent reader observes
+either the old contents or the new but never a partial write.  When
+the target is non-regular — a TTY, `/dev/null`, a named pipe, or a
+socket — atomic replacement is not available, and `>` falls back to a
+streaming truncate-and-write.  The variant `>~` is the streaming form
+unconditionally, with POSIX `>` semantics: bytes land as they arrive
+and a concurrent reader may observe a half-written file.  Use `>~`
+when streaming visibility is part of the contract (logs, FIFOs that
+must not be replaced) or when `>` would refuse the target.  `>>`
+appends, and `<` reads.
 
 **File I/O.** File reads and writes are redirect-and-codec: a decoder
 on `< $path` for reads, an encoder on `> $path` for writes.
@@ -1191,17 +1155,8 @@ echo done       >> $p                # append
 The interactive frontend decides once, at startup, whether the terminal
 accepts ANSI escape sequences and whether terminal round-trip queries
 (cursor-position report, device attributes) are worth attempting.  The
-decision is recorded in a `TerminalState` value and exposed to user code
-as the binding `$TERMINAL`.
-
-```
-$ ral
-ral $ echo $TERMINAL[supports_ansi]
-true
-ral $ echo $TERMINAL[is_tmux]
-false
-```
-
+decision is recorded in a `TerminalState` value and exposed to user
+code as the binding `$TERMINAL`, indexed in the usual way (§6).
 Fields of `$TERMINAL`:
 
 | Name            | Type   | Meaning                                         |
@@ -1237,15 +1192,11 @@ prompt: {
 }
 ```
 
-Map access uses the `$m[key]` form (§6), so the same rule applies to
-`$TERMINAL`.
-
-The point is that a terminal that cannot render ANSI, or a session that
-the user has told us to treat as dumb, must not see escape sequences at
-all — not in the prompt, not in syntax highlighting, and not in the
-form of a CPR query that will never be answered.  Everything else stays
-the same: the language is unchanged and scripts run identically under
-any mode.
+A terminal that cannot render ANSI, or one the user has told us to
+treat as dumb, must not see escape sequences at all — not in the
+prompt, not in syntax highlighting, and not as a cursor-position
+query that will never be answered.  The language itself is unchanged
+across modes: scripts run identically under any of them.
 
 ## 16  Builtins
 
@@ -1268,21 +1219,17 @@ not the preferred user surface. Return-type rules follow §4.2.
 | `write-json` | Write a value as JSON to a file |
 | `which` | Resolve lookup target; `String` or failure |
 | `cwd` | Current directory as `String` |
+| `diff` | Keys in `a` not in `b`, as a list |
 | `grep-files` | Regex over files; returns `[[file: String, line: Int, text: String]]` (1-based lines, ordered by input file then match order) |
 
 ### 16.2  Predicates
 
-All return `Bool`; a `false` return is successful.
-
+All return `Bool`, and a `false` return is itself successful:
 `exists`, `is-file`, `is-dir`, `is-link`, `is-readable`,
-`is-writable`, `is-empty` (List, Map, Bytes, or String),
-`equal` (structural), `lt`, `gt` (lexicographic on `String`).
+`is-writable`, `is-empty` (over List, Map, Bytes, or String),
+`equal` (structural), and `lt` / `gt` (lexicographic on `String`).
 
-### 16.3  Map operations
-
-`diff` — keys in `a` not in `b`.
-
-### 16.4  Private substrate
+### 16.3  Private substrate
 
 `_each`, `_map`, `_filter`, `_fold`, `_sort-list`,
 `_sort-list-by`, `_fold-lines`; `_fork`, `_await`, `_race`, `_cancel`,
@@ -1296,348 +1243,45 @@ families `_str` (`upper`, `lower`, `replace`, `replace-all`, `find-match`,
 `push`, `accept`, `tui`, `history`, `parse`, `ghost`, `highlight`,
 `state`; §18.1), `_plugin` (`load`, `unload`; §18.1).
 
-`_try-apply f val` applies `f` to `val`, catching *only*
-pattern-mismatch failures from destructuring `f`'s parameter; it
-returns `[ok: true, value: r]` on success and `[ok: false, value:
-unit]` on mismatch. Any other failure in `f`'s body propagates.
+`_try-apply f val` applies `f` to `val` and returns
+`[ok: true, value: r]` on success or `[ok: false, value: unit]` when
+`val` fails to destructure against `f`'s parameter pattern.  It
+catches the distinguished `PatternMismatch` error kind raised by
+destructuring (a block parameter, an explicit `let pat = …`, or a
+list/map shape mismatch), and only at the parameter-bind step: any
+other failure in `f`'s body, including a `PatternMismatch` from an
+inner `let`, propagates as usual, so `_try-apply` never silently
+swallows a bug.  `case` (§17) is built directly on top, trying each
+clause's parameter pattern in order and committing to the first
+match.
 
-The surface mechanism is a distinguished error kind, `PatternMismatch`,
-raised by destructuring — a block parameter `{ |pat| … }`, an explicit
-`let pat = …`, or a list/map index shape mismatch — when the value does
-not fit the pattern. `_try-apply` catches this kind **at the parameter
-bind step only**. If `f`'s body itself raises `PatternMismatch` (e.g. a
-failing inner `let [a, b] = …`), it propagates like any other error, so
-`_try-apply` never silently swallows a bug. `case` (§17.1) is built on
-top of this: it tries each clause's parameter pattern in turn and
-commits to the first one that matches.
+### 16.4  Bundled coreutils
 
-### 16.5  Bundled coreutils
-
-With `--features coreutils`, ≈ 60 GNU-compatible utilities
-(`ls`, `cat`, `wc`, `head`, `tail`, `cp`, `mv`, `rm`, `sort`,
-`tr`, `uniq`, …) are in-process byte-output builtins. On Unix
-they are normally on `PATH` and the feature is unnecessary; on
-Windows it produces a self-contained binary. `diffutils` adds `diff`
-and `cmp`. All are byte-output commands.
-
-`--features grep` enables all regex-backed builtins using ripgrep's
-engine: `grep-files`, `match`, `split`, `replace`, `replace-all`,
-`find-match`, `find-matches`. Without this feature these builtins are
-present but raise an error at runtime. For byte-stream grep, use the
-system `grep` on `PATH`.
+The `coreutils` Cargo feature folds a broad set of GNU-compatible
+utilities — `ls`, `cat`, `wc`, `head`, `tail`, `cp`, `mv`, `rm`,
+`sort`, `tr`, `uniq`, and around seventy more — into the binary as
+in-process byte-output builtins.  On Unix systems they are normally
+already on `PATH`, so the feature exists chiefly to produce a
+self-contained binary on Windows.  The `diffutils` feature adds `diff`
+and `cmp` in the same shape, and the `grep` feature enables the
+regex-backed builtins `grep-files`, `match`, `split`, `replace`,
+`replace-all`, `find-match`, and `find-matches` using ripgrep's
+engine.  Without `grep`, those builtins are present but raise at
+runtime; for byte-stream `grep`, fall back to the system one on
+`PATH`.
 
 ## 17  Prelude
 
-The prelude is ral. All names are ordinary bindings in scope before
-user code runs, elaborated by the SCC rule of §3. The linter warns
-on shadowing. Names are implicit in head position and explicit
-elsewhere with `$` (§4); currying (§4.5) supports partial
-application.
+The prelude is itself written in ral.  Its names are ordinary
+bindings in scope before user code runs, elaborated by the SCC rule
+of §3, and the linter warns when user code shadows one.  As with any
+other binding, a prelude name is implicit in head position and
+explicit elsewhere through `$` (§4), and currying (§4.5) supports
+partial application of any parameterised one.
 
-### 17.1  Definitions
-
-```
-# Strings (via _str)
-let upper   = { |s|          _str 'upper' $s }
-let lower   = { |s|          _str 'lower' $s }
-let replace      = { |pattern repl s|  _str 'replace' $pattern $repl $s }
-let replace-all  = { |pattern repl s|  _str 'replace-all' $pattern $repl $s }
-let find-match   = { |pattern s|       _str 'find-match' $pattern $s }
-let find-matches = { |pattern s|       _str 'find-matches' $pattern $s }
-let join    = { |sep items|  _str 'join' $sep $items }
-let slice   = { |s start n|  _str 'slice' $s $start $n }
-let split   = { |pattern s|  _str 'split' $pattern $s }
-let match   = { |pattern s|  _str 'match' $pattern $s }
-let lines   = { |s|          split '\n' $s }
-let words   = { |s|          split '\s+' $s }
-let dedent  = { |s|          _str 'dedent' $s }
-
-# Paths (via _path)
-let stem         = { |p|     _path 'stem' $p }
-let ext          = { |p|     _path 'ext' $p }
-let dir          = { |p|     _path 'dir' $p }
-let base         = { |p|     _path 'base' $p }
-let resolve-path = { |p|     _path 'resolve' $p }
-let path-join    = { |parts| _path 'join' $parts }
-
-# Filesystem (via _fs) — read-only
-let line-count  = { |p| _fs 'lines' $p }
-let file-size   = { |p| _fs 'size' $p }
-let file-mtime  = { |p| _fs 'mtime' $p }
-let file-empty  = { |p| _fs 'empty' $p }
-# File reads use redirects: `from-string < $p`, `from-lines < $p`,
-# `from-json < $p`, `from-bytes < $p`, `from-line < $p`.
-# `read-file-range PATH START COUNT` (1-indexed slice) and
-# `read-file-numbered PATH` (cat -n shape) are agent-citation sugars
-# defined later in the prelude (they need `enumerate`, `take`, `drop`,
-# `map`); both delegate to `from-lines < $p` for CRLF handling and
-# trailing-newline normalisation.
-
-# Filesystem (via _fs) — mutating
-# File writes use redirects: `to-string $s > $p`, `to-json $v > $p`,
-# `to-lines $xs > $p`, `to-bytes $b > $p`.  `>` is atomic: either the
-# old or the new contents are observed, never a half-written file.
-# `>~` is streaming truncate (POSIX `>` semantics); `>>` is append.
-let copy-file   = { |src dest|  _fs 'copy' $src $dest }
-let move-file   = { |src dest|  _fs 'rename' $src $dest }
-let remove-file = { |p|         _fs 'remove' $p }
-let make-dir    = { |p|         _fs 'mkdir' $p }
-let list-dir    = { |p|         _fs 'list' $p }
-# list-dir returns List of Map with name (String),
-# type ("file"/"dir"/"symlink"/"other"), size (Int bytes),
-# mtime (Int, Unix epoch seconds).  Sorted by name.
-let temp-dir   = { _fs 'tempdir' }
-let temp-file  = { _fs 'tempfile' }
-# temp-dir / temp-file create fresh paths in the system temporary
-# directory and return the created path as a String.
-
-# Value coercions (via _convert)
-let int   = { |v| _convert 'int' $v }
-let float = { |v| _convert 'float' $v }
-let str   = { |v| _convert 'string' $v }
-# str does not accept Bytes; decode bytes with `from-string < $p`
-# (path) or `to-bytes $b | from-string` (Bytes value already in hand).
-
-# Byte-channel encoders
-let to-json   = { |v| _encode json $v }
-let to-lines  = { |v| _encode lines $v }
-let to-line   = { |s| _encode line $s }
-let to-string = { |v| _encode string $v }
-let to-bytes  = { |v| _encode bytes $v }
-
-# Byte-channel decoders (read pipe / `< PATH` redirect)
-let from-json   = { _decode json }
-let from-lines  = { _decode lines }
-let from-string = { _decode string }
-let from-bytes  = { _decode bytes }
-let from-line   = { _decode line }
-# JSON mapping: object→Map, array→List, string→String,
-# integer→Int, other number→Float, boolean→Bool, null→unit.
-# `from-line` strips one trailing newline; `to-line` appends one.
-# A `Bytes` value already in hand can be fed to a decoder via the
-# `to-bytes` encoder stage: `to-bytes $b | from-X`.
-
-# Control flow.  Logical connectives are syntax — use `$[...]` (§2).
-let for   = { |items body| _each $items $body }
-
-# Functional combinators — data-last
-let each         = { |f items|      _each $items $f }
-let map          = { |f items|      _map $f $items }
-let filter       = { |f items|      _filter $f $items }
-let fold         = { |f init items| _fold $items $init $f }
-let reduce       = { |f items|
-    if !{is-empty $items} { fail 1 } else {
-        let [head, ...tail] = $items
-        fold $f $head $tail
-    }
-}
-let sort-list    = { |items|   _sort-list $items }
-let sort-list-by = { |f items| _sort-list-by $f $items }
-
-let reverse = { |items|
-    let _rev = { |xs acc|
-        if !{is-empty $xs} { return $acc } else {
-            let [h, ...t] = $xs
-            _rev $t [$h, ...$acc]
-        }
-    }
-    _rev $items []
-}
-
-let get = { |m key default|
-    if !{has $m $key} { return $m[$key] } else { return $default }
-}
-
-# List combinators (all tail-recursive)
-let take-while = { |pred items|
-    let _go = { |xs acc|
-        if !{is-empty $xs} { return !{reverse $acc} } else {
-            let [head, ...rest] = $xs
-            if !{$pred $head} { _go $rest [$head, ...$acc] } else {
-                return !{reverse $acc}
-            }
-        }
-    }
-    _go $items []
-}
-let drop-while = { |pred items|
-    if !{is-empty $items} { return [] } else {
-        let [head, ...rest] = $items
-        if !{$pred $head} { drop-while $pred $rest } else { return $items }
-    }
-}
-let take = { |n items|
-    let _go = { |k xs acc|
-        if $[$k <= 0 || !{is-empty $xs}] { return !{reverse $acc} } else {
-            let [head, ...rest] = $xs
-            _go $[$k - 1] $rest [$head, ...$acc]
-        }
-    }
-    _go $n $items []
-}
-let drop = { |n items|
-    if $[$n <= 0 || !{is-empty $items}] { return $items } else {
-        let [_, ...rest] = $items
-        drop $[$n - 1] $rest
-    }
-}
-let zip = { |a b|
-    let _go = { |xs ys acc|
-        if $[!{is-empty $xs} || !{is-empty $ys}] { return !{reverse $acc} } else {
-            let [xh, ...xt] = $xs
-            let [yh, ...yt] = $ys
-            _go $xt $yt [[$xh, $yh], ...$acc]
-        }
-    }
-    _go $a $b []
-}
-
-# Error handling
-let retry = { |n body|
-    try $body { |err|
-        if $[$n > 1] { retry $[$n - 1] $body } else { fail $err[status] }
-    }
-}
-
-# Dispatch
-# case tries each clause (a parameterised block) in order, applying
-# it to val.
-# The first clause whose parameter pattern destructures val successfully
-# wins; its body runs with the bound names in scope.  case is purely
-# structural: it dispatches on the shape of val (list length, map keys,
-# nesting), not on value equality.  For value tests, use equal inside
-# a clause body or an explicit if.  If no clause matches, case fails.
-# A trailing `{ |_| … }` is the catch-all.
-#
-#   case $msg [
-#       { |[]|                  empty }
-#       { |[x]|                 single $x }
-#       { |[head, ...tail]|     cons $head $tail }
-#       { |[kind: k, body: b]|  tagged $k $b }
-#       { |_|                   fail 2 }
-#   ]
-let case = { |val clauses|
-    if !{is-empty $clauses} { fail 1 } else {
-        let [clause, ...rest] = $clauses
-        let r = _try-apply $clause $val
-        if $r[ok] { return $r[value] } else { case $val $rest }
-    }
-}
-
-# Concurrency
-let spawn  = { |body|      _fork $body }
-let await  = { |handle|    _await $handle }
-let race   = { |handles|   _race $handles }
-let cancel = { |handle|    _cancel $handle }
-let par    = { |f items j| _par $f $items $j }
-let disown = { |handle|    _disown $handle }
-
-# Failure suppression
-let attempt = { |body| let _ = _try $body }
-
-# Cleanup
-let guard = { |body cleanup| _guard $body $cleanup }
-
-# Observability
-let audit = { |body| _audit $body }
-
-# Map utilities
-let entries   = { |m| map { |k| return [$k, $m[$k]] } !{keys $m} }
-let values    = { |m| map { |k| return $m[$k] } !{keys $m} }
-let union     = { |a b| fold { |m k| if !{has $m $k} { return [...$m, $k: $b[$k]] } else { return $m } } $a !{keys $b} }
-let intersect = { |a b| fold { |m k| return [...$m, $k: $a[$k]] } [:] !{filter { |k| has $b $k } !{keys $a}} }
-
-# Utilities
-let sum   = { |items| fold { |acc x| return $[$acc + $x] } 0 $items }
-# seq produces the half-open range [start, end).
-let seq = { |start end|
-    let _go = { |i acc|
-        if $[$i < $start] { return $acc } else {
-            _go $[$i - 1] [$i, ...$acc]
-        }
-    }
-    _go $[$end - 1] []
-}
-let flat-map = { |f items| concat !{map $f $items} }
-let first = { |pred items|
-    if !{is-empty $items} { fail 1 } else {
-        let [head, ...rest] = $items
-        if !{$pred $head} { return $head } else { first $pred $rest }
-    }
-}
-let enumerate = { |items|
-    map { |i| return [index: $i, item: $items[$i]] } !{seq 0 !{length $items}}
-}
-let concat = { |xss|
-    let _go = { |remaining acc|
-        if !{is-empty $remaining} { return $acc } else {
-            let [head, ...rest] = $remaining
-            _go $rest [...$acc, ...$head]
-        }
-    }
-    _go $xss []
-}
-let chain = { |init fns| fold { |acc f| $f $acc } $init $fns }
-
-# Streaming (stdin, line by line)
-let fold-lines = { |f init| _fold-lines $f $init }
-# map-lines and filter-lines emit bytes and return Unit.
-let map-lines = { |f|
-    _fold-lines { |_ line| echo !{$f $line}; return unit } unit
-}
-let filter-lines = { |pred|
-    _fold-lines { |_ line|
-        if !{$pred $line} { echo $line }
-        return unit
-    } unit
-}
-let each-line = { |f|
-    _fold-lines { |_ line| $f $line; return unit } unit
-}
-
-# String quoting
-let shell-quote = { |s| _str 'shell-quote' $s }
-let shell-split = { |s| _str 'shell-split' $s }
-
-# Editor state — plugin API (interactive-only; _editor errors in scripts)
-let _ed-get    = { _editor 'get' }
-let _ed-set    = { |s| _editor 'set' $s }
-let _ed-text   = { let s = _editor 'get'; return $s[text] }
-let _ed-cursor = { let s = _editor 'get'; return $s[cursor] }
-let _ed-keymap = { let s = _editor 'get'; return $s[keymap] }
-let _ed-lbuffer = {
-    let s = _editor 'get'
-    slice $s[text] 0 $s[cursor]
-}
-let _ed-set-lbuffer = { |l|
-    let s = _editor 'get'
-    let r = slice $s[text] $s[cursor] $[!{length $s[text]} - $s[cursor]]
-    _editor 'set' [text: "$l$r", cursor: !{length $l}]
-}
-let _ed-insert = { |str|
-    let s = _editor 'get'
-    let l = slice $s[text] 0 $s[cursor]
-    let r = slice $s[text] $s[cursor] $[!{length $s[text]} - $s[cursor]]
-    _editor 'set' [text: "$l$str$r", cursor: $[$s[cursor] + !{length $str}]]
-}
-let _ed-tui = { |body|
-    try {
-        let output = _editor 'tui' $body
-        return [output: $output, status: 0]
-    } { |e|
-        return [output: !{to-bytes $e[stderr] | from-string}, status: $e[status]]
-    }
-}
-
-# Membership test
-let elem = { |x items|
-    $[not !{equal unit !{first { |y| equal $y $x } $items}}]
-}
-
-# Plugin lifecycle
-let load-plugin   = { |name options| _plugin 'load' $name $options }
-let unload-plugin = { |name| _plugin 'unload' $name }
-```
+The canonical source is `core/src/prelude.ral`.  A normative listing
+will appear in this section once the surface is stable; until then,
+treat the source file as authoritative.
 
 ## 18  Interactive layer
 
@@ -1651,8 +1295,10 @@ host-language features.
 | `quit` | Exit (≡ Ctrl-D) |
 | Ctrl-Z | Suspend foreground |
 
-**SIGINT.** Foreground command: delivered to process group. Prompt:
-discards current line. Script: unwinding (§10.7).
+**SIGINT.** With a foreground command running, SIGINT is delivered to
+its process group.  At the prompt, it discards the current line and
+redraws.  In a non-interactive script, it begins the unwinding
+process described in §10.7.
 
 ### 18.1  Plugins
 
@@ -1699,22 +1345,19 @@ to `[:]`. If the module returns a manifest map directly, a non-empty
 options map is a load-time error.  **`_plugin 'unload' <name>`**
 removes it.
 
-**`_str 'shell-quote' <s>`** quotes a single argument for a POSIX-style
-shell. The exact quoting form is implementation-defined; it is chosen
-to preserve one argument when re-read by a compatible shell parser and
-to round-trip with `shell-split` for ordinary text arguments.
-
-**`_str 'shell-split' <s>`** tokenizes a shell-quoted string into a
-list of arguments using POSIX rules (`'`, `"`, and `\` are honored).
-Errors on unterminated quotes. Example: `'bat --color=always {}'`
-becomes a single element. The inverse of `shell-quote` when round-
-tripping whitespace-sensitive arguments.
+**`_str 'shell-quote' <s>`** and **`_str 'shell-split' <s>`** form a
+POSIX-style round-trip pair.  `shell-quote` returns one argument in a
+form a compatible shell parser will re-read as a single argument;
+`shell-split` tokenises a shell-quoted string back into a list of
+arguments, honouring `'`, `"`, and `\` and erroring on an
+unterminated quote.  The exact quoting form is implementation-defined
+but stable enough to round-trip ordinary text arguments.
 
 **`grep-files <pattern> <files>`** searches each file in order and
-returns a list of maps `[file: String, line: Int, text: String]` for
-every matching line. `line` is 1-based; `text` is the matched line
-without its trailing newline. This is a structured value builtin, not a
-byte-stream command like `grep`.
+returns a list of maps `[file: String, line: Int, text: String]`,
+one per match, with 1-based `line` and the trailing newline stripped
+from `text`.  Unlike `grep`, this is a structured-value builtin
+rather than a byte-stream command.
 
 **`_editor`** provides ten sub-commands for interacting with the
 line editor from plugin handlers. All are gated by the `editor`
@@ -1733,52 +1376,86 @@ capability (§11.5).
 | `highlight` | write | set highlight spans `[{start, end, style}]` |
 | `state` | write | per-plugin persistent state: `<default> <updater>` |
 
-`_editor 'tui'` installs a capture buffer around the body — the same
-mechanism `let` uses at a byte-mode boundary (§4.3). External commands
-inside the body write their stdout into that buffer; stderr still goes
-to the TTY, so a curses-style UI (fzf, etc.) renders normally. On
-return, if the body produced a non-`Unit` value it wins; otherwise the
-captured bytes are UTF-8-decoded (one trailing newline stripped) and
-returned as a `Str`. This gives the idiomatic zsh pattern
-`result=$(fzf)` directly inside a handler, without the plugin needing
-to know about pipes.
+`_editor 'tui'` installs a capture buffer around the body using the
+same mechanism `let` applies at a byte-mode boundary (§4.3).
+External commands inside the body write their stdout into that
+buffer while stderr still reaches the TTY, so a curses-style UI such
+as fzf renders normally.  On return, a non-`Unit` value from the
+body wins outright; otherwise the captured bytes are UTF-8-decoded
+(stripping one trailing newline) and returned as a `Str`.
 
-**Hooks.** Five events; handlers are thunks called with the real
-`Env` (not a snapshot), wrapped in `grant`:
+The prelude exposes a small layer of `_ed-*` helpers over `_editor`,
+intended for plugin authors and inert in non-interactive contexts (any
+`_editor` call from a script raises).  They factor common operations
+on the buffer — reading text or the cursor, replacing the
+left-of-cursor segment, inserting at the cursor — and wrap
+`_editor 'tui'` so the caller receives a `[output, status]` record
+even when the body fails:
 
-| Event | Signature | When |
-|---|---|---|
-| `buffer-change` | `{Str → Str → Int → F Unit}` | keystroke changes buffer |
-| `pre-exec` | `{Str → F Unit}` | before command evaluation |
-| `post-exec` | `{Str → Int → F Unit}` | after command; receives exit status |
-| `chpwd` | `{Str → Str → F Unit}` | after `cd`; old → new path |
-| `prompt` | `{Str → F Str}` | before prompt; receives base prompt |
+```
+let _ed-get    = { _editor 'get' }
+let _ed-set    = { |s| _editor 'set' $s }
+let _ed-text   = { let s = _editor 'get'; return $s[text] }
+let _ed-cursor = { let s = _editor 'get'; return $s[cursor] }
+let _ed-keymap = { let s = _editor 'get'; return $s[keymap] }
+let _ed-lbuffer = {
+    let s = _editor 'get'
+    slice $s[text] 0 $s[cursor]
+}
+let _ed-set-lbuffer = { |l|
+    let s = _editor 'get'
+    let r = slice $s[text] $s[cursor] $[!{length $s[text]} - $s[cursor]]
+    _editor 'set' [text: "$l$r", cursor: !{length $l}]
+}
+let _ed-insert = { |str|
+    let s = _editor 'get'
+    let l = slice $s[text] 0 $s[cursor]
+    let r = slice $s[text] $s[cursor] $[!{length $s[text]} - $s[cursor]]
+    _editor 'set' [text: "$l$str$r", cursor: $[$s[cursor] + !{length $str}]]
+}
+let _ed-tui = { |body|
+    try {
+        let output = _editor 'tui' $body
+        return [output: $output, status: 0]
+    } { |e|
+        return [output: !{to-bytes $e[stderr] | from-string}, status: $e[status]]
+    }
+}
+```
 
-`buffer-change` hooks run inside the line editor (from
-`Hinter::hint()`). The runtime lock is released before calling
-the evaluator: handlers write to `env.plugin_context` rather than
-shared state, avoiding reentrancy. `_editor 'tui'` is rejected
-inside `buffer-change` handlers (`in_readline` flag).
+**Hooks.** Five events fire at well-defined moments, with handlers
+called as thunks against the real `Env` (not a snapshot) and wrapped
+in `grant`.  `buffer-change` (`{Str → Str → Int → F Unit}`) fires on
+each keystroke that changes the buffer; `pre-exec` (`{Str → F Unit}`)
+runs before command evaluation and `post-exec` (`{Str → Int → F
+Unit}`) runs after, receiving the exit status; `chpwd` (`{Str → Str
+→ F Unit}`) fires after `cd` with the old and new paths; and
+`prompt` (`{Str → F Str}`) runs just before the prompt is drawn,
+receiving the base prompt and returning the rendered one.
 
-**Keybinding dispatch.** Handlers are tried in reverse load order.
-Return `true` to consume the key, `false` to pass it to the next
-handler (or built-in editing). On error, the key is treated as
-consumed and the error logged.
+`buffer-change` hooks fire inside the line editor with the runtime
+lock released, so handlers must communicate through plugin context
+rather than shared state to avoid reentrancy; `_editor 'tui'` is
+rejected from inside one.
 
-`_editor 'accept'` marks the buffer for immediate execution after
-the handler returns, instead of re-entering the line editor. This
-is the plugin equivalent of zsh's `zle accept-line`.
+**Keybinding dispatch.** Handlers are tried in reverse load order:
+returning `true` consumes the key, `false` passes it to the next
+handler or to built-in editing.  An error is treated as a consume
+and is logged.
 
-`_editor 'push'` saves the current buffer and clears it. On the
-next prompt, the saved buffer is restored (a stack, so nested pushes
-work). Combined with `accept`, this gives the zsh `push-line` +
-`accept-line` pattern used by fzf-cd.
+The two write sub-commands `accept` and `push` interact with the
+prompt's lifecycle.  `accept` marks the current buffer for immediate
+execution once the handler returns, in place of re-entering the line
+editor; `push` saves the buffer and clears it, restoring it on the
+next prompt as a stack so that nested pushes compose.  Combining
+them gives the familiar push-then-accept pattern useful for things
+like fzf-driven directory hops.
 
 **`~/.ralrc` integration.** The RC map gains an optional `plugins`
-key, a list loaded at startup. Each entry is a map
-`[plugin: Str, options?: Map]`.  `options` (if present) is passed as
-the single argument to the plugin's top-level block; for plugins
-that take no configuration the key is omitted:
+key, a list of `[plugin: Str, options?: Map]` entries loaded at
+startup, equivalent to calling `_plugin 'load' name options` for
+each.  `options`, when present, is passed as the single argument to
+the plugin's top-level block:
 
 ```
 return [
@@ -1792,9 +1469,9 @@ return [
 ]
 ```
 
-Equivalent to calling `_plugin 'load' name options` for each entry.
-Unknown top-level keys in an entry are warned and ignored so the
-schema can grow (e.g. `enabled:`, `when:`) without breaking parsers.
+Unknown top-level keys in an entry are warned and ignored, so the
+schema can grow with `enabled:` or `when:` flags without breaking
+older parsers.
 
 ## 19  Miscellaneous rules
 
@@ -1858,15 +1535,14 @@ Principal signatures:
 | Decoder (`from-X`)                  | `F[Bytes, ∅] A` |
 | Value builtin (`length`, `line-count`) | `F[∅, ∅] A` |
 
-For external commands and byte-output builtins, bytes flow on the
-output channel but the return type is `String`; decoding of the
-emitted stream happens at materialisation (at the `let` binding), not
-inside the pipe. Streaming reducers emit line by line without
-buffering; they have no accumulated result and return `Unit`. Codec
-pairs are the sole dual-channel commands: encoders emit on the pipe
-and also return the bytes as `Bytes`; decoders consume from the pipe
-and return a structured value. `from-bytes` has `A = Bytes` with
-output mode `∅`.
+For externals and byte-output builtins the bytes flow on the output
+channel while the return type is `String`, with decoding deferred to
+the `let` boundary rather than performed inside the pipe.  Streaming
+reducers process line by line without buffering and so return `Unit`.
+Encoders and decoders are the sole dual-channel commands: an encoder
+emits the bytes on the pipe and also returns them as `Bytes`, and a
+decoder consumes bytes from the pipe to produce a structured value
+(`from-bytes` is the special case `A = Bytes` with output mode `∅`).
 
 ### 20.4  Pipelines
 
@@ -1880,13 +1556,14 @@ ls | from-lines | map { |line| … }
 F[∅,Bytes] String   F[Bytes,∅] [String]    F[∅,∅] […]
 ```
 
-Mismatches are caught at type-check time. The non-final return is not
-threaded on byte edges; composition follows the output mode (§4.2).
+Mismatches between adjacent stages are caught at type-check time,
+and the non-final return is not threaded across byte edges, since
+composition follows the output mode rather than the value (§4.2).
 
 ### 20.5  Polymorphism
 
-Types are inferred; no annotations. Generalisation occurs at
-`let`:
+Types are inferred without annotations, and generalisation occurs at
+the `let` boundary:
 
 ```
 let id = { |x| return $x }         -- id : {α → F α}
@@ -1894,38 +1571,29 @@ id 42                              -- F Int
 id 'hello'                         -- F String
 ```
 
-Generalisation follows the SCC elaboration of §3: a non-recursive SCC
-is generalised at the binding point; a mutually-recursive SCC is
-monomorphic within the group and generalised after its fixed point is
-reached.
+The discipline follows the SCC elaboration of §3: a non-recursive
+SCC is generalised at the binding point, while a mutually recursive
+SCC is monomorphic within its group and generalised only after the
+fixed point is reached.
 
 ### 20.6  Type errors
 
-Abort with exit status 1. Messages include source position, expected
-type, and inferred type:
+A type error aborts the program with exit status 1, and the message
+carries the source position together with the expected and inferred
+types:
 
 ```
 script.ral:12:5: type error: type mismatch: Int vs String
 ```
 
-### 20.7  Implementation
-
-Inference runs on the command/value IR after elaboration, not the
-surface AST. Source positions travel through `Comp::Pos` markers.
-The algorithm is Algorithm W with Rémy-style row polymorphism;
-unification uses path-compressing union-find over four variable
-kinds: value (α), command (β), mode (μ), and row (ρ).
-Let-generalisation uses the standard free-variable calculation,
-skipping variables free in the outer environment.
-
-### 20.8  Row polymorphism and record types
+### 20.7  Row polymorphism and record types
 
 Row typing follows Leijen (2005) with scoped labels: duplicate
-labels are permitted in rows; selection returns the first
-occurrence; extension prepends, shadowing earlier entries without a
-restriction operator. A map literal with a single spread flows the
-spread source's field types through into the result type; with
-multiple spreads the result is open but imprecise.
+labels are permitted in a row, selection returns the first
+occurrence, and extension prepends to shadow earlier entries without
+needing a restriction operator.  A map literal with a single spread
+threads the spread source's field types into the result type, while
+multiple spreads yield an open but imprecise result.
 
 Literal maps with static keys infer as closed records:
 
@@ -1951,20 +1619,21 @@ let greet = { |x| echo "hello $x[name]" }
 -- greet : ∀α ρ. {[name:String | ρ] → F String}
 ```
 
-A record is usable where `[String:A]` is expected when all its fields
-have type `A`; a heterogeneous record is not.
+A record is usable where `[String:A]` is expected exactly when all
+of its fields share the type `A`; a heterogeneous record cannot be
+treated as a homogeneous map.
 
 Record-returning builtins:
 
 | Builtin | Return record |
 |---|---|
-| `_try`   | `[ok:Bool, value:α, status:Int, cmd:String, stderr:Bytes, line:Int, col:Int]` |
+| `_try`   | `[ok:Bool, value:α, status:Int, cmd:String, message:String, stdout:Bytes, line:Int, col:Int]` |
 | `_audit` | `Node` (§10.3) |
 
-Dynamic keys fall back to the homogeneous map rule; list indexing
-(`$xs[0]`) is unaffected.
+Dynamic keys fall back to the homogeneous-map rule, and list
+indexing such as `$xs[0]` is unaffected by all of this.
 
-### 20.9  CBPV correspondence
+### 20.8  CBPV correspondence
 
 The formal model is call-by-push-value.
 
@@ -1987,19 +1656,12 @@ without breaking POSIX-assuming tooling (scp, rsync, git-over-ssh, ansible,
 `ssh host cmd`), install the `ral-sh` companion binary as the registered
 login shell.
 
-`ral-sh` is a thin dispatcher: it never interprets ral or POSIX syntax.
-
-| Invocation | Dispatch |
-|---|---|
-| Interactive (stdin and stdout are ttys, no arguments) | `exec ral` |
-| All other cases (`-c`, script path, piped stdin, unknown flags) | `exec /bin/sh` |
-
-Registration (both platforms):
-
-```
-sudo sh -c 'echo /usr/local/bin/ral-sh >> /etc/shells'
-chsh -s /usr/local/bin/ral-sh
-```
+`ral-sh` is a thin dispatcher and never interprets either ral or
+POSIX syntax: with no arguments and a tty on both stdin and stdout
+it `exec`s `ral`, and in every other case (`-c`, a script path,
+piped stdin, unknown flags) it `exec`s `/bin/sh`.  Registration is
+the usual `chsh -s /usr/local/bin/ral-sh` after adding the path to
+`/etc/shells`.
 
 ### 21.2  Login-shell semantics
 

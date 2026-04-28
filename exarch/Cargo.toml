@@ -17,9 +17,12 @@ diffutils = ["ral-core/diffutils"]
 
 [dependencies]
 ral-core   = { path = "../core", features = ["grep"] }
-ureq       = { version = "2", features = ["json"] }
+reqwest    = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+tokio      = { version = "1", features = ["rt", "macros", "time"] }
+libc       = "0.2"
 serde      = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
+toml       = "1"
 postcard   = { version = "1", features = ["alloc"] }
 clap       = { version = "4", features = ["derive"] }
 rustyline  = "=18.0.0"

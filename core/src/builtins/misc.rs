@@ -143,16 +143,18 @@ pub(super) fn builtin_help(args: &[Value], shell: &mut Shell) -> Value {
 pub fn pretty_print(val: &Value, indent: usize) -> String {
     match val {
         Value::String(s) => {
-            let escaped = s.replace('\'', "''");
-            if escaped.len() > 80 || escaped.contains('\n') {
-                let first_line = escaped.lines().next().unwrap_or("");
+            let body = if s.len() > 80 || s.contains('\n') {
+                let first_line = s.lines().next().unwrap_or("");
                 // Truncate by chars — slicing by byte offset can split a UTF-8
                 // multibyte sequence and panic.
                 let truncated: String = first_line.chars().take(72).collect();
-                format!("'{truncated}...'")
+                format!("{truncated}...")
             } else {
-                format!("'{escaped}'")
-            }
+                s.clone()
+            };
+            let level = quote_bump_level(&body);
+            let hashes: String = "#".repeat(level);
+            format!("{hashes}'{body}'{hashes}")
         }
         Value::Unit => "unit".into(),
         Value::Bool(b) => {
@@ -166,7 +168,7 @@ pub fn pretty_print(val: &Value, indent: usize) -> String {
         Value::Float(f) => format!("{f}"),
         Value::Handle(_) => "<handle>".into(),
         Value::Thunk { body, .. } => crate::types::fmt_block(body),
-        Value::Bytes(b) => format!("<bytes: {}>", b.len()),
+        Value::Bytes(b) => String::from_utf8_lossy(b).into_owned(),
         Value::List(items) => {
             if items.is_empty() {
                 return "[]".into();
@@ -203,6 +205,28 @@ pub fn pretty_print(val: &Value, indent: usize) -> String {
             format!("[\n{}\n{end_pad}]", parts.join(",\n"))
         }
     }
+}
+
+/// Smallest hash-bump level that lets `body` round-trip inside
+/// `n*'#' + "'" + body + "'" + n*'#'`.  Zero if the body has no `'`;
+/// otherwise one more than the longest run of `#`s following any `'`.
+fn quote_bump_level(body: &str) -> usize {
+    let bytes = body.as_bytes();
+    let mut max_run: Option<usize> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            let mut run = 0;
+            while i + 1 + run < bytes.len() && bytes[i + 1 + run] == b'#' {
+                run += 1;
+            }
+            max_run = Some(max_run.map_or(run, |m| m.max(run)));
+            i += 1 + run;
+        } else {
+            i += 1;
+        }
+    }
+    max_run.map_or(0, |m| m + 1)
 }
 
 fn is_simple(val: &Value) -> bool {

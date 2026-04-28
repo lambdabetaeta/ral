@@ -54,7 +54,7 @@ impl TtyInputPermit {
 
     /// Issued when fd 0 of the parent is not a controlling terminal —
     /// inheritance cannot SIGTTIN anyone.  Caller must have just observed
-    /// `terminal.stdin_tty == false`.
+    /// `terminal.startup_stdin_tty == false`.
     pub(crate) fn for_non_tty_stdin() -> Self {
         Self { _private: () }
     }
@@ -84,12 +84,16 @@ impl StdinRoute {
     }
 }
 
-/// Routing decisions for a child process's standard streams, derived once
+/// Routing decisions for a child process's stdout / stderr, derived once
 /// from the call-site redirects.  `stderr_to_stdout` captures the `2>&1` fd
 /// dup; the file fields carry their `RedirectMode` so `open_file` can pick
 /// create-vs-append.
+///
+/// Stdin is *not* on the plan: `<file` is opened upstream and parked in
+/// `shell.io.stdin` by [`install_stdin_redirect`], so every dispatch arm
+/// (builtin, external, pipeline stage) reads input through the same `Source`
+/// channel.  See the module docstring on the cached-tty bug class.
 struct RedirectPlan {
-    stdin_file: Option<(String, RedirectMode)>,
     stdout_file: Option<(String, RedirectMode)>,
     stderr_file: Option<(String, RedirectMode)>,
     stderr_to_stdout: bool,
@@ -106,7 +110,6 @@ fn stderr_mode(mode: &RedirectMode) -> RedirectMode {
 
 fn classify_redirects(redirects: &[(u32, RedirectMode, EvalRedirect)]) -> RedirectPlan {
     let mut plan = RedirectPlan {
-        stdin_file: None,
         stdout_file: None,
         stderr_file: None,
         stderr_to_stdout: false,
@@ -119,7 +122,7 @@ fn classify_redirects(redirects: &[(u32, RedirectMode, EvalRedirect)]) -> Redire
                 }
             }
             EvalRedirect::File(filename) => match fd {
-                0 => plan.stdin_file = Some((filename.clone(), *mode)),
+                // fd 0 is handled by install_stdin_redirect upstream.
                 1 => plan.stdout_file = Some((filename.clone(), *mode)),
                 2 => plan.stderr_file = Some((filename.clone(), *mode)),
                 _ => {}
@@ -168,27 +171,26 @@ fn reject_exec_arg(cmd: &str, arg: &Value, shell: &Shell) -> Option<EvalSignal> 
 
 /// Choose the stdin route for a single-command external job.
 ///
-/// Precedence: explicit `<file` redirect, then any pipe handed to us by an
-/// outer pipeline stage, then inherit fd 0 from the parent process.  The
-/// inherit case is gated on a `TtyInputPermit`: inheriting fd 0 when the
-/// parent's fd 0 is the controlling tty is only safe when this child will
-/// hold the foreground itself (`for_standalone_external`) or when fd 0 is
-/// not actually a tty (`for_non_tty_stdin`).  Both are issued here.
-fn wire_stdin(plan: &RedirectPlan, shell: &mut Shell) -> Result<StdinRoute, EvalSignal> {
-    if let Some((path, _)) = &plan.stdin_file {
-        shell.check_fs_read(path)?;
-        let f = std::fs::File::open(path).map_err(|e| io_error(path, e, 1, None))?;
-        return Ok(StdinRoute::File(f));
+/// All non-terminal sources (pipeline pipe, `<file` redirect already opened
+/// by [`install_stdin_redirect`]) flow through `shell.io.stdin`; this routine
+/// just consumes whatever sits there.  The fall-through inherit case is gated
+/// on a `TtyInputPermit`: inheriting fd 0 when the parent's fd 0 is the
+/// controlling tty is only safe when this child will hold the foreground
+/// itself (`for_standalone_external`) or when fd 0 is not actually a tty
+/// (`for_non_tty_stdin`).  Both are issued here.
+fn wire_stdin(shell: &mut Shell) -> StdinRoute {
+    match shell.io.stdin.take_reader() {
+        Some(crate::io::SourceReader::Pipe(r)) => StdinRoute::Pipe(r),
+        Some(crate::io::SourceReader::File(f)) => StdinRoute::File(f),
+        None => {
+            let permit = if shell.io.terminal.startup_stdin_tty {
+                TtyInputPermit::for_standalone_external()
+            } else {
+                TtyInputPermit::for_non_tty_stdin()
+            };
+            StdinRoute::Inherit(permit)
+        }
     }
-    if let Some(reader) = shell.io.stdin.take_pipe() {
-        return Ok(StdinRoute::Pipe(reader));
-    }
-    let permit = if shell.io.terminal.stdin_tty {
-        TtyInputPermit::for_standalone_external()
-    } else {
-        TtyInputPermit::for_non_tty_stdin()
-    };
-    Ok(StdinRoute::Inherit(permit))
 }
 
 /// Wire the child's stdout to a redirect file when one is set.
@@ -475,11 +477,10 @@ pub(crate) fn exec_external(
 ) -> Result<Value, EvalSignal> {
     let rc = resolve_command(cmd, args, shell)?;
     let cmd_name = rc.shown.clone();
-    let resolved = rc.resolved.clone();
     let mut command = build_command(&rc, shell);
 
     let plan = classify_redirects(redirects);
-    command.stdin(wire_stdin(&plan, shell)?.into_stdio());
+    command.stdin(wire_stdin(shell).into_stdio());
     let mut atomic_commit = wire_stdout_file(&mut command, &plan, shell)?;
 
     let auditing = shell.audit.tree.is_some();
@@ -492,7 +493,7 @@ pub(crate) fn exec_external(
     // fd 1 — for foreground commands the prompt is not drawn, so a direct
     // dup is safe and is the only way `ls`/`grep`/pagers see a TTY.
     let inherit_tty = plan.stdout_file.is_none()
-        && shell.io.terminal.stdout_tty
+        && shell.io.terminal.startup_stdout_tty
         && matches!(
             shell.io.stdout,
             crate::io::Sink::Terminal | crate::io::Sink::External(_)
@@ -520,14 +521,15 @@ pub(crate) fn exec_external(
         };
         crate::dbg_trace!(
             "exec",
-            "cmd={cmd_name} resolved={resolved} tty=[in:{} out:{} err:{}] \
+            "cmd={cmd_name} resolved={} tty=[in:{} out:{} err:{}] \
              sink={sink} audit={auditing} inherit={inherit_tty} pump={needs_pump} \
              interactive={} fg_job={}",
-            shell.io.terminal.stdin_tty,
-            shell.io.terminal.stdout_tty,
-            shell.io.terminal.stderr_tty,
+            rc.resolved,
+            shell.io.terminal.startup_stdin_tty,
+            shell.io.terminal.startup_stdout_tty,
+            shell.io.terminal.startup_stderr_tty,
             shell.io.interactive,
-            shell.io.interactive && shell.io.terminal.stdin_tty && !needs_pump,
+            shell.io.interactive && shell.io.terminal.startup_stdin_tty && !needs_pump,
         );
     }
 
@@ -554,7 +556,7 @@ pub(crate) fn exec_external(
     #[cfg(unix)]
     let want_fg = shell.io.job_control.may_foreground()
         && shell.io.interactive
-        && shell.io.terminal.stdin_tty
+        && shell.io.terminal.startup_stdin_tty
         && !needs_pump
         && matches!(
             shell.io.stdout,
@@ -701,9 +703,67 @@ pub(crate) struct RedirectGuard {
     commits: Vec<AtomicCommit>,
 }
 
+/// Read+File redirects to fd 0 are owned by `shell.io.stdin` (set up by
+/// [`install_stdin_redirect`]); `apply_redirects` and `wire_stdin` must agree
+/// to leave them alone.  This predicate is the single point where that rule
+/// is named.
+fn is_stdin_file_redirect(r: &(u32, RedirectMode, EvalRedirect)) -> bool {
+    matches!(r, (0, RedirectMode::Read, EvalRedirect::File(_)))
+}
+
+/// Open `<file` redirects to fd 0 and park the file in `shell.io.stdin`.
+///
+/// Returns a [`StdinRedirectGuard`] whose `restore` puts back whatever Source
+/// was previously installed (a pipeline pipe, an outer redirect, or
+/// Terminal).  When several `<file` redirects target fd 0, the last one wins
+/// — same as POSIX shells.  No-op when no such redirect is present, in which
+/// case `shell.io.stdin` is left untouched.
+///
+/// Routing `<file` through `Source` rather than `dup2` is what keeps the
+/// cached `startup_stdin_tty` from lying to downstream consumers (codecs,
+/// `lines`): they consult the cache only when `Source` is `Terminal`, and
+/// `Terminal` truly does mean "fall through to the inherited fd 0".
+pub(crate) fn install_stdin_redirect(
+    redirects: &[(u32, RedirectMode, EvalRedirect)],
+    shell: &mut Shell,
+) -> Result<StdinRedirectGuard, EvalSignal> {
+    let Some(path) = redirects
+        .iter()
+        .rev()
+        .find_map(|r| match r {
+            (0, RedirectMode::Read, EvalRedirect::File(p)) => Some(p),
+            _ => None,
+        })
+    else {
+        return Ok(StdinRedirectGuard::Untouched);
+    };
+    shell.check_fs_read(path)?;
+    let resolved = shell.resolve_path(path);
+    let f = std::fs::File::open(&resolved).map_err(|e| io_error(path, e, 1, None))?;
+    let prior = std::mem::replace(&mut shell.io.stdin, crate::io::Source::File(f));
+    Ok(StdinRedirectGuard::Installed(prior))
+}
+
+/// Restore-on-exit token for [`install_stdin_redirect`].
+pub(crate) enum StdinRedirectGuard {
+    Untouched,
+    Installed(crate::io::Source),
+}
+
+impl StdinRedirectGuard {
+    pub(crate) fn restore(self, shell: &mut Shell) {
+        if let StdinRedirectGuard::Installed(prior) = self {
+            shell.io.stdin = prior;
+        }
+    }
+}
+
 /// Apply fd redirects (for builtins that print via stdout/stderr directly).
 /// Returns a guard whose `commits` must be fired by `restore_redirects` after
 /// the builtin runs successfully.
+///
+/// Read+File redirects to fd 0 are skipped: they are owned by
+/// [`install_stdin_redirect`], not by the dup2 path.
 #[cfg(unix)]
 pub(crate) fn apply_redirects(
     redirects: &[(u32, RedirectMode, EvalRedirect)],
@@ -711,7 +771,11 @@ pub(crate) fn apply_redirects(
 ) -> Result<RedirectGuard, EvalSignal> {
     let mut saved = Vec::new();
     let mut commits = Vec::new();
-    for (fd, mode, target) in redirects {
+    for r in redirects {
+        if is_stdin_file_redirect(r) {
+            continue;
+        }
+        let (fd, mode, target) = r;
         match target {
             EvalRedirect::File(path) => {
                 let effective_mode = if *fd == 2 { stderr_mode(mode) } else { *mode };

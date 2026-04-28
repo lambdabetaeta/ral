@@ -112,50 +112,31 @@ pub(super) fn build_profile(policy: &SandboxPolicy) -> String {
         "(allow process-exec)".to_string(),
     ];
 
-    // Always-readable system paths.  /private/etc is intentionally excluded;
-    // only specific networking-related files are allowed below.  /private/var
-    // is needed for the dyld shared cache (/private/var/db/dyld on older macOS)
-    // and per-user temp directories (/private/var/folders).
-    for path in [
-        "/bin",
-        "/usr",
-        "/lib",
-        "/System",
-        "/dev",
-        "/tmp",
-        "/private/tmp",
-        "/var",
-        "/private/var",
-        "/private/etc/resolv.conf",
-        "/private/etc/hosts",
-        "/private/etc/ssl",
-        "/private/etc/openssl",
-    ] {
-        lines.push(format!("(allow file-read* (subpath \"{path}\"))"));
-    }
-    // For each grant prefix, also allow file-read-metadata on its ancestor
-    // directories so that path-traversal tools (e.g. the `glob` crate) can
-    // stat intermediate path components without being granted full read access
-    // to their contents.  Without this, `glob "/a/b/c/*"` silently returns []
-    // when Seatbelt blocks `stat("/a")` even though `(subpath "/a/b/c")` is
-    // allowed.
-    let all_prefixes = bind_spec.read_prefixes.iter()
-        .chain(bind_spec.write_prefixes.iter());
-    let mut ancestor_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for prefix in all_prefixes {
-        for ancestor in std::path::Path::new(prefix).ancestors().skip(1) {
-            if ancestor == std::path::Path::new("/") || ancestor.as_os_str().is_empty() {
-                break;
-            }
-            ancestor_set.insert(ancestor.to_string_lossy().into_owned());
-        }
-    }
-    for ancestor in &ancestor_set {
+    let system_read_paths = existing_system_read_paths();
+    emit_ancestor_metadata(&mut lines, system_read_paths.iter().copied());
+    emit_read_subpaths(&mut lines, system_read_paths.iter().copied());
+    // Shell redirections and common libc / tooling paths open these device
+    // nodes for write.  Without explicit literal allows, `2>/dev/null`
+    // and similar patterns fail under Seatbelt even though `/dev` is
+    // readable.
+    for path in ["/dev/null", "/dev/zero", "/dev/dtracehelper", "/dev/tty"] {
         lines.push(format!(
-            "(allow file-read-metadata (literal \"{}\"))",
-            escape_path(ancestor)
+            "(allow file-write* (literal \"{}\"))",
+            escape_path(path)
         ));
     }
+    // For each grant prefix, also allow file-read-metadata on its
+    // ancestors.  Seatbelt checks parent metadata during lookup; without
+    // these, path traversal and posix_spawn can report ENOENT even when
+    // the final subpath is allowed.
+    emit_ancestor_metadata(
+        &mut lines,
+        bind_spec
+            .read_prefixes
+            .iter()
+            .chain(bind_spec.write_prefixes.iter())
+            .map(String::as_str),
+    );
 
     for prefix in &bind_spec.read_prefixes {
         lines.push(format!(
@@ -168,11 +149,96 @@ pub(super) fn build_profile(policy: &SandboxPolicy) -> String {
         lines.push(format!("(allow file-read* (subpath \"{escaped}\"))"));
         lines.push(format!("(allow file-write* (subpath \"{escaped}\"))"));
     }
+    // Per-file deny rules.  Emitted *after* the broad write allows so
+    // Seatbelt's last-match-wins semantics let the deny override.  The
+    // `file-link*` deny closes the hardlink/rename hole: writes via a
+    // hardlink elsewhere would otherwise hit the same inode.
+    for path in &bind_spec.deny_paths {
+        let escaped = escape_path(path);
+        lines.push(format!("(deny file-write* (literal \"{escaped}\"))"));
+        lines.push(format!("(deny file-link* (literal \"{escaped}\"))"));
+    }
     if policy.net {
         lines.push("(allow network*)".to_string());
     }
 
     lines.join("\n")
+}
+
+/// Always-readable system paths.  These are not grant policy: they are
+/// enough of the platform runtime to let already-authorised executables
+/// start, dynamically link, resolve users/hosts, and for C toolchains,
+/// spawn their internal tools (`clang` -> `ld`) under Seatbelt.
+///
+/// User temp/workspace paths are deliberately absent here; they must
+/// arrive via the active fs grant.
+fn system_read_paths() -> &'static [&'static str] {
+    &[
+        "/bin",
+        "/usr",
+        "/lib",
+        "/System",
+        "/dev",
+        "/Library/Apple/usr",
+        "/Library/Developer/CommandLineTools",
+        "/Applications/Xcode.app/Contents/Developer",
+        "/opt/homebrew",
+        "/private/var/db/dyld",
+        "/var/db/dyld",
+        "/private/etc/resolv.conf",
+        "/private/etc/hosts",
+        "/private/etc/ssl",
+        "/private/etc/openssl",
+        // getpwuid / getgrgid sit in libc startup paths; without these,
+        // many programs can't even resolve $HOME.
+        "/private/etc/passwd",
+        "/private/etc/group",
+        "/private/etc/services",
+        "/private/etc/protocols",
+        "/private/etc/nsswitch.conf",
+    ]
+}
+
+fn existing_system_read_paths() -> Vec<&'static str> {
+    system_read_paths()
+        .iter()
+        .copied()
+        .filter(|p| std::path::Path::new(p).exists())
+        .collect()
+}
+
+fn emit_read_subpaths<'a>(lines: &mut Vec<String>, paths: impl IntoIterator<Item = &'a str>) {
+    for path in paths {
+        lines.push(format!(
+            "(allow file-read* (subpath \"{}\"))",
+            escape_path(path)
+        ));
+    }
+}
+
+fn emit_ancestor_metadata<'a>(
+    lines: &mut Vec<String>,
+    paths: impl IntoIterator<Item = &'a str>,
+) {
+    for ancestor in metadata_ancestors(paths) {
+        lines.push(format!(
+            "(allow file-read-metadata (literal \"{}\"))",
+            escape_path(&ancestor)
+        ));
+    }
+}
+
+fn metadata_ancestors<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for path in paths {
+        for ancestor in std::path::Path::new(path).ancestors().skip(1) {
+            if ancestor == std::path::Path::new("/") || ancestor.as_os_str().is_empty() {
+                break;
+            }
+            out.insert(ancestor.to_string_lossy().into_owned());
+        }
+    }
+    out.into_iter().collect()
 }
 
 fn escape_path(path: &str) -> String {
@@ -190,7 +256,7 @@ unsafe extern "C" {
 
 #[cfg(test)]
 mod tests {
-    use super::build_profile;
+    use super::{build_profile, metadata_ancestors};
     use crate::types::SandboxPolicy;
 
     #[test]
@@ -206,5 +272,73 @@ mod tests {
             ..SandboxPolicy::default()
         });
         assert!(!profile.contains("(allow network*)"));
+    }
+
+    #[test]
+    fn mac_profile_allows_common_dev_writes() {
+        let profile = build_profile(&SandboxPolicy::default());
+        for path in ["/dev/null", "/dev/zero", "/dev/dtracehelper", "/dev/tty"] {
+            assert!(
+                profile.contains(&format!("(allow file-write* (literal \"{path}\"))")),
+                "missing write allowance for {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn mac_profile_grants_toolchain_ancestor_metadata() {
+        let ancestors = metadata_ancestors(["/Library/Developer/CommandLineTools/usr/bin/ld"]);
+        assert!(ancestors.contains(&"/Library".to_string()));
+        assert!(ancestors.contains(&"/Library/Developer".to_string()));
+        assert!(ancestors.contains(&"/Library/Developer/CommandLineTools/usr/bin".to_string()));
+        assert!(!ancestors.contains(&"/".to_string()));
+    }
+
+    #[test]
+    fn mac_profile_allows_command_line_tools_lookup_when_installed() {
+        if !std::path::Path::new("/Library/Developer/CommandLineTools").exists() {
+            return;
+        }
+        let profile = build_profile(&SandboxPolicy::default());
+        assert!(
+            profile
+                .contains("(allow file-read* (subpath \"/Library/Developer/CommandLineTools\"))")
+        );
+        assert!(profile.contains("(allow file-read-metadata (literal \"/Library\"))"));
+        assert!(
+            profile.contains("(allow file-read-metadata (literal \"/Library/Developer\"))")
+        );
+    }
+
+    #[test]
+    fn mac_profile_does_not_grant_tmp_as_system_read_path() {
+        let profile = build_profile(&SandboxPolicy::default());
+        assert!(!profile.contains("(allow file-read* (subpath \"/tmp\"))"));
+        assert!(!profile.contains("(allow file-read* (subpath \"/private/tmp\"))"));
+    }
+
+    #[test]
+    fn mac_profile_emits_deny_rules_for_deny_paths() {
+        use crate::types::FsPolicy;
+        let policy = SandboxPolicy {
+            fs: FsPolicy {
+                read_prefixes: Vec::new(),
+                write_prefixes: vec!["/tmp/work".into()],
+                deny_paths: vec!["/tmp/work/.exarch.toml".into()],
+            },
+            net: true,
+        };
+        let profile = build_profile(&policy);
+        let allow_idx = profile
+            .find("(allow file-write* (subpath \"/tmp/work\"))")
+            .expect("write allow rendered");
+        let deny_w_idx = profile
+            .find("(deny file-write* (literal \"/tmp/work/.exarch.toml\"))")
+            .expect("write deny rendered");
+        let deny_l_idx = profile
+            .find("(deny file-link* (literal \"/tmp/work/.exarch.toml\"))")
+            .expect("link deny rendered");
+        assert!(allow_idx < deny_w_idx, "deny must come after allow for last-match-wins");
+        assert!(allow_idx < deny_l_idx);
     }
 }

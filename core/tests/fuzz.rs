@@ -61,6 +61,30 @@ fn unterminated_double_quote() {
 }
 
 #[test]
+fn unterminated_bumped_string_level0() {
+    must_reject("echo 'unclosed");
+}
+
+#[test]
+fn unterminated_bumped_string_level1() {
+    // Has a `'` in body but no `'#` to close.
+    must_reject("echo #'body with ' but no hash");
+}
+
+#[test]
+fn unterminated_bumped_string_close_too_thin() {
+    // Level 2 open, only level 1 close present.
+    must_reject("echo ##'body'#");
+}
+
+#[test]
+fn bumped_string_round_trip() {
+    must_parse(r#"let p = "print('hello', 'world')""#);
+    must_parse(r##"let p = #'say "hi" to 'alice''#"##);
+    must_parse("let p = ##'body '# hash'##");
+}
+
+#[test]
 fn unterminated_block() {
     must_reject("{ echo hello");
 }
@@ -239,8 +263,8 @@ fn empty_double_quote() {
 }
 
 #[test]
-fn single_quote_doubled() {
-    must_parse("return 'it''s'");
+fn single_quote_hash_bumped() {
+    must_parse("return #'it's'#");
 }
 
 #[test]
@@ -249,9 +273,53 @@ fn double_quote_all_escapes() {
 }
 
 #[test]
+fn double_quote_numeric_escapes() {
+    must_parse("return \"\\x41\"");     // \x41 = 'A'
+    must_parse("return \"\\x00\"");     // \x00 = NUL
+    must_parse("return \"\\u{41}\"");   // U+0041 = 'A'
+    must_parse("return \"\\u{1F600}\""); // emoji
+}
+
+#[test]
 fn double_quote_bad_escape() {
-    must_parse("return \"\\z\"");
-} // unknown escape kept
+    must_reject("return \"\\z\"");
+}
+
+#[test]
+fn double_quote_x_escape_too_high() {
+    must_reject("return \"\\x80\"");
+}
+
+#[test]
+fn double_quote_x_escape_bad_digits() {
+    must_reject("return \"\\xZZ\"");
+    must_reject("return \"\\x4\"");
+}
+
+#[test]
+fn double_quote_u_escape_surrogate() {
+    must_reject("return \"\\u{D800}\"");
+}
+
+#[test]
+fn double_quote_u_escape_out_of_range() {
+    must_reject("return \"\\u{110000}\"");
+}
+
+#[test]
+fn double_quote_u_escape_empty_braces() {
+    must_reject("return \"\\u{}\"");
+}
+
+#[test]
+fn double_quote_u_escape_no_braces() {
+    must_reject("return \"\\u41\"");
+}
+
+#[test]
+fn double_quote_u_escape_too_long() {
+    must_reject("return \"\\u{1234567}\"");
+}
 
 #[test]
 fn multiline_single_quote() {

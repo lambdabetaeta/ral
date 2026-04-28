@@ -42,6 +42,29 @@ pub struct Cli {
     pub file: Option<std::path::PathBuf>,
     #[arg(long = "system", value_name = "FILE")]
     pub system_files: Vec<std::path::PathBuf>,
+    /// Session ceiling.  Three bake-ins: `minimal` (coreutils + cwd
+    /// + /tmp + net), `reasonable` (default; coreutils + everyday
+    /// tooling), or `dangerous` (no attenuation; expects an outer
+    /// trust boundary like a Docker container).  Bases are bake-ins;
+    /// there is no directory convention for adding more.  To widen
+    /// the ceiling for a nonstandard tool, use `--extend-base`; to
+    /// start permissive, use `--base dangerous --restrict <FILE>`
+    /// (root ⊓ file = file).
+    #[arg(long = "base", value_name = "NAME", default_value = "reasonable")]
+    pub base: String,
+    /// Single TOML file lattice-joined with the base *before* any
+    /// attenuation, widening the ceiling.  Use to add allowances for
+    /// nonstandard tools (extra exec entries, fs prefixes) without
+    /// editing a bake-in.  Trust boundary: this widens, so source it
+    /// from your own config — never auto-loaded from cwd.
+    #[arg(long = "extend-base", value_name = "FILE")]
+    pub extend_base: Option<std::path::PathBuf>,
+    /// Attenuation file(s) meet-composed with the (possibly extended)
+    /// base.  Repeatable; order doesn't matter (meet is commutative).
+    /// Each file's resolved path is added to the fs deny list, so the
+    /// agent cannot modify any file influencing its own permissions.
+    #[arg(long = "restrict", value_name = "FILE")]
+    pub restrict: Vec<std::path::PathBuf>,
 }
 
 /// Resolve `--system FILE...` into the narrative half of the prompt

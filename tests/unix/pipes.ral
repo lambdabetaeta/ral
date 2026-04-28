@@ -45,19 +45,19 @@ echo "[$result]"
 
 # from-line strips trailing newline
 let b = printf "hello\n"
-let s = _decode line $b
+let s = from-line $b
 if $[not !{equal $s "hello"}] { fail [status: 1] }
 echo "from-line: $s"
 # Expected: from-line: hello
 
 # from-line preserves internal newlines, strips only the final one
 let b2 = printf "foo\nbar\n"
-let s2 = _decode line $b2
+let s2 = from-line $b2
 if $[not !{equal $s2 "foo\nbar"}] { fail [status: 1] }
 
 # from-line on bytes with no trailing newline is a no-op
 let b3 = printf "no-newline"
-let s3 = _decode line $b3
+let s3 = from-line $b3
 if $[not !{equal $s3 "no-newline"}] { fail [status: 1] }
 
 # Cleanup

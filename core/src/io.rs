@@ -51,16 +51,24 @@ impl InteractiveMode {
 
 /// Cached terminal capability snapshot, taken once at shell start.
 ///
-/// `stdin_tty` / `stdout_tty` / `stderr_tty` are the raw `isatty(3)` results
-/// for fds 0/1/2.  The remaining fields record whether the terminal is known
-/// to accept ANSI escape sequences and which "hostile but common" environment
-/// we are running inside.  Population happens once via
-/// `TerminalState::probe_with_mode`; nothing re-queries the OS mid-session.
+/// `startup_stdin_tty` / `startup_stdout_tty` / `startup_stderr_tty` are the
+/// raw `isatty(3)` results for fds 0/1/2 *at process entry*.  They are the
+/// right oracle for "did the user launch us interactively?" and for any
+/// fall-through code path that reads the inherited fd 0/1/2 directly; they
+/// are the wrong oracle for "is fd N a tty *right now*?", since `<file` and
+/// `>file` redirects can replace the underlying fd transiently.  Code that
+/// asks a current-state question should route through the `Source`/`Sink`
+/// abstractions instead of consulting these fields.
+///
+/// The remaining fields record whether the terminal is known to accept ANSI
+/// escape sequences and which "hostile but common" environment we are running
+/// inside.  Population happens once via `TerminalState::probe_with_mode`;
+/// nothing re-queries the OS mid-session.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TerminalState {
-    pub stdin_tty: bool,
-    pub stdout_tty: bool,
-    pub stderr_tty: bool,
+    pub startup_stdin_tty: bool,
+    pub startup_stdout_tty: bool,
+    pub startup_stderr_tty: bool,
     /// `true` when stdout is a tty *and* TERM/platform checks say ANSI works.
     pub supports_ansi: bool,
     /// `NO_COLOR` is set in the environment.
@@ -84,7 +92,7 @@ impl TerminalState {
     /// Query the OS and environment for the current terminal state.
     pub fn probe_with_mode(mode: InteractiveMode) -> Self {
         #[cfg(unix)]
-        let (stdin_tty, stdout_tty, stderr_tty) = {
+        let (startup_stdin_tty, startup_stdout_tty, startup_stderr_tty) = {
             use std::io::IsTerminal;
             (
                 std::io::stdin().is_terminal(),
@@ -93,13 +101,13 @@ impl TerminalState {
             )
         };
         #[cfg(windows)]
-        let (stdin_tty, stdout_tty, stderr_tty) = (
+        let (startup_stdin_tty, startup_stdout_tty, startup_stderr_tty) = (
             crate::compat::is_console(crate::compat::STD_INPUT_HANDLE),
             crate::compat::is_console(crate::compat::STD_OUTPUT_HANDLE),
             crate::compat::is_console(crate::compat::STD_ERROR_HANDLE),
         );
         #[cfg(not(any(unix, windows)))]
-        let (stdin_tty, stdout_tty, stderr_tty) = (false, false, false);
+        let (startup_stdin_tty, startup_stdout_tty, startup_stderr_tty) = (false, false, false);
 
         let no_color = anstyle_query::no_color();
         let is_ci = anstyle_query::is_ci();
@@ -111,13 +119,15 @@ impl TerminalState {
         let supports_ansi = match mode {
             InteractiveMode::Full => true,
             InteractiveMode::Minimal => false,
-            InteractiveMode::Auto => stdout_tty && anstyle_query::term_supports_ansi_color(),
+            InteractiveMode::Auto => {
+                startup_stdout_tty && anstyle_query::term_supports_ansi_color()
+            }
         };
 
         TerminalState {
-            stdin_tty,
-            stdout_tty,
-            stderr_tty,
+            startup_stdin_tty,
+            startup_stdout_tty,
+            startup_stderr_tty,
             supports_ansi,
             no_color,
             is_tmux,
@@ -136,7 +146,7 @@ impl TerminalState {
     /// Terminal round-trip queries (CPR, DA, OSC) are appropriate.  False on
     /// non-tty stdout or in minimal mode.
     pub fn ui_round_trips_ok(&self) -> bool {
-        self.stdout_tty && !self.mode.is_minimal()
+        self.startup_stdout_tty && !self.mode.is_minimal()
     }
 
     /// Terminal title may be set via OSC 0/2 sequences.
@@ -151,7 +161,7 @@ impl TerminalState {
     pub fn stderr_ansi_ok(&self) -> bool {
         !self.mode.is_minimal()
             && !self.no_color
-            && self.stderr_tty
+            && self.startup_stderr_tty
             && (matches!(self.mode, InteractiveMode::Full)
                 || anstyle_query::term_supports_ansi_color())
     }
@@ -185,7 +195,7 @@ pub trait ExternalWrite: Send + Sync {
 /// Where a pipeline stage's byte output goes.
 pub enum Sink {
     /// The shell's inherited stdout (fd 1 at process start).  Whether it is
-    /// actually a terminal is recorded in `TerminalState::stdout_tty`.
+    /// actually a terminal is recorded in `TerminalState::startup_stdout_tty`.
     Terminal,
     /// The shell's inherited stderr (fd 2).  Used when --audit reserves
     /// stdout for JSON and the user still wants to see command output.
@@ -472,21 +482,77 @@ impl Write for Sink {
 
 // ── Source ────────────────────────────────────────────────────────────────
 
-/// Where a pipeline stage's byte input comes from.
+/// Where a stage's byte input comes from.
+///
+/// `Pipe` is the upstream pipeline writer; `File` is a `<file` redirect that
+/// has been opened upstream and parked here so consumers see all redirected
+/// input through one channel rather than racing the cached `stdin_tty` against
+/// a `dup2`'d fd 0.  `Terminal` means "no redirect — fall through to whatever
+/// fd 0 of the shell process is".
 pub enum Source {
-    /// The shell's inherited stdin (fd 0 at process start).
     Terminal,
-    /// Byte pipe from the previous pipeline stage.
     Pipe(os_pipe::PipeReader),
+    File(std::fs::File),
+}
+
+/// Owning handle to a non-terminal input source, returned by
+/// [`Source::take_reader`].
+///
+/// Read-trait consumers (codecs, `lines`) call `Read` directly; fd consumers
+/// (sandbox spawn, `with_stdin_redirected`, externals) reach for `AsRawFd` /
+/// `Into<Stdio>` without caring whether the underlying handle was a pipe or a
+/// file.
+pub enum SourceReader {
+    Pipe(os_pipe::PipeReader),
+    File(std::fs::File),
 }
 
 impl Source {
-    /// Consume the pipe reader, replacing `self` with `Terminal`.
-    /// Returns `None` when already `Terminal`.
-    pub fn take_pipe(&mut self) -> Option<os_pipe::PipeReader> {
+    /// Consume any non-terminal source, leaving `Terminal` in place.  Returns
+    /// `None` when already `Terminal`.
+    pub fn take_reader(&mut self) -> Option<SourceReader> {
         match std::mem::replace(self, Source::Terminal) {
-            Source::Pipe(r) => Some(r),
             Source::Terminal => None,
+            Source::Pipe(r) => Some(SourceReader::Pipe(r)),
+            Source::File(f) => Some(SourceReader::File(f)),
+        }
+    }
+}
+
+impl Read for SourceReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            SourceReader::Pipe(r) => r.read(buf),
+            SourceReader::File(f) => f.read(buf),
+        }
+    }
+}
+
+impl From<SourceReader> for std::process::Stdio {
+    fn from(r: SourceReader) -> Self {
+        match r {
+            SourceReader::Pipe(r) => std::process::Stdio::from(r),
+            SourceReader::File(f) => std::process::Stdio::from(f),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl std::os::unix::io::AsRawFd for SourceReader {
+    fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
+        match self {
+            SourceReader::Pipe(r) => r.as_raw_fd(),
+            SourceReader::File(f) => f.as_raw_fd(),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::AsRawHandle for SourceReader {
+    fn as_raw_handle(&self) -> std::os::windows::io::RawHandle {
+        match self {
+            SourceReader::Pipe(r) => r.as_raw_handle(),
+            SourceReader::File(f) => f.as_raw_handle(),
         }
     }
 }
@@ -603,8 +669,9 @@ impl Io {
         self.terminal = parent.terminal;
         self.interactive = parent.interactive;
         self.job_control = parent.job_control;
-        self.stdin = match parent.stdin.take_pipe() {
-            Some(r) => Source::Pipe(r),
+        self.stdin = match parent.stdin.take_reader() {
+            Some(SourceReader::Pipe(r)) => Source::Pipe(r),
+            Some(SourceReader::File(f)) => Source::File(f),
             None => Source::Terminal,
         };
         self.value_in = parent.value_in.take();
@@ -614,8 +681,9 @@ impl Io {
     /// child received back to `parent`.  Called from `Shell::return_to` so
     /// subsequent sibling calls in the parent see the unconsumed pipe.
     pub fn return_to_parent(&mut self, child: &mut Io) {
-        self.stdin = match child.stdin.take_pipe() {
-            Some(r) => Source::Pipe(r),
+        self.stdin = match child.stdin.take_reader() {
+            Some(SourceReader::Pipe(r)) => Source::Pipe(r),
+            Some(SourceReader::File(f)) => Source::File(f),
             None => Source::Terminal,
         };
         self.value_in = child.value_in.take();
@@ -665,9 +733,9 @@ mod tests {
         stdout_tty: bool,
     ) -> TerminalState {
         TerminalState {
-            stdin_tty: stdout_tty,
-            stdout_tty,
-            stderr_tty: stdout_tty,
+            startup_stdin_tty: stdout_tty,
+            startup_stdout_tty: stdout_tty,
+            startup_stderr_tty: stdout_tty,
             supports_ansi,
             no_color,
             is_tmux: false,

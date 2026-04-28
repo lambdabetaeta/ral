@@ -283,7 +283,7 @@ fn parse_capabilities(entries: &[(String, Value)]) -> Result<Capabilities, EvalS
                     v,
                     "plugin capabilities editor",
                     |v| matches!(v, Value::Bool(true)),
-                    |cap: &mut EditorCapability, k, b| match k {
+                    |cap: &mut EditorPolicy, k, b| match k {
                         "read" => cap.read = b,
                         "write" => cap.write = b,
                         "tui" => cap.tui = b,
@@ -296,7 +296,7 @@ fn parse_capabilities(entries: &[(String, Value)]) -> Result<Capabilities, EvalS
                     v,
                     "plugin capabilities shell",
                     |v| matches!(v, Value::Bool(true)),
-                    |cap: &mut ShellCapability, k, b| {
+                    |cap: &mut ShellPolicy, k, b| {
                         if k == "chdir" {
                             cap.chdir = b
                         }

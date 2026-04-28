@@ -43,11 +43,11 @@ fn head_sig_modes() {
     use ral_core::ty::{Mode, ModeUnifier, head_sig};
 
     let mut unifier = ModeUnifier::new();
-    let read = head_sig("_decode", &[], &mut unifier);
+    let read = head_sig("from-json", &[], &mut unifier);
     assert_eq!(read.input, Mode::Bytes);
     assert_eq!(read.output, Mode::None);
 
-    let write = head_sig("_encode", &[], &mut unifier);
+    let write = head_sig("to-json", &[], &mut unifier);
     assert_eq!(write.input, Mode::None);
     assert_eq!(write.output, Mode::Bytes);
 

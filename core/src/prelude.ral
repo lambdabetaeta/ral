@@ -63,30 +63,6 @@ let float = { |v| _convert 'float' $v }
 ## Convert a value to its string representation.
 let str = { |v| _convert 'string' $v }
 
-# Byte-channel encoders: value → bytes (write to pipe, return Bytes)
-## Encode a value to JSON bytes.
-let to-json = { |v| _encode json $v }
-## Encode a list of strings to newline-separated bytes.
-let to-lines = { |v| _encode lines $v }
-## Encode a string with a single trailing newline appended (inverse of `from-line`).
-let to-line = { |s| _encode line $s }
-## Encode a value to UTF-8 string bytes.
-let to-string = { |v| _encode string $v }
-## Pass Bytes through to the byte channel (identity, strict).
-let to-bytes = { |v| _encode bytes $v }
-
-# Byte-channel decoders: pipe bytes → value
-## Decode JSON bytes from the pipe to a value.
-let from-json = { _decode json }
-## Decode pipe bytes to a list of lines.
-let from-lines = { _decode lines }
-## Decode UTF-8 pipe bytes to a String.
-let from-string = { _decode string }
-## Read raw pipe bytes as Bytes.
-let from-bytes = { _decode bytes }
-## Decode pipe bytes to a String, stripping one trailing newline.
-let from-line = { _decode line }
-
 # Control flow
 ## Iterate over a list for side effects.
 let for = { |items body| _each $items $body }

@@ -76,13 +76,9 @@ pub fn apply_child_limits(_child: &std::process::Child) {
 #[cfg(unix)]
 pub fn early_init(argv: &[String]) -> Result<(Vec<String>, Option<ExitCode>), String> {
     let (policy, stripped) = strip_policy_arg(argv)?;
-    if std::env::var_os(spawn::SANDBOX_SELF_ENV).is_none()
-        && let Ok(exe) = std::env::current_exe()
-    {
-        // Safety: `set_var` requires single-threaded access; `early_init`
-        // runs before any thread is spawned in main().
-        unsafe { std::env::set_var(spawn::SANDBOX_SELF_ENV, exe) };
-    }
+    // Pin this binary's executable inode so any later restrictive
+    // `grant { … }` block re-execs *us*, immune to on-disk swaps.
+    spawn::register_sandbox_self();
     if let Some(code) = spawn::maybe_enter_process_sandbox(&stripped, policy.as_ref())? {
         return Ok((stripped, Some(code)));
     }
@@ -191,6 +187,7 @@ mod tests {
                 fs: crate::types::FsPolicy {
                     read_prefixes: vec!["/tmp".into()],
                     write_prefixes: Vec::new(),
+                    deny_paths: Vec::new(),
                 },
                 net: true,
             })

@@ -54,7 +54,16 @@ pub enum Ast {
     /// Explicit value-to-command lift: return <value>?
     Return(Option<Box<Ast>>),
     /// Function/command application in command context.
-    App { head: Head, args: Vec<Ast> },
+    ///
+    /// `span` covers the head and all arguments — the full extent of the
+    /// surface command, used by the elaborator to stamp the resulting
+    /// `Comp::App` so diagnostics underline the whole command, not just
+    /// the head's first token.
+    App {
+        head: Head,
+        args: Vec<Ast>,
+        span: Span,
+    },
     /// A pipeline: cmd1 | cmd2 | cmd3
     Pipeline(Vec<Ast>),
     /// Chained commands: cmd1 ? cmd2 ? cmd3
@@ -298,7 +307,7 @@ impl Ast {
             Ast::Let { value, .. } | Ast::Return(Some(value)) => {
                 value.collect_free_refs(candidates, scopes, out);
             }
-            Ast::App { head, args } => {
+            Ast::App { head, args, .. } => {
                 head.collect_free_refs(candidates, scopes, out);
                 for arg in args {
                     arg.collect_free_refs(candidates, scopes, out);

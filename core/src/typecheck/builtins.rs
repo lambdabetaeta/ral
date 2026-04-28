@@ -269,6 +269,8 @@ pub fn builtin_scheme(name: &str, u: &mut Unifier) -> Option<Scheme> {
         // ∀α β. U(F α) → F {kind:Str, cmd:Str, args:[Str], status:Int, script:Str, line:Int,
         //                    col:Int, stdout:Bytes, stderr:Bytes, value:α,
         //                    children:[[Str:β]], start:Int, end:Int, principal:Str}
+        // stdout/stderr are stored as raw bytes; `ral --audit` renders them
+        // as lossy UTF-8 in its JSON output.
         {
             mk(
                 &[av, bv],

@@ -102,16 +102,16 @@ directory as a single atom.
 
 ## Strings
 
-Single-quoted strings are literal, with no escapes and no
-interpolation; embed a single quote by doubling it.  Double-quoted
-strings support interpolation with `$` and `!`, plus escape sequences
-(`\n`, `\t`, `\\`, `\0`, `\e`, `\"`, `\$`, `\!`).
+Single-quoted strings are literal: no escapes, no interpolation.
+Double-quoted strings support interpolation with `$` and `!`, plus
+escape sequences (`\n`, `\t`, `\\`, `\0`, `\e`, `\"`, `\$`, `\!`,
+`\xNN`, `\u{X..}`).
 
 ```ral
 'literal — no interpolation, no escapes'
-'embed a quote by doubling: it''s fine'
 "interpolation: $name and !{hostname}"
 "escapes: \n \t \\ \0 \" \$ \!"
+"numeric: \x41 is 'A'; \u{1F600} is an emoji"
 "delimited dereference: $(name)_suffix"
 ```
 
@@ -119,6 +119,25 @@ Note that `\n` in a double-quoted string is a real newline character,
 not the two characters `\` and `n`.  Use single quotes when you need
 the literal backslash-n, e.g. for passing format strings to external
 commands.
+
+**Embedding `'` — hash bumping.**  To embed a single quote in the body,
+raise the hash level: `#'…'#` closes on `'#`, `##'…'##` closes on `'##`,
+and so on.  A `'` in the body followed by fewer than the opening
+`#`-count is literal.  Pick the smallest level whose close pattern
+does not appear in the body.
+
+```ral
+let greeting = #'it's working'#
+let sql      = #'SELECT name FROM t WHERE val = "O'Brien"'#
+let py       = #'
+import sys
+print('hello', 'world', file=sys.stderr)
+'#
+```
+
+For generated or LLM-authored content this is the form to reach for:
+the body is verbatim, no character is special, and any level mismatch
+is a hard lex error rather than a silent semantic mistake.
 
 Only strings can be interpolated.  To embed a list, map, or other
 non-string value, convert explicitly with `str`:

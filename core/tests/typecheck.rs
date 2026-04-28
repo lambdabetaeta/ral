@@ -7,12 +7,16 @@
 
 mod common;
 
-use ral_core::{elaborate, parse, typecheck};
+use ral_core::{TypeError, elaborate, parse, typecheck};
 
-fn errors(src: &str) -> Vec<String> {
+fn raw_errors(src: &str) -> Vec<TypeError> {
     let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
     let comp = elaborate(&ast, Default::default());
     typecheck(&comp, common::prelude_schemes())
+}
+
+fn errors(src: &str) -> Vec<String> {
+    raw_errors(src)
         .into_iter()
         .map(|e| e.kind.render_message())
         .collect()
@@ -337,4 +341,58 @@ fn pipeline_value_pass_through() {
 #[test]
 fn interpolation_no_error() {
     ok("let x = world; return \"hello $x\"");
+}
+
+// ─── Head-not-callable (T0011, surface phrasing) ──────────────────────────────
+
+/// `'foo' bar baz` — a quoted string in command position with arguments.
+/// The diagnostic must talk about the head being non-callable, not about
+/// `Cmd a vs a → b` jargon nor about an argument-type mismatch.
+#[test]
+fn head_not_callable_string_with_args() {
+    let errs = errors("'foo' bar baz");
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("cannot be used as a command head")),
+        "expected 'cannot be used as a command head' message, got: {errs:?}"
+    );
+    assert!(
+        !errs.iter().any(|e| e.contains("argument type")),
+        "should not mention argument-type mismatch, got: {errs:?}"
+    );
+    assert!(
+        !errs.iter().any(|e| e.contains("Cmd")),
+        "should not surface internal `Cmd` jargon, got: {errs:?}"
+    );
+}
+
+/// The error span must cover the whole command — head and args — so the
+/// diagnostic underlines `'foo' bar baz`, not just the opening quote.
+#[test]
+fn head_not_callable_span_covers_whole_command() {
+    let src = "'foo' bar baz";
+    let errs = raw_errors(src);
+    assert_eq!(
+        errs.len(),
+        1,
+        "expected exactly one error, got: {:?}",
+        errs.iter()
+            .map(|e| e.kind.render_message())
+            .collect::<Vec<_>>()
+    );
+    let pos = errs[0].pos.expect("error must carry a span");
+    assert_eq!(
+        (pos.start as usize, pos.end as usize),
+        (0, src.len()),
+        "span should cover the entire command `{src}`, got [{}, {})",
+        pos.start,
+        pos.end
+    );
+}
+
+/// A bound non-callable value (`let x = 42; $x foo`) must trip the same
+/// diagnostic — the value is data, not a function.
+#[test]
+fn head_not_callable_int_variable_with_args() {
+    has_error("let x = 42\n$x foo", "cannot be used as a command head");
 }

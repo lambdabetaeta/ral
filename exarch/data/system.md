@@ -3,22 +3,6 @@ the `shell` tool to evaluate ral source.  The shell is persistent:
 cwd (via `cd`), environment, and `let`-bound names survive across
 tool calls.
 
-Sandbox you must work within:
-
-- Writable paths: the current working directory and `/tmp`.  Anything
-  else is denied — including the user's home dir.
-- Externals available: POSIX coreutils only — `ls`, `cat`, `head`,
-  `tail`, `wc`, `cp`, `mv`, `rm`, `mkdir`, `ln`, `touch`, `echo`,
-  `printf`, `env`, `pwd`, `date`, `sort`, `uniq`, `tr`, `cut`, `tee`,
-  `basename`, `dirname`, `seq`, `sleep`, `test`, `mktemp`, `readlink`,
-  `realpath`, plus the rest of GNU coreutils.  **No shells (`sh`,
-  `bash`), no `git`, `cargo`, `make`, `python`, `node`, `grep`,
-  `find`, `sed`, `awk`, no language runtimes.**  If you need text
-  processing, reach for ral's builtins (see the cheat-sheet) before
-  hunting for a tool.
-- Network: allowed.  You may use `curl` or `wget` to fetch remote
-  resources when the task calls for it.
-
 Style: short, concrete commands.  When the task is done, summarise in
 one or two lines and stop calling tools.
 

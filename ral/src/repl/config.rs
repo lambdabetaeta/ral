@@ -98,9 +98,9 @@ pub(super) fn terminal_capability_map(t: &ral_core::io::TerminalState) -> Value 
         InteractiveMode::Full => "full",
     };
     Value::Map(vec![
-        ("stdin_tty".into(), Value::Bool(t.stdin_tty)),
-        ("stdout_tty".into(), Value::Bool(t.stdout_tty)),
-        ("stderr_tty".into(), Value::Bool(t.stderr_tty)),
+        ("stdin_tty".into(), Value::Bool(t.startup_stdin_tty)),
+        ("stdout_tty".into(), Value::Bool(t.startup_stdout_tty)),
+        ("stderr_tty".into(), Value::Bool(t.startup_stderr_tty)),
         ("supports_ansi".into(), Value::Bool(t.supports_ansi)),
         ("no_color".into(), Value::Bool(t.no_color)),
         ("is_tmux".into(), Value::Bool(t.is_tmux)),

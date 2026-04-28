@@ -14,7 +14,7 @@ jobs:
   build-linux-x86_64:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install musl toolchain
         run: |
           rustup target add x86_64-unknown-linux-musl
@@ -22,7 +22,7 @@ jobs:
       - name: Build
         run: cargo build --release -p ral --target x86_64-unknown-linux-musl
       - name: Upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ral-linux-x86_64
           path: target/x86_64-unknown-linux-musl/release/ral
@@ -31,7 +31,7 @@ jobs:
   build-linux-x86_64-allutils:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install musl toolchain
         run: |
           rustup target add x86_64-unknown-linux-musl
@@ -39,7 +39,7 @@ jobs:
       - name: Build
         run: cargo build --release -p ral --target x86_64-unknown-linux-musl --features coreutils,diffutils,grep
       - name: Upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ral-linux-x86_64-allutils
           path: target/x86_64-unknown-linux-musl/release/ral
@@ -48,7 +48,7 @@ jobs:
   build-linux-arm64:
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install musl toolchain
         run: |
           rustup target add aarch64-unknown-linux-musl
@@ -56,7 +56,7 @@ jobs:
       - name: Build
         run: cargo build --release -p ral --target aarch64-unknown-linux-musl
       - name: Upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ral-linux-arm64
           path: target/aarch64-unknown-linux-musl/release/ral
@@ -65,7 +65,7 @@ jobs:
   build-linux-arm64-allutils:
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install musl toolchain
         run: |
           rustup target add aarch64-unknown-linux-musl
@@ -73,7 +73,7 @@ jobs:
       - name: Build
         run: cargo build --release -p ral --target aarch64-unknown-linux-musl --features coreutils,diffutils,grep
       - name: Upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ral-linux-arm64-allutils
           path: target/aarch64-unknown-linux-musl/release/ral
@@ -82,11 +82,11 @@ jobs:
   build-macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build
         run: cargo build --release -p ral
       - name: Upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ral-macos-arm64
           path: target/release/ral
@@ -95,11 +95,11 @@ jobs:
   build-macos-allutils:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build
         run: cargo build --release -p ral --features coreutils,diffutils,grep
       - name: Upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ral-macos-arm64-allutils
           path: target/release/ral
@@ -108,11 +108,11 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build
         run: cargo build --release -p ral
       - name: Upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ral-windows
           path: target/release/ral.exe
@@ -121,14 +121,64 @@ jobs:
   build-windows-allutils:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build
         run: cargo build --release -p ral --features coreutils,diffutils,grep
       - name: Upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ral-windows-allutils
           path: target/release/ral.exe
+          if-no-files-found: error
+
+  # exarch — built for Linux + macOS only (no Windows target, no
+  # `coreutils,diffutils,grep` features — those belong to ral).  Same
+  # toolchains as the ral matrix above.
+  build-exarch-linux-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install musl toolchain
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get install -y musl-tools
+      - name: Build
+        run: cargo build --release -p exarch --target x86_64-unknown-linux-musl
+      - name: Upload
+        uses: actions/upload-artifact@v5
+        with:
+          name: exarch-linux-x86_64
+          path: target/x86_64-unknown-linux-musl/release/exarch
+          if-no-files-found: error
+
+  build-exarch-linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install musl toolchain
+        run: |
+          rustup target add aarch64-unknown-linux-musl
+          sudo apt-get install -y musl-tools
+      - name: Build
+        run: cargo build --release -p exarch --target aarch64-unknown-linux-musl
+      - name: Upload
+        uses: actions/upload-artifact@v5
+        with:
+          name: exarch-linux-arm64
+          path: target/aarch64-unknown-linux-musl/release/exarch
+          if-no-files-found: error
+
+  build-exarch-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build
+        run: cargo build --release -p exarch
+      - name: Upload
+        uses: actions/upload-artifact@v5
+        with:
+          name: exarch-macos-arm64
+          path: target/release/exarch
           if-no-files-found: error
 
   release:
@@ -141,6 +191,9 @@ jobs:
       - build-macos-allutils
       - build-windows
       - build-windows-allutils
+      - build-exarch-linux-x86_64
+      - build-exarch-linux-arm64
+      - build-exarch-macos
     # Only publish on real tag pushes.  Manual dispatches just produce
     # workflow artifacts without cutting a GitHub release.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
@@ -148,10 +201,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: artifacts
 
@@ -165,6 +218,9 @@ jobs:
           mv artifacts/ral-macos-arm64-allutils/ral     artifacts/ral-macos-arm64-allutils/ral-macos-arm64-allutils
           mv artifacts/ral-windows/ral.exe              artifacts/ral-windows/ral-windows.exe
           mv artifacts/ral-windows-allutils/ral.exe     artifacts/ral-windows-allutils/ral-windows-allutils.exe
+          mv artifacts/exarch-linux-x86_64/exarch       artifacts/exarch-linux-x86_64/exarch-linux-x86_64
+          mv artifacts/exarch-linux-arm64/exarch        artifacts/exarch-linux-arm64/exarch-linux-arm64
+          mv artifacts/exarch-macos-arm64/exarch        artifacts/exarch-macos-arm64/exarch-macos-arm64
 
       - name: Generate checksums
         run: |
@@ -196,3 +252,9 @@ jobs:
             artifacts/ral-windows/ral-windows.exe.sha256
             artifacts/ral-windows-allutils/ral-windows-allutils.exe
             artifacts/ral-windows-allutils/ral-windows-allutils.exe.sha256
+            artifacts/exarch-linux-x86_64/exarch-linux-x86_64
+            artifacts/exarch-linux-x86_64/exarch-linux-x86_64.sha256
+            artifacts/exarch-linux-arm64/exarch-linux-arm64
+            artifacts/exarch-linux-arm64/exarch-linux-arm64.sha256
+            artifacts/exarch-macos-arm64/exarch-macos-arm64
+            artifacts/exarch-macos-arm64/exarch-macos-arm64.sha256

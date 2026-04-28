@@ -124,6 +124,20 @@ impl Inferencer<'_> {
             match self.ctx.unifier.resolve_comp_ty(&cty) {
                 CompTy::Return(_, ty) => match self.ctx.unifier.resolve_ty(&ty) {
                     Ty::Thunk(inner) => cty = *inner,
+                    // Free type variable in head position: this matches the
+                    // runtime behavior where eval_app's Thunk arm trampoline-
+                    // forces a Thunk value before applying args.  At type
+                    // level we constrain the head to be a Thunk and continue
+                    // unfolding.  Without this, a parameter `$f` whose type
+                    // is yet unknown would fail to unify when args are
+                    // applied (the elaborator no longer emits a `Force`
+                    // wrapper that used to plant this constraint).
+                    Ty::Var(_) => {
+                        let inner = self.ctx.unifier.fresh_comp_ty();
+                        self.ctx
+                            .unify_ty(&ty, &Ty::Thunk(Box::new(inner.clone())));
+                        cty = inner;
+                    }
                     _ => return cty,
                 },
                 _ => return cty,
@@ -140,11 +154,28 @@ impl Inferencer<'_> {
             self.ctx.unify_comp_ty_hint(
                 &cty,
                 &expected,
-                "argument type does not match what the function expects",
+                "this argument's type does not match the function's parameter",
             );
             cty = result;
         }
         cty
+    }
+
+    /// If `head_ty` resolves to a `Return(_, ty)` where `ty` is concretely
+    /// non-callable — i.e. not a `Thunk` and not a free type variable that
+    /// could later become one — return that `ty`.  Otherwise return `None`.
+    ///
+    /// Used by `CompKind::App` to detect `'foo' bar baz` and friends and
+    /// raise a surface-level diagnostic before the general unifier
+    /// mismatch fires.
+    fn head_non_callable_ty(&mut self, head_ty: &CompTy) -> Option<Ty> {
+        match self.ctx.unifier.resolve_comp_ty(head_ty) {
+            CompTy::Return(_, ty) => match self.ctx.unifier.resolve_ty(&ty) {
+                Ty::Thunk(_) | Ty::Var(_) => None,
+                concrete => Some(concrete),
+            },
+            CompTy::Fun(_, _) | CompTy::Var(_) => None,
+        }
     }
 
     fn apply_piped_value(&mut self, cty: CompTy, piped_ty: Ty) -> CompTy {
@@ -711,6 +742,29 @@ impl Inferencer<'_> {
             }
             CompKind::App { head, args, .. } => {
                 let head_ty = self.infer_comp(head);
+                // Surface the common surface error — a literal value
+                // (`'foo'`, `42`, ...) used as a command head with args —
+                // before falling into the general `Cmd a vs a → b`
+                // mismatch path, which prints implementation jargon.
+                if !args.is_empty()
+                    && let Some(ty) = self.head_non_callable_ty(&head_ty)
+                {
+                    self.ctx.emit_kind(
+                        crate::typecheck::scheme::TypeErrorKind::HeadNotCallable { ty },
+                        Some(
+                            "a command head must be a function or a thunk; \
+                             a value here is data, not a callable — pass it as \
+                             an argument or wrap a callable instead",
+                        ),
+                    );
+                    // Still type-check the args for cascading errors, then
+                    // return a fresh result so the outer pipeline / chain
+                    // type-checks against something coherent.
+                    for arg in args {
+                        let _ = self.infer_val(arg);
+                    }
+                    return self.ctx.unifier.fresh_comp_ty();
+                }
                 self.apply_args(head_ty, args)
             }
             CompKind::Exec {

@@ -34,11 +34,19 @@ const ART: &str = " ███████╗██╗  ██╗ █████
  ███████╗██╔╝ ██╗██║  ██║██║  ██║╚██████╗██║  ██║
  ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝";
 
-pub fn banner(provider: &str, model: &str) {
+pub fn banner(
+    provider: &str,
+    model: &str,
+    base: &str,
+    extend_base: Option<&std::path::Path>,
+    restrict_files: &[std::path::PathBuf],
+) {
     let p = pink();
     let c = cyan();
     let l = lime();
     let s = slate();
+    let o = orange();
+    let r = red();
     eprintln!();
     for line in ART.lines() {
         eprintln!("{p}{BOLD}{line}{RESET}");
@@ -46,6 +54,27 @@ pub fn banner(provider: &str, model: &str) {
     eprintln!(" {s}{ITAL}a delegate driving ral under a grant{RESET}");
     eprintln!(
         "{s}provider {RESET}{c}{BOLD}{provider}{RESET}    {s}model {RESET}{l}{BOLD}{model}{RESET}"
+    );
+    // Base name; tint `dangerous` red so it's visually loud.
+    let base_color = if base == "dangerous" { &r } else { &o };
+    let path_list = |paths: &[std::path::PathBuf]| -> String {
+        paths
+            .iter()
+            .map(|p| format!("{o}{BOLD}{}{RESET}", p.display()))
+            .collect::<Vec<_>>()
+            .join(&format!("{s}, {RESET}"))
+    };
+    let none = || format!("{s}none{RESET}");
+    let extend_label = extend_base
+        .map(|p| format!("{o}{BOLD}{}{RESET}", p.display()))
+        .unwrap_or_else(none);
+    let restrict_label = if restrict_files.is_empty() {
+        none()
+    } else {
+        path_list(restrict_files)
+    };
+    eprintln!(
+        "{s}base {RESET}{base_color}{BOLD}{base}{RESET}    {s}extend-base {RESET}{extend_label}    {s}restrict {RESET}{restrict_label}"
     );
     eprintln!("{}{}{RESET}", purple(), "━".repeat(W));
 }

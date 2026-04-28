@@ -69,8 +69,9 @@ pub(crate) fn eval_call_args(
 
 // ── Application dispatch ─────────────────────────────────────────────────
 
-/// Run `body` with `redirects` applied: open the targets, dup over fd 0/1/2,
-/// run, then always restore.  Atomic-write commits fire on success and are
+/// Run `body` with `redirects` applied: open the targets, dup over fd 1/2
+/// (and fd 0 for `<&N` fd-dup), park `<file` input on `shell.io.stdin`, run,
+/// then always restore.  Atomic-write commits fire on success and are
 /// dropped on failure (so the tmp file is removed).  When redirects are
 /// non-empty, stdout/stderr are flushed before restoring fds so buffered
 /// bytes land at the redirect target rather than back at the terminal.
@@ -80,6 +81,12 @@ pub(crate) fn eval_call_args(
 /// the matching `Sink::Terminal` / `Sink::Stderr`.  Otherwise a `Sink::Buffer`
 /// (capture), `Sink::Pipe` (pipeline stage), or `Sink::External` (REPL
 /// printer) would absorb the builtin's bytes ahead of the redirect.
+///
+/// `<file` redirects to fd 0 do *not* go through `dup2` — they are opened by
+/// `install_stdin_redirect` and parked on `shell.io.stdin`.  This is what
+/// keeps the cached `startup_stdin_tty` honest: it gets consulted only when
+/// `shell.io.stdin` is `Terminal`, which truly means "fall through to the
+/// inherited fd 0".
 fn with_redirects<F>(
     redirects: &[(u32, RedirectMode, EvalRedirect)],
     shell: &mut Shell,
@@ -91,7 +98,14 @@ where
     if redirects.is_empty() {
         return body(shell);
     }
-    let guard = exec::apply_redirects(redirects, shell)?;
+    let stdin_guard = exec::install_stdin_redirect(redirects, shell)?;
+    let fd_guard = match exec::apply_redirects(redirects, shell) {
+        Ok(g) => g,
+        Err(e) => {
+            stdin_guard.restore(shell);
+            return Err(e);
+        }
+    };
     let touches = |fd: u32| redirects.iter().any(|(f, ..)| *f == fd);
     let prev_stdout = touches(1).then(|| std::mem::replace(&mut shell.io.stdout, Sink::Terminal));
     let prev_stderr = touches(2).then(|| std::mem::replace(&mut shell.io.stderr, Sink::Stderr));
@@ -106,7 +120,8 @@ where
     if let Some(s) = prev_stderr {
         shell.io.stderr = s;
     }
-    let commits = exec::restore_redirects(guard);
+    let commits = exec::restore_redirects(fd_guard);
+    stdin_guard.restore(shell);
     let v = result?;
     exec::commit_atomics(commits)?;
     Ok(v)
@@ -285,6 +300,10 @@ pub(crate) fn dispatch_by_name(
 }
 
 /// PATH-resolved external command with start/end audit framing.
+///
+/// `<file` redirects are unified with the builtin path here: `install_stdin_redirect`
+/// parks the file on `shell.io.stdin` so `wire_stdin` consumes it through the
+/// same `Source` channel that pipeline pipes use.
 fn run_external(
     name: &ExecName,
     args: &[Value],
@@ -292,7 +311,9 @@ fn run_external(
     shell: &mut Shell,
 ) -> Result<Value, EvalSignal> {
     let start_us = audit::start(shell);
+    let stdin_guard = exec::install_stdin_redirect(redirects, shell)?;
     let result = exec::exec_external(name, args, redirects, shell);
+    stdin_guard.restore(shell);
     let shown = exec::render_exec_name(name, shell);
     audit::record_exec(
         shell,

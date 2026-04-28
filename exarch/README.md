@@ -126,6 +126,12 @@ grant [
 ] { <model command> }
 ```
 
-Process-level sandboxing (`sandbox::early_init`) is *not* applied — that
-would also block the exarch's HTTPS calls. The grant block is the only
-gate. Treat the exarch as a development tool, not a hardened jail.
+The Exarch process itself is not sandboxed — it still needs HTTPS for the
+model API.  Each tool call is evaluated in a `grant`; when that grant
+contains filesystem or network restrictions, ral re-execs a child process
+under the platform sandbox (Seatbelt on macOS, bwrap on Linux) and the
+child evaluates the block there.  Exec permissions are checked in ral
+before spawning; file/network permissions are also enforced by the OS
+sandbox where supported.
+
+Treat Exarch as a development tool, not a hardened jail.

@@ -121,16 +121,41 @@ impl PipelineGroup {
 
     /// Hand terminal foreground to the pipeline's process group.
     ///
-    /// Refuses for `Mixed` pipelines — handing the tty to a pgid that
-    /// excludes ral's threads would background those threads.  Idempotent:
-    /// subsequent calls are no-ops once the guard is held.
+    /// `PureExternal` pipelines always claim — every stage is an external
+    /// process whose pgid is the pipeline pgid, so handing over the tty is
+    /// the natural completion of the spawn.
+    ///
+    /// `Mixed` pipelines normally refuse: handing the tty to a pgid that
+    /// excludes ral's threads would background those threads, and an
+    /// internal stage that reads `fd 0 = /dev/tty` would SIGTTIN.  The one
+    /// exception is when the pipeline runs inside a `_ed-tui` body — the
+    /// editor is suspended, the main thread is parked in the pipeline
+    /// collect loop, and the `_ed-tui` contract is precisely "give the
+    /// body the terminal."  In that context, an external interactive tail
+    /// (e.g. `fzf`) needs foreground so its first `tcsetattr` doesn't trip
+    /// SIGTTOU and get reaped as exit 137.  Internal stages of such a
+    /// pipeline are expected not to read `/dev/tty`; the common pattern
+    /// (e.g. `to-lines $entries | fzf`) writes a value-typed argument to a
+    /// pipe and never touches stdin.
+    ///
+    /// Idempotent: subsequent calls are no-ops once the guard is held.
     pub(super) fn claim_foreground(&mut self, shell: &Shell) {
         #[cfg(unix)]
-        if self.mode == PipelineMode::PureExternal
-            && self.foreground.is_none()
-            && let Some(Pgid(leader)) = self.leader
         {
-            self.foreground = crate::signal::ForegroundGuard::try_acquire(leader, shell);
+            let permitted = match self.mode {
+                PipelineMode::PureExternal => true,
+                PipelineMode::Mixed => shell
+                    .repl
+                    .plugin_context
+                    .as_ref()
+                    .is_some_and(|pc| pc.in_tui),
+            };
+            if permitted
+                && self.foreground.is_none()
+                && let Some(Pgid(leader)) = self.leader
+            {
+                self.foreground = crate::signal::ForegroundGuard::try_acquire(leader, shell);
+            }
         }
         #[cfg(not(unix))]
         let _ = shell;

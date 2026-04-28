@@ -58,8 +58,6 @@ COPY --from=download /tmp/exarch /usr/local/bin/exarch
 COPY entrypoint.sh /usr/local/bin/exarch-entrypoint
 RUN chmod +x /usr/local/bin/exarch-entrypoint
 
-ENV EXARCH_DANGEROUS=1
-
 ARG EXARCH_PROVIDER=
 ARG EXARCH_MODEL=
 ENV EXARCH_PROVIDER=${EXARCH_PROVIDER}

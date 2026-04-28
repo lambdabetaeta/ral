@@ -671,7 +671,14 @@ impl Parser {
     }
 
     /// command = head (arg | redir)*
+    ///
+    /// The returned `Ast::App` carries a `span` covering the head and all
+    /// arguments — start is the byte where `parse_head` began, end is the
+    /// byte just past the last consumed token.  Diagnostics on the resulting
+    /// command (e.g. T0011 for a non-callable head) underline this whole
+    /// range.
     fn parse_command(&mut self) -> Result<Ast, ParseError> {
+        let start = self.span().byte;
         let head = self.parse_head()?;
         let mut args = Vec::new();
 
@@ -682,6 +689,7 @@ impl Parser {
                 args.push(self.parse_arg()?);
             }
         }
+        let span = start.join(self.prev_byte_span());
 
         if args.is_empty() {
             match head {
@@ -689,11 +697,21 @@ impl Parser {
                 Head::Bare(s) if is_value_literal_name(&s) || s == "return" => {
                     Ok(Ast::Word(Word::Plain(s)))
                 }
-                head => Ok(Ast::App { head, args: vec![] }),
+                head => Ok(Ast::App { head, args: vec![], span }),
             }
         } else {
-            Ok(Ast::App { head, args })
+            Ok(Ast::App { head, args, span })
         }
+    }
+
+    /// Byte span of the most recently consumed token.  Used to compute the
+    /// end of an `Ast::App` once all args have been parsed.  Falls back to
+    /// the current-position span at the start of input.
+    fn prev_byte_span(&self) -> crate::span::Span {
+        self.tokens
+            .get(self.pos.saturating_sub(1))
+            .map(|(_, s)| s.byte)
+            .unwrap_or_else(|| self.span().byte)
     }
 
     /// Check if we've reached the end of a command's argument list.
@@ -1211,6 +1229,17 @@ mod tests {
         Head::Value(Box::new(ast))
     }
 
+    /// Construct `Ast::App` with a zero-width span — the parser tests do not
+    /// inspect spans, and `strip_one` already drops them, so this keeps the
+    /// expected-AST literals readable.
+    fn app(head: Head, args: Vec<Ast>) -> Ast {
+        Ast::App {
+            head,
+            args,
+            span: crate::span::Span::point(crate::source::FileId::DUMMY, 0),
+        }
+    }
+
     /// Strip Pos nodes and unwrap lone-atom Commands for test assertions.
     fn strip_pos(ast: Vec<Ast>) -> Vec<Ast> {
         ast.into_iter()
@@ -1229,22 +1258,16 @@ mod tests {
     fn strip_one(n: Ast) -> Ast {
         match n {
             // Unwrap Command { name: X, args: [] } → X (lone atom in command position)
-            Ast::App { head, args } if args.is_empty() => match head {
+            Ast::App { head, args, .. } if args.is_empty() => match head {
                 Head::Bare(s) => plain(&s),
                 Head::Path(s) => Ast::Word(Word::Slash(s)),
                 Head::TildePath(path) => tilde_word(path),
                 Head::Value(ast) => strip_one(*ast),
-                Head::ExternalName(s) => Ast::App {
-                    head: Head::ExternalName(s),
-                    args: vec![],
-                },
+                Head::ExternalName(s) => app(Head::ExternalName(s), vec![]),
             },
             Ast::Return(None) => Ast::Return(None),
             Ast::Return(Some(value)) => Ast::Return(Some(Box::new(strip_one(*value)))),
-            Ast::App { head, args } => Ast::App {
-                head: strip_head(head),
-                args: strip_pos(args),
-            },
+            Ast::App { head, args, .. } => app(strip_head(head), strip_pos(args)),
             Ast::Block(body) => Ast::Block(strip_pos(body)),
             Ast::Lambda { param, body } => Ast::Lambda {
                 param,
@@ -1265,13 +1288,7 @@ mod tests {
     #[test]
     fn parse_simple_command() {
         let ast = strip_pos(parse("echo hello").unwrap());
-        assert_eq!(
-            ast,
-            vec![Ast::App {
-                head: bare_head("echo"),
-                args: vec![plain("hello")],
-            }]
-        );
+        assert_eq!(ast, vec![app(bare_head("echo"), vec![plain("hello")])]);
     }
 
     #[test]
@@ -1279,10 +1296,7 @@ mod tests {
         let ast = strip_pos(parse("echo $x").unwrap());
         assert_eq!(
             ast,
-            vec![Ast::App {
-                head: bare_head("echo"),
-                args: vec![Ast::Variable("x".into())],
-            }]
+            vec![app(bare_head("echo"), vec![Ast::Variable("x".into())])]
         );
     }
 
@@ -1291,13 +1305,13 @@ mod tests {
         let ast = strip_pos(parse("$map $upper ['a']").unwrap());
         assert_eq!(
             ast,
-            vec![Ast::App {
-                head: value_head(Ast::Variable("map".into())),
-                args: vec![
+            vec![app(
+                value_head(Ast::Variable("map".into())),
+                vec![
                     Ast::Variable("upper".into()),
                     Ast::List(vec![ListElem::Single(Ast::Literal("a".into()))]),
                 ],
-            }]
+            )]
         );
     }
 
@@ -1312,10 +1326,7 @@ mod tests {
         let ast = strip_pos(parse("^git status").unwrap());
         assert_eq!(
             ast,
-            vec![Ast::App {
-                head: external_head("git"),
-                args: vec![plain("status")],
-            }]
+            vec![app(external_head("git"), vec![plain("status")])]
         );
     }
 
@@ -1323,7 +1334,7 @@ mod tests {
     fn parse_external_name_head_without_args() {
         let ast = parse("^git").unwrap();
         match ast.as_slice() {
-            [Ast::Pos(_), Ast::App { head, args }] => {
+            [Ast::Pos(_), Ast::App { head, args, .. }] => {
                 assert!(args.is_empty());
                 assert_eq!(head, &external_head("git"));
             }
@@ -1354,10 +1365,7 @@ mod tests {
         assert_eq!(
             ast,
             vec![Ast::Pipeline(vec![
-                Ast::App {
-                    head: bare_head("echo"),
-                    args: vec![plain("hello")],
-                },
+                app(bare_head("echo"), vec![plain("hello")]),
                 plain("upper"),
             ])]
         );
@@ -1382,10 +1390,7 @@ mod tests {
             ast,
             vec![Ast::Chain(vec![
                 Ast::Return(Some(Box::new(plain("true")))),
-                Ast::App {
-                    head: bare_head("echo"),
-                    args: vec![plain("yes")],
-                },
+                app(bare_head("echo"), vec![plain("yes")]),
             ])]
         );
     }
@@ -1395,10 +1400,10 @@ mod tests {
         let ast = strip_pos(parse("{ echo hello }").unwrap());
         assert_eq!(
             ast,
-            vec![Ast::Block(vec![Ast::App {
-                head: bare_head("echo"),
-                args: vec![plain("hello")],
-            }])]
+            vec![Ast::Block(vec![app(
+                bare_head("echo"),
+                vec![plain("hello")]
+            )])]
         );
     }
 
@@ -1407,16 +1412,16 @@ mod tests {
         let ast = strip_pos(parse("echo { |x| echo $x }").unwrap());
         assert_eq!(
             ast,
-            vec![Ast::App {
-                head: bare_head("echo"),
-                args: vec![Ast::Lambda {
+            vec![app(
+                bare_head("echo"),
+                vec![Ast::Lambda {
                     param: Pattern::Name("x".into()),
-                    body: vec![Ast::App {
-                        head: bare_head("echo"),
-                        args: vec![Ast::Variable("x".into())],
-                    }],
+                    body: vec![app(
+                        bare_head("echo"),
+                        vec![Ast::Variable("x".into())]
+                    )],
                 }],
-            }]
+            )]
         );
     }
 
@@ -1518,13 +1523,13 @@ mod tests {
         let ast = strip_pos(parse("echo $items[0]").unwrap());
         assert_eq!(
             ast,
-            vec![Ast::App {
-                head: bare_head("echo"),
-                args: vec![Ast::Index {
+            vec![app(
+                bare_head("echo"),
+                vec![Ast::Index {
                     target: Box::new(Ast::Variable("items".into())),
                     keys: vec![plain("0")],
                 }],
-            }]
+            )]
         );
     }
 
@@ -1545,13 +1550,13 @@ mod tests {
         let ast = strip_pos(parse("echo \"hello $name\"").unwrap());
         assert_eq!(
             ast,
-            vec![Ast::App {
-                head: bare_head("echo"),
-                args: vec![Ast::Interpolation(vec![
+            vec![app(
+                bare_head("echo"),
+                vec![Ast::Interpolation(vec![
                     Ast::Literal("hello ".into()),
                     Ast::Variable("name".into()),
                 ])],
-            }]
+            )]
         );
     }
 
@@ -1633,7 +1638,7 @@ mod tests {
     fn parse_command_with_lambda_arg() {
         let ast = strip_pos(parse("for $items { |x| echo $x }").unwrap());
         match &ast[0] {
-            Ast::App { head, args } => {
+            Ast::App { head, args, .. } => {
                 assert_eq!(head, &bare_head("for"));
                 assert_eq!(args.len(), 2); // $items and the lambda
                 assert!(matches!(args[0], Ast::Variable(_)));
@@ -1679,7 +1684,7 @@ mod tests {
         let src = "case $action [\n    quit: { echo quitting },\n    help: { echo help },\n    _: { echo unknown },\n]";
         let ast = strip_pos(parse(src).unwrap());
         match &ast[0] {
-            Ast::App { head, args } => {
+            Ast::App { head, args, .. } => {
                 assert_eq!(head, &bare_head("case"));
                 assert_eq!(args.len(), 2);
                 assert!(matches!(&args[1], Ast::Map(_)));
@@ -1785,13 +1790,13 @@ mod tests {
         let ast = strip_pos(parse("cd ~").unwrap());
         assert_eq!(
             ast,
-            vec![Ast::App {
-                head: bare_head("cd"),
-                args: vec![tilde_word(TildePath {
+            vec![app(
+                bare_head("cd"),
+                vec![tilde_word(TildePath {
                     user: None,
                     suffix: None,
                 })],
-            }]
+            )]
         );
     }
 
@@ -1823,7 +1828,7 @@ mod tests {
     fn parse_tilde_path_command_head_without_args() {
         let ast = parse("~/.local/bin/claude").unwrap();
         match ast.as_slice() {
-            [Ast::Pos(_), Ast::App { head, args }] => {
+            [Ast::Pos(_), Ast::App { head, args, .. }] => {
                 assert!(args.is_empty());
                 assert_eq!(
                     head,
@@ -1858,7 +1863,7 @@ mod tests {
     fn parse_literal_path_head_without_args() {
         let ast = parse("./script").unwrap();
         match ast.as_slice() {
-            [Ast::Pos(_), Ast::App { head, args }] => {
+            [Ast::Pos(_), Ast::App { head, args, .. }] => {
                 assert!(args.is_empty());
                 assert_eq!(head, &path_head("./script"));
             }
@@ -1872,16 +1877,16 @@ mod tests {
         let ast = strip_pos(parse("echo ~ foo").unwrap());
         assert_eq!(
             ast,
-            vec![Ast::App {
-                head: bare_head("echo"),
-                args: vec![
+            vec![app(
+                bare_head("echo"),
+                vec![
                     tilde_word(TildePath {
                         user: None,
                         suffix: None,
                     }),
                     plain("foo"),
                 ],
-            }]
+            )]
         );
     }
 
@@ -1890,10 +1895,10 @@ mod tests {
         let ast = strip_pos(parse("{ { echo inner } }").unwrap());
         assert_eq!(
             ast,
-            vec![Ast::Block(vec![Ast::Block(vec![Ast::App {
-                head: bare_head("echo"),
-                args: vec![plain("inner")],
-            }])])]
+            vec![Ast::Block(vec![Ast::Block(vec![app(
+                bare_head("echo"),
+                vec![plain("inner")]
+            )])])]
         );
     }
 
@@ -1902,10 +1907,10 @@ mod tests {
         let ast = strip_pos(parse("!{echo hello}").unwrap());
         assert_eq!(
             ast,
-            vec![Ast::Force(Box::new(Ast::Block(vec![Ast::App {
-                head: bare_head("echo"),
-                args: vec![plain("hello")],
-            }])))]
+            vec![Ast::Force(Box::new(Ast::Block(vec![app(
+                bare_head("echo"),
+                vec![plain("hello")]
+            )])))]
         );
     }
 
@@ -1922,10 +1927,7 @@ mod tests {
             ast,
             vec![Ast::Let {
                 pattern: Pattern::Name("x".into()),
-                value: Box::new(Ast::App {
-                    head: bare_head("echo"),
-                    args: vec![plain("hi")],
-                }),
+                value: Box::new(app(bare_head("echo"), vec![plain("hi")])),
             }]
         );
     }
@@ -1938,10 +1940,7 @@ mod tests {
             ast,
             vec![Ast::Let {
                 pattern: Pattern::Name("x".into()),
-                value: Box::new(Ast::App {
-                    head: bare_head("echo"),
-                    args: vec![plain("hi")],
-                }),
+                value: Box::new(app(bare_head("echo"), vec![plain("hi")])),
             }]
         );
     }
@@ -1973,14 +1972,8 @@ mod tests {
             vec![Ast::Let {
                 pattern: Pattern::Name("x".into()),
                 value: Box::new(Ast::Chain(vec![
-                    Ast::App {
-                        head: bare_head("echo"),
-                        args: vec![plain("hi")],
-                    },
-                    Ast::App {
-                        head: bare_head("echo"),
-                        args: vec![plain("bye")],
-                    },
+                    app(bare_head("echo"), vec![plain("hi")]),
+                    app(bare_head("echo"), vec![plain("bye")]),
                 ])),
             }]
         );
@@ -1993,10 +1986,7 @@ mod tests {
         assert_eq!(
             ast,
             vec![Ast::Pipeline(vec![
-                Ast::App {
-                    head: bare_head("echo"),
-                    args: vec![plain("hello")],
-                },
+                app(bare_head("echo"), vec![plain("hello")]),
                 plain("upper"),
             ])]
         );
@@ -2009,10 +1999,7 @@ mod tests {
         assert_eq!(
             ast,
             vec![Ast::Pipeline(vec![
-                Ast::App {
-                    head: bare_head("echo"),
-                    args: vec![plain("hello")],
-                },
+                app(bare_head("echo"), vec![plain("hello")]),
                 plain("upper"),
             ])]
         );

@@ -122,7 +122,7 @@ pub(crate) fn run_interactive(is_login: bool, opts: &super::InteractiveOpts) -> 
                 // *then* flush any plugin diagnostics so they land on a
                 // durable line above the next prompt.  Order matters:
                 // printing before the escape would have its line clobbered.
-                if shell.io.terminal.stdout_tty {
+                if shell.io.terminal.startup_stdout_tty {
                     use std::io::Write;
                     let _ = std::io::stdout().write_all(b"\x1b[A\r\x1b[K");
                     let _ = std::io::stdout().flush();
@@ -144,7 +144,7 @@ pub(crate) fn run_interactive(is_login: bool, opts: &super::InteractiveOpts) -> 
                 fe.add_history(trimmed);
 
                 #[cfg(unix)]
-                let stdin_tty = shell.io.terminal.stdin_tty;
+                let stdin_tty = shell.io.terminal.startup_stdin_tty;
                 match step(
                     trimmed,
                     &mut shell,

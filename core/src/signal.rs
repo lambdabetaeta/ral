@@ -446,14 +446,18 @@ impl ForegroundGuard {
     /// Hand the controlling tty to `target`, recording the prior pgid for
     /// the eventual restore.  Returns `None` when no handoff is appropriate.
     pub fn try_acquire(target: libc::pid_t, shell: &crate::types::Shell) -> Option<Self> {
-        if !shell.io.interactive || !shell.io.terminal.stdin_tty || target == 0 {
+        if !shell.io.interactive || !shell.io.terminal.startup_stdin_tty || target == 0 {
             return None;
         }
         let saved = unsafe { libc::getpgrp() };
         let rc = unsafe { libc::tcsetpgrp(libc::STDIN_FILENO, target) };
         if rc != 0 {
-            let err = std::io::Error::last_os_error();
-            crate::dbg_trace!("fg", "acquire: tcsetpgrp({target}) failed: {err}");
+            #[cfg(debug_assertions)]
+            crate::dbg_trace!(
+                "fg",
+                "acquire: tcsetpgrp({target}) failed: {}",
+                std::io::Error::last_os_error()
+            );
             return None;
         }
         Some(Self { saved_pgid: saved })

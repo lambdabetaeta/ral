@@ -27,4 +27,12 @@ fi
 [ -n "${EXARCH_PROVIDER:-}" ] && set -- --provider "$EXARCH_PROVIDER" "$@"
 [ -n "${EXARCH_MODEL:-}"    ] && set -- --model    "$EXARCH_MODEL"    "$@"
 
+# Container is the trust boundary: default to the lattice top so the
+# agent has ambient authority inside the rootless image.  Override by
+# passing `--base reasonable` (or `minimal`) via `docker run`.
+case " $* " in
+    *" --base "*) ;;
+    *) set -- --base dangerous "$@" ;;
+esac
+
 exec /usr/local/bin/exarch "$@"

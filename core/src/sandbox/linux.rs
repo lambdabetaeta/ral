@@ -1,9 +1,9 @@
 //! Linux sandbox using bubblewrap (`bwrap`).
 //!
-//! Each external command is wrapped in a `bwrap` invocation that binds only
-//! the paths listed in the policy.  The top-level ral process is also
-//! re-exec'd inside `bwrap` when `--sandbox-policy` is provided on startup
-//! (see [`super::early_init`]).
+//! A ral subprocess is re-exec'd inside `bwrap` when `--sandbox-policy`
+//! is provided on startup (see [`super::early_init`]).  External commands
+//! spawned by that child inherit the same mount namespace and seccomp
+//! filter.
 //!
 //! On x86-64 and aarch64 a seccomp-BPF filter is additionally applied via a
 //! memfd, blocking dangerous syscalls (`ptrace`, `kexec_load`, `bpf`, etc.)
@@ -20,9 +20,8 @@ use std::process::{Command, ExitCode, Stdio};
 
 /// Build a [`Command`] that runs `name` inside a `bwrap` sandbox
 /// configured by `policy`.  Read-only and read-write bind mounts are
-/// derived from the policy prefixes; the active `within [dir:]` is
-/// already baked into those prefixes by `sandbox_policy()`, so this
-/// function takes no cwd.
+/// derived from the policy prefixes, with `deny_paths` overlaid read-only
+/// after broad writable binds.
 pub fn make_command_with_policy(name: &str, args: &[String], policy: &SandboxPolicy) -> Command {
     let mut c = Command::new("bwrap");
     let bind_spec = policy.bind_spec();
@@ -66,6 +65,18 @@ pub fn make_command_with_policy(name: &str, args: &[String], policy: &SandboxPol
     for bind in &rw_binds {
         if Path::new(bind).exists() {
             c.args(["--bind", bind, bind]);
+        }
+    }
+    // `deny_paths` are write-only carve-outs inside otherwise writable
+    // prefixes.  bwrap has no negative path rule, so overlay an existing
+    // denied path back onto itself read-only after the broad rw binds.
+    // This is the same "last mount wins" shape as the Seatbelt profile.
+    let mut denied_binds = bind_spec.deny_paths;
+    denied_binds.sort();
+    denied_binds.dedup();
+    for bind in &denied_binds {
+        if Path::new(bind).exists() {
+            c.args(["--ro-bind", bind, bind]);
         }
     }
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -229,11 +240,9 @@ pub(super) fn respawn_under_bwrap(
 }
 
 /// System paths that are always bind-mounted read-only.  `/etc` is
-/// intentionally excluded; only the files needed for dynamic linking and
-/// name resolution are listed.
+/// intentionally excluded; only the files needed for dynamic linking, name
+/// resolution, user lookup, and toolchain resolution are listed.
 fn default_ro_binds() -> Vec<String> {
-    // /etc is intentionally excluded; only the files actually needed for
-    // dynamic linking and name resolution are listed.
     [
         "/bin",
         "/usr",
@@ -251,6 +260,14 @@ fn default_ro_binds() -> Vec<String> {
         "/etc/ssl",
         "/etc/ca-certificates",
         "/etc/pki",
+        // getpwuid / getgrgid sit in libc startup paths; without these,
+        // many programs can't even resolve $HOME.
+        "/etc/passwd",
+        "/etc/group",
+        // Debian/Ubuntu toolchain symlinks (cc → gcc-13, etc.).
+        "/etc/alternatives",
+        // Linuxbrew prefix; analogous to /opt/homebrew on macOS.
+        "/home/linuxbrew/.linuxbrew",
     ]
     .iter()
     .filter(|path| Path::new(path).exists())
@@ -258,3 +275,46 @@ fn default_ro_binds() -> Vec<String> {
     .collect()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::make_command_with_policy;
+    use crate::types::{FsPolicy, SandboxPolicy};
+
+    #[test]
+    fn denied_paths_are_overlaid_after_rw_binds() {
+        let dir = std::env::temp_dir().join(format!(
+            "ral-bwrap-deny-test-{}",
+            std::process::id(),
+        ));
+        let denied = dir.join(".exarch.toml");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&denied, "capabilities").unwrap();
+
+        let policy = SandboxPolicy {
+            fs: FsPolicy {
+                read_prefixes: Vec::new(),
+                write_prefixes: vec![dir.to_string_lossy().into_owned()],
+                deny_paths: vec![denied.to_string_lossy().into_owned()],
+            },
+            net: true,
+        };
+        let cmd = make_command_with_policy("/bin/true", &[], &policy);
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let bind_pos = args
+            .windows(3)
+            .position(|w| w[0] == "--bind" && w[1] == dir.to_string_lossy());
+        let deny_pos = args.windows(3).position(|w| {
+            w[0] == "--ro-bind" && w[1] == denied.to_string_lossy()
+        });
+
+        assert!(bind_pos.is_some(), "rw bind missing: {args:?}");
+        assert!(deny_pos.is_some(), "deny overlay missing: {args:?}");
+        assert!(bind_pos.unwrap() < deny_pos.unwrap(), "deny overlay must win");
+
+        let _ = std::fs::remove_file(denied);
+        let _ = std::fs::remove_dir(dir);
+    }
+}

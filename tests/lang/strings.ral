@@ -21,11 +21,11 @@ third'
 echo $msg
 # Expected: first (newline) second (newline) third
 
-# Doubling quotes
-echo 'it''s working'
+# Hash-bumped literals (embed quotes without escapes)
+echo #'it's working'#
 # Expected: it's working
 
-echo "she said ""hello"""
+echo "she said \"hello\""
 # Expected: she said "hello"
 
 # Literal dollar

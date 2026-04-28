@@ -23,7 +23,7 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Render site index
         run: python3 scripts/render-site-index.py
       - name: Stage web assets
@@ -33,7 +33,7 @@ jobs:
           cp docs/SPEC.md site/SPEC.md
           cp docs/RATIONALE.md site/RATIONALE.md
       - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v4
         with:
           path: site
       - uses: actions/deploy-pages@v4

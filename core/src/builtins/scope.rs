@@ -153,7 +153,7 @@ fn parse_catch_all(v: &Value) -> Result<Value, EvalSignal> {
 
 pub(super) fn builtin_grant(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
     use crate::types::{
-        Capabilities, EditorCapability, ExecPolicy, FsPolicy, ShellCapability,
+        Capabilities, EditorPolicy, ExecPolicy, FsPolicy, ShellPolicy,
     };
     if args.len() < 2 {
         return Err(sig("grant requires 2 arguments (capabilities_map, body)"));
@@ -168,11 +168,12 @@ pub(super) fn builtin_grant(args: &[Value], shell: &mut Shell) -> Result<Value, 
     // [exec: [foo: []]] body` from triggering OS-level fs/net sandboxing
     // (no fs/net dimension is restricted, so no child sandbox is needed).
     let mut exec_policy: Option<Vec<(String, ExecPolicy)>> = None;
+    let mut exec_dirs_policy: Option<Vec<String>> = None;
     let mut fs_policy: Option<FsPolicy> = None;
     let mut net_policy: Option<bool> = None;
     let mut audit_flag = false;
-    let mut editor_policy: Option<EditorCapability> = None;
-    let mut shell_policy: Option<ShellCapability> = None;
+    let mut editor_policy: Option<EditorPolicy> = None;
+    let mut shell_policy: Option<ShellPolicy> = None;
 
     for (k, v) in &caps {
         match k.as_str() {
@@ -209,6 +210,18 @@ pub(super) fn builtin_grant(args: &[Value], shell: &mut Shell) -> Result<Value, 
                     entries.push((cmd, policy));
                 }
                 exec_policy = Some(entries);
+            }
+            "exec_dirs" => {
+                let dirs = match v {
+                    Value::List(items) => items.iter().map(|i| i.to_string()).collect(),
+                    other => {
+                        return Err(sig(format!(
+                            "grant exec_dirs: expected a list of paths, got {}",
+                            other.type_name()
+                        )));
+                    }
+                };
+                exec_dirs_policy = Some(dirs);
             }
             "fs" => {
                 let fs_map = as_map(v, "grant fs")?;
@@ -247,7 +260,7 @@ pub(super) fn builtin_grant(args: &[Value], shell: &mut Shell) -> Result<Value, 
             }
             "editor" => {
                 let editor_map = as_map(v, "grant editor")?;
-                let mut cap = EditorCapability {
+                let mut cap = EditorPolicy {
                     read: false,
                     write: false,
                     tui: false,
@@ -264,7 +277,7 @@ pub(super) fn builtin_grant(args: &[Value], shell: &mut Shell) -> Result<Value, 
             }
             "shell" => {
                 let shell_map = as_map(v, "grant shell")?;
-                let mut cap = ShellCapability::default();
+                let mut cap = ShellPolicy::default();
                 for (field, fv) in shell_map {
                     match field.as_str() {
                         "chdir" => cap.chdir = matches!(fv, Value::Bool(true)),
@@ -279,6 +292,7 @@ pub(super) fn builtin_grant(args: &[Value], shell: &mut Shell) -> Result<Value, 
 
     let ctx = Capabilities {
         exec: exec_policy,
+        exec_dirs: exec_dirs_policy,
         fs: fs_policy,
         net: net_policy,
         audit: audit_flag,
