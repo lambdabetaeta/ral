@@ -11,7 +11,7 @@
 //! builtin.
 
 use crate::span::Span;
-use crate::util::TildePath;
+use crate::path::tilde::TildePath;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 

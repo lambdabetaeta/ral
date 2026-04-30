@@ -27,8 +27,6 @@ OPTIONS
                             (default 1024; overrides rc recursion_limit:)
     --login, -l             start as a login shell; sources login profiles
     --norc, --noprofile     skip rc and profile files
-    --sandbox-policy <json> set the sandbox policy as a JSON object;
-                            processed before all other flags
     --version, -V           print version string and exit
     --help, -h              print this message and exit
 

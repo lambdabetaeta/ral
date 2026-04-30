@@ -50,7 +50,7 @@ impl Drop for ScriptContextGuard<'_> {
 pub(super) fn builtin_source(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
     let path = arg0_str(args);
     let resolved = resolve_relative_to_current_script(&path, shell);
-    let abs_path = std::fs::canonicalize(&resolved)
+    let abs_path = crate::path::canon::canonicalise_strict(&resolved)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| resolved.to_string_lossy().into_owned());
     if shell.modules.stack.contains(&abs_path) {
@@ -85,12 +85,12 @@ pub(crate) fn builtin_use(args: &[Value], shell: &mut Shell) -> Result<Value, Ev
     let path = arg0_str(args);
     let resolved = resolve_relative_to_current_script(&path, shell);
 
-    let abs_path = std::fs::canonicalize(&resolved)
+    let abs_path = crate::path::canon::canonicalise_strict(&resolved)
         .or_else(|_| {
             if let Ok(ral_path) = std::env::var("RAL_PATH") {
                 for dir in ral_path.split(':') {
                     let candidate = std::path::Path::new(dir).join(&path);
-                    if let Ok(p) = std::fs::canonicalize(&candidate) {
+                    if let Ok(p) = crate::path::canon::canonicalise_strict(&candidate) {
                         return Ok(p);
                     }
                 }

@@ -2,12 +2,18 @@
 //!
 //! Loads the baked prelude once, seeds standard env vars, and runs each
 //! tool call wrapped in a `grant` block with stdout/stderr captured.
+//!
+//! Each tool call's stdout and stderr are tee'd: one branch into an
+//! in-memory buffer (replayed to the model in conversation history),
+//! one branch into a [`StreamingPrinter`] that line-buffers and writes
+//! coloured `╎ <line>` lines to the user's terminal as they arrive.
 
-use ral_core::io::{Sink, Source};
+use ral_core::io::{ExternalWrite, Sink, Source};
 use ral_core::ir::Comp;
 use ral_core::typecheck::Scheme;
 use ral_core::types::EvalSignal;
 use ral_core::{Shell, Value as RalValue, diagnostic, elaborate, parse, sandbox};
+use std::io::{self, Write};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// The prelude IR, deserialized on first use.
@@ -127,8 +133,22 @@ pub fn run_shell(
 
     let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let prev_stdout = std::mem::replace(&mut shell.io.stdout, Sink::Buffer(stdout_buf.clone()));
-    let prev_stderr = std::mem::replace(&mut shell.io.stderr, Sink::Buffer(stderr_buf.clone()));
+    let stdout_stream = Arc::new(StreamingPrinter::stdout());
+    let stderr_stream = Arc::new(StreamingPrinter::stderr());
+    let prev_stdout = std::mem::replace(
+        &mut shell.io.stdout,
+        Sink::Tee(
+            Box::new(Sink::Buffer(stdout_buf.clone())),
+            Box::new(Sink::External(stdout_stream.clone() as Arc<dyn ExternalWrite>)),
+        ),
+    );
+    let prev_stderr = std::mem::replace(
+        &mut shell.io.stderr,
+        Sink::Tee(
+            Box::new(Sink::Buffer(stderr_buf.clone())),
+            Box::new(Sink::External(stderr_stream.clone() as Arc<dyn ExternalWrite>)),
+        ),
+    );
     let prev_stdin = std::mem::replace(&mut shell.io.stdin, Source::Terminal);
     let prev_loc_script = std::mem::replace(&mut shell.location.script, name.to_string());
     let prev_loc_call = std::mem::replace(&mut shell.location.call_site.script, name.to_string());
@@ -152,6 +172,12 @@ pub fn run_shell(
     shell.location.script = prev_loc_script;
     shell.location.call_site.script = prev_loc_call;
     shell.location.source = prev_loc_source;
+
+    // A child that wrote a partial last line (no terminating '\n') leaves
+    // bytes parked in the streaming printer; flush them so they reach the
+    // user before we render EXIT.
+    stdout_stream.flush();
+    stderr_stream.flush();
 
     let stdout_bytes = std::mem::take(&mut *stdout_buf.lock().unwrap());
     let mut stderr_bytes = std::mem::take(&mut *stderr_buf.lock().unwrap());
@@ -191,3 +217,86 @@ pub fn run_shell(
     })
 }
 
+/// Line-buffering ANSI-tinted writer used as the streaming branch of
+/// the stdout/stderr `Sink::Tee`.  Bytes accumulate until a newline,
+/// then `prefix + line + suffix + '\n'` is written to stderr in one
+/// shot — keeping each line atomic and matching the colour scheme
+/// `ui::tool_result` uses for the captured-and-replayed case.
+///
+/// Two sinks share the underlying terminal (one per stream), so
+/// stderr's lock around the per-line `write_all` is what prevents
+/// stdout's "checking…" lines from interleaving with stderr's "warning:"
+/// lines mid-byte.
+pub struct StreamingPrinter {
+    prefix: &'static str,
+    suffix: &'static str,
+    pending: Mutex<Vec<u8>>,
+}
+
+const STREAM_RESET: &str = "\x1b[0m";
+// Lime ╎ rail, dim slate body — same palette as ui::tool_result's
+// STDOUT branch.
+const STREAM_STDOUT: &str =
+    "\x1b[38;2;57;255;20m╎\x1b[0m \x1b[2m\x1b[38;2;140;150;170m";
+// Lime rail, dim orange body — matches STDERR.
+const STREAM_STDERR: &str =
+    "\x1b[38;2;57;255;20m╎\x1b[0m \x1b[2m\x1b[38;2;255;95;31m";
+
+impl StreamingPrinter {
+    pub fn stdout() -> Self {
+        Self {
+            prefix: STREAM_STDOUT,
+            suffix: STREAM_RESET,
+            pending: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn stderr() -> Self {
+        Self {
+            prefix: STREAM_STDERR,
+            suffix: STREAM_RESET,
+            pending: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Emit any partial trailing line still parked in the buffer.
+    /// Called once at the end of a tool run.
+    pub fn flush(&self) {
+        let mut pending = self.pending.lock().unwrap();
+        if pending.is_empty() {
+            return;
+        }
+        let line = std::mem::take(&mut *pending);
+        drop(pending);
+        let _ = self.emit_line(&line);
+    }
+
+    fn emit_line(&self, line: &[u8]) -> io::Result<()> {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let mut out = io::stderr().lock();
+        out.write_all(self.prefix.as_bytes())?;
+        out.write_all(line)?;
+        out.write_all(self.suffix.as_bytes())?;
+        out.write_all(b"\n")
+    }
+}
+
+impl ExternalWrite for StreamingPrinter {
+    fn write(&self, bytes: &[u8]) -> io::Result<()> {
+        let mut pending = self.pending.lock().unwrap();
+        pending.extend_from_slice(bytes);
+        while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = pending.drain(..=pos).collect();
+            // `line` includes the trailing '\n'; strip before emit so we
+            // own the line ending and can place the suffix before it.
+            let body = &line[..line.len() - 1];
+            // Drop the lock around stderr I/O so a second writer (the
+            // sibling stream) can buffer concurrently while we emit.
+            let body_owned = body.to_vec();
+            drop(pending);
+            self.emit_line(&body_owned)?;
+            pending = self.pending.lock().unwrap();
+        }
+        Ok(())
+    }
+}

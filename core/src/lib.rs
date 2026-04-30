@@ -11,6 +11,7 @@ pub mod ansi;
 pub mod ast;
 pub mod builtins;
 pub mod classify;
+pub(crate) mod capability;
 pub mod compat;
 pub mod diagnostic;
 pub mod elaborator;

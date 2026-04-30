@@ -15,7 +15,7 @@ let assert_eq = { |name expected actual|
 }
 
 let path = '/tmp/ral-stdin-redirect-test.json'
-write-json $path [host: localhost, port: 8080]
+to-json [host: localhost, port: 8080] > $path
 
 # `from-json` is a primitive; `<file` flows directly through the Exec arm,
 # exercising the with_redirects → install_stdin_redirect path.

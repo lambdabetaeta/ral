@@ -69,20 +69,19 @@ pub fn run_task(
     let mut input = Step::User(prompt);
     for n in 1..=MAX_TURNS {
         ui::turn(n);
-        let step_out = provider.step(input);
+        let mut painter = ui::Streaming::new();
+        let step_out = provider.step(input, &mut |t: &str| painter.push(t));
         if cancel::is_set() {
             return cancelled(provider, task);
         }
-        let StepOut { text, tool_calls, done, usage } = match step_out {
+        let StepOut { tool_calls, done, usage } = match step_out {
             Ok(s) => s,
             Err(e) if api::is_cancelled(&e) => return cancelled(provider, task),
             Err(e) => return Err(e),
         };
         task += usage;
         *total += usage;
-        if !text.is_empty() {
-            ui::assistant_text(&text);
-        }
+        painter.finish();
         if tool_calls.is_empty() {
             return Ok((task, false));
         }
@@ -178,6 +177,52 @@ impl Drop for Spill {
     }
 }
 
+/// Per-session scratch directory exposed to the agent as `$EXARCH_SCRATCH`.
+///
+/// Caches the agent might want to scribble to (build artefacts, package
+/// manager state, anything ephemeral) live here instead of in the user's
+/// real cache dirs (`~/.cargo/registry`, `~/.npm`, …) — those are denied
+/// by the reasonable profile's grant, so any direct write there fails
+/// loudly.  The agent is expected to redirect tool cache env vars
+/// (`CARGO_HOME`, `GRADLE_USER_HOME`, etc.) into this dir when it
+/// matters; the system-prompt note about `$EXARCH_SCRATCH` is the only
+/// hand-holding.  Dropped when the session ends, so nothing persists
+/// across runs.
+pub struct Scratch {
+    dir: PathBuf,
+}
+
+impl Scratch {
+    pub fn new() -> io::Result<Self> {
+        let dir = PathBuf::from(format!("/tmp/exarch-scratch-{}", std::process::id()));
+        if dir.exists() {
+            fs::remove_dir_all(&dir)?;
+        }
+        fs::create_dir_all(&dir)?;
+        Ok(Self { dir })
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.dir
+    }
+
+    /// Seed `$EXARCH_SCRATCH` into `shell` — both the env-var map (so
+    /// child processes inherit it) and the ral-side binding (so
+    /// `$EXARCH_SCRATCH` works in ral source).  Mirrors how
+    /// [`crate::eval::seed_default_env`] installs the standard vars.
+    pub fn install_into(&self, shell: &mut Shell) {
+        let p = self.dir.to_string_lossy().into_owned();
+        shell.dynamic.env_vars.insert("EXARCH_SCRATCH".into(), p.clone());
+        shell.set("EXARCH_SCRATCH".into(), ral_core::types::Value::String(p));
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
 /// Per-section caps applied independently so a chatty stdout can't
 /// crowd out a short stderr or audit trace.  Sum + overhead stays
 /// within `MAX_TOOL_RESULT`.
@@ -188,17 +233,25 @@ const AUDIT_CAP: usize = 4 * 1024;
 
 /// Render `r` with the section layout `eval` historically emitted.
 /// `capped` enables per-section caps; `audit_summary` swaps the audit
-/// JSON for a one-line node-count for terminal display.  Returns the
-/// rendered string and whether anything was elided.
-fn render(r: &eval::ToolResult, capped: bool, audit_summary: bool) -> (String, bool) {
+/// JSON for a one-line node-count for terminal display; `omit_streams`
+/// drops the STDOUT/STDERR sections (they were streamed live to the
+/// terminal during the run, so the post-run frame only needs the
+/// EXIT/VALUE/audit summary).  Returns the rendered string and
+/// whether anything was elided.
+fn render(
+    r: &eval::ToolResult,
+    capped: bool,
+    audit_summary: bool,
+    omit_streams: bool,
+) -> (String, bool) {
     use std::fmt::Write;
     let cap = |c: usize| capped.then_some(c);
     let mut out = String::new();
     let mut cut = false;
-    if !r.stdout.is_empty() {
+    if !omit_streams && !r.stdout.is_empty() {
         cut |= push(&mut out, "STDOUT:\n", &String::from_utf8_lossy(&r.stdout), cap(STDOUT_CAP));
     }
-    if !r.stderr.is_empty() {
+    if !omit_streams && !r.stderr.is_empty() {
         cut |= push(&mut out, "STDERR:\n", &String::from_utf8_lossy(&r.stderr), cap(STDERR_CAP));
     }
     if let Some(v) = &r.value {
@@ -218,17 +271,17 @@ fn render(r: &eval::ToolResult, capped: bool, audit_summary: bool) -> (String, b
 }
 
 fn format_for_display(r: &eval::ToolResult) -> String {
-    render(r, false, true).0
+    render(r, false, true, true).0
 }
 
 /// Cap each section to fit in `MAX_TOOL_RESULT`.  If anything was
 /// elided, spill the full original to disk and append a pointer line.
 fn format_for_history(r: &eval::ToolResult, spill: &Spill) -> String {
-    let (full, _) = render(r, false, false);
+    let (full, _) = render(r, false, false, false);
     if full.len() <= MAX_TOOL_RESULT {
         return full;
     }
-    let (capped, any_cut) = render(r, true, false);
+    let (capped, any_cut) = render(r, true, false, false);
     if !any_cut {
         return full; // unreachable given current caps, but be defensive
     }
@@ -386,7 +439,10 @@ mod tests {
     fn render_matches_legacy_layout() {
         // Byte-for-byte equal to what eval.rs used to build by hand.
         let r = tr("abc\n", "err\n", Some("v"), 0, None);
-        assert_eq!(render(&r, false, false).0, "STDOUT:\nabc\n\nSTDERR:\nerr\n\nVALUE:\nv\n\nEXIT: 0");
+        assert_eq!(
+            render(&r, false, false, false).0,
+            "STDOUT:\nabc\n\nSTDERR:\nerr\n\nVALUE:\nv\n\nEXIT: 0",
+        );
     }
 
     #[test]
@@ -395,6 +451,23 @@ mod tests {
         let out = format_for_display(&r);
         assert!(out.ends_with("\n[+ audit tree, 2 node(s)]"));
         assert!(!out.contains("AUDIT:\n"));
+    }
+
+    #[test]
+    fn format_for_display_omits_streamed_byte_sections() {
+        // stdout/stderr are streamed live during the run; the post-run
+        // frame must not duplicate them.  History rendering still keeps
+        // both so the model sees the output on subsequent turns.
+        let r = tr("on the screen already\n", "and stderr too\n", Some("v"), 0, None);
+        let display = format_for_display(&r);
+        assert!(!display.contains("STDOUT:"));
+        assert!(!display.contains("STDERR:"));
+        assert!(display.contains("VALUE:\nv"));
+        assert!(display.contains("EXIT: 0"));
+
+        let history = format_for_history(&r, &fresh_spill("omit"));
+        assert!(history.contains("STDOUT:\non the screen already"));
+        assert!(history.contains("STDERR:\nand stderr too"));
     }
 
     #[test]
@@ -426,7 +499,7 @@ mod tests {
         let path: PathBuf = out
             .split_once("[full output spilled to ").unwrap().1
             .split_whitespace().next().unwrap().into();
-        assert_eq!(fs::read_to_string(&path).unwrap(), render(&r, false, false).0);
+        assert_eq!(fs::read_to_string(&path).unwrap(), render(&r, false, false, false).0);
         // Same content → same path (content-hashed).
         assert_eq!(format_for_history(&r, &spill), out);
     }

@@ -8,7 +8,9 @@ mod api;
 mod cancel;
 mod cli;
 mod eval;
-mod grant;
+mod host;
+mod policy;
+mod prompt;
 mod runtime;
 mod ui;
 
@@ -18,9 +20,21 @@ use rustyline::error::ReadlineError;
 use rustyline::{Editor, history::DefaultHistory};
 
 fn main() -> std::process::ExitCode {
+    // Hidden multicall dispatch — see
+    // `ral_core::builtins::uutils::try_run_uutils_helper` for the rationale.
+    // The parent ral/exarch process spawns `current_exe()` with the helper
+    // sentinel as the first arg to run a bundled coreutils tool in a fresh
+    // subprocess.  Not user-facing; not in `--help`.
+    if let Some(code) = ral_core::builtins::uutils::try_run_uutils_helper() {
+        return std::process::ExitCode::from(code);
+    }
     if let Some(code) = runtime::sandbox_dispatch_or_continue() {
         return code;
     }
+    // Undocumented debug switch — see `ral_core::sandbox::SANDBOX_DUMP_PROFILE_ENV`.
+    // No-op unless the env var is set; when set, prints the OS-sandbox profile
+    // exarch *would* install for an empty policy and continues startup.
+    ral_core::sandbox::dump_profile_if_requested(&ral_core::types::SandboxProjection::default());
     match real_main() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
@@ -35,30 +49,38 @@ fn real_main() -> Result<(), String> {
     let seed = cli::load_seed(c.prompt, c.file)?;
     let (label, default_model, key_env, _) = c.provider.info();
     let model = c.model.unwrap_or_else(|| default_model.into());
-    let system = cli::load_system(&c.system_files)?;
     let key = std::env::var(key_env).map_err(|_| format!("{key_env} not set"))?;
-
-    let mut provider = Provider::new(c.provider, key, model, system);
-    let mut shell = runtime::boot_shell();
-    // boot_shell installed ral's signal handlers; chain ours on top so
-    // a single Ctrl-C unwinds both the in-flight ral evaluator and the
-    // exarch turn loop.
-    cancel::install();
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".into());
-    let (caps, restrict_files) = grant::for_invocation(
+    let (caps, restrict_files) = policy::for_invocation(
         &cwd,
         &c.base,
         c.extend_base.as_deref(),
         &c.restrict,
     )?;
+    // Allocate the per-session scratch dir before assembling the prompt
+    // so its path can be named in the Grant section the agent reads.
+    let scratch = runtime::Scratch::new().map_err(|e| format!("scratch dir: {e}"))?;
+    let system = prompt::assemble(&c.system_files, &caps, scratch.path())?;
+    let system_size = system.len();
+
+    let mut provider = Provider::new(c.provider, key, model, system);
+    let mut shell = runtime::boot_shell();
+    scratch.install_into(&mut shell);
+    // boot_shell installed ral's signal handlers; chain ours on top so
+    // a single Ctrl-C unwinds both the in-flight ral evaluator and the
+    // exarch turn loop.
+    cancel::install();
     ui::banner(
         label,
         provider.model(),
+        system_size,
+        &c.system_files,
         &c.base,
         c.extend_base.as_deref(),
         &restrict_files,
+        scratch.path(),
     );
     let spill = runtime::Spill::new().map_err(|e| format!("spill dir: {e}"))?;
 
@@ -82,13 +104,17 @@ fn real_main() -> Result<(), String> {
                     if m == "/clear" {
                         provider.clear_history();
                         shell = runtime::boot_shell();
+                        scratch.install_into(&mut shell);
                         total = Usage::default();
                         ui::banner(
                             label,
                             provider.model(),
+                            system_size,
+                            &c.system_files,
                             &c.base,
                             c.extend_base.as_deref(),
                             &restrict_files,
+                            scratch.path(),
                         );
                         continue;
                     }

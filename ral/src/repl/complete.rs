@@ -190,21 +190,24 @@ fn single_quote(s: &str) -> String {
     out
 }
 
-/// Expand a tilde-prefixed directory component.
-/// `"~/"` → `"{home}/"`, `"~/sub/"` → `"{home}/sub/"`.
-/// Returns `None` when the home directory is unavailable.
+/// Expand a tilde-prefixed directory component for completion.
+/// Delegates to [`ral_core::path::tilde`] so the rule matches the
+/// rest of ral; returns `None` when the home directory is
+/// unavailable so the caller can fall back to non-tilde
+/// completion.
 fn expand_tilde(dir: &str) -> Option<String> {
-    match dir.strip_prefix('~') {
-        Some(rest) => {
-            let home = crate::platform::home_dir();
-            if home == "." {
-                None
-            } else {
-                Some(format!("{home}{rest}"))
-            }
-        }
-        None => Some(dir.to_string()),
+    let Some(parsed) = ral_core::path::tilde::TildePath::parse(dir) else {
+        return Some(dir.to_string());
+    };
+    let home = crate::platform::home_dir();
+    if home == "." {
+        return None;
     }
+    Some(ral_core::path::tilde::expand_tilde_path(
+        parsed.user.as_deref(),
+        parsed.suffix.as_deref(),
+        &home,
+    ))
 }
 
 /// List entries of `dir` whose names start with `prefix` (case-sensitive),

@@ -1,4 +1,4 @@
-# Test: from-json codec and write-json (§16.5)
+# Test: from-json / to-json codecs (§16.5)
 
 # Parse simple object
 let m = !{to-string '{"name": "alice", "age": 30}' | from-json}
@@ -18,7 +18,7 @@ echo !{length $n[a][b]}
 
 # Write and re-read
 let data = [host: localhost, port: 8080]
-write-json '/tmp/ral-json-test.json' $data
+to-json $data > '/tmp/ral-json-test.json'
 let back = !{cat '/tmp/ral-json-test.json' | from-json}
 echo $back[host]
 echo $back[port]

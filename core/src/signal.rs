@@ -11,7 +11,7 @@
 //! (replacing SIG_IGN); when no slots are active it does nothing.
 
 #[cfg(unix)]
-use std::sync::atomic::AtomicI32;
+use std::sync::atomic::{AtomicI32, AtomicU64};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 /// 0 = normal, 1 = interrupted, 2 = second signal, >=3 = force exit.
@@ -55,9 +55,13 @@ pub fn is_interrupted() -> bool {
 }
 
 /// Install signal handlers for SIGINT, SIGTERM, SIGHUP.
-/// Must be called once at program startup.
+/// Must be called once at program startup.  Snapshots inherited SIG_IGN
+/// dispositions *before* installing ral's own handlers so the nohup rule
+/// (preserve dispositions the parent deliberately ignored) can be honored
+/// in spawned children — see `reset_child_signals`.
 #[cfg(unix)]
 pub fn install_handlers() {
+    snapshot_inherited_ignored();
     unsafe {
         libc::signal(libc::SIGINT, handler as *const () as libc::sighandler_t);
         libc::signal(libc::SIGTERM, handler as *const () as libc::sighandler_t);
@@ -94,15 +98,17 @@ pub fn term_handler() -> extern "C" fn(libc::c_int) {
 
 #[cfg(windows)]
 pub fn install_handlers() {
-    // SetConsoleCtrlHandler via the ctrlc crate.  The handler increments the
-    // same SIGNAL_COUNT flag the evaluator polls between statements, and
-    // returns TRUE so Windows does not terminate the process.
+    // SetConsoleCtrlHandler via the ctrlc crate.  The handler increments
+    // the same SIGNAL_COUNT flag the evaluator polls between statements,
+    // returns TRUE so Windows does not terminate the process, and fans
+    // Ctrl-Break out to every active pipeline group (the Windows
+    // analogue of the Unix relay handler).
     let _ = ctrlc::set_handler(|| {
         let prev = SIGNAL_COUNT.fetch_add(1, Ordering::Relaxed);
         if prev >= 2 {
-            // Third Ctrl+C: give up and exit immediately.
             std::process::exit(130);
         }
+        win_relay_fire();
     });
 }
 
@@ -175,9 +181,176 @@ impl Drop for PipelineRelay {
     }
 }
 
-/// Non-unix stub so callers can use `PipelineRelay` unconditionally.
-#[cfg(not(unix))]
+// ── Windows pipeline-group state ────────────────────────────────────────────
+//
+// Windows has neither POSIX pgids nor `kill(-pgid, …)`.  The pieces we
+// build out of Win32 primitives:
+//
+//   * Each external pipeline stage is spawned with
+//     `CREATE_NEW_PROCESS_GROUP` so it's individually addressable via
+//     `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)` (Ctrl-C is
+//     deliberately suppressed in groups created this way; Ctrl-Break
+//     is always delivered).
+//   * A single Job Object per pipeline.  Every stage is
+//     `AssignProcessToJobObject`'d into it, so a single
+//     `TerminateJobObject` on the abort path takes the whole tree —
+//     including descendants spawned by stages.
+//   * The list of member pids per pipeline is kept in `GROUPS` keyed
+//     by the leader's pid (the same value `Pgid` carries).  The Ctrl-C
+//     handler walks that list directly to fan Ctrl-Break out to every
+//     stage individually, since console process groups can't be
+//     joined post-spawn.  No separate "active relay" list — the
+//     registry IS the live-pipelines set.
+//
+// `GROUPS` uses a `Mutex` rather than the lock-free atomic-array trick
+// used for `RELAY_PGIDS` on Unix.  Windows `SetConsoleCtrlHandler`
+// callbacks run on a worker thread, not in async-signal context, so a
+// mutex is safe and the hot paths (pipeline start / Ctrl-C arrival)
+// are infrequent enough that lock contention is irrelevant.
+
+#[cfg(windows)]
+mod win_groups {
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::Mutex;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+
+    /// Per-pipeline state: the Job Object and the member pids (each its
+    /// own console-group leader).
+    pub(super) struct GroupState {
+        pub job: HANDLE,
+        pub members: Vec<u32>,
+    }
+
+    // SAFETY: `HANDLE` is a raw pointer; we never share it outside the
+    // Mutex.  CloseHandle / TerminateJobObject / AssignProcessToJobObject
+    // are documented to be safe to call from any thread.
+    unsafe impl Send for GroupState {}
+
+    /// Live pipeline groups, keyed by leader pid.  A `Vec` rather than
+    /// a map: at most a handful of pipelines are ever simultaneously
+    /// live and a linear walk is fine.
+    pub(super) static GROUPS: Mutex<Vec<(i32, GroupState)>> = Mutex::new(Vec::new());
+
+    /// Create a fresh Job Object, assign `leader`, and register the
+    /// group keyed by the leader's pid.  Returns the leader pid as i32
+    /// (== Pgid value).
+    pub(super) fn new_leader(leader: &std::process::Child) -> i32 {
+        let leader_pid = leader.id() as i32;
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null_mut()) };
+        if !job.is_null() {
+            // KILL_ON_JOB_CLOSE means: when the last handle to the
+            // job is closed (we hold exactly one), every still-alive
+            // member is terminated.  Wires the abort path to plain
+            // RAII — `release(leader)` does the kill-and-free.
+            unsafe {
+                let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    &raw const info as *const _,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                );
+                AssignProcessToJobObject(job, leader.as_raw_handle() as HANDLE);
+            }
+        }
+        let mut groups = GROUPS.lock().unwrap();
+        groups.push((
+            leader_pid,
+            GroupState {
+                job,
+                members: vec![leader.id()],
+            },
+        ));
+        leader_pid
+    }
+
+    /// Add `member` to the group identified by `leader`, if any.  No-op
+    /// when the group has already been released (race against drop).
+    pub(super) fn join(leader: i32, member: &std::process::Child) {
+        let mut groups = GROUPS.lock().unwrap();
+        if let Some((_, state)) = groups.iter_mut().find(|(p, _)| *p == leader) {
+            if !state.job.is_null() {
+                unsafe {
+                    AssignProcessToJobObject(state.job, member.as_raw_handle() as HANDLE);
+                }
+            }
+            state.members.push(member.id());
+        }
+    }
+
+    /// Send `CTRL_BREAK_EVENT` to every member of every live pipeline
+    /// group.  Called from the Ctrl-C handler.  The fan-out is per-pid
+    /// because Windows console process groups can't be joined: each
+    /// stage was spawned with its own `CREATE_NEW_PROCESS_GROUP`.
+    pub(super) fn signal_all() {
+        let groups = GROUPS.lock().unwrap();
+        for (_, state) in groups.iter() {
+            for &pid in &state.members {
+                unsafe {
+                    GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid);
+                }
+            }
+        }
+    }
+
+    /// Remove the group entry and close the Job handle.  Called from
+    /// `PipelineGroup::Drop`; idempotent (release on a missing key is
+    /// a no-op).  Closing the only handle to a job created with
+    /// `KILL_ON_JOB_CLOSE` terminates any still-alive members — that's
+    /// the abort-path teardown, no explicit `TerminateJobObject` needed.
+    pub(super) fn release(leader: i32) {
+        let mut groups = GROUPS.lock().unwrap();
+        if let Some(idx) = groups.iter().position(|(p, _)| *p == leader) {
+            let (_, state) = groups.swap_remove(idx);
+            if !state.job.is_null() {
+                unsafe {
+                    CloseHandle(state.job);
+                }
+            }
+        }
+    }
+}
+
+/// Windows analogue of the Unix `PipelineRelay`: a no-op marker.  The
+/// live-pipelines set is `win_groups::GROUPS` itself, populated by
+/// `spawn_with_pgid` and cleaned up by `release_win_group` from
+/// `PipelineGroup::Drop`.  `install` exists only to keep the
+/// cross-platform call site in `pipeline.rs` free of cfg gates.
+#[cfg(windows)]
 pub struct PipelineRelay;
+
+#[cfg(windows)]
+impl PipelineRelay {
+    pub fn install(_pgid: i32) -> Option<Self> {
+        Some(Self)
+    }
+}
+
+/// Fire from the ctrlc handler: walk the live pipeline groups and
+/// send Ctrl-Break to every member of every group.  Locking inside a
+/// Win32 console handler is fine — the OS calls handlers on a
+/// dedicated worker thread, not in signal-handler context.
+#[cfg(windows)]
+fn win_relay_fire() {
+    win_groups::signal_all();
+}
+
+/// Release the Job Object backing the pipeline group identified by
+/// `leader`.  Closing the only handle terminates any still-alive
+/// members (the job was created with `KILL_ON_JOB_CLOSE`).
+/// Idempotent: safe to call from `PipelineGroup::Drop` even when
+/// `PipelineRelay::Drop` already released.
+#[cfg(windows)]
+pub fn release_win_group(leader: i32) {
+    win_groups::release(leader);
+}
 
 // ── Cooperative cancellation ────────────────────────────────────────────────
 //
@@ -271,13 +444,20 @@ impl Default for CancelScope {
 // that choice explicit at the type level — no `pid_t == 0` sentinel, no
 // "did the caller remember to setpgid?" comments.
 
-/// Newtype wrapping a Unix process-group ID.  Constructed from a real pid;
-/// no `0` sentinel encodes "no pgid" — the `Option<Pgid>` does.
-#[cfg(unix)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Pgid(pub libc::pid_t);
-
-#[cfg(not(unix))]
+/// Newtype wrapping a process-group identifier.
+///
+/// On Unix: a POSIX pgid (== leader's pid).  Addressable via
+/// `kill(-pgid, sig)` to fan a signal out across every member.
+///
+/// On Windows: the leader's pid.  Windows console process groups can't
+/// be joined post-spawn — every external pipeline stage is its own
+/// group leader (spawned with `CREATE_NEW_PROCESS_GROUP`).  The
+/// `Pgid` here is the *first* stage's pid; the `PipelineGroup` keeps
+/// the full member list and a Job Object that ties them together for
+/// abort-time `TerminateJobObject`.
+///
+/// Constructed only from a real pid; no `0` sentinel encodes "no pgid"
+/// — the `Option<Pgid>` does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Pgid(pub i32);
 
@@ -301,9 +481,10 @@ impl PgidPolicy {
     /// Apply this policy from inside a `pre_exec` closure.  Safe to call from
     /// the post-fork pre-exec context; no allocation, no stdlib mutex use.
     ///
-    /// This is the *only* place `setpgid` should be called from spawning
-    /// code.  Searching for `setpgid` should yield this single call site
-    /// plus a parent-side race-guard that mirrors it (see `exec_external`).
+    /// Callers should not invoke `setpgid` directly — `spawn_with_pgid` is
+    /// the single funnel that installs this policy and mirrors it in the
+    /// parent.  Searching for `setpgid` should yield this method plus the
+    /// parent-side mirror inside `spawn_with_pgid`.
     pub fn apply(self) {
         unsafe {
             match self {
@@ -324,29 +505,216 @@ impl PgidPolicy {
     pub fn apply(self) {}
 }
 
-/// Restore default disposition for the signals that ral overrides or
-/// ignores in its own process.  Must run from the post-fork pre-exec
+/// Spawn `cmd` with a single, canonical pre-exec discipline:
+///
+///   1. inside the child (post-fork, pre-exec): apply `pgid`, then
+///      `reset_child_signals` (with the nohup rule);
+///   2. inside the parent (post-spawn): mirror the `setpgid` so the
+///      child's pgid is established regardless of which side wins
+///      the race.
+///
+/// Returns the child plus its leader pgid: `Some` for `NewLeader` /
+/// `Join`, `None` for `Inherit`.  Callers that need the leader pgid for
+/// later `wait_handling_stop` or for the pipeline group simply read it
+/// off the return value — there is no separate registration step.
+///
+/// Ordering: `pre_exec` closures run in registration order, so any
+/// caller-installed `pre_exec` (sandbox `RLIMIT`, `2>&1` dup2) runs
+/// *before* the closure this function adds.  That order is intentional:
+/// fd plumbing and rlimits are independent of pgid placement, and
+/// `reset_child_signals` is the last thing we want to happen before
+/// `execve` clears the slate.
+#[cfg(unix)]
+pub fn spawn_with_pgid(
+    cmd: &mut std::process::Command,
+    pgid: PgidPolicy,
+) -> std::io::Result<(std::process::Child, Option<Pgid>)> {
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        cmd.pre_exec(move || {
+            pgid.apply();
+            reset_child_signals();
+            Ok(())
+        });
+    }
+    let child = cmd.spawn()?;
+    let leader = match pgid {
+        PgidPolicy::Inherit => None,
+        PgidPolicy::NewLeader => {
+            let pid = child.id() as libc::pid_t;
+            unsafe { libc::setpgid(pid, pid) };
+            Some(Pgid(pid))
+        }
+        PgidPolicy::Join(p) => {
+            let pid = child.id() as libc::pid_t;
+            unsafe { libc::setpgid(pid, p.0) };
+            Some(p)
+        }
+    };
+    Ok((child, leader))
+}
+
+/// Windows arm: there's no `pre_exec`, no pgid, no `setpgid`.  Three
+/// gestures replace them:
+///
+///   * `CREATE_NEW_PROCESS_GROUP` so the child can be addressed
+///     individually by `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)`
+///     — Windows console process groups can't be joined post-spawn,
+///     so every external pipeline stage becomes its own group leader.
+///   * Job Object membership so the whole pipeline (including
+///     descendants) can be torn down with one `TerminateJobObject` on
+///     the abort path.  `NewLeader` creates a fresh job and assigns
+///     this stage; `Join` looks up the leader's job and assigns there.
+///   * No signal-disposition reset — Windows children inherit the
+///     parent's console-control handlers, and Rust's runtime does not
+///     install console handlers we need to undo.
+///
+/// The returned `Pgid` is the leader pid (the *first* stage's pid),
+/// matching the value `pipeline/group.rs` already keys off.
+#[cfg(windows)]
+pub fn spawn_with_pgid(
+    cmd: &mut std::process::Command,
+    pgid: PgidPolicy,
+) -> std::io::Result<(std::process::Child, Option<Pgid>)> {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
+    match pgid {
+        PgidPolicy::Inherit => {
+            let child = cmd.spawn()?;
+            Ok((child, None))
+        }
+        PgidPolicy::NewLeader => {
+            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+            let child = cmd.spawn()?;
+            let leader = win_groups::new_leader(&child);
+            Ok((child, Some(Pgid(leader))))
+        }
+        PgidPolicy::Join(p) => {
+            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+            let child = cmd.spawn()?;
+            win_groups::join(p.0, &child);
+            Ok((child, Some(p)))
+        }
+    }
+}
+
+/// Bare fallback for `cfg(not(any(unix, windows)))` — wasm and the
+/// like.  Keeps the compile path open without trying to emulate
+/// process-group semantics on platforms where they don't exist.
+#[cfg(not(any(unix, windows)))]
+pub fn spawn_with_pgid(
+    cmd: &mut std::process::Command,
+    _pgid: PgidPolicy,
+) -> std::io::Result<(std::process::Child, Option<Pgid>)> {
+    let child = cmd.spawn()?;
+    Ok((child, None))
+}
+
+/// Stub `PipelineRelay` for `cfg(not(any(unix, windows)))` so callers
+/// can use it unconditionally.
+#[cfg(not(any(unix, windows)))]
+pub struct PipelineRelay;
+
+#[cfg(not(any(unix, windows)))]
+impl PipelineRelay {
+    pub fn install(_pgid: i32) -> Option<Self> {
+        None
+    }
+}
+
+/// The signals whose startup disposition we snapshot in
+/// `snapshot_inherited_ignored` and consult in `reset_child_signals`.
+/// Listed once so the two consumers cannot drift.
+///
+/// SIGPIPE is deliberately absent: Rust's runtime sets SIGPIPE=IGN at
+/// startup so panics on broken-pipe writes are graceful, and that
+/// disposition would falsely register as "parent intent" by the time
+/// ral reads it.  SIGPIPE is reset unconditionally to SIG_DFL — see
+/// `reset_child_signals`.
+#[cfg(unix)]
+const MANAGED_SIGNALS: &[libc::c_int] = &[
+    libc::SIGINT,
+    libc::SIGQUIT,
+    libc::SIGTSTP,
+    libc::SIGTTIN,
+    libc::SIGTTOU,
+    libc::SIGHUP,
+];
+
+/// Bitmask of signals that were SIG_IGN when ral started, indexed by
+/// signal number.  Captured by `install_handlers` before any of ral's
+/// own dispositions are installed.  Read in `reset_child_signals` to
+/// honor the POSIX nohup rule: a signal the parent deliberately set to
+/// SIG_IGN (e.g. `nohup ral …` ignoring SIGHUP, or `cmd | ral …` where
+/// `cmd` ignored SIGPIPE) must remain SIG_IGN in our spawned children.
+///
+/// All managed signal numbers are < 64, so a single u64 suffices.
+#[cfg(unix)]
+static INHERITED_IGNORED: AtomicU64 = AtomicU64::new(0);
+
+/// Record which `MANAGED_SIGNALS` are currently SIG_IGN.  Idempotent
+/// once the shell process has installed its own handlers — subsequent
+/// calls would see ral's handlers, not the inherited dispositions, so
+/// this must run exactly once at startup, before `install_handlers`
+/// touches anything.
+#[cfg(unix)]
+fn snapshot_inherited_ignored() {
+    let mut mask: u64 = 0;
+    for &sig in MANAGED_SIGNALS {
+        let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::sigaction(sig, std::ptr::null(), &mut old) };
+        if rc == 0 && old.sa_sigaction == libc::SIG_IGN {
+            mask |= 1u64 << sig;
+        }
+    }
+    INHERITED_IGNORED.store(mask, Ordering::Release);
+}
+
+/// True iff `sig` was SIG_IGN when ral started.  Async-signal-safe: a
+/// single atomic load.  Safe to call from a `pre_exec` closure.
+#[cfg(unix)]
+fn was_inherited_ignored(sig: libc::c_int) -> bool {
+    let mask = INHERITED_IGNORED.load(Ordering::Acquire);
+    (mask & (1u64 << sig)) != 0
+}
+
+/// Restore the appropriate disposition for the signals that ral overrides
+/// or ignores in its own process.  Must run from the post-fork pre-exec
 /// closure of every external-child spawn — it is *not* a foreground-only
 /// concern.
 ///
-/// ral installs handlers for SIGINT and ignores SIGTTIN / SIGTTOU /
-/// SIGPIPE at startup; without this reset, every spawned external
-/// inherits those dispositions and behaves unlike the same command run
-/// from a normal shell.  In particular SIGPIPE-IGN means a child that
-/// writes past a closed downstream stage gets EPIPE instead of dying —
-/// most utilities don't handle EPIPE and end up looping or producing
-/// confusing diagnostics on what should be a clean SIGPIPE death.
+/// Without an explicit reset, every spawned external would inherit ral's
+/// handler pointers.  execve(2) resets handler pointers to SIG_DFL
+/// automatically, so this would mostly work — but SIG_IGN survives
+/// execve.  Anything whose disposition should be SIG_IGN must therefore
+/// be set *explicitly* to SIG_IGN here.
 ///
-/// Universal — applies to standalone externals, pipeline external stages,
-/// foreground or backgrounded.
+/// The nohup rule: a signal that was already SIG_IGN when ral started —
+/// recorded in `INHERITED_IGNORED` — must be SIG_IGN in our children
+/// too.  The parent (e.g. `nohup`) deliberately set it; that intent has
+/// to survive ral.  For every other managed signal, SIG_DFL is the
+/// right disposition because external commands expect default behavior.
+///
+/// SIGPIPE is special-cased to SIG_DFL unconditionally.  Rust's runtime
+/// sets SIGPIPE=IGN at startup; that's not user intent and must not
+/// propagate — pipeline producers need SIGPIPE-DFL to die cleanly when
+/// their reader closes (`yes | head`).
+///
+/// Universal — applies to standalone externals, pipeline external
+/// stages, foreground or backgrounded.
 #[cfg(unix)]
 pub fn reset_child_signals() {
+    for &sig in MANAGED_SIGNALS {
+        let target = if was_inherited_ignored(sig) {
+            libc::SIG_IGN
+        } else {
+            libc::SIG_DFL
+        };
+        unsafe {
+            libc::signal(sig, target);
+        }
+    }
     unsafe {
-        libc::signal(libc::SIGINT, libc::SIG_DFL);
-        libc::signal(libc::SIGQUIT, libc::SIG_DFL);
-        libc::signal(libc::SIGTSTP, libc::SIG_DFL);
-        libc::signal(libc::SIGTTIN, libc::SIG_DFL);
-        libc::signal(libc::SIGTTOU, libc::SIG_DFL);
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 }
@@ -427,8 +795,15 @@ pub fn wait_handling_stop(
 // reversed before the next REPL read or that read returns EIO (ral ignores
 // SIGTTIN, see repl.rs).  `ForegroundGuard` makes the restoration unconditional
 // under any early return: acquiring the guard performs `tcsetpgrp(target)`,
-// dropping it performs `tcsetpgrp(saved)`.  Only the unix variant has fields;
-// non-unix is a zero-sized stub so callers compile unchanged.
+// dropping it performs `tcsetpgrp(saved)`.
+//
+// On Windows the guard is a zero-sized no-op — and that is correct, not
+// a stub.  Windows has a single shared console; every attached process
+// reads/writes it concurrently, with no notion of a "foreground process
+// group" that owns the tty.  Console programs (fzf, less, vim) talk to
+// the Console API directly and work without any handoff from ral.  The
+// internal-stage SIGTTIN deadlock that motivates the Mixed-pipeline
+// gate on Unix simply does not exist here.
 
 /// RAII guard for terminal foreground ownership.
 ///
@@ -499,7 +874,10 @@ impl Drop for ForegroundGuard {
     }
 }
 
-/// Non-unix stub so callers can use `ForegroundGuard` unconditionally.
+/// Non-unix `ForegroundGuard`: a zero-sized type whose `try_acquire`
+/// always returns `None`.  See the module-level comment above —
+/// Windows shares one console across attached processes, so there is
+/// nothing to acquire and nothing to release.
 #[cfg(not(unix))]
 pub struct ForegroundGuard;
 

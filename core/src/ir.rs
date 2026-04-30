@@ -11,7 +11,7 @@
 
 use crate::ast::{ExprOp, Param, Pattern, RedirectMode};
 use crate::span::Span;
-use crate::util::TildePath;
+use crate::path::tilde::TildePath;
 
 // ── Values ──────────────────────────────────────────────────────────────
 //

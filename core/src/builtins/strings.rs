@@ -76,7 +76,11 @@ pub(super) fn builtin_slice(args: &[Value]) -> Result<Value, EvalSignal> {
 
 pub(super) fn builtin_shell_split(args: &[Value]) -> Result<Value, EvalSignal> {
     let s = arg0_str(args);
-    let parts = shell_words::split(&s).map_err(|e| sig(format!("shell-split: {e}")))?;
+    // shlex returns `None` on malformed input (e.g. unterminated quote)
+    // without distinguishing the cause; the underlying tokenizer simply
+    // halts.  A single message is honest about that.
+    let parts = shlex::split(&s)
+        .ok_or_else(|| sig("shell-split: malformed input (unterminated quote?)".to_string()))?;
     Ok(Value::List(parts.into_iter().map(Value::String).collect()))
 }
 

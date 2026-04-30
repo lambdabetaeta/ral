@@ -39,13 +39,13 @@ echo !{is-empty 'hello'}
 # Expected: false
 
 # file-empty on filesystem paths
-make-dir /tmp/ral-pred-test
+mkdir -p /tmp/ral-pred-test
 echo !{file-empty /tmp/ral-pred-test}
 # Expected: true (empty directory)
 echo x > /tmp/ral-pred-test/file
 echo !{file-empty /tmp/ral-pred-test}
 # Expected: false (directory has entries)
-remove-file /tmp/ral-pred-test
+rm -rf /tmp/ral-pred-test
 
 # Filesystem predicates
 echo !{exists /tmp}

@@ -130,7 +130,7 @@ let host_build = { |target pkg name feats sign|
         cargo build --release -p $pkg ...$feats
     }
     let dst = "$artifact_dir/$name"
-    copy-file "$target/release/$pkg" $dst
+    cp "$target/release/$pkg" $dst
     if $sign { attempt { codesign -s - $dst } }
 }
 let host_variants_ral = { |target os arch sign|
@@ -149,12 +149,12 @@ let main = {
 
     # --clean-builds wipes on-disk caches; --clean-images removes the three
     # cross-compile docker images; --clean does both.  Must come before
-    # make-dir so we don't recreate what we're about to remove.
+    # mkdir so we don't recreate what we're about to remove.
     if $want_clean_builds {
         for [$artifact_dir, $cache_dir] { |d|
             if !{exists $d} {
                 echo "!{styled $ansi-dim "  removing $d"}"
-                remove-file $d
+                rm -rf $d
             }
         }
     }
@@ -167,9 +167,9 @@ let main = {
     }
     if $want_clean { exit 0 }
 
-    make-dir $artifact_dir
-    make-dir "$cache_dir/registry"
-    make-dir "$cache_dir/rustup"
+    mkdir -p $artifact_dir
+    mkdir -p "$cache_dir/registry"
+    mkdir -p "$cache_dir/rustup"
 
     # --local short-circuits: build for the host with host cargo and exit.
     # No docker, no cross-compilation, no publish — the dev-loop answer to
@@ -237,7 +237,7 @@ let main = {
                 '-w', '/work',
             ]
             docker run ...$run_args $t[img] cargo build --release -p $t[pkg] --target $t[triple] ...$t[feats]
-            copy-file "$td/$t[triple]/release/$t[bin]" $out
+            cp "$td/$t[triple]/release/$t[bin]" $out
             attempt { chmod +x $out }
         }
     }

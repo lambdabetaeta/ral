@@ -24,10 +24,12 @@ pub(crate) fn probe_terminal(warn: bool) -> (InteractiveMode, TerminalState) {
 }
 
 /// Home directory: `$HOME` on Unix, `%USERPROFILE%` on Windows.
+/// Falls back to `.` so REPL completion never panics on a path
+/// join.  Routes through [`ral_core::path::home::home_from_env`]
+/// so the resolution rule lives in one place.
 pub(crate) fn home_dir() -> String {
-    std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".into())
+    let h = ral_core::path::home::home_from_env();
+    if h.is_empty() { ".".into() } else { h }
 }
 
 /// Current user name: `$USER` on Unix, `%USERNAME%` on Windows.

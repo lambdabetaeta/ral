@@ -18,8 +18,11 @@ echo hello > /tmp/al-test-out.txt
 cat /tmp/al-test-out.txt
 # Expected: hello
 
-# Redirect stderr — ls /nonexistent fails, use attempt to suppress propagation
-attempt { ls /nonexistent 2> /tmp/al-test-err.txt }
+# Redirect stderr — ls /nonexistent fails, use attempt to suppress
+# propagation.  `2>~` is streaming (POSIX `2>`); plain `2>` is atomic
+# and rolls back on body error, which is the right semantic for `>`
+# but not for capturing the stderr of a failing command.
+attempt { ls /nonexistent 2>~ /tmp/al-test-err.txt }
 cat /tmp/al-test-err.txt
 # Expected: error message about /nonexistent
 

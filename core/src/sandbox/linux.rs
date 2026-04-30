@@ -1,6 +1,6 @@
 //! Linux sandbox using bubblewrap (`bwrap`).
 //!
-//! A ral subprocess is re-exec'd inside `bwrap` when `--sandbox-policy`
+//! A ral subprocess is re-exec'd inside `bwrap` when `--sandbox-projection`
 //! is provided on startup (see [`super::early_init`]).  External commands
 //! spawned by that child inherit the same mount namespace and seccomp
 //! filter.
@@ -10,10 +10,10 @@
 //! while allowing everything else.
 //!
 //! Network filtering is all-or-nothing: `--unshare-net` removes the network
-//! namespace entirely.  [`SandboxPolicy::net`] is therefore a boolean
+//! namespace entirely.  [`SandboxProjection::net`] is therefore a boolean
 //! allow/deny bit, not an endpoint list.
 
-use crate::types::SandboxPolicy;
+use crate::types::SandboxProjection;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
@@ -22,7 +22,7 @@ use std::process::{Command, ExitCode, Stdio};
 /// configured by `policy`.  Read-only and read-write bind mounts are
 /// derived from the policy prefixes, with `deny_paths` overlaid read-only
 /// after broad writable binds.
-pub fn make_command_with_policy(name: &str, args: &[String], policy: &SandboxPolicy) -> Command {
+pub fn make_command_with_policy(name: &str, args: &[String], policy: &SandboxProjection) -> Command {
     let mut c = Command::new("bwrap");
     let bind_spec = policy.bind_spec();
     let mut ro_binds = default_ro_binds();
@@ -67,16 +67,18 @@ pub fn make_command_with_policy(name: &str, args: &[String], policy: &SandboxPol
             c.args(["--bind", bind, bind]);
         }
     }
-    // `deny_paths` are write-only carve-outs inside otherwise writable
-    // prefixes.  bwrap has no negative path rule, so overlay an existing
-    // denied path back onto itself read-only after the broad rw binds.
-    // This is the same "last mount wins" shape as the Seatbelt profile.
+    // `deny_paths` carve out fully-forbidden subtrees inside otherwise
+    // bound prefixes.  bwrap has no negative path rule, so we overlay
+    // an empty tmpfs at each denied path; reads find an empty dir,
+    // writes land in throwaway memory.  This is the "last mount wins"
+    // analogue of Seatbelt's deny rules — both reads and writes denied,
+    // matching the FsPolicy docs.
     let mut denied_binds = bind_spec.deny_paths;
     denied_binds.sort();
     denied_binds.dedup();
     for bind in &denied_binds {
         if Path::new(bind).exists() {
-            c.args(["--ro-bind", bind, bind]);
+            c.args(["--tmpfs", bind]);
         }
     }
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -216,7 +218,7 @@ fn apply_seccomp(cmd: &mut Command, filter: Vec<u8>) {
 pub(super) fn respawn_under_bwrap(
     exe: &Path,
     args: &[String],
-    policy: &SandboxPolicy,
+    policy: &SandboxProjection,
     active_env: &str,
 ) -> Result<ExitCode, String> {
     let mut cmd = make_command_with_policy(exe.to_string_lossy().as_ref(), args, policy);
@@ -278,7 +280,7 @@ fn default_ro_binds() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::make_command_with_policy;
-    use crate::types::{FsPolicy, SandboxPolicy};
+    use crate::types::{FsPolicy, SandboxProjection};
 
     #[test]
     fn denied_paths_are_overlaid_after_rw_binds() {
@@ -290,7 +292,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&denied, "capabilities").unwrap();
 
-        let policy = SandboxPolicy {
+        let policy = SandboxProjection {
             fs: FsPolicy {
                 read_prefixes: Vec::new(),
                 write_prefixes: vec![dir.to_string_lossy().into_owned()],
@@ -306,12 +308,12 @@ mod tests {
         let bind_pos = args
             .windows(3)
             .position(|w| w[0] == "--bind" && w[1] == dir.to_string_lossy());
-        let deny_pos = args.windows(3).position(|w| {
-            w[0] == "--ro-bind" && w[1] == denied.to_string_lossy()
-        });
+        let deny_pos = args
+            .windows(2)
+            .position(|w| w[0] == "--tmpfs" && w[1] == denied.to_string_lossy());
 
         assert!(bind_pos.is_some(), "rw bind missing: {args:?}");
-        assert!(deny_pos.is_some(), "deny overlay missing: {args:?}");
+        assert!(deny_pos.is_some(), "tmpfs deny overlay missing: {args:?}");
         assert!(bind_pos.unwrap() < deny_pos.unwrap(), "deny overlay must win");
 
         let _ = std::fs::remove_file(denied);

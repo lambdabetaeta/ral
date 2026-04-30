@@ -30,8 +30,8 @@ pub(super) fn builtin_path(args: &[Value], shell: &mut Shell) -> Result<Value, E
         "resolve" => {
             let s = need_path("resolve")?;
             shell.check_fs_read(&s)?;
-            let resolved =
-                std::fs::canonicalize(&s).map_err(|e| sig(format!("resolve-path: {s}: {e}")))?;
+            let resolved = crate::path::canon::canonicalise_strict(std::path::Path::new(&s))
+                .map_err(|e| sig(format!("resolve-path: {s}: {e}")))?;
             Ok(Value::String(resolved.to_string_lossy().into_owned()))
         }
         "join" => {
@@ -83,13 +83,22 @@ fn which_line(name: &str, shell: &Shell) -> Option<String> {
             Some(format!("{name}: alias {}", format_alias(alias)))
         }
         CommandHead::Builtin => Some(format!("{name}: builtin")),
-        CommandHead::GrantDenied => Some(format!("{name}: denied by grant")),
+        // The classifier returns GrantDenied for any name not on the
+        // allow side of the policy — including names that are nowhere
+        // on the filesystem, since "no admission" is the same outcome
+        // as "explicit deny" at the policy layer.  That's correct for
+        // the gate but indistinguishable from "not installed" in a
+        // `which` answer, so disambiguate here: only call it denied
+        // when the binary is actually present.
+        CommandHead::GrantDenied => shell
+            .locate_command(name)
+            .map(|p| format!("{name}: denied by grant ({})", p.display())),
         CommandHead::External if shell.lookup_handler(name).is_some() => {
             Some(format!("{name}: handler"))
         }
-        CommandHead::External => {
-            find_external_command(name, shell).map(|p| p.to_string_lossy().into_owned())
-        }
+        CommandHead::External => shell
+            .locate_command(name)
+            .map(|p| p.to_string_lossy().into_owned()),
     }
 }
 
@@ -97,98 +106,5 @@ fn format_alias(entry: &AliasEntry) -> String {
     match &entry.source {
         Some(src) => src.clone(),
         None => entry.value.to_string(),
-    }
-}
-
-/// Resolve `p` against `shell.dynamic.cwd` if relative; otherwise return as-is.
-fn anchor_to_cwd(p: std::path::PathBuf, shell: &Shell) -> std::path::PathBuf {
-    if p.is_absolute() {
-        return p;
-    }
-    match &shell.dynamic.cwd {
-        Some(cwd) => cwd.join(p),
-        None => p,
-    }
-}
-
-fn find_external_command(name: &str, shell: &Shell) -> Option<std::path::PathBuf> {
-    let has_sep =
-        name.contains(std::path::MAIN_SEPARATOR) || name.contains('/') || name.contains('\\');
-
-    if has_sep {
-        let candidate = anchor_to_cwd(std::path::PathBuf::from(name), shell);
-        return command_candidate_exists(&candidate).then_some(candidate);
-    }
-
-    let path_value = shell
-        .dynamic
-        .env_vars
-        .get("PATH")
-        .map(std::ffi::OsString::from)
-        .or_else(|| std::env::var_os("PATH"))?;
-
-    for dir in std::env::split_paths(&path_value) {
-        let candidate = anchor_to_cwd(dir, shell).join(name);
-
-        #[cfg(windows)]
-        {
-            for c in windows_command_candidates(&candidate) {
-                if command_candidate_exists(&c) {
-                    return Some(c);
-                }
-            }
-        }
-        #[cfg(not(windows))]
-        {
-            if command_candidate_exists(&candidate) {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
-#[cfg(windows)]
-fn windows_command_candidates(base: &std::path::Path) -> Vec<std::path::PathBuf> {
-    use std::ffi::OsStr;
-
-    let mut out = Vec::new();
-    if base.extension().is_some() {
-        out.push(base.to_path_buf());
-    }
-
-    let pathext = std::env::var_os("PATHEXT")
-        .unwrap_or_else(|| OsStr::new(".COM;.EXE;.BAT;.CMD").to_os_string());
-
-    for ext in pathext
-        .to_string_lossy()
-        .split(';')
-        .map(str::trim)
-        .filter(|e| !e.is_empty())
-    {
-        let ext = ext.trim_start_matches('.');
-        out.push(base.with_extension(ext));
-    }
-
-    out
-}
-
-fn command_candidate_exists(path: &std::path::Path) -> bool {
-    if !path.is_file() {
-        return false;
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = std::fs::metadata(path) {
-            return (meta.permissions().mode() & 0o111) != 0;
-        }
-        false
-    }
-
-    #[cfg(not(unix))]
-    {
-        true
     }
 }

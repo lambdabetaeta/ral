@@ -394,6 +394,14 @@ fn main() -> ExitCode {
     #[cfg(windows)]
     ral_core::compat::enable_virtual_terminal_processing();
 
+    // Hidden multicall dispatch — see `ral_core::builtins::try_run_uutils_helper`
+    // for the rationale.  The parent process spawns `current_exe()` with
+    // the helper sentinel as the first arg to run a bundled coreutils
+    // tool in a fresh subprocess.  Not user-facing; not in `--help`.
+    if let Some(code) = ral_core::builtins::uutils::try_run_uutils_helper() {
+        return ExitCode::from(code);
+    }
+
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let (stripped, exit) = match ral_core::sandbox::early_init(&argv) {
         Ok(result) => result,

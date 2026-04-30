@@ -359,39 +359,6 @@ impl Sink {
         }
     }
 
-    /// Run `f` with fd 1 pointing at this sink, then restore.
-    ///
-    /// Used for in-process uutils execution, which calls `isatty(1)` to decide
-    /// whether to emit colour.  `Terminal` calls `f` directly so that uutils
-    /// sees the real terminal fd.  Other variants redirect fd 1 via dup2.
-    #[cfg(any(feature = "coreutils", feature = "diffutils"))]
-    pub fn with_child_stdout(&mut self, f: impl FnOnce() -> i32) -> i32 {
-        // Redirect fd 1 into a pipe, run `f`, drain the pipe.  Falls back to
-        // running `f` directly when the pipe cannot be created.
-        fn pipe_capture(f: impl FnOnce() -> i32) -> Option<(i32, Vec<u8>)> {
-            let (mut reader, writer) = os_pipe::pipe().ok()?;
-            let code = crate::compat::with_stdout_redirected(&writer, f);
-            drop(writer);
-            let mut out = Vec::new();
-            let _ = reader.read_to_end(&mut out);
-            Some((code, out))
-        }
-
-        match self {
-            // `External` is installed only when the REPL holds a real TTY,
-            // so fd 1 is already a terminal: let uutils see it directly.
-            Sink::Terminal | Sink::External(_) => f(),
-            Sink::Pipe(w) => crate::compat::with_stdout_redirected(w, f),
-            _ => match pipe_capture(f) {
-                None => -1,
-                Some((code, out)) => {
-                    let _ = self.write_all(&out);
-                    let _ = self.flush_pending();
-                    code
-                }
-            },
-        }
-    }
 }
 
 /// Append `bytes` to `buf`, enforcing `SINK_BUFFER_CAP`.

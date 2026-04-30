@@ -743,7 +743,7 @@ mod tests {
         };
         assert_eq!(
             name,
-            &ExecName::TildePath(crate::util::TildePath {
+            &ExecName::TildePath(crate::path::tilde::TildePath {
                 user: None,
                 suffix: Some("/.local/bin/claude".into()),
             })
@@ -760,7 +760,7 @@ mod tests {
         };
         assert_eq!(
             name,
-            &ExecName::TildePath(crate::util::TildePath {
+            &ExecName::TildePath(crate::path::tilde::TildePath {
                 user: None,
                 suffix: Some("/.local/bin/claude".into()),
             })

@@ -1,6 +1,6 @@
-#[cfg(any(feature = "coreutils", feature = "diffutils"))]
+#[cfg(feature = "diffutils")]
 use crate::diagnostic;
-#[cfg(any(feature = "coreutils", feature = "diffutils"))]
+#[cfg(feature = "diffutils")]
 use crate::types::*;
 
 #[cfg(feature = "diffutils")]
@@ -11,6 +11,14 @@ macro_rules! declare_uutils {
     ($($name:literal => $module:ident),+ $(,)?) => {
         $(use $module;)+
 
+        /// Names of every uutils tool the helper subprocess can dispatch.
+        /// Read by [`is_uutils_tool`] so command resolution can route a bare
+        /// `cat`/`yes`/`wc`/... through `current_exe() --ral-uutils-helper`
+        /// instead of PATH's system binary.  The macro keeps this list in
+        /// lockstep with the dispatch arms below — adding a tool in one
+        /// place adds it in both.
+        pub(crate) const UUTILS_TOOLS: &[&str] = &[$($name),+];
+
         fn uutils_invoke(tool: &str, args: Vec<std::ffi::OsString>) -> i32 {
             match tool {
                 $($name => $module::uumain(args.into_iter()),)+
@@ -18,6 +26,68 @@ macro_rules! declare_uutils {
             }
         }
     };
+}
+
+/// True when `name` is one of the bundled uutils tools — the resolver
+/// substitutes a re-exec of ourselves with `--ral-uutils-helper` for these,
+/// so they ride through the same external-command boundary as `/usr/bin/cat`.
+#[cfg(feature = "coreutils")]
+pub(crate) fn is_uutils_tool(name: &str) -> bool {
+    UUTILS_TOOLS.iter().any(|t| *t == name)
+}
+
+/// `coreutils` feature off → no bundled tools, so resolution falls through
+/// to PATH for every name.
+#[cfg(not(feature = "coreutils"))]
+pub(crate) fn is_uutils_tool(_name: &str) -> bool {
+    false
+}
+
+/// Hidden multicall sentinel.  The parent process passes this as the
+/// first argument when spawning `current_exe()` to act as a bundled
+/// coreutils helper.  Not user-facing; not in `--help`.
+pub const HELPER_FLAG: &str = "--ral-uutils-helper";
+
+/// One-line check at the very top of a binary's `main`: when the first
+/// argument is the helper sentinel, dispatch to the bundled coreutils
+/// runtime and return its exit code; otherwise return `None` and let
+/// normal `main` run.  ral and exarch both call this so the multicall
+/// dispatch isn't duplicated.
+///
+/// Each invocation runs in a fresh OS process, so process-global state
+/// inside `uucore` (locale init, the `EXIT_CODE` atomic) starts clean
+/// every time.  Returned values are clamped to `0..=255` for `ExitCode`.
+pub fn try_run_uutils_helper() -> Option<u8> {
+    let mut args = std::env::args_os();
+    let _argv0 = args.next();
+    if args.next().as_deref().map(std::ffi::OsStr::to_string_lossy)? != HELPER_FLAG {
+        return None;
+    }
+    #[cfg(feature = "coreutils")]
+    {
+        // Rust's runtime sets SIGPIPE=IGN before main; uucore writes
+        // therefore see EPIPE and return 1 instead of the helper dying
+        // from SIGPIPE.  A non-final pipeline stage that exits 1 is
+        // indistinguishable from a real error — `yes | head` would
+        // mis-report failure.  Restore the default disposition so the
+        // helper dies with signal 13 → exit 141, which `is_broken_pipe_exit`
+        // forgives.
+        #[cfg(unix)]
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL); }
+        let tool_args: Vec<std::ffi::OsString> = args.collect();
+        if tool_args.is_empty() {
+            eprintln!("ral: {HELPER_FLAG} requires a tool name");
+            return Some(2);
+        }
+        let tool = tool_args[0].to_string_lossy().into_owned();
+        let code = uutils_invoke(&tool, tool_args);
+        Some(code.clamp(0, 255) as u8)
+    }
+    #[cfg(not(feature = "coreutils"))]
+    {
+        eprintln!("ral: built without 'coreutils' feature; cannot run as uutils helper");
+        Some(2)
+    }
 }
 
 #[cfg(feature = "coreutils")]
@@ -32,7 +102,6 @@ declare_uutils! {
     "mkdir" => uu_mkdir,
     "mv" => uu_mv,
     "rm" => uu_rm,
-    "seq" => uu_seq,
     "sort" => uu_sort,
     "tee" => uu_tee,
     "touch" => uu_touch,
@@ -99,36 +168,6 @@ declare_uutils! {
     "unlink" => uu_unlink,
     "vdir" => uu_vdir,
     "whoami" => uu_whoami
-}
-
-#[cfg(feature = "coreutils")]
-pub(crate) fn uutils(tool: &str, args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
-    use std::ffi::OsString;
-    let mut uargs: Vec<OsString> = vec![OsString::from(tool)];
-    uargs.extend(args.iter().map(|v| OsString::from(v.to_string())));
-    let pipe_stdin = shell.io.stdin.take_reader();
-    let invoke = |uargs: Vec<OsString>| {
-        if let Some(ref reader) = pipe_stdin {
-            crate::compat::with_stdin_redirected(reader, || uutils_invoke(tool, uargs))
-        } else {
-            uutils_invoke(tool, uargs)
-        }
-    };
-    // dup2 of fd 0/1 mutates global state; serialize against any other thread
-    // doing the same.  Lock is held across the entire redirect/run/restore
-    // window (both stdout and the inner stdin redirect).
-    let _fd_lock = crate::compat::lock_stdio_redirect();
-    let code = shell.io.stdout.with_child_stdout(|| invoke(uargs));
-    drop(_fd_lock);
-    shell.control.last_status = code;
-    if code == 0 {
-        Ok(Value::Unit)
-    } else {
-        Err(EvalSignal::Error(Error::new(
-            format!("{tool}: exited with status {code}"),
-            code,
-        )))
-    }
 }
 
 #[cfg(feature = "diffutils")]

@@ -257,19 +257,67 @@ implicit `return` in command context. The shell convention
 (unquoted words run commands) is preserved without collapsing the
 language into strings.
 
-## Bundled coreutils are optional, not core
+## Three layers, one asymmetry
 
-`ls`, `cat`, `grep`, … exist mainly for Windows and portability; they
-are byte-output commands, not privileged constructs. Structured
-builtins (`from-string < $path`, `file-size`, `grep-files`, `path-join`)
-are preferred for structured work; the bundled tools should not be
-relied upon when a structured alternative exists.
+The filesystem surface is split into three layers:
+
+1. **Structured queries** — primitives that return values: `list-dir`,
+   `file-size`, `file-mtime`, `file-empty`, `path-*`, `grep-files`,
+   `temp-dir`, `temp-file`. These are what drives a structured
+   pipeline; they have no shell-tool analogue worth bothering with.
+2. **Bytes I/O** — codecs (`from-string`, `to-json`, …) plus redirects.
+   `to-json $v > $path` replaces the old `write-json`; `from-string
+   < $path` replaces a read-file primitive. Atomic-rename-on-write is
+   built into `>` for regular files.
+3. **Filesystem effects** — bundled coreutils (`cp`, `mv`, `rm`,
+   `mkdir`, `ln -s`, `chmod`, …). Effects don't return structured
+   values, so giving them ral-native primitives buys nothing the shell
+   form doesn't already give. The old `copy-file`, `move-file`,
+   `make-dir`, `remove-file` wrappers are gone for this reason.
+
+The asymmetry is the design: structured returns earn a primitive;
+effects don't.
+
+## `remove-file` was a footgun
+
+The dropped `remove-file` did `rm -rf` if you pointed it at a
+directory. That is the kind of behaviour ral exists to abolish. The
+dangerous verb wears its name — `rm -r` (or `rm -rf`) — and the
+caller writes it on purpose. Effects are bundled coreutils now;
+the trap goes away.
+
+## Bundled coreutils are mandatory in exarch, optional in ral
+
+A sealed exarch profile that depends on host coreutils isn't sealed —
+it's reproducible only modulo whatever `cp` or `mv` the host happens
+to ship (BSD vs GNU drift, version skew, locale defaults). Exarch
+therefore bundles a curated coreutils set and pins behaviour. The
+binary-size cost is paid once per profile build and is the price of
+"I know exactly what's in this".
+
+The bare `ral` binary keeps coreutils behind a feature flag. An
+interactive shell on a developer machine has system coreutils
+already; no reason to ship 30+MB of duplicate tools.
+
+## Capability-checked dispatch for bundled tools
+
+Every uutils invocation goes through a wrapper that consults the
+tool's own clap parser to find the path-argv positions, then calls
+the same `check_fs_read` / `check_fs_write` that the structured
+primitives use. Bypassing the sandbox by reaching for `cp` instead
+of a primitive is therefore not possible — both paths land at the
+same chokepoint. `within [dir: ...]` scope propagates by chdir under
+a per-call lock, so relative paths resolve against ral's scoped CWD,
+not the host process CWD.
 
 ## Syscall bridge, not text parsing
 
-`_fs` and `_path` replace shelling out to `stat`, `dirname`,
-`basename`, etc. and parsing their text. Platform differences and the
-perpetual bytes–text–structured round-trip disappear.
+The structured query primitives (`_fs lines/size/mtime/empty/list`,
+`_path …`) replace shelling out to `stat`, `dirname`, `basename`,
+etc. and parsing their text. Platform differences and the perpetual
+bytes–text–structured round-trip disappear. Effects are not in the
+bridge — they are bundled commands invoked through the
+capability-checked dispatch.
 
 ## Record types and scoped labels
 

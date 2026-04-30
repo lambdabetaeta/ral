@@ -18,14 +18,17 @@
 //! sandboxed-child path.
 //!
 //! Network filtering is all-or-nothing at the OS level: Seatbelt does not
-//! support per-address rules.  `SandboxPolicy::net` is therefore a boolean
+//! support per-address rules.  `SandboxProjection::net` is therefore a boolean
 //! allow/deny bit, not an endpoint list.
 
-use crate::types::SandboxPolicy;
+use crate::path::canon::match_variants;
+use crate::types::SandboxProjection;
+use std::collections::BTreeSet;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
+use std::path::Path;
 
-pub(super) fn apply_current_process_policy(policy: &SandboxPolicy) -> std::io::Result<()> {
+pub(super) fn apply_current_process_policy(policy: &SandboxProjection) -> std::io::Result<()> {
     let profile = build_profile(policy);
     apply_profile(&profile, std::iter::empty::<(&str, &str)>())
 }
@@ -33,7 +36,7 @@ pub(super) fn apply_current_process_policy(policy: &SandboxPolicy) -> std::io::R
 /// Apply `policy` to the current process and mark the sandbox as active so
 /// children inherit the flag and skip re-entry.
 pub(super) fn enter_current_process(
-    policy: &SandboxPolicy,
+    policy: &SandboxProjection,
     active_env: &str,
 ) -> Result<(), String> {
     apply_current_process_policy(policy)
@@ -88,8 +91,11 @@ fn apply_profile<'a>(
     Ok(())
 }
 
-pub(super) fn build_profile(policy: &SandboxPolicy) -> String {
+pub(super) fn build_profile(policy: &SandboxProjection) -> String {
     let bind_spec = policy.bind_spec();
+    let read_prefixes  = expand(&bind_spec.read_prefixes);
+    let write_prefixes = expand(&bind_spec.write_prefixes);
+    let deny_paths     = expand(&bind_spec.deny_paths);
     let mut lines = vec![
         "(version 1)".to_string(),
         "(deny default)".to_string(),
@@ -113,8 +119,8 @@ pub(super) fn build_profile(policy: &SandboxPolicy) -> String {
     ];
 
     let system_read_paths = existing_system_read_paths();
-    emit_ancestor_metadata(&mut lines, system_read_paths.iter().copied());
-    emit_read_subpaths(&mut lines, system_read_paths.iter().copied());
+    emit_ancestor_metadata(&mut lines, system_read_paths.iter().map(String::as_str));
+    emit_read_subpaths(&mut lines, system_read_paths.iter().map(String::as_str));
     // Shell redirections and common libc / tooling paths open these device
     // nodes for write.  Without explicit literal allows, `2>/dev/null`
     // and similar patterns fail under Seatbelt even though `/dev` is
@@ -131,32 +137,36 @@ pub(super) fn build_profile(policy: &SandboxPolicy) -> String {
     // the final subpath is allowed.
     emit_ancestor_metadata(
         &mut lines,
-        bind_spec
-            .read_prefixes
+        read_prefixes
             .iter()
-            .chain(bind_spec.write_prefixes.iter())
+            .chain(write_prefixes.iter())
             .map(String::as_str),
     );
 
-    for prefix in &bind_spec.read_prefixes {
+    for prefix in &read_prefixes {
         lines.push(format!(
             "(allow file-read* (subpath \"{}\"))",
             escape_path(prefix)
         ));
     }
-    for prefix in &bind_spec.write_prefixes {
+    for prefix in &write_prefixes {
         let escaped = escape_path(prefix);
         lines.push(format!("(allow file-read* (subpath \"{escaped}\"))"));
         lines.push(format!("(allow file-write* (subpath \"{escaped}\"))"));
     }
-    // Per-file deny rules.  Emitted *after* the broad write allows so
-    // Seatbelt's last-match-wins semantics let the deny override.  The
-    // `file-link*` deny closes the hardlink/rename hole: writes via a
-    // hardlink elsewhere would otherwise hit the same inode.
-    for path in &bind_spec.deny_paths {
+    // Per-path deny rules.  Emitted *after* the broad allows so
+    // Seatbelt's last-match-wins semantics let the deny override.
+    // `subpath` (not `literal`) so a directory entry covers everything
+    // under it — `xdg:config/gh` denies the whole gh-CLI dir, not just
+    // the literal `gh` inode.  `file-link` (no wildcard — Seatbelt has
+    // no `file-link*` group) blocks `link(2)` against the source path,
+    // closing the hardlink hole where a new name elsewhere would let
+    // writes bypass the path-based deny.
+    for path in &deny_paths {
         let escaped = escape_path(path);
-        lines.push(format!("(deny file-write* (literal \"{escaped}\"))"));
-        lines.push(format!("(deny file-link* (literal \"{escaped}\"))"));
+        lines.push(format!("(deny file-read* (subpath \"{escaped}\"))"));
+        lines.push(format!("(deny file-write* (subpath \"{escaped}\"))"));
+        lines.push(format!("(deny file-link (subpath \"{escaped}\"))"));
     }
     if policy.net {
         lines.push("(allow network*)".to_string());
@@ -184,27 +194,42 @@ fn system_read_paths() -> &'static [&'static str] {
         "/Applications/Xcode.app/Contents/Developer",
         "/opt/homebrew",
         "/private/var/db/dyld",
-        "/var/db/dyld",
-        "/private/etc/resolv.conf",
-        "/private/etc/hosts",
-        "/private/etc/ssl",
-        "/private/etc/openssl",
-        // getpwuid / getgrgid sit in libc startup paths; without these,
-        // many programs can't even resolve $HOME.
-        "/private/etc/passwd",
-        "/private/etc/group",
-        "/private/etc/services",
-        "/private/etc/protocols",
-        "/private/etc/nsswitch.conf",
+        // System config under /etc (firmlinked to /private/etc).  Allowed
+        // wholesale rather than cherry-picked: tools read whatever they
+        // read (gitconfig, paths.d, zshenv, ssh_config, nix.conf, …) and
+        // omitting one breaks them mysteriously.  Nothing user-secret
+        // lives here on macOS — master.passwd is 0600 and Seatbelt
+        // enforces inode permissions on top of the profile.
+        "/private/etc",
+        // xcode-select state.  /usr/bin/git and the other CommandLineTools
+        // shims read /var/select/developer_dir to find the active toolchain;
+        // libtool and make also probe /var/select/sh.  Without read access
+        // here both fail with "Operation not permitted", which build drivers
+        // then misreport as a missing or broken xcode-select install.
+        "/private/var/select",
+        // configd's runtime state.  /etc/resolv.conf is a symlink to
+        // /var/run/resolv.conf, and mDNSResponder's Unix socket lives at
+        // /var/run/mDNSResponder, so DNS resolution goes through here.
+        // Read-only grant: contents are sockets, PID files, locks — system
+        // state, no user secrets.  If DNS still fails, the next missing
+        // piece is the socket connect, which needs a separate write rule.
+        "/private/var/run",
     ]
 }
 
-fn existing_system_read_paths() -> Vec<&'static str> {
-    system_read_paths()
+/// Filter to entries that exist on this host, then expand each to its
+/// firmlink-equivalent forms — `/private/etc` becomes `[/etc, /private/etc]`,
+/// `/private/var/db/dyld` becomes `[/var/db/dyld, /private/var/db/dyld]`,
+/// and so on — so the rendered profile matches whichever form Seatbelt
+/// presents at MAC-hook time.
+fn existing_system_read_paths() -> Vec<String> {
+    let filtered: Vec<String> = system_read_paths()
         .iter()
         .copied()
-        .filter(|p| std::path::Path::new(p).exists())
-        .collect()
+        .filter(|p| Path::new(p).exists())
+        .map(str::to_string)
+        .collect();
+    expand(&filtered)
 }
 
 fn emit_read_subpaths<'a>(lines: &mut Vec<String>, paths: impl IntoIterator<Item = &'a str>) {
@@ -245,6 +270,25 @@ fn escape_path(path: &str) -> String {
     path.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// Expand every entry into its [`match_variants`] — the canonical
+/// form plus the firmlinked form on macOS — and dedupe.  A grant for
+/// `/tmp/work` produces rules for both `/tmp/work` and
+/// `/private/tmp/work`, since Seatbelt may present either to the MAC
+/// hook depending on the syscall.
+fn expand(paths: &[String]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for p in paths {
+        for v in match_variants(Path::new(p)) {
+            let s = v.to_string_lossy().into_owned();
+            if seen.insert(s.clone()) {
+                out.push(s);
+            }
+        }
+    }
+    out
+}
+
 unsafe extern "C" {
     fn sandbox_init_with_parameters(
         profile: *const c_char,
@@ -257,26 +301,26 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::{build_profile, metadata_ancestors};
-    use crate::types::SandboxPolicy;
+    use crate::types::SandboxProjection;
 
     #[test]
     fn mac_shell_profile_allows_general_exec() {
-        let profile = build_profile(&SandboxPolicy::default());
+        let profile = build_profile(&SandboxProjection::default());
         assert!(profile.contains("(allow process-exec)"));
     }
 
     #[test]
     fn mac_profile_denies_network_when_disabled() {
-        let profile = build_profile(&SandboxPolicy {
+        let profile = build_profile(&SandboxProjection {
             net: false,
-            ..SandboxPolicy::default()
+            ..SandboxProjection::default()
         });
         assert!(!profile.contains("(allow network*)"));
     }
 
     #[test]
     fn mac_profile_allows_common_dev_writes() {
-        let profile = build_profile(&SandboxPolicy::default());
+        let profile = build_profile(&SandboxProjection::default());
         for path in ["/dev/null", "/dev/zero", "/dev/dtracehelper", "/dev/tty"] {
             assert!(
                 profile.contains(&format!("(allow file-write* (literal \"{path}\"))")),
@@ -299,7 +343,7 @@ mod tests {
         if !std::path::Path::new("/Library/Developer/CommandLineTools").exists() {
             return;
         }
-        let profile = build_profile(&SandboxPolicy::default());
+        let profile = build_profile(&SandboxProjection::default());
         assert!(
             profile
                 .contains("(allow file-read* (subpath \"/Library/Developer/CommandLineTools\"))")
@@ -312,7 +356,7 @@ mod tests {
 
     #[test]
     fn mac_profile_does_not_grant_tmp_as_system_read_path() {
-        let profile = build_profile(&SandboxPolicy::default());
+        let profile = build_profile(&SandboxProjection::default());
         assert!(!profile.contains("(allow file-read* (subpath \"/tmp\"))"));
         assert!(!profile.contains("(allow file-read* (subpath \"/private/tmp\"))"));
     }
@@ -320,7 +364,12 @@ mod tests {
     #[test]
     fn mac_profile_emits_deny_rules_for_deny_paths() {
         use crate::types::FsPolicy;
-        let policy = SandboxPolicy {
+        // /tmp -> /private/tmp on macOS; both forms must appear so
+        // Seatbelt matches whichever the kernel presents at MAC-hook
+        // time.  Each deny_paths entry produces file-read*, file-write*
+        // and file-link denies (full untouchability), each emitted
+        // *after* the covering allow for last-match-wins.
+        let policy = SandboxProjection {
             fs: FsPolicy {
                 read_prefixes: Vec::new(),
                 write_prefixes: vec!["/tmp/work".into()],
@@ -329,16 +378,17 @@ mod tests {
             net: true,
         };
         let profile = build_profile(&policy);
-        let allow_idx = profile
-            .find("(allow file-write* (subpath \"/tmp/work\"))")
-            .expect("write allow rendered");
-        let deny_w_idx = profile
-            .find("(deny file-write* (literal \"/tmp/work/.exarch.toml\"))")
-            .expect("write deny rendered");
-        let deny_l_idx = profile
-            .find("(deny file-link* (literal \"/tmp/work/.exarch.toml\"))")
-            .expect("link deny rendered");
-        assert!(allow_idx < deny_w_idx, "deny must come after allow for last-match-wins");
-        assert!(allow_idx < deny_l_idx);
+        for form in ["/tmp/work", "/private/tmp/work"] {
+            let allow_idx = profile
+                .find(&format!("(allow file-write* (subpath \"{form}\"))"))
+                .unwrap_or_else(|| panic!("write allow for {form} missing"));
+            for op in ["file-read*", "file-write*", "file-link"] {
+                let deny_idx = profile
+                    .find(&format!("(deny {op} (subpath \"{form}/.exarch.toml\"))"))
+                    .unwrap_or_else(|| panic!("{op} deny for {form}/.exarch.toml missing"));
+                assert!(allow_idx < deny_idx, "{op} deny must follow allow for {form}");
+            }
+        }
     }
+
 }

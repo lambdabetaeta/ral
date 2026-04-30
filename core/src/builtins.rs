@@ -31,7 +31,7 @@ mod shell;
 mod strings;
 pub use util::{value_to_json_audit, value_to_json_pub};
 mod util;
-mod uutils;
+pub mod uutils;
 
 /// Computation-type hint for a builtin, consumed by the type checker to
 /// determine how the command's return value flows through pipelines.
@@ -223,9 +223,7 @@ builtin_registry! {
     Gt { names: ["gt"], hint: Value,
         doc: "gt <a> <b>  — true if a > b (lexicographic or numeric).", },
     Fs { names: ["_fs"], hint: Value,
-        doc: "_fs <op> ...  — filesystem ops: read write copy rename remove mkdir list size lines mtime tempdir tempfile.", },
-    WriteJson { names: ["write-json"], hint: EncodeToBytes,
-        doc: "write-json <path> <data>  — write data as pretty-printed JSON to a file.", },
+        doc: "_fs <op> ...  — filesystem queries: lines size mtime empty list tempdir tempfile.", },
     Par { names: ["par"], hint: Value,
         doc: "par <fn> <list> <jobs>  — parallel map with a concurrency limit.", },
     Convert { names: ["_convert"], hint: Value,
@@ -244,21 +242,12 @@ builtin_registry! {
         doc: "cancel <handle>  — cancel a running task.", },
     Disown { names: ["disown"], hint: Value,
         doc: "disown <handle>  — detach a task, letting it run in the background.", },
-    #[cfg(feature = "coreutils")]
-    Uutils {
-        names: [
-            "ls", "cat", "wc", "head", "tail", "cp", "cut", "mkdir", "mv", "rm", "seq",
-            "sort", "tee", "touch", "tr", "uniq", "yes", "basename", "comm", "date", "df",
-            "dirname", "du", "env", "join", "ln", "paste", "printf", "sleep", "arch", "b2sum",
-            "base32", "base64", "basenc", "cksum", "csplit", "dd", "dir", "dircolors", "expand",
-            "expr", "factor", "fmt", "fold", "hostname", "link", "md5sum", "mktemp", "nl", "nproc",
-            "numfmt", "od", "pr", "printenv", "ptx", "pwd", "readlink", "realpath", "rmdir", "sha1sum",
-            "sha224sum", "sha256sum", "sha384sum", "sha512sum", "shred", "shuf", "sum", "sync", "tac",
-            "test", "truncate", "tsort", "uname", "unexpand", "unlink", "vdir", "whoami"
-        ],
-        hint: Bytes,
-        doc: "Coreutils-compatible command (see man pages).",
-    },
+    // Bundled uutils tools (cat, yes, head, wc, ...) are not builtins.
+    // `resolve_command` substitutes their resolved exec for a re-exec of
+    // ourselves with `--ral-uutils-helper`, so they ride through the same
+    // boundary as `/usr/bin/cat` did before bundling — one spawn site, one
+    // wait site, one signal/exit-code policy, one broken-pipe rule.  See
+    // [`crate::builtins::uutils::is_uutils_tool`].
     #[cfg(feature = "diffutils")]
     UuCmp { names: ["cmp"], hint: Bytes,
         doc: "Compare two files byte by byte (coreutils cmp).", },
@@ -403,7 +392,6 @@ pub fn call(name: &str, args: &[Value], shell: &mut Shell) -> Result<Option<Valu
         BuiltinName::Lt => Ok(Some(predicates::builtin_lt(args, shell)?)),
         BuiltinName::Gt => Ok(Some(predicates::builtin_gt(args, shell)?)),
         BuiltinName::Fs => Ok(Some(fs::builtin_fs(args, shell)?)),
-        BuiltinName::WriteJson => Ok(Some(fs::builtin_write_json(args, shell)?)),
         BuiltinName::Par => Ok(Some(control::builtin_par(args, shell)?)),
         BuiltinName::Convert => Ok(Some(strings::builtin_convert(args)?)),
         BuiltinName::Diff => {
@@ -430,8 +418,6 @@ pub fn call(name: &str, args: &[Value], shell: &mut Shell) -> Result<Option<Valu
         BuiltinName::Race => Ok(Some(concurrency::builtin_race(args, shell)?)),
         BuiltinName::Cancel => Ok(Some(concurrency::builtin_cancel(args, shell)?)),
         BuiltinName::Disown => Ok(Some(concurrency::builtin_disown(args, shell)?)),
-        #[cfg(feature = "coreutils")]
-        BuiltinName::Uutils => Ok(Some(uutils::uutils(name, args, shell)?)),
         #[cfg(feature = "diffutils")]
         BuiltinName::UuCmp => Ok(Some(uutils::uu_cmp(args, shell)?)),
         BuiltinName::GrepFiles => {

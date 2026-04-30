@@ -9,7 +9,7 @@ use crate::ast::RedirectMode;
 use crate::io::Sink;
 use crate::ir::ExecName;
 use crate::types::*;
-use crate::util::expand_tilde_path;
+use crate::path::tilde::expand_tilde_path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
@@ -194,25 +194,44 @@ fn wire_stdin(shell: &mut Shell) -> StdinRoute {
 }
 
 /// Wire the child's stdout to a redirect file when one is set.
-/// Returns the atomic-commit token (`Some` for `>` to a regular file).
+///
+/// Returns the atomic-commit token (`Some` for `>` to a regular file) plus an
+/// optional `Stdio` handle to assign to the child's stderr — populated only on
+/// Windows when the redirect plan has `2>&1`, since Windows lacks `pre_exec`
+/// and the dup must be wired pre-spawn from a clone of the same handle.
 fn wire_stdout_file(
     command: &mut Command,
     plan: &RedirectPlan,
     shell: &mut Shell,
-) -> Result<Option<AtomicCommit>, EvalSignal> {
+) -> Result<(Option<AtomicCommit>, Option<Stdio>), EvalSignal> {
     let Some((path, mode)) = &plan.stdout_file else {
-        return Ok(None);
+        return Ok((None, None));
     };
     let (file, commit) = open_file(path, mode, shell)?;
+    #[cfg(windows)]
+    let stderr_dup = if plan.stderr_to_stdout {
+        Some(Stdio::from(file.try_clone().map_err(pipe_err)?))
+    } else {
+        None
+    };
+    #[cfg(not(windows))]
+    let stderr_dup = None;
     command.stdout(Stdio::from(file));
-    Ok(commit)
+    Ok((commit, stderr_dup))
 }
 
 /// Set up the child's stderr according to plan and audit mode.
 ///
-/// On Unix, `2>&1` is realised via `pre_exec` dup2 so the child inherits the
-/// actual stdout fd after we've wired stdout.  On non-Unix we fall back to
-/// `Stdio::inherit()`, which is less faithful but keeps the tree running.
+/// `2>&1` is realised differently per platform:
+///   * Unix: a `pre_exec` `dup2(STDOUT, STDERR)` runs after the kernel has
+///     wired the child's fd 1, so stderr inherits whatever stdout was pointed
+///     at — pipe, file, or inherited fd.
+///   * Windows: there is no `pre_exec`, so the dup must happen pre-spawn by
+///     cloning the same handle that's about to be assigned as stdout.
+///     `stdout_file_dup` carries that clone for the file-redirect case;
+///     for sink-driven stdout we re-clone the writer from `shell.io.stdout`,
+///     and for the inherit-tty case we duplicate the parent's `STDOUT_HANDLE`.
+///
 /// An explicit `2>file` always wins over auditing; auditing captures stderr
 /// only when no other destination is set.
 ///
@@ -223,12 +242,14 @@ fn wire_stderr(
     command: &mut Command,
     plan: &RedirectPlan,
     auditing: bool,
+    inherit_tty: bool,
+    stdout_file_dup: Option<Stdio>,
     shell: &mut Shell,
 ) -> Result<bool, EvalSignal> {
     if plan.stderr_to_stdout {
-        // 2>&1: Unix dup2's stderr from stdout post-fork; non-Unix inherits.
         #[cfg(unix)]
         {
+            let _ = (inherit_tty, stdout_file_dup);
             use std::os::unix::process::CommandExt;
             unsafe {
                 command.pre_exec(|| {
@@ -239,8 +260,34 @@ fn wire_stderr(
                 });
             }
         }
-        #[cfg(not(unix))]
-        command.stderr(Stdio::inherit());
+        #[cfg(windows)]
+        {
+            let stdio = if let Some(dup) = stdout_file_dup {
+                dup
+            } else if inherit_tty {
+                use std::os::windows::io::AsHandle;
+                let owned = std::io::stdout()
+                    .as_handle()
+                    .try_clone_to_owned()
+                    .map_err(pipe_err)?;
+                Stdio::from(owned)
+            } else {
+                match &shell.io.stdout {
+                    crate::io::Sink::Pipe(w) => Stdio::from(w.try_clone().map_err(pipe_err)?),
+                    // Buffer / Tee / LineFramed sinks pump child.stdout via an
+                    // anonymous pipe allocated by `Stdio::piped()`; we cannot
+                    // reach into that pipe pre-spawn to share it with stderr.
+                    // Fall back to inherit so diagnostics still surface.
+                    _ => Stdio::inherit(),
+                }
+            };
+            command.stderr(stdio);
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (inherit_tty, stdout_file_dup);
+            command.stderr(Stdio::inherit());
+        }
         Ok(false)
     } else if let Some((path, mode)) = &plan.stderr_file {
         let (file, _) = open_file(path, &stderr_mode(mode), shell)?;
@@ -393,7 +440,30 @@ pub(crate) fn exec_policy_names(name: &ExecName, shell: &Shell, resolved: &str) 
     if resolved != names.last().map(String::as_str).unwrap_or_default() {
         names.push(resolved.into());
     }
+    // Path-style execs (`./configure`, `bin/run`) render and resolve to a
+    // relative string, so the `exec_dirs` matcher — which requires
+    // absolute paths — never sees them.  Push the cwd-joined absolute
+    // form as an extra candidate so a directory grant covering the
+    // working tree can admit them.
+    if matches!(name, ExecName::Path(_))
+        && let Some(last) = names.last()
+        && let Some(abs) = absolutize_relative(last, shell)
+        && !names.iter().any(|n| n == &abs)
+    {
+        names.push(abs);
+    }
     names
+}
+
+/// Lexically resolve a relative path against the shell's effective
+/// cwd, collapsing `.` and `..`.  Returns `None` when `s` is already
+/// absolute.
+fn absolutize_relative(s: &str, shell: &Shell) -> Option<String> {
+    if std::path::Path::new(s).is_absolute() {
+        return None;
+    }
+    let cwd = shell.dynamic.cwd.as_deref();
+    Some(crate::path::resolve_path(cwd, s).to_string_lossy().into_owned())
 }
 
 /// A fully-resolved external command, ready to be turned into a `Command`.
@@ -416,7 +486,13 @@ pub(crate) struct ResolvedCommand {
 ///   * `reject_exec_arg` rejection of list/map/thunk/handle/Bytes args;
 ///   * stringification of the remaining values;
 ///   * `resolve_in_path` against the shell-scoped PATH;
-///   * grant policy name expansion + `check_exec_args`.
+///   * grant policy name expansion + `check_exec_args`;
+///   * uutils helper substitution (when the bare name is one of the
+///     bundled tools): replace the resolved exec with our own
+///     `current_exe()` and prepend `--ral-uutils-helper <name>` so the
+///     spawn enters a fresh ral that dispatches the bundled uucore tool.
+///     Display, diagnostics, and grant-policy keys still use the tool
+///     name, not the helper path.
 ///
 /// Returns the same diagnostic shape both call sites used to produce
 /// independently — there is now one source of truth.
@@ -436,6 +512,33 @@ pub(crate) fn resolve_command(
     let policy_names = exec_policy_names(name, shell, &resolved);
     let policy_name_refs: Vec<&str> = policy_names.iter().map(String::as_str).collect();
     shell.check_exec_args(&shown, &policy_name_refs, &arg_strs)?;
+
+    // Bundled uutils: re-route exec to ourselves with the multicall flag.
+    // Done last so display / policy / arg-rejection are unchanged from the
+    // user's perspective; only the spawn target moves.
+    if let ExecName::Bare(bare) = name
+        && crate::builtins::uutils::is_uutils_tool(bare)
+    {
+        match std::env::current_exe() {
+            Ok(self_exe) => {
+                let mut helper_args =
+                    Vec::with_capacity(2 + arg_strs.len());
+                helper_args.push(crate::builtins::uutils::HELPER_FLAG.into());
+                helper_args.push(bare.clone());
+                helper_args.extend(arg_strs);
+                return Ok(ResolvedCommand {
+                    shown,
+                    resolved: self_exe.to_string_lossy().into_owned(),
+                    args: helper_args,
+                });
+            }
+            // current_exe() failed: fall through to whatever PATH gave us
+            // — usually the system /usr/bin/<tool>, which is a reasonable
+            // fallback rather than a hard error.
+            Err(_) => {}
+        }
+    }
+
     Ok(ResolvedCommand {
         shown,
         resolved,
@@ -451,6 +554,163 @@ pub(crate) fn build_command(rc: &ResolvedCommand, shell: &Shell) -> Command {
     let mut cmd = crate::sandbox::make_command(&rc.resolved, &rc.args, shell);
     apply_env(&mut cmd, shell);
     cmd
+}
+
+/// Spawn an external child the canonical way: install the canonical
+/// `pre_exec` (apply pgid, reset child signals) via
+/// `signal::spawn_with_pgid`, mirror `setpgid` in the parent, then
+/// apply sandbox child limits if any capability grant is active.
+///
+/// One funnel for both standalone exec (`exec_external`) and pipeline
+/// stages (`launch_external_stage` via `PipelineGroup::spawn`) so the
+/// post-spawn boilerplate cannot drift.
+///
+/// Returns the child plus its leader pgid: `Some` when `pgid` is
+/// `NewLeader` or `Join`, `None` for `Inherit`.
+pub(crate) fn spawn_external(
+    cmd: &mut Command,
+    pgid: crate::signal::PgidPolicy,
+    shell: &Shell,
+) -> std::io::Result<(std::process::Child, Option<crate::signal::Pgid>)> {
+    let (child, leader) = crate::signal::spawn_with_pgid(cmd, pgid)?;
+    if shell.has_active_capabilities() {
+        crate::sandbox::apply_child_limits(&child);
+    }
+    Ok((child, leader))
+}
+
+/// Build the canonical "command exited with status N" error, complete
+/// with hint lookup.  Both `exec_external` and the pipeline collector
+/// produce diagnostics of this exact shape; centralising the
+/// construction keeps the wording, status, hint integration, and
+/// `SourceLoc` use in a single place.
+pub(crate) fn external_exit_error(
+    cmd_name: &str,
+    code: i32,
+    loc: crate::diagnostic::SourceLoc,
+    shell: &Shell,
+) -> Error {
+    let hint = shell.exit_hints.lookup(cmd_name, code);
+    let mut err = Error::new(format!("{cmd_name}: exited with status {code}"), code).at_loc(loc);
+    err.hint = hint;
+    err
+}
+
+/// A spawned external child paired with the threads that drain its
+/// piped stdout and stderr.  The shared core of standalone exec and
+/// pipeline external stages: both flavours configure stdio, spawn,
+/// and end up holding one of these.  Lifecycle:
+///
+///   * success path — `wait` then `drain`, in that order.  `drain`
+///     consumes self, joining all drainers and returning their
+///     captures; the child has already been taken out so `Drop`
+///     becomes a no-op.
+///   * abort path — `Drop` runs without `drain` having been called.
+///     SIGKILLs the pgid (or the direct PID if no pgid was assigned),
+///     joins the drainers, reaps the child.  `child` lives in
+///     `Option` so the success-vs-abort distinction is structural
+///     rather than a flag.
+///
+/// Holding the pgid (not just the pid) means killing on abort takes
+/// out descendants too — `/bin/sh -c 'sleep 999'` doesn't leave the
+/// `sleep` alive when its parent goes away.
+pub(crate) struct RunningChild {
+    pub child: Option<std::process::Child>,
+    pub pgid: Option<crate::signal::Pgid>,
+    pub pump: Option<std::thread::JoinHandle<()>>,
+    /// Bounded reader for piped stderr — only present when auditing.
+    /// Captures a leading prefix into `Vec<u8>`; mutually exclusive
+    /// with `stderr_pump`.
+    pub stderr_reader: Option<std::thread::JoinHandle<Vec<u8>>>,
+    /// Pump thread draining piped stderr into a non-default
+    /// `Sink::stderr` (capture buffer, replay tee, etc.).  Mutually
+    /// exclusive with `stderr_reader`: a child either has its stderr
+    /// captured for audit OR redirected via a sink, not both.
+    pub stderr_pump: Option<std::thread::JoinHandle<()>>,
+    pub audit_capture: Option<Arc<Mutex<Vec<u8>>>>,
+    /// Display name used in wait-error messages.
+    pub name: String,
+}
+
+/// Bytes drained out of a finished `RunningChild`.  `stdout` is the
+/// audit-tee buffer (empty when no audit/capture was wired); `stderr`
+/// is whatever `stderr_reader` collected.
+pub(crate) struct ChildCaptures {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+impl RunningChild {
+    /// Wait for the child to terminate via `wait_handling_stop` so that
+    /// SIGTSTP'd children don't hang the waiter (the helper SIGKILLs
+    /// the pgid and loops to reap).  Borrows `&mut self` so the caller
+    /// can interleave atomic-commit / pump-join steps before `drain`.
+    pub fn wait(&mut self) -> Result<std::process::ExitStatus, EvalSignal> {
+        let child = self
+            .child
+            .as_mut()
+            .expect("RunningChild::wait called after drain or twice");
+        crate::signal::wait_handling_stop(child, self.pgid)
+            .map_err(|e| EvalSignal::Error(Error::new(format!("{}: {e}", self.name), 1)))
+    }
+
+    /// Consume self: take the child (so `Drop` is a no-op), join the
+    /// drainer threads, and return their captured bytes.  Must run
+    /// only after the child has been observed dead — drainers block
+    /// on pipe EOF, which arrives only when the child closes its
+    /// write end.
+    pub fn drain(mut self) -> ChildCaptures {
+        let _ = self.child.take();
+        if let Some(jh) = self.pump.take() {
+            let _ = jh.join();
+        }
+        let stderr = self
+            .stderr_reader
+            .take()
+            .and_then(|jh| jh.join().ok())
+            .unwrap_or_default();
+        if let Some(jh) = self.stderr_pump.take() {
+            let _ = jh.join();
+        }
+        let stdout = self
+            .audit_capture
+            .take()
+            .and_then(|b| b.lock().ok().map(|g| g.clone()))
+            .unwrap_or_default();
+        ChildCaptures { stdout, stderr }
+    }
+}
+
+impl Drop for RunningChild {
+    /// Abort-path cleanup: SIGKILL the pgid (or fall back to the
+    /// direct PID), join the drainers, reap.  No-op when `drain`
+    /// already took the child.
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        #[cfg(unix)]
+        match self.pgid {
+            Some(crate::signal::Pgid(p)) => unsafe {
+                libc::kill(-p, libc::SIGKILL);
+            },
+            None => {
+                let _ = child.kill();
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = child.kill();
+        if let Some(jh) = self.pump.take() {
+            let _ = jh.join();
+        }
+        if let Some(jh) = self.stderr_reader.take() {
+            let _ = jh.join();
+        }
+        if let Some(jh) = self.stderr_pump.take() {
+            let _ = jh.join();
+        }
+        let _ = child.wait();
+    }
 }
 
 pub(crate) fn render_exec_name(name: &ExecName, shell: &Shell) -> String {
@@ -481,7 +741,7 @@ pub(crate) fn exec_external(
 
     let plan = classify_redirects(redirects);
     command.stdin(wire_stdin(shell).into_stdio());
-    let mut atomic_commit = wire_stdout_file(&mut command, &plan, shell)?;
+    let (mut atomic_commit, stdout_file_dup) = wire_stdout_file(&mut command, &plan, shell)?;
 
     let auditing = shell.audit.tree.is_some();
     // When the shell's stdout is a real TTY, inherit it so the child can
@@ -499,8 +759,9 @@ pub(crate) fn exec_external(
             crate::io::Sink::Terminal | crate::io::Sink::External(_)
         );
 
-    let stderr_piped = wire_stderr(&mut command, &plan, auditing, shell)?;
-
+    // Wire stdout from the sink before stderr: the Windows `2>&1` arm of
+    // `wire_stderr` reads `shell.io.stdout` to clone a writer, and on Unix
+    // the `pre_exec` dup2 needs a real stdout fd in place pre-fork.
     let needs_pump = if plan.stdout_file.is_none() {
         shell.io
             .stdout
@@ -509,6 +770,15 @@ pub(crate) fn exec_external(
     } else {
         false
     };
+
+    let stderr_piped = wire_stderr(
+        &mut command,
+        &plan,
+        auditing,
+        inherit_tty,
+        stdout_file_dup,
+        shell,
+    )?;
 
     // Debug builds: trace I/O wiring decisions for external commands.
     #[cfg(debug_assertions)]
@@ -568,24 +838,20 @@ pub(crate) fn exec_external(
     //   * a pgid policy: NewLeader if this child is taking foreground,
     //     Inherit otherwise (it shares ral's pgid like any background
     //     child).
+    //
+    // `spawn_with_pgid` is the funnel: it installs the canonical
+    // pre_exec (apply pgid + reset signals), spawns, mirrors `setpgid`
+    // in the parent to close the race, and hands back the leader pgid.
     #[cfg(unix)]
-    {
-        let pgid_policy = if want_fg {
-            crate::signal::PgidPolicy::NewLeader
-        } else {
-            crate::signal::PgidPolicy::Inherit
-        };
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            command.pre_exec(move || {
-                pgid_policy.apply();
-                crate::signal::reset_child_signals();
-                Ok(())
-            });
-        }
-    }
+    let pgid_policy = if want_fg {
+        crate::signal::PgidPolicy::NewLeader
+    } else {
+        crate::signal::PgidPolicy::Inherit
+    };
+    #[cfg(not(unix))]
+    let pgid_policy = crate::signal::PgidPolicy::Inherit;
 
-    let mut child = command.spawn().map_err(|e| {
+    let (mut child, wait_pgid) = spawn_external(&mut command, pgid_policy, shell).map_err(|e| {
         io_error(
             &cmd_name,
             e,
@@ -593,36 +859,26 @@ pub(crate) fn exec_external(
             Some(crate::compat::not_found_hint(&cmd_name)),
         )
     })?;
-    if shell.has_active_capabilities() {
-        crate::sandbox::apply_child_limits(&child);
-    }
 
     // Hand the terminal to the child via a `ForegroundGuard`: the guard's
     // `Drop` restores ral's pgid no matter how this function returns.  The
     // shell ignores SIGTTIN, so a missed restore would put the next REPL
     // read into EIO — making the restore RAII-managed is the only reliable
     // way to plug every early-return path between here and `child.wait()`.
-    //
-    // `wait_pgid` is the same value: a foreground job is its own pgid leader,
-    // and we need it later for `wait_handling_stop` to SIGKILL the group if
-    // the child gets SIGTSTP'd (Ctrl-Z).
     #[cfg(unix)]
-    let (_fg_guard, wait_pgid) = if want_fg {
+    let _fg_guard = if want_fg {
         let child_pid = child.id() as libc::pid_t;
-        unsafe { libc::setpgid(child_pid, child_pid) }; // parent-side race guard
-        (
-            crate::signal::ForegroundGuard::try_acquire(child_pid, shell),
-            Some(crate::signal::Pgid(child_pid)),
-        )
+        crate::signal::ForegroundGuard::try_acquire(child_pid, shell)
     } else {
-        (None, None)
+        None
     };
-    #[cfg(not(unix))]
-    let wait_pgid: Option<crate::signal::Pgid> = None;
 
     // Auditing captures stderr into a bounded reader for the exec tree.
     // Otherwise, if stderr is piped (because shell.io.stderr is non-default),
-    // spawn a pump that drains into shell.io.stderr.
+    // spawn a pump that drains into shell.io.stderr.  The audit-stderr
+    // reader is owned by `RunningChild`; the non-audit `stderr_pump` is
+    // a standalone-only concern (pipeline stages never have a non-default
+    // stderr sink) so it lives outside the unified handle.
     let stderr_reader = if auditing && !plan.stderr_to_stdout && plan.stderr_file.is_none() {
         spawn_stderr_reader(&mut child)
     } else {
@@ -649,8 +905,20 @@ pub(crate) fn exec_external(
         (None, None)
     };
 
-    let status = crate::signal::wait_handling_stop(&mut child, wait_pgid)
-        .map_err(|e| EvalSignal::Error(Error::new(format!("{cmd_name}: {e}"), 1)))?;
+    // Hand ownership of the in-flight resources to a `RunningChild`.
+    // From here on, any error path triggers its `Drop` which SIGKILLs
+    // the pgid and reaps — no manual cleanup needed.
+    let mut running = RunningChild {
+        child: Some(child),
+        pgid: wait_pgid,
+        pump: pump_handle,
+        stderr_reader,
+        stderr_pump,
+        audit_capture: audit_buf,
+        name: cmd_name.clone(),
+    };
+
+    let status = running.wait()?;
 
     // Atomic-redirect commit: child completed (any exit code, but not killed).
     // status.code().is_some() is true on normal exit; None for signal-killed,
@@ -666,34 +934,29 @@ pub(crate) fn exec_external(
     // Foreground is restored by `_fg_guard`'s `Drop` when this function
     // returns — see the binding above.
 
-    if let Some(reader) = stderr_reader
-        && let Ok(buf) = reader.join()
-        && !buf.is_empty()
-    {
-        shell.audit.captured_stderr = buf;
+    let captures = running.drain();
+    if !captures.stderr.is_empty() {
+        shell.audit.captured_stderr = captures.stderr;
     }
-    if let Some(jh) = pump_handle {
-        let _ = jh.join();
-    }
-    if let Some(jh) = stderr_pump {
-        let _ = jh.join();
-    }
-    if let Some(buf) = audit_buf {
-        shell.audit.captured_stdout = buf
-            .lock()
-            .map(|mut g| std::mem::take(&mut *g))
-            .unwrap_or_default();
+    if !captures.stdout.is_empty() {
+        shell.audit.captured_stdout = captures.stdout;
     }
     let code = exit_code(status);
     shell.control.last_status = code;
     if code == 0 {
         Ok(Value::Unit)
     } else {
-        let hint = shell.exit_hints.lookup(&cmd_name, code);
-        let mut err = Error::new(format!("{cmd_name}: exited with status {code}"), code)
-            .at(shell.location.line, shell.location.col);
-        err.hint = hint;
-        Err(EvalSignal::Error(err))
+        Err(EvalSignal::Error(external_exit_error(
+            &cmd_name,
+            code,
+            crate::diagnostic::SourceLoc {
+                file: String::new(),
+                line: shell.location.line,
+                col: shell.location.col,
+                len: 0,
+            },
+            shell,
+        )))
     }
 }
 
@@ -848,6 +1111,116 @@ pub(crate) fn commit_atomics(commits: Vec<AtomicCommit>) -> Result<(), EvalSigna
 /// Pending tmp-to-target rename for an atomic `>` redirect.
 ///
 /// Drop removes the tmp; `commit` fsyncs and renames it into place.
+///
+/// # The atomic-write recipe, and what each step buys you
+///
+/// 1. **Resolve symlinks via `canonicalize`.**  Without this, writing
+///    to a symlink would replace the link itself with a regular file
+///    — silently breaking anyone else who held the link as a path.
+///    For new files (no canonical form yet) we fall through to the
+///    literal path.  Done in [`open_atomic`].
+///
+/// 2. **Place the tmp file in the same directory as the target.**
+///    `rename(2)` is only atomic within a single filesystem; cross-fs
+///    rename returns `EXDEV` and the recipe fails outright.  Using
+///    `/tmp` for the staging file would break on every machine where
+///    `/tmp` is a separate mount (which is most of them, post-tmpfs).
+///    Done in [`open_atomic`].
+///
+/// 3. **Use a cryptographically random tmp name.**  A predictable
+///    name (e.g. `target.tmp`) races with concurrent writers and
+///    invites symlink-attack-shaped surprises in shared dirs.
+///    `tempfile::Builder` picks the name with `O_EXCL` semantics and
+///    RAII-deletes the file if we error out before persisting, so we
+///    never leak `.tmp` detritus.  Done in [`open_atomic`].
+///
+/// 4. **Write the contents, then flush them to disk before rename.**
+///    Skip this and a power loss in the window between rename and
+///    background data flush leaves a renamed-but-zero-length file:
+///    the directory entry was committed, the data blocks weren't.
+///    This is the ext4 `data=ordered` bug from 2009 that ate config
+///    files all over the Linux desktop (see "Further reading").
+///    Step 4a (write) is the redirect's writer; step 4b (flush) is
+///    the `sync_all` in [`AtomicCommit::commit`].
+///
+/// 5. **Copy the target's existing mode onto the tmp before rename
+///    (or default to 0644 for new files).**  Skip this and a
+///    previously-0600 sensitive file silently becomes 0600 with the
+///    *new* owner-only contents — or, on platforms where the default
+///    differs, becomes world-readable.  Either way the resulting
+///    permissions don't match what the user had before.  Done in
+///    [`open_atomic`].
+///
+/// 6. **Atomic `rename(tmp, target)`.**  Skip this in favour of
+///    "truncate target, write" and you reintroduce exactly the bug
+///    we're fixing: a crash or `^C` mid-write leaves a half-written
+///    file with no recovery path.  Skip it for "copy then unlink"
+///    and there's a window where the target doesn't exist; readers
+///    racing the swap see `ENOENT`.  Done in [`AtomicCommit::commit`].
+///
+/// 7. **Best-effort flush the parent directory to disk.**  Skip this
+///    and a kernel panic right after the rename can roll back the
+///    directory entry: the data is on disk under the tmp name, but
+///    on next boot the rename appears never to have happened.
+///    Errors here don't roll back the rename, so we ignore them;
+///    on platforms that don't support directory-level flush (Windows)
+///    the open itself fails and we fall through silently.  Done in
+///    [`AtomicCommit::commit`].
+///
+/// # Things this deliberately does *not* handle
+///
+/// - **Hardlink fan-out breaks.**  Atomic rename creates a fresh
+///   inode; any other names that pointed at the old inode keep its
+///   old contents.  Every editor accepts this tradeoff — preserving
+///   the inode would mean truncate-and-write, which is non-atomic.
+///   Pick one.
+/// - **Owner/group, xattrs, ACLs, SELinux contexts** are not copied
+///   over.  Kernel default-inheritance handles the common case;
+///   explicit copying belongs in a separate "preserve" path if it's
+///   ever needed.
+/// - **Concurrent writers** race normally — atomic rename gives
+///   crash safety, not mutual exclusion.  Last writer wins.
+///
+/// # New failure mode vs. plain `fs::write`
+///
+/// Atomic rename requires write permission on the *parent
+/// directory*, not just the target file.  Callers that previously
+/// relied on file-only write perms will now see `EACCES` here.
+/// This is the standard tradeoff for crash safety.
+///
+/// # Platform notes
+///
+/// On Linux/macOS the recipe is exact: `rename(2)` swaps the inode
+/// even if other processes have the target open, and the open
+/// handles keep reading the old inode until close.
+///
+/// On Windows, `tempfile::persist` calls
+/// `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`, which is atomic on NTFS
+/// in the no-observable-intermediate-state sense — but it *fails*
+/// (rather than silently swapping) if another process has the target
+/// open with a sharing mode that excludes deletion.  Live readers
+/// (editors, tail-followers, AV scanners) therefore turn what would
+/// be a silent success on Linux into a hard error on Windows.
+/// Mode preservation (step 5) and directory-level flush (step 7) are
+/// no-ops on Windows: the former because the POSIX permission
+/// bitfield doesn't apply to NTFS DACLs, the latter because NTFS
+/// commits directory-entry changes via its own journal and there's
+/// no API to force it from a regular file handle.
+///
+/// # Further reading
+///
+/// - [`rename(2)`](https://man7.org/linux/man-pages/man2/rename.2.html)
+///   — atomicity guarantees and the same-filesystem constraint.
+/// - [`fsync(2)`](https://man7.org/linux/man-pages/man2/fsync.2.html)
+///   — what gets flushed; why the directory-level flush matters.
+/// - [Theodore Ts'o, "Don't fear the fsync!"](https://lwn.net/Articles/322823/)
+///   — the ext4 `data=ordered` zero-length-after-rename saga that
+///   forced flush-before-rename into common practice.
+/// - [Pillai et al., "All File Systems Are Not Created Equal"](https://www.usenix.org/conference/osdi14/technical-sessions/presentation/pillai)
+///   — academic survey showing how often application code gets
+///   crash-safe updates wrong.  This recipe passes their checks.
+/// - [Dan Luu, "Files are hard"](https://danluu.com/file-consistency/)
+///   — accessible overview of the surprising failure modes.
 pub(crate) struct AtomicCommit {
     tmp: tempfile::NamedTempFile,
     target: std::path::PathBuf,
@@ -855,8 +1228,20 @@ pub(crate) struct AtomicCommit {
 
 impl AtomicCommit {
     pub fn commit(self) -> std::io::Result<()> {
+        // (4b) Durably commit data blocks before any directory entry change.
         self.tmp.as_file().sync_all()?;
-        self.tmp.persist(&self.target).map(|_| ()).map_err(|e| e.error)
+        // (6) Atomic rename.  `tempfile::persist` calls `rename(2)`; on
+        // success the tmp's RAII cleanup is disarmed automatically.
+        self.tmp.persist(&self.target).map(|_| ()).map_err(|e| e.error)?;
+        // (7) Best-effort directory-level flush.  Errors don't unwind
+        // the rename, so we eat them; platforms without directory-level
+        // flush (Windows) just fail to open the dir as a regular file.
+        if let Some(parent) = self.target.parent().filter(|p| !p.as_os_str().is_empty())
+            && let Ok(dir) = std::fs::File::open(parent)
+        {
+            let _ = dir.sync_all();
+        }
+        Ok(())
     }
 }
 
@@ -873,10 +1258,19 @@ fn open_atomic(
     path: &str,
     target: std::path::PathBuf,
 ) -> Result<(std::fs::File, AtomicCommit), EvalSignal> {
+    // (1) Symlink resolution.  `canonicalise_strict` errors on
+    // non-existent paths — for a fresh file the literal target is
+    // the right thing.
+    let target = crate::path::canon::canonicalise_strict(&target).unwrap_or(target);
+    // (2) Same-directory tmp.  `Path::parent` returns `Some("")` for
+    // a bare filename; treat empty as "current directory" so the
+    // tempfile call doesn't choke.
     let parent = target
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| std::path::Path::new("."));
+    // (3) Random tmp name with RAII-cleanup on early return.  Dot
+    // prefix hides it from `ls`; `O_EXCL` semantics inside.
     let tmp = tempfile::Builder::new()
         .prefix(".")
         .suffix(".ral-write.tmp")
@@ -991,7 +1385,7 @@ mod tests {
             .insert("HOME".into(), "/tmp/home".into());
         assert_eq!(
             render_exec_name(
-                &ExecName::TildePath(crate::util::TildePath {
+                &ExecName::TildePath(crate::path::tilde::TildePath {
                     user: None,
                     suffix: Some("/.local/bin/claude".into()),
                 }),
@@ -1017,6 +1411,36 @@ mod tests {
             render_exec_name(&ExecName::Path("./bin/claude".into()), &shell),
             "./bin/claude"
         );
+    }
+
+    #[test]
+    fn policy_names_absolutize_relative_path_execs() {
+        // ./configure is denied by exec_dirs (which require absolute
+        // paths) unless we also surface the cwd-joined form.
+        let mut shell = Shell::default();
+        shell.dynamic.cwd = Some("/tmp/jq_src/jq-1.7".into());
+
+        let name = ExecName::Path("./configure".into());
+        let resolved = resolve_in_path(&name, &shell);
+        let names = exec_policy_names(&name, &shell, &resolved);
+
+        assert_eq!(
+            names,
+            vec![
+                "./configure".to_string(),
+                "/tmp/jq_src/jq-1.7/configure".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn policy_names_leave_absolute_path_execs_alone() {
+        // Already-absolute paths should not duplicate.
+        let shell = Shell::default();
+        let name = ExecName::Path("/usr/local/bin/configure".into());
+        let resolved = resolve_in_path(&name, &shell);
+        let names = exec_policy_names(&name, &shell, &resolved);
+        assert_eq!(names, vec!["/usr/local/bin/configure".to_string()]);
     }
 
     #[test]

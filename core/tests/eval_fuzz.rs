@@ -4,6 +4,7 @@
 mod common;
 
 use ral_core::builtins;
+use std::collections::BTreeMap;
 use ral_core::types::{Capabilities, ExecPolicy};
 use ral_core::{Shell, Error, EvalSignal, Value, elaborate, evaluate, parse, typecheck};
 
@@ -734,10 +735,10 @@ fn with_does_not_leak() {
 fn grant_exec_subcommand_allows_listed_subcommand() {
     let mut shell = Shell::new(Default::default());
     let grant = Capabilities {
-        exec: Some(vec![(
+        exec: Some(BTreeMap::from([(
             "/bin/sh".into(),
             ExecPolicy::Subcommands(vec!["-c".into()]),
-        )]),
+        )])),
         ..Capabilities::root()
     };
     let args = vec!["-c".into(), "exit 0".into()];
@@ -815,14 +816,97 @@ fn grant_fs_read_denies_builtin_read() {
     let allowed = dir.join("allowed");
     let denied = dir.join("denied");
     std::fs::write(&denied, "secret").unwrap();
+    // Read goes through the redirect path (`from-string < $path`); the
+    // capability layer is consulted in `open_file` regardless of the
+    // builtin doing the actual read.
     let script = format!(
-        "grant [fs: [read: ['{}']]] {{ _fs read '{}' }}",
+        "grant [fs: [read: ['{}']]] {{ from-string < '{}' }}",
         allowed.display(),
         denied.display()
     );
     must_fail(&script);
     let _ = std::fs::remove_file(&denied);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `deny` is symmetric: a region named in the deny list blocks
+/// reads as well as writes.  This test puts a file inside an
+/// otherwise readable region and a deny entry on the file; the
+/// read must fail.  Earlier shapes only consulted deny_paths on
+/// writes — this regression-locks the symmetric semantics.
+#[cfg(unix)]
+#[test]
+fn grant_fs_deny_blocks_reads() {
+    let dir = std::env::temp_dir().join(format!("ral-deny-read-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let target = dir.join("secret.txt");
+    std::fs::write(&target, "shh").unwrap();
+    let script = format!(
+        "grant [fs: [read: ['{}'], deny: ['{}']]] {{ from-string < '{}' }}",
+        dir.display(),
+        target.display(),
+        target.display(),
+    );
+    must_fail(&script);
+    let _ = std::fs::remove_file(&target);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `deny` matches by containment, not equality.  A deny entry
+/// for a directory blocks every path beneath it — the rule the
+/// SPEC describes.  This test admits the parent of two files
+/// for read, denies the directory itself, and asserts that a
+/// read of one of the files fails.
+#[cfg(unix)]
+#[test]
+fn grant_fs_deny_covers_subpaths_of_a_directory() {
+    let outer = std::env::temp_dir().join(format!("ral-deny-dir-{}", std::process::id()));
+    let inner = outer.join("forbidden");
+    let _ = std::fs::create_dir_all(&inner);
+    let leaf = inner.join("leaf.txt");
+    std::fs::write(&leaf, "no").unwrap();
+    let script = format!(
+        "grant [fs: [read: ['{}'], deny: ['{}']]] {{ from-string < '{}' }}",
+        outer.display(),
+        inner.display(),
+        leaf.display(),
+    );
+    must_fail(&script);
+    let _ = std::fs::remove_dir_all(&outer);
+}
+
+/// `glob` runs through the same `Resolver::lex` pipeline that
+/// every other path-taking builtin uses, so `~` and `xdg:` at
+/// the head of a pattern expand before the glob crate sees it.
+/// Regression: a previous shape would have fed the literal
+/// `~/...` to glob and quietly matched nothing.
+#[cfg(unix)]
+#[test]
+fn glob_expands_tilde_in_pattern() {
+    let dir = std::env::temp_dir().join(format!("ral-glob-tilde-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    std::fs::write(dir.join("a.txt"), "").unwrap();
+    std::fs::write(dir.join("b.txt"), "").unwrap();
+
+    // Use HOME pointed at the tempdir so `~/*.txt` resolves into it.
+    // SAFETY: tests in this file mutate process env serially when needed;
+    // restore afterwards.
+    let prev_home = std::env::var_os("HOME");
+    unsafe { std::env::set_var("HOME", &dir) };
+    let result = eval("let xs = glob \"~/*.txt\"; return $xs");
+    match prev_home {
+        Some(v) => unsafe { std::env::set_var("HOME", v) },
+        None => unsafe { std::env::remove_var("HOME") },
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let items = match result {
+        Ok(Value::List(xs)) => xs,
+        other => panic!("glob with ~ pattern: unexpected {other:?}"),
+    };
+    let names: Vec<String> = items.iter().map(|v| v.to_string()).collect();
+    assert!(names.iter().any(|n| n.ends_with("/a.txt")), "expected /a.txt in {names:?}");
+    assert!(names.iter().any(|n| n.ends_with("/b.txt")), "expected /b.txt in {names:?}");
 }
 
 #[cfg(unix)]
@@ -893,17 +977,17 @@ fn grant_exec_attenuation_subcommand_intersection_permits_common() {
     // Intersection of [-c, -s] and [-c] permits -c.
     let mut shell = Shell::new(Default::default());
     let outer = Capabilities {
-        exec: Some(vec![(
+        exec: Some(BTreeMap::from([(
             "/bin/sh".into(),
             ExecPolicy::Subcommands(vec!["-c".into(), "-s".into()]),
-        )]),
+        )])),
         ..Capabilities::root()
     };
     let inner = Capabilities {
-        exec: Some(vec![(
+        exec: Some(BTreeMap::from([(
             "/bin/sh".into(),
             ExecPolicy::Subcommands(vec!["-c".into()]),
-        )]),
+        )])),
         ..Capabilities::root()
     };
     let args = vec!["-c".into(), "exit 0".into()];
@@ -2263,7 +2347,7 @@ fn audit_fs_write_denied_recorded() {
     // surface sandboxed capability-check frames back into the parent audit
     // tree.  If a simple allowed fs read does not produce an audit child, the
     // denied-write assertion below is not observable here.
-    let probe = must_succeed("audit { grant [fs: [read: ['/tmp']], audit: true] { _fs 'read' '/tmp' } }");
+    let probe = must_succeed("audit { grant [fs: [read: ['/tmp']], audit: true] { glob '/tmp/*' } }");
     if !has_cap_check(&children_of(&probe), "fs", "allowed") {
         return;
     }
@@ -2272,7 +2356,7 @@ fn audit_fs_write_denied_recorded() {
         std::process::id()
     );
     let script = format!(
-        "audit {{ grant [fs: [write: ['/tmp']], audit: true] {{ _fs 'write' '{outside}' 'x' }} }}"
+        "audit {{ grant [fs: [write: ['/tmp']], audit: true] {{ to-string 'x' > '{outside}' }} }}"
     );
     let tree = must_succeed(&script);
     let children = children_of(&tree);

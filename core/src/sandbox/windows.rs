@@ -18,8 +18,8 @@ use crate::types::{Shell, EvalSignal, Value};
 /// alone, and warn once if `net: false` was requested but cannot be
 /// enforced on this platform.
 pub fn eval_grant(body: &Value, shell: &mut Shell) -> Result<Value, EvalSignal> {
-    if let Some(policy) = shell.sandbox_policy()
-        && !policy.net
+    if let Some(projection) = shell.sandbox_projection()
+        && !projection.net
     {
         warn_unenforceable_net_once();
     }

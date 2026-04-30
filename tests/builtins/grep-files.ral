@@ -16,6 +16,6 @@ echo $first[text]
 let second = $results[1]
 echo $second[line]
 
-remove-file /tmp/ral-grep-test.txt
+rm /tmp/ral-grep-test.txt
 
 echo 'grep-files tests done'

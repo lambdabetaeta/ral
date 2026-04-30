@@ -291,26 +291,38 @@ The decoder reads from `< $path`; the encoder writes to `> $path`:
 on crash, `^C`, etc.).  Use `>~` for streaming truncate (POSIX `>`
 semantics) when you need readers to see partial output.
 
-The remaining filesystem builtins are in the prelude:
+Filesystem effects (mutations) go through bundled coreutils — they
+share the capability-checked dispatch with primitives, so denial in
+exarch fires the same way:
 
-    copy-file $src $dst
-    move-file $src $dst
-    remove-file $path            # works on files *and* directories
-    make-dir $path               # mkdir -p
-    list-dir $path               # returns [[name: ..., type: ...], ...]
+    cp  $src $dst                # copy a file
+    mv  $src $dst                # rename / move
+    rm  $path                    # remove a regular file
+    rm -rf $path                 # recursive — the dangerous verb
+                                 # wears its name
+    mkdir -p $path               # create directories
+    ln -s $target $link          # symbolic link
 
-    is-file $path
-    is-dir $path
-    exists $path
+Structured queries — operations that return a value worth piping —
+are primitives in the prelude:
+
+    list-dir $path               # [[name: ..., type: ...,
+                                 #   size: ..., mtime: ...], …]
+    file-size $path              # bytes
+    line-count $path
+    file-mtime $path             # seconds since epoch
+    file-empty $path             # bool
+
+    is-file $path                is-dir $path
+    exists $path                 is-link $path
 
     resolve-path $path           # -> absolute path
     path-join [$a, $b, $c]       # join with /
     temp-file                    # -> fresh path in tmpdir
     temp-dir                     # -> fresh directory
 
-    file-size $path
-    line-count $path
-    file-mtime $path             # integer
+The asymmetry is the point: structured returns earn a primitive;
+effects are bundled coreutils invoked through the sandboxed dispatch.
 
 ## 14. String and path builtins
 
@@ -436,7 +448,7 @@ blocks to `if`, etc.) that bash would silently mis-interpret.
         echo "+ cargo build --release --target $t[triple]"
         if $dry_run {} {
             cargo build --release --target $t[triple]
-            copy-file "target/$t[triple]/release/ral" "dist/$t[name]"
+            cp "target/$t[triple]/release/ral" "dist/$t[name]"
         }
     }
 

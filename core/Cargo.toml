@@ -11,7 +11,7 @@ workspace = true
 coreutils = [
     "dep:uu_ls",    "dep:uu_cat",   "dep:uu_wc",    "dep:uu_head",  "dep:uu_tail",
     "dep:uu_cp",    "dep:uu_cut",   "dep:uu_mkdir",  "dep:uu_mv",   "dep:uu_rm",
-    "dep:uu_seq",   "dep:uu_sort",  "dep:uu_tee",   "dep:uu_touch", "dep:uu_tr",
+    "dep:uu_sort",  "dep:uu_tee",   "dep:uu_touch", "dep:uu_tr",
     "dep:uu_uniq",  "dep:uu_yes",   "dep:uu_basename","dep:uu_comm", "dep:uu_date",
     "dep:uu_df",    "dep:uu_dirname","dep:uu_du",    "dep:uu_env",   "dep:uu_join",
     "dep:uu_ln",    "dep:uu_paste", "dep:uu_printf", "dep:uu_sleep",
@@ -33,10 +33,8 @@ grep      = ["dep:grep", "dep:regex"]
 os_pipe       = "1"
 glob          = "0.3"
 regex         = { version = "1", optional = true }
-shell-words   = "1"
 shlex         = "1.3"
 tempfile      = "3.27"
-fs-err        = "3"
 serde         = { version = "1", features = ["derive", "rc"] }
 serde_json    = "1"
 anstyle-query = "1"
@@ -51,7 +49,6 @@ uu_cut       = { version = "0.8", optional = true }
 uu_mkdir     = { version = "0.8", optional = true }
 uu_mv        = { version = "0.8", optional = true }
 uu_rm        = { version = "0.8", optional = true }
-uu_seq       = { version = "0.8", optional = true }
 uu_sort      = { version = "0.8", optional = true }
 uu_tee       = { version = "0.8", optional = true }
 uu_touch     = { version = "0.8", optional = true }
@@ -129,5 +126,7 @@ ctrlc        = "3"
 windows-sys  = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security_Cryptography",
+    "Win32_System_Console",
     "Win32_System_JobObjects",
+    "Win32_System_Threading",
 ] }

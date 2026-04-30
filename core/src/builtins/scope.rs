@@ -152,9 +152,7 @@ fn parse_catch_all(v: &Value) -> Result<Value, EvalSignal> {
 }
 
 pub(super) fn builtin_grant(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
-    use crate::types::{
-        Capabilities, EditorPolicy, ExecPolicy, FsPolicy, ShellPolicy,
-    };
+    use crate::types::{EditorPolicy, ExecPolicy, FsPolicy, RawCapabilities, ShellPolicy};
     if args.len() < 2 {
         return Err(sig("grant requires 2 arguments (capabilities_map, body)"));
     }
@@ -167,7 +165,7 @@ pub(super) fn builtin_grant(args: &[Value], shell: &mut Shell) -> Result<Value, 
     // and leaves the rest alone.  Critically this keeps `grant
     // [exec: [foo: []]] body` from triggering OS-level fs/net sandboxing
     // (no fs/net dimension is restricted, so no child sandbox is needed).
-    let mut exec_policy: Option<Vec<(String, ExecPolicy)>> = None;
+    let mut exec_policy: Option<std::collections::BTreeMap<String, ExecPolicy>> = None;
     let mut exec_dirs_policy: Option<Vec<String>> = None;
     let mut fs_policy: Option<FsPolicy> = None;
     let mut net_policy: Option<bool> = None;
@@ -179,7 +177,7 @@ pub(super) fn builtin_grant(args: &[Value], shell: &mut Shell) -> Result<Value, 
         match k.as_str() {
             "exec" => {
                 let exec_map = as_map(v, "grant exec")?;
-                let mut entries = Vec::new();
+                let mut entries = std::collections::BTreeMap::new();
                 for (cmd, policy_val) in exec_map {
                     let policy = match policy_val {
                         Value::Bool(_) => {
@@ -189,11 +187,7 @@ pub(super) fn builtin_grant(args: &[Value], shell: &mut Shell) -> Result<Value, 
                         }
                         Value::List(items) => {
                             let subs: Vec<String> = items.iter().map(|i| i.to_string()).collect();
-                            if subs.is_empty() {
-                                ExecPolicy::Allow
-                            } else {
-                                ExecPolicy::Subcommands(subs)
-                            }
+                            if subs.is_empty() { ExecPolicy::Allow } else { ExecPolicy::Subcommands(subs) }
                         }
                         Value::Thunk { .. } => {
                             return Err(sig(format!(
@@ -207,7 +201,7 @@ pub(super) fn builtin_grant(args: &[Value], shell: &mut Shell) -> Result<Value, 
                             )));
                         }
                     };
-                    entries.push((cmd, policy));
+                    entries.insert(cmd, policy);
                 }
                 exec_policy = Some(entries);
             }
@@ -239,7 +233,10 @@ pub(super) fn builtin_grant(args: &[Value], shell: &mut Shell) -> Result<Value, 
                     match sub.as_str() {
                         "read" => fp.read_prefixes = list,
                         "write" => fp.write_prefixes = list,
-                        _ => return Err(sig(format!("grant fs: unknown key '{sub}'"))),
+                        "deny" => fp.deny_paths = list,
+                        _ => return Err(sig(format!(
+                            "grant fs: unknown key '{sub}' — expected one of read, write, deny"
+                        ))),
                     }
                 }
                 fs_policy = Some(fp);
@@ -290,7 +287,7 @@ pub(super) fn builtin_grant(args: &[Value], shell: &mut Shell) -> Result<Value, 
         }
     }
 
-    let ctx = Capabilities {
+    let raw = RawCapabilities {
         exec: exec_policy,
         exec_dirs: exec_dirs_policy,
         fs: fs_policy,
@@ -299,6 +296,10 @@ pub(super) fn builtin_grant(args: &[Value], shell: &mut Shell) -> Result<Value, 
         editor: editor_policy,
         shell: shell_policy,
     };
+    let home = shell.dynamic.home();
+    let cwd = shell.dynamic.effective_cwd();
+    let freeze_ctx = crate::path::sigil::FreezeCtx { home: &home, cwd: &cwd };
+    let ctx = raw.freeze(&freeze_ctx).map_err(|e| sig(format!("grant: {e}")))?;
     crate::evaluator::audit::with_audited_scope(shell, "grant", args, |shell| {
         shell.with_capabilities(ctx, |shell| crate::sandbox::eval_grant(&args[1], shell))
     })

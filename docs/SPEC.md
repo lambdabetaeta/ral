@@ -803,21 +803,72 @@ Unlisted names are denied.
 
 ### 11.2  `fs`
 
-Governs the ral builtins that touch the filesystem — `glob`,
-`list-dir`, redirects, the `_fs` family — through two sub-keys
-`read` and `write`, each a list of path prefixes.  A path is
-canonicalised after resolution against the active `within [dir: …]`,
-with `.` and `..` collapsed and symlinks resolved when the OS
-exposes them, so a `within [dir: …]` inside a `grant` cannot escape
-its enclosing policy: only the resolved path matters.  An empty map
-`fs: [:]` denies filesystem access entirely; `/dev/null` is exempt
-from both checks as a discard device.
+Governs every operation that touches the filesystem — structured
+queries (`glob`, `list-dir`, the `_fs` query ops), redirects (`<`,
+`>`, `>>`, `>~`), and bundled coreutils (`cp`, `mv`, `rm`, `mkdir`,
+`ln`, …) — through three sub-keys
+`read`, `write`, and `deny`, each a list of path prefixes.  A path
+is canonicalised after resolution against the active `within
+[dir: …]`, with `.` and `..` collapsed and symlinks resolved when
+the OS exposes them, so a `within [dir: …]` inside a `grant`
+cannot escape its enclosing policy: only the resolved path
+matters.  An empty map `fs: [:]` denies filesystem access
+entirely; `/dev/null` is exempt from both checks as a discard
+device.
 
-`fs` does not restrict an external program's own I/O — those need
-their binary, linker, and system libraries — so use `exec` together
-with `within [handlers:]` to shape that surface.  Where OS sandboxing
-is available, write policy and non-system read paths are also
-enforced for externals as defence in depth.
+A `read` or `write` succeeds when, at every layer with an `fs`
+opinion, the path falls inside some entry of the corresponding
+prefix list and outside every entry of `deny`.  Both prefixes
+and denies are path *regions*, not exact paths: a deny on
+`/etc/secrets` covers `/etc/secrets/foo`, and a read prefix on
+`~/.local` (resolved at load) covers everything beneath it.
+Membership is alias-aware so the macOS firmlink `/tmp` ↔
+`/private/tmp` does not produce two different answers depending
+on which form the policy author chose.
+
+Deny is symmetric: the same deny region blocks reads and writes.
+This is the simpler rule, and it has the right effect for the
+common case — a directory the agent should not see is also one
+it should not modify.  Deny is anti-monotonic in the lattice:
+more layers can only add denies (composition unions them), so a
+nested grant can never uncover a region the outer policy denied.
+Prefixes compose by intersection, so a nested grant can only
+narrow what is reachable.
+
+`fs` does not restrict an external program's own I/O — those
+need their binary, linker, and system libraries — so use `exec`
+together with `within [handlers:]` to shape that surface.  Where
+OS sandboxing is available, write policy and non-system read
+paths are also enforced for externals as defence in depth.
+
+#### 11.2.1  Path-prefix sigils
+
+Two sigils are recognised at the head of a path string in any
+`fs.read`, `fs.write`, `fs.deny`, or `exec_dirs` entry, and resolved
+once at policy load:
+
+- `~`, `~/sub`, `~user`, `~user/sub` — the usual shell tilde rule.
+- `xdg:NAME` and `xdg:NAME/sub` — an XDG basedir, where `NAME` is
+  one of `config`, `data`, `cache`, `state`, `bin`.  The first four
+  are the [XDG basedir spec][xdg-basedir]; `bin` is non-spec but
+  conventional.  Each maps to its `XDG_*_HOME` env var when set,
+  otherwise to the Linux default — `~/.config`, `~/.local/share`,
+  `~/.cache`, `~/.local/state`, `~/.local/bin` — universally, so
+  cross-platform tools that respect XDG behave the same on macOS
+  and Linux.
+
+[xdg-basedir]: https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html
+
+Any other entry passes through unchanged.
+
+Resolution is one-shot at policy load: tokens are rewritten into
+concrete absolute paths in the policy itself, so later mutation of
+HOME or `XDG_*_HOME` cannot widen what was already authorised.  An
+`xdg:NAME[/sub]` token whose resolved base sits outside HOME is
+rejected at load — for example, with `XDG_DATA_HOME=/etc` set in
+the calling environment, a policy naming `xdg:data` errors instead
+of granting `/etc` read.  Unknown names (`xdg:cofnig`) error at the
+same boundary, in the spirit of `deny_unknown_fields`.
 
 ### 11.3  `net`
 
@@ -1216,7 +1267,6 @@ not the preferred user surface. Return-type rules follow §4.2.
 | `keys` | Map keys in insertion order |
 | `has` | Test map membership |
 | `ask` | `/dev/tty` prompt; fails on EOF |
-| `write-json` | Write a value as JSON to a file |
 | `which` | Resolve lookup target; `String` or failure |
 | `cwd` | Current directory as `String` |
 | `diff` | Keys in `a` not in `b`, as a list |
@@ -1237,8 +1287,9 @@ All return `Bool`, and a `false` return is itself successful:
 `_decode`, `_encode` (used via the `from-X`/`to-X` wrappers, §15);
 families `_str` (`upper`, `lower`, `replace`, `replace-all`, `find-match`,
 `find-matches`, `join`, `slice`, `split`, `match`, `shell-quote`, `shell-split`, `dedent`), `_path` (`stem`, `ext`, `dir`, `base`,
-`resolve`, `join`), `_fs` (`read`, `lines`, `size`, `mtime`, `empty`, `write`,
-`copy`, `rename`, `remove`, `mkdir`, `list`, `tempdir`, `tempfile`),
+`resolve`, `join`), `_fs` (`lines`, `size`, `mtime`, `empty`, `list`,
+`tempdir`, `tempfile` — structured queries only; bytes I/O goes
+through codec + redirect, effects through bundled coreutils),
 `_convert` (`int`, `float`, `string`), `_editor` (`get`, `set`,
 `push`, `accept`, `tui`, `history`, `parse`, `ghost`, `highlight`,
 `state`; §18.1), `_plugin` (`load`, `unload`; §18.1).
@@ -1257,18 +1308,37 @@ match.
 
 ### 16.4  Bundled coreutils
 
-The `coreutils` Cargo feature folds a broad set of GNU-compatible
+The `coreutils` Cargo feature folds a curated set of GNU-compatible
 utilities — `ls`, `cat`, `wc`, `head`, `tail`, `cp`, `mv`, `rm`,
-`sort`, `tr`, `uniq`, and around seventy more — into the binary as
-in-process byte-output builtins.  On Unix systems they are normally
-already on `PATH`, so the feature exists chiefly to produce a
-self-contained binary on Windows.  The `diffutils` feature adds `diff`
-and `cmp` in the same shape, and the `grep` feature enables the
-regex-backed builtins `grep-files`, `match`, `split`, `replace`,
-`replace-all`, `find-match`, and `find-matches` using ripgrep's
-engine.  Without `grep`, those builtins are present but raise at
-runtime; for byte-stream `grep`, fall back to the system one on
-`PATH`.
+`mkdir`, `ln`, `sort`, `tr`, `uniq`, and around seventy total — into
+the binary as in-process builtins.  Bare `ral` keeps the feature
+optional (developers usually have system coreutils); `exarch` enables
+it unconditionally so a sealed profile is reproducible without
+depending on the host's `cp` or `mv`.
+
+Filesystem effects (`cp`, `mv`, `rm`, `mkdir`, `ln`, `chmod`, …) are
+the canonical way to perform mutations: there are no `copy-file` /
+`make-dir` / `remove-file` primitives.  Effects don't return
+structured values, so wrapping them buys nothing.
+
+Every bundled invocation goes through a capability-checked dispatch
+wrapper.  For each path-taking tool, the wrapper consults the tool's
+own clap parser to identify path arguments and their roles
+(read / write / both), then calls `check_fs_read` or `check_fs_write`
+on each before delegating to `uumain`.  Bypassing the sandbox by
+reaching for `cp` instead of a primitive is therefore not possible —
+both paths land at the same chokepoint.
+
+`within [dir: ...]` propagates by chdir under the same lock that
+serialises uutils stdio redirection, so relative path arguments
+resolve against ral's scoped CWD, not the host process CWD.
+
+The `diffutils` feature adds `diff` and `cmp` in the same shape, and
+the `grep` feature enables the regex-backed builtins `grep-files`,
+`match`, `split`, `replace`, `replace-all`, `find-match`, and
+`find-matches` using ripgrep's engine.  Without `grep`, those
+builtins are present but raise at runtime; for byte-stream `grep`,
+fall back to the system one on `PATH`.
 
 ## 17  Prelude
 

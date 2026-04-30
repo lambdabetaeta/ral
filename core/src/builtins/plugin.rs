@@ -53,7 +53,7 @@ fn plugin_load(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
         Ok::<_, EvalSignal>(module)
     })?;
 
-    let plugin = LoadedPlugin::parse(&module)?;
+    let plugin = LoadedPlugin::parse(&module, shell)?;
     check_not_loaded(&plugin.name, shell)?;
     register_aliases(&plugin.aliases, &plugin.name, shell)?;
 
@@ -80,13 +80,29 @@ fn parse_options_arg<'a>(rest: &'a [Value], name: &str) -> Result<Option<&'a Val
 }
 
 impl LoadedPlugin {
-    fn parse(val: &Value) -> Result<Self, EvalSignal> {
+    /// Parse a plugin manifest value.
+    ///
+    /// `shell` is consulted for `HOME` so the manifest's
+    /// capability path lists can be frozen — historically this
+    /// path skipped freezing, which would have let a manifest
+    /// pass `~` or `xdg:` strings straight into the dynamic
+    /// stack.  The freeze is now structural: parse_capabilities
+    /// returns `RawCapabilities` and the call below resolves
+    /// every sigil before the result lands in `LoadedPlugin`.
+    fn parse(val: &Value, shell: &Shell) -> Result<Self, EvalSignal> {
         let map = map_entries(val);
         let name = get(map, "name")
             .map(|v| v.to_string())
             .ok_or_else(|| load_err("manifest missing required 'name' field"))?;
+        let raw = parse_capabilities(get(map, "capabilities").map_or(&[], map_entries))?;
+        let home = shell.dynamic.home();
+        let cwd = shell.dynamic.effective_cwd();
+        let freeze_ctx = crate::path::sigil::FreezeCtx { home: &home, cwd: &cwd };
+        let capabilities = raw.freeze(&freeze_ctx).map_err(|e| {
+            load_err(format!("plugin '{name}' capabilities: {e}"))
+        })?;
         Ok(Self {
-            capabilities: parse_capabilities(get(map, "capabilities").map_or(&[], map_entries))?,
+            capabilities,
             hooks: parse_hooks(get(map, "hooks").map_or(&[], map_entries))?,
             keybindings: parse_keybindings(get(map, "keybindings").map_or(&[], list_entries))?,
             aliases: parse_aliases(get(map, "aliases").map_or(&[], map_entries), &name)?,
@@ -228,7 +244,7 @@ fn resolve_plugin_path(name_or_path: &str) -> Result<String, EvalSignal> {
                 .map(|dir| format!("{dir}/{name_or_path}.ral")),
         )
         .chain([name_or_path.to_string(), format!("{name_or_path}.ral")])
-        .find_map(|cand| std::fs::canonicalize(&cand).ok())
+        .find_map(|cand| crate::path::canon::canonicalise_strict(std::path::Path::new(&cand)).ok())
         .map(|p| p.to_string_lossy().into_owned())
         .ok_or_else(|| load_err(format!("plugin '{name_or_path}' not found")))
 }
@@ -249,9 +265,11 @@ fn config_base() -> Option<String> {
 
 // ── Manifest parsing ──────────────────────────────────────────────────────
 
-/// Build a `Capabilities` from capability entries; unknown keys are silently ignored.
-fn parse_capabilities(entries: &[(String, Value)]) -> Result<Capabilities, EvalSignal> {
-    let mut capabilities = Capabilities::deny_all();
+/// Build a [`RawCapabilities`] from capability entries; unknown
+/// keys are silently ignored.  Returned unfrozen so the caller
+/// can apply the same freeze rule as the rest of the system.
+fn parse_capabilities(entries: &[(String, Value)]) -> Result<RawCapabilities, EvalSignal> {
+    let mut capabilities = RawCapabilities::deny_all();
     for (k, v) in entries {
         match k.as_str() {
             "exec" => capabilities.exec = Some(parse_exec_policy(v)?),
@@ -310,7 +328,7 @@ fn parse_capabilities(entries: &[(String, Value)]) -> Result<Capabilities, EvalS
 }
 
 /// `false` → skip entry; `[sub, ...]` → `Subcommands`; anything else → `Allow`.
-fn parse_exec_policy(v: &Value) -> Result<Vec<(String, ExecPolicy)>, EvalSignal> {
+fn parse_exec_policy(v: &Value) -> Result<std::collections::BTreeMap<String, ExecPolicy>, EvalSignal> {
     fold_map(
         v,
         "plugin capabilities exec",
@@ -321,9 +339,9 @@ fn parse_exec_policy(v: &Value) -> Result<Vec<(String, ExecPolicy)>, EvalSignal>
             )),
             _ => Some(ExecPolicy::Allow),
         },
-        |acc: &mut Vec<(String, ExecPolicy)>, cmd, policy| {
+        |acc: &mut std::collections::BTreeMap<String, ExecPolicy>, cmd, policy| {
             if let Some(p) = policy {
-                acc.push((cmd.to_owned(), p));
+                acc.insert(cmd.to_owned(), p);
             }
         },
     )

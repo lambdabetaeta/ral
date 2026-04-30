@@ -39,15 +39,7 @@ let file-mtime = { |p| _fs 'mtime' $p }
 ## True if file has zero bytes or directory has no entries.
 let file-empty = { |p| _fs 'empty' $p }
 
-# Filesystem — mutating (wrappers around _fs)
-## Copy a file.
-let copy-file = { |src dest| _fs 'copy' $src $dest }
-## Move or rename a file.
-let move-file = { |src dest| _fs 'rename' $src $dest }
-## Remove a file or directory.
-let remove-file = { |p| _fs 'remove' $p }
-## Create a directory (and parents).
-let make-dir = { |p| _fs 'mkdir' $p }
+# Filesystem — queries (wrappers around _fs)
 ## List directory contents as [{name, type, size, mtime}].
 let list-dir = { |p| _fs 'list' $p }
 ## Create a temporary directory.

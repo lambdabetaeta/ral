@@ -1,0 +1,12 @@
+# Path-handling discipline: every canonicalisation goes through
+# `core::path::canon`, where it picks `canonicalise_strict` or
+# `canonicalise_lenient` and names its intent at the call site.
+#
+# A direct `std::fs::canonicalize` elsewhere bypasses that
+# distinction and re-opens the bypass-by-direct-call class of
+# bugs the path/ consolidation closed.  The two real callers in
+# `core/src/path/canon.rs` carry an `#[allow(clippy::disallowed_methods)]`
+# attribute so the lint fires only outside that file.
+disallowed-methods = [
+    { path = "std::fs::canonicalize", reason = "Use crate::path::canon::canonicalise_strict (file must exist) or canonicalise_lenient (ancestor-walk fallback). Both name the call-site intent and keep the discipline of one canonicaliser per shape." },
+]

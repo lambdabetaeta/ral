@@ -168,15 +168,34 @@ fn analyze_stage(
         });
     };
 
-    let hit = match name {
-        StageHead::Exec(name) => name
-            .bare()
-            .map(|name| ctx.resolve_head(name, Some(shell)))
-            .unwrap_or(crate::ty::HeadResolution {
-                comp_type: crate::ty::CompType::ext(),
-                internal: false,
-            }),
-        StageHead::App(name) => ctx.resolve_head(name, Some(shell)),
+    // SPEC §339: `^name` is external-only — its channel signature is the
+    // external default (byte-mode I/O), regardless of any value-typed
+    // builtin / alias of the same name in scope.  Resolving the head via
+    // the env in that case would find e.g. the `str` builtin and report a
+    // phantom channel-mode mismatch when piping `^str | cat`.
+    let external_only = matches!(
+        &stage.kind,
+        CompKind::Exec {
+            external_only: true,
+            ..
+        }
+    );
+    let hit = if external_only {
+        crate::ty::HeadResolution {
+            comp_type: crate::ty::CompType::ext(),
+            internal: false,
+        }
+    } else {
+        match name {
+            StageHead::Exec(name) => name
+                .bare()
+                .map(|name| ctx.resolve_head(name, Some(shell)))
+                .unwrap_or(crate::ty::HeadResolution {
+                    comp_type: crate::ty::CompType::ext(),
+                    internal: false,
+                }),
+            StageHead::App(name) => ctx.resolve_head(name, Some(shell)),
+        }
     };
 
     let dispatch = match (classify_stage_dispatch(stage, shell), &stage.kind) {
@@ -315,125 +334,57 @@ pub(super) enum StageHandle {
     Thread(std::thread::JoinHandle<(Result<Value, EvalSignal>, i32)>),
 }
 
-/// A running external-process stage with its pump thread and audit capture.
+/// A running external-process stage: shared `RunningChild` core plus
+/// the pipeline-specific audit metadata (resolved argv string list,
+/// source location, start timestamp) needed to populate an
+/// `ExecNode` at join time.
 ///
-/// `child` is held in an `Option` so that the success path (`join`) and the
-/// abort path (`Drop`) can be distinguished structurally: `join` takes the
-/// child out, so by the time `Drop` runs the field is `None` and the
-/// destructor is a no-op.  If `Drop` runs *without* a successful join — a
-/// panic between launches, an early-error return — the child is still
-/// `Some`, and the destructor kills the pgid (taking sibling stages with
-/// it) and reaps.
+/// Lifecycle is the same as `RunningChild`'s: `join` is the success
+/// path, taking the child out via `RunningChild::drain`; `Drop` (via
+/// the embedded `RunningChild`) is the abort path, SIGKILLing the
+/// pgid and reaping if `join` was never called.
 pub(super) struct ProcessHandle {
-    name: String,
+    running: exec::RunningChild,
     args: Vec<String>,
     line: usize,
     col: usize,
-    child: Option<std::process::Child>,
-    /// Pipeline pgid the child belongs to.  Used by `wait_handling_stop`
-    /// and by `Drop` to SIGKILL the whole group rather than only the
-    /// direct child PID — `/bin/sh -c 'sleep 999'` should not leave the
-    /// sleep alive when its parent dies.
-    pgid: Option<crate::signal::Pgid>,
-    /// Pump thread draining piped stdout into the next stage or final sink.
-    /// `None` when stdout is inherited or connected via a direct OS pipe.
-    pump: Option<std::thread::JoinHandle<()>>,
-    /// stderr drainer thread (only present when auditing pipes stderr).
-    /// Captures a bounded prefix and discards the rest, so a child that
-    /// fills its stderr pipe cannot deadlock against the stdout pump.
-    stderr_reader: Option<std::thread::JoinHandle<Vec<u8>>>,
-    /// Capture buffer for auditing; written by the pump's Tee sink.
-    audit_capture: Option<Arc<Mutex<Vec<u8>>>>,
     /// Wall-clock start time (µs since epoch); 0 when not auditing.
     start_us: i64,
 }
 
-impl Drop for ProcessHandle {
-    /// Abort-path cleanup.  Runs only when `join` was *not* called — the
-    /// success path takes `child` out, leaving `None`.
-    ///
-    /// Order: kill the pgid first so the child terminates quickly and the
-    /// pump / stderr drainer (which were reading from the child's stdout /
-    /// stderr) see EOF; join the drainer threads; then wait to reap.
-    /// Killing the pgid (rather than just `child.kill()`) ensures any
-    /// descendant of the direct child — `/bin/sh` spawning `sleep 999` —
-    /// gets cleaned up too.
-    fn drop(&mut self) {
-        let Some(mut child) = self.child.take() else {
-            return;
-        };
-        #[cfg(unix)]
-        match self.pgid {
-            Some(crate::signal::Pgid(p)) => unsafe {
-                libc::kill(-p, libc::SIGKILL);
-            },
-            None => {
-                let _ = child.kill();
-            }
-        }
-        #[cfg(not(unix))]
-        let _ = child.kill();
-        if let Some(jh) = self.pump.take() {
-            let _ = jh.join();
-        }
-        if let Some(jh) = self.stderr_reader.take() {
-            let _ = jh.join();
-        }
-        let _ = child.wait();
-    }
-}
-
 impl ProcessHandle {
-    /// Wait for the child to terminate, then join pump and stderr drainer.
+    /// Wait for the child to terminate, then collect drainer captures
+    /// and (when auditing) emit an `ExecNode` for this stage.
     ///
-    /// Order matters: a child stopped by SIGTSTP / SIGSTOP keeps its
-    /// stdout / stderr pipes open, so a drainer that joined first would
-    /// block forever waiting for EOF — and `wait_handling_stop` would
-    /// never run to detect the stop and tear the pgid down.  By calling
-    /// the wait helper first we guarantee that either the child exits
-    /// cleanly or we SIGKILL its pgid; in both cases the pipes close and
-    /// the drainers reach EOF promptly.
-    ///
-    /// The drainers are running on background threads from spawn time, so
-    /// they keep the child's pipes drained while we wait — the child can
-    /// still produce output without blocking on a full pipe.  Joining them
-    /// after the wait simply collects their results.
-    fn join(mut self, shell: &mut Shell, is_last: bool) -> Result<i32, EvalSignal> {
-        // Take the child out so Drop becomes a no-op for this handle on
-        // the success path; sibling pipeline stages keep running.
-        let mut child = self
-            .child
-            .take()
-            .expect("ProcessHandle::join called twice");
-        let status = crate::signal::wait_handling_stop(&mut child, self.pgid)
-            .map_err(|e| EvalSignal::Error(Error::new(format!("{}: {e}", self.name), 1)))?;
+    /// Order: `RunningChild::wait` first (it handles SIGTSTP via
+    /// SIGKILL of the pgid, so drainers always reach EOF promptly);
+    /// then `RunningChild::drain` which joins the drainer threads.
+    /// Drainers ran on background threads from spawn time so the
+    /// child never blocked on a full pipe while we waited.
+    fn join(self, shell: &mut Shell, is_last: bool) -> Result<i32, EvalSignal> {
+        let ProcessHandle {
+            mut running,
+            mut args,
+            line,
+            col,
+            start_us,
+        } = self;
+        let name = running.name.clone();
 
-        if let Some(jh) = self.pump.take() {
-            let _ = jh.join();
-        }
-
-        let stderr = self
-            .stderr_reader
-            .take()
-            .and_then(|jh| jh.join().ok())
-            .unwrap_or_default();
-        if !stderr.is_empty() {
-            eprint!("{}", String::from_utf8_lossy(&stderr));
-        }
-
+        let status = running.wait()?;
         let code = exec::exit_code(status);
-        let effective = if !is_last && code == super::SIGPIPE_STATUS {
+        let effective = if !is_last && super::is_broken_pipe_exit(code) {
             0
         } else {
             code
         };
 
+        let captures = running.drain();
+        if !captures.stderr.is_empty() {
+            eprint!("{}", String::from_utf8_lossy(&captures.stderr));
+        }
         // Strip one trailing newline from captured stdout — same as $().
-        let mut stdout = self
-            .audit_capture
-            .take()
-            .and_then(|b| b.lock().ok().map(|g| g.clone()))
-            .unwrap_or_default();
+        let mut stdout = captures.stdout;
         if stdout.last() == Some(&b'\n') {
             stdout.pop();
         }
@@ -441,16 +392,16 @@ impl ProcessHandle {
         let principal = audit::principal(shell);
         if let Some(tree) = &mut shell.audit.tree {
             let mut node = ExecNode::leaf(
-                &self.name,
-                std::mem::take(&mut self.args),
+                &name,
+                std::mem::take(&mut args),
                 effective,
                 &shell.location.call_site.script,
-                self.line,
-                self.col,
+                line,
+                col,
             );
             node.stdout = stdout;
-            node.stderr = stderr;
-            node.start = self.start_us;
+            node.stderr = captures.stderr;
+            node.start = start_us;
             node.end = epoch_us();
             node.principal = principal;
             tree.push(node);
@@ -553,7 +504,19 @@ fn launch_external_stage(
     let mut pump_sink: Option<Sink> = None;
     let mut audit_capture: Option<Arc<Mutex<Vec<u8>>>> = None;
 
-    cmd.stderr(if auditing {
+    // stderr disposition for this stage:
+    //   * auditing → pipe + bounded reader → ExecNode.stderr;
+    //   * non-default `shell.io.stderr` (capture buffer, replay tee,
+    //     etc.) → pipe + pump → that sink, mirroring `wire_stderr` in
+    //     standalone exec;
+    //   * else → inherit the parent's stderr.
+    //
+    // Without the second branch, a pipeline stage's stderr leaks out
+    // to the surrounding process's stderr even when the caller has
+    // installed a redirecting sink — `spawn { cmd | cat }` would lose
+    // any diagnostics `cmd` wrote to fd 2.
+    let needs_stderr_pump = !auditing && !matches!(shell.io.stderr, crate::io::Sink::Stderr);
+    cmd.stderr(if auditing || needs_stderr_pump {
         Stdio::piped()
     } else {
         Stdio::inherit()
@@ -607,19 +570,26 @@ fn launch_external_stage(
         }
     };
 
-    group.pre_exec_hook(&mut cmd);
-
-    let mut child = cmd.spawn().map_err(|e| exec::spawn_error(&rc.shown, e))?;
-    group.register_child(&child);
+    let mut child = group
+        .spawn(&mut cmd)
+        .map_err(|e| exec::spawn_error(&rc.shown, e))?;
     if shell.has_active_capabilities() {
         crate::sandbox::apply_child_limits(&child);
     }
 
-    // stderr is `Stdio::piped()` iff `auditing` (see above).  Spawn the
-    // drainer immediately so the child cannot deadlock on stderr while the
-    // stdout pump waits for EOF.
+    // Drain piped stderr immediately (when present) so the child
+    // cannot deadlock on a full stderr pipe while the stdout pump
+    // waits for EOF.  `stderr_reader` (audit) and `stderr_pump`
+    // (non-default sink) are mutually exclusive — see the
+    // `cmd.stderr(...)` decision above.
     let stderr_reader = if auditing {
         exec::spawn_stderr_reader(&mut child)
+    } else {
+        None
+    };
+    let stderr_pump = if needs_stderr_pump {
+        let sink = shell.io.stderr.try_clone().map_err(pipe_error)?;
+        child.stderr.take().map(|stderr| sink.pump(stderr))
     } else {
         None
     };
@@ -632,15 +602,18 @@ fn launch_external_stage(
     };
 
     let handle = ProcessHandle {
-        name: rc.shown,
+        running: exec::RunningChild {
+            child: Some(child),
+            pgid: group.leader_pgid(),
+            pump,
+            stderr_reader,
+            stderr_pump,
+            audit_capture,
+            name: rc.shown,
+        },
         args: rc.args,
         line: spec.line,
         col: spec.col,
-        child: Some(child),
-        pgid: group.leader_pgid(),
-        pump,
-        stderr_reader,
-        audit_capture,
         start_us: if auditing { epoch_us() } else { 0 },
     };
 
@@ -673,27 +646,30 @@ fn launch_internal_stage(
         _ => (None, None), // drop: unblocks sender
     };
 
-    let byte_pipe = if needs_byte_output {
-        Some(create_pipe()?)
-    } else {
-        None
+    // Destructure once: each pipe end has exactly one owner from
+    // construction onward.  The writer (and value-tx) are moved into
+    // the spawned thread; the reader (and value-rx) become the
+    // outgoing channel.  No `try_clone`, no `as_ref().transpose()` —
+    // ownership alone enforces "the parent holds nothing extra."
+    let (outgoing_byte_reader, pipe_writer) = match needs_byte_output {
+        true => {
+            let (r, w) = create_pipe()?;
+            (Some(r), Some(w))
+        }
+        false => (None, None),
     };
-    let value_pipe = if needs_value_output {
-        Some(std::sync::mpsc::channel::<ValueResult>())
-    } else {
-        None
+    let (val_tx, outgoing_value_rx) = match needs_value_output {
+        true => {
+            let (tx, rx) = std::sync::mpsc::channel::<ValueResult>();
+            (Some(tx), Some(rx))
+        }
+        false => (None, None),
     };
 
     let stage_comp = stage.clone();
     let snap = shell.snapshot();
     let outer_io = shell.io.try_clone().map_err(pipe_error)?;
     let output_channel = comp_type.output;
-    let pipe_writer = byte_pipe
-        .as_ref()
-        .map(|(_, w)| w.try_clone())
-        .transpose()
-        .map_err(pipe_error)?;
-    let val_tx = value_pipe.as_ref().map(|(tx, _)| tx.clone());
 
     let handle = shell.spawn_thread(snap, move |child_env| {
         child_env.io.stdout = if output_channel == crate::ty::Mode::Bytes && !is_last {
@@ -737,9 +713,9 @@ fn launch_internal_stage(
         (result, child_env.control.last_status)
     });
 
-    let outgoing = match (byte_pipe, value_pipe) {
-        (Some((reader, _)), _) => Channel::Bytes(reader),
-        (_, Some((_, rx))) => Channel::Value(rx),
+    let outgoing = match (outgoing_byte_reader, outgoing_value_rx) {
+        (Some(reader), _) => Channel::Bytes(reader),
+        (_, Some(rx)) => Channel::Value(rx),
         _ => Channel::None,
     };
     Ok((handle, outgoing))
@@ -878,6 +854,11 @@ pub(super) struct PipelineCollector {
     status: i32,
     /// The first error encountered from any stage.
     error: Option<Error>,
+    /// Captured non-`Error` `EvalSignal` (Exit / Return / Break / etc.)
+    /// from any non-final stage, propagated unchanged by `finish`.
+    /// `exit 7 | str` must surface as `Exit(7)`, not as a phantom
+    /// "pipeline exited with status 0" Error.
+    pending_signal: Option<EvalSignal>,
     /// The structured result of the final stage (internal stages only).
     last_result: Option<Result<Value, EvalSignal>>,
 }
@@ -888,6 +869,7 @@ impl PipelineCollector {
             failed: false,
             status: 0,
             error: None,
+            pending_signal: None,
             last_result: None,
         }
     }
@@ -911,21 +893,16 @@ impl PipelineCollector {
         is_last: bool,
         handle: ProcessHandle,
     ) -> Result<(), EvalSignal> {
-        let (line, col, name_len) = (handle.line, handle.col, handle.name.len());
-        let name = handle.name.clone();
+        let loc = crate::diagnostic::SourceLoc {
+            file: String::new(),
+            line: handle.line,
+            col: handle.col,
+            len: handle.running.name.len(),
+        };
+        let name = handle.running.name.clone();
         let effective = handle.join(shell, is_last)?;
         if effective != 0 {
-            let hint = shell.exit_hints.lookup(&name, effective);
-            let mut err = Error::new(format!("{name}: exited with status {effective}"), effective)
-                .at_loc(crate::diagnostic::SourceLoc {
-                    file: String::new(),
-                    line,
-                    col,
-                    len: name_len,
-                });
-            if let Some(h) = hint {
-                err.hint = Some(h);
-            }
+            let err = exec::external_exit_error(&name, effective, loc, shell);
             self.note_failure(effective, Some(err));
         }
         shell.control.last_status = effective;
@@ -952,22 +929,42 @@ impl PipelineCollector {
         if is_last {
             shell.control.last_status = last_status;
             self.last_result = Some(result);
-        } else if let Err(EvalSignal::Error(err)) = result {
-            self.note_failure(err.status, Some(err));
-        } else if result.is_err() {
-            self.failed = true;
+        } else {
+            match result {
+                Ok(_) => {}
+                Err(EvalSignal::Error(err)) => self.note_failure(err.status, Some(err)),
+                Err(other) => {
+                    // Non-Error signal (Exit / Return / Break / …) from
+                    // a non-final stage.  Capture for propagation in
+                    // `finish` so its semantics match outside-pipeline
+                    // use; the first such signal wins (subsequent
+                    // stages' results are ignored, mirroring how a
+                    // single-thread evaluator unwinds on the first
+                    // signal it sees).
+                    self.failed = true;
+                    if self.pending_signal.is_none() {
+                        self.pending_signal = Some(other);
+                    }
+                }
+            }
         }
     }
 
     /// Produce the pipeline's final result.
     ///
-    /// If any stage failed, returns the first recorded error.  Otherwise
-    /// delegates to `finalize` to extract the value from the last stage.
+    /// Priority: a captured non-Error `EvalSignal` (Exit / Return / …)
+    /// from any non-final stage propagates unchanged — the pipeline
+    /// abort is observable to the caller as the same signal the stage
+    /// raised.  Only after that do recorded `Error` failures surface;
+    /// otherwise `finalize` extracts the last stage's value.
     pub(super) fn finish(
         self,
         shell: &mut Shell,
         last_output: crate::ty::Mode,
     ) -> Result<Value, EvalSignal> {
+        if let Some(sig) = self.pending_signal {
+            return Err(sig);
+        }
         if self.failed {
             shell.control.last_status = self.status;
             let err = self.error.unwrap_or_else(|| {

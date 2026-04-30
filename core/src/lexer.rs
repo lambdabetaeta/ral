@@ -21,7 +21,7 @@
 use crate::ast::Word;
 use crate::source::FileId;
 use crate::span::Span as ByteSpan;
-use crate::util::TildePath;
+use crate::path::tilde::TildePath;
 use std::fmt;
 
 /// Source location attached to every token.

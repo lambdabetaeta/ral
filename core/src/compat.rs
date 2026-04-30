@@ -1,16 +1,15 @@
 //! Platform compatibility shims.
 //!
-//! Provides TTY detection, ANSI virtual-terminal-processing setup on
-//! Windows, and in-process stdio redirection for the embedded uutils
-//! coreutils/diffutils shims.  On Unix the redirection uses `dup`/`dup2`;
-//! on Windows it swaps the Win32 standard-handle slots directly.
+//! TTY detection, ANSI virtual-terminal-processing setup on Windows, and
+//! in-process stdin redirection for the embedded `diffutils` shims.  On
+//! Unix the stdin redirection uses `dup`/`dup2`; on Windows it swaps the
+//! Win32 standard-input handle slot directly.
 //!
-//! Pipeline stages may run on concurrent OS threads (see
-//! `evaluator/pipeline/stages.rs`), and the redirection helpers manipulate
-//! process-wide fd 0/1 — i.e. shared state.  Callers MUST hold the guard
-//! returned by [`lock_stdio_redirect`] across any sequence that touches fd
-//! 0 or fd 1, otherwise two concurrent redirects can interleave their
-//! save/restore and route bytes into the wrong pipe.
+//! Coreutils used to need analogous fd 1 redirection here too, but that
+//! path was removed when uutils dispatch moved to a helper subprocess —
+//! the kernel handles fd 0/1 cleanly across process boundaries, which
+//! the in-process design did not.  See `core/src/builtins/uutils.rs` for
+//! the rationale.
 
 /// Format a "command not found" message for `cmd`.
 pub(crate) fn not_found_hint(cmd: &str) -> String {
@@ -24,7 +23,10 @@ pub(crate) fn not_found_hint(cmd: &str) -> String {
 // any ANSI output — uutils (uu_ls etc.) emits escape codes but relies on the
 // host process to have switched the console into VTP mode first.
 
-#[cfg(windows)]
+// STD_INPUT_HANDLE is only used by `with_stdin_win` (diffutils path).
+// STD_OUTPUT_HANDLE / STD_ERROR_HANDLE are used by
+// `enable_virtual_terminal_processing`, always-on for Windows.
+#[cfg(all(windows, feature = "diffutils"))]
 pub const STD_INPUT_HANDLE: u32 = 0xFFFFFFF6; // (DWORD)(-10)
 #[cfg(windows)]
 pub const STD_OUTPUT_HANDLE: u32 = 0xFFFFFFF5; // (DWORD)(-11)
@@ -38,7 +40,7 @@ unsafe extern "system" {
     fn SetConsoleMode(hConsoleHandle: *mut std::ffi::c_void, dwMode: u32) -> i32;
 }
 
-#[cfg(all(windows, any(feature = "coreutils", feature = "diffutils")))]
+#[cfg(all(windows, feature = "diffutils"))]
 unsafe extern "system" {
     fn SetStdHandle(nStdHandle: u32, hHandle: *mut std::ffi::c_void) -> i32;
 }
@@ -69,67 +71,28 @@ pub fn enable_virtual_terminal_processing() {
     }
 }
 
-// ── stdio redirect serialization ─────────────────────────────────────────
+// ── stdio redirect serialization (diffutils only) ────────────────────────
 //
-// dup2 of fd 0/1 mutates global process state.  When pipeline stages run on
-// concurrent threads, two stages each calling `with_*_redirected` would
-// interleave their save/restore and route writes into the wrong fd.  This
-// mutex is taken by `lock_stdio_redirect` and held across the
-// redirect/run/restore window.  The cost is that two in-process uutils
-// stages within the same pipeline run sequentially under the lock — that
-// is the price of dup2-based redirection.
+// dup2 of fd 0 mutates global process state.  Sequential `cmp` / `diff`
+// calls inside ral evaluate in the parent process and project an upstream
+// pipe reader onto the host fd 0 via `with_stdin_redirected`, so we
+// serialise them under this lock.  Coreutils used to need the same for
+// fd 1 too; that path is gone now (uutils dispatch spawns a helper
+// subprocess so the kernel handles fd 0/1 contention).
+//
+// Held by callers across the redirect/run/restore window.
 
-#[cfg(any(feature = "coreutils", feature = "diffutils"))]
+#[cfg(feature = "diffutils")]
 static STDIO_REDIRECT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Acquire the global stdio-redirect lock.
-///
-/// Hold the returned guard across any sequence that calls
-/// [`with_stdout_redirected`] or [`with_stdin_redirected`].  The lock is
-/// non-reentrant: nested redirect calls under a single guard are fine, but
-/// nested calls to `lock_stdio_redirect` will deadlock.
-#[cfg(any(feature = "coreutils", feature = "diffutils"))]
+#[cfg(feature = "diffutils")]
 pub(crate) fn lock_stdio_redirect() -> std::sync::MutexGuard<'static, ()> {
     STDIO_REDIRECT_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-// ── Windows in-process stdout capture ────────────────────────────────────
-//
-// Redirects the Win32 stdout handle to a pipe, calls f(), then restores.
-// Rust's Windows stdio queries GetStdHandle on each write, so the redirect
-// is transparent to println! / uutils internals.
-//
-// Caller must hold `lock_stdio_redirect` across the call.
-//
-// Only compiled when a feature that uses uutils shims is enabled.
-
-/// Run `f` with stdout redirected to `writer`, then restore original stdout.
-#[cfg(all(windows, any(feature = "coreutils", feature = "diffutils")))]
-pub(crate) fn with_stdout_win(writer: &os_pipe::PipeWriter, f: impl FnOnce() -> i32) -> i32 {
-    use std::io::Write as _;
-    use std::os::windows::io::AsRawHandle;
-
-    let _ = std::io::stdout().flush();
-    let saved = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
-    unsafe {
-        SetStdHandle(STD_OUTPUT_HANDLE, writer.as_raw_handle() as *mut _);
-    }
-    let code = f();
-    let _ = std::io::stdout().flush();
-    unsafe {
-        SetStdHandle(STD_OUTPUT_HANDLE, saved);
-    }
-    code
-}
-
-/// Run `f` with stdin redirected to `reader`, then restore the original stdin.
-///
-/// Same save/restore strategy as with_stdout_win: borrow the handle slot
-/// value, swap in the pipe, swap the original back.  No duplication or
-/// closing — we do not own the original handle.
-#[cfg(all(windows, any(feature = "coreutils", feature = "diffutils")))]
+#[cfg(all(windows, feature = "diffutils"))]
 pub(crate) fn with_stdin_win(
     reader: &crate::io::SourceReader,
     f: impl FnOnce() -> i32,
@@ -147,35 +110,7 @@ pub(crate) fn with_stdin_win(
     code
 }
 
-// ── Unix in-process stdout/stdin capture ─────────────────────────────────
-//
-// On Unix we redirect fd 1 (stdout) or fd 0 (stdin) to a pipe using dup/dup2,
-// the same technique used in evaluator.rs apply_redirects.
-//
-// Caller must hold `lock_stdio_redirect` across the call.
-
-#[cfg(all(unix, any(feature = "coreutils", feature = "diffutils")))]
-pub(crate) fn with_stdout_unix(writer: &os_pipe::PipeWriter, f: impl FnOnce() -> i32) -> i32 {
-    use std::io::Write as _;
-    use std::os::unix::io::AsRawFd;
-
-    let _ = std::io::stdout().flush();
-    let saved = unsafe { libc::dup(libc::STDOUT_FILENO) };
-    unsafe {
-        libc::dup2(writer.as_raw_fd(), libc::STDOUT_FILENO);
-    }
-    let code = f();
-    let _ = std::io::stdout().flush();
-    if saved >= 0 {
-        unsafe {
-            libc::dup2(saved, libc::STDOUT_FILENO);
-            libc::close(saved);
-        }
-    }
-    code
-}
-
-#[cfg(all(unix, any(feature = "coreutils", feature = "diffutils")))]
+#[cfg(all(unix, feature = "diffutils"))]
 pub(crate) fn with_stdin_unix(
     reader: &crate::io::SourceReader,
     f: impl FnOnce() -> i32,
@@ -196,24 +131,7 @@ pub(crate) fn with_stdin_unix(
     code
 }
 
-// ── Cross-platform wrappers ───────────────────────────────────────────────
-
-/// Run `f` with stdout redirected to `writer`, then restore.
-///
-/// Delegates to the platform-specific implementation.
-#[cfg(any(feature = "coreutils", feature = "diffutils"))]
-pub(crate) fn with_stdout_redirected(writer: &os_pipe::PipeWriter, f: impl FnOnce() -> i32) -> i32 {
-    #[cfg(windows)]
-    {
-        with_stdout_win(writer, f)
-    }
-    #[cfg(unix)]
-    {
-        with_stdout_unix(writer, f)
-    }
-}
-
-#[cfg(any(feature = "coreutils", feature = "diffutils"))]
+#[cfg(feature = "diffutils")]
 pub(crate) fn with_stdin_redirected(
     reader: &crate::io::SourceReader,
     f: impl FnOnce() -> i32,

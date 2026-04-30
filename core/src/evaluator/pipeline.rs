@@ -23,10 +23,19 @@ use crate::types::*;
 use group::PipelineGroup;
 use stages::{RunningPipeline, drain_trailing_bytes, launch_pipeline, resolve_pipeline};
 
-/// Conventional exit status for SIGPIPE (128 + 13).
-/// A non-final pipeline stage that exits with this code was cut off
-/// because its downstream consumer exited first; that is not a failure.
-const SIGPIPE_STATUS: i32 = 141;
+/// True for an exit code that means "downstream consumer closed the pipe
+/// before this stage was done writing" — not a failure for a non-final
+/// stage.
+///
+/// Two conventions in play:
+///   * Unix: `128 + SIGPIPE` = 141.  Set by `reset_child_signals` so a
+///     write to a closed pipe terminates the child via SIGPIPE.
+///   * Windows: `STATUS_PIPE_BROKEN` = 0xC000_00B1, surfaced as the exit
+///     code of a process that wrote to a closed pipe and was unwound by
+///     the kernel.  Sign-extended to i32 by `ExitStatus::code`.
+fn is_broken_pipe_exit(code: i32) -> bool {
+    code == 141 || (code as u32) == 0xC000_00B1
+}
 
 /// Execute a multi-stage pipeline: resolve, launch, collect.
 ///

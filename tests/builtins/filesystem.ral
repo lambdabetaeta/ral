@@ -30,46 +30,45 @@ to-string 'hello from write' > /tmp/ral-write-test.txt
 let wc = !{from-string < /tmp/ral-write-test.txt}
 echo $wc
 
-# copy-file
-copy-file /tmp/ral-write-test.txt /tmp/ral-copy-test.txt
+# cp (bundled coreutils, sandboxed via the capability-checked dispatch)
+cp /tmp/ral-write-test.txt /tmp/ral-copy-test.txt
 let cc = !{from-string < /tmp/ral-copy-test.txt}
 echo $cc
 
-# move-file
-move-file /tmp/ral-copy-test.txt /tmp/ral-move-test.txt
-if $[not !{exists /tmp/ral-copy-test.txt}] { echo 'move-file ok' }
+# mv
+mv /tmp/ral-copy-test.txt /tmp/ral-move-test.txt
+if $[not !{exists /tmp/ral-copy-test.txt}] { echo 'mv ok' }
 let mc = !{from-string < /tmp/ral-move-test.txt}
 echo $mc
 
-# make-dir
-make-dir /tmp/ral-mkdir-test/sub
-if !{is-dir /tmp/ral-mkdir-test/sub} { echo 'make-dir ok' }
+# mkdir -p
+mkdir -p /tmp/ral-mkdir-test/sub
+if !{is-dir /tmp/ral-mkdir-test/sub} { echo 'mkdir ok' }
 
-# list-dir
+# list-dir (structured query — primitive, returns a value)
 let entries = list-dir /tmp/ral-mkdir-test
 if $[!{length $entries} == 1] { echo 'list-dir ok' }
 let e = $entries[0]
 echo $e[name]
 echo $e[type]
 
-# remove-file
-remove-file /tmp/ral-write-test.txt
-remove-file /tmp/ral-move-test.txt
-if $[not !{exists /tmp/ral-write-test.txt}] { echo 'remove-file ok' }
+# rm (regular file)
+rm /tmp/ral-write-test.txt /tmp/ral-move-test.txt
+if $[not !{exists /tmp/ral-write-test.txt}] { echo 'rm ok' }
 
-# remove-file dir (recursive)
-remove-file /tmp/ral-mkdir-test
-if $[not !{exists /tmp/ral-mkdir-test}] { echo 'remove-file dir ok' }
+# rm -rf (directory tree — the dangerous verb wears its name)
+rm -rf /tmp/ral-mkdir-test
+if $[not !{exists /tmp/ral-mkdir-test}] { echo 'rm -rf ok' }
 
-# temp-dir
+# temp-dir (primitive — secure O_EXCL recipe, returns the path as a value)
 let td = temp-dir
 if !{is-dir $td} { echo 'temp-dir ok' }
-remove-file $td
+rm -rf $td
 
 # temp-file
 let tf = temp-file
 if !{is-file $tf} { echo 'temp-file ok' }
-remove-file $tf
+rm $tf
 
 # resolve-path
 let rp = resolve-path /tmp

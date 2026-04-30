@@ -1203,7 +1203,7 @@ fn flatten_index(node: Ast) -> Ast {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::util::TildePath;
+    use crate::path::tilde::TildePath;
 
     fn plain(s: &str) -> Ast {
         Ast::Word(Word::Plain(s.into()))

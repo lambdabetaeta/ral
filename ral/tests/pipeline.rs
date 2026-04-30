@@ -821,7 +821,7 @@ fn bwrap_functional() -> bool {
 fn macos_sandbox_functional() -> bool {
     Command::new(ral_bin())
         .args([
-            "--sandbox-policy",
+            "--sandbox-projection",
             r#"{"fs":{"read_prefixes":[],"write_prefixes":[]},"connect_prefixes":null,"bind_prefixes":null}"#,
             "--norc",
             "-c",

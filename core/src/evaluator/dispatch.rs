@@ -289,11 +289,21 @@ pub(crate) fn dispatch_by_name(
         Dispatch::GrantDenied => {
             let name = bare.unwrap();
             audit::record_deny(shell, name, args);
-            Err(shell.err_hint(
-                format!("command '{name}' denied by active grant"),
-                "add the command to the grant exec map to allow it",
-                1,
-            ))
+            // The classifier reports GrantDenied for any name not on
+            // the allow side of the policy, including names that
+            // simply aren't installed.  Probe the filesystem so the
+            // error and the hint each match reality.
+            let (msg, hint) = match shell.locate_command(name) {
+                Some(p) => (
+                    format!("command '{name}' denied by active grant ({})", p.display()),
+                    "add the command to the grant exec map to allow it",
+                ),
+                None => (
+                    format!("command '{name}' not found on PATH"),
+                    "install the command, or add it to the grant exec map if it lives elsewhere",
+                ),
+            };
+            Err(shell.err_hint(msg, hint, 1))
         }
         Dispatch::External => run_external(name, args, redirects, shell),
     }

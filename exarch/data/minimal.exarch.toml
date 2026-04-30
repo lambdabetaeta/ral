@@ -1,6 +1,9 @@
-# `minimal` bake-in.  Coreutils on exec, net on, chdir allowed.  The
-# resolver fills in fs prefixes (cwd + /tmp + tempdir) at runtime —
-# they cannot be expressed statically since cwd is per-invocation.
+# `minimal` bake-in.  Coreutils on exec, net on, chdir allowed.
+#
+# `cwd:` resolves to the working directory at session start;
+# `tempdir:` to `std::env::temp_dir()` (`/var/folders/...` on macOS,
+# `/tmp` on Linux).  The freeze pass rewrites both before any grant
+# matching, so the runtime sees concrete paths only.
 #
 # Edit this file to change what `--base minimal` allows.  The contents
 # are baked into the exarch binary at build time via `include_str!`.
@@ -8,8 +11,34 @@
 audit = false
 net = true
 
+# Directory-based exec allowance.  Anything under cwd or a scratch
+# directory is admitted by path, on top of the named coreutils below.
+#
+# Must appear before any `[table]` header — TOML otherwise attaches
+# this key to the preceding table where it is silently ignored.
+exec_dirs = [
+  "cwd:",
+  "/tmp",
+  "tempdir:",
+]
+
 [shell]
 chdir = true
+
+# cwd + /tmp + tempdir on read and write.  The full project tree is
+# the agent's workspace; /tmp and tempdir cover scratch space and
+# anything tools resolve through `$TMPDIR`.
+[fs]
+read_prefixes = [
+  "cwd:",
+  "/tmp",
+  "tempdir:",
+]
+write_prefixes = [
+  "cwd:",
+  "/tmp",
+  "tempdir:",
+]
 
 [exec]
 arch         = "Allow"
