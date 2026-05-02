@@ -11,9 +11,8 @@
 
 use std::mem;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
 
-use super::super::{audit, dispatch, eval_comp, exec};
+use super::super::{audit, dispatch, exec};
 use super::group::{PipelineGroup, PipelineMode};
 use crate::io::{Sink, Source};
 use crate::ir::{Comp, CompKind, ExecName, Val};
@@ -57,12 +56,46 @@ impl StageDispatch {
     }
 }
 
-/// Per-stage analysis result: resolved comp type, dispatch verdict, and
-/// source position.
+/// Frozen channel decision for one side (input or output) of a pipeline
+/// stage.  Computed once during [`resolve_pipeline`] from the unified
+/// comp-type modes so the launch loop reads a static fact rather than
+/// re-deriving it at every spawn site.
+///
+/// Values cross stage boundaries as plain function arguments — `invoke`
+/// appends them to the next stage's args — so this enum has nothing to
+/// say about value flow: only "is there a byte pipe between these
+/// stages, or not?"
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Edge {
+    /// Connects to a sibling stage via an OS byte pipe.
+    Bytes,
+    /// No byte pipe on this side — either there is no sibling
+    /// (first/last stage) or the adjacent stages communicate by value.
+    None,
+}
+
+impl Edge {
+    fn from_mode(mode: crate::ty::Mode) -> Self {
+        match mode {
+            crate::ty::Mode::Bytes => Self::Bytes,
+            _ => Self::None,
+        }
+    }
+}
+
+/// Per-stage analysis result: resolved comp type, dispatch verdict,
+/// frozen edge plan, and source position.
+///
+/// `incoming` and `outgoing` carry the fully resolved channel decision
+/// at this stage's boundaries — `None` when the stage has no neighbour
+/// on that side, otherwise `Bytes` or `Value`.  Both sides are computed
+/// once in `resolve_pipeline` and read directly by the launcher.
 #[derive(Clone, Debug)]
 pub(super) struct StageSpec {
     pub(super) comp_type: crate::ty::CompType,
     pub(super) dispatch: StageDispatch,
+    pub(super) incoming: Edge,
+    pub(super) outgoing: Edge,
     pub(super) line: usize,
     pub(super) col: usize,
 }
@@ -163,6 +196,8 @@ fn analyze_stage(
         return Ok(StageSpec {
             comp_type: ctx.comp_type(stage, None),
             dispatch: StageDispatch::Internal,
+            incoming: Edge::None,
+            outgoing: Edge::None,
             line,
             col,
         });
@@ -200,7 +235,7 @@ fn analyze_stage(
 
     let dispatch = match (classify_stage_dispatch(stage, shell), &stage.kind) {
         (DispatchKind::External, CompKind::Exec { name, args, .. }) => {
-            let vals = dispatch::eval_call_args(args, None, shell)?;
+            let vals = dispatch::eval_call_args(args, shell)?;
             StageDispatch::External(ExternalStage {
                 name: name.clone(),
                 args: vals,
@@ -213,6 +248,11 @@ fn analyze_stage(
     Ok(StageSpec {
         comp_type: hit.comp_type,
         dispatch,
+        // Edges are filled in by `resolve_pipeline` after unification:
+        // a single stage cannot decide its own boundary kinds without
+        // seeing its neighbours.
+        incoming: Edge::None,
+        outgoing: Edge::None,
         line,
         col,
     })
@@ -302,6 +342,20 @@ pub(super) fn resolve_pipeline(
         }
     }
 
+    // Freeze each stage's edge plan now that every mode is concrete.
+    // Boundaries (first stage's input, last stage's output) stay `None`;
+    // interior edges use the producer's output mode (which `validate_pipeline`
+    // unified with the consumer's input).
+    let n = specs.len();
+    for i in 0..n {
+        if i > 0 {
+            specs[i].incoming = Edge::from_mode(specs[i].comp_type.input);
+        }
+        if i + 1 < n {
+            specs[i].outgoing = Edge::from_mode(specs[i].comp_type.output);
+        }
+    }
+
     let pure_external = !specs.is_empty() && specs.iter().all(|s| s.dispatch.is_external());
     let mode = if pure_external {
         super::group::PipelineMode::PureExternal
@@ -363,7 +417,7 @@ impl ProcessHandle {
     /// child never blocked on a full pipe while we waited.
     fn join(self, shell: &mut Shell, is_last: bool) -> Result<i32, EvalSignal> {
         let ProcessHandle {
-            mut running,
+            running,
             mut args,
             line,
             col,
@@ -371,15 +425,18 @@ impl ProcessHandle {
         } = self;
         let name = running.name.clone();
 
-        let status = running.wait()?;
-        let code = exec::exit_code(status);
+        // wait → WaitedChild; drain joins drainers post-mortem.  The
+        // typestate guarantees we never drain before the child has been
+        // reaped, and never wait twice.
+        let waited = running.wait()?;
+        let code = exec::exit_code(waited.status);
         let effective = if !is_last && super::is_broken_pipe_exit(code) {
             0
         } else {
             code
         };
 
-        let captures = running.drain();
+        let captures = waited.drain();
         if !captures.stderr.is_empty() {
             eprint!("{}", String::from_utf8_lossy(&captures.stderr));
         }
@@ -411,32 +468,24 @@ impl ProcessHandle {
     }
 }
 
-pub(super) type ValueResult = Result<Value, EvalSignal>;
-pub(super) type ValueRx = std::sync::mpsc::Receiver<ValueResult>;
-
-/// The inter-stage channel carried forward through the pipeline launch loop.
+/// Bytes flowing forward through the pipeline launch loop.
 ///
-/// Each stage consumes the channel it received from its predecessor and
-/// produces a new channel for its successor.  Having a single enum (rather
-/// than two parallel Options) ensures the two kinds of channel are mutually
-/// exclusive and makes the handoff explicit.
-pub(super) enum Channel {
-    /// No predecessor output is available (first stage, or value-less edge).
-    None,
-    /// A byte stream from the predecessor's stdout.
-    Bytes(os_pipe::PipeReader),
-    /// A structured value from the predecessor's evaluation.
-    Value(ValueRx),
-}
+/// `Some(reader)` is the read end of a pipe whose write end is held by an
+/// upstream concurrent unit (process or threaded stage).  `None` either
+/// means "no upstream byte producer" or "the previous stage produced a
+/// value, which has been folded into the launcher's value accumulator."
+pub(super) type ByteChannel = Option<os_pipe::PipeReader>;
 
-/// Arguments gathered by `run_pipeline` and forwarded into `launch_stage`.
-pub(super) struct LaunchContext<'a> {
-    pub(super) spec: &'a StageSpec,
-    pub(super) i: usize,
-    pub(super) specs: &'a [StageSpec],
-    pub(super) group: &'a mut PipelineGroup,
-    /// Pipeline cancel scope; stamped on internal stage threads.
-    pub(super) cancel: crate::signal::CancelScope,
+/// What `launch_pipeline` reports back to `run_pipeline`.
+///
+/// `final_value` is `Some` when the pipeline's last stage was either sync
+/// (a value-only internal) or an early-joined threaded value-producer —
+/// the value is already in hand.  `None` means the last stage was a
+/// byte-output thread or process whose handle is the last entry in
+/// `running`; the collector will recover its exit code.
+pub(super) struct LaunchOutcome {
+    pub(super) trailing_byte_pipe: ByteChannel,
+    pub(super) final_value: Option<Value>,
 }
 
 /// How the external stage's stdout is routed.
@@ -469,10 +518,10 @@ fn launch_external_stage(
     is_last: bool,
     next_is_ext: bool,
     shell: &mut Shell,
-    incoming: Channel,
+    incoming: ByteChannel,
     group: &mut PipelineGroup,
     auditing: bool,
-) -> Result<(ProcessHandle, Channel), EvalSignal> {
+) -> Result<(ProcessHandle, ByteChannel), EvalSignal> {
     let external = match &spec.dispatch {
         StageDispatch::External(e) => e.clone(),
         StageDispatch::Internal => {
@@ -501,8 +550,10 @@ fn launch_external_stage(
     // the audit-capture buffer and shell.io.stdout clone are allocated up
     // here for the same reason.
     let mut outgoing_reader: Option<os_pipe::PipeReader> = None;
-    let mut pump_sink: Option<Sink> = None;
-    let mut audit_capture: Option<Arc<Mutex<Vec<u8>>>> = None;
+    // Base sink (pre-audit-tee).  `RunningChild::assemble` will compose
+    // the tee in once, alongside its capture buffer — so this stays the
+    // raw destination, no duplicates.
+    let mut pump_base: Option<Sink> = None;
 
     // stderr disposition for this stage:
     //   * auditing → pipe + bounded reader → ExecNode.stderr;
@@ -522,18 +573,18 @@ fn launch_external_stage(
         Stdio::inherit()
     });
     // External stages consume only a byte stream from their predecessor.
-    // Value channels are dropped, unblocking the sender.  When there is no
-    // upstream pipe, choose between inherit and null based on pipeline
-    // mode: a pure-external pipeline will own the tty (the leader pgid is
-    // foregrounded) so its stages can safely read fd 0; a mixed pipeline
-    // keeps the tty with ral, so handing fd 0 to a backgrounded external
-    // would SIGTTIN it.  Pre-tty inputs (non-tty stdin) are always safe.
+    // When there is no upstream pipe, choose between inherit and null based
+    // on pipeline mode: a pure-external pipeline will own the tty (the
+    // leader pgid is foregrounded) so its stages can safely read fd 0; a
+    // mixed pipeline keeps the tty with ral, so handing fd 0 to a
+    // backgrounded external would SIGTTIN it.  Pre-tty inputs (non-tty
+    // stdin) are always safe.
     let stdin_route = match incoming {
-        Channel::Bytes(r) => exec::StdinRoute::Pipe(r),
-        _ if !shell.io.terminal.startup_stdin_tty => {
+        Some(r) => exec::StdinRoute::Pipe(r),
+        None if !shell.io.terminal.startup_stdin_tty => {
             exec::StdinRoute::Inherit(exec::TtyInputPermit::for_non_tty_stdin())
         }
-        _ => match group.mode() {
+        None => match group.mode() {
             PipelineMode::PureExternal => {
                 exec::StdinRoute::Inherit(exec::TtyInputPermit::for_pure_external_pipeline())
             }
@@ -553,123 +604,88 @@ fn launch_external_stage(
         }
         StdoutPlan::Pump => {
             cmd.stdout(Stdio::piped());
-            let base_sink = if is_last {
+            pump_base = Some(if is_last {
                 shell.io.stdout.try_clone().map_err(pipe_error)?
             } else {
                 let (reader, writer) = create_pipe()?;
                 outgoing_reader = Some(reader);
                 Sink::Pipe(writer)
-            };
-            pump_sink = Some(if auditing {
-                let cap = Arc::new(Mutex::new(Vec::<u8>::new()));
-                audit_capture = Some(cap.clone());
-                Sink::Tee(Box::new(Sink::Buffer(cap)), Box::new(base_sink))
-            } else {
-                base_sink
             });
         }
     };
 
-    let mut child = group
+    let child = group
         .spawn(&mut cmd)
         .map_err(|e| exec::spawn_error(&rc.shown, e))?;
     if shell.has_active_capabilities() {
         crate::sandbox::apply_child_limits(&child);
     }
 
-    // Drain piped stderr immediately (when present) so the child
-    // cannot deadlock on a full stderr pipe while the stdout pump
-    // waits for EOF.  `stderr_reader` (audit) and `stderr_pump`
-    // (non-default sink) are mutually exclusive — see the
-    // `cmd.stderr(...)` decision above.
-    let stderr_reader = if auditing {
-        exec::spawn_stderr_reader(&mut child)
+    // Resolve the stderr disposition into the unified `StderrCapture`
+    // enum — mirroring `exec_external` so both call sites flow through
+    // the same `RunningChild::assemble` funnel.  Pipeline stages have no
+    // file/`2>&1` paths, so the choice reduces to audit / non-default
+    // sink / inherit.
+    let stderr_capture = if auditing {
+        exec::StderrCapture::AuditReader
+    } else if needs_stderr_pump {
+        exec::StderrCapture::SinkPump(shell.io.stderr.try_clone().map_err(pipe_error)?)
     } else {
-        None
-    };
-    let stderr_pump = if needs_stderr_pump {
-        let sink = shell.io.stderr.try_clone().map_err(pipe_error)?;
-        child.stderr.take().map(|stderr| sink.pump(stderr))
-    } else {
-        None
+        exec::StderrCapture::Inherited
     };
 
-    // Wire up the pump now that the child exists; everything fallible was
-    // resolved pre-spawn, so this branch can no longer leak the child.
-    let pump = match (pump_sink, child.stdout.take()) {
-        (Some(sink), Some(child_stdout)) => Some(sink.pump(child_stdout)),
-        _ => None,
-    };
+    let running = exec::RunningChild::assemble(
+        child,
+        group.leader_pgid(),
+        rc.shown,
+        exec::ExternalPlumbing {
+            stdout_pump: pump_base,
+            stderr: stderr_capture,
+            auditing,
+        },
+    );
 
     let handle = ProcessHandle {
-        running: exec::RunningChild {
-            child: Some(child),
-            pgid: group.leader_pgid(),
-            pump,
-            stderr_reader,
-            stderr_pump,
-            audit_capture,
-            name: rc.shown,
-        },
+        running,
         args: rc.args,
         line: spec.line,
         col: spec.col,
         start_us: if auditing { epoch_us() } else { 0 },
     };
 
-    Ok((
-        handle,
-        outgoing_reader.map_or(Channel::None, Channel::Bytes),
-    ))
+    Ok((handle, outgoing_reader))
 }
 
 type ThreadOutcome = (Result<Value, EvalSignal>, i32);
-type InternalStageResult = Result<(std::thread::JoinHandle<ThreadOutcome>, Channel), EvalSignal>;
+type InternalStageResult =
+    Result<(std::thread::JoinHandle<ThreadOutcome>, ByteChannel), EvalSignal>;
 
 fn launch_internal_stage(
     stage: &Comp,
-    comp_type: crate::ty::CompType,
+    spec: &StageSpec,
     is_last: bool,
-    next_input: Option<crate::ty::Mode>,
     shell: &Shell,
-    incoming: Channel,
+    incoming_byte: ByteChannel,
+    upstream: Option<Value>,
     cancel: crate::signal::CancelScope,
 ) -> InternalStageResult {
-    let needs_byte_output = matches!(next_input, Some(crate::ty::Mode::Bytes));
-    let needs_value_output = matches!(next_input, Some(crate::ty::Mode::None));
-
-    // Extract the predecessor's channel, dropping it if this stage doesn't
-    // consume it (so the sending side is not left blocked).
-    let (incoming_stdin, incoming_value_rx) = match incoming {
-        Channel::Bytes(r) if comp_type.input == crate::ty::Mode::Bytes => (Some(r), None),
-        Channel::Value(rx) if comp_type.input == crate::ty::Mode::None => (None, Some(rx)),
-        _ => (None, None), // drop: unblocks sender
-    };
-
-    // Destructure once: each pipe end has exactly one owner from
-    // construction onward.  The writer (and value-tx) are moved into
-    // the spawned thread; the reader (and value-rx) become the
-    // outgoing channel.  No `try_clone`, no `as_ref().transpose()` —
-    // ownership alone enforces "the parent holds nothing extra."
-    let (outgoing_byte_reader, pipe_writer) = match needs_byte_output {
-        true => {
+    // Per-stage edge plan from `resolve_pipeline`: the launcher does not
+    // re-derive byte/value routing.  Bytes flow through OS pipes; values
+    // are passed by move into the spawned thread (`upstream`) and
+    // returned via the `JoinHandle` outcome.  No mpsc channels exist
+    // anywhere in the pipeline path.
+    let (outgoing_byte_reader, pipe_writer) = match spec.outgoing {
+        Edge::Bytes => {
             let (r, w) = create_pipe()?;
             (Some(r), Some(w))
         }
-        false => (None, None),
-    };
-    let (val_tx, outgoing_value_rx) = match needs_value_output {
-        true => {
-            let (tx, rx) = std::sync::mpsc::channel::<ValueResult>();
-            (Some(tx), Some(rx))
-        }
-        false => (None, None),
+        Edge::None => (None, None),
     };
 
     let stage_comp = stage.clone();
     let snap = shell.snapshot();
     let outer_io = shell.io.try_clone().map_err(pipe_error)?;
-    let output_channel = comp_type.output;
+    let output_channel = spec.comp_type.output;
 
     let handle = shell.spawn_thread(snap, move |child_env| {
         child_env.io.stdout = if output_channel == crate::ty::Mode::Bytes && !is_last {
@@ -689,125 +705,181 @@ fn launch_internal_stage(
         // pipeline aborts.  Without this the thread would have a fresh
         // root scope and never observe the parent's cancel.
         child_env.cancel = cancel;
-        // incoming_stdin is Some only when input_channel == Bytes (by construction above).
-        child_env.io.stdin = incoming_stdin.map(Source::Pipe).unwrap_or(Source::Terminal);
-        child_env.io.value_in = None;
+        child_env.io.stdin = incoming_byte.map(Source::Pipe).unwrap_or(Source::Terminal);
 
-        if let Some(rx) = incoming_value_rx {
-            match rx.recv() {
-                Ok(Ok(v)) => child_env.io.value_in = Some(v),
-                Ok(Err(e)) => {
-                    if let Some(tx) = val_tx {
-                        let _ = tx.send(Err(e.clone()));
-                    }
-                    return (Err(e), child_env.control.last_status);
-                }
-                Err(_) => {}
-            }
-        }
-
-        let result = eval_comp(&stage_comp, child_env);
-        if let Some(tx) = val_tx {
-            let _ = tx.send(result.clone());
-        }
+        let result = crate::evaluator::invoke::invoke(&stage_comp, upstream, child_env);
         (result, child_env.control.last_status)
     });
 
-    let outgoing = match (outgoing_byte_reader, outgoing_value_rx) {
-        (Some(reader), _) => Channel::Bytes(reader),
-        (_, Some(rx)) => Channel::Value(rx),
-        _ => Channel::None,
-    };
-    Ok((handle, outgoing))
+    Ok((handle, outgoing_byte_reader))
 }
 
-/// Launch every stage in `plan` in order, accumulating handles into
-/// `running` and channels through the loop.  On the first launch failure,
-/// drains any trailing channel and returns the error — `running`'s Drop
-/// kills/reaps the stages that did spawn.  On success, returns the final
-/// trailing channel (which still needs draining if it carries bytes that
-/// nothing reads).
+/// Launch every stage in `plan` in order, choosing per-stage between two
+/// realisations:
 ///
-/// Caller owns the `PipelineGroup` so it can install the SIGINT relay
-/// after launch returns; the relay's lifetime must span collect.
+/// * **sync fold** — internal stages with no byte involvement on either
+///   edge.  `invoke::invoke` is called directly with the running value
+///   accumulator as upstream; the result becomes the next upstream.  No
+///   thread, no pipe, no handle in `running`.
+/// * **threaded** — externals and any stage that touches bytes.  The
+///   stage runs as a thread or child process, joined either now (when
+///   it produces a value the next stage needs as upstream) or later by
+///   the collector (when it produces bytes or is the last stage).
+///
+/// Mode unification (in `validate_pipeline`) guarantees the byte-pipe
+/// accumulator is empty whenever a sync stage runs, and the value
+/// accumulator is empty whenever a stage with a byte-input runs.
+///
+/// On first launch failure, drains any trailing byte channel and
+/// returns the error — `running`'s `Drop` handles the rest.
 pub(super) fn launch_pipeline(
     stages: &[Comp],
     plan: &PipelinePlan,
     group: &mut PipelineGroup,
     running: &mut RunningPipeline,
     shell: &mut Shell,
-) -> Result<Channel, EvalSignal> {
-    let mut channel = Channel::None;
+) -> Result<LaunchOutcome, EvalSignal> {
+    let mut acc: Option<Value> = None;
+    let mut byte_pipe: ByteChannel = None;
 
     for (i, stage) in stages.iter().enumerate() {
-        let incoming = mem::replace(&mut channel, Channel::None);
-        let ctx = LaunchContext {
-            spec: &plan.specs[i],
+        let spec = &plan.specs[i];
+        let is_last = i == stages.len() - 1;
+
+        let result = launch_one(
+            stage,
+            spec,
             i,
-            specs: &plan.specs,
+            is_last,
+            plan,
+            &mut acc,
+            &mut byte_pipe,
             group,
-            cancel: running.cancel_scope(),
-        };
-        match launch_stage(stage, ctx, shell, incoming, plan.auditing) {
-            Ok((handle, outgoing)) => {
-                running.add(handle);
-                channel = outgoing;
-            }
-            Err(err) => {
-                drain_trailing_bytes(&mut channel);
-                return Err(err);
-            }
+            running,
+            shell,
+        );
+        if let Err(err) = result {
+            drain_trailing_bytes(&mut byte_pipe);
+            return Err(err);
         }
         // `claim_foreground` decides per-mode whether to acquire — see
-        // its docstring.  It is idempotent and a no-op until the leader
-        // pgid exists, so calling unconditionally on every iteration is
-        // both correct and the cheapest place to cover both
-        // `PureExternal` and `Mixed` (in `_ed-tui`) pipelines.
+        // its docstring.  Idempotent and a no-op until the leader pgid
+        // exists, so calling unconditionally on every iteration covers
+        // `PureExternal` and `Mixed` (in `_ed-tui`) pipelines alike.
         group.claim_foreground(shell);
     }
 
-    Ok(channel)
+    Ok(LaunchOutcome {
+        trailing_byte_pipe: byte_pipe,
+        final_value: acc,
+    })
 }
 
-/// Dispatch to the appropriate launcher and return the new inter-stage channel
-/// and the live handle for later collection.
-pub(super) fn launch_stage(
-    stage: &Comp,
-    ctx: LaunchContext,
-    shell: &mut Shell,
-    incoming: Channel,
-    auditing: bool,
-) -> Result<(StageHandle, Channel), EvalSignal> {
-    let is_last = ctx.i == ctx.specs.len() - 1;
-    let next_input = ctx.specs.get(ctx.i + 1).map(|s| s.comp_type.input);
-    let next_is_ext = ctx
-        .specs
-        .get(ctx.i + 1)
-        .is_some_and(|s| s.dispatch.is_external());
+/// True when this stage has no byte involvement and no external dispatch
+/// — pure value-mode internal computation.  These stages run inline in
+/// the parent thread; values flow through `acc`.
+fn is_sync_stage(spec: &StageSpec) -> bool {
+    !spec.dispatch.is_external()
+        && spec.comp_type.input != crate::ty::Mode::Bytes
+        && spec.comp_type.output != crate::ty::Mode::Bytes
+}
 
-    if ctx.spec.dispatch.is_external() {
-        let (handle, outgoing) = launch_external_stage(
-            ctx.spec,
+/// Launch one stage, advancing whichever accumulator (value or byte) the
+/// stage's edges call for.
+///
+/// For internal threaded stages whose output is a value (e.g. `from-lines`
+/// straddling the byte→value boundary), join the thread immediately to
+/// recover the value into `acc` — the next stage needs it as upstream.
+/// Byte-output stages stay in `running` so the collector can wait on
+/// their exit codes after their downstream readers have drained.
+#[allow(clippy::too_many_arguments)]
+fn launch_one(
+    stage: &Comp,
+    spec: &StageSpec,
+    i: usize,
+    is_last: bool,
+    plan: &PipelinePlan,
+    acc: &mut Option<Value>,
+    byte_pipe: &mut ByteChannel,
+    group: &mut PipelineGroup,
+    running: &mut RunningPipeline,
+    shell: &mut Shell,
+) -> Result<(), EvalSignal> {
+    if is_sync_stage(spec) {
+        // Mode unification guarantees we never have a pending byte pipe
+        // entering a value-only stage.
+        debug_assert!(byte_pipe.is_none(), "value-only stage cannot follow byte-output");
+        let result = crate::evaluator::invoke::invoke(stage, acc.take(), shell)?;
+        *acc = Some(result);
+        return Ok(());
+    }
+
+    // Threaded stage (external or byte-touching internal).  Pick whichever
+    // input the stage's incoming edge declares; mode unification has
+    // already ruled out the contradictory cases (value→bytes, etc.).
+    let upstream = if spec.incoming == Edge::None && i > 0 {
+        acc.take()
+    } else {
+        None
+    };
+    let incoming_byte = if spec.incoming == Edge::Bytes {
+        byte_pipe.take()
+    } else {
+        None
+    };
+
+    let (handle, outgoing) = if spec.dispatch.is_external() {
+        let next_is_ext = plan
+            .specs
+            .get(i + 1)
+            .is_some_and(|s| s.dispatch.is_external());
+        let (h, out) = launch_external_stage(
+            spec,
             is_last,
             next_is_ext,
             shell,
-            incoming,
-            ctx.group,
-            auditing,
+            incoming_byte,
+            group,
+            plan.auditing,
         )?;
-        Ok((StageHandle::Process(handle), outgoing))
+        (StageHandle::Process(h), out)
     } else {
-        let (handle, outgoing) = launch_internal_stage(
+        let cancel = running.cancel_scope();
+        let (h, out) = launch_internal_stage(
             stage,
-            ctx.spec.comp_type,
+            spec,
             is_last,
-            next_input,
             shell,
-            incoming,
-            ctx.cancel,
+            incoming_byte,
+            upstream,
+            cancel,
         )?;
-        Ok((StageHandle::Thread(handle), outgoing))
+        (StageHandle::Thread(h), out)
+    };
+
+    *byte_pipe = outgoing;
+
+    // Mid-pipeline byte→value transformer: join now so `acc` carries the
+    // value forward to whichever stage consumes it next.  The last stage
+    // is exempt — joining it during launch would block before collect's
+    // `wait_handling_stop` can rescue a stuck upstream, leading to a
+    // hang on `kill -STOP $$ | from-string` and friends.  For the last
+    // stage, collect joins everything in launch order and recovers the
+    // value as `last_result`.
+    if !is_last
+        && spec.comp_type.output != crate::ty::Mode::Bytes
+        && let StageHandle::Thread(jh) = handle
+    {
+        let (result, last_status) = jh.join().unwrap_or_else(|_| {
+            (Err(EvalSignal::Error(Error::new("pipeline stage panicked", 1))), 1)
+        });
+        shell.control.last_status = last_status;
+        *acc = Some(result?);
+        return Ok(());
     }
+
+    running.add(handle);
+    Ok(())
 }
 
 // ╔═══ Collect ═════════════════════════════════════════════════════════════╗
@@ -817,8 +889,8 @@ pub(super) fn launch_stage(
 /// Streams bytes straight into `io::sink()` rather than buffering them: a
 /// noisy detached producer must not be able to grow this thread's allocation
 /// without bound.
-pub(super) fn drain_trailing_bytes(channel: &mut Channel) {
-    if let Channel::Bytes(r) = mem::replace(channel, Channel::None) {
+pub(super) fn drain_trailing_bytes(channel: &mut ByteChannel) {
+    if let Some(r) = channel.take() {
         std::thread::spawn(move || {
             let mut r = r;
             let _ = std::io::copy(&mut r, &mut std::io::sink());
@@ -826,29 +898,16 @@ pub(super) fn drain_trailing_bytes(channel: &mut Channel) {
     }
 }
 
-/// Determine the pipeline's return value from the final stage's result.
+/// Accumulator for pipeline stage outcomes during the collect phase.
 ///
-/// When the final stage produces bytes (its output goes to stdout), the
-/// pipeline returns `Unit` regardless of thread result, since the bytes
-/// have already been written.  Otherwise the thread's result is used directly.
-fn finalize(
-    last_output: crate::ty::Mode,
-    last_result: Option<Result<Value, EvalSignal>>,
-) -> Result<Value, EvalSignal> {
-    match (last_output, last_result) {
-        (crate::ty::Mode::Bytes, Some(Err(e))) => Err(e),
-        (crate::ty::Mode::Bytes, _) => Ok(Value::Unit),
-        (_, Some(result)) => result,
-        (_, None) => Ok(Value::Unit),
-    }
-}
-
-/// Accumulator for pipeline stage outcomes.
-///
-/// As each stage handle is joined, the collector records failures and
-/// captures the last stage's structured result.  After the join loop,
-/// `finish` inspects the accumulated state and returns either the
-/// pipeline's value or the first failure error.
+/// When launch already produced the pipeline's value (sync last stage or
+/// early-joined mid-pipeline value-producer), the collector only drains
+/// the remaining byte-output handles, surfaces the first error, and
+/// (when applicable) records `last_status` for the pipeline-final stage.
+/// When the pipeline-final stage is a byte-input/value-output thread
+/// that we deliberately did *not* early-join (to let collect's
+/// stop-handling resolve a stuck upstream first), `last_result` captures
+/// its returned value.
 pub(super) struct PipelineCollector {
     failed: bool,
     status: i32,
@@ -859,7 +918,8 @@ pub(super) struct PipelineCollector {
     /// `exit 7 | str` must surface as `Exit(7)`, not as a phantom
     /// "pipeline exited with status 0" Error.
     pending_signal: Option<EvalSignal>,
-    /// The structured result of the final stage (internal stages only).
+    /// The value of the pipeline-final stage when launch left it in
+    /// `running`.  `None` when the value already came from launch.
     last_result: Option<Result<Value, EvalSignal>>,
 }
 
@@ -887,10 +947,12 @@ impl PipelineCollector {
 
     /// Join an external-process stage handle: wait for exit, record status,
     /// and note failure with a diagnostic if the exit code is non-zero.
+    /// `is_pipeline_final` is true only for the stage that holds the
+    /// pipeline's last position — its exit code becomes `last_status`.
     fn observe_process(
         &mut self,
         shell: &mut Shell,
-        is_last: bool,
+        is_pipeline_final: bool,
         handle: ProcessHandle,
     ) -> Result<(), EvalSignal> {
         let loc = crate::diagnostic::SourceLoc {
@@ -900,23 +962,24 @@ impl PipelineCollector {
             len: handle.running.name.len(),
         };
         let name = handle.running.name.clone();
-        let effective = handle.join(shell, is_last)?;
+        let effective = handle.join(shell, is_pipeline_final)?;
         if effective != 0 {
             let err = exec::external_exit_error(&name, effective, loc, shell);
             self.note_failure(effective, Some(err));
         }
-        shell.control.last_status = effective;
+        if is_pipeline_final {
+            shell.control.last_status = effective;
+        }
         Ok(())
     }
 
-    /// Join an internal (thread-based) stage handle.
-    ///
-    /// If this is the final stage, its result is saved for `finish` and its
-    /// `last_status` is rejoined into the parent shell.  For non-final
-    /// stages, errors are recorded as failures.
+    /// Join an internal (thread-based) stage handle.  When this is the
+    /// pipeline's final stage, capture its value for `finish`; otherwise
+    /// the value (typically `Unit` for byte-output threads) is discarded
+    /// and only errors and exit codes matter.
     fn observe_thread(
         &mut self,
-        is_last: bool,
+        is_pipeline_final: bool,
         shell: &mut Shell,
         handle: std::thread::JoinHandle<(Result<Value, EvalSignal>, i32)>,
     ) {
@@ -926,25 +989,22 @@ impl PipelineCollector {
                 1,
             )
         });
-        if is_last {
+        if is_pipeline_final {
             shell.control.last_status = last_status;
             self.last_result = Some(result);
-        } else {
-            match result {
-                Ok(_) => {}
-                Err(EvalSignal::Error(err)) => self.note_failure(err.status, Some(err)),
-                Err(other) => {
-                    // Non-Error signal (Exit / Return / Break / …) from
-                    // a non-final stage.  Capture for propagation in
-                    // `finish` so its semantics match outside-pipeline
-                    // use; the first such signal wins (subsequent
-                    // stages' results are ignored, mirroring how a
-                    // single-thread evaluator unwinds on the first
-                    // signal it sees).
-                    self.failed = true;
-                    if self.pending_signal.is_none() {
-                        self.pending_signal = Some(other);
-                    }
+            return;
+        }
+        match result {
+            Ok(_) => {}
+            Err(EvalSignal::Error(err)) => self.note_failure(err.status, Some(err)),
+            Err(other) => {
+                // Non-Error signal (Exit / Return / Break / …) from a
+                // pipeline stage.  Capture for propagation by `finish` —
+                // the first such signal wins, mirroring how a single-
+                // thread evaluator unwinds on the first signal it sees.
+                self.failed = true;
+                if self.pending_signal.is_none() {
+                    self.pending_signal = Some(other);
                 }
             }
         }
@@ -953,14 +1013,15 @@ impl PipelineCollector {
     /// Produce the pipeline's final result.
     ///
     /// Priority: a captured non-Error `EvalSignal` (Exit / Return / …)
-    /// from any non-final stage propagates unchanged — the pipeline
-    /// abort is observable to the caller as the same signal the stage
-    /// raised.  Only after that do recorded `Error` failures surface;
-    /// otherwise `finalize` extracts the last stage's value.
+    /// propagates unchanged.  Then any recorded `Error` failure surfaces.
+    /// Otherwise: byte-output last stage → `Unit`; value-output last
+    /// stage → `final_value` from launch (sync / early-joined) or
+    /// `last_result` from collect (last byte→value transformer thread).
     pub(super) fn finish(
         self,
         shell: &mut Shell,
         last_output: crate::ty::Mode,
+        final_value: Option<Value>,
     ) -> Result<Value, EvalSignal> {
         if let Some(sig) = self.pending_signal {
             return Err(sig);
@@ -976,7 +1037,21 @@ impl PipelineCollector {
             });
             return Err(EvalSignal::Error(err));
         }
-        finalize(last_output, self.last_result)
+        match last_output {
+            // Byte-output last stage already wrote its bytes to stdout;
+            // its returned value is `Unit` unless evaluation itself
+            // failed (e.g. `to-bytes` rejecting an out-of-range int) —
+            // surface that error instead of swallowing it.
+            crate::ty::Mode::Bytes => match self.last_result {
+                Some(Err(e)) => Err(e),
+                _ => Ok(Value::Unit),
+            },
+            _ => match (final_value, self.last_result) {
+                (Some(v), _) => Ok(v),
+                (None, Some(result)) => result,
+                (None, None) => Ok(Value::Unit),
+            },
+        }
     }
 }
 
@@ -1023,28 +1098,45 @@ impl RunningPipeline {
         self.cancel.clone()
     }
 
-    /// Success path: join every handle in stage order and return the
-    /// accumulated outcomes.  Even if a `join` panics partway through,
-    /// the local `handles` Vec drops, taking remaining
-    /// `ProcessHandle`s with it (their `Drop` SIGKILLs the pgid).  Any
-    /// remaining thread handles in that scenario detach by default —
-    /// the same gap that the abort path's explicit join + cancel
-    /// closes; collect-time panics are rare enough to accept it.
-    pub(super) fn collect(mut self, shell: &mut Shell, stage_count: usize) -> PipelineCollector {
+    /// True when no live handles remain — the launch loop early-joined
+    /// every threaded stage (or there were no threaded stages at all,
+    /// as in a pure-value-internal pipeline).
+    pub(super) fn is_empty(&self) -> bool {
+        self.handles.is_empty()
+    }
+
+    /// Success path: join every handle in launch order and return the
+    /// accumulated outcomes.  `pipeline_final_in_running` says whether
+    /// the last handle here is the pipeline's last stage — when false
+    /// (last stage was sync or early-joined), no handle is treated as
+    /// "the final" and `last_status` already reflects the right value.
+    ///
+    /// Even if a `join` panics partway through, the local `handles` Vec
+    /// drops, taking remaining `ProcessHandle`s with it (their `Drop`
+    /// SIGKILLs the pgid).  Remaining thread handles in that scenario
+    /// detach — the same gap the abort path's explicit join + cancel
+    /// closes; collect-time panics are rare enough to accept that.
+    pub(super) fn collect(
+        mut self,
+        shell: &mut Shell,
+        pipeline_final_in_running: bool,
+    ) -> PipelineCollector {
         let handles = mem::take(&mut self.handles);
         let mut collector = PipelineCollector::new();
-        let last = stage_count.saturating_sub(1);
+        let last_idx = handles.len().saturating_sub(1);
         for (idx, handle) in handles.into_iter().enumerate() {
-            let is_last = idx == last;
+            let is_pipeline_final = pipeline_final_in_running && idx == last_idx;
             match handle {
                 StageHandle::Process(ph) => {
                     if let Err(EvalSignal::Error(err)) =
-                        collector.observe_process(shell, is_last, ph)
+                        collector.observe_process(shell, is_pipeline_final, ph)
                     {
                         collector.note_failure(err.status, Some(err));
                     }
                 }
-                StageHandle::Thread(jh) => collector.observe_thread(is_last, shell, jh),
+                StageHandle::Thread(jh) => {
+                    collector.observe_thread(is_pipeline_final, shell, jh)
+                }
             }
         }
         collector

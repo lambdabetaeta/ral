@@ -152,150 +152,34 @@ fn parse_catch_all(v: &Value) -> Result<Value, EvalSignal> {
 }
 
 pub(super) fn builtin_grant(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
-    use crate::types::{EditorPolicy, ExecPolicy, FsPolicy, RawCapabilities, ShellPolicy};
+    use crate::types::RawCapabilities;
+    use super::caps;
+
     if args.len() < 2 {
         return Err(sig("grant requires 2 arguments (capabilities_map, body)"));
     }
-    let caps = as_map(&args[0], "grant")?;
+    let caps_entries = as_map(&args[0], "grant")?;
 
-    // Each cap dimension stays `None` (no opinion → inherits caller) unless
-    // the user explicitly named it.  This is *not* parse_capabilities's
-    // deny-default behaviour: a plugin manifest declares a self-contained
-    // ceiling, while a user grant attenuates *along the dimensions named*
-    // and leaves the rest alone.  Critically this keeps `grant
-    // [exec: [foo: []]] body` from triggering OS-level fs/net sandboxing
-    // (no fs/net dimension is restricted, so no child sandbox is needed).
-    let mut exec_policy: Option<std::collections::BTreeMap<String, ExecPolicy>> = None;
-    let mut exec_dirs_policy: Option<Vec<String>> = None;
-    let mut fs_policy: Option<FsPolicy> = None;
-    let mut net_policy: Option<bool> = None;
-    let mut audit_flag = false;
-    let mut editor_policy: Option<EditorPolicy> = None;
-    let mut shell_policy: Option<ShellPolicy> = None;
-
-    for (k, v) in &caps {
+    // Every dimension stays `None` (no opinion → inherits caller) unless
+    // the user explicitly names it.  This is *not* the plugin-manifest
+    // deny-default behaviour: a manifest declares a self-contained ceiling,
+    // while a user grant attenuates *along the dimensions named* and leaves
+    // the rest alone.  Critically this keeps `grant [exec: [foo: []]] body`
+    // from triggering OS-level fs/net sandboxing (no fs/net dimension is
+    // restricted, so no child sandbox is needed).
+    let mut raw = RawCapabilities::default();
+    for (k, v) in &caps_entries {
         match k.as_str() {
-            "exec" => {
-                let exec_map = as_map(v, "grant exec")?;
-                let mut entries = std::collections::BTreeMap::new();
-                for (cmd, policy_val) in exec_map {
-                    let policy = match policy_val {
-                        Value::Bool(_) => {
-                            return Err(sig(format!(
-                                "grant exec: use [] to allow all subcommands for '{cmd}', not true/false"
-                            )));
-                        }
-                        Value::List(items) => {
-                            let subs: Vec<String> = items.iter().map(|i| i.to_string()).collect();
-                            if subs.is_empty() { ExecPolicy::Allow } else { ExecPolicy::Subcommands(subs) }
-                        }
-                        Value::Thunk { .. } => {
-                            return Err(sig(format!(
-                                "grant exec: block form for '{cmd}' removed; use within [handlers: [{cmd}: ...]] instead"
-                            )));
-                        }
-                        other => {
-                            return Err(sig(format!(
-                                "grant exec: policy for '{cmd}' must be a list of subcommands; got {}",
-                                other.type_name()
-                            )));
-                        }
-                    };
-                    entries.insert(cmd, policy);
-                }
-                exec_policy = Some(entries);
-            }
-            "exec_dirs" => {
-                let dirs = match v {
-                    Value::List(items) => items.iter().map(|i| i.to_string()).collect(),
-                    other => {
-                        return Err(sig(format!(
-                            "grant exec_dirs: expected a list of paths, got {}",
-                            other.type_name()
-                        )));
-                    }
-                };
-                exec_dirs_policy = Some(dirs);
-            }
-            "fs" => {
-                let fs_map = as_map(v, "grant fs")?;
-                let mut fp = FsPolicy::default();
-                for (sub, paths) in fs_map {
-                    let list = match paths {
-                        Value::List(items) => items.iter().map(|i| i.to_string()).collect(),
-                        other => {
-                            return Err(sig(format!(
-                                "grant fs: '{sub}' must be a list of paths, got {} (use [\"/path\"])",
-                                other.type_name()
-                            )));
-                        }
-                    };
-                    match sub.as_str() {
-                        "read" => fp.read_prefixes = list,
-                        "write" => fp.write_prefixes = list,
-                        "deny" => fp.deny_paths = list,
-                        _ => return Err(sig(format!(
-                            "grant fs: unknown key '{sub}' — expected one of read, write, deny"
-                        ))),
-                    }
-                }
-                fs_policy = Some(fp);
-            }
-            "net" => {
-                net_policy = Some(match v {
-                    Value::Bool(b) => *b,
-                    other => {
-                        return Err(sig(format!(
-                            "grant net: expected a Bool, got {}",
-                            other.type_name()
-                        )));
-                    }
-                });
-            }
-            "audit" => {
-                audit_flag = matches!(v, Value::Bool(true));
-            }
-            "editor" => {
-                let editor_map = as_map(v, "grant editor")?;
-                let mut cap = EditorPolicy {
-                    read: false,
-                    write: false,
-                    tui: false,
-                };
-                for (field, fv) in editor_map {
-                    match field.as_str() {
-                        "read" => cap.read = matches!(fv, Value::Bool(true)),
-                        "write" => cap.write = matches!(fv, Value::Bool(true)),
-                        "tui" => cap.tui = matches!(fv, Value::Bool(true)),
-                        _ => return Err(sig(format!("grant editor: unknown key '{field}'"))),
-                    }
-                }
-                editor_policy = Some(cap);
-            }
-            "shell" => {
-                let shell_map = as_map(v, "grant shell")?;
-                let mut cap = ShellPolicy::default();
-                for (field, fv) in shell_map {
-                    match field.as_str() {
-                        "chdir" => cap.chdir = matches!(fv, Value::Bool(true)),
-                        _ => return Err(sig(format!("grant shell: unknown key '{field}'"))),
-                    }
-                }
-                shell_policy = Some(cap);
-            }
+            "exec" => raw.exec = Some(caps::parse_exec_grant(v, "grant exec")?),
+            "fs" => raw.fs = Some(caps::parse_fs(v, "grant fs", true, true)?),
+            "net" => raw.net = Some(caps::parse_net(v, "grant net")?),
+            "audit" => raw.audit = matches!(v, Value::Bool(true)),
+            "editor" => raw.editor = Some(caps::parse_editor(v, "grant editor", true)?),
+            "shell" => raw.shell = Some(caps::parse_shell(v, "grant shell", true)?),
             _ => return Err(sig(format!("grant: unknown key '{k}'"))),
         }
     }
 
-    let raw = RawCapabilities {
-        exec: exec_policy,
-        exec_dirs: exec_dirs_policy,
-        fs: fs_policy,
-        net: net_policy,
-        audit: audit_flag,
-        editor: editor_policy,
-        shell: shell_policy,
-    };
     let home = shell.dynamic.home();
     let cwd = shell.dynamic.effective_cwd();
     let freeze_ctx = crate::path::sigil::FreezeCtx { home: &home, cwd: &cwd };

@@ -63,7 +63,7 @@ fn iterate_audited(
         let end = crate::types::epoch_us();
         let principal = shell
             .dynamic
-            .env_vars
+            .env_vars()
             .get("USER")
             .cloned()
             .unwrap_or_default();

@@ -204,6 +204,10 @@ pub fn pretty_print(val: &Value, indent: usize) -> String {
                 .collect();
             format!("[\n{}\n{end_pad}]", parts.join(",\n"))
         }
+        Value::Variant { label, payload } => match payload {
+            None => format!(".{label}"),
+            Some(p) => format!(".{label} {}", pretty_print(p, indent)),
+        },
     }
 }
 

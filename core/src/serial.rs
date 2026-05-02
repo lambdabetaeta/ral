@@ -29,6 +29,10 @@ pub(crate) enum SerialValue {
     Bytes { value: Vec<u8> },
     List { items: Vec<SerialValue> },
     Map { entries: Vec<(std::string::String, SerialValue)> },
+    Variant {
+        label: std::string::String,
+        payload: Option<Box<SerialValue>>,
+    },
     Thunk(SerialThunk),
 }
 
@@ -171,6 +175,11 @@ fn collect_scope_deps(value: &SerialValue, out: &mut HashSet<u32>) {
                 collect_scope_deps(v, out);
             }
         }
+        SerialValue::Variant {
+            payload: Some(p), ..
+        } => {
+            collect_scope_deps(p, out);
+        }
         _ => {}
     }
 }
@@ -197,6 +206,13 @@ impl SerialValue {
                     .iter()
                     .map(|(k, v)| Ok((k.clone(), Self::from_runtime(v, ctx)?)))
                     .collect::<Result<_, EvalSignal>>()?,
+            },
+            Value::Variant { label, payload } => Self::Variant {
+                label: label.clone(),
+                payload: match payload {
+                    Some(p) => Some(Box::new(Self::from_runtime(p, ctx)?)),
+                    None => None,
+                },
             },
             Value::Thunk { body, captured } => Self::Thunk(SerialThunk {
                 body: body.as_ref().clone(),
@@ -234,6 +250,13 @@ impl SerialValue {
                     .map(|(k, v)| Ok((k, v.into_runtime(arcs)?)))
                     .collect::<Result<_, EvalSignal>>()?,
             ),
+            Self::Variant { label, payload } => Value::Variant {
+                label,
+                payload: match payload {
+                    Some(p) => Some(Box::new((*p).into_runtime(arcs)?)),
+                    None => None,
+                },
+            },
             Self::Thunk(thunk) => Value::Thunk {
                 body: Arc::new(thunk.body),
                 captured: Arc::new(thunk.captured.into_runtime(arcs)?),

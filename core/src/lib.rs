@@ -30,6 +30,7 @@ pub(crate) mod serial;
 pub mod signal;
 pub mod source;
 pub mod span;
+pub mod step;
 pub mod ty;
 pub mod typecheck;
 pub mod types;

@@ -146,21 +146,6 @@ let retry = { |n body|
     }
 }
 
-# Dispatch
-## Dispatch on a value by trying each parameterised block in order; the first
-## whose parameter pattern matches wins.  Catch-all is { |_| ... }.  Value
-## equality dispatch uses explicit `equal` inside a clause body.
-let case = { |val clauses|
-    let try-clauses = { |cs|
-        if !{is-empty $cs} { fail [status: 1] } else {
-            let [c, ...rest] = $cs
-            let r = _try-apply $c $val
-            if $r[ok] { return $r[value] } else { try-clauses $rest }
-        }
-    }
-    !{try-clauses $clauses}
-}
-
 # Concurrency, cleanup, observability, failure suppression — each
 # primitive is a builtin under its non-underscored name.  No prelude
 # wrappers needed; see `core/src/builtins.rs` for the registry.
@@ -177,7 +162,9 @@ let values = { |m| map { |k| return $m[$k] } !{keys $m} }
 ## Merge two maps; b's entries win on conflict.
 let union = { |a b| fold { |m k| if !{has $m $k} { return [...$m, $k: $b[$k]] } else { return $m } } $a !{keys $b} }
 ## Keys present in both maps, with a's values.
-let intersect = { |a b| fold { |m k| return [...$m, $k: $a[$k]] } [:] !{filter { |k| has $b $k } !{keys $a}} }
+let intersection = { |a b| fold { |m k| return [...$m, $k: $a[$k]] } [:] !{filter { |k| has $b $k } !{keys $a}} }
+## Keys in a but not in b, with a's values.
+let difference = { |a b| fold { |m k| if !{has $b $k} { return $m } else { return [...$m, $k: $a[$k]] } } [:] !{keys $a} }
 
 # Standard library
 ## Sum a list of numbers.
@@ -240,22 +227,95 @@ let concat = { |xss|
     _go $xss []
 }
 
+# Step — demand-driven streams as a recursive variant.
+#
+# A Step A is the value of forcing a thunk that produces either
+# `.more [head: A, tail: { Step A }]` or `.done`.  The tail is itself
+# a thunk so producers run only when downstream demand reaches them
+# (Haskell-style laziness expressed in CBPV value form).
+#
+# Every combinator takes a *thunk* of Step as its second argument.
+# This is what keeps inference well-typed: the recursion in the
+# Step shape goes through `Thunk(F (Step α))`, which Phase C's
+# equi-recursive comp types accept.  Taking a Step value directly
+# would push the recursion into the value-type space, which the
+# `TyVar` occurs check still rejects.  Wrap with `{ return $s }` to
+# produce a thunk from a Step value at a use site.
+
+## Construct a non-empty step: head and a thunk producing the rest.
+let step-cons = { |head tail| return .more [head: $head, tail: $tail] }
+## The empty step.
+let step-done = { return .done }
+
+## Realise the entire step into a list (eager).  Use `step-take` first
+## for infinite producers.
+let step-into-list = { |s|
+    case !$s [
+        .more: { |p| return [$p[head], ...!{step-into-list $p[tail]}] },
+        .done: { |_| return [] }
+    ]
+}
+
+## Take at most `n` elements from the front of a step.
+let step-take = { |n s|
+    if $[$n <= 0] { step-done } else {
+        case !$s [
+            .more: { |p| step-cons $p[head] { !{step-take $[$n - 1] $p[tail]} } },
+            .done: { |_| step-done }
+        ]
+    }
+}
+
+## Map `f` over each element of the step lazily.
+let step-map = { |f s|
+    case !$s [
+        .more: { |p| step-cons !{$f $p[head]} { !{step-map $f $p[tail]} } },
+        .done: { |_| step-done }
+    ]
+}
+
+## Reduce the step left-to-right with `f` from initial `z`.
+let step-fold = { |f z s|
+    case !$s [
+        .more: { |p| step-fold $f !{$f $z $p[head]} $p[tail] },
+        .done: { |_| return $z }
+    ]
+}
+
+## Apply `f` to each element for side effect; returns unit.
+let step-each = { |f s|
+    case !$s [
+        .more: { |p| $f $p[head]; step-each $f $p[tail] },
+        .done: { |_| return unit }
+    ]
+}
+
+## Identity on a producer-thunk — a cosmetic marker at the head of a
+## pipeline so the canonical infinite-stream pattern reads as
+## `step-source { producer } | { |x| … }`.  Equivalent to `!$producer`.
+let step-source = { |producer| !$producer }
+
 # File reading sugar — depend on `enumerate`, `take`, `drop`, and `map`
-# above.  Delegate to `from-lines` via `<`, which handles `\r\n` and
-# strips a trailing newline cleanly.
+# above, and on Step helpers here.
+
+## Read a file as a materialised list of lines.
+let from-lines-list = { |p|
+    let s = !{from-lines < $p}
+    step-into-list { return $s }
+}
 
 ## Read a slice of lines: `start` is 1-indexed, `count` is the number
 ## of lines to take.  Returns at most `count` lines; fewer if the
 ## slice runs past EOF.  Out-of-range starts return [].
 let read-file-range = { |p start count|
-    take $count !{drop $[$start - 1] !{from-lines < $p}}
+    take $count !{drop $[$start - 1] !{from-lines-list $p}}
 }
 
 ## Read a file with 1-indexed line numbers prepended to each line,
 ## two spaces between number and content (cat -n shape).  Useful for
 ## citing locations in agent or tool output.
 let read-file-numbered = { |p|
-    let xs = !{from-lines < $p}
+    let xs = !{from-lines-list $p}
     let formatted = map { |x|
         let n = $[$x[index] + 1]
         let line = $x[item]

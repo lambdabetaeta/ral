@@ -54,21 +54,19 @@ fn eval_request(request: SandboxedBlockRequest) -> Result<EvalOutcome, EvalSigna
         modules,
         loc,
         script_args,
-        pipe_value,
         audit,
     } = request;
 
     let arcs = build_arcs(&scope_table)?;
 
     let mut outer = Shell::new(Default::default());
-    outer.dynamic.env_vars = ambient.env_vars;
+    outer.dynamic.replace_env_vars(ambient.env_vars);
     outer.dynamic.cwd = ambient.cwd;
     outer.dynamic.capabilities_stack = ambient.capabilities_stack;
     outer.dynamic.script_args = script_args;
     outer.location = loc;
     registry.install_into(&mut outer, &arcs)?;
     modules.install_into(&mut outer, &arcs)?;
-    outer.io.value_in = pipe_value.map(|v| v.into_runtime(&arcs)).transpose()?;
     outer.audit.tree = if audit { Some(Vec::new()) } else { None };
 
     let captured = captured.into_runtime(&arcs)?;

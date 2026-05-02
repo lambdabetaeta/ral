@@ -109,16 +109,23 @@ pub(crate) fn seed_default_env(shell: &mut Shell) {
     });
     let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".into());
     let lang = std::env::var("LANG").unwrap_or_else(|_| "C.UTF-8".into());
+    #[allow(clippy::disallowed_methods)]
     let pwd =
         std::env::current_dir().map_or_else(|_| "/".into(), |p| p.to_string_lossy().to_string());
     let oldpwd = std::env::var("OLDPWD").unwrap_or_else(|_| pwd.clone());
     let logname = std::env::var("LOGNAME").unwrap_or_else(|_| user.clone());
 
+    // PWD/OLDPWD live on the process, not in `dynamic.env_vars` or the
+    // ral scope — see `Shell::apply_chdir`.  Make sure the process env
+    // reflects the actual cwd at startup so child commands inherit a
+    // sane PWD even when we were launched without one.
+    unsafe {
+        std::env::set_var("PWD", &pwd);
+        std::env::set_var("OLDPWD", &oldpwd);
+    }
+
     let mut install = |k: &str, v: String| {
-        shell.dynamic
-            .env_vars
-            .entry(k.into())
-            .or_insert_with(|| v.clone());
+        shell.dynamic.set_env_var_or_keep(k, v.clone());
         shell.set(k.into(), Value::String(v));
     };
 
@@ -129,8 +136,6 @@ pub(crate) fn seed_default_env(shell: &mut Shell) {
         ("SHELL", shell_path),
         ("TERM", term),
         ("LANG", lang),
-        ("PWD", pwd),
-        ("OLDPWD", oldpwd),
         ("LOGNAME", logname),
     ] {
         install(k, v);
@@ -157,7 +162,7 @@ pub(crate) fn seed_default_env(shell: &mut Shell) {
         .unwrap_or(0)
         .saturating_add(1)
         .to_string();
-    shell.dynamic.env_vars.insert("SHLVL".into(), shlvl.clone());
+    shell.dynamic.set_env_var("SHLVL", shlvl.clone());
     shell.set("SHLVL".into(), Value::String(shlvl));
 
     shell.exit_hints = load_exit_hints();

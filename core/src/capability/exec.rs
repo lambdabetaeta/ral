@@ -1,10 +1,15 @@
 //! Per-layer and stack-level exec policy evaluation.
 //!
 //! Two internal types encode the per-layer and whole-stack verdicts;
-//! `evaluate_exec` folds the stack, `layer_exec_verdict` decides one layer.
+//! `evaluate_exec` folds the stack, `layer_exec_verdict` decides one
+//! layer.  Within a layer the unified exec map admits commands two
+//! ways: by literal key match (bare name or absolute path), or by
+//! subpath-prefix match (a key ending in `/` covering anything under
+//! it).  Literal beats subpath; deeper subpath beats shallower.
 
-use crate::types::{Capabilities, Dynamic, ExecPolicy};
+use crate::types::{is_subpath_key, Capabilities, Dynamic, ExecPolicy, Meet};
 use crate::path;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// One capability layer's vote on a candidate command.
@@ -39,7 +44,7 @@ pub(super) fn evaluate_exec(dynamic: &Dynamic, names: &[&str]) -> ExecVerdict {
     let mut any_opinion = false;
     let mut saw_exec_policy = false;
     for ctx in &dynamic.capabilities_stack {
-        saw_exec_policy |= ctx.exec.is_some() || ctx.exec_dirs.is_some();
+        saw_exec_policy |= ctx.exec.is_some();
         match layer_exec_verdict(ctx, names) {
             LayerExec::NoOpinion => {}
             LayerExec::Denied => return ExecVerdict::Denied,
@@ -47,7 +52,7 @@ pub(super) fn evaluate_exec(dynamic: &Dynamic, names: &[&str]) -> ExecVerdict {
                 any_opinion = true;
                 policy = Some(match policy.take() {
                     None => p,
-                    Some(prev) => intersect_exec_policy(prev, p),
+                    Some(prev) => prev.meet(p),
                 });
             }
         }
@@ -63,59 +68,84 @@ pub(super) fn evaluate_exec(dynamic: &Dynamic, names: &[&str]) -> ExecVerdict {
 
 /// Decide a single layer's verdict on a command.
 ///
-/// Two routes match a layer: (a) name in the layer's `exec` map,
-/// (b) resolved absolute path under one of the layer's `exec_dirs`.
-/// Name match wins if both are present (takes the named policy).
+/// The unified exec map admits or denies commands two ways: literal
+/// key match (bare name or absolute path) and subpath-prefix match
+/// (key ending in `/`).  Match order:
 ///
-/// `None` on either field is "no opinion" for that route.  A layer
-/// that declared only one route and missed it abstains, letting another
-/// layer admit the command by a different route.
+///   1. Literal hit wins.  An explicit `Deny` here vetoes even when a
+///      sibling subpath would otherwise admit the path.  Multiple
+///      candidate-name hits are meet-folded.
+///   2. Otherwise the longest matching subpath key wins.  A subpath
+///      `Deny` propagates as `LayerExec::Denied`; a subpath `Allow`
+///      yields `LayerExec::Allowed(Allow)`.  Deeper prefix beats
+///      shallower, so `/usr/bin/sudo/: Deny` excludes a hole inside
+///      `/usr/bin/: Allow`.
+///   3. Neither form fires: strict deny — the deny-by-default that
+///      every opining layer carries.
+///
+/// A layer with no `exec` field at all has no opinion.
 pub(super) fn layer_exec_verdict(ctx: &Capabilities, names: &[&str]) -> LayerExec {
-    let exec_set = ctx.exec.is_some();
-    let dirs_set = ctx.exec_dirs.is_some();
-    if !exec_set && !dirs_set {
+    let Some(exec) = &ctx.exec else {
         return LayerExec::NoOpinion;
-    }
-    if let Some(exec) = &ctx.exec {
-        let mut matched = names.iter().filter_map(|n| exec.get(*n));
-        if let Some(first) = matched.next() {
-            let policy = matched.fold(first.clone(), |acc, p| intersect_exec_policy(acc, p.clone()));
-            // Name match wins over `exec_dirs`: an explicit `Deny`
-            // here vetos even when a directory route would admit
-            // the resolved path.
-            if matches!(policy, ExecPolicy::Deny) {
-                return LayerExec::Denied;
-            }
-            return LayerExec::Allowed(policy);
+    };
+    if let Some(policy) = match_literal_keys(exec, names) {
+        if matches!(policy, ExecPolicy::Deny) {
+            return LayerExec::Denied;
         }
+        return LayerExec::Allowed(policy);
     }
-    if let Some(dirs) = &ctx.exec_dirs
-        && dirs.iter().any(|d| {
-            names.iter().any(|n| {
-                let p = Path::new(n);
-                p.is_absolute() && path::path_within(p, Path::new(d))
-            })
-        })
-    {
-        return LayerExec::Allowed(ExecPolicy::Allow);
-    }
-    // Both routes declared, neither matched → strict deny.
-    // Otherwise abstain so an outer layer's opinion can decide.
-    if exec_set && dirs_set {
-        LayerExec::Denied
-    } else {
-        LayerExec::NoOpinion
+    match longest_subpath_match(exec, names) {
+        Some(ExecPolicy::Deny) => LayerExec::Denied,
+        Some(ExecPolicy::Allow) => LayerExec::Allowed(ExecPolicy::Allow),
+        // Subcommands is rejected on subpath keys at validation time;
+        // ignore here defensively rather than panicking.
+        Some(ExecPolicy::Subcommands(_)) | None => LayerExec::Denied,
     }
 }
 
-/// Meet two exec policies: the intersection of their granted authority.
-pub(super) fn intersect_exec_policy(outer: ExecPolicy, inner: ExecPolicy) -> ExecPolicy {
-    match (outer, inner) {
-        (ExecPolicy::Deny, _) | (_, ExecPolicy::Deny) => ExecPolicy::Deny,
-        (ExecPolicy::Allow, inner) => inner,
-        (outer, ExecPolicy::Allow) => outer,
-        (ExecPolicy::Subcommands(a), ExecPolicy::Subcommands(b)) => {
-            ExecPolicy::Subcommands(a.into_iter().filter(|s| b.contains(s)).collect())
+/// Look up every candidate name as a literal key (bare names and
+/// absolute paths both live in the same keyspace).  Multiple hits are
+/// meet-folded so a layer that lists the same binary under both a
+/// bare name and its resolved path takes the intersection of the two
+/// policies.  Subpath-style keys (trailing `/`) never literal-match
+/// here — they're the path-prefix half of the keyspace and are
+/// handled by `subpath_admits`.
+fn match_literal_keys(
+    exec: &BTreeMap<String, ExecPolicy>,
+    names: &[&str],
+) -> Option<ExecPolicy> {
+    let mut matched = names.iter().filter_map(|n| exec.get(*n).cloned());
+    let first = matched.next()?;
+    Some(matched.fold(first, ExecPolicy::meet))
+}
+
+/// Find the longest subpath key that covers any absolute candidate
+/// and return its policy.  "Longest" by character count of the key,
+/// which is monotone with prefix depth for canonical absolute paths.
+/// Returns `None` if no subpath matches.
+fn longest_subpath_match(
+    exec: &BTreeMap<String, ExecPolicy>,
+    names: &[&str],
+) -> Option<ExecPolicy> {
+    let mut best: Option<(usize, ExecPolicy)> = None;
+    for (key, policy) in exec {
+        if !is_subpath_key(key) {
+            continue;
+        }
+        let prefix = Path::new(key);
+        let matches_any = names.iter().any(|n| {
+            let p = Path::new(n);
+            p.is_absolute() && path::path_within(p, prefix)
+        });
+        if !matches_any {
+            continue;
+        }
+        let len = key.len();
+        match &best {
+            Some((best_len, _)) if *best_len >= len => {}
+            _ => best = Some((len, policy.clone())),
         }
     }
+    best.map(|(_, p)| p)
 }
+

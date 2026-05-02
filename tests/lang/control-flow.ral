@@ -12,16 +12,11 @@ if !{is-dir /tmp} { echo 'tmp exists' }
 for [a, b, c] { |x| echo $x }
 # Expected: a, b, c (each on a line)
 
-# case dispatch: structural — one clause handles all strings, value
-# equality is expressed with nested `if` using `equal`.
+# Value-equality dispatch via if/elsif chains.
 let action = 'help'
-case $action [
-    { |v|
-        if !{equal $v 'quit'} { echo quitting }
-            elsif !{equal $v 'help'} { echo 'showing help' }
-            else { echo unknown }
-    }
-]
+if !{equal $action 'quit'} { echo quitting }
+    elsif !{equal $action 'help'} { echo 'showing help' }
+    else { echo unknown }
 # Expected: showing help
 
 # ? chaining

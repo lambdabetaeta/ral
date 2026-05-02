@@ -65,9 +65,9 @@ index.  To keep the brackets literal, wrap the name:
 
     echo "$(prefix)[archived]"        # prefix_value[archived]
 
-Double-quoted strings support `\n`, `\t`, `\\`, `\0`, `\e`, `\"`,
-`\$`, `\!`, and numeric escapes `\xNN` (two hex digits, ASCII only)
-and `\u{X..}` (1–6 hex digits, any Unicode scalar):
+Double-quoted strings support `\n`, `\r`, `\t`, `\\`, `\0`, `\e`,
+`\"`, `\$`, `\!`, and numeric escapes `\xNN` (two hex digits, ASCII
+only) and `\u{X..}` (1–6 hex digits, any Unicode scalar):
 
     echo "\u{1F600}"                  # 😀
     echo "\x41\x42\x43"              # ABC
@@ -280,7 +280,7 @@ Reading and writing files is done with **redirects** plus codec stages.
 The decoder reads from `< $path`; the encoder writes to `> $path`:
 
     let body  = from-string < $path     # read file as String
-    let lines = from-lines  < $path     # read file as List Str
+    let lines = from-lines-list $path    # read file as List Str
     let cfg   = from-json   < $path     # read file as JSON value
 
     to-string $body > $path             # write atomically

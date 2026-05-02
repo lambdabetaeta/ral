@@ -17,14 +17,17 @@ where
     super::with_tail(shell, false, f)
 }
 
-/// Evaluate pipeline-in value, redirect targets, and argument values.
+/// Evaluate redirect targets and argument values.
+///
+/// Pipeline upstream values do not flow through here — the pipeline
+/// runtime appends them at `pipeline::invoke` instead.  This function
+/// is purely "evaluate args + redirects, in lock-step."
 #[allow(clippy::type_complexity)]
 pub(crate) fn eval_call_parts(
     args: &[Val],
     redirects: &[(u32, RedirectMode, ValRedirectTarget)],
     shell: &mut Shell,
 ) -> Result<(Vec<Value>, Vec<(u32, RedirectMode, EvalRedirect)>), EvalSignal> {
-    let piped = shell.io.value_in.take();
     let redir_eval = redirects
         .iter()
         .map(|(fd, mode, target)| {
@@ -38,18 +41,14 @@ pub(crate) fn eval_call_parts(
             ))
         })
         .collect::<Result<Vec<_>, EvalSignal>>()?;
-    let arg_vals = eval_call_args(args, piped, shell)?;
+    let arg_vals = eval_call_args(args, shell)?;
     Ok((arg_vals, redir_eval))
 }
 
 /// Evaluate argument list, expanding `...$xs` spreads.
 /// Shared by the normal call path and `pipeline::analyze_stage`.
-pub(crate) fn eval_call_args(
-    args: &[Val],
-    piped: Option<Value>,
-    shell: &mut Shell,
-) -> Result<Vec<Value>, EvalSignal> {
-    let mut arg_vals = Vec::with_capacity(args.len() + usize::from(piped.is_some()));
+pub(crate) fn eval_call_args(args: &[Val], shell: &mut Shell) -> Result<Vec<Value>, EvalSignal> {
+    let mut arg_vals = Vec::with_capacity(args.len());
     for arg in args {
         let v = eval_val(arg, shell)?;
         if let Val::List(elems) = arg
@@ -60,9 +59,6 @@ pub(crate) fn eval_call_args(
             continue;
         }
         arg_vals.push(v);
-    }
-    if let Some(piped) = piped {
-        arg_vals.push(piped);
     }
     Ok(arg_vals)
 }

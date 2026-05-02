@@ -36,6 +36,13 @@ pub enum Value {
     Bytes(Vec<u8>),
     List(Vec<Value>),
     Map(Vec<(std::string::String, Value)>),
+    /// A variant: a constructor `.label` carrying an optional payload.
+    /// The label is stored without its leading dot; the `Display` impl prints
+    /// it as `.label` for consistency with the surface syntax.
+    Variant {
+        label: std::string::String,
+        payload: Option<Box<Value>>,
+    },
     Thunk {
         body: std::sync::Arc<crate::ir::Comp>,
         captured: Arc<Env>,
@@ -80,6 +87,7 @@ impl Value {
             Value::Bytes(_) => "Bytes",
             Value::List(_) => "List",
             Value::Map(_) => "Map",
+            Value::Variant { .. } => "Variant",
             Value::Thunk { .. } => "Block",
             Value::Handle(_) => "Handle",
         }
@@ -132,6 +140,16 @@ impl PartialEq for Value {
             (Value::Bytes(a), Value::Bytes(b)) => a == b,
             (Value::List(a), Value::List(b)) => a == b,
             (Value::Map(a), Value::Map(b)) => a == b,
+            (
+                Value::Variant {
+                    label: la,
+                    payload: pa,
+                },
+                Value::Variant {
+                    label: lb,
+                    payload: pb,
+                },
+            ) => la == lb && pa == pb,
             // Closures and handles are never structurally equal.
             (Value::Thunk { .. }, Value::Thunk { .. }) => false,
             (Value::Handle(_), Value::Handle(_)) => false,
@@ -175,6 +193,10 @@ impl fmt::Display for Value {
                 }
                 write!(f, "]")
             }
+            Value::Variant { label, payload } => match payload {
+                None => write!(f, ".{label}"),
+                Some(p) => write!(f, ".{label} {p}"),
+            },
             Value::Thunk { body, .. } => write!(f, "{}", fmt_block(body)),
             Value::Handle(h) => write!(f, "<handle:{}>", h.cmd),
         }

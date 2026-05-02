@@ -112,12 +112,14 @@ impl Env {
 
     /// Borrow the underlying scope chain.  Used by `crate::serial` to
     /// intern scopes by `Arc` pointer identity.
+    #[cfg(unix)]
     pub(crate) fn scopes(&self) -> &[Arc<HashMap<String, Value>>] {
         &self.scopes
     }
 
     /// Build an `Env` from a raw scope vector.  Used by `crate::serial`
     /// when reconstituting a wire-format env on the receiving side.
+    #[cfg(unix)]
     pub(crate) fn from_scopes(scopes: Vec<Arc<HashMap<String, Value>>>) -> Self {
         Self { scopes }
     }

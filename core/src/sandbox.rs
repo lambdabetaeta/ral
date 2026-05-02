@@ -74,6 +74,7 @@ pub const SANDBOX_DUMP_PROFILE_ENV: &str = "RAL_DUMP_SANDBOX_PROFILE";
 /// real sandbox.  Pass `SandboxProjection::default()` to see the
 /// baseline (system reads + canned defaults); pass an actual policy
 /// to see how user grants extend it.
+#[cfg_attr(windows, allow(unused_variables))]
 pub fn dump_profile_if_requested(policy: &crate::types::SandboxProjection) {
     if std::env::var_os(SANDBOX_DUMP_PROFILE_ENV).is_none() {
         return;
@@ -220,7 +221,7 @@ mod tests {
     fn strip_policy_arg_extracts_json_and_preserves_other_args() {
         let (policy, args) = strip_policy_arg(&[
             "--sandbox-projection".into(),
-            r#"{"fs":{"read_prefixes":["/tmp"],"write_prefixes":[]},"net":true}"#.into(),
+            r#"{"fs":{"kind":"restricted","policy":{"read_prefixes":["/tmp"],"write_prefixes":[]}},"net":true}"#.into(),
             "-c".into(),
             "echo hi".into(),
         ])
@@ -228,12 +229,13 @@ mod tests {
         assert_eq!(
             policy,
             Some(SandboxProjection {
-                fs: crate::types::FsPolicy {
+                fs: crate::types::FsProjection::Restricted(crate::types::FsPolicy {
                     read_prefixes: vec!["/tmp".into()],
                     write_prefixes: Vec::new(),
                     deny_paths: Vec::new(),
-                },
+                }),
                 net: true,
+                exec: crate::types::ExecProjection::default(),
             })
         );
         assert_eq!(args, vec!["-c", "echo hi"]);

@@ -26,10 +26,10 @@ The formal model is call-by-push-value; see §20.8.
 
 ```
 program       = stmt*
-stmt          = bg-pipeline (NL? '?' bg-pipeline)* NL?
+stmt          = binding | bg-pipeline (NL? '?' bg-pipeline)* NL?
 bg-pipeline   = pipeline '&'?
 pipeline      = stage (NL? '|' NL? stage)*
-stage         = binding | return-stage | if-stage | command | atom-stage
+stage         = return-stage | if-stage | command | atom-stage
 binding       = 'let' pattern '=' binding-rhs
 binding-rhs   = pipeline (NL? '?' pipeline)* '&'?
 return-stage  = 'return' atom?
@@ -70,13 +70,18 @@ unary         = deref | force | NUMBER | 'true' | 'false' | 'not' unary | '-' un
 ```
 
 The grammar is written without `NL` tokens for clarity; see the
-newline-handling rule below.  The RHS of `binding` is a pipeline, hence a
-command context; head-form dispatch applies (§4). `VALUE_NAME` is a
-plain `NAME` whose spelling is a numeric literal, `true`, `false`, or
-`unit`. A pipeline terminates at newline, `;`, `}`, or `)`. Trailing
-`&` on a pipeline spawns it in the background and yields a `Handle`
-(§13.1); every arm of a statement-level `?`-chain may carry its own
-`&`, while a `let` RHS may only carry a final trailing `&`.
+newline-handling rule below.  A `binding` is a statement, not a stage:
+`let` may only appear at the start of a `stmt` (or as the RHS of an
+enclosing `let`, since `binding-rhs` itself is a pipeline-and-chain).
+It cannot appear after `|` or after `?` — `cmd | let x = …` and
+`cmd ? let x = …` are parse errors.  The RHS of `binding` is a
+pipeline, hence a command context; head-form dispatch applies (§4).
+`VALUE_NAME` is a plain `NAME` whose spelling is a numeric literal,
+`true`, `false`, or `unit`. A pipeline terminates at newline, `;`,
+`}`, or `)`. Trailing `&` on a pipeline spawns it in the background
+and yields a `Handle` (§13.1); every arm of a statement-level
+`?`-chain may carry its own `&`, while a `let` RHS may only carry a
+final trailing `&`.
 
 **Newline handling.**  A newline terminates a statement unless it appears:
 
@@ -143,7 +148,8 @@ not to the block itself; `(!{cmd})[k]` and `!{cmd}[k]` are identical.
 
 ```
 Value ::= Unit | Bytes | String | Int | Float | Bool
-        | List Value | Map String Value | Block | Handle
+        | List Value | Map String Value | Variant Label Value?
+        | Block | Handle
 ```
 
 `String` is UTF-8 text. `Bytes` is a finite byte sequence, possibly
@@ -174,8 +180,66 @@ the `not` keyword is the logical negation.  String comparison is
 `lt`/`gt` (§16.2).
 
 Maps preserve insertion order, and sets are `Map String Unit` by
-convention with `has` and `diff` as builtins and `union` and
-`intersect` as prelude functions.  `Handle α` is opaque and
+convention with `has` as a builtin and `union`, `intersection`, and
+`difference` as prelude functions.
+
+Variants are tagged sums.  A constructor is written `.label` (nullary)
+or `.label payload`, where the payload is the next value atom; the
+label is the bare identifier with a leading dot.  A variant value's
+type is row-polymorphic: `.ok 5` has type `[.ok: Int | ρ]` for some
+free row `ρ`, so the same value flows through code that knows about
+`.ok`, `.err`, or any other constructors that may co-exist.  Records
+also accept tag keys: `[.dev: 8080, .prod: 443]` is a closed record
+whose row labels begin with a dot.  The two row alphabets — bare keys
+for ordinary records, tag keys for variants and tag-keyed records —
+do not unify; mixing them in one literal is a parse error.
+
+The eliminator is `case`:
+
+```
+case <scrutinee> [
+  .ok:  { |x| … },
+  .err: { |m| … }
+]
+```
+
+The handler table is a tag-keyed record of thunks.  The result of the
+case is the result of forcing the matching handler on the variant's
+payload.  Typing requires the handler row to cover every constructor
+the scrutinee can produce; missing or extraneous arms are reported as
+non-exhaustiveness.  Nullary tags pass `Unit` to their handler.
+
+Computation types are *equi-recursive*.  A self-recursive function
+whose return type cycles through `Thunk(F …)` — for example an
+infinite stream producer
+
+```
+let nats = { |n| step-cons $n { !{nats $[$n + 1]} } }
+```
+
+— receives a cyclic computation type μβ. `Int → F (Step Int)`.  No
+type annotations are needed; the union-find slot for β closes on
+itself and every traversal that descends through the cycle is guarded
+by a visited set.  Value types remain non-recursive: the occurs
+check on `TyVar` is preserved, so `α = [α]` is still rejected.
+
+The prelude exposes a small Step library — `step-cons`, `step-done`,
+`step-take`, `step-map`, `step-fold`, `step-each`, `step-into-list`
+— for ergonomic demand-driven streams over a typed protocol.
+
+A Step value flowing into a pipeline consumer is iterated
+element-by-element: `producer | { |x| … }` calls the consumer once
+per `.more` head, forces the tail, and terminates on `.done`.  The
+typechecker propagates the *element* type at this boundary, so the
+consumer sees `τ` rather than `Step τ`.  The recogniser is
+structural — any variant whose row carries `.more {head, tail:
+Thunk(_)}` and `.done` participates, regardless of whether it came
+from the prelude `step-*` family or a user-defined recursive
+variant of the same shape.  Variants that don't fit this shape
+(e.g. `.ok 5`) are passed through to the consumer as ordinary
+single values.
+
+`Handle α` is opaque and
 parameterised by the return type of the spawned block: only `await`,
 `race`, `cancel`, and `disown` apply, and a handle prints as
 `<handle:PID>`.  Handles arise from a trailing `&` on a pipeline
@@ -184,9 +248,11 @@ specified in §13.3.
 
 The literals `true`, `false`, `unit`, and numeric NAME tokens (matching
 `NUMBER`) are recognised as values before any name lookup. The words
-`if`, `elsif`, `else`, `let`, `return`, `true`, `false`, and `unit` are
-reserved: the parser rejects them as binding names in `let` patterns and
-lambda parameters.
+`if`, `elsif`, `else`, `let`, `return`, `true`, `false`, `unit`, and
+`case` are reserved: the parser rejects them as binding names in `let`
+patterns and lambda parameters.  `case` is also a stage-form keyword
+(§2 above) — the parser dispatches on the head identifier rather than
+treating `case` as an ordinary callable.
 
 ## 3  Binding
 
@@ -637,25 +703,39 @@ thunk and discards both the result and any failure.
 
 ### 10.1  `_try`, `_audit`, `try`
 
-`_try B` runs `B` and returns
+`_try B` runs `B` and returns the outcome variant
 
 ```
-[ok: Bool, value: α, status: Int, cmd: String, message: String,
- stdout: Bytes, line: Int, col: Int]
+[.ok: α | .err: ErrorRec]
 ```
 
-On success the body's result is in `value`, `ok` is true, `status` is
-zero, and `line`/`col` point at the `_try` call site.  On failure
-`ok` is false, `status` carries the exit code, `cmd` names the
-failing command, `message` is the failure text (the runtime error's
-own message, or the failing external command's stderr decoded as
-UTF-8), and `line`/`col` point at the failing command's position in
-source.  In either case `stdout` holds every byte the body wrote to
-fd 1 during evaluation.  The record's shape is the input shape `fail`
-accepts (modulo `stdout`, which `fail` ignores), so
-`try { ... } { |e| fail $e }` re-raises verbatim.  Only runtime
-errors count as failure: a body that returns `false` is still
-successful, with `ok = true` and `value = false`.
+where
+
+```
+ErrorRec = [status: Int, cmd: String, message: String,
+            stdout: Bytes, line: Int, col: Int]
+```
+
+On success the variant is `.ok v` where `v` is the body's value.  On
+failure the variant is `.err r` where `r` carries the exit `status`,
+the `cmd` that failed, a `message` (the runtime error's own message or
+the failing external command's stderr decoded as UTF-8), and
+`line`/`col` for the failing command's position in source.  `stdout`
+holds every byte the body wrote to fd 1 during evaluation — present
+on the failure side because that's where it's most useful.  The
+record's shape is the input shape `fail` accepts, so
+`try { … } { |e| fail $e }` re-raises verbatim.  Only runtime errors
+count as failure: a body that returns `false` is still `.ok false`.
+
+To destructure, pair `_try` with `case`:
+
+```
+let r = _try { make -j4 }
+case $r [
+  .ok:  { |_| echo built },
+  .err: { |e| echo "failed: $e[message]" }
+]
+```
 
 `_try` is a *complete* capture: §4.3's non-final-flush rule is
 suppressed inside the body, so multi-stage bodies leave their full
@@ -778,14 +858,16 @@ terminates the process immediately.
 
 ## 11  Capabilities (`grant`)
 
-`grant C { B }` installs a deny-by-default capability context for
-`B` using the dynamic-context mechanism of §3.1. Outside `grant`,
-evaluation is ambient; inside, every omitted capability is denied.
-`C` admits six keys: `exec`, `fs`, `net`, `audit`, `editor`, `shell`.
+`grant C { B }` attenuates authority for `B` using the dynamic-context
+mechanism of §3.1.  Each capability dimension `C` mentions is
+deny-by-default within the grant; dimensions `C` *omits* keep ambient
+authority — `grant [exec: …] body` tightens exec but leaves fs, net,
+editor, shell at whatever the caller had.  Six keys are accepted:
+`exec`, `fs`, `net`, `audit`, `editor`, `shell`.
 
 ```
 grant [
-    exec: [git: [], make: []],
+    exec: ['git': [], 'make': [], '/usr/bin/': 'Allow'],
     fs:   [read: ['/home/project'], write: ['/tmp/build']],
     net:  true,
     audit: true,
@@ -794,12 +876,41 @@ grant [
 
 ### 11.1  `exec`
 
-Keyed by command name; each value is a list of allowed first arguments:
+A unified map keyed by one of three shapes:
 
-- `[]` — allow with any arguments;
-- `[s₁, …]` — allow only when `argv[0] ∈ {sᵢ}`;
+- **bare command name** (`git`, `kubectl`) — match by name as the
+  user typed it, after PATH lookup.
+- **absolute literal path** (`/usr/bin/git`) — match a specific
+  resolved binary.
+- **absolute subpath** (`/usr/bin/`, trailing `/`) — match any
+  binary whose resolved path lies inside the directory.  Path-prefix
+  sigils (§11.2.1) may appear at the head of literal-path or subpath
+  keys (`xdg:bin/`, `~/.cargo/bin/`, `cwd:/`); they're rewritten to
+  absolute paths at policy load.
 
-Unlisted names are denied.
+Each value is the policy.  Bare-name and literal-path keys carry the
+full lattice:
+
+- `[]` (or `'Allow'` in TOML) — allow with any arguments;
+- `[s₁, …]` (`{Subcommands = […]}` in TOML) — allow only when
+  `argv[0] ∈ {sᵢ}`;
+- `'Deny'` — sticky veto.
+
+Subpath keys carry only `'Allow'` or `'Deny'` — `Subcommands` is
+name-shaped and is rejected on a subpath key at policy load.
+
+**Match precedence within a layer:**
+
+1. **Literal hits win.**  An exact key match (bare name or
+   absolute path) wins over any sibling subpath that would also
+   admit the same binary.  An explicit literal `Deny` vetoes.
+2. **Otherwise the longest matching subpath wins.**  Deeper prefix
+   beats shallower, so `'/usr/bin/sensitive/': 'Deny'` carves a
+   hole inside `'/usr/bin/': 'Allow'` for binaries under the
+   inner directory.
+3. **Otherwise the layer denies.**  A layer that opts into `exec`
+   admits *only* what its map says; everything else is denied
+   within that layer.
 
 ### 11.2  `fs`
 
@@ -844,8 +955,8 @@ paths are also enforced for externals as defence in depth.
 #### 11.2.1  Path-prefix sigils
 
 Two sigils are recognised at the head of a path string in any
-`fs.read`, `fs.write`, `fs.deny`, or `exec_dirs` entry, and resolved
-once at policy load:
+`fs.read`, `fs.write`, `fs.deny`, or path-shaped `exec` key (literal
+path or subpath), and resolved once at policy load:
 
 - `~`, `~/sub`, `~user`, `~user/sub` — the usual shell tilde rule.
 - `xdg:NAME` and `xdg:NAME/sub` — an XDG basedir, where `NAME` is
@@ -927,16 +1038,24 @@ means `cd ~`.
 
 ### 11.7  Attenuation
 
-Nested grants can only reduce authority:
+Nested grants can only reduce authority.  Per dimension:
 
-- `exec` — names intersect across layers; for a name allowed at every
-  layer the subcommand lists intersect; a name not present in some
-  outer layer's allow set cannot be re-introduced inside;
+- `exec` — the literal half (bare names, absolute paths) intersects
+  across layers: a literal key allowed at every opining layer
+  survives, with its policies meet-folded (Subcommands lists
+  intersect; `Deny` is sticky from any layer); subpath keys
+  intersect by path containment (deeper survives on overlap);
+  literal `Deny` and subpath `Deny` propagate even when only one
+  layer names them.
 - `fs` — narrow by path containment (and for externals under OS
-  sandboxing);
-- `net` — boolean AND;
-- `audit` — logical OR;
+  sandboxing).
+- `net` — boolean AND.
+- `audit` — logical OR.
 - `editor` — per-boolean AND (inner can only disable).
+
+A dimension that *no* layer in the stack opined on stays at ambient
+authority — there is no implicit deny from omission across the stack,
+only within a layer that opted into the dimension.
 
 Authority may be restricted but never amplified. `grant` affects
 ral-dispatched actions; if a permitted external program internally
@@ -949,10 +1068,19 @@ In-process `exec`/`fs`/`net` checks apply on every platform.  OS-level
 enforcement varies:
 
 - **macOS** — Seatbelt (`sandbox_init_with_parameters`); ral
-  re-executes itself inside Seatbelt when `fs:` is present or `net`
-  is `false`, so builtins are also kernel-enforced.
-- **Linux** — bubblewrap with seccomp BPF (x86-64, AArch64), using
-  the same re-execution strategy.
+  re-executes itself inside Seatbelt when `fs:` is present, when
+  `net` is `false`, or when `exec:` is present.  Under exec
+  attenuation the Seatbelt profile renders the meet-folded admit
+  set as a path allow-list, so the OS layer also gates spawns
+  that the in-process check can't see — including binaries
+  re-execed by interpreters like `sh -c "…"`, `xargs CMD`, or
+  `find -exec`.  When `fs:` is absent the OS layer passes fs
+  through (the user's working tree, HOME, etc. stay reachable).
+- **Linux** — bubblewrap with seccomp BPF (x86-64, AArch64).
+  Re-executes when `fs:` is present or `net` is `false`; pure
+  exec attenuation does not enter the sandbox subprocess because
+  bwrap has no path-based exec filter.  In-process exec checks
+  still apply.
 - **Windows** — no filesystem or network enforcement; only in-process
   checks apply, and `net: false` emits a one-time stderr warning that
   the restriction will not be applied.  Each external command inside
@@ -1142,12 +1270,14 @@ corresponding bytes on the pipe, and also returns them as `Bytes`.
 |----------------|---------|----------------------------------|
 | `from-line`    | `Bytes` | `String` (trailing `\n` dropped) |
 | `from-string`  | `Bytes` | `String`                         |
-| `from-lines`   | `Bytes` | `[String]`                       |
+| `from-lines`   | `Bytes` | `Step String`                    |
 | `from-json`    | `Bytes` | JSON value                       |
 | `from-bytes`   | `Bytes` | `Bytes`                          |
 
 All text decoders fail on invalid UTF-8; `from-json` additionally
-fails on invalid JSON; `from-bytes` cannot fail.
+fails on invalid JSON; `from-bytes` cannot fail.  `from-lines` is
+stream-shaped (Step); materialise with `step-into-list` (or prelude
+`from-lines-list`) when a list is required.
 
 | Encoder      | In                | Out     |
 |--------------|-------------------|---------|
@@ -1191,7 +1321,8 @@ on `< $path` for reads, an encoder on `> $path` for writes.
 
 ```
 let body = from-string < $p          # read string
-let xs   = from-lines  < $p          # read list of lines
+let s    = from-lines  < $p          # read Step String
+let xs   = from-lines-list $p        # read list of lines
 let v    = from-json   < $p          # read JSON
 let b    = from-bytes  < $p          # read raw bytes
 
@@ -1269,7 +1400,6 @@ not the preferred user surface. Return-type rules follow §4.2.
 | `ask` | `/dev/tty` prompt; fails on EOF |
 | `which` | Resolve lookup target; `String` or failure |
 | `cwd` | Current directory as `String` |
-| `diff` | Keys in `a` not in `b`, as a list |
 | `grep-files` | Regex over files; returns `[[file: String, line: Int, text: String]]` (1-based lines, ordered by input file then match order) |
 
 ### 16.2  Predicates
@@ -1294,17 +1424,17 @@ through codec + redirect, effects through bundled coreutils),
 `push`, `accept`, `tui`, `history`, `parse`, `ghost`, `highlight`,
 `state`; §18.1), `_plugin` (`load`, `unload`; §18.1).
 
-`_try-apply f val` applies `f` to `val` and returns
-`[ok: true, value: r]` on success or `[ok: false, value: unit]` when
-`val` fails to destructure against `f`'s parameter pattern.  It
+`_try-apply f val` applies `f` to `val` and returns the outcome
+variant `[.ok: r | .err: Unit]` — `.ok r` on success, `.err unit`
+when `val` fails to destructure against `f`'s parameter pattern.  It
 catches the distinguished `PatternMismatch` error kind raised by
 destructuring (a block parameter, an explicit `let pat = …`, or a
 list/map shape mismatch), and only at the parameter-bind step: any
 other failure in `f`'s body, including a `PatternMismatch` from an
 inner `let`, propagates as usual, so `_try-apply` never silently
-swallows a bug.  `case` (§17) is built directly on top, trying each
-clause's parameter pattern in order and committing to the first
-match.
+swallows a bug.  The error tag is `unit` because pattern-mismatch
+failure carries no structured record — caller distinguishes by the
+tag alone.
 
 ### 16.4  Bundled coreutils
 
@@ -1333,7 +1463,10 @@ both paths land at the same chokepoint.
 serialises uutils stdio redirection, so relative path arguments
 resolve against ral's scoped CWD, not the host process CWD.
 
-The `diffutils` feature adds `diff` and `cmp` in the same shape, and
+The `diffutils` feature bundles `cmp` and `diff` through the same
+helper-subprocess path as coreutils — `resolve_command` rewrites a bare
+`cmp`/`diff` to `--ral-uutils-helper`, the parent never runs them
+in-process — and
 the `grep` feature enables the regex-backed builtins `grep-files`,
 `match`, `split`, `replace`, `replace-all`, `find-match`, and
 `find-matches` using ripgrep's engine.  Without `grep`, those
@@ -1586,7 +1719,7 @@ fields are typed through row polymorphism.
 
 ```
 B ::= F[I,O] A  |  A → B  |  β
-I,O ::= ∅ | Bytes | Values(A) | μ
+I,O ::= ∅ | Bytes | μ
 ```
 
 `F[∅,∅] A` is abbreviated `F A`. A nullary block has type `{B}`; a
@@ -1622,8 +1755,8 @@ A stage has type `F[I,O] A`; connection requires `O_left = I_right`:
 ls | grep foo | wc -l
 F[∅,Bytes] String   F[Bytes,Bytes] String   F[Bytes,Bytes] String
 
-ls | from-lines | map { |line| … }
-F[∅,Bytes] String   F[Bytes,∅] [String]    F[∅,∅] […]
+ls | from-lines | { |line| … }
+F[∅,Bytes] String   F[Bytes,∅] Step String   F[∅,∅] […]
 ```
 
 Mismatches between adjacent stages are caught at type-check time,
@@ -1697,7 +1830,7 @@ Record-returning builtins:
 
 | Builtin | Return record |
 |---|---|
-| `_try`   | `[ok:Bool, value:α, status:Int, cmd:String, message:String, stdout:Bytes, line:Int, col:Int]` |
+| `_try`   | `[.ok: α \| .err: [status:Int, cmd:String, message:String, stdout:Bytes, line:Int, col:Int]]` |
 | `_audit` | `Node` (§10.3) |
 
 Dynamic keys fall back to the homogeneous-map rule, and list

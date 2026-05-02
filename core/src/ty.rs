@@ -199,6 +199,7 @@ fn constrain_comp(comp: &Comp, unifier: &mut ModeUnifier) -> CompType {
         CompKind::If { then, else_, .. } => {
             infer_branches(&[then.clone(), else_.clone()], unifier)
         }
+        CompKind::Case { .. } => CompType::val(),
     }
 }
 

@@ -28,6 +28,72 @@ use serde::{Deserialize, Serialize};
 
 use super::{Shell, unique_strings};
 
+// ── Lattice traits ────────────────────────────────────────────────────────
+//
+// `Meet` and `Join` name the two semilattice operations the capability
+// system runs over.  They live here, alongside the types they're
+// implemented on, so the algebraic structure is one file.  Lifting
+// impls for `Option<T>` and `bool` come with the traits — `None` as
+// identity is a capability convention (no opinion on a field), not a
+// universal one, so the impls aren't general enough to belong in a
+// stand-alone module.
+
+/// Greatest lower bound under the type's partial order.  Combining
+/// two `Meet` values produces the most-authority element below both.
+///
+/// Required laws (verified by `lattice_tests` per type):
+///
+/// * `a.meet(b) == b.meet(a)` — commutative.
+/// * `(a.meet(b)).meet(c) == a.meet(b.meet(c))` — associative.
+/// * `a.meet(a) == a` — idempotent.
+pub trait Meet {
+    fn meet(self, other: Self) -> Self;
+}
+
+/// Least upper bound under the type's partial order — dual of [`Meet`].
+/// Used at load time to widen a base ceiling with an extension before
+/// any attenuation runs (`base.join(extension)` adds authority).
+pub trait Join {
+    fn join(self, other: Self) -> Self;
+}
+
+/// `None` is the meet identity: a layer with no opinion on a field
+/// contributes nothing, so the other side's value survives unchanged.
+impl<T: Meet> Meet for Option<T> {
+    fn meet(self, other: Self) -> Self {
+        match (self, other) {
+            (None, x) | (x, None) => x,
+            (Some(a), Some(b)) => Some(a.meet(b)),
+        }
+    }
+}
+
+/// `None` is also the join identity, by the same reasoning: nothing
+/// to widen with, so the present side survives.
+impl<T: Join> Join for Option<T> {
+    fn join(self, other: Self) -> Self {
+        match (self, other) {
+            (None, x) | (x, None) => x,
+            (Some(a), Some(b)) => Some(a.join(b)),
+        }
+    }
+}
+
+/// Meet on bool is `&&`: both sides must hold.  Used for `net`,
+/// `editor.{read,write,tui}`, `shell.chdir`.
+impl Meet for bool {
+    fn meet(self, other: Self) -> Self {
+        self && other
+    }
+}
+
+/// Join on bool is `||`: either side widens.
+impl Join for bool {
+    fn join(self, other: Self) -> Self {
+        self || other
+    }
+}
+
 /// Exec policy value for a single command in a `grant` exec map.
 ///
 /// Forms a three-point lattice with `Allow` at top, `Subcommands(_)`
@@ -35,7 +101,15 @@ use super::{Shell, unique_strings};
 /// bottom.  An explicit `Deny` is a sticky veto: it survives meet
 /// against absence in another layer's map (so a base ceiling can
 /// pin a command name out without restrict files having to repeat
-/// it) and overrides directory-based admission via `exec_dirs`.
+/// it) and beats subpath admission elsewhere in the same map.
+///
+/// A key in the exec map may be a bare command name (`git`), an
+/// absolute literal path (`/usr/bin/git`), or — when the key ends
+/// with `/` — an absolute subpath prefix (`/usr/bin/`) that admits
+/// or denies any binary resolving inside that directory.  Subpath
+/// keys carry `Allow` or `Deny`; `Subcommands` on a subpath key is
+/// rejected at validation time.  Longest-prefix wins among subpath
+/// keys, and literal keys beat subpaths.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExecPolicy {
     /// Allow the command with any arguments.
@@ -76,6 +150,78 @@ pub struct FsPolicy {
     pub deny_paths: Vec<String>,
 }
 
+/// OS-renderable view of the meet-folded fs policy.
+///
+/// `Unrestricted` is the lattice top: no layer attenuated fs, so the
+/// OS profile passes fs through (broad `(allow file-read*)` /
+/// `(allow file-write*)` on macOS; whole-tree `--dev-bind / /` on
+/// Linux).  `Restricted` carries the closed set: the
+/// [`FsPolicy::read_prefixes`], [`FsPolicy::write_prefixes`] and
+/// [`FsPolicy::deny_paths`] survive into platform-specific rules.
+///
+/// Empty `Restricted(FsPolicy::default())` is "deny everything fs":
+/// the user explicitly granted no read or write prefix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "policy", rename_all = "snake_case")]
+pub enum FsProjection {
+    Unrestricted,
+    Restricted(FsPolicy),
+}
+
+impl Default for FsProjection {
+    fn default() -> Self {
+        Self::Unrestricted
+    }
+}
+
+impl FsProjection {
+    /// The policy when restricted, or `None` for the unrestricted top.
+    /// Renderers that only care about the policy bytes (Linux's
+    /// `make_command_with_policy`, the bind/check spec helpers) match
+    /// on this; the macOS profile builder branches on the variant
+    /// directly so it can emit different SBPL shapes.
+    pub fn as_policy(&self) -> Option<&FsPolicy> {
+        match self {
+            Self::Unrestricted => None,
+            Self::Restricted(p) => Some(p),
+        }
+    }
+}
+
+/// OS-renderable view of the meet-folded exec policy.
+///
+/// `Unrestricted` is the lattice top: no layer attenuated exec, so
+/// the OS profile leaves `process-exec` wide open and the in-ral
+/// gate is the only check.  `Restricted` carries the closed set the
+/// OS profile may admit (`allow_paths` resolved literals and
+/// `allow_dirs` subpath roots) plus the explicit `deny_dirs` carved
+/// out of those admits with longest-prefix-wins semantics.  Anything
+/// outside admits is denied at the OS layer too, closing the
+/// `sh -c "PATH=…; cmd"` route by which a sandboxed child re-execs
+/// binaries the in-ral gate never sees.
+///
+/// Empty `Restricted { allow_paths: [], allow_dirs: [], deny_dirs: [] }`
+/// means a layer opted in to exec restriction and admitted nothing —
+/// the OS profile emits no `(allow process-exec …)` rule and the
+/// deny-default kills any spawn from inside the grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExecProjection {
+    Unrestricted,
+    Restricted {
+        allow_paths: Vec<String>,
+        allow_dirs: Vec<String>,
+        #[serde(default)]
+        deny_dirs: Vec<String>,
+    },
+}
+
+impl Default for ExecProjection {
+    fn default() -> Self {
+        Self::Unrestricted
+    }
+}
+
 /// The OS-renderable projection of the effective capability grant.
 ///
 /// Produced by `capability::EffectiveGrant::sandbox_projection` after
@@ -84,18 +230,25 @@ pub struct FsPolicy {
 /// the IPC boundary in the internal `--sandbox-projection` flag.
 ///
 /// This is distinct from `Capabilities` (one stack frame, possibly
-/// extending authority) — a `SandboxProjection` is the reduced fs+net
-/// shape no further composition can widen.
+/// extending authority) — a `SandboxProjection` is the reduced
+/// fs+net+exec shape no further composition can widen.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxProjection {
-    pub fs: FsPolicy,
+    #[serde(default)]
+    pub fs: FsProjection,
     /// Final network verdict after reducing the capability stack.
     pub net: bool,
+    #[serde(default)]
+    pub exec: ExecProjection,
 }
 
 impl Default for SandboxProjection {
     fn default() -> Self {
-        Self { fs: FsPolicy::default(), net: true }
+        Self {
+            fs: FsProjection::default(),
+            net: true,
+            exec: ExecProjection::default(),
+        }
     }
 }
 
@@ -119,24 +272,35 @@ pub struct SandboxCheckSpec {
 }
 
 impl SandboxProjection {
+    /// Lexical-form bind spec for the OS profile renderer.  Returns an
+    /// empty spec when fs is `Unrestricted` — the renderer should not
+    /// emit per-prefix rules in that case (it emits broad allows).
     pub fn bind_spec(&self) -> SandboxBindSpec {
+        let Some(fs) = self.fs.as_policy() else {
+            return SandboxBindSpec::default();
+        };
         SandboxBindSpec {
-            read_prefixes: unique_strings(self.fs.read_prefixes.iter().cloned()),
-            write_prefixes: unique_strings(self.fs.write_prefixes.iter().cloned()),
-            deny_paths: unique_strings(self.fs.deny_paths.iter().cloned()),
+            read_prefixes: unique_strings(fs.read_prefixes.iter().cloned()),
+            write_prefixes: unique_strings(fs.write_prefixes.iter().cloned()),
+            deny_paths: unique_strings(fs.deny_paths.iter().cloned()),
         }
     }
 
+    /// Resolver-form check spec for in-ral fs decisions.  Same shape as
+    /// `bind_spec` and same `Unrestricted` → empty rule.
     pub fn check_spec(&self, shell: &Shell) -> SandboxCheckSpec {
+        let Some(fs) = self.fs.as_policy() else {
+            return SandboxCheckSpec::default();
+        };
         let resolve = |prefixes: &[String]| -> Vec<String> {
             unique_strings(prefixes.iter().map(|p| {
                 shell.dynamic.resolver().check(p).to_string_lossy().into_owned()
             }))
         };
         SandboxCheckSpec {
-            read_prefixes: resolve(&self.fs.read_prefixes),
-            write_prefixes: resolve(&self.fs.write_prefixes),
-            deny_paths: resolve(&self.fs.deny_paths),
+            read_prefixes: resolve(&fs.read_prefixes),
+            write_prefixes: resolve(&fs.write_prefixes),
+            deny_paths: resolve(&fs.deny_paths),
         }
     }
 }
@@ -174,10 +338,13 @@ pub struct ShellPolicy {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawCapabilities {
+    /// Unified exec map.  Keys are either bare command names, absolute
+    /// literal paths, or absolute subpath prefixes (trailing `/`).
+    /// See [`ExecPolicy`] for the lattice.  Subpath keys may carry
+    /// sigils (`xdg:bin/`, `~/.cargo/bin/`, `cwd:/`) which are
+    /// resolved by [`Self::freeze`].
     #[serde(default)]
     pub exec: Option<BTreeMap<String, ExecPolicy>>,
-    #[serde(default)]
-    pub exec_dirs: Option<Vec<String>>,
     #[serde(default)]
     pub fs: Option<FsPolicy>,
     #[serde(default)]
@@ -207,10 +374,9 @@ pub struct RawCapabilities {
 /// XDG-escapes-HOME guard.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capabilities {
+    /// Unified exec map.  See [`RawCapabilities::exec`].
     #[serde(default)]
     pub exec: Option<BTreeMap<String, ExecPolicy>>,
-    #[serde(default)]
-    pub exec_dirs: Option<Vec<String>>,
     #[serde(default)]
     pub fs: Option<FsPolicy>,
     #[serde(default)]
@@ -237,7 +403,6 @@ impl Capabilities {
     pub fn deny_all() -> Self {
         Self {
             exec: Some(BTreeMap::new()),
-            exec_dirs: Some(Vec::new()),
             fs: Some(FsPolicy::default()),
             net: Some(false),
             editor: Some(EditorPolicy::default()),
@@ -250,7 +415,6 @@ impl Capabilities {
     /// root.
     pub fn is_restrictive(&self) -> bool {
         self.exec.is_some()
-            || self.exec_dirs.is_some()
             || self.fs.is_some()
             || self.net.is_some()
             || self.editor.is_some()
@@ -264,7 +428,6 @@ impl RawCapabilities {
     pub fn deny_all() -> Self {
         Self {
             exec: Some(BTreeMap::new()),
-            exec_dirs: Some(Vec::new()),
             fs: Some(FsPolicy::default()),
             net: Some(false),
             editor: Some(EditorPolicy::default()),
@@ -276,22 +439,35 @@ impl RawCapabilities {
     /// True for a real attenuation context, false for ambient root.
     pub fn is_restrictive(&self) -> bool {
         self.exec.is_some()
-            || self.exec_dirs.is_some()
             || self.fs.is_some()
             || self.net.is_some()
             || self.editor.is_some()
             || self.shell.is_some()
     }
 
-    /// Reject unknown `xdg:` tokens in any path list.  Pure
-    /// syntactic check; cheap, no env or filesystem access.
-    /// Production loaders should call [`Self::freeze`], which
-    /// subsumes this check and resolves the tokens to concrete
-    /// paths under `home`.
+    /// Reject unknown `xdg:` tokens in any path list, and reject any
+    /// subpath-style exec key (`/path/to/dir/`) carrying a non-`Allow`
+    /// policy.  Pure syntactic check; cheap, no env or filesystem
+    /// access.  Production loaders should call [`Self::freeze`], which
+    /// subsumes this check and resolves the tokens to concrete paths
+    /// under `home`.
     pub fn validate_paths(&self) -> Result<(), String> {
         use crate::path::sigil::validate_xdg_tokens;
-        if let Some(dirs) = &self.exec_dirs {
-            validate_xdg_tokens(dirs)?;
+        if let Some(exec) = &self.exec {
+            // Sigil-bearing keys (xdg:, ~, cwd:, tempdir:) are the only
+            // exec-map entries that need xdg validation; literal names
+            // like `git` carry no sigils.  Easiest: validate the whole
+            // key set — `validate_xdg_tokens` no-ops on non-sigil keys.
+            let keys: Vec<String> = exec.keys().cloned().collect();
+            validate_xdg_tokens(&keys)?;
+            for (key, policy) in exec {
+                if is_subpath_key(key) && matches!(policy, ExecPolicy::Subcommands(_)) {
+                    return Err(format!(
+                        "exec subpath key '{key}' may carry 'Allow' or 'Deny'; \
+                         'Subcommands' is name-shaped and requires a literal key"
+                    ));
+                }
+            }
         }
         if let Some(fs) = &self.fs {
             validate_xdg_tokens(&fs.read_prefixes)?;
@@ -315,8 +491,8 @@ impl RawCapabilities {
     /// and `tempdir:` against `std::env::temp_dir()`.
     pub fn freeze(mut self, ctx: &crate::path::sigil::FreezeCtx<'_>) -> Result<Capabilities, String> {
         use crate::path::sigil::freeze_path_list;
-        if let Some(dirs) = self.exec_dirs.as_deref_mut() {
-            freeze_path_list(dirs, ctx)?;
+        if let Some(exec) = self.exec.as_mut() {
+            *exec = freeze_exec_map(std::mem::take(exec), ctx)?;
         }
         if let Some(fs) = self.fs.as_mut() {
             freeze_path_list(&mut fs.read_prefixes, ctx)?;
@@ -325,7 +501,6 @@ impl RawCapabilities {
         }
         Ok(Capabilities {
             exec: self.exec,
-            exec_dirs: self.exec_dirs,
             fs: self.fs,
             net: self.net,
             audit: self.audit,
@@ -346,16 +521,21 @@ impl RawCapabilities {
     /// `audit` is not part of the lattice: it propagates upward
     /// (logical OR).
     pub fn meet(self, other: Self) -> Self {
+        // Per-field meets via the lattice trait (Option<T>: Meet does
+        // the None-as-identity lift; bool, FsPolicy, EditorPolicy,
+        // ShellPolicy each impl Meet directly).  The exec map needs
+        // shape-aware partitioning for subpath keys, so it goes through
+        // the local `meet_exec` helper rather than the trait.
         Self {
-            exec:      combine_opt(self.exec,      other.exec,      meet_exec),
-            exec_dirs: combine_opt(self.exec_dirs, other.exec_dirs, |a, b| {
-                intersect_prefix_strings(&a, &b)
-            }),
-            fs:        combine_opt(self.fs,        other.fs,        meet_fs),
-            net:       combine_opt(self.net,       other.net,       |a, b| a && b),
-            editor:    combine_opt(self.editor,    other.editor,    meet_editor),
-            shell:     combine_opt(self.shell,     other.shell,     meet_shell),
-            audit:     self.audit || other.audit,
+            exec:   match (self.exec, other.exec) {
+                (None, x) | (x, None) => x,
+                (Some(a), Some(b)) => Some(meet_exec(a, b)),
+            },
+            fs:     self.fs.meet(other.fs),
+            net:    self.net.meet(other.net),
+            editor: self.editor.meet(other.editor),
+            shell:  self.shell.meet(other.shell),
+            audit:  self.audit || other.audit,
         }
     }
 
@@ -369,42 +549,208 @@ impl RawCapabilities {
     /// shell), and intersect (`fs.deny_paths` — fewer denies =
     /// more authority).
     pub fn join(self, other: Self) -> Self {
+        // Per-field joins via the lattice trait — symmetric to `meet`.
         Self {
-            exec:      combine_opt(self.exec,      other.exec,      join_exec),
-            exec_dirs: combine_opt(self.exec_dirs, other.exec_dirs, union_prefix_strings),
-            fs:        combine_opt(self.fs,        other.fs,        join_fs),
-            net:       combine_opt(self.net,       other.net,       |a, b| a || b),
-            editor:    combine_opt(self.editor,    other.editor,    join_editor),
-            shell:     combine_opt(self.shell,     other.shell,     join_shell),
-            audit:     self.audit || other.audit,
+            exec:   match (self.exec, other.exec) {
+                (None, x) | (x, None) => x,
+                (Some(a), Some(b)) => Some(join_exec(a, b)),
+            },
+            fs:     self.fs.join(other.fs),
+            net:    self.net.join(other.net),
+            editor: self.editor.join(other.editor),
+            shell:  self.shell.join(other.shell),
+            audit:  self.audit || other.audit,
         }
     }
 }
 
-/// `None` is the identity for `f`: if either side has no opinion the other
-/// survives; if both do, combine with `f`.
-fn combine_opt<T>(a: Option<T>, b: Option<T>, f: impl FnOnce(T, T) -> T) -> Option<T> {
-    match (a, b) {
-        (None, None) => None,
-        (None, Some(x)) | (Some(x), None) => Some(x),
-        (Some(a), Some(b)) => Some(f(a, b)),
+/// True if `key` is a subpath-style exec map key — an absolute path
+/// ending in `/` (or a sigil that resolves to such a path).  Bare
+/// command names and absolute literal paths return false.
+pub fn is_subpath_key(key: &str) -> bool {
+    key.ends_with('/')
+}
+
+/// Freeze sigils in exec map keys.  Both subpath keys (`xdg:bin/`,
+/// `~/.cargo/bin/`, `cwd:/`) and literal-path keys may carry sigils;
+/// the trailing `/` survives expansion.  Bare command names
+/// (`git`, `kubectl`) are passed through unchanged — they're not paths.
+fn freeze_exec_map(
+    map: BTreeMap<String, ExecPolicy>,
+    ctx: &crate::path::sigil::FreezeCtx<'_>,
+) -> Result<BTreeMap<String, ExecPolicy>, String> {
+    use crate::path::sigil::{freeze_path_list, looks_like_path_or_sigil};
+    let mut out = BTreeMap::new();
+    for (key, policy) in map {
+        if looks_like_path_or_sigil(&key) {
+            let trailing_slash = key.ends_with('/');
+            let mut singleton = vec![key.trim_end_matches('/').to_string()];
+            freeze_path_list(&mut singleton, ctx)?;
+            let mut frozen = singleton.into_iter().next().unwrap();
+            if trailing_slash && !frozen.ends_with('/') {
+                frozen.push('/');
+            }
+            out.insert(frozen, policy);
+        } else {
+            out.insert(key, policy);
+        }
+    }
+    Ok(out)
+}
+
+// ── Lattice impls ─────────────────────────────────────────────────────────
+//
+// One impl per lattice type, both Meet and Join.  Map-level meets/joins
+// (over the unified exec map) live below as free fns because they need
+// the partition-by-shape that the per-element trait can't see.
+
+impl Meet for ExecPolicy {
+    fn meet(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Deny, _) | (_, Self::Deny) => Self::Deny,
+            (Self::Allow, Self::Allow) => Self::Allow,
+            (Self::Allow, Self::Subcommands(s)) | (Self::Subcommands(s), Self::Allow) => {
+                Self::Subcommands(unique_strings(s))
+            }
+            (Self::Subcommands(s1), Self::Subcommands(s2)) => {
+                Self::Subcommands(unique_strings(s1.into_iter().filter(|x| s2.contains(x))))
+            }
+        }
     }
 }
 
-/// Intersect two exec maps.  Allow-sided keys survive only when
-/// present in both sides (per-command policies meet).  `Deny`
-/// entries are sticky: a `Deny` on either side propagates into the
-/// result even if the other side does not list the name, so a base
-/// ceiling's veto cannot be lost when a restrict file fails to
-/// repeat it.
+impl Join for ExecPolicy {
+    fn join(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Allow, _) | (_, Self::Allow) => Self::Allow,
+            (Self::Deny, p) | (p, Self::Deny) => p,
+            (Self::Subcommands(s1), Self::Subcommands(s2)) => {
+                Self::Subcommands(unique_strings(s1.into_iter().chain(s2)))
+            }
+        }
+    }
+}
+
+impl Meet for FsPolicy {
+    fn meet(self, other: Self) -> Self {
+        Self {
+            read_prefixes: intersect_prefix_strings(&self.read_prefixes, &other.read_prefixes),
+            write_prefixes: intersect_prefix_strings(&self.write_prefixes, &other.write_prefixes),
+            deny_paths: unique_strings(self.deny_paths.into_iter().chain(other.deny_paths)),
+        }
+    }
+}
+
+impl Join for FsPolicy {
+    fn join(self, other: Self) -> Self {
+        Self {
+            read_prefixes: union_prefix_strings(self.read_prefixes, other.read_prefixes),
+            write_prefixes: union_prefix_strings(self.write_prefixes, other.write_prefixes),
+            deny_paths: self.deny_paths.into_iter().filter(|p| other.deny_paths.contains(p)).collect(),
+        }
+    }
+}
+
+impl Meet for EditorPolicy {
+    fn meet(self, other: Self) -> Self {
+        Self {
+            read: self.read.meet(other.read),
+            write: self.write.meet(other.write),
+            tui: self.tui.meet(other.tui),
+        }
+    }
+}
+
+impl Join for EditorPolicy {
+    fn join(self, other: Self) -> Self {
+        Self {
+            read: self.read.join(other.read),
+            write: self.write.join(other.write),
+            tui: self.tui.join(other.tui),
+        }
+    }
+}
+
+impl Meet for ShellPolicy {
+    fn meet(self, other: Self) -> Self {
+        Self { chdir: self.chdir.meet(other.chdir) }
+    }
+}
+
+impl Join for ShellPolicy {
+    fn join(self, other: Self) -> Self {
+        Self { chdir: self.chdir.join(other.chdir) }
+    }
+}
+
+/// Meet two unified exec maps.  Literal halves (bare names, absolute
+/// literal paths) follow per-key meet — Allow keys must be on both
+/// sides, `Deny` is sticky.  Subpath halves follow prefix meet —
+/// deeper prefix wins on overlap.
+///
+/// Not a `Meet for BTreeMap<…>` blanket impl because the "absent key"
+/// rule (Deny propagation) is exec-specific; other map uses of meet
+/// would want different behaviour.
 fn meet_exec(
+    a: BTreeMap<String, ExecPolicy>,
+    b: BTreeMap<String, ExecPolicy>,
+) -> BTreeMap<String, ExecPolicy> {
+    let (a_lit, a_sub) = partition_exec(a);
+    let (b_lit, b_sub) = partition_exec(b);
+    let mut out = meet_literal_exec(a_lit, b_lit);
+    let a_paths: Vec<String> = a_sub.keys().cloned().collect();
+    let b_paths: Vec<String> = b_sub.keys().cloned().collect();
+    for path in intersect_prefix_strings(&a_paths, &b_paths) {
+        out.insert(path, ExecPolicy::Allow);
+    }
+    out
+}
+
+/// Join over the unified exec map — symmetric counterpart to `meet_exec`.
+fn join_exec(
+    a: BTreeMap<String, ExecPolicy>,
+    b: BTreeMap<String, ExecPolicy>,
+) -> BTreeMap<String, ExecPolicy> {
+    let (a_lit, a_sub) = partition_exec(a);
+    let (b_lit, b_sub) = partition_exec(b);
+    let mut out = join_literal_exec(a_lit, b_lit);
+    let a_paths: Vec<String> = a_sub.keys().cloned().collect();
+    let b_paths: Vec<String> = b_sub.keys().cloned().collect();
+    for path in union_prefix_strings(a_paths, b_paths) {
+        out.insert(path, ExecPolicy::Allow);
+    }
+    out
+}
+
+fn partition_exec(
+    map: BTreeMap<String, ExecPolicy>,
+) -> (BTreeMap<String, ExecPolicy>, BTreeMap<String, ExecPolicy>) {
+    let mut literal = BTreeMap::new();
+    let mut subpath = BTreeMap::new();
+    for (k, v) in map {
+        if is_subpath_key(&k) {
+            subpath.insert(k, v);
+        } else {
+            literal.insert(k, v);
+        }
+    }
+    (literal, subpath)
+}
+
+/// Per-name meet over the literal half of an exec map.  Allow-sided
+/// keys must appear on both sides (uses `ExecPolicy::meet`); `Deny`
+/// propagates from either side even when absent on the other.
+///
+/// Exposed crate-wide so projection-time reduction (which has already
+/// partitioned subpath keys) doesn't have to re-implement it.
+pub(crate) fn meet_literal_exec(
     a: BTreeMap<String, ExecPolicy>,
     b: BTreeMap<String, ExecPolicy>,
 ) -> BTreeMap<String, ExecPolicy> {
     let mut out = BTreeMap::new();
     for (name, pa) in &a {
         match b.get(name) {
-            Some(pb) => { out.insert(name.clone(), meet_exec_policy(pa.clone(), pb.clone())); }
+            Some(pb) => { out.insert(name.clone(), pa.clone().meet(pb.clone())); }
             None if matches!(pa, ExecPolicy::Deny) => { out.insert(name.clone(), ExecPolicy::Deny); }
             None => {}
         }
@@ -418,37 +764,32 @@ fn meet_exec(
     out
 }
 
-fn meet_exec_policy(a: ExecPolicy, b: ExecPolicy) -> ExecPolicy {
-    match (a, b) {
-        (ExecPolicy::Deny, _) | (_, ExecPolicy::Deny) => ExecPolicy::Deny,
-        (ExecPolicy::Allow, ExecPolicy::Allow) => ExecPolicy::Allow,
-        (ExecPolicy::Allow, ExecPolicy::Subcommands(s))
-        | (ExecPolicy::Subcommands(s), ExecPolicy::Allow) => {
-            ExecPolicy::Subcommands(unique_strings(s))
-        }
-        (ExecPolicy::Subcommands(s1), ExecPolicy::Subcommands(s2)) => {
-            ExecPolicy::Subcommands(unique_strings(s1.into_iter().filter(|x| s2.contains(x))))
+fn join_literal_exec(
+    a: BTreeMap<String, ExecPolicy>,
+    b: BTreeMap<String, ExecPolicy>,
+) -> BTreeMap<String, ExecPolicy> {
+    let mut out = BTreeMap::new();
+    for (name, pa) in &a {
+        match b.get(name) {
+            Some(pb) => { out.insert(name.clone(), pa.clone().join(pb.clone())); }
+            None if !matches!(pa, ExecPolicy::Deny) => { out.insert(name.clone(), pa.clone()); }
+            None => {}
         }
     }
-}
-
-/// Intersect read & write prefix sets; union deny_paths.
-fn meet_fs(a: FsPolicy, b: FsPolicy) -> FsPolicy {
-    FsPolicy {
-        read_prefixes:  intersect_prefix_strings(&a.read_prefixes,  &b.read_prefixes),
-        write_prefixes: intersect_prefix_strings(&a.write_prefixes, &b.write_prefixes),
-        deny_paths:     unique_strings(a.deny_paths.into_iter().chain(b.deny_paths)),
+    for (name, pb) in &b {
+        if a.contains_key(name) { continue; }
+        if !matches!(pb, ExecPolicy::Deny) {
+            out.insert(name.clone(), pb.clone());
+        }
     }
+    out
 }
 
-/// Prefix-set intersection: keep the deeper prefix from each overlapping pair.
-///
-/// Lexical-only: this lattice operation runs without a `Dynamic`, so it
-/// cannot canonicalise paths.  Two layers that name the same directory
-/// through different symlinks (`/tmp` vs `/private/tmp`) will not be
-/// recognised as overlapping here.  The runtime fold in
-/// `capability::prefix::intersect_grant_paths` does symlink-aware overlap
-/// when reducing the dynamic stack at sandbox-render time.
+/// Prefix-set intersection: keep the deeper prefix from each
+/// overlapping pair.  Lexical-only (no symlink resolution); the
+/// runtime fold in `capability::prefix::intersect_grant_paths` does
+/// symlink-aware overlap when reducing the dynamic stack at
+/// sandbox-render time.
 fn intersect_prefix_strings(a: &[String], b: &[String]) -> Vec<String> {
     fn within(p: &str, q: &str) -> bool {
         crate::path::path_within(std::path::Path::new(p), std::path::Path::new(q))
@@ -463,69 +804,8 @@ fn intersect_prefix_strings(a: &[String], b: &[String]) -> Vec<String> {
     unique_strings(out)
 }
 
-fn meet_editor(a: EditorPolicy, b: EditorPolicy) -> EditorPolicy {
-    EditorPolicy { read: a.read && b.read, write: a.write && b.write, tui: a.tui && b.tui }
-}
-
-fn meet_shell(a: ShellPolicy, b: ShellPolicy) -> ShellPolicy {
-    ShellPolicy { chdir: a.chdir && b.chdir }
-}
-
-/// Union two exec maps: allow-sided commands from either side
-/// survive; shared commands have their policies joined.  `Deny`
-/// only survives when both sides agree to deny — a one-sided veto
-/// is dominated by the other side's authority and is dropped from
-/// the join.
-fn join_exec(
-    a: BTreeMap<String, ExecPolicy>,
-    b: BTreeMap<String, ExecPolicy>,
-) -> BTreeMap<String, ExecPolicy> {
-    let mut out = BTreeMap::new();
-    for (name, pa) in &a {
-        match b.get(name) {
-            Some(pb) => { out.insert(name.clone(), join_exec_policy(pa.clone(), pb.clone())); }
-            None if !matches!(pa, ExecPolicy::Deny) => { out.insert(name.clone(), pa.clone()); }
-            None => {}
-        }
-    }
-    for (name, pb) in &b {
-        if a.contains_key(name) { continue; }
-        if !matches!(pb, ExecPolicy::Deny) {
-            out.insert(name.clone(), pb.clone());
-        }
-    }
-    out
-}
-
-fn join_exec_policy(a: ExecPolicy, b: ExecPolicy) -> ExecPolicy {
-    match (a, b) {
-        (ExecPolicy::Allow, _) | (_, ExecPolicy::Allow) => ExecPolicy::Allow,
-        (ExecPolicy::Deny, p) | (p, ExecPolicy::Deny) => p,
-        (ExecPolicy::Subcommands(s1), ExecPolicy::Subcommands(s2)) => {
-            ExecPolicy::Subcommands(unique_strings(s1.into_iter().chain(s2)))
-        }
-    }
-}
-
-/// Union read & write prefix sets; intersect deny_paths.
-fn join_fs(a: FsPolicy, b: FsPolicy) -> FsPolicy {
-    FsPolicy {
-        read_prefixes:  union_prefix_strings(a.read_prefixes,  b.read_prefixes),
-        write_prefixes: union_prefix_strings(a.write_prefixes, b.write_prefixes),
-        deny_paths:     a.deny_paths.into_iter().filter(|p| b.deny_paths.contains(p)).collect(),
-    }
-}
-
 fn union_prefix_strings(a: Vec<String>, b: Vec<String>) -> Vec<String> {
     unique_strings(a.into_iter().chain(b))
-}
-
-fn join_editor(a: EditorPolicy, b: EditorPolicy) -> EditorPolicy {
-    EditorPolicy { read: a.read || b.read, write: a.write || b.write, tui: a.tui || b.tui }
-}
-
-fn join_shell(a: ShellPolicy, b: ShellPolicy) -> ShellPolicy {
-    ShellPolicy { chdir: a.chdir || b.chdir }
 }
 
 // ── Lattice tests ─────────────────────────────────────────────────────────
@@ -533,13 +813,44 @@ fn join_shell(a: ShellPolicy, b: ShellPolicy) -> ShellPolicy {
 mod lattice_tests {
     use super::*;
 
+    // ── Generic lifts: Option<T> and bool ────────────────────────────────
+
+    #[test]
+    fn option_meet_treats_none_as_top() {
+        assert_eq!(Some(true).meet(None), Some(true));
+        assert_eq!(None::<bool>.meet(Some(false)), Some(false));
+        assert_eq!(None::<bool>.meet(None), None);
+    }
+
+    #[test]
+    fn option_join_treats_none_as_identity() {
+        assert_eq!(Some(false).join(None), Some(false));
+        assert_eq!(None::<bool>.join(Some(true)), Some(true));
+    }
+
+    #[test]
+    fn bool_meet_is_and() {
+        assert!(!true.meet(false));
+        assert!(true.meet(true));
+        assert!(!false.meet(false));
+    }
+
+    #[test]
+    fn bool_join_is_or() {
+        assert!(true.join(false));
+        assert!(true.join(true));
+        assert!(!false.join(false));
+    }
+
+    // ── RawCapabilities lattice properties ───────────────────────────────
+
     fn witness_a() -> RawCapabilities {
         RawCapabilities {
             exec: Some(BTreeMap::from([
                 ("cargo".into(), ExecPolicy::Allow),
                 ("git".into(), ExecPolicy::Subcommands(vec!["log".into(), "status".into()])),
+                ("/usr/bin/".into(), ExecPolicy::Allow),
             ])),
-            exec_dirs: Some(vec!["/usr/bin".into()]),
             fs: Some(FsPolicy {
                 read_prefixes: vec!["/tmp".into()],
                 write_prefixes: vec!["/tmp".into()],
@@ -557,8 +868,9 @@ mod lattice_tests {
             exec: Some(BTreeMap::from([
                 ("cargo".into(), ExecPolicy::Subcommands(vec!["build".into()])),
                 ("ls".into(), ExecPolicy::Allow),
+                ("/usr/bin/".into(), ExecPolicy::Allow),
+                ("/usr/local/bin/".into(), ExecPolicy::Allow),
             ])),
-            exec_dirs: Some(vec!["/usr/bin".into(), "/usr/local/bin".into()]),
             fs: Some(FsPolicy {
                 read_prefixes: vec!["/tmp/work".into()],
                 write_prefixes: vec!["/tmp/work".into()],
@@ -574,7 +886,6 @@ mod lattice_tests {
     fn witness_c() -> RawCapabilities {
         RawCapabilities {
             exec: Some(BTreeMap::from([("cargo".into(), ExecPolicy::Allow)])),
-            exec_dirs: None,
             fs: Some(FsPolicy {
                 read_prefixes: vec!["/tmp".into()],
                 write_prefixes: Vec::new(),
@@ -623,7 +934,6 @@ mod lattice_tests {
         let a = witness_a();
         let m = a.meet(RawCapabilities::deny_all());
         assert!(m.exec.expect("exec retained").is_empty());
-        assert!(m.exec_dirs.expect("exec_dirs retained").is_empty());
         let fs = m.fs.expect("fs retained");
         assert!(fs.read_prefixes.is_empty());
         assert!(fs.write_prefixes.is_empty());
@@ -637,12 +947,18 @@ mod lattice_tests {
     fn meet_exec_intersects_and_meets_policies() {
         let m = witness_a().meet(witness_b());
         let exec = m.exec.unwrap();
-        assert_eq!(exec.len(), 1);
+        // Literal half: cargo is shared (Subcommands meet), git/ls are
+        // one-sided so drop.  Subpath half: /usr/bin/ is shared,
+        // /usr/local/bin/ is one-sided so drops.
         assert!(exec.contains_key("cargo"));
         match exec.get("cargo").unwrap() {
             ExecPolicy::Subcommands(s) => assert_eq!(s, &vec!["build".to_string()]),
             other => panic!("unexpected: {other:?}"),
         }
+        assert!(!exec.contains_key("git"));
+        assert!(!exec.contains_key("ls"));
+        assert!(exec.contains_key("/usr/bin/"));
+        assert!(!exec.contains_key("/usr/local/bin/"));
     }
 
     /// `Deny` is sticky downward: a base ceiling that vetos `bash`
@@ -767,7 +1083,10 @@ mod lattice_tests {
     #[test]
     fn validate_paths_accepts_known_tokens() {
         let caps = RawCapabilities {
-            exec_dirs: Some(vec!["xdg:bin".into(), "/usr/bin".into()]),
+            exec: Some(BTreeMap::from([
+                ("xdg:bin/".into(), ExecPolicy::Allow),
+                ("/usr/bin/".into(), ExecPolicy::Allow),
+            ])),
             fs: Some(FsPolicy {
                 read_prefixes: vec![
                     "xdg:config".into(),
@@ -807,7 +1126,10 @@ mod lattice_tests {
     #[test]
     fn freeze_rewrites_sigils_to_concrete_paths() {
         let raw = RawCapabilities {
-            exec_dirs: Some(vec!["xdg:bin".into(), "/usr/bin".into()]),
+            exec: Some(BTreeMap::from([
+                ("xdg:bin/".into(), ExecPolicy::Allow),
+                ("/usr/bin/".into(), ExecPolicy::Allow),
+            ])),
             fs: Some(FsPolicy {
                 read_prefixes: vec!["~/notes".into(), "/etc".into()],
                 ..Default::default()
@@ -822,9 +1144,11 @@ mod lattice_tests {
         if let Some(v) = prev {
             unsafe { std::env::set_var("XDG_BIN_HOME", v) };
         }
-        let dirs = caps.exec_dirs.unwrap();
-        assert_eq!(dirs[0], "/h/.local/bin");
-        assert_eq!(dirs[1], "/usr/bin");
+        // Subpath keys preserve the trailing `/` after sigil expansion,
+        // so the in-ral matcher still recognises them as subpaths.
+        let exec = caps.exec.unwrap();
+        assert!(exec.contains_key("/h/.local/bin/"));
+        assert!(exec.contains_key("/usr/bin/"));
         let reads = caps.fs.unwrap().read_prefixes;
         assert_eq!(reads[0], "/h/notes");
         assert_eq!(reads[1], "/etc");

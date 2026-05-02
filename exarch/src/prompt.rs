@@ -63,12 +63,13 @@ fn render(sections: &[(Option<&str>, String)]) -> String {
 fn grant_summary(caps: &Capabilities, scratch: &Path) -> String {
     let mut s = String::new();
     s.push_str(&format!("- exec: {}\n", exec_line(caps)));
+    let dirs = exec_dirs_line(caps);
+    if !dirs.is_empty() {
+        s.push_str(&format!("- exec dirs: {dirs}\n"));
+    }
     let denies = exec_denies(caps);
     if !denies.is_empty() {
         s.push_str(&format!("- exec deny: {}\n", denies.join(", ")));
-    }
-    if let Some(dirs) = &caps.exec_dirs {
-        s.push_str(&format!("- exec dirs: {}\n", or_none(dirs)));
     }
     if let Some(fs) = &caps.fs {
         s.push_str(&format!("- fs read: {}\n",  or_none(&fs.read_prefixes)));
@@ -88,20 +89,38 @@ fn grant_summary(caps: &Capabilities, scratch: &Path) -> String {
 
 /// Per-command exec policy as `name` or `name[sub1,sub2,...]`,
 /// comma-joined.  `None` (no exec map) is "unrestricted"; empty map
-/// (or one with only `Deny` entries) is "(none)".  `Deny` entries
-/// are surfaced separately by [`exec_denies`].
+/// (or one with only `Deny`/subpath entries) is "(none)".  Subpath
+/// keys (trailing `/`) are surfaced separately by [`exec_dirs_line`];
+/// `Deny` entries by [`exec_denies`].
 fn exec_line(caps: &Capabilities) -> String {
     let Some(m) = &caps.exec else { return "unrestricted".into() };
-    let admitted: Vec<String> = m.iter().filter_map(|(name, pol)| match pol {
-        ExecPolicy::Allow             => Some(name.clone()),
-        ExecPolicy::Subcommands(subs) => Some(format!("{name}[{}]", subs.join(","))),
-        ExecPolicy::Deny              => None,
+    let admitted: Vec<String> = m.iter().filter_map(|(name, pol)| {
+        if ral_core::types::is_subpath_key(name) { return None; }
+        match pol {
+            ExecPolicy::Allow             => Some(name.clone()),
+            ExecPolicy::Subcommands(subs) => Some(format!("{name}[{}]", subs.join(","))),
+            ExecPolicy::Deny              => None,
+        }
     }).collect();
     if admitted.is_empty() { "(none)".into() } else { admitted.join(", ") }
 }
 
-/// Names with an explicit `Deny` policy — vetoed even if `exec_dirs`
-/// would admit their resolved path.
+/// Subpath admittances inside the unified exec map — keys ending in
+/// `/`, comma-joined.  Empty when no subpath entries are present.
+fn exec_dirs_line(caps: &Capabilities) -> String {
+    caps.exec.as_ref().map_or_else(String::new, |m| {
+        let dirs: Vec<&str> = m
+            .keys()
+            .filter(|k| ral_core::types::is_subpath_key(k))
+            .map(String::as_str)
+            .collect();
+        dirs.join(", ")
+    })
+}
+
+/// Names with an explicit `Deny` policy — vetoed even when a subpath
+/// admittance elsewhere in the same map would otherwise admit the
+/// resolved path.
 fn exec_denies(caps: &Capabilities) -> Vec<String> {
     caps.exec.as_ref().map_or_else(Vec::new, |m| {
         m.iter()

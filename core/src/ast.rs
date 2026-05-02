@@ -80,6 +80,23 @@ pub enum Ast {
     Map(Vec<MapEntry>),
     /// String interpolation: "hello $name"
     Interpolation(Vec<Ast>),
+    /// Variant constructor: `.label` (nullary) or `.label payload` where the
+    /// payload is the next adjacent atom.  The `label` is stored without its
+    /// leading dot.  Tag-keyed record entries are *not* `Ast::Tag` — they go
+    /// through `Ast::Map` with keys `Ast::Literal(".label")`.
+    Tag {
+        label: String,
+        payload: Option<Box<Ast>>,
+    },
+    /// Sum eliminator: `case <scrutinee> [.l₁: h₁, …, .lₙ: hₙ]`.  The
+    /// `table` is required to be a tag-keyed record literal whose values
+    /// are handler thunks (`{ |x| body }`).  Type-checking and the runtime
+    /// connect the scrutinee's variant row to the handler row label by
+    /// label.
+    Case {
+        scrutinee: Box<Ast>,
+        table: Box<Ast>,
+    },
     /// Expression block: $[expr]
     Expr(Box<Expr>),
     /// Indexing: $name[k1][k2]
@@ -320,6 +337,15 @@ impl Ast {
             }
             Ast::Background(inner) | Ast::Force(inner) => {
                 inner.collect_free_refs(candidates, scopes, out);
+            }
+            Ast::Tag { payload, .. } => {
+                if let Some(p) = payload {
+                    p.collect_free_refs(candidates, scopes, out);
+                }
+            }
+            Ast::Case { scrutinee, table } => {
+                scrutinee.collect_free_refs(candidates, scopes, out);
+                table.collect_free_refs(candidates, scopes, out);
             }
             Ast::Expr(expr) => {
                 expr.collect_free_refs(candidates, scopes, out);

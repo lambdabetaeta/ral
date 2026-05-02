@@ -14,6 +14,8 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use super::process_cwd;
+
 /// Bidirectional firmlink/symlink pairs the kernel substitutes
 /// transparently: a path under `a` and the same path under `b`
 /// denote the same file.  macOS-only — empty elsewhere so
@@ -87,7 +89,7 @@ pub fn resolve_path(cwd: Option<&Path>, path: &str) -> PathBuf {
         input
     } else if let Some(cwd) = cwd {
         cwd.join(input)
-    } else if let Ok(cwd) = std::env::current_dir() {
+    } else if let Some(cwd) = process_cwd() {
         cwd.join(input)
     } else {
         PathBuf::from(path)
@@ -111,6 +113,29 @@ pub fn resolve_path(cwd: Option<&Path>, path: &str) -> PathBuf {
     } else {
         normalized
     }
+}
+
+/// Proper ancestors of `paths`, dedup'd, root excluded.  For each
+/// input path, walk `Path::ancestors()` upward stopping above `/` and
+/// collect every intermediate directory.  Output is sorted (BTreeSet
+/// iteration order) and free of duplicates across inputs.
+///
+/// Used by the macOS Seatbelt builder to emit `file-read-metadata`
+/// allows on the parents of each grant prefix (Seatbelt checks
+/// parent-directory metadata during path lookup).  Generic enough to
+/// live next to the path lattice rather than alongside the SBPL
+/// renderer.
+pub fn proper_ancestors<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for path in paths {
+        for ancestor in Path::new(path).ancestors().skip(1) {
+            if ancestor == Path::new("/") || ancestor.as_os_str().is_empty() {
+                break;
+            }
+            out.insert(ancestor.to_string_lossy().into_owned());
+        }
+    }
+    out.into_iter().collect()
 }
 
 #[cfg(test)]

@@ -22,7 +22,9 @@
 //!   from parent into child on `inherit_from`, and moved back on
 //!   `return_to`.  This is intentional: while the child is running the
 //!   parent must not see the editor scratch.  `pending_chpwd` is
-//!   fresh-on-child.
+//!   fresh-on-child and *flows back* on `return_to` if the child queued
+//!   one — `cd` inside a thunk is a real process-state change, and the
+//!   REPL must fire `chpwd` for it just like it does for top-level cd.
 //! - **Thread spawn (TS)**: neither field flows.  Spawned threads have
 //!   no editor; `ReplScratch::default()` is fine.
 //! - **Sandbox IPC**: not transmitted; sandbox children get a fresh

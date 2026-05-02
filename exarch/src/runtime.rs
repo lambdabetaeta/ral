@@ -3,13 +3,15 @@
 //! REPL above just calls `run_task` once per user line.
 
 use crate::api::{self, Provider, Step, StepOut, ToolCall, Usage};
-use crate::{cancel, eval, ui};
+use crate::ui::{self, UiEvent};
+use crate::{cancel, eval};
 use ral_core::io::TerminalState;
 use ral_core::{Shell, builtins, diagnostic};
 use std::fs;
 use std::hash::{DefaultHasher, Hasher};
 use std::io;
 use std::path::PathBuf;
+use std::sync::mpsc::Sender;
 
 const MAX_TURNS: usize = 40;
 
@@ -63,45 +65,49 @@ pub fn run_task(
     spill: &Spill,
     total: &mut Usage,
     prompt: String,
+    tx: &Sender<UiEvent>,
 ) -> Result<(Usage, bool), String> {
     cancel::clear();
     let mut task = Usage::default();
     let mut input = Step::User(prompt);
     for n in 1..=MAX_TURNS {
-        ui::turn(n);
-        let mut painter = ui::Streaming::new();
-        let step_out = provider.step(input, &mut |t: &str| painter.push(t));
+        ui::emit(tx, ui::turn(n));
+        let step_out = {
+            let tx_step = tx.clone();
+            provider.step(input, &mut |t: &str| { let _ = tx_step.send(UiEvent::Token(t.into())); })
+        };
+        let _ = tx.send(UiEvent::OpenBoundary);
         if cancel::is_set() {
-            return cancelled(provider, task);
+            return cancelled(provider, task, tx);
         }
         let StepOut { tool_calls, done, usage } = match step_out {
             Ok(s) => s,
-            Err(e) if api::is_cancelled(&e) => return cancelled(provider, task),
+            Err(e) if api::is_cancelled(&e) => return cancelled(provider, task, tx),
             Err(e) => return Err(e),
         };
         task += usage;
         *total += usage;
-        painter.finish();
+        let _ = tx.send(UiEvent::Cost(total.dollars));
         if tool_calls.is_empty() {
             return Ok((task, false));
         }
         let mut results = Vec::with_capacity(tool_calls.len());
         for ToolCall { id, cmd, audit } in tool_calls {
-            ui::tool_call(&cmd, audit);
-            match eval::run_shell(shell, caps, &cmd, audit) {
+            ui::emit(tx, ui::tool_call(&cmd, audit));
+            match eval::run_shell(shell, caps, &cmd, audit, tx) {
                 eval::Outcome::Ran(r) => {
                     // Audit JSON is large; the user sees a one-line node-
                     // count summary while the model gets the (capped) JSON.
-                    ui::tool_result(&format_for_display(&r));
+                    ui::emit(tx, ui::tool_result(&format_for_display(&r)));
                     results.push((id, format_for_history(&r, spill)));
                 }
                 eval::Outcome::Static(s) => {
-                    ui::tool_result(&s);
+                    ui::emit(tx, ui::tool_result(&s));
                     results.push((id, opaque_truncate(s, spill)));
                 }
             }
             if cancel::is_set() {
-                return cancelled(provider, task);
+                return cancelled(provider, task, tx);
             }
         }
         if done {
@@ -109,7 +115,7 @@ pub fn run_task(
         }
         input = Step::ToolResults(results);
     }
-    ui::error("max turns reached for this task");
+    ui::emit(tx, ui::error("max turns reached for this task"));
     provider.trim_last_if_tool_use();
     Ok((task, true))
 }
@@ -118,10 +124,10 @@ pub fn run_task(
 /// `tool_use` block from history (otherwise the next call 400s on
 /// Anthropic), surface the abort to the user, and return without
 /// re-queueing — the REPL falls through to the prompt.
-fn cancelled(provider: &mut Provider, task: Usage) -> Result<(Usage, bool), String> {
+fn cancelled(provider: &mut Provider, task: Usage, tx: &Sender<UiEvent>) -> Result<(Usage, bool), String> {
     provider.trim_last_if_tool_use();
     cancel::clear();
-    ui::error("cancelled");
+    ui::emit(tx, ui::error("cancelled"));
     Ok((task, false))
 }
 
@@ -182,15 +188,34 @@ impl Drop for Spill {
 /// Caches the agent might want to scribble to (build artefacts, package
 /// manager state, anything ephemeral) live here instead of in the user's
 /// real cache dirs (`~/.cargo/registry`, `~/.npm`, …) — those are denied
-/// by the reasonable profile's grant, so any direct write there fails
-/// loudly.  The agent is expected to redirect tool cache env vars
-/// (`CARGO_HOME`, `GRADLE_USER_HOME`, etc.) into this dir when it
-/// matters; the system-prompt note about `$EXARCH_SCRATCH` is the only
-/// hand-holding.  Dropped when the session ends, so nothing persists
-/// across runs.
+/// for write by `reasonable`, so a direct write there fails loudly.
+///
+/// To make this transparent to the agent, [`Scratch::install_into`]
+/// redirects a small fixed list of legacy tool env vars (`CARGO_HOME`,
+/// `npm_config_cache`, `GRADLE_USER_HOME`, `GOPATH`, `GOMODCACHE`,
+/// `RUSTUP_HOME`) to subdirs of `$EXARCH_SCRATCH`.  Modern tools that
+/// respect `$XDG_CACHE_HOME` need no per-tool redirection — the
+/// `xdg:cache` write admit in reasonable handles them.
+///
+/// Dropped when the session ends, so nothing persists across runs.
 pub struct Scratch {
     dir: PathBuf,
 }
+
+/// Legacy build-tool home env vars that pre-date or ignore XDG.  Each
+/// gets a dedicated subdir under `$EXARCH_SCRATCH` so the toolchains
+/// can do their own bookkeeping without colliding.  This list is
+/// deliberately stable and short — modern tools added since ~2018
+/// (uv, pnpm, bun, mise, hatch, ruff, …) respect `$XDG_CACHE_HOME`
+/// and don't need an entry here.
+const LEGACY_TOOL_HOMES: &[(&str, &str)] = &[
+    ("CARGO_HOME",       "cargo"),
+    ("npm_config_cache", "npm-cache"),
+    ("GRADLE_USER_HOME", "gradle"),
+    ("GOPATH",           "go"),
+    ("GOMODCACHE",       "go/pkg/mod"),
+    ("RUSTUP_HOME",      "rustup"),
+];
 
 impl Scratch {
     pub fn new() -> io::Result<Self> {
@@ -206,14 +231,25 @@ impl Scratch {
         &self.dir
     }
 
-    /// Seed `$EXARCH_SCRATCH` into `shell` — both the env-var map (so
-    /// child processes inherit it) and the ral-side binding (so
-    /// `$EXARCH_SCRATCH` works in ral source).  Mirrors how
-    /// [`crate::eval::seed_default_env`] installs the standard vars.
+    /// Seed `$EXARCH_SCRATCH` and the legacy-tool env vars into
+    /// `shell` — both the env-var map (so child processes inherit
+    /// them) and the ral-side bindings (so the same names resolve
+    /// inside ral source).  Always overrides: a user pre-set
+    /// `CARGO_HOME` pointing into `~/.cargo` would land outside
+    /// reasonable's write set and fail mysteriously, so the sandbox
+    /// is the trust boundary, not the inherited environment.
     pub fn install_into(&self, shell: &mut Shell) {
-        let p = self.dir.to_string_lossy().into_owned();
-        shell.dynamic.env_vars.insert("EXARCH_SCRATCH".into(), p.clone());
-        shell.set("EXARCH_SCRATCH".into(), ral_core::types::Value::String(p));
+        let scratch = self.dir.to_string_lossy().into_owned();
+        self.set_var(shell, "EXARCH_SCRATCH", &scratch);
+        for (var, sub) in LEGACY_TOOL_HOMES {
+            let value = format!("{scratch}/{sub}");
+            self.set_var(shell, var, &value);
+        }
+    }
+
+    fn set_var(&self, shell: &mut Shell, name: &str, value: &str) {
+        shell.dynamic.set_env_var(name, value);
+        shell.set(name.into(), ral_core::types::Value::String(value.into()));
     }
 }
 
@@ -367,24 +403,19 @@ fn align_cut_forward(s: &str, idx: usize) -> usize {
 /// If the conversation has grown past `COMPACT_THRESHOLD`, run a
 /// summary turn and reset history.  Returns the cost charged for the
 /// summary call so the caller can fold it into its running total.
-pub fn maybe_compact(provider: &mut Provider, total: &mut Usage) {
+pub fn maybe_compact(provider: &mut Provider, total: &mut Usage, tx: &Sender<UiEvent>) {
     let bytes = provider.history_bytes();
     if bytes < COMPACT_THRESHOLD {
         return;
     }
-    eprintln!(
-        "\x1b[2m[compacting history: {} KB → summary]\x1b[0m",
-        bytes / 1024,
-    );
+    ui::emit(tx, ui::dim(&format!("[compacting history: {} KB → summary]", bytes / 1024)));
     match provider.compact() {
         Ok((inp, out, dollars)) => {
             *total += Usage { input: inp, output: out, cache_creation: 0, cache_read: 0, dollars };
-            eprintln!(
-                "\x1b[2m[compacted: now {} KB]\x1b[0m",
-                provider.history_bytes() / 1024,
-            );
+            let _ = tx.send(UiEvent::Cost(total.dollars));
+            ui::emit(tx, ui::dim(&format!("[compacted: now {} KB]", provider.history_bytes() / 1024)));
         }
-        Err(e) => ui::error(&format!("compact failed: {e}")),
+        Err(e) => ui::emit(tx, ui::error(&format!("compact failed: {e}"))),
     }
 }
 

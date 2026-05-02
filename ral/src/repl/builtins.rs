@@ -3,6 +3,7 @@
 //! Job-control commands (`jobs`, `fg`, `bg`, `disown`) that manipulate the
 //! job table directly rather than going through the evaluator.
 
+#[cfg(unix)]
 use ral_core::diagnostic;
 
 /// Dispatch a job-control command (`jobs`, `fg`, `bg`, `disown`).

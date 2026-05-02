@@ -86,6 +86,10 @@ pub enum Token {
     RParen,
     Comma,
     Spread,
+    /// Variant tag `.<ident>` — the label is stored without its leading dot.
+    /// Construction (`.ok 5`), tag-keyed record keys (`[.ok: 5]`), and case
+    /// handler tables share this token.
+    Tag(String),
     /// Deref resolved by lexer: $name, $(name), $name[key].
     Deref(StringPart),
     /// Expression block: $[expr].
@@ -131,6 +135,7 @@ impl fmt::Display for Token {
             Token::RParen => write!(f, ")"),
             Token::Comma => write!(f, ","),
             Token::Spread => write!(f, "..."),
+            Token::Tag(s) => write!(f, ".{s}"),
             Token::Deref(part) => match part {
                 StringPart::Variable(n) => write!(f, "${n}"),
                 StringPart::Index(n, _) => write!(f, "${n}[...]"),
@@ -425,6 +430,22 @@ impl Lexer {
                     self.bump();
                     Ok((Token::Spread, self.finish(span)))
                 }
+                '.' if self
+                    .peek_n(1)
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_') =>
+                {
+                    self.bump(); // consume '.'
+                    let mut label = String::new();
+                    while let Some(c) = self.peek() {
+                        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                            label.push(c);
+                            self.bump();
+                        } else {
+                            break;
+                        }
+                    }
+                    Ok((Token::Tag(label), self.finish(span)))
+                }
                 _ if Self::is_bare_char(ch) => Ok(self.scan_bare_word(span)),
                 _ => {
                     self.bump();
@@ -640,6 +661,10 @@ impl Lexer {
             Some('n') => {
                 self.bump();
                 literal.push('\n');
+            }
+            Some('r') => {
+                self.bump();
+                literal.push('\r');
             }
             Some('t') => {
                 self.bump();

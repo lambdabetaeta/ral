@@ -26,8 +26,10 @@ use std::path::{Path, PathBuf};
 
 /// Compute the effective `Capabilities` for a session.
 ///
-/// `base_name` selects the ceiling: `minimal`, `reasonable`, or
-/// `dangerous`.  `extend_base`, if `Some`, is loaded and joined
+/// `base_name` selects the ceiling — one of `dangerous`,
+/// `reasonable`, `read-only`, `minimal`, or `confined` — see
+/// [`base::resolve_base`] for the per-profile shape.
+/// `extend_base`, if `Some`, is loaded and joined
 /// into the ceiling.  Each entry in `restrict_files` is loaded
 /// and meet'd in.  All composition runs on [`RawCapabilities`];
 /// a single freeze pass at the end resolves every `~` / `xdg:`

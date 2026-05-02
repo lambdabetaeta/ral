@@ -77,6 +77,12 @@ pub enum Val {
     List(Vec<ValListElem>),
     /// A map literal, possibly containing spread (`...x`) entries.
     Map(Vec<ValMapEntry>),
+    /// A variant constructor: `.label` (no payload) or `.label payload`.
+    /// The label is stored without its leading dot.
+    Variant {
+        label: String,
+        payload: Option<Box<Val>>,
+    },
     /// Home-directory expansion: `~`, `~user`, `~/path`, or `~user/path`.
     TildePath(TildePath),
 }
@@ -245,5 +251,14 @@ pub enum CompKind {
         cond: Box<Comp>,
         then: Val,
         else_: Val,
+    },
+    /// Sum eliminator: evaluate `scrutinee` to a `Value::Variant`, look up
+    /// the matching handler in `table` (a tag-keyed record of thunks),
+    /// force it on the payload, and return the result.  Typechecking
+    /// guarantees coverage; an unmatched label at runtime is an internal
+    /// error.
+    Case {
+        scrutinee: Box<Comp>,
+        table: Box<Comp>,
     },
 }

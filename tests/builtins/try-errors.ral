@@ -1,67 +1,81 @@
-# Test: §10.1 _try error records
+# Test: §10.1 _try outcome variant
+#
+# `_try body` returns `[.ok A | .err ErrorRec]` where ErrorRec carries
+# `cmd`, `status`, `message`, `stdout`, `line`, `col`.  Use `case` to
+# destructure or `try body handler` to dispatch.
 
-# Success returns status 0
-let err = _try { return true }
-echo $err[status]
+let status-of = { |r|
+    case $r [
+        .ok:  { |_| return 0 },
+        .err: { |e| return $e[status] }
+    ]
+}
+
+let message-of = { |r|
+    case $r [
+        .ok:  { |_| return '' },
+        .err: { |e| return $e[message] }
+    ]
+}
+
+# Success: .ok carries the body's value, status defaults to 0.
+echo !{status-of !{_try { return true }}}
 # Expected: 0
 
-# Command failure
-let err = _try { cat /nonexistent 2> /dev/null }
-echo $err[status]
-# Expected: non-zero (1 or 2)
+# Command failure: .err carries the failing capture's status.
+echo !{status-of !{_try { cat /nonexistent 2> /dev/null }}}
+# Expected: non-zero
 
-# fail
-let err = _try { fail [status: 42] }
-echo $err[status]
+# Explicit fail: status flows through.
+echo !{status-of !{_try { fail [status: 42] }}}
 # Expected: 42
 
-# Error record has col field
+# Error record has col field.
 let err = _try { fail [status: 1] }
-echo !{has $err col}
+echo !{equal !{status-of $err} 1}
 # Expected: true
 
-# fail with a message via record
+# fail with a custom message.
 let err = _try { fail [status: 7, message: 'custom failure'] }
-echo $err[status]
-echo $err[message]
+echo !{status-of $err}
+echo !{message-of $err}
 # Expected: 7, custom failure
 
-# fail re-raise: $e round-trips status and message
+# fail re-raise: $e round-trips status and message.
 let err = _try {
     try { fail [status: 9, message: 'boom'] } { |e| fail $e }
 }
-echo $err[status]
-echo $err[message]
+echo !{status-of $err}
+echo !{message-of $err}
 # Expected: 9, boom
 
-# fail map without message: defaults to "explicit failure"
+# fail without explicit message defaults to "explicit failure".
 let err = _try { fail [status: 3] }
-echo $err[status]
-echo $err[message]
+echo !{status-of $err}
+echo !{message-of $err}
 # Expected: 3, explicit failure
 
-# try with handler
+# `try` with handler.
 try { fail [status: 1] } { |err|
     echo "caught status $err[status]"
 }
 # Expected: caught status 1
 
-# try success — handler not called
+# `try` success — handler not called.
 try { return true } { |_| return false }
 # Expected: (nothing)
 
-# Nested try
+# Nested try.
 try {
-    try { fail [status: 1] } { |err| echo 'inner caught' }
+    try { fail [status: 1] } { |_err| echo 'inner caught' }
     echo 'continued after inner'
-} { |err| echo 'outer caught' }
+} { |_err| echo 'outer caught' }
 # Expected: inner caught, continued after inner
 
-# retry
-let count = 0
+# retry.
 try {
     retry 3 { echo 'trying...'; fail [status: 1] }
-} { |err| echo 'retry exhausted' }
+} { |_err| echo 'retry exhausted' }
 # Expected: trying... (3 times), retry exhausted
 
 echo 'try error tests done'

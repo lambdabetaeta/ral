@@ -23,14 +23,19 @@ pub struct Cli {
     pub file: Option<std::path::PathBuf>,
     #[arg(long = "system", value_name = "FILE")]
     pub system_files: Vec<std::path::PathBuf>,
-    /// Session ceiling.  Three bake-ins: `minimal` (coreutils + cwd
-    /// + /tmp + net), `reasonable` (default; coreutils + everyday
-    /// tooling), or `dangerous` (no attenuation; expects an outer
-    /// trust boundary like a Docker container).  Bases are bake-ins;
-    /// there is no directory convention for adding more.  To widen
-    /// the ceiling for a nonstandard tool, use `--extend-base`; to
-    /// start permissive, use `--base dangerous --restrict <FILE>`
-    /// (root ⊓ file = file).
+    /// Session ceiling.  Five bake-ins, ordered from most to least
+    /// authority: `dangerous` (no attenuation; expects an outer
+    /// trust boundary like a Docker container), `reasonable`
+    /// (default; everyday tooling + standard binary dirs),
+    /// `read-only` (reasonable's reads/exec but writes only to
+    /// scratch — for review/audit), `minimal` (coreutils + cwd +
+    /// scratch + net; small base for additive `--extend-base`
+    /// composition), `confined` (build jail after BrianSwift's
+    /// confined.sb: tight reads/writes, no network, exec by subpath
+    /// only).  Bases are bake-ins; there is no directory convention
+    /// for adding more.  To widen the ceiling for a nonstandard
+    /// tool, use `--extend-base`; to start permissive, use
+    /// `--base dangerous --restrict <FILE>` (root ⊓ file = file).
     #[arg(long = "base", value_name = "NAME", default_value = "reasonable")]
     pub base: String,
     /// Single TOML file lattice-joined with the base *before* any

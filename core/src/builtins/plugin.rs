@@ -1,7 +1,8 @@
 use crate::types::*;
 use std::collections::HashMap;
 
-use super::util::{arg0_str, fold_map, get, list_entries, map_entries, sig, str_list};
+use super::caps;
+use super::util::{arg0_str, get, list_entries, map_entries, sig};
 
 // ── Plugin helpers ────────────────────────────────────────────────────────
 
@@ -265,86 +266,35 @@ fn config_base() -> Option<String> {
 
 // ── Manifest parsing ──────────────────────────────────────────────────────
 
-/// Build a [`RawCapabilities`] from capability entries; unknown
-/// keys are silently ignored.  Returned unfrozen so the caller
-/// can apply the same freeze rule as the rest of the system.
+/// Build a [`RawCapabilities`] from capability entries; unknown keys are
+/// silently ignored.  Returned unfrozen so the caller can apply the same
+/// freeze rule as the rest of the system.
+///
+/// Defaults: `RawCapabilities::deny_all()` — anything the manifest does
+/// not name is denied.  This is the manifest contract, distinct from the
+/// `grant` builtin's "no opinion → inherit" stance; both share the per-
+/// dimension parsers in [`super::caps`].
 fn parse_capabilities(entries: &[(String, Value)]) -> Result<RawCapabilities, EvalSignal> {
     let mut capabilities = RawCapabilities::deny_all();
     for (k, v) in entries {
         match k.as_str() {
-            "exec" => capabilities.exec = Some(parse_exec_policy(v)?),
+            "exec" => capabilities.exec = Some(caps::parse_exec_manifest(v)?),
             "fs" => {
-                capabilities.fs = Some(fold_map(
-                    v,
-                    "plugin capabilities fs",
-                    str_list,
-                    |fp: &mut FsPolicy, k, vs| match k {
-                        "read" => fp.read_prefixes = vs,
-                        "write" => fp.write_prefixes = vs,
-                        _ => {}
-                    },
-                )?)
+                capabilities.fs = Some(caps::parse_fs(v, "plugin capabilities fs", false, false)?)
             }
-            "net" => {
-                capabilities.net = Some(match v {
-                    Value::Bool(b) => *b,
-                    other => {
-                        return Err(load_err(format!(
-                            "plugin capabilities net: expected a Bool, got {}",
-                            other.type_name()
-                        )));
-                    }
-                });
-            }
+            "net" => capabilities.net = Some(caps::parse_net(v, "plugin capabilities net")?),
             "editor" => {
-                capabilities.editor = Some(fold_map(
-                    v,
-                    "plugin capabilities editor",
-                    |v| matches!(v, Value::Bool(true)),
-                    |cap: &mut EditorPolicy, k, b| match k {
-                        "read" => cap.read = b,
-                        "write" => cap.write = b,
-                        "tui" => cap.tui = b,
-                        _ => {}
-                    },
-                )?)
+                capabilities.editor =
+                    Some(caps::parse_editor(v, "plugin capabilities editor", false)?)
             }
             "shell" => {
-                capabilities.shell = Some(fold_map(
-                    v,
-                    "plugin capabilities shell",
-                    |v| matches!(v, Value::Bool(true)),
-                    |cap: &mut ShellPolicy, k, b| {
-                        if k == "chdir" {
-                            cap.chdir = b
-                        }
-                    },
-                )?)
+                capabilities.shell =
+                    Some(caps::parse_shell(v, "plugin capabilities shell", false)?)
             }
             _ => {}
         }
     }
     Ok(capabilities)
-}
-
-/// `false` → skip entry; `[sub, ...]` → `Subcommands`; anything else → `Allow`.
-fn parse_exec_policy(v: &Value) -> Result<std::collections::BTreeMap<String, ExecPolicy>, EvalSignal> {
-    fold_map(
-        v,
-        "plugin capabilities exec",
-        |v| match v {
-            Value::Bool(false) => None,
-            Value::List(items) if !items.is_empty() => Some(ExecPolicy::Subcommands(
-                items.iter().map(|i| i.to_string()).collect(),
-            )),
-            _ => Some(ExecPolicy::Allow),
-        },
-        |acc: &mut std::collections::BTreeMap<String, ExecPolicy>, cmd, policy| {
-            if let Some(p) = policy {
-                acc.insert(cmd.to_owned(), p);
-            }
-        },
-    )
 }
 
 const KNOWN_HOOKS: &[&str] = &["buffer-change", "pre-exec", "post-exec", "chpwd", "prompt"];

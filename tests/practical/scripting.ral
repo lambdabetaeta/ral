@@ -4,7 +4,8 @@
 # This is the motivating example from the design process.
 
 # Find all m4a files
-let files = find . -name '*.m4a' | from-lines
+let files_step = find . -name '*.m4a' | from-lines
+let files = !{step-into-list { return $files_step }}
 
 let count = length $files
 if $[$count == 0] {

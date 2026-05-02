@@ -22,14 +22,14 @@ within [env: [A: 1]] {
 
 # dir key
 
-let original = $env[PWD]
+let original = !{cwd}
 within [dir: /tmp] {
     pwd
 }
 # Expected: /tmp
 
 # dir doesn't leak
-let after = $env[PWD]
+let after = !{cwd}
 if !{equal $original $after} { echo 'cwd restored' } else { echo 'cwd leaked!' }
 
 # handlers key (per-name)

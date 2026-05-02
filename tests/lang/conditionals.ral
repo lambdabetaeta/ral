@@ -18,24 +18,16 @@ return true ? echo 'chain yes'
 return false ? echo 'chain no'
 # Expected: (nothing)
 
-# case dispatch: structural — one clause handles all strings, value
-# equality is expressed with nested `if` using `equal`.
+# Value-equality dispatch via if/elsif chains.
 let action = 'help'
-case $action [
-    { |v|
-        if !{equal $v 'quit'} { echo quitting }
-            elsif !{equal $v 'help'} { echo 'showing help' }
-            else { echo unknown }
-    }
-]
+if !{equal $action 'quit'} { echo quitting }
+    elsif !{equal $action 'help'} { echo 'showing help' }
+    else { echo unknown }
 # Expected: showing help
 
-# case with fallback: unmatched value.
-case bogus [
-    { |v|
-        if !{equal $v 'help'} { echo help } else { echo fallback }
-    }
-]
+# Fallback: unmatched value.
+let other = 'bogus'
+if !{equal $other 'help'} { echo help } else { echo fallback }
 # Expected: fallback
 
 echo 'conditional tests done'

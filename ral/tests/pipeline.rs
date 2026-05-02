@@ -295,7 +295,7 @@ fn mixed_pipeline_first_external_stage_does_not_inherit_tty_stdin() {
     // no upstream pipe, and the pipeline should terminate promptly with
     // an empty result rather than blocking on cat's read.
     let o = run_with_timeout(
-        "let xs = !{cat | from-lines}; echo done; echo !{length $xs}",
+        "let s = !{cat | from-lines}; let xs = !{step-into-list { return $s }}; echo done; echo !{length $xs}",
         Duration::from_secs(5),
     )
     .expect("mixed-pipeline first external stage hung — likely inherited stdin");
@@ -427,7 +427,8 @@ fn mixed_pipeline_seq_grep() {
 #[test]
 fn mixed_pipeline_internal_byte_stage_buffers_output_cleanly() {
     let script = r#"
-let lines = !{printf "a\nb\n" | map-lines { |x| return $x } | from-lines}
+let s = !{printf "a\nb\n" | map-lines { |x| return $x } | from-lines}
+let lines = !{step-into-list { return $s }}
 echo !{length $lines}
 echo $lines[0]
 echo $lines[1]
@@ -587,6 +588,7 @@ fn read_lines_from_pipeline() {
     let o = run(r#"let ls = !{/bin/echo -e "a
 b
 c" | from-lines}
+let ls = !{step-into-list { return $ls }}
 echo !{length $ls}"#);
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "3");
@@ -695,7 +697,7 @@ fn ext_command_non_utf8_gives_named_error() {
 #[test]
 fn read_lines_from_stdin() {
     let o = run_with_stdin(
-        "let ls = !{from-lines}\necho !{length $ls}",
+        "let ls = !{from-lines}\nlet ls = !{step-into-list { return $ls }}\necho !{length $ls}",
         b"one\ntwo\nthree\n",
     );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
@@ -723,32 +725,32 @@ fn fold_lines_from_stdin() {
     assert_eq!(o.stdout.trim(), "2");
 }
 
-// ── Internal→internal composition over byte pipelines ─────────────────────────
+// ── Step decode + materialisation over byte pipelines ─────────────────────────
 
 #[test]
-fn internal_to_internal_map_identity() {
-    // ext → from-lines (internal) → map { |x| x } (internal)
-    // Using map with identity (just returning x) lets us check the element count.
-    let o = run(r#"let result = !{/bin/echo -e "a
+fn internal_decode_to_step_then_list() {
+    // ext → from-lines (internal Step decode) → step-into-list materialisation.
+    let o = run(r#"let s = !{/bin/echo -e "a
 b
-c" | from-lines | map { |x| return $x }}
+c" | from-lines}
+let result = !{step-into-list { return $s }}
 echo !{length $result}"#);
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "3");
 }
 
 #[test]
-fn internal_to_internal_map_matches_direct() {
-    // `find . -name "*.rs" | from-lines` and
-    // `find . -name "*.rs" | from-lines | map { |x| return $x }`
-    // must produce the same set of file paths.
+fn from_lines_step_materialisation_matches_roundtrip() {
+    // Materialising `from-lines` to a list should agree with a line count
+    // computed via `fold-lines` on the same byte-producing command.
     //
     // Running inside the ral process's working directory (workspace root).
     let o = run(r#"
-let direct  = find . -name "*.rs" -not -path "./target/*" | from-lines
-let via_map = find . -name "*.rs" -not -path "./target/*" | from-lines | map { |x| return $x }
+let s_direct = find . -name "*.rs" -not -path "./target/*" | from-lines
+let direct = !{step-into-list { return $s_direct }}
+let n = !{find . -name "*.rs" -not -path "./target/*" | fold-lines { |acc _| return $[$acc + 1] } 0}
 echo !{length $direct}
-echo !{length $via_map}
+echo $n
 "#);
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     let lines: Vec<&str> = o.stdout.trim().lines().collect();
@@ -760,6 +762,77 @@ echo !{length $via_map}
     );
     let count: usize = lines[0].parse().expect("count");
     assert!(count > 0, "no .rs files found");
+}
+
+// ── Pure-value pipelines: data-last application across all stage shapes ────
+//
+// These exercise the post-redesign rule: the upstream value is the
+// data-last argument of the next stage's call, regardless of whether the
+// stage is `Exec`, `App`, a bare-block, or `Force(Variable)`.  Pure-value
+// pipelines short-circuit to a sequential fold; no threading is involved.
+
+#[test]
+fn block_as_stage_binds_upstream_to_param() {
+    // The original bug: `5 | { |x| echo $x }` returned the thunk instead
+    // of echoing 5.  After the redesign the block's |x| binds to the
+    // upstream value and the body runs.
+    let o = run("5 | { |x| echo $x }");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "5");
+}
+
+#[test]
+fn block_as_stage_returns_value_via_let() {
+    let o = run("let r = 5 | { |x| return $x }\necho $r");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "5");
+}
+
+#[test]
+fn pure_value_pipeline_chains_compose_data_last() {
+    // [1,2,3] | map { |x| x*2 } | map { |y| y+1 } → [3,5,7]
+    let o = run(
+        r#"let r = [1, 2, 3] | map { |x| return $[$x * 2] } | map { |y| return $[$y + 1] }
+echo !{length $r} $r[0] $r[1] $r[2]"#,
+    );
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "3 3 5 7");
+}
+
+#[test]
+fn force_variable_as_stage_applies_to_upstream() {
+    // `5 | $f` where f is a unary block: f gets applied to 5.
+    let o = run("let f = { |x| return $[$x + 10] }\nlet r = 5 | $f\necho $r");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "15");
+}
+
+#[test]
+fn pipe_into_non_function_value_errors() {
+    // `5 | 6` — there's no function on the right; the trampoline says so.
+    let o = run("5 | 6");
+    assert_ne!(o.status, 0, "expected failure, got: {}", o.stdout);
+    assert!(
+        o.stderr.contains("is not a function"),
+        "stderr: {}",
+        o.stderr
+    );
+}
+
+#[test]
+fn pipe_into_zero_arity_block_runs_then_errors_on_excess_arg() {
+    // `5 | { echo hi }` — the block has no params; echo runs (eager)
+    // and then the trampoline errors with "too many arguments" because
+    // the block's Unit result can't accept the upstream 5.
+    let o = run("5 | { echo hi }");
+    assert_ne!(o.status, 0);
+    // The side effect happened before the error.
+    assert!(o.stdout.contains("hi"), "stdout: {}", o.stdout);
+    assert!(
+        o.stderr.contains("too many arguments") || o.stderr.contains("is not a function"),
+        "stderr: {}",
+        o.stderr
+    );
 }
 
 // ── Sandbox IPC subprocess stdio routing ────────────────────────────────
@@ -857,7 +930,7 @@ fn grant_fs_capture_returns_output() {
         return;
     }
     let o = run(
-        "let x = grant [exec: ['/bin/echo': []], fs: [read: ['/tmp']]] { /bin/echo captured | from-lines }; echo $x[0]",
+        "let x = grant [exec: ['/bin/echo': []], fs: [read: ['/tmp']]] { let s = !{/bin/echo captured | from-lines}; step-into-list { return $s } }; echo $x[0]",
     );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "captured");
@@ -873,7 +946,7 @@ fn grant_fs_pipeline_stdin_forwarded() {
     if !sandbox_functional() {
         return;
     }
-    let o = run("let x = /bin/echo piped | grant [fs: [read: ['/tmp']]] { from-lines }; echo $x[0]");
+    let o = run("let x = /bin/echo piped | grant [fs: [read: ['/tmp']]] { let s = !{from-lines}; step-into-list { return $s } }; echo $x[0]");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "piped");
 }

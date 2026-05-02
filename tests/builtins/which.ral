@@ -27,7 +27,11 @@ within [handlers: [zz_test_mock: { return unit }]] {
 }
 
 # Missing command should return status 1 (captured via _try)
-let err = _try { which __definitely_missing_command_for_ral_test__ }
-assert_eq 'which missing status' 1 $err[status]
+let r = _try { which __definitely_missing_command_for_ral_test__ }
+let status = case $r [
+    .ok:  { |_| return 0 },
+    .err: { |e| return $e[status] }
+]
+assert_eq 'which missing status' 1 $status
 
 echo 'which tests done'

@@ -226,9 +226,22 @@ impl Parser {
         Ok(stmts)
     }
 
-    /// stmt = pipeline '&'? (NL? '?' pipeline '&'?)* NL?
+    /// stmt = binding | pipeline '&'? (NL? '?' pipeline '&'?)* NL?
     /// The `?` can appear after a newline (continuation).
+    ///
+    /// A `let` binding is a *statement*, never a pipeline stage or chain
+    /// branch — its RHS already absorbs an entire pipeline-and-chain, and
+    /// embedding it deeper would produce an `Ast::Let` in expression
+    /// position (which the elaborator cannot lower).  Catching it here is
+    /// what keeps `parse_stage`'s leading-`let` rejection truly defensive.
     fn parse_stmt(&mut self) -> Result<Ast, ParseError> {
+        if let Some(binding) = self.try_parse_binding()? {
+            // Consume the optional statement terminator (one newline).
+            if self.peek() == &Token::Newline {
+                self.advance();
+            }
+            return Ok(binding);
+        }
         let first = self.parse_maybe_background_pipeline()?;
         let mut chains = vec![first];
 
@@ -313,11 +326,20 @@ impl Parser {
         Ok(node)
     }
 
-    /// stage = binding | return | if | command
+    /// stage = return | if | command
+    ///
+    /// `let` is a statement, not a stage — `parse_stmt` peels it off
+    /// before reaching here.  Seeing it now means the caller embedded
+    /// a binding in pipeline or chain position (`cmd | let x = …`,
+    /// `cmd ? let x = …`); reject it with a clear error rather than
+    /// mis-parse `let` as a command head.
     fn parse_stage(&mut self) -> Result<Ast, ParseError> {
-        // Try to parse a binding: let pattern = pipeline
-        if let Some(binding) = self.try_parse_binding()? {
-            return Ok(binding);
+        if self.peek().as_plain_word() == Some("let") {
+            return Err(self.error(
+                "`let` is a statement, not a pipeline stage or chain branch — \
+                 move the binding to its own line, or wrap the consumer in a \
+                 block: `{ let x = …; … }`",
+            ));
         }
 
         // `return` is a dedicated stage form that lifts a value into a
@@ -331,7 +353,34 @@ impl Parser {
             return self.parse_if();
         }
 
+        // `case` is a syntactic stage form: `case <scrutinee> [<handlers>]`.
+        // It is not a regular command application — the table argument has
+        // restricted shape (tag-keyed record of thunks) and the typing rule
+        // is bespoke, so the parser captures it as a dedicated AST node.
+        if self.peek().as_plain_word() == Some("case") {
+            return self.parse_case();
+        }
+
         self.parse_command()
+    }
+
+    /// case = 'case' atom atom
+    ///
+    /// The first atom is the scrutinee (a variant value); the second is a
+    /// tag-keyed record literal of handler thunks.  Both restrictions are
+    /// enforced by the typechecker rather than the parser — any atom is
+    /// accepted here so that error messages downstream can refer to the
+    /// resolved type.
+    fn parse_case(&mut self) -> Result<Ast, ParseError> {
+        self.advance(); // consume `case`
+        self.skip_newlines();
+        let scrutinee = self.parse_atom()?;
+        self.skip_newlines();
+        let table = self.parse_atom()?;
+        Ok(Ast::Case {
+            scrutinee: Box::new(scrutinee),
+            table: Box::new(table),
+        })
     }
 
     /// if = 'if' atom atom [elsif atom atom]* [else atom]
@@ -767,12 +816,45 @@ impl Parser {
                 self.advance();
                 self.parse_bang()
             }
+            Token::Tag(label) => {
+                self.advance();
+                let payload = if self.at_tag_payload_end() {
+                    None
+                } else {
+                    Some(Box::new(self.parse_atom()?))
+                };
+                Ok(Ast::Tag { label, payload })
+            }
             _ => Err(ParseError {
                 message: format!("unexpected token: {}", self.peek()),
                 line: span.line,
                 col: span.col,
             }),
         }
+    }
+
+    /// True at boundaries where a `.tag` should remain nullary instead of
+    /// greedily absorbing the next atom as a payload — separator and closer
+    /// tokens, basically.  In atom contexts (list elements, argument lists,
+    /// command heads) anything that looks like a value following a tag is
+    /// taken as the payload; the writer picks separators (`,` in lists,
+    /// newline in stages) to terminate.
+    fn at_tag_payload_end(&self) -> bool {
+        matches!(
+            self.peek(),
+            Token::Newline
+                | Token::Eof
+                | Token::RBrace
+                | Token::RBracket
+                | Token::RParen
+                | Token::Pipe
+                | Token::Question
+                | Token::Ampersand
+                | Token::Comma
+                | Token::Colon
+                | Token::Spread
+                | Token::Redirect { .. }
+        )
     }
 
     /// force = '!' primary
@@ -875,8 +957,9 @@ impl Parser {
             }
         }
 
-        if let Some(Token::Word(Word::Plain(_)) | Token::SingleQuoted(_) | Token::Deref(_)) =
-            self.tokens.get(i).map(|(t, _)| t)
+        if let Some(
+            Token::Word(Word::Plain(_)) | Token::SingleQuoted(_) | Token::Deref(_) | Token::Tag(_),
+        ) = self.tokens.get(i).map(|(t, _)| t)
         {
             matches!(self.tokens.get(i + 1).map(|(t, _)| t), Some(Token::Colon))
         } else {
@@ -903,6 +986,10 @@ impl Parser {
 
     fn parse_map_entries(&mut self) -> Result<Ast, ParseError> {
         let mut entries = Vec::new();
+        // Track the alphabet of static keys (literal `name` vs tag `.name`)
+        // so that mixing them in one literal is rejected at parse time.
+        // Dynamic `$var` keys do not contribute to the alphabet decision.
+        let mut alphabet: Option<KeyAlphabet> = None;
 
         self.parse_separated_until(Token::RBracket, "map", |p| {
             if p.peek() == &Token::Spread {
@@ -910,27 +997,42 @@ impl Parser {
                 entries.push(MapEntry::Spread(p.parse_atom()?));
                 return Ok(SepFlow::Cont);
             }
-            // mapkey = IDENT | QUOTED | deref
-            let key_ast = match p.peek().clone() {
+            // mapkey = IDENT | QUOTED | deref | tag
+            let (key_ast, this_alphabet) = match p.peek().clone() {
                 Token::Word(Word::Plain(k)) if is_ident(&k) => {
                     p.advance();
-                    Ast::Literal(k)
+                    (Ast::Literal(k), Some(KeyAlphabet::Bare))
                 }
                 Token::SingleQuoted(k) => {
                     p.advance();
-                    Ast::Literal(k)
+                    (Ast::Literal(k), Some(KeyAlphabet::Bare))
                 }
                 Token::Deref(StringPart::Variable(k)) => {
                     p.advance();
-                    Ast::Variable(k)
+                    (Ast::Variable(k), None)
+                }
+                Token::Tag(label) => {
+                    p.advance();
+                    (Ast::Literal(format!(".{label}")), Some(KeyAlphabet::Tag))
                 }
                 Token::Word(Word::Plain(k)) if k.parse::<f64>().is_ok() => {
                     return Err(p.error(
                         "map keys must be identifiers or quoted strings, not numbers; use '0': val",
                     ));
                 }
-                _ => return Err(p.error("expected map key: name, 'quoted', or $var")),
+                _ => return Err(p.error("expected map key: name, 'quoted', .tag, or $var")),
             };
+            if let Some(a) = this_alphabet {
+                match alphabet {
+                    None => alphabet = Some(a),
+                    Some(prev) if prev != a => {
+                        return Err(p.error(
+                            "record literal mixes bare and tag keys — pick one alphabet",
+                        ));
+                    }
+                    Some(_) => {}
+                }
+            }
             p.expect(&Token::Colon)?;
             entries.push(MapEntry::Entry(key_ast, p.parse_atom()?));
             Ok(SepFlow::Cont)
@@ -1161,8 +1263,16 @@ fn fuse_logical_pairs(tokens: Vec<(Token, Span)>) -> Vec<(Token, Span)> {
 fn is_reserved(s: &str) -> bool {
     matches!(
         s,
-        "if" | "elsif" | "else" | "let" | "return" | "true" | "false" | "unit"
+        "if" | "elsif" | "else" | "let" | "return" | "true" | "false" | "unit" | "case"
     )
+}
+
+/// Distinguishes the two record-key alphabets so mixed-alphabet literals
+/// (`[host: ..., .dev: ...]`) are rejected at parse time.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KeyAlphabet {
+    Bare,
+    Tag,
 }
 
 /// IDENT = [a-zA-Z_][a-zA-Z0-9_-]*
@@ -1681,11 +1791,11 @@ mod tests {
         assert!(matches!(&ast1[0], Ast::Map(_)));
 
         // Second test: multiline map as command argument
-        let src = "case $action [\n    quit: { echo quitting },\n    help: { echo help },\n    _: { echo unknown },\n]";
+        let src = "dispatch $action [\n    quit: { echo quitting },\n    help: { echo help },\n    _: { echo unknown },\n]";
         let ast = strip_pos(parse(src).unwrap());
         match &ast[0] {
             Ast::App { head, args, .. } => {
-                assert_eq!(head, &bare_head("case"));
+                assert_eq!(head, &bare_head("dispatch"));
                 assert_eq!(args.len(), 2);
                 assert!(matches!(&args[1], Ast::Map(_)));
             }

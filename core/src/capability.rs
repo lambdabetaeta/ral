@@ -12,6 +12,9 @@
 //! - `check`     — internal stack-walk helpers backing `EffectiveGrant`.
 //! - `exec`      — per-layer and stack-level exec verdict evaluation.
 //! - `prefix`    — `GrantPath` and prefix-set intersection helpers.
+//!
+//! The `Meet` and `Join` traits live alongside the types they operate
+//! on, in [`crate::types::capability`].
 
 mod check;
 mod effective;

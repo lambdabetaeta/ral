@@ -456,6 +456,16 @@ impl Elaborator {
                 ))
             ),
 
+            Ast::Tag { label, payload } => comp!(
+                self,
+                CompKind::Return(Val::Variant {
+                    label: label.clone(),
+                    payload: payload
+                        .as_ref()
+                        .map(|p| Box::new(self.to_val(p, binds))),
+                })
+            ),
+
             Ast::Interpolation(parts) => {
                 comp!(
                     self,
@@ -494,6 +504,18 @@ impl Elaborator {
                 elsif,
                 else_,
             } => self.elab_if(cond, then, elsif, else_, binds),
+
+            Ast::Case { scrutinee, table } => {
+                let scrutinee_comp = self.elab_expr(scrutinee, binds);
+                let table_comp = self.elab_expr(table, binds);
+                comp!(
+                    self,
+                    CompKind::Case {
+                        scrutinee: Box::new(scrutinee_comp),
+                        table: Box::new(table_comp),
+                    }
+                )
+            }
 
             Ast::Let { .. } => unreachable!("assignment in elab_expr"),
         }

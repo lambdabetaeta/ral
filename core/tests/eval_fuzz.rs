@@ -1057,9 +1057,7 @@ fn script_args_are_not_polluted_by_runner_argv() {
 #[test]
 fn env_overrides_shadow_process_env_in_dollar_env() {
     let mut shell = Shell::new(Default::default());
-    shell.dynamic
-        .env_vars
-        .insert("RAL_TEST_ENV".into(), "override".into());
+    shell.dynamic.set_env_var("RAL_TEST_ENV", "override");
     builtins::register(&mut shell, common::prelude_comp());
     let result = evaluate(
         &elaborate(
@@ -1128,72 +1126,22 @@ fn retry_exhaustion() {
     must_fail("retry 3 { fail [status: 1] }");
 }
 
-#[test]
-fn case_dispatch() {
-    // SPEC §8.1: case is structural.  Value equality dispatch uses `equal`
-    // inside a clause body (no literal patterns), so a single clause with a
-    // name parameter handles all strings.
-    must_succeed(
-        "case help [\n\
-         { |v| if !{equal $v 'help'} { echo 'showing help' } else { echo unknown } }\n\
-         ]",
-    );
-}
-
-#[test]
-fn case_fallback() {
-    must_succeed(
-        "case bogus [\n\
-         { |v| if !{equal $v 'help'} { echo help } else { echo fallback } }\n\
-         ]",
-    );
-}
-
-#[test]
-fn case_structural_list_vs_map() {
-    // A list-shaped clause succeeds on a list, and a map-shape catch-all
-    // would *not* be reached.  This demonstrates structural dispatch.
-    let result = must_succeed(
-        "case [1, 2] [\n\
-         { |[a, b]| return $[$a + $b] },\n\
-         { |_| return 0 }\n\
-         ]",
-    );
-    assert_eq!(result, Value::Int(3));
-}
-
-#[test]
-fn case_structural_falls_through_on_mismatch() {
-    // First clause expects at least two elements; input has one, so the
-    // pattern-match fails and the catch-all runs.
-    let result = must_succeed(
-        "case [9] [\n\
-         { |[a, b]| return $[$a + $b] },\n\
-         { |_| return -1 }\n\
-         ]",
-    );
-    assert_eq!(result, Value::Int(-1));
-}
-
-#[test]
-fn case_no_match_fails() {
-    // No clause matches (both expect two-element lists) — case must fail.
-    must_fail(
-        "case [1] [\n\
-         { |[a, b]| return 0 },\n\
-         { |[a, b, c]| return 1 }\n\
-         ]",
-    );
-}
+// The old structural-dispatch `case` is gone (Phase B); the new `case` is
+// a sum eliminator over variants and lives in core/tests/typecheck.rs and
+// ral/tests/variants.rs.
 
 #[test]
 fn try_apply_catches_param_mismatch_only() {
-    // Pattern-mismatch on parameter: returns ok:false.
-    let r = must_succeed("let r = _try-apply { |[a, b]| return $a } [1]\nreturn $r[ok]");
-    assert_eq!(r, Value::Bool(false));
-    // Successful apply: returns ok:true and the result.
+    // Pattern-mismatch on parameter: returns the .err arm.
     let r = must_succeed(
-        "let r = _try-apply { |[a, b]| return $[$a + $b] } [10, 32]\nreturn $r[value]",
+        "let r = _try-apply { |[a, b]| return $a } [1]\n\
+         case $r [.ok: { |_| return false }, .err: { |_| return true }]",
+    );
+    assert_eq!(r, Value::Bool(true));
+    // Successful apply: returns the .ok arm with the result.
+    let r = must_succeed(
+        "let r = _try-apply { |[a, b]| return $[$a + $b] } [10, 32]\n\
+         case $r [.ok: { |v| return $v }, .err: { |_| return -1 }]",
     );
     assert_eq!(r, Value::Int(42));
 }
@@ -1356,7 +1304,7 @@ fn equal_type_mismatch_is_false() {
 const ASSERT_EQ_DEF: &str = "
 let assert_eq = { |name expected actual|
     if !{equal $expected $actual} {} else {
-        echo 'FAIL' 1>&2
+        echo 'assert_eq mismatch' 1>&2
         fail [status: 1]
     }
 }";
@@ -1416,8 +1364,10 @@ fn lambda_to_external_is_error() {
 
 #[test]
 fn try_runtime_error_has_cmd_runtime() {
-    let result =
-        must_succeed("let err = !{_try { f = { |x| return $x }; f 1 2 }}\nreturn $err[cmd]");
+    let result = must_succeed(
+        "let r = !{_try { f = { |x| return $x }; f 1 2 }}\n\
+         case $r [.ok: { |_| return '' }, .err: { |e| return $e[cmd] }]",
+    );
     assert_eq!(result, Value::String("<runtime>".into()));
 }
 
@@ -1877,7 +1827,8 @@ fn guard_runs_cleanup_on_failure() {
 fn guard_propagates_original_error() {
     // The error from body propagates, not from cleanup.
     let result = must_succeed(
-        "let err = !{_try { guard { fail [status: 42] } { echo cleanup } }}\nreturn $err[status]",
+        "let r = !{_try { guard { fail [status: 42] } { echo cleanup } }}\n\
+         case $r [.ok: { |_| return 0 }, .err: { |e| return $e[status] }]",
     );
     assert_eq!(result, Value::Int(42));
 }

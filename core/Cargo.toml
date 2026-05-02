@@ -26,7 +26,7 @@ coreutils = [
     "dep:uu_test",  "dep:uu_truncate","dep:uu_tsort","dep:uu_uname", "dep:uu_unexpand",
     "dep:uu_unlink","dep:uu_vdir",  "dep:uu_whoami",
 ]
-diffutils = ["dep:diffutils"]
+diffutils = ["dep:diffutils", "dep:same-file"]
 grep      = ["dep:grep", "dep:regex"]
 
 [dependencies]
@@ -68,6 +68,7 @@ uu_paste     = { version = "0.8", optional = true }
 uu_printf    = { version = "0.8", optional = true }
 uu_sleep     = { version = "0.8", optional = true }
 diffutils    = { version = "0.5", optional = true }
+same-file    = { version = "1", optional = true }
 grep         = { version = "0.4", optional = true }
 uu_arch      = { version = "0.8", optional = true }
 uu_b2sum     = { version = "0.8", optional = true }

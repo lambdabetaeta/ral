@@ -26,9 +26,11 @@ pub use repl::ReplScratch;
 // types/capability.rs.
 mod capability;
 pub use capability::{
-    Capabilities, EditorPolicy, ExecPolicy, FsPolicy, RawCapabilities, SandboxBindSpec,
-    SandboxCheckSpec, SandboxProjection, ShellPolicy,
+    is_subpath_key, Capabilities, EditorPolicy, ExecPolicy, ExecProjection, FsPolicy,
+    FsProjection, Join, Meet, RawCapabilities, SandboxBindSpec, SandboxCheckSpec,
+    SandboxProjection, ShellPolicy,
 };
+pub(crate) use capability::meet_literal_exec;
 
 // Runtime values: Value, Handle*, HandlerFrame, fmt_block.  See
 // types/value.rs.

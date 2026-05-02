@@ -1,8 +1,8 @@
 # `reasonable` bake-in.  Coreutils + a curated everyday-tooling set
 # (shells, version control, net fetch, search/inspect, scripting,
-# archives), plus directory-based allowance for the standard
-# system / package-manager binary dirs so build drivers (cargo,
-# make, cc, npm, …) work out of the box.
+# archives), plus directory-based allowance (trailing-`/` keys in
+# `[exec]`) for the standard system / package-manager binary dirs so
+# build drivers (cargo, make, cc, npm, …) work out of the box.
 #
 # In spirit similar to Claude Code's default tool set.  The OS
 # sandbox (Seatbelt fs/net rules) still does the real work — a
@@ -14,29 +14,6 @@
 
 audit = false
 net = true
-
-# Directory-based exec allowance.  Any command whose resolved
-# absolute path is under one of these prefixes is admitted (with
-# `Allow`).  Per-command `[exec]` entries below take precedence and
-# can still tighten via `Subcommands`.
-#
-# Must appear before any `[table]` header — otherwise TOML attaches
-# this key to the preceding table (e.g. `shell.exec_dirs`) where it
-# is silently ignored.
-exec_dirs = [
-  "xdg:bin",                # ${XDG_BIN_HOME:-~/.local/bin}
-  "/usr/bin",
-  "/bin",
-  "/usr/local/bin",
-  "/opt/homebrew/bin",      # Apple-silicon Homebrew
-  "/opt/homebrew/sbin",
-  "/usr/local/sbin",
-  "/usr/sbin",
-  "/sbin",
-  "cwd:",                   # scripts the agent drops into the project tree
-  "/tmp",                   # scratch builds (autotools `./configure`, ad-hoc scripts)
-  "tempdir:",               # `$TMPDIR` on macOS — distinct from /tmp
-]
 
 [shell]
 chdir = true
@@ -67,7 +44,7 @@ chdir = true
 # data files, and binaries — but only `xdg:cache` is writable.
 # Two reasons for the asymmetry:
 #
-#   * exec_dirs admits any resolved path under `xdg:bin`.  Write
+#   * `xdg:bin/` in `[exec]` admits any resolved path under it. Write
 #     access there would let a sandboxed process drop a binary the
 #     next call auto-admits — a sandbox escape via filesystem.
 #
@@ -99,18 +76,32 @@ read_prefixes = [
   "~/.rbenv",
   "~/.nvm",
 ]
-# Writes are limited to the working tree and the system scratch areas;
-# the user's real cache dirs (~/.cargo/registry, ~/.npm, ~/.gradle/caches,
-# …) are kept *read*-only so the agent can benefit from a pre-warmed
-# cache without polluting it.  For tool caches that legitimately need to
-# write, exarch publishes a per-session scratch dir as `$EXARCH_SCRATCH`
-# (under /tmp); the agent is expected to redirect cache env vars
-# (`CARGO_HOME`, `GRADLE_USER_HOME`, `npm_config_cache`, …) into it
-# rather than expanding writes here.
+# Writes go to ephemeral / recoverable surfaces only — the working
+# tree, scratch directories, and `xdg:cache`.  The XDG spec defines
+# cache contents as re-derivable, so a hallucinating agent that
+# corrupts `~/.cache/foo` causes at most a re-fetch.  Modern tooling
+# (uv, pnpm, bun, mise, ruff, hatch, …) respects `$XDG_CACHE_HOME`
+# and lands its writes there automatically.
+#
+# The user's real cache dirs (~/.cargo/registry, ~/.npm,
+# ~/.gradle/caches, …) stay *read*-only — they're persistent caches
+# the user pre-warmed; agent writes there would force re-fetches in
+# their later non-agent shells.  Legacy tools that ignore XDG (cargo,
+# npm, gradle, maven, go) get redirected to `$EXARCH_SCRATCH`/<tool>
+# at session entry by exarch's runtime, so `cargo build` and friends
+# work without the agent having to know any redirection protocol.
+#
+# `xdg:config`, `xdg:data`, `xdg:state`, `xdg:bin` stay non-writable:
+# tool configs (gitconfig, npmrc) shouldn't be silently rewritten;
+# persistent state (browser data, history) shouldn't be corrupted;
+# and write-to-`xdg:bin` would let an agent drop a binary the next
+# call auto-admits via the `[exec]` `xdg:bin/` subpath — sandbox
+# escape via filesystem.
 write_prefixes = [
   "cwd:",
   "/tmp",
   "tempdir:",
+  "xdg:cache",
 ]
 
 # Per-tool credential subdirs of `xdg:config`.  The broad `xdg:config`
@@ -125,6 +116,24 @@ deny_paths = [
 ]
 
 [exec]
+# Directory-based exec admittance.  A key ending in `/` is a subpath
+# prefix: any binary whose resolved absolute path lies inside the
+# directory is admitted with `Allow`.  Per-name entries below win on
+# more-specific match, so `bash = "Deny"` overrides `"/bin/" = "Allow"`
+# even though `/bin/bash` is under `/bin/`.
+"xdg:bin/"            = "Allow"   # ${XDG_BIN_HOME:-~/.local/bin}
+"/usr/bin/"           = "Allow"
+"/bin/"               = "Allow"
+"/usr/local/bin/"     = "Allow"
+"/opt/homebrew/bin/"  = "Allow"   # Apple-silicon Homebrew
+"/opt/homebrew/sbin/" = "Allow"
+"/usr/local/sbin/"    = "Allow"
+"/usr/sbin/"          = "Allow"
+"/sbin/"              = "Allow"
+"cwd:/"               = "Allow"   # scripts the agent drops into the project tree
+"/tmp/"               = "Allow"   # scratch builds (autotools `./configure`, ad-hoc scripts)
+"tempdir:/"           = "Allow"   # `$TMPDIR` on macOS — distinct from /tmp
+
 # Coreutils
 arch         = "Allow"
 b2sum        = "Allow"
@@ -205,7 +214,7 @@ whoami       = "Allow"
 yes          = "Allow"
 
 # Shells
-sh           = "Allow"
+sh           = "Deny"
 bash         = "Deny"
 zsh          = "Deny"
 

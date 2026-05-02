@@ -9,6 +9,8 @@
 
 use crate::cancel;
 use clap::ValueEnum;
+use eventsource_stream::Eventsource;
+use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::time::Duration;
 
@@ -426,73 +428,62 @@ async fn stream_anthropic<F: FnMut(&str)>(
     body: Value,
     on_text: &mut F,
 ) -> Result<(Value, String, Value), String> {
-    let mut resp = post_open(client, url, headers, body).await?;
-
+    let resp = post_open(client, url, headers, body).await?;
+    let mut events = resp.bytes_stream().eventsource();
     let mut blocks: Vec<Option<Block>> = Vec::new();
     let mut stop = String::new();
     let mut usage = json!({});
-    let mut sse = Sse::new();
 
-    loop {
-        let chunk = tokio::select! {
-            biased;
-            _ = wait_for_cancel() => return Err(format!("{CANCEL_MARKER} cancelled mid-stream")),
-            c = resp.chunk() => c.map_err(|e| e.to_string())?,
-        };
-        let Some(bytes) = chunk else { break };
-        sse.feed(&bytes, |event, data| {
-            let v: Value = serde_json::from_str(data)
-                .map_err(|e| format!("sse json: {e}"))?;
-            match event {
-                Some("content_block_start") => {
-                    let idx = v["index"].as_u64().unwrap_or(0) as usize;
-                    let block = &v["content_block"];
-                    grow(&mut blocks, idx + 1);
-                    blocks[idx] = match block["type"].as_str().unwrap_or("") {
-                        "text" => Some(Block::Text(String::new())),
-                        "tool_use" => Some(Block::Tool {
-                            id: block["id"].as_str().unwrap_or("").into(),
-                            name: block["name"].as_str().unwrap_or("").into(),
-                            args: String::new(),
-                        }),
-                        _ => None,
-                    };
-                }
-                Some("content_block_delta") => {
-                    let idx = v["index"].as_u64().unwrap_or(0) as usize;
-                    let d = &v["delta"];
-                    match (d["type"].as_str().unwrap_or(""), blocks.get_mut(idx).and_then(Option::as_mut)) {
-                        ("text_delta", Some(Block::Text(buf))) => {
-                            if let Some(t) = d["text"].as_str() {
-                                buf.push_str(t);
-                                on_text(t);
-                            }
-                        }
-                        ("input_json_delta", Some(Block::Tool { args, .. })) => {
-                            if let Some(p) = d["partial_json"].as_str() {
-                                args.push_str(p);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Some("message_start") => {
-                    if let Some(u) = v.get("message").and_then(|m| m.get("usage")) {
-                        merge_into(&mut usage, u);
-                    }
-                }
-                Some("message_delta") => {
-                    if let Some(s) = v["delta"]["stop_reason"].as_str() {
-                        stop = s.to_string();
-                    }
-                    if let Some(u) = v.get("usage") {
-                        merge_into(&mut usage, u);
-                    }
-                }
-                _ => {}
+    while let Some(ev) = next_event(&mut events).await? {
+        let v: Value = serde_json::from_str(&ev.data).map_err(|e| format!("sse json: {e}"))?;
+        match ev.event.as_str() {
+            "content_block_start" => {
+                let idx = v["index"].as_u64().unwrap_or(0) as usize;
+                let block = &v["content_block"];
+                grow(&mut blocks, idx + 1);
+                blocks[idx] = match block["type"].as_str().unwrap_or("") {
+                    "text" => Some(Block::Text(String::new())),
+                    "tool_use" => Some(Block::Tool {
+                        id: block["id"].as_str().unwrap_or("").into(),
+                        name: block["name"].as_str().unwrap_or("").into(),
+                        args: String::new(),
+                    }),
+                    _ => None,
+                };
             }
-            Ok(())
-        })?;
+            "content_block_delta" => {
+                let idx = v["index"].as_u64().unwrap_or(0) as usize;
+                let d = &v["delta"];
+                match (d["type"].as_str().unwrap_or(""), blocks.get_mut(idx).and_then(Option::as_mut)) {
+                    ("text_delta", Some(Block::Text(buf))) => {
+                        if let Some(t) = d["text"].as_str() {
+                            buf.push_str(t);
+                            on_text(t);
+                        }
+                    }
+                    ("input_json_delta", Some(Block::Tool { args, .. })) => {
+                        if let Some(p) = d["partial_json"].as_str() {
+                            args.push_str(p);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "message_start" => {
+                if let Some(u) = v.get("message").and_then(|m| m.get("usage")) {
+                    merge_into(&mut usage, u);
+                }
+            }
+            "message_delta" => {
+                if let Some(s) = v["delta"]["stop_reason"].as_str() {
+                    stop = s.to_string();
+                }
+                if let Some(u) = v.get("usage") {
+                    merge_into(&mut usage, u);
+                }
+            }
+            _ => {}
+        }
     }
 
     let content: Vec<Value> = blocks.into_iter().filter_map(|b| match b? {
@@ -517,58 +508,45 @@ async fn stream_openai<F: FnMut(&str)>(
     body: Value,
     on_text: &mut F,
 ) -> Result<(Value, String, Value), String> {
-    let mut resp = post_open(client, url, headers, body).await?;
-
+    let resp = post_open(client, url, headers, body).await?;
+    let mut events = resp.bytes_stream().eventsource();
     let mut content = String::new();
     let mut tools: Vec<Option<ToolAcc>> = Vec::new();
     let mut finish = String::new();
     let mut usage = json!({});
-    let mut sse = Sse::new();
 
-    loop {
-        let chunk = tokio::select! {
-            biased;
-            _ = wait_for_cancel() => return Err(format!("{CANCEL_MARKER} cancelled mid-stream")),
-            c = resp.chunk() => c.map_err(|e| e.to_string())?,
-        };
-        let Some(bytes) = chunk else { break };
-        sse.feed(&bytes, |_event, data| {
-            if data == "[DONE]" { return Ok(()); }
-            let v: Value = serde_json::from_str(data)
-                .map_err(|e| format!("sse json: {e}"))?;
-            if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
-                usage = u.clone();
-            }
-            let Some(choice) = v["choices"].as_array().and_then(|a| a.first()) else {
-                return Ok(());
-            };
-            if let Some(fr) = choice["finish_reason"].as_str() {
-                finish = fr.to_string();
-            }
-            let delta = &choice["delta"];
-            if let Some(t) = delta["content"].as_str() {
-                content.push_str(t);
-                on_text(t);
-            }
-            if let Some(tcs) = delta["tool_calls"].as_array() {
-                for tc in tcs {
-                    let i = tc["index"].as_u64().unwrap_or(0) as usize;
-                    grow(&mut tools, i + 1);
-                    let slot = tools[i].get_or_insert_with(ToolAcc::default);
-                    if let Some(id) = tc["id"].as_str() {
-                        if slot.id.is_empty() { slot.id = id.into(); }
-                    }
-                    let f = &tc["function"];
-                    if let Some(name) = f["name"].as_str() {
-                        if slot.name.is_empty() { slot.name = name.into(); }
-                    }
-                    if let Some(args) = f["arguments"].as_str() {
-                        slot.args.push_str(args);
-                    }
+    while let Some(ev) = next_event(&mut events).await? {
+        if ev.data == "[DONE]" { continue; }
+        let v: Value = serde_json::from_str(&ev.data).map_err(|e| format!("sse json: {e}"))?;
+        if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
+            usage = u.clone();
+        }
+        let Some(choice) = v["choices"].as_array().and_then(|a| a.first()) else { continue };
+        if let Some(fr) = choice["finish_reason"].as_str() {
+            finish = fr.to_string();
+        }
+        let delta = &choice["delta"];
+        if let Some(t) = delta["content"].as_str() {
+            content.push_str(t);
+            on_text(t);
+        }
+        if let Some(tcs) = delta["tool_calls"].as_array() {
+            for tc in tcs {
+                let i = tc["index"].as_u64().unwrap_or(0) as usize;
+                grow(&mut tools, i + 1);
+                let slot = tools[i].get_or_insert_with(ToolAcc::default);
+                if let Some(id) = tc["id"].as_str() {
+                    if slot.id.is_empty() { slot.id = id.into(); }
+                }
+                let f = &tc["function"];
+                if let Some(name) = f["name"].as_str() {
+                    if slot.name.is_empty() { slot.name = name.into(); }
+                }
+                if let Some(args) = f["arguments"].as_str() {
+                    slot.args.push_str(args);
                 }
             }
-            Ok(())
-        })?;
+        }
     }
 
     let mut msg = json!({ "role": "assistant" });
@@ -581,6 +559,23 @@ async fn stream_openai<F: FnMut(&str)>(
         msg["tool_calls"] = Value::Array(calls);
     }
     Ok((msg, finish, usage))
+}
+
+/// Pull the next SSE event from `events`, racing the cancel flag so
+/// Ctrl-C aborts mid-stream.  Returns `Ok(None)` at end of stream.
+async fn next_event<S>(events: &mut S) -> Result<Option<eventsource_stream::Event>, String>
+where
+    S: futures_util::Stream<Item = Result<eventsource_stream::Event, eventsource_stream::EventStreamError<reqwest::Error>>> + Unpin,
+{
+    tokio::select! {
+        biased;
+        _ = wait_for_cancel() => Err(format!("{CANCEL_MARKER} cancelled mid-stream")),
+        ev = events.next() => match ev {
+            Some(Ok(e)) => Ok(Some(e)),
+            Some(Err(e)) => Err(e.to_string()),
+            None => Ok(None),
+        },
+    }
 }
 
 /// One assembled content block in an Anthropic streaming response.
@@ -652,53 +647,6 @@ fn stamp_last_message_cache(messages: &mut [Value]) {
         && let Some(obj) = last_block.as_object_mut()
     {
         obj.insert("cache_control".into(), json!({ "type": "ephemeral" }));
-    }
-}
-
-/// Server-Sent Events line buffer.  Feed it bytes; emit one event per
-/// blank-line-terminated block of `field: value` lines.  Comments
-/// (`:…`) and unknown fields are ignored; multiple `data:` lines per
-/// event join with `\n` per the SSE spec.
-struct Sse {
-    buf: Vec<u8>,
-    event: Option<String>,
-    data: Vec<String>,
-}
-
-impl Sse {
-    fn new() -> Self {
-        Self { buf: Vec::new(), event: None, data: Vec::new() }
-    }
-
-    fn feed<F>(&mut self, bytes: &[u8], mut emit: F) -> Result<(), String>
-    where
-        F: FnMut(Option<&str>, &str) -> Result<(), String>,
-    {
-        self.buf.extend_from_slice(bytes);
-        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
-            let line: Vec<u8> = self.buf.drain(..=pos).collect();
-            let line = std::str::from_utf8(&line).unwrap_or("")
-                .trim_end_matches('\n')
-                .trim_end_matches('\r');
-            if line.is_empty() {
-                if !self.data.is_empty() {
-                    let data = self.data.join("\n");
-                    let event = self.event.take();
-                    emit(event.as_deref(), &data)?;
-                    self.data.clear();
-                }
-                continue;
-            }
-            if line.starts_with(':') {
-                continue;
-            }
-            if let Some(rest) = line.strip_prefix("data:") {
-                self.data.push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
-            } else if let Some(rest) = line.strip_prefix("event:") {
-                self.event = Some(rest.strip_prefix(' ').unwrap_or(rest).to_string());
-            }
-        }
-        Ok(())
     }
 }
 

@@ -35,7 +35,8 @@ let sample = !{cat "$dir/upper-3" | from-string}
 echo "uppercase: $sample"
 
 # Count all files
-let all_files = find $dir -type f | from-lines
+let all_files_step = find $dir -type f | from-lines
+let all_files = !{step-into-list { return $all_files_step }}
 let nfiles = length $all_files
 echo "total files: $nfiles"
 

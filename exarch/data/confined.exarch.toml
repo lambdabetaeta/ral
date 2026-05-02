@@ -1,0 +1,43 @@
+# `confined` bake-in.  Build-jail profile shaped after
+# BrianSwift/macOSSandboxBuild's `confined.sb`: tight reads (working
+# tree + scratch + system base), tight writes (working tree + scratch),
+# no network, exec admits via subpaths only — no per-name lattice.
+#
+# Use when the agent's job is to compile or process *this one tree*
+# and nothing else: `--base confined` for ad-hoc invocations,
+# `--base confined --extend-base extra.toml` to widen for one tool.
+
+audit = false
+net   = false                       # no network — confined.sb has the same default
+
+[shell]
+chdir = true                        # cd inside the tree is fine
+
+# The working tree, plus scratch directories.  Nothing else readable;
+# nothing else writable.  System paths needed by the platform runtime
+# (libc, dyld, /private/etc, …) come automatically from the macOS
+# sandbox base — see `core/src/sandbox/macos.rs::system_paths`.
+[fs]
+read_prefixes = [
+  "cwd:",                           # working tree
+  "tempdir:",                       # $TMPDIR (per-session scratch)
+  "/tmp",                           # legacy scratch
+]
+write_prefixes = [
+  "cwd:",                           # build artefacts land here
+  "tempdir:",
+  "/tmp",
+]
+
+# Exec by subpath only.  No per-name allow-list: the build sandbox
+# trusts whatever lives in the standard binary dirs.  Apple's
+# toolchain (CommandLineTools, Xcode, /opt/homebrew) is folded in
+# automatically by the OS sandbox base, so `gcc → cc1 → as → ld`
+# resolves without listing each tool here.
+[exec]
+"/bin/"           = "Allow"         # sh, bash
+"/usr/bin/"       = "Allow"         # uname, dirname, env, sed, awk
+"/usr/local/bin/" = "Allow"         # user-installed CLI tools
+"cwd:/"           = "Allow"         # ./configure, ./build.sh, etc.
+"tempdir:/"       = "Allow"         # build-tree-shadowed scratch
+"/tmp/"           = "Allow"

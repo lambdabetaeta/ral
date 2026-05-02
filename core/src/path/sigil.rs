@@ -95,6 +95,20 @@ pub fn looks_like_xdg(s: &str) -> bool {
     s.starts_with("xdg:")
 }
 
+/// True when `s` is shaped like a path or path-prefix sigil — it
+/// either contains a path separator or starts with one of the four
+/// sigil tokens recognised by [`freeze_one`] (`~`, `xdg:`, `cwd:`,
+/// `tempdir:`).  Used by the unified exec map: bare command names
+/// (no `/`, no sigil) pass through freeze unchanged; everything else
+/// gets sigil-resolved.
+pub fn looks_like_path_or_sigil(s: &str) -> bool {
+    s.contains('/')
+        || s.starts_with('~')
+        || s.starts_with("xdg:")
+        || s.starts_with("cwd:")
+        || s.starts_with("tempdir:")
+}
+
 /// Parse `xdg:NAME[/sub]` into a kind plus optional sub-path.
 /// `None` if the input does not start with `xdg:` or names an
 /// unknown kind.

@@ -117,9 +117,10 @@ impl Shell {
     pub fn new(terminal: crate::io::TerminalState) -> Self {
         Shell {
             env: Env::new(),
-            dynamic: Dynamic {
-                capabilities_stack: vec![Capabilities::root()],
-                ..Dynamic::default()
+            dynamic: {
+                let mut d = Dynamic::default();
+                d.capabilities_stack = vec![Capabilities::root()];
+                d
             },
             control: ControlState::default(),
             io: crate::io::Io {
@@ -187,10 +188,10 @@ impl Shell {
         overrides: HashMap<std::string::String, std::string::String>,
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
-        let saved = self.dynamic.env_vars.clone();
-        self.dynamic.env_vars.extend(overrides);
+        let saved = self.dynamic.env_vars().clone();
+        self.dynamic.extend_env(overrides);
         let r = f(self);
-        self.dynamic.env_vars = saved;
+        self.dynamic.replace_env_vars(saved);
         r
     }
 
@@ -272,8 +273,14 @@ impl Shell {
     pub fn resolve_builtin(&self, name: &str) -> Option<Value> {
         match name {
             "env" => {
-                let mut merged: HashMap<String, String> = std::env::vars().collect();
-                merged.extend(self.dynamic.env_vars.clone());
+                // PWD/OLDPWD are process-state, not env-overrides:
+                // they change every `cd` and live on the process; ral
+                // code reads the current directory via `cwd`.  Drop
+                // them at the source so `$env` reads as the rule.
+                let mut merged: HashMap<String, String> = std::env::vars()
+                    .filter(|(k, _)| !matches!(k.as_str(), "PWD" | "OLDPWD"))
+                    .collect();
+                merged.extend(self.dynamic.env_vars().clone());
                 let mut pairs: Vec<_> = merged
                     .into_iter()
                     .map(|(k, v)| (k, Value::String(v)))
@@ -380,16 +387,29 @@ impl Shell {
         self.dynamic.check_shell_chdir()
     }
 
-    /// Change the process working directory, updating `PWD`/`OLDPWD` in both
-    /// `env_vars` and the ral scope.  Returns `(old_path, new_path)` on
-    /// success so the caller can fire the `chpwd` lifecycle hook.
+    /// Live process working directory.  Never cached — there is one
+    /// cwd in the world, owned by the OS.  Reading it through this
+    /// accessor (and the `cwd` builtin), not through a stored field,
+    /// is what makes the discipline unforgeable; a clippy lint forbids
+    /// `std::env::current_dir` everywhere else.
+    pub fn cwd(&self) -> std::path::PathBuf {
+        #[allow(clippy::disallowed_methods)]
+        std::env::current_dir().unwrap_or_default()
+    }
+
+    /// Change the process working directory.  `PWD`/`OLDPWD` are written
+    /// only to process env, where child commands inherit them; they are
+    /// deliberately not stored in `dynamic.env_vars` or the lexical scope,
+    /// since both are rolled back on `return_to` while `set_current_dir`
+    /// is not — a stored copy would go stale the moment `cd` ran inside
+    /// a thunk.  Within ral, the current directory is read via `cwd`,
+    /// not via `$env[PWD]` (which is filtered out of `$env`).  Returns
+    /// `(old_path, new_path)` so the caller can fire the `chpwd` hook.
     ///
     /// Tilde expansion is delegated to `expand_tilde_path`; an empty `target`
     /// is treated as `~`.
     pub fn apply_chdir(&mut self, target: &str) -> Result<(String, String), EvalSignal> {
-        let old = std::env::current_dir()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let old = self.cwd().to_string_lossy().into_owned();
 
         let home = self.dynamic.home();
         let home = if home.is_empty() { ".".into() } else { home };
@@ -404,13 +424,15 @@ impl Shell {
         std::env::set_current_dir(&resolved)
             .map_err(|e| EvalSignal::Error(Error::new(format!("{resolved}: {e}"), 1)))?;
 
-        let new = std::env::current_dir()
-            .map_or_else(|_| resolved.clone(), |p| p.to_string_lossy().into_owned());
+        let new = {
+            let p = self.cwd();
+            if p.as_os_str().is_empty() { resolved.clone() } else { p.to_string_lossy().into_owned() }
+        };
 
-        self.dynamic.env_vars.insert("OLDPWD".into(), old.clone());
-        self.dynamic.env_vars.insert("PWD".into(), new.clone());
-        self.set("OLDPWD".into(), Value::String(old.clone()));
-        self.set("PWD".into(), Value::String(new.clone()));
+        unsafe {
+            std::env::set_var("OLDPWD", &old);
+            std::env::set_var("PWD", &new);
+        }
         self.control.last_status = 0;
 
         Ok((old, new))
@@ -458,7 +480,7 @@ impl Shell {
     /// Together they let `which` and the dispatch error path tell
     /// "denied but installed" apart from "not installed."
     pub fn locate_command(&self, name: &str) -> Option<std::path::PathBuf> {
-        let env_path = self.dynamic.env_vars.get("PATH").cloned();
+        let env_path = self.dynamic.env_vars().get("PATH").cloned();
         let env_path = env_path.or_else(|| std::env::var("PATH").ok());
         crate::path::locate(name, env_path.as_deref(), self.dynamic.cwd.as_deref())
     }
@@ -495,7 +517,7 @@ impl Shell {
         }
         let active = self
             .dynamic
-            .env_vars
+            .env_vars()
             .get("PATH")
             .cloned()
             .or_else(|| std::env::var("PATH").ok());
@@ -654,6 +676,13 @@ impl Shell {
         parent.audit.tree = self.audit.tree.take();
         // Plugin context: moved back into parent.
         parent.repl.plugin_context = self.repl.plugin_context.take();
+        // pending_chpwd: queued effect — if the child cd'd, the REPL
+        // must drain and fire `chpwd` after the top-level evaluate
+        // returns.  Only overwrite if the child has one queued, so a
+        // nested call doesn't clobber an outer pending pair.
+        if let Some(pair) = self.repl.pending_chpwd.take() {
+            parent.repl.pending_chpwd = Some(pair);
+        }
         // IO: stack-restore parent's pushed redirections.
         parent.io.return_to_parent(&mut self.io);
     }
@@ -703,31 +732,36 @@ mod grant_policy_tests {
         assert_eq!(head, CommandHead::GrantDenied);
     }
 
-    /// `exec_dirs` admits a command whose resolved absolute path is
-    /// under one of the listed prefixes, even when the per-name
-    /// `exec` map has no entry.
+    /// A subpath-style key (`/usr/bin/`) admits a command whose
+    /// resolved absolute path is inside, even when the same map has
+    /// no per-name entry for it.  Replaces the old `exec_dirs`
+    /// admittance route.
     #[test]
-    fn exec_dirs_allows_resolved_path_under_prefix() {
+    fn subpath_key_admits_path_under_prefix() {
         let mut shell = Shell::default();
         let grant = Capabilities {
-            exec: Some(BTreeMap::new()),
-            exec_dirs: Some(vec!["/usr/bin".into()]),
+            exec: Some(BTreeMap::from([(
+                "/usr/bin/".into(),
+                ExecPolicy::Allow,
+            )])),
             ..Capabilities::root()
         };
         shell
             .with_capabilities(grant, |shell| {
                 shell.check_exec_args("ls", &["ls", "/usr/bin/ls"], &[])
             })
-            .expect("ls under /usr/bin should be admitted by exec_dirs");
+            .expect("ls under /usr/bin/ subpath key should be admitted");
     }
 
-    /// `exec_dirs` does not allow a binary outside any listed prefix.
+    /// A subpath key does not admit a binary outside its prefix.
     #[test]
-    fn exec_dirs_denies_outside_prefixes() {
+    fn subpath_key_denies_outside_prefix() {
         let mut shell = Shell::default();
         let grant = Capabilities {
-            exec: Some(BTreeMap::new()),
-            exec_dirs: Some(vec!["/usr/bin".into()]),
+            exec: Some(BTreeMap::from([(
+                "/usr/bin/".into(),
+                ExecPolicy::Allow,
+            )])),
             ..Capabilities::root()
         };
         let result = shell.with_capabilities(grant, |shell| {
@@ -736,18 +770,20 @@ mod grant_policy_tests {
         assert!(result.is_err());
     }
 
-    /// Per-name `exec` policy wins over `exec_dirs`: a `Subcommands`
-    /// restriction on a named entry must not be relaxed by a
-    /// directory match.
+    /// Literal beats subpath: a per-name `Subcommands` restriction on
+    /// `cargo` is not relaxed by a sibling subpath key admitting the
+    /// directory cargo lives in.
     #[test]
-    fn exec_dirs_does_not_relax_named_subcommands() {
+    fn literal_subcommands_beats_subpath_admit() {
         let mut shell = Shell::default();
         let grant = Capabilities {
-            exec: Some(BTreeMap::from([(
-                "cargo".into(),
-                ExecPolicy::Subcommands(vec!["build".into()]),
-            )])),
-            exec_dirs: Some(vec!["/opt/homebrew/bin".into()]),
+            exec: Some(BTreeMap::from([
+                (
+                    "cargo".into(),
+                    ExecPolicy::Subcommands(vec!["build".into()]),
+                ),
+                ("/opt/homebrew/bin/".into(), ExecPolicy::Allow),
+            ])),
             ..Capabilities::root()
         };
         let result = shell.with_capabilities(grant, |shell| {
@@ -759,43 +795,57 @@ mod grant_policy_tests {
         });
         assert!(
             result.is_err(),
-            "named subcommand restriction should beat exec_dirs"
+            "literal Subcommands restriction must beat sibling subpath admit"
         );
     }
 
-    /// A layer that declares only `exec` and misses should abstain so an
-    /// enclosing `exec_dirs` layer can still allow the resolved path.
+    /// Subpath `Deny` carves a hole inside a broader subpath `Allow`:
+    /// `/usr/bin/sensitive/` denied, `/usr/bin/` allowed.  Longest
+    /// subpath wins, so a binary in the inner directory is denied
+    /// even though the outer admits.
     #[test]
-    fn exec_name_only_layer_abstains_and_outer_exec_dirs_allows() {
+    fn subpath_deny_carves_hole_in_subpath_allow() {
         let mut shell = Shell::default();
-        let outer = Capabilities {
-            exec_dirs: Some(vec!["/usr/bin".into()]),
+        let grant = Capabilities {
+            exec: Some(BTreeMap::from([
+                ("/usr/bin/".into(), ExecPolicy::Allow),
+                ("/usr/bin/sensitive/".into(), ExecPolicy::Deny),
+            ])),
             ..Capabilities::root()
         };
-        let inner = Capabilities {
-            exec: Some(BTreeMap::from([("git".into(), ExecPolicy::Allow)])),
-            ..Capabilities::root()
-        };
-        shell.with_capabilities(outer, |shell| {
-            shell.with_capabilities(inner, |shell| {
-                shell.check_exec_args("ls", &["ls", "/usr/bin/ls"], &[])
+        // Outside the deny region: admitted.
+        shell
+            .with_capabilities(grant.clone(), |sh| {
+                sh.check_exec_args("ls", &["ls", "/usr/bin/ls"], &[])
             })
-        })
-        .expect("inner name-only miss should not override outer exec_dirs allow");
+            .expect("ls under /usr/bin/ subpath should be admitted");
+        // Inside the deny region: denied by the deeper subpath.
+        let result = shell.with_capabilities(grant, |sh| {
+            sh.check_exec_args("payload", &["payload", "/usr/bin/sensitive/payload"], &[])
+        });
+        assert!(
+            result.is_err(),
+            "longer subpath Deny should beat shorter subpath Allow"
+        );
     }
 
-    /// `exec_dirs = []` is an explicit opinion that no directory match is
-    /// allowed, so a layer that also declares `exec` stays strict.
+    /// Deny-by-default within an opining layer: a layer with `exec`
+    /// declared admits *only* what's in its map.  A nested layer that
+    /// names `git` does not pass through to outer `/usr/bin/` admits.
+    /// (This replaces the old "name-only abstains" pattern, which was
+    /// an artefact of the now-removed `exec_dirs` field.)
     #[test]
-    fn explicit_empty_exec_dirs_keeps_single_layer_strict() {
+    fn nested_exec_layer_denies_outside_its_map() {
         let mut shell = Shell::default();
         let outer = Capabilities {
-            exec_dirs: Some(vec!["/usr/bin".into()]),
+            exec: Some(BTreeMap::from([(
+                "/usr/bin/".into(),
+                ExecPolicy::Allow,
+            )])),
             ..Capabilities::root()
         };
         let inner = Capabilities {
             exec: Some(BTreeMap::from([("git".into(), ExecPolicy::Allow)])),
-            exec_dirs: Some(Vec::new()),
             ..Capabilities::root()
         };
         let result = shell.with_capabilities(outer, |shell| {
@@ -805,7 +855,7 @@ mod grant_policy_tests {
         });
         assert!(
             result.is_err(),
-            "explicit empty exec_dirs should keep the inner layer restrictive"
+            "inner layer's exec map is a complete opinion; ls is not in it"
         );
     }
 

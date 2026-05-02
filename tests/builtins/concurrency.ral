@@ -25,10 +25,13 @@ let rb = await $b
 echo !{to-bytes $ra[stdout] | from-string} !{to-bytes $rb[stdout] | from-string}
 # Expected: alpha beta
 
-# Spawn with error: await re-raises; `_try` captures it as an error record.
+# Spawn with error: await re-raises; `_try` captures it as a `.err` arm.
 let h = spawn { /bin/false }
 let r = _try { await $h }
-echo "child ok=$r[ok] status=$r[status]"
+case $r [
+    .ok:  { |_| echo "child ok=true" },
+    .err: { |e| echo "child ok=false status=$e[status]" }
+]
 # Expected: child ok=false status=1
 
 # Handles are values — store in a list, then await each.

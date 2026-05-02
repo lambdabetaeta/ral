@@ -1,25 +1,15 @@
-#[cfg(feature = "diffutils")]
-use crate::diagnostic;
-#[cfg(feature = "diffutils")]
-use crate::types::*;
-
-#[cfg(feature = "diffutils")]
-use diffutilslib;
-
 #[cfg(feature = "coreutils")]
-macro_rules! declare_uutils {
+macro_rules! declare_coreutils {
     ($($name:literal => $module:ident),+ $(,)?) => {
         $(use $module;)+
 
-        /// Names of every uutils tool the helper subprocess can dispatch.
-        /// Read by [`is_uutils_tool`] so command resolution can route a bare
-        /// `cat`/`yes`/`wc`/... through `current_exe() --ral-uutils-helper`
-        /// instead of PATH's system binary.  The macro keeps this list in
-        /// lockstep with the dispatch arms below — adding a tool in one
-        /// place adds it in both.
-        pub(crate) const UUTILS_TOOLS: &[&str] = &[$($name),+];
+        /// Names of every coreutils tool the helper subprocess can dispatch.
+        /// The macro keeps this list in lockstep with the dispatch arms below —
+        /// adding a tool in one place adds it in both.  Consulted by
+        /// [`is_uutils_tool`] together with [`DIFFUTILS_TOOLS`].
+        pub(crate) const COREUTILS_TOOLS: &[&str] = &[$($name),+];
 
-        fn uutils_invoke(tool: &str, args: Vec<std::ffi::OsString>) -> i32 {
+        fn coreutils_invoke(tool: &str, args: Vec<std::ffi::OsString>) -> i32 {
             match tool {
                 $($name => $module::uumain(args.into_iter()),)+
                 _ => 1,
@@ -28,18 +18,25 @@ macro_rules! declare_uutils {
     };
 }
 
-/// True when `name` is one of the bundled uutils tools — the resolver
-/// substitutes a re-exec of ourselves with `--ral-uutils-helper` for these,
-/// so they ride through the same external-command boundary as `/usr/bin/cat`.
-#[cfg(feature = "coreutils")]
-pub(crate) fn is_uutils_tool(name: &str) -> bool {
-    UUTILS_TOOLS.iter().any(|t| *t == name)
-}
+/// Bundled diffutils tools — currently `cmp` and `diff`, both gated on the
+/// `diffutils` Cargo feature.  Each ships an argv-style shim that runs in
+/// the helper subprocess; the parent process never executes them in-process.
+#[cfg(feature = "diffutils")]
+pub(crate) const DIFFUTILS_TOOLS: &[&str] = &["cmp", "diff"];
 
-/// `coreutils` feature off → no bundled tools, so resolution falls through
-/// to PATH for every name.
-#[cfg(not(feature = "coreutils"))]
+/// True when `name` is one of the bundled uutils tools — coreutils or
+/// diffutils.  The resolver substitutes a re-exec of ourselves with
+/// `--ral-uutils-helper` for these, so they ride through the same
+/// external-command boundary as `/usr/bin/cat`.
 pub(crate) fn is_uutils_tool(_name: &str) -> bool {
+    #[cfg(feature = "coreutils")]
+    if COREUTILS_TOOLS.iter().any(|t| *t == _name) {
+        return true;
+    }
+    #[cfg(feature = "diffutils")]
+    if DIFFUTILS_TOOLS.iter().any(|t| *t == _name) {
+        return true;
+    }
     false
 }
 
@@ -63,7 +60,7 @@ pub fn try_run_uutils_helper() -> Option<u8> {
     if args.next().as_deref().map(std::ffi::OsStr::to_string_lossy)? != HELPER_FLAG {
         return None;
     }
-    #[cfg(feature = "coreutils")]
+    #[cfg(any(feature = "coreutils", feature = "diffutils"))]
     {
         // Rust's runtime sets SIGPIPE=IGN before main; uucore writes
         // therefore see EPIPE and return 1 instead of the helper dying
@@ -83,15 +80,42 @@ pub fn try_run_uutils_helper() -> Option<u8> {
         let code = uutils_invoke(&tool, tool_args);
         Some(code.clamp(0, 255) as u8)
     }
-    #[cfg(not(feature = "coreutils"))]
+    #[cfg(not(any(feature = "coreutils", feature = "diffutils")))]
     {
-        eprintln!("ral: built without 'coreutils' feature; cannot run as uutils helper");
+        eprintln!(
+            "ral: built without 'coreutils' or 'diffutils' feature; cannot run as uutils helper"
+        );
         Some(2)
     }
 }
 
+/// Helper-subprocess dispatch.  Diffutils tools (`cmp`, `diff`) are
+/// matched first since they're a tiny set; anything else falls through
+/// to coreutils.  Each branch is feature-gated, so a build with only
+/// `diffutils` (or only `coreutils`) compiles down to a single arm.
+#[cfg(any(feature = "coreutils", feature = "diffutils"))]
+fn uutils_invoke(tool: &str, args: Vec<std::ffi::OsString>) -> i32 {
+    #[cfg(feature = "diffutils")]
+    {
+        match tool {
+            "cmp" => return cmp_main(args.into_iter()),
+            "diff" => return diff_main(args.into_iter()),
+            _ => {}
+        }
+    }
+    #[cfg(feature = "coreutils")]
+    {
+        return coreutils_invoke(tool, args);
+    }
+    #[cfg(not(feature = "coreutils"))]
+    {
+        let _ = (tool, args);
+        1
+    }
+}
+
 #[cfg(feature = "coreutils")]
-declare_uutils! {
+declare_coreutils! {
     "ls" => uu_ls,
     "cat" => uu_cat,
     "wc" => uu_wc,
@@ -170,146 +194,144 @@ declare_uutils! {
     "whoami" => uu_whoami
 }
 
+/// `cmp` shim, dispatched by the helper subprocess when the parent's
+/// `resolve_command` rewrites a bare `cmp` to `--ral-uutils-helper cmp`.
+/// Argv layout matches `parse_params`'s expectation: argv[0] is the tool
+/// name, argv[1..] are user arguments.  Faithful translation of upstream
+/// `diffutilslib::cmp::main` (`src/cmp.rs:476`), with two structural
+/// divergences forced by upstream's API:
+///
+///   * No same-file/both-stdin shortcut.  Upstream's `main` checks
+///     `params.from == "-" && params.to == "-"
+///      || same_file::is_same_file(&params.from, &params.to)` and returns
+///     SUCCESS without re-reading.  `cmp::Params.from` and `params.to`
+///     are private, so we cannot replicate the test; `cmp::cmp` re-does
+///     the I/O and reports `Equal`, giving the same exit code at higher
+///     I/O cost.
+///   * No `--quiet` suppression.  Upstream's `main` skips the `eprintln!`
+///     under `params.quiet`; that field is also private.  We always
+///     emit the error.
+///
+/// Bump diffutils → re-audit this function against the new `cmp::main`.
 #[cfg(feature = "diffutils")]
-pub(crate) fn uu_diff(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
-    use diffutilslib::params::{self, Format};
-    use std::ffi::OsString;
-    use std::io::{self, Read};
-    let mut uargs: Vec<OsString> = vec![OsString::from("diff")];
-    uargs.extend(args.iter().map(|v| OsString::from(v.to_string())));
-    let params = match params::parse_params(uargs.into_iter().peekable()) {
-        Ok(p) => p,
-        Err(e) => {
-            diagnostic::cmd_error("diff", &e.to_string());
-            shell.control.last_status = 2;
-            return Err(EvalSignal::Error(Error::new(format!("diff: {e}"), 2)));
-        }
-    };
-    let mut pipe = shell.io.stdin.take_reader();
-    let mut read_input =
-        |path: &OsString,
-         pipe: &mut Option<crate::io::SourceReader>|
-         -> io::Result<Vec<u8>> {
-            if path == "-" {
-                let mut buf = Vec::new();
-                if let Some(r) = pipe.take() {
-                    io::BufReader::new(r).read_to_end(&mut buf)?;
-                } else {
-                    io::stdin().read_to_end(&mut buf)?;
-                }
-                Ok(buf)
-            } else {
-                shell.check_fs_read(&path.to_string_lossy())
-                    .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e.to_string()))?;
-                std::fs::read(path)
-            }
-        };
-    let from = match read_input(&params.from, &mut pipe) {
-        Ok(c) => c,
-        Err(e) => {
-            diagnostic::cmd_error("diff", &format!("{}: {e}", params.from.to_string_lossy()));
-            shell.control.last_status = 2;
-            return Err(EvalSignal::Error(Error::new(
-                format!("diff: {}: {e}", params.from.to_string_lossy()),
-                2,
-            )));
-        }
-    };
-    let to = match read_input(&params.to, &mut pipe) {
-        Ok(c) => c,
-        Err(e) => {
-            diagnostic::cmd_error("diff", &format!("{}: {e}", params.to.to_string_lossy()));
-            shell.control.last_status = 2;
-            return Err(EvalSignal::Error(Error::new(
-                format!("diff: {}: {e}", params.to.to_string_lossy()),
-                2,
-            )));
-        }
-    };
-    if from == to {
-        if params.report_identical_files {
-            let _ = shell.write_stdout(
-                format!(
-                    "Files {} and {} are identical",
-                    params.from.to_string_lossy(),
-                    params.to.to_string_lossy()
-                )
-                .as_bytes(),
-            );
-            let _ = shell.write_stdout(b"\n");
-        }
-        shell.control.last_status = 0;
-        return Ok(Value::Unit);
-    }
-    if params.brief {
-        let _ = shell.write_stdout(
-            format!(
-                "Files {} and {} differ",
-                params.from.to_string_lossy(),
-                params.to.to_string_lossy()
-            )
-            .as_bytes(),
-        );
-        let _ = shell.write_stdout(b"\n");
-        shell.control.last_status = 1;
-        return Err(EvalSignal::Error(Error::new("diff: files differ", 1)));
-    }
-    let output = match params.format {
-        Format::Unified => diffutilslib::unified_diff(&from, &to, &params),
-        Format::Context => diffutilslib::context_diff(&from, &to, &params),
-        Format::Ed => diffutilslib::ed_diff(&from, &to, &params).unwrap_or_default(),
-        Format::SideBySide => {
-            let mut buf: Vec<u8> = Vec::new();
-            diffutilslib::side_by_side_diff(&from, &to, &mut buf, &params);
-            buf
-        }
-        Format::Normal => diffutilslib::normal_diff(&from, &to, &params),
-    };
-    let _ = shell.write_stdout(&output);
-    shell.control.last_status = 1;
-    Err(EvalSignal::Error(Error::new("diff: files differ", 1)))
-}
-
-#[cfg(feature = "diffutils")]
-pub(crate) fn uu_cmp(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
+fn cmp_main<I: Iterator<Item = std::ffi::OsString>>(args: I) -> i32 {
     use diffutilslib::cmp::{self, Cmp};
-    use std::cell::RefCell;
-    use std::ffi::OsString;
-    let mut uargs: Vec<OsString> = vec![OsString::from("cmp")];
-    uargs.extend(args.iter().map(|v| OsString::from(v.to_string())));
-    let params = match cmp::parse_params(uargs.into_iter().peekable()) {
-        Ok(p) => p,
+    let params = match cmp::parse_params(args.peekable()) {
+        Ok(param) => param,
         Err(e) => {
-            diagnostic::cmd_error("cmp", &e.to_string());
-            shell.control.last_status = 2;
-            return Err(EvalSignal::Error(Error::new(format!("cmp: {e}"), 2)));
+            eprintln!("{e}");
+            return 2;
         }
     };
-    let result: RefCell<Result<Cmp, String>> = RefCell::new(Ok(Cmp::Equal));
-    if let Some(ref reader) = shell.io.stdin.take_reader() {
-        let _fd_lock = crate::compat::lock_stdio_redirect();
-        crate::compat::with_stdin_redirected(reader, || {
-            *result.borrow_mut() = cmp::cmp(&params);
-            0
-        });
-    } else {
-        *result.borrow_mut() = cmp::cmp(&params);
-    }
-    let code = match result.into_inner() {
+    match cmp::cmp(&params) {
         Ok(Cmp::Equal) => 0,
         Ok(Cmp::Different) => 1,
         Err(e) => {
-            diagnostic::cmd_error("cmp", &e);
+            eprintln!("{e}");
             2
         }
+    }
+}
+
+/// `diff` shim, line-for-line translation of upstream `diff::main`
+/// (`src/diff.rs:21` in `diffutils-0.5.0`).  Upstream's `diff::main`
+/// lives in the binary crate (not the library), so it cannot be called
+/// directly; this is the closest we can get.
+///
+/// `params::Params` exposes its fields as `pub`, so unlike `cmp_main`
+/// the only divergences are surface ones: the helper subprocess returns
+/// `i32` rather than `ExitCode`, and `Format::Ed` errors return 2
+/// directly instead of going through `std::process::exit(2)` (the helper
+/// caller clamps the value to a `u8` exit code anyway).
+///
+/// Bump diffutils → re-audit this function against the new `diff::main`.
+#[cfg(feature = "diffutils")]
+fn diff_main<I: Iterator<Item = std::ffi::OsString>>(args: I) -> i32 {
+    use diffutilslib::params::{parse_params, Format};
+    use diffutilslib::utils::report_failure_to_read_input_file;
+    use std::ffi::OsString;
+    use std::fs;
+    use std::io::{self, stdout, Read, Write};
+    let params = match parse_params(args.peekable()) {
+        Ok(p) => p,
+        Err(error) => {
+            eprintln!("{error}");
+            return 2;
+        }
     };
-    shell.control.last_status = code;
-    if code == 0 {
-        Ok(Value::Unit)
+    let maybe_report_identical_files = || {
+        if params.report_identical_files {
+            println!(
+                "Files {} and {} are identical",
+                params.from.to_string_lossy(),
+                params.to.to_string_lossy(),
+            );
+        }
+    };
+    if params.from == "-" && params.to == "-"
+        || same_file::is_same_file(&params.from, &params.to).unwrap_or(false)
+    {
+        maybe_report_identical_files();
+        return 0;
+    }
+
+    fn read_file_contents(filepath: &OsString) -> io::Result<Vec<u8>> {
+        if filepath == "-" {
+            let mut content = Vec::new();
+            io::stdin().read_to_end(&mut content).and(Ok(content))
+        } else {
+            fs::read(filepath)
+        }
+    }
+    let mut io_error = false;
+    let from_content = match read_file_contents(&params.from) {
+        Ok(c) => c,
+        Err(e) => {
+            report_failure_to_read_input_file(&params.executable, &params.from, &e);
+            io_error = true;
+            vec![]
+        }
+    };
+    let to_content = match read_file_contents(&params.to) {
+        Ok(c) => c,
+        Err(e) => {
+            report_failure_to_read_input_file(&params.executable, &params.to, &e);
+            io_error = true;
+            vec![]
+        }
+    };
+    if io_error {
+        return 2;
+    }
+
+    let result: Vec<u8> = match params.format {
+        Format::Normal => diffutilslib::normal_diff(&from_content, &to_content, &params),
+        Format::Unified => diffutilslib::unified_diff(&from_content, &to_content, &params),
+        Format::Context => diffutilslib::context_diff(&from_content, &to_content, &params),
+        Format::Ed => diffutilslib::ed_diff(&from_content, &to_content, &params).unwrap_or_else(
+            |error| {
+                eprintln!("{error}");
+                std::process::exit(2);
+            },
+        ),
+        Format::SideBySide => {
+            let mut output = stdout().lock();
+            diffutilslib::side_by_side_diff(&from_content, &to_content, &mut output, &params)
+        }
+    };
+    if params.brief && !result.is_empty() {
+        println!(
+            "Files {} and {} differ",
+            params.from.to_string_lossy(),
+            params.to.to_string_lossy()
+        );
     } else {
-        Err(EvalSignal::Error(Error::new(
-            format!("cmp: exited with status {code}"),
-            code,
-        )))
+        io::stdout().write_all(&result).unwrap();
+    }
+    if result.is_empty() {
+        maybe_report_identical_files();
+        0
+    } else {
+        1
     }
 }

@@ -378,12 +378,12 @@ To decode structured data from a byte stream, use the `from-X` commands:
 
 ```ral
 let obj   = curl -s $url | from-json
-let lines = find . | from-lines
+let s     = find . | from-lines
 let raw   = curl -s $url | from-bytes
 ```
 
 Each codec has its own named command: `from-line` (one stripped line),
-`from-string` (exact UTF-8), `from-lines` (list of lines),
+`from-string` (exact UTF-8), `from-lines` (Step stream of lines),
 `from-json`, `from-bytes`.
 
 For encoding a value back to bytes, use `to-X`: `to-json $data`,
@@ -394,7 +394,8 @@ To read directly from a file, attach `<` to the decoder:
 
 ```ral
 let body  = from-string < $path     # whole file as String
-let lines = from-lines  < $path     # list of lines
+let s     = from-lines  < $path     # Step String
+let lines = from-lines-list $path   # list of lines
 let cfg   = from-json   < $path     # JSON value
 ```
 
@@ -552,8 +553,8 @@ echo "deployed to !{length $targets} hosts"
 | `get` | `map key default` | Lookup with default |
 | `has` | `map key` | Key exists (Bool) |
 | `union` | `a b` | Merge; b's entries win on conflict |
-| `intersect` | `a b` | Keys present in both, with a's values |
-| `diff` | `a b` | Keys in a not in b |
+| `intersection` | `a b` | Keys present in both, with a's values |
+| `difference` | `a b` | Keys in a not in b, with a's values |
 
 ### Streaming (stdin)
 

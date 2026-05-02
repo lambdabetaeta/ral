@@ -117,6 +117,25 @@ pub fn match_variants(p: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// List-shaped [`match_variants`]: expand every entry to its firmlink
+/// equivalents, flatten, dedupe.  A grant for `/tmp/work` produces
+/// `[/tmp/work, /private/tmp/work]`, since Seatbelt may present either
+/// form to the MAC hook depending on the syscall.  Used by the macOS
+/// sandbox profile builder when laying out subpath rules.
+pub fn match_variants_list(paths: &[String]) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for p in paths {
+        for v in match_variants(Path::new(p)) {
+            let s = v.to_string_lossy().into_owned();
+            if seen.insert(s.clone()) {
+                out.push(s);
+            }
+        }
+    }
+    out
+}
+
 /// If `p` begins with one of the macOS firmlink roots (in either
 /// direction), return the toggled variant; otherwise `None`.
 /// Pure string operation — no filesystem access — so it works on

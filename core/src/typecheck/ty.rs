@@ -11,7 +11,7 @@
 //!   that reads stdin, writes stdout, and produces a value; or a function
 //!   from a value type to a computation type.
 //! - Pipeline modes (`PipeMode`) classify the I/O channels connecting
-//!   pipeline stages: none, raw bytes, or typed value streams.
+//!   pipeline stages: none or raw bytes.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Type variables
@@ -64,6 +64,12 @@ pub enum Ty {
     List(Box<Ty>),
     Map(Box<Ty>),       // String-keyed; values are homogeneous
     Record(Row),        // row-typed record {l₁:A₁, …, lₙ:Aₙ | ρ}
+    /// Tagged sum: a value carrying one of `{.l₁: A₁, …, .lₙ: Aₙ | ρ}`.
+    /// Dual to `Record`; shares the `Row` data structure.  By convention
+    /// the labels in a `Variant` row are *tag* labels (begin with `.`),
+    /// while a `Record` row's labels are *bare* (no leading `.`).  The
+    /// two alphabets do not unify.
+    Variant(Row),
     Thunk(Box<CompTy>), // U B — suspended computation
     Handle(Box<Ty>),    // Handle α — await produces a record with `value: α`
     Var(TyVar),
@@ -123,13 +129,11 @@ impl CompTy {
 ///
 /// `None` — no byte stream (pure computation).
 /// `Bytes` — raw byte channel (external commands, `to-X`/`from-X`).
-/// `Values(A)` — typed value stream carrying elements of type `A`.
 /// `Var` — unification variable, resolved during inference.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PipeMode {
     None,
     Bytes,
-    Values(Box<Ty>),
     Var(ModeVar),
 }
 

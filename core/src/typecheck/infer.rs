@@ -9,13 +9,35 @@ use super::builtins::{
     FieldSchema, builtin_scheme, plugin_entry_field_ty, plugin_op_arg_spec, scoping_schema,
 };
 use super::env::{InferCtx, TyEnv};
-use super::fmt::{fmt_mode, fmt_ty};
+use super::fmt::fmt_ty;
 use super::generalize::{generalize, instantiate};
 use super::scheme::Scheme;
 use super::ty::{CompTy, PipeMode, PipeSpec, Row, Ty};
+use crate::step::{DONE_TAG, HEAD_FIELD, MORE_TAG, TAIL_FIELD};
 use crate::ast::{ExprOp, Pattern};
 use crate::classify::{HeadKind, head_kind};
 use crate::ir::{Comp, CompKind, ExecName, Val, ValListElem, ValMapEntry};
+
+/// Walk a row spine and collect (label, payload_ty) pairs in source order,
+/// stopping at the first non-Extend node (Empty or unresolved variable).
+/// Caller is expected to have applied substitutions; later duplicates of
+/// the same label are skipped per scoped-label semantics.
+fn collect_extends(row: &Row) -> Vec<(String, Ty)> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut cur = row;
+    loop {
+        match cur {
+            Row::Extend(l, ty, rest) => {
+                if seen.insert(l.clone()) {
+                    out.push((l.clone(), (**ty).clone()));
+                }
+                cur = rest;
+            }
+            _ => return out,
+        }
+    }
+}
 
 fn literal_ty(s: &str) -> Ty {
     match s {
@@ -34,6 +56,12 @@ pub fn infer_comp(ctx: &mut InferCtx, env: &mut TyEnv, comp: &Comp) -> CompTy {
 struct Inferencer<'a> {
     ctx: &'a mut InferCtx,
     env: &'a mut TyEnv,
+}
+
+enum StepProbe {
+    NotStep,
+    Step(Ty),
+    Invalid(&'static str),
 }
 
 impl Inferencer<'_> {
@@ -179,6 +207,23 @@ impl Inferencer<'_> {
     }
 
     fn apply_piped_value(&mut self, cty: CompTy, piped_ty: Ty) -> CompTy {
+        // Step-shaped output flowing into a function consumer is iterated
+        // element-by-element by the runtime (see `evaluator/invoke.rs`).
+        // The typechecker mirrors that: when the producer's value type
+        // unifies with `[.more: {head: τ, tail: Thunk(_)} | .done: _ | ρ]`,
+        // we propagate `τ` rather than the whole variant, so the consumer
+        // is checked against the element type.
+        let piped_ty = match self.step_probe(&piped_ty) {
+            StepProbe::Step(elem) => elem,
+            StepProbe::NotStep => piped_ty,
+            StepProbe::Invalid(msg) => {
+                self.ctx.error_hint(
+                    "invalid Step value in pipeline".to_string(),
+                    &format!("{msg}; expected .more {{head, tail: Block}} or .done"),
+                );
+                piped_ty
+            }
+        };
         let cty = self.autoderef_thunk_return(cty);
         let result = self.ctx.unifier.fresh_comp_ty();
         let expected = CompTy::Fun(Box::new(piped_ty), Box::new(result.clone()));
@@ -187,6 +232,99 @@ impl Inferencer<'_> {
         // let the pipeline mode unification in infer_pipeline catch the real error.
         let _ = self.ctx.unifier.unify_comp_ty(&cty, &expected);
         result
+    }
+
+    /// Probe whether `ty` matches the runtime Step protocol at a pipeline
+    /// boundary.
+    fn step_probe(&mut self, ty: &Ty) -> StepProbe {
+        let resolved = self.ctx.unifier.apply_ty(ty);
+        let row = match resolved.clone() {
+            Ty::Variant(r) => r,
+            _ => return StepProbe::NotStep,
+        };
+        let labels = collect_extends(&row);
+        let more_payload = labels
+            .iter()
+            .find(|(l, _)| l == MORE_TAG)
+            .map(|(_, t)| t.clone());
+        if more_payload.is_none() {
+            if labels.iter().any(|(l, _)| l == DONE_TAG) {
+                return StepProbe::Step(self.ctx.unifier.fresh_ty());
+            }
+            return StepProbe::NotStep;
+        }
+
+        let payload = self.ctx.unifier.apply_ty(&more_payload.expect("checked is_some"));
+        let payload_row = match payload {
+            Ty::Record(r) => r,
+            _ => return StepProbe::Invalid(".more payload must be a record"),
+        };
+        let payload_labels = collect_extends(&payload_row);
+        let head_ty = payload_labels
+            .iter()
+            .find(|(l, _)| l == HEAD_FIELD)
+            .map(|(_, t)| t.clone());
+        let Some(head_ty) = head_ty else {
+            return StepProbe::Invalid(".more payload missing head");
+        };
+        let tail_ty = payload_labels
+            .iter()
+            .find(|(l, _)| l == TAIL_FIELD)
+            .map(|(_, t)| t.clone());
+        let Some(tail_ty) = tail_ty else {
+            return StepProbe::Invalid(".more payload missing tail");
+        };
+        let tail_cty = match self.ctx.unifier.apply_ty(&tail_ty) {
+            Ty::Thunk(cty) => *cty,
+            _ => return StepProbe::Invalid(".more tail must be a Block"),
+        };
+        let (tail_ret, _, _) = self.extract_return(&tail_cty);
+        let tail_stepish = match self.ctx.unifier.apply_ty(&tail_ret) {
+            Ty::Variant(r) => {
+                let labels = collect_extends(&r);
+                labels
+                    .iter()
+                    .any(|(l, _)| l == MORE_TAG || l == DONE_TAG)
+            }
+            _ => false,
+        };
+        if !tail_stepish {
+            return StepProbe::Invalid(".more tail does not return a Step");
+        }
+        // Keep the recogniser honest: a Step node's tail must itself
+        // produce a Step node of the same shape.
+        if self.ctx.unifier.unify_ty(&tail_ret, &resolved).is_err() {
+            return StepProbe::Invalid(".more tail Step shape does not match current node");
+        }
+        StepProbe::Step(head_ty)
+    }
+
+    /// The value shape returned by `from-lines`: a recursive Step stream
+    /// of Strings, i.e. `.more {head: String, tail: Thunk(F Step)}` or
+    /// `.done`.  The recursion closes through a comp-var root, not a TyVar.
+    fn from_lines_step_ty(&mut self) -> Ty {
+        let tail_comp = self.ctx.unifier.fresh_comp_ty();
+        let payload = Ty::Record(Row::Extend(
+            HEAD_FIELD.into(),
+            Box::new(Ty::String),
+            Box::new(Row::Extend(
+                TAIL_FIELD.into(),
+                Box::new(Ty::Thunk(Box::new(tail_comp.clone()))),
+                Box::new(Row::Empty),
+            )),
+        ));
+        let step = Ty::Variant(Row::Extend(
+            MORE_TAG.into(),
+            Box::new(payload),
+            Box::new(Row::Extend(
+                DONE_TAG.into(),
+                Box::new(Ty::Unit),
+                Box::new(Row::Empty),
+            )),
+        ));
+        self.ctx
+            .unify_comp_ty(&tail_comp, &CompTy::pure(step.clone()));
+        step
     }
 
     fn infer_branches(&mut self, args: &[Val]) -> CompTy {
@@ -367,6 +505,11 @@ impl Inferencer<'_> {
                 .unwrap_or_default();
             eprintln!("_type: {}{}", pos, fmt_ty(&resolved));
             return CompTy::pure(ty);
+        }
+
+        if !external_only && name == "from-lines" {
+            self.infer_args(args);
+            return CompTy::Return(PipeSpec::decode(), Box::new(self.from_lines_step_ty()));
         }
 
         if !external_only && let Some(scheme) = builtin_scheme(name, &mut self.ctx.unifier) {
@@ -557,6 +700,22 @@ impl Inferencer<'_> {
                 Ty::List(Box::new(elem))
             }
             Val::Map(entries) => self.infer_map_val(entries),
+            Val::Variant { label, payload } => {
+                // Variant construction is open: `.ok 5` infers
+                // `[.ok: Int | ρ]` where ρ is a fresh row variable.  The
+                // label is stored *with* its leading dot in the row so that
+                // alphabet checks at unify time treat it as a tag.
+                let payload_ty = match payload {
+                    Some(p) => self.infer_val(p),
+                    None => Ty::Unit,
+                };
+                let rest = self.ctx.unifier.fresh_row();
+                Ty::Variant(Row::Extend(
+                    format!(".{label}"),
+                    Box::new(payload_ty),
+                    Box::new(rest),
+                ))
+            }
         }
     }
 
@@ -579,20 +738,7 @@ impl Inferencer<'_> {
             }
 
             let inp = self.comp_input_mode(&stage_tys[i + 1]);
-            let inp_resolved = self.ctx.unifier.resolve_mode(&inp);
-            match (&out_resolved, &inp_resolved) {
-                (PipeMode::Bytes, PipeMode::Values(_)) | (PipeMode::Values(_), PipeMode::Bytes) => {
-                    self.ctx.error_hint(
-                        format!(
-                            "pipeline mode mismatch: stdout {} vs stdin {}",
-                            fmt_mode(&out_resolved),
-                            fmt_mode(&inp_resolved)
-                        ),
-                        "insert from-X or to-X to convert between byte and value channels",
-                    )
-                }
-                _ => self.ctx.unify_mode(&out, &inp),
-            }
+            self.ctx.unify_mode(&out, &inp);
         }
 
         let input = self.comp_input_mode(&stage_tys[0]);
@@ -654,6 +800,89 @@ impl Inferencer<'_> {
         CompTy::pure(current_ty)
     }
 
+    fn infer_case(&mut self, scrutinee: &Comp, table: &Comp) -> CompTy {
+        // Scrutinee value type, table value type, and the shared result.
+        // Both scrutinee and table are constrained to return values at
+        // this point: `case` inspects the scrutinee value and indexes
+        // the handler table value.
+        let scrutinee_cty = self.infer_comp(scrutinee);
+        let (scrut_ty, _, _) = self.extract_return(&scrutinee_cty);
+        let table_cty = self.infer_comp(table);
+        let (table_ty, _, _) = self.extract_return(&table_cty);
+        let result_cty = self.ctx.unifier.fresh_comp_ty();
+
+        // Shape constraints.
+        let scrut_row_var = self.ctx.unifier.fresh_row_var();
+        self.ctx
+            .unify_ty(&scrut_ty, &Ty::Variant(Row::Var(scrut_row_var)));
+        let handler_row_var = self.ctx.unifier.fresh_row_var();
+        self.ctx
+            .unify_ty(&table_ty, &Ty::Record(Row::Var(handler_row_var)));
+
+        // Resolve the handler row.  Record literals always close to Empty,
+        // so this returns a clean label list under normal use.
+        let handler_resolved = self
+            .ctx
+            .unifier
+            .apply_row(&Row::Var(handler_row_var));
+        let handler_labels = collect_extends(&handler_resolved);
+
+        // Per-label connection: each handler at `.l` must be a thunk of a
+        // function `payload_l → result_cty`.  Build the closed scrutinee row
+        // from these payload types as we go.
+        let mut closed_scrut = Row::Empty;
+        for (label, handler_ty) in handler_labels.iter().rev() {
+            let payload_ty = self.ctx.unifier.fresh_ty();
+            let expected = Ty::Thunk(Box::new(CompTy::Fun(
+                Box::new(payload_ty.clone()),
+                Box::new(result_cty.clone()),
+            )));
+            if self.ctx.unifier.unify_ty(handler_ty, &expected).is_err() {
+                let expected_resolved = self.ctx.unifier.apply_ty(&expected);
+                let found_resolved = self.ctx.unifier.apply_ty(handler_ty);
+                self.ctx.emit_kind(
+                    crate::typecheck::scheme::TypeErrorKind::CaseLabelTypeMismatch {
+                        label: label.clone(),
+                        expected: expected_resolved,
+                        found: found_resolved,
+                    },
+                    None,
+                );
+            }
+            closed_scrut = Row::Extend(
+                label.clone(),
+                Box::new(payload_ty),
+                Box::new(closed_scrut),
+            );
+        }
+
+        // Force scrutinee row to exactly the handler label set.  Row mismatch
+        // becomes CaseNotExhaustive: an extra label on the handler side means
+        // the handler covers a constructor the scrutinee can never produce;
+        // a missing label means the scrutinee has a constructor with no arm.
+        if let Err(kind) = self
+            .ctx
+            .unifier
+            .unify_row(&Row::Var(scrut_row_var), &closed_scrut)
+        {
+            use crate::typecheck::scheme::TypeErrorKind;
+            let translated = match kind {
+                TypeErrorKind::RowExtraField { label } => TypeErrorKind::CaseNotExhaustive {
+                    missing: vec![],
+                    extra: vec![label],
+                },
+                TypeErrorKind::RowMissingField { label } => TypeErrorKind::CaseNotExhaustive {
+                    missing: vec![label],
+                    extra: vec![],
+                },
+                other => other,
+            };
+            self.ctx.emit_kind(translated, None);
+        }
+
+        result_cty
+    }
+
     fn infer_letrec(&mut self, bindings: &[(String, Comp)]) -> CompTy {
         let betas: Vec<CompTy> = bindings
             .iter()
@@ -670,10 +899,24 @@ impl Inferencer<'_> {
             let lam_ty = self.infer_comp(lam_comp);
             self.ctx.unify_comp_ty(&lam_ty, beta);
         }
+        // Drop the mono self-bindings before generalising.  If they
+        // stayed in env, `env_free_vars` would see their (post-body)
+        // free comp/ty/row vars as residuals and `generalize` would
+        // refuse to quantify them — which silently un-poly's every
+        // recursive scheme and lets one call site bind a polymorphic
+        // var that all other call sites then share.  Re-bind below
+        // with the polymorphic schemes once each is built.
+        for (name, _) in bindings {
+            self.env.unbind(name);
+        }
+        let mut schemes: Vec<(String, Scheme)> = Vec::with_capacity(bindings.len());
         for ((name, _), beta) in bindings.iter().zip(betas.iter()) {
             let thunk_ty = Ty::Thunk(Box::new(beta.clone()));
             let scheme = generalize(&mut self.ctx.unifier, self.env, &thunk_ty);
-            self.env.bind(name.clone(), scheme);
+            schemes.push((name.clone(), scheme));
+        }
+        for (name, scheme) in schemes {
+            self.env.bind(name, scheme);
         }
 
         CompTy::pure(Ty::Unit)
@@ -815,6 +1058,7 @@ impl Inferencer<'_> {
                 self.ctx.unify_ty(&else_ty, &thunk_ty);
                 result
             }
+            CompKind::Case { scrutinee, table } => self.infer_case(scrutinee, table),
         }
     }
 }

@@ -13,9 +13,11 @@
 //! - [`audit`] — exec-tree recording for `audit { … }` blocks
 
 pub mod audit;
+pub(crate) mod case;
 pub(crate) mod dispatch;
 pub mod exec;
 pub mod expr;
+pub(crate) mod invoke;
 pub(crate) mod pattern;
 pub(crate) mod pipeline;
 pub(crate) mod trampoline;
@@ -284,36 +286,11 @@ pub fn eval_comp(comp: &Comp, shell: &mut Shell) -> Result<Value, EvalSignal> {
             eval_comp(rest, shell)
         }
 
-        CompKind::App {
-            head,
-            args,
-            redirects,
-        } => {
-            let (head_val, arg_vals, redir_eval) = dispatch::eval_subcall(shell, |shell| {
-                let head_val = eval_comp(head, shell)?;
-                let (arg_vals, redir_eval) = dispatch::eval_call_parts(args, redirects, shell)?;
-                Ok((head_val, arg_vals, redir_eval))
-            })?;
-            dispatch::eval_app(&head_val, &arg_vals, &redir_eval, shell)
-        }
-
-        CompKind::Exec {
-            name,
-            args,
-            redirects,
-            external_only,
-        } => {
-            let (arg_vals, redir_eval) =
-                dispatch::eval_subcall(shell, |shell| dispatch::eval_call_parts(args, redirects, shell))?;
-            dispatch::dispatch_by_name(name, &arg_vals, &redir_eval, *external_only, shell)
-        }
-
-        CompKind::Builtin { name, args } => {
-            let arg_vals = dispatch::eval_subcall(shell, |shell| {
-                args.iter().map(|v| eval_val(v, shell)).collect::<Result<Vec<_>, _>>()
-            })?;
-            crate::builtins::call(name, &arg_vals, shell)?
-                .ok_or_else(|| shell.err(format!("internal error: builtin '{name}' missing"), 1))
+        // Call-shaped computations all funnel through `invoke` with no
+        // upstream — same uniform call evaluator the pipeline uses,
+        // just with `upstream = None`.
+        CompKind::App { .. } | CompKind::Exec { .. } | CompKind::Builtin { .. } => {
+            invoke::invoke(comp, None, shell)
         }
 
         CompKind::Pipeline(stages) => {
@@ -377,6 +354,8 @@ pub fn eval_comp(comp: &Comp, shell: &mut Shell) -> Result<Value, EvalSignal> {
             force(branch_val, shell)
         }
 
+        CompKind::Case { scrutinee, table } => case::eval_case(scrutinee, table, shell),
+
         CompKind::Seq(comps) => {
             let mut result = Value::Unit;
             let len = comps.len();
@@ -432,6 +411,16 @@ pub(crate) fn eval_val(val: &Val, shell: &mut Shell) -> Result<Value, EvalSignal
         }),
         Val::List(elems) => eval_list(elems, shell),
         Val::Map(entries) => eval_map(entries, shell),
+        Val::Variant { label, payload } => {
+            let payload = match payload {
+                Some(p) => Some(Box::new(eval_val(p, shell)?)),
+                None => None,
+            };
+            Ok(Value::Variant {
+                label: label.clone(),
+                payload,
+            })
+        }
         Val::TildePath(path) => Ok(Value::String(expand_tilde_path(
             path.user.as_deref(),
             path.suffix.as_deref(),

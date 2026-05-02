@@ -15,14 +15,14 @@ echo !{has $u alice}
 echo !{has $u dave}
 # Expected: true, true
 
-# intersect
-let i = intersect $a $b
+# intersection
+let i = intersection $a $b
 echo !{has $i bob}
 echo !{has $i alice}
 # Expected: true, false
 
-# diff
-let d = diff $a $b
+# difference
+let d = difference $a $b
 echo !{has $d alice}
 echo !{has $d bob}
 # Expected: true, false

@@ -13,7 +13,11 @@ use super::check::{
 };
 use super::exec::{ExecVerdict, evaluate_exec};
 use super::prefix::{GrantPath, canonical_grant_paths, grant_path_raws, intersect_grant_paths};
-use crate::types::{Audit, Capabilities, Dynamic, EvalSignal, FsPolicy, Location, SandboxProjection};
+use crate::types::{
+    is_subpath_key, meet_literal_exec, Audit, Capabilities, Dynamic, EvalSignal, ExecPolicy,
+    ExecProjection, FsPolicy, FsProjection, Location, SandboxProjection,
+};
+use std::collections::BTreeMap;
 
 /// The single decision front door for the dynamic capability stack.
 ///
@@ -134,8 +138,8 @@ pub(super) fn check_grant_bool(
 
 /// Meet-fold the stack into an `Option<SandboxProjection>`.
 ///
-/// Returns `None` when no layer imposes fs or net restrictions so callers
-/// can cheaply skip OS sandbox setup.
+/// Returns `None` when no layer imposes fs, net, or exec restrictions so
+/// callers can cheaply skip OS sandbox setup.
 fn reduce(dynamic: &Dynamic) -> Option<SandboxProjection> {
     let mut read_prefixes: Option<Vec<GrantPath>> = None;
     let mut write_prefixes: Option<Vec<GrantPath>> = None;
@@ -169,16 +173,148 @@ fn reduce(dynamic: &Dynamic) -> Option<SandboxProjection> {
         }
     }
 
-    if !saw_fs && (!saw_net || net_allowed) {
+    let exec = reduce_exec(dynamic);
+    // Exec attenuation only triggers an OS-layer sandbox where the
+    // backend can actually filter exec — Seatbelt on macOS does it via
+    // the rendered `(allow file-read* process-exec …)` rule; bwrap on
+    // Linux has no path-exec filter, so paying the sandbox-subprocess
+    // cost there buys nothing.  In-ral exec gating still runs on every
+    // platform regardless.
+    #[cfg(target_os = "macos")]
+    let exec_triggers_sandbox = !matches!(exec, ExecProjection::Unrestricted);
+    #[cfg(not(target_os = "macos"))]
+    let exec_triggers_sandbox = false;
+
+    if !saw_fs && (!saw_net || net_allowed) && !exec_triggers_sandbox {
         return None;
     }
 
-    Some(SandboxProjection {
-        fs: FsPolicy {
+    let fs = if saw_fs {
+        FsProjection::Restricted(FsPolicy {
             read_prefixes: grant_path_raws(&read_prefixes.unwrap_or_default()),
             write_prefixes: grant_path_raws(&write_prefixes.unwrap_or_default()),
             deny_paths: crate::types::unique_strings(deny_paths),
-        },
-        net: net_allowed,
-    })
+        })
+    } else {
+        FsProjection::Unrestricted
+    };
+    Some(SandboxProjection { fs, net: net_allowed, exec })
+}
+
+/// Reduce the exec component of the stack.
+///
+/// `Unrestricted` means no layer attenuated exec; the OS profile
+/// leaves `process-exec` open and the in-ral gate is the only check.
+/// `Restricted` carries three meet-folded sets:
+///
+///   * `allow_paths` — literal exec keys (Allow / Subcommands)
+///     resolved to absolute paths via PATH.  The OS profile renders
+///     them as `(literal …)`.
+///   * `allow_dirs` — subpath keys carrying `Allow`, intersected by
+///     prefix across opining layers.  Rendered as `(subpath …)`.
+///   * `deny_dirs` — subpath keys carrying `Deny`, *unioned* across
+///     layers (denies are sticky).  Rendered as `(deny process-exec
+///     (subpath …))` after the broad allow so SBPL's last-match-wins
+///     gives them precedence.
+fn reduce_exec(dynamic: &Dynamic) -> ExecProjection {
+    let mut subpath_allow: Option<Vec<GrantPath>> = None;
+    let mut subpath_deny: Vec<GrantPath> = Vec::new();
+    let mut literal_map: Option<BTreeMap<String, ExecPolicy>> = None;
+    let mut saw = false;
+    for ctx in &dynamic.capabilities_stack {
+        let Some(map) = &ctx.exec else { continue };
+        saw = true;
+        let SplitMap { literal, allow_subpaths, deny_subpaths } = split_exec_map(map);
+        let allow_canon = canonical_grant_paths(dynamic, &allow_subpaths);
+        let deny_canon = canonical_grant_paths(dynamic, &deny_subpaths);
+        subpath_allow = Some(match subpath_allow {
+            Some(prev) => intersect_grant_paths(&prev, &allow_canon),
+            None => allow_canon,
+        });
+        subpath_deny.extend(deny_canon);
+        literal_map = Some(match literal_map {
+            Some(prev) => meet_literal_exec(prev, literal),
+            None => literal,
+        });
+    }
+    if !saw {
+        return ExecProjection::Unrestricted;
+    }
+    let allow_dirs = grant_path_raws(&subpath_allow.unwrap_or_default())
+        .into_iter()
+        .map(|p| p.trim_end_matches('/').to_string())
+        .collect();
+    let deny_dirs = grant_path_raws(&subpath_deny)
+        .into_iter()
+        .map(|p| p.trim_end_matches('/').to_string())
+        .collect();
+    let allow_paths = resolve_allow_names(dynamic, literal_map.unwrap_or_default());
+    ExecProjection::Restricted { allow_paths, allow_dirs, deny_dirs }
+}
+
+/// Split a unified exec map into its three render-time halves.  The
+/// trailing `/` is dropped from subpath keys so they can flow through
+/// the existing `canonical_grant_paths` / `intersect_grant_paths`
+/// pipeline alongside fs prefixes; the marker is restored only at
+/// SBPL render time, not in the projection.
+struct SplitMap {
+    literal: BTreeMap<String, ExecPolicy>,
+    allow_subpaths: Vec<String>,
+    deny_subpaths: Vec<String>,
+}
+
+fn split_exec_map(map: &BTreeMap<String, ExecPolicy>) -> SplitMap {
+    let mut literal = BTreeMap::new();
+    let mut allow_subpaths = Vec::new();
+    let mut deny_subpaths = Vec::new();
+    for (key, policy) in map {
+        if is_subpath_key(key) {
+            let path = key.trim_end_matches('/').to_string();
+            match policy {
+                ExecPolicy::Deny => deny_subpaths.push(path),
+                ExecPolicy::Allow => allow_subpaths.push(path),
+                // Rejected at validate_paths; ignore defensively.
+                ExecPolicy::Subcommands(_) => {}
+            }
+        } else {
+            literal.insert(key.clone(), policy.clone());
+        }
+    }
+    SplitMap { literal, allow_subpaths, deny_subpaths }
+}
+
+/// Resolve named `[exec]` allows to absolute paths via the parent's PATH.
+/// `Deny` entries contribute no positive authority and are skipped — the
+/// OS-layer rule is purely an allow-list, with deny-default doing the work
+/// for everything not on the list.  Absolute names are kept as-is.  Names
+/// that fail PATH resolution are dropped with a debug trace.
+fn resolve_allow_names(dynamic: &Dynamic, map: BTreeMap<String, ExecPolicy>) -> Vec<String> {
+    let path_env = dynamic
+        .env_vars()
+        .get("PATH")
+        .map(String::as_str)
+        .unwrap_or("");
+    let mut out = Vec::new();
+    for (name, policy) in &map {
+        match policy {
+            ExecPolicy::Deny => continue,
+            ExecPolicy::Allow | ExecPolicy::Subcommands(_) => {}
+        }
+        if name.starts_with('/') {
+            out.push(name.clone());
+            continue;
+        }
+        if let Some(resolved) = crate::path::which::resolve_in_path(name, path_env) {
+            out.push(resolved);
+        } else {
+            crate::dbg_trace!(
+                "sandbox-exec",
+                "exec '{}' not on PATH at projection time; OS gate cannot pin it",
+                name
+            );
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }

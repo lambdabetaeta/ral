@@ -167,6 +167,58 @@ impl TerminalState {
     }
 }
 
+// ── ChildStdioPlan ────────────────────────────────────────────────────────
+
+/// Joint plan for a child process's stdout *or* stderr: the `Stdio` to
+/// hand `Command`, plus an optional `Sink` the caller must pump bytes
+/// into after spawn.
+///
+/// `pump = None` means the child writes directly to the destination
+/// (`inherit` or a `Pipe` end); the caller does not need to drain the
+/// child fd.  `pump = Some(sink)` means the child writes to a piped fd
+/// allocated by the kernel; the caller must take that fd after `spawn()`
+/// and feed it to [`Sink::pump`] so the bytes reach `sink`.
+///
+/// Constructed only via [`Sink::child_stdout`] / [`Sink::child_stderr`]
+/// or the small inherent constructors here, so the (stdio, pump)
+/// invariant is centralised — no caller computes "inherit, pipe, pump,
+/// tee" by hand.
+pub struct ChildStdioPlan {
+    pub stdio: std::process::Stdio,
+    pub pump: Option<Sink>,
+}
+
+impl ChildStdioPlan {
+    /// The child reads/writes the parent's matching fd directly.
+    pub fn inherit() -> Self {
+        Self {
+            stdio: std::process::Stdio::inherit(),
+            pump: None,
+        }
+    }
+
+    /// Build the plan for a non-inherited routing of `sink`.  A `Pipe(w)`
+    /// becomes the child's fd directly; everything else is piped and the
+    /// pump field carries a clone of the sink.
+    fn for_sink(sink: &Sink) -> io::Result<Self> {
+        match sink {
+            Sink::Pipe(w) => Ok(Self {
+                stdio: std::process::Stdio::from(w.try_clone()?),
+                pump: None,
+            }),
+            other => Ok(Self {
+                stdio: std::process::Stdio::piped(),
+                pump: Some(other.try_clone()?),
+            }),
+        }
+    }
+
+    /// True when the caller must drain a piped child fd through `pump`.
+    pub fn needs_pump(&self) -> bool {
+        self.pump.is_some()
+    }
+}
+
 // ── Sink ──────────────────────────────────────────────────────────────────
 
 /// Hard cap on in-memory `Sink::Buffer` growth.  Past this point we append a
@@ -249,60 +301,43 @@ impl Sink {
         }
     }
 
-    /// Produce a `Stdio` for `Command::stdout`.
+    /// Plan to route a child process's stdout into this sink.
     ///
-    /// For sinks that require the shell to read child bytes (all variants
-    /// except Terminal and Pipe), returns `Stdio::piped()`.  The caller must
-    /// drain the child's piped stdout via `Sink::pump`.
-    pub fn as_stdio(&self) -> io::Result<std::process::Stdio> {
-        use std::process::Stdio;
-        match self {
-            Sink::Terminal => Ok(Stdio::inherit()),
-            Sink::Pipe(w) => Ok(Stdio::from(w.try_clone()?)),
-            _ => Ok(Stdio::piped()),
+    /// `inherit_tty=true` widens the "no pump needed" set to sinks that
+    /// ultimately resolve to a real fd (Terminal, External, Stderr): the
+    /// child gets the parent's fd 1 directly via `Stdio::inherit()`, which
+    /// is the only way it sees a TTY.  Conservative default
+    /// (`inherit_tty=false`) pumps everything except a direct `Pipe`.
+    ///
+    /// Callers MUST consume the returned plan in two steps: assign
+    /// `plan.stdio` to `cmd.stdout(...)` before spawn, then — after spawn
+    /// — if `plan.pump` is `Some(sink)`, take `child.stdout` and call
+    /// `sink.pump(stdout)`.  The two-method asymmetry between stdout and
+    /// stderr lives here in [`ChildStdioPlan`] alone, so the rest of the
+    /// codebase routes through one shape.
+    pub fn child_stdout(&self, inherit_tty: bool) -> io::Result<ChildStdioPlan> {
+        // Sinks already targeting fd 1 inherit directly when the caller
+        // has verified TTY ownership.  `Sink::Stderr` here means "swap fd 1
+        // for fd 2" (audit mode); inheriting is correct only when the
+        // caller knows the child won't try to re-grab the TTY from fd 1.
+        if matches!(self, Sink::Terminal)
+            || (inherit_tty && matches!(self, Sink::Stderr | Sink::External(_)))
+        {
+            return Ok(ChildStdioPlan::inherit());
         }
+        ChildStdioPlan::for_sink(self)
     }
 
-    /// True when bytes from a piped child stdout must be forwarded to this
-    /// sink via a pump thread (i.e. `as_stdio` returns `Stdio::piped()`).
-    pub fn needs_pump(&self) -> bool {
-        !matches!(self, Sink::Terminal | Sink::Pipe(_))
-    }
-
-    /// Set `command.stdout` for this sink and report whether a pump thread
-    /// will be needed after `spawn()`.
+    /// Plan to route a child process's stderr into this sink.
     ///
-    /// `inherit_tty` should be true when the shell's real TTY fd can be given
-    /// to the child directly — typically in non-audit interactive mode with a
-    /// Terminal sink.  When true the child inherits fd 1 and no pump is needed.
-    ///
-    /// Returns `Ok(true)` when a pump is needed; the caller should take
-    /// `child.stdout` after `spawn()` and call `sink.pump(stdout, capture)`.
-    pub fn wire_command_stdout(
-        &self,
-        cmd: &mut std::process::Command,
-        inherit_tty: bool,
-    ) -> io::Result<bool> {
-        use std::process::Stdio;
-        // Inheriting the TTY is only safe when this sink targets the real
-        // fd 1: `Terminal` (the inherited stdout) and `External` (REPL's
-        // rustyline printer, which also writes to fd 1) both qualify.
-        // `LineFramed` (watched block) must *not* inherit: its bytes need
-        // to be prefixed and line-atomic, so the child must stay piped.
-        if inherit_tty && matches!(self, Sink::Terminal | Sink::Stderr | Sink::External(_)) {
-            cmd.stdout(Stdio::inherit());
-            return Ok(false);
+    /// Default-inherit for `Sink::Stderr` (the natural fd 2 target); other
+    /// sinks drain via a pump.  No `inherit_tty` parameter: stderr never
+    /// owns the TTY in any pipeline shape.
+    pub fn child_stderr(&self) -> io::Result<ChildStdioPlan> {
+        if matches!(self, Sink::Stderr) {
+            return Ok(ChildStdioPlan::inherit());
         }
-        match self {
-            Sink::Pipe(w) => {
-                cmd.stdout(Stdio::from(w.try_clone()?));
-                Ok(false)
-            }
-            _ => {
-                cmd.stdout(Stdio::piped());
-                Ok(true)
-            }
-        }
+        ChildStdioPlan::for_sink(self)
     }
 
     /// Spawn a background thread that reads `reader` to EOF and writes all
@@ -466,9 +501,8 @@ pub enum Source {
 /// [`Source::take_reader`].
 ///
 /// Read-trait consumers (codecs, `lines`) call `Read` directly; fd consumers
-/// (sandbox spawn, `with_stdin_redirected`, externals) reach for `AsRawFd` /
-/// `Into<Stdio>` without caring whether the underlying handle was a pipe or a
-/// file.
+/// (sandbox spawn, externals) reach for `AsRawFd` / `Into<Stdio>` without
+/// caring whether the underlying handle was a pipe or a file.
 pub enum SourceReader {
     Pipe(os_pipe::PipeReader),
     File(std::fs::File),
@@ -579,8 +613,6 @@ pub struct Io {
     /// Spawned handles install a `Sink::Buffer` here so errors are buffered
     /// in the handle and replayed on `await` (§13.3 replay rule).
     pub stderr: Sink,
-    /// Structured value piped from the previous internal pipeline stage.
-    pub value_in: Option<crate::types::Value>,
     /// True when the shell is running as an interactive REPL.
     pub interactive: bool,
     /// Cached isatty results from shell startup.
@@ -608,7 +640,6 @@ impl Io {
             stdin: Source::Terminal,
             stdout: self.stdout.try_clone()?,
             stderr: self.stderr.try_clone()?,
-            value_in: self.value_in.clone(),
             interactive: self.interactive,
             terminal: self.terminal,
             job_control: self.job_control,
@@ -622,10 +653,10 @@ impl Io {
 
     /// Install Io state from `parent` into `self` for a same-thread child shell
     /// (thunk body, `try`, `_audit`, …).  Bytes sinks are `try_clone`d; the
-    /// pipe stdin and structured `value_in` are *moved* out of the parent so
-    /// the child consumes them once.  `try_clone` failure collapses to the
-    /// default terminal sink — the parent's FDs are already gone by then, and
-    /// silent `Inherit` would re-open the sandbox-bypass class.
+    /// pipe stdin is *moved* out of the parent so the child consumes it once.
+    /// `try_clone` failure collapses to the default terminal sink — the
+    /// parent's FDs are already gone by then, and silent `Inherit` would
+    /// re-open the sandbox-bypass class.
     pub fn install_from_parent(&mut self, parent: &mut Io) {
         self.stdout = parent.stdout.try_clone().unwrap_or(Sink::Terminal);
         self.stderr = parent.stderr.try_clone().unwrap_or(Sink::Stderr);
@@ -641,19 +672,16 @@ impl Io {
             Some(SourceReader::File(f)) => Source::File(f),
             None => Source::Terminal,
         };
-        self.value_in = parent.value_in.take();
     }
 
-    /// Mirror of `install_from_parent`: return the read-once resources the
-    /// child received back to `parent`.  Called from `Shell::return_to` so
-    /// subsequent sibling calls in the parent see the unconsumed pipe.
+    /// Mirror of `install_from_parent`: return the read-once stdin to
+    /// `parent` so subsequent sibling calls see the unconsumed pipe.
     pub fn return_to_parent(&mut self, child: &mut Io) {
         self.stdin = match child.stdin.take_reader() {
             Some(SourceReader::Pipe(r)) => Source::Pipe(r),
             Some(SourceReader::File(f)) => Source::File(f),
             None => Source::Terminal,
         };
-        self.value_in = child.value_in.take();
     }
 }
 
@@ -663,7 +691,6 @@ impl Default for Io {
             stdin: Source::Terminal,
             stdout: Sink::Terminal,
             stderr: Sink::Stderr,
-            value_in: None,
             interactive: false,
             terminal: TerminalState::default(),
             job_control: JobControl::default(),

@@ -1,7 +1,7 @@
 //! Typing environment and inference context, plus free-variable collection.
 
 use super::scheme::{Scheme, TypeError, TypeErrorKind};
-use super::ty::{CompTy, ModeVar, PipeMode, Row, RowVar, Ty, TyVar};
+use super::ty::{CompTy, CompTyVar, ModeVar, PipeMode, Row, RowVar, Ty, TyVar};
 use super::unify::Unifier;
 use crate::span::Span;
 use std::collections::{HashMap, HashSet};
@@ -10,9 +10,10 @@ use std::collections::{HashMap, HashSet};
 // Free-variable collection
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// All three variable kinds, collected in one traversal.
+/// All four variable kinds, collected in one traversal.
 pub struct FreeVars {
     pub tys: HashSet<TyVar>,
+    pub comps: HashSet<CompTyVar>,
     pub modes: HashSet<ModeVar>,
     pub rows: HashSet<RowVar>,
 }
@@ -21,6 +22,7 @@ impl FreeVars {
     pub fn new() -> Self {
         FreeVars {
             tys: HashSet::new(),
+            comps: HashSet::new(),
             modes: HashSet::new(),
             rows: HashSet::new(),
         }
@@ -28,51 +30,74 @@ impl FreeVars {
 }
 
 pub fn free_ty(u: &mut Unifier, ty: &Ty, out: &mut FreeVars) {
+    let mut visited = HashSet::new();
+    free_ty_inner(u, ty, out, &mut visited);
+}
+
+fn free_ty_inner(u: &mut Unifier, ty: &Ty, out: &mut FreeVars, visited: &mut HashSet<u32>) {
     match u.resolve_ty(ty) {
         Ty::Var(v) => {
             out.tys.insert(v);
         }
-        Ty::List(a) | Ty::Map(a) | Ty::Handle(a) => free_ty(u, &a, out),
-        Ty::Record(r) => free_row(u, &r, out),
-        Ty::Thunk(b) => free_comp(u, &b, out),
+        Ty::List(a) | Ty::Map(a) | Ty::Handle(a) => free_ty_inner(u, &a, out, visited),
+        Ty::Record(r) | Ty::Variant(r) => free_row_inner(u, &r, out, visited),
+        Ty::Thunk(b) => free_comp_inner(u, &b, out, visited),
         _ => {}
     }
 }
 
-fn free_row(u: &mut Unifier, row: &Row, out: &mut FreeVars) {
+fn free_row_inner(u: &mut Unifier, row: &Row, out: &mut FreeVars, visited: &mut HashSet<u32>) {
     match u.resolve_row(row) {
         Row::Empty => {}
         Row::Var(v) => {
             out.rows.insert(v);
         }
         Row::Extend(_, ty, rest) => {
-            free_ty(u, &ty, out);
-            free_row(u, &rest, out);
+            free_ty_inner(u, &ty, out, visited);
+            free_row_inner(u, &rest, out, visited);
         }
     }
 }
 
-fn free_comp(u: &mut Unifier, cty: &CompTy, out: &mut FreeVars) {
+fn free_comp_inner(u: &mut Unifier, cty: &CompTy, out: &mut FreeVars, visited: &mut HashSet<u32>) {
+    let root = match cty {
+        CompTy::Var(CompTyVar(i)) => Some(u.comp_root(*i)),
+        _ => None,
+    };
+    if let Some(r) = root
+        && !visited.insert(r)
+    {
+        // Already walked this subtree — cycle back-edge.
+        return;
+    }
     match u.resolve_comp_ty(cty) {
-        CompTy::Var(_) => {}
+        CompTy::Var(v) => {
+            // Unbound comp var — record it so generalize can quantify
+            // over it and instantiate can mint fresh ids per use site.
+            out.comps.insert(v);
+        }
         CompTy::Return(spec, a) => {
-            free_mode(u, &spec.input, out);
-            free_mode(u, &spec.output, out);
-            free_ty(u, &a, out);
+            free_mode_inner(u, &spec.input, out, visited);
+            free_mode_inner(u, &spec.output, out, visited);
+            free_ty_inner(u, &a, out, visited);
         }
         CompTy::Fun(a, b) => {
-            free_ty(u, &a, out);
-            free_comp(u, &b, out);
+            free_ty_inner(u, &a, out, visited);
+            free_comp_inner(u, &b, out, visited);
         }
     }
 }
 
-fn free_mode(u: &mut Unifier, mode: &PipeMode, out: &mut FreeVars) {
+fn free_mode_inner(
+    u: &mut Unifier,
+    mode: &PipeMode,
+    out: &mut FreeVars,
+    _visited: &mut HashSet<u32>,
+) {
     match u.resolve_mode(mode) {
         PipeMode::Var(v) => {
             out.modes.insert(v);
         }
-        PipeMode::Values(a) => free_ty(u, &a, out),
         _ => {}
     }
 }
@@ -83,6 +108,7 @@ pub fn env_free_vars(u: &mut Unifier, env: &TyEnv) -> FreeVars {
     for s in env.all_schemes() {
         if let Some(cached) = &s.cached_fv {
             out.tys.extend(&cached.ty_fv);
+            out.comps.extend(&cached.comp_fv);
             out.modes.extend(&cached.mode_fv);
             out.rows.extend(&cached.row_fv);
         } else {
@@ -91,6 +117,9 @@ pub fn env_free_vars(u: &mut Unifier, env: &TyEnv) -> FreeVars {
             for v in &s.ty_vars {
                 fvs.tys.remove(v);
             }
+            for v in &s.comp_ty_vars {
+                fvs.comps.remove(v);
+            }
             for v in &s.mode_vars {
                 fvs.modes.remove(v);
             }
@@ -98,6 +127,7 @@ pub fn env_free_vars(u: &mut Unifier, env: &TyEnv) -> FreeVars {
                 fvs.rows.remove(v);
             }
             out.tys.extend(fvs.tys);
+            out.comps.extend(fvs.comps);
             out.modes.extend(fvs.modes);
             out.rows.extend(fvs.rows);
         }
@@ -140,6 +170,19 @@ impl TyEnv {
 
     pub fn bind(&mut self, name: String, scheme: Scheme) {
         self.scopes.last_mut().unwrap().insert(name, scheme);
+    }
+
+    /// Remove a binding from whichever scope owns it.  Used by
+    /// `infer_letrec` to drop the temporary mono self-binding before
+    /// generalising — leaving it in place would let its free comp
+    /// vars leak into `env_free_vars` as residuals, blocking
+    /// quantification of exactly the vars we need to quantify over.
+    pub fn unbind(&mut self, name: &str) {
+        for scope in self.scopes.iter_mut().rev() {
+            if scope.remove(name).is_some() {
+                return;
+            }
+        }
     }
 
     pub fn all_schemes(&self) -> impl Iterator<Item = &Scheme> {

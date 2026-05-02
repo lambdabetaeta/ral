@@ -20,7 +20,7 @@ pub(crate) fn start(shell: &Shell) -> i64 {
 pub(crate) fn principal(shell: &Shell) -> String {
     shell
         .dynamic
-        .env_vars
+        .env_vars()
         .get("USER")
         .cloned()
         .unwrap_or_default()

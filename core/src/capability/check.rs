@@ -74,7 +74,7 @@ pub(super) fn check_exec_args_impl(
     let has_exec_policy = dynamic
         .capabilities_stack
         .iter()
-        .any(|ctx| ctx.exec.is_some() || ctx.exec_dirs.is_some());
+        .any(|ctx| ctx.exec.is_some());
     if has_exec_policy {
         emit_capability_audit(dynamic, "exec", result.is_ok(), audit, location, |pairs| {
             pairs.push(("name".into(), Value::String(display_name.into())));
@@ -220,7 +220,7 @@ fn emit_capability_audit(
     let script = location.call_site.script.clone();
     let line = location.call_site.line;
     let col = location.call_site.col;
-    let principal = dynamic.env_vars.get("USER").cloned().unwrap_or_default();
+    let principal = dynamic.env_vars().get("USER").cloned().unwrap_or_default();
     let mut node = ExecNode::capability_check(kind, decision, &script, line, col);
     node.principal = principal;
     if let Value::Map(ref mut pairs) = node.value {

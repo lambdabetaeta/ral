@@ -16,6 +16,15 @@ use crate::types::{Error, EvalSignal, Shell, Value};
 use std::fmt::Display;
 use std::process::{Command, Stdio};
 
+/// Pump destinations carried out of [`configure_subprocess_stdio`] so the
+/// caller can drain the child fds after `spawn()`.  Either field is
+/// `Some(sink)` exactly when the matching plan asked for a pump — the
+/// `Sink::child_*` routines own the (stdio, pump) pairing.
+struct PumpSinks {
+    stdout: Option<Sink>,
+    stderr: Option<Sink>,
+}
+
 pub(super) const INTERNAL_BLOCK_MODE: &str = "--internal-sandbox-block";
 
 // ── Runner dispatch ──────────────────────────────────────────────────────
@@ -111,42 +120,22 @@ pub(super) fn stage_err(stage: &str, e: impl Display) -> EvalSignal {
     EvalSignal::Error(Error::new(format!("grant sandbox: {stage}: {e}"), 1))
 }
 
-/// Stdio pump sinks for the spawned child's stdout/stderr.
-struct PumpSinks {
-    stdout: Option<Sink>,
-    stderr: Option<Sink>,
-}
-
 fn configure_subprocess_stdio(cmd: &mut Command, shell: &mut Shell) -> std::io::Result<PumpSinks> {
     match shell.io.stdin.take_reader() {
         Some(r) => cmd.stdin(Stdio::from(r)),
         None => cmd.stdin(Stdio::inherit()),
     };
-    cmd.stdout(shell.io.stdout.as_stdio()?);
-    cmd.stderr(stderr_stdio(&shell.io.stderr)?);
+    // Sandbox-spawned children never own the controlling tty — the parent
+    // is the one that drives the IPC.  Pass `inherit_tty=false` so every
+    // non-Pipe sink gets piped + pumped; the audit/buffer paths require it.
+    let stdout = shell.io.stdout.child_stdout(false)?;
+    cmd.stdout(stdout.stdio);
+    let stderr = shell.io.stderr.child_stderr()?;
+    cmd.stderr(stderr.stdio);
     Ok(PumpSinks {
-        stdout: shell
-            .io
-            .stdout
-            .needs_pump()
-            .then(|| shell.io.stdout.try_clone())
-            .transpose()?,
-        stderr: stderr_needs_pump(&shell.io.stderr)
-            .then(|| shell.io.stderr.try_clone())
-            .transpose()?,
+        stdout: stdout.pump,
+        stderr: stderr.pump,
     })
-}
-
-fn stderr_stdio(sink: &Sink) -> std::io::Result<Stdio> {
-    match sink {
-        Sink::Stderr => Ok(Stdio::inherit()),
-        Sink::Pipe(w) => Ok(Stdio::from(w.try_clone()?)),
-        _ => Ok(Stdio::piped()),
-    }
-}
-
-fn stderr_needs_pump(sink: &Sink) -> bool {
-    !matches!(sink, Sink::Stderr | Sink::Pipe(_))
 }
 
 /// Round-trip a request through a freshly-spawned sandboxed child.

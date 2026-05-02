@@ -13,7 +13,7 @@
 //! namespace entirely.  [`SandboxProjection::net`] is therefore a boolean
 //! allow/deny bit, not an endpoint list.
 
-use crate::types::SandboxProjection;
+use crate::types::{FsProjection, SandboxProjection};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
@@ -44,27 +44,31 @@ pub fn make_command_with_policy(name: &str, args: &[String], policy: &SandboxPro
     rw_binds.sort();
     rw_binds.dedup();
 
-    c.args([
-        "--die-with-parent",
-        "--new-session",
-        "--proc",
-        "/proc",
-        "--dev",
-        "/dev",
-        "--tmpfs",
-        "/tmp",
-    ]);
+    c.args(["--die-with-parent", "--new-session"]);
     if !policy.net {
         c.arg("--unshare-net");
     }
-    for bind in ro_binds {
-        if Path::new(&bind).exists() && !rw_binds.iter().any(|w| w == &bind) {
-            c.args(["--ro-bind", &bind, &bind]);
+    match &policy.fs {
+        FsProjection::Restricted(_) => {
+            c.args(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]);
+            for bind in ro_binds {
+                if Path::new(&bind).exists() && !rw_binds.iter().any(|w| w == &bind) {
+                    c.args(["--ro-bind", &bind, &bind]);
+                }
+            }
+            for bind in &rw_binds {
+                if Path::new(bind).exists() {
+                    c.args(["--bind", bind, bind]);
+                }
+            }
         }
-    }
-    for bind in &rw_binds {
-        if Path::new(bind).exists() {
-            c.args(["--bind", bind, bind]);
+        FsProjection::Unrestricted => {
+            // No fs attenuation in the stack: pass fs through.  bwrap
+            // is only here for the seccomp/--die-with-parent envelope;
+            // the grant body should see the host filesystem unchanged.
+            // `--dev-bind / /` mount-binds the whole tree including
+            // device nodes (`--bind` would skip them).
+            c.args(["--dev-bind", "/", "/"]);
         }
     }
     // `deny_paths` carve out fully-forbidden subtrees inside otherwise
@@ -280,7 +284,7 @@ fn default_ro_binds() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::make_command_with_policy;
-    use crate::types::{FsPolicy, SandboxProjection};
+    use crate::types::{FsPolicy, FsProjection, SandboxProjection};
 
     #[test]
     fn denied_paths_are_overlaid_after_rw_binds() {
@@ -293,12 +297,13 @@ mod tests {
         std::fs::write(&denied, "capabilities").unwrap();
 
         let policy = SandboxProjection {
-            fs: FsPolicy {
+            fs: FsProjection::Restricted(FsPolicy {
                 read_prefixes: Vec::new(),
                 write_prefixes: vec![dir.to_string_lossy().into_owned()],
                 deny_paths: vec![denied.to_string_lossy().into_owned()],
-            },
+            }),
             net: true,
+            exec: crate::types::ExecProjection::default(),
         };
         let cmd = make_command_with_policy("/bin/true", &[], &policy);
         let args: Vec<String> = cmd

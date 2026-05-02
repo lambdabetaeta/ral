@@ -87,11 +87,12 @@ impl CapturedEval {
         }
     }
 
-    fn try_record(&self) -> Value {
+    /// The error half of the `_try` outcome — just the failure-specific
+    /// fields.  `ok` and `value` are no longer here; they live in the
+    /// variant's `.ok` / `.err` tag and the success payload respectively.
+    fn try_error_record(&self) -> Value {
         let o = self.classify();
         Value::Map(vec![
-            ("ok".into(), Value::Bool(o.ok)),
-            ("value".into(), o.value),
             ("cmd".into(), Value::String(o.cmd)),
             ("status".into(), Value::Int(o.status as i64)),
             ("message".into(), Value::String(o.message)),
@@ -99,6 +100,22 @@ impl CapturedEval {
             ("line".into(), Value::Int(o.line as i64)),
             ("col".into(), Value::Int(o.col as i64)),
         ])
+    }
+
+    /// Build the `[.ok A | .err ErrorRec]` variant for `_try`.
+    fn try_outcome(&self) -> Value {
+        let o = self.classify();
+        if o.ok {
+            Value::Variant {
+                label: "ok".into(),
+                payload: Some(Box::new(o.value)),
+            }
+        } else {
+            Value::Variant {
+                label: "err".into(),
+                payload: Some(Box::new(self.try_error_record())),
+            }
+        }
     }
 
     fn audit_node(&self, cmd: &str) -> ExecNode {
@@ -142,7 +159,7 @@ fn eval_captured(body: &Value, shell: &mut Shell) -> CapturedEval {
     let start = crate::types::epoch_us();
     let principal = shell
         .dynamic
-        .env_vars
+        .env_vars()
         .get("USER")
         .cloned()
         .unwrap_or_default();
@@ -164,8 +181,11 @@ fn eval_captured(body: &Value, shell: &mut Shell) -> CapturedEval {
         call_col,
     }
 }
-/// Shared core for `_try` and `try`: capture, debug-log, record audit node.
-fn try_capture(body: &Value, shell: &mut Shell) -> (Outcome, Value) {
+/// Shared core for `_try` and `try`: capture, debug-log, record audit
+/// node.  Returns the classified outcome plus both the variant outcome
+/// (the public-facing `_try` result) and the error half on its own
+/// (handed to `try`'s on-failure handler).
+fn try_capture(body: &Value, shell: &mut Shell) -> (Outcome, Value, Value) {
     let captured = eval_captured(body, shell);
 
     // Debug builds always echo; release builds opt in via RAL_DEBUG.
@@ -183,43 +203,48 @@ fn try_capture(body: &Value, shell: &mut Shell) -> (Outcome, Value) {
     }
 
     let outcome = captured.classify();
-    let record = captured.try_record();
+    let variant = captured.try_outcome();
+    let err_record = captured.try_error_record();
 
     if let Some(parent_tree) = &mut shell.audit.tree {
         let mut node = captured.audit_node("try");
         node.script = shell.location.call_site.script.clone();
         node.line = shell.location.call_site.line;
         node.col = shell.location.call_site.col;
-        node.value = record.clone();
+        node.value = variant.clone();
         parent_tree.push(node);
     }
 
-    (outcome, record)
+    (outcome, variant, err_record)
 }
 
-/// `_try body` — returns the error record without dispatching.
+/// `_try body` — returns the outcome variant `[.ok A | .err ErrorRec]`
+/// without dispatching.  Use `case` (or `try` for the dispatch form) to
+/// destructure.
 pub(super) fn builtin_try(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
     if args.is_empty() {
         return Err(sig("try requires 1 argument (body)"));
     }
-    let (_, record) = try_capture(&args[0], shell);
+    let (_, variant, _) = try_capture(&args[0], shell);
     shell.control.last_status = 0;
-    Ok(record)
+    Ok(variant)
 }
 
-/// `try body handler` — on failure, calls handler with the error record.
+/// `try body handler` — on failure, calls handler with the error record
+/// (the `.err` arm's payload).  The `.ok` arm's payload is unwrapped
+/// and returned directly on success.
 pub(super) fn builtin_try_with(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
     if args.len() < 2 {
         return Err(sig("try requires 2 arguments (body, handler)"));
     }
-    let (outcome, record) = try_capture(&args[0], shell);
+    let (outcome, _, err_record) = try_capture(&args[0], shell);
     if outcome.ok {
         if let Value::Bool(b) = &outcome.value {
             shell.set_status_from_bool(*b);
         }
         Ok(outcome.value)
     } else {
-        call_value(&args[1], &[record], shell)
+        call_value(&args[1], &[err_record], shell)
     }
 }
 
@@ -228,14 +253,17 @@ pub(super) fn builtin_try_apply(args: &[Value], shell: &mut Shell) -> Result<Val
         return Err(sig("_try-apply requires 2 arguments (f, val)"));
     }
     let r = crate::evaluator::try_apply(&args[0], &args[1], shell)?;
-    let (ok, value) = match r {
-        Some(v) => (true, v),
-        None => (false, Value::Unit),
+    let variant = match r {
+        Some(v) => Value::Variant {
+            label: "ok".into(),
+            payload: Some(Box::new(v)),
+        },
+        None => Value::Variant {
+            label: "err".into(),
+            payload: Some(Box::new(Value::Unit)),
+        },
     };
-    Ok(Value::Map(vec![
-        ("ok".into(), Value::Bool(ok)),
-        ("value".into(), value),
-    ]))
+    Ok(variant)
 }
 
 pub(super) fn builtin_guard(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {

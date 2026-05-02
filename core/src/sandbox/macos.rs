@@ -3,9 +3,13 @@
 //! Single mode of operation: a ral subprocess spawned by
 //! `eval_grant_sandboxed` enters the Seatbelt profile once at startup via
 //! `enter_current_process`, then evaluates the grant body in-process with
-//! every external it spawns inheriting the confinement.  `process-exec` is
-//! allowed without restriction; file and network access are limited by the
-//! policy.
+//! every external it spawns inheriting the confinement.  `process-exec`
+//! is gated when the projection's `exec` field is `Restricted`: the
+//! profile renders a single combined `file-read* process-exec` allow rule
+//! over the exec_dirs and resolved [exec] literals, mirroring the idiom
+//! used by Apple-blessed build profiles (see BrianSwift/macOSSandboxBuild
+//! `confined.sb`).  `Unrestricted` keeps the wildcard allow so plain
+//! `grant [fs: …]` blocks without exec attenuation behave as before.
 //!
 //! We deliberately do *not* apply per-command Seatbelt profiles in the
 //! parent ral process or inside plugin handlers: the overhead-vs-benefit
@@ -21,9 +25,8 @@
 //! support per-address rules.  `SandboxProjection::net` is therefore a boolean
 //! allow/deny bit, not an endpoint list.
 
-use crate::path::canon::match_variants;
-use crate::types::SandboxProjection;
-use std::collections::BTreeSet;
+use crate::path::{match_variants_list, proper_ancestors};
+use crate::types::{ExecProjection, FsProjection, SandboxProjection};
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::path::Path;
@@ -91,69 +94,32 @@ fn apply_profile<'a>(
     Ok(())
 }
 
+/// Policy-independent SBPL preamble — `(version 1)`, `(deny default)`,
+/// the Apple-required carve-outs (mach-lookup for dyld, process-fork
+/// next to exec, root-literal for path resolution, /dev/{null,tty,…}
+/// writes for shell redirection).  Lifted into a sibling file so the
+/// rules live as readable SBPL rather than `format!()`'d strings, and
+/// to make the source idiom — the deny-default + folded `file-read*
+/// process-exec` shape from BrianSwift/macOSSandboxBuild's
+/// `confined.sb` — citable in one place.
+const BASE_PROFILE: &str = include_str!("macos-base.sbpl");
+
 pub(super) fn build_profile(policy: &SandboxProjection) -> String {
-    let bind_spec = policy.bind_spec();
-    let read_prefixes  = expand(&bind_spec.read_prefixes);
-    let write_prefixes = expand(&bind_spec.write_prefixes);
-    let deny_paths     = expand(&bind_spec.deny_paths);
-    let mut lines = vec![
-        "(version 1)".to_string(),
-        "(deny default)".to_string(),
-        "(allow signal (target self))".to_string(),
-        "(allow sysctl-read)".to_string(),
-        // dyld talks to launchd over Mach to locate the dyld shared
-        // cache; without it `(allow process-exec)` is not enough — the
-        // child aborts before main().
-        "(allow mach-lookup)".to_string(),
-        // process-exec without process-fork yields EPERM at spawn time:
-        // Seatbelt gates fork() separately from execve().
-        "(allow process-fork)".to_string(),
-        // Path resolution requires reading the root inode itself, even
-        // when every interesting subpath is allowed via (subpath ...).
-        // Without this dyld aborts with SIGABRT before main().
-        "(allow file-read* (literal \"/\"))".to_string(),
-        // Shell-mode entry: every external the sandboxed child spawns
-        // inherits this profile, so process-exec is unrestricted; the
-        // exec capability check happens in-ral before spawn.
-        "(allow process-exec)".to_string(),
-    ];
+    let mut lines: Vec<String> = vec![BASE_PROFILE.to_string()];
+    let deny_paths = match &policy.fs {
+        FsProjection::Restricted(fs) => emit_fs_restricted(&mut lines, fs),
+        FsProjection::Unrestricted => {
+            // No fs attenuation in the stack: pass fs through.  Lets
+            // exec-only grants enter the OS sandbox for the sake of
+            // exec gating without clamping the agent's cwd or HOME.
+            lines.push("(allow file-read*)".to_string());
+            lines.push("(allow file-write*)".to_string());
+            Vec::new()
+        }
+    };
 
-    let system_read_paths = existing_system_read_paths();
-    emit_ancestor_metadata(&mut lines, system_read_paths.iter().map(String::as_str));
-    emit_read_subpaths(&mut lines, system_read_paths.iter().map(String::as_str));
-    // Shell redirections and common libc / tooling paths open these device
-    // nodes for write.  Without explicit literal allows, `2>/dev/null`
-    // and similar patterns fail under Seatbelt even though `/dev` is
-    // readable.
-    for path in ["/dev/null", "/dev/zero", "/dev/dtracehelper", "/dev/tty"] {
-        lines.push(format!(
-            "(allow file-write* (literal \"{}\"))",
-            escape_path(path)
-        ));
-    }
-    // For each grant prefix, also allow file-read-metadata on its
-    // ancestors.  Seatbelt checks parent metadata during lookup; without
-    // these, path traversal and posix_spawn can report ENOENT even when
-    // the final subpath is allowed.
-    emit_ancestor_metadata(
-        &mut lines,
-        read_prefixes
-            .iter()
-            .chain(write_prefixes.iter())
-            .map(String::as_str),
-    );
+    emit_exec_rules(&mut lines, &policy.exec);
 
-    for prefix in &read_prefixes {
-        lines.push(format!(
-            "(allow file-read* (subpath \"{}\"))",
-            escape_path(prefix)
-        ));
-    }
-    for prefix in &write_prefixes {
-        let escaped = escape_path(prefix);
-        lines.push(format!("(allow file-read* (subpath \"{escaped}\"))"));
-        lines.push(format!("(allow file-write* (subpath \"{escaped}\"))"));
-    }
     // Per-path deny rules.  Emitted *after* the broad allows so
     // Seatbelt's last-match-wins semantics let the deny override.
     // `subpath` (not `literal`) so a directory entry covers everything
@@ -175,61 +141,213 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> String {
     lines.join("\n")
 }
 
-/// Always-readable system paths.  These are not grant policy: they are
-/// enough of the platform runtime to let already-authorised executables
-/// start, dynamically link, resolve users/hosts, and for C toolchains,
-/// spawn their internal tools (`clang` -> `ld`) under Seatbelt.
+/// Emit the per-prefix `(allow file-read* …)` / `(allow file-write* …)`
+/// rules and ancestor-metadata carve-outs for a restricted fs policy.
+/// Returns the expanded deny_paths so the caller can layer them after
+/// every allow rule has been written (Seatbelt is last-match-wins).
+fn emit_fs_restricted(lines: &mut Vec<String>, fs: &crate::types::FsPolicy) -> Vec<String> {
+    let read_prefixes = match_variants_list(&fs.read_prefixes);
+    let write_prefixes = match_variants_list(&fs.write_prefixes);
+    let deny_paths = match_variants_list(&fs.deny_paths);
+    let system_read_paths = existing_system_read_paths();
+    emit_ancestor_metadata(lines, system_read_paths.iter().map(String::as_str));
+    emit_read_subpaths(lines, system_read_paths.iter().map(String::as_str));
+    // For each grant prefix, also allow file-read-metadata on its
+    // ancestors.  Seatbelt checks parent metadata during lookup;
+    // without these, path traversal and posix_spawn can report
+    // ENOENT even when the final subpath is allowed.
+    emit_ancestor_metadata(
+        lines,
+        read_prefixes
+            .iter()
+            .chain(write_prefixes.iter())
+            .map(String::as_str),
+    );
+    for prefix in &read_prefixes {
+        lines.push(format!(
+            "(allow file-read* (subpath \"{}\"))",
+            escape_path(prefix)
+        ));
+    }
+    for prefix in &write_prefixes {
+        let escaped = escape_path(prefix);
+        lines.push(format!("(allow file-read* (subpath \"{escaped}\"))"));
+        lines.push(format!("(allow file-write* (subpath \"{escaped}\"))"));
+    }
+    deny_paths
+}
+
+/// Render the `process-exec` rules.  `Unrestricted` keeps the historic
+/// wildcard so plain `grant [fs: …]` blocks don't accidentally lose exec
+/// at the OS layer.  `Restricted` emits a single combined `file-read*
+/// process-exec` allow over the meet-folded `exec_dirs` and the
+/// resolved `[exec]` literals — folded because Seatbelt requires both
+/// operations to spawn a binary (read for posix_spawn, then exec) and
+/// scattering the read across `system_read_paths` doesn't cover
+/// user-installed toolchain dirs like `~/.rustup/.../bin`.
 ///
-/// User temp/workspace paths are deliberately absent here; they must
+/// The `(subpath …)` rules cover any binary under an admitted dir —
+/// matching the in-ral gate's `exec_dirs` semantics — which means the
+/// OS layer admits e.g. `/usr/bin/cargo` even when `[exec]` doesn't
+/// list it.  This is intentional: the OS layer's job here is to close
+/// the *interpreter-bypass* class (sh -c, env CMD, xargs CMD, find
+/// -exec) by denying paths *outside* the granted dirs/literals.
+/// Per-name `Deny` entries inside an admitted dir are handled by the
+/// in-ral gate, which still runs first.
+///
+/// An empty `Restricted` (no allow_paths, no allow_dirs) emits no
+/// `(allow process-exec …)` rule at all — deny-default kills every
+/// spawn from inside the grant.
+fn emit_exec_rules(lines: &mut Vec<String>, exec: &ExecProjection) {
+    match exec {
+        ExecProjection::Unrestricted => {
+            lines.push("(allow process-exec)".to_string());
+        }
+        ExecProjection::Restricted { allow_paths, allow_dirs, deny_dirs } => {
+            // Combined rule covers user policy admits *and* the
+            // platform exec base (Apple toolchain dirs).  Folding the
+            // base in keeps multi-stage exec chains (`gcc → cc1 → as
+            // → ld`) working when the user's `[exec]` only names
+            // `/usr/bin/`: Apple's real binaries live under
+            // CommandLineTools / Xcode and those would otherwise be
+            // exec-denied even though they're readable via
+            // `system_paths`.  Same idiom as
+            // BrianSwift/macOSSandboxBuild's `confined.sb`.
+            let user_dirs = match_variants_list(allow_dirs);
+            let system_dirs = existing_system_exec_paths();
+            let deny_dirs = match_variants_list(deny_dirs);
+            // The bundled-uutils helper re-execs the running binary with
+            // `--ral-uutils-helper`; admit its path so `pwd`, `ls`, … work
+            // inside every restricted profile without each TOML naming
+            // wherever exarch happens to live.
+            let self_exec = super::reexec::SANDBOX_SELF
+                .get()
+                .map(|s| s.exec_path.to_string_lossy().into_owned());
+            let mut rule = String::from("(allow file-read* process-exec");
+            for path in allow_paths.iter().chain(self_exec.as_ref()) {
+                rule.push_str(&format!("\n  (literal \"{}\")", escape_path(path)));
+            }
+            for dir in user_dirs.iter().chain(system_dirs.iter()) {
+                rule.push_str(&format!("\n  (subpath \"{}\")", escape_path(dir)));
+            }
+            rule.push(')');
+            lines.push(rule);
+            // Ancestor metadata for the binary literals: posix_spawn
+            // walks the parent directories and Seatbelt gates each
+            // lookup independently of the final allow on the binary
+            // itself.
+            emit_ancestor_metadata(
+                lines,
+                allow_paths
+                    .iter()
+                    .map(String::as_str)
+                    .chain(self_exec.as_deref()),
+            );
+            // Deny subpaths emitted *after* the broad allow so SBPL's
+            // last-match-wins semantics give them precedence.  Both
+            // file-read* and process-exec are denied — Seatbelt
+            // requires both ops to spawn a binary, so denying read
+            // alone would let exec through with EACCES later, but
+            // denying exec alone wouldn't stop a read of the binary.
+            for dir in &deny_dirs {
+                let escaped = escape_path(dir);
+                lines.push(format!("(deny file-read* (subpath \"{escaped}\"))"));
+                lines.push(format!("(deny process-exec (subpath \"{escaped}\"))"));
+            }
+        }
+    }
+}
+
+/// What ops a baseline system path needs to admit.  Every entry is
+/// `Read` (libc, dyld, configd, gitconfig, …); toolchain dirs that
+/// host real binaries — gcc/clang, ld, as, codesign — are also
+/// `Exec`, so a multi-stage chain like `gcc → cc1 → as → ld` runs
+/// even when the user's `[exec]` map only names `/usr/bin/`.
+///
+/// Keeping reads and execs in one tagged list (rather than two
+/// parallel constants) keeps the data right next to the comment
+/// that explains why each path is here.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SystemAccess {
+    Read,
+    Exec, // implies read; emitted in the folded `file-read* process-exec` rule
+}
+
+/// Baseline system paths the runtime needs available regardless of
+/// user grant.  `Exec`-tagged entries are folded into the same
+/// combined `(allow file-read* process-exec …)` rule the user's
+/// `[exec]` admits go into — the idiom from
+/// BrianSwift/macOSSandboxBuild's `confined.sb` (`(allow file-read*
+/// process-exec (subpath "/bin") (subpath "/usr/bin")
+/// (subpath "/Applications/Xcode.app"))`) generalised here so every
+/// platform exec subpath comes with a free read.
+///
+/// User temp/workspace paths are deliberately absent; they must
 /// arrive via the active fs grant.
-fn system_read_paths() -> &'static [&'static str] {
+fn system_paths() -> &'static [(&'static str, SystemAccess)] {
+    use SystemAccess::*;
     &[
-        "/bin",
-        "/usr",
-        "/lib",
-        "/System",
-        "/dev",
-        "/Library/Apple/usr",
-        "/Library/Developer/CommandLineTools",
-        "/Applications/Xcode.app/Contents/Developer",
-        "/opt/homebrew",
-        "/private/var/db/dyld",
+        ("/bin",                                       Exec),
+        ("/usr",                                       Exec),
+        ("/Library/Apple/usr",                         Exec),
+        ("/Library/Developer/CommandLineTools",        Exec),
+        ("/Applications/Xcode.app/Contents/Developer", Exec),
+        ("/opt/homebrew",                              Exec),
+        ("/lib",                                       Read),
+        ("/System",                                    Read),
+        ("/dev",                                       Read),
+        ("/private/var/db/dyld",                       Read),
         // System config under /etc (firmlinked to /private/etc).  Allowed
         // wholesale rather than cherry-picked: tools read whatever they
         // read (gitconfig, paths.d, zshenv, ssh_config, nix.conf, …) and
         // omitting one breaks them mysteriously.  Nothing user-secret
         // lives here on macOS — master.passwd is 0600 and Seatbelt
         // enforces inode permissions on top of the profile.
-        "/private/etc",
+        ("/private/etc",                               Read),
         // xcode-select state.  /usr/bin/git and the other CommandLineTools
         // shims read /var/select/developer_dir to find the active toolchain;
         // libtool and make also probe /var/select/sh.  Without read access
         // here both fail with "Operation not permitted", which build drivers
         // then misreport as a missing or broken xcode-select install.
-        "/private/var/select",
+        ("/private/var/select",                        Read),
         // configd's runtime state.  /etc/resolv.conf is a symlink to
         // /var/run/resolv.conf, and mDNSResponder's Unix socket lives at
         // /var/run/mDNSResponder, so DNS resolution goes through here.
         // Read-only grant: contents are sockets, PID files, locks — system
         // state, no user secrets.  If DNS still fails, the next missing
         // piece is the socket connect, which needs a separate write rule.
-        "/private/var/run",
+        ("/private/var/run",                           Read),
     ]
 }
 
-/// Filter to entries that exist on this host, then expand each to its
-/// firmlink-equivalent forms — `/private/etc` becomes `[/etc, /private/etc]`,
-/// `/private/var/db/dyld` becomes `[/var/db/dyld, /private/var/db/dyld]`,
-/// and so on — so the rendered profile matches whichever form Seatbelt
-/// presents at MAC-hook time.
+/// Host-existing system paths admitted for read.  All entries —
+/// every `Read` *and* every `Exec` — appear here, since `Exec`
+/// implies read.  Each is expanded to its firmlink-equivalent forms
+/// (`/private/etc` → `[/etc, /private/etc]`) so the rendered
+/// profile matches whichever form Seatbelt presents at MAC-hook
+/// time.
 fn existing_system_read_paths() -> Vec<String> {
-    let filtered: Vec<String> = system_read_paths()
-        .iter()
-        .copied()
+    match_variants_list(&filter_existing(system_paths().iter().map(|(p, _)| *p)))
+}
+
+/// Host-existing system paths admitted for exec — the `Exec`-tagged
+/// subset of [`system_paths`].  Folded into the combined exec rule
+/// alongside user policy admits when exec is `Restricted`.
+fn existing_system_exec_paths() -> Vec<String> {
+    match_variants_list(&filter_existing(
+        system_paths()
+            .iter()
+            .filter(|(_, k)| *k == SystemAccess::Exec)
+            .map(|(p, _)| *p),
+    ))
+}
+
+fn filter_existing<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    paths
+        .into_iter()
         .filter(|p| Path::new(p).exists())
         .map(str::to_string)
-        .collect();
-    expand(&filtered)
+        .collect()
 }
 
 fn emit_read_subpaths<'a>(lines: &mut Vec<String>, paths: impl IntoIterator<Item = &'a str>) {
@@ -245,7 +363,7 @@ fn emit_ancestor_metadata<'a>(
     lines: &mut Vec<String>,
     paths: impl IntoIterator<Item = &'a str>,
 ) {
-    for ancestor in metadata_ancestors(paths) {
+    for ancestor in proper_ancestors(paths) {
         lines.push(format!(
             "(allow file-read-metadata (literal \"{}\"))",
             escape_path(&ancestor)
@@ -253,40 +371,8 @@ fn emit_ancestor_metadata<'a>(
     }
 }
 
-fn metadata_ancestors<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-    let mut out = std::collections::BTreeSet::new();
-    for path in paths {
-        for ancestor in std::path::Path::new(path).ancestors().skip(1) {
-            if ancestor == std::path::Path::new("/") || ancestor.as_os_str().is_empty() {
-                break;
-            }
-            out.insert(ancestor.to_string_lossy().into_owned());
-        }
-    }
-    out.into_iter().collect()
-}
-
 fn escape_path(path: &str) -> String {
     path.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-/// Expand every entry into its [`match_variants`] — the canonical
-/// form plus the firmlinked form on macOS — and dedupe.  A grant for
-/// `/tmp/work` produces rules for both `/tmp/work` and
-/// `/private/tmp/work`, since Seatbelt may present either to the MAC
-/// hook depending on the syscall.
-fn expand(paths: &[String]) -> Vec<String> {
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::new();
-    for p in paths {
-        for v in match_variants(Path::new(p)) {
-            let s = v.to_string_lossy().into_owned();
-            if seen.insert(s.clone()) {
-                out.push(s);
-            }
-        }
-    }
-    out
 }
 
 unsafe extern "C" {
@@ -301,12 +387,128 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::{build_profile, metadata_ancestors};
-    use crate::types::SandboxProjection;
+    use crate::types::{ExecProjection, SandboxProjection};
 
     #[test]
-    fn mac_shell_profile_allows_general_exec() {
+    fn mac_shell_profile_allows_general_exec_when_unrestricted() {
         let profile = build_profile(&SandboxProjection::default());
         assert!(profile.contains("(allow process-exec)"));
+        // The restricted form must not appear when exec is unrestricted.
+        assert!(!profile.contains("(allow file-read* process-exec"));
+    }
+
+    #[test]
+    fn mac_profile_emits_combined_read_exec_rule_when_restricted() {
+        let policy = SandboxProjection {
+            exec: ExecProjection::Restricted {
+                allow_paths: vec!["/usr/bin/git".into()],
+                allow_dirs: vec!["/usr/bin".into(), "/opt/homebrew/bin".into()],
+                deny_dirs: Vec::new(),
+            },
+            ..SandboxProjection::default()
+        };
+        let profile = build_profile(&policy);
+        // Folded `file-read* process-exec` rule (idiom from
+        // BrianSwift/macOSSandboxBuild's confined.sb).
+        assert!(
+            profile.contains("(allow file-read* process-exec"),
+            "missing combined read+exec rule:\n{profile}"
+        );
+        assert!(profile.contains("(literal \"/usr/bin/git\")"));
+        assert!(profile.contains("(subpath \"/usr/bin\")"));
+        assert!(profile.contains("(subpath \"/opt/homebrew/bin\")"));
+        // The wildcard exec must NOT appear in restricted mode — that's
+        // the bypass we're closing.
+        assert!(
+            !profile.contains("(allow process-exec)\n"),
+            "wildcard process-exec leaked into restricted profile"
+        );
+    }
+
+    /// Apple's toolchain spawns its real binaries from
+    /// `/Library/Developer/CommandLineTools/usr/bin` (and on systems
+    /// with full Xcode, `/Applications/Xcode.app/...`).  When exec is
+    /// restricted, those dirs must be folded into the combined rule
+    /// alongside user policy admits — otherwise `gcc → cc1 → as →
+    /// ld` dies at the first descendant exec even though `/usr/bin/`
+    /// is in the user's `[exec]`.  Mirrors confined.sb's `(subpath
+    /// "/Applications/Xcode.app")` line.
+    #[test]
+    fn mac_profile_folds_toolchain_into_combined_exec_rule_when_restricted() {
+        if !std::path::Path::new("/Library/Developer/CommandLineTools").exists() {
+            return; // No toolchain on this host; nothing to assert.
+        }
+        let policy = SandboxProjection {
+            exec: ExecProjection::Restricted {
+                allow_paths: Vec::new(),
+                allow_dirs: vec!["/usr/bin".into()],
+                deny_dirs: Vec::new(),
+            },
+            ..SandboxProjection::default()
+        };
+        let profile = build_profile(&policy);
+        // Both the user's admit and the system base appear in one
+        // combined rule — confined.sb idiom.
+        let combined = profile
+            .find("(allow file-read* process-exec")
+            .expect("missing combined rule");
+        let user = profile[combined..]
+            .find("(subpath \"/usr/bin\")")
+            .expect("user admit missing from combined rule");
+        let toolchain = profile[combined..]
+            .find("(subpath \"/Library/Developer/CommandLineTools\")")
+            .expect("toolchain not folded into combined rule");
+        // No standalone exec allow for the toolchain — it shares the
+        // rule with the user's admits, just like confined.sb.
+        assert!(user > 0 && toolchain > 0);
+    }
+
+    #[test]
+    fn mac_profile_emits_only_system_base_when_restricted_to_empty() {
+        let policy = SandboxProjection {
+            exec: ExecProjection::Restricted {
+                allow_paths: Vec::new(),
+                allow_dirs: Vec::new(),
+                deny_dirs: Vec::new(),
+            },
+            ..SandboxProjection::default()
+        };
+        let profile = build_profile(&policy);
+        // Empty user policy => only the platform exec base admitted.
+        // Same shape as `system_read_paths`: an empty user fs grant
+        // doesn't deny libc and dyld, and an empty exec map doesn't
+        // deny the platform toolchain.  Users wanting full lockdown
+        // can subpath-Deny the system roots explicitly.
+        assert!(profile.contains("(allow file-read* process-exec"));
+        // The wildcard exec must not appear.
+        assert!(!profile.contains("(allow process-exec)\n"));
+        // No user literals or dirs should appear (none were granted).
+        assert!(!profile.contains("(literal \""));
+    }
+
+    #[test]
+    fn mac_profile_emits_subpath_deny_after_broad_allow() {
+        let policy = SandboxProjection {
+            exec: ExecProjection::Restricted {
+                allow_paths: Vec::new(),
+                allow_dirs: vec!["/usr/bin".into()],
+                deny_dirs: vec!["/usr/bin/sensitive".into()],
+            },
+            ..SandboxProjection::default()
+        };
+        let profile = build_profile(&policy);
+        let allow_idx = profile
+            .find("(allow file-read* process-exec")
+            .expect("missing broad allow");
+        let deny_exec_idx = profile
+            .find("(deny process-exec (subpath \"/usr/bin/sensitive\"))")
+            .expect("missing deny process-exec for /usr/bin/sensitive");
+        let deny_read_idx = profile
+            .find("(deny file-read* (subpath \"/usr/bin/sensitive\"))")
+            .expect("missing deny file-read* for /usr/bin/sensitive");
+        // Last-match-wins: deny rules must follow the broad allow.
+        assert!(allow_idx < deny_read_idx, "deny read must follow allow");
+        assert!(allow_idx < deny_exec_idx, "deny exec must follow allow");
     }
 
     #[test]

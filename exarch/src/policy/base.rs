@@ -1,22 +1,29 @@
 //! Built-in capability bases for exarch sessions.
 //!
-//! Three bake-ins are embedded from TOML files in `exarch/data/`:
+//! Five bake-ins are embedded from TOML files in `exarch/data/`,
+//! ordered loosely from no-attenuation down to tightest:
 //!
-//! - `minimal`    — coreutils + cwd + /tmp + tempdir + net + chdir.
-//! - `reasonable` — everyday tooling + standard binary dirs (default).
 //! - `dangerous`  — `Capabilities::root()`.  Lattice top; no attenuation.
+//! - `reasonable` — everyday tooling + standard binary dirs (default).
+//! - `read-only`  — `reasonable` reads/exec, but writes only to scratch.
+//! - `minimal`    — coreutils + cwd + /tmp + tempdir + net + chdir.
+//!                  Small base for additive `--extend-base` composition.
+//! - `confined`   — build-jail shape (after BrianSwift's `confined.sb`):
+//!                  tight reads/writes, no network, exec by subpath only.
 //!
-//! `minimal` and `reasonable` use `cwd:` and `tempdir:` sigils in
-//! their `[fs]` and `exec_dirs` lists; the freeze pass in
-//! [`ral_core::types::RawCapabilities::freeze`] resolves both at
-//! session start, so the per-invocation working directory is baked
+//! `minimal`, `confined`, `read-only`, and `reasonable` use `cwd:` and
+//! `tempdir:` sigils in their `[fs]` and `[exec]` entries; the freeze
+//! pass in [`ral_core::types::RawCapabilities::freeze`] resolves them
+//! at session start, so the per-invocation working directory is baked
 //! into the policy without exarch having to inject it dynamically.
 
 use ral_core::types::{FsPolicy, RawCapabilities};
 
-const MINIMAL_TOML: &str = include_str!("../../data/minimal.exarch.toml");
+const MINIMAL_TOML:    &str = include_str!("../../data/minimal.exarch.toml");
 const REASONABLE_TOML: &str = include_str!("../../data/reasonable.exarch.toml");
-const DANGEROUS_TOML: &str = include_str!("../../data/dangerous.exarch.toml");
+const READ_ONLY_TOML:  &str = include_str!("../../data/read-only.exarch.toml");
+const CONFINED_TOML:   &str = include_str!("../../data/confined.exarch.toml");
+const DANGEROUS_TOML:  &str = include_str!("../../data/dangerous.exarch.toml");
 
 /// Resolve `name` to a [`RawCapabilities`].  Returns unfrozen so
 /// the orchestrator (`policy::for_invocation`) can join an
@@ -24,13 +31,15 @@ const DANGEROUS_TOML: &str = include_str!("../../data/dangerous.exarch.toml");
 /// pass settles every sigil in the composed result.
 pub(super) fn resolve_base(name: &str) -> Result<RawCapabilities, String> {
     let text = match name {
-        "minimal" => MINIMAL_TOML,
+        "minimal"    => MINIMAL_TOML,
         "reasonable" => REASONABLE_TOML,
-        "dangerous" => DANGEROUS_TOML,
+        "read-only"  => READ_ONLY_TOML,
+        "confined"   => CONFINED_TOML,
+        "dangerous"  => DANGEROUS_TOML,
         other => {
             return Err(format!(
                 "exarch: unknown base '{other}'; \
-                 expected 'minimal', 'reasonable', or 'dangerous'"
+                 expected one of: minimal, reasonable, read-only, confined, dangerous"
             ));
         }
     };
@@ -53,15 +62,17 @@ mod tests {
     use super::*;
     use ral_core::types::{Capabilities, RawCapabilities, Shell};
 
-    /// All three bake-ins must parse and validate.  Catches both
-    /// malformed TOML and unknown `xdg:` tokens at `cargo test` time
-    /// rather than at first user invocation.
+    /// Every bake-in must parse and validate.  Catches both malformed
+    /// TOML and unknown `xdg:` tokens at `cargo test` time rather
+    /// than at first user invocation.
     #[test]
     fn bakeins_parse() {
         for (name, text) in [
-            ("minimal", MINIMAL_TOML),
+            ("minimal",    MINIMAL_TOML),
             ("reasonable", REASONABLE_TOML),
-            ("dangerous", DANGEROUS_TOML),
+            ("read-only",  READ_ONLY_TOML),
+            ("confined",   CONFINED_TOML),
+            ("dangerous",  DANGEROUS_TOML),
         ] {
             let raw: RawCapabilities = toml::from_str(text)
                 .unwrap_or_else(|e| panic!("base '{name}' failed to parse: {e}"));
@@ -70,37 +81,81 @@ mod tests {
         }
     }
 
+    /// `confined` is the build-jail profile: net off, no user-home
+    /// reads, exec by subpath only.  These three properties are the
+    /// load-bearing differences vs `reasonable`; pin them so a future
+    /// edit doesn't accidentally widen the build jail.
+    #[test]
+    fn confined_is_offline_subpath_only_no_home_reads() {
+        let raw: RawCapabilities = toml::from_str(CONFINED_TOML).unwrap();
+        assert_eq!(raw.net, Some(false), "confined must have net off");
+        let exec = raw.exec.as_ref().expect("confined declares [exec]");
+        // No bare-name admits — every key is a subpath (trailing /).
+        for key in exec.keys() {
+            assert!(
+                key.ends_with('/'),
+                "confined [exec] '{key}' is bare-name; build jail uses subpaths only"
+            );
+        }
+        let fs = raw.fs.as_ref().expect("confined declares [fs]");
+        for prefix in fs.read_prefixes.iter().chain(fs.write_prefixes.iter()) {
+            assert!(
+                !prefix.starts_with('~'),
+                "confined fs prefix '{prefix}' reaches into ~ — build jail must not"
+            );
+        }
+    }
+
+    /// `read-only` differs from `reasonable` only in that writes
+    /// don't include the working tree.  Fold a future regression
+    /// where someone re-adds `cwd:` to write_prefixes.
+    #[test]
+    fn read_only_does_not_write_cwd() {
+        let raw: RawCapabilities = toml::from_str(READ_ONLY_TOML).unwrap();
+        let fs = raw.fs.as_ref().expect("read-only declares [fs]");
+        assert!(
+            !fs.write_prefixes.iter().any(|p| p == "cwd:"),
+            "read-only must not list cwd: in write_prefixes"
+        );
+        assert!(
+            fs.read_prefixes.iter().any(|p| p == "cwd:"),
+            "read-only must list cwd: in read_prefixes"
+        );
+    }
+
     #[test]
     fn dangerous_is_root() {
         let raw: RawCapabilities = toml::from_str(DANGEROUS_TOML).unwrap();
         assert_eq!(raw, RawCapabilities::default());
     }
 
-    /// Reasonable's exec_dirs includes `xdg:bin`, which expands to
-    /// `${XDG_BIN_HOME:-~/.local/bin}` at freeze time.  Pre-freeze
-    /// the entry is a literal string; this asserts it survives
-    /// parsing.
+    /// Reasonable's `[exec]` includes the `xdg:bin/` subpath key,
+    /// which expands to `${XDG_BIN_HOME:-~/.local/bin}/` at freeze
+    /// time.  Pre-freeze the entry is a literal string; this asserts
+    /// it survives parsing.
     #[test]
-    fn reasonable_carries_xdg_bin_in_exec_dirs() {
+    fn reasonable_carries_xdg_bin_subpath_in_exec() {
         let raw: RawCapabilities = toml::from_str(REASONABLE_TOML).unwrap();
+        let exec = raw.exec.as_ref().expect("reasonable should declare [exec]");
         assert!(
-            raw.exec_dirs.as_ref().is_some_and(|d| d.iter().any(|p| p == "xdg:bin")),
-            "reasonable should list xdg:bin in exec_dirs"
+            exec.contains_key("xdg:bin/"),
+            "reasonable should list xdg:bin/ in [exec]"
         );
     }
 
-    /// `cwd:` and `tempdir:` sigils land in both the fs and exec_dirs
-    /// lists for `minimal` and `reasonable` so a per-invocation
-    /// working tree is admitted without exarch injecting it dynamically.
+    /// `cwd:/` and `tempdir:/` subpath keys land in `[exec]` and
+    /// matching plain sigils land in `[fs]` for both `minimal` and
+    /// `reasonable`, so a per-invocation working tree is admitted
+    /// without exarch injecting it dynamically.
     #[test]
     fn minimal_and_reasonable_carry_cwd_and_tempdir_sigils() {
         for (name, text) in [("minimal", MINIMAL_TOML), ("reasonable", REASONABLE_TOML)] {
             let raw: RawCapabilities = toml::from_str(text).unwrap();
-            let dirs = raw.exec_dirs.as_ref().unwrap_or_else(|| {
-                panic!("{name} should declare exec_dirs")
+            let exec = raw.exec.as_ref().unwrap_or_else(|| {
+                panic!("{name} should declare [exec]")
             });
-            assert!(dirs.iter().any(|p| p == "cwd:"), "{name} exec_dirs missing cwd:");
-            assert!(dirs.iter().any(|p| p == "tempdir:"), "{name} exec_dirs missing tempdir:");
+            assert!(exec.contains_key("cwd:/"), "{name} [exec] missing cwd:/");
+            assert!(exec.contains_key("tempdir:/"), "{name} [exec] missing tempdir:/");
             let fs = raw.fs.as_ref().unwrap_or_else(|| {
                 panic!("{name} should declare [fs]")
             });
@@ -147,13 +202,16 @@ mod tests {
 
     /// Regression: a command at /opt/homebrew/bin/cmake — invoked
     /// by short name OR full absolute path — must be admitted by
-    /// reasonable's exec_dirs even though cmake is not in [exec].
+    /// reasonable's `/opt/homebrew/bin/` subpath key in `[exec]`
+    /// even though cmake itself is not a per-name entry.
     #[test]
     fn reasonable_admits_cmake_under_opt_homebrew_bin() {
         let raw: RawCapabilities = toml::from_str(REASONABLE_TOML).unwrap();
         assert!(
-            raw.exec_dirs.as_ref().is_some_and(|d| d.iter().any(|p| p == "/opt/homebrew/bin")),
-            "reasonable should list /opt/homebrew/bin in exec_dirs"
+            raw.exec
+                .as_ref()
+                .is_some_and(|m| m.contains_key("/opt/homebrew/bin/")),
+            "reasonable should list /opt/homebrew/bin/ in [exec]"
         );
         let caps: Capabilities = raw
             .freeze(&ral_core::path::sigil::FreezeCtx {
@@ -181,14 +239,15 @@ mod tests {
             .expect("full-path cmake under /opt/homebrew/bin must be admitted");
     }
 
-    /// `reasonable` lists the standard system `bin` directories in
-    /// `exec_dirs`, which would otherwise admit `/bin/bash`,
-    /// `/usr/bin/zsh`, …  An explicit `Deny` in `[exec]` is the
-    /// override knob: name-match wins over directory match, so the
-    /// agent cannot reach those shells through the admitted dirs.
-    /// `sh` itself stays allowed — autoconf-generated `configure`
-    /// scripts and `make` recipes shell out via `/bin/sh -c`, and
-    /// denying it breaks every portable build system.
+    /// `reasonable` lists the standard system `bin` directories as
+    /// subpath keys in `[exec]`, which would otherwise admit
+    /// `/bin/bash`, `/usr/bin/zsh`, …  An explicit `Deny` per-name
+    /// entry in the same map is the override knob: literal-match
+    /// wins over subpath-match, so the agent cannot reach those
+    /// shells through the admitted dirs.  `sh` itself stays allowed
+    /// — autoconf-generated `configure` scripts and `make` recipes
+    /// shell out via `/bin/sh -c`, and denying it breaks every
+    /// portable build system.
     #[test]
     fn reasonable_denies_shells_despite_bin_in_exec_dirs() {
         let raw: RawCapabilities = toml::from_str(REASONABLE_TOML).unwrap();

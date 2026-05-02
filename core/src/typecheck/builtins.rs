@@ -28,17 +28,13 @@ pub fn closed_record(fields: &[(&str, Ty)]) -> Ty {
     Ty::Record(row)
 }
 
-/// The `{ok, value, status, cmd, message, stdout, line, col}` record
-/// returned by `_try` / `try`.  `message` carries the failure text —
-/// runtime errors' own message, or the failing external command's
-/// stderr decoded as UTF-8.  `stdout` is the body's fd 1 capture as
-/// `Bytes`; a body that prints before failing leaves those bytes here
-/// rather than on the terminal.  Use `await`'s `stderr: Bytes` field
-/// if you need the raw fd 2 of a captured task.
-fn try_error_record(value_ty: Ty) -> Ty {
+/// The error half of `_try` / `try`'s outcome.  `message` carries the
+/// failure text — the runtime error's message or the failing external
+/// command's stderr decoded as UTF-8.  `stdout` is the body's fd 1
+/// capture as `Bytes`.  Use `await`'s `stderr: Bytes` field if you need
+/// the raw fd 2 of a captured task.
+fn try_error_record() -> Ty {
     closed_record(&[
-        ("ok", Ty::Bool),
-        ("value", value_ty),
         ("status", Ty::Int),
         ("cmd", Ty::String),
         ("message", Ty::String),
@@ -46,6 +42,21 @@ fn try_error_record(value_ty: Ty) -> Ty {
         ("line", Ty::Int),
         ("col", Ty::Int),
     ])
+}
+
+/// The variant returned by `_try` and `_try-apply`: success carries the
+/// body's value as `.ok A`; failure carries the error record as
+/// `.err ErrorRec`.  Pair with `case` to destruct.
+fn try_outcome(value_ty: Ty, error_ty: Ty) -> Ty {
+    Ty::Variant(super::ty::Row::Extend(
+        ".ok".into(),
+        Box::new(value_ty),
+        Box::new(super::ty::Row::Extend(
+            ".err".into(),
+            Box::new(error_ty),
+            Box::new(super::ty::Row::Empty),
+        )),
+    ))
 }
 
 /// The `{ value, stdout, stderr, status }` record returned by `await`/`race`.
@@ -87,9 +98,11 @@ pub fn builtin_scheme(name: &str, u: &mut Unifier) -> Option<Scheme> {
 
     let mk = |ty_vars: &[TyVar], mode_vars: &[ModeVar], row_vars: &[RowVar], ty: Ty| Scheme {
         ty_vars: ty_vars.to_vec(),
+        comp_ty_vars: vec![],
         mode_vars: mode_vars.to_vec(),
         row_vars: row_vars.to_vec(),
         ty,
+        comp_ty_bindings: vec![],
         cached_fv: Some(CachedFreeVars::default()),
     };
     // F[μ₀,μ₁] A  — used for branch/lastthunk returns with fresh modes
@@ -223,37 +236,7 @@ pub fn builtin_scheme(name: &str, u: &mut Unifier) -> Option<Scheme> {
 
         // ── Error handling ───────────────────────────────────────────────────
         "_try" =>
-        // ∀α. U(F α) → F {ok:Bool, value:α, status:Int, cmd:Str, stderr:Bytes, line:Int, col:Int}
-        {
-            mk(
-                &[av],
-                &[],
-                &[],
-                thunk(fun(thunk(pure(a())), pure(try_error_record(a())))),
-            )
-        }
-
-        "_try-apply" =>
-        // ∀α β. U(α → F β) → α → F {ok:Bool, value:β}
-        {
-            mk(
-                &[av, bv],
-                &[],
-                &[],
-                thunk(fun(
-                    thunk(fun(a(), pure(b()))),
-                    fun(
-                        a(),
-                        pure(closed_record(&[("ok", Ty::Bool), ("value", b())])),
-                    ),
-                )),
-            )
-        }
-
-        "try" =>
-        // ∀α. U(F α) → U(error(α) → F α) → F α
-        // Both body and handler must return the same type: on success
-        // the body's value is returned, on failure the handler's is.
+        // ∀α. U(F α) → F [.ok: α | .err: ErrorRec]
         {
             mk(
                 &[av],
@@ -261,7 +244,41 @@ pub fn builtin_scheme(name: &str, u: &mut Unifier) -> Option<Scheme> {
                 &[],
                 thunk(fun(
                     thunk(pure(a())),
-                    fun(thunk(fun(try_error_record(a()), pure(a()))), pure(a())),
+                    pure(try_outcome(a(), try_error_record())),
+                )),
+            )
+        }
+
+        "_try-apply" =>
+        // ∀α β. U(α → F β) → α → F [.ok: β | .err: Unit]
+        // The error tag is unit because pattern-mismatch failure does
+        // not carry a structured record.
+        {
+            mk(
+                &[av, bv],
+                &[],
+                &[],
+                thunk(fun(
+                    thunk(fun(a(), pure(b()))),
+                    fun(a(), pure(try_outcome(b(), Ty::Unit))),
+                )),
+            )
+        }
+
+        "try" =>
+        // ∀α. U(F α) → U(ErrorRec → F α) → F α
+        // Both body and handler must return the same type: on success
+        // the body's value is returned, on failure the handler's is.
+        // The handler receives just the error record; the .ok tag's
+        // payload is unwrapped before reaching it.
+        {
+            mk(
+                &[av],
+                &[],
+                &[],
+                thunk(fun(
+                    thunk(pure(a())),
+                    fun(thunk(fun(try_error_record(), pure(a()))), pure(a())),
                 )),
             )
         }

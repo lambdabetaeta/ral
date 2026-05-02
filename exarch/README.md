@@ -5,8 +5,10 @@ chosen LLM provider against a single tool — `shell` — that evaluates a
 ral source string in process against a persistent `Shell`.
 
 Each command the model emits is wrapped in a `grant` block so ral's
-in-language capability mechanism scopes file and exec access to the
-current working directory and `/tmp`. Outbound network is denied.
+in-language capability mechanism scopes file and exec access.  Five
+profiles ship in the binary (`dangerous`, `reasonable`, `read-only`,
+`minimal`, `confined`); see [`PROFILES.md`](PROFILES.md) for what
+each admits and when to use it.  `reasonable` is the default.
 
 The name is the role: in Byzantine usage, an *exarch* was a viceroy
 who acted on behalf of a distant sovereign within a bounded province.

@@ -18,9 +18,9 @@ return { |options|
         if !{is-empty $args} {
             cd ~
         } else {
-            let cwd = $env[PWD]
+            let here = !{cwd}
             let result = try {
-                return !{zoxide query --exclude $cwd -- ...$args | from-line}
+                return !{zoxide query --exclude $here -- ...$args | from-line}
             } { |_| return '' }
             if $[not !{is-empty $result}] { cd $result }
         }

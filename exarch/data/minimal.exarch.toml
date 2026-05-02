@@ -1,33 +1,41 @@
-# `minimal` bake-in.  Coreutils on exec, net on, chdir allowed.
+# `minimal` bake-in.  The smallest base that's actually useful as a
+# starting point for additive `--extend-base` composition: standard
+# system binaries (`/bin`, `/usr/bin`) + cwd + scratch, network on,
+# chdir allowed.  Nothing from the user's home except scratch:
+# `xdg:bin` is not admitted (so a fresh tool dropped in
+# `~/.local/bin` is a deliberate choice via extend-base, not an
+# implicit one); `/opt/homebrew` is not admitted (so user-installed
+# brew tools must be opted in); toolchain caches and `~/Library`
+# are not readable.
 #
-# `cwd:` resolves to the working directory at session start;
-# `tempdir:` to `std::env::temp_dir()` (`/var/folders/...` on macOS,
-# `/tmp` on Linux).  The freeze pass rewrites both before any grant
-# matching, so the runtime sees concrete paths only.
+# The contrast with `reasonable`: this is "system tools only,
+# nothing pulled from my home or homebrew, network on so I can
+# fetch what I tell it to fetch."  The contrast with `confined`:
+# minimal has network on; confined doesn't.  The contrast with
+# `dangerous + --restrict`: minimal is a curated starting point;
+# dangerous-with-restrict is a bespoke profile written from scratch.
 #
-# Edit this file to change what `--base minimal` allows.  The contents
-# are baked into the exarch binary at build time via `include_str!`.
+# `cwd:` and `tempdir:` sigils are resolved by the freeze pass at
+# session start, so the per-invocation working directory bakes in
+# without exarch having to inject anything dynamically.
+#
+# Edit this file to change what `--base minimal` admits.  The
+# contents are baked into the exarch binary at build time via
+# `include_str!`.
 
 audit = false
-net = true
-
-# Directory-based exec allowance.  Anything under cwd or a scratch
-# directory is admitted by path, on top of the named coreutils below.
-#
-# Must appear before any `[table]` header — TOML otherwise attaches
-# this key to the preceding table where it is silently ignored.
-exec_dirs = [
-  "cwd:",
-  "/tmp",
-  "tempdir:",
-]
+net   = true
 
 [shell]
 chdir = true
 
-# cwd + /tmp + tempdir on read and write.  The full project tree is
-# the agent's workspace; /tmp and tempdir cover scratch space and
-# anything tools resolve through `$TMPDIR`.
+# Reads and writes mirror the threat model of `reasonable` —
+# writes go only to ephemeral / recoverable surfaces (cwd, scratch,
+# `xdg:cache`) so a hallucinating agent can't corrupt persistent
+# state.  Modern tools that respect `$XDG_CACHE_HOME` land there
+# automatically.  Legacy build tools (cargo, npm, gradle, …) get
+# their home env vars redirected to `$EXARCH_SCRATCH/<tool>` by
+# exarch's runtime.
 [fs]
 read_prefixes = [
   "cwd:",
@@ -38,83 +46,33 @@ write_prefixes = [
   "cwd:",
   "/tmp",
   "tempdir:",
+  "xdg:cache",
 ]
 
+# Subpath admittance for the standard system binary directories,
+# plus cwd and scratch.  No per-name enumeration of coreutils:
+# every coreutil lives under `/bin/` or `/usr/bin/` and gets
+# admitted by the subpath rule.  This admits more than coreutils —
+# `make`, `find`, `xargs`, `git`, `curl`, `tar`, `awk`, `sed`,
+# `pkg-config`, `clang`, … — which matches what users actually
+# want from "tight but functional."
+#
+# Apple's toolchain (CommandLineTools, Xcode) is folded in
+# automatically by the macOS sandbox base — see
+# `core/src/sandbox/macos.rs::system_paths`.  Building from source
+# works without listing each tool here.
+#
+# `bash` and `zsh` carry over from `reasonable`'s explicit denies:
+# both shells live under `/bin/` (admitted by subpath above), but a
+# literal-match `Deny` overrides the subpath rule.  Autoconf-style
+# `configure` scripts and `make` recipes shell out via `/bin/sh -c`
+# and need `sh` itself; bash/zsh are agent quality-of-life only.
 [exec]
-arch         = "Allow"
-b2sum        = "Allow"
-base32       = "Allow"
-base64       = "Allow"
-basename     = "Allow"
-basenc       = "Allow"
-cat          = "Allow"
-cksum        = "Allow"
-comm         = "Allow"
-cp           = "Allow"
-csplit       = "Allow"
-cut          = "Allow"
-date         = "Allow"
-df           = "Allow"
-dir          = "Allow"
-dircolors    = "Allow"
-dirname      = "Allow"
-du           = "Allow"
-echo         = "Allow"
-env          = "Allow"
-expand       = "Allow"
-expr         = "Allow"
-factor       = "Allow"
-fmt          = "Allow"
-fold         = "Allow"
-head         = "Allow"
-hostname     = "Allow"
-join         = "Allow"
-link         = "Allow"
-ln           = "Allow"
-ls           = "Allow"
-md5sum       = "Allow"
-mkdir        = "Allow"
-mktemp       = "Allow"
-mv           = "Allow"
-nl           = "Allow"
-nproc        = "Allow"
-numfmt       = "Allow"
-od           = "Allow"
-paste        = "Allow"
-pr           = "Allow"
-printenv     = "Allow"
-printf       = "Allow"
-ptx          = "Allow"
-pwd          = "Allow"
-readlink     = "Allow"
-realpath     = "Allow"
-rm           = "Allow"
-rmdir        = "Allow"
-seq          = "Allow"
-sha1sum      = "Allow"
-sha224sum    = "Allow"
-sha256sum    = "Allow"
-sha384sum    = "Allow"
-sha512sum    = "Allow"
-shred        = "Allow"
-shuf         = "Allow"
-sleep        = "Allow"
-sort         = "Allow"
-sum          = "Allow"
-sync         = "Allow"
-tac          = "Allow"
-tail         = "Allow"
-tee          = "Allow"
-test         = "Allow"
-touch        = "Allow"
-tr           = "Allow"
-truncate     = "Allow"
-tsort        = "Allow"
-uname        = "Allow"
-unexpand     = "Allow"
-uniq         = "Allow"
-unlink       = "Allow"
-vdir         = "Allow"
-wc           = "Allow"
-whoami       = "Allow"
-yes          = "Allow"
+"/bin/"      = "Allow"
+"/usr/bin/"  = "Allow"
+"cwd:/"      = "Allow"
+"/tmp/"      = "Allow"
+"tempdir:/"  = "Allow"
+
+bash = "Deny"
+zsh  = "Deny"

@@ -78,7 +78,6 @@ pub struct SandboxedBlockRequest {
     pub modules: IpcModules,
     pub loc: crate::types::Location,
     pub script_args: Vec<String>,
-    pub pipe_value: Option<SerialValue>,
     pub audit: bool,
 }
 
@@ -118,7 +117,7 @@ pub enum ChildFrame {
 impl IpcAmbient {
     pub fn from_dynamic(d: &crate::types::Dynamic) -> Self {
         Self {
-            env_vars: d.env_vars.clone(),
+            env_vars: d.env_vars().clone(),
             cwd: d.cwd.clone(),
             capabilities_stack: d.capabilities_stack.clone(),
         }
@@ -251,12 +250,6 @@ pub fn pack(
     let captured = SerialEnvSnapshot::from_runtime(captured, &mut ctx)?;
     let registry = IpcRegistry::from_runtime(shell, &mut ctx)?;
     let modules = IpcModules::from_runtime(shell, &mut ctx)?;
-    let pipe_value = shell
-        .io
-        .value_in
-        .as_ref()
-        .map(|v| SerialValue::from_runtime(v, &mut ctx))
-        .transpose()?;
     Ok(SandboxedBlockRequest {
         scope_table: ctx.scope_table,
         body,
@@ -266,7 +259,6 @@ pub fn pack(
         modules,
         loc: shell.location.clone(),
         script_args: shell.dynamic.script_args.clone(),
-        pipe_value,
         audit: shell.audit.tree.is_some(),
     })
 }

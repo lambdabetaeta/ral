@@ -10,7 +10,7 @@
 //!       | {l₁:A₁, …, lₙ:Aₙ | ρ}   -- record (row-polymorphic)
 //!       | {B} | Handle | α
 //!   B ::= F[I,O] A | A → B | β
-//!   I,O ::= ∅ | Bytes | Values(A) | μ
+//!   I,O ::= ∅ | Bytes | μ
 //!
 //! Generalisation happens at Bind (let) nodes.  Recursive bindings (LetRec,
 //! Rec) are given monomorphic types to prevent unsound generalisation.

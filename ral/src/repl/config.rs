@@ -213,7 +213,7 @@ pub(crate) fn apply_rc_config(
     for (key, val) in pairs {
         match key.as_str() {
             "env" => for (k, v) in into_map(val) {
-                ctx.shell.dynamic.env_vars.insert(k.clone(), v.to_string());
+                ctx.shell.dynamic.set_env_var(k.clone(), v.to_string());
                 ctx.shell.set(k, v);
             },
             "prompt" => ctx.shell.set("RAL_PROMPT".into(), val),

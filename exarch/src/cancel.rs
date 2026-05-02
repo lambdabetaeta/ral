@@ -30,6 +30,13 @@ pub fn clear() {
     CANCEL.store(false, Ordering::Relaxed);
 }
 
+/// Set the flag without going through a signal — used by the TUI's
+/// Ctrl-C key handler under raw mode, where the kernel no longer
+/// turns Ctrl-C into SIGINT for us.
+pub fn raise() {
+    CANCEL.store(true, Ordering::Relaxed);
+}
+
 /// Install the chained signal handler.  Must run *after*
 /// `ral_core::signal::install_handlers` — we capture ral's handler and
 /// forward to it so its `SIGNAL_COUNT` semantics are preserved.

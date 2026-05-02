@@ -148,7 +148,51 @@ fn io_error(ctx: &str, e: std::io::Error, status: i32, not_found: Option<String>
     EvalSignal::Error(Error::new(msg, status))
 }
 
-fn reject_exec_arg(cmd: &str, arg: &Value, shell: &Shell) -> Option<EvalSignal> {
+/// Proof token: the command head has been resolved against PATH and is
+/// known to exist (or is a path literal the OS will adjudicate at spawn).
+///
+/// The constitutional point is the borrow: `validate_argv` requires
+/// `&Identified`, so any shape-of-args rejection cannot run before
+/// existence has been settled.  A future contributor adding a new
+/// argv-shape validator gets the ordering for free; one who tries to
+/// inline shape rejection ahead of identification literally won't compile.
+struct Identified {
+    shown: String,
+    resolved: String,
+}
+
+/// Establish identity: render the head, walk PATH for bare names, and
+/// fail fast with 127 when the name is bare and missing.  Path / tilde
+/// literals reach the OS unchanged — kernel-level ENOENT at spawn time
+/// is a perfectly good diagnostic for those.  Builtins, aliases, and
+/// grant-denied heads are filtered upstream by `classify_dispatch`, so
+/// any Bare name that didn't resolve here really is unfindable.
+/// Bundled uutils tools are exempt: on platforms where they have no system
+/// counterpart (e.g. `ls` on Windows), PATH lookup returns the bare name
+/// unchanged, but `rewrite_spawn_target` will redirect them to the helper
+/// subprocess — so the not-found check must not fire for them.
+fn identify(name: &ExecName, shell: &Shell) -> Result<Identified, EvalSignal> {
+    let shown = render_exec_name(name, shell);
+    let resolved = resolve_in_path(name, shell);
+    if let ExecName::Bare(bare) = name
+        && resolved == shown
+        && !crate::builtins::uutils::is_uutils_tool(bare)
+    {
+        return Err(EvalSignal::Error(
+            Error::new(crate::compat::not_found_hint(&shown), 127),
+        ));
+    }
+    Ok(Identified { shown, resolved })
+}
+
+/// Reject argv shapes the external boundary cannot accept.
+///
+/// Takes `&Identified` rather than `&str` so the diagnostic priority
+/// ("does this command exist?" beats "is this argument the right
+/// shape?") becomes a borrow-check obligation: shape rejection cannot
+/// fire ahead of existence resolution.
+fn reject_exec_arg(id: &Identified, arg: &Value, shell: &Shell) -> Option<EvalSignal> {
+    let cmd = id.shown.as_str();
     match arg {
         Value::List(_) | Value::Map(_) | Value::Thunk { .. } | Value::Handle(_) => {
             Some(shell.err_hint(
@@ -167,6 +211,22 @@ fn reject_exec_arg(cmd: &str, arg: &Value, shell: &Shell) -> Option<EvalSignal> 
         )),
         _ => None,
     }
+}
+
+/// Stringify `args`, refusing any shape the external boundary cannot
+/// accept.  `&Identified` is the borrow that proves identity has been
+/// settled — without it, this function cannot be called.
+fn validate_argv(
+    id: &Identified,
+    args: &[Value],
+    shell: &Shell,
+) -> Result<Vec<String>, EvalSignal> {
+    for arg in args {
+        if let Some(sig) = reject_exec_arg(id, arg, shell) {
+            return Err(sig);
+        }
+    }
+    Ok(args.iter().map(|v| v.to_string()).collect())
 }
 
 /// Choose the stdin route for a single-command external job.
@@ -352,22 +412,17 @@ fn pipe_err(e: std::io::Error) -> EvalSignal {
     EvalSignal::Error(Error::new(format!("pipe: {e}"), 1))
 }
 
-/// Build the sink that receives the child's stdout.  Under auditing we tee
-/// into a private buffer so the exec tree can record what the user also saw.
-#[allow(clippy::type_complexity)]
-pub(crate) fn build_pump_sink(
-    shell: &Shell,
-    auditing: bool,
-) -> Result<(Sink, Option<Arc<Mutex<Vec<u8>>>>), EvalSignal> {
+/// Wrap `base` in a Tee that mirrors bytes into a private audit buffer
+/// when `auditing` is on; otherwise pass through unchanged.  Used by
+/// every external-pump path (standalone exec, pipeline external stage)
+/// so the audit-capture invariant lives in one place.
+pub(crate) fn audit_tee(base: Sink, auditing: bool) -> (Sink, Option<Arc<Mutex<Vec<u8>>>>) {
     if auditing {
         let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let sink = Sink::Tee(
-            Box::new(Sink::Buffer(buf.clone())),
-            Box::new(shell.io.stdout.try_clone().map_err(pipe_err)?),
-        );
-        Ok((sink, Some(buf)))
+        let sink = Sink::Tee(Box::new(Sink::Buffer(buf.clone())), Box::new(base));
+        (sink, Some(buf))
     } else {
-        Ok((shell.io.stdout.try_clone().map_err(pipe_err)?, None))
+        (base, None)
     }
 }
 
@@ -408,7 +463,7 @@ pub(crate) fn resolve_in_path(name: &ExecName, shell: &Shell) -> String {
     let rendered = render_exec_name(name, shell);
     if let ExecName::Bare(_) = name {
         let fallback;
-        let path = match shell.dynamic.env_vars.get("PATH") {
+        let path = match shell.dynamic.env_vars().get("PATH") {
             Some(p) => p.as_str(),
             None => {
                 fallback = std::env::var("PATH").unwrap_or_default();
@@ -479,20 +534,31 @@ pub(crate) struct ResolvedCommand {
     pub(crate) args: Vec<String>,
 }
 
+impl ResolvedCommand {
+    fn is_uutils_helper(&self) -> bool {
+        self.args.first().map(String::as_str) == Some(crate::builtins::uutils::HELPER_FLAG)
+    }
+}
+
 /// Resolve a command name and pre-evaluated values into a [`ResolvedCommand`].
 ///
-/// Performs every check that must precede `Command::new`:
-///   * tilde / PATH rendering for diagnostics;
-///   * `reject_exec_arg` rejection of list/map/thunk/handle/Bytes args;
-///   * stringification of the remaining values;
-///   * `resolve_in_path` against the shell-scoped PATH;
-///   * grant policy name expansion + `check_exec_args`;
-///   * uutils helper substitution (when the bare name is one of the
-///     bundled tools): replace the resolved exec with our own
-///     `current_exe()` and prepend `--ral-uutils-helper <name>` so the
-///     spawn enters a fresh ral that dispatches the bundled uucore tool.
-///     Display, diagnostics, and grant-policy keys still use the tool
-///     name, not the helper path.
+/// The work splits into four phases whose ordering is structurally
+/// enforced — each phase consumes the previous phase's output token,
+/// so they cannot run out of order:
+///
+///   1. **identity**: PATH lookup; bare-not-found → 127.  Yields
+///      [`Identified`].
+///   2. **argv shape**: `validate_argv` rejects list/map/thunk/handle/Bytes
+///      args and stringifies the rest.  Requires `&Identified`, which is
+///      how the diagnostic priority "does this command exist?" beats
+///      "is this argument the right shape?" without relying on review.
+///   3. **grant policy**: `exec_policy_names` + `check_exec_args` against
+///      the active grant lattice.
+///   4. **spawn target rewrite**: bundled uutils tools become a re-exec
+///      of `current_exe()` with the multicall flag prepended; everything
+///      else spawns the resolved path directly.  Display, diagnostics,
+///      and grant-policy keys still use the tool name, not the helper
+///      path.
 ///
 /// Returns the same diagnostic shape both call sites used to produce
 /// independently — there is now one source of truth.
@@ -501,49 +567,55 @@ pub(crate) fn resolve_command(
     args: &[Value],
     shell: &mut Shell,
 ) -> Result<ResolvedCommand, EvalSignal> {
-    let shown = render_exec_name(name, shell);
-    for arg in args {
-        if let Some(sig) = reject_exec_arg(&shown, arg, shell) {
-            return Err(sig);
-        }
-    }
-    let arg_strs: Vec<String> = args.iter().map(|v| v.to_string()).collect();
-    let resolved = resolve_in_path(name, shell);
-    let policy_names = exec_policy_names(name, shell, &resolved);
+    // Phase 1 — identity: existence and 127 land here.  The returned
+    // `Identified` is the borrow token for everything downstream; any
+    // shape / policy / spawn-target step requires it, so the ordering
+    // (existence ⇒ shape ⇒ policy ⇒ spawn rewrite) is a type-system
+    // obligation, not a code-review note.
+    let id = identify(name, shell)?;
+    // Phase 2 — argv shape: rejected only after identity is known.
+    let arg_strs = validate_argv(&id, args, shell)?;
+    // Phase 3 — grant policy: the grant lattice gets to see the shown
+    // name, the resolved path, and the stringified argv.
+    let policy_names = exec_policy_names(name, shell, &id.resolved);
     let policy_name_refs: Vec<&str> = policy_names.iter().map(String::as_str).collect();
-    shell.check_exec_args(&shown, &policy_name_refs, &arg_strs)?;
+    shell.check_exec_args(&id.shown, &policy_name_refs, &arg_strs)?;
+    // Phase 4 — spawn target: bundled uutils tools get rewritten to a
+    // re-exec of ourselves with the multicall flag; everything else
+    // spawns the resolved path directly.  Display/policy/argv-shape are
+    // already settled, so this only moves *where* spawn lands.
+    Ok(rewrite_spawn_target(name, id, arg_strs))
+}
 
-    // Bundled uutils: re-route exec to ourselves with the multicall flag.
-    // Done last so display / policy / arg-rejection are unchanged from the
-    // user's perspective; only the spawn target moves.
+/// Apply the bundled-uutils helper substitution if applicable: when the
+/// bare name is a uutils tool, swap the resolved exec for `current_exe()`
+/// and prepend `[--ral-uutils-helper, name]` to argv so the spawn enters
+/// a fresh ral that dispatches the bundled uucore tool.  Display name
+/// and argv ordering for diagnostics are unchanged.
+fn rewrite_spawn_target(
+    name: &ExecName,
+    id: Identified,
+    arg_strs: Vec<String>,
+) -> ResolvedCommand {
     if let ExecName::Bare(bare) = name
         && crate::builtins::uutils::is_uutils_tool(bare)
+        && let Ok(self_exe) = std::env::current_exe()
     {
-        match std::env::current_exe() {
-            Ok(self_exe) => {
-                let mut helper_args =
-                    Vec::with_capacity(2 + arg_strs.len());
-                helper_args.push(crate::builtins::uutils::HELPER_FLAG.into());
-                helper_args.push(bare.clone());
-                helper_args.extend(arg_strs);
-                return Ok(ResolvedCommand {
-                    shown,
-                    resolved: self_exe.to_string_lossy().into_owned(),
-                    args: helper_args,
-                });
-            }
-            // current_exe() failed: fall through to whatever PATH gave us
-            // — usually the system /usr/bin/<tool>, which is a reasonable
-            // fallback rather than a hard error.
-            Err(_) => {}
-        }
+        let mut helper_args = Vec::with_capacity(2 + arg_strs.len());
+        helper_args.push(crate::builtins::uutils::HELPER_FLAG.into());
+        helper_args.push(bare.clone());
+        helper_args.extend(arg_strs);
+        return ResolvedCommand {
+            shown: id.shown,
+            resolved: self_exe.to_string_lossy().into_owned(),
+            args: helper_args,
+        };
     }
-
-    Ok(ResolvedCommand {
-        shown,
-        resolved,
+    ResolvedCommand {
+        shown: id.shown,
+        resolved: id.resolved,
         args: arg_strs,
-    })
+    }
 }
 
 /// Build a `Command` from a `ResolvedCommand` and apply the shell's
@@ -553,6 +625,13 @@ pub(crate) fn resolve_command(
 pub(crate) fn build_command(rc: &ResolvedCommand, shell: &Shell) -> Command {
     let mut cmd = crate::sandbox::make_command(&rc.resolved, &rc.args, shell);
     apply_env(&mut cmd, shell);
+    if rc.is_uutils_helper() {
+        // Helper main short-circuits on the sentinel and never reads these,
+        // but bypassing the sentinel must not hand them to a fresh exarch.
+        for k in ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"] {
+            cmd.env_remove(k);
+        }
+    }
     cmd
 }
 
@@ -596,71 +675,184 @@ pub(crate) fn external_exit_error(
     err
 }
 
-/// A spawned external child paired with the threads that drain its
-/// piped stdout and stderr.  The shared core of standalone exec and
-/// pipeline external stages: both flavours configure stdio, spawn,
-/// and end up holding one of these.  Lifecycle:
+/// A spawned external child plus the threads draining its piped
+/// stdout/stderr.  The shared core of standalone exec and pipeline
+/// external stages.
 ///
-///   * success path — `wait` then `drain`, in that order.  `drain`
-///     consumes self, joining all drainers and returning their
-///     captures; the child has already been taken out so `Drop`
-///     becomes a no-op.
-///   * abort path — `Drop` runs without `drain` having been called.
-///     SIGKILLs the pgid (or the direct PID if no pgid was assigned),
-///     joins the drainers, reaps the child.  `child` lives in
-///     `Option` so the success-vs-abort distinction is structural
-///     rather than a flag.
+/// Lifecycle is a small typestate:
 ///
-/// Holding the pgid (not just the pid) means killing on abort takes
+/// ```text
+///     RunningChild ──wait──► WaitedChild ──drain──► ChildCaptures
+///         │  Drop                │  Drop
+///         ▼                      ▼
+///     SIGKILL+reap           join+drop
+/// ```
+///
+/// `wait` consumes `RunningChild` and yields a `WaitedChild` that
+/// carries the `ExitStatus`.  `drain` is only callable on `WaitedChild`,
+/// so the bug class "drain before wait" (which would let drainers block
+/// on a still-open pipe) is unwritable: there's no `RunningChild::drain`.
+/// Likewise "wait twice" is unwritable: `wait` consumes self, so a
+/// second call has nothing to consume.
+///
+/// Holding the pgid (not just the pid) means abort-path SIGKILL takes
 /// out descendants too — `/bin/sh -c 'sleep 999'` doesn't leave the
-/// `sleep` alive when its parent goes away.
+/// `sleep` alive when its parent goes away.  The Option around `child`
+/// is the disarm latch for `Drop`: `wait` takes the child to call
+/// `wait_handling_stop` and never puts it back, so the abort path's
+/// kill/reap logic short-circuits if `wait` already ran.
 pub(crate) struct RunningChild {
     pub child: Option<std::process::Child>,
     pub pgid: Option<crate::signal::Pgid>,
     pub pump: Option<std::thread::JoinHandle<()>>,
     /// Bounded reader for piped stderr — only present when auditing.
-    /// Captures a leading prefix into `Vec<u8>`; mutually exclusive
-    /// with `stderr_pump`.
+    /// Mutually exclusive with `stderr_pump`.
     pub stderr_reader: Option<std::thread::JoinHandle<Vec<u8>>>,
     /// Pump thread draining piped stderr into a non-default
-    /// `Sink::stderr` (capture buffer, replay tee, etc.).  Mutually
-    /// exclusive with `stderr_reader`: a child either has its stderr
-    /// captured for audit OR redirected via a sink, not both.
+    /// `Sink::stderr`.  Mutually exclusive with `stderr_reader`.
     pub stderr_pump: Option<std::thread::JoinHandle<()>>,
     pub audit_capture: Option<Arc<Mutex<Vec<u8>>>>,
     /// Display name used in wait-error messages.
     pub name: String,
 }
 
-/// Bytes drained out of a finished `RunningChild`.  `stdout` is the
-/// audit-tee buffer (empty when no audit/capture was wired); `stderr`
-/// is whatever `stderr_reader` collected.
+/// A `RunningChild` whose `wait_handling_stop` returned successfully.
+/// Holds the `ExitStatus` plus the still-running drainer threads (which
+/// see EOF as soon as the child's write ends close at termination, but
+/// haven't necessarily been joined yet).
+///
+/// Construction is gated by [`RunningChild::wait`]; there is no other
+/// path.  All atomic-commit / status-interpretation / capture-collection
+/// steps therefore have a borrow-check proof of "child has been observed
+/// dead" before they run.
+pub(crate) struct WaitedChild {
+    pub status: std::process::ExitStatus,
+    pump: Option<std::thread::JoinHandle<()>>,
+    stderr_reader: Option<std::thread::JoinHandle<Vec<u8>>>,
+    stderr_pump: Option<std::thread::JoinHandle<()>>,
+    audit_capture: Option<Arc<Mutex<Vec<u8>>>>,
+}
+
+/// Bytes drained out of a finished child.  `stdout` is the audit-tee
+/// buffer (empty when no audit/capture was wired); `stderr` is whatever
+/// `stderr_reader` collected.
 pub(crate) struct ChildCaptures {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
 }
 
-impl RunningChild {
-    /// Wait for the child to terminate via `wait_handling_stop` so that
-    /// SIGTSTP'd children don't hang the waiter (the helper SIGKILLs
-    /// the pgid and loops to reap).  Borrows `&mut self` so the caller
-    /// can interleave atomic-commit / pump-join steps before `drain`.
-    pub fn wait(&mut self) -> Result<std::process::ExitStatus, EvalSignal> {
-        let child = self
-            .child
-            .as_mut()
-            .expect("RunningChild::wait called after drain or twice");
-        crate::signal::wait_handling_stop(child, self.pgid)
-            .map_err(|e| EvalSignal::Error(Error::new(format!("{}: {e}", self.name), 1)))
-    }
+/// Disposition of a spawned child's stderr.  Mutually-exclusive: once a
+/// caller decides "pipe stderr for the audit tree", the pump-to-sink
+/// branch cannot also fire on the same fd, and vice versa.  Inherited /
+/// file / `2>&1` stderr leaves nothing for ral to drain — that's the
+/// `Inherited` arm.
+pub(crate) enum StderrCapture {
+    /// stderr is wired directly (file, 2>&1, or default inherit) — nothing
+    /// for ral to read after spawn.
+    Inherited,
+    /// stderr is piped; a bounded reader will collect the leading 64 KiB
+    /// for the exec tree.  Auditing-only.
+    AuditReader,
+    /// stderr is piped; pump into this sink (a clone of `shell.io.stderr`
+    /// when the caller has installed a non-default destination).
+    SinkPump(Sink),
+}
 
-    /// Consume self: take the child (so `Drop` is a no-op), join the
-    /// drainer threads, and return their captured bytes.  Must run
-    /// only after the child has been observed dead — drainers block
-    /// on pipe EOF, which arrives only when the child closes its
-    /// write end.
+/// Post-spawn plumbing for an external child: how stdout is drained, how
+/// stderr is captured, and whether stdout bytes are tee'd into an audit
+/// buffer.  Both standalone exec and pipeline external stages compute
+/// one of these and hand it to [`RunningChild::assemble`], so the
+/// `Drop` / wait / drain rules of `RunningChild` cannot be re-derived
+/// at each call site.
+pub(crate) struct ExternalPlumbing {
+    /// Base sink for child stdout when piped.  `None` means stdout was
+    /// inherited or wired through a direct OS pipe (next pipeline stage's
+    /// stdin) and no pump is needed.
+    pub stdout_pump: Option<Sink>,
+    /// Stderr disposition — see [`StderrCapture`].
+    pub stderr: StderrCapture,
+    /// Whether the active context is recording an audit tree.  When `true`
+    /// and `stdout_pump` is `Some(base)`, [`audit_tee`] wraps `base` in a
+    /// private capture buffer that the audit node will read after wait.
+    pub auditing: bool,
+}
+
+impl RunningChild {
+    /// Assemble a `RunningChild` from a freshly-spawned child plus a
+    /// per-call plumbing plan.  Single source of truth for the
+    /// stderr-reader / stderr-pump / stdout-pump / audit-tee triple, used
+    /// by both [`exec_external`] and the pipeline external stage launcher.
+    pub(crate) fn assemble(
+        mut child: std::process::Child,
+        pgid: Option<crate::signal::Pgid>,
+        name: String,
+        plumbing: ExternalPlumbing,
+    ) -> Self {
+        let ExternalPlumbing {
+            stdout_pump,
+            stderr,
+            auditing,
+        } = plumbing;
+
+        let mut stderr_reader = None;
+        let mut stderr_pump = None;
+        match stderr {
+            StderrCapture::Inherited => {}
+            StderrCapture::AuditReader => stderr_reader = spawn_stderr_reader(&mut child),
+            StderrCapture::SinkPump(sink) => {
+                stderr_pump = child.stderr.take().map(|s| sink.pump(s));
+            }
+        }
+
+        let (pump, audit_capture) = match stdout_pump {
+            Some(base) => {
+                let (sink, cap) = audit_tee(base, auditing);
+                (child.stdout.take().map(|s| sink.pump(s)), cap)
+            }
+            None => (None, None),
+        };
+
+        Self {
+            child: Some(child),
+            pgid,
+            pump,
+            stderr_reader,
+            stderr_pump,
+            audit_capture,
+            name,
+        }
+    }
+}
+
+impl RunningChild {
+    /// Wait for the child to terminate via `wait_handling_stop` (which
+    /// SIGKILLs the pgid on SIGTSTP so the waiter cannot hang).
+    /// Consumes `self`: a second call has nothing to consume, and the
+    /// returned `WaitedChild` is the only handle to the drainer threads
+    /// from this point on.  On error the `RunningChild` is dropped and
+    /// `Drop` runs the SIGKILL+reap+join sequence.
+    pub fn wait(mut self) -> Result<WaitedChild, EvalSignal> {
+        // Take the child out so Drop's kill/reap sequence is disarmed
+        // on the success path.  Construction always sets `Some(_)`.
+        let mut child = self.child.take().expect("RunningChild has no child");
+        let status = crate::signal::wait_handling_stop(&mut child, self.pgid)
+            .map_err(|e| EvalSignal::Error(Error::new(format!("{}: {e}", self.name), 1)))?;
+        Ok(WaitedChild {
+            status,
+            pump: self.pump.take(),
+            stderr_reader: self.stderr_reader.take(),
+            stderr_pump: self.stderr_pump.take(),
+            audit_capture: self.audit_capture.take(),
+        })
+    }
+}
+
+impl WaitedChild {
+    /// Join the drainer threads and collect their captured bytes.
+    /// Consumes `self`: drainers can be joined exactly once.  Safe by
+    /// construction: a `WaitedChild` only exists once the child has been
+    /// observed dead, so drainers see pipe-EOF promptly.
     pub fn drain(mut self) -> ChildCaptures {
-        let _ = self.child.take();
         if let Some(jh) = self.pump.take() {
             let _ = jh.join();
         }
@@ -683,8 +875,8 @@ impl RunningChild {
 
 impl Drop for RunningChild {
     /// Abort-path cleanup: SIGKILL the pgid (or fall back to the
-    /// direct PID), join the drainers, reap.  No-op when `drain`
-    /// already took the child.
+    /// direct PID), join the drainers, reap.  No-op when `wait`
+    /// already took the child — that's the success path's disarm.
     fn drop(&mut self) {
         let Some(mut child) = self.child.take() else {
             return;
@@ -716,7 +908,7 @@ impl Drop for RunningChild {
 pub(crate) fn render_exec_name(name: &ExecName, shell: &Shell) -> String {
     let home = shell
         .dynamic
-        .env_vars
+        .env_vars()
         .get("HOME")
         .cloned()
         .unwrap_or_else(|| std::env::var("HOME").unwrap_or_default());
@@ -762,14 +954,14 @@ pub(crate) fn exec_external(
     // Wire stdout from the sink before stderr: the Windows `2>&1` arm of
     // `wire_stderr` reads `shell.io.stdout` to clone a writer, and on Unix
     // the `pre_exec` dup2 needs a real stdout fd in place pre-fork.
-    let needs_pump = if plan.stdout_file.is_none() {
-        shell.io
-            .stdout
-            .wire_command_stdout(&mut command, inherit_tty)
-            .map_err(pipe_err)?
+    let stdout_plan = if plan.stdout_file.is_none() {
+        let p = shell.io.stdout.child_stdout(inherit_tty).map_err(pipe_err)?;
+        command.stdout(p.stdio);
+        p.pump
     } else {
-        false
+        None
     };
+    let _needs_pump = stdout_plan.is_some();
 
     let stderr_piped = wire_stderr(
         &mut command,
@@ -792,14 +984,14 @@ pub(crate) fn exec_external(
         crate::dbg_trace!(
             "exec",
             "cmd={cmd_name} resolved={} tty=[in:{} out:{} err:{}] \
-             sink={sink} audit={auditing} inherit={inherit_tty} pump={needs_pump} \
+             sink={sink} audit={auditing} inherit={inherit_tty} pump={_needs_pump} \
              interactive={} fg_job={}",
             rc.resolved,
             shell.io.terminal.startup_stdin_tty,
             shell.io.terminal.startup_stdout_tty,
             shell.io.terminal.startup_stderr_tty,
             shell.io.interactive,
-            shell.io.interactive && shell.io.terminal.startup_stdin_tty && !needs_pump,
+            shell.io.interactive && shell.io.terminal.startup_stdin_tty && !_needs_pump,
         );
     }
 
@@ -827,7 +1019,7 @@ pub(crate) fn exec_external(
     let want_fg = shell.io.job_control.may_foreground()
         && shell.io.interactive
         && shell.io.terminal.startup_stdin_tty
-        && !needs_pump
+        && !_needs_pump
         && matches!(
             shell.io.stdout,
             crate::io::Sink::Terminal | crate::io::Sink::External(_)
@@ -851,7 +1043,7 @@ pub(crate) fn exec_external(
     #[cfg(not(unix))]
     let pgid_policy = crate::signal::PgidPolicy::Inherit;
 
-    let (mut child, wait_pgid) = spawn_external(&mut command, pgid_policy, shell).map_err(|e| {
+    let (child, wait_pgid) = spawn_external(&mut command, pgid_policy, shell).map_err(|e| {
         io_error(
             &cmd_name,
             e,
@@ -873,52 +1065,39 @@ pub(crate) fn exec_external(
         None
     };
 
-    // Auditing captures stderr into a bounded reader for the exec tree.
-    // Otherwise, if stderr is piped (because shell.io.stderr is non-default),
-    // spawn a pump that drains into shell.io.stderr.  The audit-stderr
-    // reader is owned by `RunningChild`; the non-audit `stderr_pump` is
-    // a standalone-only concern (pipeline stages never have a non-default
-    // stderr sink) so it lives outside the unified handle.
-    let stderr_reader = if auditing && !plan.stderr_to_stdout && plan.stderr_file.is_none() {
-        spawn_stderr_reader(&mut child)
+    // Resolve the stderr disposition into the unified `StderrCapture`
+    // enum — a bounded reader for the audit tree when auditing is on and
+    // stderr was actually piped, a pump into a non-default `shell.io.stderr`
+    // sink otherwise, or `Inherited` (file / 2>&1 / default fd 2).
+    let stderr_capture = if auditing && !plan.stderr_to_stdout && plan.stderr_file.is_none() {
+        StderrCapture::AuditReader
+    } else if !auditing && stderr_piped {
+        StderrCapture::SinkPump(shell.io.stderr.try_clone().map_err(pipe_err)?)
     } else {
-        None
-    };
-    let stderr_pump = if !auditing && stderr_piped {
-        let sink = shell.io.stderr.try_clone().map_err(pipe_err)?;
-        child.stderr.take().map(|stderr| sink.pump(stderr))
-    } else {
-        None
+        StderrCapture::Inherited
     };
 
-    // Spawn a pump thread when the shell must read the child's piped stdout.
-    // Route bytes into shell.io.stdout (which may be a capture buffer, a pipe,
-    // or a tee).  We wait for the child first (to let it exit), then join
-    // the pump (which sees EOF once the child's write-end is closed).
-    let (pump_handle, audit_buf) = if needs_pump {
-        let (sink, audit_buf) = build_pump_sink(shell, auditing)?;
-        (
-            child.stdout.take().map(|stdout| sink.pump(stdout)),
-            audit_buf,
-        )
-    } else {
-        (None, None)
-    };
+    // Hand ownership of the in-flight resources to a `RunningChild`
+    // through the shared assembly funnel.  From here on, any error path
+    // triggers its `Drop` which SIGKILLs the pgid and reaps — no manual
+    // cleanup needed.
+    let running = RunningChild::assemble(
+        child,
+        wait_pgid,
+        cmd_name.clone(),
+        ExternalPlumbing {
+            stdout_pump: stdout_plan,
+            stderr: stderr_capture,
+            auditing,
+        },
+    );
 
-    // Hand ownership of the in-flight resources to a `RunningChild`.
-    // From here on, any error path triggers its `Drop` which SIGKILLs
-    // the pgid and reaps — no manual cleanup needed.
-    let mut running = RunningChild {
-        child: Some(child),
-        pgid: wait_pgid,
-        pump: pump_handle,
-        stderr_reader,
-        stderr_pump,
-        audit_capture: audit_buf,
-        name: cmd_name.clone(),
-    };
-
-    let status = running.wait()?;
+    // Wait consumes RunningChild; the resulting `WaitedChild` is the
+    // only handle that lets us read `status` or `drain` captures.  All
+    // post-wait work below thus carries a borrow-check proof of
+    // "child has been observed dead".
+    let waited = running.wait()?;
+    let status = waited.status;
 
     // Atomic-redirect commit: child completed (any exit code, but not killed).
     // status.code().is_some() is true on normal exit; None for signal-killed,
@@ -934,7 +1113,7 @@ pub(crate) fn exec_external(
     // Foreground is restored by `_fg_guard`'s `Drop` when this function
     // returns — see the binding above.
 
-    let captures = running.drain();
+    let captures = waited.drain();
     if !captures.stderr.is_empty() {
         shell.audit.captured_stderr = captures.stderr;
     }
@@ -970,6 +1149,7 @@ pub(crate) struct RedirectGuard {
 /// [`install_stdin_redirect`]); `apply_redirects` and `wire_stdin` must agree
 /// to leave them alone.  This predicate is the single point where that rule
 /// is named.
+#[cfg(unix)]
 fn is_stdin_file_redirect(r: &(u32, RedirectMode, EvalRedirect)) -> bool {
     matches!(r, (0, RedirectMode::Read, EvalRedirect::File(_)))
 }
@@ -1358,7 +1538,7 @@ pub(crate) fn open_file(
 /// strip dynamic-loader overrides before spawning.  Used by `exec_external`
 /// and by the pipeline stage builder.
 pub fn apply_env(cmd: &mut Command, shell: &Shell) {
-    for (k, v) in &shell.dynamic.env_vars {
+    for (k, v) in shell.dynamic.env_vars() {
         cmd.env(k, v);
     }
     if let Some(cwd) = &shell.dynamic.cwd {
@@ -1380,9 +1560,7 @@ mod tests {
     #[test]
     fn expand_tilde_uses_env_home() {
         let mut shell = Shell::default();
-        shell.dynamic
-            .env_vars
-            .insert("HOME".into(), "/tmp/home".into());
+        shell.dynamic.set_env_var("HOME", "/tmp/home");
         assert_eq!(
             render_exec_name(
                 &ExecName::TildePath(crate::path::tilde::TildePath {
@@ -1453,9 +1631,7 @@ mod tests {
         std::fs::set_permissions(&tool, perms).unwrap();
 
         let mut shell = Shell::default();
-        shell.dynamic
-            .env_vars
-            .insert("PATH".into(), dir.path().to_string_lossy().into_owned());
+        shell.dynamic.set_env_var("PATH", dir.path().to_string_lossy().into_owned());
 
         let resolved = resolve_in_path(&ExecName::Bare("git".into()), &shell);
         let names = exec_policy_names(&ExecName::Bare("git".into()), &shell, &resolved);

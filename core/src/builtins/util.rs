@@ -119,14 +119,6 @@ pub(crate) fn get<'a>(map: &'a [(String, Value)], key: &str) -> Option<&'a Value
     map.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
 
-/// Coerce a value to a list of strings; a non-`List` wraps its stringification in a singleton.
-pub(crate) fn str_list(v: &Value) -> Vec<String> {
-    match v {
-        Value::List(items) => items.iter().map(|i| i.to_string()).collect(),
-        other => vec![other.to_string()],
-    }
-}
-
 /// Fold map entries into a `Default` struct; error if `val` is not a map.
 pub(crate) fn fold_map<T: Default, V>(
     val: &Value,
@@ -265,6 +257,14 @@ fn value_to_json_inner(v: &Value, lossy_bytes: bool) -> serde_json::Value {
             } else {
                 serde_json::Value::Array(b.iter().map(|byte| serde_json::json!(*byte)).collect())
             }
+        }
+        Value::Variant { label, payload } => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("tag".into(), serde_json::Value::String(label.clone()));
+            if let Some(p) = payload {
+                obj.insert("payload".into(), value_to_json_inner(p, lossy_bytes));
+            }
+            serde_json::Value::Object(obj)
         }
     }
 }

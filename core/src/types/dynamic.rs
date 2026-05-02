@@ -24,7 +24,7 @@
 //! separate wire field.  Wire layout is preserved across this
 //! refactor.
 
-use crate::path::{CanonMode, Resolver};
+use crate::path::{process_cwd, CanonMode, Resolver};
 use crate::types::{Capabilities, HandlerFrame};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -35,8 +35,14 @@ use super::capability::SandboxProjection;
 /// Dynamically-scoped runtime context.
 #[derive(Debug, Clone, Default)]
 pub struct Dynamic {
-    /// Process environment overrides (`within [shell: ...]`).
-    pub env_vars: HashMap<String, String>,
+    /// Process environment overrides (`within [shell: ...]`).  The
+    /// field is private so the only paths to mutation go through
+    /// [`Self::set_env_var`] / [`Self::set_env_var_or_keep`] /
+    /// [`Self::extend_env`], all of which guard against process-owned
+    /// keys (`PWD`, `OLDPWD`).  A stored copy of those would go stale
+    /// on the first `cd` inside a thunk, since `dynamic` rolls back on
+    /// `return_to` while the process CWD does not.
+    env_vars: HashMap<String, String>,
     /// Working directory override (`within [dir: ...]`).
     pub cwd: Option<PathBuf>,
     /// Capability restriction stack — innermost last.
@@ -63,6 +69,56 @@ pub struct Dynamic {
 // each method below builds one and forwards.
 
 impl Dynamic {
+    /// Read-only borrow of the env-overrides map.  Callers iterate
+    /// or look up by name; mutation goes through [`Self::set_env_var`]
+    /// (and friends) so the PWD/OLDPWD guard cannot be bypassed.
+    pub fn env_vars(&self) -> &HashMap<String, String> {
+        &self.env_vars
+    }
+
+    /// Insert into `env_vars` with a debug-time guard against
+    /// process-owned keys (`PWD`, `OLDPWD`).  Their canonical home is
+    /// the process; a copy in `env_vars` would go stale on the first
+    /// `cd` inside a thunk because `dynamic` rolls back on
+    /// `return_to`.  `apply_chdir` writes them with `set_var`.
+    pub fn set_env_var(&mut self, k: impl Into<String>, v: impl Into<String>) {
+        let k = k.into();
+        debug_assert!(
+            !matches!(k.as_str(), "PWD" | "OLDPWD"),
+            "{k} is process-owned; write to std::env, not Dynamic::env_vars",
+        );
+        self.env_vars.insert(k, v.into());
+    }
+
+    /// Insert into `env_vars` only if `k` is unset.  Same guard as
+    /// [`Self::set_env_var`].  Mirrors `HashMap::entry().or_insert_with`.
+    pub fn set_env_var_or_keep(&mut self, k: impl Into<String>, v: impl Into<String>) {
+        let k = k.into();
+        if !self.env_vars.contains_key(k.as_str()) {
+            self.set_env_var(k, v);
+        }
+    }
+
+    /// Bulk-insert into `env_vars`, guard-checked per item.
+    pub fn extend_env<I, K, V>(&mut self, items: I)
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        for (k, v) in items {
+            self.set_env_var(k, v);
+        }
+    }
+
+    /// Wholesale replace `env_vars` with a vetted map.  `pub(crate)`
+    /// so only `with_env_overrides`' save/restore and the sandbox
+    /// IPC ambient install can use it; both have already validated
+    /// the contents.
+    pub(crate) fn replace_env_vars(&mut self, m: HashMap<String, String>) {
+        self.env_vars = m;
+    }
+
     /// Whether the active stack denies every candidate name outright.
     /// Used by `classify_command_head` to colour the dispatch site
     /// before any args are parsed.
@@ -112,9 +168,10 @@ impl Dynamic {
     /// shell's logical cwd, not the process's, so a `within`
     /// override is honoured.
     pub fn effective_cwd(&self) -> std::path::PathBuf {
+        // No Shell at this layer — Dynamic is purer than Shell.
         self.cwd
             .clone()
-            .or_else(|| std::env::current_dir().ok())
+            .or_else(process_cwd)
             .unwrap_or_else(|| std::path::PathBuf::from("."))
     }
 

@@ -163,6 +163,23 @@ pub(super) fn builtin_grep_files(args: &[Value], shell: &mut Shell) -> Result<Va
     Ok(Value::List(results))
 }
 
+/// Dispatch wrapper used by the registry: presents a uniform signature
+/// regardless of whether the `grep` feature compiled in, so the macro
+/// table need not carry a `cfg` gate.
+pub(super) fn builtin_grep_files_dispatch(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
+    #[cfg(feature = "grep")]
+    {
+        builtin_grep_files(args, shell)
+    }
+    #[cfg(not(feature = "grep"))]
+    {
+        let _ = (args, shell);
+        Err(sig(
+            "grep-files: grep feature not compiled in — rebuild with --features grep",
+        ))
+    }
+}
+
 pub(super) fn builtin_glob(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
     let pattern = checked_read_path(shell, &arg0_str(args))?
         .to_string_lossy()

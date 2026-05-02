@@ -12,6 +12,9 @@
 //! unset — see `read_stdin_bytes`.
 
 use crate::types::*;
+use crate::step::{DONE_LABEL, HEAD_FIELD, MORE_LABEL, TAIL_FIELD};
+use crate::ir::{Comp, CompKind, Val};
+use std::sync::Arc;
 
 use super::call_value;
 use super::util::{as_byte_list, as_list, check_arity, json_to_value, sig, sig_hint, value_to_json};
@@ -118,14 +121,42 @@ pub(super) fn builtin_from_line(args: &[Value], shell: &mut Shell) -> Result<Val
     Ok(Value::String(stripped.to_owned()))
 }
 
+fn step_done() -> Value {
+    Value::Variant {
+        label: DONE_LABEL.into(),
+        payload: None,
+    }
+}
+
+fn step_more(head: String, tail: Value) -> Value {
+    let mut captured = Env::new();
+    captured.set("__step_tail".into(), tail);
+    let body = Arc::new(Comp::new(CompKind::Return(Val::Variable(
+        "__step_tail".into(),
+    ))));
+    Value::Variant {
+        label: MORE_LABEL.into(),
+        payload: Some(Box::new(Value::Map(vec![
+            (HEAD_FIELD.into(), Value::String(head)),
+            (
+                TAIL_FIELD.into(),
+                Value::Thunk {
+                    body,
+                    captured: Arc::new(captured),
+                },
+            ),
+        ]))),
+    }
+}
+
 pub(super) fn builtin_from_lines(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {
     let bytes = input_bytes(args, "from-lines", false, shell)?;
     let text = String::from_utf8_lossy(&bytes).into_owned();
-    Ok(Value::List(
-        text.lines()
-            .map(|line| Value::String(line.to_string()))
-            .collect(),
-    ))
+    let mut step = step_done();
+    for line in text.lines().rev() {
+        step = step_more(line.to_owned(), step);
+    }
+    Ok(step)
 }
 
 pub(super) fn builtin_from_json(args: &[Value], shell: &mut Shell) -> Result<Value, EvalSignal> {

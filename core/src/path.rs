@@ -26,6 +26,16 @@ pub mod sigil;
 pub mod tilde;
 pub mod which;
 
-pub use lex::{path_aliases, path_within, resolve_path};
+pub use canon::match_variants_list;
+pub use lex::{path_aliases, path_within, proper_ancestors, resolve_path};
 pub use resolver::{CanonMode, Resolver};
 pub use which::{locate, resolve_in_path};
+
+/// Process working directory.  The one syscall behind the lint —
+/// `Shell::cwd` is the canonical accessor for shells; this helper is
+/// for the few shell-less callers (path resolver fallback, sandbox
+/// host snapshot, `Dynamic::effective_cwd`).
+#[allow(clippy::disallowed_methods)]
+pub fn process_cwd() -> Option<std::path::PathBuf> {
+    std::env::current_dir().ok()
+}

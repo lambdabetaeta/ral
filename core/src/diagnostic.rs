@@ -185,6 +185,16 @@ fn label_message_for_kind(kind: &crate::typecheck::TypeErrorKind) -> String {
         }
         K::RowExtraField { label } => format!("unexpected field '{label}'"),
         K::RowMissingField { label } => format!("missing field '{label}'"),
+        K::CaseNotExhaustive { missing, extra } => {
+            if !missing.is_empty() && extra.is_empty() {
+                format!("missing arms: {}", missing.join(", "))
+            } else if missing.is_empty() && !extra.is_empty() {
+                format!("extra arms: {}", extra.join(", "))
+            } else {
+                "case arms do not match scrutinee".into()
+            }
+        }
+        K::CaseLabelTypeMismatch { label, .. } => format!("handler at {label} has wrong shape"),
         K::AdHoc { .. } => "here".into(),
     }
 }

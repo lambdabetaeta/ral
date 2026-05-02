@@ -30,18 +30,18 @@ impl PromptBindings {
 
     fn collect(shell: &Shell) -> Self {
         let user = crate::platform::user_name();
-        let cwd = std::env::current_dir().map_or_else(
-            |_| "?".into(),
-            |p| {
-                let s = p.to_string_lossy().to_string();
-                let home = crate::platform::home_dir();
-                if !home.is_empty() && s.starts_with(&home) {
-                    format!("~{}", &s[home.len()..])
-                } else {
-                    s
-                }
-            },
-        );
+        let cwd = {
+            let p = shell.cwd();
+            let s = p.to_string_lossy().to_string();
+            let home = crate::platform::home_dir();
+            if !home.is_empty() && s.starts_with(&home) {
+                format!("~{}", &s[home.len()..])
+            } else if s.is_empty() {
+                "?".into()
+            } else {
+                s
+            }
+        };
         Self {
             user,
             cwd,
@@ -54,7 +54,7 @@ impl PromptBindings {
     fn apply(&self, shell: &mut Shell) {
         for (k, v, s) in self.entries() {
             shell.set(k.into(), v);
-            shell.dynamic.env_vars.insert(k.into(), s);
+            shell.dynamic.set_env_var(k, s);
         }
     }
 
@@ -108,9 +108,12 @@ pub(super) fn eval_prompt_block(prompt: &Value, shell: &Shell, bindings: &Prompt
 pub(super) fn build_prompt(shell: &mut Shell) -> String {
     if shell.io.terminal.ui_title_ok() {
         use std::io::Write;
-        // CWD not yet computed; read current dir directly for the title.
-        let cwd = std::env::current_dir()
-            .map_or_else(|_| "?".into(), |p| p.to_string_lossy().to_string());
+        let p = shell.cwd();
+        let cwd = if p.as_os_str().is_empty() {
+            "?".into()
+        } else {
+            p.to_string_lossy().into_owned()
+        };
         let _ = std::io::stdout().write_all(format!("\x1b]0;ral: {cwd}\x07").as_bytes());
         let _ = std::io::stdout().flush();
     }

@@ -15,7 +15,7 @@ pub fn snapshot() -> String {
     if let Some(d) = date_line() {
         out.push_str(&format!("- now: {d}\n"));
     }
-    if let Ok(cwd) = std::env::current_dir() {
+    if let Some(cwd) = ral_core::path::process_cwd() {
         out.push_str(&format!("- cwd: {}\n", cwd.display()));
     }
     if let Ok(u) = std::env::var("USER") {

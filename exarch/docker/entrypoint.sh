@@ -29,7 +29,8 @@ fi
 
 # Container is the trust boundary: default to the lattice top so the
 # agent has ambient authority inside the rootless image.  Override by
-# passing `--base reasonable` (or `minimal`) via `docker run`.
+# passing `--base reasonable` (or any other bake-in: `read-only`,
+# `minimal`, `confined`) via `docker run`.
 case " $* " in
     *" --base "*) ;;
     *) set -- --base dangerous "$@" ;;

@@ -7,6 +7,7 @@
 
 mod common;
 
+use ral_core::typecheck::{CompTy, CompTyVar, Scheme, Ty, fmt_scheme};
 use ral_core::{TypeError, elaborate, parse, typecheck};
 
 fn raw_errors(src: &str) -> Vec<TypeError> {
@@ -218,6 +219,38 @@ fn let_generalize_list_id() {
     ok("let id = { |x| return $x }; let _ = !{id [1, 2]}; let _ = !{id [a, b]}; return unit");
 }
 
+#[test]
+fn fmt_scheme_shows_quantified_comp_vars() {
+    let beta = CompTyVar(17);
+    let scheme = Scheme {
+        ty_vars: vec![],
+        comp_ty_vars: vec![beta],
+        mode_vars: vec![],
+        row_vars: vec![],
+        ty: Ty::Thunk(Box::new(CompTy::Var(beta))),
+        comp_ty_bindings: vec![],
+        cached_fv: None,
+    };
+    let rendered = fmt_scheme(&scheme);
+    assert_eq!(rendered, "∀ϕ. ϕ");
+}
+
+#[test]
+fn fmt_scheme_quantifies_cyclic_comp_roots() {
+    let root = CompTyVar(29);
+    let scheme = Scheme {
+        ty_vars: vec![],
+        comp_ty_vars: vec![],
+        mode_vars: vec![],
+        row_vars: vec![],
+        ty: Ty::Thunk(Box::new(CompTy::Var(root))),
+        comp_ty_bindings: vec![(root.0, CompTy::pure(Ty::Unit))],
+        cached_fv: None,
+    };
+    let rendered = fmt_scheme(&scheme);
+    assert_eq!(rendered, "∀ϕ. ϕ");
+}
+
 // ─── Thunks and forcing ───────────────────────────────────────────────────────
 
 #[test]
@@ -284,12 +317,18 @@ fn builtin_filter() {
 
 #[test]
 fn builtin_try() {
-    ok("let r = _try { return 42 }; let _ = $r[ok]; return unit");
+    // `_try` returns `[.ok: A | .err: ErrorRec]`.  Use `case` to
+    // destructure; the .ok arm carries the body's value.
+    ok("let r = _try { return 42 }; case $r [.ok: { |v| return $v }, .err: { |_| return 0 }]");
 }
 
 #[test]
-fn builtin_try_field_type() {
-    ok("let r = _try { return 1 }; return $r[value]");
+fn builtin_try_err_field_types() {
+    // The .err arm carries a typed error record with `status` etc.
+    ok(
+        "let r = _try { return 1 }; case $r \
+         [.ok: { |_| return 0 }, .err: { |e| return $e[status] }]",
+    );
 }
 
 #[test]
@@ -395,4 +434,133 @@ fn head_not_callable_span_covers_whole_command() {
 #[test]
 fn head_not_callable_int_variable_with_args() {
     has_error("let x = 42\n$x foo", "cannot be used as a command head");
+}
+
+// ─── Variants and tag-keyed records (Phase A) ────────────────────────────────
+
+#[test]
+fn variant_construction_with_payload() {
+    ok("let x = .ok 42\nreturn $x");
+}
+
+#[test]
+fn variant_nullary() {
+    ok("let x = .none\nreturn $x");
+}
+
+#[test]
+fn variant_list_unifies_open_row() {
+    // Each .ok / .err in a list extends the same open row.  The list is
+    // homogeneous because the rows unify against a shared element type.
+    ok("return [.ok 1, .err hello]");
+}
+
+#[test]
+fn tag_keyed_record_literal() {
+    ok("let r = [.dev: 8080, .prod: 443]\nreturn $r");
+}
+
+#[test]
+fn variant_payload_type_mismatch() {
+    // The payload must respect the variant's inferred type.  Re-using a
+    // label with a different payload type forces a unification error.
+    has_error(
+        "let a = .ok 1\nlet b = .ok hello\nreturn [$a, $b]",
+        "type mismatch",
+    );
+}
+
+// ─── Case (sum eliminator, Phase B) ───────────────────────────────────────────
+
+#[test]
+fn case_exhaustive() {
+    ok("let r = .ok 5\nlet x = case $r [.ok: { |x| return $x }, .err: { |_| return -1 }]\nreturn $x");
+}
+
+#[test]
+fn case_open_scrutinee_absorbs_handler_labels() {
+    // `.ok 5` produces an open variant `[.ok: Int | ρ]`.  A case with
+    // .ok and .err arms forces ρ to extend with .err, leaving the
+    // scrutinee row with both constructors after the case.
+    ok("let r = .ok 5\nlet x = case $r [.ok: { |x| return $x }, .err: { |_| return -1 }]\nreturn $x");
+}
+
+#[test]
+fn case_missing_arm_when_variant_has_more() {
+    // The if branches force the variant row to include both .ok and
+    // .err.  A case that handles only .ok leaves .err unhandled.
+    has_error(
+        "let r = if true { return .ok 1 } else { return .err hello }\nlet x = case $r [.ok: { |i| return $i }]\nreturn $x",
+        "missing handlers",
+    );
+}
+
+#[test]
+fn case_handler_payload_mismatch() {
+    // The .ok handler uses its payload as a String (via `upper`), but the
+    // scrutinee's .ok was constructed with an Int payload — per-label
+    // unification surfaces a type mismatch.
+    has_error(
+        "let r = .ok 5\nlet x = case $r [.ok: { |s| !{upper $s} }, .err: { |_| !{upper hello} }]\nreturn $x",
+        "type mismatch",
+    );
+}
+
+#[test]
+fn case_arms_disagree_on_result() {
+    // The two handlers return values of different types — the shared
+    // result type cannot unify.
+    has_error(
+        "let r = .ok 5\nlet x = case $r [.ok: { |x| return $x }, .err: { |_| return hello }]\nreturn $x",
+        "type mismatch",
+    );
+}
+
+#[test]
+fn case_scrutinee_must_be_variant_return() {
+    // A function that cases on `!$x` must reject call sites where `x`
+    // returns a non-variant value.
+    has_error(
+        "let bad = { |x| case !$x [.ok: { |v| return $v }] }\n\
+         bad { return 1 }",
+        "mismatch",
+    );
+}
+
+// ─── Recursive computation types (Phase C) ────────────────────────────────────
+
+#[test]
+fn self_recursive_function() {
+    // The canonical countdown.  The fix-point combinator binds `f` to
+    // `Thunk(β)`; the body's recursive call unifies `β` with
+    // `Fun(Int, β)`, producing a cyclic comp type which the unifier
+    // accepts equi-recursively.
+    ok("let f = { |n| if $[$n == 0] { return 0 } else { return !{f $[$n - 1]} } }\nreturn unit");
+}
+
+#[test]
+fn recursive_stream_consumer() {
+    // Pattern lifted from the streaming plan: a consumer that cases on a
+    // forced thunk and recurses through the .more arm's payload.
+    ok("let drain = { |s| case !$s [.more: { |p| !{drain $p[tail]} }, .done: { |_| return unit }] }\nreturn unit");
+}
+
+#[test]
+fn recursive_stream_producer_typechecks() {
+    // The canonical infinite-producer pattern.  Phase C's equi-recursive
+    // comp types let the cycle Var(beta) ⟶ Fun(Int, F (Variant {.more:
+    // {head: Int, tail: Thunk(beta)} | .done | ρ})) close in the
+    // union-find without tripping an occurs check.
+    ok("let nats = { |n| step-cons $n { !{nats $[$n + 1]} } }\nreturn unit");
+}
+
+#[test]
+fn step_pipeline_rejects_non_recursive_tail() {
+    // A `.more` node whose tail returns a non-Step variant would crash at
+    // runtime on the second iteration; reject it statically at pipeline
+    // boundaries.
+    has_error(
+        "return .more [head: 1, tail: { return .ok 2 }] | { |v| echo $v }",
+        "invalid Step value in pipeline",
+    );
 }

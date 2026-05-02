@@ -21,23 +21,27 @@ greet [name: alice]
 greet [name: bob, dept: eng]
 # Expected: hello alice, hello bob
 
-# Record from _try — all fields are statically typed
+# Outcome variant from _try — `.ok` carries the body's value,
+# `.err` carries a typed error record.
 let ok = _try { return 42 }
-echo !{equal $ok[ok] true}
-echo !{equal $ok[status] 0}
-# Expected: true, true
+case $ok [
+    .ok:  { |v| echo !{equal $v 42} },
+    .err: { |_| echo false }
+]
+# Expected: true
 
 let bad = _try { fail [status: 7] }
-echo !{equal $bad[ok] false}
-echo !{equal $bad[status] 7}
-# Expected: true, true
+case $bad [
+    .ok:  { |_| echo false },
+    .err: { |e| echo !{equal $e[status] 7} }
+]
+# Expected: true
 
-# try handler receives a typed record
+# try handler receives a typed error record (the .err arm's payload).
 try { fail [status: 3] } { |err|
     echo "status is $err[status]"
-    echo !{equal $err[ok] false}
 }
-# Expected: status is 3, true
+# Expected: status is 3
 
 # Map spread: adding a field to a record
 let base = [x: 1, y: 2]
