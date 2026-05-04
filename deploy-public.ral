@@ -1,0 +1,92 @@
+#!/usr/bin/env ral
+
+# deploy-public.ral — sync ral-private source to the public ral repo and,
+# if target/release-artifacts/ is non-empty, publish the `latest` prerelease
+# there too.  Run build-release.ral first to populate artifacts.
+#
+# Usage:
+#   deploy-public.ral [commit-message]
+#
+# The optional argument overrides the default commit message
+# "sync from ral-private".
+
+let here         = dir $script
+let repo_root    = resolve-path "$here/.."
+let public_repo  = 'git@github.com:lambdabetaeta/ral.git'
+let public_dir   = "$repo_root/dev/ral-public"
+let artifact_dir = "$repo_root/target/release-artifacts"
+
+# ── Clone ─────────────────────────────────────────────────────────────────
+
+if $[not !{is-dir "$public_dir/.git"}] {
+    echo "Cloning public repo into $public_dir ..."
+    git clone $public_repo $public_dir
+}
+
+# ── Sync ──────────────────────────────────────────────────────────────────
+
+echo ''
+echo "!{styled $ansi-cyan '==>'} syncing source"
+let rsync_args = [
+    '-av', '--delete',
+    '--exclude=.git/', '--exclude=dev/', '--exclude=CLAUDE.md', '--exclude=bench',
+    '--exclude=agent/',
+    # transfer.yml drives the cross-repo release push and references a
+    # secret that lives only in ral-private; never sync it to the public
+    # repo.
+    '--exclude=.github/workflows/transfer.yml',
+    '--filter=:- .gitignore',
+    "$repo_root/", $public_dir,
+]
+rsync ...$rsync_args
+
+# ── Commit ────────────────────────────────────────────────────────────────
+
+within [dir: $public_dir] {
+    let status = git status --porcelain
+    echo "porcelain status: $status"
+    if !{is-empty $status} {
+        echo ''
+        echo 'Nothing changed. Public repo source is already up to date.'
+    } else {
+        let commit_msg = if $[not !{is-empty $args}] { return $args[0] } else { return 'sync from ral-private' }
+        echo ''
+        echo "!{styled $ansi-cyan '==>'} committing: $commit_msg"
+        git add -A
+        git commit -m $commit_msg
+        git push
+    }
+}
+
+# ── Release ───────────────────────────────────────────────────────────────
+
+let has_artifacts = if !{exists $artifact_dir} {
+    return $[not !{is-empty !{list-dir $artifact_dir}}]
+} else { return false }
+
+if $has_artifacts {
+    echo ''
+    echo "!{styled $ansi-cyan '==>'} publishing !{styled $ansi-bold "'latest'"} to public repo"
+    let notes = "Synced from ral-private on !{date -u +%Y-%m-%dT%H:%M:%SZ}"
+    let files  = map { |e| return "$artifact_dir/$e[name]" } !{list-dir $artifact_dir}
+
+    within [dir: $public_dir] {
+        git tag -f latest
+        git push -f origin refs/tags/latest
+    }
+
+    gh release delete latest --repo lambdabetaeta/ral --yes --cleanup-tag=false ? {}
+    gh release create latest --repo lambdabetaeta/ral --title 'Latest Build' --prerelease --notes $notes ...$files
+
+    echo ''
+    echo "!{styled $ansi-green '  Release published.'} https://github.com/lambdabetaeta/ral/releases/tag/latest"
+} else {
+    echo ''
+    echo "!{styled $ansi-dim '  No artifacts — skipping release publish.'}"
+    echo "  (Run build-release.ral first if you want a release.)"
+}
+
+rm -rf $public_dir
+
+echo ''
+echo "!{styled $ansi-green '  Done.'} Public repo updated and $public_dir removed."

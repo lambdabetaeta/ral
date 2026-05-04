@@ -1,0 +1,9 @@
+let files = find $ws -name '*.py' | from-lines
+let jobs  = map { |p|
+    spawn {
+        grant [exec: [:], fs: [read: [$p]]] {
+            !{analyse $p}
+        }
+    }
+} $files
+let reports = map { |h| await $h } $jobs

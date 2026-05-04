@@ -1,0 +1,7 @@
+let x        = 'hostname'                               # `host` stands for the String `hostname`
+let host     = hostname                                 # records the hostname as a String
+$host                                                   # prints out the hostname
+let hostb    = { hostname }                             # `hostb` holds a _block_
+!$hostb                                                 # prints out the hostname
+let hello    = { |x| "hi $x, you are on !{hostname}"}   # _parameterized block_ ...
+hello 'alex'                          

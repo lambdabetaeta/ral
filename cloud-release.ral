@@ -1,0 +1,41 @@
+#!/usr/bin/env ral
+
+# cloud-release.ral — kick off the cloud release pipeline by
+# dispatching build-binaries.yml on lambdabetaeta/ral-private.
+#
+# transfer.yml and publish-exarch-box.yml chain off it via
+# `workflow_run`, so a single dispatch produces:
+#   1. binaries on ral-private (workflow artifacts)
+#   2. release on lambdabetaeta/ral
+#   3. ghcr.io/lambdabetaeta/exarch-box:latest
+#
+# Usage: cloud-release.ral [BRANCH]
+# BRANCH defaults to the current HEAD of this clone.
+
+let repo      = 'lambdabetaeta/ral-private'
+let repo_root = resolve-path "!{dir $script}/.."
+let ref       = if !{is-empty $args} { return !{git -C $repo_root rev-parse --abbrev-ref HEAD | from-string} }
+                else { return $args[0] }
+
+# Dispatch by workflow name, not slug.  `gh workflow run
+# build-binaries.yml --ref main` returns 422 "No ref found for: main"
+# on this repo for reasons that have nothing to do with the ref;
+# dispatching by display name resolves through a different code path
+# and works.
+let wf = 'Build Binaries'
+
+echo "==> dispatch '$wf' on $ref"
+gh workflow run $wf --repo $repo --ref $ref
+
+# `gh workflow run` doesn't print the new run id; pick the most recent
+# workflow_dispatch run on this branch and watch it.  Transfer and
+# exarch-box fire automatically on success.
+sleep 3
+let runs = !{gh run list --repo $repo --workflow $wf --branch $ref --event workflow_dispatch --limit 1 --json databaseId | from-json}
+let id = $runs[0][databaseId]
+echo "==> watching $id"
+gh run watch $id --repo $repo --exit-status
+
+echo ''
+echo "Build done.  Transfer + exarch-box should fire shortly."
+echo "https://github.com/$repo/actions"

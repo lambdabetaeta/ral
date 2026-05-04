@@ -1,0 +1,38 @@
+# presenterm configuration for the sgai-demo slide deck.
+#
+# Usage:
+#   presenterm --config-file presenterm-config.yaml slides.md
+#
+# This enables exec_replace so that bash +exec_replace blocks can run
+# ral scripts live.  It does NOT add ral syntax highlighting --
+# presenterm compiles its syntax set into a binary at build time and
+# has no runtime mechanism to load custom grammars.
+#
+# To get ral highlighting in presenterm, register the grammar with
+# bat (which shares the syntect engine presenterm uses):
+#
+#   mkdir -p "$(bat --config-dir)/syntaxes"
+#   cp ../../editor-support/ral-syntax/ral.sublime-syntax \
+#      "$(bat --config-dir)/syntaxes/"
+#   bat cache --build
+#
+# Then verify:  bat --list-languages | grep -i ral
+#
+# After that, ral fenced code blocks in slides.md will render as
+# plain text in presenterm (because presenterm ignores bat's cache),
+# but bat itself will highlight .ral files correctly.  To get
+# in-presentation highlighting, replace ```ral blocks with
+# ```bash +exec_replace blocks that invoke bat, e.g.:
+#
+#   ```bash +exec_replace
+#   bat --color always --style plain --language ral 01-word-splitting.ral
+#   ```
+#
+# A future presenterm release may support loading external syntaxes;
+# see https://github.com/mfontanini/presenterm/issues/603
+
+snippet:
+  exec:
+    enable: true
+  exec_replace:
+    enable: true

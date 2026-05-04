@@ -1,0 +1,15 @@
+# Example 3.3 — structured error records.
+
+try {
+    cat /no/such/file 2> /dev/null
+} { |err|
+    echo "command:  $err[cmd]"
+    echo "status:   $err[status]"
+    echo "ok:       $err[ok]"
+}
+
+echo 'continued past the error'
+
+# The error record also carries stderr (as Bytes), a column, line,
+# and a children list holding the full execution tree.  Decode stderr
+# with  read-string $err[stderr]  when you need the text.

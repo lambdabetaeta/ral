@@ -1,0 +1,8 @@
+let nums    = [1, 2, 3, 4, 5]
+let doubled = map    { |x| $[$x * 2] } $nums
+let big     = filter { |x| $[$x > 5] } $doubled
+let total   = fold   { |a x| $[$a + $x] } 0 $doubled
+
+echo "doubled:" ...$doubled
+echo "big:    " ...$big
+echo "sum:    " $total

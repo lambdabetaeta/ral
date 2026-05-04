@@ -1,0 +1,10 @@
+# Example 3.2 — typed values, first-class functions.
+
+let nums    = [1, 2, 3, 4, 5]
+let doubled = map { |x| return $[$x * 2] } $nums
+let big     = filter { |x| return $[$x > 5] } $doubled
+let total   = fold { |a x| return $[$a + $x] } 0 $doubled
+
+echo "doubled:" ...$doubled
+echo "big:    " ...$big
+echo "sum:    " $total

@@ -1,0 +1,10 @@
+try {
+    cat /no/such/file 2> /dev/null
+} { |err|
+  echo $err
+  echo "command: $err[cmd]"
+  echo "status:  $err[status]"
+  echo "ok:      $err[ok]"
+  echo "stderr:  '!{ read-string $err[stderr] }'"
+}
+echo 'runs past the error'

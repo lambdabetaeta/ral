@@ -1,0 +1,17 @@
+# Example 3.4 — spawn/await.  Two 1-second jobs run in parallel.
+# Echoes around each sleep let you see both jobs interleave live.
+
+let a = spawn {
+    echo '[a] starting'
+    sleep 1
+    echo '[a] done'
+    return alpha
+}
+let b = spawn {
+    echo '[b] starting'
+    sleep 1
+    echo '[b] done'
+    return beta
+}
+echo 'main: awaiting...'
+echo "got: !{await $a} and !{await $b}"

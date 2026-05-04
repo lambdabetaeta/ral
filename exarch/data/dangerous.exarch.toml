@@ -1,7 +1,0 @@
-# `dangerous` bake-in.  No attenuation: every field defaults to the
-# lattice top (None / unset).  The agent has ambient authority.  Use
-# only when something else is the trust boundary (e.g. a Docker
-# container).
-#
-# Combine with `--restrict <FILE>` to "start permissive and
-# attenuate from there": `dangerous ⊓ file = file`.

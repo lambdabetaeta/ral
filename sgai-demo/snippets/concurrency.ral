@@ -1,0 +1,14 @@
+let a = spawn {
+    echo '[a] starting'
+    sleep 3
+    echo '=> [a] done'
+    return alpha
+}
+let b = spawn {
+    echo '[b] starting'
+    sleep 3
+    echo '=> [b] done'
+    return beta
+}
+echo 'main: awaiting...'
+echo "got: !{await $a} and !{await $b}"

@@ -1,0 +1,10 @@
+grant [
+    exec: [cat: [], grep: []],
+    fs:   [read: ['/srv/corpus']],
+] {
+    # inside this block:
+    #   those commands, those paths, and nothing else.
+    # curl      -> denied.
+    # /etc/pw   -> denied.
+    # fork+exec -> denied.
+}

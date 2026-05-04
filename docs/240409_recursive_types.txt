@@ -1,0 +1,284 @@
+ ▐▛███▜▌   Claude Code v2.1.94
+▝▜█████▛▘  Opus 4.6 (1M context) · Claude Team
+  ▘▘ ▝▝    ~/projects/shell
+
+  Message from Safeguarded AI:
+  Alex Kavvos' custom settings.json has been loaded.
+
+❯ /clear                                                                        
+  ⎿  (no content)
+
+❯ /plan One can write really neat tricks using recursive computation types in   
+CBPV (read papers/zydeco-relmonad.pdf for examples). I'd like these to be       
+supported in ral. Is it feasible? Could we get full inference with recursive    
+computation types? It would also solve the streaming problem as I could make    
+streams of values. Plan the implementation if you think it can be done.         
+  ⎿  Enabled plan mode
+
+⏺ Let me read the paper and understand the current type system before planning.
+
+  Read 2 files (ctrl+o to expand)
+
+⏺ Let me read the rest of the paper and explore the codebase in parallel.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Explore(Explore ral type system)
+  ⎿  Done (40 tool uses · 103.2k tokens · 2m 41s)
+  (ctrl+o to expand)
+
+⏺ Let me read the SPEC and the type checker to understand the details before
+  planning.
+
+  Read 2 files (ctrl+o to expand)
+
+⏺ Let me read the generalize/instantiate code and a few more critical sections.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Now let me launch the Plan agent with all the context I've gathered.
+
+⏺ Plan(Design recursive comp types plan)
+  ⎿  Done (39 tool uses · 79.0k tokens · 6m 26s)
+  (ctrl+o to expand)
+
+⏺ Let me check the remaining critical functions and then write the final plan.
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+⏺ Now I have a complete understanding. Let me write the final plan.
+
+⏺ Updated plan
+  ⎿  /plan to preview
+
+⏺ User approved Claude's plan
+  ⎿  Plan saved to: ~/.claude-sgai/plans/stateless-bubbling-volcano.md · /plan 
+     to edit
+     Equi-recursive computation types for ral
+
+     Context
+
+     The Zydeco paper (zydeco-relmonad.pdf) shows that recursive computation
+     types
+     ν Y : CTy. B enable powerful patterns in CBPV: variadic functions, stream
+     protocols, stack types like Int →* OS. Currently ral rejects all recursive
+     types via occurs checks in unification. The goal is to allow recursive
+     computation types while preserving full HM inference and ral's "no type
+     annotations" philosophy.
+
+     Equi-recursive types (cycles in the union-find) are the right fit: no new
+     syntax (no roll/unroll, no type annotations), decidable with principal
+     types
+     (Amadio & Cardelli 1993). Recursive value types remain forbidden — the
+     paper's
+     ν only binds at kind CTy, and recursive value types (α = [α]) are more
+     likely bugs than intent.
+
+     What changes
+
+     All changes are in one file: ral/src/typecheck.rs (plus tests and SPEC).
+     No changes to the parser, elaborator, evaluator, or runtime type system.
+
+     Design
+
+     After the change, Comp::Rec at line 1075 does:
+
+     beta = fresh_comp_ty()
+     env.bind(name, mono(Thunk(beta)))
+     body_ty = infer_comp(body)        -- e.g. Fun(Int, Var(beta))
+     unify_comp_ty(body_ty, beta)      -- binds beta = Fun(Int, Var(beta))  ←
+     cycle!
+
+     This produces a cyclic binding in the union-find: comp_ty_slots[N] = 
+     Bound(Fun(Int, Var(N))).
+     Every function that structurally descends into computation types must
+     detect this cycle.
+
+     Value type occurs checks are kept. Value types can still contain recursive
+     comp types through Thunk(B), so cycle guards must be threaded through
+     the mutual Ty/CompTy traversals.
+
+     Generalization/instantiation correctness
+
+     The hard part. After apply_ty, a cyclic comp type becomes a tree with
+     CompTy::Var(root) back-edges. If the cycle body contains a generalized
+     ty var α, two instantiations of the scheme would share the same union-find
+     slot for the cycle root, but need independent copies with different α
+     substitutions.
+
+     Solution: extend Scheme with comp_ty_bindings: Vec<(u32, CompTy)> that
+     snapshots the applied binding of each cyclic comp var. instantiate creates
+     fresh comp var IDs and re-binds them with the ty/mode/comp var substitution
+     applied.
+
+     Implementation steps
+
+     All steps modify ral/src/typecheck.rs unless noted otherwise.
+
+     Step 1: Extend Scheme (mechanical, no behavior change)
+
+     - Add field comp_ty_bindings: Vec<(u32, CompTy)> to Scheme
+     - Update Scheme::mono() — pass comp_ty_bindings: vec![]
+     - Update is_poly() — also check !self.comp_ty_bindings.is_empty()
+     - Update seed_builtins (line 1348) — add comp_ty_bindings: vec![]
+
+     Step 2: Cycle-aware apply_ty / apply_comp_ty (no behavior change yet)
+
+     Add _inner variants that take visited: &mut HashSet<u32> (comp ty var root
+     IDs):
+
+     - apply_comp_ty_inner: before recursing into a resolved Var(i), find root.
+     If root already in visited → return CompTy::Var(root) (cycle back-edge).
+     Otherwise insert root, recurse, leave it inserted (don't remove — the whole
+     subtree under that root is already expanded).
+     - apply_ty_inner: delegates to apply_comp_ty_inner through Thunk(b).
+     - Public apply_ty / apply_comp_ty create empty visited set and delegate.
+
+     Step 3: Cycle-aware ty_occurs_comp (no behavior change yet)
+
+     Thread visited: &mut HashSet<u32> through the ty_occurs / ty_occurs_comp
+     mutual recursion. ty_occurs_comp checks/inserts the comp var root before
+     recursing. ty_occurs creates the visited set when calling through Thunk.
+
+     Step 4: Cycle-aware free-variable collection (no behavior change yet)
+
+     Thread visited: &mut HashSet<u32> through:
+     - fv_ty / fv_comp / fv_mode
+     - fmv_ty / fmv_comp
+
+     Public wrappers create the visited set. fv_comp inserts the comp var root
+     before recursing; on revisit returns immediately.
+
+     Step 5: Cycle-aware comp_input_mode / comp_output_mode
+
+     These recurse through Fun(_, b) and would loop on β = Fun(Int, β).
+     Add visited set; on cycle return a fresh mode variable.
+
+     Step 6: Cycle guard in apply_args / apply_piped_value auto-force loops
+
+     The auto-force loop (F{B} → B) at lines 850-863 and 884-897 would loop on
+     β = Return(_, Thunk(β)). Add a small visited set to break after one cycle.
+
+     Step 7: Extended substitution functions
+
+     Add subst_ty_full and subst_comp_full that also accept
+     cm: &HashMap<u32, u32> for comp ty var ID substitution:
+
+     CompTy::Var(i) => CompTy::Var(*cm.get(i).unwrap_or(i))
+
+     The existing subst_ty / subst_comp remain for seed_builtins which
+     doesn't need comp var substitution, or can be replaced.
+
+     Step 8: Update generalize
+
+     After calling apply_ty (now cycle-safe), scan the applied type for
+     CompTy::Var(id) nodes where id is a bound comp var root. These are
+     cycle back-edges. For each, snapshot its applied binding (call
+     apply_comp_ty_inner on the raw binding with the root pre-inserted in
+     visited). Store as comp_ty_bindings in the Scheme.
+
+     Step 9: Update instantiate
+
+     - Allocate fresh comp ty vars for each entry in comp_ty_bindings
+     - Build cm: HashMap<u32, u32> mapping old → fresh
+     - For each (old, binding), apply subst_comp_full(binding, &tm, &mm, &cm)
+     and bind the fresh var to the result in the union-find
+     - Use subst_ty_full for the scheme body
+
+     Step 10: Remove comp occurs check — the semantic change
+
+     In unify_comp_ty (lines 345-356), delete the two comp_occurs calls.
+     Delete the now-dead comp_occurs and comp_occurs_ty methods.
+
+     Step 11: Co-inductive guard in unify_comp_ty
+
+     After removing the occurs check, unifying two cyclic types that share
+     structure can loop. Add a HashSet<(u32, u32)> tracking pairs of comp var
+     roots currently being unified. On revisit → Ok(()). Implementation:
+
+     - Add unify_comp_ty_inner with the pair set parameter
+     - Public unify_comp_ty creates the set and delegates
+     - Only track pairs when both sides originate from a bound Var
+
+     Step 12: Cycle-aware display
+
+     For error messages: fmt_comp_ty is called on resolved-but-not-applied
+     types,
+     where CompTy::Var(id) displays as ?. This is already safe (no loop).
+
+     For applied types in diagnostics: add Unifier::display_ty / display_comp_ty
+     methods with visited set. On cycle back-edge display ... (or μ notation
+     as a follow-up). Low priority — the standalone fmt_* functions won't loop
+     on resolved types.
+
+     Step 13: Update SPEC.md
+
+     Add to section 21.2:
+
+     Computation types may be recursive. A self-recursive function like
+
+         let countdown = |n| { if $[$n == 0] { return 0 } { countdown $[$n - 1]
+     } }
+
+     receives the computation type  μβ. Int → β  — a function that accepts
+     arbitrarily many Int arguments. The recursion arises from the fixed-point
+     combinator (Comp::Rec) during type inference; no type annotations are
+     needed.
+
+     Value types remain non-recursive. The occurs check on value type variables
+     is preserved: a type like α = [α] is still rejected.
+
+     Step 14: Tests
+
+     In ral/tests/type_system.rs (or new recursive_types.rs):
+
+     1. Self-recursive fn: let f = |n| { f $[$n - 1] } — no type error
+     2. Mutual recursion: even/odd — no type error
+     3. Recursive fn with pipeline: let f = |n| { echo $n; f $[$n - 1] } — no
+     type error
+     4. Value occurs check preserved: scenarios that trigger value-type
+     recursion still error
+     5. Polymorphic recursive fn: let f generalized, used at two different types
+      — both work
+     6. Display doesn't panic: force a type mismatch involving cyclic type — no
+     stack overflow
+     7. All existing tests pass unchanged
+
+     Verification
+
+     docker exec shell-dev cargo build && docker exec shell-dev cargo test
+
+     Run the full workspace build + test. All existing tests in type_system.rs,
+     scripts.rs, and eval_fuzz.rs must pass. New recursive-type tests must pass.
+
+     Files to modify
+
+     - ral/src/typecheck.rs — all type system changes
+     - ral/tests/type_system.rs — new test cases
+     - doc/SPEC.md — document recursive computation types (section 21.2)
+
+     Risks
+
+     ┌─────────────────────────────────┬───────────────────────────────────────┐
+     │              Risk               │              Mitigation               │
+     ├─────────────────────────────────┼───────────────────────────────────────┤
+     │ unify_comp_ty loops on shared   │ Step 11: co-inductive pair guard      │
+     │ cyclic structure                │                                       │
+     ├─────────────────────────────────┼───────────────────────────────────────┤
+     │ Generalize/instantiate sharing  │ Step 8-9: fresh comp var copies with  │
+     │ bug                             │ substituted bindings                  │
+     ├─────────────────────────────────┼───────────────────────────────────────┤
+     │ Auto-force loop on Return(_,    │ Step 6: visited set in auto-force     │
+     │ Thunk(β)) cycles                │                                       │
+     ├─────────────────────────────────┼───────────────────────────────────────┤
+     │ Performance (HashSet on every   │ Cycles are rare; sets are empty in    │
+     │ apply/fv call)                  │ the common case. Optimize later if    │
+     │                                 │ needed                                │
+     ├─────────────────────────────────┼───────────────────────────────────────┤
+     │ env_fv stale bindings           │ Standard HM: fv follows live unifier  │
+     │                                 │ state, which is correct               │
+     └─────────────────────────────────┴───────────────────────────────────────┘
+  ⎿  You're out of extra usage · resets 10pm (Europe/Athens)
+     /extra-usage to request more usage from your admin.
+
+✻ Cooked for 20m 28s
