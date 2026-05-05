@@ -1,0 +1,19 @@
+services:
+  shell-dev-heritable:
+    build:
+      context: .
+    container_name: shell-dev-heritable
+    command: ["tail", "-f", "/dev/null"]
+    working_dir: /work
+    volumes:
+      - ..:/work
+    stdin_open: true
+    tty: true
+    mem_limit: ${SHELL_DEV_MEMORY:-8g}
+    memswap_limit: ${SHELL_DEV_MEMORY_SWAP:-8g}
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined

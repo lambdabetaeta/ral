@@ -1,8 +1,8 @@
 let analyse = { |path|
     let content = read-file $path
     let lines   = read-lines $content
-    let imports = filter { |l| !{match '^(import|from) ' $l} } $lines
-    let suspect = filter { |l| !{match '(eval|exec|subprocess)' $l} } $lines
+    let imports = filter { |l| !{re-match '^(import|from) ' $l} } $lines
+    let suspect = filter { |l| !{re-match '(eval|exec|subprocess)' $l} } $lines
 
     # three prompt-injected escape attempts
     let esc_fs_s = try { read-file '/etc/passwd';                 return true } { |_| return false }

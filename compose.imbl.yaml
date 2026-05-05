@@ -1,0 +1,28 @@
+services:
+  shell-dev-imbl:
+    build:
+      context: .
+    container_name: shell-dev-imbl
+    command: ["tail", "-f", "/dev/null"]
+    working_dir: /work
+    volumes:
+      - ..:/work
+    stdin_open: true
+    tty: true
+    mem_limit: ${SHELL_DEV_MEMORY:-8g}
+    memswap_limit: ${SHELL_DEV_MEMORY_SWAP:-8g}
+    # Required for bubblewrap: the grant-sandbox subprocess on Linux
+    # creates new user + mount + network namespaces. Docker's default
+    # seccomp profile blocks the unshare/clone flags bwrap needs, and
+    # AppArmor denies the mount ops inside the new namespace.
+    # CAP_SYS_ADMIN lets the bwrap helper set up the namespace without
+    # being setuid; CAP_NET_ADMIN lets it bring `lo` up after
+    # `--unshare-net` (the linuxkit kernel reports EPERM as ECHILD on
+    # RTM_NEWADDR without it, surfacing as
+    # "loopback: Failed RTM_NEWADDR: No child processes").
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined

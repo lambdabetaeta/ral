@@ -39,8 +39,8 @@ echo 'def hash(x): return x * 2654435761' >  "$ws/hash.py"
 let analyse = { |path|
     let content = read-file $path
     let lines   = read-lines $content
-    let imports = filter { |l| !{match '^(import|from) ' $l} } $lines
-    let suspect = filter { |l| !{match '(eval|exec|subprocess)' $l} } $lines
+    let imports = filter { |l| !{re-match '^(import|from) ' $l} } $lines
+    let suspect = filter { |l| !{re-match '(eval|exec|subprocess)' $l} } $lines
 
     # Three prompt-injected escape attempts.  Each is a real capability
     # violation; grant blocks each one in-process.
