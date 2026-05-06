@@ -1,0 +1,34 @@
+# Test: from-json / to-json codecs (§16.5)
+
+# Parse simple object
+let m = !{to-string '{"name": "alice", "age": 30}' | from-json}
+echo $m[name]
+echo $m[age]
+# Expected: alice, 30
+
+# Parse array
+let a = !{to-string '[1, 2, 3]' | from-json}
+echo !{length $a}
+# Expected: 3
+
+# Parse nested
+let n = !{to-string '{"a": {"b": [1, 2]}}' | from-json}
+echo !{length $n[a][b]}
+# Expected: 2
+
+# Write and re-read
+let data = [host: localhost, port: 8080]
+to-json $data > '/tmp/ral-json-test.json'
+let back = !{cat '/tmp/ral-json-test.json' | from-json}
+echo $back[host]
+echo $back[port]
+# Expected: localhost, 8080
+
+rm /tmp/ral-json-test.json
+
+# Parse booleans and null
+let m2 = !{to-string '{"ok": true, "val": null}' | from-json}
+echo $m2[ok]
+# Expected: true
+
+echo 'json tests done'

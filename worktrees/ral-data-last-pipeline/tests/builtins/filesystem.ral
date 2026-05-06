@@ -1,0 +1,81 @@
+# Test: §16.4 filesystem builtins
+
+# read file via from-string < path
+echo hello > /tmp/ral-fs-test.txt
+let content = !{from-string < /tmp/ral-fs-test.txt}
+echo $content
+# Expected: hello
+
+# file-size
+let size = file-size /tmp/ral-fs-test.txt
+echo $size
+# Expected: 6 (hello + newline)
+
+# line-count
+echo "a\nb\nc" > /tmp/ral-fs-lines.txt
+let count = line-count /tmp/ral-fs-lines.txt
+echo $count
+# Expected: 3
+
+# file-mtime returns an Int
+let mtime = file-mtime /tmp/ral-fs-test.txt
+if $[$mtime > 0] { echo 'mtime ok' }
+# Expected: mtime ok
+
+# Cleanup
+rm /tmp/ral-fs-test.txt /tmp/ral-fs-lines.txt
+
+# write file via to-string > path
+to-string 'hello from write' > /tmp/ral-write-test.txt
+let wc = !{from-string < /tmp/ral-write-test.txt}
+echo $wc
+
+# cp (bundled coreutils, sandboxed via the capability-checked dispatch)
+cp /tmp/ral-write-test.txt /tmp/ral-copy-test.txt
+let cc = !{from-string < /tmp/ral-copy-test.txt}
+echo $cc
+
+# mv
+mv /tmp/ral-copy-test.txt /tmp/ral-move-test.txt
+if $[not !{exists /tmp/ral-copy-test.txt}] { echo 'mv ok' }
+let mc = !{from-string < /tmp/ral-move-test.txt}
+echo $mc
+
+# mkdir -p
+mkdir -p /tmp/ral-mkdir-test/sub
+if !{is-dir /tmp/ral-mkdir-test/sub} { echo 'mkdir ok' }
+
+# list-dir (structured query — primitive, returns a value)
+let entries = list-dir /tmp/ral-mkdir-test
+if $[!{length $entries} == 1] { echo 'list-dir ok' }
+let e = $entries[0]
+echo $e[name]
+echo $e[type]
+
+# rm (regular file)
+rm /tmp/ral-write-test.txt /tmp/ral-move-test.txt
+if $[not !{exists /tmp/ral-write-test.txt}] { echo 'rm ok' }
+
+# rm -rf (directory tree — the dangerous verb wears its name)
+rm -rf /tmp/ral-mkdir-test
+if $[not !{exists /tmp/ral-mkdir-test}] { echo 'rm -rf ok' }
+
+# temp-dir (primitive — secure O_EXCL recipe, returns the path as a value)
+let td = temp-dir
+if !{is-dir $td} { echo 'temp-dir ok' }
+rm -rf $td
+
+# temp-file
+let tf = temp-file
+if !{is-file $tf} { echo 'temp-file ok' }
+rm $tf
+
+# resolve-path
+let rp = resolve-path /tmp
+if !{match 'tmp' $rp} { echo 'resolve-path ok' }
+
+# path-join
+let pj = path-join ['/usr', 'local', 'bin']
+echo $pj
+
+echo 'filesystem tests done'

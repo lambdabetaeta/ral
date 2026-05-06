@@ -1,0 +1,56 @@
+# Test: type system — Bool, Int, Float, Unit
+
+# Numeric literals
+let x = 42
+echo $x
+# Expected: 42
+
+let y = 3.14
+echo $y
+# Expected: 3.14
+
+# Arithmetic produces typed values
+let sum = $[10 + 20]
+echo $sum
+# Expected: 30
+
+let ratio = $[10.0 / 3.0]
+echo $ratio
+# Expected: 3.3333333333333335
+
+# Integer division stays int when exact
+echo $[10 / 2]
+# Expected: 5
+
+# Integer division promotes to float when inexact
+echo $[10 / 3]
+# Expected: 3.3333333333333335
+
+# Comparisons produce Bool
+echo $[5 == 5]
+echo $[5 != 3]
+echo $[3 < 5]
+echo $[10 >= 10]
+# Expected: true, true, true, true
+
+# Bool from arithmetic comparison
+let result = $[1 == 1]
+echo $result
+# Expected: true
+
+# Bool from filesystem predicates
+echo !{exists /tmp}
+echo !{is-dir /tmp}
+echo !{is-file /nonexistent}
+# Expected: true, true, false
+
+# Strict bool in conditionals — blocks return bool
+if $[1 == 1] { echo 'condition works' }
+# Expected: condition works
+
+if !{is-dir /tmp} { echo 'dir check works' }
+# Expected: dir check works
+
+# Negation
+echo $[not !{is-file /nonexistent}]
+# Expected: true

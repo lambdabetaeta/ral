@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ral — rationale</title>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg:      #07000c;
+      --orange:  #e86800;
+      --bright:  #ff9a3c;
+      --dim:     #6b2e00;
+      --dimmer:  #3a1800;
+    }
+
+    html {
+      background: var(--bg);
+      color: var(--orange);
+      font-family: 'Courier New', 'Lucida Console', 'DejaVu Sans Mono', monospace;
+      font-size: 17px;
+      line-height: 1.65;
+    }
+
+    body {
+      min-height: 100vh;
+      overflow-y: scroll;
+    }
+
+    /* scanlines */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: repeating-linear-gradient(
+        to bottom,
+        transparent 0px,
+        transparent 3px,
+        rgba(0, 0, 0, 0.18) 3px,
+        rgba(0, 0, 0, 0.18) 4px
+      );
+      pointer-events: none;
+      z-index: 10;
+    }
+
+    /* vignette */
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: radial-gradient(
+        ellipse 80% 80% at 50% 50%,
+        transparent 55%,
+        rgba(0, 0, 0, 0.75) 100%
+      );
+      pointer-events: none;
+      z-index: 9;
+    }
+
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      background: var(--bg);
+      border-bottom: 1px solid var(--dimmer);
+      padding: 0.55rem 2rem;
+    }
+
+    nav a {
+      color: var(--dim);
+      text-decoration: none;
+      font-size: 0.78rem;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      transition: color 0.2s;
+    }
+
+    nav a:hover { color: var(--bright); }
+
+    article {
+      position: relative;
+      z-index: 1;
+      max-width: 72ch;
+      margin: 0 auto;
+      padding: 3rem 2rem 6rem;
+    }
+
+    article h1 {
+      font-size: clamp(1.9rem, 5vw, 2.6rem);
+      font-weight: normal;
+      color: var(--bright);
+      letter-spacing: 0.12em;
+      text-shadow:
+        0 0 6px  var(--orange),
+        0 0 18px var(--dim),
+        0 0 40px var(--dimmer);
+      margin-bottom: 2rem;
+      border-bottom: 1px solid var(--dimmer);
+      padding-bottom: 0.75rem;
+    }
+
+    article h2 {
+      font-size: 1.25rem;
+      font-weight: normal;
+      color: var(--bright);
+      letter-spacing: 0.08em;
+      text-shadow: 0 0 6px var(--dim);
+      margin: 2.4rem 0 0.75rem;
+    }
+
+    article h3 {
+      font-size: 1.05rem;
+      font-weight: normal;
+      color: var(--orange);
+      letter-spacing: 0.05em;
+      margin: 1.8rem 0 0.5rem;
+    }
+
+    article h4 {
+      font-size: 1rem;
+      font-weight: normal;
+      color: var(--orange);
+      margin: 1.4rem 0 0.4rem;
+    }
+
+    article p {
+      margin-bottom: 0.9rem;
+      color: var(--orange);
+    }
+
+    article ul, article ol {
+      margin: 0.5rem 0 0.9rem 1.6rem;
+      color: var(--orange);
+    }
+
+    article li { margin-bottom: 0.3rem; }
+
+    article a {
+      color: var(--bright);
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+
+    article a:hover { text-shadow: 0 0 8px var(--orange); }
+
+    article strong { color: var(--bright); font-weight: bold; }
+    article em { color: var(--orange); font-style: italic; }
+
+    article code {
+      font-family: inherit;
+      font-size: 0.9em;
+      color: var(--bright);
+      background: rgba(232, 104, 0, 0.07);
+      border: 1px solid var(--dimmer);
+      padding: 0.08em 0.35em;
+      border-radius: 0;
+    }
+
+    article pre {
+      background: rgba(232, 104, 0, 0.04);
+      border: 1px solid var(--dim);
+      box-shadow:
+        0 0 0 1px var(--dimmer),
+        inset 0 0 12px rgba(232, 104, 0, 0.03);
+      padding: 1rem 1.2rem;
+      overflow-x: auto;
+      margin: 0.8rem 0 1.2rem;
+      color: var(--bright);
+      text-shadow: 0 0 4px rgba(232, 104, 0, 0.4);
+      font-size: 0.88rem;
+      line-height: 1.55;
+    }
+
+    article pre code {
+      background: none;
+      border: none;
+      padding: 0;
+      font-size: inherit;
+    }
+
+    article blockquote {
+      border-left: 2px solid var(--dim);
+      padding-left: 1rem;
+      margin: 0.8rem 0;
+      color: var(--dim);
+    }
+
+    article hr {
+      border: none;
+      border-top: 1px solid var(--dimmer);
+      margin: 2rem 0;
+    }
+
+    article table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 1rem 0;
+      font-size: 0.9rem;
+    }
+
+    article th, article td {
+      border: 1px solid var(--dim);
+      padding: 0.4rem 0.8rem;
+      text-align: left;
+    }
+
+    article th { color: var(--bright); }
+
+    #content-loading {
+      color: var(--dim);
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      font-size: 0.75rem;
+      padding: 3rem 0;
+    }
+  </style>
+</head>
+<body>
+  <nav><a href="./">&#8592; ral</a></nav>
+  <article>
+    <div id="content-loading">loading rationale&#8230;</div>
+  </article>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script>
+    fetch('RATIONALE.md')
+      .then(function(r) { return r.text(); })
+      .then(function(md) {
+        var el = document.querySelector('article');
+        el.innerHTML = marked.parse(md);
+      })
+      .catch(function() {
+        document.getElementById('content-loading').textContent = 'failed to load rationale.';
+      });
+  </script>
+</body>
+</html>

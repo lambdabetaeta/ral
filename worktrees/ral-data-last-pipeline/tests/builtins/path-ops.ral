@@ -1,0 +1,15 @@
+# Test: §16.3 path builtins
+
+echo !{stem '/a/b.m4a'}
+# Expected: b
+
+echo !{ext '/a/b.m4a'}
+# Expected: m4a
+
+echo !{dir '/a/b.m4a'}
+# Expected: /a
+
+echo !{base '/a/b.m4a'}
+# Expected: b.m4a
+
+echo 'path tests done'

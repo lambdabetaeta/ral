@@ -1,0 +1,60 @@
+# Test: string builtins — replace, split, join, upper, lower, length, slice, match
+
+# upper / lower
+echo !{upper hello}
+echo !{lower HELLO}
+# Expected: HELLO, hello
+
+# length
+echo !{length hello}
+echo !{length [a, b, c]}
+# Expected: 5, 3
+
+# replace — unique-anchor; errors on 0 or >1 matches
+echo !{replace world al 'hello world'}
+# Expected: hello al
+
+# replace-all — every occurrence
+echo !{replace-all a b 'a-a-a'}
+# Expected: b-b-b
+
+# replace errors on ambiguous pattern (with line numbers)
+try { replace a b 'a-a' } { |e| echo $e[message] }
+# Expected: replace: pattern matches 2 times (lines 1, 1) — ambiguous
+
+# replace errors on missing pattern
+try { replace xyz q 'hello' } { |e| echo $e[message] }
+# Expected: replace: pattern not found
+
+# split / intercalate
+let parts = split '/' '/usr/local/bin'
+echo $parts[0]
+echo $parts[2]
+let joined = intercalate '-' $parts
+echo $joined
+# Expected: (empty), local, -usr-local-bin
+
+# slice
+echo !{slice hello 1 3}
+# Expected: ell (or el depending on inclusive/exclusive)
+
+# match
+if !{match '\.ral$' 'hello.ral'} { echo 'matches' }
+# Expected: matches
+
+# shell-quote
+echo !{shell-quote 'hello world'}
+# Expected: 'hello world'
+
+# has
+let m = [a: 1, b: 2]
+if !{has $m a} { echo 'has a' }
+if $[not !{has $m c}] { echo 'no c' }
+# Expected: has a, no c
+
+# Path builtins
+echo !{stem '/home/user/doc.txt'}
+echo !{ext '/home/user/doc.txt'}
+echo !{dir '/home/user/doc.txt'}
+echo !{base '/home/user/doc.txt'}
+# Expected: doc, txt, /home/user, doc.txt

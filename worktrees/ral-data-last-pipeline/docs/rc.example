@@ -1,0 +1,53 @@
+# ~/.config/ral/rc — ral interactive shell configuration
+#
+# Copy to ~/.config/ral/rc (or ~/.ralrc for legacy compatibility).
+#
+# This file must return a map with optional keys:
+#   env       — Map of environment variables inherited by child processes
+#   prompt    — String or Block returning the prompt string
+#   bindings  — Map of name → value bindings available at the prompt
+#   aliases   — Map of name → command aliases
+#   edit_mode — String: emacs (default) or vi
+#
+# The following variables are available inside a prompt block:
+#   $USER    — current username
+#   $CWD     — current working directory (~ substituted for home)
+#   $STATUS  — numeric exit status of the last command
+
+# ANSI escape sequences for prompt colouring.
+let red   = "\e[31m"
+let blue  = "\e[34m"
+let reset = "\e[0m"
+
+return [
+    # Line-editing mode: emacs (default) or vi.
+    edit_mode: vi,
+
+    # Environment variables set in every child process spawned from this shell.
+    env: [
+        EDITOR: vim,
+        PAGER:  less,
+    ],
+
+    # Extra bindings merged into the top-level scope at startup.
+    # Useful for shorthand paths you type often.
+    bindings: [
+        proj: ~/src/project,
+    ],
+
+    # Prompt block.  Return a string; $USER, $CWD, and $STATUS are in scope.
+    # $STATUS is 0 on success, non-zero on failure — useful for a colour cue.
+    prompt: {
+        let lbracket = '['
+        let rbracket = ']'
+        return "$red$lbracket $USER $rbracket$reset $blue$CWD$reset $ "
+    },
+
+    # Aliases expand before external-command lookup.
+    # A block receives any trailing arguments as $args.
+    aliases: [
+        ll: { |args| ls -lh ...$args },
+        la: { |args| ls -lha ...$args },
+        g:  { |args| git ...$args },
+    ],
+]

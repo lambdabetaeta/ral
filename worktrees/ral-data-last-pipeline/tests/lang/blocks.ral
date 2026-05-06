@@ -1,0 +1,28 @@
+# Test: blocks, lambdas, closures, optional parameters
+
+# Block as value
+let b = { |_| echo 'block executed' }
+!{b unit}
+# Expected: block executed
+
+# Command substitution
+let result = echo hello
+echo $result
+# Expected: hello
+
+# Lambda
+let double = { |x| return $[$x * 2] }
+echo !{double 5}
+# Expected: 10
+
+# Closure
+let base = 100
+let add_base = { |x| return $[$base + $x] }
+echo !{add_base 42}
+# Expected: 142
+
+# Block scoping
+for [1, 2, 3] { |x|
+    let tmp = $x
+}
+# $tmp should not be visible here — would be a runtime error

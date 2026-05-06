@@ -1,0 +1,43 @@
+# Test: shell-split — POSIX tokenization of shell-quoted strings.
+
+let assert_eq = { |name expected actual|
+    if $[not !{equal $expected $actual}] {
+        echo "FAIL:" $name 1>&2
+        echo "  expected:" $expected 1>&2
+        echo "  actual:  " $actual 1>&2
+        fail [status: 1]
+    }
+}
+
+# Empty string → empty list.
+assert_eq 'empty'        []                      !{shell-split ''}
+
+# Plain whitespace split.
+assert_eq 'plain'        [a, b, c]               !{shell-split 'a b c'}
+
+# Single quotes group words together.
+let sq_expected = [--preview, 'bat --color=always {}']
+assert_eq 'single-quote' $sq_expected !{shell-split "--preview 'bat --color=always {}'"}
+
+# Double quotes group too.
+assert_eq 'double-quote' $sq_expected !{shell-split '--preview "bat --color=always {}"'}
+
+# Backslash escapes next char.
+assert_eq 'backslash'    ['a b', c]              !{shell-split 'a\ b c'}
+
+# Collapsed whitespace.
+assert_eq 'tabs'         [x, y, z]               !{shell-split "x\ty  z"}
+
+# Real-world fzf opts.
+let fzf_expected = [--preview, 'bat --color=always {}', --preview-window=right:50%]
+assert_eq 'fzf-opts' $fzf_expected !{shell-split "--preview 'bat --color=always {}' --preview-window=right:50%"}
+
+# Unmatched quote → error, caught by try.  Handler returns a list (matching
+# the body's `shell-split` return type) so the two branches unify.
+let _ = try { shell-split "oops 'unterminated" } { |err|
+    echo 'unterminated rejected'
+    return []
+}
+# Expected: unterminated rejected
+
+echo 'shell-split tests done'

@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+
+RAL_SH=/usr/bin/ral-sh
+
+if [ "$1" = "configure" ]; then
+    if ! grep -qxF "$RAL_SH" /etc/shells 2>/dev/null; then
+        echo "$RAL_SH" >> /etc/shells
+    fi
+fi

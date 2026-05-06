@@ -1,0 +1,78 @@
+# `minimal` bake-in.  The smallest base that's actually useful as a
+# starting point for additive `--extend-base` composition: standard
+# system binaries (`/bin`, `/usr/bin`) + cwd + scratch, network on,
+# chdir allowed.  Nothing from the user's home except scratch:
+# `xdg:bin` is not admitted (so a fresh tool dropped in
+# `~/.local/bin` is a deliberate choice via extend-base, not an
+# implicit one); `/opt/homebrew` is not admitted (so user-installed
+# brew tools must be opted in); toolchain caches and `~/Library`
+# are not readable.
+#
+# The contrast with `reasonable`: this is "system tools only,
+# nothing pulled from my home or homebrew, network on so I can
+# fetch what I tell it to fetch."  The contrast with `confined`:
+# minimal has network on; confined doesn't.  The contrast with
+# `dangerous + --restrict`: minimal is a curated starting point;
+# dangerous-with-restrict is a bespoke profile written from scratch.
+#
+# `cwd:` and `tempdir:` sigils are resolved by the freeze pass at
+# session start, so the per-invocation working directory bakes in
+# without exarch having to inject anything dynamically.
+#
+# Edit this file to change what `--base minimal` admits.  The
+# contents are baked into the exarch binary at build time via
+# `include_str!`.
+
+audit = false
+net   = true
+
+[shell]
+chdir = true
+
+# Reads and writes mirror the threat model of `reasonable` —
+# writes go only to ephemeral / recoverable surfaces (cwd, scratch,
+# `xdg:cache`) so a hallucinating agent can't corrupt persistent
+# state.  Modern tools that respect `$XDG_CACHE_HOME` land there
+# automatically.  Legacy build tools (cargo, npm, gradle, …) get
+# their home env vars redirected to `$EXARCH_SCRATCH/<tool>` by
+# exarch's runtime.
+[fs]
+read_prefixes = [
+  "cwd:",
+  "/tmp",
+  "tempdir:",
+]
+write_prefixes = [
+  "cwd:",
+  "/tmp",
+  "tempdir:",
+  "xdg:cache",
+]
+
+# Subpath admittance for the standard system binary directories,
+# plus cwd and scratch.  No per-name enumeration of coreutils:
+# every coreutil lives under `/bin/` or `/usr/bin/` and gets
+# admitted by the subpath rule.  This admits more than coreutils —
+# `make`, `find`, `xargs`, `git`, `curl`, `tar`, `awk`, `sed`,
+# `pkg-config`, `clang`, … — which matches what users actually
+# want from "tight but functional."
+#
+# Apple's toolchain (CommandLineTools, Xcode) is folded in
+# automatically by the macOS sandbox base — see
+# `core/src/sandbox/macos.rs::system_paths`.  Building from source
+# works without listing each tool here.
+#
+# `bash` and `zsh` carry over from `reasonable`'s explicit denies:
+# both shells live under `/bin/` (admitted by subpath above), but a
+# literal-match `Deny` overrides the subpath rule.  Autoconf-style
+# `configure` scripts and `make` recipes shell out via `/bin/sh -c`
+# and need `sh` itself; bash/zsh are agent quality-of-life only.
+[exec]
+"/bin/"      = "Allow"
+"/usr/bin/"  = "Allow"
+"cwd:/"      = "Allow"
+"/tmp/"      = "Allow"
+"tempdir:/"  = "Allow"
+
+bash = "Deny"
+zsh  = "Deny"

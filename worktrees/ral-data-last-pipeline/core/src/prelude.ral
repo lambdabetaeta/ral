@@ -1,0 +1,379 @@
+# ral prelude — standard library
+#
+# Wrappers around _ primitives come first so they're in scope for
+# all subsequent lambdas (closures capture at definition time).
+
+# Strings — direct builtins: upper, lower, split, match, replace,
+# replace-all, intercalate, slice, find-match, find-matches, dedent,
+# shell-quote, shell-split.  (`join` itself is the coreutils command
+# for joining lines from two files; ral's list-of-strings join is
+# `intercalate` — interpose a separator between every pair.)  Use
+# `$name` to obtain a first-class value (a synthesised thunk pinned
+# to the primitive).
+## Split a string into lines.
+let lines = { |s| split '\n' $s }
+## Split a string into Unicode-whitespace-delimited words.
+let words = { |s| split '\s+' $s }
+
+# Paths (wrappers around _path)
+## File stem (basename without extension).
+let stem = { |p| _path 'stem' $p }
+## File extension.
+let ext = { |p| _path 'ext' $p }
+## Parent directory of a path.
+let dir = { |p| _path 'dir' $p }
+## Basename of a path.
+let base = { |p| _path 'base' $p }
+## Resolve a path to an absolute path.
+let resolve-path = { |p| _path 'resolve' $p }
+## Join path components.
+let path-join = { |parts| _path 'join' $parts }
+
+# Filesystem — read-only (wrappers around _fs)
+## Count lines in a file.
+let line-count = { |p| _fs 'lines' $p }
+## File size in bytes.
+let file-size = { |p| _fs 'size' $p }
+## File modification time (seconds since epoch).
+let file-mtime = { |p| _fs 'mtime' $p }
+## True if file has zero bytes or directory has no entries.
+let file-empty = { |p| _fs 'empty' $p }
+
+# Filesystem — queries (wrappers around _fs)
+## List directory contents as [{name, type, size, mtime}].
+let list-dir = { |p| _fs 'list' $p }
+## Create a temporary directory.
+let temp-dir = { _fs 'tempdir' }
+## Create a temporary file.
+let temp-file = { _fs 'tempfile' }
+
+# Value coercions (wrappers around _convert)
+## Parse a value as an integer.
+let int = { |v| _convert 'int' $v }
+## Parse a value as a float.
+let float = { |v| _convert 'float' $v }
+## Convert a value to its string representation.
+let str = { |v| _convert 'string' $v }
+
+# Control flow
+## Iterate over a list for side effects.
+let for = { |items body| _each $items $body }
+# Functional combinators — data-last for curried threading.
+# `map`, `filter`, `sort-list`, `sort-list-by` are builtins under their
+# bare names; only `each`, `fold`, `reduce` need wrappers (re-ordering
+# args to data-last or supplying a non-empty default).
+
+## Apply fn for each element (data-last). See also: for.
+let each = { |f items| _each $items $f }
+## Reduce a list: fold <fn> <init> <items>.
+let fold = { |f init items| _fold $items $init $f }
+## Reduce without an initial value; list must be non-empty.
+let reduce = { |f items|
+    if !{is-empty $items} { fail [status: 1] } else {
+        let [head, ...tail] = $items
+        fold $f $head $tail
+    }
+}
+
+## Reverse a list.
+let reverse = { |items|
+    let _rev = { |xs acc|
+        if !{is-empty $xs} { return $acc } else {
+            let [h, ...t] = $xs
+            _rev $t [$h, ...$acc]
+        }
+    }
+    _rev $items []
+}
+
+## Get a map value, returning default if key is absent.
+let get = { |m key default|
+    if !{has $m $key} { return $m[$key] } else { return $default }
+}
+
+# List combinators
+## Take elements from the front while predicate holds.
+let take-while = { |pred items|
+    let _go = { |xs acc|
+        if !{is-empty $xs} {
+            let rev = !{reverse $acc}
+            return $rev
+        } else {
+            let [head, ...rest] = $xs
+            if !{$pred $head} { _go $rest [$head, ...$acc] } else {
+                let rev = !{reverse $acc}
+                return $rev
+            }
+        }
+    }
+    _go $items []
+}
+## Drop elements from the front while predicate holds.
+let drop-while = { |pred items|
+    if !{is-empty $items} { return [] } else {
+        let [head, ...rest] = $items
+        if !{$pred $head} {
+            drop-while $pred $rest
+        } else { return $items }
+    }
+}
+## Take the first n elements.
+let take = { |n items|
+    let _go = { |k xs acc|
+        if $[$k <= 0 || !{is-empty $xs}] {
+            let rev = !{reverse $acc}
+            return $rev
+        } else {
+            let [head, ...rest] = $xs
+            _go $[$k - 1] $rest [$head, ...$acc]
+        }
+    }
+    _go $n $items []
+}
+## Drop the first n elements.
+let drop = { |n items|
+    if $[$n <= 0 || !{is-empty $items}] { return $items } else {
+        let [_, ...rest] = $items
+        drop $[$n - 1] $rest
+    }
+}
+
+# Error handling
+## Retry body up to n times on failure.
+let retry = { |n body|
+    try $body { |err|
+        if $[$n > 1] { retry $[$n - 1] $body } else { fail $err }
+    }
+}
+
+# Dispatch
+## Dispatch on a value by trying each parameterised block in order; the first
+## whose parameter pattern matches wins.  Catch-all is { |_| ... }.  Value
+## equality dispatch uses explicit `equal` inside a clause body.
+let case = { |val clauses|
+    let try-clauses = { |cs|
+        if !{is-empty $cs} { fail [status: 1] } else {
+            let [c, ...rest] = $cs
+            let r = _try-apply $c $val
+            if $r[ok] { return $r[value] } else { try-clauses $rest }
+        }
+    }
+    !{try-clauses $clauses}
+}
+
+# Concurrency, cleanup, observability, failure suppression — each
+# primitive is a builtin under its non-underscored name.  No prelude
+# wrappers needed; see `core/src/builtins.rs` for the registry.
+
+## Run body; suppress failure and return unit.  For fire-and-forget commands
+## where the outcome is irrelevant.
+let attempt = { |body| let _ = _try $body }
+
+# Map utilities
+## Map keys to [key, value] pairs.
+let entries = { |m| map { |k| return [$k, $m[$k]] } !{keys $m} }
+## Map keys to their values as a list.
+let values = { |m| map { |k| return $m[$k] } !{keys $m} }
+## Merge two maps; b's entries win on conflict.
+let union = { |a b| fold { |m k| if !{has $m $k} { return [...$m, $k: $b[$k]] } else { return $m } } $a !{keys $b} }
+## Keys present in both maps, with a's values.
+let intersection = { |a b| fold { |m k| return [...$m, $k: $a[$k]] } [:] !{filter { |k| has $b $k } !{keys $a}} }
+## Keys in a but not in b, with a's values.
+let difference = { |a b| fold { |m k| if !{has $b $k} { return $m } else { return [...$m, $k: $a[$k]] } } [:] !{keys $a} }
+
+# Standard library
+## Sum a list of numbers.
+let sum = { |items| fold { |acc x| return $[$acc + $x] } 0 $items }
+
+## Generate an integer sequence [start, start+1, ..., end-1].
+let seq = { |start end|
+    let _go = { |i acc|
+        if $[$i < $start] { return $acc } else {
+            _go $[$i - 1] [$i, ...$acc]
+        }
+    }
+    _go $[$end - 1] []
+}
+
+## Zip two lists into a list of pairs (tail-recursive).
+let zip = { |a b|
+    let _go = { |xs ys acc|
+        if $[!{is-empty $xs} || !{is-empty $ys}] {
+            let rev = !{reverse $acc}
+            return $rev
+        } else {
+            let [xh, ...xt] = $xs
+            let [yh, ...yt] = $ys
+            _go $xt $yt [[$xh, $yh], ...$acc]
+        }
+    }
+    _go $a $b []
+}
+
+## Map f over items, then flatten one level.
+let flat-map = { |f items|
+    let mapped = !{map $f $items}
+    concat $mapped
+}
+
+## Return the first element matching pred; fails if none matches.
+let first = { |pred items|
+    if !{is-empty $items} { fail [status: 1] } else {
+        let [head, ...rest] = $items
+        if !{$pred $head} { return $head } else { first $pred $rest }
+    }
+}
+
+## Zip items with their indices: enumerate $xs → [[index: 0, item: x0], ...].
+let enumerate = { |items|
+    map { |i| return [index: $i, item: $items[$i]] } !{seq 0 !{length $items}}
+}
+
+## Flatten a list of lists one level (tail-recursive).
+let concat = { |xss|
+    let _go = { |remaining acc|
+        if !{is-empty $remaining} {
+            return $acc
+        } else {
+            let [head, ...rest] = $remaining
+            _go $rest [...$acc, ...$head]
+        }
+    }
+    _go $xss []
+}
+
+# File reading sugar — depend on `enumerate`, `take`, `drop`, and `map`
+# above.  Delegate to `from-lines` via `<`, which handles `\r\n` and
+# strips a trailing newline cleanly.
+
+## Read a slice of lines: `start` is 1-indexed, `count` is the number
+## of lines to take.  Returns at most `count` lines; fewer if the
+## slice runs past EOF.  Out-of-range starts return [].
+let read-file-range = { |p start count|
+    take $count !{drop $[$start - 1] !{from-lines < $p}}
+}
+
+## Read a file with 1-indexed line numbers prepended to each line,
+## two spaces between number and content (cat -n shape).  Useful for
+## citing locations in agent or tool output.
+let read-file-numbered = { |p|
+    let xs = !{from-lines < $p}
+    let formatted = map { |x|
+        let n = $[$x[index] + 1]
+        let line = $x[item]
+        return "$n  $line"
+    } !{enumerate $xs}
+    intercalate "\n" $formatted
+}
+
+# Streaming (stdin, line by line).  `fold-lines` is a builtin; `map-lines`
+# and `filter-lines` are ergonomic wrappers around it.
+## Map a function over stdin lines, echoing results.
+let map-lines = { |f|
+    fold-lines { |_ line| echo !{$f $line}; return unit } unit
+}
+## Filter stdin lines by a predicate.
+let filter-lines = { |pred|
+    fold-lines { |_ line|
+        if !{$pred $line} { echo $line } else { return unit }
+        return unit
+    } unit
+}
+## Apply a function to each stdin line.
+let each-line = { |f|
+    fold-lines { |_ line| $f $line; return unit } unit
+}
+
+# ANSI styling
+## ANSI escape constants for terminal colour and style.
+## All constants are empty strings when colour is not supported,
+## so `styled` and interpolated uses are automatically no-ops.
+let ansi-reset   = if !{_ansi-ok} { return "\e[0m"    } else { return '' }
+let ansi-bold    = if !{_ansi-ok} { return "\e[1m"    } else { return '' }
+let ansi-dim     = if !{_ansi-ok} { return "\e[2m"    } else { return '' }
+let ansi-red     = if !{_ansi-ok} { return "\e[0;31m" } else { return '' }
+let ansi-green   = if !{_ansi-ok} { return "\e[0;32m" } else { return '' }
+let ansi-yellow  = if !{_ansi-ok} { return "\e[0;33m" } else { return '' }
+let ansi-blue    = if !{_ansi-ok} { return "\e[0;34m" } else { return '' }
+let ansi-magenta = if !{_ansi-ok} { return "\e[0;35m" } else { return '' }
+let ansi-cyan    = if !{_ansi-ok} { return "\e[0;36m" } else { return '' }
+## Wrap text in an ANSI style code, resetting after.
+let styled = { |code text| "$code$text$ansi-reset" }
+
+# File editing — depends on ANSI helpers above
+## Edit a file by replacing one occurrence of `from` with `to`. Errors
+## propagate from `replace` if `from` is absent or matches more than
+## once. On success, prints a `-/+` diff to stderr (coloured on a tty,
+## plain otherwise — the ansi-* constants collapse when not a tty).
+let edit-file = { |path from to|
+    let body = !{from-string < $path}
+    to-string !{replace $from $to $body} > $path
+    _warn $path
+    for !{lines $from} { |l| _warn !{styled $ansi-red "- $l"} }
+    for !{lines $to}   { |l| _warn !{styled $ansi-green "+ $l"} }
+}
+
+# Editor state — wrappers around _editor 'get' / 'set' (plugin API)
+## Get editor state record [text, cursor, keymap].
+let _ed-get    = { _editor 'get' }
+## Set editor state from a record.
+let _ed-set    = { |s| _editor 'set' $s }
+## Get the current buffer text.
+let _ed-text   = { let s = _editor 'get'; return $s[text] }
+## Get the current cursor position.
+let _ed-cursor = { let s = _editor 'get'; return $s[cursor] }
+## Get the current keymap name.
+let _ed-keymap = { let s = _editor 'get'; return $s[keymap] }
+
+# Split-buffer convenience (plugin API)
+## Get text left of cursor.
+let _ed-lbuffer = {
+    let s = _editor 'get'
+    slice $s[text] 0 $s[cursor]
+}
+
+## Set text left of cursor, preserving the right side.
+let _ed-set-lbuffer = { |l|
+    let s = _editor 'get'
+    let r = slice $s[text] $s[cursor] $[!{length $s[text]} - $s[cursor]]
+    _editor 'set' [text: "$l$r", cursor: !{length $l}]
+}
+
+## Insert text at cursor position.
+let _ed-insert = { |str|
+    let s = _editor 'get'
+    let l = slice $s[text] 0 $s[cursor]
+    let r = slice $s[text] $s[cursor] $[!{length $s[text]} - $s[cursor]]
+    _editor 'set' [text: "$l$str$r", cursor: $[$s[cursor] + !{length $str}]]
+}
+
+## Suspend the editor and run a TUI block; return [output, status] without
+## raising on body status.  Plugins handle Esc (130) and "no match" (1)
+## gracefully by checking status; infrastructure errors (capability denial
+## etc.) still raise.  Raw access without the record wrap is
+## `_editor 'tui' $body`.
+let _ed-tui = { |body|
+    try {
+        let output = _editor 'tui' $body
+        return [output: $output, status: 0]
+    } { |e|
+        return [output: $e[message], status: $e[status]]
+    }
+}
+
+## Test if x is an element of items.
+let elem = { |x items|
+    if !{is-empty $items} { return false } else {
+        let [head, ...rest] = $items
+        if !{equal $head $x} { return true } else { elem $x $rest }
+    }
+}
+
+# Plugin lifecycle
+## Load a plugin by name (or path) with an options map.  The options map
+## is passed as the single argument to the plugin's top-level block; plugins
+## extract fields by name (with defaults via `get`).  Pass [:] for plugins
+## that take no options.
+let load-plugin   = { |name options| _plugin 'load' $name $options }
+## Unload a plugin by name.
+let unload-plugin = { |name| _plugin 'unload' $name }

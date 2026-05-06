@@ -1,0 +1,265 @@
+# `reasonable` bake-in.  Coreutils + a curated everyday-tooling set
+# (shells, version control, net fetch, search/inspect, scripting,
+# archives), plus directory-based allowance (trailing-`/` keys in
+# `[exec]`) for the standard system / package-manager binary dirs so
+# build drivers (cargo, make, cc, npm, …) work out of the box.
+#
+# In spirit similar to Claude Code's default tool set.  The OS
+# sandbox (Seatbelt fs/net rules) still does the real work — a
+# permissive exec list paired with a strict fs grant means the
+# agent can run cargo but can't write outside cwd / read your SSH
+# keys / open arbitrary network endpoints.
+#
+# Default base when `--base` is omitted.
+
+audit = false
+net = true
+
+[shell]
+chdir = true
+
+# Build-toolchain caches, user-installed toolchains, and the
+# project tree itself.  The OS sandbox layer's system paths
+# (CommandLineTools, /opt/homebrew, /etc/alternatives, …) are
+# added separately; this section covers what the OS layer can't
+# bake in.
+#
+# Path-prefix sigils are expanded before grant matching:
+#   * `~` / `~user` — the usual shell tilde rule.
+#   * `xdg:NAME[/sub]` — an XDG basedir, honouring `XDG_*_HOME` env
+#     vars with the Linux defaults universally.
+#   * `cwd:[/sub]` — the working directory at session start.
+#   * `tempdir:[/sub]` — `std::env::temp_dir()`.
+#
+# See `core/src/path/sigil.rs` for the recognised tokens.
+#
+# Tool-specific caches and registries (~/.cargo/registry,
+# ~/.gradle/caches, ~/.m2/repository, …) are scoped to the cache
+# subpath rather than the tool root, since the root usually holds
+# adjacent credential files: ~/.cargo/credentials.toml is the
+# crates.io publish token, ~/.gradle/gradle.properties and
+# ~/.m2/settings.xml hold repository credentials.
+#
+# The XDG basedirs are all readable so tools find their configs,
+# data files, and binaries — but only `xdg:cache` is writable.
+# Two reasons for the asymmetry:
+#
+#   * `xdg:bin/` in `[exec]` admits any resolved path under it. Write
+#     access there would let a sandboxed process drop a binary the
+#     next call auto-admits — a sandbox escape via filesystem.
+#
+#   * `xdg:config` holds credentials for many tools (gh, op,
+#     gcloud OAuth tokens, …).  Read is accepted as a
+#     data-exfiltration risk; write would let an agent rewrite
+#     those configs.
+[fs]
+read_prefixes = [
+  "cwd:",                   # the project tree the agent is working in
+  "/tmp",
+  "tempdir:",               # `$TMPDIR` on macOS — distinct from /tmp
+  "xdg:config",             # ${XDG_CONFIG_HOME:-~/.config}
+  "xdg:data",               # ${XDG_DATA_HOME:-~/.local/share}
+  "xdg:cache",              # ${XDG_CACHE_HOME:-~/.cache}
+  "xdg:state",              # ${XDG_STATE_HOME:-~/.local/state}
+  "xdg:bin",                # ${XDG_BIN_HOME:-~/.local/bin}
+  "~/Library/Caches",       # macOS-native CLI caches outside the XDG world
+  "~/.cargo/registry",
+  "~/.cargo/git",
+  "~/.rustup",
+  "~/go",
+  "~/.npm",
+  "~/.gem",
+  "~/.bundle",
+  "~/.gradle/caches",
+  "~/.m2/repository",
+  "~/.pyenv",
+  "~/.rbenv",
+  "~/.nvm",
+]
+# Writes go to ephemeral / recoverable surfaces only — the working
+# tree, scratch directories, and `xdg:cache`.  The XDG spec defines
+# cache contents as re-derivable, so a hallucinating agent that
+# corrupts `~/.cache/foo` causes at most a re-fetch.  Modern tooling
+# (uv, pnpm, bun, mise, ruff, hatch, …) respects `$XDG_CACHE_HOME`
+# and lands its writes there automatically.
+#
+# The user's real cache dirs (~/.cargo/registry, ~/.npm,
+# ~/.gradle/caches, …) stay *read*-only — they're persistent caches
+# the user pre-warmed; agent writes there would force re-fetches in
+# their later non-agent shells.  Legacy tools that ignore XDG (cargo,
+# npm, gradle, maven, go) get redirected to `$EXARCH_SCRATCH`/<tool>
+# at session entry by exarch's runtime, so `cargo build` and friends
+# work without the agent having to know any redirection protocol.
+#
+# `xdg:config`, `xdg:data`, `xdg:state`, `xdg:bin` stay non-writable:
+# tool configs (gitconfig, npmrc) shouldn't be silently rewritten;
+# persistent state (browser data, history) shouldn't be corrupted;
+# and write-to-`xdg:bin` would let an agent drop a binary the next
+# call auto-admits via the `[exec]` `xdg:bin/` subpath — sandbox
+# escape via filesystem.
+write_prefixes = [
+  "cwd:",
+  "/tmp",
+  "tempdir:",
+  "xdg:cache",
+]
+
+# Per-tool credential subdirs of `xdg:config`.  The broad `xdg:config`
+# read above is intentional (tools mysteriously break without their
+# config), but a few well-known dirs hold OAuth tokens or session
+# secrets the agent should never see, even read-only.  These are
+# overlaid as denies; same shape as `.exarch.toml`'s self-deny.
+deny_paths = [
+  "xdg:config/gh",      # gh CLI — hosts.yml has the GitHub OAuth token
+  "xdg:config/op",      # 1Password CLI session
+  "xdg:config/gcloud",  # Google Cloud SDK OAuth
+]
+
+[exec]
+# Directory-based exec admittance.  A key ending in `/` is a subpath
+# prefix: any binary whose resolved absolute path lies inside the
+# directory is admitted with `Allow`.  Per-name entries below win on
+# more-specific match, so `bash = "Deny"` overrides `"/bin/" = "Allow"`
+# even though `/bin/bash` is under `/bin/`.
+"xdg:bin/"            = "Allow"   # ${XDG_BIN_HOME:-~/.local/bin}
+"/usr/bin/"           = "Allow"
+"/bin/"               = "Allow"
+"/usr/local/bin/"     = "Allow"
+"/opt/homebrew/bin/"  = "Allow"   # Apple-silicon Homebrew
+"/opt/homebrew/sbin/" = "Allow"
+"/usr/local/sbin/"    = "Allow"
+"/usr/sbin/"          = "Allow"
+"/sbin/"              = "Allow"
+"cwd:/"               = "Allow"   # scripts the agent drops into the project tree
+"/tmp/"               = "Allow"   # scratch builds (autotools `./configure`, ad-hoc scripts)
+"tempdir:/"           = "Allow"   # `$TMPDIR` on macOS — distinct from /tmp
+
+# Coreutils
+arch         = "Allow"
+b2sum        = "Allow"
+base32       = "Allow"
+base64       = "Allow"
+basename     = "Allow"
+basenc       = "Allow"
+cat          = "Allow"
+cksum        = "Allow"
+comm         = "Allow"
+cp           = "Allow"
+csplit       = "Allow"
+cut          = "Allow"
+date         = "Allow"
+df           = "Allow"
+dir          = "Allow"
+dircolors    = "Allow"
+dirname      = "Allow"
+du           = "Allow"
+echo         = "Allow"
+env          = "Allow"
+expand       = "Allow"
+expr         = "Allow"
+factor       = "Allow"
+fmt          = "Allow"
+fold         = "Allow"
+head         = "Allow"
+hostname     = "Allow"
+join         = "Allow"
+link         = "Allow"
+ln           = "Allow"
+ls           = "Allow"
+md5sum       = "Allow"
+mkdir        = "Allow"
+mktemp       = "Allow"
+mv           = "Allow"
+nl           = "Allow"
+nproc        = "Allow"
+numfmt       = "Allow"
+od           = "Allow"
+paste        = "Allow"
+pr           = "Allow"
+printenv     = "Allow"
+printf       = "Allow"
+ptx          = "Allow"
+pwd          = "Allow"
+readlink     = "Allow"
+realpath     = "Allow"
+rm           = "Allow"
+rmdir        = "Allow"
+seq          = "Allow"
+sha1sum      = "Allow"
+sha224sum    = "Allow"
+sha256sum    = "Allow"
+sha384sum    = "Allow"
+sha512sum    = "Allow"
+shred        = "Allow"
+shuf         = "Allow"
+sleep        = "Allow"
+sort         = "Allow"
+sum          = "Allow"
+sync         = "Allow"
+tac          = "Allow"
+tail         = "Allow"
+tee          = "Allow"
+test         = "Allow"
+touch        = "Allow"
+tr           = "Allow"
+truncate     = "Allow"
+tsort        = "Allow"
+uname        = "Allow"
+unexpand     = "Allow"
+uniq         = "Allow"
+unlink       = "Allow"
+vdir         = "Allow"
+wc           = "Allow"
+whoami       = "Allow"
+yes          = "Allow"
+
+# Shells
+sh           = "Deny"
+bash         = "Deny"
+zsh          = "Deny"
+
+# Version control
+git          = "Allow"
+gh           = "Allow"
+
+# Net fetch
+curl         = "Allow"
+wget         = "Allow"
+
+# Search / inspect
+rg           = "Allow"
+fd           = "Allow"
+jq           = "Allow"
+yq           = "Allow"
+awk          = "Allow"
+gawk         = "Allow"
+find         = "Allow"
+xargs        = "Allow"
+file         = "Allow"
+which        = "Allow"
+
+# Scripting runtimes (one-off scripts, common as tooling)
+python       = "Allow"
+python3      = "Allow"
+
+# Archives
+tar          = "Allow"
+gzip         = "Allow"
+gunzip       = "Allow"
+bzip2        = "Allow"
+bunzip2      = "Allow"
+xz           = "Allow"
+zip          = "Allow"
+unzip        = "Allow"
+
+# Diff / patch / docs
+diff         = "Allow"
+patch        = "Allow"
+less         = "Allow"
+more         = "Allow"
+man          = "Allow"
+
+# Process inspection (read-only)
+ps           = "Allow"
+lsof         = "Allow"
+pgrep        = "Allow"

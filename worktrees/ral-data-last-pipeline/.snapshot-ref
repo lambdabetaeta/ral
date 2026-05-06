@@ -1,0 +1,5 @@
+commit 3a6cdce
+core: pipeline carries upstream as data-last arg; drop value_in side channel
+
+This is the semantic reference point where pipeline stage invocation was
+defined as data-last application: `x | f` means `f !{x}`.

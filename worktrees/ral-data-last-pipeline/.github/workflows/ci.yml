@@ -1,0 +1,44 @@
+name: CI
+# Smoke checks on every push and PR: format, lint, build, test.
+# Kept deliberately lean (single Linux runner, no cross-targets) so it
+# stays cheap in Actions minutes.  Cross-target builds live in
+# build-binaries.yml and only run on version-tag pushes.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # rust-toolchain.toml pins the channel + components; this action
+      # respects it automatically.
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+          components: rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo build
+        run: cargo build --workspace --all-targets
+
+      # Integration tests in ral/tests/ invoke the `ral` binary as a
+      # subprocess, so `cargo build` above is load-bearing — `cargo test`
+      # alone does not reliably refresh that binary.
+      - name: cargo test
+        run: cargo test --workspace
+
+      - name: Render site index
+        run: python3 scripts/render-site-index.py

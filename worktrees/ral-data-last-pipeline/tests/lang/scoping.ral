@@ -1,0 +1,31 @@
+# Test: §3 lexical scoping, closures, shadowing
+
+# Lexical scoping
+let x = 10
+let f = { |y| return $[$x + $y] }
+echo !{f 5}
+# Expected: 15
+
+# Closures capture at definition
+let x = 10
+let f = { |y| return $[$x + $y] }
+let x = 20
+echo !{f 5}
+# Expected: 15 (captured x=10, not x=20)
+
+# Block-like scoping via lambda call
+let x = 'outer'
+!{{ |_|
+    let x = 'inner'
+    echo $x
+    return unit
+} unit}
+echo $x
+# Expected: inner, outer
+
+# Shadowing in for does not leak
+let total = fold { |acc x| return $[$acc + $x] } 0 [1, 2, 3]
+echo $total
+# Expected: 6
+
+echo 'scoping tests done'

@@ -1,0 +1,44 @@
+# Test: standard library functions (prelude wrappers)
+
+# sum
+echo !{sum [1, 2, 3, 4, 5]}
+# Expected: 15
+
+echo !{sum [10, 20, 30]}
+# Expected: 60
+
+# lines
+let parts = lines "hello\nworld\nfoo"
+let nparts = length $parts
+echo $nparts
+# Expected: 3
+
+# line-count
+echo hello > /tmp/ral-stdlib-test
+echo world >> /tmp/ral-stdlib-test
+echo foo >> /tmp/ral-stdlib-test
+echo !{line-count /tmp/ral-stdlib-test}
+# Expected: 3
+
+# read file via from-string < path
+let content = !{from-string < /tmp/ral-stdlib-test}
+echo $content
+# Expected: hello\nworld\nfoo (as one string)
+
+rm /tmp/ral-stdlib-test
+
+# data-last fold
+echo !{fold { |acc x| return $[$acc + $x] } 0 [1, 2, 3]}
+# Expected: 6
+
+# data-last reduce
+echo !{reduce { |a b| return $[$a * $b] } [2, 3, 4]}
+# Expected: 24
+
+# Composition via substitution
+let doubled = map { |x| return $[$x * 2] } [1, 2, 3, 4, 5]
+let result = sum $doubled
+echo $result
+# Expected: 30
+
+echo 'stdlib tests done'

@@ -1,0 +1,58 @@
+;; ral macOS Seatbelt base profile.
+;;
+;; This file is the policy-independent preamble of the Seatbelt profile
+;; ral installs at the entry of every `grant { fs: ... | net: ...
+;; | exec: ... }` block on macOS.  It is concatenated with policy-derived
+;; rules emitted by `core/src/sandbox/macos.rs::build_profile` (write
+;; prefixes, deny_paths, exec allow-list, network bit) at runtime.
+;;
+;; Structure adapted from BrianSwift/macOSSandboxBuild's `confined.sb`:
+;;   https://github.com/BrianSwift/macOSSandboxBuild/blob/master/confined.sb
+;; The deny-default + selective-allow shape, the folded `file-read*
+;; process-exec` idiom for binary directories, and the use of
+;; `(allow process-fork)` next to `(allow process-exec ...)` (Seatbelt
+;; gates fork separately from exec) all come from there.  ral diverges
+;; in two places:
+;;
+;;   * paths are inlined at profile-build time rather than passed as
+;;     `(param "_RX1")`, since ral's `exec_dirs` toml is variable-length
+;;     and Seatbelt parameters are scalars; and
+;;   * read prefixes for the user's policy-allowed system roots are
+;;     derived from the projection at runtime, not hard-coded — see
+;;     `system_read_paths` in `macos.rs`.
+;;
+;; Anything in this file should be true for *every* sandbox entry,
+;; independent of which grant the user wrote.
+
+(version 1)
+(deny default)
+
+;; Self-targeted signals (kill, etc.) — without this even
+;; `process::exit` paths can hit a denial.
+(allow signal (target self))
+
+;; Read sysctls — many runtimes (libdispatch, libmalloc) probe these on
+;; init and abort if denied.  Read-only.
+(allow sysctl-read)
+
+;; dyld talks to launchd over Mach to locate the dyld shared cache;
+;; without it `(allow process-exec)` is not enough — the child aborts
+;; before main().
+(allow mach-lookup)
+
+;; process-exec without process-fork yields EPERM at spawn time:
+;; Seatbelt gates fork() separately from execve().
+(allow process-fork)
+
+;; Path resolution requires reading the root inode itself, even when
+;; every interesting subpath is allowed via (subpath ...).  Without this
+;; dyld aborts with SIGABRT before main().
+(allow file-read* (literal "/"))
+
+;; Shell redirections and common libc / tooling paths open these device
+;; nodes for write.  Without explicit literal allows, `2>/dev/null` and
+;; similar patterns fail under Seatbelt even though `/dev` is readable.
+(allow file-write* (literal "/dev/null"))
+(allow file-write* (literal "/dev/zero"))
+(allow file-write* (literal "/dev/dtracehelper"))
+(allow file-write* (literal "/dev/tty"))

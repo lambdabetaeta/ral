@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ral</title>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg:      #07000c;
+      --orange:  #ff7a15;
+      --bright:  #ffae5c;
+      --dim:     #c46010;
+      --dimmer:  #7a3800;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--orange);
+      font-family: 'Lucida Console', 'Courier New', 'DejaVu Sans Mono', monospace;
+      font-size: 18px;
+      overflow-x: hidden;
+    }
+
+    /* scanlines */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: repeating-linear-gradient(
+        to bottom,
+        transparent 0px,
+        transparent 3px,
+        rgba(0, 0, 0, 0.18) 3px,
+        rgba(0, 0, 0, 0.18) 4px
+      );
+      pointer-events: none;
+      z-index: 10;
+    }
+
+    /* vignette */
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: radial-gradient(
+        ellipse 80% 80% at 50% 50%,
+        transparent 55%,
+        rgba(0, 0, 0, 0.75) 100%
+      );
+      pointer-events: none;
+      z-index: 9;
+    }
+
+    main {
+      position: relative;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 2.2rem;
+      z-index: 1;
+      padding: 3rem 1.5rem;
+    }
+
+    h1 {
+      font-size: clamp(3.5rem, 10vw, 6rem);
+      font-weight: normal;
+      letter-spacing: 0.6rem;
+      text-indent: 0.6rem;
+      color: var(--bright);
+      text-shadow:
+        0 0 6px  var(--orange),
+        0 0 18px var(--dim),
+        0 0 40px var(--dimmer);
+    }
+
+    .cursor {
+      display: inline-block;
+      width: 0.52em;
+      height: 0.9em;
+      background: var(--bright);
+      box-shadow: 0 0 8px var(--orange), 0 0 16px var(--dim);
+      animation: blink 1.15s step-end infinite;
+      vertical-align: text-bottom;
+      margin-left: 0.1em;
+    }
+
+    @keyframes blink { 50% { opacity: 0; } }
+
+    .tagline {
+      font-size: 0.82rem;
+      color: var(--dim);
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+    }
+
+    /* install box */
+    .install {
+      display: inline-flex;
+      flex-direction: column;
+      gap: 0.35rem;
+      border: 1px solid var(--dim);
+      padding: 0.9rem 1.5rem;
+      background: rgba(232, 104, 0, 0.03);
+      box-shadow:
+        0 0 0 1px var(--dimmer),
+        0 0 20px rgba(232, 104, 0, 0.08),
+        inset 0 0 16px rgba(232, 104, 0, 0.03);
+      cursor: pointer;
+      transition: border-color 0.2s, box-shadow 0.2s;
+      user-select: none;
+    }
+
+    .install:hover {
+      border-color: var(--orange);
+      box-shadow:
+        0 0 0 1px var(--dim),
+        0 0 28px rgba(232, 104, 0, 0.18),
+        inset 0 0 16px rgba(232, 104, 0, 0.06);
+    }
+
+    .install-label {
+      font-size: 0.6rem;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--dim);
+    }
+
+    .install code {
+      font-family: inherit;
+      font-size: clamp(0.7rem, 2.2vw, 0.88rem);
+      color: var(--bright);
+      text-shadow: 0 0 8px var(--orange);
+      white-space: nowrap;
+    }
+
+    .copied {
+      font-size: 0.62rem;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--dim);
+      opacity: 0;
+      transition: opacity 0.25s;
+      height: 1rem;
+    }
+
+    .copied.show { opacity: 1; }
+
+    /* doc links */
+    .docs {
+      display: flex;
+      gap: 1.2rem;
+    }
+
+    .doc-link {
+      display: inline-block;
+      border: 1px solid var(--dim);
+      padding: 0.65rem 1.8rem;
+      background: rgba(232, 104, 0, 0.03);
+      box-shadow:
+        0 0 0 1px var(--dimmer),
+        0 0 20px rgba(232, 104, 0, 0.06),
+        inset 0 0 12px rgba(232, 104, 0, 0.02);
+      color: var(--dim);
+      text-decoration: none;
+      font-size: 0.72rem;
+      letter-spacing: 0.3em;
+      text-transform: uppercase;
+      transition: color 0.2s, border-color 0.2s, box-shadow 0.2s;
+    }
+
+    .doc-link:hover {
+      color: var(--bright);
+      border-color: var(--orange);
+      box-shadow:
+        0 0 0 1px var(--dim),
+        0 0 28px rgba(232, 104, 0, 0.16),
+        inset 0 0 16px rgba(232, 104, 0, 0.05);
+      text-shadow: 0 0 8px var(--orange);
+    }
+
+    /* ── downloads ── */
+    .downloads {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1.4rem;
+      width: 100%;
+      max-width: 680px;
+    }
+
+    .downloads-label {
+      font-size: 0.6rem;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--dim);
+    }
+
+    .dl-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 0.7rem;
+      width: 100%;
+    }
+
+    .dl-group {
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+    }
+
+    .dl-os {
+      font-size: 0.58rem;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--dim);
+      padding-bottom: 0.25rem;
+      border-bottom: 1px solid var(--dimmer);
+      margin-bottom: 0.1rem;
+    }
+
+    .dl-btn {
+      display: block;
+      border: 1px solid var(--dimmer);
+      padding: 0.5rem 0.7rem;
+      background: rgba(232, 104, 0, 0.02);
+      color: var(--dim);
+      text-decoration: none;
+      font-family: inherit;
+      font-size: 0.65rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      transition: color 0.2s, border-color 0.2s, box-shadow 0.2s, background 0.2s;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .dl-btn:hover {
+      color: var(--bright);
+      border-color: var(--orange);
+      background: rgba(232, 104, 0, 0.06);
+      box-shadow:
+        0 0 0 1px var(--dim),
+        0 0 16px rgba(232, 104, 0, 0.12),
+        inset 0 0 10px rgba(232, 104, 0, 0.04);
+      text-shadow: 0 0 6px var(--orange);
+    }
+
+    .dl-btn.primary {
+      color: var(--orange);
+      border-color: var(--dim);
+    }
+
+    .dl-btn.allutils {
+      font-size: 0.6rem;
+      opacity: 0.75;
+    }
+
+    .dl-btn.allutils::before {
+      content: '+ ';
+      color: var(--dimmer);
+    }
+
+    .dl-sep {
+      border: none;
+      border-top: 1px solid var(--dimmer);
+      width: 100%;
+      margin: 0.2rem 0;
+    }
+
+    .dl-src {
+      display: flex;
+      gap: 0.7rem;
+      justify-content: center;
+    }
+
+    .dl-src .dl-btn {
+      font-size: 0.6rem;
+      padding: 0.45rem 1rem;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>ral<span class="cursor"></span></h1>
+    <p class="tagline">a simple yet modern shell built on algebraic effects</p>
+    <div class="install" id="install" role="button" aria-label="Copy install command">
+      <span class="install-label">install</span>
+      <code>curl -fsSL https://lambdabetaeta.github.io/ral/scripts/install.sh | sh</code>
+    </div>
+    <p class="copied" id="copied" aria-live="polite">copied to clipboard</p>
+    <div class="docs">
+      <a class="doc-link" href="spec.html">spec</a>
+      <a class="doc-link" href="rationale.html">rationale</a>
+    </div>
+
+    <div class="downloads">
+      <span class="downloads-label">downloads</span>
+      <div class="dl-grid">
+{{DOWNLOAD_GROUPS}}
+      </div>
+      <hr class="dl-sep">
+      <div class="dl-src">
+        <a class="dl-btn" href="https://github.com/lambdabetaeta/ral/archive/refs/heads/main.tar.gz" download>source .tar.gz</a>
+        <a class="dl-btn" href="https://github.com/lambdabetaeta/ral/archive/refs/heads/main.zip" download>source .zip</a>
+      </div>
+    </div>
+
+  </main>
+  <script>
+    var box = document.getElementById('install');
+    var msg = document.getElementById('copied');
+    box.addEventListener('click', function () {
+      var text = box.querySelector('code').textContent;
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(text).then(function () {
+          msg.classList.add('show');
+          setTimeout(function () { msg.classList.remove('show'); }, 2000);
+        });
+      }
+    });
+  </script>
+</body>
+</html>
