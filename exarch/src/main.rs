@@ -6,15 +6,12 @@
 fn main() -> std::process::ExitCode {
     #[cfg(unix)]
     ral_core::builtins::uutils::init_signal_dispositions();
-    // Teach core how to dress a sandbox-IPC child's fresh shell with
-    // exarch's host builtins, then serve any pipeline-stage / test
-    // helper re-exec.  Must happen before `sandbox_dispatch_or_continue`
-    // — that call exits in the child process before any further setup.
-    if let Some(code) = exarch::install_child_hooks_and_serve_helpers() {
-        return std::process::ExitCode::from(code);
-    }
-    if let Some(code) = exarch::bootstrap::sandbox_dispatch_or_continue() {
-        return code;
+    // Serve any helper / sandbox re-exec in one call: dress a sandbox-IPC
+    // child's fresh shell with exarch's host builtins, serve the
+    // pipeline-stage / test helper dispatch, then the OS-sandbox stage.
+    // A re-exec child exits here before any further setup.
+    if let Some(code) = exarch::dispatch_pre_main() {
+        std::process::exit(code as i32);
     }
     match exarch::run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -25,12 +22,14 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-/// Test-binary counterpart to the two startup trampolines at the top of
-/// `main` (helper re-exec dispatch, then sandbox `early_init`).  Run from
-/// a pre-`main` constructor so both are served before libtest sees the
-/// flags either would reject; see [`exarch::serve_test_pre_main`].
+/// Test-binary counterpart to the pre-`main` re-exec dispatch at the top
+/// of `main`.  Run from a pre-`main` constructor so every helper / sandbox
+/// re-exec is served before libtest sees the flags it would reject; see
+/// [`exarch::dispatch_pre_main`].
 #[cfg(test)]
 #[ctor::ctor(unsafe)]
 fn init_test_binary() {
-    exarch::serve_test_pre_main();
+    if let Some(code) = exarch::dispatch_pre_main() {
+        std::process::exit(code as i32);
+    }
 }

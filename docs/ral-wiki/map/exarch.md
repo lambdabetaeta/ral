@@ -18,15 +18,17 @@ tool call is evaluated as a ral top-level turn against a persistent in-process
 capability lattice (`policy.rs`, `policy/`), assembles the layered system prompt
 (`prompt.rs`: basic rules, live grant/host, ral language card, script-style
 guide), builds a `Session` + `Provider`, and hands off to one frontend.
-Before that, `main` runs two pre-`main` trampolines that short-circuit a re-exec
-child: `install_child_hooks_and_serve_helpers` (sets the child-shell extension,
-serves pipeline/test-helper re-execs) then `bootstrap::sandbox_dispatch_or_continue`.
+Before that, `main` runs `dispatch_pre_main`, the single pre-`main` dispatch that
+short-circuits a re-exec child: `install_child_hooks_and_serve_helpers` (sets the
+child-shell extension, serves pipeline/test-helper re-execs) then the OS-sandbox
+stage ([[map/core/capabilities|`serve_sandbox_early_init`]], over `early_init`).
 A test binary reaches `main` only through libtest yet is the same
 [[invariants/single-binary|multicall executable]] a child re-execs, so
-`serve_test_pre_main` runs both from each test `#[ctor]`; without the second the
-confined transport is unpinned and that binary's confined-path tests cannot run.
-`bootstrap.rs` holds the once-per-process pieces: `sandbox_dispatch_or_continue`
-(the re-exec child mode, over [[map/core/capabilities|`early_init`]]), `boot_shell` (the exarch-ready session-shell
+`dispatch_pre_main` runs from each test `#[ctor]` too; `main` and every ctor run
+this identical function, differing only in how they act on `Some` (return vs
+exit). Skip the sandbox stage and the confined transport stays unpinned, so that
+binary's confined-path tests cannot run. `bootstrap.rs` holds the once-per-process
+pieces: `boot_shell` (the exarch-ready session-shell
 constructor: clear stale ral interrupt, install ral handlers, re-chain exarch
 cancel, call core's [[map/repl/startup|`ral_core::host::boot_shell`]], then layer
 exarch's host builtins and source the `agent.ral` library), the disposable

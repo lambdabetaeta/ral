@@ -239,7 +239,7 @@ pub(super) fn verify_unswapped(s: &SandboxSelf) -> Result<(), Error> {
 pub(super) fn maybe_enter_process_sandbox(
     args_without_policy: &[String],
     policy: Option<&crate::types::SandboxProjection>,
-) -> Result<Option<std::process::ExitCode>, String> {
+) -> Result<Option<u8>, String> {
     let Some(policy) = policy else {
         return Ok(None);
     };
@@ -250,7 +250,7 @@ pub(super) fn maybe_enter_process_sandbox(
 pub(super) fn maybe_enter_process_sandbox(
     _args_without_policy: &[String],
     _policy: Option<&crate::types::SandboxProjection>,
-) -> Result<Option<std::process::ExitCode>, String> {
+) -> Result<Option<u8>, String> {
     Ok(None)
 }
 
@@ -280,7 +280,7 @@ fn assert_not_already_confined() -> Result<(), String> {
 fn enter_for_platform(
     _args: &[String],
     policy: &crate::types::SandboxProjection,
-) -> Result<Option<std::process::ExitCode>, String> {
+) -> Result<Option<u8>, String> {
     assert_not_already_confined()?;
     super::macos::enter_current_process(policy, super::SANDBOX_ACTIVE_ENV)?;
     Ok(None)
@@ -290,7 +290,7 @@ fn enter_for_platform(
 fn enter_for_platform(
     args: &[String],
     policy: &crate::types::SandboxProjection,
-) -> Result<Option<std::process::ExitCode>, String> {
+) -> Result<Option<u8>, String> {
     assert_not_already_confined()?;
     let exe = std::env::current_exe().map_err(|e| format!("ral: current_exe: {e}"))?;
     super::linux::respawn_under_bwrap(&exe, args, policy, super::SANDBOX_ACTIVE_ENV).map(Some)
@@ -300,13 +300,13 @@ fn enter_for_platform(
 fn enter_for_platform(
     _args: &[String],
     _policy: &crate::types::SandboxProjection,
-) -> Result<Option<std::process::ExitCode>, String> {
+) -> Result<Option<u8>, String> {
     Err("ral: fs/net sandboxing is unavailable on this Unix platform".into())
 }
 
 /// Detect `--internal-sandbox-block` in `args` and run the IPC child
 /// loop if present.  Returns `Some(code)` to signal immediate exit.
-pub(super) fn maybe_handle_internal_mode(args: &[String]) -> Option<std::process::ExitCode> {
+pub(super) fn maybe_handle_internal_mode(args: &[String]) -> Option<u8> {
     if args.first().map(|a| a.as_str()) != Some(super::runner::INTERNAL_EVAL_MODE) {
         return None;
     }

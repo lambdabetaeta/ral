@@ -19,12 +19,14 @@ use genai::chat::{ChatRole, ContentPart, ToolCall};
 use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
 
-/// Mirror the binary's two `main` startup trampolines — helper re-exec
-/// dispatch, then sandbox `early_init` — before libtest sees the flags
-/// either would reject; see [`exarch::serve_test_pre_main`].
+/// Mirror the binary's pre-`main` re-exec dispatch — helper re-exec
+/// dispatch, then the OS-sandbox stage — before libtest sees the flags
+/// either would reject; see [`exarch::dispatch_pre_main`].
 #[ctor::ctor(unsafe)]
 fn init_test_binary() {
-    exarch::serve_test_pre_main();
+    if let Some(code) = exarch::dispatch_pre_main() {
+        std::process::exit(code as i32);
+    }
 }
 
 /// A unique scratch directory per test so concurrent runs don't share

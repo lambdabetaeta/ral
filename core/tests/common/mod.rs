@@ -22,7 +22,9 @@ use std::sync::{Arc, OnceLock};
 fn init_test_binary() {
     #[cfg(unix)]
     ral_core::builtins::uutils::init_signal_dispositions();
-    // Two modes get dispatched ahead of the Rust test harness:
+    // Two stages get dispatched ahead of the Rust test harness, chained
+    // by `.or_else` (the helper stage returns `None` on a non-helper
+    // invocation, falling through to the sandbox stage):
     //
     //   1. `--ral-pipeline-stage-helper` and friends — the pipeline
     //      re-execs `current_exe()` (which is *this* test binary) to
@@ -30,17 +32,15 @@ fn init_test_binary() {
     //      land in the test framework instead of the helper.
     //   2. `--sandbox-projection ...` and `--internal-sandbox-block` —
     //      `grant { … }` re-execs the same way to install the OS
-    //      sandbox.  `ral_core::sandbox::early_init` consumes the
-    //      flag, enters the sandbox, and (for the internal-block
-    //      mode) serves one IPC request.  Letting libtest see those
-    //      flags would crash with "unknown argument".
-    if let Some(code) = ral_core::try_run_pipeline_stage_helper() {
+    //      sandbox.  `serve_sandbox_early_init` consumes the flag, pins
+    //      `SANDBOX_SELF`, enters the sandbox, and (for the
+    //      internal-block mode) serves one IPC request.  Letting libtest
+    //      see those flags would crash with "unknown argument".
+    if let Some(code) =
+        ral_core::try_run_pipeline_stage_helper().or_else(ral_core::sandbox::serve_sandbox_early_init)
+    {
         std::process::exit(code as i32);
     }
-    // `early_init` consumes the projection flag, pins `SANDBOX_SELF`, and
-    // dispatches the internal-sandbox-block mode; the shared ctor wrapper
-    // self-exits when this process is the re-exec child.
-    ral_core::sandbox::early_init_or_exit_for_test_ctor();
 }
 
 /// The prelude baked once at runtime (test binaries have no build-time

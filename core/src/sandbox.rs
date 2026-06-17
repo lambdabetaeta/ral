@@ -40,7 +40,7 @@ mod windows;
 mod windows_restricted_token;
 
 use crate::types::{SandboxProjection, Shell};
-use std::process::{Command, ExitCode};
+use std::process::Command;
 use std::sync::OnceLock;
 
 /// Host-supplied callback that the IPC child runs against its fresh
@@ -278,7 +278,7 @@ pub(crate) fn self_command() -> std::io::Result<Command> {
 /// process sandbox when --sandbox-projection was given (Unix only — on
 /// Windows the sandbox is applied by the parent at child spawn time);
 /// dispatching --internal-sandbox-block (the IPC subprocess mode).
-pub fn early_init(argv: &[String]) -> Result<(Vec<String>, Option<ExitCode>), String> {
+pub fn early_init(argv: &[String]) -> Result<(Vec<String>, Option<u8>), String> {
     let (policy, stripped) = strip_policy_arg(argv)?;
     // Pin this binary's executable so any later restrictive
     // `grant { … }` block re-execs *us*, immune to on-disk swaps.
@@ -292,30 +292,23 @@ pub fn early_init(argv: &[String]) -> Result<(Vec<String>, Option<ExitCode>), St
     Ok((stripped, None))
 }
 
-/// Run [`early_init`] from a test binary's pre-`main` `#[ctor]` and, when
-/// this process is a re-exec child (a `grant { … }` block's
+/// The OS-sandbox stage of the pre-`main` dispatch, as an `Option<u8>`
+/// building block: run [`early_init`] over the process argv and, when this
+/// process is a re-exec child (a `grant { … }` block's
 /// `--internal-sandbox-block` IPC server, or the Linux bwrap respawn),
-/// terminate it before libtest sees the flags it would reject.  A normal
-/// top-level test invocation returns, letting libtest run; `early_init`
-/// also pins `SANDBOX_SELF`, so the confined-transport availability probe
-/// reports `Ready` for tests that exercise the confined path.
-///
-/// The binary's own `main` keeps the faithful child [`ExitCode`]
-/// `early_init` returns.  A `#[ctor]` cannot — `ExitCode` is opaque to
-/// `std::process::exit` — so it maps success to `0` and an `early_init`
-/// error to `1`; the genuine result of an internal-block child travels
-/// back over the IPC channel, and any error detail is on stderr, so the
-/// child's own exit code is not what the parent reads.  This is the one
-/// place every ral-family test ctor expresses that mapping.
-pub fn early_init_or_exit_for_test_ctor() {
+/// surface its exit code so the caller can terminate. A normal top-level
+/// invocation yields `None`. `early_init` also pins `SANDBOX_SELF` here, so
+/// the confined-transport availability probe reports `Ready`. The stripped
+/// argv is discarded — callers that need it (the `ral` binary parses its CLI
+/// from it) call `early_init` directly.
+pub fn serve_sandbox_early_init() -> Option<u8> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     match early_init(&argv) {
-        Ok((_, Some(_))) => std::process::exit(0),
+        Ok((_, code)) => code,
         Err(e) => {
-            eprintln!("ral test harness: sandbox early_init: {e}");
-            std::process::exit(1);
+            eprintln!("ral: sandbox init: {e}");
+            Some(1)
         }
-        Ok((_, None)) => {}
     }
 }
 

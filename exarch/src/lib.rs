@@ -57,30 +57,26 @@ pub fn install_child_hooks_and_serve_helpers() -> Option<u8> {
     None
 }
 
-/// Full pre-`main` trampoline for exarch's test binaries, mirroring the
-/// two startup steps the binary's `main` runs in order: serve helper
-/// re-execs ([`install_child_hooks_and_serve_helpers`]), then dispatch the
-/// OS sandbox ([`ral_core::sandbox::early_init`], wrapped for a `#[ctor]`
-/// by [`ral_core::sandbox::early_init_or_exit_for_test_ctor`]).  A test
-/// binary reaches `main` only through libtest, so each one runs both steps
-/// from a `#[ctor]`; without the second, a `grant { … }` block's re-exec
-/// lands in libtest instead of the `--internal-sandbox-block` IPC loop,
-/// and `SANDBOX_SELF` is never pinned, so the confined-transport
-/// availability probe reports `Unavailable` and confined-path tests cannot
-/// run.
-pub fn serve_test_pre_main() {
-    if let Some(code) = install_child_hooks_and_serve_helpers() {
-        std::process::exit(code as i32);
-    }
-    ral_core::sandbox::early_init_or_exit_for_test_ctor();
+/// The full pre-`main` re-exec dispatch, shared by the binary's `main` and
+/// every test `#[ctor]`: serve helper re-execs
+/// ([`install_child_hooks_and_serve_helpers`] — which also sets the
+/// child-shell extension), then the OS-sandbox stage
+/// ([`ral_core::sandbox::serve_sandbox_early_init`]). Returns `Some(code)`
+/// when this process is a re-exec child that should exit now, `None` to
+/// continue to the frontend. `main` and the test ctors run this identical
+/// function; the only difference is how they act on `Some` (return vs exit).
+pub fn dispatch_pre_main() -> Option<u8> {
+    install_child_hooks_and_serve_helpers().or_else(ral_core::sandbox::serve_sandbox_early_init)
 }
 
 /// Pre-`main` trampoline for the library's own unit-test binary; see
-/// [`serve_test_pre_main`].
+/// [`dispatch_pre_main`].
 #[cfg(test)]
 #[ctor::ctor(unsafe)]
 fn init_lib_test_binary() {
-    serve_test_pre_main();
+    if let Some(code) = dispatch_pre_main() {
+        std::process::exit(code as i32);
+    }
 }
 
 /// The binary's entry point, lifted into the library so integration

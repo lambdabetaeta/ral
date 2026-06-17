@@ -12,19 +12,6 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-/// If we were re-execed as a sandbox child, ral's `early_init` handles
-/// the IPC block and tells us to exit.  Otherwise it returns `None`.
-pub fn sandbox_dispatch_or_continue() -> Option<std::process::ExitCode> {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    match ral_core::sandbox::early_init(&argv) {
-        Ok((_, exit)) => exit,
-        Err(e) => {
-            eprintln!("exarch: sandbox init: {e}");
-            Some(std::process::ExitCode::from(1))
-        }
-    }
-}
-
 /// Probe the terminal in the same mode `boot_shell` and `Session::fork`
 /// both want — honours `RAL_INTERACTIVE_MODE` if set.
 pub fn probe_terminal() -> TerminalState {

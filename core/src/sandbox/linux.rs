@@ -16,7 +16,7 @@
 use crate::types::{FsProjection, SandboxProjection};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Command, Stdio};
 
 /// Build a [`Command`] that runs `name` inside a `bwrap` sandbox
 /// configured by `policy`.  Read-only and read-write bind mounts are
@@ -232,7 +232,7 @@ fn apply_seccomp(cmd: &mut Command, filter: Vec<u8>) {
 }
 
 /// Re-exec the current ral process under `bwrap` with `policy` enforced.
-/// Blocks until the child exits, returning its status as an [`ExitCode`].
+/// Blocks until the child exits, returning its status as a `u8`.
 /// `active_env` is set in the child so it doesn't try to re-enter the
 /// sandbox recursively on startup.
 pub(super) fn respawn_under_bwrap(
@@ -240,7 +240,7 @@ pub(super) fn respawn_under_bwrap(
     args: &[String],
     policy: &SandboxProjection,
     active_env: &str,
-) -> Result<ExitCode, String> {
+) -> Result<u8, String> {
     let mut cmd = make_command_with_policy(exe.to_string_lossy().as_ref(), args, policy);
     cmd.env(active_env, "1")
         .stdin(Stdio::inherit())
@@ -260,9 +260,7 @@ pub(super) fn respawn_under_bwrap(
     let status = child
         .wait()
         .map_err(|e| format!("ral: failed to enter sandbox: {e}"))?;
-    Ok(ExitCode::from(
-        status.code().unwrap_or(1).clamp(0, 255) as u8
-    ))
+    Ok(status.code().unwrap_or(1).clamp(0, 255) as u8)
 }
 
 /// System paths that are always bind-mounted read-only.  `/etc` is

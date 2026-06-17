@@ -19,13 +19,12 @@
 use crate::child_eval::{ChildEvalRequest, ChildKind, run_child_eval};
 use crate::subprocess_codec::{Tokened, read_frame, write_frame};
 use std::io::{BufReader, Read, Write};
-use std::process::ExitCode;
 
 /// Transport-neutral child body: read one request from `reader`, adopt
 /// its confinement token, evaluate under [`ChildKind::Sandbox`], and
-/// write the single response to `writer`.  Returns the process exit
-/// code.
-fn serve<R: Read, W: Write>(reader: R, mut writer: W) -> ExitCode {
+/// write the single response to `writer`.  Returns the `u8` process
+/// exit code.
+fn serve<R: Read, W: Write>(reader: R, mut writer: W) -> u8 {
     let mut reader = BufReader::new(reader);
     let request: ChildEvalRequest = match read_frame(&mut reader) {
         Ok(Some(req)) => req,
@@ -34,7 +33,7 @@ fn serve<R: Read, W: Write>(reader: R, mut writer: W) -> ExitCode {
                 "ral",
                 "sandbox ipc: parent closed before sending request",
             );
-            return ExitCode::from(1);
+            return 1;
         }
         Err(e) => {
             // First-frame deserialise failure is almost always a
@@ -50,7 +49,7 @@ fn serve<R: Read, W: Write>(reader: R, mut writer: W) -> ExitCode {
                 "  hint: rebuild ral/exarch from a clean checkout so parent \
                  and child are the same binary"
             );
-            return ExitCode::from(1);
+            return 1;
         }
     };
 
@@ -75,15 +74,15 @@ fn serve<R: Read, W: Write>(reader: R, mut writer: W) -> ExitCode {
     };
     if let Err(e) = write_frame(&mut writer, &framed) {
         crate::diagnostic::cmd_error("ral", &format!("sandbox ipc write: {e}"));
-        return ExitCode::from(1);
+        return 1;
     }
-    ExitCode::from(0)
+    0
 }
 
 /// Child entry point: adopt the IPC fd from the environment, then serve
 /// one request over the socketpair.
 #[cfg(unix)]
-pub fn serve_from_env_fd() -> ExitCode {
+pub fn serve_from_env_fd() -> u8 {
     let Some(fd) = std::env::var(super::transport::IPC_FD_ENV)
         .ok()
         .and_then(|s| s.parse::<i32>().ok())
@@ -92,7 +91,7 @@ pub fn serve_from_env_fd() -> ExitCode {
             "ral",
             &format!("{} not set or not an fd", super::transport::IPC_FD_ENV),
         );
-        return ExitCode::from(1);
+        return 1;
     };
     // Safety: the parent lent the fd inheritable across the spawn and is
     // the sole prior owner; this child now owns it.  `adopt` re-arms
@@ -102,14 +101,14 @@ pub fn serve_from_env_fd() -> ExitCode {
         Ok(e) => e,
         Err(e) => {
             crate::diagnostic::cmd_error("ral", &format!("sandbox ipc adopt: {e}"));
-            return ExitCode::from(1);
+            return 1;
         }
     };
     let (reader_stream, writer_stream) = match endpoint.streams() {
         Ok(pair) => pair,
         Err(e) => {
             crate::diagnostic::cmd_error("ral", &format!("sandbox ipc clone: {e}"));
-            return ExitCode::from(1);
+            return 1;
         }
     };
     serve(reader_stream, writer_stream)
@@ -120,7 +119,7 @@ pub fn serve_from_env_fd() -> ExitCode {
 /// `serve_from_env_fd` but uses a handle inherited via
 /// [`super::IPC_HANDLE_ENV`].
 #[cfg(windows)]
-pub fn serve_from_env_handle() -> ExitCode {
+pub fn serve_from_env_handle() -> u8 {
     use std::os::windows::io::RawHandle;
 
     // Parent encoded the inherited HANDLE as a pointer-sized integer in
@@ -133,7 +132,7 @@ pub fn serve_from_env_handle() -> ExitCode {
             "ral",
             &format!("{} not set or not a handle", super::IPC_HANDLE_ENV),
         );
-        return ExitCode::from(1);
+        return 1;
     };
 
     // Safety: the parent lent the handle inheritable across the spawn and
@@ -144,7 +143,7 @@ pub fn serve_from_env_handle() -> ExitCode {
         Ok(e) => e,
         Err(e) => {
             crate::diagnostic::cmd_error("ral", &format!("sandbox ipc adopt: {e}"));
-            return ExitCode::from(1);
+            return 1;
         }
     };
 

@@ -86,10 +86,12 @@ Linux has no path-exec filter so there the in-process gate stands alone.
   (`ipc::serve_from_env_fd` / `_handle`). A test binary is the same
   [[invariants/single-binary|multicall executable]] a confined child re-execs, so
   it must serve these flags from its own pre-`main` `#[ctor]` (it reaches `main`
-  only through libtest); `early_init_or_exit_for_test_ctor` is that one shared
-  wrapper, self-exiting when this run is the child. Skip it and `SANDBOX_SELF`
-  stays unpinned, so `confined_availability()` reports `Unavailable` and the
-  binary's confined-path tests cannot exercise the sandbox.
+  only through libtest); `serve_sandbox_early_init` is the shared `Option<u8>`
+  building block the pre-`main` dispatch uses for that — run by `main` and every
+  test `#[ctor]` alike, surfacing the re-exec child's exit code so the caller can
+  terminate. Skip it and `SANDBOX_SELF` stays unpinned, so
+  `confined_availability()` reports `Unavailable` and the binary's confined-path
+  tests cannot exercise the sandbox.
 - `reexec.rs` — pins an immutable handle on this executable at boot so a
   confined re-exec runs the same binary even under an on-disk swap, with a
   per-platform identity check (`/proc/self/fd` on Linux, `(dev, ino)` snapshot on

@@ -551,7 +551,7 @@ fn main() -> ExitCode {
         }
     };
     if let Some(code) = exit {
-        return code;
+        return ExitCode::from(code);
     }
 
     let cli =
