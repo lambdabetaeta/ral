@@ -1,50 +1,71 @@
 //! Adversarial (review finding S8): a bare or forged `RAL_SANDBOX_ACTIVE`
 //! must NOT suppress OS confinement.
 //!
-//! The OS sandbox is the sole enforcer of `net` and of bundled-coreutils
-//! filesystem access ([[design/two-enforcers]]).  Before the
-//! authenticated-marker fix, `transport::dispatch` ran every restrictive
-//! `grant` body in-process the moment `RAL_SANDBOX_ACTIVE` was merely
-//! *present* — a public-name env var any ancestor process can export.  An
-//! attacker who set it once would silently downgrade `grant [net: false]`
-//! and `grant [fs: …]` to unconfined local evaluation.
+//! `RAL_SANDBOX_ACTIVE` is a public-name env var any ancestor process can
+//! export. The per-command sandbox launcher in
+//! `runtime::command::process::build_command` gates on
+//! `!marker_authenticated() && sandbox_projection().is_some()`:
+//! confinement fires unless this process is *genuinely* confined, which is
+//! proven by the marker's value matching a per-re-exec capability token
+//! (`marker::authenticated`), not by the marker's mere presence. A forged
+//! value has no matching recorded token, so `marker_authenticated()`
+//! returns false, `!marker_authenticated()` stays true, and the per-command
+//! sandbox still confines every external child.
 //!
-//! The fix authenticates the marker against a per-re-exec random token
-//! that only ral's own sandbox re-exec mints and delivers over the
-//! already-authenticated IPC request channel (`ChildEvalRequest`).  A
-//! marker value that does not match a token *recorded from a wire
-//! request* is not trusted, so confinement is still attempted.
+//! The regression this pins: if a forged marker *did* authenticate (the
+//! pre-S8 "presence is enough" bug), the gate would flip to the
+//! run-unconfined branch and an external command writing outside an fs
+//! grant would escape — the dangerous write would land. So the
+//! load-bearing observation is that, under a forged marker, the
+//! out-of-grant write still does **not** land while the same command with
+//! no projection at all *does* write (proving the command works and the
+//! path is writable, so the denial is the projection, not a broken `sh`).
 //!
-//! This target deliberately does **not** import `core/tests/common`,
-//! whose `#[ctor::ctor]` pins `SANDBOX_SELF`.  Without that pin,
-//! `confined_availability()` is `Unavailable`, so an *attempted*
-//! confinement surfaces as the fail-closed "sandbox confinement
-//! unavailable" error — the observable proof that dispatch refused to run
-//! the body locally under the forged marker.  Pre-fix the body would have
-//! run locally and succeeded; that divergence is the regression this
-//! pins.  Single test in its own target so the `RAL_SANDBOX_ACTIVE`
-//! mutation cannot race other tests.
+//! Net has no in-process gate, so for `net` the OS sandbox is the sole
+//! enforcer; a `net: false` grant produces a non-`None`
+//! `sandbox_projection()` (`saw_net && !net_allowed`) exactly as an fs
+//! grant does, so the same per-command gate covers it — the
+//! forged-marker-does-not-suppress property holds for net by the identical
+//! `!marker_authenticated()` term. Proving net is actually blocked needs a
+//! network-attempting external and a backend (macOS omits `(allow
+//! network*)`; the unenforceable-backend fail-closed is the unit test
+//! `sandbox::tests::projection_enforceable_rejects_net_false_on_windows`);
+//! that is not re-driven here. The fs discriminator below is the honest,
+//! in-scope proof that a forged marker does not flip the gate.
+//!
+//! This target **imports** `core/tests/common`: its `#[ctor::ctor]` runs
+//! `serve_sandbox_early_init`, which is what lets the per-command re-exec
+//! child enter Seatbelt and exec the target inside it. It is gated to
+//! macOS, matching the end-to-end denial tests in `sandbox/launch.rs` and
+//! `sandbox_fail_closed.rs`. Single test in its own target so the
+//! `RAL_SANDBOX_ACTIVE` mutation cannot race other tests.
 
-#![cfg(any(target_os = "macos", target_os = "linux"))]
+#![cfg(all(feature = "test-util", target_os = "macos"))]
+
+mod common;
 
 use ral_core::evaluator;
-use ral_core::sandbox::{ConfinedAvailability, SANDBOX_ACTIVE_ENV, confined_availability};
-use ral_core::types::{Capabilities, FsPolicy, Shell};
+use ral_core::sandbox::SANDBOX_ACTIVE_ENV;
+use ral_core::types::{Break, Capabilities, FsPolicy, Shell, Value};
+
+fn boot() -> Shell {
+    ral_core::host::boot_shell(Default::default(), common::prelude())
+}
+
+fn run(shell: &mut Shell, caps: Capabilities, src: &str) -> ral_core::types::Settled<Value> {
+    let comp = match ral_core::compile_and_typecheck(src, shell.session_schemes()) {
+        ral_core::CompileOutcome::Compiled(c) => std::sync::Arc::new(c),
+        ral_core::CompileOutcome::Parse(e) => panic!("parse: {e}"),
+        ral_core::CompileOutcome::Types(errs) => {
+            let msgs: Vec<_> = errs.iter().map(|e| e.kind.render_message()).collect();
+            panic!("type: {}", msgs.join("; "));
+        }
+    };
+    shell.with_capabilities(caps, |s| evaluator::eval_top_level(&comp, s))
+}
 
 #[test]
 fn forged_sandbox_marker_does_not_suppress_confinement() {
-    // File assumption: no `SANDBOX_SELF` pin in this target, so an
-    // attempted confinement routes to the fail-closed branch.  If a
-    // future change pins it (a stray `common` import, a ctor), the
-    // observable below would change meaning — fail loudly here.
-    match confined_availability() {
-        ConfinedAvailability::Unavailable(_) => {}
-        ConfinedAvailability::Ready => panic!(
-            "this test target must run without SANDBOX_SELF pinned; \
-             did you add a `common` import or another early_init call?"
-        ),
-    }
-
     #[allow(clippy::disallowed_methods)] // marker save/restore, not a basedir
     let prior = std::env::var_os(SANDBOX_ACTIVE_ENV);
     // SAFETY: this is the only test in this target; restored on drop.
@@ -56,62 +77,62 @@ fn forged_sandbox_marker_does_not_suppress_confinement() {
         prior,
     };
 
-    assert_net_restriction_enforced();
-    assert_fs_restriction_enforced();
-}
+    let work = std::env::temp_dir().join(format!("ral_forged_{}", std::process::id()));
+    std::fs::create_dir_all(&work).expect("work dir");
+    let work_s = work.to_string_lossy().into_owned();
 
-/// `grant [net: false] { … }` under the forged marker must refuse to run
-/// the body locally — net has no in-process gate, so local dispatch is a
-/// full-network bypass.
-fn assert_net_restriction_enforced() {
-    let mut shell = Shell::default();
-    let caps = Capabilities {
-        net: Some(false),
-        ..Capabilities::root()
-    };
-    let comp = std::sync::Arc::new(ral_core::compile("return ok").expect("compile"));
-    let result = shell.with_capabilities(caps, |s| evaluator::eval_top_level(&comp, s));
-    assert_confinement_was_attempted(result, "net: false");
-}
+    // The single path both probes target: outside the grant's write
+    // prefix, so the projection must deny it.
+    let target = std::env::temp_dir().join(format!("ral_forged_target_{}", std::process::id()));
+    let _ = std::fs::remove_file(&target);
+    let target_s = target.to_string_lossy().into_owned();
 
-/// An fs-restricting grant under the forged marker must likewise refuse
-/// local dispatch — bundled coreutils touch the filesystem with no
-/// in-process `check_fs_*`, so the OS layer is the only fs enforcer.
-fn assert_fs_restriction_enforced() {
-    let mut shell = Shell::default();
+    // Discriminating control: forged marker + NO projection. With no fs/net
+    // grant, `sandbox_projection()` is `None`, the per-command gate does
+    // not fire, and the external writes normally. This proves the forged
+    // marker alone does not break ordinary exec and that `target` is a
+    // writable path — so the denial below is the projection enforcing,
+    // not a broken command or an unwritable destination.
+    let unconfined = run(
+        &mut boot(),
+        Capabilities::root(),
+        &format!("sh -c 'echo x > {target_s}'"),
+    );
+    unconfined.expect("forged marker + no projection: the external must run normally");
+    assert!(
+        target.exists(),
+        "control write (no projection) should have landed at {target_s}"
+    );
+    let _ = std::fs::remove_file(&target);
+
+    // The property: forged marker + restrictive fs grant. If the forged
+    // marker authenticated (the S8 regression), the gate would skip
+    // confinement and this out-of-grant write would land. It must not.
     let caps = Capabilities {
         fs: Some(FsPolicy {
-            read_prefixes: vec!["/tmp/ral-forged-marker-safe".into()],
-            write_prefixes: Vec::new(),
+            read_prefixes: vec![work_s.clone().into()],
+            write_prefixes: vec![work_s.clone().into()],
             deny_paths: Vec::new(),
         }),
         ..Capabilities::root()
     };
-    let comp = std::sync::Arc::new(ral_core::compile("return ok").expect("compile"));
-    let result = shell.with_capabilities(caps, |s| evaluator::eval_top_level(&comp, s));
-    assert_confinement_was_attempted(result, "fs restriction");
-}
-
-/// The boundary must have routed to confined dispatch and hit the
-/// fail-closed branch (no `SANDBOX_SELF` in this target) rather than
-/// running the body locally.
-fn assert_confinement_was_attempted(
-    result: ral_core::types::Settled<ral_core::types::Value>,
-    label: &str,
-) {
-    match result {
-        Ok(value) => panic!(
-            "forged RAL_SANDBOX_ACTIVE suppressed confinement for {label}: \
-             the body ran locally and produced {value:?} instead of \
-             attempting confinement"
+    let confined = run(&mut boot(), caps, &format!("sh -c 'echo x > {target_s}'"));
+    match confined {
+        Err(Break::Error(_)) => {}
+        Err(other) => panic!("expected the confined external to fail, got {other:?}"),
+        Ok(v) => panic!(
+            "forged RAL_SANDBOX_ACTIVE suppressed confinement: the external \
+             ran and produced Ok({v:?}) instead of being confined"
         ),
-        Err(ral_core::types::Break::Error(e)) => assert!(
-            e.message.contains("sandbox confinement unavailable"),
-            "expected fail-closed confinement error for {label}, got: {}",
-            e.message
-        ),
-        Err(other) => panic!("expected fail-closed error for {label}, got: {other:?}"),
     }
+    assert!(
+        !target.exists(),
+        "forged marker must not suppress confinement: the out-of-grant write \
+         must not have landed at {target_s}"
+    );
+
+    let _ = std::fs::remove_dir_all(&work);
+    let _ = std::fs::remove_file(&target);
 }
 
 struct EnvGuard {

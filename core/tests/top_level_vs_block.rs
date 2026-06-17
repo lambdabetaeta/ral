@@ -417,42 +417,37 @@ fn par_prelude_returns_values_in_order() {
     );
 }
 
-/// A concurrent-block body that returns a live `Handle` cannot cross
-/// the confined-eval IPC boundary — handles are process-local
-/// references to a worker thread.  Under an active
-/// projection, the child fails closed with a diagnostic that names
-/// the situation ("handle" / "sandboxed evaluation") and points the
-/// user at `await`.
+/// A `spawn` inside a grant body is usable *within that body*: under an
+/// active fs projection the grant body now evaluates **locally** (there is
+/// no grant-body IPC boundary anymore — milestone 4 of
+/// `decisions/260617_sandbox-external-children`), so the handle is an
+/// ordinary process-local reference to a worker thread and `await` on it
+/// returns the worker's value.
 ///
-/// Skipped when the OS sandbox backend can't actually launch a child
-/// on this host: the property is about the confined transport's error
-/// surface, which is vacuous if confinement itself can't run.
+/// This replaces the old `handle_cannot_cross_confined_eval`, which
+/// asserted a handle could not cross the confined-eval IPC boundary. That
+/// boundary is gone: a `grant` body is a dynamic effect scope, not a
+/// process boundary, so a handle created and consumed inside it just works.
+/// (Confinement now lives at external dispatch, exercised by
+/// `sandbox_fail_closed.rs`, not at grant-body entry.)
 #[cfg(unix)]
 #[test]
-fn handle_cannot_cross_confined_eval() {
-    if !confined_transport_runnable() {
-        return;
-    }
+fn handle_is_usable_inside_local_grant_body() {
     let mut shell = fresh_shell();
     let caps = projecting_caps();
-    let result = top_level_under(&mut shell, caps, "let h = !{spawn { return 1 }}\nreturn $h");
-    let err = match result {
-        Err(ral_core::Break::Error(e)) => e,
-        Err(other) => panic!("expected handle-across-IPC error, got {other:?}"),
-        Ok(v) => panic!("expected handle-across-IPC error, got Ok({v:?})"),
-    };
-    let msg = err.message.to_lowercase();
-    assert!(
-        msg.contains("handle") && msg.contains("sandbox"),
-        "diagnostic must mention handle and sandbox; got: {:?}",
-        err.message
+    let result = top_level_under(
+        &mut shell,
+        caps,
+        "let h = !{spawn { return 1 }}\nlet r = await $h\nreturn $r[value]",
     );
-    let hint = err.hint.unwrap_or_default().to_lowercase();
-    assert!(
-        hint.contains("await") && hint.contains("confined"),
-        "hint must mention await + confined block; got: {:?}",
-        hint
-    );
+    match result {
+        Ok(v) => assert_eq!(
+            v,
+            Value::Int(1),
+            "a spawn handle created and awaited under an active projection must work locally"
+        ),
+        Err(e) => panic!("handle should be usable in a local grant body, got error: {e:?}"),
+    }
 }
 
 /// `poll` is the non-blocking dual of `await`.  A handle whose block

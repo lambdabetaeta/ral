@@ -91,6 +91,8 @@ pub use launch::serve_sandbox_exec;
 
 // Confined-eval entry point.  `evaluator` routes here once
 // `confined_availability()` returns `Ready`.
+// dead after the grant-local flip; deleted in M5 (sandbox-external-children)
+#[allow(unused_imports)]
 pub(crate) use runner::run_confined;
 
 // Authenticate the inherited confinement marker against the capability

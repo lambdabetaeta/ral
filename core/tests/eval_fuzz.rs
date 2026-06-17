@@ -1035,6 +1035,57 @@ fn grant_fs_deny_covers_subpaths_of_a_directory() {
     let _ = std::fs::remove_dir_all(&outer);
 }
 
+/// `glob` gates every match, not just the pattern: a deny on a
+/// subpath drops the matching hits while readable siblings survive.
+/// `checked_read_path` admits the pattern's parent, so without the
+/// per-match gate the denied file would be enumerated and returned —
+/// an unchecked in-process read of a denied path.
+#[cfg(unix)]
+#[test]
+fn grant_fs_deny_omits_glob_matches() {
+    let dir = std::env::temp_dir().join(format!("ral-deny-glob-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let visible = dir.join("visible.txt");
+    let secret = dir.join("secret.txt");
+    std::fs::write(&visible, "ok").unwrap();
+    std::fs::write(&secret, "shh").unwrap();
+    let script = format!(
+        "grant [fs: [read: ['{}'], deny: ['{}']]] {{ glob '{}/*.txt' }}",
+        dir.display(),
+        secret.display(),
+        dir.display(),
+    );
+    let out = format!("{:?}", must_succeed(&script));
+    assert!(out.contains("visible.txt"), "readable match must survive");
+    assert!(!out.contains("secret.txt"), "denied match must be omitted");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `list-dir` gates every entry, not just the directory: a deny on a
+/// subpath drops that entry (and its size/mtime metadata) while
+/// readable siblings survive.  Without the per-entry gate the denied
+/// file would be stat'd and returned.
+#[cfg(unix)]
+#[test]
+fn grant_fs_deny_omits_list_dir_entries() {
+    let dir = std::env::temp_dir().join(format!("ral-deny-list-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let visible = dir.join("visible.txt");
+    let secret = dir.join("secret.txt");
+    std::fs::write(&visible, "ok").unwrap();
+    std::fs::write(&secret, "shh").unwrap();
+    let script = format!(
+        "grant [fs: [read: ['{}'], deny: ['{}']]] {{ list-dir '{}' }}",
+        dir.display(),
+        secret.display(),
+        dir.display(),
+    );
+    let out = format!("{:?}", must_succeed(&script));
+    assert!(out.contains("visible.txt"), "readable entry must survive");
+    assert!(!out.contains("secret.txt"), "denied entry must be omitted");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Cwd-relative patterns return cwd-relative matches, so
 /// `glob '*.rs' | each { |f| ... $f ... }` composes.
 #[cfg(unix)]

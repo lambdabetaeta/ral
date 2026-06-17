@@ -40,6 +40,15 @@ pub(super) fn builtin_list_dir(args: &[Value], shell: &mut Shell) -> Settled<Val
     let mut entries: Vec<(String, Value)> = Vec::new();
     for entry in fs::read_dir(&path).map_err(|e| io_err("list-dir", &path, e))? {
         let entry = entry.map_err(|e| io_err("list-dir", &path, e))?;
+        // `checked_read_path` admitted the directory, but each entry is
+        // a distinct path whose metadata (size/mtime/type) this stats and
+        // returns, so a deny on a subpath must drop that entry.  Skip a
+        // denied entry rather than abort the listing — the same policy
+        // `_search-files` / `explore-dir` apply to their walked entries.
+        let rp = shell.resolve(&entry.path().to_string_lossy());
+        if shell.check_fs_read(&rp).is_err() {
+            continue;
+        }
         entries.push(dir_entry_value(entry)?);
     }
     entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -100,6 +109,16 @@ pub(super) fn builtin_glob(args: &[Value], shell: &mut Shell) -> Settled<Value> 
         Ok(paths) => {
             for entry in paths {
                 let path = entry.map_err(|e| sig(format!("glob: {e}")))?;
+                // Gate every match: `checked_read_path` admitted the
+                // *pattern*, but the walk visits and returns concrete
+                // paths under it, so a deny on a subpath must drop the
+                // matching hits.  Skip a denied match rather than abort
+                // the whole glob — the same policy `_search-files` /
+                // `explore-dir` apply to their walked entries.
+                let rp = shell.resolve(&path.to_string_lossy());
+                if shell.check_fs_read(&rp).is_err() {
+                    continue;
+                }
                 let rendered = match &strip_prefix {
                     Some(cwd) => path
                         .strip_prefix(cwd)

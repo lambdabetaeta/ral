@@ -1,317 +1,287 @@
 #![allow(clippy::disallowed_methods)]
 
-//! Fail-closed property of the evaluator's transport dispatch.
+//! Fail-closed property of the evaluator at **external dispatch**.
 //!
-//! When the caller has pushed a `Capabilities` frame that produces a
-//! non-`None` `SandboxProjection`, the evaluator must run the body
-//! under the OS sandbox.  If the confined-transport backend is
-//! unavailable — `SANDBOX_SELF` was never pinned, or the platform has
-//! no backend — the documented rule is **fail closed**: surface a
-//! clear error and refuse to run.  Silently falling back to local
-//! would weaken the caller's restriction.
+//! History: this file used to test fail-closed at *grant-body entry*. The
+//! evaluator detected a restrictive grant body and re-execed the whole
+//! body into an OS sandbox over IPC; if that confined transport was
+//! unavailable, the body errored before it ran. The premise of the
+//! original tests was therefore "register no `SANDBOX_SELF`, push a
+//! projecting capability frame, and the trivial body never runs". That
+//! whole-body re-exec is gone (milestone 4 of
+//! `decisions/260617_sandbox-external-children`): a `grant` body now
+//! always evaluates **locally** in-process. RAL-owned filesystem effects
+//! are checked in process by `capability::check_fs_op`; the surviving
+//! confinement boundary is the **per-command sandbox launcher** in
+//! `runtime::command::process::build_command`, which confines each
+//! external/bundled child it spawns under the effective
+//! `SandboxProjection`.
 //!
-//! This file is its own integration-test target on purpose.  It
-//! **deliberately does not import** `core/tests/common`, whose
-//! `#[ctor::ctor]` calls `ral_core::sandbox::early_init` and so
-//! registers `SANDBOX_SELF`.  Without that ctor running,
-//! `confined_availability()` returns `Unavailable` for the reason the
-//! evaluator then quotes back in its error message.
+//! So the fail-closed locus moved. Under a restrictive fs grant, an
+//! external command that tries to write outside the grant is held by the
+//! kernel sandbox (Seatbelt here) when it is spawned — not refused at
+//! grant-body entry. These tests assert that new locus: each pairs a
+//! positive control (a write *inside* the grant succeeds) with a denial (a
+//! write *outside* fails, the file never appears). The positive control is
+//! load-bearing: it makes the test fail if confinement were broken in
+//! *either* direction — a blanket-deny would fail the control, and a
+//! disabled sandbox would let the denied write land.
 //!
-//! We do not mock or inject `confined_availability` — the property
-//! under test is the evaluator's behaviour in the natural state where
-//! the backend reports itself unavailable.
+//! Unlike the old version, this target **imports** `core/tests/common` on
+//! purpose: its `#[ctor::ctor]` runs `serve_sandbox_early_init`, which is
+//! what lets the per-command re-exec child actually enter Seatbelt and
+//! `execve` the target inside it. Without that ctor the re-exec child
+//! would land in the libtest framework and crash on the unknown
+//! `--sandbox-projection` flag — the command would "fail" for the wrong
+//! reason (a broken child, not an enforced policy), which would not prove
+//! enforcement at all.
+//!
+//! Gated to macOS, matching the end-to-end denial tests in
+//! `sandbox/launch.rs`: it is the backend that can confine an in-tree
+//! re-exec child end-to-end without an external helper binary (`bwrap` on
+//! Linux is commonly absent in CI). The *other* fail-closed axis —
+//! `projection_enforceable` rejecting `net: false` on a backend with no
+//! kernel network enforcement (Windows) — is covered by the unit test
+//! `sandbox::tests::projection_enforceable_rejects_net_false_on_windows`
+//! and is not re-driven through the eval path here.
+
+#![cfg(all(feature = "test-util", target_os = "macos"))]
+
+mod common;
 
 use ral_core::evaluator;
-use ral_core::sandbox::{ConfinedAvailability, confined_availability};
-use ral_core::types::{Break, Capabilities, FsPolicy, Shell};
+use ral_core::types::{Break, Capabilities, FsPolicy, Shell, Value};
 
-#[test]
-fn confined_backend_is_unavailable_in_this_binary() {
-    // Sanity-check the file's own assumption.  If a future change
-    // causes some other code path to register `SANDBOX_SELF` (for
-    // example by linking `common` into this target by accident), the
-    // remaining test would silently start exercising the wrong branch
-    // — fail loudly here instead.
-    match confined_availability() {
-        ConfinedAvailability::Unavailable(_) => {}
-        ConfinedAvailability::Ready => panic!(
-            "this test target must run without SANDBOX_SELF pinned; \
-             if you imported `common` here, drop it — that ctor calls \
-             early_init and breaks this file's whole premise"
-        ),
+/// A `Shell` matching what every front end ends up with after bootstrap:
+/// prelude registered, default env, root capabilities.
+fn boot() -> Shell {
+    ral_core::host::boot_shell(Default::default(), common::prelude())
+}
+
+/// A process-unique work directory under the system temp root, created on
+/// the host (outside any sandbox) so a confined child can write into it.
+fn unique_workdir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("ral_fc_{tag}_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create work dir");
+    dir
+}
+
+/// A process-unique path *outside* any granted prefix, pre-cleaned so its
+/// post-hoc absence is the load-bearing observation.
+fn denied_path(tag: &str) -> std::path::PathBuf {
+    let p = std::env::temp_dir().join(format!("ral_fc_denied_{tag}_{}", std::process::id()));
+    let _ = std::fs::remove_file(&p);
+    p
+}
+
+/// A capability frame whose fs policy confines reads and writes to `dir`.
+/// Any `fs` key makes `sandbox_projection()` return `Some(_)`, so the
+/// per-command launcher confines every external child.
+fn restrict_to(dir: &str) -> Capabilities {
+    Capabilities {
+        fs: Some(FsPolicy {
+            read_prefixes: vec![dir.into()],
+            write_prefixes: vec![dir.into()],
+            deny_paths: Vec::new(),
+        }),
+        ..Capabilities::root()
     }
 }
 
-#[test]
-fn eval_top_level_fails_closed_when_projection_active_but_backend_unavailable() {
-    let mut shell = Shell::default();
-
-    // Push a capability frame that produces a non-`None` projection.
-    // Any fs policy is enough: the reducer's `saw_fs` branch turns it
-    // into a `Restricted(...)` projection.
-    let caps = Capabilities {
-        fs: Some(FsPolicy {
-            read_prefixes: vec!["/".into()],
-            write_prefixes: vec!["/".into()],
-            deny_paths: Vec::new(),
-        }),
-        ..Capabilities::root()
+/// Compile `src` against `shell`'s live bindings, then route it through
+/// `eval_top_level` under `caps`, mirroring exarch's per-tool flow.
+fn top_level_under(shell: &mut Shell, caps: Capabilities, src: &str) -> ral_core::types::Settled<Value> {
+    let comp = match ral_core::compile_and_typecheck(src, shell.session_schemes()) {
+        ral_core::CompileOutcome::Compiled(c) => std::sync::Arc::new(c),
+        ral_core::CompileOutcome::Parse(e) => panic!("parse: {src:?}: {e}"),
+        ral_core::CompileOutcome::Types(errs) => {
+            let msgs: Vec<_> = errs.iter().map(|e| e.kind.render_message()).collect();
+            panic!("type: {src:?}: {}", msgs.join("; "));
+        }
     };
+    shell.with_capabilities(caps, |s| evaluator::eval_top_level(&comp, s))
+}
 
-    // The body is irrelevant: the boundary's `Unavailable` branch
-    // produces the error before the body ever runs.  We compile a
-    // trivial Comp so the call shape is well-formed.
-    let comp = std::sync::Arc::new(ral_core::compile("return ok").expect("compile"));
+/// Positive control: under a restrictive fs grant, an external command
+/// that writes *inside* the grant's write prefix succeeds and the file
+/// lands. Pairs with the denial below — if the sandbox blanket-denied
+/// every write this would fail, proving the projection is selective rather
+/// than off or all-deny.
+#[test]
+fn external_write_inside_grant_succeeds() {
+    let work = unique_workdir("ctl");
+    let work_s = work.to_string_lossy().into_owned();
+    let inside = work.join("inside.txt");
+    let inside_s = inside.to_string_lossy().into_owned();
 
-    let result = shell.with_capabilities(caps, |s| evaluator::eval_top_level(&comp, s));
+    let mut shell = boot();
+    let result = top_level_under(
+        &mut shell,
+        restrict_to(&work_s),
+        &format!("sh -c 'echo x > {inside_s}'"),
+    );
+    result.expect("a confined external writing inside the grant must succeed");
+    assert!(
+        inside.exists(),
+        "in-prefix write should have landed at {inside_s}"
+    );
+    let _ = std::fs::remove_dir_all(&work);
+}
 
-    let err = match result {
-        Err(Break::Error(e)) => e,
-        Err(other) => panic!("expected Break::Error, got {other:?}"),
+/// New fail-closed locus at the top level: under a restrictive fs grant,
+/// an external command writing *outside* the grant is denied by the
+/// per-command sandbox when it spawns. The eval surfaces the child's
+/// failure and the file never appears.
+#[test]
+fn external_write_outside_grant_denied_at_top_level() {
+    let work = unique_workdir("top");
+    let work_s = work.to_string_lossy().into_owned();
+    let denied = denied_path("top");
+    let denied_s = denied.to_string_lossy().into_owned();
+
+    let mut shell = boot();
+    let result = top_level_under(
+        &mut shell,
+        restrict_to(&work_s),
+        &format!("sh -c 'echo x > {denied_s}'"),
+    );
+    match result {
+        Err(Break::Error(_)) => {}
+        Err(other) => panic!("expected the confined external to fail, got {other:?}"),
         Ok(v) => panic!(
-            "expected fail-closed error, got Ok({v:?}); \
-             silent local fallback would have produced exactly this"
+            "expected fail-closed at external dispatch, got Ok({v:?}); \
+             the write outside the grant was not confined"
         ),
-    };
+    }
     assert!(
-        err.message.contains("sandbox") && err.message.contains("unavailable"),
-        "error must clearly say the sandbox is unavailable; got: {:?}",
-        err.message
+        !denied.exists(),
+        "out-of-grant write must not have landed at {denied_s}"
     );
+    let _ = std::fs::remove_dir_all(&work);
+    let _ = std::fs::remove_file(&denied);
 }
 
+/// The same denial through the **block boundary**: the projection comes
+/// from a `grant [fs: …] { … }` block (not an outer `with_capabilities`),
+/// and the external launched inside the forced grant body is confined just
+/// the same. This is the surviving analogue of the old block-entry
+/// fail-closed test — the grant body runs locally, but the child it spawns
+/// is confined.
 #[test]
-fn eval_block_fails_closed_when_projection_active_but_backend_unavailable() {
-    // The same property at the block boundary: a `grant`/`within`-shape
-    // forced thunk inside an active projection must error rather than
-    // fall back to local.  We construct a thunk via the evaluator and
-    // route it through the public block entry.
-    let mut shell = Shell::default();
-    ral_core::builtins::register(&mut shell, prelude_comp());
+fn external_write_outside_grant_denied_in_block_body() {
+    let work = unique_workdir("blk");
+    let work_s = work.to_string_lossy().into_owned();
+    let denied = denied_path("blk");
+    let denied_s = denied.to_string_lossy().into_owned();
 
-    let caps = Capabilities {
-        fs: Some(FsPolicy {
-            read_prefixes: vec!["/".into()],
-            write_prefixes: vec!["/".into()],
-            deny_paths: Vec::new(),
-        }),
-        ..Capabilities::root()
-    };
-
-    // Evaluate a thunk literal so we have a `Value::Thunk` to apply.
-    // `apply` routes a `Value::Thunk` through the trampoline into the
-    // block path — the same route `!{ … }` and `grant` take internally.
-    let thunk_comp =
-        std::sync::Arc::new(ral_core::compile("{ return ok }").expect("compile thunk"));
-    let thunk_value = ral_core::evaluate(&thunk_comp, &mut shell).expect("thunk evaluates");
-
-    let result = shell.with_capabilities(caps, |s| evaluator::apply(thunk_value, vec![], s));
-
-    let err = match result {
-        Err(Break::Error(e)) => e,
-        Err(other) => panic!("expected Break::Error, got {other:?}"),
-        Ok(v) => panic!("expected fail-closed error at the block boundary, got Ok({v:?})"),
-    };
-    assert!(
-        err.message.contains("sandbox") && err.message.contains("unavailable"),
-        "block boundary error must mention sandbox unavailability; got: {:?}",
-        err.message
+    let mut shell = boot();
+    let result = top_level_under(
+        &mut shell,
+        Capabilities::root(),
+        &format!(
+            "grant [fs: [read: ['{work_s}'], write: ['{work_s}']]] \
+             {{ sh -c 'echo x > {denied_s}' }}"
+        ),
     );
+    match result {
+        Err(Break::Error(_)) => {}
+        Err(other) => panic!("expected block-body external to fail closed, got {other:?}"),
+        Ok(v) => panic!("expected fail-closed in the grant block body, got Ok({v:?})"),
+    }
+    assert!(
+        !denied.exists(),
+        "block-body out-of-grant write must not have landed at {denied_s}"
+    );
+    let _ = std::fs::remove_dir_all(&work);
+    let _ = std::fs::remove_file(&denied);
 }
 
-/// The fail-closed top-level error must install `last_status = 1`
-/// onto the parent shell's mobile, not leave the previous turn's value
-/// in place.  This pins the contract of `finish_top_level`'s
-/// "install the boundary's chosen status" step: the parent's `$?`
-/// reports the transport refusal, not whatever happened before.
+/// When the confined external fails, the top-level turn installs the
+/// child's failing status into the parent's mobile, not the previous
+/// turn's value. Pins the `finish_top_level` "install the chosen status"
+/// step: the parent's `$?` reports the confined failure.
 #[test]
-fn eval_top_level_fail_closed_installs_status_1_into_mobile() {
-    let mut shell = Shell::default();
+fn denied_external_installs_failing_status_into_mobile() {
+    let work = unique_workdir("stat");
+    let work_s = work.to_string_lossy().into_owned();
+    let denied = denied_path("stat");
+    let denied_s = denied.to_string_lossy().into_owned();
 
-    let caps = Capabilities {
-        fs: Some(FsPolicy {
-            read_prefixes: vec!["/".into()],
-            write_prefixes: vec!["/".into()],
-            deny_paths: Vec::new(),
-        }),
-        ..Capabilities::root()
-    };
-
-    // Plain `return ok`: the boundary refuses before the body runs, so
-    // we don't need the prelude registered to bake this comp.
-    let comp = std::sync::Arc::new(ral_core::compile("return ok").expect("compile"));
-
-    let result = shell.with_capabilities(caps, |s| evaluator::eval_top_level(&comp, s));
+    let mut shell = boot();
+    let result = top_level_under(
+        &mut shell,
+        restrict_to(&work_s),
+        &format!("sh -c 'echo x > {denied_s}'"),
+    );
     assert!(
         result.is_err(),
-        "expected fail-closed error from active projection + unavailable backend, got Ok"
+        "expected the confined external to fail closed, got Ok"
     );
-    assert_eq!(
-        shell.mobile.control.last_status, 1,
-        "fail-closed top-level error must install last_status = 1 into the parent's mobile"
+    assert_ne!(
+        shell.mobile.control.last_status, 0,
+        "a denied confined external must install a non-zero last_status into the mobile"
     );
+    assert!(!denied.exists());
+    let _ = std::fs::remove_dir_all(&work);
+    let _ = std::fs::remove_file(&denied);
 }
 
-/// A spawned concurrent block is a thunk evaluated on a worker thread
-/// via `with_scope(eval_comp(body))`.  With a projection active and the
-/// confined-eval backend unavailable, every nested forced block inside
-/// the body (the literal `to-string 'bad' > '…'` here is parsed as one
-/// such block) must fail closed — exactly the same way a forced
-/// `grant`/`within` block does at top level — instead of running
-/// locally with the parent's full authority.  `await` then surfaces
-/// that failure rather than the user's intended payload, and the side
-/// effect inside the body must not have happened.
+/// A `spawn { … }` worker evaluates its body on a worker thread, but an
+/// external it spawns is confined the same way — the per-command launcher
+/// folds the same effective projection. A write outside the grant inside
+/// the spawned body is denied; `await` surfaces the failure and the side
+/// effect never lands.
 #[test]
-fn spawn_fails_closed_when_projection_active_and_backend_unavailable() {
-    use std::io::Write;
-    let mut shell = Shell::default();
-    ral_core::builtins::register(&mut shell, prelude_comp());
+fn external_write_outside_grant_denied_in_spawn_body() {
+    let work = unique_workdir("spawn");
+    let work_s = work.to_string_lossy().into_owned();
+    let denied = denied_path("spawn");
+    let denied_s = denied.to_string_lossy().into_owned();
 
-    // A target path we can verify post-hoc.  If fail-closed is correct
-    // the file is never created; if the body silently ran with host
-    // authority, it appears.
-    let dir = std::env::temp_dir().join("ral-fail-closed-spawn-tests");
-    std::fs::create_dir_all(&dir).expect("temp dir");
-    let target = dir.join(format!(
-        "spawn-leak-{}-{}.txt",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    // Best-effort pre-cleanup — `assert` after the boundary call is what
-    // pins the property either way.
-    let _ = std::fs::remove_file(&target);
-
-    let caps = Capabilities {
-        fs: Some(FsPolicy {
-            read_prefixes: vec!["/".into()],
-            write_prefixes: vec!["/".into()],
-            deny_paths: Vec::new(),
-        }),
-        ..Capabilities::root()
-    };
-
-    let target_path = target.display().to_string();
-    let source = format!(
-        "let h = !{{spawn {{ to-string 'bad' > '{target_path}' }}}}\n\
+    let mut shell = boot();
+    let src = format!(
+        "let h = !{{spawn {{ sh -c 'echo x > {denied_s}' }}}}\n\
          let r = await $h\n\
          return $r[value]"
     );
-
-    let comp = match ral_core::compile_and_typecheck(&source, shell.session_schemes()) {
-        ral_core::CompileOutcome::Compiled(c) => std::sync::Arc::new(c),
-        ral_core::CompileOutcome::Parse(e) => panic!("parse: {e}"),
-        ral_core::CompileOutcome::Types(errs) => {
-            let msgs: Vec<_> = errs.iter().map(|e| e.kind.render_message()).collect();
-            panic!("type: {}", msgs.join("; "));
-        }
-    };
-    let result = shell.with_capabilities(caps, |s| evaluator::eval_top_level(&comp, s));
-
-    let err = match result {
-        Err(Break::Error(e)) => e,
-        Err(other) => panic!("expected fail-closed error surfacing through await, got {other:?}"),
+    let result = top_level_under(&mut shell, restrict_to(&work_s), &src);
+    match result {
+        Err(Break::Error(_)) => {}
+        Err(other) => panic!("expected the spawned confined external to fail, got {other:?}"),
         Ok(v) => panic!(
-            "expected fail-closed error, got Ok({v:?}); the spawn body \
-             silently ran with host authority"
+            "expected fail-closed through the spawn worker, got Ok({v:?}); \
+             the write outside the grant was not confined on the worker thread"
         ),
-    };
-
-    // Whether the error message is the boundary's own
-    // ("sandbox confinement unavailable") or `await`'s
-    // ("await: spawned thread panicked") depends on whether the worker
-    // already reached the boundary refusal before we joined.  Either
-    // way the body must not have succeeded — the side effect is the
-    // load-bearing observation.
+    }
     assert!(
-        !std::path::Path::new(&target_path).exists(),
-        "fail-closed must prevent the body's side effect; file exists at {target_path}: {:?}",
-        err.message
+        !denied.exists(),
+        "spawned out-of-grant write must not have landed at {denied_s}"
     );
-    let _ = std::fs::remove_file(&target);
-    drop(std::io::stderr().lock().flush());
+    let _ = std::fs::remove_dir_all(&work);
+    let _ = std::fs::remove_file(&denied);
 }
 
-/// `par` is prelude code over `spawn`, so the fail-closed property
-/// extends through it: when projection is active and backend
-/// unavailable, `par` must surface an error rather than silently
-/// running its tasks with host authority.
+/// `par` is prelude code over `spawn`, so per-command confinement extends
+/// through it: an external inside a `par` task that writes outside the
+/// grant is denied, `par` surfaces the failure, and nothing lands.
 #[test]
-fn par_fails_closed_by_spawn_when_projection_active_and_backend_unavailable() {
-    let mut shell = Shell::default();
-    ral_core::builtins::register(&mut shell, prelude_comp());
+fn external_write_outside_grant_denied_in_par_task() {
+    let work = unique_workdir("par");
+    let work_s = work.to_string_lossy().into_owned();
+    let denied = denied_path("par");
+    let denied_s = denied.to_string_lossy().into_owned();
 
-    let dir = std::env::temp_dir().join("ral-fail-closed-par-tests");
-    std::fs::create_dir_all(&dir).expect("temp dir");
-    let target = dir.join(format!(
-        "par-leak-{}-{}.txt",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    let _ = std::fs::remove_file(&target);
-
-    let caps = Capabilities {
-        fs: Some(FsPolicy {
-            read_prefixes: vec!["/".into()],
-            write_prefixes: vec!["/".into()],
-            deny_paths: Vec::new(),
-        }),
-        ..Capabilities::root()
-    };
-
-    let target_path = target.display().to_string();
-    let source = format!("!{{par {{ |x| to-string 'bad' > '{target_path}'; return $x }} [1] 1}}");
-
-    let comp = match ral_core::compile_and_typecheck(&source, shell.session_schemes()) {
-        ral_core::CompileOutcome::Compiled(c) => std::sync::Arc::new(c),
-        ral_core::CompileOutcome::Parse(e) => panic!("parse: {e}"),
-        ral_core::CompileOutcome::Types(errs) => {
-            let msgs: Vec<_> = errs.iter().map(|e| e.kind.render_message()).collect();
-            panic!("type: {}", msgs.join("; "));
-        }
-    };
-    let result = shell.with_capabilities(caps, |s| evaluator::eval_top_level(&comp, s));
-
+    let mut shell = boot();
+    let src = format!("!{{par {{ |x| sh -c 'echo x > {denied_s}'; return $x }} [1] 1}}");
+    let result = top_level_under(&mut shell, restrict_to(&work_s), &src);
     assert!(
         result.is_err(),
-        "expected par to surface fail-closed error from spawn, got Ok"
+        "expected par to surface the confined external's failure, got Ok"
     );
     assert!(
-        !std::path::Path::new(&target_path).exists(),
-        "fail-closed must prevent par's tasks from writing; file exists at {target_path}"
+        !denied.exists(),
+        "par task's out-of-grant write must not have landed at {denied_s}"
     );
-    let _ = std::fs::remove_file(&target);
-}
-
-/// The annotated prelude comp paired with the schemes harvested off its
-/// top-level `Bind` nodes — what one `bake_prelude` pass yields.
-type BakedPrelude = (
-    std::sync::Arc<ral_core::Comp>,
-    Vec<(String, ral_core::Scheme)>,
-);
-
-/// The prelude checked once.  Duplicates `core/tests/common::baked`
-/// deliberately — we must not link `common` into this target (see
-/// file-level comment), as its ctor would pin `SANDBOX_SELF`.
-fn baked() -> &'static BakedPrelude {
-    use std::sync::{Arc, OnceLock};
-    static B: OnceLock<BakedPrelude> = OnceLock::new();
-    B.get_or_init(|| {
-        let src = include_str!("../src/prelude.ral");
-        let ast = ral_core::parse(src).expect("prelude parse");
-        let comp = ral_core::elaborate(&ast, Default::default());
-        let (annotated, schemes) = ral_core::bake_prelude(&comp);
-        (Arc::new(annotated), schemes)
-    })
-}
-
-/// The annotated prelude comp — its `Bind` nodes carry the checker's
-/// schemes, so `builtins::register` installs each prelude binding's scheme.
-fn prelude_comp() -> &'static std::sync::Arc<ral_core::Comp> {
-    &baked().0
+    let _ = std::fs::remove_dir_all(&work);
+    let _ = std::fs::remove_file(&denied);
 }

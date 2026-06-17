@@ -86,6 +86,8 @@ pub(super) fn stage_err(stage: &str, e: impl Display) -> Break {
 /// fragment is merged into `parent.local.audit` here so the contract
 /// layer doesn't bubble it.  Body-shape agnostic: the mobile carries
 /// everything the child needs to install onto its own shell.
+// dead after the grant-local flip; deleted in M5 (sandbox-external-children)
+#[allow(dead_code)]
 pub(crate) fn run_confined(
     body: &Arc<Comp>,
     mobile: Mobile,
