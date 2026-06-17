@@ -7,11 +7,10 @@
 //! directly-spawned external stages; no process / pipe is created here.
 //! Everything this module produces is read by [`super::launch`].
 
-use super::super::command::{CommandIdentity, EvalRedirect};
+use super::super::command::CommandIdentity;
 use super::super::command_call;
 use crate::evaluator::call;
 use crate::ir::{Comp, CompKind};
-use crate::syntax::ast::RedirectMode;
 use crate::types::*;
 use std::sync::Arc;
 
@@ -72,25 +71,25 @@ impl PipelineKind {
 /// Args are kept as `Value`s rather than strings so launch-time
 /// `command::vet` can run the same shape rejection that single-command
 /// exec runs (lists / maps / lambdas / blocks / handles / bytes
-/// rejected with a hint to use `...$xs` or `to-bytes`).  Redirects
-/// are evaluated here too so the launcher can apply them at spawn time.
+/// rejected with a hint to use `...$xs` or `to-bytes`).  A `Direct`
+/// stage carries no redirects — [`direct_spawnable`] gates on
+/// `e.redirects.is_empty()` — so none are threaded through here.
 #[derive(Clone, Debug)]
 pub(super) struct ExternalStage {
     pub(super) id: CommandIdentity,
     pub(super) args: Vec<Value>,
-    pub(super) redirects: Vec<(u32, RedirectMode, EvalRedirect)>,
 }
 
 /// Head resolution for one process-staged pipeline stage: a ral
-/// computation evaluated in a helper, an external command found on
-/// `PATH`, or a bundled coreutils tool.  `External` and `Uutils` carry
-/// the resolved [`CommandIdentity`] so the launch decision needs no
-/// second `PATH` walk.
+/// computation evaluated in a helper, or an external command found on
+/// `PATH`.  A bundled tool resolves to `External` like any other head;
+/// its `ral --ral-bundled-tool` child is selected later by the command
+/// image, not by a separate stage kind.  `External` carries the resolved
+/// [`CommandIdentity`] so the launch decision needs no second `PATH` walk.
 #[derive(Clone, Debug)]
 enum StageKind {
     Ral,
     External(CommandIdentity),
-    Uutils(CommandIdentity),
 }
 
 /// The frozen launch decision for one process-staged stage, made once in
@@ -98,17 +97,17 @@ enum StageKind {
 /// terminal plan, the unified wire modes, the redirects, and whether a
 /// `!{…}` audit is capturing bytes.
 ///
-/// `Direct` spawns a pure external command with no stage helper;
-/// `HelperUutils` runs a bundled tool through the helper's in-process
-/// uutils arm; `HelperEval` evaluates the stage's ral computation in the
-/// helper.  Launch reads this decision rather than re-deriving it, and
-/// argv is evaluated into the carried [`ExternalStage`] only for the two
-/// paths that consume it — a helper-evaluated stage re-evaluates its
+/// `Direct` spawns an external command with no stage helper — a host
+/// binary, or, when the head is a bundled tool, the `ral
+/// --ral-bundled-tool` child selected by the command image;
+/// `HelperEval` evaluates the stage's ral computation in the helper.
+/// Launch reads this decision rather than re-deriving it, and argv is
+/// evaluated into the carried [`ExternalStage`] only for the `Direct`
+/// path that consumes it — a helper-evaluated stage re-evaluates its
 /// argv inside the child, so evaluating it here too would be redundant.
 #[derive(Clone, Debug)]
 pub(super) enum StageLaunch {
     Direct(ExternalStage),
-    HelperUutils(ExternalStage),
     HelperEval,
 }
 
@@ -148,21 +147,16 @@ fn stage_loc(stage: &Comp, shell: &Shell) -> crate::diagnostic::SourceLoc {
 
 /// Decide which launcher kind a pipeline stage needs.
 ///
-/// Bundled-first demotion: bundled coreutils / diffutils / ripgrep tools
-/// live inside the ral binary, not as standalone executables on PATH.
-/// Even on hosts that ship a same-named system binary (`/usr/bin/cat`
-/// on Linux, etc.), policy is that the bundled implementation always
-/// wins so behaviour is uniform across platforms.  Demote them to a
-/// Ral stage on every platform so the launcher dispatches via
-/// `--ral-pipeline-stage-helper`; inside that helper the in-process
-/// uutils path in `exec_uutils_in_process` fires and writes uu_*'s
-/// bytes to the inherited std handle (the pipe end the parent wired).
-/// The visible cost on Unix is one extra fork per bundled stage versus
-/// spawning the system binary directly; the gain is that `ls`, `cat`,
-/// `wc`, … behave identically everywhere, including on Windows where no
-/// `.exe` exists to spawn.
-/// `External` and `Uutils` carry the resolved [`CommandIdentity`] so the
-/// caller threads it into launch without a second PATH walk.
+/// A byte stage — whether its head is a host binary or a bundled
+/// coreutils / diffutils / ripgrep tool — is classified the same:
+/// [`StageKind::External`] carrying the resolved [`CommandIdentity`], so
+/// the caller threads it into launch without a second PATH walk.  Launch
+/// then spawns it directly when [`direct_spawnable`] holds, and otherwise
+/// evaluates it in a helper.  A bundled head's direct child is the `ral
+/// --ral-bundled-tool` placement chosen later by the command image
+/// (`command::build_command` reads `ExecImage::BundledTool`); nothing
+/// here distinguishes it, so `ls`, `cat`, `wc`, … behave identically
+/// everywhere, including on Windows where no `.exe` exists to spawn.
 /// Handler-intercepted and builtin-bound heads route to Ral; admission
 /// is left to the launch-time gate inside `command::vet`, so a denied
 /// head still routes here and surfaces its denial through ral's
@@ -171,22 +165,20 @@ fn classify_stage(stage: &Comp, shell: &Shell) -> StageKind {
     let CompKind::Exec(e) = &stage.item else {
         return StageKind::Ral;
     };
-    let command_call::Resolution::External(id) = command_call::resolve_command_word(&e.head, shell)
-    else {
-        return StageKind::Ral;
-    };
-    match e.head.name().bare() {
-        Some(bare) if crate::builtins::uutils::is_uutils_tool(bare) => StageKind::Uutils(id),
-        _ => StageKind::External(id),
+    match command_call::resolve_command_word(&e.head, shell) {
+        command_call::Resolution::External(id) => StageKind::External(id),
+        _ => StageKind::Ral,
     }
 }
 
-/// Evaluate a stage's argv and redirects into an [`ExternalStage`].
+/// Evaluate a stage's argv into an [`ExternalStage`].
 ///
-/// Run only for the launch paths that consume the result — `Direct` and
-/// `HelperUutils`.  A `HelperEval` external re-evaluates its argv inside
-/// the child, so evaluating it here as well would be a discarded second
-/// evaluation of any effectful argument.
+/// Run only for the launch path that consumes the result — `Direct`,
+/// which [`direct_spawnable`] admits only for a redirect-free stage, so
+/// the evaluated redirects are always empty and are dropped here.  A
+/// `HelperEval` external re-evaluates its argv inside the child, so
+/// evaluating it here as well would be a discarded second evaluation of
+/// any effectful argument.
 fn eval_external_stage(
     id: CommandIdentity,
     stage: &Comp,
@@ -196,11 +188,8 @@ fn eval_external_stage(
         unreachable!("classify_stage yields an identity only for Exec stages")
     };
     let (args, redirects) = call::eval_call_parts(&e.args, &e.redirects, shell)?;
-    Ok(ExternalStage {
-        id,
-        args,
-        redirects,
-    })
+    debug_assert!(redirects.is_empty(), "direct_spawnable gates on no redirects");
+    Ok(ExternalStage { id, args })
 }
 
 /// Whether stage `i` of `n` carries a value edge on either side: the
@@ -240,12 +229,13 @@ fn direct_spawnable(
 /// Freeze the launch decision for one stage from its head resolution and
 /// the resolve-time facts (see [`StageLaunch`]).
 ///
-/// A bundled tool takes the uutils arm only when no value edge touches the
-/// stage: the uutils arm execs the tool without entering the evaluator, so
-/// it cannot perform data-last application.  A bundled head carrying a
-/// value edge is evaluated as a ral stage instead — inside that child the
-/// in-process uutils path still fires from command dispatch, so the
-/// bundled-first policy is preserved.
+/// An external head — host binary or bundled tool — is spawned directly
+/// when [`direct_spawnable`] holds, and otherwise evaluated in a helper.
+/// A value-edge bundled stage is `direct_spawnable == false` (the
+/// predicate excludes [`carries_value_edge`]), so it routes to
+/// `HelperEval`: data-last application (`x | f = f !{x}`) is evaluator
+/// work, and the bundled tool's in-process path still fires from command
+/// dispatch inside that child, preserving the bundled-first policy.
 fn resolve_launch(
     i: usize,
     n: usize,
@@ -256,8 +246,6 @@ fn resolve_launch(
 ) -> Settled<StageLaunch> {
     Ok(match classify_stage(stage, shell) {
         StageKind::Ral => StageLaunch::HelperEval,
-        StageKind::Uutils(_) if carries_value_edge(i, n, comp_type) => StageLaunch::HelperEval,
-        StageKind::Uutils(id) => StageLaunch::HelperUutils(eval_external_stage(id, stage, shell)?),
         StageKind::External(id) => {
             if direct_spawnable(i, n, stage, comp_type, terminal, shell) {
                 StageLaunch::Direct(eval_external_stage(id, stage, shell)?)

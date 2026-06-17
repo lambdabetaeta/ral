@@ -14,7 +14,6 @@
 use super::super::command;
 use super::collect::RunningPipeline;
 use super::group::PipelineGroup;
-use super::helper::{StageJob, UutilsSnapshot, WireRedirect};
 use super::protocol::DeferredFrame;
 use super::resolve::{ExternalStage, PipelinePlan, StageLaunch, StageSpec};
 use super::route::{ByteIn, ByteOut, FinalValue, StageRoute, open_stage_routes};
@@ -170,7 +169,7 @@ fn spawn_stage(
     route: StageRoute,
     cx: LaunchCx<'_>,
 ) -> Settled<SpawnedStage> {
-    let job = match &spec.launch {
+    let request = match &spec.launch {
         StageLaunch::Direct(ext) => {
             let handle =
                 launch_external_stage_direct(ext, route, cx.shell, cx.group, cx.park_on_stop)?;
@@ -179,14 +178,13 @@ fn spawn_stage(
                 gate: None,
             });
         }
-        StageLaunch::HelperUutils(ext) => pack_uutils_stage_job(ext, cx.shell)?,
         StageLaunch::HelperEval => {
             let captured = cx.shell.snapshot();
             // Pipeline stages are subshells: only the final value-typed
             // stage ships its return value (`wants_value`) and no stage
             // ships its post-run mobile (`wants_mobile = false`).
             let wants_value = matches!(route.final_value, FinalValue::Report);
-            let request = pack_request(
+            pack_request(
                 Arc::clone(stage),
                 &cx.shell.mobile,
                 Some(&captured),
@@ -194,30 +192,14 @@ fn spawn_stage(
                 wants_value,
                 false,
                 None,
-            )?;
-            StageJob::Ral(request)
+            )?
         }
     };
     let (handle, deferred) =
-        launch_helper_stage(job, spec, route, cx.shell, cx.group, cx.park_on_stop)?;
+        launch_helper_stage(request, spec, route, cx.shell, cx.group, cx.park_on_stop)?;
     Ok(SpawnedStage {
         handle: StageHandle::Helper(handle),
         gate: Some(deferred),
-    })
-}
-
-fn pack_uutils_stage_job(ext: &ExternalStage, shell: &mut Shell) -> Settled<StageJob> {
-    let rc = command::vet(&ext.id, &ext.args, shell)?;
-    let redirects = ext
-        .redirects
-        .iter()
-        .map(|(fd, mode, target)| WireRedirect::from_eval(*fd, *mode, target))
-        .collect();
-    Ok(StageJob::Uutils {
-        tool: rc.shown,
-        args: rc.args,
-        redirects,
-        ambient: UutilsSnapshot::from_shell(shell),
     })
 }
 
@@ -375,7 +357,7 @@ fn launch_external_stage_direct(
     debug_assert!(route.value_in.is_none() && route.value_out.is_none());
 
     let rc = command::vet(&ext.id, &ext.args, shell)?;
-    let mut cmd = command::build_command(&rc, shell);
+    let mut cmd = command::build_command(&rc, shell)?;
 
     cmd.stdin(route_stdin(route.stdin, group, shell).into_stdio());
 

@@ -554,6 +554,15 @@ fn main() -> ExitCode {
         return ExitCode::from(code);
     }
 
+    // Bundled-tool multicall dispatch — runs *after* `early_init` so a
+    // `--sandbox-projection` child enters the OS sandbox first, then runs
+    // the tool confined.  `stripped` is the post-early_init argv (sans
+    // binary name); a leading `--ral-bundled-tool <tool> …` runs the tool
+    // and exits here, never reaching clap.
+    if let Some(code) = ral_core::try_run_bundled_tool(&stripped) {
+        return ExitCode::from(code);
+    }
+
     let cli =
         Cli::parse_from(std::iter::once("ral".to_string()).chain(inject_arg_terminator(stripped)));
     let mode = cli.into_mode();

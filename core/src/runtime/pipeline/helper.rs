@@ -2,31 +2,22 @@
 //!
 //! `--ral-pipeline-stage-helper` runs one ral stage in a fresh child
 //! shell.  The parent packs the stage and the ambient shell snapshot
-//! into a [`StageJob`]; the helper reconstructs the shell, optionally
-//! reads one typed upstream value from `VALUE_IN_FD_ENV`, runs the
-//! stage via `invoke`, and emits a structured [`ChildEvalResponse`] (with
-//! the final value embedded for the parent to recover after the helper
-//! exits).
+//! into a [`ChildEvalRequest`]; the helper reconstructs the shell,
+//! optionally reads one typed upstream value from `VALUE_IN_FD_ENV`, runs
+//! the stage via `invoke`, and emits a structured
+//! [`ChildEvalResponse`](crate::child_eval::ChildEvalResponse) (with the
+//! final value embedded for the parent to recover after the helper exits).
 //!
 //! `--ral-pipeline-anchor` owns the pipeline pgid for the whole launch
 //! so a fast-exiting first stage cannot strand later stages.
 
 use crate::child_eval::{
-    ChildEvalRequest, ChildEvalResponse, ChildKind, break_response, report_without_eval,
-    run_child_eval, transfer_error,
+    ChildEvalRequest, ChildKind, break_response, run_child_eval, transfer_error,
 };
-use crate::evaluator::audit;
-use crate::io::TerminalState;
-use crate::runtime::command;
 use crate::serial::{InternCtx, ScopeTable, SerialValue, build_arcs};
 use crate::subprocess_codec::{read_frame, write_frame};
-use crate::syntax::ast::RedirectMode;
-use crate::types::{
-    Break, CapturePolicy, EnvVars, Error, GrantStack, LocationCursor, Settled, Shell, Value,
-};
+use crate::types::{Break, Error, Settled, Value};
 use serde::{Deserialize, Serialize};
-use std::ffi::OsString;
-use std::path::PathBuf;
 use std::process::Command;
 
 /// Hidden multicall sentinel for one pipeline-stage helper subprocess.
@@ -55,89 +46,34 @@ pub(crate) const VALUE_OUT_HANDLE_ENV: &str = "RAL_PIPELINE_STAGE_VALUE_OUT_HAND
 /// Hidden multicall sentinel for the stable pipeline pgid anchor.
 pub(crate) const ANCHOR_FLAG: &str = "--ral-pipeline-anchor";
 
+/// Hidden multicall sentinel for a child placement of a bundled tool
+/// (`ral --ral-bundled-tool <tool> <args...>`).  Unlike the stage helper
+/// this child reads no [`ChildEvalRequest`] and sends no
+/// [`ChildEvalResponse`](crate::child_eval::ChildEvalResponse): its
+/// inherited env/cwd/stdio/process-group/sandbox are the execution
+/// context, so it just runs `uutils_invoke` and exits with the tool
+/// status.  See `decisions/260616_bundled-tools-as-exec-images`.
+pub(crate) const BUNDLED_TOOL_FLAG: &str = "--ral-bundled-tool";
+
+/// Optional start-gate descriptor the pipeline launcher passes so the
+/// bundled-tool child blocks until all stages have joined the process
+/// group and the terminal handoff is settled.  Absent means run
+/// immediately.  Mirrors [`ANCHOR_FD_ENV`]: the child reads the
+/// descriptor to EOF and proceeds.  Only the bundled-tool entrypoint
+/// reads it, so the const tracks the same feature gate.
+#[cfg(all(unix, any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")))]
+pub(crate) const BUNDLED_TOOL_GATE_FD_ENV: &str = "RAL_BUNDLED_TOOL_GATE_FD";
+#[cfg(all(
+    windows,
+    any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
+))]
+pub(crate) const BUNDLED_TOOL_GATE_HANDLE_ENV: &str = "RAL_BUNDLED_TOOL_GATE_HANDLE";
+
 /// A multicall sentinel that no live caller emits.  Recognising it here
 /// turns a stale invocation — an old script, or a re-exec from a
 /// mismatched binary — into a clear diagnostic and a non-zero exit
 /// rather than an opaque clap usage error.
 pub(crate) const RETIRED_EXEC_FLAG: &str = "--ral-pipeline-exec-helper";
-
-/// The job frame the parent gates a stage helper on: a ral computation
-/// wrapping a shared [`ChildEvalRequest`], or a terminal bundled-tool
-/// invocation that never enters the evaluator.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) enum StageJob {
-    Ral(ChildEvalRequest),
-    Uutils {
-        tool: String,
-        args: Vec<String>,
-        redirects: Vec<WireRedirect>,
-        ambient: UutilsSnapshot,
-    },
-}
-
-/// The subset of [`Context`](crate::types::Context) a terminal uutils
-/// helper needs.  Mirrors the runtime field names so a reader can
-/// trace the IPC payload back to its source without a translation
-/// table.
-///
-/// Deliberately excludes the ral evaluator payload: no `Comp`,
-/// captured environment, registry, modules, or handlers cross this arm.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct UutilsSnapshot {
-    pub env_overrides: EnvVars,
-    pub dir: Option<PathBuf>,
-    pub grants: GrantStack,
-    pub location: LocationCursor,
-    /// Carried separately from the mobile-shaped fields above; see
-    /// [`Audit::active_policy`](crate::types::Audit::active_policy)
-    /// for why audit policy isn't part of the mobile snapshot.
-    pub audit_policy: Option<CapturePolicy>,
-}
-
-impl UutilsSnapshot {
-    pub(crate) fn from_shell(shell: &Shell) -> Self {
-        Self {
-            env_overrides: shell.mobile.context.env_overrides().clone(),
-            dir: shell.mobile.context.dir.clone(),
-            grants: shell.mobile.context.grants.clone(),
-            location: shell.turn.loc.clone(),
-            audit_policy: shell.local.audit.active_policy(),
-        }
-    }
-}
-
-/// Wire form for an already-evaluated redirect.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct WireRedirect {
-    pub fd: u32,
-    pub mode: RedirectMode,
-    pub target: WireRedirectTarget,
-}
-
-impl WireRedirect {
-    pub(crate) fn from_eval(fd: u32, mode: RedirectMode, target: &command::EvalRedirect) -> Self {
-        let target = match target {
-            command::EvalRedirect::File(path) => WireRedirectTarget::File(path.clone()),
-            command::EvalRedirect::Fd(fd) => WireRedirectTarget::Fd(*fd),
-        };
-        Self { fd, mode, target }
-    }
-
-    fn into_eval(self) -> (u32, RedirectMode, command::EvalRedirect) {
-        let target = match self.target {
-            WireRedirectTarget::File(path) => command::EvalRedirect::File(path),
-            WireRedirectTarget::Fd(fd) => command::EvalRedirect::Fd(fd),
-        };
-        (self.fd, self.mode, target)
-    }
-}
-
-/// Wire form for an already-evaluated redirect target.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) enum WireRedirectTarget {
-    File(String),
-    Fd(u32),
-}
 
 /// One typed value crossing a process-staged pipeline boundary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,122 +96,6 @@ pub(crate) fn pack_stage_value(value: &Value) -> Result<StageValue, Error> {
 pub(crate) fn unpack_stage_value(value: StageValue) -> Result<Value, Error> {
     let arcs = build_arcs(&value.scope_table)?;
     value.value.into_runtime(&arcs)
-}
-
-struct ProcessStateGuard {
-    cwd: Option<PathBuf>,
-    env: Vec<(String, Option<OsString>)>,
-}
-
-impl ProcessStateGuard {
-    fn install(ambient: &UutilsSnapshot) -> Settled<Self> {
-        // Helper subprocess only: the parent already set our process
-        // cwd via `Command::current_dir(shell.cwd())` at spawn time,
-        // so this `current_dir()` reads the parent's effective cwd
-        // (the within override if any, otherwise the parent's
-        // cwd.current).  Saved and re-installed on drop so a uutils
-        // tool's internal `chdir` cannot leak across helper jobs.
-        #[allow(clippy::disallowed_methods)]
-        let cwd = std::env::current_dir().ok();
-        let mut env = Vec::new();
-        for (key, value) in ambient.env_overrides.iter() {
-            // Snapshots the within-override keys to restore on drop; the keys
-            // are arbitrary user vars, not basedirs.
-            #[allow(clippy::disallowed_methods)]
-            env.push((key.clone(), std::env::var_os(key)));
-            unsafe {
-                std::env::set_var(key, value);
-            }
-        }
-        if let Some(cwd) = &ambient.dir {
-            // Helper subprocess only: align the kernel cwd with the
-            // parent's `within [dir: …]` override so `uumain`'s
-            // `getcwd(3)` matches what ral promised.
-            #[allow(clippy::disallowed_methods)]
-            std::env::set_current_dir(cwd).map_err(|e| {
-                Break::Error(Error::new(format!("pipeline helper: {cwd:?}: {e}"), 1))
-            })?;
-        }
-        Ok(Self { cwd, env })
-    }
-}
-
-impl Drop for ProcessStateGuard {
-    fn drop(&mut self) {
-        for (key, value) in self.env.drain(..).rev() {
-            unsafe {
-                match value {
-                    Some(value) => std::env::set_var(key, value),
-                    None => std::env::remove_var(key),
-                }
-            }
-        }
-        if let Some(cwd) = &self.cwd {
-            // Helper subprocess only: restore the cwd captured in
-            // `install` after `uumain` returns; no parent-side code
-            // ever runs through this `Drop`.
-            #[allow(clippy::disallowed_methods)]
-            let _ = std::env::set_current_dir(cwd);
-        }
-    }
-}
-
-/// Run a terminal bundled-tool job without entering the ral evaluator.
-///
-/// The uutils arm is not part of the [`run_child_eval`] protocol — no
-/// `Comp`, captured env, or mobile crosses it — so it builds its
-/// [`ChildEvalResponse`] directly via [`child_eval::report_without_eval`],
-/// keeping the report channel a single frame type.
-pub(crate) fn run_uutils_stage_job(job: StageJob) -> Settled<ChildEvalResponse> {
-    let StageJob::Uutils {
-        tool,
-        args,
-        redirects,
-        ambient,
-    } = job
-    else {
-        return Err(Break::Error(Error::new(
-            "pipeline helper expected a uutils stage job",
-            1,
-        )));
-    };
-
-    let _guard = ProcessStateGuard::install(&ambient)?;
-    let mut shell = Shell::new(Default::default());
-    shell.mobile.context.env_overrides = ambient.env_overrides;
-    shell.mobile.context.dir = ambient.dir;
-    shell.mobile.context.grants = ambient.grants;
-    shell.turn.loc = ambient.location;
-    shell
-        .local
-        .audit
-        .install_active_policy(ambient.audit_policy);
-    shell.turn.io.terminal = TerminalState::probe();
-    shell.turn.io.job_control = crate::io::JobControl::pipeline_child();
-
-    let redirects: Vec<_> = redirects.into_iter().map(WireRedirect::into_eval).collect();
-    let audit_args: Vec<Value> = args.iter().cloned().map(Value::String).collect();
-    let start = audit::start(&shell);
-    // This helper builds a fresh Shell whose stdin is a Terminal, so it
-    // installs any `<file` redirect itself — `run_external` does the same on
-    // the standalone path — and `run_uutils_in_process` binds the parked
-    // `Source` onto fd 0 without re-opening it.
-    let stdin_guard = command::install_stdin_redirect(&redirects, &mut shell)?;
-    let result = command::run_uutils_in_process(&tool, &args, &redirects, &mut shell);
-    stdin_guard.restore(&mut shell);
-    audit::finish_command(
-        &mut shell,
-        start,
-        &tool,
-        &audit_args,
-        &result,
-        Vec::new(),
-        Vec::new(),
-    );
-
-    let audit_nodes = shell.local.audit.take_fragment().into_nodes();
-    let last_status = shell.mobile.control.last_status;
-    report_without_eval(result.map(|_| ()), last_status, audit_nodes)
 }
 
 /// Read a required env var and parse it as `T`.  Absent or non-unicode
@@ -400,20 +220,21 @@ fn write_stage_value<W: std::io::Write>(writer: &mut W, value: &Value) -> Result
     })
 }
 
-/// Shared stage-serve logic: block-read the [`StageJob`], optionally
-/// read an upstream value, run the stage via the shared
+/// Shared stage-serve logic: block-read the [`ChildEvalRequest`],
+/// optionally read an upstream value, run the stage via the shared
 /// [`run_child_eval`], optionally forward the output value, and emit the
-/// [`ChildEvalResponse`].  Platform-specific I/O setup (fd/handle
-/// parsing, CLOEXEC, `from_raw_fd`/`from_raw_handle`) lives in the
-/// callers; this function works exclusively through `BufRead` / `Write`.
+/// [`ChildEvalResponse`](crate::child_eval::ChildEvalResponse).
+/// Platform-specific I/O setup (fd/handle parsing, CLOEXEC,
+/// `from_raw_fd`/`from_raw_handle`) lives in the callers; this function
+/// works exclusively through `BufRead` / `Write`.
 fn serve_stage_core<R: std::io::BufRead + ?Sized, W: std::io::Write + ?Sized>(
     job_reader: &mut R,
     report_writer: &mut W,
     value_in: Option<Box<dyn std::io::BufRead>>,
     value_out: Option<Box<dyn std::io::Write>>,
 ) -> u8 {
-    let job: StageJob = match read_frame(job_reader) {
-        Ok(Some(job)) => job,
+    let request: ChildEvalRequest = match read_frame(job_reader) {
+        Ok(Some(request)) => request,
         Ok(None) => return 0,
         Err(err) => {
             crate::diagnostic::cmd_error(
@@ -430,44 +251,25 @@ fn serve_stage_core<R: std::io::BufRead + ?Sized, W: std::io::Write + ?Sized>(
     // the value-forwarding match below.
     let force_output = value_out.is_some();
 
-    let (report, output_value) = match job {
-        StageJob::Ral(request) => {
-            let upstream = match value_in {
-                Some(mut reader) => match read_required_stage_value(&mut reader) {
-                    Ok(value) => Some(value),
-                    Err(signal) => {
-                        let report = break_response(signal);
-                        if let Err(err) = write_frame(report_writer, &report) {
-                            crate::diagnostic::cmd_error(
-                                "ral",
-                                &format!("pipeline helper: failed to write stage report: {err}"),
-                            );
-                            return 1;
-                        }
-                        return 0;
-                    }
-                },
-                None => None,
-            };
-            run_child_eval(request, upstream, ChildKind::PipelineStage { force_output })
-        }
-        StageJob::Uutils { .. } => {
-            if value_in.is_some() || value_out.is_some() {
-                (
-                    break_response(Break::Error(Error::new(
-                        "pipeline helper: uutils stage cannot carry value channels",
-                        1,
-                    ))),
-                    None,
-                )
-            } else {
-                match run_uutils_stage_job(job) {
-                    Ok(report) => (report, None),
-                    Err(signal) => (break_response(signal), None),
+    let upstream = match value_in {
+        Some(mut reader) => match read_required_stage_value(&mut reader) {
+            Ok(value) => Some(value),
+            Err(signal) => {
+                let report = break_response(signal);
+                if let Err(err) = write_frame(report_writer, &report) {
+                    crate::diagnostic::cmd_error(
+                        "ral",
+                        &format!("pipeline helper: failed to write stage report: {err}"),
+                    );
+                    return 1;
                 }
+                return 0;
             }
-        }
+        },
+        None => None,
     };
+    let (report, output_value) =
+        run_child_eval(request, upstream, ChildKind::PipelineStage { force_output });
 
     let report = match (value_out, output_value.as_ref()) {
         (Some(mut writer), Some(value)) => match write_stage_value(&mut writer, value) {
@@ -693,43 +495,113 @@ pub fn try_run_pipeline_stage_helper() -> Option<u8> {
     }
 }
 
-#[cfg(all(test, any(unix, windows), feature = "coreutils"))]
-mod tests {
-    use super::*;
-    use crate::Shell;
-    use crate::child_eval::WireOutcome;
+/// Block until the launcher releases the optional start gate.  The gate
+/// is one inheritable descriptor (fd / Win32 HANDLE) the parent holds
+/// open; reading it to EOF means the launcher has closed its end after
+/// the whole pipeline joined the process group and the terminal handoff
+/// settled.  Absent descriptor → run immediately (a standalone bundled
+/// child has no gate).  Mirrors [`serve_anchor_from_env_fd`].
+#[cfg(all(unix, any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")))]
+fn block_on_bundled_tool_gate() {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::net::UnixStream;
+    match read_env_optional(BUNDLED_TOOL_GATE_FD_ENV, "an fd", |s| s.parse::<i32>().ok()) {
+        Ok(Some(fd)) => {
+            let mut stream = unsafe { UnixStream::from_raw_fd(fd) };
+            let _ = std::io::copy(&mut stream, &mut std::io::sink());
+        }
+        Ok(None) => {}
+        Err(err) => report_helper_env_err(err),
+    }
+}
 
-    #[test]
-    fn uutils_stage_job_runs_terminal_tool_without_ral_eval() {
-        let shell = Shell::default();
-        let job = StageJob::Uutils {
-            tool: "sleep".into(),
-            args: vec!["0".into()],
-            redirects: Vec::new(),
-            ambient: UutilsSnapshot::from_shell(&shell),
-        };
+#[cfg(all(
+    windows,
+    any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
+))]
+fn block_on_bundled_tool_gate() {
+    use std::os::windows::io::FromRawHandle;
+    match read_env_optional(BUNDLED_TOOL_GATE_HANDLE_ENV, "a handle", |s| {
+        s.parse::<usize>().ok().map(|v| v as std::os::windows::io::RawHandle)
+    }) {
+        Ok(Some(handle)) => {
+            let mut reader = unsafe { os_pipe::PipeReader::from_raw_handle(handle) };
+            let _ = std::io::copy(&mut reader, &mut std::io::sink());
+        }
+        Ok(None) => {}
+        Err(err) => report_helper_env_err(err),
+    }
+}
 
-        let response = run_uutils_stage_job(job).expect("run");
-        assert!(matches!(response.outcome, WireOutcome::Ok(None)));
-        assert_eq!(response.last_status, 0);
-        assert!(response.mobile.is_none());
+/// There is no inheritable-descriptor gate transport off Unix/Windows;
+/// the bundled tools only link on those platforms anyway (see
+/// `run_uutils_in_process`), so the gate is a no-op here.
+#[cfg(all(
+    not(any(unix, windows)),
+    any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
+))]
+fn block_on_bundled_tool_gate() {}
+
+/// Hidden bundled-tool dispatch from the binary entrypoint
+/// (`ral --ral-bundled-tool <tool> <args...>`).
+///
+/// Returns `None` when `args` does not start with [`BUNDLED_TOOL_FLAG`]
+/// (the normal CLI path runs); otherwise runs the bundled tool in this
+/// process and returns `Some(exit_code)`.
+///
+/// `args` is the post-`early_init` argv slice (sans the binary name) — by
+/// then the OS sandbox is already entered, so the tool runs confined.
+/// The child reads no `ChildEvalRequest` and emits no `ChildEvalResponse`:
+/// its inherited env/cwd/stdio/process-group/sandbox are the execution
+/// context.  The exit code combines `uutils_invoke`'s direct return with
+/// uucore's process-global cell exactly as `run_uutils_in_process` does
+/// (`if global == 0 { code } else { global }`).
+#[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
+pub fn try_run_bundled_tool(args: &[String]) -> Option<u8> {
+    use crate::builtins::uutils;
+
+    let (flag, rest) = args.split_first()?;
+    if flag != BUNDLED_TOOL_FLAG {
+        return None;
+    }
+    let Some((tool, tool_args)) = rest.split_first() else {
+        crate::diagnostic::cmd_error("ral", &format!("{BUNDLED_TOOL_FLAG} requires a tool name"));
+        return Some(2);
+    };
+    if !uutils::is_uutils_tool(tool) {
+        crate::diagnostic::cmd_error("ral", &format!("'{tool}' is not a bundled tool"));
+        return Some(127);
     }
 
-    #[test]
-    fn uutils_stage_job_nonzero_is_error_not_exit_control() {
-        let shell = Shell::default();
-        let job = StageJob::Uutils {
-            tool: "ls".into(),
-            args: vec!["/definitely-not-present-ral-uutils-test".into()],
-            redirects: Vec::new(),
-            ambient: UutilsSnapshot::from_shell(&shell),
-        };
+    block_on_bundled_tool_gate();
 
-        let response = run_uutils_stage_job(job).expect("run");
-        assert!(
-            matches!(response.outcome, WireOutcome::Error { status, .. } if status != 0),
-            "nonzero uutils status must report ordinary command failure"
-        );
-        assert_ne!(response.last_status, 0);
+    // Slot 0 carries the tool name for every tool — `uutils_invoke`'s `rg`
+    // arm drops it internally (`ral-ripgrep-core` wants argv without
+    // argv[0]); coreutils/diffutils keep it.  This matches exactly how
+    // `run_uutils_in_process` builds `os_args`, so there is no per-family
+    // branching here and no double-adjustment of ripgrep's argv.
+    let os_args: Vec<std::ffi::OsString> = std::iter::once(std::ffi::OsString::from(tool.as_str()))
+        .chain(tool_args.iter().map(std::ffi::OsString::from))
+        .collect();
+
+    uutils::reset_exit_code();
+    let code = uutils::uutils_invoke(tool, os_args);
+    let global = uutils::get_exit_code();
+    let exit_code = if global == 0 { code } else { global };
+    Some(exit_code.clamp(0, 255) as u8)
+}
+
+/// No-bundled-features fallback so the binary entrypoint stays
+/// feature-clean.  Without any bundled tool linked in there is nothing
+/// `--ral-bundled-tool` could dispatch, so it is unreachable; recognise
+/// the sentinel anyway to turn it into a clear diagnostic rather than an
+/// opaque clap usage error, mirroring [`RETIRED_EXEC_FLAG`].
+#[cfg(not(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")))]
+pub fn try_run_bundled_tool(args: &[String]) -> Option<u8> {
+    let flag = args.first()?;
+    if flag != BUNDLED_TOOL_FLAG {
+        return None;
     }
+    crate::diagnostic::cmd_error("ral", "no bundled tools are available in this build");
+    Some(127)
 }

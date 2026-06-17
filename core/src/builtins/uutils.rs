@@ -152,8 +152,8 @@ pub(crate) fn uutils_invoke(tool: &str, args: Vec<std::ffi::OsString>) -> i32 {
     }
 }
 
-/// `rg` shim, dispatched by the helper subprocess when the parent
-/// routes a bare `rg` through `dispatch_uutils_via_pipeline`.
+/// `rg` shim, dispatched via [`uutils_invoke`] — from the in-process
+/// fast path or from the `ral --ral-bundled-tool rg` child placement.
 /// `ral-ripgrep-core` expects argv without argv[0], so we drop the
 /// tool-name slot and pass through the original user arguments unchanged.
 #[cfg(feature = "ripgrep")]
@@ -221,8 +221,8 @@ declare_coreutils! {
     }
 }
 
-/// `cmp` shim, dispatched by the helper subprocess when the parent
-/// routes a bare `cmp` through `dispatch_uutils_via_pipeline`.
+/// `cmp` shim, dispatched via [`uutils_invoke`] — from the in-process
+/// fast path or from the `ral --ral-bundled-tool cmp` child placement.
 /// Argv layout matches `parse_params`'s expectation: argv[0] is the tool
 /// name, argv[1..] are user arguments.  Faithful translation of upstream
 /// `diffutilslib::cmp::main` (`src/cmp.rs:476`), with two structural

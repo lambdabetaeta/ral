@@ -61,7 +61,7 @@ pub use diagnostic::SourceLoc;
 pub use elaborator::elaborate;
 pub use evaluator::{apply, evaluate};
 pub use ir::{Comp, Val};
-pub use runtime::pipeline::helper::try_run_pipeline_stage_helper;
+pub use runtime::pipeline::helper::{try_run_bundled_tool, try_run_pipeline_stage_helper};
 pub use syntax::ast::Ast;
 pub use syntax::parser::{ParseError, parse};
 pub use turn::{IoFrame, StaticDiagnostics, TurnFrame, TurnLifecycle, TurnOutcome, eval_turn};

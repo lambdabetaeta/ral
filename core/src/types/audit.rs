@@ -227,15 +227,16 @@ impl Audit {
     /// always travel together.  Returns `None` when audit is
     /// inactive (no trail to inherit).
     ///
-    /// IPC seams (the re-exec'd-child `ChildEvalRequest` and the
-    /// bundled-tool `UutilsSnapshot`) carry the return value of this in a
+    /// The re-exec'd-child IPC seam (`ChildEvalRequest`, the only frame
+    /// that crosses to a helper now that a bundled tool rides as an
+    /// ordinary external stage) carries the return value of this in a
     /// dedicated `audit_policy` field rather than embedding it in the mobile
     /// snapshot: audit policy is an **instruction** to the helper
     /// process, not a snapshot property — `WireMobile` carries
     /// mobile-only state with no local audit on it.  And the policy
-    /// is `Option<CapturePolicy>` rather than a `bool` so a uutils
-    /// stage inside `try { … }` rides as `None` (live streaming) and
-    /// one inside `audit { … }` rides as `Some(Bytes)` (recorded).
+    /// is `Option<CapturePolicy>` rather than a `bool` so a stage inside
+    /// `try { … }` rides as `None` (live streaming) and one inside
+    /// `audit { … }` rides as `Some(Bytes)` (recorded).
     pub fn active_policy(&self) -> Option<CapturePolicy> {
         self.active().then_some(self.capture)
     }

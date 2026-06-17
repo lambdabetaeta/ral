@@ -331,12 +331,21 @@ pub fn early_init(argv: &[String]) -> Result<(Vec<String>, Option<u8>), String> 
 /// surface its exit code so the caller can terminate. A normal top-level
 /// invocation yields `None`. `early_init` also pins `SANDBOX_SELF` here, so
 /// the confined-transport availability probe reports `Ready`. The stripped
-/// argv is discarded — callers that need it (the `ral` binary parses its CLI
-/// from it) call `early_init` directly.
+/// argv is otherwise discarded — callers that need to parse a CLI from it
+/// (the `ral` binary) call `early_init` directly.
+///
+/// After sandbox setup this also serves the `--ral-bundled-tool` multicall
+/// (via [`crate::try_run_bundled_tool`]) on the post-`early_init` argv, so a
+/// bundled tool re-exec is reachable from the test ctors and the exarch
+/// frontend that route their pre-`main` dispatch through here — exactly as
+/// the `ral` binary serves it on its own `early_init` result. The order
+/// matters: a `--sandbox-projection` child enters the OS sandbox in
+/// `early_init` first, then runs the tool confined.
 pub fn serve_sandbox_early_init() -> Option<u8> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     match early_init(&argv) {
-        Ok((_, code)) => code,
+        Ok((_, Some(code))) => Some(code),
+        Ok((stripped, None)) => crate::try_run_bundled_tool(&stripped),
         Err(e) => {
             eprintln!("ral: sandbox init: {e}");
             Some(1)

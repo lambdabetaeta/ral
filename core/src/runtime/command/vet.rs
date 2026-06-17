@@ -25,13 +25,22 @@ use crate::types::*;
 
 use super::identity::CommandIdentity;
 
+/// The executable image a vetted call resolves to.  A host program is
+/// run by path (or bare name) via `Command::new`; a bundled
+/// coreutils/diffutils/ripgrep tool is run as a child placement of ral
+/// itself (`ral --ral-bundled-tool <tool> …`) so it goes through the
+/// same spawn/stdio/`RunningChild`/audit machinery as a host external.
+pub(crate) enum ExecImage {
+    Host(String),                 // resolved path (or bare name) for `Command::new`
+    BundledTool { tool: String }, // run as `ral --ral-bundled-tool <tool>`
+}
+
 /// A vetted call, ready to feed [`super::process::build_command`].
-/// `shown` is the surface name (diagnostics, audit), `resolved` is
-/// the absolute path `Command::new` will receive, and `args` is the
-/// stringified argv.
+/// `shown` is the surface name (diagnostics, audit), `image` is the
+/// resolved executable image, and `args` is the stringified argv.
 pub(crate) struct SpawnPlan {
     pub(crate) shown: String,
-    pub(crate) resolved: String,
+    pub(crate) image: ExecImage,
     pub(crate) args: Vec<String>,
 }
 
@@ -42,9 +51,15 @@ pub(crate) fn vet(id: &CommandIdentity, args: &[Value], shell: &mut Shell) -> Se
     let policy_names = id.policy_names(&shell.mobile.context);
     let policy_refs: Vec<&str> = policy_names.iter().map(String::as_str).collect();
     shell.check_exec_args(&id.shown, &policy_refs, &arg_strs)?;
+    let image = match &id.name {
+        CommandName::Bare(b) if crate::builtins::uutils::is_uutils_tool(b) => {
+            ExecImage::BundledTool { tool: b.clone() }
+        }
+        _ => ExecImage::Host(id.resolved.clone()),
+    };
     Ok(SpawnPlan {
         shown: id.shown.clone(),
-        resolved: id.resolved.clone(),
+        image,
         args: arg_strs,
     })
 }

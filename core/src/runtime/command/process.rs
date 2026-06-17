@@ -7,16 +7,36 @@
 use crate::types::*;
 use std::process::Command;
 
-use super::vet::SpawnPlan;
+use super::vet::{ExecImage, SpawnPlan};
 
 /// Build a `Command` from a [`SpawnPlan`] and apply the shell's
 /// scoped env vars + cwd.  Stdio routing and `pre_exec` hooks are the
 /// caller's responsibility: those vary between single-command and
 /// pipeline contexts.
-pub(crate) fn build_command(plan: &SpawnPlan, shell: &Shell) -> Command {
-    let mut cmd = crate::sandbox::make_command(&plan.resolved, &plan.args, shell);
+///
+/// A [`ExecImage::Host`] is `Command::new`'d directly.  A
+/// [`ExecImage::BundledTool`] is rendered as a child placement of ral
+/// itself (`ral --ral-bundled-tool <tool> …`) via the cross-platform
+/// self-exec helper, so building it is fallible (the self-path lookup
+/// can fail); the resulting child inherits cwd/env/PWD through
+/// `apply_env` exactly like a host external.
+pub(crate) fn build_command(plan: &SpawnPlan, shell: &Shell) -> Settled<Command> {
+    let mut cmd = match &plan.image {
+        ExecImage::Host(path) => crate::sandbox::make_command(path, &plan.args, shell),
+        ExecImage::BundledTool { tool } => {
+            use crate::runtime::pipeline::helper::{BUNDLED_TOOL_FLAG, self_reexec};
+            let mut cmd = self_reexec(BUNDLED_TOOL_FLAG)
+                .map_err(|e| Break::Error(Error::new(format!("bundled tool '{tool}': {e}"), 1)))?;
+            cmd.arg(tool);
+            cmd.args(&plan.args);
+            if shell.has_active_capabilities() {
+                crate::sandbox::apply_resource_limits(&mut cmd);
+            }
+            cmd
+        }
+    };
     apply_env(&mut cmd, shell);
-    cmd
+    Ok(cmd)
 }
 
 /// Spawn an external child the canonical way: install the canonical

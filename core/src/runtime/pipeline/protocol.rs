@@ -9,9 +9,9 @@
 //! thread that reads one frame from a child-side channel.
 //!
 //! [`HelperProtocol`] composes those primitives for ral helper stages
-//! (carrying [`StageJob`] in and a
-//! [`ChildEvalResponse`](crate::child_eval::ChildEvalResponse) back, plus
-//! optional value-channel ends).
+//! (carrying a [`ChildEvalRequest`](crate::child_eval::ChildEvalRequest)
+//! in and a [`ChildEvalResponse`](crate::child_eval::ChildEvalResponse)
+//! back, plus optional value-channel ends).
 //!
 //! ## Backend boundary
 //!
@@ -63,8 +63,8 @@ pub(super) use fallback::{Channel as ValueChannel, pair as create_value_pair, pa
 #[allow(unused_imports)]
 pub(super) use windows::{Channel as ValueChannel, pair as create_value_pair, pass};
 
-use super::helper::StageJob;
+use crate::child_eval::ChildEvalRequest;
 
 /// The concrete gate-frame type queued by the launcher until
 /// `claim_foreground` completes, then released in one pass.
-pub(super) type DeferredFrame = PendingFrame<StageJob>;
+pub(super) type DeferredFrame = PendingFrame<ChildEvalRequest>;

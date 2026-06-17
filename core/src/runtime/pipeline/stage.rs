@@ -1,10 +1,10 @@
 //! Process-staged pipeline launcher for *ral helper* stages.
 //!
 //! A ral helper stage runs in a re-execed ral subprocess
-//! (`--ral-pipeline-stage-helper`) that takes a [`StageJob`] frame from
-//! the parent and emits a [`ChildEvalResponse`] frame back.  The helper
-//! gates itself on the job frame — no user code runs before the parent
-//! has finished spawning every stage and (interactive) called
+//! (`--ral-pipeline-stage-helper`) that takes a [`ChildEvalRequest`]
+//! frame from the parent and emits a [`ChildEvalResponse`] frame back.
+//! The helper gates itself on the job frame — no user code runs before
+//! the parent has finished spawning every stage and (interactive) called
 //! `tcsetpgrp`.
 //!
 //! ## Final value transport
@@ -18,12 +18,11 @@
 use super::super::command;
 use super::collect::StageObservation;
 use super::group::PipelineGroup;
-use super::helper::StageJob;
 use super::launch::{route_stdin, spawn_into_group, wire_stage_stdout};
 use super::protocol::{DeferredFrame, FrameReader, HelperProtocol, pipe_error};
 use super::resolve::StageSpec;
 use super::route::{ByteIn, ByteOut, StageRoute};
-use crate::child_eval::{ChildEvalResponse, DecodedResponse, decode_response};
+use crate::child_eval::{ChildEvalRequest, ChildEvalResponse, DecodedResponse, decode_response};
 use crate::types::*;
 
 /// A running ral helper stage: one process and one report-reader thread.
@@ -155,7 +154,7 @@ fn wire_ral_stdio(
 }
 
 pub(super) fn launch_helper_stage(
-    job: StageJob,
+    job: ChildEvalRequest,
     spec: &StageSpec,
     route: StageRoute,
     shell: &mut Shell,

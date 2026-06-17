@@ -2,29 +2,20 @@
 //!
 //! These tools live inside the ral binary, not on PATH, so they need
 //! a dispatch shape distinct from spawning a system process: call
-//! `uumain` in-process when sinks and logical state agree with the
-//! kernel-level fds, otherwise hop through the pipeline-stage helper
-//! so `apply_env` can propagate overrides via a child subprocess
-//! instead of mutating this process's env or cwd from a thread.
-//!
-//! Builds without the bundled feature set get a stub
-//! [`run_uutils_in_process`] that errors with 127, so call sites in
-//! [`super`] remain feature-clean.
-
-use crate::syntax::ast::RedirectMode;
-use crate::types::*;
-
-use super::stdio::EvalRedirect;
+//! `uumain` in-process via [`run_uutils_in_process`] when sinks and
+//! logical state agree with the kernel-level fds (the
+//! [`can_run_uutils_in_process`] fast path), otherwise spawn the
+//! `ral --ral-bundled-tool <tool>` command image as an ordinary child
+//! so `apply_env` can propagate overrides via that subprocess instead
+//! of mutating this process's env or cwd from a thread.  Both
+//! `run_uutils_in_process` and the bundled feature set it needs are
+//! gated on the same cfg, so the inline fast path is the only call site.
 
 #[cfg(all(
     any(unix, windows),
     any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
 ))]
-use {
-    super::redirect::{apply_redirects, bind_stdin_for_uutils, commit_atomics, restore_redirects},
-    crate::ir::{CommandName, CommandWord, CompKind, RedirectV, Val, ValRedirectTarget},
-    std::io::Write,
-};
+use {crate::types::*, super::redirect::bind_stdin_for_uutils, std::io::Write};
 
 #[cfg(all(
     any(unix, windows),
@@ -37,8 +28,13 @@ use {
 /// and ral's logical state agrees with the process state.  Any capture
 /// buffer or audit Tee, or any `env_overrides` / `within [dir: …]` /
 /// `cd`-mutated logical cwd that the kernel doesn't see, forces the
-/// pipeline-helper detour: mutating process env or cwd from this
-/// thread would race other ral threads (`spawn`, `par`, pipeline).
+/// child placement: mutating process env or cwd from this thread would
+/// race other ral threads (`spawn`, `par`, pipeline).  An active
+/// sandbox projection also refuses the inline path: an in-process tool
+/// would run unconfined and escape the projection the child placement
+/// pins via `sandbox::self_command`.  The projection fold returns
+/// `None` immediately when no grant is active, so the extra check stays
+/// cheap on the common path.
 pub(crate) fn can_run_uutils_in_process(shell: &Shell) -> bool {
     use crate::io::Sink;
     let cwd_matches_process = match &shell.mobile.context.cwd.current {
@@ -50,19 +46,23 @@ pub(crate) fn can_run_uutils_in_process(shell: &Shell) -> bool {
         && shell.mobile.context.env_overrides().is_empty()
         && shell.mobile.context.dir.is_none()
         && cwd_matches_process
+        && shell.sandbox_projection().is_none()
 }
 
-/// Call `uumain` for `tool` in this process, with `redirects` applied
-/// via the same fd-level plumbing the builtins use.  Stdio is restored
-/// before return; a panicking tool surfaces as a 1-status error.
+/// Call `uumain` for `tool` in this process.  Stdio is restored before
+/// return; a panicking tool surfaces as a 1-status error.
 ///
 /// `can_run_uutils_in_process` must have admitted the call: the
 /// caller's sink discipline and env/cwd state are read implicitly
-/// through libc, not through `shell`.
+/// through libc, not through `shell`.  Admission implies no call-site
+/// redirects (`Sink::Terminal | External` with `redirects.is_empty()`),
+/// so this path wires no `> file` / `2>&1` plumbing.
 ///
-/// A `<file` stdin redirect must already be installed by the caller —
-/// its parked `Source` is bound onto fd 0 here, never re-opened — so the
-/// read is checked and audited exactly once.
+/// Stdin is still bound: the inline gate constrains the *output* sinks,
+/// not the input, so a function whose body is a bundled tool can carry a
+/// parent `Pipe` / `File` on `shell.turn.io.stdin`.
+/// [`bind_stdin_for_uutils`] aliases that source onto fd 0 for the
+/// in-process tool and restores fd 0 on drop.
 #[cfg(all(
     any(unix, windows),
     any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
@@ -70,7 +70,6 @@ pub(crate) fn can_run_uutils_in_process(shell: &Shell) -> bool {
 pub(crate) fn run_uutils_in_process(
     tool: &str,
     arg_strs: &[String],
-    redirects: &[(u32, RedirectMode, EvalRedirect)],
     shell: &mut Shell,
 ) -> Settled<Value> {
     use crate::builtins::uutils;
@@ -78,11 +77,10 @@ pub(crate) fn run_uutils_in_process(
     // Rust's userspace stdout/stderr buffers sit above the kernel
     // fd / Win32 std slot.  Flushing here keeps pending bytes aimed
     // at the parent destination instead of being re-targeted by the
-    // redirect we're about to install.
+    // stdin alias we're about to install.
     std::io::stdout().flush().ok();
     std::io::stderr().flush().ok();
 
-    let guard = apply_redirects(redirects, shell)?;
     let _stdin_backup = bind_stdin_for_uutils(shell);
 
     uutils::reset_exit_code();
@@ -108,13 +106,11 @@ pub(crate) fn run_uutils_in_process(
         let _ = std::env::set_current_dir(cwd);
     }
 
-    // Flush uumain's buffered output through the redirect target
-    // before unwinding the fd swap.
+    // Flush uumain's buffered output before unwinding the stdin alias.
     std::io::stdout().flush().ok();
     std::io::stderr().flush().ok();
 
     drop(_stdin_backup);
-    let commits = restore_redirects(guard);
 
     let exit_code = match result {
         Ok(code) => {
@@ -129,10 +125,6 @@ pub(crate) fn run_uutils_in_process(
         }
     };
 
-    if exit_code == 0 {
-        commit_atomics(commits)?;
-    }
-
     shell.mobile.control.last_status = exit_code;
     if exit_code == 0 {
         Ok(Value::Unit)
@@ -145,89 +137,4 @@ pub(crate) fn run_uutils_in_process(
             .at_loc(shell.turn.loc.source_loc(tool.len())),
         ))
     }
-}
-
-/// Capture-active fallback: route a bundled invocation through a
-/// synthetic single-stage pipeline so dispatch lands in
-/// `--ral-pipeline-stage-helper`.
-///
-/// Used when [`can_run_uutils_in_process`] refuses the fast path
-/// (capture Tee, `!{…}`, audit) and spawning the bare tool as a
-/// system process would either ENOENT (Windows ships no `ls.exe`)
-/// or contradict bundled-first policy.  Inside the helper the sinks
-/// are fresh Terminal/Stderr, so the fast path fires there and the
-/// helper's bytes flow back through the standard pump plumbing.
-///
-/// Args are emitted as pre-stringified literals; redirects round-trip
-/// through `ValRedirectTarget` so the helper's own `eval_call_parts`
-/// reproduces the same `EvalRedirect` shape.  The synthetic head uses
-/// `CommandWord::External` so the helper does not re-resolve to a
-/// same-named builtin or alias in the rehydrated child shell.
-#[cfg(all(
-    any(unix, windows),
-    any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
-))]
-pub(crate) fn dispatch_uutils_via_pipeline(
-    cmd: &CommandName,
-    arg_strs: &[String],
-    redirects: &[(u32, RedirectMode, EvalRedirect)],
-    shell: &mut Shell,
-) -> Raw<Value> {
-    let val_args: crate::ir::Args = arg_strs
-        .iter()
-        .map(|s| {
-            crate::source::Spanned::synthetic(crate::ir::ValListElem::Single(Val::String(
-                s.clone(),
-            )))
-        })
-        .collect();
-    let val_redirects: Vec<RedirectV> = redirects
-        .iter()
-        .map(|(fd, mode, target)| {
-            let val_target = match target {
-                EvalRedirect::File(path) => ValRedirectTarget::File(Val::String(path.clone())),
-                EvalRedirect::Fd(n) => ValRedirectTarget::Fd(*n),
-            };
-            RedirectV {
-                fd: *fd,
-                mode: *mode,
-                target: val_target,
-            }
-        })
-        .collect();
-    let stage = std::sync::Arc::new(crate::source::Spanned::synthetic(CompKind::Exec(
-        crate::ir::Exec {
-            head: CommandWord::External(cmd.clone()),
-            args: val_args,
-            redirects: val_redirects,
-        },
-    )));
-    // The synthetic stage is an external head: byte output, and an input
-    // edge the checker would leave a fresh variable.  With no neighbour to
-    // pin it, that variable grounds to the value channel — the wire the
-    // annotation pass would write for this lone external stage.
-    let wires = [crate::mode::Wire::EXTERNAL];
-    // A lone external stage is collected over the wire and emits no
-    // tail call, so its tail position has no effect ([`Tail::No`]).
-    crate::runtime::pipeline::run_pipeline(std::slice::from_ref(&stage), &wires, Tail::No, shell)
-}
-
-/// No-bundled-features fallback so call sites stay feature-clean.
-/// Errors with 127 — the same exit code the OS would produce for a
-/// missing executable, which is the moral equivalent when the bundled
-/// implementation isn't compiled in.
-#[cfg(not(all(
-    any(unix, windows),
-    any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
-)))]
-pub(crate) fn run_uutils_in_process(
-    tool: &str,
-    _arg_strs: &[String],
-    _redirects: &[(u32, RedirectMode, EvalRedirect)],
-    _shell: &mut Shell,
-) -> Settled<Value> {
-    Err(Break::Error(Error::new(
-        format!("bundled tool '{tool}' is not available in this build"),
-        127,
-    )))
 }

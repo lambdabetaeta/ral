@@ -28,11 +28,6 @@
 //! the same `build_command` / `spawn` primitives directly through
 //! [`super::pipeline::run_pipeline`].
 
-#[cfg(all(
-    any(unix, windows),
-    any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
-))]
-use crate::ir::CommandName;
 use crate::syntax::ast::RedirectMode;
 use crate::types::*;
 
@@ -54,7 +49,7 @@ pub(crate) use redirect::{
 };
 use stdio::classify_redirects;
 pub(crate) use stdio::{EvalRedirect, StdinRoute, TtyInputPermit, stderr_mode};
-pub(crate) use uutils::run_uutils_in_process;
+use vet::ExecImage;
 pub(crate) use vet::vet;
 
 use child::WaitedChild;
@@ -78,26 +73,28 @@ pub(crate) fn run(
     let rc = vet(&id, args, shell)?;
     let cmd_name = rc.shown.clone();
 
-    // Bundled uutils short-circuit the OS spawn path. The in-process
-    // route is taken when the call's sinks agree with the kernel-level
-    // fds; otherwise the call runs through a one-stage pipeline so
-    // that ral-side environment overrides propagate to the helper
-    // subprocess.
+    // A bundled uutils image keeps an inline placement only for the
+    // clean-terminal case: direct terminal/stderr sinks, no redirects,
+    // no capture/audit tee, no env overrides, no `within [dir: …]`, no
+    // logical/process cwd mismatch, and no active sandbox projection.
+    // The `redirects.is_empty()` gate means `run_uutils_in_process`
+    // wires no `> file` plumbing.  Any other bundled invocation falls
+    // through to the ordinary spawn path below as
+    // `ral --ral-bundled-tool <tool> …`, an ordinary child whose
+    // redirects become child stdio and whose env/cwd come from
+    // `apply_env`.
     #[cfg(all(
         any(unix, windows),
         any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
     ))]
-    if let CommandName::Bare(tool) = &id.name
-        && crate::builtins::uutils::is_uutils_tool(tool)
+    if let ExecImage::BundledTool { tool } = &rc.image
+        && redirects.is_empty()
+        && uutils::can_run_uutils_in_process(shell)
     {
-        if uutils::can_run_uutils_in_process(shell) {
-            return uutils::run_uutils_in_process(tool, &rc.args, redirects, shell)
-                .map_err(Control::from);
-        }
-        return uutils::dispatch_uutils_via_pipeline(&id.name, &rc.args, redirects, shell);
+        return uutils::run_uutils_in_process(tool, &rc.args, shell).map_err(Control::from);
     }
 
-    let mut command = build_command(&rc, shell);
+    let mut command = build_command(&rc, shell)?;
 
     let plan = classify_redirects(redirects);
     command.stdin(wire_stdin(shell).into_stdio());
@@ -136,7 +133,11 @@ pub(crate) fn run(
     };
 
     let fg = ForegroundDecision::for_standalone(shell, needs_pump);
-    trace_io_wiring(&cmd_name, &rc.resolved, inherit_tty, needs_pump, &fg, shell);
+    let image_shown = match &rc.image {
+        ExecImage::Host(p) => p.clone(),
+        ExecImage::BundledTool { tool } => format!("ral --ral-bundled-tool {tool}"),
+    };
+    trace_io_wiring(&cmd_name, &image_shown, inherit_tty, needs_pump, &fg, shell);
 
     announce_command_title(&cmd_name, shell);
 

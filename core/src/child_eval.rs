@@ -549,33 +549,6 @@ pub(crate) fn break_response(signal: Break) -> ChildEvalResponse {
     }
 }
 
-/// Build a response for a child that ran *outside* the evaluator — the
-/// pipeline's terminal bundled-tool stage, which executes a uutils tool
-/// in process and never produces a transferable ral value or a post-run
-/// mobile.  It still reports its settled outcome, the `last_status` the
-/// parent installs, and the audit nodes it collected.  The outer `Err`
-/// is an audit-pack fault, distinct from a tool failure (which rides the
-/// returned outcome).
-pub(crate) fn report_without_eval(
-    result: Settled<()>,
-    last_status: i32,
-    audit_nodes: Vec<ExecNode>,
-) -> Settled<ChildEvalResponse> {
-    let audit_nodes = pack_audit_nodes(audit_nodes)?;
-    let outcome = match result {
-        Ok(()) => WireOutcome::Ok(None),
-        Err(b) => break_to_outcome(b),
-    };
-    Ok(ChildEvalResponse {
-        scope_table: ScopeTable::default(),
-        outcome,
-        last_status,
-        mobile: None,
-        audit_nodes,
-        surface_events: Vec::new(),
-    })
-}
-
 /// Rehydrate a [`ChildEvalResponse`] into runtime values, audit nodes,
 /// the post-run mobile, and the body's pass/fail signal, returning audit
 /// and signal side by side so the parent can record audit before

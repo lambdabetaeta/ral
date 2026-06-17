@@ -370,12 +370,12 @@ builtin_registry! {
         doc: "cancel <handle>  — cancel a running concurrent block.",
         call: |args, shell| concurrency::builtin_cancel(args, shell), },
     // Bundled uutils tools (cat, yes, head, wc, ...) are not builtins.
-    // `runtime::command::uutils` routes a bare invocation through
-    // either an in-process `uumain` call or a synthetic
-    // single-stage pipeline (`dispatch_uutils_via_pipeline`), so they
-    // ride through the same wait / signal / exit-code boundary as a
-    // system binary — one spawn site, one broken-pipe rule.  See
-    // [`crate::builtins::uutils::is_uutils_tool`].
+    // `runtime::command` routes a bare invocation either through an
+    // in-process `uumain` call (the clean-terminal fast path) or by
+    // spawning the `ral --ral-bundled-tool <tool>` command image as an
+    // ordinary child, so they ride through the same wait / signal /
+    // exit-code boundary as a system binary — one spawn site, one
+    // broken-pipe rule.  See [`crate::builtins::uutils::is_uutils_tool`].
     // _type's signature carries a probe diagnostic: typing is ordinary
     // `α → F α`, and the inferencer prints the resolved α as a separate
     // side effect. Runtime is a passthrough.
