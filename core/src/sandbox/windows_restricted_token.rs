@@ -28,13 +28,17 @@
 //! this directory; everything else in the user's tree is read-only via the
 //! integrity-level write barrier.
 //!
-//! **Policy mapping note:** `policy.fs.{read,write,deny}_paths` and
-//! `policy.net` are *advisory* under this backend — they are surfaced in
+//! **Policy mapping note:** `policy.fs.{read,write,deny}_paths` are
+//! *advisory* under this backend — they are surfaced in
 //! `dump_profile_for_windows` for audit and `policy.exec` is still gated
 //! in-process before the spawn, but the kernel-side enforcement comes
 //! entirely from the restricted token + Low IL + Job Object combination.
-//! Per-path read/write/deny is a no-op; net is a no-op until a future
-//! WFP integration.
+//! Per-path read/write/deny is a no-op.  Network is different: this
+//! backend has no kernel network enforcement, so a net-restricting
+//! projection (`net: false`) is rejected fail-closed by
+//! [`crate::sandbox::projection_enforceable`] before dispatch ever
+//! reaches this backend; a body never runs here with net silently
+//! ignored.  A future WFP integration would lift that restriction.
 
 use crate::types::{Break, Error, SandboxProjection};
 use std::ffi::OsStr;
@@ -651,11 +655,13 @@ ral-sandbox-<pid>-<ns>; stamped Low via SACL\n",
     out.push_str("    BOTTOM_UP_ASLR_ALWAYS_ON\n");
     out.push_str("    HEAP_TERMINATE_ALWAYS_ON\n");
     out.push_str("    BLOCK_NON_MICROSOFT_BINARIES_ALWAYS_ON\n");
-    out.push_str("  ignored (advisory under this backend):\n");
     out.push_str(&format!(
-        "    net: {} -- NOT enforced; WFP integration is a TODO\n",
-        if policy.net { "requested" } else { "deny" }
+        "  net: {} -- no kernel network enforcement on this backend; a \
+net-restricting projection is rejected fail-closed before dispatch (see \
+projection_enforceable), so only net: allow reaches here\n",
+        if policy.net { "allow" } else { "deny" }
     ));
+    out.push_str("  ignored (advisory under this backend):\n");
     if let Some(fs) = policy.fs.as_policy() {
         out.push_str("    fs.read_prefixes (logged only, not enforced as allow-list):\n");
         for p in &fs.read_prefixes {

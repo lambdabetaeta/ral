@@ -159,6 +159,38 @@ pub fn confined_availability() -> ConfinedAvailability {
     }
 }
 
+/// Whether this platform's OS backend can actually enforce a network
+/// restriction (`net: false`).  Linux (`--unshare-net`) and macOS
+/// (deny-default Seatbelt) can; the Windows restricted-token backend has
+/// no kernel network enforcement.  Mirrors the cfg structure of
+/// [`confined_availability`].
+fn net_enforced() -> bool {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        true
+    }
+    #[cfg(windows)]
+    {
+        false
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        false
+    }
+}
+
+/// Returns `Err(reason)` when `projection` requests a restriction this
+/// platform's OS backend cannot actually enforce. The only such axis is
+/// offline/`net`: a `net: false` projection on a backend without kernel
+/// network enforcement must error rather than run where net is ignored.
+pub(crate) fn projection_enforceable(projection: &SandboxProjection) -> Result<(), &'static str> {
+    if !projection.net && !net_enforced() {
+        return Err("offline mode (net: false) is unsupported on this platform: \
+                    no kernel network enforcement exists");
+    }
+    Ok(())
+}
+
 /// CLI flag that carries the JSON-encoded [`SandboxProjection`] into a
 /// re-exec'd ral process.
 const SANDBOX_PROJECTION_FLAG: &str = "--sandbox-projection";
@@ -385,8 +417,51 @@ pub fn make_command(name: &str, args: &[String], shell: &Shell) -> Command {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_policy_arg;
+    use super::{net_enforced, projection_enforceable, strip_policy_arg};
     use crate::types::SandboxProjection;
+
+    #[test]
+    fn projection_enforceable_allows_net_true_on_any_platform() {
+        // `net: true` requests no network restriction, so there is nothing
+        // for the OS backend to enforce — it is `Ok` everywhere.
+        let p_net_true = SandboxProjection {
+            fs: crate::types::FsProjection::default(),
+            net: true,
+            exec: crate::types::ExecProjection::default(),
+        };
+        assert!(projection_enforceable(&p_net_true).is_ok());
+    }
+
+    #[test]
+    fn projection_enforceable_net_false_tracks_net_enforced() {
+        // The guard's invariant, stated relationally so it holds on any
+        // host: a `net: false` projection is enforceable exactly when this
+        // platform's OS backend can enforce a network restriction.
+        let p_net_false = SandboxProjection {
+            fs: crate::types::FsProjection::default(),
+            net: false,
+            exec: crate::types::ExecProjection::default(),
+        };
+        assert_eq!(projection_enforceable(&p_net_false).is_ok(), net_enforced());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn projection_enforceable_rejects_net_false_on_windows() {
+        // Windows has no kernel network enforcement, so a `net: false`
+        // projection must fail closed rather than run with net ignored.
+        let p_net_false = SandboxProjection {
+            fs: crate::types::FsProjection::default(),
+            net: false,
+            exec: crate::types::ExecProjection::default(),
+        };
+        let err = projection_enforceable(&p_net_false)
+            .expect_err("net: false must be rejected where net is unenforceable");
+        assert!(
+            err.contains("offline mode"),
+            "fail-closed message must explain the offline restriction; got: {err:?}"
+        );
+    }
 
     #[test]
     fn strip_policy_arg_extracts_json_and_preserves_other_args() {

@@ -60,26 +60,35 @@ pub(crate) fn dispatch(
     tail: Tail,
     shell: &mut Shell,
 ) -> (Mobile, Settled<Value>) {
-    if crate::sandbox::marker_authenticated() || shell.sandbox_projection().is_none() {
+    // Test the marker first so an already-confined child need not resolve
+    // the exec policy through `$PATH`; then bind the projection once,
+    // since computing it is what does that resolution.
+    if crate::sandbox::marker_authenticated() {
         return run_local(body, mobile, tail, shell);
     }
+    let Some(projection) = shell.sandbox_projection() else {
+        return run_local(body, mobile, tail, shell);
+    };
+    // Hand the input mobile back so the contract layer has a well-defined
+    // value to install / discard, with `last_status` overwritten so the
+    // parent sees the refusal rather than the previous turn's status.
+    let fail_closed = |mobile: Mobile, shell: &mut Shell, reason: &str| {
+        let mut mobile = mobile;
+        mobile.control.last_status = 1;
+        (
+            mobile,
+            Err(Break::Error(shell.err(
+                format!("sandbox confinement unavailable: {reason}"),
+                1,
+            ))),
+        )
+    };
     match confined_availability() {
-        ConfinedAvailability::Ready => run_confined(body, mobile, shell),
-        // Hand the input mobile back so the contract layer has a
-        // well-defined value to install / discard, with `last_status`
-        // overwritten so the parent sees the refusal rather than the
-        // previous turn's status.
-        ConfinedAvailability::Unavailable(reason) => {
-            let mut mobile = mobile;
-            mobile.control.last_status = 1;
-            (
-                mobile,
-                Err(Break::Error(shell.err(
-                    format!("sandbox confinement unavailable: {reason}"),
-                    1,
-                ))),
-            )
-        }
+        ConfinedAvailability::Ready => match crate::sandbox::projection_enforceable(&projection) {
+            Ok(()) => run_confined(body, mobile, shell),
+            Err(reason) => fail_closed(mobile, shell, reason),
+        },
+        ConfinedAvailability::Unavailable(reason) => fail_closed(mobile, shell, reason),
     }
 }
 
