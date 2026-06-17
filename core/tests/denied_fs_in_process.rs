@@ -387,3 +387,199 @@ fn grant_fs_write_allows_helper_stage_redirect_inside_set() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ── 5. Read-gated query builtins (`file-info`, `resolve-path`) ────────────
+//
+// `file-info` and `resolve-path` are RAL-owned query builtins that stat /
+// canonicalise their path argument.  Both run `check_fs_read` on the
+// resolved argument *before* touching the filesystem (`file-info` before
+// `symlink_metadata`, `resolve-path` before `canonicalise_strict`), so a
+// path outside the read set is denied at `check_fs_op`, not by an io error.
+// Because the gate fires first, the negative cases need no file on disk —
+// `must_deny`'s "denied by grant" assertion rules out an io "not found"
+// masquerading as enforcement.
+
+/// `file-info` on a path outside the read set is denied at `check_fs_read`,
+/// before `symlink_metadata` — so the denial fires whether or not the path
+/// exists.  Asserting on the grant-denial message (not an io error)
+/// proves the gate, not the missing file, rejected the call.
+#[cfg(unix)]
+#[test]
+fn grant_fs_read_denies_file_info_outside_set() {
+    let dir = scratch("fileinfo");
+    let allowed = dir.join("allowed");
+    std::fs::create_dir_all(&allowed).unwrap();
+    let denied = dir.join("secret.txt");
+    std::fs::write(&denied, "top secret\n").unwrap();
+    let script = format!(
+        "grant [fs: [read: ['{}']]] {{ file-info '{}' }}",
+        allowed.display(),
+        denied.display()
+    );
+    must_deny(&script);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Positive control for `file-info`: under a grant that *does* permit the
+/// path, the stat runs and returns the file's metadata map.  This proves
+/// the denial above gates on the region, not on `file-info` per se.
+#[cfg(unix)]
+#[test]
+fn grant_fs_read_allows_file_info_inside_set() {
+    let dir = scratch("fileinfook");
+    let target = dir.join("seen.txt");
+    std::fs::write(&target, "hello\n").unwrap();
+    let script = format!(
+        "grant [fs: [read: ['{}']]] {{ file-info '{}' }}",
+        dir.display(),
+        target.display()
+    );
+    let out = must_succeed(&script);
+    match out {
+        Value::Map(m) => assert_eq!(
+            m.get("name"),
+            Some(&Value::String("seen.txt".into())),
+            "granted file-info must stat the file and report its name"
+        ),
+        other => panic!("file-info should return a Map, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `resolve-path` on a path outside the read set is denied at
+/// `check_fs_read`, before `canonicalise_strict` — so the denial fires
+/// whether or not the path exists.  The grant-denial message (not an io
+/// error) proves the gate rejected the call.
+#[cfg(unix)]
+#[test]
+fn grant_fs_read_denies_resolve_path_outside_set() {
+    let dir = scratch("resolve");
+    let allowed = dir.join("allowed");
+    std::fs::create_dir_all(&allowed).unwrap();
+    let denied = dir.join("target");
+    std::fs::create_dir_all(&denied).unwrap();
+    let script = format!(
+        "grant [fs: [read: ['{}']]] {{ resolve-path '{}' }}",
+        allowed.display(),
+        denied.display()
+    );
+    must_deny(&script);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Positive control for `resolve-path`: under a grant that permits the
+/// path, the canonicalisation runs and returns an absolute path.  This
+/// proves the denial above gates on the region, not on `resolve-path`
+/// per se.
+#[cfg(unix)]
+#[test]
+fn grant_fs_read_allows_resolve_path_inside_set() {
+    let dir = scratch("resolveok");
+    let target = dir.join("here");
+    std::fs::create_dir_all(&target).unwrap();
+    let script = format!(
+        "grant [fs: [read: ['{}']]] {{ resolve-path '{}' }}",
+        dir.display(),
+        target.display()
+    );
+    let out = must_succeed(&script);
+    match out {
+        Value::String(s) => assert!(
+            s.starts_with('/'),
+            "granted resolve-path must return an absolute path, got {s:?}"
+        ),
+        other => panic!("resolve-path should return a String, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── 6. Write-gated temp-path builtins (`temp-dir`, `temp-file`) ───────────
+//
+// `temp-dir` and `temp-file` take no path argument: they create a new entry
+// under `std::env::temp_dir()` and run `check_fs_write` on that system temp
+// directory *before* creating anything.  A grant whose write set is a
+// strict subdirectory of the temp root therefore does NOT cover the temp
+// root itself (`path_within` is prefix containment, and the root is the
+// parent of the granted subdir), so the create is denied at
+// `check_fs_op`.  The positive control grants write to the temp root,
+// which does cover it.
+
+/// `temp-dir` under a grant whose write set is a strict subdirectory of the
+/// system temp root is denied at `check_fs_write` on `std::env::temp_dir()`,
+/// before any directory is created.
+#[cfg(unix)]
+#[test]
+fn grant_fs_write_denies_temp_dir_outside_set() {
+    let dir = scratch("tmpdir");
+    let script = format!(
+        "grant [fs: [write: ['{}']]] {{ temp-dir }}",
+        dir.display()
+    );
+    must_deny(&script);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Positive control for `temp-dir`: under a grant that permits the system
+/// temp root, the create runs and returns a path.  This proves the denial
+/// above gates on the region, not on `temp-dir` per se.  The returned
+/// directory is cleaned up.
+#[cfg(unix)]
+#[test]
+fn grant_fs_write_allows_temp_dir_inside_set() {
+    let root = std::env::temp_dir();
+    let script = format!(
+        "grant [fs: [write: ['{}']]] {{ temp-dir }}",
+        root.display()
+    );
+    let out = must_succeed(&script);
+    match out {
+        Value::String(s) => {
+            assert!(
+                std::path::Path::new(&s).is_dir(),
+                "granted temp-dir must create and return a directory, got {s:?}"
+            );
+            let _ = std::fs::remove_dir_all(&s);
+        }
+        other => panic!("temp-dir should return a String, got {other:?}"),
+    }
+}
+
+/// `temp-file` under a grant whose write set is a strict subdirectory of the
+/// system temp root is denied at `check_fs_write` on `std::env::temp_dir()`,
+/// before any file is created.
+#[cfg(unix)]
+#[test]
+fn grant_fs_write_denies_temp_file_outside_set() {
+    let dir = scratch("tmpfile");
+    let script = format!(
+        "grant [fs: [write: ['{}']]] {{ temp-file }}",
+        dir.display()
+    );
+    must_deny(&script);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Positive control for `temp-file`: under a grant that permits the system
+/// temp root, the create runs and returns a path.  This proves the denial
+/// above gates on the region, not on `temp-file` per se.  The returned
+/// file is cleaned up.
+#[cfg(unix)]
+#[test]
+fn grant_fs_write_allows_temp_file_inside_set() {
+    let root = std::env::temp_dir();
+    let script = format!(
+        "grant [fs: [write: ['{}']]] {{ temp-file }}",
+        root.display()
+    );
+    let out = must_succeed(&script);
+    match out {
+        Value::String(s) => {
+            assert!(
+                std::path::Path::new(&s).is_file(),
+                "granted temp-file must create and return a file, got {s:?}"
+            );
+            let _ = std::fs::remove_file(&s);
+        }
+        other => panic!("temp-file should return a String, got {other:?}"),
+    }
+}
