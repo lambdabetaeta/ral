@@ -156,6 +156,30 @@ lexical effect boundary pretending to be one.
   `ExecImage::BundledTool` children unless they touch a value edge and therefore
   need evaluator semantics.
 
+## Implementation deviation: direct byte stages are the NoTerminal case only
+
+The "byte stages are direct children with a start-gate fd" letter above is
+realised narrowly. `direct_spawnable` (`runtime/pipeline/resolve.rs`) admits the
+`StageLaunch::Direct` path only when the stage carries no value edge **and** none
+of the three conditions a bare direct child cannot serve hold: the pipeline does
+not own the controlling terminal (`NoTerminal`), the stage has no redirects, and
+no `!{…}` audit is capturing bytes. A byte stage that is foreground, redirected,
+or byte-audited routes through the existing `HelperEval` re-exec instead of a new
+direct-child-with-start-gate launcher. Those three conditions are exactly the ones
+that need helper capabilities the helper already provides — park-on-stop and
+`tcsetpgrp` handoff, redirect-as-child-stdio, and byte accounting — so reusing the
+helper avoids building a third launch path that would reimplement them. This does
+not weaken the safety invariant: the helper carries the grant stack and spawns its
+external/bundled child under the same per-command `SandboxProjection` a direct
+child would (`child_eval.rs`), and the denied-fs regressions cover the helper path
+as a non-third fs path. The cost is one extra `ral` re-exec per affected
+*host-external* stage; bundled stages pay nothing (their direct child is already a
+`ral --ral-bundled-tool` process). On Windows the terminal plan is always
+`NoTerminal`, so the foreground branch never applies there and the only residual
+exposure is host-external stages with a redirect or under a byte-capturing audit.
+The full direct-gate refactor remains available for exact letter fidelity if that
+extra re-exec ever shows up as a latency cost (most plausibly on Windows).
+
 
 ## What disappears
 
