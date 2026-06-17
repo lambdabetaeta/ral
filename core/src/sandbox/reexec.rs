@@ -240,9 +240,11 @@ pub(super) fn verify_unswapped(s: &SandboxSelf) -> Result<(), Error> {
 /// Returns `Some(code)` when the process should exit immediately (Linux
 /// bwrap respawn path), `None` to continue normally.
 ///
-/// On Windows there is no parent-side self-entry: AppContainer is
-/// applied to the *child* at `CreateProcessW` time by the runner, so
-/// this returns `Ok(None)` for any policy.
+/// On Windows per-command process sandboxing is unimplemented: there is
+/// no AppContainer / restricted-token runner.  When a policy is supplied
+/// it cannot be enforced, so this entrypoint fails closed rather than
+/// running unconfined.  With no policy there is nothing to enforce and it
+/// returns `Ok(None)` to continue normally.
 #[cfg(unix)]
 pub(super) fn maybe_enter_process_sandbox(
     args_without_policy: &[String],
@@ -257,8 +259,15 @@ pub(super) fn maybe_enter_process_sandbox(
 #[cfg(windows)]
 pub(super) fn maybe_enter_process_sandbox(
     _args_without_policy: &[String],
-    _policy: Option<&crate::types::SandboxProjection>,
+    policy: Option<&crate::types::SandboxProjection>,
 ) -> Result<Option<u8>, String> {
+    if policy.is_some() {
+        return Err(
+            "per-command Windows sandbox not yet implemented: a requested \
+             sandbox policy cannot be enforced, refusing to continue"
+                .into(),
+        );
+    }
     Ok(None)
 }
 
