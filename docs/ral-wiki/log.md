@@ -2775,3 +2775,14 @@ operational consequence of [[invariants/single-binary|single-binary]] (the test
 binary *is* the multicall executable a child re-execs), recorded as "where" prose
 in [[map/core/capabilities|core capabilities]] and [[map/exarch|exarch]] — not a
 new invariant.
+
+## [2026-06-17] ingest | grant sandboxes external children
+
+Recorded [[decisions/260617_sandbox-external-children|sandbox-external-children]]
+from the re-exec design conversation. The proposed cut keeps sandboxing as the
+reason ral exists while moving the ordinary `grant` process boundary to
+external-command dispatch: ral-owned filesystem effects use `check_fs_op`,
+child-owned effects launch under the effective sandbox projection, bundled tools
+become exec images when process semantics are required, pipeline helpers remain
+the principled re-exec mode, and endpoint-shaped/advisory network policy is
+replaced by offline child confinement or fail-closed unsupported backends.
