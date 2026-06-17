@@ -27,7 +27,8 @@ every residual variable and resolves the body against the final unifier
 Every other carrier only transports what those two closed: the build-time
 prelude bake harvests the schemes off the annotated prelude's `Bind` nodes
 (`typecheck::bake_prelude`), and the serial scope tables carry the installed
-`(value, scheme)` pairs across the sandbox IPC (`serial::SerialBinding`).
+`(value, scheme)` pairs across the pipeline-stage helper wire
+(`serial::SerialBinding`).
 
 One consequence: α-equivalence is **not** quotiented. `Scheme`'s `PartialEq` is
 derived, hence structural on the listed ids, so two schemes minted by different

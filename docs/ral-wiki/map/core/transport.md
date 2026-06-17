@@ -1,25 +1,28 @@
 ---
-generated_at_commit: 1f8cb95d
-generated_at_date: 2026-06-15
+generated_at_commit: df36715
+generated_at_date: 2026-06-17
 covers_paths: [core/src/serial.rs, core/src/subprocess.rs, core/src/subprocess_codec.rs]
 ---
 
 # Map: core / transport
 
-The wire layer that carries a shell across a process boundary. When a
-[[design/grant|grant]] drops into the OS sandbox, or a pipeline stage runs in a
-re-exec'd helper, the [[internals/evaluator-machine|Mobile half]] of the shell —
-a computation, its captured closure, the relevant parent state — is serialised
-to JSON, framed, and reconstituted on the other side of a re-exec of this
-[[invariants/single-binary|same binary]].
+The wire layer that carries a shell across a process boundary. When a pipeline
+stage runs in a re-exec'd helper, the [[internals/evaluator-machine|Mobile half]]
+of the shell — a computation, its captured closure, the relevant parent state —
+is serialised to JSON, framed, and reconstituted on the other side of a re-exec
+of this [[invariants/single-binary|same binary]]. (A [[design/grant|grant]] no
+longer rides this wire: its body evaluates locally, and external children are
+confined per-command — see
+[[decisions/260617_sandbox-external-children|sandbox-external-children]].)
 
 **Every wire↔runtime hop is an exhaustive, field-complete map: no hop may pass
 through a constructor that defaults a field the wire carries, and no kind may
 round-trip through a string with a catch-all decode arm.** This is what keeps
-confined evaluation indistinguishable from local — a divergence between the two
-is exactly a field the hop dropped or a variant it collapsed. The discipline is
-mechanical: an exhaustive match makes a new variant fail the build, and a
-field-complete struct literal makes a new field fail it. Three realisations:
+helper-stage evaluation indistinguishable from local — a divergence between the
+two is exactly a field the hop dropped or a variant it collapsed. The discipline
+is mechanical: an exhaustive match makes a new variant fail the build, and a
+field-complete struct literal makes a new field fail it. Three
+realisations:
 
 - *value walks* (`serial.rs`) match `Value`/`SerialValue` exhaustively;
 - *hydration* installs a complete `HandlerFrame` through
@@ -35,8 +38,8 @@ field-complete struct literal makes a new field fail it. Three realisations:
 it:
 
 - `SerialLambda` / `SerialThunk` for closures, `SerialEnvSnapshot` for an `Env`;
-  `SerialBinding` mirrors a scope entry — value *and* scheme — so a confined turn
-  preserves the binding's scheme across the round-trip
+  `SerialBinding` mirrors a scope entry — value *and* scheme — so a re-exec'd
+  helper stage preserves the binding's scheme across the round-trip
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
 - An interning table, `InternCtx`, deduplicates shared scopes, so a captured
   environment with shared frames cannot unfold into an O(2^N) tree.
@@ -62,36 +65,24 @@ never reaching past them):
 - `WireMobile` / `WireContext` — the top;
 - `WireExecNode` — the [[design/audit|audit]] tree fragment;
 - `WireHandlerFrame` — a [[internals/handler-dispatch|handler stack]] frame,
-  carrying each alias arm's scheme so a confined turn does not strip it
+  carrying each alias arm's scheme so a re-exec'd helper stage does not strip it
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]);
 - `WireModules`, `WireControl`.
 
 `install_shell_mobile` reinstates a received mobile bundle into a child `Shell`.
-`reexec_child_shell` is the one constructor both re-exec paths — the
-[[map/core/capabilities|sandbox IPC child]] and the
-[[internals/pipeline-execution|pipeline-stage helper]] — build their shell
-through (`Shell::new` + the host-builtin extension hook + `install_shell_mobile`),
-so neither path can drop the host builtins. All conversions share the `InternCtx`
-from `serial.rs`.
+`reexec_child_shell` is the one constructor the
+[[internals/pipeline-execution|pipeline-stage helper]] — now the sole re-exec'd
+eval path — builds its shell through (`Shell::new` + the host-builtin extension
+hook + `install_shell_mobile`), so it cannot drop the host builtins. All
+conversions share the `InternCtx` from `serial.rs`.
 
 ## Framing codec — `core/src/subprocess_codec.rs`
 
 `write_frame` / `read_frame` are length-prefixed JSON frames (a `u32` length
-followed by the `serde_json` body). One codec is shared by both re-exec
-protocols — the grant sandbox IPC path
-([[map/core/capabilities|sandbox/ipc]]) and the
-[[internals/pipeline-execution|pipeline-stage helper]] — so the framing cannot
-drift between them.
-
-- *token-bound decode* — `read_frame_seeded` decodes a body through a
-  `DeserializeSeed` rather than a `DeserializeOwned` impl, so the decode itself
-  can carry a constraint. `Tokened<T>` is a payload stamped with the
-  per-re-exec sandbox token; `ExpectToken<T>` is the seed that checks it in
-  constant time and yields the proven `inner`, so a forged or untokened
-  response frame fails to decode rather than reifying a `T`. This is the codec
-  half of [[internals/capability-enforcement|capability enforcement]].
+followed by the `serde_json` body). One codec carries the
+[[internals/pipeline-execution|pipeline-stage helper]]'s request/response frames,
+the single re-exec'd eval protocol.
 
 This layer is the mechanism behind the Mobile/Local split that the
-[[internals/evaluator-machine|evaluator machine]] describes and that
-[[internals/capability-enforcement|capability enforcement]] relies on for
-confined evaluation.
+[[internals/evaluator-machine|evaluator machine]] describes and that the
+pipeline-stage helper relies on for out-of-process stage evaluation.

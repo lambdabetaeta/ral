@@ -40,10 +40,11 @@ Filesystem checks are alias-aware and resolve symlinks, so a directory scoped by
 coreutils (`cp`, `mv`, `rm`, `mkdir`) route through the same check chokepoint as
 the structured primitives, closing the bypass.
 
-When OS sandboxing is available an `fs`/`net`-restricting grant re-execs ral
-inside an OS sandbox; otherwise checks run in process. The re-exec is a transport
-detail — the body returns to its caller the same way either way, and the caller
-observes only the outcome and an audit fragment. A `.ral` profile and the inline
+The grant body evaluates locally. RAL-owned filesystem effects are checked in
+process by `check_fs_op` before the syscall; each external or bundled child the
+body spawns is confined per-command under the effective projection (Seatbelt,
+bwrap, or — on Windows, where no per-command backend exists yet — a fail-closed
+error). A `.ral` profile and the inline
 `grant` surface are symmetric: both decode through the same walker into one
 frozen `Capabilities`, so configuration is the grant value written as source,
 not a second schema. That walker resolves every sigil as it decodes —

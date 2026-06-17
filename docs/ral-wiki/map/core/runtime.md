@@ -34,11 +34,13 @@ guards, and `transport::dispatch`
   runs it; the evaluator's down-seam for a bare command.
 - `pipeline/` — pipeline planning and execution. `resolve.rs` reads each stage's
   channel signature off the checker's ground `Wire` and freezes the launch
-  decision once as `StageLaunch` (`Direct` | `HelperUutils` | `HelperEval`), so
+  decision once as `StageLaunch` (`Direct` | `HelperEval`), so
   launch reads a decision rather than re-deriving a dispatch gate
   ([[decisions/260603_ir-pipespec-annotation|ir-pipespec-annotation]]). A
-  bundled (uutils) head that carries a value edge routes `HelperEval`, not
-  `HelperUutils`: the uutils arm execs the tool without entering the evaluator,
+  bundled (uutils) head that carries a value edge routes `HelperEval`, since
+  data-last application is evaluator work; a byte-only bundled head routes
+  `Direct` as a `ral --ral-bundled-tool` child placement
+  ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]]),
   so it cannot perform the data-last application a value edge demands. The
   value-edge judgment — stage `i` of `n` receives a value iff `i > 0 && input ≠
   Bytes`, emits one iff `i + 1 < n && output ≠ Bytes` — has one definition,

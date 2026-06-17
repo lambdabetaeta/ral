@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 7ce10d61
-verified_at_date: 2026-06-13
+verified_at_commit: df36715
+verified_at_date: 2026-06-17
 anchors: [run_pipeline, resolve_pipeline, StageLaunch, value_edge_in, force_pipe_value, run_child_eval, PipelineGroup, spawn_with_pgid, wait_handling_stop, Escape::Stopped, wait_foreground, ForegroundGuard, startup_foreground, park_on_stop]
 ---
 
@@ -22,8 +22,10 @@ off the ground `Vec<Wire>` the checker wrote onto the `Pipeline` node
 re-inferring it — and, from the unified modes, the redirects, the terminal plan,
 and whether a `!{…}` audit is capturing bytes, commits one decision per stage:
 
-- `Direct` — a pure external command spawned with no stage helper;
-- `HelperUutils` — a bundled tool run through the helper's in-process uutils arm;
+- `Direct` — an external command spawned with no stage helper. A bundled tool's
+  byte stage takes this arm too: its direct child is the `ral --ral-bundled-tool
+  <tool>` placement chosen by the command image
+  ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]]);
 - `HelperEval` — the stage's ral computation evaluated in a helper.
 
 Launch reads this decision; it does not re-derive it. A whole pipeline whose every
@@ -49,10 +51,10 @@ lambda whose force is the identity) passes through. The same function is called
 - in the parent fold (`run_value_fold`, for a `PureValue` pipeline — a sequential
   `f !{x}` over `call::invoke`, no process, no pipe, outside job control), and
 - in the re-exec'd helper for a `ProcessStaged` value edge, via
-  `ChildKind::PipelineStage { force_output }` — `force_output` derived at the
-  helper's serve site from the stage's *own* value-out channel (a stage holding
-  a value-out edge feeds a value consumer and forces; a final or byte-mode stage
-  holds none and leaves the value as-is).
+  `run_child_eval(request, upstream, force_output)` — `force_output` derived at
+  the helper's serve site from the stage's *own* value-out channel (a stage
+  holding a value-out edge feeds a value consumer and forces; a final or
+  byte-mode stage holds none and leaves the value as-is).
 
 So the single thunk-deref the checker models at a value edge has exactly one
 runtime mirror, parent-side and child-side ([[decisions/260609_pure-pipe-equation|pure-pipe-equation]];
@@ -65,11 +67,13 @@ snapshot into one request frame and gates the helper on it; the helper
 reconstructs a child shell (`Shell::child_of` over the captured closure env),
 optionally reads one upstream value, applies the body `call::invoke` data-last,
 forces per `force_output`, and ships one response frame carrying the final value,
-status, and audit nodes. The confined-eval child and the pipeline stage are the
-same protocol with two preludes — no second wire shape to keep byte-compatible
-([[internals/capability-enforcement|capability enforcement]]). A `HelperUutils`
-stage runs *outside* the evaluator and builds its response directly
-(`report_without_eval`), keeping the report channel one frame type.
+status, and audit nodes. This `run_child_eval` runner is the one re-exec'd-child
+eval protocol; the grant body no longer re-execs through it — a `grant` evaluates
+locally and confines each external child per-command instead
+([[internals/capability-enforcement|capability enforcement]];
+[[decisions/260617_sandbox-external-children|sandbox-external-children]]). A
+byte-only bundled stage takes the `Direct` arm as a `ral --ral-bundled-tool`
+child, so it never reaches this runner.
 
 **Byte pipelines run as one process group; the pgid anchor exists only for two
 or more stages.** As soon as an edge touches bytes, every stage — including

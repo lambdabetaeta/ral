@@ -1,5 +1,5 @@
 ---
-generated_at_commit: d7e97288
+generated_at_commit: df36715
 generated_at_date: 2026-06-17
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/sandbox_diag.rs, exarch/src/sandbox_diag/, exarch/src/agent_builtins.rs, exarch/data/agent.ral]
 ---
@@ -31,11 +31,10 @@ persistent [[map/core/shell-state|`Shell`]]. `run_shell`:
   [[map/exarch/session|digest]] caps shape only the model's history view;
 - arms a wall-clock watchdog over a child `CancelScope`; only
   `CancelCause::Deadline` maps to timeout exit 124, while Esc remains an
-  interrupt. If the call enters the OS-sandbox transport, the parent-side
-  `SandboxCancelWatch` in [[map/core/capabilities|capabilities]] observes the
-  same scope and kills the confined helper subtree while `run_shell` is blocked
-  on IPC ([[decisions/260617_sandbox-ipc-cancel|sandbox-ipc-cancel]]). `audit`
-  still forces a fresh audit subtree when requested.
+  interrupt. A grant body evaluates locally — there is no sandbox-IPC round trip
+  to interrupt — so cancellation reaches any spawned child through the ordinary
+  process group / cancel-scope path. `audit` still forces a fresh audit subtree
+  when requested.
 
 The whole per-call IO frame — the stdout/stderr/stdin tees, the `SurfaceSink`,
 the script-context location triple, and the watchdog `CancelScope` — is installed

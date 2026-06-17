@@ -1,7 +1,7 @@
 ---
-verified_at_commit: d7e97288
+verified_at_commit: df36715
 verified_at_date: 2026-06-17
-anchors: [check_exec_args, check_fs_op, sandbox_projection, GrantStack, run_confined, SandboxCancelWatch, marker_authenticated]
+anchors: [check_exec_args, check_fs_op, sandbox_projection, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox]
 ---
 
 # Capability enforcement: one chokepoint, two enforcers
@@ -58,48 +58,50 @@ spawned process does on its own.**
   ([[decisions/260530_linux-exec-confinement|linux-exec-confinement]]).
 - *Filesystem* — gated in-process too (`check_fs_op`, read and write), and
   backed by an OS sandbox that confines a spawned child's own reads and writes:
-  Seatbelt on macOS, bwrap on Linux, AppContainer on Windows.
+  Seatbelt on macOS, bwrap on Linux. Windows is fail-closed: per-command
+  AppContainer / restricted-token confinement is not yet implemented, so an
+  fs-restricting (or offline) projection errors rather than running a child
+  unsandboxed (`projection_enforceable`, `sandboxed_command`).
 - *Network* — no in-process gate at all, since ral dispatches no network
   operation itself, so the OS sandbox is the sole enforcer.
 
-**The sandbox is a re-exec of ral itself.** When an `fs`/`net`-restricting grant
-engages, `run_confined` (`sandbox/runner.rs`) re-execs the *current binary* —
-pinned at `early_init` so an on-disk swap cannot subvert it — carrying the
-`SandboxProjection` as a CLI argument, and runs the body in that confined child
-over an IPC channel (`sandbox/ipc/`). That channel ships one request frame in and
-one response frame out — the *same* `child_eval` protocol a process-staged
-pipeline stage uses ([[internals/pipeline-execution|pipeline execution]];
-[[decisions/260610_child-eval-unification|child-eval-unification]]), so there is
-one wire shape, not two that must agree. The re-exec is a transport detail: the
-body returns its value, error, or escape to the caller exactly as an in-process
-run would, plus an audit fragment. The OS sandbox itself is entered in
-`early_init`, before the child's serve loop runs.
-`confined_availability()` tells the
-[[internals/evaluator-machine|evaluator]] whether to take the confined transport.
+**The sandbox is applied per external command, not by re-execing the grant
+body.** A `grant` is a *local* dynamic effect scope: its body evaluates in
+process, and `transport::dispatch` just runs that body locally — nested grants
+compose by intersecting authority on the evaluator's `GrantStack`, which is not a
+process boundary ([[design/grant|grant]]). Confinement happens one level down, at
+external dispatch. When `build_command` (`runtime/command/process.rs`) spawns an
+admitted external or bundled child under a restrictive projection, it routes
+through `sandboxed_command` (`sandbox/launch.rs`), which confines that *one*
+child:
 
-Because that IPC read is synchronous, cancellation of the enclosing foreground
-scope needs a parent-side path. On Unix `SandboxCancelWatch` watches the same
-scope while the parent is blocked in `run_confined`; `Interrupt` sends SIGINT to
-the observed helper subtree, `Deadline` / `Explicit` send SIGTERM then SIGKILL,
-and `RootAbort` sends SIGKILL immediately. The signals come from the
-unconfined parent, not from inside Seatbelt/bwrap, so enforcing a host timeout
-does not require widening child sandbox authority
-([[decisions/260617_sandbox-ipc-cancel|sandbox-ipc-cancel]]).
+- *Linux* wraps each child in `bwrap` via `make_command_with_policy`, threading
+  the logical cwd in as `--chdir`;
+- *macOS* re-execs a tiny launcher — `ral --sandbox-projection <json>
+  --ral-sandbox-exec <host>` for a host external, or `--ral-bundled-tool <tool>`
+  for a bundled tool — that enters Seatbelt in `early_init`
+  (`maybe_enter_process_sandbox`) and then runs the one target inside it;
+- *Windows* is fail-closed: `sandboxed_command` errors rather than launch
+  unsandboxed.
 
-**A process is trusted as already-confined only by an authenticated
-marker, never the bare env var.** `RAL_SANDBOX_ACTIVE` is inheritable and
-public-named, so its mere presence cannot mean "already inside the OS
-sandbox" — an arbitrary parent could export it and switch the whole OS
-layer off. The confined child instead adopts a per-re-exec capability
-token its parent minted and shipped inside the IPC request frame (a
-channel a wrapper cannot write to), recording it and stamping it into the
-marker; `marker_authenticated()` trusts the marker only when its value
-equals that token. The transport gate routes a restrictive grant body
-local only when the marker authenticates, so a forged marker no longer
-suppresses confinement, and a bundled coreutil's filesystem access —
-which has no in-process gate — is floored by the OS profile of the
-confined child it now necessarily runs in
-([[decisions/260611_authenticated-confinement-marker|authenticated-confinement-marker]]).
+The launcher pins the *current binary* (`SANDBOX_SELF`, fixed at `early_init`) so
+an on-disk swap cannot subvert it. Because confinement is per-command, the gate
+fires only when a child is actually spawned: a `grant [net: false] { … }` with no
+external child no longer fails closed, and an unenforceable offline request fails
+closed at the spawn (`projection_enforceable`).
+
+The pipeline-stage helper re-exec is unchanged and unrelated: a process-staged
+ral stage still runs through `run_child_eval` over one request/response frame
+([[internals/pipeline-execution|pipeline execution]];
+[[decisions/260610_child-eval-unification|child-eval-unification]]). That is a
+real process boundary, not a lexical grant body pretending to be one.
+
+A bundled coreutil's filesystem access has no in-process gate, so under a
+restrictive grant it is never inlined: it is spawned as a `ral --ral-bundled-tool
+<tool>` child that receives the same per-command sandbox as any external, which
+is what floors it
+([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]];
+[[decisions/260617_sandbox-external-children|sandbox-external-children]]).
 
 This is the boundary [[design/exarch-architecture|exarch]] reuses unchanged — an
 agent turn is a host-pushed grant frame over this same stack.

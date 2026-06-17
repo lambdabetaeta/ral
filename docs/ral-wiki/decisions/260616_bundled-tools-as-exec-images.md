@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: active
 ---
 
 # Bundled tools are executable images

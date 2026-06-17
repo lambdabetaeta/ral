@@ -57,14 +57,15 @@ Bodies are grouped by concern, one submodule each:
   which inherits a snapshot of the parent's mobile state; the body is evaluated
   *directly* with `eval_comp(.., Tail::Yes)` under a child scope, deliberately
   bypassing the `eval_top_level` / `eval_block` boundary, because the worker's own
-  `Shell` is the only one its bindings touch and they die with the thread. No
-  confined re-exec is attempted from a worker — the OS sandbox already wraps the
-  whole process — yet a forced block *inside* the worker still meets the standard
-  boundary rule, so a `spawn` under a `grant` cannot escape it. A `Handle` is a
-  resident, process-local reference: it cannot cross the sandbox IPC boundary, so
-  returning one from a confined evaluation raises the wire diagnostic *"cannot
-  return a handle from sandboxed evaluation"* (`core/src/serial.rs`) rather than a
-  generic failure ([[internals/capability-enforcement|capability-enforcement]]);
+  `Shell` is the only one its bindings touch and they die with the thread. The
+  worker carries the parent's grant stack, so a forced block *inside* the worker
+  still meets the standard boundary rule and any external child it spawns is
+  confined per-command — a `spawn` under a `grant` cannot escape it. A `Handle` is
+  a resident, process-local reference: it cannot cross the pipeline-stage helper
+  wire, so returning one from a helper-evaluated stage raises the wire diagnostic
+  *"cannot return a handle from sandboxed evaluation"* (`core/src/serial.rs`)
+  rather than a generic failure
+  ([[internals/capability-enforcement|capability-enforcement]]);
 - `modules.rs` — the cacheless `use` / `source` loader. `evaluate_source` is
   the shared guarded parse + elaborate + evaluate core (cycle stack, depth
   bound, `ScriptContextGuard`); `use` is a scope-projecting wrapper over it,

@@ -32,7 +32,8 @@ narrates *how* each runs; this page argues *why* both exist.
   grant denied what, and exarch's turn loop receives it as a value to reason
   about. A sandbox violation is an `EPERM` or a `SIGKILL`, after the fact and
   unattributable. And when no layer restricts fs or net the projection is empty,
-  so the costly re-exec is skipped entirely.
+  so the per-command sandbox launch is skipped entirely — an unrestricted child
+  spawns directly.
 
 **Why the gate cannot be the only enforcer.**
 

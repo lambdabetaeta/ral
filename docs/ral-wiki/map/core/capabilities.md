@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 7ba500b
+generated_at_commit: df36715
 generated_at_date: 2026-06-17
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
@@ -82,56 +82,52 @@ re-execs the in-process check never sees (`sh -c`, `find -exec`), while bwrap on
 Linux has no path-exec filter so there the in-process gate stands alone.
 
 - `early_init(argv)` — startup: consumes `--sandbox-projection`, pins
-  `SANDBOX_SELF`, enters the OS sandbox (Unix), and dispatches the IPC child mode
-  (`ipc::serve_from_env_fd` / `_handle`). A test binary is the same
-  [[invariants/single-binary|multicall executable]] a confined child re-execs, so
-  it must serve these flags from its own pre-`main` `#[ctor]` (it reaches `main`
-  only through libtest); `serve_sandbox_early_init` is the shared `Option<u8>`
-  building block the pre-`main` dispatch uses for that — run by `main` and every
-  test `#[ctor]` alike, surfacing the re-exec child's exit code so the caller can
-  terminate. Skip it and `SANDBOX_SELF` stays unpinned, so
-  `confined_availability()` reports `Unavailable` and the binary's confined-path
-  tests cannot exercise the sandbox.
+  `SANDBOX_SELF`, and on Unix enters the OS sandbox for a per-command
+  `--sandbox-projection` child (`maybe_enter_process_sandbox`). A test binary is
+  the same [[invariants/single-binary|multicall executable]] a confined child
+  re-execs, so it must serve these flags from its own pre-`main` `#[ctor]` (it
+  reaches `main` only through libtest); `serve_sandbox_early_init` is the shared
+  `Option<u8>` building block the pre-`main` dispatch uses for that — run by
+  `main` and every test `#[ctor]` alike, surfacing the re-exec child's exit code
+  so the caller can terminate, then serving the per-command re-exec tails
+  (`serve_sandbox_exec` for a host external, `try_run_bundled_tool` for a bundled
+  tool). Skip it and `SANDBOX_SELF` stays unpinned, so the per-command launcher
+  cannot pin the binary it re-execs.
 - `reexec.rs` — pins an immutable handle on this executable at boot so a
   confined re-exec runs the same binary even under an on-disk swap, with a
   per-platform identity check (`/proc/self/fd` on Linux, `(dev, ino)` snapshot on
-  macOS, `BY_HANDLE_FILE_INFORMATION` on Windows).
-- `marker.rs` — authenticates the `RAL_SANDBOX_ACTIVE` confinement marker
-  against a per-re-exec capability token (`mint` / `adopt` /
-  `authenticated`): a genuine child adopts the token its parent shipped
-  in the IPC request, so a forged env var does not suppress confinement
-  ([[decisions/260611_authenticated-confinement-marker|authenticated-confinement-marker]]).
+  macOS, `BY_HANDLE_FILE_INFORMATION` on Windows); `maybe_enter_process_sandbox`
+  enters the OS sandbox in a per-command `--sandbox-projection` child (Unix).
+- `projection_enforceable` (`sandbox.rs`) — rejects an offline (`net: false`)
+  projection on a backend with no kernel network enforcement, so an unenforceable
+  request fails closed rather than running ignored.
 - `make_command` — wraps an external command in the active policy.
+- `launch.rs` (`sandboxed_command`) — the per-command launcher. `build_command`
+  (`runtime/command/process.rs`) routes an external or bundled child through here
+  whenever a projection is active and the process is not already confined,
+  confining that *one* child: a `LaunchTarget::Host` external, or a
+  `LaunchTarget::BundledTool` placed as `ral --ral-bundled-tool <tool>`. Linux
+  wraps each child in `bwrap` (`make_command_with_policy`); macOS re-execs the
+  pinned self (`ral --sandbox-projection <json> --ral-sandbox-exec <host>`, or
+  `--ral-bundled-tool <tool>`) so the child enters Seatbelt in `early_init`, then
+  `serve_sandbox_exec` `execve`s the host target inside it; Windows fails closed
+  (no per-command AppContainer / restricted-token backend yet). The grant body
+  itself evaluates locally — `transport::dispatch` no longer re-execs it
+  ([[decisions/260617_sandbox-external-children|sandbox-external-children]]).
 - Backends: `macos.rs` (Seatbelt, `macos-base.sbpl`), `linux.rs` (bwrap),
   `windows.rs` (Job Objects) + `windows_restricted_token.rs` (a restricted token
   with every privilege dropped and integrity lowered to Low — the Chrome-renderer
   model: a file unreadable to the restricting SID set is unreadable to the child).
-- `runner.rs` (`run_confined`) re-execs ral inside the sandbox for confined
-  evaluation and folds the response back (`fold_response`). The wire rides the
-  shared [[map/core/runtime|child-eval runner]]: `ipc/` (`transport.rs` over a
-  Unix socketpair, `transport_windows.rs` over a named pipe, `child.rs` for the
-  child entry points) ships one `ChildEvalRequest` out and reads one
-  `ChildEvalResponse` back (`crate::child_eval`), the same single-frame protocol
-  the pipeline stage uses. The response carries the events the body surfaced in
-  the child (`ChildEvalResponse.surface_events`, replayed through the parent's
-  [[map/core/shell-state|surface sink]] once `run_confined` returns — batched,
-  not live). The child runs `run_child_eval(.., ChildKind::Sandbox)` against a
-  shell built through `subprocess::reexec_child_shell`, so its host builtins
-  survive the re-exec. On Unix, `SandboxCancelWatch` watches the parent
-  foreground `CancelScope` while the parent is blocked in IPC and signals the
-  observed helper subtree from outside the OS sandbox on Esc/deadline/root abort
-  ([[decisions/260617_sandbox-ipc-cancel|sandbox-ipc-cancel]]).
-  `confined_availability()` tells the [[map/core/evaluator|evaluator]] whether
-  to take the confined transport.
 
 Path-scoped *exec* confinement is unenforced on Linux (no landlock backend) —
 [[decisions/260530_linux-exec-confinement|linux-exec-confinement]].
 
 This boundary is what [[map/exarch|exarch]] reuses as its sandbox. Bundled
 tools route through the *exec* chokepoint in-process; their **filesystem**
-access has no in-process gate and is floored only by the OS profile of the
-confined child every `fs`/`net`-restricting grant body now runs in
-([[decisions/260611_authenticated-confinement-marker|authenticated-confinement-marker]]).
+access has no in-process gate, so under a restrictive grant a bundled tool is
+never inlined — it is spawned as a `ral --ral-bundled-tool` child and floored by
+the OS profile of the per-command sandbox it runs in
+([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]]).
 That single binary carrying both ral and its coreutils is part of why ral
 is a [[invariants/single-binary|single-binary]]. `docs/SPEC.md` gives the
 formal capability calculus.
