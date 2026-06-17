@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e28f2054
-generated_at_date: 2026-06-16
+generated_at_commit: 7ba500b
+generated_at_date: 2026-06-17
 covers_paths: [exarch/src/main.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/prompt.rs, exarch/data/system.md, exarch/data/ral.md, exarch/data/script-style.md]
 ---
 
@@ -18,8 +18,15 @@ tool call is evaluated as a ral top-level turn against a persistent in-process
 capability lattice (`policy.rs`, `policy/`), assembles the layered system prompt
 (`prompt.rs`: basic rules, live grant/host, ral language card, script-style
 guide), builds a `Session` + `Provider`, and hands off to one frontend.
+Before that, `main` runs two pre-`main` trampolines that short-circuit a re-exec
+child: `install_child_hooks_and_serve_helpers` (sets the child-shell extension,
+serves pipeline/test-helper re-execs) then `bootstrap::sandbox_dispatch_or_continue`.
+A test binary reaches `main` only through libtest yet is the same
+[[invariants/single-binary|multicall executable]] a child re-execs, so
+`serve_test_pre_main` runs both from each test `#[ctor]`; without the second the
+confined transport is unpinned and that binary's confined-path tests cannot run.
 `bootstrap.rs` holds the once-per-process pieces: `sandbox_dispatch_or_continue`
-(the re-exec child mode), `boot_shell` (the exarch-ready session-shell
+(the re-exec child mode, over [[map/core/capabilities|`early_init`]]), `boot_shell` (the exarch-ready session-shell
 constructor: clear stale ral interrupt, install ral handlers, re-chain exarch
 cancel, call core's [[map/repl/startup|`ral_core::host::boot_shell`]], then layer
 exarch's host builtins and source the `agent.ral` library), the disposable

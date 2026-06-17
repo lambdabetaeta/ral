@@ -292,6 +292,33 @@ pub fn early_init(argv: &[String]) -> Result<(Vec<String>, Option<ExitCode>), St
     Ok((stripped, None))
 }
 
+/// Run [`early_init`] from a test binary's pre-`main` `#[ctor]` and, when
+/// this process is a re-exec child (a `grant { … }` block's
+/// `--internal-sandbox-block` IPC server, or the Linux bwrap respawn),
+/// terminate it before libtest sees the flags it would reject.  A normal
+/// top-level test invocation returns, letting libtest run; `early_init`
+/// also pins `SANDBOX_SELF`, so the confined-transport availability probe
+/// reports `Ready` for tests that exercise the confined path.
+///
+/// The binary's own `main` keeps the faithful child [`ExitCode`]
+/// `early_init` returns.  A `#[ctor]` cannot — `ExitCode` is opaque to
+/// `std::process::exit` — so it maps success to `0` and an `early_init`
+/// error to `1`; the genuine result of an internal-block child travels
+/// back over the IPC channel, and any error detail is on stderr, so the
+/// child's own exit code is not what the parent reads.  This is the one
+/// place every ral-family test ctor expresses that mapping.
+pub fn early_init_or_exit_for_test_ctor() {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    match early_init(&argv) {
+        Ok((_, Some(_))) => std::process::exit(0),
+        Err(e) => {
+            eprintln!("ral test harness: sandbox early_init: {e}");
+            std::process::exit(1);
+        }
+        Ok((_, None)) => {}
+    }
+}
+
 /// Extract and deserialise `--sandbox-projection <json>` from `raw`, returning
 /// the parsed policy (if any) and the remaining arguments.
 fn strip_policy_arg(raw: &[String]) -> Result<(Option<SandboxProjection>, Vec<String>), String> {

@@ -25,16 +25,12 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-/// Test-binary counterpart to the trampoline at the top of `main`: a
-/// byte-mode pipeline stage (e.g. `echo foo | cat -n`) re-execs the
-/// running binary — under `cargo test`, the test harness binary — with
-/// `--ral-pipeline-stage-helper`, which libtest would reject.  Run the
-/// helper dispatch from a pre-main constructor so the re-exec is served
-/// before libtest sees the flag.
+/// Test-binary counterpart to the two startup trampolines at the top of
+/// `main` (helper re-exec dispatch, then sandbox `early_init`).  Run from
+/// a pre-`main` constructor so both are served before libtest sees the
+/// flags either would reject; see [`exarch::serve_test_pre_main`].
 #[cfg(test)]
 #[ctor::ctor(unsafe)]
 fn init_test_binary() {
-    if let Some(code) = exarch::install_child_hooks_and_serve_helpers() {
-        std::process::exit(code as i32);
-    }
+    exarch::serve_test_pre_main();
 }

@@ -37,20 +37,10 @@ fn init_test_binary() {
     if let Some(code) = ral_core::try_run_pipeline_stage_helper() {
         std::process::exit(code as i32);
     }
-    // `early_init` consumes the projection flag and dispatches the
-    // internal-sandbox-block mode.  Its exact exit code is an opaque
-    // `ExitCode`; we cannot route it through `std::process::exit`
-    // verbatim, so we map success vs failure to 0 / 1 — the IPC
-    // protocol itself reports detail on stderr.
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    match ral_core::sandbox::early_init(&argv) {
-        Ok((_, Some(_))) => std::process::exit(0),
-        Err(e) => {
-            eprintln!("ral test harness: sandbox early_init: {e}");
-            std::process::exit(1);
-        }
-        Ok((_, None)) => {}
-    }
+    // `early_init` consumes the projection flag, pins `SANDBOX_SELF`, and
+    // dispatches the internal-sandbox-block mode; the shared ctor wrapper
+    // self-exits when this process is the re-exec child.
+    ral_core::sandbox::early_init_or_exit_for_test_ctor();
 }
 
 /// The prelude baked once at runtime (test binaries have no build-time

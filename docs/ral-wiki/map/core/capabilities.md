@@ -1,5 +1,5 @@
 ---
-generated_at_commit: d7e97288
+generated_at_commit: 7ba500b
 generated_at_date: 2026-06-17
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
@@ -81,9 +81,15 @@ Seatbelt profile additionally renders a `process-exec` allow-list, catching the
 re-execs the in-process check never sees (`sh -c`, `find -exec`), while bwrap on
 Linux has no path-exec filter so there the in-process gate stands alone.
 
-- `early_init(argv)` — startup: consumes `--sandbox-projection`, enters the OS
-  sandbox (Unix), and dispatches the IPC child mode (`ipc::serve_from_env_fd` /
-  `_handle`).
+- `early_init(argv)` — startup: consumes `--sandbox-projection`, pins
+  `SANDBOX_SELF`, enters the OS sandbox (Unix), and dispatches the IPC child mode
+  (`ipc::serve_from_env_fd` / `_handle`). A test binary is the same
+  [[invariants/single-binary|multicall executable]] a confined child re-execs, so
+  it must serve these flags from its own pre-`main` `#[ctor]` (it reaches `main`
+  only through libtest); `early_init_or_exit_for_test_ctor` is that one shared
+  wrapper, self-exiting when this run is the child. Skip it and `SANDBOX_SELF`
+  stays unpinned, so `confined_availability()` reports `Unavailable` and the
+  binary's confined-path tests cannot exercise the sandbox.
 - `reexec.rs` — pins an immutable handle on this executable at boot so a
   confined re-exec runs the same binary even under an on-disk swap, with a
   per-platform identity check (`/proc/self/fd` on Linux, `(dev, ino)` snapshot on

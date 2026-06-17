@@ -57,18 +57,30 @@ pub fn install_child_hooks_and_serve_helpers() -> Option<u8> {
     None
 }
 
-/// Pre-`main` trampoline for the library's own unit-test binary.  A
-/// byte-mode pipeline stage re-execs the running binary — under
-/// `cargo test --lib` that is this test harness — with
-/// `--ral-pipeline-stage-helper`; serve it before libtest sees the
-/// flag.  The binary and the `tests/` integration binaries carry their
-/// own copies of this trampoline.
-#[cfg(test)]
-#[ctor::ctor(unsafe)]
-fn init_lib_test_binary() {
+/// Full pre-`main` trampoline for exarch's test binaries, mirroring the
+/// two startup steps the binary's `main` runs in order: serve helper
+/// re-execs ([`install_child_hooks_and_serve_helpers`]), then dispatch the
+/// OS sandbox ([`ral_core::sandbox::early_init`], wrapped for a `#[ctor]`
+/// by [`ral_core::sandbox::early_init_or_exit_for_test_ctor`]).  A test
+/// binary reaches `main` only through libtest, so each one runs both steps
+/// from a `#[ctor]`; without the second, a `grant { … }` block's re-exec
+/// lands in libtest instead of the `--internal-sandbox-block` IPC loop,
+/// and `SANDBOX_SELF` is never pinned, so the confined-transport
+/// availability probe reports `Unavailable` and confined-path tests cannot
+/// run.
+pub fn serve_test_pre_main() {
     if let Some(code) = install_child_hooks_and_serve_helpers() {
         std::process::exit(code as i32);
     }
+    ral_core::sandbox::early_init_or_exit_for_test_ctor();
+}
+
+/// Pre-`main` trampoline for the library's own unit-test binary; see
+/// [`serve_test_pre_main`].
+#[cfg(test)]
+#[ctor::ctor(unsafe)]
+fn init_lib_test_binary() {
+    serve_test_pre_main();
 }
 
 /// The binary's entry point, lifted into the library so integration

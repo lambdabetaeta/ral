@@ -19,16 +19,12 @@ use genai::chat::{ChatRole, ContentPart, ToolCall};
 use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
 
-/// Serve a byte-mode pipeline-stage re-exec before libtest sees the
-/// flag — the integration-test counterpart of the binary's `main`
-/// trampoline.  Without this, a tool command that spawns an external
-/// pipeline stage would re-exec this test binary with a helper flag
-/// libtest rejects.
+/// Mirror the binary's two `main` startup trampolines — helper re-exec
+/// dispatch, then sandbox `early_init` — before libtest sees the flags
+/// either would reject; see [`exarch::serve_test_pre_main`].
 #[ctor::ctor(unsafe)]
 fn init_test_binary() {
-    if let Some(code) = exarch::install_child_hooks_and_serve_helpers() {
-        std::process::exit(code as i32);
-    }
+    exarch::serve_test_pre_main();
 }
 
 /// A unique scratch directory per test so concurrent runs don't share

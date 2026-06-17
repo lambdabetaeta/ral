@@ -2762,3 +2762,16 @@ foreground `CancelScope`. Updated [[internals/capability-enforcement|capability
 enforcement]], [[map/core/capabilities|core capabilities]], and
 [[map/exarch/shell-eval|exarch shell-eval]] for the parent-side watcher and the
 `Deadline`-only timeout classification.
+
+## [2026-06-17] ingest | test ctors must serve the multicall re-exec flags
+
+`exarch`'s `timeout_kills_sandboxed_subprocess_tree` failed (not skipped):
+the exarch test `#[ctor]`s served helper re-execs but never ran
+`ral_core::sandbox::early_init`, so `SANDBOX_SELF` was unpinned and the confined
+transport was permanently `Unavailable`. Hoisted the test-ctor sandbox tail into
+`early_init_or_exit_for_test_ctor` (one place for the success→0/error→1 mapping),
+called by `core/tests/common` and exarch's new `serve_test_pre_main`. This is an
+operational consequence of [[invariants/single-binary|single-binary]] (the test
+binary *is* the multicall executable a child re-execs), recorded as "where" prose
+in [[map/core/capabilities|core capabilities]] and [[map/exarch|exarch]] — not a
+new invariant.
