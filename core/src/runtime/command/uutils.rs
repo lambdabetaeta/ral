@@ -63,6 +63,24 @@ pub(crate) fn can_run_uutils_in_process(shell: &Shell) -> bool {
 /// parent `Pipe` / `File` on `shell.turn.io.stdin`.
 /// [`bind_stdin_for_uutils`] aliases that source onto fd 0 for the
 /// in-process tool and restores fd 0 on drop.
+/// Serialises the inline `uutils_invoke` path so the uucore exit-code
+/// cell cannot interleave across threads.  `reset_exit_code`,
+/// `uutils_invoke`, and `get_exit_code` all touch one process-global
+/// cell; two clean-terminal inline invocations on different threads (the
+/// REPL thread plus a `spawn` / `watch` / `par` worker) would otherwise
+/// reset/invoke/read out of order and read each other's status.
+///
+/// Per ADR `260616_bundled-tools-as-exec-images` §"Two placements", this
+/// mutex guards ONLY the exit-code cell.  It is not an authority
+/// mechanism and must never be used to admit fd/env/cwd mutation: those
+/// stay thread-local solely by the inline gate excluding every state the
+/// child placement owns.
+#[cfg(all(
+    any(unix, windows),
+    any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
+))]
+static INLINE_UUTILS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(all(
     any(unix, windows),
     any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
@@ -82,6 +100,14 @@ pub(crate) fn run_uutils_in_process(
     std::io::stderr().flush().ok();
 
     let _stdin_backup = bind_stdin_for_uutils(shell);
+
+    // Hold this guard across the whole reset → invoke → read window so
+    // no other thread can touch the uucore exit-code cell between them.
+    // A poisoned lock just means a previous tool panicked (its panic is
+    // caught below, and `reset_exit_code` immediately clears the cell),
+    // so proceed under the poisoned guard exactly as the other
+    // process-local serialisation mutexes in the tree do.
+    let _exit_code_guard = INLINE_UUTILS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     uutils::reset_exit_code();
 
@@ -125,6 +151,10 @@ pub(crate) fn run_uutils_in_process(
         }
     };
 
+    // The exit-code cell has been read; release the lock before the
+    // status bookkeeping below so unrelated inline work does not wait.
+    drop(_exit_code_guard);
+
     shell.mobile.control.last_status = exit_code;
     if exit_code == 0 {
         Ok(Value::Unit)
@@ -136,5 +166,57 @@ pub(crate) fn run_uutils_in_process(
             )
             .at_loc(shell.turn.loc.source_loc(tool.len())),
         ))
+    }
+}
+
+#[cfg(all(
+    test,
+    any(unix, windows),
+    any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
+))]
+mod tests {
+    use super::INLINE_UUTILS_LOCK;
+    use std::cell::Cell;
+    use std::sync::Barrier;
+
+    /// `INLINE_UUTILS_LOCK` must serialise the reset → invoke → read
+    /// window so two threads cannot interleave on the uucore exit-code
+    /// cell.  Model that cell with a non-atomic `Cell` only ever touched
+    /// under the lock: if the guard truly excludes the sibling, each
+    /// thread's write is still readable after the simulated invoke.  An
+    /// interleave would let the sibling clobber the value between write
+    /// and read.  No fd/env/cwd state is touched, so this is safe inline
+    /// per ADR `260616_bundled-tools-as-exec-images`.
+    #[test]
+    fn lock_serialises_exit_code_cell_across_threads() {
+        // `Sync` is not implied by the lock; wrap the non-`Sync` cell in
+        // a newtype the lock makes safe to share, mirroring how the real
+        // process-global cell is only sound under the guard.
+        struct Cell0(Cell<i32>);
+        // SAFETY: every access goes through `INLINE_UUTILS_LOCK`, so the
+        // cell is never touched concurrently.
+        unsafe impl Sync for Cell0 {}
+        let cell = Cell0(Cell::new(0));
+        let start = Barrier::new(2);
+
+        std::thread::scope(|s| {
+            for code in [7, 13] {
+                let cell = &cell;
+                let start = &start;
+                s.spawn(move || {
+                    start.wait();
+                    for _ in 0..2_000 {
+                        let _g = INLINE_UUTILS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                        cell.0.set(code);
+                        // A sibling permitted into this window would
+                        // overwrite `code` before we read it back.
+                        assert_eq!(cell.0.get(), code, "exit-code cell interleaved");
+                    }
+                });
+            }
+        });
+
+        // The guard drops correctly: the lock is reacquirable afterward.
+        assert!(INLINE_UUTILS_LOCK.try_lock().is_ok());
     }
 }
