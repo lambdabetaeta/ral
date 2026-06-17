@@ -1,0 +1,224 @@
+//! Tail-call trampoline. [`apply`] applies a callee to arguments and
+//! loops on `Control::Tail`, so every tail-call signal emitted by the
+//! evaluator body is absorbed here before control returns. Every
+//! public entry into evaluation (`evaluate`, [`apply`]) hands back a
+//! [`Settled<Value>`] — [`Tail`] cannot escape this module.
+
+use super::comp::{eval_comp, with_scope};
+use super::pattern::assign_pattern;
+use crate::ir::{CompKind, IrPattern};
+use crate::types::*;
+
+/// One lambda call frame: install the lambda's `captured`
+/// environment, push a fresh scope, bind `pat` to `arg`, then evaluate
+/// `body`. The single call site supplies one `body` closure that
+/// branches internally on `if let CompKind::Lam`: a curried inner
+/// `Lam` is closed into a fresh `Value::Lambda`, otherwise the body is
+/// evaluated via [`eval_comp`].
+///
+/// `is_last` is the lambda body's tail position — true when this is the
+/// final argument of the call, so the body's final computation sits
+/// under the trivial continuation that returns from the call. The
+/// trampoline is the sole mint point for [`Tail::Yes`] besides an
+/// eliminator forwarding its own tail-ness; `body` consults `is_last`
+/// to decide what tail to grant its computation.
+fn apply_lambda_frame(
+    captured: &Env,
+    pat: &IrPattern,
+    arg: &Value,
+    shell: &mut Shell,
+    body: impl FnOnce(&mut Shell) -> Raw<Value>,
+) -> Raw<Value> {
+    shell.with_child(captured, |child| {
+        with_scope(child, |child| {
+            assign_pattern(pat, arg, None, child)?;
+            body(child)
+        })
+    })
+}
+
+/// Applies `callee` to `args`, looping on [`Tail`] for O(1)
+/// tail-call space.
+///
+/// A recursion cap (`shell.mobile.control.recursion_limit`) raises a
+/// clean error before the host stack can overflow; tail calls land
+/// in the loop without entering a new frame, so they do not count
+/// against the cap. The cap defaults to `DEFAULT_RECURSION_LIMIT`
+/// and is overridden by the rc `recursion_limit:` key or the
+/// `--recursion-limit` flag.
+pub fn apply(callee: Value, args: Vec<Value>, shell: &mut Shell) -> Settled<Value> {
+    if shell.mobile.control.call_depth >= shell.mobile.control.recursion_limit {
+        return Err(Break::Error(
+            Error::new(
+                format!(
+                    "recursion limit exceeded ({})",
+                    shell.mobile.control.recursion_limit
+                ),
+                1,
+            )
+            .with_hint(
+                "usually a runaway recursive function — \
+                 raise via rc recursion_limit: or --recursion-limit",
+            ),
+        ));
+    }
+    shell.mobile.control.call_depth += 1;
+    let result = apply_inner(callee, args, shell);
+    shell.mobile.control.call_depth -= 1;
+    result
+}
+
+fn apply_inner(mut callee: Value, mut args: Vec<Value>, shell: &mut Shell) -> Settled<Value> {
+    loop {
+        match &callee {
+            // Lambda — apply one arg per iteration; with no args, the
+            // lambda is a value, return it as-is.
+            Value::Lambda {
+                param,
+                body,
+                captured,
+            } => {
+                if args.is_empty() {
+                    return Ok(callee);
+                }
+                let param = param.clone();
+                let body = body.clone();
+                let captured = captured.clone();
+                let arg = args.remove(0);
+                let is_last = args.is_empty();
+                // The body sits in tail position exactly when this is
+                // the call's final argument: its value is what the call
+                // returns, under the trivial continuation the trampoline
+                // provides.
+                let body_tail = if is_last { Tail::Yes } else { Tail::No };
+                // Curried lambdas (`λx.λy.M`) are flattened by the
+                // elaborator, so `body` itself can be `Lam` — close
+                // it directly into a fresh `Value::Lambda` instead
+                // of routing through `eval_comp(Lam)`, which is
+                // unreachable.
+                let result = apply_lambda_frame(&captured, &param, &arg, shell, |child| {
+                    if let CompKind::Lam {
+                        param: inner_param,
+                        body: inner_body,
+                    } = &body.item
+                    {
+                        Ok(Value::Lambda {
+                            param: inner_param.clone(),
+                            body: inner_body.clone(),
+                            captured: child.snapshot(),
+                        })
+                    } else {
+                        eval_comp(&body, child, body_tail)
+                    }
+                });
+                if let Some(done) = step(result, &mut callee, &mut args, shell) {
+                    return done;
+                }
+            }
+            // Block — force through the block boundary so the
+            // install-vs-discard mobile policy matches `force` and
+            // `grant` / `within`.
+            //
+            // The block body sits in tail position exactly when no
+            // arguments remain to apply; `eval_block` forwards that
+            // grant into the body's mobile so its final call
+            // trampolines here rather than recursing on the host stack.
+            Value::Block { body, captured } => {
+                let block_tail = if args.is_empty() { Tail::Yes } else { Tail::No };
+                let body = body.clone();
+                let captured = captured.clone();
+                let result =
+                    super::eval_block(&body, captured, block_tail, shell).map_err(Control::from);
+                if let Some(done) = step(result, &mut callee, &mut args, shell) {
+                    return done;
+                }
+            }
+            // Non-callable: done if no args, error otherwise.
+            _ if args.is_empty() => return Ok(callee),
+            _ => {
+                let hint = if matches!(callee, Value::Unit) {
+                    "too many arguments — the function returned before consuming all of them"
+                } else {
+                    "only Lambdas and Blocks are functions"
+                };
+                return Err(Break::Error(
+                    Error::new(format!("{} is not a function", callee.type_name()), 1)
+                        .with_hint(hint),
+                ));
+            }
+        }
+    }
+}
+
+/// One trampoline step: `Some(done)` to exit, `None` to iterate.
+///
+/// `Control::Tail` is absorbed here — the loop continues with the
+/// new callee and arguments. Every other [`Control`] variant
+/// collapses to a [`Break`] returned to the caller as
+/// [`Settled<Value>`].
+fn step(
+    result: Raw<Value>,
+    callee: &mut Value,
+    args: &mut Vec<Value>,
+    shell: &mut Shell,
+) -> Option<Settled<Value>> {
+    match result {
+        Ok(v) if args.is_empty() => Some(Ok(v)),
+        Ok(v) => {
+            *callee = v;
+            None
+        }
+        Err(Control::Tail(TailCall { callee: c, args: a })) => {
+            if let Err(b) = crate::process::check(shell) {
+                return Some(Err(b));
+            }
+            *callee = c;
+            *args = a;
+            None
+        }
+        Err(Control::Break(b)) => Some(Err(b)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// When `call_depth` has already reached the configured limit,
+    /// entering `apply` raises a clean error instead of recursing
+    /// further. This is the unit-level analogue of "the host stack
+    /// is about to overflow" — exercising it through real recursion
+    /// in a debug build would exhaust the OS stack before the
+    /// counter trips.
+    #[test]
+    fn cap_fires_at_limit() {
+        let mut shell = Shell::new(Default::default());
+        shell.mobile.control.recursion_limit = 8;
+        shell.mobile.control.call_depth = 8;
+        let result = apply(Value::Unit, vec![Value::Unit], &mut shell);
+        match result {
+            Err(Break::Error(e)) => {
+                assert!(
+                    e.message.contains("recursion limit"),
+                    "expected 'recursion limit' in {:?}",
+                    e.message,
+                );
+            }
+            other => panic!("expected recursion-limit error, got {other:?}"),
+        }
+        // call_depth must be unchanged on the early-return path.
+        assert_eq!(shell.mobile.control.call_depth, 8);
+    }
+
+    /// One apply call below the cap increments and decrements
+    /// `call_depth` cleanly, leaving it at its original value.
+    #[test]
+    fn cap_not_fired_below_limit() {
+        let mut shell = Shell::new(Default::default());
+        shell.mobile.control.recursion_limit = 8;
+        shell.mobile.control.call_depth = 7;
+        // Value::Unit with no args returns Ok(Unit) without recursing.
+        let _ = apply(Value::Unit, vec![], &mut shell);
+        assert_eq!(shell.mobile.control.call_depth, 7);
+    }
+}

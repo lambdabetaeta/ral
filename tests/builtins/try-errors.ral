@@ -1,0 +1,55 @@
+# Test: §10.1 try / handler dispatch
+#
+# `try body handler` runs body and returns its value; on failure it
+# calls handler with an ErrorRec [cmd, status, message, line, col] and
+# returns the handler's value instead.
+
+# Success: handler is not called.
+echo !{try { return 0 } { |e| return $e[status] }}
+
+# Command failure: status flows into the handler.
+echo !{try { cat /nonexistent 2> /dev/null; return 0 } { |e| return $e[status] }}
+
+# Explicit fail: status flows through.
+echo !{try { fail [status: 42] } { |e| return $e[status] }}
+
+# fail with a custom message: status and message round-trip.
+try { fail [status: 7, message: 'custom failure'] } { |e|
+    echo $e[status]
+    echo $e[message]
+}
+
+# fail re-raise inside a handler: $e round-trips through nested try.
+try {
+    try { fail [status: 9, message: 'boom'] } { |e| fail $e }
+} { |e|
+    echo $e[status]
+    echo $e[message]
+}
+
+# fail without explicit message defaults to "explicit failure".
+try { fail [status: 3] } { |e|
+    echo $e[status]
+    echo $e[message]
+}
+
+# `try` with side-effecting handler.
+try { fail [status: 1] } { |err|
+    echo "caught status $err[status]"
+}
+
+# `try` success — handler not called.
+try { return true } { |_| return false }
+
+# Nested try.
+try {
+    try { fail [status: 1] } { |_err| echo 'inner caught' }
+    echo 'continued after inner'
+} { |_err| echo 'outer caught' }
+
+# retry.
+try {
+    retry 3 { echo 'trying...'; fail [status: 1] }
+} { |_err| echo 'retry exhausted' }
+
+echo 'try error tests done'

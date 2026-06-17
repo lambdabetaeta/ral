@@ -1,0 +1,67 @@
+[package]
+name = "ral"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+default-run = "ral"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "ral"
+path = "src/main.rs"
+
+[features]
+default    = ["grep"]
+coreutils  = ["ral-core/coreutils"]
+diffutils  = ["ral-core/diffutils"]
+grep       = ["ral-core/grep"]
+ripgrep    = ["ral-core/ripgrep"]
+
+[dependencies]
+# default-features = false so ral's own `grep` feature actually governs
+# whether core compiles the regex builtins; without this, core's default
+# `grep` stays on and `--no-default-features` only flips the test cfg.
+ral-core  = { path = "../core", default-features = false }
+rustyline  = "=18.0.0"
+serde      = { workspace = true }
+serde_json = { workspace = true }
+clap       = { workspace = true }
+base64     = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+] }
+
+[package.metadata.deb]
+name = "ral"
+maintainer = "Alex Kavvos <alex.kavvos@bristol.ac.uk>"
+copyright = "2024 Alex Kavvos"
+license-file = ["../LICENSE-MIT", "4"]
+extended-description = """\
+ral is a shell based on algebraic effects. It provides a clean, typed
+command language with first-class pipelines, structured data, and
+job control. ral-sh is included as a POSIX-bridge login shell that
+forwards non-interactive invocations to /bin/sh."""
+depends = "$auto"
+section = "shells"
+priority = "optional"
+maintainer-scripts = "../packaging/debian"
+assets = [
+    { source = "../target/release/ral",    dest = "/usr/bin/ral",    mode = "755" },
+    { source = "../target/release/ral-sh", dest = "/usr/bin/ral-sh", mode = "755" },
+    { source = "../docs/SPEC.md",          dest = "/usr/share/doc/ral/SPEC.md",          mode = "644" },
+    { source = "../docs/TUTORIAL.md",      dest = "/usr/share/doc/ral/TUTORIAL.md",       mode = "644" },
+]
+
+[build-dependencies]
+ral-core = { path = "../core" }
+
+[dev-dependencies]
+tempfile = "3.27"

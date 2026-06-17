@@ -1,0 +1,31 @@
+# Test: list destructuring, map destructuring, rest params, nested
+
+# List destructuring
+let [first, second, third] = [a, b, c]
+echo $first $second $third
+
+# Rest params
+let [head, ...tail] = [1, 2, 3, 4, 5]
+echo $head
+echo !{length $tail}
+
+# Map destructuring
+let [host: h, port: p] = [host: prod1, port: 8080]
+echo $h $p
+
+# Nested destructuring
+let [name: n, addr: [city: c]] = [name: alice, addr: [city: london, zip: 'SW1']]
+echo "$n lives in $c"
+
+# Destructuring in lambda params
+let servers = [
+    [host: alpha, port: 80],
+    [host: beta, port: 443],
+]
+for $servers { |[host: h, port: p]|
+    echo "$h:$p"
+}
+# Should be:
+for $servers { |[host: h, port: p]|
+    echo "$h on port $p"
+}

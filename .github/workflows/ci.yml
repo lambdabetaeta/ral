@@ -1,0 +1,90 @@
+name: CI
+# Smoke checks: format, lint, build, test.  Manual only — run from the
+# Actions tab or `gh workflow run ci.yml`.  Kept deliberately lean
+# (single Linux runner, no cross-targets) so it stays cheap in Actions
+# minutes.  Cross-target builds live in build-binaries.yml (v* tags or
+# manual dispatch).
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # An explicit `toolchain:` input overrides rust-toolchain.toml, so the
+      # value here is authoritative; keep it in step with the channel in
+      # rust-toolchain.toml (both track `stable`).
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "stable"
+          components: rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo build
+        run: cargo build --workspace --all-targets
+
+      # Integration tests in ral/tests/ invoke the `ral` binary as a
+      # subprocess, so `cargo build` above is load-bearing — `cargo test`
+      # alone does not reliably refresh that binary.
+      - name: cargo test
+        run: cargo test --workspace
+
+      - uses: astral-sh/setup-uv@v5
+
+      # Renders the whole site.  Without tree-sitter installed the examples
+      # page falls back to the regex highlighter, which keeps this check cheap
+      # on every PR while still catching a broken example, doc, or template.
+      - name: Render site
+        run: uv run scripts/render-site.py
+
+      - name: Syntax-check examples, kit, and plugins
+        run: |
+          for f in examples/*.ral kit/*.ral plugins/*.ral; do
+            cargo run -p ral --quiet -- --check "$f"
+          done
+
+  windows-check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "stable"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # The `coreutils` feature pulls in `uu_timeout`, which currently
+      # does not build on Windows; build / test the cores that do.
+      - name: cargo build (core)
+        run: cargo build -p ral-core
+      - name: cargo build (ral)
+        run: cargo build -p ral
+      - name: cargo build (ral with grep + ripgrep)
+        run: cargo build -p ral --features grep,ripgrep
+      # exarch carries cfg(windows) console paths and a windows-sys dep that
+      # compile nowhere else; its default `coreutils` feature stays on the
+      # Windows-buildable subset (coreutils-unix-only is cfg(unix)-gated).
+      - name: cargo build (exarch)
+        run: cargo build -p exarch
+
+      - name: cargo test (core)
+        run: cargo test -p ral-core
+      - name: cargo test (ral)
+        run: cargo test -p ral
+      - name: cargo test (ral with grep + ripgrep)
+        run: cargo test -p ral --features grep,ripgrep
+      - name: cargo test (exarch)
+        run: cargo test -p exarch

@@ -1,0 +1,33 @@
+target/
+target-host/
+.build-cache/
+.worktrees/
+
+# qmd project-local search index (generated; rebuild with scripts/wiki-index.sh)
+.qmd/
+
+# tree-sitter-ral build artefacts
+editors/tree-sitter-ral/node_modules/
+editors/tree-sitter-ral/build/
+editors/tree-sitter-ral/bindings/
+editors/tree-sitter-ral/.ts-lib/
+editors/tree-sitter-ral/package-lock.json
+editors/tree-sitter-ral/*.wasm
+editors/tree-sitter-ral/*.so
+editors/tree-sitter-ral/*.obj
+editors/tree-sitter-ral/*.lib
+editors/tree-sitter-ral/*.exp
+
+*.swp
+*.swo
+*~
+# generated site pages (scripts/render-site.py)
+site/index.html
+site/examples.html
+site/tutorial.html
+site/spec.html
+site/rationale.html
+
+CLAUDE.md
+
+.letta

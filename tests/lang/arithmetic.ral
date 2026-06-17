@@ -1,0 +1,28 @@
+# Test: arithmetic substitution
+
+# Basic ops
+echo $[2 + 3]
+echo $[10 - 4]
+echo $[3 * 7]
+echo $[15 / 4]
+echo $[17 % 5]
+
+# Precedence
+echo $[2 + 3 * 4]
+echo $[(2 + 3) * 4]
+
+# Variables in arithmetic
+let x = 10
+let y = 3
+echo $[$x + $y]
+echo $[$x * $y - 1]
+
+# Comparisons
+echo $[5 == 5]
+echo $[5 != 3]
+echo $[3 < 5]
+echo $[10 >= 10]
+
+# Floats
+echo $[1.5 + 2.5]
+echo $[10.0 / 3.0]

@@ -1,0 +1,209 @@
+# tasks.ral — a small task-management kit.
+#
+# Load with `source "kit/tasks.ral"` (or `use kit/tasks` once a project
+# module path resolves there).  The bindings drop into the current
+# scope; loading also echoes a short API recap to stdout so the
+# model sees the kit's surface in the tool result.
+#
+# Schema (records are statically typed; every field is always present):
+#     id     : Int
+#     desc   : String
+#     status : String     -- "open" | "doing" | "blocked" | "done"
+#     tags   : [String]
+#     notes  : String     -- "" means none
+#
+# Two layers:
+#
+# * The pure data layer (set-status, update-task, by-status, render-*,
+#   save-/load-tasks, …) is side-effect-free and runs in a bare ral
+#   REPL with no host.
+# * The host-surfacing layer (add-task, transition, surface-progress)
+#   hands the host a tagged event with the `surface` builtin, which an
+#   exarch host renders as a typed rail event (a `` `task `` or
+#   `` `meter `` variant).  With no host installed `surface` is the
+#   identity, so the kit stays runnable in a bare ral REPL.
+#
+# Id allocation: `add-task` calls `next-id`, which returns
+# `max(ids) + 1`.  Ids freed by `remove-task` are recycled.
+
+
+# --- tool-use watchdog ------------------------------------------------------
+# Under exarch a per-session counter file tracks how many watched "work"
+# commands have run since the task list was last touched.  Past `wd-limit`
+# the kit nudges on stderr -- which lands in the model's tool result as a
+# `STDERR:` section, in-band -- and resets.  Using the kit (add-task /
+# transition) resets it too.  Outside exarch the counter path is unset, so
+# every probe is a `try`-guarded no-op and the watched aliases just forward.
+# The counter dir comes from `$EXARCH_SESSION_DIR`, seeded by the host.
+
+let wd-limit = 8
+
+let __wd-probe = {
+    try {
+        let cf = "$EXARCH_SESSION_DIR/.wd-count"
+        let n = if !{exists $cf} { from-json < $cf } else { 0 }
+        if $[ $n >= $wd-limit ] {
+            echo "[tasks] $n commands since the task list was last updated -- record progress with add-task / transition" 1>&2
+            to-json 0 > $cf
+        } else {
+            to-json $[ $n + 1 ] > $cf
+        }
+        return unit
+    } { |_| return unit }
+}
+
+let __wd-reset = {
+    try { to-json 0 > "$EXARCH_SESSION_DIR/.wd-count" ; return unit } { |_| return unit }
+}
+
+# --- constructor ------------------------------------------------------------
+
+let mk-task = { |id desc|
+  [ id: $id, desc: $desc, status: "open", tags: [], notes: "" ]
+}
+
+# A correctly-typed empty task list. A bare `[]` would be polymorphic and
+# get monomorphised to the wrong element type at the first use site.
+let empty-tasks = drop 1 [ !{mk-task 0 ""} ]
+
+# --- per-field setters ------------------------------------------------------
+# One respread per setter, so adding a field touches O(setters), not O(callers).
+
+let set-desc   = { |t v| [id: $t[id], desc: $v,       status: $t[status], tags: $t[tags], notes: $t[notes]] }
+let set-status = { |t v| [id: $t[id], desc: $t[desc], status: $v,         tags: $t[tags], notes: $t[notes]] }
+let set-tags   = { |t v| [id: $t[id], desc: $t[desc], status: $t[status], tags: $v,       notes: $t[notes]] }
+let set-notes  = { |t v| [id: $t[id], desc: $t[desc], status: $t[status], tags: $t[tags], notes: $v        ] }
+
+let add-tag    = { |t g| set-tags $t [...$t[tags], $g] }
+let remove-tag = { |t g| set-tags $t !{filter { |x| $[not !{equal $x $g}] } $t[tags]} }
+
+
+# --- id allocation ---------------------------------------------------------
+# Project ids first so the fold accumulator is unambiguously Int.
+# Returns 1 for an empty list, max(ids) + 1 otherwise.
+
+let next-id = { |ts|
+  let ids = map { |t| $t[id] } $ts
+  if !{is-empty $ids} { 1 }
+    else { $[!{fold { |acc x| if $[$x > $acc] { $x } else { $acc } } 0 $ids} + 1] }
+}
+
+# --- list combinators ------------------------------------------------------
+
+## Construct a fresh task with `desc`, allocate its id via `next-id`,
+## and append it to `ts`.  Surfaces the creation as a `task open <desc>`
+## event followed by the refreshed rollup meter, so growing the list
+## lands on the rail alongside the data update.  Returns the updated
+## list.  Canonical entry point for growing the task list.
+let add-task = { |ts desc|
+  let new-ts = [...$ts, !{mk-task !{next-id $ts} $desc}]
+  surface `task [status: "open", desc: $desc]
+  surface-progress $new-ts
+  __wd-reset
+  $new-ts
+}
+
+## Append a pre-built Task to `ts`.  Useful for deserialisation and
+## bulk import.
+let append-task = { |ts t| [...$ts, $t] }
+
+let remove-task = { |ts id|   filter { |t| $[$t[id] != $id] } $ts }
+let find-task   = { |ts id|   first  { |t| $[$t[id] == $id] } $ts }
+let update-task = { |ts id f|
+  map { |t| if $[$t[id] == $id] { f $t } else { $t } } $ts
+}
+
+# --- queries ---------------------------------------------------------------
+
+let by-status   = { |ts s| filter { |t| equal $t[status] $s } $ts }
+let by-tag      = { |ts g| filter { |t| elem   $g $t[tags]  } $ts }
+let open-tasks  = { |ts| by-status $ts "open" }
+
+let status-counts = { |ts|
+  [ open:    !{length !{by-status $ts "open"   }},
+    doing:   !{length !{by-status $ts "doing"  }},
+    blocked: !{length !{by-status $ts "blocked"}},
+    done:    !{length !{by-status $ts "done"   }} ]
+}
+
+# --- rendering -------------------------------------------------------------
+
+let render-task = { |t|
+  let tag-str  = if !{is-empty $t[tags]}   { "" } else { " [!{intercalate "," $t[tags]}]" }
+  let note-str = if !{equal $t[notes] ""}  { "" } else { "  -- $t[notes]" }
+  "#$t[id]  $t[status]  $t[desc]$tag-str$note-str"
+}
+
+let render-tasks = { |ts| for $ts { |t| echo !{render-task $t} } }
+
+# --- persistence -----------------------------------------------------------
+
+let save-tasks = { |ts path| to-json   $ts > $path }
+let load-tasks = { |path|    from-json     < $path }
+
+# --- host-rail surfacing ---------------------------------------------------
+# `surface` hands the host a tagged variant; under exarch it renders as
+# a typed rail event, and with no host it is the identity.  See
+# `value_to_kind` in `exarch/src/shell_eval.rs` for the host's decoder.
+
+## Push a `tasks <done>/<total>` meter onto the host rail.  The label
+## is the noun being counted; the kit fixes it to "tasks" so the
+## reader can scan the rollup at a glance.
+let surface-progress = { |ts|
+    let done = !{length !{by-status $ts "done"}}
+    let total = !{length $ts}
+    surface `meter [done: $done, total: $total, label: "tasks"]
+}
+
+## Transition a task's status and surface both the change (as a `task`
+## event carrying status + desc) and the refreshed rollup meter.
+## Returns the updated task list.  Falls back to "task #N" for desc
+## when the id does not resolve, so a stale id never silences the
+## surface call.
+let transition = { |ts id new-status|
+    let matches = filter { |t| $[$t[id] == $id] } $ts
+    let desc =
+        if !{is-empty $matches} { return "task #$id" }
+        else { return $matches[0][desc] }
+    let new-ts = update-task $ts $id { |t| set-status $t $new-status }
+    surface `task [status: $new-status, desc: $desc]
+    surface-progress $new-ts
+    __wd-reset
+    $new-ts
+}
+
+
+# --- watched "work" commands ------------------------------------------------
+# Each forwards transparently (self-masking) after a probe.  Genuine
+# externals only -- `alias` rejects builtins and lexical names.  Editing the
+# list is how a kit author tunes what counts as "work".
+
+alias git     { |a| __wd-probe; git     ...$a }
+alias rg      { |a| __wd-probe; rg      ...$a }
+alias fd      { |a| __wd-probe; fd      ...$a }
+alias find    { |a| __wd-probe; find    ...$a }
+alias sed     { |a| __wd-probe; sed     ...$a }
+alias awk     { |a| __wd-probe; awk     ...$a }
+alias python3 { |a| __wd-probe; python3 ...$a }
+
+# --- load-time briefing ----------------------------------------------------
+# Runs once when the file is sourced.  The echoes land in the
+# sourcing tool call's stdout so the model receives the API recap
+# alongside the bindings.
+
+echo 'tasks kit loaded.'
+echo '  empty-tasks                          — correctly-typed empty list'
+echo '  add-task $tasks <desc>               — fresh id, append, surface creation'
+echo '  remove-task $tasks <id>              — drop by id'
+echo '  update-task $tasks <id> { |t| … }    — patch one task pure-functionally'
+echo '  transition $tasks <id> <status>      — change status + surface to rail'
+echo '  status-counts $tasks                 — record of per-status counts'
+echo '  render-tasks $tasks                  — echo each task to stdout'
+echo '  save-tasks $tasks <path> / load-tasks <path>'
+echo ''
+echo 'add tasks with `add-task`; change status with `transition` —'
+echo 'transition pushes a task event and progress meter to the rail'
+echo 'so the user can see what you are working on.'
+echo ''
+echo 'a watchdog reminds you to update the task list if you run a stretch'
+echo 'of work commands (git, rg, find, sed, …) without touching it.'

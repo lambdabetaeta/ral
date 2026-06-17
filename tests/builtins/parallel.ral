@@ -1,0 +1,19 @@
+# Test: par — parallel map with concurrency limit
+
+# Unlimited (j=0)
+let results = par { |x| return $[$x * 10] } [1, 2, 3, 4, 5] 0
+echo ...$results
+
+# Limited (j=2)
+let results2 = par { |x| return $[$x * 100] } [1, 2, 3, 4] 2
+echo ...$results2
+
+# Empty list
+let results3 = par { |x| return $x } [] 0
+echo !{length $results3}
+
+# Preserves input order
+let results4 = par { |x| return $x } [c, a, b] 0
+echo ...$results4
+
+echo 'parallel tests done'

@@ -1,0 +1,53 @@
+name: Deploy Pages
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # tree-sitter CLI (prebuilt binary) for the examples-page highlighting.
+      # `highlight` needs only the binary and the committed parser.c — no node.
+      - name: Install tree-sitter CLI
+        run: |
+          curl -fsSL https://github.com/tree-sitter/tree-sitter/releases/download/v0.26.9/tree-sitter-linux-x64.gz \
+            | gunzip > /usr/local/bin/tree-sitter
+          chmod +x /usr/local/bin/tree-sitter
+
+      - uses: astral-sh/setup-uv@v5
+
+      # Renders index.html, examples.html (tree-sitter), and spec.html /
+      # rationale.html (markdown) into site/.  uv resolves the one dependency.
+      - name: Render site
+        run: uv run scripts/render-site.py
+
+      - name: Stage install script
+        run: |
+          mkdir -p site/scripts
+          cp scripts/install.sh site/scripts/install.sh
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+      - uses: actions/deploy-pages@v4
+        id: deploy

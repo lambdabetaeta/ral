@@ -1,0 +1,27 @@
+tree-sitter-ral
+===============
+
+A tree-sitter grammar for the ral shell language, used for editor
+syntax highlighting via queries/highlights.scm.
+
+The canonical source is grammar.js. Everything tree-sitter derives
+from it is generated, not tracked: src/parser.c, src/grammar.json,
+src/node-types.json, and the runtime headers under src/tree_sitter/
+(parser.h, alloc.h, array.h). The compiled parser library (ral.dylib
+and friends) and the node-gyp build/ tree are likewise build outputs.
+All of these are listed in .gitignore.
+
+Regeneration
+------------
+
+The package.json build script runs the generate step:
+
+    npm run build        # tree-sitter generate && node-gyp build
+
+or, to produce only the parser sources without compiling:
+
+    tree-sitter generate
+
+Run this after editing grammar.js to refresh src/parser.c and the
+accompanying JSON and headers. Test the grammar against the corpus
+with `tree-sitter test` (npm test).

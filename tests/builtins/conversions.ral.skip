@@ -1,0 +1,28 @@
+# Test: int, float, str (§16.2)
+
+echo !{int '42'}
+# Expected: 42
+
+echo !{float '3.14'}
+# Expected: 3.14
+
+echo !{str 42}
+# Expected: 42
+
+# Type checking
+let n = int '10'
+echo $[$n + 5]
+# Expected: 15
+
+let f = float '2.5'
+echo $[$f * 2]
+# Expected: 5
+
+# Error on bad conversion
+try { int 'abc' } { |err| echo 'bad int caught' }
+# Expected: bad int caught
+
+try { float 'xyz' } { |err| echo 'bad float caught' }
+# Expected: bad float caught
+
+echo 'conversion tests done'

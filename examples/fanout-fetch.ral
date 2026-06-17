@@ -1,0 +1,42 @@
+#!/usr/bin/env ral
+
+# Fetch a list of URLs in parallel; write a JSON manifest of outcomes.
+#
+#     ral fanout-fetch.ral urls.txt out/
+#
+# Bash:
+#
+#     cat urls.txt | xargs -P 8 -I{} curl -fsSL -o "out/$(basename {})" {}
+#
+# which silently loses per-URL failures and depends on filenames being
+# unique within `basename`.  `par` returns a structured result per
+# input — failures land in the manifest alongside successes, so the
+# "what didn't fetch?" answer is one filter call.
+
+let [list_file, out_dir] = $args
+
+let urls = from-lines-list $list_file
+
+mkdir -p $out_dir
+
+let fetch = { |url|
+    let dst = "$out_dir/!{re-replace-all '[^a-zA-Z0-9.]+' '_' $url}"
+    try {
+        curl -fsSL --max-time 15 $url > $dst
+        return [url: $url, path: $dst, ok: true, status: 0]
+    } { |err|
+        return [url: $url, path: '', ok: false, status: $err[status]]
+    }
+}
+
+let results = par $fetch $urls 8
+
+to-json $results > "$out_dir/manifest.json"
+
+let ok  = filter { |r| return $r[ok] }       $results
+let bad = filter { |r| return $[not $r[ok]] } $results
+echo "fetched: !{length $ok} ok, !{length $bad} failed"
+
+for $bad { |r|
+    echo "!{styled $ansi-red '  fail'} status=$r[status]  $r[url]" 1>&2
+}

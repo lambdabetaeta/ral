@@ -1,0 +1,45 @@
+# Test: §21.9 record types and row polymorphism
+
+# Heterogeneous map literal: each field has its own type
+let r = [host: prod1, port: 8080, debug: false]
+echo $r[host]
+echo $r[port]
+echo !{equal $r[debug] false}
+
+# Nested records: inner fields retain their types
+let config = [db: [host: localhost, port: 5432], workers: 4]
+echo $config[db][host]
+echo $config[db][port]
+echo $config[workers]
+
+# Row-polymorphic function: reads one field, ignores the rest
+# Inferred type: ∀α ρ. {name: Str | ρ} → F Unit
+let greet = { |x| echo "hello $x[name]" }
+greet [name: alice]
+greet [name: bob, dept: eng]
+
+# try returns the body's value on success.
+let ok = try { return 42 } { |_| return -1 }
+echo !{equal $ok 42}
+
+# try calls the handler on failure with a typed error record.
+let status = try { fail [status: 7] } { |e| return $e[status] }
+echo !{equal $status 7}
+
+# Inline form: handler can echo, return, or further dispatch.
+try { fail [status: 3] } { |err|
+    echo "status is $err[status]"
+}
+
+# Map spread: adding a field to a record
+let base = [x: 1, y: 2]
+let extended = [z: 3, ...$base]
+echo $extended[x]
+echo $extended[z]
+
+# Record used as argument to row-polymorphic function
+let get_x = { |r| return $r[x] }
+echo !{get_x [x: 99, y: 0]}
+echo !{get_x [label: a, x: 42]}
+
+echo 'records ok'

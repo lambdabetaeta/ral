@@ -1,0 +1,17 @@
+0
+1
+42
+7
+custom failure
+9
+boom
+3
+explicit failure
+caught status 1
+inner caught
+continued after inner
+trying...
+trying...
+trying...
+retry exhausted
+try error tests done

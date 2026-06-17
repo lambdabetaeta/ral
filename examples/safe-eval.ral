@@ -1,0 +1,35 @@
+#!/usr/bin/env ral
+
+# Capability-sandboxed evaluation.
+#
+#     ral safe-eval.ral
+#
+# `grant` attenuates authority — it can only narrow, never amplify.
+# Inside the block, the program sees a synthetic universe where one
+# scratch directory is writable, nothing else is, and exec is dead.
+#
+# Bash's analogue is `chroot` + `setuid` + `seccomp`, each at a
+# different layer of the system, all process-scoped, none in-language.
+# Here it is one expression around the offending code.
+
+let sandbox = temp-dir
+
+let try-op = { |label body|
+    let outcome = try { !$body ; return 'allowed' } { |_| return 'blocked' }
+    echo "  $outcome  $label"
+}
+
+echo 'outside the grant block:'
+try-op 'write inside  /tmp'      { to-string 'ok' > "$sandbox/scratch" }
+try-op 'read  /etc/hosts'        { let _ = !{from-string < /etc/hosts} ; return unit }
+
+echo ''
+echo 'inside grant [exec: [:], fs: [read+write only the sandbox]]:'
+grant [exec: [:], fs: [read: [$sandbox], write: [$sandbox]]] {
+    try-op 'write inside  sandbox'   { to-string 'ok' > "$sandbox/inside"  }
+    try-op 'write outside sandbox'   { to-string 'no' > "/tmp/escape"      }
+    try-op 'read  /etc/hosts'        { let _ = !{from-string < /etc/hosts} ; return unit }
+    try-op 'exec  curl'              { curl http://example.com 2> /dev/null }
+}
+
+rm -rf $sandbox

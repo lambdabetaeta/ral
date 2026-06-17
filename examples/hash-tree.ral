@@ -1,0 +1,30 @@
+#!/usr/bin/env ral
+
+# Hash every file under a directory in parallel.
+#
+#     ral hash-tree.ral .            # 8 workers
+#     ral hash-tree.ral . 16         # 16 workers
+#
+# Bash:
+#
+#     find . -type f -print0 | xargs -0 -P 8 sha256sum
+#
+# The `-print0` / `-0` dance exists only because filenames are shell
+# tokens that get re-split.  Here a path is a value; `par` distributes
+# values; the same paths come back out the other side paired with
+# their hashes, in input order.
+
+let [root, ...rest] = $args
+let jobs = if !{is-empty $rest} { return 8 } else { return !{int $rest[0]} }
+
+let files = filter { |p| is-file $p } !{glob "$root/**/*"}
+
+let results = par { |p|
+    let line  = !{sha256sum $p | from-string}
+    let parts = words $line
+    return [hash: $parts[0], path: $p]
+} $files $jobs
+
+for !{sort-list-by { |r| return $r[path] } $results} { |r|
+    echo "$r[hash]  $r[path]"
+}

@@ -1,0 +1,58 @@
+#!/usr/bin/env ral
+
+# ci-local.ral — replay the Linux CI job locally so you can check
+# before pushing.  Mirrors the `check` job in
+# .github/workflows/ci.yml; kept in lock-step with that file.
+#
+# The `windows-check` job needs a Windows host and is out of scope
+# here.  The closest local approximation for Windows is
+#   cargo check --target x86_64-pc-windows-gnu --tests
+# (compile-only, no test execution).
+#
+# Steps:
+#   1. cargo build --workspace --all-targets   (RUSTFLAGS=-D warnings)
+#   2. cargo test --workspace
+#   3. uv run scripts/render-site.py
+#   4. for f in examples/*.ral: cargo run -p ral -- --check $f
+#
+# Exits non-zero on the first failing step (default ral semantics —
+# external command failures propagate).
+
+let here      = dirname $script
+let repo_root = resolve-path "$here/.."
+
+# Print a CI-style banner, then run the thunk.  Matches the `==>`
+# section-header style used in build-release.ral so output from
+# multiple scripts stays consistent.
+let step = { |label thunk|
+    echo ''
+    echo "!{styled $ansi-cyan '==>'} !{styled $ansi-yellow $label}"
+    !$thunk
+}
+
+within [dir: $repo_root] {
+    # -D warnings is what CI sees; without it, local builds pass on
+    # warnings that CI then rejects.  Scoped to the cargo block so
+    # the python steps don't inherit it.
+    within [env: [RUSTFLAGS: '-D warnings']] {
+        step 'cargo build --workspace --all-targets' {
+            cargo build --workspace --all-targets
+        }
+        step 'cargo test --workspace' {
+            cargo test --workspace
+        }
+    }
+
+    step 'render-site.py' {
+        uv run scripts/render-site.py
+    }
+
+    step 'syntax-check examples/*.ral' {
+        for !{glob 'examples/*.ral'} { |f|
+            cargo run -p ral --quiet -- --check $f
+        }
+    }
+}
+
+echo ''
+echo "!{styled $ansi-green '  CI-local OK.'}"

@@ -1,0 +1,31 @@
+# Test: within [handlers:] scoping and nesting
+
+# Basic handler override
+within [handlers: [cat: { echo 'mocked cat' }]] {
+    cat anything
+}
+
+# Override gone after block
+try { cat /nonexistent 2> /dev/null } { |_| echo 'real cat failed' }
+
+# Nesting: inner wins for same name
+within [handlers: [cat: { echo 'outer' }]] {
+    within [handlers: [cat: { echo 'inner' }]] {
+        cat x
+    }
+    cat x
+}
+
+# Different names coexist
+within [handlers: [cmd1: { echo 'mock1' }, cmd2: { echo 'mock2' }]] {
+    cmd1 x
+    cmd2 x
+}
+
+# within handlers do not shadow builtins
+# this tests that 'echo' as a builtin still works normally
+within [handlers: [ls: { echo 'overridden' }]] {
+    echo 'still real echo'
+}
+
+echo 'with scope tests done'

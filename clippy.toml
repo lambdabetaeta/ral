@@ -1,0 +1,85 @@
+# Path-handling discipline: every canonicalisation goes through
+# `core::path::canon`, where it picks `canonicalise_strict` or
+# `canonicalise_lenient` and names its intent at the call site.
+#
+# A direct `std::fs::canonicalize` elsewhere bypasses that
+# distinction and re-opens the bypass-by-direct-call class of
+# bugs the path/ consolidation closed.  The two real callers in
+# `core/src/path/canon.rs` carry an `#[allow(clippy::disallowed_methods)]`
+# attribute so the lint fires only outside that file.
+#
+# Path-construction discipline: every place that builds a path
+# from a string goes through a named helper in `core::path` so
+# the resolution rule (cwd anchoring, sigil expansion, alias
+# matching, basename extraction, …) is visible at one call site.
+# `std::path::Path::new` is the stdlib constructor that turns a
+# borrowed string into a borrowed path; banning it outside
+# `core/src/path/` keeps caller code from quietly reimplementing
+# path semantics.  Construction sites inside the path/ module
+# carry per-function `#[allow]` attributes; legitimate adapter
+# sites elsewhere (FFI glue, env-var lifting, user-input literal
+# paths) carry the same attribute with a reason at the call site.
+#
+# `std::path::PathBuf::from` is *not* lint-enforced because it
+# resolves through the `From` trait, which clippy cannot scope to
+# a single impl — adding it raises a "does not refer to a
+# reachable function" warning and the lint never fires.  The
+# discipline still applies (own PathBuf construction belongs in
+# `crate::path`), but the enforcement is by review, not clippy.
+#
+# CWD discipline: process CWD is OS-global and races every parallel
+# ral thread; reading it should go through `Shell::cwd` so a `within`
+# override or a prior `cd` is honoured, and writing it is reserved
+# for genuine subprocess setup.  Logical shell cwd lives on
+# `Shell::logical_cwd`; `cd` mutates that, not the process.
+#
+# Genuine syscall sites carry an `#[allow]` so the lint fires only
+# outside them:
+#
+# Reads (`std::env::current_dir`):
+#   * `crate::path::process_cwd` — the single accessor that returns
+#     the kernel value as a fallback for shell-less callers.
+#   * `crate::evaluator::exec::run_uutils_in_process` — defensive
+#     save/restore around a third-party tool that might internally
+#     `chdir`.
+#
+# Writes (`std::env::set_current_dir`):
+#   * `crate::evaluator::pipeline::helper::ProcessStateGuard` — the helper
+#     subprocess that re-installs the parent's `within [dir: …]`
+#     override into its own process cwd before invoking `uumain`.
+#     Helper-only; never run from the parent's evaluator.
+#   * `crate::evaluator::exec::run_uutils_in_process` — restores the
+#     pre-call cwd after a third-party tool that might internally
+#     `chdir`.
+# Basedir discipline: every XDG base directory (config/data/cache/state
+# /bin) is resolved by `crate::path::basedir::resolve_xdg`, which reads the
+# `XDG_*_HOME` override only when it is absolute (per the spec's
+# relative-values-are-ignored rule) and otherwise joins the home-relative
+# default.  A hand-rolled `std::env::var_os("XDG_STATE_HOME")` skips that
+# rule and accepts a relative override — the bypass class the
+# canonicalisation discipline above guards against, applied to basedirs.
+# `std::env::var_os` is the path-valued env reader, so it is banned: the
+# resolver itself carries an `#[allow]`, and the genuine non-basedir
+# readers (terminal/sandbox/PATH probes, the helper's env snapshot, test
+# scaffolding) carry the same attribute with a reason at the call site.
+#
+# Child-wait discipline: `std::process::Child::wait` / `try_wait` call
+# the kernel without `WUNTRACED`, so a SIGSTOP'd child looks "still
+# running" to `try_wait` and blocks forever in `wait`.  Every
+# ral-managed child goes through `crate::process::ChildHandle`, which
+# exposes `wait_handling_stop` / `try_wait_handling_stop` — both pass
+# `WUNTRACED` on Unix and classify the result into `WaitOutcome`.  The
+# few legitimate raw waiters (post-SIGKILL reap inside `ChildHandle`,
+# one-shot sandbox/bwrap respawn, anchor subprocess waited after
+# SIGCONT, test harnesses) carry an `#[allow]` with a reason at the
+# call site.
+disallowed-methods = [
+    { path = "std::fs::canonicalize", reason = "Use crate::path::canon::canonicalise_strict (file must exist) or canonicalise_lenient (ancestor-walk fallback). Both name the call-site intent and keep the discipline of one canonicaliser per shape." },
+    { path = "std::env::current_dir", reason = "Use Shell::cwd() — process CWD must not be cached in any shell-scoped store; that's how PWD went stale across thunks." },
+    { path = "std::env::set_current_dir", reason = "ral's `cd` mutates Shell::logical_cwd, not the process cwd. Process-cwd writes are reserved for the pipeline helper subprocess and the in-process uutils save/restore — both carry an explicit #[allow]." },
+    { path = "std::path::Path::new", reason = "Use a named helper in crate::path (is_absolute / exists / basename / path_within_str / …) so the path-construction rule lives in one place. FFI glue and env-var lifting may #[allow] at the call site with a reason." },
+    { path = "std::process::Child::wait", reason = "Use crate::process::ChildHandle::wait_handling_stop — Child::wait blocks forever on a SIGSTOP'd child (no WUNTRACED). Sandbox respawn, anchor-after-SIGCONT, and tests #[allow] explicitly." },
+    { path = "std::process::Child::try_wait", reason = "Use crate::process::ChildHandle::try_wait_handling_stop — Child::try_wait reports a stopped child as still running (no WUNTRACED), so cancel-aware polling spins forever." },
+    { path = "std::env::var_os", reason = "An XDG basedir read goes through crate::path::basedir::resolve_xdg, which ignores relative overrides per the spec. Other path-valued env reads (terminal/sandbox/PATH probes, helper env snapshot, tests) #[allow] explicitly with a reason." },
+    { path = "ignore::WalkBuilder::build", reason = "Directory walks go through exarch::agent_builtins::cancellable, the single sanctioned build() site (it carries the one #[allow(clippy::disallowed_methods)]); each walk loop polls ral_core::process::check per raw entry so a long walk honours the tool-timeout / Esc cancel the bare ignore::Walk ignores." },
+]

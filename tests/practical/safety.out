@@ -1,0 +1,11 @@
+hello world.txt
+*.txt
+[hello world]
+[foo bar]
+echo hello; rm -rf /
+5
+caught: status 1
+hello
+MY_TEST_VAR correctly unset
+2 4 6 8 10
+all safety checks passed

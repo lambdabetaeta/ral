@@ -1,0 +1,33 @@
+# Test: §4.6 argument spreading and §6 collection spreading
+
+# Spread list into args
+let args = [hello, world]
+echo ...$args
+
+# Spread empty list
+let empty = []
+echo ...$empty
+
+# Spread in list literal
+let combined = [...[1, 2], ...[3, 4]]
+echo $combined
+
+# Cons-spread shape: [x, ...xs]
+let xs = [2, 3]
+let ys = [1, ...$xs]
+echo $ys
+
+# Snoc-spread shape: [...xs, x]
+let zs = [...$xs, 4]
+echo $zs
+
+# Aliasing: $xs must be unchanged after [0, ...$xs] / [...$xs, 99]
+echo $xs
+
+# Spread in map literal (explicit entries take priority)
+let defaults = [host: localhost, port: 8080]
+let config = [port: 9090, ...$defaults]
+echo $config[port]
+echo $config[host]
+
+echo 'spreading tests done'

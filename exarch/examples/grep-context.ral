@@ -1,0 +1,36 @@
+#!/usr/bin/env ral
+
+# Grep with surrounding-line context, like `grep -rn -C 2 PATTERN`.
+#
+#     ral grep-context.ral 'TODO'           # search cwd
+#     ral grep-context.ral 'TODO' src/      # scope to src/
+#
+# `grep-files PATTERN` returns a list of `[file, line, text, hash]`
+# records from a recursive walk of cwd.  The bash post-grep dance is
+# to re-parse `file:line:text` back into pieces; here the pieces
+# never left, and `line` plus `hash` are ready to feed an edit.
+# `view-around` reads stdin centred on a given 1-based line —
+# composing them is one loop, no parsing.
+
+if !{is-empty $args} {
+    echo 'usage: grep-context.ral PATTERN [DIR]' 1>&2
+    exit 2
+}
+
+let [pattern, ...rest] = $args
+let where = if !{is-empty $rest} { return '.' } else { return $rest[0] }
+
+within [dir: $where] {
+    let hits = !{grep-files $pattern}
+
+    if !{is-empty $hits} {
+        echo 'no matches'
+        exit 1
+    }
+
+    for $hits { |h|
+        echo "!{styled $ansi-cyan "==> $h[file]:$h[line]"}"
+        view-around $h[line] 2 < $h[file]
+        echo ''
+    }
+}

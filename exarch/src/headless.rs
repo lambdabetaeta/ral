@@ -1,0 +1,404 @@
+//! One-shot frontend over the bus event stream.  In text mode the root
+//! agent's assistant tokens stream to stdout; under `--output-format
+//! json` they are held back for a single result object emitted at the
+//! end.  Every other event — and sub-agent activity, as breadcrumbs —
+//! goes to stderr; the process exits after one seed turn.  Takes the
+//! default [`Sink::drive`]; only [`Sink::handle`] is custom.
+//!
+//! Independently of what reaches stdout/stderr, the full structured
+//! event stream is mirrored to `transcript.jsonl` in the session log
+//! dir — one JSON object per event, tagged with its session id — so a
+//! post-mortem reader gets the lossless trace (every tool `cmd` and
+//! result, step, usage delta, patch, subagent boundary) whatever the
+//! human stdout/stderr projection shows, and sub-agent output
+//! de-multiplexes cleanly by id.
+
+use crate::bus::{Event, Kind, SessionId, Sink};
+use crate::provider::{Provider, Usage};
+use crate::session::Session;
+use crate::tui::SessionInfo;
+use std::fs::File;
+use std::io::{self, BufWriter, Write};
+use std::time::Instant;
+
+/// What the root agent's output looks like on stdout in headless mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum OutputFormat {
+    /// Stream the root agent's assistant text to stdout as it arrives.
+    Text,
+    /// Hold the text back and emit one JSON result object to stdout
+    /// when the run ends.
+    Json,
+}
+
+pub struct Headless {
+    usage: Usage,
+    /// The root session's id.  Only this session's tokens reach
+    /// stdout; sub-agent token streams stay off the main surface
+    /// (they'd interleave) and surface as `SubagentDone` breadcrumbs.
+    root_id: SessionId,
+    /// Structured mirror of the bus: every event except the token
+    /// stream and the interactive-only live lines is written here as
+    /// one JSON object per line. Independent of `verbose` — this is
+    /// the lossless trace; stdout/stderr are its human projection.
+    events: BufWriter<File>,
+    /// Start instant for the monotonic `t_ms` offset stamped on each
+    /// JSONL record.
+    started: Instant,
+    /// When true, stdout carries a single JSON result object emitted at
+    /// the end instead of the live token stream.
+    json_mode: bool,
+    /// Highest root-session step number seen — the turn count surfaced
+    /// at the end and in the JSON result.
+    turns: u32,
+    /// Last non-routine stop reason surfaced by the root, if any.
+    last_stop: Option<String>,
+    /// Root assistant tokens for the message currently streaming (json
+    /// mode only); rolled into `final_msg` at each message boundary.
+    cur_msg: String,
+    /// The root's last completed assistant message — the `result` field
+    /// of the JSON output.
+    final_msg: String,
+    /// Set when a worker thread unwound this run.  `run_turn` recovers from
+    /// the panic and returns `Ok`, so without latching it here the JSON
+    /// result would report a crashed turn as a clean, empty success.
+    panicked: bool,
+    /// Whether the last stdout byte written in text mode was a newline, so
+    /// the closing newline is emitted only when the streamed reply did not
+    /// already end with one.
+    ended_with_newline: bool,
+}
+
+impl Headless {
+    fn new(json_mode: bool, events: BufWriter<File>, root_id: SessionId) -> Self {
+        Self {
+            usage: Usage::default(),
+            root_id,
+            events,
+            started: Instant::now(),
+            json_mode,
+            turns: 0,
+            last_stop: None,
+            cur_msg: String::new(),
+            final_msg: String::new(),
+            panicked: false,
+            ended_with_newline: false,
+        }
+    }
+}
+
+/// Project one event into its `transcript.jsonl` record, or `None` for
+/// the variants we deliberately omit: the `Token` stream (assistant
+/// prose is already on stdout) and the interactive-only `Boundary` and
+/// `UserPromptEcho`. The exhaustive match means a new [`Kind`] variant
+/// won't silently fall out of the trace.
+fn event_record(t_ms: u128, id: SessionId, kind: &Kind) -> Option<serde_json::Value> {
+    use serde_json::json;
+    let (name, mut obj) = match kind {
+        Kind::Born { log_dir, title } => (
+            "born",
+            json!({ "log_dir": log_dir.to_string_lossy(), "title": title }),
+        ),
+        Kind::Died => ("died", json!({})),
+        Kind::Usage(u) => (
+            "usage",
+            json!({
+                "input": u.input,
+                "output": u.output,
+                "cache_creation": u.cache_creation,
+                "cache_read": u.cache_read,
+                "dollars": u.dollars,
+            }),
+        ),
+        Kind::Step(n) => ("step", json!({ "n": n })),
+        Kind::ToolCall { tool, cmd, summary } => (
+            "tool_call",
+            json!({ "tool": tool, "cmd": cmd, "summary": summary }),
+        ),
+        Kind::ToolResult(text) => ("tool_result", json!({ "text": text })),
+        Kind::StopReason(raw) => ("stop_reason", json!({ "raw": raw })),
+        Kind::Error(msg) => ("error", json!({ "msg": msg })),
+        Kind::Dim(text) => ("dim", json!({ "text": text })),
+        Kind::ProviderError(error) => ("provider_error", json!({ "error": error })),
+        Kind::SubagentDone {
+            title,
+            text,
+            error,
+            elapsed,
+        } => (
+            "subagent_done",
+            json!({
+                "title": title,
+                "text": text,
+                "error": error,
+                "elapsed_ms": elapsed.as_millis() as u64,
+            }),
+        ),
+        Kind::Patch { path, hunk } => (
+            "patch",
+            json!({
+                "path": path,
+                "start": hunk.start,
+                "before": hunk.before,
+                "del": hunk.del,
+                "add": hunk.add,
+                "after": hunk.after,
+            }),
+        ),
+        Kind::Wrote {
+            path,
+            lines,
+            preview,
+        } => (
+            "wrote",
+            json!({ "path": path, "lines": lines, "preview": preview }),
+        ),
+        Kind::Task { status, desc } => ("task", json!({ "status": status.tag(), "desc": desc })),
+        Kind::Meter { done, total, label } => (
+            "meter",
+            json!({ "done": done, "total": total, "label": label }),
+        ),
+        Kind::Phase(label) => ("phase", json!({ "label": label })),
+        Kind::Token(_) | Kind::Boundary | Kind::UserPromptEcho(_) => return None,
+    };
+    let map = obj
+        .as_object_mut()
+        .expect("event_record arms are JSON objects");
+    map.insert("t_ms".into(), json!(t_ms as u64));
+    map.insert("id".into(), json!(id));
+    map.insert("kind".into(), json!(name));
+    Some(obj)
+}
+
+/// The `--output-format json` result object on stdout: the root's final
+/// message plus the run's stop reason, turn count, wall-clock, and token
+/// usage + cost.  Field names mirror Claude Code's headless result so a
+/// harness can parse either agent identically.
+fn result_json(h: &Headless, r: &Result<(), String>, elapsed: std::time::Duration) -> String {
+    use serde_json::json;
+    let u = &h.usage;
+    let mut obj = json!({
+        "type": "result",
+        "is_error": r.is_err() || h.panicked,
+        "result": h.final_msg,
+        "stop_reason": h.last_stop.clone().unwrap_or_else(|| {
+            // A recovered worker panic leaves no StopReason; report it as
+            // such rather than letting it default to "completed".
+            if h.panicked { "panicked".into() } else { "completed".into() }
+        }),
+        "num_turns": h.turns,
+        "duration_ms": elapsed.as_millis() as u64,
+        "total_cost_usd": u.dollars,
+        "usage": {
+            "input_tokens": u.input,
+            "output_tokens": u.output,
+            "cache_creation_input_tokens": u.cache_creation,
+            "cache_read_input_tokens": u.cache_read,
+        },
+    });
+    if let Err(e) = r
+        && let Some(map) = obj.as_object_mut()
+    {
+        map.insert("error".into(), json!(e));
+    }
+    serde_json::to_string(&obj)
+        .unwrap_or_else(|_| String::from(r#"{"type":"result","is_error":true}"#))
+}
+
+impl Sink for Headless {
+    fn handle(&mut self, e: Event) {
+        let t_ms = self.started.elapsed().as_millis();
+        let id = e.id;
+        if let Some(rec) = event_record(t_ms, id, &e.kind)
+            && let Ok(line) = serde_json::to_string(&rec)
+        {
+            let _ = writeln!(self.events, "{line}");
+        }
+        match e.kind {
+            // Only the root agent's tokens reach the user — in text mode
+            // they stream to stdout; in json mode they accumulate so the
+            // last completed message becomes the `result` field.  Sub-
+            // agent token streams would interleave unreadably and are an
+            // internal detail of the root's turn; their full transcript
+            // lives in that session's own log dir.
+            Kind::Token(text) if id == self.root_id => {
+                if self.json_mode {
+                    self.cur_msg.push_str(&text);
+                } else {
+                    let mut out = io::stdout();
+                    let _ = out.write_all(text.as_bytes());
+                    let _ = out.flush();
+                    if let Some(last) = text.as_bytes().last() {
+                        self.ended_with_newline = *last == b'\n';
+                    }
+                }
+            }
+            Kind::Token(_) => {}
+            Kind::Usage(u) => self.usage += u,
+            Kind::Step(n) => {
+                if id == self.root_id {
+                    self.turns = n;
+                    eprintln!("[step {n}]");
+                }
+            }
+            Kind::ToolCall {
+                tool, cmd, summary, ..
+            } if id == self.root_id => {
+                eprintln!("[tool: {tool}]");
+                if let Some(s) = &summary {
+                    for line in s.lines() {
+                        eprintln!("  {line}");
+                    }
+                }
+                for line in cmd.lines() {
+                    eprintln!("  {line}");
+                }
+            }
+            Kind::ToolCall { .. } => {}
+            Kind::ToolResult(_) => {}
+            Kind::StopReason(raw) => {
+                if id == self.root_id {
+                    self.last_stop = Some(raw.clone());
+                }
+                eprintln!("[stop: {raw}]");
+            }
+            Kind::Error(msg) => {
+                if msg.starts_with(crate::bus::WORKER_PANIC_PREFIX) {
+                    self.panicked = true;
+                }
+                eprintln!("error: {msg}");
+            }
+            Kind::Dim(text) => eprintln!("{text}"),
+            Kind::ProviderError(error) => eprintln!("provider error: {error:?}"),
+            // Rail-surfaced kit events.  In headless we condense each
+            // to one or two stderr lines; the canonical structured
+            // form lives in the bus event (and the session log).
+            Kind::Patch { path, hunk } => {
+                eprintln!("[patch: {path}]");
+                for l in &hunk.before {
+                    eprintln!("    {l}");
+                }
+                for l in &hunk.del {
+                    eprintln!("  - {l}");
+                }
+                for l in &hunk.add {
+                    eprintln!("  + {l}");
+                }
+                for l in &hunk.after {
+                    eprintln!("    {l}");
+                }
+            }
+            Kind::Wrote {
+                path,
+                lines,
+                preview,
+            } => {
+                eprintln!("[wrote: {path} ({lines} lines)]");
+                for l in &preview {
+                    eprintln!("  > {l}");
+                }
+            }
+            Kind::Task { status, desc } => eprintln!("[task: {}] {desc}", status.tag()),
+            Kind::Meter { done, total, label } => {
+                eprintln!("[{label}: {done}/{total}]")
+            }
+            // A sub-agent finished.  Headless keeps sub-agents off the
+            // main surface — their tokens never reach stdout — so this
+            // breadcrumb is the only live trace of the child.  The full
+            // sub-agent transcript lives in its own session log dir.
+            Kind::SubagentDone {
+                title,
+                text: _,
+                error,
+                elapsed,
+            } => {
+                let secs = elapsed.as_secs_f64();
+                match error {
+                    Some(reason) => {
+                        eprintln!("[agent: {title} failed in {secs:.1}s — {reason}]")
+                    }
+                    None => eprintln!("[agent: {title} done in {secs:.1}s]"),
+                }
+            }
+            // A message boundary: in json mode the root's just-completed
+            // message becomes the candidate `result` (last one wins).
+            Kind::Boundary if self.json_mode && id == self.root_id => {
+                self.final_msg = std::mem::take(&mut self.cur_msg);
+            }
+            // Boundary / Born / Died / UserPromptEcho are interactive-only;
+            // Phase is already captured in `events.json` by `event_record`
+            // and would only clutter the live stderr stream.
+            Kind::Boundary
+            | Kind::Born { .. }
+            | Kind::Died
+            | Kind::UserPromptEcho(_)
+            | Kind::Phase(_) => {}
+        }
+    }
+}
+
+pub fn run(
+    session: &mut Session,
+    provider: &Provider,
+    info: &SessionInfo<'_>,
+    seed: Option<String>,
+    format: OutputFormat,
+) -> Result<(), String> {
+    let prompt = seed.ok_or_else(|| "--headless requires --prompt or --file".to_string())?;
+    eprintln!(
+        "exarch: provider={} model={} base={}",
+        info.provider, info.model, info.base
+    );
+    let log_dir = session.log_dir();
+    let transcript = log_dir.join("transcript.jsonl");
+    let file = File::create(&transcript).map_err(|e| format!("{}: {e}", transcript.display()))?;
+    let json = format == OutputFormat::Json;
+    let mut headless = Headless::new(json, BufWriter::new(file), session.id);
+    let r = session.run_turn(&mut headless, provider, Some(prompt));
+    let _ = headless.events.flush();
+    let elapsed = headless.started.elapsed();
+    if json {
+        // The streamed text was held back, so this single result object
+        // is the only thing on stdout.
+        println!("{}", result_json(&headless, &r, elapsed));
+    } else if !headless.ended_with_newline {
+        // Trailing newline so the next shell prompt lands at column 1
+        // when the streamed reply did not end with one.
+        println!();
+    }
+    eprintln!("Session log: {}", session.log_dir().display());
+    eprintln!(
+        "[done] {} turns · {:.1}s · {} · ${:.4}",
+        headless.turns,
+        elapsed.as_secs_f64(),
+        headless.usage,
+        headless.usage.dollars
+    );
+    r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A recovered worker panic must surface in the JSON result as an error,
+    /// not a clean completion: `run_turn` absorbs the unwind and returns Ok,
+    /// so the result is built from `Ok(())` — the panic is recognised only
+    /// by the `Kind::Error` the bus emits.
+    #[test]
+    fn recovered_worker_panic_reports_error_not_success() {
+        let root: SessionId = 1;
+        let path =
+            std::env::temp_dir().join(format!("exarch-panic-result-{}.jsonl", std::process::id()));
+        let file = File::create(&path).expect("events file");
+        let mut h = Headless::new(true, BufWriter::new(file), root);
+        h.handle(Event {
+            id: root,
+            kind: Kind::Error(format!("{}boom", crate::bus::WORKER_PANIC_PREFIX)),
+        });
+        let out = result_json(&h, &Ok(()), std::time::Duration::ZERO);
+        let v: serde_json::Value = serde_json::from_str(&out).expect("result is JSON");
+        assert_eq!(v["is_error"], serde_json::json!(true), "{out}");
+        assert_eq!(v["stop_reason"], serde_json::json!("panicked"), "{out}");
+    }
+}

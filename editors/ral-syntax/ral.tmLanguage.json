@@ -1,0 +1,314 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "ral",
+  "scopeName": "source.ral",
+  "fileTypes": ["ral"],
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#string-double" },
+    { "include": "#string-single" },
+    { "include": "#arithmetic" },
+    { "include": "#let-binding" },
+    { "include": "#return-keyword" },
+    { "include": "#lambda-params" },
+    { "include": "#deref-paren" },
+    { "include": "#deref-plain" },
+    { "include": "#spread" },
+    { "include": "#force-brace" },
+    { "include": "#force-sigil" },
+    { "include": "#bypass" },
+    { "include": "#tilde" },
+    { "include": "#redirection" },
+    { "include": "#pipe-operator" },
+    { "include": "#chain-operator" },
+    { "include": "#number" },
+    { "include": "#boolean" },
+    { "include": "#unit" },
+    { "include": "#control-name" },
+    { "include": "#block" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comment": {
+      "name": "comment.line.number-sign.ral",
+      "match": "#.*$"
+    },
+
+    "string-single": {
+      "name": "string.quoted.single.ral",
+      "begin": "'",
+      "end": "'(?!')",
+      "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.ral" } },
+      "endCaptures":   { "0": { "name": "punctuation.definition.string.end.ral" } },
+      "patterns": [
+        {
+          "name": "constant.character.escape.ral",
+          "match": "''"
+        }
+      ]
+    },
+
+    "string-double": {
+      "name": "string.quoted.double.ral",
+      "begin": "\"",
+      "end": "\"",
+      "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.ral" } },
+      "endCaptures":   { "0": { "name": "punctuation.definition.string.end.ral" } },
+      "patterns": [
+        { "include": "#string-escape" },
+        { "include": "#interp-arith" },
+        { "include": "#interp-force-brace" },
+        { "include": "#interp-deref-paren" },
+        { "include": "#interp-deref-index" },
+        { "include": "#interp-force-plain" }
+      ]
+    },
+
+    "string-escape": {
+      "name": "constant.character.escape.ral",
+      "match": "\\\\[nte\\\\0\"$!]"
+    },
+
+    "interp-arith": {
+      "name": "meta.interpolation.arithmetic.ral",
+      "begin": "\\$\\[",
+      "end": "\\]",
+      "beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.ral" } },
+      "endCaptures":   { "0": { "name": "punctuation.section.interpolation.end.ral" } },
+      "patterns": [
+        { "include": "#arith-inner" }
+      ]
+    },
+
+    "interp-force-brace": {
+      "name": "meta.interpolation.force.ral",
+      "begin": "!\\{",
+      "end": "\\}",
+      "beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.ral" } },
+      "endCaptures":   { "0": { "name": "punctuation.section.interpolation.end.ral" } },
+      "patterns": [
+        { "include": "$self" }
+      ]
+    },
+
+    "interp-deref-paren": {
+      "match": "(\\$\\()([a-zA-Z_][a-zA-Z0-9_-]*)(\\))",
+      "captures": {
+        "1": { "name": "punctuation.definition.variable.begin.ral" },
+        "2": { "name": "variable.other.ral" },
+        "3": { "name": "punctuation.definition.variable.end.ral" }
+      }
+    },
+
+    "interp-deref-index": {
+      "match": "(\\$)([a-zA-Z_][a-zA-Z0-9_-]*)(\\[[^\\]]*\\])*",
+      "captures": {
+        "1": { "name": "punctuation.definition.variable.ral" },
+        "2": { "name": "variable.other.ral" },
+        "3": { "name": "punctuation.section.index.ral" }
+      }
+    },
+
+    "interp-force-plain": {
+      "match": "(!)([a-zA-Z_][a-zA-Z0-9_-]*)",
+      "captures": {
+        "1": { "name": "keyword.operator.force.ral" },
+        "2": { "name": "variable.other.ral" }
+      }
+    },
+
+    "arithmetic": {
+      "name": "meta.arithmetic.ral",
+      "begin": "\\$\\[",
+      "end": "\\]",
+      "beginCaptures": { "0": { "name": "punctuation.section.arithmetic.begin.ral" } },
+      "endCaptures":   { "0": { "name": "punctuation.section.arithmetic.end.ral" } },
+      "patterns": [
+        { "include": "#arith-inner" }
+      ]
+    },
+
+    "arith-inner": {
+      "patterns": [
+        { "include": "#deref-paren" },
+        { "include": "#arith-deref-index" },
+        { "include": "#deref-plain" },
+        { "include": "#force-brace" },
+        { "include": "#force-sigil" },
+        {
+          "name": "constant.numeric.ral",
+          "match": "[0-9]+(\\.[0-9]+)?"
+        },
+        {
+          "name": "keyword.operator.arithmetic.ral",
+          "match": "[+\\-*/%]|==|!=|<=|>=|<|>"
+        },
+        {
+          "begin": "\\(",
+          "end": "\\)",
+          "patterns": [
+            { "include": "#arith-inner" }
+          ]
+        }
+      ]
+    },
+
+    "arith-deref-index": {
+      "match": "(\\$)([a-zA-Z_][a-zA-Z0-9_-]*)(\\[)([^\\]]*)(\\])",
+      "captures": {
+        "1": { "name": "punctuation.definition.variable.ral" },
+        "2": { "name": "variable.other.ral" },
+        "3": { "name": "punctuation.section.index.begin.ral" },
+        "4": { "name": "variable.other.index-key.ral" },
+        "5": { "name": "punctuation.section.index.end.ral" }
+      }
+    },
+
+    "let-binding": {
+      "match": "\\b(let)\\s+([a-zA-Z_][a-zA-Z0-9_-]*|_)\\s*(=)",
+      "captures": {
+        "1": { "name": "keyword.other.let.ral" },
+        "2": { "name": "variable.other.assignment.ral" },
+        "3": { "name": "keyword.operator.assignment.ral" }
+      }
+    },
+
+    "return-keyword": {
+      "match": "\\breturn\\b",
+      "name": "keyword.control.return.ral"
+    },
+
+    "lambda-params": {
+      "name": "meta.lambda.parameters.ral",
+      "begin": "\\{\\s*\\|",
+      "end": "\\|",
+      "beginCaptures": { "0": { "name": "punctuation.section.lambda.begin.ral" } },
+      "endCaptures":   { "0": { "name": "punctuation.separator.lambda.ral" } },
+      "patterns": [
+        {
+          "name": "variable.parameter.ral",
+          "match": "[a-zA-Z_][a-zA-Z0-9_-]*"
+        },
+        {
+          "name": "variable.language.wildcard.ral",
+          "match": "_"
+        }
+      ]
+    },
+
+    "deref-paren": {
+      "match": "(\\$\\()([a-zA-Z_][a-zA-Z0-9_-]*)(\\))",
+      "captures": {
+        "1": { "name": "punctuation.definition.variable.begin.ral" },
+        "2": { "name": "variable.other.ral" },
+        "3": { "name": "punctuation.definition.variable.end.ral" }
+      }
+    },
+
+    "deref-plain": {
+      "match": "(\\$)([a-zA-Z_][a-zA-Z0-9_-]*)",
+      "captures": {
+        "1": { "name": "punctuation.definition.variable.ral" },
+        "2": { "name": "variable.other.ral" }
+      }
+    },
+
+    "spread": {
+      "match": "(\\.\\.\\.)(\\$)([a-zA-Z_][a-zA-Z0-9_-]*)",
+      "captures": {
+        "1": { "name": "keyword.operator.spread.ral" },
+        "2": { "name": "punctuation.definition.variable.ral" },
+        "3": { "name": "variable.other.ral" }
+      }
+    },
+
+    "force-brace": {
+      "name": "meta.force.ral",
+      "begin": "!\\{",
+      "end": "\\}",
+      "beginCaptures": { "0": { "name": "keyword.operator.force.begin.ral" } },
+      "endCaptures":   { "0": { "name": "keyword.operator.force.end.ral" } },
+      "patterns": [
+        { "include": "$self" }
+      ]
+    },
+
+    "force-sigil": {
+      "match": "(!)(?=[a-zA-Z_$\\{\\(\\[])",
+      "name": "keyword.operator.force.ral"
+    },
+
+    "bypass": {
+      "match": "(\\^)([^ \\t\\n|{}\\[\\]$<>\"'#,();]+)",
+      "captures": {
+        "1": { "name": "keyword.operator.bypass.ral" },
+        "2": { "name": "entity.name.command.bypass.ral" }
+      }
+    },
+
+    "tilde": {
+      "match": "(~)([a-zA-Z_][a-zA-Z0-9_-]*)?",
+      "captures": {
+        "1": { "name": "constant.language.tilde.ral" },
+        "2": { "name": "constant.language.tilde.user.ral" }
+      }
+    },
+
+    "redirection": {
+      "match": "([0-9])?(>{1,2}|<|>&)\\s*",
+      "captures": {
+        "1": { "name": "constant.numeric.fd.ral" },
+        "2": { "name": "keyword.operator.redirect.ral" }
+      }
+    },
+
+    "pipe-operator": {
+      "match": "\\|",
+      "name": "keyword.operator.pipe.ral"
+    },
+
+    "chain-operator": {
+      "match": "\\?",
+      "name": "keyword.operator.chain.ral"
+    },
+
+    "number": {
+      "name": "constant.numeric.ral",
+      "match": "(?<![a-zA-Z_\\-])[0-9]+(\\.[0-9]+)?"
+    },
+
+    "boolean": {
+      "name": "constant.language.boolean.ral",
+      "match": "\\b(true|false)\\b"
+    },
+
+    "unit": {
+      "name": "constant.language.unit.ral",
+      "match": "\\bunit\\b"
+    },
+
+    "control-name": {
+      "name": "keyword.control.ral",
+      "match": "\\b(if|for|try|case|while|spawn|await|race|use|source|grant|within|map|filter|fold|reduce)\\b"
+    },
+
+    "block": {
+      "begin": "\\{",
+      "end": "\\}",
+      "beginCaptures": { "0": { "name": "punctuation.section.block.begin.ral" } },
+      "endCaptures":   { "0": { "name": "punctuation.section.block.end.ral" } },
+      "patterns": [
+        { "include": "$self" }
+      ]
+    },
+
+    "punctuation": {
+      "patterns": [
+        { "match": "[\\[\\]]", "name": "punctuation.section.bracket.ral" },
+        { "match": ",",      "name": "punctuation.separator.comma.ral" },
+        { "match": ";",      "name": "punctuation.terminator.statement.ral" },
+        { "match": ":",      "name": "punctuation.separator.colon.ral" }
+      ]
+    }
+  }
+}

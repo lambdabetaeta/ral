@@ -1,0 +1,416 @@
+# ral prelude — standard library
+
+# Strings — direct builtins: upper, lower, re-split, re-match,
+# re-replace, re-replace-all, string-replace, intercalate, slice,
+# re-find-match, re-find-matches, dedent, shell-quote, shell-split.
+# Regex builtins carry the `re-` prefix because the first argument is
+# a regex, not a literal substring; `string-replace` is the
+# literal-string counterpart that demands an exactly-once match.
+# (`join` itself is the coreutils command for joining lines from two
+# files; ral's list-of-strings join is `intercalate` — interpose a
+# separator between every pair.)  Use `$name` to obtain a first-class
+# value (a synthesised thunk pinned to the primitive).
+#
+# `lines` and `words` are defined below under "List combinators", once
+# `drop-while` and `reverse` (which they use to drop edge empties) exist.
+
+# Paths and value coercions — each is a directly registered builtin
+# (resolve-path, file-info, list-dir, temp-dir, temp-file, int, float,
+# str).  Filesystem predicates and size/line-count wrappers live below
+# under "Filesystem queries".
+
+# Control flow
+# `each`, `map`, `filter`, `sort-list`, `sort-list-by`, `fold`
+# are builtins under their bare names, all data-last.
+# `for` is the traditional loop form: for <list> <fn>.
+## Loop over a list for side effects.
+let for = { |list fn| each $fn $list }
+## Reduce without an initial value; list must be non-empty.
+let reduce = { |f items|
+    if !{is-empty $items} { fail [status: 1] } else {
+        let [head, ...tail] = $items
+        fold $f $head $tail
+    }
+}
+
+## Reverse a list.  Uses `fold` so the iteration is one Rust loop with
+## one closure invocation per element, avoiding the O(n) per-call
+## evaluator overhead that explicit ral-level recursion incurs.  Cons
+## (`[$x, ...$acc]`) is O(1) amortised on the persistent list rep.
+let reverse = { |items|
+    fold { |acc x| return [$x, ...$acc] } [] $items
+}
+
+## Last element of a non-empty list; fails on empty.
+let last = { |items|
+    if !{is-empty $items} {
+        fail [status: 1, message: "last: empty list has no last element"]
+    } else {
+        let [head, ...rest] = $items
+        if !{is-empty $rest} { return $head } else { last $rest }
+    }
+}
+
+## Get a map value, returning default if key is absent.
+let get = { |m key default|
+    if !{has $m $key} { return $m[$key] } else { return $default }
+}
+
+# List combinators
+## Take elements from the front while predicate holds.
+let take-while = { |pred items|
+    let _go = { |xs acc|
+        if !{is-empty $xs} {
+            let rev = !{reverse $acc}
+            return $rev
+        } else {
+            let [head, ...rest] = $xs
+            if !{$pred $head} { _go $rest [$head, ...$acc] } else {
+                let rev = !{reverse $acc}
+                return $rev
+            }
+        }
+    }
+    _go $items []
+}
+## Drop elements from the front while predicate holds.
+let drop-while = { |pred items|
+    if !{is-empty $items} { return [] } else {
+        let [head, ...rest] = $items
+        if !{$pred $head} {
+            drop-while $pred $rest
+        } else { return $items }
+    }
+}
+## Take the first n elements.
+let take = { |n items|
+    let _go = { |k xs acc|
+        if $[$k <= 0 || !{is-empty $xs}] {
+            let rev = !{reverse $acc}
+            return $rev
+        } else {
+            let [head, ...rest] = $xs
+            _go $[$k - 1] $rest [$head, ...$acc]
+        }
+    }
+    _go $n $items []
+}
+## Drop the first n elements.
+let drop = { |n items|
+    if $[$n <= 0 || !{is-empty $items}] { return $items } else {
+        let [_, ...rest] = $items
+        drop $[$n - 1] $rest
+    }
+}
+## Drop empty strings from both ends of a list, keeping interior ones.
+let _trim-empties = { |items|
+    let front = drop-while $is-empty $items
+    let back = drop-while $is-empty !{reverse $front}
+    reverse $back
+}
+## Split a string into lines, with no spurious empty at the leading or
+## trailing edge (a trailing newline does not add a final ""), matching
+## `from-lines` and external capture.
+let lines = { |s|
+    let parts = re-split '\n' $s
+    _trim-empties $parts
+}
+## Split a string into Unicode-whitespace-delimited words; leading and
+## trailing whitespace contribute no empty elements.
+let words = { |s|
+    let parts = re-split '\s+' $s
+    _trim-empties $parts
+}
+
+# Error handling — `try` itself is a control-operator keyword (§10.1).
+## Retry body up to n times on failure.
+let retry = { |n body|
+    try $body { |err|
+        if $[$n > 1] { retry $[$n - 1] $body } else { fail $err }
+    }
+}
+
+# Concurrency, cleanup, observability — each primitive (`spawn`,
+# `watch`, `await`, `race`, `cancel`) is a builtin under its
+# non-underscored name; see `core/src/builtins.rs` for the registry.
+# `par` below is prelude code over `spawn` and `await`.
+
+## Parallel map over `items` with at most `jobs` concurrent blocks.
+##
+## `jobs <= 0` lets every item run in its own concurrent block
+## (effectively unbounded).  Output order matches input order
+## regardless of the order in which blocks complete — `par` always
+## awaits the oldest still-running handle, so the caller sees a stable
+## mapping that mirrors `map`.  Each item runs as a `spawn { $f $x }`
+## whose await record's `value` field is unwrapped into the result
+## list (stdout/stderr are captured in the per-handle buffers, as for
+## any `spawn`).
+let par = { |f items jobs|
+    let limit = if $[$jobs <= 0] { return !{length $items} } else { return $jobs }
+
+    let _par_drain = { |handles acc|
+        if !{is-empty $handles} {
+            reverse $acc
+        } else {
+            let [h, ...hs] = $handles
+            let r = await $h
+            _par_drain $hs [$r[value], ...$acc]
+        }
+    }
+
+    let _par_go = { |rest running acc|
+        if !{is-empty $rest} {
+            let vals = !{_par_drain $running []}
+            return [...$acc, ...$vals]
+        } else {
+            if $[!{length $running} < $limit] {
+                let [x, ...xs] = $rest
+                let h = spawn { let v = $f $x; return $v }
+                _par_go $xs [...$running, $h] $acc
+            } else {
+                let [h, ...hs] = $running
+                let r = await $h
+                _par_go $rest $hs [...$acc, $r[value]]
+            }
+        }
+    }
+
+    _par_go $items [] []
+}
+
+## True once a handle has settled, false while its block is still running.
+## Total over a finished handle: a `settled` block (whether it returned or
+## failed) reports `true`, only a still-running (`pending`) block reports
+## `false`.  Non-blocking: `poll` samples without waiting.  Like `await`,
+## it fails on a cancelled handle.
+let is-done = { |h|
+    let p = poll $h
+    case $p [
+        `settled: { |_| return true },
+        `pending: { |_| return false }
+    ]
+}
+
+## Run body; suppress failure and return unit.  For fire-and-forget commands
+## where the outcome is irrelevant.
+let attempt = { |body| try { !$body; return unit } { |_| return unit } }
+
+## Run body; return true on POSIX exit 0, false on any error or non-zero status.
+let succeeds = { |body| try { !$body; return true } { |_| return false } }
+
+# Filesystem queries — `exists`, `is-file`, `is-dir`, `is-link`,
+# `is-readable`, `is-writable` are native builtins (see
+# `core/src/builtins/predicates.rs`); they resolve their path
+# argument against the within-scoped cwd, which the bundled `test`
+# wrappers they replaced did not.
+## Count lines in a file.
+let line-count  = { |p| int !{wc -l < $p} }
+## true if a file has zero bytes or a directory has no entries.
+let file-empty  = { |p|
+    if !{is-dir $p} {
+        is-empty !{list-dir $p}
+    } else {
+        equal !{file-info $p}[size] 0
+    }
+}
+
+# Map utilities
+## Map keys to [key, value] pairs.
+let entries = { |m| map { |k| return [$k, $m[$k]] } !{keys $m} }
+## Map keys to their values as a list.
+let values = { |m| map { |k| return $m[$k] } !{keys $m} }
+## Merge two maps; b's entries win on conflict.
+let union = { |a b| fold { |m k| return [...$m, $k: $b[$k]] } $a !{keys $b} }
+## Keys present in both maps, with a's values.
+let intersection = { |a b| fold { |m k| return [...$m, $k: $a[$k]] } [:] !{filter { |k| has $b $k } !{keys $a}} }
+## Keys in a but not in b, with a's values.
+let difference = { |a b| fold { |m k| if !{has $b $k} { return $m } else { return [...$m, $k: $a[$k]] } } [:] !{keys $a} }
+
+# Standard library
+## Sum a list of numbers.
+let sum = { |items| fold { |acc x| return $[$acc + $x] } 0 $items }
+
+## Zip two lists into a list of pairs (tail-recursive).
+let zip = { |a b|
+    let _go = { |xs ys acc|
+        if $[!{is-empty $xs} || !{is-empty $ys}] {
+            let rev = !{reverse $acc}
+            return $rev
+        } else {
+            let [xh, ...xt] = $xs
+            let [yh, ...yt] = $ys
+            _go $xt $yt [[$xh, $yh], ...$acc]
+        }
+    }
+    _go $a $b []
+}
+
+## Map f over items, then flatten one level.
+let flat-map = { |f items|
+    let mapped = !{map $f $items}
+    concat $mapped
+}
+
+## Return the first element matching pred; fails if none matches.
+let first = { |pred items|
+    if !{is-empty $items} { fail [status: 1] } else {
+        let [head, ...rest] = $items
+        if !{$pred $head} { return $head } else { first $pred $rest }
+    }
+}
+
+## Zip items with their indices: enumerate $xs → [[index: 0, item: x0], ...].
+let enumerate = { |items|
+    let n = !{length $items}
+    let _go = { |i acc|
+        if $[$i < 0] { return $acc } else {
+            _go $[$i - 1] [$i, ...$acc]
+        }
+    }
+    map { |i| return [index: $i, item: $items[$i]] } !{_go $[$n - 1] []}
+}
+
+## Flatten a list of lists one level (tail-recursive).
+let concat = { |xss|
+    let _go = { |remaining acc|
+        if !{is-empty $remaining} {
+            return $acc
+        } else {
+            let [head, ...rest] = $remaining
+            _go $rest [...$acc, ...$head]
+        }
+    }
+    _go $xss []
+}
+
+# Stream — demand-driven streams as a recursive variant.
+#
+# A Stream A is the value of forcing a thunk that produces either
+# `` `more [head: A, tail: { Stream A }]`` or `` `done ``.  The tail
+# is itself a thunk so producers run only when downstream demand
+# reaches them (Haskell-style laziness expressed in CBPV value form).
+#
+# Every combinator takes a Stream *value* as its second argument and
+# `case`s on it directly.  The recursion still closes through the
+# `Thunk(F (Stream α))` in each node's tail, so the type stays
+# equi-recursive (ν lives at the computation level); the unifier
+# reconciles such a value-anchored stream with a comp-var-anchored
+# producer like `from-lines` co-inductively.  A stream value at a use
+# site needs no wrapping — pass it straight.
+
+## Construct a non-empty stream: head and a thunk producing the rest.
+let stream-cons = { |head tail| return `more [head: $head, tail: $tail] }
+## The empty stream.
+let stream-nil = { return `done }
+
+## Realise the entire stream into a list (eager).  Use `stream-take`
+## first for infinite producers.  Built on `stream-fold` — case-arm
+## tail calls are TCO'd, so the recursion stays flat regardless of
+## producer depth.
+let stream-to-list = { |s|
+    let rev = !{stream-fold { |acc x| return [$x, ...$acc] } [] $s}
+    reverse $rev
+}
+
+## Drop the first `n` elements of a stream, returning the rest as a
+## stream.  Tail-recursive in source so dropping deep into a long
+## producer does not blow the host stack the way a list-literal
+## recursion would.
+let stream-drop = { |n s|
+    if $[$n <= 0] { return $s } else {
+        case $s [
+            `more: { |p| stream-drop $[$n - 1] !$p[tail] },
+            `done: { |_| stream-nil }
+        ]
+    }
+}
+
+## Take at most `n` elements from the front of a stream.
+let stream-take = { |n s|
+    if $[$n <= 0] { stream-nil } else {
+        case $s [
+            `more: { |p| stream-cons $p[head] { !{stream-take $[$n - 1] !$p[tail]} } },
+            `done: { |_| stream-nil }
+        ]
+    }
+}
+
+## Map `f` over each element of the stream lazily.
+let stream-map = { |f s|
+    case $s [
+        `more: { |p| stream-cons !{$f $p[head]} { !{stream-map $f !$p[tail]} } },
+        `done: { |_| stream-nil }
+    ]
+}
+
+## Reduce the stream left-to-right with `f` from initial `z`.
+let stream-fold = { |f z s|
+    case $s [
+        `more: { |p| stream-fold $f !{$f $z $p[head]} !$p[tail] },
+        `done: { |_| return $z }
+    ]
+}
+
+## Apply `f` to each element for side effect; returns unit.
+let stream-each = { |f s|
+    case $s [
+        `more: { |p| $f $p[head]; stream-each $f !$p[tail] },
+        `done: { |_| return unit }
+    ]
+}
+
+# File reading sugar — depend on `enumerate`, `take`, `drop`, and `map`
+# above, and on Stream helpers here.
+
+## Read a file as a materialised list of lines.
+let from-lines-list = { |p|
+    let s = !{from-lines < $p}
+    stream-to-list $s
+}
+
+# Streaming (stdin, line by line).  `fold-lines` is a builtin; `map-lines`
+# and `filter-lines` are ergonomic wrappers around it.
+## Map a function over stdin lines, echoing results.
+let map-lines = { |f|
+    fold-lines { |_ line| echo !{$f $line}; return unit } unit
+}
+## Filter stdin lines by a predicate.
+let filter-lines = { |pred|
+    fold-lines { |_ line|
+        if !{$pred $line} { echo $line } else { return unit }
+        return unit
+    } unit
+}
+## Apply a function to each stdin line.
+let each-line = { |f|
+    fold-lines { |_ line| $f $line; return unit } unit
+}
+
+# ANSI styling
+## ANSI escape constants for terminal colour and style.
+## All constants are empty strings when colour is not supported,
+## so `styled` and interpolated uses are automatically no-ops.
+let ansi-reset   = if !{_ansi-ok} { return "\e[0m"    } else { return '' }
+let ansi-bold    = if !{_ansi-ok} { return "\e[1m"    } else { return '' }
+let ansi-dim     = if !{_ansi-ok} { return "\e[2m"    } else { return '' }
+let ansi-red     = if !{_ansi-ok} { return "\e[0;31m" } else { return '' }
+let ansi-green   = if !{_ansi-ok} { return "\e[0;32m" } else { return '' }
+let ansi-yellow  = if !{_ansi-ok} { return "\e[0;33m" } else { return '' }
+let ansi-blue    = if !{_ansi-ok} { return "\e[0;34m" } else { return '' }
+let ansi-magenta = if !{_ansi-ok} { return "\e[0;35m" } else { return '' }
+let ansi-cyan    = if !{_ansi-ok} { return "\e[0;36m" } else { return '' }
+## Wrap text in an ANSI style code, resetting after.
+let styled = { |code text| "$code$text$ansi-reset" }
+
+# Editor state — all _ed-* operations are host builtins registered by
+# the ral crate (see ral/src/repl/plugin_ed_builtins.rs).  The underscore
+# prefix hides them from `help`; plugin handlers call them directly
+# without going through any prelude wrapper layer.
+
+## Test if x is an element of items.
+let elem = { |x items|
+    if !{is-empty $items} { return false } else {
+        let [head, ...rest] = $items
+        if !{equal $head $x} { return true } else { elem $x $rest }
+    }
+}

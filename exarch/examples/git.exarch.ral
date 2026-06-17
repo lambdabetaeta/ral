@@ -1,0 +1,29 @@
+# Opt-in Git extension for `--extend-base`.
+#
+# `reasonable` and `read-only` already admit git as part of their
+# default toolset.  This file exists for the tighter bases:
+#
+#     exarch --base minimal   --extend-base exarch/examples/git.exarch.ral
+#     exarch --base confined  --extend-base exarch/examples/git.exarch.ral
+#
+# It admits `~/.gitconfig` + `xdg:config/git` for read and `git` for
+# exec, and re-denies the credential-config dirs (gh/op/gcloud) so a
+# user who joins this against a permissive base doesn't accidentally
+# widen them.
+
+return [
+  fs: [
+    read: [
+      '~/.gitconfig',
+      'xdg:config/git',
+    ],
+    deny: [
+      'xdg:config/gh',
+      'xdg:config/op',
+      'xdg:config/gcloud',
+    ],
+  ],
+  exec: [
+    git: 'allow',
+  ],
+]

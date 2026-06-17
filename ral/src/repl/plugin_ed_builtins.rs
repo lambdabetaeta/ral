@@ -1,0 +1,881 @@
+//! Editor builtins — line editor interface exposed to plugin handlers.
+//!
+//! Each op (`_ed-get`, `_ed-set`, `_ed-push`, …) is its own builtin so the
+//! type checker sees the actual return type, arity is fixed per op, and the
+//! `_` prefix hides them from `help`.  Every op requires an active
+//! [`PluginContext`], set up by the REPL before dispatching into a plugin
+//! handler — outside a handler every op fails with a "no plugin context"
+//! error.
+//!
+//! These builtins live in the `ral` crate rather than in `ral-core`
+//! because the editor surface is purely a host concern: core has no
+//! knowledge of editor state or plugin handlers.  They register with
+//! core via [`ED_BUILTINS`] at REPL startup
+//! (see [`super::register_host_surface`]).
+
+use ral_core::builtins::util::{arg0_str, as_list, check_arity};
+use ral_core::typecheck::builtins::{
+    BuiltinTypeRule, closed_record, fun, mk_scheme as scheme, pure, thunk,
+};
+use ral_core::typecheck::{CompTy, PipeMode, PipeSpec, Row, Scheme, Ty, Unifier};
+use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Settled, as_map, sig};
+use ral_core::{Shell, Value};
+use std::borrow::Cow;
+
+use super::complete::style_ansi;
+use super::plugin_editor::{HighlightSpan, PluginContext, Span};
+
+fn ctx(shell: &Shell) -> Settled<&PluginContext> {
+    shell
+        .repl()
+        .plugin_context
+        .as_ref()
+        .and_then(|b| b.downcast_ref::<PluginContext>())
+        .ok_or_else(|| sig("editor op: no plugin context (not inside a plugin handler)"))
+}
+
+fn ctx_mut(shell: &mut Shell) -> Settled<&mut PluginContext> {
+    shell
+        .repl_mut()
+        .plugin_context
+        .as_mut()
+        .and_then(|b| b.downcast_mut::<PluginContext>())
+        .ok_or_else(|| sig("editor op: no plugin context (not inside a plugin handler)"))
+}
+
+fn require_interactive(name: &str, shell: &Shell) -> Settled<()> {
+    if !shell.is_interactive() {
+        return Err(sig(format!(
+            "{name}: not available outside interactive mode"
+        )));
+    }
+    Ok(())
+}
+
+// ─── State read ──────────────────────────────────────────────────────────────
+
+/// `_ed-get` → `[text: Str, cursor: Int, keymap: Str]`
+pub fn builtin_ed_get(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 0, "_ed-get")?;
+    require_interactive("_ed-get", shell)?;
+    shell.check_editor_read("get")?;
+    let pc = ctx(shell)?;
+    Ok(Value::map(vec![
+        ("text".into(), Value::String(pc.editor_state.text.clone())),
+        ("cursor".into(), Value::Int(pc.editor_state.cursor as i64)),
+        (
+            "keymap".into(),
+            Value::String(pc.editor_state.keymap.clone()),
+        ),
+    ]))
+}
+
+/// `_ed-text` → `Str` — current buffer text.
+pub fn builtin_ed_text(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 0, "_ed-text")?;
+    require_interactive("_ed-text", shell)?;
+    shell.check_editor_read("text")?;
+    let pc = ctx(shell)?;
+    Ok(Value::String(pc.editor_state.text.clone()))
+}
+
+/// `_ed-cursor` → `Int` — current cursor offset (chars).
+pub fn builtin_ed_cursor(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 0, "_ed-cursor")?;
+    require_interactive("_ed-cursor", shell)?;
+    shell.check_editor_read("cursor")?;
+    let pc = ctx(shell)?;
+    Ok(Value::Int(pc.editor_state.cursor as i64))
+}
+
+/// `_ed-keymap` → `Str` — current keymap name.
+pub fn builtin_ed_keymap(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 0, "_ed-keymap")?;
+    require_interactive("_ed-keymap", shell)?;
+    shell.check_editor_read("keymap")?;
+    let pc = ctx(shell)?;
+    Ok(Value::String(pc.editor_state.keymap.clone()))
+}
+
+/// `_ed-lbuffer` → `Str` — text to the left of the cursor.
+pub fn builtin_ed_lbuffer(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 0, "_ed-lbuffer")?;
+    require_interactive("_ed-lbuffer", shell)?;
+    shell.check_editor_read("lbuffer")?;
+    let pc = ctx(shell)?;
+    Ok(Value::String(
+        pc.editor_state
+            .text
+            .chars()
+            .take(pc.editor_state.cursor)
+            .collect(),
+    ))
+}
+
+// ─── State write ─────────────────────────────────────────────────────────────
+
+/// `_ed-set [text?: Str, cursor?: Int]` — row-polymorphic partial write.
+/// Unknown fields are ignored.
+pub fn builtin_ed_set(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 1, "_ed-set")?;
+    require_interactive("_ed-set", shell)?;
+    shell.check_editor_write("set")?;
+    let map = as_map(&args[0], "_ed-set")?;
+    let text = map.get("text").map(|v| v.to_string());
+    let cursor = match map.get("cursor") {
+        Some(Value::Int(n)) => Some(*n),
+        Some(_) => return Err(sig("_ed-set: cursor must be Int")),
+        None => None,
+    };
+    let pc = ctx_mut(shell)?;
+    if let Some(text) = text {
+        pc.editor_state.text = text;
+    }
+    if let Some(n) = cursor {
+        let max = pc.editor_state.text.chars().count() as i64;
+        pc.editor_state.cursor = n.clamp(0, max) as usize;
+    }
+    Ok(Value::Unit)
+}
+
+/// `_ed-set-lbuffer <l>` — replace text left of cursor; right side preserved.
+pub fn builtin_ed_set_lbuffer(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 1, "_ed-set-lbuffer")?;
+    require_interactive("_ed-set-lbuffer", shell)?;
+    shell.check_editor_write("set-lbuffer")?;
+    let l = args[0].to_string();
+    let pc = ctx_mut(shell)?;
+    let cursor = pc.editor_state.cursor;
+    let right: String = pc.editor_state.text.chars().skip(cursor).collect();
+    let new_cursor = l.chars().count();
+    pc.editor_state.text = format!("{l}{right}");
+    pc.editor_state.cursor = new_cursor;
+    Ok(Value::Unit)
+}
+
+/// `_ed-insert <str>` — insert at cursor; cursor advances to end of insertion.
+pub fn builtin_ed_insert(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 1, "_ed-insert")?;
+    require_interactive("_ed-insert", shell)?;
+    shell.check_editor_write("insert")?;
+    let s = args[0].to_string();
+    let pc = ctx_mut(shell)?;
+    let cursor = pc.editor_state.cursor;
+    let left: String = pc.editor_state.text.chars().take(cursor).collect();
+    let right: String = pc.editor_state.text.chars().skip(cursor).collect();
+    let s_chars = s.chars().count();
+    pc.editor_state.text = format!("{left}{s}{right}");
+    pc.editor_state.cursor = cursor + s_chars;
+    Ok(Value::Unit)
+}
+
+/// `_ed-push` — save buffer to stack, clear.
+pub fn builtin_ed_push(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 0, "_ed-push")?;
+    require_interactive("_ed-push", shell)?;
+    shell.check_editor_write("push")?;
+    let pc = ctx_mut(shell)?;
+    let text = std::mem::take(&mut pc.editor_state.text);
+    let cursor = pc.editor_state.cursor;
+    pc.editor_state.cursor = 0;
+    pc.outputs.pushed_buffer = Some((text, cursor));
+    Ok(Value::Unit)
+}
+
+/// `_ed-accept` — mark buffer for immediate execution.
+pub fn builtin_ed_accept(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 0, "_ed-accept")?;
+    require_interactive("_ed-accept", shell)?;
+    shell.check_editor_write("accept")?;
+    let pc = ctx_mut(shell)?;
+    pc.outputs.accept_line = true;
+    Ok(Value::Unit)
+}
+
+// ─── TUI ─────────────────────────────────────────────────────────────────────
+
+/// `_ed-tui {body}` — suspend editor, run body, return `[output: Str, status: Int]`.
+///
+/// On success: `status: 0`, `output: <body's return value or captured stdout>`.
+/// On error  : `status: <error exit code>`, `output: <error message>`.
+///
+/// The body's stdout is captured so that a TUI command (e.g. `fzf`) which
+/// prints its selection on stdout can have that selection delivered back to
+/// the plugin as a String.  The TUI itself draws on /dev/tty via stderr, so
+/// capturing stdout does not disrupt the interface.  When the body returns a
+/// non-Unit value it wins; otherwise the captured bytes are decoded
+/// (trailing newline stripped).
+///
+/// The re-entrancy guard and the pipeline foreground signal share one flag:
+/// `shell.repl().tui_active`.  It is set on entry and cleared on
+/// exit; pipeline analysis in core reads it to keep `_ed-tui`'s body in
+/// the foreground process group despite the captured stdout pipe.
+pub fn builtin_ed_tui(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 1, "_ed-tui")?;
+    require_interactive("_ed-tui", shell)?;
+    shell.check_editor_tui()?;
+    if shell.repl().tui_active {
+        return Ok(Value::map(vec![
+            (
+                "output".into(),
+                Value::String("_ed-tui: already in TUI mode".into()),
+            ),
+            ("status".into(), Value::Int(1)),
+        ]));
+    }
+    {
+        let pc = ctx(shell)?;
+        if pc.inputs.in_readline {
+            return Ok(Value::map(vec![
+                (
+                    "output".into(),
+                    Value::String("_ed-tui: not available inside buffer-change hooks".into()),
+                ),
+                ("status".into(), Value::Int(1)),
+            ]));
+        }
+    }
+    shell.repl_mut().tui_active = true;
+    let (result, bytes) = ral_core::evaluator::with_capture(shell, |shell| {
+        ral_core::builtins::apply(&args[0], &[], shell)
+    });
+    shell.repl_mut().tui_active = false;
+    match result {
+        Ok(v) => {
+            let v = match v {
+                Value::Unit if !bytes.is_empty() => {
+                    let mut s = String::from_utf8_lossy(&bytes).into_owned();
+                    if s.ends_with('\n') {
+                        s.pop();
+                    }
+                    Value::String(s)
+                }
+                Value::Unit => Value::String(String::new()),
+                Value::Bytes(b) => {
+                    let mut s = String::from_utf8_lossy(&b).into_owned();
+                    if s.ends_with('\n') {
+                        s.pop();
+                    }
+                    Value::String(s)
+                }
+                other => other,
+            };
+            Ok(Value::map(vec![
+                ("output".into(), v),
+                ("status".into(), Value::Int(0)),
+            ]))
+        }
+        Err(Break::Error(e)) => Ok(Value::map(vec![
+            ("output".into(), Value::String(e.message.clone())),
+            ("status".into(), Value::Int(e.exit_code() as i64)),
+        ])),
+        Err(other) => Err(other),
+    }
+}
+
+// ─── Queries ─────────────────────────────────────────────────────────────────
+
+/// `_ed-history <prefix> <limit>` — prefix search over history; `limit=0` for unbounded.
+pub fn builtin_ed_history(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 2, "_ed-history")?;
+    require_interactive("_ed-history", shell)?;
+    shell.check_editor_read("history")?;
+    let prefix = args[0].to_string();
+    let limit = match &args[1] {
+        Value::Int(n) => *n as usize,
+        _ => return Err(sig("_ed-history: limit must be Int")),
+    };
+    let pc = ctx(shell)?;
+    let mut results: Vec<Value> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for entry in &pc.inputs.history_entries {
+        if !prefix.is_empty() && !entry.starts_with(&prefix) {
+            continue;
+        }
+        if seen.insert(entry.clone()) {
+            results.push(Value::String(entry.clone()));
+            if limit > 0 && results.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(Value::list(results))
+}
+
+/// `_ed-parse` → `[words: [Str], current: Int, offset: Int]` — tokenize buffer at cursor.
+pub fn builtin_ed_parse(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 0, "_ed-parse")?;
+    require_interactive("_ed-parse", shell)?;
+    shell.check_editor_read("parse")?;
+    let pc = ctx(shell)?;
+    let text = &pc.editor_state.text;
+    let cursor = pc.editor_state.cursor;
+
+    if text.is_empty() {
+        return Ok(Value::map(vec![
+            ("words".into(), Value::list(vec![])),
+            ("current".into(), Value::Int(0)),
+            ("offset".into(), Value::Int(0)),
+        ]));
+    }
+
+    // Simple whitespace tokenizer.  A full parser integration would use
+    // ral_core::parse, but for now a word-split with cursor tracking
+    // covers the common completion cases.
+    let mut words: Vec<(usize, String)> = Vec::new(); // (byte_offset, word)
+    let mut i = 0;
+    let bytes = text.as_bytes();
+    while i < bytes.len() {
+        if bytes[i].is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        // Handle single-quoted strings (no hash-bump support — completion
+        // tokenizer is intentionally minimal).
+        if bytes[i] == b'\'' {
+            i += 1;
+            let content = i;
+            while i < bytes.len() && bytes[i] != b'\'' {
+                i += 1;
+            }
+            let word = text[content..i].to_string();
+            if i < bytes.len() {
+                i += 1; // closing '
+            }
+            words.push((start, word));
+        } else if bytes[i] == b'"' {
+            // Double-quoted: just strip quotes for tokenization
+            i += 1;
+            let mut word = String::new();
+            while i < bytes.len() && bytes[i] != b'"' {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    i += 1;
+                }
+                let ch = text[i..]
+                    .chars()
+                    .next()
+                    .expect("byte index on char boundary");
+                word.push(ch);
+                i += ch.len_utf8();
+            }
+            if i < bytes.len() {
+                i += 1;
+            } // skip closing "
+            words.push((start, word));
+        } else {
+            // Unquoted token: split on whitespace and shell metacharacters
+            while i < bytes.len()
+                && !bytes[i].is_ascii_whitespace()
+                && !matches!(bytes[i], b'|' | b';' | b'{' | b'}')
+            {
+                i += 1;
+            }
+            words.push((start, text[start..i].to_string()));
+        }
+    }
+
+    // Determine which word the cursor is in/after.
+    // Convert cursor from char index to byte offset for comparison.
+    let cursor_byte = text
+        .char_indices()
+        .nth(cursor)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len());
+
+    let mut current = 0usize;
+    let mut offset = 0usize;
+    for (idx, (word_start, _)) in words.iter().enumerate() {
+        if *word_start <= cursor_byte {
+            current = idx;
+            offset = *word_start;
+        }
+    }
+
+    // Convert offset back to char index
+    let offset_chars = text[..offset].chars().count();
+
+    let word_values: Vec<Value> = words
+        .iter()
+        .map(|(_, w)| Value::String(w.clone()))
+        .collect();
+
+    Ok(Value::map(vec![
+        ("words".into(), Value::list(word_values)),
+        ("current".into(), Value::Int(current as i64)),
+        ("offset".into(), Value::Int(offset_chars as i64)),
+    ]))
+}
+
+// ─── Output channels ─────────────────────────────────────────────────────────
+
+/// `_ed-ghost <text>` — set ghost text (empty string clears).
+pub fn builtin_ed_ghost(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 1, "_ed-ghost")?;
+    require_interactive("_ed-ghost", shell)?;
+    shell.check_editor_write("ghost")?;
+    let text = arg0_str(args, "_ed-ghost")?;
+    let pc = ctx_mut(shell)?;
+    pc.outputs.ghost_text = (!text.is_empty()).then_some(text);
+    Ok(Value::Unit)
+}
+
+/// `_ed-hyperlink <uri> <text>` — wrap `text` in an OSC 8 hyperlink to
+/// `uri` when the host terminal recognises them; otherwise return `text`
+/// unchanged.
+///
+/// Pure formatter — emits nothing.  Plugins decide where the result goes
+/// (ghost text, an echo, a highlight message body).  The fallback to
+/// plain `text` means the return value is always safe to display: the
+/// worst case in a hyperlink-free terminal is an unformatted label.
+///
+/// No `editor.write` check: this is a string-shaping operation, not a
+/// side effect on editor or system state.
+pub fn builtin_ed_hyperlink(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 2, "_ed-hyperlink")?;
+    require_interactive("_ed-hyperlink", shell)?;
+    let uri = args[0].to_string();
+    let text = args[1].to_string();
+    let rendered = if shell.terminal().ui_hyperlinks_ok() {
+        ral_core::ansi::osc8_link(&uri, &text)
+    } else {
+        text
+    };
+    Ok(Value::String(rendered))
+}
+
+/// `_ed-clipboard <text>` — ask the host terminal to write `text` to the
+/// system clipboard via OSC 52.
+///
+/// Returns `Bool`: `true` when the sequence was emitted, `false` when the
+/// terminal isn't known to accept OSC 52 (so a plugin can fall back to
+/// `pbcopy` / `xclip` / `wl-copy`).  Gated on `editor.write` and the
+/// `ui_clipboard_write_ok` capability surfaced by `$TERMINAL`.
+///
+/// We emit directly to stdout because OSC 52 is zero-width: it neither
+/// moves the cursor nor writes visible bytes, so it does not corrupt the
+/// active rustyline display.  This matches the `write_terminal_title`
+/// precedent.  IO errors are swallowed — a failed copy is recoverable
+/// and shouldn't tear down the plugin handler.
+pub fn builtin_ed_clipboard(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 1, "_ed-clipboard")?;
+    require_interactive("_ed-clipboard", shell)?;
+    shell.check_editor_write("clipboard")?;
+
+    if !shell.terminal().ui_clipboard_write_ok() {
+        return Ok(Value::Bool(false));
+    }
+
+    use base64::Engine;
+    use std::io::Write;
+    let payload = base64::engine::general_purpose::STANDARD
+        .encode(arg0_str(args, "_ed-clipboard")?.as_bytes());
+    let sequence = ral_core::ansi::osc52_copy(&payload);
+    let _ = std::io::stdout().write_all(sequence.as_bytes());
+    let _ = std::io::stdout().flush();
+    Ok(Value::Bool(true))
+}
+
+/// `_ed-highlight <spans>` — set highlight spans (empty list clears).
+pub fn builtin_ed_highlight(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 1, "_ed-highlight")?;
+    require_interactive("_ed-highlight", shell)?;
+    shell.check_editor_write("highlight")?;
+    let spans_val = as_list(&args[0], "_ed-highlight")?;
+    if spans_val.is_empty() {
+        ctx_mut(shell)?.outputs.highlight_spans.clear();
+        return Ok(Value::Unit);
+    }
+    let text_len = ctx(shell)?.editor_state.text.chars().count();
+    let int_field = |v: &Value, field: &'static str| match v {
+        Value::Int(n) => Ok(*n),
+        _ => Err(sig(format!("highlight span: {field} must be Int"))),
+    };
+    let mut spans = Vec::with_capacity(spans_val.len());
+    for sv in &spans_val {
+        let m = as_map(sv, "_ed-highlight span")?;
+        let mut start: i64 = 0;
+        let mut end: i64 = 0;
+        let mut style = String::new();
+        for (k, v) in &m {
+            match k.as_str() {
+                "start" => start = int_field(v, "start")?,
+                "end" => end = int_field(v, "end")?,
+                "style" => style = v.to_string(),
+                _ => {} // row polymorphism
+            }
+        }
+        if style_ansi(&style).is_none() {
+            return Err(sig(format!("_ed-highlight: unknown style '{style}'")));
+        }
+        spans.push(HighlightSpan {
+            span: Span::clamped(start.max(0) as usize, end.max(0) as usize, text_len),
+            style,
+        });
+    }
+    ctx_mut(shell)?.outputs.highlight_spans = spans;
+    Ok(Value::Unit)
+}
+
+// ─── Plugin-local state ──────────────────────────────────────────────────────
+
+/// `_ed-state <default> <updater>` — read-modify-write on the plugin's
+/// persistent cell.  `default` is used on first call; `updater` is invoked
+/// with the current value and its return becomes the new value.
+pub fn builtin_ed_state(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 2, "_ed-state")?;
+    require_interactive("_ed-state", shell)?;
+    shell.check_editor_write("state")?;
+    let default = &args[0];
+    let updater = &args[1];
+    let current = {
+        let pc = ctx(shell)?;
+        if pc.state_default_used {
+            pc.state_cell.clone().unwrap_or_else(|| default.clone())
+        } else {
+            default.clone()
+        }
+    };
+    let new_val = ral_core::builtins::apply(updater, &[current], shell)?;
+    let pc = ctx_mut(shell)?;
+    pc.state_cell = Some(new_val.clone());
+    pc.state_default_used = true;
+    Ok(new_val)
+}
+
+// ─── Host registration ───────────────────────────────────────────────────────
+//
+// Every facet that `ral_core::builtins` exposes is carried by the entry
+// that owns the call function.  This is a static host extension: plugins
+// remain dynamic source/alias/hook loaders above this surface.
+
+fn scheme_ed_get(_u: &mut Unifier) -> Scheme {
+    scheme(
+        &[],
+        &[],
+        &[],
+        thunk(pure(closed_record(&[
+            ("text", Ty::String),
+            ("cursor", Ty::Int),
+            ("keymap", Ty::String),
+        ]))),
+    )
+}
+
+fn scheme_string_thunk(_u: &mut Unifier) -> Scheme {
+    scheme(&[], &[], &[], thunk(pure(Ty::String)))
+}
+
+fn scheme_int_thunk(_u: &mut Unifier) -> Scheme {
+    scheme(&[], &[], &[], thunk(pure(Ty::Int)))
+}
+
+fn scheme_unit_thunk(_u: &mut Unifier) -> Scheme {
+    scheme(&[], &[], &[], thunk(pure(Ty::Unit)))
+}
+
+fn scheme_ed_set(u: &mut Unifier) -> Scheme {
+    let rho = u.fresh_row_var();
+    let record = Ty::Record(Row::Extend(
+        "text".into(),
+        Box::new(Ty::String),
+        Box::new(Row::Extend(
+            "cursor".into(),
+            Box::new(Ty::Int),
+            Box::new(Row::Var(rho)),
+        )),
+    ));
+    scheme(&[], &[], &[rho], thunk(fun(record, pure(Ty::Unit))))
+}
+
+fn scheme_string_to_unit(_u: &mut Unifier) -> Scheme {
+    scheme(&[], &[], &[], thunk(fun(Ty::String, pure(Ty::Unit))))
+}
+
+fn scheme_string_to_bool(_u: &mut Unifier) -> Scheme {
+    scheme(&[], &[], &[], thunk(fun(Ty::String, pure(Ty::Bool))))
+}
+
+fn scheme_string_string_to_string(_u: &mut Unifier) -> Scheme {
+    scheme(
+        &[],
+        &[],
+        &[],
+        thunk(fun(Ty::String, fun(Ty::String, pure(Ty::String)))),
+    )
+}
+
+fn scheme_highlight(u: &mut Unifier) -> Scheme {
+    let av = u.fresh_tyvar();
+    scheme(
+        &[av],
+        &[],
+        &[],
+        thunk(fun(Ty::List(Box::new(Ty::Var(av))), pure(Ty::Unit))),
+    )
+}
+
+fn scheme_history(_u: &mut Unifier) -> Scheme {
+    scheme(
+        &[],
+        &[],
+        &[],
+        thunk(fun(
+            Ty::String,
+            fun(Ty::Int, pure(Ty::List(Box::new(Ty::String)))),
+        )),
+    )
+}
+
+fn scheme_parse(_u: &mut Unifier) -> Scheme {
+    scheme(
+        &[],
+        &[],
+        &[],
+        thunk(pure(closed_record(&[
+            ("words", Ty::List(Box::new(Ty::String))),
+            ("current", Ty::Int),
+            ("offset", Ty::Int),
+        ]))),
+    )
+}
+
+fn scheme_tui(u: &mut Unifier) -> Scheme {
+    let av = u.fresh_tyvar();
+    let i = u.fresh_modevar();
+    let o = u.fresh_modevar();
+    scheme(
+        &[av],
+        &[i, o],
+        &[],
+        thunk(fun(
+            thunk(CompTy::Return(
+                PipeSpec {
+                    input: PipeMode::Var(i),
+                    output: PipeMode::Var(o),
+                },
+                Box::new(Ty::Var(av)),
+            )),
+            pure(closed_record(&[
+                ("output", Ty::String),
+                ("status", Ty::Int),
+            ])),
+        )),
+    )
+}
+
+fn scheme_state(u: &mut Unifier) -> Scheme {
+    let av = u.fresh_tyvar();
+    let a = Ty::Var(av);
+    scheme(
+        &[av],
+        &[],
+        &[],
+        thunk(fun(
+            a.clone(),
+            fun(thunk(fun(a.clone(), pure(a.clone()))), pure(a)),
+        )),
+    )
+}
+
+/// Builtins published into core's builtin registry at REPL startup
+/// (see [`super::register_host_surface`]).
+pub static ED_BUILTINS: &[BuiltinEntry] = &[
+    BuiltinEntry {
+        name: Cow::Borrowed("_ed-get"),
+        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_ed_get),
+        doc: "_ed-get  — return editor state record [text, cursor, keymap].",
+        body: BuiltinBody::Static(builtin_ed_get),
+    },
+    BuiltinEntry {
+        name: Cow::Borrowed("_ed-text"),
+        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_string_thunk),
+        doc: "_ed-text  — return current buffer text.",
+        body: BuiltinBody::Static(builtin_ed_text),
+    },
+    BuiltinEntry {
+        name: Cow::Borrowed("_ed-cursor"),
+        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_int_thunk),
+        doc: "_ed-cursor  — return current cursor offset (chars).",
+        body: BuiltinBody::Static(builtin_ed_cursor),
+    },
+    BuiltinEntry {
+        name: Cow::Borrowed("_ed-keymap"),
+        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_string_thunk),
+        doc: "_ed-keymap  — return current keymap name.",
+        body: BuiltinBody::Static(builtin_ed_keymap),
+    },
+    BuiltinEntry {
+        name: Cow::Borrowed("_ed-lbuffer"),
+        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_string_thunk),
+        doc: "_ed-lbuffer  — return text to the left of the cursor.",
+        body: BuiltinBody::Static(builtin_ed_lbuffer),
+    },
+    BuiltinEntry {
+        name: Cow::Borrowed("_ed-set"),
+        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_ed_set),
+        doc: "_ed-set <map>  — partial write of editor state (text and/or cursor); unknown fields ignored.",
+        body: BuiltinBody::Static(builtin_ed_set),
+    },
+    BuiltinEntry {
+        name: Cow::Borrowed("_ed-set-lbuffer"),
+        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_string_to_unit),
+        doc: "_ed-set-lbuffer <text>  — replace text left of cursor; right side preserved.",
+        body: BuiltinBody::Static(builtin_ed_set_lbuffer),
+    },
+    BuiltinEntry {
+        name: Cow::Borrowed("_ed-insert"),
+        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_string_to_unit),
+        doc: "_ed-insert <text>  — insert text at cursor; cursor advances past insertion.",
+        body: BuiltinBody::Static(builtin_ed_insert),
+    },
+    BuiltinEntry {
+        name: Cow::Borrowed("_ed-push"),
+        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_unit_thunk),
+        doc: "_ed-push  — save buffer to stack, clear.",
+        body: BuiltinBody::Static(builtin_ed_push),
+    },
+    BuiltinEntry {
+        name: Cow::Borrowed("_ed-accept"),
+        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_unit_thunk),
+        doc: "_ed-accept  — mark buffer for immediate execution.",
+        body: BuiltinBody::Static(builtin_ed_accept),
+    },
+    BuiltinEntry {
+        name: Cow::Borrowed("_ed-tui"),
+        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_tui),
+        doc: "_ed-tui <thunk>  — suspend editor, run thunk, return [output: Str, status: Int]; never raises on body status.",
+        body: BuiltinBody::Static(builtin_ed_tui),
+    },
+    BuiltinEntry {
+        name: Cow::Borrowed("_ed-history"),
+        type_rule: BuiltinTypeRule::Scheme(Some(2), scheme_history),
+        doc: "_ed-history <prefix> <limit>  — prefix search over history; limit=0 for unbounded.",
+        body: BuiltinBody::Static(builtin_ed_history),
+    },
+    BuiltinEntry {
+        name: Cow::Borrowed("_ed-parse"),
+        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_parse),
+        doc: "_ed-parse  — tokenize buffer at cursor; returns [words, current, offset].",
+        body: BuiltinBody::Static(builtin_ed_parse),
+    },
+    BuiltinEntry {
+        name: Cow::Borrowed("_ed-ghost"),
+        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_string_to_unit),
+        doc: "_ed-ghost <text>  — set ghost text (empty string clears).",
+        body: BuiltinBody::Static(builtin_ed_ghost),
+    },
+    BuiltinEntry {
+        name: Cow::Borrowed("_ed-highlight"),
+        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_highlight),
+        doc: "_ed-highlight <spans>  — set highlight spans (empty list clears).",
+        body: BuiltinBody::Static(builtin_ed_highlight),
+    },
+    BuiltinEntry {
+        name: Cow::Borrowed("_ed-clipboard"),
+        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_string_to_bool),
+        doc: "_ed-clipboard <text>  — OSC 52 system-clipboard write; returns Bool (true on emit, false when host terminal can't).",
+        body: BuiltinBody::Static(builtin_ed_clipboard),
+    },
+    BuiltinEntry {
+        name: Cow::Borrowed("_ed-hyperlink"),
+        type_rule: BuiltinTypeRule::Scheme(Some(2), scheme_string_string_to_string),
+        doc: "_ed-hyperlink <uri> <text>  — wrap text in OSC 8 hyperlink; returns plain text when terminal can't render hyperlinks.",
+        body: BuiltinBody::Static(builtin_ed_hyperlink),
+    },
+    BuiltinEntry {
+        name: Cow::Borrowed("_ed-state"),
+        type_rule: BuiltinTypeRule::Scheme(Some(2), scheme_state),
+        doc: "_ed-state <default> <updater>  — read-modify-write the plugin's persistent cell.",
+        body: BuiltinBody::Static(builtin_ed_state),
+    },
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repl::plugin_editor::EditorState;
+
+    /// Every `_ed-*` entry must carry all static facets directly.
+    #[test]
+    fn every_ed_name_has_all_facets() {
+        for entry in ED_BUILTINS {
+            assert!(!entry.name.is_empty());
+            assert!(
+                entry.fixed_arity().is_some(),
+                "no fixed_arity for {:?}",
+                entry.name
+            );
+            assert!(!entry.doc.is_empty(), "no doc for {:?}", entry.name);
+            assert!(
+                matches!(entry.type_rule, BuiltinTypeRule::Scheme(..)),
+                "no scheme for {:?}",
+                entry.name
+            );
+        }
+    }
+
+    /// An interactive shell carrying a plugin context whose buffer holds
+    /// `text`, ready to drive `builtin_ed_set`.
+    fn shell_with_buffer(text: &str) -> Shell {
+        let mut shell = Shell::new(Default::default());
+        shell.set_interactive(true);
+        let mut pc = PluginContext {
+            inputs: Default::default(),
+            outputs: Default::default(),
+            editor_state: Default::default(),
+            state_cell: None,
+            state_default_used: false,
+        };
+        pc.editor_state.text = text.to_string();
+        shell.repl_mut().plugin_context = Some(Box::new(pc));
+        shell
+    }
+
+    fn editor_state(shell: &Shell) -> EditorState {
+        ctx(shell).unwrap().editor_state.clone()
+    }
+
+    /// The dependency-order regression: setting `text` and `cursor`
+    /// together clamps the cursor against the **new** text, not the old
+    /// (shorter) buffer.  `OrdMap` visits `"cursor"` before `"text"`, so
+    /// a fold over entries would clamp `11` against the empty buffer and
+    /// silently lose it.
+    #[test]
+    fn ed_set_clamps_cursor_against_new_text() {
+        let mut shell = shell_with_buffer("");
+        let arg = Value::map(vec![
+            ("text".into(), Value::String("hello world".into())),
+            ("cursor".into(), Value::Int(11)),
+        ]);
+        builtin_ed_set(&[arg], &mut shell).unwrap();
+        let st = editor_state(&shell);
+        assert_eq!(st.text, "hello world");
+        assert_eq!(st.cursor, 11);
+    }
+
+    /// An over-long cursor clamps to the new text's character count.
+    #[test]
+    fn ed_set_clamps_over_long_cursor_to_new_len() {
+        let mut shell = shell_with_buffer("");
+        let arg = Value::map(vec![
+            ("text".into(), Value::String("abc".into())),
+            ("cursor".into(), Value::Int(99)),
+        ]);
+        builtin_ed_set(&[arg], &mut shell).unwrap();
+        assert_eq!(editor_state(&shell).cursor, 3);
+    }
+
+    /// A non-Int cursor errors before any mutation.
+    #[test]
+    fn ed_set_rejects_non_int_cursor() {
+        let mut shell = shell_with_buffer("old");
+        let arg = Value::map(vec![
+            ("text".into(), Value::String("new".into())),
+            ("cursor".into(), Value::String("3".into())),
+        ]);
+        assert!(builtin_ed_set(&[arg], &mut shell).is_err());
+        let st = editor_state(&shell);
+        assert_eq!(st.text, "old");
+    }
+}

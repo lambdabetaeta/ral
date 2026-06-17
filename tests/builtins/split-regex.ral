@@ -1,0 +1,28 @@
+# Test: re-split with regex patterns
+
+# Simple literal split
+let result = re-split '/' 'a/b/c'
+echo !{length $result}
+echo $result
+
+# Regex split on whitespace
+let result = words 'hello   world'
+echo !{length $result}
+
+# words splits on tabs and newlines too
+let result = words "hello\tworld\nfoo"
+echo !{length $result}
+
+# Split on regex pattern
+let result = re-split '[,;]+' 'a,b;;c,d'
+echo $result
+
+# Split on digits
+let result = re-split '[0-9]+' 'foo123bar456baz'
+echo $result
+
+# Lines splits on newline
+let result = lines "first\nsecond\nthird"
+echo !{length $result}
+
+echo 're-split tests done'

@@ -1,0 +1,20 @@
+hello
+
+6
+3
+mtime ok
+file
+hello from write
+hello from write
+mv ok
+hello from write
+mkdir ok
+list-dir ok
+sub
+dir
+rm ok
+rm -rf ok
+temp-dir ok
+temp-file ok
+resolve-path ok
+filesystem tests done

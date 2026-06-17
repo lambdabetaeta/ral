@@ -1,0 +1,13 @@
+#!/usr/bin/env ral
+
+# Greet a list of people.
+#
+#     ral hello.ral alice bob "carol smith"
+#
+# In bash, "carol smith" would split into two words unless you remembered
+# to quote everything in the loop body too.  Here it cannot — `$args` is
+# a list of String values, not a re-lexed token soup.
+
+let names = if !{is-empty $args} { return [world] } else { return $args }
+
+for $names { |n| echo "hello, $n" }

@@ -1,0 +1,289 @@
+%YAML 1.2
+---
+# Sublime Text / syntect syntax definition for ral.
+# Derived from the TextMate grammar (ral.tmLanguage.json) in this directory.
+# Used by bat, delta, presenterm (via bat cache), and Sublime Text.
+name: ral
+scope: source.ral
+file_extensions:
+  - ral
+first_line_match: '^#!.*\bral\b'
+
+contexts:
+  main:
+    - include: comment
+    - include: string-double
+    - include: string-single
+    - include: arithmetic
+    - include: let-binding
+    - include: return-keyword
+    - include: lambda-params
+    - include: deref-paren
+    - include: deref-plain
+    - include: spread
+    - include: force-brace
+    - include: force-sigil
+    - include: bypass
+    - include: tilde
+    - include: redirection
+    - include: pipe-operator
+    - include: chain-operator
+    - include: number
+    - include: boolean
+    - include: unit
+    - include: control-name
+    - include: block
+    - include: punctuation
+
+  comment:
+    - match: '#.*$'
+      scope: comment.line.number-sign.ral
+
+  # --- strings ---
+
+  string-single:
+    - match: "'"
+      scope: punctuation.definition.string.begin.ral
+      push: string-single-body
+
+  string-single-body:
+    - meta_scope: string.quoted.single.ral
+    - match: "''"
+      scope: constant.character.escape.ral
+    - match: "'"
+      scope: punctuation.definition.string.end.ral
+      pop: true
+
+  string-double:
+    - match: '"'
+      scope: punctuation.definition.string.begin.ral
+      push: string-double-body
+
+  string-double-body:
+    - meta_scope: string.quoted.double.ral
+    - match: '\\[nte\\0"$!]'
+      scope: constant.character.escape.ral
+    - include: interp-arith
+    - include: interp-force-brace
+    - include: interp-deref-paren
+    - include: interp-deref-index
+    - include: interp-force-plain
+    - match: '"'
+      scope: punctuation.definition.string.end.ral
+      pop: true
+
+  interp-arith:
+    - match: '\$\['
+      scope: punctuation.section.interpolation.begin.ral
+      push: interp-arith-body
+
+  interp-arith-body:
+    - meta_scope: meta.interpolation.arithmetic.ral
+    - include: arith-inner
+    - match: '\]'
+      scope: punctuation.section.interpolation.end.ral
+      pop: true
+
+  interp-force-brace:
+    - match: '!\{'
+      scope: punctuation.section.interpolation.begin.ral
+      push: interp-force-brace-body
+
+  interp-force-brace-body:
+    - meta_scope: meta.interpolation.force.ral
+    - include: main
+    - match: '\}'
+      scope: punctuation.section.interpolation.end.ral
+      pop: true
+
+  interp-deref-paren:
+    - match: '(\$\()([a-zA-Z_][a-zA-Z0-9_-]*)(\))'
+      captures:
+        1: punctuation.definition.variable.begin.ral
+        2: variable.other.ral
+        3: punctuation.definition.variable.end.ral
+
+  interp-deref-index:
+    - match: '(\$)([a-zA-Z_][a-zA-Z0-9_-]*)(\[[^\]]*\])*'
+      captures:
+        1: punctuation.definition.variable.ral
+        2: variable.other.ral
+        3: punctuation.section.index.ral
+
+  interp-force-plain:
+    - match: '(!)([a-zA-Z_][a-zA-Z0-9_-]*)'
+      captures:
+        1: keyword.operator.force.ral
+        2: variable.other.ral
+
+  # --- arithmetic ---
+
+  arithmetic:
+    - match: '\$\['
+      scope: punctuation.section.arithmetic.begin.ral
+      push: arithmetic-body
+
+  arithmetic-body:
+    - meta_scope: meta.arithmetic.ral
+    - include: arith-inner
+    - match: '\]'
+      scope: punctuation.section.arithmetic.end.ral
+      pop: true
+
+  arith-inner:
+    - include: deref-paren
+    - include: arith-deref-index
+    - include: deref-plain
+    - include: force-brace
+    - include: force-sigil
+    - match: '[0-9]+(\.[0-9]+)?'
+      scope: constant.numeric.ral
+    - match: '[+\-*/%]|==|!=|<=|>=|<|>'
+      scope: keyword.operator.arithmetic.ral
+    - match: '\('
+      push: arith-paren
+
+  arith-paren:
+    - include: arith-inner
+    - match: '\)'
+      pop: true
+
+  arith-deref-index:
+    - match: '(\$)([a-zA-Z_][a-zA-Z0-9_-]*)(\[)([^\]]*)(\])'
+      captures:
+        1: punctuation.definition.variable.ral
+        2: variable.other.ral
+        3: punctuation.section.index.begin.ral
+        4: variable.other.index-key.ral
+        5: punctuation.section.index.end.ral
+
+  # --- bindings and keywords ---
+
+  let-binding:
+    - match: '\b(let)\s+([a-zA-Z_][a-zA-Z0-9_-]*|_)\s*(=)'
+      captures:
+        1: keyword.other.let.ral
+        2: variable.other.assignment.ral
+        3: keyword.operator.assignment.ral
+
+  return-keyword:
+    - match: '\breturn\b'
+      scope: keyword.control.return.ral
+
+  lambda-params:
+    - match: '\{\s*\|'
+      scope: punctuation.section.lambda.begin.ral
+      push: lambda-params-body
+
+  lambda-params-body:
+    - meta_scope: meta.lambda.parameters.ral
+    - match: '[a-zA-Z_][a-zA-Z0-9_-]*'
+      scope: variable.parameter.ral
+    - match: '_'
+      scope: variable.language.wildcard.ral
+    - match: '\|'
+      scope: punctuation.separator.lambda.ral
+      pop: true
+
+  # --- derefs and operators ---
+
+  deref-paren:
+    - match: '(\$\()([a-zA-Z_][a-zA-Z0-9_-]*)(\))'
+      captures:
+        1: punctuation.definition.variable.begin.ral
+        2: variable.other.ral
+        3: punctuation.definition.variable.end.ral
+
+  deref-plain:
+    - match: '(\$)([a-zA-Z_][a-zA-Z0-9_-]*)'
+      captures:
+        1: punctuation.definition.variable.ral
+        2: variable.other.ral
+
+  spread:
+    - match: '(\.\.\.)(\$)([a-zA-Z_][a-zA-Z0-9_-]*)'
+      captures:
+        1: keyword.operator.spread.ral
+        2: punctuation.definition.variable.ral
+        3: variable.other.ral
+
+  force-brace:
+    - match: '!\{'
+      scope: keyword.operator.force.begin.ral
+      push: force-brace-body
+
+  force-brace-body:
+    - meta_scope: meta.force.ral
+    - include: main
+    - match: '\}'
+      scope: keyword.operator.force.end.ral
+      pop: true
+
+  force-sigil:
+    - match: '(!)(?=[a-zA-Z_$\{\(\[])'
+      scope: keyword.operator.force.ral
+
+  bypass:
+    - match: '(\^)([^ \t\n|{}\[\]$<>"''#,();]+)'
+      captures:
+        1: keyword.operator.bypass.ral
+        2: entity.name.command.bypass.ral
+
+  tilde:
+    - match: '(~)([a-zA-Z_][a-zA-Z0-9_-]*)?'
+      captures:
+        1: constant.language.tilde.ral
+        2: constant.language.tilde.user.ral
+
+  redirection:
+    - match: '([0-9])?(>{1,2}|<|>&)\s*'
+      captures:
+        1: constant.numeric.fd.ral
+        2: keyword.operator.redirect.ral
+
+  pipe-operator:
+    - match: '\|'
+      scope: keyword.operator.pipe.ral
+
+  chain-operator:
+    - match: '\?'
+      scope: keyword.operator.chain.ral
+
+  # --- literals ---
+
+  number:
+    - match: '(?<![a-zA-Z_\-])[0-9]+(\.[0-9]+)?'
+      scope: constant.numeric.ral
+
+  boolean:
+    - match: '\b(true|false)\b'
+      scope: constant.language.boolean.ral
+
+  unit:
+    - match: '\bunit\b'
+      scope: constant.language.unit.ral
+
+  control-name:
+    - match: '\b(if|for|try|case|while|spawn|await|race|use|source|grant|within|map|filter|fold|reduce)\b'
+      scope: keyword.control.ral
+
+  block:
+    - match: '\{'
+      scope: punctuation.section.block.begin.ral
+      push: block-body
+
+  block-body:
+    - include: main
+    - match: '\}'
+      scope: punctuation.section.block.end.ral
+      pop: true
+
+  punctuation:
+    - match: '[\[\]]'
+      scope: punctuation.section.bracket.ral
+    - match: ','
+      scope: punctuation.separator.comma.ral
+    - match: ';'
+      scope: punctuation.terminator.statement.ral
+    - match: ':'
+      scope: punctuation.separator.colon.ral

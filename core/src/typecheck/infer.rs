@@ -1,0 +1,2062 @@
+//! Type inference: infer_val, infer_comp, and supporting helpers.
+//!
+//! `infer_val` synthesizes a value type (Ty) for a Val node.
+//! `infer_comp` synthesizes a computation type (CompTy) for a Comp node.
+//! Both are mutually recursive: thunk bodies are inferred as computations,
+//! and return values are inferred as values.
+
+use super::builtins::{
+    ArgSig, ArgTemplate, BuiltinDiagnostic, BuiltinSig, CompTemplate, FieldSchema, TyTemplate,
+    fail_status_is_zero_literal, plugin_entry_field_ty, sig_pipe_spec,
+};
+use super::env::{InferCtx, TyEnv};
+use super::fmt::fmt_ty;
+use super::generalize::{generalize, instantiate};
+use super::scheme::{Scheme, TypeErrorKind};
+use super::ty::{CompTy, PipeMode, PipeSpec, Row, Ty};
+use crate::ir::{
+    CommandName, CommandWord, Comp, CompKind, IrPattern, ScopeOp, Val, ValListElem, ValMapEntry,
+};
+use crate::source::Span;
+use crate::source::WithSpan;
+use crate::stream::{HEAD_FIELD, TAIL_FIELD, done_tag, more_tag};
+use crate::syntax::ast::{BinaryOp, BinaryOpKind};
+use crate::syntax::tag::tag_row_label;
+use std::sync::Arc;
+
+/// Walk a row spine and collect (label, payload_ty) pairs in order of first
+/// appearance, stopping at the first non-Extend node (Empty or unresolved
+/// variable).  Caller is expected to have applied substitutions; a duplicated
+/// label resolves last-wins (the deeper, later occurrence's payload type),
+/// matching the runtime's last-wins semantics for duplicate keys.
+fn collect_extends(row: &Row) -> Vec<(String, Ty)> {
+    let mut out: Vec<(String, Ty)> = Vec::new();
+    let mut cur = row;
+    loop {
+        match cur {
+            Row::Extend(l, ty, rest) => {
+                match out.iter_mut().find(|(k, _)| k == l) {
+                    Some(slot) => slot.1 = (**ty).clone(),
+                    None => out.push((l.clone(), (**ty).clone())),
+                }
+                cur = rest;
+            }
+            _ => return out,
+        }
+    }
+}
+
+/// Best-effort lookup from a `case` arm's row label to the span of
+/// the handler body the user wrote at that arm.
+///
+/// `table` is expected to be the second operand of `case` — a literal
+/// `Val::Map` of `(label → handler thunk)` entries.  For each entry
+/// whose key is a tag-shaped literal and whose value is a `Val::Thunk`,
+/// record `(label_with_leading_backtick, handler_body_span)`.  Any other
+/// shape (spread, runtime key, non-thunk handler) is silently skipped
+/// — the caller falls back to the enclosing `case` span when no entry
+/// matches.
+///
+/// The "handler body span" peers past the lambda's wrapping `Lam` node
+/// (whose span is the enclosing statement, not the body) to the actual
+/// body Comp the user wrote.  Without that, `{ |s| body }` arms would
+/// resolve back to the enclosing `let`/`case` span and the caret would
+/// underline the whole `case` form — exactly what we're trying to
+/// avoid.
+fn collect_handler_spans(table: &Val) -> std::collections::HashMap<String, crate::source::Span> {
+    fn handler_body_span(inner: &Comp) -> Option<crate::source::Span> {
+        match &inner.item {
+            // `{ |p| body }` elaborates to `Lam { param, body }`; the
+            // outer Lam's span is the surrounding statement, but
+            // `body.span` is the user-written body itself.
+            crate::ir::CompKind::Lam { body, .. } => body.span.or(inner.span),
+            _ => inner.span,
+        }
+    }
+    let mut out = std::collections::HashMap::new();
+    let Val::Map(entries) = table else {
+        return out;
+    };
+    for entry in entries {
+        let crate::ir::ValMapEntry::Entry(key, value) = entry else {
+            continue;
+        };
+        let raw_key = match key {
+            Val::String(s) => s.as_str(),
+            _ => continue,
+        };
+        // Row labels are stored with their leading backtick (see
+        // `tag_row_label`); the surface map key is already tag-shaped
+        // (`'\`ok'`), so we can match against it directly.
+        if !raw_key.starts_with('`') {
+            continue;
+        }
+        let Val::Thunk(inner) = value else { continue };
+        if let Some(span) = handler_body_span(inner) {
+            out.insert(raw_key.to_string(), span);
+        }
+    }
+    out
+}
+
+/// Heuristic: did the user almost certainly write a single `"..."` string
+/// that the lexer split at an unescaped inner `"`?  Recognised pattern:
+/// the head came from a quoted-string source (a `Val::String` or a
+/// `CompKind::Interpolation`), AND the args list contains both a string
+/// chunk and a hoisted non-string fragment — that's the IR shape the
+/// lexer produces when it closes the outer string on an inner `"` and
+/// the body in between contains an interpolation / subshell that gets
+/// hoisted into its own bind (so it lands as `Val::Variable` in arg
+/// position).  Pure `'foo' bar baz` (head-string + bare-word args) keeps
+/// the generic hint: every arg is a `Val::String` after [`Val::from_word`]
+/// classifies it, so the "non-string fragment" half of the conjunction
+/// is false and we fall through.
+fn looks_like_nested_quote_mistake(head: &Comp, args: &[&Val]) -> bool {
+    let head_from_quoted = matches!(
+        head.item,
+        CompKind::Return(Val::String(_)) | CompKind::Interpolation(_)
+    );
+    let any_string_arg = args.iter().any(|a| matches!(a, Val::String(_)));
+    let any_non_string_arg = args.iter().any(|a| !matches!(a, Val::String(_)));
+    head_from_quoted && any_string_arg && any_non_string_arg
+}
+
+/// Recognise the IR shape the elaborator produces for `alias name { body }`.
+///
+/// Returns `Ok(Some((name, thunk)))` when the shape matches; `Ok(None)`
+/// when the head is not `alias` (normal exec, fall through); `Err(msg)`
+/// when the head is `alias` but the shape is malformed — a bug in the
+/// elaborator or an adversarial IR.
+fn alias_statement_shape(part: &Comp) -> Result<Option<(&str, &Arc<Comp>)>, &'static str> {
+    let CompKind::Exec(exec) = &part.item else {
+        return Ok(None);
+    };
+    let CommandWord::Name(CommandName::Bare(head)) = &exec.head else {
+        return Ok(None);
+    };
+    if head != "alias" {
+        return Ok(None);
+    }
+    if !exec.redirects.is_empty() {
+        return Err("alias: redirects in alias definition are not allowed");
+    }
+    let Some(positional) = crate::ir::args::positional(&exec.args) else {
+        return Err("alias: spread arguments in alias definition are not allowed");
+    };
+    let [Val::String(name), Val::Thunk(thunk)] = positional[..] else {
+        return Err("alias: expected `alias name { body }`");
+    };
+    Ok(Some((name.as_str(), thunk)))
+}
+
+fn unalias_statement_shape(part: &Comp) -> Result<Option<&str>, &'static str> {
+    let CompKind::Exec(exec) = &part.item else {
+        return Ok(None);
+    };
+    let CommandWord::Name(CommandName::Bare(head)) = &exec.head else {
+        return Ok(None);
+    };
+    if head != "unalias" {
+        return Ok(None);
+    }
+    if !exec.redirects.is_empty() {
+        return Err("unalias: redirects are not allowed");
+    }
+    let Some(positional) = crate::ir::args::positional(&exec.args) else {
+        return Err("unalias: spread arguments are not allowed");
+    };
+    let [Val::String(name)] = positional[..] else {
+        return Err("unalias: expected `unalias name`");
+    };
+    Ok(Some(name.as_str()))
+}
+
+pub fn infer_comp(ctx: &mut InferCtx, env: &mut TyEnv, comp: &Comp) -> CompTy {
+    Inferencer { ctx, env }.infer_comp(comp)
+}
+
+/// Inference state.  The struct itself is `pub` so the
+/// builtin signature interpreter can name it, but both fields remain
+/// `pub(super)` — only code inside `typecheck/` can read or mutate
+/// them.
+pub struct Inferencer<'a> {
+    pub(super) ctx: &'a mut InferCtx,
+    pub(super) env: &'a mut TyEnv,
+}
+
+impl WithSpan for Inferencer<'_> {
+    fn span_slot(&mut self) -> &mut Option<Span> {
+        &mut self.ctx.pos
+    }
+}
+
+impl Inferencer<'_> {
+    pub(super) fn with_scope<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let saved_pos = self.ctx.pos;
+        self.env.push();
+        let out = f(self);
+        self.env.pop();
+        self.ctx.pos = saved_pos;
+        out
+    }
+
+    fn bind_pattern(&mut self, pat: &IrPattern, ty: &Ty) {
+        match pat {
+            IrPattern::Wildcard => {}
+            IrPattern::Name(name) => {
+                self.env.bind(name.clone(), Scheme::mono(ty.clone()));
+            }
+            IrPattern::List { elems, rest } => {
+                let elem = self.ctx.unifier.fresh_ty();
+                self.ctx.unify_ty_hint(
+                    ty,
+                    &Ty::List(Box::new(elem.clone())),
+                    "the pattern `[a, b, ...]` only destructures a list — \
+                     the value being bound has to be a list of the same shape",
+                );
+                for elem_pat in elems {
+                    self.bind_pattern(elem_pat, &elem);
+                }
+                if let Some(rest_name) = rest {
+                    self.env
+                        .bind(rest_name.clone(), Scheme::mono(Ty::List(Box::new(elem))));
+                }
+            }
+            IrPattern::Map(entries) => {
+                // Required entries (no default) shape the value's row;
+                // defaulted entries do not — the field may be absent and
+                // the default supplies the binding instead.  The field's
+                // type stays a fresh tyvar in either case, refined by
+                // uses of the bound name.
+                let tail = self.ctx.unifier.fresh_row_var();
+                let mut row = Row::Var(tail);
+                let mut field_tys = Vec::with_capacity(entries.len());
+                for entry in entries.iter().rev() {
+                    let field_ty = self.ctx.unifier.fresh_ty();
+                    field_tys.push(field_ty.clone());
+                    if entry.default.is_none() {
+                        row = Row::Extend(entry.key.row_label(), Box::new(field_ty), Box::new(row));
+                    }
+                }
+                field_tys.reverse();
+                self.ctx.unify_ty_hint(
+                    ty,
+                    &Ty::Record(row),
+                    "the pattern `[key: name, ...]` only destructures a \
+                     record — the value being bound has to be a record \
+                     with at least the named fields",
+                );
+                for (entry, field_ty) in entries.iter().zip(field_tys.iter()) {
+                    self.bind_pattern(&entry.pattern, field_ty);
+                }
+            }
+        }
+    }
+
+    fn extract_return(&mut self, cty: &CompTy) -> (Ty, PipeMode, PipeMode) {
+        match self.ctx.unifier.resolve_comp_ty(cty) {
+            CompTy::Return(spec, ty) => (*ty, spec.input, spec.output),
+            _ => {
+                let ty = self.ctx.unifier.fresh_ty();
+                let input = self.ctx.unifier.fresh_mode();
+                let output = self.ctx.unifier.fresh_mode();
+                let expected = CompTy::Return(PipeSpec { input, output }, Box::new(ty.clone()));
+                self.ctx.unify_comp_ty(cty, &expected);
+                (ty, input, output)
+            }
+        }
+    }
+
+    /// Single-step force of a producer's return type at a value edge.
+    ///
+    /// A bare-block producer stage (`{ … }`) has return type
+    /// `Ty::Thunk(body)` — the suspended body computation.  At a value
+    /// edge the runtime forces it exactly once (`run_value_fold` runs
+    /// the block, yielding the body's result), so the value that
+    /// crosses to the consumer is the *body's* return
+    /// type.  Deref one thunk level to mirror that; a non-thunk producer
+    /// value (a `List`, a `Return`-typed stage's concrete value, or a
+    /// free var the consumer will constrain) passes through unchanged so
+    /// existing value-edge shapes (`[1,2,3] | { |xs| … }`) are untouched.
+    fn deref_forced_producer(&mut self, ty: Ty) -> Ty {
+        match self.ctx.unifier.resolve_ty(&ty) {
+            Ty::Thunk(inner) => match self.ctx.unifier.resolve_comp_ty(&inner) {
+                CompTy::Return(_, inner_ty) => *inner_ty,
+                // A `Fun`-shaped thunk (a `{ |x| … }` lambda producer with
+                // no upstream) is itself the produced value — forcing a
+                // lambda yields the lambda, matching `step_force`.  Leave
+                // the thunk in place so the consumer sees the function.
+                _ => ty,
+            },
+            _ => ty,
+        }
+    }
+
+    /// Project the I/O end (input or output) of a computation type, peering
+    /// past `Fun` arrows.  An unresolved comp var yields a fresh mode.
+    fn comp_end_mode(&mut self, cty: &CompTy, pick: fn(PipeSpec) -> PipeMode) -> PipeMode {
+        match self.ctx.unifier.resolve_comp_ty(cty) {
+            CompTy::Return(spec, _) => pick(spec),
+            CompTy::Fun(_, body) => self.comp_end_mode(&body, pick),
+            CompTy::Var(_) => self.ctx.unifier.fresh_mode(),
+        }
+    }
+
+    /// A stage's own channel signature for the annotation pass.
+    ///
+    /// A stage consumed as a value argument (the data-last fold's
+    /// function) takes its upstream on the value edge, so its input
+    /// channel is `∅`; its output is whatever the application result
+    /// emits — `infer_pipeline` has already rewritten the stage's type to
+    /// that result, so `comp_output_mode` reads it directly (a `{ |x|
+    /// echo $x }` consumer emits `Bytes`).  Otherwise both channel modes
+    /// come from the stage's [`PipeSpec`], not peering past `Fun` arrows.
+    fn stage_own_spec(&mut self, cty: &CompTy, consumed_as_value: bool) -> PipeSpec {
+        if consumed_as_value {
+            return PipeSpec {
+                input: PipeMode::None,
+                output: self.comp_output_mode(cty),
+            };
+        }
+        PipeSpec {
+            input: self.comp_input_mode(cty),
+            output: self.comp_output_mode(cty),
+        }
+    }
+
+    fn comp_input_mode(&mut self, cty: &CompTy) -> PipeMode {
+        self.comp_end_mode(cty, |s| s.input)
+    }
+
+    fn comp_output_mode(&mut self, cty: &CompTy) -> PipeMode {
+        self.comp_end_mode(cty, |s| s.output)
+    }
+
+    /// Union of two branch modes: exactly one branch runs, so a clash is
+    /// not a contradiction but an unknown — the conditional's mode is
+    /// then a fresh variable a downstream stage can pin.  Agreement (or a
+    /// variable on either side) unifies as usual.  A conditional that
+    /// emits bytes in one arm and a value in the other (`if c { echo x }
+    /// else {}`) is accepted rather than rejected.
+    fn union_mode(&mut self, a: PipeMode, b: PipeMode) -> PipeMode {
+        if self.ctx.unifier.unify_mode(&a, &b).is_err() {
+            self.ctx.unifier.fresh_mode()
+        } else {
+            a
+        }
+    }
+
+    /// Merge a conditional's branches into one computation type.  The
+    /// return value type is shared — every branch must produce the same
+    /// value (`unify_ty_hint` reports a real disagreement) — but the
+    /// pipeline I/O modes are *unioned* via [`Self::union_mode`], not
+    /// equated, since only one branch runs.  A non-`Return` branch (a
+    /// bare lambda arm) falls back to strict computation-type unification.
+    fn merge_branches(&mut self, branches: Vec<CompTy>, hint: &str) -> CompTy {
+        let mut iter = branches.into_iter();
+        let Some(mut acc) = iter.next() else {
+            return CompTy::pure(self.ctx.unifier.fresh_ty());
+        };
+        for branch in iter {
+            acc = match (
+                self.ctx.unifier.resolve_comp_ty(&acc),
+                self.ctx.unifier.resolve_comp_ty(&branch),
+            ) {
+                (CompTy::Return(sa, ta), CompTy::Return(sb, tb)) => {
+                    self.ctx.unify_ty_hint(&ta, &tb, hint);
+                    CompTy::Return(
+                        PipeSpec {
+                            input: self.union_mode(sa.input, sb.input),
+                            output: self.union_mode(sa.output, sb.output),
+                        },
+                        ta,
+                    )
+                }
+                _ => {
+                    self.ctx.unify_comp_ty_hint(&acc, &branch, hint);
+                    acc
+                }
+            };
+        }
+        acc
+    }
+
+    /// Eventual return type of a computation, peering past `Fun` arrows
+    /// the same way [`Self::comp_end_mode`] peers past them for modes.
+    /// An unresolved `Var` yields a fresh type — callers that need the
+    /// constraint propagated back must unify themselves.
+    fn comp_return_ty(&mut self, cty: &CompTy) -> Ty {
+        match self.ctx.unifier.resolve_comp_ty(cty) {
+            CompTy::Return(_, ty) => *ty,
+            CompTy::Fun(_, body) => self.comp_return_ty(&body),
+            CompTy::Var(_) => self.ctx.unifier.fresh_ty(),
+        }
+    }
+
+    /// Does this pipeline consumer take its upstream as a *value
+    /// argument* rather than over the byte channel?  A consumer applied
+    /// to the piped value is function-shaped — a bare lambda (`Fun`), a
+    /// block literal carrying one (`Return(_, Thunk(Fun))`), or a head
+    /// still unknown enough to become one (a `Var`).  A consumer that is
+    /// a concrete non-thunk stage (`Return(_, τ)` for a byte decoder like
+    /// `from-X`) reads its input over the channel, so a value producer
+    /// feeding it is a `∅`-into-`Bytes` channel adjacency, not an
+    /// application.  A stage whose input mode resolves to ground `Bytes`
+    /// concretely reads the byte channel, so it takes the channel edge
+    /// regardless of how polymorphic its return value is.  Peers past
+    /// block-literal thunks the same way [`Self::autoderef_thunk_return`]
+    /// does, without planting constraints.
+    fn consumes_value_arg(&mut self, cty: &CompTy) -> bool {
+        match self.ctx.unifier.resolve_comp_ty(cty) {
+            CompTy::Fun(..) | CompTy::Var(_) => true,
+            CompTy::Return(spec, ty) => {
+                if self.ctx.unifier.resolve_mode(&spec.input) == PipeMode::Bytes {
+                    return false;
+                }
+                match self.ctx.unifier.resolve_ty(&ty) {
+                    Ty::Thunk(inner) => self.consumes_value_arg(&inner),
+                    Ty::Var(_) => true,
+                    _ => false,
+                }
+            }
+        }
+    }
+
+    fn autoderef_thunk_return(&mut self, mut cty: CompTy) -> CompTy {
+        loop {
+            match self.ctx.unifier.resolve_comp_ty(&cty) {
+                CompTy::Return(_, ty) => match self.ctx.unifier.resolve_ty(&ty) {
+                    Ty::Thunk(inner) => cty = *inner,
+                    // Free type variable in head position: this matches the
+                    // runtime behavior where eval_app's Thunk arm trampoline-
+                    // forces a Thunk value before applying args.  At type
+                    // level we constrain the head to be a Thunk and continue
+                    // unfolding.  Without this, a parameter `$f` whose type
+                    // is yet unknown would fail to unify when args are
+                    // applied.
+                    Ty::Var(_) => {
+                        let inner = self.ctx.unifier.fresh_comp_ty();
+                        self.ctx.unify_ty(&ty, &Ty::Thunk(Box::new(inner.clone())));
+                        cty = inner;
+                    }
+                    _ => return cty,
+                },
+                _ => return cty,
+            }
+        }
+    }
+
+    pub(super) fn apply_args(&mut self, mut cty: CompTy, args: &crate::ir::Args) -> CompTy {
+        // Precise per-arg checking is only possible when the args list
+        // has no spreads.  With spread the arity is dynamic; we still
+        // infer sub-expressions for type errors inside them, but don't
+        // constrain the function's parameter list.
+        let Some(positional) = crate::ir::args::positional(args) else {
+            for sub in crate::ir::args::iter_subvals(args) {
+                let _ = self.infer_val(sub);
+            }
+            return cty;
+        };
+        for (i, arg) in positional.into_iter().enumerate() {
+            cty = self.autoderef_thunk_return(cty);
+            // Narrow pos to this argument's source range so a per-arg
+            // unify failure underlines the offending argument rather
+            // than the whole call.  Synthetic entries (no span,
+            // hoisted applications) fall back to the call's own pos
+            // via `with_span`'s `None`-as-no-op branch.
+            cty = self.with_span(args[i].span, |this| {
+                let arg_ty = this.infer_val(arg);
+                let result = this.ctx.unifier.fresh_comp_ty();
+                let expected = CompTy::Fun(Box::new(arg_ty), Box::new(result.clone()));
+                this.ctx.unify_comp_ty_hint(
+                    &cty,
+                    &expected,
+                    "the function's parameter type and the argument's type \
+                     must agree — check what the function expects and what \
+                     you're passing in",
+                );
+                result
+            });
+        }
+        cty
+    }
+
+    /// If `head_ty` resolves to a `Return(_, ty)` where `ty` is concretely
+    /// non-callable — i.e. not a `Thunk` and not a free type variable that
+    /// could later become one — return that `ty`.  Otherwise return `None`.
+    ///
+    /// Used by `CompKind::App` to detect `'foo' bar baz` and friends and
+    /// raise a surface-level diagnostic before the general unifier
+    /// mismatch fires.
+    fn command_non_callable_ty(&mut self, head_ty: &CompTy) -> Option<Ty> {
+        match self.ctx.unifier.resolve_comp_ty(head_ty) {
+            CompTy::Return(_, ty) => match self.ctx.unifier.resolve_ty(&ty) {
+                Ty::Thunk(_) | Ty::Var(_) => None,
+                concrete => Some(concrete),
+            },
+            CompTy::Fun(_, _) | CompTy::Var(_) => None,
+        }
+    }
+
+    fn apply_piped_value(&mut self, cty: CompTy, piped_ty: Ty) -> CompTy {
+        let cty = self.autoderef_thunk_return(cty);
+        let result = self.ctx.unifier.fresh_comp_ty();
+        let expected = CompTy::Fun(Box::new(piped_ty.clone()), Box::new(result.clone()));
+        // The consumer is a value-arg function (the caller routes only
+        // `Fun`/`Var` consumers here; a `Return` stage takes the channel
+        // edge instead), so the produced value must fit its first
+        // parameter.  A clash here is a genuine arg-shape error.
+        let mut hint = String::from(
+            "this stage produces a value that is piped into the next \
+             stage's function — the value's type and the function's \
+             parameter type must agree",
+        );
+        // A Step-shaped piped value (a variant carrying `more`/`done`) is
+        // a lazy stream the consumer receives whole; on a clash, point at
+        // the explicit eliminators.
+        if self.piped_ty_is_step_shaped(&piped_ty) {
+            hint.push_str(
+                "; this stage receives a lazy Step stream — consume it \
+                 explicitly with stream-each / stream-map / stream-to-list",
+            );
+        }
+        self.ctx.unify_comp_ty_hint(&cty, &expected, &hint);
+        result
+    }
+
+    /// Does the piped value's type resolve to a variant whose row carries
+    /// a Step label (`` `more `` / `` `done ``)?  Diagnostic-only: the
+    /// answer shapes the unification hint in [`Self::apply_piped_value`],
+    /// never the types.
+    fn piped_ty_is_step_shaped(&mut self, ty: &Ty) -> bool {
+        let Ty::Variant(row) = self.ctx.unifier.apply_ty(ty) else {
+            return false;
+        };
+        let more_tag = more_tag();
+        let done_tag = done_tag();
+        collect_extends(&row)
+            .iter()
+            .any(|(l, _)| l == &more_tag || l == &done_tag)
+    }
+
+    /// The value shape returned by `from-lines`: a recursive Step stream
+    /// of Strings, i.e. `` `more {head: String, tail: Thunk(F Step)}`` or
+    /// `` `done ``.  The recursion closes through a comp-var root, not a TyVar.
+    pub(super) fn lines_step_ty(&mut self) -> Ty {
+        let tail_comp = self.ctx.unifier.fresh_comp_ty();
+        let more_tag = more_tag();
+        let done_tag = done_tag();
+        let payload = Ty::Record(Row::Extend(
+            HEAD_FIELD.into(),
+            Box::new(Ty::String),
+            Box::new(Row::Extend(
+                TAIL_FIELD.into(),
+                Box::new(Ty::Thunk(Box::new(tail_comp.clone()))),
+                Box::new(Row::Empty),
+            )),
+        ));
+        let step = Ty::Variant(Row::Extend(
+            more_tag,
+            Box::new(payload),
+            Box::new(Row::Extend(
+                done_tag,
+                Box::new(Ty::Unit),
+                Box::new(Row::Empty),
+            )),
+        ));
+        self.ctx
+            .unify_comp_ty(&tail_comp, &CompTy::pure(step.clone()));
+        step
+    }
+
+    /// Validate a map literal's entries against a per-key `schema`.
+    ///
+    /// For each entry, the value is inferred (so side-effects and inner
+    /// type errors surface); additionally, if the key is a literal the
+    /// `schema` knows, the value's type is unified against the expected
+    /// one.  Unknown keys, spreads, and dynamic keys stay runtime-
+    /// dispatched.  Shared by `within`, `grant`, and rc plugin entries —
+    /// three shapes of the same "optional-args map" idiom.
+    pub(super) fn check_map_entry_fields(
+        &mut self,
+        entries: &[ValMapEntry],
+        ctx: &str,
+        schema: FieldSchema,
+    ) {
+        for entry in entries {
+            let (key, val) = match entry {
+                ValMapEntry::Entry(Val::String(k), v) => (Some(k.as_str()), v),
+                ValMapEntry::Entry(_, v) | ValMapEntry::Spread(v) => (None, v),
+            };
+            let expected = key.and_then(|k| schema(k, &mut self.ctx.unifier));
+            let actual = self.infer_val(val);
+            if let (Some(key), Some(expected)) = (key, expected) {
+                self.ctx.unify_ty_hint(
+                    &actual,
+                    &expected,
+                    &format!("{ctx} {key}: wrong value type"),
+                );
+            }
+        }
+    }
+
+    /// Infer an rc `plugins:` list: validate each literal-map entry against
+    /// the plugin-entry schema, with no cross-entry unification so entries
+    /// with mixed shapes coexist.  The list's element type is a fresh var.
+    fn infer_plugins_list(&mut self, elems: &[ValListElem]) -> Ty {
+        for elem in elems {
+            match elem {
+                ValListElem::Single(Val::Map(entries)) => {
+                    self.check_map_entry_fields(entries, "plugin entry", plugin_entry_field_ty);
+                }
+                ValListElem::Single(v) => {
+                    let _ = self.infer_val(v);
+                }
+                ValListElem::Spread(v) => {
+                    let spread_ty = self.infer_val(v);
+                    let inner = self.ctx.unifier.fresh_ty();
+                    self.ctx.unify_ty(&spread_ty, &Ty::List(Box::new(inner)));
+                }
+            }
+        }
+        Ty::List(Box::new(self.ctx.unifier.fresh_ty()))
+    }
+
+    /// Instantiate `scheme` and apply the resulting body to a positional
+    /// `args` list.  Strips the outer `Thunk`, then runs `apply_args`.
+    /// Used by every entry-point dispatcher that lands on a scheme — the
+    /// registry's `Scheme` rule and the host-scheme fallback.  Going
+    /// through `instantiate()` prevents quantifier-var sharing across call
+    /// sites, so callers can pass a `Scheme` reference directly without
+    /// instantiating first.  For mono schemes `instantiate` short-circuits
+    /// to a clone of the body, so there is no overhead in the common case.
+    pub(super) fn apply_scheme(
+        &mut self,
+        scheme: &super::scheme::Scheme,
+        args: &crate::ir::Args,
+    ) -> CompTy {
+        let head_cty = self.instantiate_comp(scheme);
+        self.apply_args(head_cty, args)
+    }
+
+    /// Infer the arm for head `name`, pin its `PipeSpec` to the head's, and
+    /// generalise.  Reinterpreting a known head preserves that head's modes;
+    /// an unknown head's modes are whatever the arm defines.  The arm's value
+    /// type stays whatever inference yields.  Reinterpreting a known head with
+    /// incompatible modes surfaces as a positioned
+    /// [`TypeErrorKind::ModeMismatch`] (`docs/SPEC.md` §4.2.1).
+    pub(super) fn handler_comp_scheme(&mut self, name: &str, comp: &Comp) -> Scheme {
+        let cty = self.infer_handler_comp(comp);
+        if let Err(mismatch) = self.pin_arm_to_head(name, &cty) {
+            self.ctx.emit_kind(
+                TypeErrorKind::ModeMismatch {
+                    expected: mismatch.left,
+                    actual: mismatch.right,
+                },
+                Some(
+                    "a handler or alias reinterprets a head — it preserves the head's \
+                     pipeline modes; match the existing head's modes or add a codec",
+                ),
+            );
+        }
+        let thunk_ty = Ty::Thunk(Box::new(cty));
+        super::generalize::generalize(&mut self.ctx.unifier, self.env, &thunk_ty)
+    }
+
+    /// Head `name`'s known `PipeSpec`: the spec carried by its handler
+    /// scheme when one is already in scope, so reinterpreting a known head
+    /// constrains the arm to that head's modes.  An unknown head carries no
+    /// spec, so it yields a fully fresh `F[μ, ν]` and the arm defines the
+    /// head's modes; the byte-channel discipline is enforced where pipeline
+    /// channels connect (`docs/SPEC.md` §4.2.1).  A scheme that does not
+    /// resolve to a `Return` constrains nothing, so it too yields a fully
+    /// fresh spec.  Lexical bindings and builtins never reach here — the
+    /// install guards reject those names before any arm is inferred.
+    fn head_pipe_spec(&mut self, name: &str) -> PipeSpec {
+        let spec = self.env.lookup_handler(name).cloned().and_then(|handler| {
+            let cty = self.instantiate_comp(&handler.scheme);
+            match self.alias_arm_body(&cty) {
+                CompTy::Return(spec, _) => Some(spec),
+                _ => None,
+            }
+        });
+        spec.unwrap_or_else(|| self.ctx.unifier.fresh_spec())
+    }
+
+    /// Peel the leading `Fun` arrows of an alias arm to reach the body's
+    /// computation.  An arm with a parameter is typed `Fun(argv, body)`
+    /// (the calling convention forces it on the argv list); the head's
+    /// pipeline modes live on the *body's* `Return`, so mode pinning works
+    /// past the parameter arrows.
+    fn alias_arm_body(&mut self, cty: &CompTy) -> CompTy {
+        match self.ctx.unifier.resolve_comp_ty(cty) {
+            CompTy::Fun(_, body) => self.alias_arm_body(&body),
+            resolved => resolved,
+        }
+    }
+
+    /// Unify the arm's `PipeSpec` against head `name`'s known spec, leaving
+    /// the arm's value type free.  Forcing the arm's `CompTy` to a `Return`
+    /// shape is infallible; the only failure is a ground mode clash, returned
+    /// distinctly so the install path can reject it while the static path
+    /// positions it.
+    pub(super) fn pin_arm_to_head(
+        &mut self,
+        name: &str,
+        arm: &CompTy,
+    ) -> Result<(), crate::mode::ModeMismatch> {
+        let body = self.alias_arm_body(arm);
+        let (_, arm_input, arm_output) = self.extract_return(&body);
+        let head = self.head_pipe_spec(name);
+        self.ctx.unifier.unify_mode(&arm_input, &head.input)?;
+        self.ctx.unifier.unify_mode(&arm_output, &head.output)
+    }
+
+    /// Instantiate `scheme` and strip the outer `Thunk` that schemes
+    /// carry, yielding the bare computation type — a fresh comp var if
+    /// the instantiated body is not a thunk.
+    fn instantiate_comp(&mut self, scheme: &Scheme) -> CompTy {
+        match instantiate(&mut self.ctx.unifier, scheme) {
+            Ty::Thunk(body) => *body,
+            _ => self.ctx.unifier.fresh_comp_ty(),
+        }
+    }
+
+    /// Apply an alias/handler arm to a call site's arguments.
+    ///
+    /// A parameterised arm is typed `Fun(List(elem), body)`: the calling
+    /// convention forces it on the argv *list*, so every supplied argument
+    /// must inhabit the arm's element type `elem`.  Unifying each argument
+    /// against `elem` connects the call site to the arm's parameter —
+    /// without it an arm whose body constrains `elem` (e.g. `$[$a[0] + 1]`
+    /// pinning `elem` to `Integer`) accepted any argument and deferred the
+    /// clash to runtime.  Spreads splice a whole list, so each is unified
+    /// against `List(elem)`.  A nullary arm carries no parameter; its
+    /// arguments are inferred for inner errors but discarded, matching the
+    /// runtime, which ignores them.
+    fn apply_alias_arm(&mut self, scheme: &Scheme, args: &crate::ir::Args) -> CompTy {
+        let cty = self.instantiate_comp(scheme);
+        let CompTy::Fun(param, body) = self.ctx.unifier.resolve_comp_ty(&cty) else {
+            self.infer_args(args);
+            return cty;
+        };
+        let elem = self.ctx.unifier.fresh_ty();
+        self.ctx.unify_ty(&param, &Ty::List(Box::new(elem.clone())));
+        for entry in args {
+            let span = entry.span;
+            match &entry.item {
+                crate::ir::ValListElem::Single(arg) => {
+                    self.with_span(span, |this| {
+                        let arg_ty = this.infer_val(arg);
+                        this.ctx.unify_ty_hint(
+                            &arg_ty,
+                            &elem,
+                            "this argument is passed to an alias/handler arm — its \
+                             type must match what the arm's body does with the argv \
+                             elements",
+                        );
+                    });
+                }
+                crate::ir::ValListElem::Spread(arg) => {
+                    let spread_ty = self.infer_val(arg);
+                    self.ctx
+                        .unify_ty(&spread_ty, &Ty::List(Box::new(elem.clone())));
+                }
+            }
+        }
+        *body
+    }
+
+    /// The runtime handler calling convention: an alias arm is forced on
+    /// the argv list.  When `param` is `Some`, the arm is a lambda whose
+    /// parameter binds the argv (`Ty::List` of a fresh element type)
+    /// inside a fresh scope; the arm's type keeps its `Fun(argv, body)`
+    /// shape so the call site can unify the supplied arguments against the
+    /// parameter type ([`Self::apply_alias_arm`]).  When `None`, the arm is
+    /// a bare body inferred inside that same scope frame with no argument
+    /// bound.
+    pub(super) fn infer_alias_arm(&mut self, param: Option<&IrPattern>, body: &Comp) -> CompTy {
+        match param {
+            Some(param) => {
+                let elem = self.ctx.unifier.fresh_ty();
+                let argv_ty = Ty::List(Box::new(elem));
+                let body_cty = self.with_scope(|this| {
+                    this.bind_pattern(param, &argv_ty);
+                    this.infer_comp(body)
+                });
+                CompTy::Fun(Box::new(argv_ty), Box::new(body_cty))
+            }
+            None => self.with_scope(|this| this.infer_comp(body)),
+        }
+    }
+
+    /// The ordinary calling convention for a callable installed as a
+    /// lexical scope binding: a lambda is a function `Fun(param, body)`
+    /// whose parameter binds a fresh value type (independent per
+    /// parameter) inside a fresh scope, a block is its bare body inferred
+    /// in that same scope frame.
+    pub(super) fn infer_binding_value(&mut self, param: Option<&IrPattern>, body: &Comp) -> CompTy {
+        match param {
+            Some(param) => {
+                let param_ty = self.ctx.unifier.fresh_ty();
+                let body_ty = self.with_scope(|this| {
+                    this.bind_pattern(param, &param_ty);
+                    this.infer_comp(body)
+                });
+                CompTy::Fun(Box::new(param_ty), Box::new(body_ty))
+            }
+            None => self.with_scope(|this| this.infer_comp(body)),
+        }
+    }
+
+    fn infer_handler_comp(&mut self, comp: &Comp) -> CompTy {
+        match &comp.item {
+            CompKind::Lam { param, body } => self.infer_alias_arm(Some(param), body),
+            _ => self.infer_alias_arm(None, comp),
+        }
+    }
+
+    pub(super) fn binding_claims_name(&self, name: &str) -> bool {
+        self.env.lookup_binding(name).is_some() || crate::builtins::is_builtin(name)
+    }
+
+    pub(super) fn reject_handler_for_binding(&mut self, name: &str, verb: &str) -> bool {
+        if !self.binding_claims_name(name) {
+            return false;
+        }
+        let message = if crate::builtins::is_builtin(name) {
+            format!("cannot {verb} builtin `{name}`")
+        } else {
+            format!("handler `{name}` is hidden by a lexical binding in this scope")
+        };
+        let hint = if crate::builtins::is_builtin(name) {
+            "lexical and builtin names are not handler names; did you mean `let name = ...`?"
+        } else {
+            "bare command lookup resolves to the lexical value before handlers are considered"
+        };
+        self.ctx.error_hint(message, hint);
+        true
+    }
+
+    fn ty_from_template(&mut self, template: TyTemplate) -> Ty {
+        match template {
+            TyTemplate::String => Ty::String,
+            TyTemplate::Int => Ty::Int,
+            TyTemplate::Float => Ty::Float,
+            TyTemplate::Bool => Ty::Bool,
+            TyTemplate::Bytes => Ty::Bytes,
+            TyTemplate::Unit => Ty::Unit,
+            TyTemplate::Any => self.ctx.unifier.fresh_ty(),
+            TyTemplate::ListAny => {
+                let elem = self.ctx.unifier.fresh_ty();
+                Ty::List(Box::new(elem))
+            }
+            TyTemplate::ListInt => Ty::List(Box::new(Ty::Int)),
+        }
+    }
+
+    fn builtin_sig_result(&mut self, sig: BuiltinSig) -> CompTy {
+        let pipe = sig_pipe_spec(&sig.result, &mut self.ctx.unifier);
+        let value = match sig.result {
+            CompTemplate::Pure(ty) | CompTemplate::Return { value: ty, .. } => {
+                self.ty_from_template(ty)
+            }
+            CompTemplate::Never => self.ctx.unifier.fresh_ty(),
+            CompTemplate::LinesStep => self.lines_step_ty(),
+        };
+        CompTy::Return(pipe, Box::new(value))
+    }
+
+    fn unify_arg_template(&mut self, actual: &Ty, template: ArgTemplate) {
+        match template {
+            ArgTemplate::Any => {}
+            ArgTemplate::Ty(ty) => {
+                let expected = self.ty_from_template(ty);
+                self.ctx.unify_ty(actual, &expected);
+            }
+            ArgTemplate::BlockOrLambda => {
+                let result = self.ctx.unifier.fresh_comp_ty();
+                let expected = Ty::Thunk(Box::new(result));
+                self.ctx.unify_ty_hint(
+                    actual,
+                    &expected,
+                    "this builtin expects a block value here",
+                );
+            }
+            ArgTemplate::OneOf(options) => {
+                let resolved = self.ctx.unifier.apply_ty(actual);
+                match resolved {
+                    Ty::Bytes
+                        if options
+                            .iter()
+                            .any(|o| matches!(o, ArgTemplate::Ty(TyTemplate::Bytes))) => {}
+                    Ty::List(_)
+                        if options
+                            .iter()
+                            .any(|o| matches!(o, ArgTemplate::Ty(TyTemplate::ListInt))) =>
+                    {
+                        self.ctx.unify_ty(actual, &Ty::List(Box::new(Ty::Int)))
+                    }
+                    Ty::Var(_)
+                        if options
+                            .iter()
+                            .any(|o| matches!(o, ArgTemplate::Ty(TyTemplate::Bytes))) =>
+                    {
+                        self.ctx.unify_ty(actual, &Ty::Bytes)
+                    }
+                    _ => {
+                        if let Some(ArgTemplate::Ty(ty)) = options.first() {
+                            let expected = self.ty_from_template(*ty);
+                            self.ctx.unify_ty(actual, &expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn apply_builtin_sig(&mut self, sig: BuiltinSig, args: &crate::ir::Args) -> CompTy {
+        if sig.diagnostic == BuiltinDiagnostic::FailStatusNonzero
+            && fail_status_is_zero_literal(args)
+        {
+            self.ctx.error_hint(
+                "`fail [status: 0]` is not allowed — fail requires a nonzero status".into(),
+                "use `return` for a clean exit",
+            );
+        }
+
+        let mut type_probe_arg = None;
+        match crate::ir::args::positional(args) {
+            Some(positional) => match sig.args {
+                ArgSig::Exact(expected) | ArgSig::DataLast(expected) => {
+                    let missing_data_last = matches!(sig.args, ArgSig::DataLast(_))
+                        && positional.len() + 1 == expected.len();
+                    if positional.len() != expected.len() && !missing_data_last {
+                        self.ctx.error_hint(
+                            format!(
+                                "builtin expected {} argument(s), got {}",
+                                expected.len(),
+                                positional.len()
+                            ),
+                            "check the builtin's help entry for its command shape",
+                        );
+                    }
+                    for (arg, template) in positional.iter().zip(expected.iter()) {
+                        let actual = self.infer_val(arg);
+                        if sig.diagnostic == BuiltinDiagnostic::TypeProbe {
+                            type_probe_arg = Some(actual.clone());
+                        }
+                        self.unify_arg_template(&actual, *template);
+                    }
+                    for arg in positional.iter().skip(expected.len()) {
+                        let _ = self.infer_val(arg);
+                    }
+                }
+                ArgSig::Optional(template) => {
+                    if positional.len() > 1 {
+                        self.ctx.error_hint(
+                            format!(
+                                "builtin expected at most 1 argument, got {}",
+                                positional.len()
+                            ),
+                            "remove the extra arguments or pass a single list value",
+                        );
+                    }
+                    for arg in &positional {
+                        let actual = self.infer_val(arg);
+                        self.unify_arg_template(&actual, template);
+                    }
+                }
+                ArgSig::Variadic(template) => {
+                    for arg in &positional {
+                        let actual = self.infer_val(arg);
+                        self.unify_arg_template(&actual, template);
+                    }
+                }
+                ArgSig::Any => self.infer_args(args),
+            },
+            None => self.infer_args(args),
+        }
+
+        let result = self.builtin_sig_result(sig);
+        if sig.diagnostic == BuiltinDiagnostic::TypeProbe
+            && let Some(arg_ty) = type_probe_arg
+        {
+            // `_type` is `α → F α`: thread the argument's type through to
+            // the result so the probe is transparent to downstream
+            // inference, then print the resolved α.
+            if let CompTy::Return(_, value_ty) = &result {
+                self.ctx.unify_ty(value_ty, &arg_ty);
+            }
+            let resolved = self.ctx.unifier.apply_ty(&arg_ty);
+            let pos = self
+                .ctx
+                .pos
+                .map(|sp| format!("@{}..{}: ", sp.start, sp.end))
+                .unwrap_or_default();
+            eprintln!("_type: {}{}", pos, fmt_ty(&resolved));
+        }
+        result
+    }
+
+    fn infer_not(&mut self, val: &Val) -> Ty {
+        let ty = self.infer_val(val);
+        self.ctx.unify_ty_hint(
+            &ty,
+            &Ty::Bool,
+            "`not` flips a Bool — its operand has to be a Bool (`true` / `false` or a comparison)",
+        );
+        Ty::Bool
+    }
+
+    fn infer_binary(&mut self, op: BinaryOp, lhs: &Val, rhs: &Val) -> Ty {
+        let lhs_ty = self.infer_val(lhs);
+        let rhs_ty = self.infer_val(rhs);
+        let hint: &str = match op.kind() {
+            BinaryOpKind::Arith(_) => {
+                "the two sides of a `+` / `-` / `*` / `/` must have the same numeric type"
+            }
+            BinaryOpKind::Compare(_) => {
+                "you can only compare two values of the same type with `<` / `>` / `<=` / `>=`"
+            }
+            BinaryOpKind::Eq(_) => {
+                "you can only check equality between two values of the same type"
+            }
+        };
+        self.ctx.unify_ty_hint(&lhs_ty, &rhs_ty, hint);
+        match op.kind() {
+            BinaryOpKind::Eq(_) | BinaryOpKind::Compare(_) => Ty::Bool,
+            BinaryOpKind::Arith(_) => lhs_ty,
+        }
+    }
+
+    fn exec_comp_ty(&mut self, name: &str, args: &crate::ir::Args, external_only: bool) -> CompTy {
+        // Binding first: lexical/prelude names beat handlers and external
+        // commands.  A binding hit is final; errors in callability do not
+        // fall through to shell-style command lookup.
+        if !external_only && let Some(scheme) = self.env.lookup_binding(name).cloned() {
+            return self.apply_scheme(&scheme, args);
+        }
+
+        // Builtin binding.  These are language names, not user handlers,
+        // so they are consulted before aliases and `within [handlers:]`.
+        if !external_only && let Some(rule) = crate::builtins::builtin_type_rule(name) {
+            use super::builtins::BuiltinTypeRule;
+            match rule {
+                BuiltinTypeRule::Scheme(_, factory) => {
+                    let scheme = factory(&mut self.ctx.unifier);
+                    return self.apply_scheme(&scheme, args);
+                }
+                BuiltinTypeRule::Sig(sig) => return self.apply_builtin_sig(sig, args),
+            }
+        }
+
+        if let Some(handler) = self.env.lookup_handler(name).cloned() {
+            return self.apply_alias_arm(&handler.scheme, args);
+        }
+
+        // Fallback: a name that is neither a binding, a builtin, nor a
+        // handler is an external command.  Prelude functions reach the
+        // checker as bound variables (`App`), never as a bare `Exec` head,
+        // so no internal classification is needed here.
+        self.external_exec_comp_ty(args)
+    }
+
+    fn external_exec_comp_ty(&mut self, args: &crate::ir::Args) -> CompTy {
+        self.infer_args(args);
+        let input = self.ctx.unifier.fresh_mode();
+        CompTy::Return(
+            PipeSpec {
+                input,
+                output: PipeMode::Bytes,
+            },
+            Box::new(Ty::String),
+        )
+    }
+
+    pub(super) fn infer_args(&mut self, args: &crate::ir::Args) {
+        for sub in crate::ir::args::iter_subvals(args) {
+            let _ = self.infer_val(sub);
+        }
+    }
+
+    /// Walk a `Seq`'s statements in order, binding alias definitions into
+    /// the current `TyEnv` scope as they are encountered so subsequent
+    /// statements in the same Seq can resolve against them.  Always runs
+    /// normal inference on every statement afterwards — the binding is
+    /// additive, not a replacement, so errors inside the alias body still
+    /// surface through the alias builtin's own type rule.
+    ///
+    /// The Seq must run inside a `with_scope` frame (added at the caller
+    /// in `infer_comp`'s `Seq` arm) so the bindings do not leak past the
+    /// Seq's lexical extent.  Aliases inside conditional or function
+    /// bodies aren't at Seq level, so they don't leak — documented
+    /// behaviour.
+    ///
+    /// Nullary aliases are bound: the doc's
+    /// `alias greet { return "hi" }; greet` example requires it, and
+    /// `greet x` becoming a static mismatch is preferable to silently
+    /// discarding `x` at runtime.
+    pub(super) fn infer_seq_with_alias_bindings(
+        &mut self,
+        parts: &[Arc<Comp>],
+        empty: Ty,
+    ) -> CompTy {
+        let mut last = CompTy::pure(empty);
+        let mut emits_bytes = false;
+        for part in parts {
+            match alias_statement_shape(part) {
+                Ok(Some((name, thunk))) => {
+                    if !self.reject_handler_for_binding(name, "alias") {
+                        let scheme = self.handler_comp_scheme(name, thunk);
+                        self.env.bind_handler(name.to_string(), scheme, true);
+                    }
+                }
+                Err(msg) => {
+                    self.ctx
+                        .error_hint("malformed alias definition".into(), msg);
+                }
+                Ok(None) => {}
+            }
+            match unalias_statement_shape(part) {
+                Ok(Some(name)) => {
+                    self.env.unbind_removable_handler(name);
+                }
+                Err(msg) => {
+                    self.ctx.error_hint("malformed unalias".into(), msg);
+                }
+                Ok(None) => {}
+            }
+            last = self.infer_comp(part);
+            let out = self.comp_output_mode(&last);
+            emits_bytes |= self.ctx.unifier.resolve_mode(&out) == PipeMode::Bytes;
+        }
+        self.lift_seq_output(last, emits_bytes)
+    }
+
+    /// A `Seq`'s stdout is everything its statements write, so its
+    /// byte-output mode is a join over the sequence: `Bytes` if *any*
+    /// statement emits bytes, not merely the last.  The return value and
+    /// input mode stay the last statement's — only the output mode is
+    /// lifted, so a byte-emitting body (e.g. the `map-lines`/`filter-lines`
+    /// callbacks that `echo` per line) classifies as byte-output.  A
+    /// `Fun`-tailed sequence is a block that yields a function, not a
+    /// pipeline stage, so it keeps its shape.
+    fn lift_seq_output(&mut self, last: CompTy, emits_bytes: bool) -> CompTy {
+        if !emits_bytes {
+            return last;
+        }
+        match self.ctx.unifier.resolve_comp_ty(&last) {
+            CompTy::Fun(..) => last,
+            _ => {
+                let (ret, input, _) = self.extract_return(&last);
+                CompTy::Return(
+                    PipeSpec {
+                        input,
+                        output: PipeMode::Bytes,
+                    },
+                    Box::new(ret),
+                )
+            }
+        }
+    }
+
+    /// Infer a `Chain`: `a ? b ? c …` returns whichever arm succeeds
+    /// at runtime, so the chain's overall *value type* can be any of
+    /// the arms' return types — a union we don't have a precise way
+    /// to spell.  Typecheck each arm independently for errors within
+    /// it, but expose the chain's return type as a fresh variable so
+    /// downstream consumers don't accidentally pin themselves to one
+    /// arm's choice and silently miscompute when another arm wins.
+    /// (Previous code returned the *last* arm's type, which is
+    /// unsound: `(return 1) ? (return "hi")` was typed `String` even
+    /// though the value at runtime was `1: Int`.)
+    ///
+    /// The pipeline I/O modes, by contrast, are *unioned* across the
+    /// arms via [`Self::union_mode`] — exactly as [`Self::merge_branches`]
+    /// does for a conditional — since only one arm runs: `tmux a ? tmux b`
+    /// emits bytes whichever arm wins, so the chain is byte-output rather
+    /// than the value edge `CompTy::pure` would force.
+    fn infer_chain(&mut self, parts: &[Arc<Comp>]) -> CompTy {
+        let arm_specs: Vec<PipeSpec> = parts
+            .iter()
+            .map(|part| {
+                let arm = self.infer_comp(part);
+                match self.ctx.unifier.resolve_comp_ty(&arm) {
+                    CompTy::Return(s, _) => s,
+                    _ => PipeSpec::none(),
+                }
+            })
+            .collect();
+        let mut specs = arm_specs.into_iter();
+        let mut spec = specs.next().unwrap_or_else(PipeSpec::none);
+        for arm_spec in specs {
+            spec = PipeSpec {
+                input: self.union_mode(spec.input, arm_spec.input),
+                output: self.union_mode(spec.output, arm_spec.output),
+            };
+        }
+        CompTy::Return(spec, Box::new(self.ctx.unifier.fresh_ty()))
+    }
+
+    fn infer_map_val(&mut self, entries: &[ValMapEntry]) -> Ty {
+        let all_literal_keys = entries.iter().all(|entry| match entry {
+            ValMapEntry::Entry(Val::String(_), _) => true,
+            ValMapEntry::Entry(_, _) => false,
+            ValMapEntry::Spread(_) => true,
+        });
+
+        if all_literal_keys && !entries.is_empty() {
+            // `all_literal_keys` rules out non-string keys for every
+            // `Entry`, so the match below is exhaustive without a
+            // wildcard `Entry(_, _)` arm.
+            let mut spread_rows = Vec::new();
+            let mut field_entries = Vec::new();
+            for entry in entries {
+                match entry {
+                    ValMapEntry::Entry(Val::String(key), value)
+                        if key == "plugins" && matches!(value, Val::List(_)) =>
+                    {
+                        let Val::List(elems) = value else {
+                            unreachable!("guard restricts value to Val::List(_)")
+                        };
+                        let ty = self.infer_plugins_list(elems);
+                        field_entries.push((key.clone(), ty));
+                    }
+                    ValMapEntry::Entry(Val::String(key), value) => {
+                        field_entries.push((key.clone(), self.infer_val(value)));
+                    }
+                    ValMapEntry::Spread(value) => {
+                        let spread_ty = self.infer_val(value);
+                        let row_var = self.ctx.unifier.fresh_row_var();
+                        self.ctx
+                            .unify_ty(&spread_ty, &Ty::Record(Row::Var(row_var)));
+                        spread_rows.push(row_var);
+                    }
+                    ValMapEntry::Entry(_, _) => {
+                        unreachable!("all_literal_keys guarantees every Entry has a String key")
+                    }
+                }
+            }
+
+            // A duplicate explicit key resolves last-wins, matching the
+            // runtime `Value::map` (`[x: 1, x: 2]` denotes `[x: 2]`).  Keep
+            // each label's final value type; first-appearance order is
+            // retained only to give the row spine a deterministic shape.
+            let mut deduped: Vec<(String, Ty)> = Vec::new();
+            for (key, value_ty) in field_entries {
+                match deduped.iter_mut().find(|(k, _)| *k == key) {
+                    Some(slot) => slot.1 = value_ty,
+                    None => deduped.push((key, value_ty)),
+                }
+            }
+
+            let mut row = match spread_rows.len() {
+                0 => Row::Empty,
+                1 => Row::Var(spread_rows[0]),
+                _ => Row::Var(self.ctx.unifier.fresh_row_var()),
+            };
+            for (key, value_ty) in deduped.into_iter().rev() {
+                row = Row::Extend(key, Box::new(value_ty), Box::new(row));
+            }
+            Ty::Record(row)
+        } else {
+            // Dynamic-key map (`[$k: v, …]`) — the type is `Map<elem>`,
+            // where `elem` is shared by every entry's value and every
+            // spread's element type.  Unifying all of them rules out the
+            // silent-mistyping shape: without the constraint a literal
+            // like `[$k: 1, $j: "hi"]` would check as `Map<α>` with α
+            // free, leaving the consumer free to pick (e.g. `Map<Int>`)
+            // while a String still sits at one key.
+            //
+            // Every dynamic key must itself be a `String` — the runtime
+            // rejects non-string keys with a sigil-1 error, so we lift
+            // that check up to typecheck time.  A literal like `[2: foo]`
+            // is an Int-vs-String type error rather than a deferred
+            // runtime failure.
+            let elem = self.ctx.unifier.fresh_ty();
+            for entry in entries {
+                match entry {
+                    ValMapEntry::Entry(key, value) => {
+                        let key_ty = self.infer_val(key);
+                        self.ctx.unify_ty_hint(
+                            &key_ty,
+                            &Ty::String,
+                            "map keys must be Strings — quote a bare token or convert with `str`",
+                        );
+                        let value_ty = self.infer_val(value);
+                        self.ctx.unify_ty(&value_ty, &elem);
+                    }
+                    ValMapEntry::Spread(value) => {
+                        let spread_ty = self.infer_val(value);
+                        self.ctx
+                            .unify_ty(&spread_ty, &Ty::Map(Box::new(elem.clone())));
+                    }
+                }
+            }
+            Ty::Map(Box::new(elem))
+        }
+    }
+
+    pub(super) fn infer_val(&mut self, val: &Val) -> Ty {
+        match val {
+            Val::Unit => Ty::Unit,
+            Val::TildePath(_) => Ty::String,
+            Val::String(_) => Ty::String,
+            Val::Int(_) => Ty::Int,
+            Val::Float(_) => Ty::Float,
+            Val::Bool(_) => Ty::Bool,
+            Val::Variable(name) => {
+                if matches!(
+                    name.as_str(),
+                    "within" | "try" | "guard" | "grant" | "audit"
+                ) {
+                    self.ctx.error_hint(
+                        format!(
+                            "'{name}' is a control operator, not a value; it can only appear in command position"
+                        ),
+                        &format!("did you mean to invoke `{name}` as a command (e.g. `{name} ...`)?"),
+                    );
+                    self.ctx.unifier.fresh_ty()
+                } else {
+                    match self.env.lookup_binding(name).cloned() {
+                        Some(scheme) => instantiate(&mut self.ctx.unifier, &scheme),
+                        None => {
+                            match super::builtins::builtin_scheme(name, &mut self.ctx.unifier) {
+                                Some(scheme) => instantiate(&mut self.ctx.unifier, &scheme),
+                                None if self.env.lookup_handler(name).is_some() => {
+                                    self.ctx.error_hint(
+                                        format!(
+                                            "`{name}` is a handler entry, not a first-class value"
+                                        ),
+                                        "aliases and `within` handlers are command handlers; use command position to invoke them",
+                                    );
+                                    self.ctx.unifier.fresh_ty()
+                                }
+                                None if crate::builtins::is_builtin(name) => {
+                                    self.ctx.error_hint(
+                                        format!(
+                                            "`{name}` is a builtin command, not a first-class value"
+                                        ),
+                                        &format!(
+                                            "did you mean to invoke `{name} ...` in command position?"
+                                        ),
+                                    );
+                                    self.ctx.unifier.fresh_ty()
+                                }
+                                None => self.ctx.unifier.fresh_ty(),
+                            }
+                        }
+                    }
+                }
+            }
+            Val::Thunk(comp) => Ty::Thunk(Box::new(self.with_scope(|this| this.infer_comp(comp)))),
+            Val::List(elems) => {
+                let elem = self.ctx.unifier.fresh_ty();
+                for entry in elems {
+                    let entry_ty = match entry {
+                        ValListElem::Single(value) => self.infer_val(value),
+                        ValListElem::Spread(value) => {
+                            let spread_ty = self.infer_val(value);
+                            let inner = self.ctx.unifier.fresh_ty();
+                            self.ctx.unify_ty_hint(
+                                &spread_ty,
+                                &Ty::List(Box::new(inner.clone())),
+                                "a `...x` spread copies the elements of a \
+                                 list into this position, so the value \
+                                 after `...` must itself be a list",
+                            );
+                            inner
+                        }
+                    };
+                    self.ctx.unify_ty(&entry_ty, &elem);
+                }
+                Ty::List(Box::new(elem))
+            }
+            Val::Map(entries) => self.infer_map_val(entries),
+            Val::Variant { label, payload } => {
+                // Variant construction is open: `` `ok 5 `` infers
+                // [`ok: Int | ρ] where ρ is a fresh row variable.  The
+                // label is stored *with* its leading backtick in the row so that
+                // alphabet checks at unify time treat it as a tag.
+                let payload_ty = match payload {
+                    Some(p) => self.infer_val(p),
+                    None => Ty::Unit,
+                };
+                let rest = self.ctx.unifier.fresh_row();
+                Ty::Variant(Row::Extend(
+                    tag_row_label(label),
+                    Box::new(payload_ty),
+                    Box::new(rest),
+                ))
+            }
+        }
+    }
+
+    fn infer_pipeline(&mut self, stages: &[Arc<Comp>]) -> CompTy {
+        // The parser guarantees ≥2 stages: a single-stage parse is
+        // unwrapped to the bare stage and never becomes Ast::Pipeline,
+        // and the elaborator preserves that shape.
+        debug_assert!(stages.len() >= 2, "Pipeline carries ≥2 stages");
+
+        let mut stage_tys: Vec<CompTy> =
+            stages.iter().map(|stage| self.infer_comp(stage)).collect();
+        // A stage consumed as a value argument is the data-last fold's
+        // function: its input channel is `∅` (the upstream arrives as the
+        // final argument, not over a byte pipe), while its output channel
+        // is whatever its application body emits — a `{ |x| echo $x }`
+        // consumer is a `Bytes` producer for the stage after it.  The
+        // rewrite below replaces such a stage's type with its application
+        // body; record the value-input fact now so the annotation pass
+        // and the pipeline's tail output mode read input `∅` paired with
+        // the applied body's output.
+        let mut consumed_as_value = vec![false; stage_tys.len()];
+        for i in 0..stage_tys.len() - 1 {
+            // A clash on this edge underlines its consumer stage (the stage
+            // that fails to accept the upstream), falling back to the
+            // producer.  Without this narrowing the diagnostic carries
+            // whatever `ctx.pos` the last-inferred stage left behind, so a
+            // clash on an early edge would underline the final stage.
+            let edge_span = stages[i + 1].span.or(stages[i].span);
+            let out = self.comp_output_mode(&stage_tys[i]);
+            let out_resolved = self.ctx.unifier.resolve_mode(&out);
+
+            // A value-producing stage (`∅` output) feeding a value-arg
+            // function consumer is data-last application: `x | f` is
+            // `f !{x}`, and `apply_piped_value` flows the produced value
+            // into the function's first parameter.  A
+            // value producer feeding a non-application stage (a concrete
+            // `Return`, e.g. a `from-X` byte decoder) is a plain channel
+            // edge: unify the modes so a `∅`-into-`Bytes` adjacency is
+            // rejected as the §4.2.1 mismatch it is, rather than forced
+            // through the function path.  `consumes_value_arg` peers past
+            // block-literal thunks so a `{ |v| … }` consumer still takes
+            // the application path.
+            //
+            // A still-unresolved output mode is the diverging-producer
+            // case (`{ fail … }`, whose `fail` carries fresh, quantified
+            // channel modes): it grounds to `∅` (value edge) per the
+            // `Var → Empty` grounding rule, so when the consumer takes a
+            // value arg it is a value edge too.  Treat it like `None`
+            // here, otherwise the producer's *thunk* value type is
+            // unified against the consumer's parameter (e.g. `{Command α}`
+            // vs `Int`) instead of forcing the producer and piping its
+            // return type — the runtime would then hand the consumer the
+            // unforced producer block rather than running it.
+            let out_is_value_edge = matches!(out_resolved, PipeMode::None | PipeMode::Var(_));
+            if out_is_value_edge && self.consumes_value_arg(&stage_tys[i + 1]) {
+                let (piped_ty, _, _) = self.extract_return(&stage_tys[i]);
+                // A bare-block producer (`{ … }`) is a `Return(_,
+                // Thunk(body))`: the runtime forces it once before the
+                // value crosses the edge (see `run_value_fold`), so the
+                // piped value is the *body's*
+                // return type, not the thunk itself.  Deref one thunk
+                // level to mirror that single force — without this a
+                // `{ fail … } | { |v| … }` producer pipes `{Command α}`
+                // into the consumer's parameter, clashing with whatever
+                // concrete type the consumer expects.
+                let piped_ty = self.deref_forced_producer(piped_ty);
+                let next = stage_tys[i + 1].clone();
+                stage_tys[i + 1] =
+                    self.with_span(edge_span, |this| this.apply_piped_value(next, piped_ty));
+                consumed_as_value[i + 1] = true;
+                continue;
+            }
+
+            let inp = self.comp_input_mode(&stage_tys[i + 1]);
+            self.with_span(edge_span, |this| this.ctx.unify_mode(&out, &inp));
+        }
+
+        // Pipeline shape: input from the first stage, output mode and
+        // return type from the last.  `Fun` at the tail is the
+        // byte-pipe-to-value-arg case (e.g. `cat foo | length`): the
+        // typechecker doesn't yet model that connection structurally,
+        // so `comp_return_ty` drills past the arrows the same way
+        // `comp_output_mode` does for modes.  For a `Var`-resolved
+        // last we then unify it back against the synthesized `Return`
+        // shape, so consumers of the pipeline see the actual return
+        // type rather than an unrelated fresh variable.
+        let input = self.comp_input_mode(&stage_tys[0]);
+        let last_consumed = consumed_as_value[stage_tys.len() - 1];
+        let last = stage_tys
+            .last()
+            .expect("≥2 stages by invariant above")
+            .clone();
+        // The tail's contribution to the pipeline's output channel: a
+        // value-arg-consumed last stage emits no bytes on its own channel,
+        // so the pipeline is a value producer there.
+        let output = self.stage_own_spec(&last, last_consumed).output;
+        let ret_ty = self.comp_return_ty(&last);
+        if matches!(self.ctx.unifier.resolve_comp_ty(&last), CompTy::Var(_)) {
+            let bound = CompTy::Return(
+                PipeSpec {
+                    input: self.comp_input_mode(&last),
+                    output,
+                },
+                Box::new(ret_ty.clone()),
+            );
+            self.ctx.unify_comp_ty(&last, &bound);
+        }
+
+        // Record each stage's byte channels for the annotation pass.
+        // The modes may still be variables; they resolve once the whole
+        // walk's constraints are in.
+        for (i, (stage, ty)) in stages.iter().zip(&stage_tys).enumerate() {
+            let spec = self.stage_own_spec(ty, consumed_as_value[i]);
+            self.ctx
+                .stage_specs
+                .insert(stage.as_ref() as *const Comp as usize, spec);
+        }
+
+        CompTy::Return(PipeSpec { input, output }, Box::new(ret_ty))
+    }
+
+    fn infer_index(&mut self, target: &Val, keys: &[crate::source::Spanned<Val>]) -> CompTy {
+        let mut current_ty = self.infer_val(target);
+        for key in keys {
+            current_ty = self.with_span(key.span, |this| {
+                this.infer_index_step(&current_ty, &key.item)
+            });
+        }
+        CompTy::pure(current_ty)
+    }
+
+    /// One step of an indexing chain — `current_ty[key]`.  Runs under
+    /// the caller's narrowed pos (`infer_index` wraps each call in
+    /// `with_span`) so any unify failure here underlines just this
+    /// step rather than the whole chain.
+    fn infer_index_step(&mut self, current_ty: &Ty, key: &Val) -> Ty {
+        let resolved = self.ctx.unifier.apply_ty(current_ty);
+        match resolved {
+            Ty::List(elem) => {
+                // List index: the key must be `Int`, so unifying it
+                // against `Ty::Int` rejects `xs["foo"]` on a `[_]`.
+                let key_ty = self.infer_val(key);
+                self.ctx.unify_ty_hint(
+                    &key_ty,
+                    &Ty::Int,
+                    "indexing into a list takes an Integer (the position)",
+                );
+                *elem
+            }
+            Ty::Map(elem) => {
+                // Map index: key must be `String`.  Same shape of
+                // discarded-key-type unsoundness as the List case
+                // above.
+                let key_ty = self.infer_val(key);
+                self.ctx.unify_ty_hint(
+                    &key_ty,
+                    &Ty::String,
+                    "indexing into a map takes a String (the key)",
+                );
+                *elem
+            }
+            Ty::Thunk(_) => {
+                self.ctx.error_hint(
+                    "this is a block — you can't read a field from it directly".to_string(),
+                    "run the block first, then index its result: `!{!$t}[field]` \
+                     (`!$t[field]` reads `field` off `$t` and forces *that*)",
+                );
+                let _ = self.infer_val(key);
+                self.ctx.unifier.fresh_ty()
+            }
+            _ => {
+                // A statically-known string key (quoted or bare-non-numeric
+                // after `Val::from_word` classification) reads a record
+                // field; bare-numeric `Val::Int` keys flow through the
+                // dynamic-key arm below and reject with the "can't index
+                // …" hint (no record uses an Int field name).
+                let record_label = match key {
+                    Val::String(label) => Some(label.clone()),
+                    _ => None,
+                };
+                if let Some(label) = record_label {
+                    let field_ty = self.ctx.unifier.fresh_ty();
+                    let tail_row = self.ctx.unifier.fresh_row();
+                    let record_ty = Ty::Record(Row::Extend(
+                        label.clone(),
+                        Box::new(field_ty.clone()),
+                        Box::new(tail_row),
+                    ));
+                    // When the target is concretely *not* a record
+                    // (Int, String, Bool, …), the raw unify error
+                    // surfaces `Int vs [b: α, ...ρ]` — accurate but
+                    // hostile.  Catch the concrete case and produce a
+                    // sentence the user can act on.
+                    let resolved = self.ctx.unifier.apply_ty(current_ty);
+                    let concretely_non_record = !matches!(resolved, Ty::Record(_) | Ty::Var(_));
+                    if concretely_non_record {
+                        self.ctx.error_hint(
+                            format!(
+                                "you tried to read the field `{label}` from a value of type {}, but only records have fields",
+                                fmt_ty(&resolved)
+                            ),
+                            "check that the value you're indexing is a record like `[a: 1, b: 2]`",
+                        );
+                        field_ty
+                    } else {
+                        self.ctx.unify_ty(current_ty, &record_ty);
+                        field_ty
+                    }
+                } else {
+                    // Dynamic-key index on a non-List/Map/Thunk
+                    // target.  Catching this case is what makes
+                    // `let x = 42; $x[$k]` a typecheck error rather
+                    // than a deferred runtime failure.
+                    //
+                    // For a free target, use the key's type to pin
+                    // it: `Int` ⇒ `List<elem>`, `String` ⇒
+                    // `Map<elem>`.  Otherwise leave it; whatever pins
+                    // it later will run through the List/Map arms
+                    // above and unify the key correctly.
+                    //
+                    // For a target whose shape is already known and
+                    // isn't `List` / `Map` / `Thunk`, raise a
+                    // typecheck error — no value of that shape
+                    // accepts dynamic indexing.
+                    let key_ty = self.infer_val(key);
+                    let elem = self.ctx.unifier.fresh_ty();
+                    let resolved_target = self.ctx.unifier.apply_ty(current_ty);
+                    match resolved_target {
+                        Ty::Var(_) => match self.ctx.unifier.apply_ty(&key_ty) {
+                            Ty::Int => self
+                                .ctx
+                                .unify_ty(current_ty, &Ty::List(Box::new(elem.clone()))),
+                            Ty::String => self
+                                .ctx
+                                .unify_ty(current_ty, &Ty::Map(Box::new(elem.clone()))),
+                            _ => {}
+                        },
+                        other => {
+                            self.ctx.error_hint(
+                                format!(
+                                    "can't index a value of type {} with a runtime key",
+                                    fmt_ty(&other)
+                                ),
+                                "only lists (key: Integer) and maps (key: String) \
+                                 accept a key computed at runtime — for a record \
+                                 field, use a static name like $r[fieldname]",
+                            );
+                        }
+                    }
+                    elem
+                }
+            }
+        }
+    }
+
+    /// Check one `case` arm against the case form's `result_cty` and the
+    /// scrutinee's resolved per-label payload row `scrut_payloads`.
+    fn check_case_arm(
+        &mut self,
+        label: &str,
+        handler_ty: &Ty,
+        result_cty: &CompTy,
+        scrut_payloads: &std::collections::HashMap<String, Ty>,
+    ) -> Ty {
+        let payload_ty = self.ctx.unifier.fresh_ty();
+        let expected = Ty::Thunk(Box::new(CompTy::Fun(
+            Box::new(payload_ty.clone()),
+            Box::new(result_cty.clone()),
+        )));
+        if self.ctx.unifier.unify_ty(handler_ty, &expected).is_err() {
+            let expected_resolved = self.ctx.unifier.apply_ty(&expected);
+            let found_resolved = self.ctx.unifier.apply_ty(handler_ty);
+            self.ctx.emit_kind(
+                crate::typecheck::scheme::TypeErrorKind::CaseLabelTypeMismatch {
+                    label: label.to_string(),
+                    expected: expected_resolved,
+                    found: found_resolved,
+                },
+                None,
+            );
+        }
+        // If the scrutinee already has a known payload at this label
+        // (e.g. the scrutinee was inferred from a literal `\`ok 5`),
+        // force the handler's payload to agree with it here, while
+        // pos is on the arm.  Without this the mismatch only surfaces
+        // in the final row-unify, where pos has been restored and the
+        // caret lands on the entire `case` form.
+        if let Some(scrut_payload) = scrut_payloads.get(label)
+            && self
+                .ctx
+                .unifier
+                .unify_ty(&payload_ty, scrut_payload)
+                .is_err()
+        {
+            let expected_resolved = self.ctx.unifier.apply_ty(scrut_payload);
+            let found_resolved = self.ctx.unifier.apply_ty(&payload_ty);
+            self.ctx.emit_kind(
+                crate::typecheck::scheme::TypeErrorKind::TyMismatch {
+                    expected: expected_resolved,
+                    actual: found_resolved,
+                },
+                Some(
+                    "the `case` arm's handler must accept the payload \
+                     type the scrutinee constructs at that tag",
+                ),
+            );
+            return self.ctx.unifier.fresh_ty();
+        }
+        payload_ty
+    }
+
+    fn infer_case(
+        &mut self,
+        scrutinee: &crate::source::Spanned<Val>,
+        table: &crate::source::Spanned<Val>,
+    ) -> CompTy {
+        // Scrutinee is a variant value; table is a record-of-thunks value.
+        // CBPV: `case` is the eliminator over a sum value with a record of
+        // continuations — both operands sit in value position.
+        let scrutinee_span = scrutinee.span;
+        let table_span = table.span;
+        let scrut_ty = self.with_span(scrutinee_span, |this| this.infer_val(&scrutinee.item));
+        let table_ty = self.with_span(table_span, |this| this.infer_val(&table.item));
+        let result_cty = self.ctx.unifier.fresh_comp_ty();
+
+        // Pre-build a lookup from handler label → that handler's inner
+        // Comp span (the body of the thunk the user wrote at this arm).
+        // When a per-arm payload-mismatch fires, we point the caret at
+        // *that arm* rather than at the whole `case` form — `let r =
+        // case x [\`ok: { … }, \`err: { … }]` is far too wide a target
+        // for what is conceptually a single-arm complaint.
+        let handler_spans = collect_handler_spans(&table.item);
+
+        // Shape constraints.  If the scrutinee is already concretely
+        // *not* a variant (Int, String, Record, …), prefer a friendly
+        // "case needs a variant" diagnostic over the raw row-shape
+        // mismatch — the latter prints `[...ρ]` which a beginner has
+        // no way to read.
+        let scrut_resolved = self.ctx.unifier.apply_ty(&scrut_ty);
+        let scrut_row_var = self.ctx.unifier.fresh_row_var();
+        self.with_span(scrutinee_span, |this| match scrut_resolved {
+            Ty::Variant(_) | Ty::Var(_) => {
+                this.ctx
+                    .unify_ty(&scrut_ty, &Ty::Variant(Row::Var(scrut_row_var)));
+            }
+            other => {
+                this.ctx.error_hint(
+                    format!(
+                        "`case` needs a variant value (something built with a backtick, like `` `ok 1 `` or `` `err msg ``), but this is a value of type {}",
+                        super::fmt::fmt_ty(&other)
+                    ),
+                    "construct the value with a tag (`name payload) before scrutinising it",
+                );
+            }
+        });
+        let handler_row_var = self.ctx.unifier.fresh_row_var();
+        self.with_span(table_span, |this| {
+            this.ctx
+                .unify_ty(&table_ty, &Ty::Record(Row::Var(handler_row_var)));
+        });
+
+        // Resolve the handler row.  Record literals always close to Empty,
+        // so this returns a clean label list under normal use.
+        let handler_resolved = self.ctx.unifier.apply_row(&Row::Var(handler_row_var));
+        let handler_labels = collect_extends(&handler_resolved);
+
+        // Pre-resolve the scrutinee's per-label payload types so the
+        // per-arm loop can unify each handler's payload against its
+        // matching scrut payload *under the arm's own pos*.  Anything
+        // here that's still a Var was contributed by the handlers and
+        // is fine to leave for the final row-unify pass.
+        let scrut_resolved_row = self.ctx.unifier.apply_row(&Row::Var(scrut_row_var));
+        let scrut_payloads: std::collections::HashMap<String, Ty> =
+            collect_extends(&scrut_resolved_row).into_iter().collect();
+
+        // Per-label connection: each handler at `.l` must be a thunk of
+        // a function `payload_l → result_cty`.  Build the closed
+        // scrutinee row from these payload types as we go.
+        let mut closed_scrut = Row::Empty;
+        for (label, handler_ty) in handler_labels.iter().rev() {
+            // Narrow pos to *this arm's* body for the duration of the
+            // per-arm work, so an arm-local error (handler shape,
+            // payload type, return-type disagreement) underlines that
+            // arm rather than the entire `case` form.
+            let arm_span = handler_spans.get(label.as_str()).copied();
+            let closed_payload = self.with_span(arm_span, |this| {
+                this.check_case_arm(label, handler_ty, &result_cty, &scrut_payloads)
+            });
+            closed_scrut = Row::Extend(
+                label.clone(),
+                Box::new(closed_payload),
+                Box::new(closed_scrut),
+            );
+        }
+
+        // Force scrutinee row to exactly the handler label set.  Row mismatch
+        // becomes CaseNotExhaustive: an extra label on the handler side means
+        // the handler covers a constructor the scrutinee can never produce;
+        // a missing label means the scrutinee has a constructor with no arm.
+        if let Err(kind) = self
+            .ctx
+            .unifier
+            .unify_row(&Row::Var(scrut_row_var), &closed_scrut)
+        {
+            use crate::typecheck::scheme::TypeErrorKind;
+            let translated = match kind {
+                TypeErrorKind::RowExtraField { label } => TypeErrorKind::CaseNotExhaustive {
+                    missing: vec![],
+                    extra: vec![label],
+                },
+                TypeErrorKind::RowMissingField { label } => TypeErrorKind::CaseNotExhaustive {
+                    missing: vec![label],
+                    extra: vec![],
+                },
+                other => other,
+            };
+            self.ctx.emit_kind(translated, None);
+        }
+
+        result_cty
+    }
+
+    /// Establish each binding as a self-referential mono thunk, then infer
+    /// every RHS in that recursive environment, unifying it against its own
+    /// thunk type.  Returns the per-binding computation types (`betaᵢ`) — the
+    /// shared core of both `LetRec` arms.  The caller decides what to do with
+    /// the still-installed mono self-bindings: `slot: None` generalises and
+    /// rebinds them into the current scope; `slot: Some(i)` infers inside a
+    /// throwaway scope and returns binding `i`'s type.
+    fn infer_letrec_betas(&mut self, bindings: &[(String, Val)]) -> Vec<CompTy> {
+        let betas: Vec<CompTy> = bindings
+            .iter()
+            .map(|_| self.ctx.unifier.fresh_comp_ty())
+            .collect();
+
+        for ((name, _), beta) in bindings.iter().zip(betas.iter()) {
+            self.env.bind(
+                name.clone(),
+                Scheme::mono(Ty::Thunk(Box::new(beta.clone()))),
+            );
+        }
+        for ((_, lam_val), beta) in bindings.iter().zip(betas.iter()) {
+            let lam_ty = self.infer_val(lam_val);
+            self.ctx
+                .unify_ty(&lam_ty, &Ty::Thunk(Box::new(beta.clone())));
+        }
+        betas
+    }
+
+    /// `LetRec { slot: Some(i) }` re-establishes the group in a throwaway
+    /// scope and returns binding `i`'s lambda.  Infer the whole group inside a
+    /// `with_scope` frame so its type errors surface and the self-bindings do
+    /// not leak, and yield binding `i`'s thunk type as the produced value.
+    /// These nodes are synthesised by `eval_letrec` at runtime, so the path is
+    /// normally exercised only when such IR is re-checked; inferring the
+    /// bodies keeps it sound rather than returning an unconstrained fresh var.
+    fn infer_letrec_slot(&mut self, bindings: &[(String, Val)], slot: usize) -> CompTy {
+        self.with_scope(|this| {
+            let betas = this.infer_letrec_betas(bindings);
+            let beta = betas
+                .get(slot)
+                .cloned()
+                .unwrap_or_else(|| this.ctx.unifier.fresh_comp_ty());
+            CompTy::pure(Ty::Thunk(Box::new(beta)))
+        })
+    }
+
+    fn infer_letrec(&mut self, bindings: &[(String, Val)]) -> CompTy {
+        let betas = self.infer_letrec_betas(bindings);
+        // Drop the mono self-bindings before generalising.  If they
+        // stayed in env, `env_free_vars` would see their (post-body)
+        // free comp/ty/row vars as residuals and `generalize` would
+        // refuse to quantify them — which silently un-poly's every
+        // recursive scheme and lets one call site bind a polymorphic
+        // var that all other call sites then share.  Re-bind below
+        // with the polymorphic schemes once each is built.
+        for (name, _) in bindings {
+            self.env.unbind(name);
+        }
+        let mut schemes: Vec<(String, Scheme)> = Vec::with_capacity(bindings.len());
+        for ((name, _), beta) in bindings.iter().zip(betas.iter()) {
+            let thunk_ty = Ty::Thunk(Box::new(beta.clone()));
+            let scheme = generalize(&mut self.ctx.unifier, self.env, &thunk_ty);
+            schemes.push((name.clone(), scheme));
+        }
+        for (name, scheme) in schemes {
+            self.env.bind(name, scheme);
+        }
+
+        CompTy::pure(Ty::Unit)
+    }
+
+    pub(super) fn infer_comp(&mut self, comp: &Comp) -> CompTy {
+        // Update position from the node's span.
+        if let Some(span) = comp.span {
+            self.ctx.pos = Some(span);
+        }
+
+        match &comp.item {
+            CompKind::Return(value) => CompTy::pure(self.infer_val(value)),
+            CompKind::Lam { param, body } => {
+                let param_ty = self.ctx.unifier.fresh_ty();
+                let body_ty = self.with_scope(|this| {
+                    this.bind_pattern(param, &param_ty);
+                    this.infer_comp(body)
+                });
+                CompTy::Fun(Box::new(param_ty), Box::new(body_ty))
+            }
+            CompKind::Force(value) => {
+                let val_ty = self.infer_val(value);
+                let cty = self.ctx.unifier.fresh_comp_ty();
+                self.ctx.unify_ty_hint(
+                    &val_ty,
+                    &Ty::Thunk(Box::new(cty.clone())),
+                    "the `!` operator runs a block — its operand must be a \
+                     block value (something built with `{ ... }`), not data",
+                );
+                cty
+            }
+            CompKind::Bind {
+                comp: inner,
+                pattern,
+                rest,
+                ..
+            } => {
+                let inner_ty = self.infer_comp(inner);
+                // A `Fun` RHS is a lambda: evaluating it builds a closure
+                // and emits no bytes, so its output channel is `∅`.  Any
+                // other shape carries its `Return` spec's output mode.
+                let (bound_ty, rhs_output) = match self.ctx.unifier.resolve_comp_ty(&inner_ty) {
+                    CompTy::Fun(..) => (Ty::Thunk(Box::new(inner_ty)), PipeMode::None),
+                    _ => {
+                        let (ty, _, output) = self.extract_return(&inner_ty);
+                        (ty, output)
+                    }
+                };
+                self.ctx
+                    .bind_outputs
+                    .insert(comp as *const Comp as usize, rhs_output);
+
+                match pattern {
+                    IrPattern::Name(name) => {
+                        self.ctx
+                            .bind_tys
+                            .insert(comp as *const Comp as usize, bound_ty.clone());
+                        let scheme = generalize(&mut self.ctx.unifier, self.env, &bound_ty);
+                        self.env.bind(name.clone(), scheme);
+                    }
+                    other => {
+                        let concrete = self.ctx.unifier.apply_ty(&bound_ty);
+                        self.bind_pattern(other, &concrete);
+                    }
+                }
+                self.infer_comp(rest)
+            }
+            CompKind::App { head, args } => {
+                let head_ty = self.infer_comp(head);
+                // Surface the common surface error — a literal value
+                // (`'foo'`, `42`, ...) used as a command head with args —
+                // before falling into the general `Cmd a vs a → b`
+                // mismatch path, which prints implementation jargon.
+                // We only flag this when there's at least one positional
+                // arg; a spread-only call still wants the cascading check.
+                let positional = crate::ir::args::positional(args).unwrap_or_default();
+                if !positional.is_empty()
+                    && let Some(ty) = self.command_non_callable_ty(&head_ty)
+                {
+                    let hint = if looks_like_nested_quote_mistake(head, &positional) {
+                        "this looks like a single \"...\" string broken \
+                         apart by an unescaped inner \" — nested double \
+                         quotes close the outer string. Escape them as \
+                         \\\" inside the string, or drop the inner quoting"
+                    } else {
+                        "a command head must be a function or a thunk; \
+                         a value here is data, not a callable — pass it \
+                         as an argument or wrap a callable instead"
+                    };
+                    self.ctx.emit_kind(
+                        crate::typecheck::scheme::TypeErrorKind::CommandNotCallable { ty },
+                        Some(hint),
+                    );
+                    // Still type-check the args for cascading errors, then
+                    // return a fresh result so the outer pipeline / chain
+                    // type-checks against something coherent.
+                    for sub in crate::ir::args::iter_subvals(args) {
+                        let _ = self.infer_val(sub);
+                    }
+                    return self.ctx.unifier.fresh_comp_ty();
+                }
+                self.apply_args(head_ty, args)
+            }
+            CompKind::Exec(e) => match &e.head {
+                CommandWord::Name(CommandName::Bare(name)) => {
+                    self.exec_comp_ty(name, &e.args, false)
+                }
+                CommandWord::External(CommandName::Bare(name)) => {
+                    self.exec_comp_ty(name, &e.args, true)
+                }
+                CommandWord::Name(CommandName::Path(_) | CommandName::TildePath(_))
+                | CommandWord::External(CommandName::Path(_) | CommandName::TildePath(_)) => {
+                    self.external_exec_comp_ty(&e.args)
+                }
+            },
+            CompKind::Pipeline { stages, .. } => self.infer_pipeline(stages),
+            CompKind::Chain(parts) => self.infer_chain(parts),
+            CompKind::Binary(op, lhs, rhs) => CompTy::pure(self.infer_binary(*op, lhs, rhs)),
+            CompKind::Not(val) => CompTy::pure(self.infer_not(val)),
+            CompKind::Interpolation(parts) => {
+                for value in parts {
+                    let _ = self.infer_val(value);
+                }
+                CompTy::pure(Ty::String)
+            }
+            CompKind::Index { target, keys } => self.infer_index(target, keys),
+            CompKind::Seq(comps) => {
+                // Run the seq inside a fresh TyEnv frame so alias bindings
+                // introduced by statements in this Seq do not leak past the
+                // Seq's lexical extent.  The alias-binding logic lives in
+                // `infer_seq_with_alias_bindings`; `with_scope` supplies the
+                // push/pop.
+                self.with_scope(|this| this.infer_seq_with_alias_bindings(comps, Ty::Unit))
+            }
+            CompKind::LetRec {
+                slot: None,
+                bindings,
+            } => self.infer_letrec(bindings),
+            CompKind::LetRec {
+                slot: Some(i),
+                bindings,
+            } => self.infer_letrec_slot(bindings, *i),
+            CompKind::If { cond, then, else_ } => {
+                let cond_ty = self.infer_val(&cond.item);
+                // Narrow pos to the cond's own span (when the parser
+                // captured one) before the Bool unify so a non-Bool
+                // diagnostic underlines just the cond, not the whole
+                // `if … else …` form.
+                self.with_span(cond.span, |this| {
+                    this.ctx.unify_ty_hint(
+                        &cond_ty,
+                        &Ty::Bool,
+                        "the condition of an `if` must be a Bool — either `true`/`false` \
+                         or an expression that produces one (e.g. `$[$x == 1]`)",
+                    );
+                });
+                let then_cty = self.infer_comp(then);
+                let else_cty = self.infer_comp(else_);
+                self.merge_branches(
+                    vec![then_cty, else_cty],
+                    "both branches of an `if` must produce the same type, \
+                     because the whole expression has one type",
+                )
+            }
+            CompKind::Case { scrutinee, table } => self.infer_case(scrutinee, table),
+            CompKind::Scope(op) => match op {
+                ScopeOp::Within { opts, body } => self.infer_within(opts, body),
+                ScopeOp::Grant { caps, body } => self.infer_grant(caps, body),
+                ScopeOp::Try { body, handler } => self.infer_try(body, handler),
+                ScopeOp::Guard { body, cleanup } => self.infer_guard(body, cleanup),
+                ScopeOp::Audit { body } => self.infer_audit(body),
+                // Redirect-frame scope: a transparent passthrough for
+                // the body's I/O modes — the redirect installs fds
+                // for the body's duration but does not change its
+                // type signature.  Unlike the other scope ops the
+                // body is an `Arc<Comp>` rather than a thunk-shaped
+                // `Val`, so we infer it directly.
+                ScopeOp::Redirect { body, .. } => self.infer_comp(body),
+            },
+        }
+    }
+}

@@ -1,0 +1,19 @@
+hello
+TEST_VAR correctly unset
+1
+2
+1
+/
+cwd restored
+handled
+got a b c
+mycmd gone
+inner
+outer
+caught foo x y
+intercepted nonexistent-command
+builtin runs normally
+from external
+handler-cat
+env=scoped
+within tests done

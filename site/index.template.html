@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ral — a typed, capability-secure shell</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg:      #0a0807;
+      --ivory:   #e8ded0;
+      --muted:   #b3a48d;
+      --orange:  #ff7a15;
+      --bright:  #ffae5c;
+      --dim:     #c46010;
+      --dimmer:  #7a3800;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--ivory);
+      font-family: 'Lucida Console', 'Courier New', 'DejaVu Sans Mono', monospace;
+      font-size: 20px;
+      overflow-x: hidden;
+    }
+
+    /* scanlines */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: repeating-linear-gradient(
+        to bottom,
+        transparent 0px,
+        transparent 3px,
+        rgba(0, 0, 0, 0.18) 3px,
+        rgba(0, 0, 0, 0.18) 4px
+      );
+      pointer-events: none;
+      z-index: 10;
+    }
+
+    /* vignette */
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: radial-gradient(
+        ellipse 80% 80% at 50% 50%,
+        transparent 55%,
+        rgba(0, 0, 0, 0.75) 100%
+      );
+      pointer-events: none;
+      z-index: 9;
+    }
+
+    main {
+      position: relative;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 2.2rem;
+      z-index: 1;
+      padding: 3rem 1.5rem;
+    }
+
+    h1 {
+      font-size: clamp(3.5rem, 10vw, 6rem);
+      font-weight: normal;
+      letter-spacing: 0.6rem;
+      text-indent: 0.6rem;
+      color: var(--bright);
+      text-shadow:
+        0 0 6px  var(--orange),
+        0 0 18px var(--dim),
+        0 0 40px var(--dimmer);
+    }
+
+    /* the crest: an empty force-block above the name */
+    .sigil {
+      font-size: clamp(3rem, 7vw, 4.5rem);
+      line-height: 1;
+      color: var(--dim);
+      text-shadow:
+        0 0 8px  var(--dimmer),
+        0 0 28px rgba(232, 104, 0, 0.25);
+      margin-bottom: -0.9rem;
+      user-select: none;
+    }
+
+    .tagline {
+      font-size: 1.05rem;
+      color: var(--muted);
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+    }
+
+    .motto {
+      font-size: 0.85rem;
+      color: var(--dimmer);
+      letter-spacing: 0.18em;
+      margin-top: -1.5rem;
+    }
+
+    /* install box */
+    .install {
+      display: inline-flex;
+      flex-direction: column;
+      gap: 0.35rem;
+      border: 1px solid var(--dim);
+      padding: 0.9rem 1.5rem;
+      background: rgba(232, 104, 0, 0.03);
+      box-shadow:
+        0 0 0 1px var(--dimmer),
+        0 0 20px rgba(232, 104, 0, 0.08),
+        inset 0 0 16px rgba(232, 104, 0, 0.03);
+      cursor: pointer;
+      transition: border-color 0.2s, box-shadow 0.2s;
+      user-select: none;
+    }
+
+    .install:hover {
+      border-color: var(--orange);
+      box-shadow:
+        0 0 0 1px var(--dim),
+        0 0 28px rgba(232, 104, 0, 0.18),
+        inset 0 0 16px rgba(232, 104, 0, 0.06);
+    }
+
+    .install-label {
+      font-size: 0.75rem;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--dim);
+    }
+
+    .install code {
+      font-family: inherit;
+      font-size: clamp(0.9rem, 2.6vw, 1.1rem);
+      color: var(--bright);
+      text-shadow: 0 0 8px var(--orange);
+      white-space: nowrap;
+    }
+
+    .copied {
+      font-size: 0.78rem;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--dim);
+      opacity: 0;
+      transition: opacity 0.25s;
+      height: 1rem;
+    }
+
+    .copied.show { opacity: 1; }
+
+    /* ── taste ── */
+    .taste {
+      display: inline-flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      border: 1px solid var(--dim);
+      padding: 1rem 1.6rem;
+      background: rgba(232, 104, 0, 0.03);
+      box-shadow:
+        0 0 0 1px var(--dimmer),
+        0 0 20px rgba(232, 104, 0, 0.08),
+        inset 0 0 16px rgba(232, 104, 0, 0.03);
+      text-align: left;
+      max-width: 100%;
+      overflow-x: auto;
+    }
+
+    .taste-label {
+      font-size: 0.75rem;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--dim);
+    }
+
+    .taste pre {
+      font-family: inherit;
+      font-size: clamp(0.78rem, 2.2vw, 0.95rem);
+      line-height: 1.75;
+      color: var(--ivory);
+    }
+
+    .taste .c { color: var(--muted); opacity: 0.7; }
+    .taste .k { color: var(--bright); text-shadow: 0 0 8px var(--dim); }
+    .taste .s { color: #e0bb70; }
+
+    /* doc links */
+    .docs {
+      display: flex;
+      gap: 1.2rem;
+    }
+
+    .doc-link {
+      display: inline-block;
+      border: 1px solid var(--dim);
+      padding: 0.65rem 1.8rem;
+      background: rgba(232, 104, 0, 0.03);
+      box-shadow:
+        0 0 0 1px var(--dimmer),
+        0 0 20px rgba(232, 104, 0, 0.06),
+        inset 0 0 12px rgba(232, 104, 0, 0.02);
+      color: var(--dim);
+      text-decoration: none;
+      font-size: 1rem;
+      letter-spacing: 0.3em;
+      text-transform: uppercase;
+      transition: color 0.2s, border-color 0.2s, box-shadow 0.2s;
+    }
+
+    .doc-link:hover {
+      color: var(--bright);
+      border-color: var(--orange);
+      box-shadow:
+        0 0 0 1px var(--dim),
+        0 0 28px rgba(232, 104, 0, 0.16),
+        inset 0 0 16px rgba(232, 104, 0, 0.05);
+      text-shadow: 0 0 8px var(--orange);
+    }
+
+    /* ── downloads ── */
+    .downloads {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1.4rem;
+      width: 100%;
+      max-width: 900px;
+    }
+
+    .downloads-label {
+      font-size: 0.75rem;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--dim);
+    }
+
+    .dl-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 0.7rem;
+      width: 100%;
+    }
+
+    .dl-group {
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+    }
+
+    .dl-os {
+      font-size: 0.75rem;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--dim);
+      padding-bottom: 0.25rem;
+      border-bottom: 1px solid var(--dimmer);
+      margin-bottom: 0.1rem;
+    }
+
+    .dl-btn {
+      display: block;
+      border: 1px solid var(--dimmer);
+      padding: 0.5rem 0.7rem;
+      background: rgba(232, 104, 0, 0.02);
+      color: var(--dim);
+      text-decoration: none;
+      font-family: inherit;
+      font-size: 0.9rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      transition: color 0.2s, border-color 0.2s, box-shadow 0.2s, background 0.2s;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .dl-btn:hover {
+      color: var(--bright);
+      border-color: var(--orange);
+      background: rgba(232, 104, 0, 0.06);
+      box-shadow:
+        0 0 0 1px var(--dim),
+        0 0 16px rgba(232, 104, 0, 0.12),
+        inset 0 0 10px rgba(232, 104, 0, 0.04);
+      text-shadow: 0 0 6px var(--orange);
+    }
+
+    .dl-btn.primary {
+      color: var(--orange);
+      border-color: var(--dim);
+    }
+
+    .dl-btn.allutils {
+      font-size: 0.8rem;
+      opacity: 0.75;
+    }
+
+    .dl-btn.allutils::before {
+      content: '+ ';
+      color: var(--dimmer);
+    }
+
+    .dl-sep {
+      border: none;
+      border-top: 1px solid var(--dimmer);
+      width: 100%;
+      margin: 0.2rem 0;
+    }
+
+    .dl-src {
+      display: flex;
+      gap: 0.7rem;
+      justify-content: center;
+    }
+
+    .dl-src .dl-btn {
+      font-size: 0.8rem;
+      padding: 0.45rem 1rem;
+    }
+
+    /* ── author ── */
+    .author {
+      font-size: 0.7rem;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--dimmer);
+      margin-top: 1.5rem;
+    }
+
+    .author a {
+      color: var(--dim);
+      text-decoration: none;
+      transition: color 0.2s, text-shadow 0.2s;
+    }
+
+    .author a:hover {
+      color: var(--bright);
+      text-shadow: 0 0 8px var(--orange);
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="sigil" aria-hidden="true">!{}</p>
+    <h1>ral</h1>
+    <p class="tagline">a typed, capability-secure shell</p>
+    <p class="motto">a value is; a command does</p>
+    <div class="install" id="install" role="button" aria-label="Copy install command">
+      <span class="install-label">install</span>
+      <code>curl -fsSL https://lambdabetaeta.github.io/ral/scripts/install.sh | sh</code>
+    </div>
+    <p class="copied" id="copied" aria-live="polite">copied to clipboard</p>
+
+    <div class="taste">
+      <span class="taste-label">taste</span>
+      <pre><span class="k">let</span> cfg = curl -s $api | from-json      <span class="c"># pipelines typecheck before anything runs</span>
+<span class="k">for</span> $cfg[hosts] { |h|                   <span class="c"># $h is one argument; no word splitting</span>
+    <span class="k">grant</span> [exec: [ssh: []]] {           <span class="c"># deny-by-default: only ssh may run</span>
+        ssh $h <span class="s">'systemctl restart app'</span>
+    }
+}</pre>
+    </div>
+
+    <div class="docs">
+      <a class="doc-link" href="tutorial.html">tutorial</a>
+      <a class="doc-link" href="spec.html">spec</a>
+      <a class="doc-link" href="rationale.html">rationale</a>
+      <a class="doc-link" href="examples.html">examples</a>
+    </div>
+
+    <div class="downloads">
+      <span class="downloads-label">downloads</span>
+      <div class="dl-grid">
+{{DOWNLOAD_GROUPS}}
+      </div>
+      <hr class="dl-sep">
+      <div class="dl-src">
+        <a class="dl-btn" href="https://github.com/lambdabetaeta/ral/archive/refs/heads/main.tar.gz" download>source .tar.gz</a>
+        <a class="dl-btn" href="https://github.com/lambdabetaeta/ral/archive/refs/heads/main.zip" download>source .zip</a>
+      </div>
+    </div>
+
+    <p class="author">by <a href="https://www.lambdabetaeta.eu">G. A. Kavvos</a></p>
+
+  </main>
+  <script>
+    var box = document.getElementById('install');
+    var msg = document.getElementById('copied');
+    box.addEventListener('click', function () {
+      var text = box.querySelector('code').textContent;
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(text).then(function () {
+          msg.classList.add('show');
+          setTimeout(function () { msg.classList.remove('show'); }, 2000);
+        });
+      }
+    });
+  </script>
+</body>
+</html>

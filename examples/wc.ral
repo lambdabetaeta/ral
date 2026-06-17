@@ -1,0 +1,30 @@
+#!/usr/bin/env ral
+
+# Count lines, words, and bytes for each file.
+#
+#     ral wc.ral file1 file2 ...
+#
+# `length` is polymorphic — Strings, Lists, Maps, Bytes share one name —
+# so the three counts read like three projections of the same datum,
+# which is what they are.  Bytes come from `file-info` because `length`
+# of a String is in Unicode scalar values, not octets, and the
+# distinction is worth keeping honest.
+
+if !{is-empty $args} {
+    echo 'usage: wc.ral FILE...' 1>&2
+    exit 2
+}
+
+let count = { |path|
+    let body = !{from-string < $path}
+    return [
+        path:  $path,
+        lines: !{length !{lines $body}},
+        words: !{length !{words $body}},
+        bytes: !{file-info $path}[size],
+    ]
+}
+
+for !{map $count $args} { |s|
+    echo "$s[lines]\t$s[words]\t$s[bytes]\t$s[path]"
+}

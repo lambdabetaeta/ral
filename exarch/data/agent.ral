@@ -1,0 +1,164 @@
+# exarch agent helper library — sourced into the shell at boot
+
+## Split a file body into rows that rejoin faithfully: a raw `\n` split
+## keeps the trailing empty a terminal newline produces, so
+## `intercalate "\n" !{_rows $body}` reproduces `$body` exactly.  The
+## prelude `lines` strips edge empties for general tokenizing; the
+## read/witness/rebuild round-trip here needs the byte-faithful split so
+## a file's trailing newline survives an edit and the window-hashes are
+## computed over the file's actual line structure.
+let _rows = { |s| re-split '\n' $s }
+
+## The witness for line `i` (0-indexed) of the line list `rows`: the
+## `line-hash` of the ±3 surrounding lines' own `line-hash`es, joined and
+## prefixed with the target's offset within the window.  Folding the
+## context into the hash gives two identical lines distinct witnesses
+## whenever their neighbourhoods differ, so a repeated header, blank, or
+## brace is addressable without a line number.  The offset keeps lines
+## distinct in a file short enough that the window saturates to the whole
+## of it.  The window clamps at the ends of the file.
+let window-hash = { |rows i|
+    let n = length $rows
+    let lo = if $[$i > 3] { $[$i - 3] } else { 0 }
+    let hi = if $[$i + 4 < $n] { $[$i + 4] } else { $n }
+    let body = intercalate '' !{map { |j| line-hash $rows[$j] } !{range $lo $hi}}
+    line-hash "$[$i - $lo]:$body"
+}
+
+## Show the half-open range `[start, end)` of stdin (1-indexed, end
+## exclusive — EWD-831): `view 100 150` yields fifty lines, 100 through
+## 149.  Each line is tagged `<line-no>\t<window-hash>\t<text>`; the hash
+## is the witness `grep-files` reports and `edit` checks, so a read hands
+## you the edit witness directly.  Reads stdin — feed it via a pipe or
+## `<`: `view 100 150 < foo.rs`, `git show HEAD:f.rs | view 100 150`.
+## Both bounds must be `>= 1`; an empty range yields no output.
+let view = { |start end|
+    if $[$start < 1 || $end < 1] {
+        fail [status: 2, message: "view: bounds must be >= 1, got start=$start end=$end (range is half-open: end > start)"]
+    } else {
+        let rows = _rows !{from-string}
+        let n = length $rows
+        let hi = if $[$end - 1 < $n] { $[$end - 1] } else { $n }
+        let out = map { |i|
+            let h = window-hash $rows $i
+            let l = $rows[$i]
+            "$[$i + 1]\t$h\t$l"
+        } !{range $[$start - 1] $hi}
+        echo !{intercalate "\n" $out}
+    }
+}
+
+## Around a stdin file, show `peek` hashed lines on each side of `line`
+## (`2*peek + 1` total), clamped at the top of the file.
+let view-around = { |line peek|
+    let lo = if $[$line > $peek] { return $[$line - $peek] } else { return 1 }
+    view $lo $[$line + $peek + 1]
+}
+
+## Apply a batch of edits to `path` in a single read/write pass.  `edits`
+## is a list of `[hash, new-text]` pairs: each replaces the one line whose
+## window-hash is `hash` with `new-text`, taken verbatim — a real newline
+## inside the quotes splits the line into several; the two characters `\n`
+## do not.  An empty `new-text` deletes the line.  The hash is the witness
+## `view`, `view-around`, and `grep-files` print beside every line.
+##
+## Every hash resolves against the file as read, before anything is
+## written, so the edits never interfere — adjacent lines included — and
+## there is no need to re-read between them.  The batch is atomic: it fails,
+## writing nothing, unless every hash picks exactly one line (zero means the
+## file moved, more than one means the line and its ±3 context both repeat)
+## and no two pairs name the same line.  A single edit is a batch of one.
+let edit = { |path edits|
+    if !{is-empty $edits} {
+        fail [status: 2, message: "edit: no edits given — pass a list of [hash, new-text] pairs."]
+    }
+    let body = from-string < $path
+    let rows = _rows $body
+    let n = length $rows
+    let hashes = map { |i| window-hash $rows $i } !{range 0 $n}
+    ## Resolve each pair to the unique index of the line its hash names,
+    ## against the original snapshot.  A stale or repeated hash fails here,
+    ## before the write.
+    let resolved = map { |e|
+        let want = $e[0]
+        let idxs = filter { |i| equal $hashes[$i] $want } !{range 0 $n}
+        let matches = length $idxs
+        if $[$matches == 0] {
+            fail [status: 2, message: "edit: no line in $path hashes to $want — did the file change? Re-read with view/grep-files before editing."]
+        }
+        if $[$matches > 1] {
+            let at = map { |i| str $[$i + 1] } $idxs
+            let where = intercalate ", " $at
+            fail [status: 2, message: "edit: hash $want matches lines $where in $path — the text repeats, so a hash alone cannot choose one."]
+        }
+        [at: $idxs[0], new: $e[1]]
+    } $edits
+    ## Rebuild in one pass over the original rows: an untouched row passes
+    ## through, a named row becomes its replacement (newlines split; empty
+    ## drops).  Two pairs naming the same line fail before the write.
+    let out = flat-map { |i|
+        let hit = filter { |r| equal $r[at] $i } $resolved
+        if !{is-empty $hit} {
+            [$rows[$i]]
+        } else {
+            if $[!{length $hit} > 1] {
+                fail [status: 2, message: "edit: two edits name line $[$i + 1] in $path."]
+            }
+            let new = $hit[0][new]
+            if !{equal $new ''} { [] } else { _rows $new }
+        }
+    } !{range 0 $n}
+    to-string !{intercalate "\n" $out} > $path
+    ## One `` `patch `` per edit, with context drawn from the original
+    ## snapshot, so the rail renders a hunk for each change.
+    each { |r|
+        let i = $r[at]
+        let line = $[$i + 1]
+        let before = take $i $rows
+        let after = drop $line $rows
+        let add = if !{equal $r[new] ''} { [] } else { _rows $r[new] }
+        let del = [$rows[$i]]
+        let peek = 2
+        let ctx-drop = if $[$i > $peek] { $[$i - $peek] } else { 0 }
+        let ctx-before = drop $ctx-drop $before
+        let last = $rows[$[$n - 1]]
+        let m = if !{equal $last ''} { $[$n - 1] } else { $n }
+        let ca-hi = if $[$line + $peek < $m] { $[$line + $peek] } else { $m }
+        let ctx-after = take $[$ca-hi - $line] $after
+        surface `patch [path: $path, start: $line, before: $ctx-before, del: $del, add: $add, after: $ctx-after]
+    } $resolved
+}
+
+## Recursively search the cwd for `pattern` (Rust regex, ignore-aware) and
+## stamp each hit with the witness `edit` checks, giving a list of records
+## `[file, line, text, hash]`.  The raw search is the `_search-files` host
+## atom (hidden from `help`); the walker reports a file's hits together, so
+## one pass suffices: when a hit names a new file, read and split it once;
+## otherwise reuse the rows already in hand to compute the `window-hash` —
+## the same line list `edit` rebuilds, so a search result feeds straight
+## into a batch.  Keeping the read inside the scan makes the cost linear in
+## the hit count rather than the product of files and hits.
+let grep-files = { |pattern|
+    let hits = _search-files $pattern
+    let stamped = fold { |acc h|
+        let f = $(h)[file]
+        ## The scan (`_search-files`) decodes lossily, so it can match a
+        ## file the strict `from-string` re-read then rejects; name that
+        ## file and point at the search scope, since no decode the model
+        ## can pass into a `grep-files` call would witness it.
+        let rows = if !{equal $f $acc[file]} {
+            $acc[rows]
+        } else {
+            try { _rows !{from-string < $f} } { |_|
+                fail [status: 2, message: "grep-files: '$f' is not valid UTF-8, so its matches cannot be witnessed for editing. Scope the search to a directory of text sources to skip binary artefacts like this one."]
+            }
+        }
+        let l = $(h)[line]
+        [ file: $f
+        , rows: $rows
+        , out: [ ...$acc[out]
+               , [file: $f, line: $l, text: $(h)[text], hash: !{window-hash $rows $[$l - 1]}] ]
+        ]
+    } [file: '', rows: [], out: []] $hits
+    return $stamped[out]
+}

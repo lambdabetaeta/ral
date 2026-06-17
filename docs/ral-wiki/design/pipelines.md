@@ -1,0 +1,49 @@
+# Pipelines: byte processes and value folds
+
+**`|` is dataflow: it threads each stage's output into the next, and what it does
+at runtime is decided by the type of the connecting edge, not by any keyword.**
+The byte modes of [[design/types|computation types]] select one of two execution
+models.
+
+Failure is a separate axis. A pipeline propagates a stage's failure, but the
+pipe never *reacts* to it: recovering from failure is `?`'s and `try`'s job, and
+branching is on `Bool`, never on command success ([[design/failure|failure]]).
+
+**Value pipelines are folds.** When every stage operates on the value channel,
+`x | f` is typed data-last composition — it reduces to `f !{x}` and is evaluated
+sequentially in the parent. No process is spawned, no pipe exists, no process
+group is formed. `range 1 21 | filter $even | sum` is three function calls
+threaded by the value channel.
+
+**Byte pipelines are processes.** As soon as one edge touches bytes — an
+external command, or any byte-output stage — the whole pipeline runs as a
+Unix-style process pipeline:
+
+- every stage, *including* ral-implemented ones, executes in a subprocess;
+- all subprocesses share one process group;
+- the parent ral process is not a member of that group.
+
+This is what lets a terminal-touching pipeline behave exactly as a shell's does,
+regardless of whether a stage is `/bin/cat`, a handler, or a ral block.
+
+Out-of-process stages are therefore subshells with respect to mutation: a
+helper stage's `cd`, env, alias, or module changes do not flow back to the
+parent — only the pipe contents and the final value cross the boundary. This
+matches every traditional shell and is what keeps job control coherent: a shell
+process inside its own foreground pipeline cannot consistently both own the
+terminal and not own it. It is the same isolation a spawned block enjoys
+([[design/cbpv|immutable bindings]]).
+
+The terminal-handoff machinery — the foreground exec trampoline on Unix, Job
+Objects on Windows — is transport detail, not semantics; it lives in the
+[[map/core/runtime|runtime]]'s `pipeline/` and [[map/core/io-process|process]]
+maps.
+
+See also [[design/types|types]], [[design/cbpv|cbpv]],
+[[design/scoping|scoping]].
+
+**Realised in** [[internals/pipeline-execution|pipeline-execution]].
+
+Cite: RATIONALE §"Byte pipelines are processes;
+value pipelines are folds", §"Piping and failure", §"No command-level `||`",
+§"Concurrency: isolation, not shared state"; `docs/SPEC.md` §4, §13, §20.4.

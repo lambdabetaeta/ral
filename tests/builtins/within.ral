@@ -1,0 +1,91 @@
+# Test: within (unified scoping primitive)
+
+# env key
+
+within [env: [TEST_VAR: hello]] {
+    printenv TEST_VAR
+}
+
+# env doesn't leak
+try { printenv TEST_VAR } { |_| echo 'TEST_VAR correctly unset' }
+
+# Nested env
+within [env: [A: 1]] {
+    within [env: [B: 2]] {
+        printenv A
+        printenv B
+    }
+    printenv A
+}
+
+# dir key
+# Use `/` (no symlink) so an external `pwd` prints the same path whether it
+# is the system binary or the bundled uutils one, which resolves symlinks
+# (`/tmp` → `/private/tmp` on macOS).
+
+let original = !{cwd}
+within [dir: /] {
+    pwd
+}
+
+# dir doesn't leak
+let after = !{cwd}
+if !{equal $original $after} { echo 'cwd restored' } else { echo 'cwd leaked!' }
+
+# handlers key (per-name)
+
+# Simple nullary handler
+within [handlers: [mycmd: { echo 'handled' }]] {
+    mycmd
+}
+
+# Lambda handler receives args
+within [handlers: [mycmd: { |args| echo 'got' ...$args }]] {
+    mycmd a b c
+}
+
+# Handler gone after block
+try { mycmd 2> /dev/null } { |_| echo 'mycmd gone' }
+
+# Nesting: inner wins
+within [handlers: [mycmd: { echo 'outer' }]] {
+    within [handlers: [mycmd: { echo 'inner' }]] {
+        mycmd
+    }
+    mycmd
+}
+
+# handler key (catch-all) — fires only for external commands
+
+# Catch-all receives (name, args)
+within [handler: { |name args| echo caught $name ...$args }] {
+    foo x y
+}
+
+# Self-masking: handler body doesn't see its own frame
+within [handler: { |name args| echo intercepted $name }] {
+    nonexistent-command
+}
+
+# Catch-all does NOT intercept builtins — they are language-internal
+within [handler: { |name args| echo caught $name }] {
+    echo 'builtin runs normally'
+}
+
+# ^name bypass: skips builtins, goes to external binary
+let result = ^echo 'from external'
+echo $result
+
+# Containment: ^name does NOT escape within [handlers:]
+within [handlers: [cat: { echo 'handler-cat' }]] {
+    # Even ^cat triggers the handler (containment property)
+    ^cat anything
+}
+
+# Combined keys
+
+within [env: [MY_VAR: scoped], handlers: [mycmd: { echo "env=$env[MY_VAR]" }]] {
+    mycmd
+}
+
+echo 'within tests done'

@@ -1,0 +1,13 @@
+{
+  "grammars": [
+    {
+      "name": "ral",
+      "scope": "source.ral",
+      "file-types": ["ral"],
+      "highlights": ["queries/highlights.scm"]
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0"
+  }
+}

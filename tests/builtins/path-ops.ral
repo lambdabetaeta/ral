@@ -1,0 +1,7 @@
+# Test: path operations via coreutils
+
+echo !{dirname '/a/b.m4a'}
+
+echo !{basename '/a/b.m4a'}
+
+echo 'path tests done'

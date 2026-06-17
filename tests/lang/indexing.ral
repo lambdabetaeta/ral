@@ -1,0 +1,40 @@
+# Test: bracket indexing, context-sensitive : =, and command arg spreading
+
+# Bracket indexing on maps
+let config = [host: prod1, port: 8080]
+echo $config[host]
+echo $config[port]
+
+# Nested bracket indexing
+let app = [db: [host: localhost, port: 5432], cache: [host: redis, port: 6379]]
+echo $app[db][host]
+echo $app[cache][port]
+
+# Bracket indexing in interpolation
+echo "database at $app[db][host]:$app[db][port]"
+
+# Context-sensitive : — bare word when embedded
+echo localhost:5432
+
+echo http://example.com
+
+# Context-sensitive = — bare word when embedded
+echo -DFOO=bar
+
+# : splits for map entries
+let opts = [host: local, port: 3000]
+echo $opts[host]
+
+# Command arg spreading
+let files = [/tmp, /var]
+ls ...$files > /dev/null
+echo 'spread worked'
+
+# Spread in echo
+let words = [hello, world]
+echo ...$words
+
+# Spread with map function
+let nums = [1, 2, 3]
+let doubled = map { |x| echo $[$x * 2] } $nums
+echo ...$doubled

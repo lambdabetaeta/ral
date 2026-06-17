@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = ["core", "ral", "ral-sh", "exarch", "vendor/ripgrep-core"]
+exclude = ["vendor/genai"]
+
+# Shared third-party versions.  Member crates point at these with
+# `dep = { workspace = true }` so a version bump happens in one place.
+# `windows-sys` carries only its version here — each crate selects its own
+# Win32 feature set on top, since they differ (core needs the full sandbox
+# surface, ral the console, exarch the console plus browser handoff).
+[workspace.dependencies]
+serde      = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+libc       = "0.2"
+clap       = { version = "4", features = ["derive"] }
+base64     = "0.22"
+windows-sys = "0.61"
+
+[workspace.lints.clippy]
+complexity = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+correctness = { level = "warn", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+disallowed_methods = "deny"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = "z"
+panic = "abort"
+
+# Same codegen as release, but with debug info kept and stripping disabled
+# so samply / perf can resolve symbols.  LTO stays on so inlining matches
+# release; the debuginfo just makes the inline tree readable.
+
+[profile.profiling]
+inherits = "release"
+strip = false
+debug = "full"
+
+# genai 0.6.5's WebClient::default() — the transport behind its model-listing
+# adapter paths, which take no injectable client — builds a reqwest client
+# against rustls-platform-verifier and aborts where no system trust store
+# exists. The vendored copy binds that default to the bundled webpki roots,
+# matching exarch/src/tls.rs.
+[patch.crates-io]
+genai = { path = "vendor/genai" }

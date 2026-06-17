@@ -1,0 +1,14 @@
+# Output of `tree-sitter generate` (run from the build script). The
+# canonical source is grammar.js; everything below is regenerated.
+src/parser.c
+src/grammar.json
+src/node-types.json
+src/tree_sitter/
+
+# Compiled parser libraries and the node-gyp build tree.
+*.dylib
+*.so
+*.dll
+*.wasm
+build/
+node_modules/

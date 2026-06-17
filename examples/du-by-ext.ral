@@ -1,0 +1,35 @@
+#!/usr/bin/env ral
+
+# Sum file sizes under a directory, grouped by extension; biggest
+# total first.
+#
+#     ral du-by-ext.ral ~/Pictures
+#
+# The bash idiom is
+#
+#     find . -type f -printf '%s\t%f\n' \
+#         | awk -F'\t' '{n=split($2,a,".");s[a[n]]+=$1} END {for(k in s) print s[k],k}' \
+#         | sort -rn
+#
+# which works until a filename contains a tab.  Here the bucket map is
+# keyed by the actual extension value; the aggregation is a fold;
+# nothing is stringly typed.
+
+let [root] = $args
+
+let files = filter { |p| is-file $p } !{glob "$root/**/*"}
+
+let totals = fold { |acc p|
+    let key   = ext $p
+    let bytes = !{file-info $p}[size]
+    let prev  = !{get $acc $key 0}
+    return [...$acc, $key: $[$prev + $bytes]]
+} [:] $files
+
+let rows = map { |k| return [ext: $k, size: $totals[$k]] } !{keys $totals}
+let sorted = reverse !{sort-list-by { |r| return $r[size] } $rows}
+
+for $sorted { |r|
+    let label = if !{equal $r[ext] ''} { return '(none)' } else { return ".$r[ext]" }
+    echo "$r[size]\t$label"
+}

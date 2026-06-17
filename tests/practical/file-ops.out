@@ -1,0 +1,11 @@
+file 1 exists
+file 2 exists
+file 3 exists
+file 4 exists
+file 5 exists
+read 5 files
+uppercase: CONTENT OF FILE 3
+
+
+total files: 10
+cleanup complete

@@ -1,0 +1,6 @@
+[env]
+# Limit concurrent test threads to prevent OOM on machines with <= 16GB RAM.
+# pipeline.rs spawns one ral subprocess per test; eval_fuzz.rs spawns internal
+# threads.  With 10-16 CPU cores, unlimited parallelism can exceed 16GB.
+# Override with: RUST_TEST_THREADS=8 cargo test
+RUST_TEST_THREADS = "4"
