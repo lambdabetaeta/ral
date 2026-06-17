@@ -27,6 +27,7 @@
 //!   no-op on Unix where limits are set via `pre_exec`).
 
 mod ipc;
+mod launch;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -80,6 +81,13 @@ pub(crate) fn run_child_shell_extension(shell: &mut Shell) {
 
 #[cfg(target_os = "linux")]
 pub use linux::make_command_with_policy;
+
+// Per-command OS sandbox launcher: `build_command` routes an external /
+// bundled child through here when the process is not already confined and
+// a projection is active.  `serve_sandbox_exec` is the macOS post-Seatbelt
+// `execve` hook for the host re-exec tail.
+pub(crate) use launch::{LaunchTarget, sandboxed_command};
+pub use launch::serve_sandbox_exec;
 
 // Confined-eval entry point.  `evaluator` routes here once
 // `confined_availability()` returns `Ready`.
@@ -195,6 +203,13 @@ pub(crate) fn projection_enforceable(projection: &SandboxProjection) -> Result<(
 /// re-exec'd ral process.
 const SANDBOX_PROJECTION_FLAG: &str = "--sandbox-projection";
 
+/// macOS-only sentinel for the per-command host re-exec tail
+/// (`ral --sandbox-projection <json> --ral-sandbox-exec <program> <args…>`).
+/// After `early_init` enters Seatbelt, [`serve_sandbox_exec`] `execve`s the
+/// program inside that Seatbelt.  Distinct from `--ral-bundled-tool`, which
+/// runs a bundled tool in-process confined instead of execing a host binary.
+const SANDBOX_EXEC_FLAG: &str = "--ral-sandbox-exec";
+
 /// Marks a ral process as running inside an OS sandbox.  Its mere
 /// presence is *not* trusted as proof of confinement — an arbitrary
 /// parent can export it (review findings S1, S2).  A genuinely-confined
@@ -225,7 +240,7 @@ pub fn dump_profile_if_requested(policy: &crate::types::SandboxProjection) {
     }
     #[cfg(target_os = "linux")]
     {
-        let cmd = linux::make_command_with_policy("/bin/true", &[], policy);
+        let cmd = linux::make_command_with_policy("/bin/true", &[], policy, None);
         let mut line = String::from("bwrap");
         for arg in cmd.get_args() {
             line.push(' ');
@@ -334,18 +349,23 @@ pub fn early_init(argv: &[String]) -> Result<(Vec<String>, Option<u8>), String> 
 /// argv is otherwise discarded — callers that need to parse a CLI from it
 /// (the `ral` binary) call `early_init` directly.
 ///
-/// After sandbox setup this also serves the `--ral-bundled-tool` multicall
-/// (via [`crate::try_run_bundled_tool`]) on the post-`early_init` argv, so a
-/// bundled tool re-exec is reachable from the test ctors and the exarch
+/// After sandbox setup this also serves the per-command re-exec tails on
+/// the post-`early_init` argv (Seatbelt / bwrap already applied): the
+/// `--ral-bundled-tool` multicall (via [`crate::try_run_bundled_tool`])
+/// runs a bundled tool in-process confined, and on macOS
+/// [`serve_sandbox_exec`] `execve`s the host program for a per-command
+/// host launch.  Both are reachable from the test ctors and the exarch
 /// frontend that route their pre-`main` dispatch through here — exactly as
-/// the `ral` binary serves it on its own `early_init` result. The order
+/// the `ral` binary serves them on its own `early_init` result. The order
 /// matters: a `--sandbox-projection` child enters the OS sandbox in
-/// `early_init` first, then runs the tool confined.
+/// `early_init` first, then runs the tool / host binary confined.
 pub fn serve_sandbox_early_init() -> Option<u8> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     match early_init(&argv) {
         Ok((_, Some(code))) => Some(code),
-        Ok((stripped, None)) => crate::try_run_bundled_tool(&stripped),
+        Ok((stripped, None)) => {
+            serve_sandbox_exec(&stripped).or_else(|| crate::try_run_bundled_tool(&stripped))
+        }
         Err(e) => {
             eprintln!("ral: sandbox init: {e}");
             Some(1)

@@ -135,3 +135,32 @@ pub fn compile_and_typecheck(source: &str, schemes: SessionSchemes) -> CompileOu
         Err(errs) => CompileOutcome::Types(errs),
     }
 }
+
+/// Pre-`main` dispatch for the lib's own unit-test binary.
+///
+/// A lib unit test that spawns a per-command sandbox re-exec (see
+/// `sandbox::launch`) launches `current_exe()` — which here is *this*
+/// test binary — with the `--sandbox-projection … --ral-sandbox-exec` /
+/// `--ral-bundled-tool` tails.  Without this constructor those tails
+/// would reach libtest's argv parser ("unknown argument") and the child
+/// would never enter the OS sandbox.  Mirrors `core/tests/common/mod.rs`'s
+/// constructor for the integration-test binaries, but ported into the
+/// crate so the *lib* test binary serves the same pre-`main` stages:
+///
+///   1. `try_run_pipeline_stage_helper` — pipeline / capture re-execs.
+///   2. `serve_sandbox_early_init` — `--sandbox-projection` enters the OS
+///      sandbox, then `serve_sandbox_exec` (`--ral-sandbox-exec`) or
+///      `try_run_bundled_tool` (`--ral-bundled-tool`) runs the target
+///      confined.  A normal (non-re-exec) test invocation yields `None`
+///      from both and falls through to libtest unchanged.
+#[cfg(test)]
+#[ctor::ctor(unsafe)]
+fn init_lib_test_binary() {
+    #[cfg(unix)]
+    builtins::uutils::init_signal_dispositions();
+    if let Some(code) =
+        try_run_pipeline_stage_helper().or_else(sandbox::serve_sandbox_early_init)
+    {
+        std::process::exit(code as i32);
+    }
+}

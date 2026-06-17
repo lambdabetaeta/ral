@@ -22,10 +22,18 @@ use std::process::{Command, Stdio};
 /// configured by `policy`.  Read-only and read-write bind mounts are
 /// derived from the policy prefixes, with `deny_paths` overlaid read-only
 /// after broad writable binds.
+///
+/// `chdir` is the in-sandbox working directory: bwrap runs the child in
+/// its mount-namespace root unless told otherwise, so a per-command
+/// launch must pass the target's logical cwd here.  The grant-body
+/// re-exec and profile-dump call sites pass `None` (the re-exec'd ral
+/// inherits the launcher cwd and threads logical cwd into its own
+/// children).
 pub fn make_command_with_policy(
     name: &str,
     args: &[String],
     policy: &SandboxProjection,
+    chdir: Option<&str>,
 ) -> Command {
     let mut c = Command::new("bwrap");
     let bind_spec = policy.bind_spec();
@@ -50,6 +58,9 @@ pub fn make_command_with_policy(
     c.args(["--die-with-parent", "--new-session"]);
     if !policy.net {
         c.arg("--unshare-net");
+    }
+    if let Some(dir) = chdir {
+        c.args(["--chdir", dir]);
     }
     match &policy.fs {
         FsProjection::Restricted(_) => {
@@ -241,7 +252,7 @@ pub(super) fn respawn_under_bwrap(
     policy: &SandboxProjection,
     active_env: &str,
 ) -> Result<u8, String> {
-    let mut cmd = make_command_with_policy(exe.to_string_lossy().as_ref(), args, policy);
+    let mut cmd = make_command_with_policy(exe.to_string_lossy().as_ref(), args, policy, None);
     cmd.env(active_env, "1")
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -320,7 +331,7 @@ mod tests {
             net: true,
             exec: crate::types::ExecProjection::default(),
         };
-        let cmd = make_command_with_policy("/bin/true", &[], &policy);
+        let cmd = make_command_with_policy("/bin/true", &[], &policy, None);
         let args: Vec<String> = cmd
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -360,7 +371,7 @@ mod tests {
             net: true,
             exec: crate::types::ExecProjection::default(),
         };
-        let cmd = make_command_with_policy("/bin/true", &[], &policy);
+        let cmd = make_command_with_policy("/bin/true", &[], &policy, None);
         let args: Vec<String> = cmd
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())

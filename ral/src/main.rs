@@ -554,11 +554,16 @@ fn main() -> ExitCode {
         return ExitCode::from(code);
     }
 
-    // Bundled-tool multicall dispatch — runs *after* `early_init` so a
+    // Per-command sandbox re-exec tails — run *after* `early_init` so a
     // `--sandbox-projection` child enters the OS sandbox first, then runs
-    // the tool confined.  `stripped` is the post-early_init argv (sans
-    // binary name); a leading `--ral-bundled-tool <tool> …` runs the tool
-    // and exits here, never reaching clap.
+    // the target confined.  `stripped` is the post-early_init argv (sans
+    // binary name).  On macOS a leading `--ral-sandbox-exec <program> …`
+    // `execve`s the host program inside the Seatbelt just entered; a
+    // leading `--ral-bundled-tool <tool> …` runs the bundled tool
+    // in-process.  Both exit here, never reaching clap.
+    if let Some(code) = ral_core::sandbox::serve_sandbox_exec(&stripped) {
+        return ExitCode::from(code);
+    }
     if let Some(code) = ral_core::try_run_bundled_tool(&stripped) {
         return ExitCode::from(code);
     }

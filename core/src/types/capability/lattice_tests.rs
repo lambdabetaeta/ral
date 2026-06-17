@@ -433,6 +433,33 @@ fn meet_fs_unions_denies_and_intersects_prefixes() {
     assert!(fs.deny_paths.iter().any(|p| p == "/tmp/work/.exarch.toml"));
 }
 
+/// Nesting an inner fs grant inside an outer one narrows authority to the
+/// *intersection*: the inner cannot widen beyond the outer.  Meeting an
+/// outer `/tmp` (read+write) with an inner `/tmp/work` (read+write) — the
+/// shape `capability::sandbox_projection` folds when two `grant [fs:…]`
+/// layers stack — keeps only the deeper `/tmp/work` and drops the wider
+/// `/tmp`, on *both* read and write.  The wider prefix surviving would let
+/// an inner grant escape its parent's bound, so its absence is the load-
+/// bearing assertion.
+#[test]
+fn meet_fs_nested_grants_narrow_to_intersection() {
+    let m = witness_a().meet(witness_b());
+    let fs = m.fs.unwrap();
+    let surface = |ps: &[crate::path::NormalizedPrefix]| -> Vec<String> {
+        ps.iter().map(|p| p.as_str().to_string()).collect()
+    };
+    assert_eq!(
+        surface(&fs.read_prefixes),
+        ["/tmp/work"],
+        "read narrows to the deeper inner prefix, outer /tmp dropped"
+    );
+    assert_eq!(
+        surface(&fs.write_prefixes),
+        ["/tmp/work"],
+        "write narrows to the deeper inner prefix, outer /tmp dropped"
+    );
+}
+
 #[test]
 fn join_commutative() {
     let a = witness_a();

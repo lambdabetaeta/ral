@@ -21,6 +21,37 @@ use super::vet::{ExecImage, SpawnPlan};
 /// can fail); the resulting child inherits cwd/env/PWD through
 /// `apply_env` exactly like a host external.
 pub(crate) fn build_command(plan: &SpawnPlan, shell: &Shell) -> Settled<Command> {
+    // Per-command OS confinement.  `marker_authenticated()` means this
+    // process is *already* OS-confined — a grant-body re-exec child during
+    // the current milestone — so re-sandboxing would double-apply (Seatbelt
+    // is one-shot → EPERM) when the ambient sandbox already confines us.
+    // When the marker is false and a projection is active, confine the child
+    // per-command under the effective projection.  (A later milestone
+    // removes the marker term once grant bodies evaluate locally.)  The
+    // marker is tested first so an already-confined child need not resolve
+    // the exec policy through `$PATH` — computing the projection is what does
+    // that resolution.
+    if !crate::sandbox::marker_authenticated()
+        && let Some(projection) = shell.sandbox_projection()
+    {
+        crate::sandbox::projection_enforceable(&projection).map_err(|reason| {
+            Break::Error(Error::new(
+                format!("sandbox confinement unavailable: {reason}"),
+                1,
+            ))
+        })?;
+        let target = match &plan.image {
+            ExecImage::Host(program) => crate::sandbox::LaunchTarget::Host { program },
+            ExecImage::BundledTool { tool } => crate::sandbox::LaunchTarget::BundledTool { tool },
+        };
+        let mut cmd = crate::sandbox::sandboxed_command(&projection, target, &plan.args, shell)?;
+        apply_env(&mut cmd, shell);
+        if shell.has_active_capabilities() {
+            crate::sandbox::apply_resource_limits(&mut cmd);
+        }
+        return Ok(cmd);
+    }
+
     let mut cmd = match &plan.image {
         ExecImage::Host(path) => crate::sandbox::make_command(path, &plan.args, shell),
         ExecImage::BundledTool { tool } => {
