@@ -219,9 +219,9 @@ fn emit_exec_rules(lines: &mut Vec<String>, exec: &ExecProjection) {
             let system_dirs = existing_system_exec_paths();
             let deny_dirs = match_variants_list(deny_dirs);
             // Bundled coreutils / diffutils / ripgrep names dispatch
-            // through `--ral-pipeline-stage-helper`, which re-execs the
-            // running binary so the in-process uutils path can fire
-            // inside the helper.  `is_uutils_tool` is the predicate that
+            // through `--ral-bundled-tool`, which re-execs the running
+            // binary so the in-process uutils path can fire inside the
+            // child.  `is_uutils_tool` is the predicate that
             // admits ral's own self-path under the sandbox grant, so
             // `pwd`, `ls`, … work inside every restricted profile
             // without each TOML naming wherever exarch (or any other

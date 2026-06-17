@@ -1,8 +1,12 @@
 ---
-status: active
+status: superseded
 ---
 
 # Sandbox IPC cancellation belongs to the parent
+
+*Superseded by [[decisions/260617_sandbox-external-children|sandbox-external-children]], which
+removed the grant-body sandbox-IPC path — and with it the parent-side cancellation watcher
+`SandboxCancelWatch` — that this decision governed.*
 
 **A confined eval child can be busy while the parent is blocked in IPC, so the
 parent must own the out-of-band teardown.** Deadline and Esc cancellation live on

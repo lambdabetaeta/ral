@@ -53,17 +53,16 @@ pub(crate) const DIFFUTILS_TOOLS: &[&str] = &["cmp", "diff"];
 #[cfg(feature = "ripgrep")]
 pub(crate) const RIPGREP_TOOLS: &[&str] = &["rg"];
 
-/// True when `name` is one of the bundled helper tools — coreutils,
+/// True when `name` is one of the bundled tools — coreutils,
 /// diffutils, or ripgrep.  Two callers consult this predicate:
 /// `command::run` dispatches `uutils_invoke` in-process when the sinks
-/// are plain Terminal/Stderr, and otherwise re-execs through the
-/// pipeline-stage helper; and `classify_stage_dispatch` demotes
-/// bundled pipeline stages to a Ral stage so the launcher re-execs through
-/// `--ral-pipeline-stage-helper`.  Both paths converge on
-/// `uutils_invoke` running in a context where stdout/stderr are
-/// plain Terminal/Stderr sinks, so the in-binary implementation is
-/// authoritative on every platform regardless of what PATH would have
-/// turned up.
+/// are plain Terminal/Stderr, and otherwise spawns the
+/// `ral --ral-bundled-tool <tool>` exec image as an ordinary child; and
+/// a bundled byte pipeline stage launches the same `--ral-bundled-tool`
+/// child placement.  Both paths converge on `uutils_invoke` running in a
+/// context where stdout/stderr are plain Terminal/Stderr sinks, so the
+/// in-binary implementation is authoritative on every platform
+/// regardless of what PATH would have turned up.
 pub(crate) fn is_uutils_tool(_name: &str) -> bool {
     #[cfg(feature = "coreutils")]
     if COREUTILS_TOOLS.contains(&_name) {

@@ -1071,12 +1071,12 @@ at 64 KB; outside `audit`, `stderr` flows to the terminal as usual.
 The tree is *lexical*: every control operator (`grant`, `within`,
 `guard`, `try`, `audit`) owns the audit nodes its body produces, and
 they appear as direct children of the scope node — not as siblings of
-it at the surrounding level.  Process boundaries (the
-OS-sandbox child ral re-execs for an `fs`/`net`-restricting `grant`,
+it at the surrounding level.  Process boundaries (each external or
+bundled command confined under an `fs`/`net`-restricting `grant`,
 each pipeline stage helper) only *transport* audit fragments back to
 the parent; the wrapping scope decides where they land.  Pipeline
 stage fragments are merged in stage order.  `grant` owns its
-OS-sandbox child's nodes the same way `within` owns its body's.
+confined children's nodes the same way `within` owns its body's.
 `try` and `audit` are the only scopes that always build a record
 regardless of an outer audit; the others build a node only when an
 outer audit scope is collecting.
@@ -1373,9 +1373,10 @@ In-process `exec` and `fs` checks apply on every platform; `net` has
 no in-process gate (§11.3) and is enforced by the OS sandbox alone.
 OS-level enforcement varies:
 
-- **macOS** — Seatbelt (`sandbox_init_with_parameters`); ral
-  re-executes itself inside Seatbelt when `fs:` is present, when
-  `net` is `false`, or when `exec:` is present.  Under exec
+- **macOS** — Seatbelt (`sandbox_init_with_parameters`); each
+  external or bundled command spawned inside the `grant` is launched
+  inside Seatbelt when `fs:` is present, when `net` is `false`, or
+  when `exec:` is present.  Under exec
   attenuation the Seatbelt profile renders the meet-folded admit
   set as a path allow-list, so the OS layer also gates spawns
   that the in-process check can't see — including binaries
@@ -1383,10 +1384,10 @@ OS-level enforcement varies:
   `find -exec`.  When `fs:` is absent the OS layer passes fs
   through (the user's working tree, HOME, etc. stay reachable).
 - **Linux** — bubblewrap with seccomp BPF (x86-64, AArch64).
-  Re-executes when `fs:` is present or `net` is `false`; pure
-  exec attenuation does not enter the OS-sandbox child because
-  bwrap has no path-based exec filter.  In-process exec checks
-  still apply.
+  A spawned command is wrapped in bwrap when `fs:` is present or
+  `net` is `false`; pure exec attenuation does not enter the
+  OS sandbox because bwrap has no path-based exec filter.
+  In-process exec checks still apply.
 - **Windows / non-Unix** — in-process `exec` / `fs` checks still
   apply (and `net` has no in-process gate), but OS-level fs/net
   confinement is unavailable (no bubblewrap, no Seatbelt).  Consequently, when an evaluation
@@ -1901,30 +1902,33 @@ the canonical way to perform mutations: there are no `copy-file` /
 `make-dir` / `remove-file` primitives.  Effects don't return
 structured values, so wrapping them buys nothing.
 
-Every bundled invocation goes through a capability-checked dispatch
-wrapper.  For each path-taking tool, the wrapper consults the tool's
-own clap parser to identify path arguments and their roles
-(read / write / both), then calls `check_fs_read` or `check_fs_write`
-on each before delegating to `uumain`.  Bypassing the sandbox by
-reaching for `cp` instead of a primitive is therefore not possible —
-both paths land at the same chokepoint.
+A bundled command is an *executable image*, not a path-rewriting
+wrapper (§ "Bundled tools are executable images").  A clean-terminal
+call may run `uumain` in-process under a tiny uucore-global lock; every
+other invocation — redirects, capture/audit, an env/cwd mismatch, a
+byte pipeline stage, or any active sandbox projection — spawns ral
+itself as `ral --ral-bundled-tool <tool> <args…>`.  That child gets its
+cwd, env, and stdio from the ordinary command-spawn plumbing
+(`apply_env` installs the scoped CWD and env; the child's `Command`
+owns fd 0/1/2), so the parent never temporarily rewires its own process
+state to make a library call look like an exec.  Under an
+`fs`-restricting `grant`, upstream uutils opens paths internally rather
+than through ral's `check_fs_op`, so the bundled child is *child-owned*:
+the parent first checks exec authority, then launches it under the same
+effective OS sandbox an external command would receive.  Bypassing the
+in-process gate by reaching for `cp` instead of a primitive is therefore
+not possible — the confinement is the kernel sandbox around the child.
 
-`within [dir: ...]` propagates by chdir under the same lock that
-serialises uutils stdio redirection, so relative path arguments
-resolve against ral's scoped CWD, not the host process CWD.
-
-The `diffutils` feature bundles `cmp` and `diff` through the same
-helper-subprocess path as coreutils — `resolve_command` rewrites a bare
-`cmp`/`diff` to `--ral-uutils-helper`, the parent never runs them
-in-process — and
+The `diffutils` feature bundles `cmp` and `diff` as bundled-tool exec
+images on the same footing as coreutils, and
 the `grep` feature enables the regex-backed builtins `re-match`,
 `re-split`, `re-replace`, `re-replace-all`, `re-find-match`, and
 `re-find-matches` using ripgrep's engine.  Without `grep`, those
 builtins are present but raise at runtime; for byte-stream `grep`,
 fall back to the system one on `PATH`.  The `ripgrep` feature bundles
-an external-style `rg` command via the same helper-subprocess path:
-`resolve_command` rewrites bare `rg` to `--ral-uutils-helper rg`,
-which runs a vendored ripgrep core in a child process.
+an external-style `rg` command on the same exec-image path: a bundled
+`rg` runs in-process on the clean-terminal fast path, otherwise as a
+`ral --ral-bundled-tool rg` child carrying a vendored ripgrep core.
 
 ## 17  Prelude
 

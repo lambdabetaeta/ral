@@ -351,9 +351,9 @@ pub(crate) fn install_shell_mobile(
 /// Build the shell for a re-exec'd helper child: a fresh `Shell::new`
 /// (which carries only `CORE_BUILTINS`), the host's builtin surface
 /// reinstalled through the child-shell-extension hook, then the wire
-/// mobile snapshot overlaid.  Both re-exec paths — the sandbox IPC
-/// child and the pipeline-stage helper — construct their shell here, so
-/// neither can omit the host builtins: [`install_shell_mobile`]
+/// mobile snapshot overlaid.  The pipeline-stage / child-eval helper —
+/// the remaining re-exec path — constructs its shell here, so it cannot
+/// omit the host builtins: [`install_shell_mobile`]
 /// preserves the receiver's builtin table, so the hook's entries
 /// survive the overlay.
 pub(crate) fn reexec_child_shell(state: WireMobile, arcs: &ScopeArcs) -> Result<Shell, Error> {

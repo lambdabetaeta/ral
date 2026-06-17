@@ -84,8 +84,9 @@ pub struct Context {
     // ── attenuable by within / grant ─────────────────────────────────────
     /// Process env-var overrides set by `within [shell: …]`.
     /// `pub(crate)` so two privileged callers — the
-    /// [`Shell::with_env`] restore step and the sandbox IPC ambient
-    /// install — can install a vetted whole map.  Per-key mutation
+    /// [`Shell::with_env`] restore step and the child-eval mobile
+    /// reconstruction (`WireMobile::into_context`) — can install a
+    /// vetted whole map.  Per-key mutation
     /// goes through [`Context::set_env_var`] (and friends).  `PWD` /
     /// `OLDPWD` are excluded: those keys live on `context.cwd`, and a
     /// copy here would shadow the canonical pair and drift on the next

@@ -308,12 +308,13 @@ ambient authority.
 
 `grant` is a *capability wrapper around a block*: it narrows the active
 authority for the duration of `body` and otherwise composes like any
-other block-bodied builtin.  An `fs`/`net`-restricting grant on a
-platform with OS sandboxing additionally re-execs ral inside the
-platform sandbox to run the block — but that re-exec is a transport
-detail, not part of `grant`'s semantics.  The block returns to the caller the same way
-whether it ran locally or in an OS-sandbox child; the caller observes
-only the outcome and the captured audit/byte observations.
+other block-bodied builtin.  The block itself always evaluates locally,
+in the caller's process; what an `fs`/`net`-restricting grant adds on a
+platform with OS sandboxing is per-command child confinement — each
+external or bundled command spawned inside the block is launched under
+the effective platform sandbox, while ral's own dispatched effects are
+gated in-process by the capability checks.  The caller observes only the
+outcome and the captured audit/byte observations.
 
 ## Effect handlers: deep with self-masking
 
@@ -403,7 +404,7 @@ rules are dedicated rather than shoehorned through a builtin scheme.
 Every audit-producing site goes through the same lexical scope: the
 scope-introducing operator (`grant`, `within`, `guard`, `try`,
 `audit`) owns the nodes its body produces.  Process boundaries —
-the OS-sandbox child ral re-execs for an `fs`/`net`-restricting
+each external or bundled command confined under an `fs`/`net`-restricting
 grant, each pipeline stage helper — only transport audit fragments;
 they never decide tree shape.  The wrapping scope merges incoming
 fragments into its own child trail, so reports stay readable: a

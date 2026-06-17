@@ -6,9 +6,10 @@
 //! tree-unfolding hazard cannot occur regardless of the captured-env
 //! shape.
 //!
-//! Used by the sandbox IPC layer (`sandbox::ipc`) to send a computation,
-//! its captured closure, and the relevant parent state across a process
-//! boundary as JSON.
+//! Used by the child-eval / pipeline-stage helper IPC (`child_eval`,
+//! framed by `subprocess_codec`) to send a computation, its captured
+//! closure, and the relevant parent state across a process boundary as
+//! JSON.
 
 use crate::ir::Comp;
 use crate::types::{Binding, Env, Error, Value};
@@ -85,7 +86,7 @@ pub(crate) struct SerialThunk {
 
 /// A shell snapshot in serialised form.  Each element of `scopes` is an
 /// index into a companion scope table (owned by the request/response
-/// envelope — see `sandbox::ipc`).  The table is a flat `Vec` of scope
+/// envelope — see `child_eval`).  The table is a flat `Vec` of scope
 /// entries, serialised at most once per `Arc`-shared allocation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct SerialEnvSnapshot {
@@ -534,8 +535,8 @@ mod tests {
             captured: SerialEnvSnapshot { scopes: Vec::new() },
         });
 
-        // The codec the sandbox IPC frame uses: `serde_json`
-        // (`subprocess_codec::write_frame`).
+        // The codec the child-eval / pipeline-stage helper frame uses:
+        // `serde_json` (`subprocess_codec::write_frame`).
         let json = serde_json::to_vec(&lambda).expect("serialise lambda");
         let back: SerialValue = serde_json::from_slice(&json).expect("deserialise lambda");
 
