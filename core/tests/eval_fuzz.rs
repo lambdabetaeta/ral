@@ -2596,27 +2596,11 @@ fn has_cap_check(children: &[Value], resource: &str, decision: &str) -> bool {
     })
 }
 
-fn sandbox_unavailable(children: &[Value]) -> bool {
-    children.iter().any(|c| {
-        let here = map_field(c, "cmd") == Value::String("grant".into())
-            && map_field(c, "status") == Value::Int(1)
-            && matches!(
-                map_field(c, "stderr"),
-                Value::Bytes(bytes)
-                    if String::from_utf8_lossy(&bytes).contains("grant sandbox unavailable")
-            );
-        here || sandbox_unavailable(&children_of(c))
-    })
-}
-
 #[cfg(unix)]
 #[test]
 fn audit_exec_allowed_recorded() {
     let tree = must_succeed("audit { grant [exec: ['/bin/true': []], audit: true] { /bin/true } }");
     let children = children_of(&tree);
-    if sandbox_unavailable(&children) {
-        return;
-    }
     assert!(
         has_cap_check(&children, "exec", "allowed"),
         "expected allowed exec capability-check in audit tree; children: {:?}",
@@ -2630,9 +2614,6 @@ fn audit_exec_denied_recorded() {
     let tree =
         must_succeed("audit { grant [exec: ['/bin/true': []], audit: true] { /bin/false } }");
     let children = children_of(&tree);
-    if sandbox_unavailable(&children) {
-        return;
-    }
     assert!(
         has_cap_check(&children, "exec", "denied"),
         "expected denied exec capability-check in audit tree; children: {:?}",
@@ -2660,9 +2641,6 @@ fn audit_nested_grant_outeraudit_propagates() {
         "audit { grant [exec: ['/bin/true': []], audit: true] { grant [exec: ['/bin/true': []]] { /bin/true } } }",
     );
     let children = children_of(&tree);
-    if sandbox_unavailable(&children) {
-        return;
-    }
     assert!(
         has_cap_check(&children, "exec", "allowed"),
         "expected exec event when inner grant lacks audit: true; children: {:?}",
@@ -2729,43 +2707,10 @@ fn earlier_use_of_a_later_non_thunk_let_is_not_shadowed() {
 
 #[test]
 fn audit_fs_write_denied_recorded() {
-    // Grant-with-fs triggers the IPC sandbox subprocess on Linux, which
-    // needs bwrap.  On a container without bwrap (or one whose user
-    // namespace can't mount devpts), the subprocess can't start and the
-    // test has no way to observe the capability-check node.  Mirrors
-    // what `FsProjection::Restricted` puts on the bwrap command line
-    // (`--dev /dev`); see `core/src/sandbox/linux.rs`.
-    #[cfg(target_os = "linux")]
-    if std::process::Command::new("bwrap")
-        .args([
-            "--ro-bind",
-            "/usr",
-            "/usr",
-            "--ro-bind",
-            "/lib",
-            "/lib",
-            "--dev",
-            "/dev",
-            "--",
-            "/usr/bin/true",
-        ])
-        .stderr(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .status()
-        .map(|s| !s.success())
-        .unwrap_or(true)
-    {
-        return;
-    }
-    // Some CI/container environments can start `bwrap` but still do not
-    // surface sandboxed capability-check frames back into the parent audit
-    // tree.  If a simple allowed fs read does not produce an audit child, the
-    // denied-write assertion below is not observable here.
-    let probe =
-        must_succeed("audit { grant [fs: [read: ['/tmp']], audit: true] { glob '/tmp/*' } }");
-    if !has_cap_check(&children_of(&probe), "fs", "allowed") {
-        return;
-    }
+    // The grant body evaluates in-process and the redirect is an
+    // RAL-owned fs effect, so the fs/denied capability-check fires
+    // through `check_fs_op` before the write — no OS sandbox subprocess
+    // is involved, so this runs on every host.
     let outside = format!("/nonexistent_ralaudit_test_{}/file.txt", std::process::id());
     let script = format!(
         "audit {{ grant [fs: [write: ['/tmp']], audit: true] {{ to-string 'x' > '{outside}' }} }}"
@@ -2819,9 +2764,6 @@ fn first_command_child(parent: &Value) -> Option<&Value> {
 fn audit_grant_owns_exec_capability_allowed_child() {
     let tree = must_succeed("audit { grant [exec: ['/bin/true': []], audit: true] { /bin/true } }");
     let outer_children = children_of(&tree);
-    if sandbox_unavailable(&outer_children) {
-        return;
-    }
     let grant = outer_children
         .iter()
         .find(|c| map_field(c, "cmd") == Value::String("grant".into()))
@@ -2844,9 +2786,6 @@ fn audit_grant_owns_exec_capability_denied_child() {
     let tree =
         must_succeed("audit { grant [exec: ['/bin/true': []], audit: true] { /bin/false } }");
     let outer_children = children_of(&tree);
-    if sandbox_unavailable(&outer_children) {
-        return;
-    }
     let grant = outer_children
         .iter()
         .find(|c| map_field(c, "cmd") == Value::String("grant".into()))
@@ -2865,25 +2804,14 @@ fn audit_grant_owns_sandboxed_fs_allowed_child() {
     let tree =
         must_succeed("audit { grant [fs: [read: ['/tmp']], audit: true] { glob '/tmp/*' } }");
     let outer_children = children_of(&tree);
-    if sandbox_unavailable(&outer_children) {
-        return;
-    }
     let grant = outer_children
         .iter()
         .find(|c| map_field(c, "cmd") == Value::String("grant".into()))
         .expect("audit tree must contain a `grant` scope node");
-    // When the sandbox subprocess couldn't deliver audit events
-    // (bwrap unavailable, container restrictions, IPC failure), the
-    // grant node will report a non-zero status with empty children.
-    // The structural claim — "fs/allowed lives under grant" — only
-    // makes sense when the sandbox actually emitted the event;
-    // gate on a probe.
+    // The grant body evaluates in-process, so the fs/allowed
+    // capability-check for `glob` is recorded directly under the grant
+    // scope node.
     let grant_children = children_of(grant);
-    if !has_cap_check(&grant_children, "fs", "allowed")
-        && !has_cap_check(&outer_children, "fs", "allowed")
-    {
-        return;
-    }
     assert!(
         has_cap_check(&grant_children, "fs", "allowed"),
         "fs/allowed event must be under `grant`, not loose at the root: outer={:?}",
@@ -2956,9 +2884,6 @@ fn audit_nested_grants_produce_nested_grant_nodes() {
         "audit { grant [exec: ['/bin/true': []], audit: true] { grant [exec: ['/bin/true': []]] { /bin/true } } }",
     );
     let outer_children = children_of(&tree);
-    if sandbox_unavailable(&outer_children) {
-        return;
-    }
     let outer_grant = outer_children
         .iter()
         .find(|c| map_field(c, "cmd") == Value::String("grant".into()))
@@ -3036,6 +2961,110 @@ fn audit_direct_external_pipeline_stage_appears_in_tree() {
         "direct-spawn echo stage must appear in audit tree: {:?}",
         cmds
     );
+}
+
+// ── Process-staged pipeline (surviving M5 helper-protocol paths) ─────────
+//
+// These four pin the helper-protocol paths the milestone-5 deletion kept
+// (the grant-body OS-sandbox re-exec went; the pipeline helper protocol
+// stayed).  Each drives a *process-staged* pipeline (at least one byte
+// edge) through the public eval path, so the stages run in real
+// `--ral-pipeline-stage-helper` / `--ral-bundled-tool` subprocesses
+// (the test binary re-execs itself via the ctor in `common/mod.rs`).
+// `from-string` is a value consumer with byte input, forcing the pipeline
+// to `ProcessStaged` and the RAL stages to `HelperEval`; `wc` / `printf`
+// resolve to bundled tools spawned as direct `--ral-bundled-tool`
+// children.
+
+/// The pure-pipe equation `x | f = f !{x}` holds across a *process
+/// boundary*.  `echo abc | from-string | length` is process-staged: the
+/// `from-string` value crosses a value edge into the `length` helper
+/// stage, where it is forced once.  `"abc\n"` has four characters, so a
+/// correct single force yields 4 — a missing or double force would not.
+/// (`scope_escapes::pipeline_non_final_stage_is_not_tail_emitting` pins
+/// the same equation for the *in-process* PureValue fold; this is its
+/// cross-process counterpart.)
+#[cfg(unix)]
+#[test]
+fn helper_stage_forces_value_edge_across_process_boundary() {
+    assert_eq!(
+        must_succeed("!{echo abc | from-string | length}"),
+        Value::Int(4),
+        "the value edge into a helper-eval stage must force exactly once \
+         (`x | f = f !{{x}}`): `echo abc` yields `\"abc\\n\"` (4 chars)"
+    );
+}
+
+/// A helper-eval stage is a subshell: a `cd` inside it must not flow back
+/// to the parent.  The stage runs in its own `--ral-pipeline-stage-helper`
+/// subprocess, so its cwd change is confined to that process; the parent's
+/// logical cwd (`!{pwd}`) must be identical before and after the pipeline.
+#[cfg(unix)]
+#[test]
+fn helper_stage_cd_does_not_flow_back_to_parent() {
+    assert_eq!(
+        must_succeed(
+            "let before = !{pwd}\n\
+             !{echo x | from-string | { |_| cd /tmp; return unit }}\n\
+             let after = !{pwd}\n\
+             return !{equal $before $after}"
+        ),
+        Value::Bool(true),
+        "a `cd` inside a helper-eval pipeline stage must not change the \
+         parent's cwd: the stage is an isolated subprocess"
+    );
+}
+
+/// Audit nodes captured *inside* a helper-eval stage merge back into the
+/// parent's audit tree.  The stage runs an external (`/bin/echo`) in its
+/// own subprocess; that command's audit node travels back in the stage's
+/// `ChildEvalResponse` and must appear somewhere under the surrounding
+/// `audit { … }` scope.
+#[cfg(unix)]
+#[test]
+fn helper_stage_audit_nodes_merge_into_parent_tree() {
+    fn collect_cmds(v: &Value, out: &mut Vec<String>) {
+        if let Value::String(s) = map_field(v, "cmd") {
+            out.push(s);
+        }
+        for child in children_of(v) {
+            collect_cmds(&child, out);
+        }
+    }
+    let tree = must_succeed("audit { echo seed | from-string | { |s| /bin/echo $s } }");
+    let mut cmds = Vec::new();
+    collect_cmds(&tree, &mut cmds);
+    assert!(
+        cmds.iter().any(|c| c.contains("/bin/echo")),
+        "the external run inside a helper-eval stage must merge its audit \
+         node into the parent tree: {cmds:?}"
+    );
+}
+
+/// A bundled byte stage runs as a direct `ral --ral-bundled-tool` child
+/// (no helper eval) and produces correct bytes and a success status.
+/// `printf … | wc -l` spawns both `printf` and `wc` as direct bundled
+/// children; capturing the count through `from-string` recovers `wc`'s
+/// bytes (`"4\n"` for four lines) and proves the pipeline succeeded — a
+/// non-zero `wc` would fail the `from-string` capture instead.
+#[cfg(unix)]
+#[test]
+fn bundled_byte_stage_runs_as_direct_child_and_produces_bytes() {
+    assert_eq!(
+        must_succeed("!{printf 'a\\nb\\nc\\nd\\n' | wc -l | from-string}"),
+        Value::String("4\n".into()),
+        "a bundled `wc -l` over four lines must emit `4`, recovered through \
+         the byte-to-value `from-string` edge"
+    );
+}
+
+/// A failing bundled tool in a process-staged pipeline surfaces a
+/// failure rather than swallowing the non-zero status: `wc` on a missing
+/// path exits non-zero, and the pipeline must fail-fast.
+#[cfg(unix)]
+#[test]
+fn failing_bundled_byte_stage_surfaces_failure() {
+    must_fail("printf 'a\\nb\\n' | wc /nonexistent/path");
 }
 
 #[test]

@@ -11,9 +11,7 @@
 //! `--ral-pipeline-anchor` owns the pipeline pgid for the whole launch
 //! so a fast-exiting first stage cannot strand later stages.
 
-use crate::child_eval::{
-    ChildEvalRequest, ChildKind, break_response, run_child_eval, transfer_error,
-};
+use crate::child_eval::{ChildEvalRequest, break_response, run_child_eval, transfer_error};
 use crate::serial::{InternCtx, ScopeTable, SerialValue, build_arcs};
 use crate::subprocess_codec::{read_frame, write_frame};
 use crate::types::{Break, Error, Settled, Value};
@@ -268,8 +266,7 @@ fn serve_stage_core<R: std::io::BufRead + ?Sized, W: std::io::Write + ?Sized>(
         },
         None => None,
     };
-    let (report, output_value) =
-        run_child_eval(request, upstream, ChildKind::PipelineStage { force_output });
+    let (report, output_value) = run_child_eval(request, upstream, force_output);
 
     let report = match (value_out, output_value.as_ref()) {
         (Some(mut writer), Some(value)) => match write_stage_value(&mut writer, value) {

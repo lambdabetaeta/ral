@@ -30,12 +30,13 @@ fn init_test_binary() {
     //      re-execs `current_exe()` (which is *this* test binary) to
     //      serve one stage; without the trampoline that re-exec would
     //      land in the test framework instead of the helper.
-    //   2. `--sandbox-projection ...` and `--internal-sandbox-block` —
-    //      `grant { … }` re-execs the same way to install the OS
-    //      sandbox.  `serve_sandbox_early_init` consumes the flag, pins
-    //      `SANDBOX_SELF`, enters the sandbox, and (for the
-    //      internal-block mode) serves one IPC request.  Letting libtest
-    //      see those flags would crash with "unknown argument".
+    //   2. `--sandbox-projection ...` — a per-command sandbox launch
+    //      re-execs the same way to install the OS sandbox.
+    //      `serve_sandbox_early_init` consumes the flag, pins
+    //      `SANDBOX_SELF`, enters the sandbox, then runs the confined
+    //      target (a `--ral-sandbox-exec` host binary or a
+    //      `--ral-bundled-tool` tool).  Letting libtest see those flags
+    //      would crash with "unknown argument".
     if let Some(code) =
         ral_core::try_run_pipeline_stage_helper().or_else(ral_core::sandbox::serve_sandbox_early_init)
     {

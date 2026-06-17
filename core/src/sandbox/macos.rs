@@ -1,9 +1,10 @@
 //! macOS sandbox using the Seatbelt (sandbox_init) API.
 //!
-//! Single mode of operation: a ral subprocess spawned by
-//! [`super::runner::run_confined`] enters the Seatbelt profile once at
-//! startup via `enter_current_process`, then evaluates the body
-//! in-process with every external it spawns inheriting the confinement.
+//! Single mode of operation: a per-command ral re-exec child carrying
+//! `--sandbox-projection` enters the Seatbelt profile once at startup via
+//! `enter_current_process`, then execs the confined target (a host binary
+//! via `--ral-sandbox-exec`, or a bundled tool in-process) inheriting the
+//! confinement.
 //! `process-exec` is gated when the projection's `exec` field is
 //! `Restricted`: the profile renders a single combined
 //! `file-read* process-exec` allow rule over the exec_dirs and resolved
@@ -37,18 +38,9 @@ pub(super) fn apply_current_process_policy(policy: &SandboxProjection) -> std::i
     apply_profile(&profile, std::iter::empty::<(&str, &str)>())
 }
 
-/// Apply `policy` to the current process and mark the sandbox as active so
-/// children inherit the flag and skip re-entry.
-pub(super) fn enter_current_process(
-    policy: &SandboxProjection,
-    active_env: &str,
-) -> Result<(), String> {
-    apply_current_process_policy(policy)
-        .map_err(|e| format!("ral: failed to enter sandbox: {e}"))?;
-    unsafe {
-        std::env::set_var(active_env, "1");
-    }
-    Ok(())
+/// Apply `policy` to the current process.
+pub(super) fn enter_current_process(policy: &SandboxProjection) -> Result<(), String> {
+    apply_current_process_policy(policy).map_err(|e| format!("ral: failed to enter sandbox: {e}"))
 }
 
 fn apply_profile<'a>(

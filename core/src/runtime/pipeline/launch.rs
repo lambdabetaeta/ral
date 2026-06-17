@@ -181,8 +181,7 @@ fn spawn_stage(
         StageLaunch::HelperEval => {
             let captured = cx.shell.snapshot();
             // Pipeline stages are subshells: only the final value-typed
-            // stage ships its return value (`wants_value`) and no stage
-            // ships its post-run mobile (`wants_mobile = false`).
+            // stage ships its return value (`wants_value`).
             let wants_value = matches!(route.final_value, FinalValue::Report);
             pack_request(
                 Arc::clone(stage),
@@ -190,8 +189,6 @@ fn spawn_stage(
                 Some(&captured),
                 cx.shell.local.audit.active_policy(),
                 wants_value,
-                false,
-                None,
             )?
         }
     };

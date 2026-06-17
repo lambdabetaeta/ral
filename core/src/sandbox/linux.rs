@@ -244,17 +244,13 @@ fn apply_seccomp(cmd: &mut Command, filter: Vec<u8>) {
 
 /// Re-exec the current ral process under `bwrap` with `policy` enforced.
 /// Blocks until the child exits, returning its status as a `u8`.
-/// `active_env` is set in the child so it doesn't try to re-enter the
-/// sandbox recursively on startup.
 pub(super) fn respawn_under_bwrap(
     exe: &Path,
     args: &[String],
     policy: &SandboxProjection,
-    active_env: &str,
 ) -> Result<u8, String> {
     let mut cmd = make_command_with_policy(exe.to_string_lossy().as_ref(), args, policy, None);
-    cmd.env(active_env, "1")
-        .stdin(Stdio::inherit())
+    cmd.stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     let mut child = cmd.spawn().map_err(|e| {

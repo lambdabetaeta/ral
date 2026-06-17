@@ -1,12 +1,11 @@
 //! Length-prefixed JSON frames for ral subprocess helpers.
 //!
-//! Used by both the grant sandbox IPC path and the pipeline-stage helper
-//! path so every re-exec protocol shares one framing codec.
+//! Used by the pipeline-stage helper path so every re-exec protocol
+//! shares one framing codec.
 
-use serde::de::{DeserializeOwned, DeserializeSeed};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::io::{self, Read, Write};
-use std::marker::PhantomData;
 
 pub fn write_frame<W: Write + ?Sized, T: Serialize>(w: &mut W, value: &T) -> io::Result<()> {
     let bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
@@ -113,24 +112,6 @@ pub fn read_frame<R: Read + ?Sized, T: DeserializeOwned>(r: &mut R) -> io::Resul
     decode_body(&body, |b| serde_json::from_slice(b)).map(Some)
 }
 
-/// Read one frame and deserialise its body through `seed` rather than a
-/// `DeserializeOwned` impl, so the decode itself can carry a constraint
-/// the caller supplies (e.g. an expected token).  Shares `read_frame`'s
-/// length-prefix read and raw-frame-dump-on-error tail; only the
-/// deserialiser differs.
-pub fn read_frame_seeded<R: Read + ?Sized, V, S>(r: &mut R, seed: S) -> io::Result<Option<V>>
-where
-    S: for<'de> DeserializeSeed<'de, Value = V>,
-{
-    let Some(body) = read_body(r)? else {
-        return Ok(None);
-    };
-    decode_body(&body, |b| {
-        seed.deserialize(&mut serde_json::Deserializer::from_slice(b))
-    })
-    .map(Some)
-}
-
 /// Read one length-prefixed frame body off `r`, retrying a signal-cut
 /// length read.  `Ok(None)` is a clean EOF at a frame boundary.
 fn read_body<R: Read + ?Sized>(r: &mut R) -> io::Result<Option<Vec<u8>>> {
@@ -186,10 +167,8 @@ fn decode_body<T>(
     }
 }
 
-/// Write a post-mortem frame dump to `path`.  A frame body may carry the
-/// per-re-exec sandbox token (see [`Tokened`]) whose secrecy guards the
-/// IPC boundary, so on Unix the file is created with owner-only
-/// permissions rather than the process umask's default.
+/// Write a post-mortem frame dump to `path`.  On Unix the file is created
+/// with owner-only permissions rather than the process umask's default.
 #[cfg(unix)]
 fn dump_frame(path: &std::path::Path, body: &[u8]) -> io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -205,50 +184,6 @@ fn dump_frame(path: &std::path::Path, body: &[u8]) -> io::Result<()> {
 #[cfg(not(unix))]
 fn dump_frame(path: &std::path::Path, body: &[u8]) -> io::Result<()> {
     std::fs::write(path, body)
-}
-
-/// A frame body carrying a capability token alongside its payload.  The
-/// child stamps the per-re-exec sandbox token; the parent reads it back
-/// through [`ExpectToken`] so a forged response frame fails to decode.
-#[derive(Serialize, Deserialize)]
-pub struct Tokened<T> {
-    pub token: String,
-    pub inner: T,
-}
-
-/// A [`DeserializeSeed`] that deserialises a [`Tokened<T>`], checks its
-/// embedded token against an expected value in constant time, and yields
-/// the proven `inner`.  A missing token is serde's "missing field"
-/// error; a wrong token is a custom error.  Both route through
-/// [`read_frame_seeded`]'s decode-failure path, so neither produces a
-/// usable `T` at the call site.
-pub struct ExpectToken<'a, T> {
-    expected: &'a str,
-    _payload: PhantomData<T>,
-}
-
-impl<'a, T> ExpectToken<'a, T> {
-    pub fn new(expected: &'a str) -> Self {
-        Self {
-            expected,
-            _payload: PhantomData,
-        }
-    }
-}
-
-impl<'de, T: Deserialize<'de>> DeserializeSeed<'de> for ExpectToken<'_, T> {
-    type Value = T;
-
-    fn deserialize<D>(self, deserializer: D) -> Result<T, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let framed = Tokened::<T>::deserialize(deserializer)?;
-        if !crate::sandbox::constant_time_eq(framed.token.as_bytes(), self.expected.as_bytes()) {
-            return Err(serde::de::Error::custom("sandbox response: token mismatch"));
-        }
-        Ok(framed.inner)
-    }
 }
 
 #[cfg(test)]
@@ -285,66 +220,17 @@ mod tests {
         assert_eq!(value.as_deref(), Some("hello"));
     }
 
-    #[test]
-    fn seeded_read_yields_inner_when_token_matches() {
-        let mut framed = Vec::new();
-        write_frame(
-            &mut framed,
-            &Tokened {
-                token: "secret".to_string(),
-                inner: 42u32,
-            },
-        )
-        .unwrap();
-        let mut reader = std::io::Cursor::new(framed);
-        let value = read_frame_seeded(&mut reader, ExpectToken::<u32>::new("secret")).unwrap();
-        assert_eq!(value, Some(42));
-    }
-
-    #[test]
-    fn seeded_read_rejects_a_wrong_token() {
-        let mut framed = Vec::new();
-        write_frame(
-            &mut framed,
-            &Tokened {
-                token: "forged".to_string(),
-                inner: 42u32,
-            },
-        )
-        .unwrap();
-        let mut reader = std::io::Cursor::new(framed);
-        let err = read_frame_seeded(&mut reader, ExpectToken::<u32>::new("secret")).unwrap_err();
-        assert!(err.to_string().contains("token mismatch"));
-    }
-
-    #[test]
-    fn seeded_read_rejects_a_missing_token() {
-        // A frame carrying only the payload, with no `token` field.
-        let mut framed = Vec::new();
-        write_frame(&mut framed, &serde_json::json!({ "inner": 42 })).unwrap();
-        let mut reader = std::io::Cursor::new(framed);
-        let err = read_frame_seeded(&mut reader, ExpectToken::<u32>::new("secret")).unwrap_err();
-        assert!(err.to_string().contains("missing field `token`"));
-    }
-
     #[cfg(unix)]
     #[test]
     fn decode_failure_dump_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
 
-        // A token-bearing frame whose payload fails to deserialise as the
-        // expected type dumps the raw bytes, including the token.
+        // A frame whose payload fails to deserialise as the expected type
+        // dumps the raw bytes for post-mortem; the dump must be owner-only.
         let mut framed = Vec::new();
-        write_frame(
-            &mut framed,
-            &Tokened {
-                token: "secret".to_string(),
-                inner: "not a number",
-            },
-        )
-        .unwrap();
+        write_frame(&mut framed, &"not a number").unwrap();
         let mut reader = std::io::Cursor::new(framed);
-        let err = read_frame_seeded(&mut reader, ExpectToken::<u32>::new("secret")).unwrap_err();
+        let err = read_frame::<_, u32>(&mut reader).unwrap_err();
 
         let message = err.to_string();
         let path = message

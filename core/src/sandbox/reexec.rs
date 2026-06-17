@@ -1,9 +1,9 @@
-//! Binary pinning and re-exec for sandboxed grant blocks.
+//! Binary pinning and re-exec for the per-command OS sandbox.
 //!
 //! At [`crate::sandbox::early_init`] we capture an immutable handle on
-//! our own executable so restrictive grant blocks can re-exec the same
-//! binary, immune to on-disk swaps (`cargo install` mid-session, package
-//! upgrades) that would produce IPC wire-format mismatches.
+//! our own executable so a per-command sandbox launch can re-exec the
+//! same binary, immune to on-disk swaps (`cargo install` mid-session,
+//! package upgrades) that would re-exec a foreign build.
 //!
 //! ## Platform strategies
 //!
@@ -34,9 +34,11 @@ pub(super) struct SandboxSelf {
     /// Platform anchor binding `exec_path` to the boot inode.
     #[allow(dead_code)]
     pin: Pin,
-    /// Exec target passed to `Command::new`.
+    /// Exec target passed to `Command::new`.  Read on Unix only.
+    #[cfg_attr(windows, allow(dead_code))]
     pub exec_path: PathBuf,
-    /// `argv[0]` for the spawned child.
+    /// `argv[0]` for the spawned child.  Read on Unix only.
+    #[cfg_attr(windows, allow(dead_code))]
     pub arg0: PathBuf,
 }
 
@@ -164,8 +166,14 @@ fn ntfs_stat(path: &std::path::Path) -> Option<(u32, u32, u32)> {
 }
 
 /// Refuse to spawn if our executable on disk has been swapped since
-/// registration.  `Pin::Fd` is a no-op — the fd-derived exec path makes
-/// swaps irrelevant.
+/// registration.  Called by the per-command self re-exec before spawning
+/// `--sandbox-projection` so a mid-session binary swap is caught rather
+/// than silently re-execing a foreign build.  `Pin::Fd` is a no-op — the
+/// fd-derived exec path makes swaps irrelevant.
+// Per-command self-reexec swap guard: live on macOS/Linux (called from
+// `macos_sandboxed_command`), unreachable on Windows which has no
+// parent-side self re-exec.
+#[cfg_attr(windows, allow(dead_code))]
 pub(super) fn verify_unswapped(s: &SandboxSelf) -> Result<(), Error> {
     match &s.pin {
         #[cfg(target_os = "linux")]
@@ -254,35 +262,12 @@ pub(super) fn maybe_enter_process_sandbox(
     Ok(None)
 }
 
-/// Reject re-entry into the OS sandbox when the current process is
-/// already confined.  The primary `run_eval` dispatch in
-/// `crate::evaluator` skips confined respawn whenever
-/// `RAL_SANDBOX_ACTIVE` is set, so reaching this guard with the env
-/// var set indicates a dispatch bug.  Errors loudly rather than
-/// silently bypassing — a silent `Ok(None)` here would disable an OS
-/// sandbox the user explicitly asked for via `--sandbox-projection`.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-// SANDBOX_ACTIVE_ENV is a confinement marker presence probe, not a basedir.
-#[allow(clippy::disallowed_methods)]
-fn assert_not_already_confined() -> Result<(), String> {
-    if std::env::var_os(super::SANDBOX_ACTIVE_ENV).is_some() {
-        return Err(format!(
-            "ral: refusing to apply nested OS sandbox ({}=1 indicates \
-             this process is already confined). This is a dispatch \
-             bug — please report it.",
-            super::SANDBOX_ACTIVE_ENV
-        ));
-    }
-    Ok(())
-}
-
 #[cfg(target_os = "macos")]
 fn enter_for_platform(
     _args: &[String],
     policy: &crate::types::SandboxProjection,
 ) -> Result<Option<u8>, String> {
-    assert_not_already_confined()?;
-    super::macos::enter_current_process(policy, super::SANDBOX_ACTIVE_ENV)?;
+    super::macos::enter_current_process(policy)?;
     Ok(None)
 }
 
@@ -291,9 +276,8 @@ fn enter_for_platform(
     args: &[String],
     policy: &crate::types::SandboxProjection,
 ) -> Result<Option<u8>, String> {
-    assert_not_already_confined()?;
     let exe = std::env::current_exe().map_err(|e| format!("ral: current_exe: {e}"))?;
-    super::linux::respawn_under_bwrap(&exe, args, policy, super::SANDBOX_ACTIVE_ENV).map(Some)
+    super::linux::respawn_under_bwrap(&exe, args, policy).map(Some)
 }
 
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
@@ -302,20 +286,4 @@ fn enter_for_platform(
     _policy: &crate::types::SandboxProjection,
 ) -> Result<Option<u8>, String> {
     Err("ral: fs/net sandboxing is unavailable on this Unix platform".into())
-}
-
-/// Detect `--internal-sandbox-block` in `args` and run the IPC child
-/// loop if present.  Returns `Some(code)` to signal immediate exit.
-pub(super) fn maybe_handle_internal_mode(args: &[String]) -> Option<u8> {
-    if args.first().map(|a| a.as_str()) != Some(super::runner::INTERNAL_EVAL_MODE) {
-        return None;
-    }
-    #[cfg(unix)]
-    {
-        Some(super::ipc::serve_from_env_fd())
-    }
-    #[cfg(windows)]
-    {
-        Some(super::ipc::serve_from_env_handle())
-    }
 }

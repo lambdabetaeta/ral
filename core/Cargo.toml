@@ -42,9 +42,9 @@ diffutils = ["dep:diffutils", "dep:same-file"]
 grep      = ["dep:grep", "dep:regex", "dep:walkdir"]
 ripgrep   = ["dep:ral-ripgrep-core"]
 
-# Exposes `sandbox::adopt_token_for_test`, a confinement-token forging
-# primitive needed only by the sandbox integration tests.  Off by
-# default so the primitive is absent from production builds.
+# Opt-in gate for the heavier sandbox integration tests (the macOS
+# Seatbelt end-to-end fail-closed target).  Off by default so a plain
+# `cargo test` skips them on hosts that cannot run the OS sandbox.
 test-util = []
 
 [dependencies]

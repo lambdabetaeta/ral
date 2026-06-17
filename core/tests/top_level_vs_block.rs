@@ -108,35 +108,6 @@ fn display_no_trailing_sep(path: &std::path::Path) -> String {
     }
 }
 
-/// Probe whether the OS sandbox backend can actually launch a confined
-/// child on this host.  Linux CI / sandboxed dev containers commonly
-/// lack `bwrap`; macOS images may lack `sandbox-exec` permissions.  In
-/// either case the confined transport errors out with a transport-level
-/// message ("bwrap not found", "ipc: Broken pipe", …) rather than the
-/// boundary's clean fail-closed message.  Tests that compare local
-/// against confined transport skip themselves when this probe shows
-/// the latter can't actually run — mirroring the `sandbox_unavailable`
-/// guard used by the existing fuzz tests under `audit_*`.
-#[cfg(unix)]
-fn confined_transport_runnable() -> bool {
-    let mut shell = fresh_shell();
-    let comp = compile_against(&shell, "return 0");
-    let result =
-        shell.with_capabilities(projecting_caps(), |s| evaluator::eval_top_level(&comp, s));
-    match result {
-        Ok(_) => true,
-        Err(ral_core::Break::Error(e)) => {
-            let msg = &e.message;
-            // The two failure modes we tolerate: the OS sandbox helper
-            // isn't installed (bwrap / sandbox-exec missing), or the
-            // child crashed during setup before IPC handshake.  Either
-            // produces a `sandbox eval: …` prefix from the runner.
-            !(msg.contains("sandbox eval") || msg.contains("bwrap"))
-        }
-        _ => true,
-    }
-}
-
 // ── (1) Top-level persistence ───────────────────────────────────────────
 
 /// Two sequential top-level calls share state: a `let` from the first
@@ -325,27 +296,15 @@ fn block_grant_does_not_leak_cd() {
 
 // ── (7) Sandbox parity ──────────────────────────────────────────────────
 
-/// Persistence, partial effects, and cwd must look the same whether
-/// the evaluator chose the local transport (no projection) or the
-/// confined transport (projection active).  This locks the
-/// `local-vs-confined transparency` clause of [`ral_core::evaluator`]'s
-/// documentation: parents observe identical behaviour either way.
-///
-/// Sandbox confinement is Unix-only — `confined_availability()`
-/// returns `Unavailable` elsewhere and the evaluator would error
-/// rather than run, which is a separate property (covered by
-/// `sandbox_fail_closed.rs`).
+/// Persistence, partial effects, and cwd must look the same whether or
+/// not a fs/net projection is active.  A `grant` body now always
+/// evaluates locally (milestone 5 of
+/// `decisions/260617_sandbox-external-children`), so an active projection
+/// must not change top-level state semantics: parents observe identical
+/// behaviour either way.
 #[cfg(unix)]
 #[test]
 fn sandbox_parity_top_level_persistence() {
-    if !confined_transport_runnable() {
-        // Same skip pattern as `sandbox_unavailable` in eval_fuzz.rs:
-        // the property under test is parity, which is vacuous if the
-        // confined path can't run at all.  This is not a "fail
-        // closed" failure (that's covered by the dedicated test
-        // file) — it's an environment-capability check.
-        return;
-    }
     let mut shell = fresh_shell();
     let caps = projecting_caps();
     top_level_under(&mut shell, caps.clone(), "let parity_n = 41").expect("first turn");
@@ -353,19 +312,16 @@ fn sandbox_parity_top_level_persistence() {
     assert_eq!(
         result,
         Value::Int(42),
-        "let must persist across calls regardless of transport"
+        "let must persist across calls regardless of an active projection"
     );
 }
 
-/// Partial effects under sandbox projection: same install-on-error
-/// rule as local.  A pre-failure binding survives; a post-failure
+/// Partial effects under an active fs projection: same install-on-error
+/// rule as without one.  A pre-failure binding survives; a post-failure
 /// binding does not.
 #[cfg(unix)]
 #[test]
 fn sandbox_parity_top_level_partial_effects() {
-    if !confined_transport_runnable() {
-        return;
-    }
     let mut shell = fresh_shell();
     let caps = projecting_caps();
     let _ = top_level_under(
@@ -550,15 +506,12 @@ fn poll_on_a_cancelled_handle_errors() {
     assert_eq!(result, Value::Bool(true));
 }
 
-/// `cd` under sandbox projection persists into the next turn, same as
-/// local.  Validates that `logical_cwd` rides the mobile through the
-/// confined transport's IPC round-trip.
+/// `cd` under an active fs projection persists into the next turn, same
+/// as without one.  Validates that `logical_cwd` rides the mobile through
+/// the (now always local) top-level dispatch under a projection.
 #[cfg(unix)]
 #[test]
 fn sandbox_parity_top_level_cd() {
-    if !confined_transport_runnable() {
-        return;
-    }
     let mut shell = fresh_shell();
     let caps = projecting_caps();
     let tmp = std::env::temp_dir();

@@ -1,14 +1,10 @@
 //! Per-command OS sandbox launching.
 //!
-//! Where [`super::runner`] re-execs the *interpreter* around a whole grant
-//! body, this module confines a single external/bundled child: it takes
-//! the already-folded effective [`SandboxProjection`] and builds a
-//! `Command` that runs one target program under the platform backend.
-//!
-//! The two milestones coexist (see
-//! `decisions/260617_sandbox-external-children`): the grant-body re-exec
-//! path still exists, so the command runner's `build_command` only routes
-//! through here when this process is *not* already OS-confined.
+//! This module confines a single external/bundled child: it takes the
+//! already-folded effective [`SandboxProjection`] and builds a `Command`
+//! that runs one target program under the platform backend.  The command
+//! runner's `build_command` routes through here whenever a projection is
+//! active (see `decisions/260617_sandbox-external-children`).
 //!
 //! Env/cwd and resource limits are deliberately **not** applied here. The
 //! caller layers `apply_env` + `apply_resource_limits` on the returned
@@ -153,6 +149,12 @@ fn macos_sandboxed_command(
             1,
         ))
     })?;
+    // Preserve binary-swap protection: refuse to re-exec if our pinned
+    // executable was swapped on disk since boot (e.g. a mid-session
+    // `cargo install`), which would otherwise launch a foreign build.
+    if let Some(s) = super::reexec::SANDBOX_SELF.get() {
+        super::reexec::verify_unswapped(s).map_err(Break::Error)?;
+    }
     let mut cmd = super::self_command().map_err(|e| {
         Break::Error(Error::new(
             format!("sandbox: failed to pin self for re-exec: {e}"),

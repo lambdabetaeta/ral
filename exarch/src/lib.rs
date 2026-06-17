@@ -141,8 +141,9 @@ pub fn run() -> Result<(), String> {
     // The model selection is exarch's own runtime state under the XDG state
     // home (`bootstrap::project_dir`), outside the agent's cwd sandbox, so a
     // tool call cannot reach it — no deny-list entry is needed.
-    // RAL_DUMP_SANDBOX_PROFILE: emit the SBPL `run_confined` will
-    // install at each tool call.  A throwaway shell mirrors the stack.
+    // RAL_DUMP_SANDBOX_PROFILE: emit the SBPL the per-command sandbox
+    // launcher will install for an external child under this projection.
+    // A throwaway shell mirrors the stack.
     {
         let mut probe = ral_core::Shell::new(Default::default());
         probe.push_session_capabilities(caps.clone());

@@ -10,31 +10,26 @@
 //! there the in-process gate stands alone.
 //!
 //! The module is organised into platform backends (`linux`, `macos`,
-//! `windows`, `windows_restricted_token`), a subprocess runner (`runner`)
-//! that re-execs ral inside the sandbox for confined evaluation, and
-//! an IPC layer (`ipc`) that serialises the evaluation request and
-//! response across the process boundary.
+//! `windows`, `windows_restricted_token`) and a per-command launcher
+//! (`launch`) that confines a single external/bundled child under the
+//! platform backend.
 //!
 //! Entry points:
 //! - [`early_init`] — called once at program startup to consume
 //!   `--sandbox-projection`, pin the binary, and (on Unix) enter the
-//!   OS process sandbox; also dispatches `--internal-sandbox-block`
-//!   into the IPC child loop.
+//!   OS process sandbox for the per-command `--sandbox-projection` child.
 //! - [`make_command`] — builds the external [`Command`] and, when a
 //!   capability grant is active, installs the resource-limit `pre_exec`
 //!   hooks (no OS policy wrapping).
 //! - [`apply_child_limits`] — post-spawn resource caps (Windows only;
 //!   no-op on Unix where limits are set via `pre_exec`).
 
-mod ipc;
 mod launch;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
-mod marker;
 mod reexec;
-mod runner;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
@@ -44,7 +39,7 @@ use crate::types::{SandboxProjection, Shell};
 use std::process::Command;
 use std::sync::OnceLock;
 
-/// Host-supplied callback that the IPC child runs against its fresh
+/// Host-supplied callback that a re-exec'd child runs against its fresh
 /// shell so host-owned builtin tables join `CORE_BUILTINS` before any
 /// body is evaluated.
 ///
@@ -52,10 +47,10 @@ use std::sync::OnceLock;
 /// publishes additional static entries (`explore-dir`, `line-hash`,
 /// …) that core cannot link, and the mobile transfer cannot carry the
 /// `BuiltinTable` either (the entries hold function pointers, which
-/// are not valid across process address spaces).  The IPC child is a
-/// re-execed copy of the host binary, so the host registers this hook
-/// before [`early_init`] dispatches the child; the child invokes it on
-/// its `Shell::new` *before* [`crate::subprocess::install_shell_mobile`]
+/// are not valid across process address spaces).  A pipeline-stage
+/// helper is a re-execed copy of the host binary, so the host registers
+/// this hook before [`early_init`]; the child invokes it on its
+/// `Shell::new` *before* [`crate::subprocess::install_shell_mobile`]
 /// runs.  `install_shell_mobile` preserves the receiver's builtin
 /// table by design, so hook-installed entries survive the mobile
 /// install and the body sees the same surface as the parent.
@@ -66,8 +61,7 @@ use std::sync::OnceLock;
 static CHILD_SHELL_HOOK: OnceLock<fn(&mut Shell)> = OnceLock::new();
 
 /// Register the host shell-extension hook.  Must be called before
-/// [`early_init`] reaches `--internal-sandbox-block`; subsequent calls
-/// are silently ignored.
+/// [`early_init`]; subsequent calls are silently ignored.
 pub fn set_child_shell_extension(hook: fn(&mut Shell)) {
     let _ = CHILD_SHELL_HOOK.set(hook);
 }
@@ -89,91 +83,10 @@ pub use linux::make_command_with_policy;
 pub(crate) use launch::{LaunchTarget, sandboxed_command};
 pub use launch::serve_sandbox_exec;
 
-// Confined-eval entry point.  `evaluator` routes here once
-// `confined_availability()` returns `Ready`.
-// dead after the grant-local flip; deleted in M5 (sandbox-external-children)
-#[allow(unused_imports)]
-pub(crate) use runner::run_confined;
-
-// Authenticate the inherited confinement marker against the capability
-// token a genuine sandbox re-exec recorded.  The transport gate and the
-// access-side resolver consult this instead of the marker's mere
-// presence; the IPC child adopts the token via `marker::adopt`.
-pub(crate) use marker::adopt as adopt_sandbox_token;
-pub(crate) use marker::authenticated as marker_authenticated;
-pub(crate) use marker::constant_time_eq;
-
-/// Test seam: simulate a genuinely-confined child by adopting a
-/// capability token the way the IPC child does when it receives an
-/// authenticated request, letting an integration test reach the
-/// authenticated-marker state.  This is a forging primitive — it mints
-/// and adopts a fresh token, flipping the process into the confined
-/// state for its remaining lifetime — so it is gated behind the
-/// `test-util` feature and absent from default builds.  Returns the
-/// minted token.
-#[cfg(feature = "test-util")]
-#[doc(hidden)]
-pub fn adopt_token_for_test() -> String {
-    let token = marker::mint();
-    marker::adopt(&token);
-    token
-}
-
-/// Whether the sandbox-confined evaluation transport is usable in this
-/// process, independent of any particular body.  The neutral
-/// [`crate::evaluator`] queries this to decide between local and
-/// confined dispatch when a sandbox projection is active.
-#[derive(Debug)]
-pub enum ConfinedAvailability {
-    /// Backend is ready: platform supports a sandbox profile and our
-    /// own executable is pinned for re-exec.
-    Ready,
-    /// Backend cannot be used; the `&'static str` carries a reason
-    /// suitable for surfacing in a `fail-closed` error.
-    Unavailable(&'static str),
-}
-
-/// Probe the confined-eval backend without inspecting any body.
-pub fn confined_availability() -> ConfinedAvailability {
-    #[cfg(unix)]
-    {
-        if !cfg!(any(target_os = "macos", target_os = "linux")) {
-            return ConfinedAvailability::Unavailable(
-                "this Unix platform has no fs/net process sandbox backend",
-            );
-        }
-        if reexec::SANDBOX_SELF.get().is_none() {
-            return ConfinedAvailability::Unavailable(
-                "failed to pin the current executable for sandbox re-exec",
-            );
-        }
-        ConfinedAvailability::Ready
-    }
-    #[cfg(windows)]
-    {
-        if reexec::SANDBOX_SELF.get().is_none() {
-            return ConfinedAvailability::Unavailable(
-                "failed to pin the current executable for sandbox re-exec",
-            );
-        }
-        if !windows_restricted_token::backend_ready() {
-            return ConfinedAvailability::Unavailable(
-                "restricted-token backend is not available on this Windows host",
-            );
-        }
-        ConfinedAvailability::Ready
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        ConfinedAvailability::Unavailable("sandbox confinement unavailable on this platform")
-    }
-}
-
 /// Whether this platform's OS backend can actually enforce a network
 /// restriction (`net: false`).  Linux (`--unshare-net`) and macOS
 /// (deny-default Seatbelt) can; the Windows restricted-token backend has
-/// no kernel network enforcement.  Mirrors the cfg structure of
-/// [`confined_availability`].
+/// no kernel network enforcement.
 fn net_enforced() -> bool {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
@@ -211,16 +124,6 @@ const SANDBOX_PROJECTION_FLAG: &str = "--sandbox-projection";
 /// program inside that Seatbelt.  Distinct from `--ral-bundled-tool`, which
 /// runs a bundled tool in-process confined instead of execing a host binary.
 const SANDBOX_EXEC_FLAG: &str = "--ral-sandbox-exec";
-
-/// Marks a ral process as running inside an OS sandbox.  Its mere
-/// presence is *not* trusted as proof of confinement — an arbitrary
-/// parent can export it (review findings S1, S2).  A genuinely-confined
-/// child stamps the per-re-exec capability token from its IPC request
-/// into this var via [`marker::adopt`]; [`marker::authenticated`] trusts
-/// the marker only when its value equals that recorded token.  The
-/// presence reads that remain (`self_command`, the nested-respawn guard)
-/// are not enforcement gates — they fail safe under a forged value.
-pub const SANDBOX_ACTIVE_ENV: &str = "RAL_SANDBOX_ACTIVE";
 
 /// Undocumented debug switch.  When set (any value), front-ends call
 /// [`dump_profile_if_requested`] on startup to print the OS-sandbox
@@ -301,18 +204,11 @@ pub(crate) fn register_self_for_helpers() {
 /// Prefers the pinned sandbox self-path when available so helper subprocesses
 /// stay bound to the boot-time binary even if the on-disk path changes.
 #[cfg(unix)]
-// SANDBOX_ACTIVE_ENV is a confinement marker presence probe, not a basedir.
-#[allow(clippy::disallowed_methods)]
 pub(crate) fn self_command() -> std::io::Result<Command> {
     use std::os::unix::process::CommandExt;
 
     if let Some(s) = reexec::SANDBOX_SELF.get() {
-        let exec = if std::env::var_os(SANDBOX_ACTIVE_ENV).is_some() {
-            &s.arg0
-        } else {
-            &s.exec_path
-        };
-        let mut cmd = Command::new(exec);
+        let mut cmd = Command::new(&s.exec_path);
         cmd.arg0(&s.arg0);
         return Ok(cmd);
     }
@@ -325,17 +221,13 @@ pub(crate) fn self_command() -> std::io::Result<Command> {
 /// Handles, in order: consuming --sandbox-projection from argv; recording the
 /// current executable path for subprocess re-invocation; entering the OS
 /// process sandbox when --sandbox-projection was given (Unix only — on
-/// Windows the sandbox is applied by the parent at child spawn time);
-/// dispatching --internal-sandbox-block (the IPC subprocess mode).
+/// Windows the sandbox is applied by the parent at child spawn time).
 pub fn early_init(argv: &[String]) -> Result<(Vec<String>, Option<u8>), String> {
     let (policy, stripped) = strip_policy_arg(argv)?;
-    // Pin this binary's executable so any later restrictive
-    // `grant { … }` block re-execs *us*, immune to on-disk swaps.
+    // Pin this binary's executable so a per-command `--sandbox-projection`
+    // child re-execs *us*, immune to on-disk swaps.
     reexec::register_sandbox_self();
     if let Some(code) = reexec::maybe_enter_process_sandbox(&stripped, policy.as_ref())? {
-        return Ok((stripped, Some(code)));
-    }
-    if let Some(code) = reexec::maybe_handle_internal_mode(&stripped) {
         return Ok((stripped, Some(code)));
     }
     Ok((stripped, None))
@@ -343,13 +235,11 @@ pub fn early_init(argv: &[String]) -> Result<(Vec<String>, Option<u8>), String> 
 
 /// The OS-sandbox stage of the pre-`main` dispatch, as an `Option<u8>`
 /// building block: run [`early_init`] over the process argv and, when this
-/// process is a re-exec child (a `grant { … }` block's
-/// `--internal-sandbox-block` IPC server, or the Linux bwrap respawn),
-/// surface its exit code so the caller can terminate. A normal top-level
-/// invocation yields `None`. `early_init` also pins `SANDBOX_SELF` here, so
-/// the confined-transport availability probe reports `Ready`. The stripped
-/// argv is otherwise discarded — callers that need to parse a CLI from it
-/// (the `ral` binary) call `early_init` directly.
+/// process is the Linux bwrap respawn child, surface its exit code so the
+/// caller can terminate. A normal top-level invocation yields `None`.
+/// `early_init` also pins `SANDBOX_SELF` here. The stripped argv is
+/// otherwise discarded — callers that need to parse a CLI from it (the
+/// `ral` binary) call `early_init` directly.
 ///
 /// After sandbox setup this also serves the per-command re-exec tails on
 /// the post-`early_init` argv (Seatbelt / bwrap already applied): the

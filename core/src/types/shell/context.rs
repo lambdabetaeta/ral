@@ -92,26 +92,14 @@ impl Context {
     }
 
     /// Build a [`Resolver`] for an access-side capability check.
-    /// Inside the sandboxed child the OS-level Seatbelt / bwrap
-    /// profile is the real gate, and `realpath(3)` may fail on
-    /// intermediate components or fall back to lexical form on only
-    /// one side of the comparison — both lead to spurious denials.
-    /// Use pure lexical resolution there, leaning on `path_within`'s
-    /// firmlink-alias awareness to keep `/tmp` ↔ `/private/tmp`
-    /// correct.  Outside the sandbox keep canonicalise-based
-    /// resolution so grants follow symlinks.
+    ///
+    /// The interpreter always runs unconfined now (a `grant` body
+    /// evaluates locally; only the per-command launcher enters the OS
+    /// sandbox, in a separate child process), so the in-process fs gate
+    /// uses canonicalise-based resolution unconditionally and grants
+    /// follow symlinks.
     pub(crate) fn resolver_for_check(&self) -> Resolver<'_> {
-        // Authenticate the marker rather than trust its mere presence: a
-        // forged `RAL_SANDBOX_ACTIVE` must not switch the in-process fs
-        // gate to lexical resolution, which would let a symlink evade a
-        // grant the way the genuinely-confined child relies on the OS
-        // profile to catch.
-        let mode = if crate::sandbox::marker_authenticated() {
-            CanonMode::LexicalOnly
-        } else {
-            CanonMode::Lenient
-        };
-        self.resolver_with(mode)
+        self.resolver_with(CanonMode::Lenient)
     }
 
     fn resolver_with(&self, mode: CanonMode) -> Resolver<'_> {
