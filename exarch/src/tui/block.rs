@@ -10,6 +10,7 @@
 //! asked for, so re-flattening the buffer each frame re-renders only the
 //! block the user just dialed, or the whole buffer once on a resize.
 
+use super::fidelity::Fidelity;
 use super::line::{self, READ_W, RAIL_W, is_blank};
 use super::md::{self, MD_INDENT};
 use super::rail::{self, RailKind};
@@ -80,6 +81,10 @@ pub(super) struct Block {
     level: u8,
     /// The producing agent's palette slot, stamped at push.
     agent: AgentSlot,
+    /// The epistemic signal this block carries — context pressure and echo
+    /// similarity, set at markdown commit (Move 7).  Sound (`0/0`) on every
+    /// other kind, so only assistant prose degrades its medium.
+    fidelity: Fidelity,
     /// A tool call's result magnitude — `text.lines().count()` of its
     /// [`crate::bus::Event::ToolResult`], attached after the fact by
     /// [`super::viewport::Viewport::set_result_size`].  Feeds the
@@ -98,7 +103,7 @@ impl Block {
     /// nothing changes visually until the user dials: `ToolCall` at L1
     /// (today's collapsed view), every other kind at L3 (today's full
     /// render).
-    fn new(kind: BlockKind, agent: AgentSlot) -> Self {
+    fn new(kind: BlockKind, agent: AgentSlot, fidelity: Fidelity) -> Self {
         let level = match kind {
             BlockKind::ToolCall { .. } => 1,
             _ => 3,
@@ -107,6 +112,7 @@ impl Block {
             kind,
             level,
             agent,
+            fidelity,
             result_size: None,
             cache: None,
             cache_w: 0,
@@ -119,16 +125,16 @@ impl Block {
         cmd: String,
         agent: AgentSlot,
     ) -> Self {
-        Self::new(BlockKind::ToolCall { tool, summary, cmd }, agent)
+        Self::new(BlockKind::ToolCall { tool, summary, cmd }, agent, Fidelity::default())
     }
-    pub(super) fn markdown(src: String, agent: AgentSlot) -> Self {
-        Self::new(BlockKind::Markdown(src), agent)
+    pub(super) fn markdown(src: String, agent: AgentSlot, fidelity: Fidelity) -> Self {
+        Self::new(BlockKind::Markdown(src), agent, fidelity)
     }
     pub(super) fn patch(path: String, hunks: Vec<Hunk>, agent: AgentSlot) -> Self {
-        Self::new(BlockKind::Patch { path, hunks }, agent)
+        Self::new(BlockKind::Patch { path, hunks }, agent, Fidelity::default())
     }
     pub(super) fn chrome(shape: RailShape, lines: Vec<Line<'static>>, agent: AgentSlot) -> Self {
-        Self::new(BlockKind::Chrome { shape, lines }, agent)
+        Self::new(BlockKind::Chrome { shape, lines }, agent, Fidelity::default())
     }
 
     /// The producing agent's palette slot.
@@ -164,6 +170,17 @@ impl Block {
     /// attaches to via [`Self::set_result_size`].
     pub(super) fn is_tool_call(&self) -> bool {
         matches!(self.kind, BlockKind::ToolCall { .. })
+    }
+
+    /// The `ral` script this block ran, if it is a `ral` tool call — the
+    /// echo signal compares committing prose against it.  `None` for any
+    /// other kind, including a non-`ral` tool call, so only a genuine
+    /// just-run script can register as an echo.
+    pub(super) fn ral_cmd(&self) -> Option<&str> {
+        match &self.kind {
+            BlockKind::ToolCall { tool, cmd, .. } if *tool == "ral" => Some(cmd),
+            _ => None,
+        }
     }
 
     /// True for a step-boundary chrome block — the column unit the
@@ -291,9 +308,9 @@ impl Block {
                 _ => line::tool_call_collapsed(summary, tool, self.result_size, width),
             },
             BlockKind::Markdown(src) => match level {
-                3 => md::render_md(src, width, MD_INDENT),
-                2 => first_rows(md::render_md(src, width, MD_INDENT), N),
-                _ => first_rows(md::render_md(src, width, MD_INDENT), 1),
+                3 => md::render_md(src, width, MD_INDENT, self.fidelity),
+                2 => first_rows(md::render_md(src, width, MD_INDENT, self.fidelity), N),
+                _ => first_rows(md::render_md(src, width, MD_INDENT, self.fidelity), 1),
             },
             BlockKind::Patch { path, hunks } => match level {
                 3 => line::patch(path, hunks),

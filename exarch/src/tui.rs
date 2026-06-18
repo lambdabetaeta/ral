@@ -16,12 +16,14 @@
 //! live preview row.
 
 mod block;
+mod fidelity;
 mod line;
 mod md;
 mod picker;
 mod rail;
 mod viewport;
 use block::{AgentSlot, RailShape};
+use fidelity::Fidelity;
 
 use line::usage_text;
 
@@ -382,6 +384,14 @@ impl App {
         self.total_usage
     }
 
+    /// The turn-level context-pressure floor (`0..=3`), the seed signal of
+    /// coherent degradation (Move 7): `last_input` against the model's
+    /// `context_window`.  Passed into each markdown commit so a stressed
+    /// turn's prose renders degraded; `0` when no context window is known.
+    fn context_floor(&self) -> u8 {
+        fidelity::context_floor(self.last_input, self.context_window)
+    }
+
     /// Set the live `provider model` label shown in the status bar. Set
     /// once at startup and again on every `/model` switch.
     pub fn set_status_model(&mut self, provider: &str, model: &str) {
@@ -457,8 +467,9 @@ impl App {
             }
             Kind::Died => {
                 self.flush_patch_buf();
+                let floor = self.context_floor();
                 if let Some(vp) = self.viewports.get_mut(&id) {
-                    vp.flush_open();
+                    vp.flush_open(floor);
                 }
                 // Root never enters the linger window; it lives as
                 // long as the program does.
@@ -480,14 +491,16 @@ impl App {
             }
             Kind::Token(text) => {
                 self.flush_patch_buf();
+                let floor = self.context_floor();
                 if let Some(vp) = self.viewports.get_mut(&id) {
-                    vp.push_token(&text);
+                    vp.push_token(&text, floor);
                 }
             }
             Kind::Boundary => {
                 self.flush_patch_buf();
+                let floor = self.context_floor();
                 if let Some(vp) = self.viewports.get_mut(&id) {
-                    vp.close_boundary();
+                    vp.close_boundary(floor);
                 }
             }
             Kind::Step(n) => self.push_chrome(id, RailShape::Step, line::step(n as usize)),
@@ -523,7 +536,16 @@ impl App {
                 error,
                 elapsed,
             } => {
-                let lines = subagent_breadcrumb(&title, &text, error.as_deref(), elapsed);
+                // The event carries no child session id, so the child's own
+                // per-block fidelity is unreachable here; the breadcrumb is
+                // root's reception of the result, so it degrades with root's
+                // turn-level context floor (echo does not apply — there is
+                // no preceding `ral` call in this render context).
+                let fidelity = Fidelity {
+                    context: self.context_floor(),
+                    echo: 0,
+                };
+                let lines = subagent_breadcrumb(&title, &text, error.as_deref(), elapsed, fidelity);
                 // Always lands in root, regardless of which nesting
                 // level emitted — main is the permanent record of
                 // delegated work.
@@ -1166,8 +1188,9 @@ impl App {
         // Flush the open markdown buffer first so any trailing
         // streamed paragraph (no double-newline yet) reaches
         // `committed`, and the `user.log`, before the final flush.
+        let floor = self.context_floor();
         for vp in self.viewports.values_mut() {
-            vp.flush_open();
+            vp.flush_open(floor);
         }
         let mut paths = Vec::with_capacity(self.dispatch_order.len());
         for &id in &self.dispatch_order {
@@ -1495,6 +1518,7 @@ fn subagent_breadcrumb(
     text: &str,
     error: Option<&str>,
     elapsed: Duration,
+    fidelity: Fidelity,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let secs = elapsed.as_secs();
@@ -1520,7 +1544,7 @@ fn subagent_breadcrumb(
     ]));
     if error.is_none() && !text.is_empty() {
         let (tw, _) = size().unwrap_or((READ_W, 24));
-        lines.extend(md::render_md(text, tw.min(READ_W), md::MD_INDENT));
+        lines.extend(md::render_md(text, tw.min(READ_W), md::MD_INDENT, fidelity));
     }
     lines.push(Line::default());
     lines

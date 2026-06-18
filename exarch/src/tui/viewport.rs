@@ -15,6 +15,7 @@
 //! file is the durable counterpart to `events.json`.
 
 use super::block::{AgentSlot, Block, RailShape, wrap_line};
+use super::fidelity::{self, Fidelity};
 use super::line::{READ_W, is_blank, plain};
 use crate::bus::Hunk;
 use crate::provider::Usage;
@@ -311,22 +312,23 @@ impl Viewport {
         }
     }
 
-    /// Push streamed assistant text; commit any fence-safe paragraphs.
-    pub(super) fn push_token(&mut self, text: &str) {
+    /// Push streamed assistant text; commit any fence-safe paragraphs at
+    /// the turn's `context_floor` (the degradation seed).
+    pub(super) fn push_token(&mut self, text: &str, context_floor: u8) {
         self.open.push_str(text);
-        self.flush_complete_paragraphs();
+        self.flush_complete_paragraphs(context_floor);
     }
 
     /// End a streaming step: commit whatever remains in `open`.
-    pub(super) fn close_boundary(&mut self) {
-        self.flush_open();
+    pub(super) fn close_boundary(&mut self, context_floor: u8) {
+        self.flush_open(context_floor);
     }
 
     /// Commit the longest fence-safe prefix of `open` as one markdown
     /// block.  Committing elsewhere would split a code fence across two
     /// `render_md` calls, so when no safe break exists the buffer keeps
     /// growing until the fence closes or the turn ends.
-    pub(super) fn flush_complete_paragraphs(&mut self) {
+    pub(super) fn flush_complete_paragraphs(&mut self, context_floor: u8) {
         let Some(idx) = safe_paragraph_break(&self.open) else {
             return;
         };
@@ -334,17 +336,38 @@ impl Viewport {
         if chunk.trim().is_empty() {
             return;
         }
-        self.push_block(Block::markdown(chunk, self.agent));
+        let fidelity = self.commit_fidelity(&chunk, context_floor);
+        self.push_block(Block::markdown(chunk, self.agent, fidelity));
     }
 
     /// Commit whatever remains in `open` as a final markdown block.
     /// Called at turn end and `/clear`.
-    pub(super) fn flush_open(&mut self) {
+    pub(super) fn flush_open(&mut self, context_floor: u8) {
         let leftover = std::mem::take(&mut self.open);
         if leftover.trim().is_empty() {
             return;
         }
-        self.push_block(Block::markdown(leftover, self.agent));
+        let fidelity = self.commit_fidelity(&leftover, context_floor);
+        self.push_block(Block::markdown(leftover, self.agent, fidelity));
+    }
+
+    /// The fidelity to stamp on a committing markdown block: the turn-level
+    /// `context_floor` (passed by `App`) plus a per-block echo delta — the
+    /// trigram overlap of `text` with the most-recent `ral` script in this
+    /// session, when the latest tool call was `ral`.  Context is the floor
+    /// every paragraph inherits; echo is the per-paragraph modifier.
+    fn commit_fidelity(&self, text: &str, context_floor: u8) -> Fidelity {
+        let echo = self
+            .blocks
+            .iter()
+            .rev()
+            .find(|b| b.is_tool_call())
+            .and_then(Block::ral_cmd)
+            .map_or(0, |cmd| fidelity::echo_delta(text, cmd));
+        Fidelity {
+            context: context_floor,
+            echo,
+        }
     }
 
     /// Append `block`, tee its log projection, and mark the flatten

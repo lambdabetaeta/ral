@@ -18,13 +18,13 @@ vocabulary of Jacques Bertin's *Sémiologie graphique*: the plane and its six
 visual variables (shape, value, size, hue, grain, orientation).
 
 
-> **Landed: Phases 0–2.** The per-`Block` substrate (agent slot, magnitude,
-> `RailShape` discriminant), the data-encoding marginal rail (Move 1), and the
-> `rule_line` value-ramp + Gantt phase ribbon (Move 3) are implemented in
-> `exarch/src/tui/`. Phases 3–8 (size bars, grain, graded reduction, the
-> agent×step matrix, coherent degradation, and the projection switch) remain
-> `proposed` — they consume the substrate this parcel establishes and compose
-> on it without rework.
+> **Landed: Phases 0–7.** The per-`Block` substrate (agent slot, magnitude,
+> `RailShape` discriminant), the data-encoding marginal rail (Move 1), the
+> `rule_line` value-ramp + Gantt phase ribbon (Move 3), the collapsed-header
+> size bars (Move 4) and diff-density grain (Move 5), graded reduction (Move 6),
+> the agent×step matrix (Move 2), and coherent degradation (Move 7) are
+> implemented in `exarch/src/tui/`. Only Phase 8 (the projection switch — the
+> codebase map and a keybinding to cycle projections) remains `proposed`.
 ## The diagnosis
 
 The present TUI is a *narrative log*:

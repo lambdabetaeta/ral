@@ -65,24 +65,29 @@ pub(super) fn value_step(magnitude: Option<u32>) -> u8 {
     }
 }
 
+/// Linearly interpolate `from` toward `to` by `t` (clamped to
+/// `0.0..=1.0`), channel by channel. The value ramp ([`lighten`]) and the
+/// fidelity modulations ([`super::md`]) both express themselves in terms
+/// of it, so colour interpolation has one definition. A non-RGB `from`
+/// passes through unchanged (the palette is RGB, so this only matters for
+/// themed fallbacks).
+pub(super) fn mix(from: Color, to: Color, t: f32) -> Color {
+    let (Color::Rgb(fr, fg, fb), Color::Rgb(tr, tg, tb)) = (from, to) else {
+        return from;
+    };
+    let t = t.clamp(0.0, 1.0);
+    let lerp = |a: u8, b: u8| -> u8 {
+        (a as f32 + (b as f32 - a as f32) * t).round().clamp(0.0, 255.0) as u8
+    };
+    Color::Rgb(lerp(fr, tr), lerp(fg, tg), lerp(fb, tb))
+}
+
 /// Interpolate an RGB colour toward white (255) by `step / 3` of the
-/// remaining distance, so step 3 is near-white. Non-RGB colours pass
-/// through unchanged (the palette is RGB, so this only matters for
-/// themed fallbacks). Brighter = larger magnitude; hue is preserved, so
-/// agent identity never collides with the value ramp.
+/// remaining distance, so step 3 is white. Non-RGB colours pass through
+/// unchanged. Brighter = larger magnitude; hue is preserved on the way,
+/// so agent identity never collides with the value ramp.
 pub(super) fn lighten(c: Color, step: u8) -> Color {
-    let Color::Rgb(r, g, b) = c else {
-        return c;
-    };
-    if step == 0 {
-        return c;
-    }
-    let t = (step as f32) / 3.0;
-    let lift = |ch: u8| -> u8 {
-        let d = 255.0 - ch as f32;
-        (ch as f32 + d * t).round().clamp(0.0, 255.0) as u8
-    };
-    Color::Rgb(lift(r), lift(g), lift(b))
+    mix(c, Color::Rgb(255, 255, 255), step as f32 / 3.0)
 }
 
 /// Build the 2-column rail span — one shape glyph styled with the

@@ -17,7 +17,9 @@ use syntect::highlighting::{Color as SynColor, FontStyle, Style as SynStyle, The
 use syntect::parsing::SyntaxSet;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use super::fidelity::Fidelity;
 use super::line::{CYAN, LIME, READ_W, SLATE, is_blank};
+use super::rail::mix;
 
 /// Left inset for assistant markdown lines, marking the model's voice
 /// against the column-0 chrome.
@@ -25,19 +27,81 @@ pub(super) const MD_INDENT: u16 = 4;
 
 const CODE_BG: Color = Color::Rgb(28, 32, 42);
 
+/// The foreground assumed for spans with no explicit colour (plain prose
+/// rendered at the terminal default), so the fidelity contrast pull and
+/// echo waver have a concrete value to interpolate. A degraded answer's
+/// prose must visibly lose contrast, so it cannot stay at the bare
+/// terminal default once modulation kicks in.
+const BASE_FG: Color = Color::Rgb(208, 213, 224);
+
 // ── public entry points ──────────────────────────────────────────────────
 
 /// Render `text` to ratatui lines, clamped to [`READ_W`] columns.  `indent`
 /// shrinks the wrap budget and prepends that many spaces to every non-blank
 /// emitted line, so the prose sits inset from the surrounding chrome.
-pub(super) fn render_md(text: &str, w: u16, indent: u16) -> Vec<Line<'static>> {
+/// `fidelity` degrades the rendering medium with its source (Move 7): a
+/// context-stressed turn dims and loses contrast, an echoed paragraph
+/// wavers.
+pub(super) fn render_md(text: &str, w: u16, indent: u16, fidelity: Fidelity) -> Vec<Line<'static>> {
     let body_w = w.min(READ_W).saturating_sub(indent).max(1) as usize;
     let mut comp = Composer::new(body_w, indent as usize);
     let mut p = Parser::new_ext(text, gfm());
     while let Some(ev) = p.next() {
         comp.event(ev, &mut p);
     }
-    comp.finish(ends_with_blank_line(text))
+    let mut lines = comp.finish(ends_with_blank_line(text));
+    modulate(&mut lines, fidelity);
+    lines
+}
+
+/// Degrade finished lines so the medium tracks the model's reliability
+/// (Move 7, coherent degradation).  Both treatments walk the already-built
+/// spans — fixed-colour code, headings, and tables are *not* exempt, so the
+/// whole block reads as one fidelity rather than a mix of degraded prose
+/// and confident code:
+///
+/// - **context pressure → value reduction.** Level 1 dims; levels 2–3 dim
+///   and pull every foreground toward the background (~40% / ~70%), so a
+///   stressed answer reads as muted.
+/// - **echo similarity → waver.** Alternate rows oscillate ±1 value-step in
+///   lightness, so an echoed paragraph reads as unsteady without parsing.
+fn modulate(lines: &mut [Line<'static>], f: Fidelity) {
+    if f.context == 0 && f.echo == 0 {
+        return;
+    }
+    let pull = match f.context {
+        0 | 1 => 0.0,
+        2 => 0.40,
+        _ => 0.70,
+    };
+    for (row, line) in lines.iter_mut().enumerate() {
+        // Even rows lift toward white, odd rows toward black — a ±1
+        // value-step oscillation when the paragraph echoes its script.
+        let waver = (f.echo > 0).then_some(if row % 2 == 0 {
+            Color::Rgb(255, 255, 255)
+        } else {
+            Color::Rgb(0, 0, 0)
+        });
+        for span in &mut line.spans {
+            if span.content.trim().is_empty() {
+                continue;
+            }
+            if f.context >= 1 {
+                span.style = span.style.add_modifier(Modifier::DIM);
+            }
+            if pull == 0.0 && waver.is_none() {
+                continue;
+            }
+            let mut fg = span.style.fg.unwrap_or(BASE_FG);
+            if pull > 0.0 {
+                fg = mix(fg, CODE_BG, pull);
+            }
+            if let Some(to) = waver {
+                fg = mix(fg, to, 1.0 / 3.0);
+            }
+            span.style.fg = Some(fg);
+        }
+    }
 }
 
 fn gfm() -> Options {
@@ -754,7 +818,7 @@ mod tests {
     /// commits land separated rather than flush against each other.
     #[test]
     fn render_keeps_one_trailing_blank_on_blank_input() {
-        let out = render_md("Paragraph.\n\n", 80, 0);
+        let out = render_md("Paragraph.\n\n", 80, 0, Fidelity::default());
         assert!(!out.is_empty());
         assert!(
             is_blank(out.last().unwrap()),
@@ -769,7 +833,7 @@ mod tests {
     /// sequentially.
     #[test]
     fn render_keeps_internal_paragraph_break() {
-        let out = render_md("Para one.\n\nPara two.\n\n", 80, 0);
+        let out = render_md("Para one.\n\nPara two.\n\n", 80, 0, Fidelity::default());
         let internal = out[..out.len() - 1].iter().filter(|l| is_blank(l)).count();
         assert_eq!(internal, 1, "expected one internal blank, got {internal}");
         assert!(is_blank(out.last().unwrap()));
@@ -777,8 +841,65 @@ mod tests {
 
     #[test]
     fn render_paragraph_has_no_trailing_blank_when_input_lacks_one() {
-        let out = render_md("Paragraph.", 80, 0);
+        let out = render_md("Paragraph.", 80, 0, Fidelity::default());
         assert!(!out.is_empty());
         assert!(!is_blank(out.last().unwrap()));
+    }
+
+    /// A sound fidelity leaves the rendering untouched — no DIM, no
+    /// recoloured foreground.  The seed signal must cost nothing when the
+    /// model is not under pressure.
+    #[test]
+    fn sound_fidelity_is_the_identity() {
+        let plain = render_md("Some prose.", 80, 0, Fidelity::default());
+        let stressed = render_md("Some prose.", 80, 0, Fidelity { context: 0, echo: 0 });
+        assert_eq!(plain, stressed);
+        for line in &plain {
+            for span in &line.spans {
+                assert!(!span.style.add_modifier.contains(Modifier::DIM));
+            }
+        }
+    }
+
+    /// Context level 2 dims every text span and pulls its foreground —
+    /// including plain prose, which had no explicit colour and so gains
+    /// the seeded base foreground pulled toward the background.
+    #[test]
+    fn context_pressure_dims_and_pulls_contrast() {
+        let out = render_md("Some prose here.", 80, 0, Fidelity { context: 2, echo: 0 });
+        let span = out
+            .iter()
+            .flat_map(|l| &l.spans)
+            .find(|s| !s.content.trim().is_empty())
+            .expect("a text span");
+        assert!(span.style.add_modifier.contains(Modifier::DIM), "level 2 dims");
+        let pulled = span.style.fg.expect("a pulled foreground");
+        // Pulled 40% from the base toward the dark background, so it sits
+        // strictly between the two.
+        let Color::Rgb(r, _, _) = pulled else {
+            panic!("expected an RGB foreground");
+        };
+        let Color::Rgb(br, _, _) = BASE_FG else { unreachable!() };
+        let Color::Rgb(cr, _, _) = CODE_BG else { unreachable!() };
+        assert!(cr < r && r < br, "fg pulled toward bg: {cr} < {r} < {br}");
+    }
+
+    /// An echoed paragraph wavers: alternate non-blank rows carry
+    /// foregrounds shifted in opposite lightness directions, so the block
+    /// reads as unsteady.  A multi-row paragraph makes the oscillation
+    /// observable.
+    #[test]
+    fn echo_wavers_alternate_rows() {
+        // Force several rows by wrapping at a narrow width.
+        let src = "one two three four five six seven eight nine ten eleven twelve";
+        let out = render_md(src, 12, 0, Fidelity { context: 0, echo: 2 });
+        let fgs: Vec<Color> = out
+            .iter()
+            .filter(|l| !is_blank(l))
+            .filter_map(|l| l.spans.iter().find(|s| !s.content.trim().is_empty()))
+            .map(|s| s.style.fg.expect("echo seeds a foreground"))
+            .collect();
+        assert!(fgs.len() >= 2, "need multiple rows to observe the waver");
+        assert_ne!(fgs[0], fgs[1], "adjacent rows waver in opposite directions");
     }
 }
