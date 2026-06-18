@@ -10,9 +10,8 @@ signal**. Three changes:
 
 - `Escape` and `BodyResult` were introduced;
 - the evaluator surface was flipped to `Settled<Value>`, with the tail call
-  absorbed inside the mobile-state swap (`468abc7`, 2026-05-14);
-- `EvalSignal` together with its transitional shims was deleted (`e3c6fe1`,
-  2026-05-14).
+  absorbed inside the mobile-state swap;
+- `EvalSignal` together with its transitional shims was deleted.
 
 This is the structural basis on which the escape-propagation bugs
 ([[decisions/260514_escape-propagation-bugs|escape-propagation-bugs]]) stay fixed: with completion and
