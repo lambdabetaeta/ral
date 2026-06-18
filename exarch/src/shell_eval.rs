@@ -440,9 +440,10 @@ mod tests {
         }
     }
 
-    /// Capability frame that forces eval through the confined transport while
-    /// admitting ordinary Unix tools.  This mirrors a restrictive exarch base:
-    /// the command body runs in a sandbox IPC child, not in the parent.
+    /// Capability frame with an `fs` projection over the whole tree while
+    /// admitting ordinary Unix tools.  This mirrors a restrictive exarch
+    /// base: the body evaluates locally, and any external command it spawns
+    /// is confined per-command under the OS sandbox.
     #[cfg(unix)]
     fn projecting_caps() -> Capabilities {
         Capabilities {
@@ -1035,7 +1036,7 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
                 || stderr.contains("failed to enter sandbox")
                 || stderr.contains("bwrap"))
         {
-            eprintln!("skip: confined transport unavailable on this host: {stderr}");
+            eprintln!("skip: OS sandbox unavailable on this host: {stderr}");
             return;
         }
 

@@ -1645,8 +1645,8 @@ in the framing sink at teardown.
 
 ### 13.6  Concurrent blocks and the sandbox boundary
 
-`spawn`/`watch` do **not** enter the eval boundary's local-vs-confined
-dispatch.  The worker thread runs the body in-process; the OS
+`spawn`/`watch` do **not** re-dispatch the body into a confined
+evaluation.  The worker thread runs the body in-process; the OS
 sandbox, if any, wraps the worker by virtue of wrapping the parent
 process (process-level OS confinement is inherited by every thread
 in that process), and the in-ral capability stack still gates the
@@ -1655,19 +1655,21 @@ attempted from a worker thread, and none is needed.
 
 Nested forced blocks *inside* a concurrent block — anything that
 calls `force`/`!{…}`, drives a branch, or evaluates a `grant`/`within`
-body — still enter the eval boundary and follow its standard
-transport rule: no projection → local; projection +
-confined-eval backend available → run the body in a fresh confined
-child; projection + backend unavailable → fail closed.  So a
-`spawn` inside an active `grant` cannot escape the grant's
-restrictions through nested code; the grant frame is inherited by
-the worker thread and applied to every nested forced block.
+body — evaluate locally in the same process; a `grant`/`within` body
+is never re-dispatched into a confined child.  The grant frame is
+folded into the live capability stack, so a `spawn` inside an active
+`grant` cannot escape the grant's restrictions through nested code:
+every nested ral-owned effect is checked in-process against the
+inherited frame, and every nested external or bundled command is
+launched under the inherited `SandboxProjection`.
 
-Handles are resident, process-local references to a worker thread.
-They cannot cross the sandbox IPC boundary: a confined evaluation
-that returns a handle errors with `cannot return a handle from
-sandboxed evaluation`, hinting that the user should `await` the
-handle before leaving the confined block.
+Handles are resident, process-local references to a worker thread, so
+a locally-evaluated `grant`/`within` body may return one freely.  What
+a handle cannot do is cross a child-eval IPC boundary: a value
+serialised to a child-eval helper (such as a pipeline-stage subshell)
+that is a handle errors with `cannot return a handle from sandboxed
+evaluation`, since the worker it names does not exist in that child.
+`await` the handle before its value leaves the process.
 
 ## 14  Scripts
 

@@ -1326,12 +1326,6 @@ fn grant_pipeline_abort_after_missing_later_stage_does_not_hang() {
             "abort path leaked helper diagnostic for n={n}: {}",
             o.stderr,
         );
-        assert!(
-            !o.stderr
-                .contains("sandbox eval: subprocess closed before sending a response"),
-            "sandbox IPC child did not return a response for n={n}: {}",
-            o.stderr,
-        );
     }
 }
 
