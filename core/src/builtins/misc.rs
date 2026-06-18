@@ -529,7 +529,7 @@ pub(super) fn builtin_exit(args: &[Value], _env: &mut Shell) -> Settled<Value> {
 /// with no sink (e.g. a bare REPL) this is the identity and returns Unit.
 pub(super) fn builtin_surface(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     if let (Some(sink), Some(event)) = (shell.turn.surface.as_ref(), args.first()) {
-        sink(event.clone());
+        sink.emit(event);
     }
     Ok(Value::Unit)
 }

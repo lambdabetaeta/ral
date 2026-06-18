@@ -24,7 +24,7 @@ use crate::types::{
     Break, CapturePolicy, Env, Error, Escape, ExecNode, Mobile, Settled, Shell, Status, Tail, Value,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Serialized one-body evaluation request.
 ///
@@ -202,17 +202,8 @@ fn eval_request(
     let mut shell = reexec_child_shell(mobile, &arcs)?;
     shell.local.audit.install_active_policy(audit_policy);
     // The stage child has no surface sink to replay to, but the body may
-    // still call `surface`; install a no-op buffering sink so those calls
-    // land somewhere rather than panicking, and drop the buffer after.
-    let surface_buf: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
-    shell.turn.surface = Some(Arc::new({
-        let buf = Arc::clone(&surface_buf);
-        move |v| {
-            if let Ok(mut events) = buf.lock() {
-                events.push(v);
-            }
-        }
-    }));
+    // still call `surface`; the no-op `()` sink discards those calls.
+    shell.turn.surface = Some(Arc::new(()));
     crate::dbg_trace!(
         "child-eval",
         "pre-eval: audit.active={}",
@@ -677,6 +668,8 @@ mod tests {
             state: Arc::new(Mutex::new(crate::types::HandleState::Completed)),
             stdout_buf: Arc::new(Mutex::new(Vec::new())),
             stderr_buf: Arc::new(Mutex::new(Vec::new())),
+            surface_buf: Arc::new(Mutex::new(Vec::new())),
+            surface_replayed: Arc::new(Mutex::new(false)),
             cmd: "dummy".into(),
             cancel: crate::process::CancelScope::default(),
         });

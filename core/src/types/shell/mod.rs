@@ -145,11 +145,29 @@ pub struct Mobile {
 }
 
 /// A sink for structured host events: the value-typed dual of the byte
-/// [`Io`](crate::io::Io) sinks.  A host installs one for the extent of an
-/// evaluation; the `surface` builtin forwards its argument to it, and is the
-/// identity when none is installed.  `Send + Sync` so it propagates into thunk
-/// bodies and spawned stages alongside the rest of the child subtree.
-pub type SurfaceSink = Arc<dyn Fn(Value) + Send + Sync>;
+/// [`Io`](crate::io::Io) sinks.  A *synchronous* trait taking a borrowed
+/// [`Value`]; the `surface` builtin forwards its argument to "the current
+/// turn's sink", and is the identity when none is installed.  Core names no
+/// host runtime type — the host decides whether `emit` prints, blocks,
+/// coalesces, or crosses a channel.  `Send + Sync` so a same-thread thunk body
+/// may share it alongside the rest of the child subtree; a *detached* worker
+/// does not receive the live sink (it buffers into bounded deferred storage and
+/// replays on `await`) so a clone of it can never define turn completion.
+pub trait EventSink: Send + Sync {
+    fn emit(&self, ev: &Value);
+}
+
+/// The no-op surface: a host with no structured-event rail installs `()`,
+/// and an absent surface (`None`) behaves identically.
+impl EventSink for () {
+    fn emit(&self, _ev: &Value) {}
+}
+
+/// Shared handle to the turn-local structured-event sink.  Turn-scoped, not a
+/// persistent `Shell` capability: installed only by
+/// [`Shell::run_turn`](crate::Shell::run_turn), it has no liveness role, so a
+/// clone can never decide that a turn is over.
+pub type SurfaceSink = Arc<dyn EventSink>;
 
 /// The whole dynamic frame a top-level turn installs.  A turn builds one,
 /// swaps it into `shell.turn`, runs, and restores the previous one on

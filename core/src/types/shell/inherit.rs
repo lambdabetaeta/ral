@@ -202,7 +202,6 @@ impl Shell {
         R: Send + 'static,
     {
         let context = self.mobile.context.clone();
-        let surface = self.turn.surface.clone();
         let detached_ceiling = self.turn.detached_ceiling;
         let root = self.session.root.clone();
         let builtins = self.session.builtins.clone();
@@ -211,7 +210,6 @@ impl Shell {
         let handle = std::thread::spawn(move || {
             let mut child = Self::from_captured(&scopes);
             child.mobile.context = context;
-            child.turn.surface = surface;
             child.turn.detached_ceiling = detached_ceiling;
             child.turn.cancel = cancel;
             child.session.root = root;

@@ -6,9 +6,8 @@
 //! entirely in this module; interactive sessions are handed off to [`repl`].
 
 use clap::{CommandFactory as _, Parser as _};
-use ral_core::evaluator::eval_top_level;
 use ral_core::types::{Break, Escape, Settled};
-use ral_core::{Shell, diagnostic, elaborate, parse};
+use ral_core::{Shell, TurnIo, TurnReport, TurnRequest, diagnostic, elaborate, parse};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -477,7 +476,23 @@ fn run_batch(name: &str, source: String, script_args: Vec<String>, opts: BatchOp
     };
     tick!("typecheck");
 
-    let result = eval_top_level(&comp, &mut shell);
+    let result = match shell.run_turn(
+        source.as_str(),
+        TurnRequest {
+            script_name: name,
+            caps: ral_core::types::Capabilities::root(),
+            turn_limit: None,
+            detached_limit: None,
+            io: TurnIo::Inherit,
+            surface: None,
+            lifecycle: Box::new(()),
+        },
+    ) {
+        TurnReport::Ran { result, .. } => result,
+        // Batch already typechecked above, so a static report should not
+        // occur here; treat it defensively as a fatal run (exit 1).
+        TurnReport::Static { .. } => Err(Break::Escape(Escape::Exit(1))),
+    };
     tick!("evaluate");
 
     let tree_children = if audit {

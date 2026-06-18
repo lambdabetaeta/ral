@@ -9,7 +9,7 @@
 //! the public embedding seam.
 
 use super::repl::ReplScratch;
-use super::{Shell, SurfaceSink};
+use super::Shell;
 use crate::diagnostic::SourceDb;
 use crate::exit_hints::ExitHints;
 use crate::io::{Sink, TerminalState};
@@ -67,14 +67,6 @@ impl Shell {
     /// The session stderr sink, for a host to write diagnostics into.
     pub fn stderr_mut(&mut self) -> &mut Sink {
         &mut self.turn.io.stderr
-    }
-
-    /// Install a structured-event sink for the `surface` builtin to forward
-    /// to.  An `Inherit`-regime host (the REPL) sets one on the session and a
-    /// turn carries it forward; a `Capture`-regime host installs it per turn
-    /// through the frame instead.
-    pub fn set_surface(&mut self, sink: SurfaceSink) {
-        self.turn.surface = Some(sink);
     }
 
     /// Turn on top-level audit collection with byte capture (`ral --audit`).

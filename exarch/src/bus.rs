@@ -6,7 +6,8 @@ use crate::provider::Usage;
 use std::collections::VecDeque;
 use std::io;
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -279,10 +280,19 @@ impl Emitter {
     }
 }
 
+/// How often the completion-aware drain loop wakes to re-check the `done`
+/// flag while no event is arriving.  Small enough that a turn returns
+/// promptly after its worker finishes, large enough not to spin.
+const DRAIN_POLL: Duration = Duration::from_millis(10);
+
 /// One presentation surface.  [`Self::handle`] consumes a single event
-/// synchronously; [`Self::drive`] drains the channel until the worker
-/// drops its sender.  The default `drive` just forwards through
-/// `handle`; the TUI overrides it to interleave redraws and key polls.
+/// synchronously; [`Self::drive`] drains the channel until the worker signals
+/// completion through `done`.  Completion is an explicit control-flow fact —
+/// the worker finished — *not* the channel disconnecting: a detached worker
+/// (a `spawn`ed server) may outlive the turn, but it holds bounded deferred
+/// surface storage in core, never a clone of this channel's sender, so it
+/// cannot keep the loop alive.  The default `drive` polls for `done` between
+/// events; the TUI overrides it to interleave redraws and key polls.
 pub trait Sink {
     fn handle(&mut self, e: Event);
 
@@ -290,18 +300,40 @@ pub trait Sink {
         PromptQueue::new()
     }
 
-    fn drive(&mut self, rx: Receiver<Event>) -> io::Result<()> {
-        while let Ok(ev) = rx.recv() {
-            self.handle(ev);
+    fn drive(&mut self, rx: Receiver<Event>, done: &AtomicBool) -> io::Result<()> {
+        loop {
+            match rx.recv_timeout(DRAIN_POLL) {
+                Ok(ev) => self.handle(ev),
+                // The worker finished: drain anything it buffered, then stop —
+                // regardless of senders still held by detached workers.
+                Err(RecvTimeoutError::Timeout) if done.load(Ordering::Acquire) => {
+                    while let Ok(ev) = rx.try_recv() {
+                        self.handle(ev);
+                    }
+                    return Ok(());
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                // Safety net: every sender dropped (the common case now that
+                // detachment holds no sender).  Drain and finish.
+                Err(RecvTimeoutError::Disconnected) => {
+                    while let Ok(ev) = rx.try_recv() {
+                        self.handle(ev);
+                    }
+                    return Ok(());
+                }
+            }
         }
-        Ok(())
     }
 }
 
 /// Run `work` on a scoped thread, hand the channel to `sink`, join.
 /// A worker panic is reported through the still-open [`Emitter`] as a
-/// final [`Kind::Error`] before the channel closes; the function
-/// returns `None` in that case.
+/// final [`Kind::Error`]; the function returns `None` in that case.
+///
+/// Completion is explicit: the worker sets `done` after `work` returns (or
+/// unwinds), and [`Sink::drive`] stops on that flag rather than on channel
+/// disconnect.  A detached worker holding a sender clone forever cannot keep
+/// the loop — hence the turn — from ending.
 pub fn pump<S, R>(
     sink: &mut S,
     root_id: SessionId,
@@ -311,6 +343,10 @@ where
     S: Sink,
     R: Send,
 {
+    // Declared outside the scope so the borrow into both the worker thread
+    // and `drive` outlives the spawned thread's `'env`.
+    let done = AtomicBool::new(false);
+    let done_ref = &done;
     std::thread::scope(|s| -> io::Result<Option<R>> {
         let (tx, rx) = channel();
         let prompt_queue = sink.prompt_queue();
@@ -325,16 +361,61 @@ where
                     .unwrap_or_else(|| "non-string payload".into());
                 emit.emit(Kind::Error(format!("{WORKER_PANIC_PREFIX}{msg}")));
             }
+            // Signal completion before the worker's `emit` (and its sender)
+            // drops: the turn is over because the worker finished.
+            done_ref.store(true, Ordering::Release);
             r.ok()
         });
-        sink.drive(rx)?;
+        sink.drive(rx, done_ref)?;
         Ok(h.join().ok().flatten())
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PromptQueue, TaskStatus};
+    use super::{Emitter, Event, Kind, PromptQueue, Sink, TaskStatus, pump};
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    /// Completion is the worker finishing, not the channel disconnecting.
+    /// A "detached holder" keeps a clone of the worker's [`Emitter`] (hence a
+    /// live `Sender`) alive past the worker's return — modelling a `spawn`ed
+    /// server that never terminates.  `pump` must still return promptly,
+    /// driven by the explicit `done` flag, while that sender is still alive.
+    /// Regression for the daemon-task hang.
+    #[test]
+    fn pump_returns_on_worker_done_not_sender_disconnect() {
+        struct CountSink(usize);
+        impl Sink for CountSink {
+            fn handle(&mut self, _e: Event) {
+                self.0 += 1;
+            }
+        }
+
+        let mut sink = CountSink(0);
+        // Outlives `pump`: holds an `Emitter` clone whose `Sender` keeps the
+        // channel from ever disconnecting, exactly as a detached worker would.
+        let holder: Mutex<Option<Emitter>> = Mutex::new(None);
+
+        let t0 = Instant::now();
+        let r = pump(&mut sink, 0, |emit| {
+            *holder.lock().unwrap() = Some(emit.clone());
+            emit.emit(Kind::Step(1));
+            "done"
+        })
+        .expect("pump returns Ok");
+
+        assert!(
+            t0.elapsed() < Duration::from_secs(5),
+            "pump must return on the explicit done signal, not wait for sender disconnect (took {:?})",
+            t0.elapsed()
+        );
+        assert_eq!(r, Some("done"), "pump returns the worker's value");
+        assert_eq!(sink.0, 1, "the worker's one event was delivered");
+        // The detached sender is still alive — proof completion did not
+        // depend on it dropping.
+        assert!(holder.lock().unwrap().is_some());
+    }
 
     /// Every known role round-trips through `parse`/`tag`, and an unknown
     /// tag is rejected — the sentinel parser turns that `None` into a

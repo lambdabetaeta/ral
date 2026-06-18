@@ -1953,9 +1953,9 @@ impl Sink for Tui {
         self.app.queue.clone()
     }
 
-    fn drive(&mut self, rx: Receiver<Event>) -> io::Result<()> {
+    fn drive(&mut self, rx: Receiver<Event>, done: &AtomicBool) -> io::Result<()> {
         self.app.busy_on();
-        let r = drive_events(self.guard.term(), &mut self.app, rx);
+        let r = drive_events(self.guard.term(), &mut self.app, rx, done);
         self.app.busy_off();
         r
     }
@@ -2429,7 +2429,12 @@ fn key_action(mode: KeyMode, k: &KeyEvent, enter_submits: bool) -> KeyAction {
 /// the REPL to send at the turn boundary if no such boundary arrives.  Ctrl-C /
 /// Esc raise the cancel flag.  The drain is batched so terminal polling never
 /// starves during heavy token streaming.
-fn drive_events(term: &mut Term, app: &mut App, rx: Receiver<Event>) -> io::Result<()> {
+fn drive_events(
+    term: &mut Term,
+    app: &mut App,
+    rx: Receiver<Event>,
+    done: &AtomicBool,
+) -> io::Result<()> {
     const BATCH: usize = 64;
     const MIN_FRAME_MS: u64 = 16; // ~60 FPS max
     loop {
@@ -2446,6 +2451,16 @@ fn drive_events(term: &mut Term, app: &mut App, rx: Receiver<Event>) -> io::Resu
                     return Ok(());
                 }
             }
+        }
+        // The worker finished: completion is that fact, not the channel
+        // disconnecting (a detached worker may hold a sender forever). Drain
+        // the remaining backlog, paint a final frame, and return.
+        if !more && done.load(Ordering::Acquire) {
+            while let Ok(ev) = rx.try_recv() {
+                app.handle(ev);
+            }
+            app.draw(term)?;
+            return Ok(());
         }
         app.tick();
         app.draw(term)?;
@@ -2775,15 +2790,12 @@ mod tests {
         // ~40% of a 100k window.
         let history = vec![
             PhaseSeg {
-                label: "thinking".into(),
                 duration: Duration::from_millis(120),
             },
             PhaseSeg {
-                label: "tool".into(),
                 duration: Duration::from_millis(80),
             },
             PhaseSeg {
-                label: "writing".into(),
                 duration: Duration::from_millis(200),
             },
         ];
@@ -2906,14 +2918,12 @@ mod tests {
         vp.set_phase("second".into());
         assert_eq!(vp.phase_label(), Some("second"));
         assert_eq!(vp.phase_history().len(), 1);
-        assert_eq!(vp.phase_history()[0].label, "first");
         assert!(vp.phase_history()[0].duration > Duration::ZERO);
 
         std::thread::sleep(Duration::from_millis(5));
         vp.clear_phase();
         assert!(vp.phase_label().is_none());
         assert_eq!(vp.phase_history().len(), 2);
-        assert_eq!(vp.phase_history()[1].label, "second");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

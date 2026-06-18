@@ -29,7 +29,8 @@ pub use capability::{
 mod value;
 pub use value::{
     BuiltinBody, BuiltinEntry, BuiltinTable, CompletedHandle, FrameHandle, HandleInner,
-    HandleState, HandlerArity, HandlerEntry, HandlerFrame, HandlerStack, Value, fmt_lambda,
+    HandleState, HandlerArity, HandlerEntry, HandlerFrame, HandlerStack, SurfaceBuffer, Value,
+    fmt_lambda,
 };
 
 // List (Value::List inner), opaque newtype around imbl::Vector<Value>.
@@ -74,6 +75,6 @@ pub use audit::{
 // Shell state, Context.  See types/shell.rs.
 mod shell;
 pub use shell::{
-    Context, DEFAULT_RECURSION_LIMIT, LocalState, Mobile, SessionState, Shell, SurfaceSink,
-    TurnState,
+    Context, DEFAULT_RECURSION_LIMIT, EventSink, LocalState, Mobile, SessionState, Shell,
+    SurfaceSink, TurnState,
 };

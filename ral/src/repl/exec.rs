@@ -7,7 +7,7 @@
 //! captured builtins installed at boot (see [`super::host_handlers`]).
 
 use ral_core::types::{Break, Escape};
-use ral_core::{IoFrame, StaticDiagnostics, TurnFrame, TurnOutcome, eval_turn};
+use ral_core::{StaticDiagnostics, TurnIo, TurnReport, TurnRequest};
 use ral_core::{Shell, Value, builtins, diagnostic};
 use std::sync::{Arc, Mutex};
 
@@ -99,16 +99,17 @@ pub(super) fn execute_input(
     #[cfg(unix)] job_table: &Arc<Mutex<crate::jobs::JobTable>>,
     runtime: &Arc<Mutex<PluginRuntime>>,
 ) -> Option<u8> {
-    let frame = TurnFrame {
-        io: IoFrame::Inherit,
-        script_name: "<stdin>".to_string(),
-        foreground: shell.durable_root().child(),
-        capabilities: ral_core::types::Capabilities::root(),
-        detached_ceiling: None,
+    let req = TurnRequest {
+        script_name: "<stdin>",
+        caps: ral_core::types::Capabilities::root(),
+        turn_limit: None,
+        detached_limit: None,
+        io: TurnIo::Inherit,
+        surface: None,
         lifecycle: Box::new(ReplLifecycle { runtime }),
     };
-    match eval_turn(shell, trimmed, frame) {
-        TurnOutcome::Static { diagnostics, .. } => {
+    match shell.run_turn(trimmed, req) {
+        TurnReport::Static { diagnostics } => {
             match diagnostics {
                 StaticDiagnostics::Parse(e) => {
                     if should_use_compact_parse_error(trimmed, &e.message) {
@@ -129,7 +130,7 @@ pub(super) fn execute_input(
             }
             None
         }
-        TurnOutcome::Runtime {
+        TurnReport::Ran {
             result,
             single_command,
             ..

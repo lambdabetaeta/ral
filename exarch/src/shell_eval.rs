@@ -13,13 +13,12 @@
 
 use crate::bus::{Emitter, Hunk, Kind};
 use crate::sandbox_diag;
-use ral_core::io::{Sink, Source};
 use ral_core::types::{Break, Escape};
 use ral_core::{
-    IoFrame, Shell, StaticDiagnostics, TurnFrame, TurnOutcome, Value as RalValue, diagnostic,
-    eval_turn,
+    EventSink, Shell, StaticDiagnostics, TurnIo, TurnReport, TurnRequest, Value as RalValue,
+    diagnostic,
 };
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Lifetime ceiling armed on every detached `spawn` worker: an
@@ -47,6 +46,24 @@ pub enum Outcome {
     Static(String),
 }
 
+/// The agent's structured-event surface: the turn-local [`EventSink`] exarch
+/// installs for a tool call.  It decodes each `Value` the `surface` builtin
+/// hands it into a rail [`Kind`] (via [`value_to_kind`]) and emits it on the
+/// presentation bus through a clone of the call's [`Emitter`].  An
+/// unrecognised value is dropped — the same graceful degradation the closure
+/// form had.  Detached workers never receive this sink: core buffers their
+/// `surface` calls and replays them on `await`, so a clone of the bus
+/// `Emitter` can never outlive the tool turn.
+struct AgentSink(Emitter);
+
+impl EventSink for AgentSink {
+    fn emit(&self, ev: &RalValue) {
+        if let Some(kind) = value_to_kind(ev) {
+            self.0.emit(kind);
+        }
+    }
+}
+
 /// Evaluate `cmd` against `shell`, wrapped in `caps`, capturing
 /// stdout and stderr into buffers.  Returns the result as named pieces
 /// so the caller can render it twice — once full for the terminal,
@@ -61,32 +78,6 @@ pub fn run_shell(
 ) -> Outcome {
     let name = "<tool>";
 
-    // stdout and stderr are captured into in-memory buffers for the
-    // model-visible transcript and the session log; nothing echoes live.
-    let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-
-    // The turn's foreground work runs under a child of the shell's current
-    // scope; the shared reaper cancels it on a missed deadline. Holding the
-    // guard across the eval and dropping it after disarms the deadline when
-    // the turn finishes early, so a turn that returns before the wall is
-    // never reaped by a late pop.
-    let timeout_scope = shell.foreground().child();
-    let wall = ral_core::process::arm_lifetime(
-        timeout_scope.as_scope().clone(),
-        Duration::from_secs(timeout_secs),
-    );
-
-    let surface = Arc::new({
-        let emit = emit.clone();
-        move |v: RalValue| {
-            if let Some(kind) = value_to_kind(&v) {
-                emit.emit(kind);
-            }
-        }
-    });
-
-    let caps = caps.clone();
     // Whenever the active grant engages the OS sandbox, poll for
     // descendant PIDs of this exarch process throughout the eval.
     // The kernel logs sandbox denials by PID; without a recorded set
@@ -99,34 +90,27 @@ pub fn run_shell(
 
     emit.emit(Kind::Phase("evaluating".into()));
 
-    let frame = TurnFrame {
-        io: IoFrame::Capture {
-            stdout: Sink::Buffer(stdout_buf.clone()),
-            stderr: Sink::Buffer(stderr_buf.clone()),
-            stdin: Source::Terminal,
-            surface: Some(surface),
-        },
-        script_name: name.to_string(),
-        foreground: timeout_scope.clone(),
-        capabilities: caps,
-        detached_ceiling: Some(DETACHED_WORKER_CEILING),
-        lifecycle: Box::new(()),
-    };
+    // One synchronous turn: core captures stdout/stderr into buffers it
+    // returns, arms the per-tool wall (`turn_limit`), installs the agent
+    // surface for this turn only, and reaps detached workers at the 1 h
+    // ceiling.  Completion is this call returning — a detached server worker
+    // holds a bounded deferred surface, never a clone of the bus `Emitter`.
     let tool_start = std::time::Instant::now();
-    let outcome = eval_turn(shell, cmd, frame);
-    let timed_out = matches!(
-        timeout_scope.cause(),
-        Some(ral_core::process::CancelCause::Deadline)
-    );
-    drop(wall);
-    ral_core::dbg_trace!(
-        "shell",
-        "eval in {:?} (timed_out={timed_out})",
-        tool_start.elapsed()
+    let report = shell.run_turn(
+        cmd,
+        TurnRequest {
+            script_name: name,
+            caps: caps.clone(),
+            turn_limit: Some(Duration::from_secs(timeout_secs)),
+            detached_limit: Some(DETACHED_WORKER_CEILING),
+            io: TurnIo::Capture,
+            surface: Some(Arc::new(AgentSink(emit.clone()))),
+            lifecycle: Box::new(()),
+        },
     );
 
-    let (result, single_command) = match outcome {
-        TurnOutcome::Static { diagnostics, .. } => {
+    let (result, single_command, captured, timed_out) = match report {
+        TurnReport::Static { diagnostics } => {
             return match diagnostics {
                 StaticDiagnostics::Parse(e) => {
                     Outcome::Static(diagnostic::format_parse_error_ariadne(name, cmd, &e))
@@ -138,15 +122,24 @@ pub fn run_shell(
                 ),
             };
         }
-        TurnOutcome::Runtime {
+        TurnReport::Ran {
             result,
             single_command,
+            captured,
+            timed_out,
             ..
-        } => (result, single_command),
+        } => (result, single_command, captured, timed_out),
     };
 
-    let stdout_bytes = std::mem::take(&mut *stdout_buf.lock().unwrap());
-    let mut stderr_bytes = std::mem::take(&mut *stderr_buf.lock().unwrap());
+    ral_core::dbg_trace!(
+        "shell",
+        "eval in {:?} (timed_out={timed_out})",
+        tool_start.elapsed()
+    );
+
+    let captured = captured.expect("TurnIo::Capture returns captured buffers");
+    let stdout_bytes = captured.stdout;
+    let mut stderr_bytes = captured.stderr;
 
     let (exit, value) = match &result {
         Ok(v) => (0, Some(v.clone())),

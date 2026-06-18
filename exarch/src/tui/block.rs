@@ -147,11 +147,6 @@ impl Block {
         )
     }
 
-    /// The producing agent's palette slot.
-    pub(super) fn agent(&self) -> AgentSlot {
-        self.agent
-    }
-
     /// The block's current disclosure level (`0..=3`).
     pub(super) fn level(&self) -> u8 {
         self.level

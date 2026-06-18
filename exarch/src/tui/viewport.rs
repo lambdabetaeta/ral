@@ -34,7 +34,6 @@ use std::time::{Duration, Instant};
 /// session.
 #[derive(Clone, Debug)]
 pub(super) struct PhaseSeg {
-    pub(super) label: String,
     pub(super) duration: Duration,
 }
 
@@ -245,9 +244,8 @@ impl Viewport {
     /// slot.  Shared by [`Self::set_phase`] (handoff) and
     /// [`Self::clear_phase`] (finalisation).
     fn finalise_phase(&mut self) {
-        if let Some((label, start)) = self.phase.take() {
+        if let Some((_label, start)) = self.phase.take() {
             self.phase_history.push(PhaseSeg {
-                label,
                 duration: start.elapsed(),
             });
             if self.phase_history.len() > PHASE_HISTORY_CAP {
@@ -294,11 +292,7 @@ impl Viewport {
     /// Append pre-rendered chrome (step header, error, write, task,
     /// meter, banner, subagent breadcrumb, summary-less tool call).
     /// `shape` lets the rail dispatch on the chrome sub-kind.
-    pub(super) fn push_chrome(
-        &mut self,
-        shape: super::block::RailShape,
-        lines: Vec<Line<'static>>,
-    ) {
+    pub(super) fn push_chrome(&mut self, shape: RailShape, lines: Vec<Line<'static>>) {
         self.push_block(Block::chrome(shape, lines, self.agent));
     }
 

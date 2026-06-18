@@ -18,11 +18,14 @@
 //! the crate it is building — so a test binary, which has no build-time
 //! blob, takes [`BakedPrelude::bake_runtime`] instead.
 
-use crate::io::TerminalState;
+use crate::io::{Source, TerminalState};
 use crate::ir::Comp;
+use crate::process::CancelCause;
+use crate::turn::{StaticDiagnostics, TurnLifecycle};
 use crate::typecheck::Scheme;
-use crate::types::Shell;
+use crate::types::{Capabilities, Settled, Shell, SurfaceSink, Value};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 /// A build-time-baked prelude: the two postcard blobs and their
 /// once-decoded forms.  `ir` is the annotated prelude [`Comp`] whose
@@ -147,4 +150,155 @@ pub fn bake_prelude_to_out_dir() {
         .expect("failed to write prelude_baked.bin");
     std::fs::write(out.join("prelude_schemes.bin"), scheme_bytes)
         .expect("failed to write prelude_schemes.bin");
+}
+
+// ── The turn entry: one synchronous, runtime-agnostic host seam ────────────
+//
+// `Shell::run_turn(src, TurnRequest) -> TurnReport` is the only host-facing
+// evaluation seam. Hosts describe *policy* (`TurnRequest`, `TurnIo`,
+// `SurfaceSink`, lifecycle hooks); core owns *resources* (`Sink`, `Source`,
+// `TurnState`, guards, buffers, signal slots). Completion is the call
+// returning — never a channel disconnecting — so a detached worker holding a
+// surface clone cannot keep a turn from ending.
+
+/// The IO regime of a turn: intent, materialised into resources by `run_turn`.
+pub enum TurnIo {
+    /// Run on the session's live streams: the turn's byte sinks are cloned
+    /// from the ambient `shell.turn`. The interactive REPL (whose stdout is
+    /// the external printer) and batch (the process streams).
+    Inherit,
+    /// Mint fresh stdout/stderr buffers core returns in
+    /// [`TurnReport::Ran`]'s `captured`; stdin falls through to the terminal
+    /// the shell already holds. exarch's tool capture.
+    Capture,
+}
+
+/// The host's per-turn policy. Everything a turn needs that is *not* a core
+/// resource: the script label, the capability ceiling, the wall and detached
+/// limits, the IO regime, the turn-local surface sink, and lifecycle hooks.
+pub struct TurnRequest<'a> {
+    /// Label for the root source context (`"<stdin>"` for the REPL,
+    /// `"<tool>"` for exarch).
+    pub script_name: &'a str,
+    /// The capability ceiling pushed for the eval's dynamic extent.
+    /// `Capabilities::root()` is the ⊤ element — the identity on authority
+    /// (the REPL) — while a narrower profile attenuates the session's grant
+    /// (exarch).
+    pub caps: Capabilities,
+    /// The turn's foreground wall: `Some(d)` arms a `Deadline` cancel on the
+    /// turn's foreground scope `d` after it starts (exarch's per-tool wall);
+    /// `None` leaves the turn uncapped (the REPL).
+    pub turn_limit: Option<Duration>,
+    /// Lifetime ceiling for workers the turn detaches at the durable root.
+    /// `None` (the interactive ral host) leaves a worker until `cancel`, root
+    /// abort, or session exit; `Some(d)` (an agent host) reaps an abandoned
+    /// worker `d` after it is spawned.
+    pub detached_limit: Option<Duration>,
+    /// The byte IO regime; see [`TurnIo`].
+    pub io: TurnIo,
+    /// The turn-local structured-event sink, installed only for this turn.
+    /// `None` is the identity (a bare REPL). Same-thread children inherit it;
+    /// detached workers buffer into bounded deferred storage instead.
+    pub surface: Option<SurfaceSink>,
+    /// Per-turn lifecycle hooks; `Box::new(())` for a host with none.
+    pub lifecycle: Box<dyn TurnLifecycle + 'a>,
+}
+
+/// The byte streams captured under [`TurnIo::Capture`], returned in
+/// [`TurnReport::Ran`].
+pub struct Captured {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+/// One flat result the host matches once. `captured`/`timed_out` live on
+/// `Ran`, where they mean something — a `Static` turn never ran.
+pub enum TurnReport {
+    /// A parse/type failure: the turn never reached evaluation. The host
+    /// renders the diagnostics and treats the turn as status 1.
+    Static { diagnostics: StaticDiagnostics },
+    /// A compiled turn ran. `status` is the transport status computed once;
+    /// `single_command` is whether the source compiled to a single command
+    /// (for runtime-error rendering); `captured` is `Some` under
+    /// [`TurnIo::Capture`]; `timed_out` is whether the wall fired.
+    Ran {
+        result: Settled<Value>,
+        status: i32,
+        single_command: bool,
+        captured: Option<Captured>,
+        timed_out: bool,
+    },
+}
+
+impl Shell {
+    /// Run one top-level turn of `src` under `req`, synchronously, and return
+    /// one flat [`TurnReport`]. The single host evaluation seam: it compiles
+    /// and typechecks against the live session, materialises the IO regime,
+    /// mints the turn's foreground scope and arms its wall, installs the
+    /// turn-local surface, evaluates under the capability ceiling, and folds
+    /// the captured bytes and `timed_out` it alone knows into the report.
+    ///
+    /// Turn completion is *this call returning* — never a channel
+    /// disconnecting. A detached worker may hold a clone of the surface sink
+    /// forever; it changes nothing, because nothing waits on that sink to
+    /// decide the turn is over.
+    pub fn run_turn(&mut self, src: &str, req: TurnRequest<'_>) -> TurnReport {
+        let (comp, single_command) = match crate::turn::compile_turn(self, src) {
+            Ok(parts) => parts,
+            Err(diagnostics) => return TurnReport::Static { diagnostics },
+        };
+
+        // Materialise the IO regime: `Capture` mints buffers we read back,
+        // `Inherit` leaves the ambient streams to flow through `build_turn`.
+        let (capture, capture_bufs) = match req.io {
+            TurnIo::Inherit => (None, None),
+            TurnIo::Capture => {
+                let (stdout_sink, stdout_buf) = crate::io::new_buffer();
+                let (stderr_sink, stderr_buf) = crate::io::new_buffer();
+                (
+                    Some((stdout_sink, stderr_sink, Source::Terminal)),
+                    Some((stdout_buf, stderr_buf)),
+                )
+            }
+        };
+
+        // Mint the turn's foreground scope and arm its wall, if any. The
+        // `Deadline` guard disarms when `_wall` drops at end of turn, so an
+        // early-finishing turn does not leave a pending reaper entry.
+        let foreground = self.durable_root().child();
+        let _wall = req
+            .turn_limit
+            .map(|d| crate::process::arm_lifetime(foreground.as_scope().clone(), d));
+
+        let next = crate::turn::build_turn(
+            self,
+            capture,
+            foreground.clone(),
+            req.detached_limit,
+            req.surface,
+        );
+        let (result, status) = crate::turn::run_compiled(
+            self,
+            comp,
+            next,
+            req.script_name,
+            src,
+            req.caps,
+            req.lifecycle,
+        );
+
+        let timed_out = foreground.cause() == Some(CancelCause::Deadline);
+        let captured = capture_bufs.map(|(out, err)| Captured {
+            stdout: crate::io::take_buffer(&out),
+            stderr: crate::io::take_buffer(&err),
+        });
+
+        TurnReport::Ran {
+            result,
+            status,
+            single_command,
+            captured,
+            timed_out,
+        }
+    }
 }

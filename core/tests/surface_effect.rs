@@ -2,15 +2,13 @@
 
 //! The `surface` effect: a value handed to the builtin reaches the
 //! host-installed sink unchanged, and with no sink installed the builtin
-//! is the identity.  Drives the public `eval_top_level` boundary the same
-//! way `ral` and `exarch` do, mirroring the harness in
-//! `top_level_vs_block.rs`.
+//! is the identity.  Drives the public `Shell::run_turn` boundary the same
+//! way `ral` and `exarch` do.
 
 mod common;
 
-use ral_core::evaluator;
-use ral_core::types::{Settled, Shell, Value};
-use ral_core::{Comp, CompileOutcome, builtins, compile_and_typecheck};
+use ral_core::types::{Capabilities, Settled, Shell, Value};
+use ral_core::{EventSink, SurfaceSink, TurnIo, TurnReport, TurnRequest, builtins};
 use std::sync::{Arc, Mutex};
 
 fn fresh_shell() -> Shell {
@@ -20,43 +18,60 @@ fn fresh_shell() -> Shell {
     shell
 }
 
-fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
-    let comp: Arc<Comp> = match compile_and_typecheck(source, shell.session_schemes()) {
-        CompileOutcome::Compiled(c) => Arc::new(c),
-        CompileOutcome::Parse(e) => panic!("parse: {source:?}: {e}"),
-        CompileOutcome::Types(errs) => {
-            let msgs: Vec<_> = errs.iter().map(|e| e.kind.render_message()).collect();
-            panic!("type: {source:?}: {}", msgs.join("; "));
-        }
-    };
-    evaluator::eval_top_level(&comp, shell)
+/// A sink that records every surfaced value.
+struct Recorder(Arc<Mutex<Vec<Value>>>);
+
+impl EventSink for Recorder {
+    fn emit(&self, ev: &Value) {
+        self.0.lock().unwrap().push(ev.clone());
+    }
 }
 
-/// Install a sink that records every surfaced value, returning the shared
-/// buffer so the test can inspect what arrived.
-fn recording_shell() -> (Shell, Arc<Mutex<Vec<Value>>>) {
-    let mut shell = fresh_shell();
+/// A fresh recording sink plus the shared buffer the test inspects.
+fn recording() -> (Arc<Mutex<Vec<Value>>>, SurfaceSink) {
     let log: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::clone(&log);
-    shell.set_surface(Arc::new(move |v| sink.lock().unwrap().push(v)));
-    (shell, log)
+    let sink: SurfaceSink = Arc::new(Recorder(Arc::clone(&log)));
+    (log, sink)
+}
+
+/// Run one turn of `source` with an optional surface sink, returning the
+/// settled value.  These sources are well-formed, so a static diagnostic is
+/// a test bug.
+fn run(shell: &mut Shell, source: &str, surface: Option<SurfaceSink>) -> Settled<Value> {
+    match shell.run_turn(
+        source,
+        TurnRequest {
+            script_name: "<test>",
+            caps: Capabilities::root(),
+            turn_limit: None,
+            detached_limit: None,
+            io: TurnIo::Inherit,
+            surface,
+            lifecycle: Box::new(()),
+        },
+    ) {
+        TurnReport::Ran { result, .. } => result,
+        TurnReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
+    }
 }
 
 /// With no sink installed `surface` returns Unit and is otherwise inert.
 #[test]
 fn surface_without_sink_is_identity() {
     let mut shell = fresh_shell();
-    let out = top_level(&mut shell, r#"surface `task [status: "open", desc: "x"]"#);
+    let out = run(&mut shell, r#"surface `task [status: "open", desc: "x"]"#, None);
     assert_eq!(out.expect("surface should succeed"), Value::Unit);
 }
 
 /// The exact variant the body constructs reaches the installed sink.
 #[test]
 fn surface_forwards_the_event_to_the_sink() {
-    let (mut shell, log) = recording_shell();
-    let out = top_level(
+    let mut shell = fresh_shell();
+    let (log, sink) = recording();
+    let out = run(
         &mut shell,
         r#"surface `meter [done: 1, total: 3, label: "tasks"]"#,
+        Some(sink),
     );
     assert_eq!(out.expect("surface should succeed"), Value::Unit);
 
@@ -81,11 +96,13 @@ fn surface_forwards_the_event_to_the_sink() {
 /// inside a called closure still reaches the host.
 #[test]
 fn surface_reaches_through_a_thunk_body() {
-    let (mut shell, log) = recording_shell();
-    let out = top_level(
+    let mut shell = fresh_shell();
+    let (log, sink) = recording();
+    let out = run(
         &mut shell,
         r#"let emit = { |d| surface `task [status: "done", desc: $d] }
 emit "ship it""#,
+        Some(sink),
     );
     out.expect("surface from a thunk should succeed");
 

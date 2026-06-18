@@ -38,6 +38,36 @@ pub(super) enum ChildIoMode {
     Watch { label: String },
 }
 
+/// Cap on a detached worker's deferred surface buffer.  Past it, one overflow
+/// marker is recorded and further events drop, so a runaway detached emitter (a
+/// `meter` in a server loop) cannot grow memory without bound.  The marker is
+/// itself a surface event; a host that does not know its tag drops it.
+const DEFERRED_SURFACE_CAP: usize = 4096;
+
+/// The surface a *detached* worker installs.  Unlike a same-thread thunk body,
+/// a detached worker may outlive the turn that spawned it, so it must not hold
+/// the turn's live sink: it buffers structured events into a bounded
+/// [`SurfaceBuffer`], which `await`/`race` replays through the awaiting turn's
+/// surface exactly once (see [`replay_deferred_surface`]).
+struct DeferredSurface {
+    buf: SurfaceBuffer,
+}
+
+impl EventSink for DeferredSurface {
+    fn emit(&self, ev: &Value) {
+        let mut buf = self.buf.lock().unwrap();
+        if buf.len() < DEFERRED_SURFACE_CAP {
+            buf.push(ev.clone());
+        } else if buf.len() == DEFERRED_SURFACE_CAP {
+            buf.push(Value::Variant {
+                label: "surface-overflow".into(),
+                payload: None,
+            });
+        }
+        // Past the cap (marker already recorded): drop.
+    }
+}
+
 /// Spawn a child concurrent block on a new OS thread.
 ///
 /// The child receives a cloned environment with IO wired according to
@@ -65,6 +95,10 @@ where
     // stdout in `Sink::LineFramed` with a per-handle prefix.
     let (stdout_sink, stdout_buf) = new_buffer();
     let (stderr_sink, stderr_buf) = new_buffer();
+    // The detached worker buffers `surface` calls here rather than holding the
+    // spawning turn's live sink; `await`/`race` replay it once.
+    let surface_buf: SurfaceBuffer = Arc::new(Mutex::new(Vec::new()));
+    let worker_surface_buf = surface_buf.clone();
     let (stdout, stderr, flush_pending) = match io_mode {
         ChildIoMode::Buffered => (stdout_sink, stderr_sink, false),
         ChildIoMode::Watch { label } => {
@@ -95,6 +129,9 @@ where
         child_env.turn.io.capture_outer = None;
         child_env.turn.io.stdout = stdout;
         child_env.turn.io.stderr = stderr;
+        child_env.turn.surface = Some(Arc::new(DeferredSurface {
+            buf: worker_surface_buf,
+        }));
 
         // Worker absorption point: a tail call cannot cross the thread
         // boundary, so the worker root settles it into the channel
@@ -126,6 +163,8 @@ where
         state: Arc::new(Mutex::new(HandleState::Running)),
         stdout_buf,
         stderr_buf,
+        surface_buf,
+        surface_replayed: Arc::new(Mutex::new(false)),
         cmd,
         cancel,
     })
@@ -284,6 +323,28 @@ fn try_settle(handle: &HandleInner, shell: &mut Shell) -> Option<CompletedHandle
     }
 }
 
+/// Replay a finished detached worker's deferred surface events through the
+/// awaiting turn's *current* surface — once.  Only the foreground eliminators
+/// `await`/`race` call this: a `poll`ed-but-not-awaited handle and a handle no
+/// turn ever awaits emit no cards, and repeated `await` does not duplicate
+/// them.  A detached worker's `surface` calls are buffered (never on the
+/// possibly-ended spawning turn's sink), so this is where they finally surface
+/// — on whichever turn observes the handle.
+fn replay_deferred_surface(handle: &HandleInner, completed: &CompletedHandle, shell: &mut Shell) {
+    {
+        let mut replayed = handle.surface_replayed.lock().unwrap();
+        if *replayed {
+            return;
+        }
+        *replayed = true;
+    }
+    if let Some(sink) = shell.turn.surface.as_ref() {
+        for ev in &completed.surface {
+            sink.emit(ev);
+        }
+    }
+}
+
 /// Project a finished block's outcome to the `await`/`race` record:
 /// `Ok(value)` → `{value, stdout, stderr}`, re-raising `Err(e)` verbatim.
 /// `$status` already reflects the block (set when the outcome was cached).
@@ -335,6 +396,7 @@ fn wait_first_settled<'a>(
 pub(super) fn await_handle(handle: &HandleInner, shell: &mut Shell) -> Settled<Value> {
     ensure_live(handle, shell)?;
     let (_, completed) = wait_first_settled(&[handle], shell)?;
+    replay_deferred_surface(handle, &completed, shell);
     project_completed(completed)
 }
 
@@ -409,6 +471,7 @@ pub(super) fn builtin_race(args: &[Value], shell: &mut Shell) -> Settled<Value> 
             detach_handle(h);
         }
     }
+    replay_deferred_surface(winner, &completed, shell);
     project_completed(completed)
 }
 
@@ -472,6 +535,7 @@ fn complete_handle(
     let completed = CompletedHandle {
         stdout: take_buffer(&handle.stdout_buf),
         stderr: take_buffer(&handle.stderr_buf),
+        surface: std::mem::take(&mut *handle.surface_buf.lock().unwrap()),
         outcome: result,
     };
     *handle.cached.lock().unwrap() = Some(completed.clone());
@@ -516,6 +580,8 @@ mod tests {
             state: Arc::new(Mutex::new(HandleState::Running)),
             stdout_buf,
             stderr_buf,
+            surface_buf: Arc::new(Mutex::new(Vec::new())),
+            surface_replayed: Arc::new(Mutex::new(false)),
             cmd: "<test>".into(),
             cancel: crate::process::CancelScope::default(),
         }
@@ -706,6 +772,8 @@ mod tests {
             state: Arc::new(Mutex::new(HandleState::Running)),
             stdout_buf,
             stderr_buf,
+            surface_buf: Arc::new(Mutex::new(Vec::new())),
+            surface_replayed: Arc::new(Mutex::new(false)),
             cmd: "<test>".into(),
             cancel: worker_scope.clone(),
         };
@@ -780,5 +848,59 @@ mod tests {
             !scope.is_cancelled(),
             "the interactive frame must arm no lifetime ceiling"
         );
+    }
+
+    /// A detached worker's `surface` events are buffered, not emitted live,
+    /// and replay through the *awaiting* turn's surface exactly once: `poll`
+    /// never replays, the first `await` replays, and a second `await` does
+    /// not duplicate.  Models `spawn { surface … }` then observing the handle.
+    #[test]
+    fn deferred_surface_replays_once_on_await_not_poll() {
+        struct Rec(Arc<Mutex<Vec<Value>>>);
+        impl EventSink for Rec {
+            fn emit(&self, ev: &Value) {
+                self.0.lock().unwrap().push(ev.clone());
+            }
+        }
+
+        let mut shell = Shell::new(Default::default());
+        let log = Arc::new(Mutex::new(Vec::new()));
+        shell.turn.surface = Some(Arc::new(Rec(log.clone())));
+
+        // A settled handle carrying one buffered surface event, modelling a
+        // detached worker that called `surface` once and returned.  The
+        // sender stays alive so the receiver sees the value, not a disconnect.
+        let (tx, rx) = mpsc::channel::<Settled<Value>>();
+        tx.send(Ok(Value::Unit)).unwrap();
+        let (_s, stdout_buf) = new_buffer();
+        let (_s2, stderr_buf) = new_buffer();
+        let surface_buf: SurfaceBuffer = Arc::new(Mutex::new(vec![Value::Variant {
+            label: "patch".into(),
+            payload: None,
+        }]));
+        let handle = HandleInner {
+            result: Arc::new(Mutex::new(Some(rx))),
+            cached: Arc::new(Mutex::new(None)),
+            state: Arc::new(Mutex::new(HandleState::Running)),
+            stdout_buf,
+            stderr_buf,
+            surface_buf,
+            surface_replayed: Arc::new(Mutex::new(false)),
+            cmd: "<test>".into(),
+            cancel: crate::process::CancelScope::default(),
+        };
+
+        // `poll` settles the handle (draining the buffer into the cache) but
+        // never replays: no cards yet.
+        builtin_poll(&[Value::Handle(handle.clone())], &mut shell).expect("poll ok");
+        assert_eq!(log.lock().unwrap().len(), 0, "poll must not replay surface");
+
+        // The first `await` replays the buffered card exactly once.
+        await_handle(&handle, &mut shell).expect("await ok");
+        assert_eq!(log.lock().unwrap().len(), 1, "await replays the deferred card");
+
+        // A second `await` reads the cache and must not duplicate it.
+        await_handle(&handle, &mut shell).expect("await ok");
+        assert_eq!(log.lock().unwrap().len(), 1, "repeat await must not duplicate");
     }
 }

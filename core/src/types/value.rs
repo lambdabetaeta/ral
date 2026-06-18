@@ -255,8 +255,20 @@ pub enum HandleState {
 pub struct CompletedHandle {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    /// Structured-event values a *detached* worker deferred, drained once
+    /// from [`HandleInner::surface_buf`].  Replayed through the awaiting
+    /// turn's surface by `await`/`race` (once), never by `poll`.
+    pub surface: Vec<Value>,
     pub outcome: super::flow::Settled<Value>,
 }
+
+/// Bounded buffer of structured-event values a *detached* worker defers
+/// instead of emitting live.  The turn that spawned the worker may already
+/// have ended, so its `surface` events are buffered here and replayed through
+/// the awaiting turn's surface on the first `await`/`race`.  Bounded so a
+/// runaway detached emitter cannot grow it without limit (see
+/// `builtins::concurrency`'s `DeferredSurface`).
+pub type SurfaceBuffer = Arc<Mutex<Vec<Value>>>;
 
 /// Shared handle to a spawned computation.
 #[derive(Debug, Clone)]
@@ -279,6 +291,15 @@ pub struct HandleInner {
     /// Buffered stderr from the spawned block (§13.3 replay rule).  Always
     /// empty for watched handles.
     pub stderr_buf: ByteBuffer,
+    /// Bounded deferred surface events from the worker: a *detached*
+    /// worker's `surface` builtin lands here rather than on the
+    /// (possibly-ended) spawning turn's live sink.  Drained once on
+    /// completion into [`CompletedHandle::surface`].
+    pub surface_buf: SurfaceBuffer,
+    /// Set once when `await`/`race` replays the deferred surface to the
+    /// caller's current sink, so repeated observation does not duplicate
+    /// cards and a never-awaited worker emits none.
+    pub surface_replayed: Arc<Mutex<bool>>,
     pub cmd: std::string::String,
     /// The worker's cancel scope, a child of the spawning shell's scope.
     /// `cancel` and `race`-of-losers fire it so the worker stops at its

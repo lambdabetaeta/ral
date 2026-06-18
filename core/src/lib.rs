@@ -64,9 +64,10 @@ pub use ir::{Comp, Val};
 pub use runtime::pipeline::helper::{try_run_bundled_tool, try_run_pipeline_stage_helper};
 pub use syntax::ast::Ast;
 pub use syntax::parser::{ParseError, parse};
-pub use turn::{IoFrame, StaticDiagnostics, TurnFrame, TurnLifecycle, TurnOutcome, eval_turn};
+pub use host::{Captured, TurnIo, TurnReport, TurnRequest};
+pub use turn::{StaticDiagnostics, TurnLifecycle};
 pub use typecheck::{Scheme, SessionSchemes, TypeError, bake_prelude, typecheck};
-pub use types::{Break, Error, Escape, Map, Settled, Shell, Value};
+pub use types::{Break, Error, EventSink, Escape, Map, Settled, Shell, SurfaceSink, Value};
 
 /// The two ahead-of-time phases — parse and elaborate — that every entry
 /// point (script, `-c`, REPL line, rc file, plugin module) performs before
