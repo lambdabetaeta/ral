@@ -5,15 +5,11 @@ Like every shell, `ral` runs commands:
     echo hello > /tmp/out
     echo 'more'  >> /tmp/out
 
-Commands are sequenced by newlines or `;`, and an uncaught failure aborts the *whole script*: `./configure; make` runs `make` only if configuration succeeded. `?` runs the second command when the first failed: `cat VERSION ? 'unversioned'`.
-
-THERE IS NO `&&` NOR `||`.
+Commands are sequenced by newlines or `;`, and an uncaught failure aborts the *whole script*: `./configure; make` runs `make` only if configuration succeeded. `?` runs the second command when the first failed: `cat VERSION ? 'unversioned'`. THERE IS NO `&&` NOR `||`.
 
 ## Values and commands
 
-Values and commands are separate categories: a value *is*; a command *does*. The value types are: Unit, Bool, Int, Float, String, Bytes, lists, records and maps, variants, blocks (commands packaged as values), and concurrent handles.
-
-A command may not be used as a value. Should you wish to use one as an exception, write `!{cmd}`.
+Values and commands are separate categories: a value *is*; a command *does*. The value types are: Unit, Bool, Int, Float, String, Bytes, lists, records and maps, variants, blocks (commands packaged as values), and concurrent handles. A command may not be used as a value. Should you wish to use one inline, you must make it into an anonymous block and force it: `!{cmd}`.
 
 ## Bindings
 
@@ -24,11 +20,13 @@ A command may not be used as a value. Should you wish to use one as an exception
     let n      = line-count notes.txt
     echo "$branch has $n lines of notes"
 
-Captured output is a `String`: split it with `lines`, parse it with `int`/`float`, or decode it with a codec taking it as an argument (`from-json $s`). A script whose last line is a `let` returns nothing; end with the value you mean to see.
+Captured output is a `String`: split it with `lines`, parse it with `int`/`float`, or decode it with a codec (`from-json $s`).
+
+A script whose last line is a `let` returns nothing; end with the value you mean to see.
 
 ## Blocks
 
-A block packages a command as a value; every *force* re-runs it. A block in head position forces; elsewhere force with `!`:
+A block packages a command as a value; forcing runs it. A block in head position is forced; otherwise use `!`:
 
     let d = { date +%s }
     d                # runs date, forcing the block
@@ -42,29 +40,29 @@ Blocks take space-separated parameters and are lexically scoped and curried:
     { |a b| $[$a + $b] }         # two parameters
     { |a, b| … }                 # PARSE ERROR — no commas
 
+If a value reads as a block where you expected a list, you under-applied a function.
+
 Blocks create scopes: in `!{ let x = 5; f $x }` the variable `x` is gone after the block.
 
-Blocks can be used with higher-order functions, such as `map`, `filter`, `each`, `fold`, `flat-map`, `sort-list-by`, … 
-
-These take the block FIRST, then a list:
+Blocks can be used with higher-order functions, such as `map`, `filter`, `each`, `fold`, `flat-map`, `sort-list-by`, …. Examples:
 
     map { |f| line-count $f } !{glob 'src/**/*.rs'}
     filter { |h| re-match '^src/' $h[file] } $hits
     fold { |acc x| $[$acc + $x[size]] } 0 !{list-dir '.'}
-    for $hits { |h| echo "$h[file]:$h[line]" }       # loop form: list first
+    for $hits { |h| echo "$h[file]:$h[line]" }
 
-Standard prelude: `take`/`drop`, `length`, `elem`, `concat`, `intercalate`, `sum`, `zip`, `enumerate`, `first`, `reverse`, `sort-list`. Dedup is a fold: `fold { |acc x| if !{elem $x $acc} { $acc } else { [...$acc, $x] } } [] $xs`. Run `help <name>` for exact signatures. If a value reads as a block where you expected a list, you under-applied a function.
+You have the standard prelude found in functional programming:: `take`, `drop`, `length`, `elem`, `concat`, `intercalate`, `sum`, `zip`, `enumerate`, `first`, `reverse`, `sort-list`. For example, use `fold { |acc x| if !{elem $x $acc} { $acc } else { [...$acc, $x] } } [] $xs` for de-duplication.
 
-Named blocks are ordinary values. Bind reusable predicates, mappers, parsers, and formatters, then pass them with `$`:
+Blocks are ordinary values. Define reusable functions pass them with `$`:
 
     let in-src = { |h| re-match '^src/' $h[file] }
     filter $in-src $hits
 
-Note that missing the `$` in `$in-src` makes `in-src` just a string argument, not a function.
+NB: omitting the `$` in `$in-src` makes `in-src` just a string argument in the above.
 
 ## Pipelines
 
-`ral` has pipelines. Some pipes carry bytes from one command to the next (external, UNIX-style). Others pipe values from one `ral` script to another. In that case the equation `x | f = f !{x}` holds.
+`ral` has pipelines. Some pipes carry bytes from one command to the next (external, UNIX-style). Others pipe values from one `ral` script to another; then the equation `x | f = f !{x}` holds.
 
 There are codecs that bridge the world of bytes to the world of values:
 
@@ -91,16 +89,16 @@ Every decoder also accepts its input as an explicit argument, which is how you d
 
 ## Strings
 
-- Single quotes ('…') are verbatim: NO ESCAPES, NO INTERPOLATION.
+- Single quotes ('…') are verbatim; NO ESCAPES, NO INTERPOLATION.
 - Double quotes may be used to interpolate variables, fields, and forces:
 
       echo "hi $name: $h[file] line $h[line], host !{hostname | from-line}, sum $[2 + 3]"
 
   A composite path must be one quoted word: `echo hi > "$dir/file"` (a bare `$dir/file` does not work).
 
-  `$(name)` delimits a variable from adjacent text that would otherwise be glued to it; it interpolates the whole value, so index with `$h[file]`, not `$(h)[file]`. Escapes are a fixed set (`\n`, `\r`, `\t`, `\\`, `\"`, `\$`, `\!`, `\0`, `\e`, `\xNN` for ASCII, `\u{…}`, and backslash-newline continuation). Anything else is a lex error, not a literal backslash.
+  `$(name)` delimits a variable from adjacent text that would otherwise be glued to it; it interpolates the whole value, so index with `$h[file]`, not `$(h)[file]`. Escapes are a fixed set (`\n`, `\r`, `\t`, `\\`, `\"`, `\$`, `\!`, `\0`, `\e`, `\xNN` for ASCII, `\u{…}`, and backslash-newline continuation).
 - Raw strings `#'…'#` are verbatim (with more hashes as needed: `##'…'##`, `###'…'###` and so on). These must be used for multiline inputs, with real newlines instead of `\n`. Use enough hashes that the closing run is not in the body. Note that a `#` run *not* followed by `'` instead marks everything to the end of the line as a comment.
-- `dedent` strips the common leading indentation from a multiline literal.
+- `dedent` strips the common leading indentation from a multiline string.
 - ral has no heredocs (`<<EOF …`). Raw strings `#'…'#` are multiline: write a file with `echo #'…'# > path`, or feed a program's stdin with `echo #'…'# | cmd`.
 
 Search and replacement are regex builtins (Rust regex syntax — `'a|b'`, DO NOT USE ESCAPES `\|`):
@@ -141,36 +139,35 @@ A *map* is the homogeneous cousin (all values one type); only maps support `keys
 
 ## Failure
 
-`try` catches a failed command; without it, a non-zero exit aborts the entire script. When a tool reports through its exit code rather than failing (`grep`, `diff`, `test`, `valgrind --error-exitcode`), wrap it in `audit` (below) to read its output as data instead of raising.
+`try` catches a failed command; without it, a non-zero exit aborts the entire script. When a tool reports through its exit code rather than failing (`grep`, `diff`, `test`, `valgrind --error-exitcode`), wrap it in `audit` to read its output as data instead of raising.
 
 Its handler receives an error record of with fields `status`, `cmd`, `message`, `line`, `col`:
 
     let log =
       try { make 2>&1 | from-string } { |err| 
-        "make failed: $err[message]"
+        "make failed: exited $err[status], $err[message]"
       }
 
-`err[message]` is synthetic status text, not the failing command's fd 2 bytes; wrap in `audit` when output is the data you need.
+The handler block must start on the same line as the body's closing brace — `} { |err| … }`. `err[message]` is synthetic status text, not the failing command's stderr; wrap in `audit` when output is the data you need.
 
-Both arms of `try` must return the same type. The handler block must start on the same line as the body's closing brace — `} { |err| … }`.
-
-Three prelude forms cover the common cases without an explicit handler:
+Prelude functions cover common cases:
 
     if !{succeeds { cargo check -q }} { echo 'clean' } else { echo 'broken' }
-    attempt { rm stale.lock }          # run; suppress any failure
+    attempt { rm stale.lock }          # suppress any failure
     retry 3 { curl -s $url }           # up to 3 attempts
 
-`guard BODY CLEANUP` runs the cleanup if the body fails, then re-raises. `fail [status: 2, message: '…']` raises deliberately.
+`guard BODY CLEANUP` runs the cleanup block if the body fails, then propagates the failure. `fail [status: 2, message: '…']` raises deliberately.
 
 ## Concurrency
 
-`spawn { … }` runs a block on a worker; `await $h` blocks until it finishes and returns `[value, stdout, stderr]` — the block's result, plus the `Bytes` it wrote to each fd. Read a bare worker's two streams straight off the result:
+`spawn { … }` runs a block on a worker and returns a handle at once; `await $h` blocks until the worker settles and returns a [value, stdout, stderr] record. Awaiting is cheap and returns the moment the block settles; should the block outlast 30s the `await` unwinds, but the worker keeps running, so await again on a later turn. Use like this:
 
-    let h = spawn { cargo build }
-    let x = await $h
-    [out: $x[stdout], errs: $x[stderr]]   # the two fds, as Bytes, kept apart
+    let b = { cargo build }
+    let h = spawn $b
+    let x = await $h                      # blocks until the worker returns
+    [out: $x[stdout], errs: $x[stderr]]   # as Bytes
 
-Wrap the worker in `audit` to read the recorded tree under `[value]` instead — it adds the exit code and per-command separation:
+Wrap in `audit` to read the recorded tree:
 
     let suite = spawn { audit { cargo test -q } }
     # … other work in this turn or a later one — handles persist across turns …
@@ -179,35 +176,28 @@ Wrap the worker in `audit` to read the recorded tree under `[value]` instead —
     let log    = lines !{from-string $report[children][0][stdout]}
     [ok: $[$report[status] == 0], log: !{take 20 $log}]
 
-A spawned failure raises at `await` before returning its buffered bytes; put `audit` or `try` inside the worker when logs matter. Bindings are immutable, so there is no shared state to race. `par F LIST JOBS` is a bounded parallel `map` preserving order; `race HANDLES` joins whichever finishes first. A worker you spawn and abandon is reaped automatically about an hour after it starts, so a runaway `spawn { loop … }` cannot linger forever — stop one sooner with `cancel $h`.
+Use `cancel $h` to stop a worker that is no longer needed.
 
-    par { |f| rustc --emit=metadata $f } $crates 4
+A spawned failure raises at `await` before returning its buffered bytes; put `audit` or `try` inside the worker when logs matter. 
 
-`poll $h` checks a handle without blocking or raising — use it to see whether a job from an earlier turn has finished before committing to `await`. It returns `` `settled `` once the block finishes, `` `pending `` while it runs:
+There is also a bounded parallel `map` and a `race`; use `help` to find out more about them. 
+
+`poll $h` checks a handle without blocking or raising: 
 
     let job = spawn { cargo build 2>&1 }
     # … a later turn …
     let p = poll $job
-    case $p [
-        `settled: { |s|
-            case $s[outcome] [
-                `ok:  { |_| echo "build finished" },
-                `err: { |e| echo "build failed, exit $e[status]" }
-            ]
-        },
-        `pending: { |_| echo "still building" }
-    ]
 
-`` `settled `` carries `[stdout, stderr, outcome]`; `outcome` is `` `ok `` with the block's value or `` `err `` with the caught-error record (the same shape `try` hands you, including `status`). A `poll` never throws on a finished job the way `await` does. `is-done $h` is the boolean form — true once `` `settled ``, false while `` `pending ``. A cancelled handle still errors.
+`poll` returns `` `settled `` once the block finishes, `` `pending `` while it runs. `` `settled `` carries `[stdout, stderr, outcome]`; `outcome` is `` `ok `` with the block's value or `` `err `` with the caught-error record (the same shape `try` hands you, including `status`). `await` is the way to wait; reach for poll only when you have other work to interleave; avoid busy-waiting on `poll`.
 
 ## Within
 
 `within` runs a block with a changed directory, environment, or handling of a command call:
 
     within [dir: 'src'] { grep-files 'TODO' }
-    within [env: [RUST_LOG: 'debug']] { cargo run }
-    within [handlers: [curl: { 'offline stub' }]] { fetch-all }
-    let blocked_make = { |name args| echo "blocked: make $name" }
+    spawn { within [env: [RUST_LOG: 'debug']] { cargo run } }
+    within [handlers: [curl: { |args| 'offline stub' }]] { fetch-all }
+    let blocked_make = { |args| echo "blocked: make ...$args" }
     within [handler: $blocked_make ] { make deploy }
 
 All keys to `within` are optional, but multiple ones may be used together.
@@ -218,7 +208,7 @@ Use `within` instead of `cd`; paths in results are relative to the `within` dire
 
 ## Audit
 
-`audit { … }` evaluates its body and returns the execution tree as a ral value: each external command's argv, per-stage stdout/stderr, exit code, and timing. **`audit` does not raise** — a non-zero exit becomes a node carrying that `status` and its captured `stdout`/`stderr`, not a failure. It keeps fd 1 and fd 2 apart, so you needn't merge with `2>&1` to capture stderr — read whichever channel you want. Bind and query it like any value:
+`audit { … }` evaluates its body and returns the execution tree as a ral value: each external command's argv, stdout, stderr, exit code, and timing. `audit` does not raise errors: it turns them into record data. It also keeps stdout/stderr apart, so you need not `2>&1` to capture stderr. Example use:
 
     let tree = audit { cargo build }         # never raises, even on a failed build
     $tree[status]                            # the exit code, as data
@@ -227,27 +217,26 @@ Use `within` instead of `cd`; paths in results are relative to the `within` dire
 A build is slow, so you usually run it on a worker and read the same tree off the handle once it joins (see Concurrency):
 
     let trace      = spawn { audit { cargo build } }
-    let cargo-build = await $trace   # [value, stdout, stderr]; value is the tree — query it as above
+    let cargo-build = await $trace   # the returned value is the audit tree
 
-This is how you read a tool whose exit code is *data* rather than failure — `grep` (1 = no match), `diff` (1 = differ), `test` (1 = false), or a deliberate signal like `valgrind --error-exitcode=77`. A bare non-zero exit would raise and abort the rest of the command; wrapping it in `audit` captures the output and lets you branch on the code:
+This is how you read a tool whose exit code is *data* (e.g. `grep` exit 1 meaning no match), deliberate signal like `valgrind --error-exitcode=77`. Wrapping such a tool in `audit` captures the output and lets you branch on the code:
 
     let r      = audit { valgrind --error-exitcode=77 --leak-check=full ./a.out }
     let report = from-string $r[children][0][stderr]
     if $[ $r[status] == 77 ] { "leaks:\n$report" } else { 'clean' }
 
-Use it for forensics when something fails silently, and to read exit-code-as-data; skip it for routine commands. Capability-decision nodes appear only under a grant with `audit: true`.
-
 ## I/O
 
 Read with `from-X < PATH`, write with `to-X $v > PATH`:
 
-    let body  = from-string < $file        # String
-    let rows  = from-lines-list $file      # [String]
-    let cfg   = from-json < $file          # structured
-    to-string $report > $file              # atomic write
-    to-json   $cfg    > $file              # atomic JSON write
+    let body  = from-string < $file    # String
+    let rows  = from-lines-list $file  # [String]
+    let cfg   = from-json < $file      # record
+    to-string $report >  $file         # write (atomic)
+    to-string $report >> $file         # append
+    to-json   $cfg    >  $file         # JSON write
 
-`>` is **atomic** (the file appears whole or not at all), `>~` truncates streaming, `>>` appends. Multi-line text with awkward quotes goes through a raw string:
+Multi-line text with awkward quotes goes through a raw string:
 
     echo #'first line
     second 'quoted' line'# > $file
@@ -268,15 +257,17 @@ Prefer these to external `rg`/`find`/`ls`: each returns a ral list or record ins
 - `view START END < PATH` shows the half-open line range `[START, END)`, each line tagged `<line-no>\t<hash>\t<text>`. Pipe from anything: `git show HEAD:f.rs | view 100 150`.
 - `view-around LINE PEEK < PATH` shows the `2*PEEK + 1` lines centred on `LINE`, tagged the same way.
 
-The hash is a *witness*: it identifies the line by its content together with its ±3-line neighbourhood, so even repeated text (a brace, a blank) is addressable as long as its surroundings differ. Every `view`, `view-around`, and `grep-files` line carries it — reading and editing are one motion, and a stale witness means the file changed under you.
+The hash is a freshness witness: it identifies the line by its content and neighbourhood. Every `view`, `view-around`, and `grep-files` line carries it, as it is required to edit.
 
 `edit PATH EDITS` applies a batch of `[HASH, NEW-TEXT]` pairs in one read/write pass. Each pair rewrites or deletes one witnessed line; `NEW-TEXT` is verbatim, so a real newline splits a line and `\n` does not. Raw `#'…'#` is only for replacements containing `'`; never double quotes, which interpolate. All hashes resolve against the file as read before any write, so adjacent edits are safe and the batch is atomic.
 
     view 80 120 < src/lib.rs
-    edit 'src/lib.rs' [ [h1b2c3, '    let n = 42
-        let scaled = n * 2']
-                      , [h4e5f6, '    let m = 0']
-                      , [h7a8b9, ''] ]
+    edit 'src/lib.rs' [
+      [h1b2c3, '    let n = 42
+        let scaled = n * 2'],
+      [h4e5f6, '    let m = 0'],
+      [h7a8b9, '']
+    ]
 
     let hits = grep-files …
     let mine = filter { |h| equal $h[file] 'src/lib.rs' } $hits
@@ -284,3 +275,10 @@ The hash is a *witness*: it identifies the line by its content together with its
 
 If `edit` reports zero or multiple matches, nothing was written: re-read with `view`/`grep-files` and use the fresh witnesses, never the stale ones.
 
+## Help
+
+When you are unsure of the signature of something you always call `help <name>`. This can be done as part of a turn:
+
+    let h = spawn { audit { make } }
+    let x = help 'view-around'
+    [view-around-help: $x]

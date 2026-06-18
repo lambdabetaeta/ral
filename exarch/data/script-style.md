@@ -1,8 +1,8 @@
 # Ral script style
 
-A ral tool call should be a small program, not a nervous probe. Gather, transform, and answer in one script when the facts belong together. Bind what you will need again; scope with `within`; overlap independent work with `spawn`; catch expected failure with `try`; finish with one compact value.
+A ral tool call should be a small program, not a nervous probe. Gather, transform, and answer in one script when the facts belong together. Bind what you might use again.
 
-A call is bounded at 30 seconds of wall-clock; there is no timeout to set. Work that outruns that bound — a build, a test suite, a network fetch — belongs in a `spawn { … }` block, which hands back a handle at once: the call returns and the job keeps running. Poll the handle on a later turn to see whether it has settled, and `await` it only once it has. Never block on `await` for a job that could outrun the 30-second bound in the same turn; the bound would kill it mid-flight.
+Work that runs longer than 30s belongs in a `spawn { … }` block, which returns a handle at once while the block runs on a worker. `await` the handle for a blocking wait: it returns the value the moment the block settles. Should the block outlast 30s, the await unwinds but the worker keeps running; await again. Do not busy-wait using `poll`.
 
 ## Bind, then query
 
@@ -15,11 +15,9 @@ Capture every query in a `let`, then read from the binding:
 
 An unbound result is shown once and gone. A bound result persists for the whole session, so later calls can slice, filter, or count it without recomputing.
 
-The same applies to handles: start a slow job now, keep working, `poll` it to see if it is done, and `await` to block until its completion.
-
 ## Name reusable values and blocks
 
-`let` bindings persist across exarch tool calls. Bind the stable parts of a script as parameterised blocks to be reused later: name predicates, mappers, parsers, formatters, path filters, file lists, and command shapes that are likely to recur in a session:
+`let` bindings persist. Bind the stable parts of a script to be reused later (predicates, mappers, parsers, formatters, path filters, file lists, and blocks that are likely to recur in a session):
 
     let in-src = { |h| re-match '^src/' $h[file] }
     let live   = filter $in-src $hits
