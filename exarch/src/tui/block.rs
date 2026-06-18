@@ -9,11 +9,33 @@
 //! asked for, so re-flattening the buffer each frame re-renders only the
 //! block the user just toggled, or the whole buffer once on a resize.
 
-use super::line::{self, READ_W};
+use super::line::{self, READ_W, RAIL_W, is_blank};
 use super::md::{self, MD_INDENT};
+use super::rail::{self, RailKind};
 use crate::bus::Hunk;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthChar;
+
+/// Index into the agent rail palette (`line::AGENT_HUES`). Root is `0`;
+/// each subagent takes the next slot at birth, wrapping modulo the
+/// palette length. Carried by value on every [`Block`] so the rail
+/// renders agent identity without a lookup on `App`.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub(super) struct AgentSlot(pub u8);
+
+/// Coarse chrome sub-kind the rail dispatches on. Patches and tool calls
+/// derive their rail shape from their own [`BlockKind`] variant; chrome
+/// carries this discriminant so the rail need not re-parse built lines.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub(super) enum RailShape {
+    /// A step boundary — renders the `━` rail marker.
+    Step,
+    /// An error — renders `✗`.
+    Error,
+    /// Everything else — renders the static `❖`.
+    #[default]
+    Generic,
+}
 
 /// What a block carries.  Each variant renders as a pure function of its
 /// data and the target width — and, for a tool call, its open state.
@@ -34,13 +56,20 @@ pub(super) enum BlockKind {
     Patch { path: String, hunks: Vec<Hunk> },
     /// Pre-built chrome whose builder already wrapped to [`READ_W`] — a
     /// step separator, prompt echo, error, write, task, meter, banner,
-    /// subagent breadcrumb, or a summary-less tool call.
-    Chrome(Vec<Line<'static>>),
+    /// subagent breadcrumb, or a summary-less tool call.  `shape` lets
+    /// the rail (and the size/grain moves) dispatch on the chrome
+    /// sub-kind without re-parsing the built lines.
+    Chrome {
+        shape: RailShape,
+        lines: Vec<Line<'static>>,
+    },
 }
 
 /// A block paired with the lines it last rendered, memoised by width.
 pub(super) struct Block {
     kind: BlockKind,
+    /// The producing agent's palette slot, stamped at push.
+    agent: AgentSlot,
     /// Lines for the current state at [`Self::cache_w`], or `None` when
     /// stale — never rendered, toggled open/shut, or asked at a new
     /// width.
@@ -49,30 +78,56 @@ pub(super) struct Block {
 }
 
 impl Block {
-    fn new(kind: BlockKind) -> Self {
+    fn new(kind: BlockKind, agent: AgentSlot) -> Self {
         Self {
             kind,
+            agent,
             cache: None,
             cache_w: 0,
         }
     }
 
-    pub(super) fn tool_call(tool: &'static str, summary: String, cmd: String) -> Self {
-        Self::new(BlockKind::ToolCall {
-            tool,
-            summary,
-            cmd,
-            open: false,
-        })
+    pub(super) fn tool_call(
+        tool: &'static str,
+        summary: String,
+        cmd: String,
+        agent: AgentSlot,
+    ) -> Self {
+        Self::new(
+            BlockKind::ToolCall {
+                tool,
+                summary,
+                cmd,
+                open: false,
+            },
+            agent,
+        )
     }
-    pub(super) fn markdown(src: String) -> Self {
-        Self::new(BlockKind::Markdown(src))
+    pub(super) fn markdown(src: String, agent: AgentSlot) -> Self {
+        Self::new(BlockKind::Markdown(src), agent)
     }
-    pub(super) fn patch(path: String, hunks: Vec<Hunk>) -> Self {
-        Self::new(BlockKind::Patch { path, hunks })
+    pub(super) fn patch(path: String, hunks: Vec<Hunk>, agent: AgentSlot) -> Self {
+        Self::new(BlockKind::Patch { path, hunks }, agent)
     }
-    pub(super) fn chrome(lines: Vec<Line<'static>>) -> Self {
-        Self::new(BlockKind::Chrome(lines))
+    pub(super) fn chrome(shape: RailShape, lines: Vec<Line<'static>>, agent: AgentSlot) -> Self {
+        Self::new(BlockKind::Chrome { shape, lines }, agent)
+    }
+
+    /// The producing agent's palette slot.
+    pub(super) fn agent(&self) -> AgentSlot {
+        self.agent
+    }
+
+    /// The block's magnitude, where defined: total changed lines
+    /// (deletions + additions) for a patch, `None` elsewhere.  The rail's
+    /// value-step and the header size-bar both read this.
+    pub(super) fn magnitude(&self) -> Option<u32> {
+        match &self.kind {
+            BlockKind::Patch { hunks, .. } => {
+                Some(hunks.iter().map(|h| (h.del.len() + h.add.len()) as u32).sum())
+            }
+            _ => None,
+        }
     }
 
     /// True for the one block kind a click opens.
@@ -101,17 +156,41 @@ impl Block {
 
     /// The block as it belongs in the session log: full content,
     /// width-independent — a tool call always opened, so the script is
-    /// on the record even while shut on screen.
+    /// on the record even while shut on screen.  Routes through the same
+    /// rendering path as [`Self::render`] (rail included) with the tool
+    /// call forced open.
     pub(super) fn log_lines(&self) -> Vec<Line<'static>> {
-        match &self.kind {
-            BlockKind::ToolCall {
-                tool, summary, cmd, ..
-            } => line::tool_call_expanded(summary, tool, cmd, READ_W),
-            _ => self.render(READ_W),
-        }
+        self.render_with(READ_W, true)
     }
 
     fn render(&self, width: u16) -> Vec<Line<'static>> {
+        self.render_with(width, false)
+    }
+
+    /// Build the block's body lines (rail-less) then prepend the
+    /// data-encoding rail span to the first content row.  `force_open`
+    /// reveals a tool call's full script regardless of its toggle — used
+    /// only by [`Self::log_lines`] so the on-disk transcript is complete.
+    fn render_with(&self, width: u16, force_open: bool) -> Vec<Line<'static>> {
+        let mut lines = self.body(width, force_open);
+        let kind = self.rail_kind(force_open);
+        let rail = rail::span(kind, self.agent, self.magnitude());
+        // Markdown insets every row by `MD_INDENT`; the rail occupies the
+        // first `RAIL_W` columns of that inset on the opening row, so shrink
+        // the inset there to keep prose flush with the body.
+        let shrink = matches!(self.kind, BlockKind::Markdown(_))
+            .then_some(RAIL_W)
+            .unwrap_or(0);
+        let idx = lines.iter().position(|l| !is_blank(l)).unwrap_or(0);
+        if shrink > 0 {
+            shrink_leading_ws(&mut lines[idx], shrink);
+        }
+        lines[idx].spans.insert(0, rail);
+        lines
+    }
+
+    /// The rail-less body at `width`.
+    fn body(&self, width: u16, force_open: bool) -> Vec<Line<'static>> {
         match &self.kind {
             BlockKind::ToolCall {
                 tool,
@@ -119,7 +198,7 @@ impl Block {
                 cmd,
                 open,
             } => {
-                if *open {
+                if *open || force_open {
                     line::tool_call_expanded(summary, tool, cmd, width)
                 } else {
                     line::tool_call_collapsed(summary, tool, width)
@@ -127,7 +206,49 @@ impl Block {
             }
             BlockKind::Markdown(src) => md::render_md(src, width, MD_INDENT),
             BlockKind::Patch { path, hunks } => line::patch(path, hunks),
-            BlockKind::Chrome(lines) => lines.clone(),
+            BlockKind::Chrome { lines, .. } => lines.clone(),
+        }
+    }
+
+    /// The rail shape this block wears.  Chrome lifts its [`RailShape`]
+    /// discriminant; patches, tool calls, and markdown derive theirs from
+    /// the variant.
+    fn rail_kind(&self, force_open: bool) -> RailKind {
+        match &self.kind {
+            BlockKind::ToolCall { open, .. } => RailKind::ToolCall(*open || force_open),
+            BlockKind::Markdown(_) => RailKind::Markdown,
+            BlockKind::Patch { .. } => RailKind::Patch,
+            BlockKind::Chrome { shape, .. } => match shape {
+                RailShape::Step => RailKind::Step,
+                RailShape::Error => RailKind::Error,
+                RailShape::Generic => RailKind::Generic,
+            },
+        }
+    }
+}
+
+/// Shrink the leading whitespace of `line` by `n` cells, trimming the
+/// first whitespace-only span(s) in place.  Used to reclaim the columns
+/// the rail occupies on a markdown block's opening row so its prose stays
+/// flush with the body inset.
+fn shrink_leading_ws(line: &mut Line<'static>, n: usize) {
+    let mut remaining = n;
+    for span in &mut line.spans {
+        if remaining == 0 {
+            break;
+        }
+        let s = span.content.as_ref();
+        if !s.chars().all(|c| c == ' ') {
+            break;
+        }
+        let len = s.chars().count();
+        if len <= remaining {
+            remaining -= len;
+            span.content = String::new().into();
+        } else {
+            let kept: String = s.chars().skip(remaining).collect();
+            span.content = kept.into();
+            remaining = 0;
         }
     }
 }

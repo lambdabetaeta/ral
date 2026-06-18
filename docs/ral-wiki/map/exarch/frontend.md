@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 7ba500b
-generated_at_date: 2026-06-17
+generated_at_commit: d8dbd81
+generated_at_date: 2026-06-18
 covers_paths: [exarch/src/bus.rs, exarch/src/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/host.rs]
 ---
 
@@ -44,24 +44,30 @@ under the durable per-run log directory (`bootstrap::log_run_dir`,
 
 Two `Sink` implementations:
 
-- `tui.rs` (+ `tui/{block,line,md,viewport}.rs`) — the full-screen TUI. It owns
-  the alternate screen and its own scrollback: each session is a `Vec<Block>`
-  (`tui/block.rs`), and the whole frame is redrawn each tick from a memoised
-  flatten of those blocks into wrapped visual rows. A tool call is the one
-  collapsible block — its summary shows shut, the full ral script when a click
-  opens it; the wheel scrolls, click-drag selects and copies the rail-stripped
-  text via OSC-52, and Shift-drag falls through to the terminal's own selection.
-  `tui/md.rs` is the streaming markdown renderer; `tui/viewport.rs` the
-  per-session block buffer, scroll position, and `user.log` tee; sub-agent
-  sessions get tabs that linger after `Died`, each keeping its own scroll
-  position. It owns the REPL loop and the raw-mode / bracketed-paste /
-  alt-screen / mouse-capture guard. A prompt the user submits while a turn
-  runs is queued (`PromptQueue` behind `App::queue`); the root dispatch loop
-  drains non-slash prompts at the next safe tool boundary, and `Repl::drive`
-  drains any remainder as the next turn's prompt, coalesced oldest-first.
-  Slash-prefixed prompts stay on the REPL command path. Until then the queue
-  renders in a strip above the input
-  ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]]).
+ `tui.rs` (+ `tui/{block,line,md,rail,viewport}.rs`) — the full-screen TUI.
+ It owns the alternate screen and its own scrollback: each session is a
+ `Vec<Block>` (`tui/block.rs`), and the whole frame is redrawn each tick from
+ a memoised flatten of those blocks into wrapped visual rows. A tool call is
+ the one collapsible block — its summary shows shut, the full ral script when
+ a click opens it; the wheel scrolls, click-drag selects and copies the
+ rail-stripped text via OSC-52, and Shift-drag falls through to the terminal's
+ own selection. `tui/md.rs` is the streaming markdown renderer;
+ `tui/viewport.rs` the per-session block buffer, scroll position, and
+ `user.log` tee; `tui/rail.rs` the data-encoding marginal rail — one cell
+ carrying three of Bertin's variables (shape → kind, hue → agent, value →
+ magnitude), the keystone of the *transcript as graphic* re-encoding
+ ([[decisions/260618_tui-transcript-as-graphic|tui-transcript-as-graphic]],
+ Phases 0–2 landed). The `rule_line` carries a value-ramp `ctx%` bar and a
+ Gantt ribbon of completed phases; phase state lives on `Viewport`, not `App`.
+ Sub-agent sessions get tabs that linger after `Died`, each keeping its own
+ scroll position. It owns the REPL loop and the raw-mode / bracketed-paste /
+ alt-screen / mouse-capture guard. A prompt the user submits while a turn
+ runs is queued (`PromptQueue` behind `App::queue`); the root dispatch loop
+ drains non-slash prompts at the next safe tool boundary, and `Repl::drive`
+ drains any remainder as the next turn's prompt, coalesced oldest-first.
+ Slash-prefixed prompts stay on the REPL command path. Until then the queue
+ renders in a strip above the input
+ ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]]).
 - `headless.rs` — one-shot pipe: assistant tokens to stdout, every other event
   condensed to one line on stderr, exit after one seed turn. Takes the default
   `Sink::drive` and an empty prompt queue.

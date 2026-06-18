@@ -2843,3 +2843,15 @@ single `eval_turn` / `TurnFrame` / `TurnOutcome` model
 `ral` batch path as the one un-unified entry. The live-stamped `internals/`
 pages (cancellation, capability-enforcement, pipeline-execution) were already
 current and left untouched.
+
+## [2026-06-18] ingest | tui-transcript-as-graphic, Phases 0–2
+
+Landed the first three parcels of
+[[decisions/260618_tui-transcript-as-graphic|tui-transcript-as-graphic]]:
+the per-`Block` substrate (`AgentSlot`, `magnitude`, `RailShape` chrome
+discriminant on `tui/block.rs`), the data-encoding marginal rail (Move 1 —
+`tui/rail.rs` encoding shape→kind, hue→agent, value→magnitude, lifted into
+`Block::render`), and `rule_line`'s value-ramp `ctx%` bar + Gantt phase
+ribbon (Move 3 — spinner dropped, `phase` state moved off `App` onto
+`Viewport`). Decision status `proposed → active`; re-stamped
+[[map/exarch/frontend|frontend]] to `d8dbd81`. Phases 3–8 remain proposed.

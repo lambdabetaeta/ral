@@ -19,7 +19,9 @@ mod block;
 mod line;
 mod md;
 mod picker;
+mod rail;
 mod viewport;
+use block::{AgentSlot, RailShape};
 
 use line::usage_text;
 
@@ -62,17 +64,11 @@ use std::{
 };
 
 use line::{
-    BANNER_CYAN, BANNER_GOLD, BANNER_LIME, BANNER_ORANGE, BANNER_PINK, BANNER_PURPLE, BANNER_RED,
-    CYAN, LIME, ORANGE, PINK, PURPLE, READ_W, SLATE, bold, slate, slate_owned,
+    AGENT_HUES, BANNER_CYAN, BANNER_GOLD, BANNER_LIME, BANNER_ORANGE, BANNER_PINK, BANNER_PURPLE,
+    BANNER_RED, CYAN, LIME, ORANGE, PINK, PURPLE, READ_W, SLATE, bold, slate, slate_owned,
 };
-use viewport::Viewport;
+use viewport::{PhaseSeg, Viewport};
 
-const SPIN: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-/// Vaporwave trio swept across the spinner: every third frame advances
-/// the colour, so the dot rotates ~1.1s per full braille cycle and the
-/// colour completes its pink → purple → cyan loop every ~1s.
-const SPIN_C: [Color; 3] = [PINK, PURPLE, CYAN];
-const SPIN_T: u128 = 110;
 pub(super) const PROMPT_PAD_H: u16 = 1;
 const ART: &str = include_str!("../data/banner.txt");
 const EAGLE: &str = include_str!("../data/eagle.txt");
@@ -258,11 +254,6 @@ pub struct App {
     /// empty prompt pulls the newest one back for editing.
     queue: PromptQueue,
     busy_since: Option<Instant>,
-    /// The worker's current phase label ([`Kind::Phase`]), shown beside
-    /// the spinner so a silent local op reads "typechecking…" rather than
-    /// a bare dot.  Set by a `Phase` event, cleared by any other event and
-    /// when the turn ends.
-    phase: Option<String>,
     total_usage: Usage,
     /// Last turn's prompt size (genai's `prompt_tokens`, which already
     /// folds the cache-read and cache-creation counts in); drives the
@@ -327,7 +318,7 @@ struct PatchBuf {
 impl App {
     pub fn new(root_id: SessionId, root_log_dir: &Path, context_window: Option<u64>) -> Self {
         let mut viewports = HashMap::new();
-        viewports.insert(root_id, Viewport::new(root_log_dir.join("user.log")));
+        viewports.insert(root_id, Viewport::new(root_log_dir.join("user.log"), AgentSlot::default()));
         let mut titles = HashMap::new();
         titles.insert(root_id, ROOT_TITLE.to_string());
         let mut textarea = TextArea::default();
@@ -355,7 +346,6 @@ impl App {
             draft: String::new(),
             queue: PromptQueue::new(),
             busy_since: None,
-            phase: None,
             total_usage: Usage::default(),
             patch_buf: None,
             last_input: 0,
@@ -388,7 +378,13 @@ impl App {
     }
     pub fn busy_off(&mut self) {
         self.busy_since = None;
-        self.phase = None;
+        // A turn ending supersedes any live phase label: finalise it
+        // into the focused viewport's Gantt history so the ribbon's
+        // bright tip drops back to a quiet state.
+        let focused = self.focused();
+        if let Some(vp) = self.viewports.get_mut(&focused) {
+            vp.clear_phase();
+        }
     }
 
     /// Drop sub-session viewports, reset root scrollback, zero cost,
@@ -417,14 +413,21 @@ impl App {
     /// one viewport via [`line`](mod@line).
     pub fn handle(&mut self, Event { id, kind }: Event) {
         // A phase label names the silent gap before the next thing
-        // happens, so any other event supersedes it.
+        // happens, so any other event supersedes it.  Finalise the live
+        // phase into the event's viewport's Gantt history first, so the
+        // ribbon records the segment's wall-time rather than dropping it.
         if !matches!(kind, Kind::Phase(_)) {
-            self.phase = None;
+            if let Some(vp) = self.viewports.get_mut(&id) {
+                vp.clear_phase();
+            }
         }
         match kind {
             Kind::Born { log_dir, title } => {
                 if let std::collections::hash_map::Entry::Vacant(slot) = self.viewports.entry(id) {
-                    slot.insert(Viewport::new(log_dir.join("user.log")));
+                    let agent = AgentSlot(
+                        (self.tabs.len() as u8) % AGENT_HUES.len() as u8,
+                    );
+                    slot.insert(Viewport::new(log_dir.join("user.log"), agent));
                     self.dispatch_order.push(id);
                 }
                 self.titles.insert(id, title);
@@ -464,8 +467,11 @@ impl App {
                     vp.close_boundary();
                 }
             }
-            Kind::Step(n) => self.push_chrome(id, line::step(n as usize)),
-            Kind::Phase(label) => self.phase = Some(label),
+            Kind::Step(n) => self.push_chrome(id, RailShape::Step, line::step(n as usize)),
+            // Route to the event's viewport; `set_phase` finalises any
+            // in-progress phase first, so consecutive Phase events hand
+            // off cleanly into the Gantt history.
+            Kind::Phase(label) => self.with_viewport(id, |vp| vp.set_phase(label)),
             Kind::ToolCall { tool, cmd, summary } => {
                 ral_core::dbg_trace!("tui", "ToolCall tool={tool} cmd={cmd:?}");
                 self.with_viewport(id, |vp| match summary {
@@ -473,18 +479,18 @@ impl App {
                     // shows shut, the script on a click.  Summary-less
                     // calls (`fff`, invalid input) have nothing to open.
                     Some(s) => vp.push_tool_call(tool, s, cmd),
-                    None => vp.push_chrome(line::tool_call_static(&cmd, tool)),
+                    None => vp.push_chrome(RailShape::Generic, line::tool_call_static(&cmd, tool)),
                 });
             }
             // Tool results never reach the rail — the script the user can
             // open is the whole of what a call surfaces.  The model still
             // receives the full result through the history pipeline.
             Kind::ToolResult(_) => {}
-            Kind::UserPromptEcho(text) => self.push_chrome(id, line::user_prompt(&text)),
-            Kind::StopReason(raw) => self.push_chrome(id, line::stop_reason(&raw)),
-            Kind::Error(msg) => self.push_chrome(id, line::error(&msg)),
-            Kind::Dim(text) => self.push_chrome(id, line::dim(&text)),
-            Kind::ProviderError(error) => self.push_chrome(id, line::provider_error(&error)),
+            Kind::UserPromptEcho(text) => self.push_chrome(id, RailShape::Generic, line::user_prompt(&text)),
+            Kind::StopReason(raw) => self.push_chrome(id, RailShape::Generic, line::stop_reason(&raw)),
+            Kind::Error(msg) => self.push_chrome(id, RailShape::Error, line::error(&msg)),
+            Kind::Dim(text) => self.push_chrome(id, RailShape::Generic, line::dim(&text)),
+            Kind::ProviderError(error) => self.push_chrome(id, RailShape::Error, line::provider_error(&error)),
             Kind::SubagentDone {
                 title,
                 text,
@@ -496,7 +502,7 @@ impl App {
                 // level emitted — main is the permanent record of
                 // delegated work.
                 let root = self.root;
-                self.push_chrome(root, lines);
+                self.push_chrome(root, RailShape::Generic, lines);
             }
             // Rail-surfaced kit events.  A kit that raised one through the
             // `surface` builtin made an explicit choice to communicate
@@ -515,10 +521,10 @@ impl App {
                 path,
                 lines,
                 preview,
-            } => self.push_chrome(id, line::wrote(&path, lines, &preview)),
-            Kind::Task { status, desc } => self.push_chrome(id, line::task(status, &desc)),
+            } => self.push_chrome(id, RailShape::Generic, line::wrote(&path, lines, &preview)),
+            Kind::Task { status, desc } => self.push_chrome(id, RailShape::Generic, line::task(status, &desc)),
             Kind::Meter { done, total, label } => {
-                self.push_chrome(id, line::meter(done, total, &label))
+                self.push_chrome(id, RailShape::Generic, line::meter(done, total, &label))
             }
         }
     }
@@ -541,8 +547,8 @@ impl App {
         }
     }
 
-    fn push_chrome(&mut self, id: SessionId, lines: Vec<Line<'static>>) {
-        self.with_viewport(id, |vp| vp.push_chrome(lines));
+    fn push_chrome(&mut self, id: SessionId, shape: RailShape, lines: Vec<Line<'static>>) {
+        self.with_viewport(id, |vp| vp.push_chrome(shape, lines));
     }
 
     /// Absorb a `Kind::Patch`'s hunk into [`Self::patch_buf`], or flush +
@@ -613,13 +619,13 @@ impl App {
             Constraint::Min(1),
             Constraint::Length(1), // breathing row between output and chrome
             Constraint::Length(tab_h),
-            Constraint::Length(1),
             Constraint::Length(queued_h),
             Constraint::Length(prompt_h),
+            Constraint::Length(1), // rule_line: sits below prompt, above footer
             Constraint::Length(1),
         ])
         .split(area);
-        let (content, tab_row, status_row, queued_row, prompt_row, footer_row) = (
+        let (content, tab_row, queued_row, prompt_row, status_row, footer_row) = (
             layout[0], layout[2], layout[3], layout[4], layout[5], layout[6],
         );
         // Reserve the rightmost column of the content area for the scrollbar.
@@ -642,7 +648,15 @@ impl App {
 
         self.style_prompt();
         let busy = self.busy_since;
-        let phase = self.phase.clone();
+        // The rule_line reads the focused viewport's phase + Gantt
+        // history.  Clone the label (an owned `String` outlives the
+        // borrow) and clone the history slice so the closure is 'static
+        // like the other extracted figures.
+        let (phase, phase_history) = self
+            .viewports
+            .get(&focused)
+            .map(|vp| (vp.phase_label().map(str::to_owned), vp.phase_history().to_vec()))
+            .unwrap_or_default();
         let usage = self.total_usage;
         let last_input = self.last_input;
         let context_window = self.context_window;
@@ -673,6 +687,7 @@ impl App {
                     text_rect.width.min(READ_W) as usize,
                     busy,
                     phase.as_deref(),
+                    &phase_history,
                     &usage,
                     last_input,
                     context_window,
@@ -1174,7 +1189,7 @@ impl App {
             Style::default().fg(BANNER_PURPLE),
         )));
         if let Some(vp) = self.viewports.get_mut(&self.root) {
-            vp.push_chrome(ls);
+            vp.push_chrome(RailShape::Generic, ls);
         }
         self.draw(term)
     }
@@ -1215,28 +1230,32 @@ fn rule_line(
     width: usize,
     busy_since: Option<Instant>,
     phase: Option<&str>,
+    phase_history: &[PhaseSeg],
     usage: &Usage,
     last_input: u64,
     context_window: Option<u64>,
     status_model: &str,
 ) -> Line<'static> {
-    let mut spans = Vec::new();
+    let mut spans: Vec<Span<'static>> = Vec::new();
     let mut left_w = 0usize;
-    if let Some(t0) = busy_since {
-        let step = (t0.elapsed().as_millis() / SPIN_T) as usize;
-        let g = SPIN[step % SPIN.len()];
-        let col = SPIN_C[(step / 3) % SPIN_C.len()];
-        spans.push(Span::styled(
-            format!("{g} "),
-            Style::default().fg(col).add_modifier(Modifier::BOLD),
-        ));
-        left_w += 2;
-        if let Some(p) = phase {
-            let label = Span::styled(format!("{p}… "), Style::default().fg(SLATE));
-            left_w += label.width();
-            spans.push(label);
-        }
+
+    // ── Gantt phase ribbon ────────────────────────────────────────────
+    // One segment per completed phase, width ∝ wall-time duration; the
+    // live phase is the bright pulsing tip.  Replaces the old `─` filler
+    // and the motion spinner — liveness now reads off the ribbon's tip
+    // and the ctx% ramp's fill level.
+    if !phase_history.is_empty() || phase.is_some() {
+        let ribbon = gantt_ribbon(phase_history, phase, busy_since, width / 3);
+        left_w += ribbon.iter().map(|s| s.width()).sum::<usize>();
+        spans.extend(ribbon);
     }
+    if let Some(p) = phase {
+        let label = Span::styled(format!("{p}… "), Style::default().fg(SLATE));
+        left_w += label.width();
+        spans.push(label);
+    }
+
+    // ── status model ──────────────────────────────────────────────────
     if !status_model.is_empty() {
         let segment: Vec<Span<'static>> = vec![
             Span::styled(status_model.to_string(), Style::default().fg(SLATE)),
@@ -1245,27 +1264,132 @@ fn rule_line(
         left_w += segment.iter().map(|s| s.width()).sum::<usize>();
         spans.extend(segment);
     }
+
+    // ── ctx% value-ramp ───────────────────────────────────────────────
+    // A fixed-width lightness ramp: filled cells step toward white as
+    // `last_input / context_window` approaches 1.0, empty cells dim
+    // slate.  The eye reads the fill level and notices the approach to
+    // full; the `N%` digit stays as a precise readout after the bar.
+    // `context_window = None` → no ctx segment at all (as today).
     if let Some(cap) = context_window
         && cap > 0
     {
         let pct = ((last_input as f64 / cap as f64) * 100.0).round() as u64;
         let pct = pct.min(999);
-        let ctx_segment: Vec<Span<'static>> = vec![
-            Span::styled("ctx ", Style::default().fg(SLATE)),
-            Span::styled(format!("{pct}%"), Style::default().fg(SLATE)),
-            Span::styled(" · ", Style::default().fg(SLATE)),
-        ];
-        left_w += ctx_segment.iter().map(|s| s.width()).sum::<usize>();
-        spans.extend(ctx_segment);
+        let bar = ctx_ramp(pct, CTX_BAR_W);
+        left_w += bar.iter().map(|s| s.width()).sum::<usize>();
+        spans.extend(bar);
+        let readout = Span::styled(format!(" {pct}% "), Style::default().fg(SLATE));
+        left_w += readout.width();
+        spans.push(readout);
     }
+
+    // ── usage (right-aligned) ─────────────────────────────────────────
     let right = usage_text(usage);
     let rw: usize = right.iter().map(|s: &Span<'_>| s.width()).sum();
-    spans.push(Span::styled(
-        "─".repeat(width.saturating_sub(left_w + rw)),
-        Style::default().fg(SLATE),
-    ));
+    let gap = width.saturating_sub(left_w + rw);
+    if gap > 0 {
+        spans.push(Span::styled(" ".repeat(gap), Style::default().fg(SLATE)));
+    }
     spans.extend(right);
     Line::from(spans)
+}
+
+/// Width of the ctx% value-ramp bar, in cells.
+const CTX_BAR_W: usize = 10;
+
+/// Build the ctx% value-ramp: `filled` cells lightened toward white by
+/// [`rail::value_step`] of the percentage (so near-full glows), then
+ /// `CTX_BAR_W - filled` dim slate cells.  Reuses the rail's ramp so the
+/// bar and the marginal rail share one value scale.
+fn ctx_ramp(pct: u64, bar_w: usize) -> Vec<Span<'static>> {
+    let pct = pct.min(100) as usize;
+    let filled = ((pct as f64 / 100.0) * bar_w as f64).round() as usize;
+    let filled = filled.min(bar_w);
+    let step = rail::value_step(Some(pct as u32));
+    let fill_col = rail::lighten(CYAN, step);
+    let mut spans = Vec::with_capacity(bar_w);
+    spans.push(Span::styled("ctx ", Style::default().fg(SLATE)));
+    for _ in 0..filled {
+        spans.push(Span::styled("█", Style::default().fg(fill_col)));
+    }
+    for _ in filled..bar_w {
+        spans.push(Span::styled("░", Style::default().fg(SLATE)));
+    }
+    spans.push(Span::styled(" ", Style::default().fg(SLATE)));
+    spans
+}
+
+/// Build the Gantt ribbon: one `▌`-cell per phase segment, width
+/// proportional to `duration`, plus a pulsing bright tip for the live
+/// phase.  `max_w` caps the total ribbon width so it never crowds the
+/// ctx% ramp or the usage readout off the row.
+///
+/// The live tip pulses by alternating its value-step every ~500 ms of
+/// elapsed busy time — a hung turn stays bright-and-dim oscillating
+/// rather than freezing at one shade, so it is distinguishable from a
+/// quiet (phase-less) turn.
+fn gantt_ribbon(
+    history: &[PhaseSeg],
+    phase: Option<&str>,
+    busy_since: Option<Instant>,
+    max_w: usize,
+) -> Vec<Span<'static>> {
+    // Allocate the ribbon budget across segments by duration.  Each
+    // completed segment gets at least one cell; the live phase reserves
+    // one cell for its pulsing tip.  Widths are scaled to fit `max_w`.
+    let mut total_dur: Duration = history.iter().map(|s| s.duration).sum();
+    if phase.is_some() {
+        total_dur += Duration::from_millis(1);
+    }
+    let live_budget = if phase.is_some() { 1 } else { 0 };
+    let hist_budget = max_w.saturating_sub(live_budget);
+    let mut widths: Vec<usize> = history
+        .iter()
+        .map(|s| {
+            if total_dur.is_zero() {
+                1
+            } else {
+                ((((s.duration.as_secs_f64() / total_dur.as_secs_f64())
+                    * hist_budget as f64)
+                    .round()) as usize)
+                    .max(1)
+            }
+        })
+        .collect();
+    // Clamp the total to the budget, trimming from the rightmost
+    // (oldest-visible) segments if the rounding overflowed.
+    while widths.iter().sum::<usize>() > hist_budget && widths.iter().any(|&w| w > 1) {
+        let last_gt1 = widths.iter().rposition(|&w| w > 1).unwrap();
+        widths[last_gt1] -= 1;
+    }
+
+    let mut spans = Vec::new();
+    for (seg, &w) in history.iter().zip(widths.iter()) {
+        let step = rail::value_step(Some(seg.duration.as_millis() as u32));
+        let col = rail::lighten(PURPLE, step);
+        spans.push(Span::styled(
+            "▌".repeat(w),
+            Style::default().fg(col),
+        ));
+    }
+    if phase.is_some() {
+        // Pulse: alternate value-step every ~500 ms of busy elapsed.
+        let pulse_step = match busy_since {
+            Some(t0) => {
+                let ms = t0.elapsed().as_millis();
+                if (ms / 500) % 2 == 0 { 2 } else { 3 }
+            }
+            None => 3,
+        };
+        let tip_col = rail::lighten(CYAN, pulse_step);
+        spans.push(Span::styled(
+            "▌",
+            Style::default().fg(tip_col).add_modifier(Modifier::BOLD),
+        ));
+    }
+    spans.push(Span::styled(" ", Style::default().fg(SLATE)));
+    spans
 }
 
 /// Build the breadcrumb that lands in root's scrollback when a
@@ -2210,13 +2334,129 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         let headers: Vec<&String> = texts
             .iter()
-            .filter(|t| t.starts_with(line::RAIL) && t.contains("patch"))
+            .filter(|t| t.starts_with("▎ ") && t.contains("patch"))
             .collect();
         assert_eq!(
             headers.len(),
             2,
             "expected two `❖ patch` headers (one per path); got {headers:?} in {texts:?}"
         );
+    }
+
+    // ── rule_line: ctx% ramp + Gantt ribbon ───────────────────────────
+
+    /// `rule_line` is a pure function over its args.  With a context
+    /// window set and `last_input` at ~40% of it, the ctx segment must
+    /// appear and the rendered line must carry a `%` readout.  With a
+    /// `phase_history` of three segments and a live phase, the ribbon
+    /// must show one `▌` run per recorded phase plus the pulsing tip —
+    /// i.e. the line text contains four `▌` groups.  `context_window =
+    /// None` suppresses the ctx segment entirely.
+    #[test]
+    fn rule_line_ctx_ramp_fills_and_ribbon_carries_one_segment_per_phase() {
+        let usage = Usage::default();
+        // ~40% of a 100k window.
+        let history = vec![
+            PhaseSeg { label: "thinking".into(), duration: Duration::from_millis(120) },
+            PhaseSeg { label: "tool".into(), duration: Duration::from_millis(80) },
+            PhaseSeg { label: "writing".into(), duration: Duration::from_millis(200) },
+        ];
+        let line = rule_line(
+            READ_W as usize,
+            Some(Instant::now()),
+            Some("typechecking"),
+            &history,
+            &usage,
+            40_000,
+            Some(100_000),
+            "openai gpt-4o",
+        );
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        // ctx ramp present with a 40% readout.
+        assert!(text.contains("ctx "), "ctx segment missing: {text:?}");
+        assert!(text.contains("40%"), "ctx readout missing: {text:?}");
+        // status model kept.
+        assert!(text.contains("openai gpt-4o"), "status model missing: {text:?}");
+        // phase label kept as text.
+        assert!(text.contains("typechecking"), "phase label missing: {text:?}");
+        // One `▌` run per recorded phase + the live tip = 4 groups.
+        let tip_count = text.matches('▌').count();
+        assert!(
+            tip_count >= 4,
+            "expected ≥4 ▌ groups (3 history + 1 live tip); got {tip_count} in {text:?}"
+        );
+
+        // context_window = None → no ctx segment at all.
+        let line_no_ctx = rule_line(
+            READ_W as usize,
+            None,
+            None,
+            &history,
+            &usage,
+            40_000,
+            None,
+            "",
+        );
+        let text_no_ctx: String = line_no_ctx.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!text_no_ctx.contains("ctx "), "ctx segment should be absent when context_window is None: {text_no_ctx:?}");
+    }
+
+    /// The ctx% ramp fills proportionally: 0% → no filled cells, ~100%
+    /// → all cells filled.  The fill count tracks `last_input` against
+    /// `context_window`, not the absolute token count.
+    #[test]
+    fn ctx_ramp_fill_tracks_percentage() {
+        let empty = ctx_ramp(0, 10);
+        let empty_text: String = empty.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(empty_text.matches('█').count(), 0, "0% should have no filled cells");
+        assert_eq!(empty_text.matches('░').count(), 10, "0% should have 10 empty cells");
+
+        let full = ctx_ramp(100, 10);
+        let full_text: String = full.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(full_text.matches('█').count(), 10, "100% should fill all 10 cells");
+        assert_eq!(full_text.matches('░').count(), 0, "100% should have no empty cells");
+
+        let half = ctx_ramp(50, 10);
+        let half_text: String = half.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(half_text.matches('█').count(), 5, "50% should fill 5 cells");
+        assert_eq!(half_text.matches('░').count(), 5, "50% should leave 5 empty");
+    }
+
+    /// `Viewport` owns phase state: `set_phase` records a live phase,
+    /// `clear_phase` finalises it into history with a duration, and a
+    /// second `set_phase` finalises the first before starting the next.
+    #[test]
+    fn viewport_phase_lifecycle_finalises_into_history() {
+        let tmp = std::env::temp_dir().join(format!(
+            "exarch-vp-phase-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&tmp);
+        let mut vp = Viewport::new(tmp.join("user.log"), AgentSlot::default());
+        assert!(vp.phase_label().is_none());
+        assert!(vp.phase_history().is_empty());
+
+        vp.set_phase("first".into());
+        assert_eq!(vp.phase_label(), Some("first"));
+        std::thread::sleep(Duration::from_millis(5));
+        // A second set_phase finalises the first into history.
+        vp.set_phase("second".into());
+        assert_eq!(vp.phase_label(), Some("second"));
+        assert_eq!(vp.phase_history().len(), 1);
+        assert_eq!(vp.phase_history()[0].label, "first");
+        assert!(vp.phase_history()[0].duration > Duration::ZERO);
+
+        std::thread::sleep(Duration::from_millis(5));
+        vp.clear_phase();
+        assert!(vp.phase_label().is_none());
+        assert_eq!(vp.phase_history().len(), 2);
+        assert_eq!(vp.phase_history()[1].label, "second");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // ── shared test helpers ────────────────────────────────────────────

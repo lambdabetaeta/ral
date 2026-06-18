@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: active
 ---
 
 # The transcript is a graphic, not a log
@@ -17,6 +17,14 @@ of the typed `bus::Kind` dispatch ([[map/exarch/frontend|frontend]]) in the
 vocabulary of Jacques Bertin's *Sémiologie graphique*: the plane and its six
 visual variables (shape, value, size, hue, grain, orientation).
 
+
+> **Landed: Phases 0–2.** The per-`Block` substrate (agent slot, magnitude,
+> `RailShape` discriminant), the data-encoding marginal rail (Move 1), and the
+> `rule_line` value-ramp + Gantt phase ribbon (Move 3) are implemented in
+> `exarch/src/tui/`. Phases 3–8 (size bars, grain, graded reduction, the
+> agent×step matrix, coherent degradation, and the projection switch) remain
+> `proposed` — they consume the substrate this parcel establishes and compose
+> on it without rework.
 ## The diagnosis
 
 The present TUI is a *narrative log*:

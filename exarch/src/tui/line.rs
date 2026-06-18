@@ -32,6 +32,12 @@ pub(super) const ORANGE: Color = Color::Rgb(215, 145, 115);
 pub(super) const RED: Color = Color::Rgb(215, 110, 125);
 pub(super) const SLATE: Color = Color::Rgb(140, 150, 170);
 pub(super) const CODE_BG: Color = Color::Rgb(36, 38, 46);
+/// Agent rail palette: one hue per producing agent, indexed by
+/// [`super::block::AgentSlot`]. Root keeps [`CYAN`] — the existing rail
+/// accent — so a root-only session is visually unchanged in hue. The
+/// rail's value-step lightens a slot toward white with magnitude, so hue
+/// stays the identity channel and value stays the magnitude channel.
+pub(super) const AGENT_HUES: [Color; 6] = [CYAN, PINK, LIME, PURPLE, ORANGE, RED];
 
 /// Saturated banner-only palette — restricted to the startup
 /// banner + eagle so the splash reads as neon while the chrome below
@@ -49,12 +55,16 @@ pub(super) const BANNER_RED: Color = Color::Rgb(255, 50, 80);
 /// Maximum readable width in columns; markdown is wrapped to this.
 pub(super) const READ_W: u16 = 100;
 
-/// Rail accent: the leading two columns that mark a chrome line (the
-/// header row of a tool call, patch, wrote, task, meter, or the user-
-/// prompt scrollback echo).  One glyph in [`CYAN`], one trailing space;
-/// every body row drops it so dragging a selection through the block
-/// copies as plain text.
+/// Rail accent glyph for chrome that owns its own marker (the pending-
+/// prompt strip, which is not a [`super::block::Block`] and so does not
+/// receive the lifted rail). Block content instead gets its rail from
+/// [`super::rail::span`], prepended by [`super::block::Block::render`].
 pub(super) const RAIL: &str = "❖ ";
+
+/// Rail width in columns: one shape glyph plus one trailing space. Every
+/// block's first content row carries a rail of this width; body rows do
+/// not, so a selection through the block copies as plain text.
+pub(super) const RAIL_W: usize = 2;
 
 /// True when every span in `l` is empty or whitespace-only — i.e. the
 /// line carries no glyphs and reads as a vertical separator rather
@@ -65,10 +75,10 @@ pub(super) fn is_blank(l: &Line<'_>) -> bool {
     l.spans.iter().all(|s| s.content.trim().is_empty())
 }
 
-/// The rail markers a header row can open with: the static `❖` and the
-/// `▸` / `▾` disclosure triangles.  [`plain`] drops one of these so
+/// The full rail shape vocabulary: one glyph + space per block kind.
+/// [`plain`] drops a leading span whose content matches one of these so
 /// copied text carries the content, not the chrome glyph.
-const RAIL_GLYPHS: [&str; 3] = [RAIL, "▸ ", "▾ "];
+const RAIL_GLYPHS: [&str; 7] = ["▎ ", "▸ ", "▾ ", "· ", "━ ", "✗ ", RAIL];
 
 /// One scrollback line as the plain text a reader would copy: span
 /// contents joined, with a leading rail glyph dropped.
@@ -92,21 +102,23 @@ pub(super) fn step(_n: usize) -> Vec<Line<'static>> {
     vec![Line::default()]
 }
 
-/// Scrollback echo of the user's submitted prompt: a cyan `❖ ` accent
-/// on the first line, two-space indent on continuations.  The typed
-/// text itself renders in reverse video so the user's turn boundary is
-/// unmistakable against the surrounding markdown/chrome; the `❖` glyph
-/// stays in its normal cyan so the rail accent reads as before.
+/// Scrollback echo of the user's submitted prompt. The typed text renders
+/// in reverse video so the user's turn boundary is unmistakable against
+/// the surrounding markdown/chrome; the `❖` glyph now arrives via the
+/// lifted rail ([`super::block::Block::render`], Generic shape), so the
+/// first line carries only the body and continuations indent two columns
+/// to align under it.
 pub(super) fn user_prompt(s: &str) -> Vec<Line<'static>> {
-    let arrow = Span::styled(RAIL, Style::default().fg(CYAN));
     let cont = Span::raw("  ");
     let body = Style::default().add_modifier(Modifier::REVERSED);
     let mut ls: Vec<Line<'static>> = vec![Line::default()];
     ls.extend(s.lines().enumerate().map(|(i, l)| {
-        Line::from(vec![
-            if i == 0 { arrow.clone() } else { cont.clone() },
-            Span::styled(l.to_string(), body),
-        ])
+        let body_span = Span::styled(l.to_string(), body);
+        if i == 0 {
+            Line::from(vec![body_span])
+        } else {
+            Line::from(vec![cont.clone(), body_span])
+        }
     }));
     ls
 }
@@ -157,25 +169,19 @@ pub(super) fn queued_prompt(
     out
 }
 
-/// Tool-call header rows: a disclosure glyph in the rail column — `▸`
-/// shut, `▾` open — then the slate tool name and the white one-line
-/// `label`.  Long labels wrap under the label's own first column, so the
-/// rail + tool prefix stays visually fixed while the comment reads as a
-/// paragraph.
-fn tool_call_header(
-    glyph: &'static str,
-    label: &str,
-    tool: &str,
-    width: u16,
-) -> Vec<Line<'static>> {
-    let prefix_w =
-        UnicodeWidthStr::width(glyph) + UnicodeWidthStr::width(tool) + UnicodeWidthStr::width("  ");
+/// Tool-call header rows: the slate tool name then the white one-line
+/// `label`. The disclosure triangle (`▸`/`▾`) lives in the lifted rail,
+/// prepended by [`super::block::Block::render`], not here — so this
+/// builder is rail-less. Long labels wrap under the label's own first
+/// column (rail width + tool prefix), so the rail + tool prefix stays
+/// visually fixed while the comment reads as a paragraph.
+fn tool_call_header(label: &str, tool: &str, width: u16) -> Vec<Line<'static>> {
+    let prefix_w = RAIL_W + UnicodeWidthStr::width(tool) + UnicodeWidthStr::width("  ");
     let body_w = (width as usize).saturating_sub(prefix_w).max(8);
     let mut out = Vec::new();
     push_wrapped(&mut out, label, body_w, |chunk, first| {
         if first {
             Line::from(vec![
-                Span::styled(glyph, Style::default().fg(CYAN)),
                 Span::styled(tool.to_string(), Style::default().fg(SLATE)),
                 Span::raw("  "),
                 Span::styled(chunk, Style::default().fg(Color::White)),
@@ -189,12 +195,10 @@ fn tool_call_header(
     });
     out
 }
-
-/// Collapsed tool call: a blank separator and the `▸` header alone.
 /// Clicking the row swaps this for [`tool_call_expanded`].
 pub(super) fn tool_call_collapsed(label: &str, tool: &str, width: u16) -> Vec<Line<'static>> {
     let mut ls = vec![Line::default()];
-    ls.extend(tool_call_header("▸ ", label, tool, width));
+    ls.extend(tool_call_header(label, tool, width));
     ls
 }
 
@@ -209,7 +213,7 @@ pub(super) fn tool_call_expanded(
     width: u16,
 ) -> Vec<Line<'static>> {
     let mut ls = vec![Line::default()];
-    ls.extend(tool_call_header("▾ ", label, tool, width));
+    ls.extend(tool_call_header(label, tool, width));
     ls.push(Line::default());
     for l in cmd.lines() {
         push_code_row(&mut ls, l, width);
@@ -248,12 +252,7 @@ fn push_code_row(ls: &mut Vec<Line<'static>>, line: &str, width: u16) {
 /// is the label, any remainder follows 2-space indented.
 pub(super) fn tool_call_static(cmd: &str, tool: &str) -> Vec<Line<'static>> {
     let mut ls = vec![Line::default()];
-    ls.extend(tool_call_header(
-        RAIL,
-        cmd.lines().next().unwrap_or(""),
-        tool,
-        READ_W,
-    ));
+    ls.extend(tool_call_header(cmd.lines().next().unwrap_or(""), tool, READ_W));
     for l in cmd.lines().skip(1) {
         ls.push(Line::from(vec![
             Span::raw("  "),
@@ -263,13 +262,14 @@ pub(super) fn tool_call_static(cmd: &str, tool: &str) -> Vec<Line<'static>> {
     ls
 }
 
-/// Error line: bold red `✗ error` prefix.
+/// Error line: the `✗` shape lives in the lifted rail (Error shape); the
+/// content is a bold red `error <msg>`.
 pub(super) fn error(msg: &str) -> Vec<Line<'static>> {
     vec![
         Line::default(),
         Line::from(vec![
             Span::styled(
-                "✗ error ",
+                "error ",
                 Style::default().fg(RED).add_modifier(Modifier::BOLD),
             ),
             Span::raw(msg.to_string()),
@@ -291,7 +291,6 @@ pub(super) fn patch(path: &str, hunks: &[Hunk]) -> Vec<Line<'static>> {
     let mut ls: Vec<Line<'static>> = vec![
         Line::default(),
         Line::from(vec![
-            Span::styled(RAIL, Style::default().fg(CYAN)),
             Span::styled("patch", Style::default().fg(SLATE)),
             Span::raw("  "),
             Span::styled(path.to_string(), Style::default().fg(Color::White)),
@@ -406,7 +405,6 @@ pub(super) fn wrote(path: &str, lines: u32, preview: &[String]) -> Vec<Line<'sta
     let mut ls: Vec<Line<'static>> = vec![
         Line::default(),
         Line::from(vec![
-            Span::styled(RAIL, Style::default().fg(CYAN)),
             Span::styled("wrote", Style::default().fg(SLATE)),
             Span::raw("  "),
             Span::styled(path.to_string(), Style::default().fg(Color::White)),
@@ -444,7 +442,6 @@ pub(super) fn task(status: TaskStatus, desc: &str) -> Vec<Line<'static>> {
     };
     let _ = col;
     vec![Line::from(vec![
-        Span::styled(RAIL, Style::default().fg(CYAN)),
         Span::styled("task", Style::default().fg(SLATE)),
         Span::raw("  "),
         Span::styled(status.tag().to_string(), style),
@@ -467,7 +464,6 @@ pub(super) fn meter(done: u32, total: u32, label: &str) -> Vec<Line<'static>> {
     let bar_filled: String = "█".repeat(filled as usize);
     let bar_empty: String = "░".repeat((W - filled) as usize);
     vec![Line::from(vec![
-        Span::styled(RAIL, Style::default().fg(CYAN)),
         Span::styled(label.to_string(), Style::default().fg(SLATE)),
         Span::raw("  "),
         Span::styled(format!("{done}/{total}"), Style::default().fg(Color::White)),
@@ -561,16 +557,17 @@ fn push_wrapped(
 
 /// Render a [`ProviderErrorRecord`] as a wrapped multi-line block.
 ///
-/// Header: blank line + bold red `✗ error <kind>`.  Body: flush-left
-/// rows for each populated field (bold slate label, plain value), with
-/// `cause` text wrapped to `READ_W` columns so long URLs and stack-like
-/// strings don't clip at the viewport edge.
+/// Header: blank line + bold red `error <kind>` (the `✗` shape lives in
+/// the lifted rail, Error shape).  Body: flush-left rows for each
+/// populated field (bold slate label, plain value), with `cause` text
+/// wrapped to `READ_W` columns so long URLs and stack-like strings
+/// don't clip at the viewport edge.
 pub(super) fn provider_error(e: &ProviderErrorRecord) -> Vec<Line<'static>> {
     let mut ls: Vec<Line<'static>> = vec![Line::default()];
     let kind = error_kind(e);
     ls.push(Line::from(vec![
         Span::styled(
-            "✗ error ",
+            "error ",
             Style::default().fg(RED).add_modifier(Modifier::BOLD),
         ),
         bold(kind.into(), RED),
