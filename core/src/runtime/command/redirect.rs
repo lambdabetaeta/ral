@@ -350,55 +350,6 @@ impl Drop for RedirectGuard {
     }
 }
 
-/// Bind the current stdin source (from `shell.turn.io.stdin`) onto the
-/// platform's stdin slot so uutils (which read from `std::io::stdin()`)
-/// see the redirected input.  On Unix that's `dup2` onto fd 0; on Windows
-/// that's `SetStdHandle(STD_INPUT_HANDLE, ...)`.  Returns `None` when
-/// stdin is `Terminal` (slot already correct).
-#[cfg(all(
-    unix,
-    any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
-))]
-pub(crate) fn bind_stdin_for_uutils(shell: &Shell) -> Option<BackupFd> {
-    use std::os::unix::io::AsRawFd;
-    let src_fd: i32 = match &shell.turn.io.stdin {
-        crate::io::Source::File(f) => f.as_raw_fd(),
-        crate::io::Source::Pipe(r) => r.as_raw_fd(),
-        crate::io::Source::Terminal => return None,
-    };
-    let backup = unsafe { libc::dup(0) };
-    if backup < 0 {
-        return None;
-    }
-    unsafe { libc::dup2(src_fd, 0) };
-    Some(BackupFd { fd: 0, backup })
-}
-
-#[cfg(all(
-    windows,
-    any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
-))]
-pub(crate) fn bind_stdin_for_uutils(shell: &Shell) -> Option<BackupHandle> {
-    use std::os::windows::io::AsRawHandle;
-    let src: HANDLE = match &shell.turn.io.stdin {
-        crate::io::Source::File(f) => f.as_raw_handle() as HANDLE,
-        crate::io::Source::Pipe(r) => r.as_raw_handle() as HANDLE,
-        crate::io::Source::Terminal => return None,
-    };
-    let prev = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
-    if unsafe { SetStdHandle(STD_INPUT_HANDLE, src) } == 0 {
-        return None;
-    }
-    // `owned: None` — `shell.turn.io.stdin` retains ownership of the source
-    // file/pipe; the std slot just aliases its handle for the duration
-    // of the uutils call.
-    Some(BackupHandle {
-        std_handle: STD_INPUT_HANDLE,
-        prev,
-        owned: None,
-    })
-}
-
 /// Read+File redirects to fd 0 are owned by `shell.turn.io.stdin` (set up by
 /// [`install_stdin_redirect`]); `apply_redirects` and `wire_stdin` must agree
 /// to leave them alone.  This predicate is the single point where that rule

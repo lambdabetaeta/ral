@@ -15,7 +15,7 @@
     any(unix, windows),
     any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
 ))]
-use {crate::types::*, super::redirect::bind_stdin_for_uutils, std::io::Write};
+use {crate::types::*, std::io::Write};
 
 #[cfg(all(
     any(unix, windows),
@@ -23,25 +23,31 @@ use {crate::types::*, super::redirect::bind_stdin_for_uutils, std::io::Write};
 ))]
 /// Fast-path predicate: is in-process `uumain` safe right now?
 ///
-/// `uumain` writes to libc fd 1/2 and reads `std::env`/`current_dir`
-/// directly, so it is sound only when ral's sinks are direct-to-fd
-/// and ral's logical state agrees with the process state.  Any capture
-/// buffer or audit Tee, or any `env_overrides` / `within [dir: …]` /
-/// `cd`-mutated logical cwd that the kernel doesn't see, forces the
-/// child placement: mutating process env or cwd from this thread would
-/// race other ral threads (`spawn`, `par`, pipeline).  An active
-/// sandbox projection also refuses the inline path: an in-process tool
-/// would run unconfined and escape the projection the child placement
-/// pins via `sandbox::self_command`.  The projection fold returns
-/// `None` immediately when no grant is active, so the extra check stays
-/// cheap on the common path.
+/// `uumain` reads libc fd 0 and writes libc fd 1/2 and reads
+/// `std::env`/`current_dir` directly, so it is sound only when ral's
+/// stdio is direct-to-fd and ral's logical state agrees with the process
+/// state.  A non-terminal stdin (`Source::Pipe` / `Source::File`, e.g. a
+/// piped-into bundled tool or a function body fed by `<`) is parked in
+/// `shell.turn.io.stdin`, not on fd 0, so it forces child placement: the
+/// child receives the real stdin handle through ordinary stdio plumbing
+/// rather than the parent rewiring its own fd 0.  Any capture buffer or
+/// audit Tee, or any `env_overrides` / `within [dir: …]` / `cd`-mutated
+/// logical cwd that the kernel doesn't see, forces the child placement
+/// for the same reason: mutating process stdio, env, or cwd from this
+/// thread would race other ral threads (`spawn`, `par`, pipeline).  An
+/// active sandbox projection also refuses the inline path: an in-process
+/// tool would run unconfined and escape the projection the child
+/// placement pins via `sandbox::self_command`.  The projection fold
+/// returns `None` immediately when no grant is active, so the extra check
+/// stays cheap on the common path.
 pub(crate) fn can_run_uutils_in_process(shell: &Shell) -> bool {
-    use crate::io::Sink;
+    use crate::io::{Sink, Source};
     let cwd_matches_process = match &shell.mobile.context.cwd.current {
         None => true,
         Some(p) => crate::path::process_cwd().is_some_and(|q| q == *p),
     };
-    matches!(shell.turn.io.stdout, Sink::Terminal | Sink::External(_))
+    matches!(shell.turn.io.stdin, Source::Terminal)
+        && matches!(shell.turn.io.stdout, Sink::Terminal | Sink::External(_))
         && matches!(shell.turn.io.stderr, Sink::Stderr)
         && shell.mobile.context.env_overrides().is_empty()
         && shell.mobile.context.dir.is_none()
@@ -53,16 +59,15 @@ pub(crate) fn can_run_uutils_in_process(shell: &Shell) -> bool {
 /// return; a panicking tool surfaces as a 1-status error.
 ///
 /// `can_run_uutils_in_process` must have admitted the call: the
-/// caller's sink discipline and env/cwd state are read implicitly
-/// through libc, not through `shell`.  Admission implies no call-site
-/// redirects (`Sink::Terminal | External` with `redirects.is_empty()`),
-/// so this path wires no `> file` / `2>&1` plumbing.
-///
-/// Stdin is still bound: the inline gate constrains the *output* sinks,
-/// not the input, so a function whose body is a bundled tool can carry a
-/// parent `Pipe` / `File` on `shell.turn.io.stdin`.
-/// [`bind_stdin_for_uutils`] aliases that source onto fd 0 for the
-/// in-process tool and restores fd 0 on drop.
+/// caller's stdio discipline and env/cwd state are read implicitly
+/// through libc, not through `shell`.  Admission implies ambient
+/// terminal stdin and no call-site redirects (`Source::Terminal` in,
+/// `Sink::Terminal | External` out, with `redirects.is_empty()`), so
+/// this path reads fd 0 as-is and wires no `> file` / `2>&1` plumbing.
+/// A non-terminal stdin (`Pipe` / `File`) is excluded by the gate and
+/// forces child placement, where the child receives the real stdin
+/// handle through ordinary stdio plumbing — the parent never rewires
+/// its own fd 0 to make this in-process call look like an exec.
 /// Serialises the inline `uutils_invoke` path so the uucore exit-code
 /// cell cannot interleave across threads.  `reset_exit_code`,
 /// `uutils_invoke`, and `get_exit_code` all touch one process-global
@@ -93,13 +98,11 @@ pub(crate) fn run_uutils_in_process(
     use crate::builtins::uutils;
 
     // Rust's userspace stdout/stderr buffers sit above the kernel
-    // fd / Win32 std slot.  Flushing here keeps pending bytes aimed
-    // at the parent destination instead of being re-targeted by the
-    // stdin alias we're about to install.
+    // fd / Win32 std slot.  Flush pending bytes here so they land at
+    // the parent destination before `uumain` writes its own output to
+    // the same fds.
     std::io::stdout().flush().ok();
     std::io::stderr().flush().ok();
-
-    let _stdin_backup = bind_stdin_for_uutils(shell);
 
     // Hold this guard across the whole reset → invoke → read window so
     // no other thread can touch the uucore exit-code cell between them.
@@ -132,11 +135,9 @@ pub(crate) fn run_uutils_in_process(
         let _ = std::env::set_current_dir(cwd);
     }
 
-    // Flush uumain's buffered output before unwinding the stdin alias.
+    // Flush uumain's buffered output before returning to ral.
     std::io::stdout().flush().ok();
     std::io::stderr().flush().ok();
-
-    drop(_stdin_backup);
 
     let exit_code = match result {
         Ok(code) => {
@@ -175,7 +176,8 @@ pub(crate) fn run_uutils_in_process(
     any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
 ))]
 mod tests {
-    use super::INLINE_UUTILS_LOCK;
+    use super::{INLINE_UUTILS_LOCK, can_run_uutils_in_process};
+    use crate::types::Shell;
     use std::cell::Cell;
     use std::sync::Barrier;
 
@@ -218,5 +220,35 @@ mod tests {
 
         // The guard drops correctly: the lock is reacquirable afterward.
         assert!(INLINE_UUTILS_LOCK.try_lock().is_ok());
+    }
+
+    /// A clean default shell — terminal stdin, terminal stdout, fd-2
+    /// stderr, no env override / scoped dir / sandbox — is the one shape
+    /// the inline `uumain` fast path is admitted for.
+    #[test]
+    fn clean_terminal_shell_admits_inline() {
+        let shell = Shell::default();
+        assert!(
+            can_run_uutils_in_process(&shell),
+            "the clean-terminal case must keep the inline fast path"
+        );
+    }
+
+    /// A non-terminal stdin (`Source::Pipe`) forces child placement.  The
+    /// inline path runs `uumain` against the parent's fd 0; aliasing the
+    /// pipe onto fd 0 to feed it is the parent fd-0 surgery the
+    /// sandbox-external-children ADR forbids (it races sibling `spawn` /
+    /// `par` / pipeline threads), so the gate must refuse inline and let
+    /// the child receive the real stdin handle through ordinary stdio.
+    #[test]
+    fn pipe_stdin_forces_child_placement() {
+        let mut shell = Shell::default();
+        let (reader, _writer) = os_pipe::pipe().expect("pipe");
+        shell.turn.io.stdin = crate::io::Source::Pipe(reader);
+        assert!(
+            !can_run_uutils_in_process(&shell),
+            "a non-terminal stdin must force child placement, not inline \
+             fd-0 surgery"
+        );
     }
 }

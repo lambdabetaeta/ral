@@ -3047,7 +3047,7 @@ fn helper_stage_audit_nodes_merge_into_parent_tree() {
 /// children; capturing the count through `from-string` recovers `wc`'s
 /// bytes (`"4\n"` for four lines) and proves the pipeline succeeded — a
 /// non-zero `wc` would fail the `from-string` capture instead.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "coreutils"))]
 #[test]
 fn bundled_byte_stage_runs_as_direct_child_and_produces_bytes() {
     assert_eq!(
@@ -3061,7 +3061,7 @@ fn bundled_byte_stage_runs_as_direct_child_and_produces_bytes() {
 /// A failing bundled tool in a process-staged pipeline surfaces a
 /// failure rather than swallowing the non-zero status: `wc` on a missing
 /// path exits non-zero, and the pipeline must fail-fast.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "coreutils"))]
 #[test]
 fn failing_bundled_byte_stage_surfaces_failure() {
     must_fail("printf 'a\\nb\\n' | wc /nonexistent/path");
