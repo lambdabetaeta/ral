@@ -2787,3 +2787,18 @@ child-owned effects launch under the effective sandbox projection, bundled tools
 become exec images when process semantics are required, pipeline helpers remain
 the principled re-exec mode, and endpoint-shaped/advisory network policy is
 replaced by offline child confinement or fail-closed unsupported backends.
+
+## [2026-06-18] ingest | cancellation page + restore Ctrl-`\` root abort
+
+Wrote [[internals/cancellation|cancellation]] threading the whole stop-work flow:
+the escalating `SIGNAL_COUNT` floor, the cause-bearing `CancelScope` tree, the
+signal-safe slots, the `process::check` poll points, the cause-directed external-
+child teardown, and the per-host gestures (REPL relay/foreground-cancel/SIGQUIT,
+exarch's chained handler and per-turn token). Two code fixes landed with it: an
+audit found `boot::setup_signals` re-bound SIGQUIT to `SIG_IGN` right after
+`jobs::setup_signals` installed `sigquit_handler`, leaving Ctrl-`\` dead in the
+REPL against [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]'s
+shipped intent — the override is removed; and `core/src/process/signal.rs` docs
+naming a non-existent `RunningPipeline::Drop` are corrected to credit the
+foreground/worker scopes and `PipelineGroup::Drop`. [[index|index]] lists the new
+page.

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1f8cb95d
-generated_at_date: 2026-06-15
+generated_at_commit: 478c977
+generated_at_date: 2026-06-18
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs, core/src/stream.rs]
 ---
 
@@ -34,13 +34,18 @@ child shells.
   sets that flag to exactly 1 without escalating toward the third-signal `_exit`
   — the non-escalating unwind a raw-mode frontend drives on Esc
   ([[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]);
-  `CancelScope` for structured-concurrency cancellation; `Pgid` / `PgidPolicy` /
-  `ChildHandle` and the platform `spawn_with_pgid` family for process-group
-  placement. Unix `ForegroundGuard` snapshots and restores tty foreground /
-  termios, blocking SIGTTOU for the parent-only restore window; unix
+  the cause-bearing `CancelScope` tree (`DurableRoot` / `ForegroundScope`,
+  `CancelCause`) for structured-concurrency cancellation, with the per-turn
+  signal-reachable slots (`request_foreground_cancel` / `request_root_cancel`)
+  that let a handler or TUI thread cancel a scope it cannot hold; `Pgid` /
+  `PgidPolicy` / `ChildHandle` and the platform `spawn_with_pgid` family for
+  process-group placement. Unix `ForegroundGuard` snapshots and restores tty
+  foreground / termios, blocking SIGTTOU for the parent-only restore window; unix
   `interrupt_foreground_child` re-sends raw-mode Esc/Ctrl-C to a foreground
-  external group. Platform handlers live in `signal/unix.rs` and
-  `signal/windows.rs`.
+  external group, `sigint_relay` fans SIGINT to active external pgids, and
+  `sigquit_handler` is the Ctrl-`\` root abort. Platform handlers live in
+  `signal/unix.rs` and `signal/windows.rs`. The whole stop-work flow is narrated
+  in [[internals/cancellation|cancellation]].
 
 ## Stream — `core/src/stream.rs`
 

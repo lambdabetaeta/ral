@@ -58,6 +58,7 @@ A guided path through the system, *why* before *how*:
 - [[internals/pipeline-execution|pipeline-execution]] — value folds vs one process group; the resolve-time `StageLaunch` freeze, one value-edge judgment, the shared child-eval frame pair, the `n ≥ 2` pgid anchor, Windows Job Objects.
 - [[internals/a-turn-end-to-end|a-turn-end-to-end]] — one top-level turn for a ral REPL line and an exarch tool call; the shared `eval_top_level` spine.
 - [[internals/output-capture-and-detachment|output-capture-and-detachment]] — capture drains each child's pipe to EOF, so a process that never closes it stalls the foreground to the wall and is killed with its tree; `spawn` moves it to a root-parented worker with a 16 MiB-bounded buffer and a one-hour death-clock. A long-running server is the canonical case.
+- [[internals/cancellation|cancellation]] — stopping in-flight work: an escalating `SIGNAL_COUNT` floor (third signal `_exit`s, batch/async only) and a cooperative cause-bearing `CancelScope` tree (`Interrupt < Explicit < Deadline < RootAbort`); signal-safe slots bridge the async edge, `process::check` polls both at status 130; per-host gestures — REPL Ctrl-C relays + foreground-cancels, Ctrl-`\` root-aborts, exarch's TUI keys drive a per-turn token.
 
 ## invariants/ — hard rules
 
