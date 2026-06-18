@@ -2754,7 +2754,8 @@ child outliving the parent turn, not merely same-batch overlap.
 
 ## [2026-06-17] ingest | sandbox IPC timeout is parent-owned
 
-Recorded [[decisions/260617_sandbox-ipc-cancel|sandbox-ipc-cancel]] after the
+Recorded `sandbox-ipc-cancel` (later superseded and removed by
+[[decisions/260617_sandbox-external-children|sandbox-external-children]]) after the
 exarch session whose `cargo test` crossed the 30 s shell-tool wall and ignored
 Esc. The root bug was not simply the Seatbelt `signal children` denial; it was a
 parent blocked on synchronous sandbox IPC with no out-of-band watcher for the
