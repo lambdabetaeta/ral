@@ -17,6 +17,7 @@
 use super::block::{AgentSlot, Block, RailShape, wrap_line};
 use super::line::{READ_W, is_blank, plain};
 use crate::bus::Hunk;
+use crate::provider::Usage;
 use ratatui::text::Line;
 use std::fs;
 use std::io;
@@ -46,6 +47,10 @@ pub(super) struct Viewport {
     /// This session's agent palette slot, stamped onto every block at
     /// push. Root is `0`; subagents take the next slot at birth.
     agent: AgentSlot,
+    /// This session's cumulative token spend, summed from every
+    /// `Kind::Usage` event routed to it. Drives the matrix's per-agent
+    /// value readout; the global `App::total_usage` stays for `rule_line`.
+    usage: Usage,
     /// In-progress assistant text since the last fence-safe paragraph
     /// boundary; renders nothing until it commits as a [`Block::markdown`].
     open: String,
@@ -146,6 +151,7 @@ impl Viewport {
         Self {
             blocks: Vec::new(),
             agent,
+            usage: Usage::default(),
             open: String::new(),
             offset: 0,
             sticky: true,
@@ -161,6 +167,49 @@ impl Viewport {
     /// This session's agent palette slot.
     pub(super) fn agent(&self) -> AgentSlot {
         self.agent
+    }
+
+    /// Fold one turn's token usage into this session's cumulative spend.
+    /// Called from the `Kind::Usage` handler alongside `App::total_usage`.
+    pub(super) fn add_usage(&mut self, u: Usage) {
+        self.usage += u;
+    }
+
+    /// This session's cumulative token spend — the matrix's value readout.
+    pub(super) fn usage(&self) -> Usage {
+        self.usage
+    }
+
+    /// Per-step "had a tool call" flags, oldest step first: scan the
+    /// blocks, opening a step at each [`Block::is_step`] boundary, and
+    /// mark the open step `true` once a tool-call block lands within it.
+    /// One bool per step — the matrix renders `●` for `true`, `○` for
+    /// `false`.  Empty when no step boundary has landed yet.
+    pub(super) fn steps(&self) -> Vec<bool> {
+        let mut steps: Vec<bool> = Vec::new();
+        for block in &self.blocks {
+            if block.is_step() {
+                steps.push(false);
+            } else if block.is_tool_call() {
+                if let Some(last) = steps.last_mut() {
+                    *last = true;
+                }
+            }
+        }
+        steps
+    }
+
+    /// Total lines this session touched: the summed [`Block::magnitude`]
+    /// over its patch blocks.  Drives the matrix's size readout; `0` for a
+    /// read-only agent.
+    pub(super) fn lines_touched(&self) -> u32 {
+        self.blocks.iter().filter_map(Block::magnitude).sum()
+    }
+
+    /// Whether the session's last block is an error — the matrix renders
+    /// the row's leading cell as `✗` rather than the done/running glyph.
+    pub(super) fn last_is_error(&self) -> bool {
+        self.blocks.last().is_some_and(Block::is_error)
     }
     /// Begin a new phase, labelling the live segment of the Gantt
     /// ribbon.  If a phase is already in progress it is finalised into
@@ -211,6 +260,7 @@ impl Viewport {
     /// the `user.log` by reopening it.  Used by `/clear` on the root.
     pub(super) fn reset(&mut self) {
         self.blocks.clear();
+        self.usage = Usage::default();
         self.open.clear();
         self.offset = 0;
         self.sticky = true;
@@ -495,6 +545,51 @@ mod tests {
             vp.flatten_text(READ_W),
             vec!["", "❖ header1", "❖ ", "", "❖ header2"]
         );
+    }
+
+    /// `add_usage` accumulates token spend across turns, and `reset`
+    /// zeroes it alongside the block buffer — the matrix's value readout
+    /// must start fresh after a `/clear`.
+    #[test]
+    fn usage_accumulates_and_reset_zeroes() {
+        let mut vp = fresh();
+        assert_eq!(vp.usage().input + vp.usage().output, 0);
+        vp.add_usage(Usage { input: 100, output: 20, ..Usage::default() });
+        vp.add_usage(Usage { input: 50, output: 5, ..Usage::default() });
+        assert_eq!(vp.usage().input, 150);
+        assert_eq!(vp.usage().output, 25);
+        vp.reset();
+        assert_eq!(vp.usage().input, 0);
+        assert_eq!(vp.usage().output, 0);
+    }
+
+    /// `steps` opens a flag at each step boundary and marks it once a tool
+    /// call lands within; `lines_touched` sums patch magnitudes;
+    /// `last_is_error` reads the tail block.  These are the matrix's
+    /// derived figures.
+    #[test]
+    fn derived_figures_track_the_block_scan() {
+        let mut vp = fresh();
+        assert!(vp.steps().is_empty());
+        assert_eq!(vp.lines_touched(), 0);
+        // Step 1 with a tool call → `true`.
+        vp.push_chrome(RailShape::Step, vec![Line::default()]);
+        vp.push_tool_call("ral", "do".into(), "script".into());
+        // Step 2 with no tool call → `false`.
+        vp.push_chrome(RailShape::Step, vec![Line::default()]);
+        assert_eq!(vp.steps(), vec![true, false]);
+        let hunk = Hunk {
+            start: 1,
+            before: vec![],
+            del: vec!["x".into()],
+            add: vec!["a".into(), "b".into()],
+            after: vec![],
+        };
+        vp.push_patch("src/foo.rs".into(), vec![hunk]);
+        assert_eq!(vp.lines_touched(), 3);
+        assert!(!vp.last_is_error());
+        vp.push_chrome(RailShape::Error, vec![Line::from(Span::raw("boom"))]);
+        assert!(vp.last_is_error());
     }
 
     /// `\n\n` inside a fence is ignored, but a later boundary outside the

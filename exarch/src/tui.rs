@@ -204,6 +204,18 @@ fn restore_stderr(backup: std::os::fd::RawFd) {
     }
 }
 
+/// How the agent×step matrix orders its rows — a render-time projection
+/// of the same `tabs`/`viewports` model, never a reshuffle of the
+/// underlying state.  [`MatrixSort::Spawn`] is the default (the `tabs`
+/// order, root first then subagents as born); [`MatrixSort::Cost`]
+/// surfaces the budget-burner by sorting on cumulative token spend.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+enum MatrixSort {
+    #[default]
+    Spawn,
+    Cost,
+}
+
 /// The main TUI application state.
 ///
 /// Owns one [`Viewport`] per session and a flat list of visible tabs.
@@ -289,6 +301,10 @@ pub struct App {
     /// In-flight left-button gesture: the row pressed, the block under
     /// it, and whether the pointer has since moved (a drag, not a click).
     press: Option<Press>,
+    /// How the multi-agent matrix orders its rows — toggled by `BackTab`
+    /// (Shift+Tab) when more than one session is live.  A render-time
+    /// projection; the `tabs`/focus model is untouched.
+    matrix_sort: MatrixSort,
 }
 
 /// Where the content area sat in the last drawn frame.
@@ -358,6 +374,7 @@ impl App {
             frame: None,
             selection: None,
             press: None,
+            matrix_sort: MatrixSort::default(),
         }
     }
 
@@ -457,6 +474,9 @@ impl App {
                 // when to `/compact` (X4).  Take the prompt total as-is.
                 self.last_input = u.input;
                 self.total_usage += u;
+                if let Some(vp) = self.viewports.get_mut(&id) {
+                    vp.add_usage(u);
+                }
             }
             Kind::Token(text) => {
                 self.flush_patch_buf();
@@ -607,7 +627,11 @@ impl App {
             Some(p) => p.height(area.height),
             None => prompt_height(&self.textarea, area.width, area.height),
         };
-        let tab_h = if self.tabs.len() > 1 { 1u16 } else { 0u16 };
+        let tab_h = if self.tabs.len() > 1 {
+            self.tabs.len() as u16
+        } else {
+            0u16
+        };
         // The pending-prompt strip above the input: messages the user queued
         // mid-turn, waiting for the next tool-result or turn boundary. Its
         // width matches the content column (the scrollbar's column reserved),
@@ -667,8 +691,17 @@ impl App {
         let last_input = self.last_input;
         let context_window = self.context_window;
         let status_model = self.status_model.clone();
-        let tab_line =
-            (self.tabs.len() > 1).then(|| tab_bar(&self.tabs, &self.titles, focused, &self.dying));
+        // The matrix replaces the tab bar when more than one session is
+        // live: one row per agent, each owning its `Line` so the `'static`
+        // draw closure captures no borrow of `self`.
+        let matrix_lines = (self.tabs.len() > 1).then(|| {
+            let rows: Vec<(SessionId, &Viewport)> = self
+                .tabs
+                .iter()
+                .filter_map(|&id| self.viewports.get(&id).map(|vp| (id, vp)))
+                .collect();
+            matrix_bar(&rows, &self.titles, focused, &self.dying, self.matrix_sort)
+        });
         let prompt_hint = self.prompt_hint(focused);
         let picker = self.picker.as_ref();
 
@@ -682,8 +715,8 @@ impl App {
                 sb_rect,
                 &mut sb,
             );
-            if let Some(line) = tab_line {
-                f.render_widget(Paragraph::new(line), tab_row);
+            if let Some(matrix) = matrix_lines {
+                f.render_widget(Paragraph::new(matrix), tab_row);
             }
             if !queued_lines.is_empty() {
                 f.render_widget(Paragraph::new(queued_lines), queued_row);
@@ -951,6 +984,15 @@ impl App {
                         self.focus = self.tabs[(pos + 1) % self.tabs.len()];
                     }
                 }
+            }
+            // Shift+Tab toggles the matrix row order between spawn and
+            // cost — a render-time projection that surfaces the
+            // budget-burner; inert with a single session (no matrix).
+            KeyCode::BackTab if self.tabs.len() > 1 => {
+                self.matrix_sort = match self.matrix_sort {
+                    MatrixSort::Spawn => MatrixSort::Cost,
+                    MatrixSort::Cost => MatrixSort::Spawn,
+                };
             }
             // Up/Down walk the prompt history, but only from the
             // prompt's edge rows: with the cursor mid-text in a
@@ -1525,6 +1567,173 @@ fn tab_bar(
     Line::from(spans)
 }
 
+/// Columns the matrix label is truncated/padded to, so the step cells,
+/// token readout, and size bar align into a grid down the rows.
+const MATRIX_LABEL_W: usize = 10;
+/// Most-recent step cells a matrix row shows; a longer run keeps the tail.
+const MATRIX_STEPS_W: usize = 8;
+
+/// The multi-agent matrix: one row per live session, columns
+/// `label  steps  tokens  sizebar  Nst`.  Rows = agents in `sort` order,
+/// coloured by each agent's rail hue so the matrix and the rail share one
+/// identity.  A *projection* of the existing `tabs`/`viewports` model —
+/// with a single session it collapses to [`tab_bar`]'s exact output, so
+/// the common case is visually unchanged.
+///
+/// `rows` pairs each tab's id with its viewport (matrix figures are
+/// derived from the viewport: step cells, lines touched, token spend);
+/// `titles`/`focused`/`dying` carry the same row state `tab_bar` reads.
+fn matrix_bar(
+    rows: &[(SessionId, &Viewport)],
+    titles: &HashMap<SessionId, String>,
+    focused: SessionId,
+    dying: &HashMap<SessionId, Instant>,
+    sort: MatrixSort,
+) -> Vec<Line<'static>> {
+    if rows.len() <= 1 {
+        let tabs: Vec<SessionId> = rows.iter().map(|(id, _)| *id).collect();
+        return vec![tab_bar(&tabs, titles, focused, dying)];
+    }
+    // Render-time row order: spawn keeps `rows` (the `tabs` order); cost
+    // sorts by cumulative spend, descending, so the budget-burner floats
+    // to the top.  A stable sort preserves spawn order among ties.
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    if sort == MatrixSort::Cost {
+        order.sort_by_key(|&i| {
+            let u = rows[i].1.usage();
+            std::cmp::Reverse(u.input + u.output)
+        });
+    }
+    // The value ramp is relative to the heaviest spender this frame: the
+    // top row(s) read near-white, the rest step down, so "which child
+    // burned the budget" is pre-attentive even though raw token counts
+    // dwarf `rail::value_step`'s line-count thresholds.
+    let max_tokens = rows
+        .iter()
+        .map(|(_, vp)| {
+            let u = vp.usage();
+            u.input + u.output
+        })
+        .max()
+        .unwrap_or(0);
+    order
+        .into_iter()
+        .map(|i| {
+            let (id, vp) = rows[i];
+            matrix_row(id, vp, titles, focused, dying, max_tokens)
+        })
+        .collect()
+}
+
+/// One matrix row: `label  steps  tokens  sizebar  Nst`, hued by the
+/// agent's rail slot.  Focused row bold; dying rows dim and carry the
+/// `LINGER` countdown in place of the size bar's right margin.
+fn matrix_row(
+    id: SessionId,
+    vp: &Viewport,
+    titles: &HashMap<SessionId, String>,
+    focused: SessionId,
+    dying: &HashMap<SessionId, Instant>,
+    max_tokens: u64,
+) -> Line<'static> {
+    let hue = AGENT_HUES
+        .get(vp.agent().0 as usize)
+        .copied()
+        .unwrap_or(AGENT_HUES[0]);
+    let dim = dying.contains_key(&id);
+
+    // Label: truncated/padded to a fixed column, focused in brackets.
+    let title = titles.get(&id).map(String::as_str).unwrap_or("?");
+    let truncated: String = title.chars().take(MATRIX_LABEL_W).collect();
+    let label = if id == focused {
+        format!("[{truncated}]")
+    } else {
+        format!(" {truncated} ")
+    };
+    let pad = (MATRIX_LABEL_W + 2).saturating_sub(label.chars().count());
+    let mut label_style = Style::default().fg(hue);
+    if id == focused {
+        label_style = label_style.add_modifier(Modifier::BOLD);
+    }
+    if dim {
+        label_style = label_style.add_modifier(Modifier::DIM);
+    }
+    let mut spans: Vec<Span<'static>> = vec![
+        Span::styled(label, label_style),
+        Span::raw(" ".repeat(pad + 1)),
+    ];
+
+    // Step cells: `●` step-with-tool-call, `○` without; the most-recent
+    // window so a long run never overruns the row.  A done/dying session
+    // leads with `✓`, an errored one with `✗`.
+    spans.push(Span::styled(step_cells(vp, dim), Style::default().fg(hue)));
+
+    // Token readout: cumulative spend, lightened toward white in
+    // proportion to the heaviest spender this frame.
+    let tokens = {
+        let u = vp.usage();
+        u.input + u.output
+    };
+    let value = relative_value_step(tokens, max_tokens);
+    let token_style = Style::default()
+        .fg(rail::lighten(hue, value))
+        .add_modifier(if dim { Modifier::DIM } else { Modifier::empty() });
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(format!("{:>6}", fmt_tokens(tokens)), token_style));
+
+    // Size readout: a `▓`-bar over lines touched (Phase 3's size-bar
+    // idiom), then the step count as `Nst`.
+    let touched = vp.lines_touched();
+    spans.push(Span::raw("  "));
+    spans.push(line::size_bar(touched));
+    spans.push(Span::styled(
+        format!("  {}st", vp.steps().len()),
+        Style::default()
+            .fg(SLATE)
+            .add_modifier(if dim { Modifier::DIM } else { Modifier::empty() }),
+    ));
+
+    if dim {
+        if let Some(t) = dying.get(&id) {
+            let left = LINGER.saturating_sub(t.elapsed()).as_secs();
+            spans.push(Span::styled(
+                format!(" ({left}s)"),
+                Style::default().fg(SLATE).add_modifier(Modifier::DIM),
+            ));
+        }
+    }
+    Line::from(spans)
+}
+
+/// The matrix row's step glyphs: `done` leads the cell run with `✓`
+/// (session in its linger window) or `✗` (last block an error); otherwise
+/// each step renders `●` (a tool call landed within it) or `○` (none).
+/// Capped to [`MATRIX_STEPS_W`] keeping the most-recent steps.
+fn step_cells(vp: &Viewport, dying: bool) -> String {
+    let steps = vp.steps();
+    let tail = steps.len().saturating_sub(MATRIX_STEPS_W);
+    let mut s = String::new();
+    if dying {
+        s.push(if vp.last_is_error() { '✗' } else { '✓' });
+    }
+    let room = MATRIX_STEPS_W.saturating_sub(s.chars().count());
+    for &had_call in steps[tail..].iter().rev().take(room).rev() {
+        s.push(if had_call { '●' } else { '○' });
+    }
+    s
+}
+
+/// Bucket `tokens` against the frame's `max_tokens` into a `0..=3`
+/// value step for [`rail::lighten`]: the heaviest spender reads brightest,
+/// the rest step down by quartile of the maximum.  `max_tokens == 0`
+/// (no spend yet) reads flat at the base hue.
+fn relative_value_step(tokens: u64, max_tokens: u64) -> u8 {
+    if max_tokens == 0 {
+        return 0;
+    }
+    ((tokens * 3 + max_tokens - 1) / max_tokens).min(3) as u8
+}
+
 /// Emit `text` to the host terminal's system clipboard via OSC 52.
 ///
 /// Uses the ST (`\e\\`) terminator rather than BEL because modern tmux
@@ -1563,7 +1772,7 @@ fn footer_hint() -> Line<'static> {
     let st = Style::default()
         .fg(SLATE)
         .add_modifier(Modifier::DIM | Modifier::ITALIC);
-    let hint = " Tab pane • click ▸ expand • drag copy (⇧ native) • wheel/PgUp scroll • Ctrl-Y yank • Ctrl-C cancel • Ctrl-D quit ";
+    let hint = " Tab pane • ⇧Tab reorder • click ▸ expand • drag copy (⇧ native) • wheel/PgUp scroll • Ctrl-Y yank • Ctrl-C cancel • Ctrl-D quit ";
     Line::from(Span::styled(hint, st))
 }
 
@@ -2577,5 +2786,91 @@ mod tests {
         let t = tail_bytes(&s, 5);
         assert!(t.len() <= 5);
         assert_eq!(t, "éé");
+    }
+
+    /// Build an in-memory viewport on `slot`, push `(steps)` step
+    /// boundaries each carrying a tool call when the flag is set, and set
+    /// its cumulative spend.  The matrix derivations read entirely off
+    /// this, so the tests need no `App`.
+    fn vp_with(slot: u8, steps: &[bool], tokens: u64) -> Viewport {
+        let mut vp = Viewport::new(PathBuf::from("/dev/null"), AgentSlot(slot));
+        for &had_call in steps {
+            vp.push_chrome(RailShape::Step, vec![Line::default()]);
+            if had_call {
+                vp.push_tool_call("ral", "do".into(), "script".into());
+            }
+        }
+        vp.add_usage(Usage { input: tokens, output: 0, ..Usage::default() });
+        vp
+    }
+
+    fn plain_row(line: &Line<'static>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// With a single session the matrix collapses to `tab_bar`'s exact
+    /// output — the common case is visually unchanged.
+    #[test]
+    fn matrix_collapses_to_tab_bar_for_one_session() {
+        let vp = vp_with(0, &[true], 100);
+        let mut titles = HashMap::new();
+        titles.insert(1u64, "main".to_string());
+        let dying = HashMap::new();
+        let rows = [(1u64, &vp)];
+        let matrix = matrix_bar(&rows, &titles, 1, &dying, MatrixSort::Spawn);
+        assert_eq!(matrix.len(), 1);
+        let bar = tab_bar(&[1u64], &titles, 1, &dying);
+        assert_eq!(plain_row(&matrix[0]), plain_row(&bar));
+    }
+
+    /// Spawn order is the `tabs`/`rows` order; cost order floats the
+    /// heaviest spender to the top.  The projection never touches the
+    /// underlying row list.
+    #[test]
+    fn matrix_row_order_follows_sort_key() {
+        let cheap = vp_with(0, &[true], 100);
+        let pricey = vp_with(1, &[false], 9000);
+        let mut titles = HashMap::new();
+        titles.insert(1u64, "main".to_string());
+        titles.insert(2u64, "child".to_string());
+        let dying = HashMap::new();
+        let rows = [(1u64, &cheap), (2u64, &pricey)];
+        let spawn = matrix_bar(&rows, &titles, 1, &dying, MatrixSort::Spawn);
+        assert!(plain_row(&spawn[0]).contains("main"));
+        assert!(plain_row(&spawn[1]).contains("child"));
+        let cost = matrix_bar(&rows, &titles, 1, &dying, MatrixSort::Cost);
+        assert!(plain_row(&cost[0]).contains("child"), "pricey row floats up");
+        assert!(plain_row(&cost[1]).contains("main"));
+    }
+
+    /// Step cells render `●` for a step with a tool call and `○` for one
+    /// without; a dying session leads with `✓`, an errored one with `✗`.
+    #[test]
+    fn matrix_step_cells_by_derived_state() {
+        let live = vp_with(0, &[true, false, true], 100);
+        let mut titles = HashMap::new();
+        titles.insert(1u64, "main".to_string());
+        titles.insert(2u64, "child".to_string());
+        let dying = HashMap::new();
+        let rows = [(1u64, &live), (2u64, &live)];
+        let matrix = matrix_bar(&rows, &titles, 1, &dying, MatrixSort::Spawn);
+        let main = plain_row(&matrix[0]);
+        assert!(main.contains("●○●"), "row carries the step glyph run: {main}");
+        assert!(main.contains("3st"), "step count readout: {main}");
+
+        // A dying session leads its cell run with `✓`.
+        let done = vp_with(0, &[true], 100);
+        let mut dying = HashMap::new();
+        dying.insert(2u64, Instant::now());
+        let rows = [(1u64, &live), (2u64, &done)];
+        let matrix = matrix_bar(&rows, &titles, 1, &dying, MatrixSort::Spawn);
+        assert!(plain_row(&matrix[1]).contains('✓'), "dying row leads with ✓");
+
+        // An errored tail renders `✗`.
+        let mut failed = vp_with(0, &[true], 100);
+        failed.push_chrome(RailShape::Error, vec![Line::from(Span::raw("boom"))]);
+        let rows = [(1u64, &live), (2u64, &failed)];
+        let matrix = matrix_bar(&rows, &titles, 1, &dying, MatrixSort::Spawn);
+        assert!(plain_row(&matrix[1]).contains('✗'), "errored dying row leads with ✗");
     }
 }

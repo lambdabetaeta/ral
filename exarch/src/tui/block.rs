@@ -166,6 +166,18 @@ impl Block {
         matches!(self.kind, BlockKind::ToolCall { .. })
     }
 
+    /// True for a step-boundary chrome block — the column unit the
+    /// matrix's per-agent step cells count.
+    pub(super) fn is_step(&self) -> bool {
+        matches!(self.kind, BlockKind::Chrome { shape: RailShape::Step, .. })
+    }
+
+    /// True for an error chrome block — drives the matrix's `✗` cell when
+    /// the session's last block is a failure.
+    pub(super) fn is_error(&self) -> bool {
+        matches!(self.kind, BlockKind::Chrome { shape: RailShape::Error, .. })
+    }
+
     /// Attach a tool call's result magnitude (`text.lines().count()`),
     /// dropping the memo so the collapsed header re-renders with its
     /// size-bar.  A no-op set on a non-tool-call block would never light
