@@ -2888,3 +2888,8 @@ builtin is unchanged, only its carrier moves from a stored cloned closure to the
 borrowed turn sink. Completes [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]
 (REPL + exarch + the `main.rs` batch path become request suppliers) by removing a
 thread rather than adding a type. host-seam-turn-observer set to `superseded`.
+
+## [2026-06-18] ingest | run-turn-host-loop review tightened
+
+Revised [[decisions/260618_run-turn-host-loop|run-turn-host-loop]] after review against the current source: the surface carrier is now a concrete turn-local `SurfaceSink` rather than an unplaceable borrow, exarch's first loop carrier preserves the existing borrowed `Session`/`Provider` shape with a scoped worker plus one-shot, and the event bus remains presentation rather than liveness.
+Also tightened deferred surface replay, backpressure, lifecycle/IO request fields, the test plan, and the [[index|index]] summary so the proposed implementation no longer relies on `spawn_blocking` ownership or dropped channels.

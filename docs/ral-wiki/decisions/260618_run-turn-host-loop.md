@@ -6,19 +6,24 @@ supersedes: decisions/260618_host-seam-turn-observer
 # A turn is a synchronous call; the host owns the loop, and completion is the call returning — not the channel closing
 
 **Core exposes one synchronous, runtime-agnostic entry —
-`Shell::run_turn(src, &TurnRequest, &dyn EventSink) -> TurnReport` — and each host
-drives it however it likes. exarch runs the turn on a `spawn_blocking` task inside
-a `tokio::select!` loop whose completion arm is the *turn task's join future*, not
-the event channel's disconnect; the REPL calls `run_turn` straight on its prompt
-thread.** The daemon-task hang dies because turn completion becomes a control-flow
-fact — the call returned — that a detached worker physically cannot influence;
-there is no shared liveness object left between detachment and turn exit. tokio
-never enters `ral_core`: the only seam is `EventSink`, a synchronous trait that
-takes a `Value`. The `surface` builtin is unchanged; only its *carrier* moves
-from a stored, cloned `Send` closure on `Shell` to the turn-scoped borrowed sink.
-This completes
+`Shell::run_turn(src, TurnRequest) -> TurnReport` — and each host drives it
+however it likes. The request carries the turn policy (`script_name`,
+capabilities, limits, byte IO, lifecycle hooks) and a turn-local
+`SurfaceSink = Arc<dyn EventSink + Send + Sync>`. exarch runs the call on a
+worker and multiplexes UI events with an explicit completion future — a scoped
+worker plus one-shot while `Session` and `Provider` are borrowed, or
+`spawn_blocking` once the driver owns the moved state — never with event-channel
+disconnect as the done signal. The REPL calls `run_turn` straight on its prompt
+thread.** The daemon-task hang dies because turn completion becomes a
+control-flow fact — the call returned, or the worker sent its done value — that a
+detached worker physically cannot influence. tokio never enters `ral_core`: the
+only seam is `EventSink`, a synchronous trait that takes a `Value`. The
+`surface` builtin is unchanged; only its *carrier* moves from a persistent,
+clone-into-workers closure to a turn frame that same-thread children inherit and
+detached workers replace with bounded deferred storage. This completes
 [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]] (one entry, all
-hosts are request suppliers) by *removing a thread*, not by adding a type.
+hosts are request suppliers) by making completion explicit, not by adding an
+observer.
 
 ## Context
 
@@ -77,10 +82,9 @@ driver thread.
 The cheaper move is to delete the fragile loop. Once turn completion is "the call
 returned," the surface's thread-discipline stops mattering: a detached worker may
 hold a sender clone forever and it changes nothing, because nothing waits on the
-channel to decide the turn is over. `Shell` stays `Send`, the pump and its
-`drive`/`Emitter`-as-transport machinery are *deleted* rather than worked around,
-and the genuinely good part of the prior ADR — one `run_turn` both hosts share —
-survives intact.
+channel to decide the turn is over. `Shell` stays `Send`, the pump/`drive`
+completion contract is deleted rather than worked around, and the genuinely good
+part of the prior ADR — one `run_turn` both hosts share — survives intact.
 
 ## Decision
 
@@ -93,9 +97,10 @@ Add to the host-embedding seam
 `core/src/host.rs`:
 
 ```rust
+pub type SurfaceSink = Arc<dyn EventSink>;
+
 impl Shell {
-    pub fn run_turn(&mut self, src: &str, req: &TurnRequest, sink: &dyn EventSink)
-        -> TurnReport;
+    pub fn run_turn(&mut self, src: &str, req: TurnRequest<'_>) -> TurnReport;
 }
 
 pub struct TurnRequest<'a> {
@@ -103,16 +108,31 @@ pub struct TurnRequest<'a> {
     pub caps: Capabilities,               // root() (REPL) | grant profile (exarch)
     pub turn_limit: Option<Duration>,     // None (REPL) | Some(30s) (exarch)
     pub detached_limit: Option<Duration>, // None (REPL) | Some(1h) (exarch)
-    pub printer: Option<Arc<dyn ExternalWrite>>, // Some = live bytes (REPL);
-                                          // None = capture, returned in `Ran`
+    pub io: TurnIo,                       // Inherit (REPL/batch) | Capture (exarch)
+    pub surface: Option<SurfaceSink>,     // no-op when absent
+    pub lifecycle: Box<dyn TurnLifecycle + 'a>,
+}
+
+pub enum TurnIo {
+    /// Clone the session's ambient streams. The REPL has already installed
+    /// its rustyline `ExternalPrinter` with `set_stdout`; batch inherits the
+    /// process streams.
+    Inherit,
+    /// Core mints stdout/stderr buffers and returns them in `TurnReport::Ran`.
+    /// Stdin falls through to the terminal/source the shell already holds.
+    Capture,
 }
 
 /// The structured-event surface. A *synchronous* trait taking a raw `Value`;
 /// core's `surface` builtin emits to "the current turn's sink." Core names no
-/// runtime type — the host decides whether `emit` prints, drops, or crosses a
-/// channel.
-pub trait EventSink {
-    fn emit(&self, ev: &Value) {}
+/// runtime type — the host decides whether `emit` prints, blocks, coalesces, or
+/// crosses a channel.
+pub trait EventSink: Send + Sync {
+    fn emit(&self, ev: &Value);
+}
+
+impl EventSink for () {
+    fn emit(&self, _ev: &Value) {}
 }
 
 /// One flat result the host matches once. `captured`/`timed_out` live on `Ran`,
@@ -123,116 +143,149 @@ pub enum TurnReport {
         result: Settled<Value>,    // Ok | error | exit N | stopped
         status: i32,
         single_command: bool,
-        captured: Option<Captured>, // Some when `printer == None`
+        captured: Option<Captured>, // Some when `io == TurnIo::Capture`
         timed_out: bool,
     },
 }
 pub struct Captured { pub stdout: Vec<u8>, pub stderr: Vec<u8> }
 ```
 
-`run_turn` builds the `IoFrame` (the `printer` becomes `Sink::External` when
-`Some`, else core mints `Sink::Buffer` captures), installs `sink` as the turn's
-surface, arms `turn_limit`/`detached_limit` on `process::reaper`, calls the
-**internal** `eval_turn`, and flattens its `TurnOutcome` into a `TurnReport`,
-folding in the captured bytes and `timed_out` it alone knows. `TurnOutcome`
-(`eval_turn`'s `Static | Runtime`) stays internal; `Settled<Value>` is reused, not
-re-spelled. Everything `run_shell` and `execute_input` do today to assemble a
-frame moves here once.
+`run_turn` translates the public request into the **internal** `TurnFrame` /
+`IoFrame`: `Inherit` clones the ambient streams already installed on the
+`Shell`, while `Capture` mints `Sink::Buffer` captures. It installs
+`surface` only in the turn frame, arms `turn_limit`/`detached_limit` on
+`process::reaper`, calls the internal `eval_turn`, and flattens its
+`TurnOutcome` into a `TurnReport`, folding in the captured bytes and
+`timed_out` it alone knows. `TurnOutcome` (`eval_turn`'s `Static | Runtime`)
+stays internal; `Settled<Value>` is reused, not re-spelled. Everything
+`run_shell`, `execute_input`, and `main.rs` do today to assemble frames moves
+behind this one method once.
 
-Two facets, two disciplines, by *where each lives*, with no type gymnastics:
+Two facets, two disciplines, by *where each lives*, with no lifetime gymnastics:
 
-- **Bytes** are request currency (`printer: Arc<dyn ExternalWrite>`, already
-  `Send + Sync`, `core/src/io/sink.rs:34`). They may legitimately detach — that is
-  what `watch` does — so they stay `Send`.
-- **The surface** is a *borrowed* turn sink (`&dyn EventSink`), never stored on the
-  persistent `Shell`, never detached. It is a dynamically-scoped handler installed
-  for the extent of the call — which is exactly what it always was, minus the
-  clone-into-workers.
+- **Bytes** are IO state. They may legitimately detach — that is what `watch`
+  does — so the live byte sinks stay `Send + Sync` and cloneable.
+- **The surface** is a turn-local `Arc<dyn EventSink + Send + Sync>`, not a
+  persistent `Shell` capability. It has no borrowed lifetime to infect
+  `TurnState`, so `Shell` stays `Send`; it has no liveness role, so a clone can
+  never define turn completion. Same-thread children may clone it. Detached
+  workers do not receive it.
 
 ### 2. Completion is the call returning; the host owns the loop
 
-exarch already runs a tokio multi-thread runtime and already drives provider calls
-with `tokio::select!` and `spawn_blocking` (`exarch/src/provider.rs:591,621`,
-`oauth/browser.rs:28`). The turn loop *joins that world* rather than introducing
-it. The CPU-bound, synchronous `eval_turn` runs on a blocking task; the reactive
-UI is a `select!` loop:
+exarch already owns a tokio runtime and already drives provider calls with
+`tokio::select!` (`exarch/src/provider.rs:591,621`). The turn loop joins that
+world at the host boundary, but it must preserve the current borrow shape:
+`Session::run_turn` lends `&mut Session` and `&Provider` to the worker today, so
+the first implementation uses a scoped blocking worker plus a one-shot
+completion future. If the driver later moves owned state into the worker, the
+same loop can replace that carrier with `spawn_blocking`; the invariant is the
+same either way: **completion is an explicit done future, not bus disconnect**.
 
 ```rust
 // exarch, one turn:
-let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();   // tx is a plain Send sender
-let mut eval = tokio::task::spawn_blocking(move || shell.run_turn(src, &req, &Sink(tx)));
-let mut frame = tokio::time::interval(Duration::from_millis(33)); // ~30 fps
-loop {
-    tokio::select! {
-        Some(ev) = rx.recv()    => ui.apply(ev),     // reactive: render as events arrive
-        _        = frame.tick() => ui.animate(),       // reactive: spinner/elapsed each frame
-        _        = cancel.cancelled() =>               // Esc / Ctrl-C / timeout, one arm
-                      process::request_foreground_cancel(CancelCause::Interrupt),
-        report   = &mut eval    => {                   // COMPLETION: the *task* resolved
-            while let Ok(ev) = rx.try_recv() { ui.apply(ev); } // drain the tail
-            break report.unwrap();
+let (tx, mut rx) = tokio::sync::mpsc::channel(EVENT_BACKLOG);
+let (done_tx, mut done_rx) = tokio::sync::oneshot::channel();
+
+std::thread::scope(|scope| {
+    scope.spawn(|| {
+        let report = catch_unwind_as_report(|| {
+            shell.run_turn(src, TurnRequest {
+                io: TurnIo::Capture,
+                surface: Some(Arc::new(AgentSink(tx.clone()))),
+                ..req
+            })
+        });
+        let _ = done_tx.send(report);
+    });
+
+    runtime.block_on(async {
+        let mut frame = tokio::time::interval(Duration::from_millis(33)); // ~30 fps
+        loop {
+            tokio::select! {
+                Some(ev) = rx.recv()    => ui.apply(ev),      // reactive: render events
+                _        = frame.tick() => ui.animate(),      // reactive: spinner/elapsed
+                _        = cancel.cancelled() =>              // Esc / Ctrl-C / timeout
+                              process::request_foreground_cancel(CancelCause::Interrupt),
+                report   = &mut done_rx => {                  // COMPLETION: explicit done
+                    while let Ok(ev) = rx.try_recv() { ui.apply(ev); }
+                    break report.unwrap_or_else(worker_panic_report);
+                }
+            }
+        }
+    })
+})
+```
+
+The loop exits on `done_rx` resolving — or, in an owned-state rewrite, the
+blocking task's join future resolving. A detached worker holding a clone of `tx`
+has **zero** bearing on whether that future resolves: `kv-store-grpc` may hold a
+sender forever, the turn still returns the instant eval finishes. The
+`while let Ok(ev) = rx.recv()` "all senders dropped = done" semantics is
+**deleted**. Headless drives the same loop without a frame timer; it must still
+drain events while waiting for done, because semantic cards use backpressure.
+
+### 3. The surface carrier becomes turn-scoped, not stored-and-cloned
+
+Keep a `surface: Option<SurfaceSink>` slot on `TurnState`
+(`core/src/types/shell/mod.rs:167`), but change what it means. The slot is
+installed only by `run_turn`; `set_surface` (`host.rs:76`) goes away, and no host
+stores a surface on the persistent session. `TurnState::inherit_from`
+(`mod.rs:190-192`) still clones the sink for same-thread child evaluation: it is
+the same turn, so the event handler is still live. The detached path
+(`inherit.rs:205,:214`) stops copying the live sink. A detached worker instead
+gets a bounded `surface_buf` beside `stdout_buf`/`stderr_buf`; the first
+`await` on the handle drains that buffer through the caller's *current* surface
+and marks it replayed. `poll` observes completion without replaying, repeated
+`await` does not duplicate cards, and an un-awaited worker emits no cards. Bytes
+remain returned values (`stdout`/`stderr`); structured surface remains a
+once-only host effect.
+
+### 4. tokio stops at exarch's `EventSink` impl
+
+`ral_core` names no `tokio`, `spawn_blocking`, `mpsc`, `select`, or host rail
+taxonomy. exarch's sink wraps the channel and decides reliability after decoding
+the `Value`:
+
+```rust
+struct AgentSink(tokio::sync::mpsc::Sender<Kind>);
+impl EventSink for AgentSink {
+    fn emit(&self, ev: &Value) {
+        let Some(kind) = value_to_kind(ev) else { return; };
+        match kind {
+            Kind::Meter { .. } => coalesce_meter(&self.0, kind), // progress: latest wins
+            Kind::Phase(_) => coalesce_phase(&self.0, kind),     // progress: latest wins
+            _ => { let _ = self.0.blocking_send(kind); }         // semantic: lossless
         }
     }
 }
 ```
 
-The loop exits on `report = &mut eval` — the eval task's join future resolving.
-A detached worker holding a clone of `tx` has **zero** bearing on whether that
-future resolves: `kv-store-grpc` may hold a sender forever, the turn still returns
-the instant eval finishes. The `while let Ok(ev) = rx.recv()` "all senders dropped
-= done" semantics is **deleted**. Headless drives the same loop with a UI impl
-that does not animate (or simply blocks on the join and drains `rx`).
-
-### 3. The surface carrier becomes turn-scoped, not stored-and-cloned
-
-Replace the `surface: Option<SurfaceSink>` field on `TurnState`
-(`core/src/types/shell/mod.rs:167`) — and `set_surface` (`host.rs:76`), the child
-inherit-clone (`mod.rs:192`), and the detached copy (`inherit.rs:205,:214`) — with
-the borrowed `&dyn EventSink` threaded through the turn install. The `surface`
-builtin (`core/src/builtins/misc.rs:530`) emits to the current turn's sink. A
-same-thread child sees it (same turn, same borrow); a detached worker does **not**
-get the live sink — it gets a worker-local buffer for deferred `await`-replay (a
-`surface_buf` beside `stdout_buf`, the §13.3 byte-replay rule extended to
-structured events), or nothing if it is never awaited, exactly as its bytes are
-dropped if never awaited.
-
-### 4. tokio stops at exarch's `EventSink` impl
-
-`ral_core` names no `tokio`, `spawn_blocking`, `mpsc`, `select`, or `Send`-on-a-
-surface. exarch's sink wraps the channel:
-
-```rust
-struct AgentSink(tokio::sync::mpsc::UnboundedSender<Kind>);
-impl EventSink for AgentSink {
-    fn emit(&self, ev: &Value) {
-        if let Some(kind) = value_to_kind(ev) { let _ = self.0.send(kind); } // non-blocking
-    }
-}
-```
-
-`value_to_kind` and the `` `patch ``/`` `wrote ``/`` `task ``/`` `meter `` vocabulary
-stay *in exarch*. The REPL's sink prints, or is the default no-op — surfacing is
-exarch's, not the REPL's — and the REPL never touches the async loop: it calls
-`run_turn` straight on its prompt thread.
+`value_to_kind` and the `` `patch ``/`` `wrote ``/`` `task ``/`` `meter ``
+vocabulary stay *in exarch*. Patch/write/task cards are semantic events and are
+not dropped; meters and phases are progress events and may coalesce under load.
+The REPL's sink prints or no-ops, and the REPL never touches the async loop: it
+calls `run_turn` straight on its prompt thread.
 
 ### 5. One ordered event stream; `Value` is the only core thing that crosses
 
 What travels the seam is the host's own currency — `Capabilities`, `Duration`s,
-`Arc<dyn ExternalWrite>`, the `TurnReport` — the opaque `&mut Shell` handle, and,
-by the same concession the `surface` builtin already makes today, raw `Value`.
-Core learns no rail taxonomy. Nothing else of core's representation crosses: no
-`TurnFrame`, `IoFrame`, `Sink`, `Source`, `arm_lifetime`, or `eval_turn` is named
-by any host.
+`TurnIo`, `SurfaceSink`, `TurnLifecycle`, the `TurnReport` — the opaque
+`&mut Shell` handle, and, by the same concession the `surface` builtin already
+makes today, raw `Value`. Core learns no rail taxonomy. Hosts no longer name
+`TurnFrame`, `IoFrame`, `arm_lifetime`, or `eval_turn`; ordinary byte sinks remain
+available through the existing host accessors for ambient REPL setup.
 
 ## Why one API covers everything
 
 Walking the policy axes, each is a request field or orthogonal:
 
-- **IO regime** → `printer`: `Some` = live bytes (REPL), `None` = capture (exarch,
-  bytes returned in `Ran`'s `captured`). The `IoFrame::Inherit | Capture` sum
-  collapses into the request; no `IoMode` flag is needed.
-- **Structured surface** → the borrowed `&dyn EventSink`; the same trait the
-  REPL no-ops and exarch routes to its rail.
+- **IO regime** → `TurnIo`: `Inherit` = ambient bytes (REPL/batch; the
+  rustyline printer is already installed on the `Shell`), `Capture` = core-minted
+  buffers returned in `Ran`'s `captured`. No `printer` flag is needed.
+- **Structured surface** → `SurfaceSink`: a turn-local
+  `Arc<dyn EventSink + Send + Sync>`; the same trait the REPL no-ops and exarch
+  routes to its rail.
 - **Cancellation** → one `select!` arm on the existing per-root-turn token
   ([[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]]); Esc / Ctrl-C /
   deadline all land there. No host names a `CancelScope`.
@@ -253,52 +306,59 @@ over `{input, inbox}`." The turn loop is the same shape one level in — the age
 
 ### core — `host.rs`, `turn.rs`, `types/shell/mod.rs`, `inherit.rs`, `builtins/misc.rs`, `builtins/concurrency.rs`
 
-1. Define `EventSink`, `TurnRequest`, the flat `TurnReport`, and `Captured` in
-   `host.rs`. `emit(&Value)` carries raw `Value`; core defines no taxonomy. Keep
-   `TurnOutcome` as `eval_turn`'s internal return.
-2. Add `Shell::run_turn`: build the `IoFrame` (`printer` → `Sink::External`, else
-   mint `Sink::Buffer` + `Source::Terminal`), install the borrowed `sink` as the
-   turn surface, arm `turn_limit`/`detached_limit` on `process::reaper`, call
-   `eval_turn`, read `timed_out` from the foreground scope's
-   `CancelCause::Deadline`, flatten into `TurnReport`. The limit arm/disarm dance
+1. Define `EventSink`, `SurfaceSink`, `TurnIo`, `TurnRequest`, the flat
+   `TurnReport`, and `Captured` in `host.rs`. `emit(&Value)` carries raw
+   `Value`; core defines no taxonomy. Keep `TurnOutcome` as `eval_turn`'s
+   internal return.
+2. Add `Shell::run_turn`: translate `TurnIo::Inherit | Capture` into the
+   internal `IoFrame`, install `surface` on the turn frame, arm
+   `turn_limit`/`detached_limit` on `process::reaper`, call `eval_turn`, read
+   `timed_out` from the foreground scope's `CancelCause::Deadline`, flatten into
+   `TurnReport`, and drain captures when present. The limit arm/disarm dance
    leaves `shell_eval.rs`.
-3. Replace the stored `SurfaceSink`: thread `&dyn EventSink` through the turn
-   install; the `surface` builtin emits to it. Delete `set_surface`, the surface
-   clone in `mod.rs:192`, and the detached copy in `inherit.rs:205,:214` — the
-   worker's live surface is gone.
-4. In `spawn_child` (`builtins/concurrency.rs`), allocate a
-   `surface_buf: Arc<Mutex<Vec<Value>>>` beside the byte buffers; the worker
-   appends `Value`s to it; the `await` drain replays them to the caller's surface,
-   alongside the existing `stdout_buf`/`stderr_buf` replay.
+3. Recast the stored `SurfaceSink`: it remains turn state, but becomes
+   `Arc<dyn EventSink + Send + Sync>` installed only by `run_turn`. Delete
+   `set_surface`; keep same-thread inheritance in `mod.rs:192`; delete the live
+   detached copy in `inherit.rs:205,:214`.
+4. In `spawn_child` (`builtins/concurrency.rs`), allocate a bounded
+   `surface_buf` beside the byte buffers. Drain it into `CompletedHandle`, replay
+   it once on `await` through the caller's current surface, and make `poll`
+   non-replaying. The overflow marker is itself one surface event, so a runaway
+   detached meter cannot allocate without bound.
 5. Confirm `ral_core` still names no runtime type (a grep guard in CI).
 
 ### exarch — delete the bespoke pump; the loop becomes `select!`
 
 `bus.rs`'s `pump` and the channel-as-completion default `drive` are deleted;
-`Emitter` stops being turn transport. `session.rs:run_turn` drives the `select!`
-loop of part 2 with `spawn_blocking`. `shell_eval.rs` collapses to an adapter:
-build `TurnRequest { script_name: "<tool>", turn_limit: Some(30s), detached_limit:
-Some(1h), printer: None, .. }`, supply an `AgentSink` (owns `value_to_kind`),
-match `TurnReport` into the existing `Outcome`/`ToolResult` (cap `captured` bytes,
-synthesise the 124 message from `timed_out`, append sandbox denials, render the
-`Value`). `headless.rs` keeps the same driver with a non-animating UI. exarch's
+`Event`/`Kind` and the emitter API remain exarch's presentation bus, but no bus
+sender is a completion token. `session.rs:run_turn` drives the `select!` loop of
+part 2 with a scoped worker + one-shot first; `spawn_blocking` is a later carrier
+only if `Session`/`Provider` ownership is moved into the task. `shell_eval.rs`
+collapses to an adapter: build `TurnRequest { script_name: "<tool>",
+turn_limit: Some(30s), detached_limit: Some(1h), io: TurnIo::Capture,
+surface: Some(AgentSink), lifecycle: Box::new(()), .. }`, match `TurnReport`
+into the existing `Outcome`/`ToolResult` (cap `captured` bytes, synthesise the
+124 message from `timed_out`, append sandbox denials, render the `Value`).
+`headless.rs` keeps the same driver with a non-animating UI. exarch's
 `DETACHED_WORKER_CEILING` and 30 s wall become request fields.
 
 ### ral REPL — `repl/exec.rs` collapses to an adapter
 
 `execute_input` builds `TurnRequest { script_name: "<stdin>", caps: root(),
-turn_limit: None, detached_limit: None, printer: Some(rustyline_printer) }`,
-supplies a print/no-op `EventSink`, calls `run_turn` **synchronously**, and
-matches `TurnReport` as today (`print_result`, exit, `Escape::Stopped` → job,
-`Break::Error` → ariadne). The hand-built `TurnFrame` (`exec.rs:102-109`) is
-deleted; the REPL only ever sees `Static` or `Ran { captured: None, .. }`. No
-async runtime is involved.
+turn_limit: None, detached_limit: None, io: TurnIo::Inherit, surface:
+Some(print_or_noop_sink), lifecycle: Box::new(ReplLifecycle { .. }) }`, calls
+`run_turn` **synchronously**, and matches `TurnReport` as today (`print_result`,
+exit, `Escape::Stopped` → job, `Break::Error` → ariadne). The hand-built
+`TurnFrame` (`exec.rs:102-109`) is deleted; the REPL only ever sees `Static` or
+`Ran { captured: None, .. }`. No async runtime is involved.
 
 ### ral batch — `main.rs` becomes the third `run_turn` client
 
 `ral/src/main.rs:480` still calls `eval_top_level` directly (the gap
 [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]] flagged). Fold it
-in: a capturing/no-op `EventSink`, `printer` per mode, synchronous `run_turn`.
+in: `TurnIo::Inherit`, a no-op `EventSink`, `Box::new(())` lifecycle, and
+synchronous `run_turn`; audit still drains `shell.take_audit_fragment()` after the
+turn.
 
 ## Test plan
 
@@ -308,53 +368,60 @@ in: a capturing/no-op `EventSink`, `printer` per mode, synchronous `run_turn`.
   is recorded. Name in the concurrency ADR's spirit:
   `detached_worker_cannot_outlive_turn_completion`.
 - **Completion-not-disconnect:** drive the `select!` loop with a fake detached
-  holder that keeps a `tx` clone alive; assert the loop returns on the join arm
-  while the sender still lives.
+  holder that keeps an event `tx` clone alive; assert the loop returns on the
+  explicit done future while the sender still lives.
+- **Borrow-preserving carrier:** a test-shaped `Session::run_turn` borrows
+  `&mut Session` and `&Provider` through the scoped worker, proving the initial
+  carrier does not require `'static` ownership the current call graph lacks.
 - **`watch` regression:** a watched worker still streams live after the turn
   returns — bytes are `Send` and detachment of *bytes* is intentional.
-- **Deferred surface:** `spawn { edit … }` then `await $h` replays the `` `patch ``
-  card; an un-awaited worker emits no card; the file is written either way.
+- **Deferred surface:** `spawn { edit … }` then the first `await $h` replays the
+  `` `patch `` card exactly once; `poll $h` and a second `await $h` do not replay
+  it; an un-awaited worker emits no card; the file is written either way.
 - **Parity (the unification):** the same source through `run_turn` with
-  `printer: Some` (REPL shape) and `printer: None` (exarch shape) on one `Shell`;
-  assert the `TurnReport` classification agrees.
+  `TurnIo::Inherit` (REPL/batch shape) and `TurnIo::Capture` (exarch shape) on one
+  `Shell`; assert the `TurnReport` classification agrees and REPL lifecycle hooks
+  still fire.
 - **Seam / tokio boundary:** grep tests that `ral_core` names no
-  `tokio`/`spawn_blocking`/`mpsc`/`select`, and that no host names `TurnFrame`,
-  `IoFrame`, `Sink`, `Source`, `arm_lifetime`, or `eval_turn` — the
+  `tokio`/`spawn_blocking`/`mpsc`/`select`, and that exarch's tool-eval path names
+  no `TurnFrame`, `IoFrame`, `arm_lifetime`, or `eval_turn` — the
   [[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-leak-into-exarch]]
-  grep, narrowed to allow `Value`.
+  grep, narrowed to allow `Value` and the REPL's ambient `Sink::External` setup.
 - **End-to-end:** re-run `kv-store-grpc` and `pypi-server`; assert no
   `AgentTimeoutError`, non-empty `result.json`, reward still `1.0`.
 
 ## Consequences
 
 - The hang is impossible by construction: turn completion is the call returning /
-  the join future resolving — a control-flow fact no background thread can change.
-  There is no shared liveness object between detachment and turn exit. To
-  reintroduce the class a maintainer would have to write a `select!` with no
-  completion arm, a visibly wrong loop, not copy one innocuous line.
-- exarch becomes genuinely reactive and async: one `select!` loop per turn, a
-  frame-timer animation that looks alive between events, and a single cancel arm —
-  built on the tokio runtime exarch already runs. Headless and TUI share the loop.
+  the explicit done future resolving — a control-flow fact no background thread
+  can change. There is no shared liveness object between detachment and turn
+  exit. To reintroduce the class a maintainer would have to write a `select!`
+  with no completion arm, a visibly wrong loop, not copy one innocuous line.
+- exarch becomes genuinely reactive: one `select!` loop per turn, a frame-timer
+  animation that looks alive between events, and a single cancel arm. Headless and
+  TUI share the loop.
 - [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]] is completed:
   one `run_turn`, three hosts (REPL, exarch, batch) as request suppliers;
-  `shell_eval.rs` and `exec.rs` shrink to adapters; `IoMode` never needs to exist.
-- `Shell` stays `Send`/`Sync`: no `Rc`, no lifetime infection of `TurnState`, and
-  the `pump`/`Session` collision the prior ADR hit (`session.rs:421`) is moot —
-  `pump` is deleted.
+  `shell_eval.rs`, `exec.rs`, and `main.rs` shrink to adapters. `TurnIo` is the
+  public IO policy; `TurnFrame`/`IoFrame` stay internal.
+- `Shell` stays `Send`/`Sync`: no `Rc`, no borrowed sink lifetime in
+  `TurnState`, and no false requirement that the current `Session` borrow become
+  `'static`. The pump/`Session` collision the prior ADR hit (`session.rs:421`) is
+  moot because completion no longer flows through `drive`.
 - tokio stays out of `ral_core`: the seam is a synchronous `EventSink` taking
   `Value`. The host owns its concurrency model; core is a synchronous evaluator
   with one runtime-agnostic turn entry — strengthening, not bending,
   [[decisions/260610_host-embedding-api|host-embedding-api]].
 - The `surface` builtin is unchanged language-side; only its carrier moved from
   stored-and-cloned to turn-scoped. `internals/output-capture-and-detachment` needs
-  a one-line correction: the surface is now turn-local, not a `Shell` field cloned
-  into workers.
+  a one-line correction: the surface is now turn-local, inherited by same-thread
+  children, and buffered once for detached `await`.
 - [[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-leak-into-exarch]]
   is *recorded as-is*, not freshly spent: the `surface` builtin already emits
   `Value` today, so `Value` already crosses this path; the rail vocabulary lives in
   exarch's `value_to_kind`, and core stays generic.
-- exarch deletes more than it adds: `pump`, the channel-as-completion `drive`, and
-  `Emitter`-as-transport are gone.
+- exarch deletes more than it adds: `pump` and the channel-as-completion `drive`
+  are gone; the event bus remains only a presentation bus.
 - The 1 h `detached_limit` is unchanged as a backstop, no longer load-bearing for
   turn exit. Do **not** lower it to mask anything.
 
@@ -382,9 +449,10 @@ in: a capturing/no-op `EventSink`, `printer` per mode, synchronous `run_turn`.
   single blocking tool call. The reactive UI is wanted, so the async loop stays.
 - **Make `eval_turn` itself `async`.** Rejected: the evaluator is CPU-bound
   tree-walking; on the reactor it would starve the very UI we want reactive, and
-  coloring the whole evaluator async is a large rewrite for negative benefit. Async
-  at the edges, synchronous in the core, bridged by `spawn_blocking` — which is
-  what async is *for*.
+  coloring the whole evaluator async is a large rewrite for negative benefit.
+  Async at the edges, synchronous in the core, bridged by a worker (scoped while
+  the host borrows state, `spawn_blocking` when it owns state) — which is what
+  async is *for*.
 - **A core `TurnEvent` taxonomy decoded by core.** Rejected: it puts exarch's rail
   vocabulary in core. Raw `Value` to `emit` keeps core generic and matches the
   existing `surface` builtin.
@@ -395,17 +463,18 @@ This is a real refactor of exarch's event loop — `pump` and the
 channel-as-completion `drive` are deleted and replaced by the `select!` driver —
 plus the core `run_turn`/`EventSink`/`TurnReport` surface absorbing frame
 construction from all three hosts. The surprising part, again, is how much of the
-fix is *deletion*: the `Emitter`-as-transport machinery goes, and `Shell` stays
-`Send`. Honest costs, none fatal:
+fix is *deletion*: completion stops being a side effect of the presentation bus,
+and `Shell` stays `Send`. Honest costs, none fatal:
 
-- **Blocking-pool pressure.** Each concurrent turn (parallel tool dispatch,
-  sub-agents) consumes a `spawn_blocking` thread. exarch's multi-thread runtime
-  already sizes a blocking pool generously, but deeply nested sub-agents warrant a
-  bound and a test.
-- **Backpressure.** Use a bounded channel and *coalesce* surface events under load
-  (the latest meter wins) so a fast emitter cannot outrun the renderer; a
-  non-blocking `try_send` from the sync sink drops intermediate frames, which is
-  correct for a progress surface.
+- **Worker pressure.** The initial exarch carrier is one scoped blocking worker
+  per active root turn so it can borrow `&mut Session`; an owned-state rewrite may
+  switch that carrier to `spawn_blocking`. Either way, deeply nested sub-agents
+  warrant a host-side bound and a test.
+- **Backpressure.** Use a bounded event channel. Semantic cards (`patch`, `wrote`,
+  `task`, tool/result/error/usage) block rather than disappear; progress cards
+  (`meter`, `phase`) coalesce so a fast emitter cannot outrun the renderer. The
+  detached `surface_buf` is bounded too and records one overflow marker instead
+  of growing forever.
 - **Cooperative cancellation must still reach the sync eval promptly** — it does,
   through the existing cancel scopes plus `EINTR` on blocking syscalls
   ([[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]]).
