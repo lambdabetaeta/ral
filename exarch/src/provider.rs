@@ -1032,6 +1032,20 @@ impl Live {
                         _ = wait_for_cancel() => {
                             return Attempt::Failed(ProviderError::Cancelled("during summary"));
                         }
+                        // `summarize` is non-streaming, so there are no
+                        // incremental events to idle between: the same budget
+                        // bounds the whole `exec_chat` request.  `tls::client`
+                        // sets no timeout, so without this a stalled connection
+                        // hangs here exactly as it did in `complete` — reaped
+                        // only by the 900s harness wall.  No partial output is
+                        // ever rendered, so it is `Failed` (retryable), never
+                        // `Committed`.
+                        _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
+                            return Attempt::Failed(ProviderError::Transient {
+                                cause: "summary request: no response within timeout".into(),
+                                attempts: 1,
+                            });
+                        }
                         r = self.client.exec_chat(model, req, Some(&options)) => r,
                     };
                     match r {
