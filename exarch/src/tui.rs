@@ -482,10 +482,13 @@ impl App {
                     None => vp.push_chrome(RailShape::Generic, line::tool_call_static(&cmd, tool)),
                 });
             }
-            // Tool results never reach the rail — the script the user can
-            // open is the whole of what a call surfaces.  The model still
-            // receives the full result through the history pipeline.
-            Kind::ToolResult(_) => {}
+            // A tool result's body is not rendered — the script the user
+            // can open is the whole of what a call surfaces, and the model
+            // receives the full result through the history pipeline — but
+            // its line count is the call's magnitude, attached to the
+            // most-recent tool-call block as the collapsed header's
+            // size-bar.
+            Kind::ToolResult(text) => self.with_viewport(id, |vp| vp.set_result_size(&text)),
             Kind::UserPromptEcho(text) => self.push_chrome(id, RailShape::Generic, line::user_prompt(&text)),
             Kind::StopReason(raw) => self.push_chrome(id, RailShape::Generic, line::stop_reason(&raw)),
             Kind::Error(msg) => self.push_chrome(id, RailShape::Error, line::error(&msg)),

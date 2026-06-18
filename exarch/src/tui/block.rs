@@ -70,6 +70,12 @@ pub(super) struct Block {
     kind: BlockKind,
     /// The producing agent's palette slot, stamped at push.
     agent: AgentSlot,
+    /// A tool call's result magnitude — `text.lines().count()` of its
+    /// [`crate::bus::Event::ToolResult`], attached after the fact by
+    /// [`super::viewport::Viewport::set_result_size`].  Feeds the
+    /// collapsed header's size-bar; `None` until the result lands (and
+    /// always, on non-`ToolCall` blocks).
+    result_size: Option<u32>,
     /// Lines for the current state at [`Self::cache_w`], or `None` when
     /// stale — never rendered, toggled open/shut, or asked at a new
     /// width.
@@ -82,6 +88,7 @@ impl Block {
         Self {
             kind,
             agent,
+            result_size: None,
             cache: None,
             cache_w: 0,
         }
@@ -123,9 +130,7 @@ impl Block {
     /// value-step and the header size-bar both read this.
     pub(super) fn magnitude(&self) -> Option<u32> {
         match &self.kind {
-            BlockKind::Patch { hunks, .. } => {
-                Some(hunks.iter().map(|h| (h.del.len() + h.add.len()) as u32).sum())
-            }
+            BlockKind::Patch { hunks, .. } => Some(line::patch_magnitude(hunks)),
             _ => None,
         }
     }
@@ -133,6 +138,21 @@ impl Block {
     /// True for the one block kind a click opens.
     pub(super) fn expandable(&self) -> bool {
         matches!(self.kind, BlockKind::ToolCall { .. })
+    }
+
+    /// True for a tool call — the one block kind a result magnitude
+    /// attaches to via [`Self::set_result_size`].
+    pub(super) fn is_tool_call(&self) -> bool {
+        matches!(self.kind, BlockKind::ToolCall { .. })
+    }
+
+    /// Attach a tool call's result magnitude (`text.lines().count()`),
+    /// dropping the memo so the collapsed header re-renders with its
+    /// size-bar.  A no-op set on a non-tool-call block would never light
+    /// a bar, but callers gate on [`Self::is_tool_call`].
+    pub(super) fn set_result_size(&mut self, n: u32) {
+        self.result_size = Some(n);
+        self.cache = None;
     }
 
     /// Flip a tool call between shut and open, dropping its memo; a
@@ -201,7 +221,7 @@ impl Block {
                 if *open || force_open {
                     line::tool_call_expanded(summary, tool, cmd, width)
                 } else {
-                    line::tool_call_collapsed(summary, tool, width)
+                    line::tool_call_collapsed(summary, tool, self.result_size, width)
                 }
             }
             BlockKind::Markdown(src) => md::render_md(src, width, MD_INDENT),

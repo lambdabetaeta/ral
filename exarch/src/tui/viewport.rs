@@ -247,6 +247,20 @@ impl Viewport {
         self.push_block(Block::chrome(shape, lines, self.agent));
     }
 
+    /// Attach a tool result's magnitude — `text.lines().count()` — to the
+    /// most-recent [`Block::is_tool_call`] block, searched backward from
+    /// the tail since `Patch` / `Wrote` side effects may land between a
+    /// call and its result.  Marks the flatten stale so the collapsed
+    /// header re-renders with its size-bar.  A no-op when no tool call
+    /// precedes the result (e.g. `fff`, whose call is summary-less chrome).
+    pub(super) fn set_result_size(&mut self, text: &str) {
+        let n = text.lines().count() as u32;
+        if let Some(block) = self.blocks.iter_mut().rev().find(|b| b.is_tool_call()) {
+            block.set_result_size(n);
+            self.flat.dirty = true;
+        }
+    }
+
     /// Push streamed assistant text; commit any fence-safe paragraphs.
     pub(super) fn push_token(&mut self, text: &str) {
         self.open.push_str(text);
@@ -506,6 +520,43 @@ mod tests {
         let text = vp.yank_text();
         assert!(text.contains("do a thing"));
         assert!(!text.contains('▸'));
+    }
+
+    /// `set_result_size` attaches the result magnitude to the most-recent
+    /// tool call even when a `Patch` side effect landed between the call
+    /// and its result — the search runs backward from the tail and skips
+    /// the patch.  The collapsed header then carries a `█` size-bar.
+    #[test]
+    fn set_result_size_targets_latest_tool_call_past_a_patch() {
+        let mut vp = fresh();
+        vp.push_tool_call("ral", "edit the file".into(), "script".into());
+        let hunk = Hunk {
+            start: 1,
+            before: vec![],
+            del: vec![],
+            add: vec!["a".into(), "b".into()],
+            after: vec![],
+        };
+        vp.push_patch("src/foo.rs".into(), vec![hunk]);
+        // The call header carries no result bar yet — only the patch's own
+        // header does, which is a different row.
+        let header = |vp: &mut Viewport| {
+            vp.flatten_text(READ_W)
+                .into_iter()
+                .find(|t| t.contains("edit the file"))
+                .expect("tool call header row")
+        };
+        assert!(
+            !header(&mut vp).contains('█'),
+            "no size-bar on the call header before the result lands"
+        );
+        // A 200-line result lands after the patch; it must attach to the
+        // call, not the patch.
+        vp.set_result_size(&"line\n".repeat(200));
+        assert!(
+            header(&mut vp).contains('█'),
+            "the call header gains a filled size-bar"
+        );
     }
 
     /// The `user.log` carries a tool call's full script even while it is

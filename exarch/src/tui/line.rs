@@ -93,6 +93,38 @@ pub(super) fn plain(line: &Line<'_>) -> String {
         .collect()
 }
 
+/// Width in cells of the header size-bar — the second ordered variable
+/// (size) after the rail's value (lightness).  A bar of [`SIZE_BAR_W`]
+/// cells, filled `█` / empty `░`, encodes `log2(magnitude)` so a
+/// 500-line event fills it and a 2-line event barely shows.
+const SIZE_BAR_W: usize = 8;
+
+/// Total changed lines (deletions + additions) across `hunks` — the
+/// patch magnitude both [`super::block::Block::magnitude`] and the
+/// header [`size_bar`] read.  One definition so the rail's value-step
+/// and the header bar never drift apart.
+pub(super) fn patch_magnitude(hunks: &[Hunk]) -> u32 {
+    hunks.iter().map(|h| (h.del.len() + h.add.len()) as u32).sum()
+}
+
+/// Map `magnitude` to a filled-cell count on a `log2` scale, clamped to
+/// `0..=SIZE_BAR_W`: `0` reads empty, a 2-line event lights a cell or
+/// two, a ~500-line event fills the bar.  Tracks the rail's value-step,
+/// which also buckets `log2` of the line count.
+fn size_cells(magnitude: u32) -> usize {
+    (((magnitude + 1) as f32).log2().round() as usize).min(SIZE_BAR_W)
+}
+
+/// The header size-bar span: [`SIZE_BAR_W`] cells, `█` for the filled
+/// run and `░` for the remainder, styled [`SLATE`] so it reads as
+/// decorative ink beside the path / summary rather than content.  A zero
+/// magnitude renders an all-empty bar.
+pub(super) fn size_bar(magnitude: u32) -> Span<'static> {
+    let filled = size_cells(magnitude);
+    let bar: String = "█".repeat(filled).chars().chain("░".repeat(SIZE_BAR_W - filled).chars()).collect();
+    Span::styled(bar, Style::default().fg(SLATE))
+}
+
 // ── Public line builders ─────────────────────────────────────────────────────
 
 /// Step separator: one blank line.  The step number itself is recorded
@@ -175,17 +207,26 @@ pub(super) fn queued_prompt(
 /// builder is rail-less. Long labels wrap under the label's own first
 /// column (rail width + tool prefix), so the rail + tool prefix stays
 /// visually fixed while the comment reads as a paragraph.
-fn tool_call_header(label: &str, tool: &str, width: u16) -> Vec<Line<'static>> {
+/// `size` is the call's result magnitude (`text.lines().count()`),
+/// rendered as a [`size_bar`] trailing the label's first row — the
+/// collapsed header *is* the call's summary, so the bar is its readout.
+/// `None` (no result yet, or the expanded / static headers) omits it.
+fn tool_call_header(label: &str, tool: &str, size: Option<u32>, width: u16) -> Vec<Line<'static>> {
     let prefix_w = RAIL_W + UnicodeWidthStr::width(tool) + UnicodeWidthStr::width("  ");
     let body_w = (width as usize).saturating_sub(prefix_w).max(8);
     let mut out = Vec::new();
     push_wrapped(&mut out, label, body_w, |chunk, first| {
         if first {
-            Line::from(vec![
+            let mut spans = vec![
                 Span::styled(tool.to_string(), Style::default().fg(SLATE)),
                 Span::raw("  "),
                 Span::styled(chunk, Style::default().fg(Color::White)),
-            ])
+            ];
+            if let Some(magnitude) = size {
+                spans.push(Span::raw("  "));
+                spans.push(size_bar(magnitude));
+            }
+            Line::from(spans)
         } else {
             Line::from(vec![
                 Span::raw(" ".repeat(prefix_w)),
@@ -195,10 +236,16 @@ fn tool_call_header(label: &str, tool: &str, width: u16) -> Vec<Line<'static>> {
     });
     out
 }
-/// Clicking the row swaps this for [`tool_call_expanded`].
-pub(super) fn tool_call_collapsed(label: &str, tool: &str, width: u16) -> Vec<Line<'static>> {
+/// Clicking the row swaps this for [`tool_call_expanded`].  `size` is the
+/// call's result magnitude, rendered as the header size-bar.
+pub(super) fn tool_call_collapsed(
+    label: &str,
+    tool: &str,
+    size: Option<u32>,
+    width: u16,
+) -> Vec<Line<'static>> {
     let mut ls = vec![Line::default()];
-    ls.extend(tool_call_header(label, tool, width));
+    ls.extend(tool_call_header(label, tool, size, width));
     ls
 }
 
@@ -213,7 +260,7 @@ pub(super) fn tool_call_expanded(
     width: u16,
 ) -> Vec<Line<'static>> {
     let mut ls = vec![Line::default()];
-    ls.extend(tool_call_header(label, tool, width));
+    ls.extend(tool_call_header(label, tool, None, width));
     ls.push(Line::default());
     for l in cmd.lines() {
         push_code_row(&mut ls, l, width);
@@ -252,7 +299,7 @@ fn push_code_row(ls: &mut Vec<Line<'static>>, line: &str, width: u16) {
 /// is the label, any remainder follows 2-space indented.
 pub(super) fn tool_call_static(cmd: &str, tool: &str) -> Vec<Line<'static>> {
     let mut ls = vec![Line::default()];
-    ls.extend(tool_call_header(cmd.lines().next().unwrap_or(""), tool, READ_W));
+    ls.extend(tool_call_header(cmd.lines().next().unwrap_or(""), tool, None, READ_W));
     for l in cmd.lines().skip(1) {
         ls.push(Line::from(vec![
             Span::raw("  "),
@@ -294,6 +341,8 @@ pub(super) fn patch(path: &str, hunks: &[Hunk]) -> Vec<Line<'static>> {
             Span::styled("patch", Style::default().fg(SLATE)),
             Span::raw("  "),
             Span::styled(path.to_string(), Style::default().fg(Color::White)),
+            Span::raw("  "),
+            size_bar(patch_magnitude(hunks)),
         ]),
     ];
     // One gutter width for the whole block — the widest number any hunk
@@ -707,6 +756,45 @@ mod tests {
                 find(needle)
             );
         }
+    }
+
+    /// The patch header carries a `log2`-scaled size-bar after the path:
+    /// a large patch fills more cells than a small one, and the bar is
+    /// always [`SIZE_BAR_W`] cells wide (filled `█` + empty `░`).  The
+    /// bar is decorative — it must not perturb the numbered diff body.
+    #[test]
+    fn patch_header_size_bar_scales_with_magnitude() {
+        let hunk = |del: usize, add: usize| Hunk {
+            start: 1,
+            before: vec![],
+            del: vec!["x".to_string(); del],
+            add: vec!["y".to_string(); add],
+            after: vec![],
+        };
+        let bar = |hunks: &[Hunk]| -> String {
+            // The header is the second row (after the leading blank); the
+            // size-bar is its trailing `█`/`░` run.
+            patch("src/foo.rs", hunks)[1]
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+                .chars()
+                .filter(|c| *c == '█' || *c == '░')
+                .collect()
+        };
+        let small = bar(&[hunk(1, 1)]); // magnitude 2
+        let large = bar(&[hunk(250, 250)]); // magnitude 500
+        assert_eq!(small.chars().count(), SIZE_BAR_W, "bar is fixed width");
+        assert_eq!(large.chars().count(), SIZE_BAR_W, "bar is fixed width");
+        let fill = |b: &str| b.chars().filter(|c| *c == '█').count();
+        assert!(
+            fill(&large) > fill(&small),
+            "large patch fills more cells: {} vs {}",
+            fill(&large),
+            fill(&small),
+        );
+        assert_eq!(fill(&large), SIZE_BAR_W, "a 500-line patch fills the bar");
     }
 
     /// A 400-character `cause` must wrap into many rows and every row
