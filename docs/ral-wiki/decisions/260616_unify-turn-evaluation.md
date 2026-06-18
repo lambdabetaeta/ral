@@ -117,7 +117,7 @@ eval_turn(shell: &mut Shell, src: &str, frame: TurnFrame) -> TurnOutcome
   `ToolResult` for exarch — and may map it to a transport status, but it does
   not re-derive the parse/type/runtime classification.
 - The save/restore of IO and scope on the persistent `Shell` is RAII, a
-  `FrameGuard` ([`core/src/turn.rs`](../../../core/src/turn.rs)) that restores
+  `TurnGuard` ([`core/src/turn.rs`](../../../core/src/turn.rs)) that restores
   the root source context and foreground scope on `Drop` — and, only under a
   `Capture` regime, the prior IO streams and surface sink. exarch continues a
   session on the same `Shell` after a caught worker panic (`bus::pump`'s
