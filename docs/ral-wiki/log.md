@@ -2815,3 +2815,16 @@ Gantt ribbon, collapsed blocks carry size bars and diff-density grain, and
 disclosure becomes graded reduction. The vertical-time log stays the
 default projection; the matrix and a codebase map are alternate
 projections of the same `Block` buffer. [[index|index]] lists the new page.
+
+## [2026-06-18] migrate | Re-baseline provenance stamps after squash
+
+The `Initial public release` squash rewrote history, so every frontmatter
+`*_at_commit` stamp pointing at a pre-release commit no longer resolved and
+the drift-lint (`git log <stamp>..HEAD`) errored. Added
+`scripts/wiki-restamp.py`, which re-stamps only the dead stamps to the
+repository root (`7ba500b`, 2026-06-17) — the honest post-release baseline,
+since a squash leaves the working tree unchanged — and leaves the eight
+pages with still-resolving stamps untouched. 67 fields across ~38 pages
+moved; `--check` now reports zero dead stamps and doubles as a CI guard for
+the next rewrite. Inline prose hashes in `decisions/` and this log were left
+as-is.

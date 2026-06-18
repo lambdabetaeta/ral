@@ -1,6 +1,6 @@
 ---
-generated_at_commit: deac2a81
-generated_at_date: 2026-06-11
+generated_at_commit: 7ba500b
+generated_at_date: 2026-06-17
 covers_paths: [ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/plugin_editor.rs, ral/src/repl/plugin_ed_builtins.rs, ral/src/repl/keybinding.rs, ral/src/repl/host_handlers.rs]
 ---
 

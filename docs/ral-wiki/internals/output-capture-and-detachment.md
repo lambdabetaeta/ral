@@ -1,5 +1,5 @@
 ---
-verified_at_commit: ae2a3f64
+verified_at_commit: 7ba500b
 verified_at_date: 2026-06-17
 anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild::drain, spawn_child, PgidPolicy::NewLeader, process::reaper, detached_ceiling]
 ---

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e0e912dc
+generated_at_commit: 7ba500b
 generated_at_date: 2026-06-17
 covers_paths: [exarch/src/tools.rs, exarch/src/tools/]
 ---

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1f8cb95d
-generated_at_date: 2026-06-15
+generated_at_commit: 7ba500b
+generated_at_date: 2026-06-17
 covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/ansi.rs, core/src/exit_hints.rs]
 ---
 

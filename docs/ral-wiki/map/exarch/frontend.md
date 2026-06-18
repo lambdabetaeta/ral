@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e28f2054
-generated_at_date: 2026-06-16
+generated_at_commit: 7ba500b
+generated_at_date: 2026-06-17
 covers_paths: [exarch/src/bus.rs, exarch/src/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/host.rs]
 ---
 

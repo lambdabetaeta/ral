@@ -1,5 +1,5 @@
 ---
-generated_at_commit: ae2a3f64
+generated_at_commit: 7ba500b
 generated_at_date: 2026-06-17
 covers_paths: [ral/src/main.rs, ral/src/platform.rs, ral/build.rs]
 ---

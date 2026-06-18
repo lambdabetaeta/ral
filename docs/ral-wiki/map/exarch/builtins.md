@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 3a9d1036
-generated_at_date: 2026-06-11
+generated_at_commit: 7ba500b
+generated_at_date: 2026-06-17
 covers_paths: [exarch/src/agent_builtins.rs, exarch/data/agent.ral]
 ---
 

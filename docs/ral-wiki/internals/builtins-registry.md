@@ -1,5 +1,5 @@
 ---
-verified_at_commit: ae2a3f64
+verified_at_commit: 7ba500b
 verified_at_date: 2026-06-17
 anchors: [builtin_registry, CORE_BUILTINS, WATCH_BUILTIN, BuiltinEntry, coreutils_invoke]
 ---

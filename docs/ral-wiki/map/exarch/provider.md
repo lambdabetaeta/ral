@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e8227dc
-generated_at_date: 2026-06-01
+generated_at_commit: 7ba500b
+generated_at_date: 2026-06-17
 covers_paths: [exarch/src/provider.rs, exarch/src/pricing.rs]
 ---
 

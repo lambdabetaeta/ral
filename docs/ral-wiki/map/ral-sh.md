@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c164cff
-generated_at_date: 2026-05-31
+generated_at_commit: 7ba500b
+generated_at_date: 2026-06-17
 covers_paths: [ral-sh/]
 ---
 

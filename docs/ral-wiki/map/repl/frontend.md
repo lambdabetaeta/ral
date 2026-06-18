@@ -1,6 +1,6 @@
 ---
-generated_at_commit: deac2a81
-generated_at_date: 2026-06-11
+generated_at_commit: 7ba500b
+generated_at_date: 2026-06-17
 covers_paths: [ral/src/repl/frontend.rs, ral/src/repl/frontend/, ral/src/repl/complete.rs]
 ---
 

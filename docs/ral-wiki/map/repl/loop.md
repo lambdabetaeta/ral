@@ -1,5 +1,5 @@
 ---
-generated_at_commit: ae2a3f64
+generated_at_commit: 7ba500b
 generated_at_date: 2026-06-17
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs]
 ---
