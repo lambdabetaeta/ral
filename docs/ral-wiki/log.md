@@ -2802,3 +2802,16 @@ shipped intent — the override is removed; and `core/src/process/signal.rs` doc
 naming a non-existent `RunningPipeline::Drop` are corrected to credit the
 foreground/worker scopes and `PipelineGroup::Drop`. [[index|index]] lists the new
 page.
+
+## [2026-06-18] ingest | TUI re-encoded as a graphic
+
+Filed [[decisions/260618_tui-transcript-as-graphic|tui-transcript-as-graphic]]
+from the design conversation on supercharging the TUI. The proposed cut
+re-projects the scrollback as an information graphic in Bertin's vocabulary:
+the decorative `❖` rail becomes a marginal index (shape→block kind,
+hue→agent, value→magnitude), the tab bar becomes a reorderable
+agents×steps matrix, `rule_line` gains a `ctx%` value-ramp and a phase
+Gantt ribbon, collapsed blocks carry size bars and diff-density grain, and
+disclosure becomes graded reduction. The vertical-time log stays the
+default projection; the matrix and a codebase map are alternate
+projections of the same `Block` buffer. [[index|index]] lists the new page.
