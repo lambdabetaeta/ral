@@ -61,6 +61,20 @@ const MAX_DELAY_MS: u64 = 8_000;
 /// ceiling so a server-supplied `retry-after` of up to half a minute is
 /// honoured rather than clamped down to 8s.
 const RATE_LIMIT_MAX_DELAY_MS: u64 = 30_000;
+/// Idle timeout for the streaming request: the maximum gap we tolerate
+/// *between* stream events (and, on the initial select, the bound on
+/// connect + time-to-first-event).  It is reset on every received chunk
+/// — not a total cap on the response — because [`tls::client`]
+/// deliberately sets no request timeout to keep long, legitimately slow
+/// completions alive.  Without it a connection that goes silent (TCP
+/// open, bytes stopped) blocks `resp.stream.next()` forever; under the
+/// terminal-bench harness that hang is reaped only by the 900s wall,
+/// which kills the run and emits an empty result.json.  120s is generous
+/// enough not to trip on a slow time-to-first-token or a long inter-token
+/// gap, yet — even after the transient retry budget (~3 attempts, see
+/// [`MAX_ATTEMPTS`]) — stays well under that wall, so a truly stalled
+/// stream surfaces as a retryable transport error instead of hanging.
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ProviderKind {
@@ -912,6 +926,16 @@ impl Live {
                             _ = wait_for_cancel() => {
                                 return Err(ProviderError::Cancelled("before request"));
                             }
+                            // A fresh `sleep` per select entry bounds connect +
+                            // time-to-first-event; surfaced as a transient
+                            // transport error so the retry budget re-issues it
+                            // (no token has streamed yet).
+                            _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
+                                return Err(ProviderError::Transient {
+                                    cause: "stream idle: no response within timeout".into(),
+                                    attempts: 1,
+                                });
+                            }
                             r = self.client.exec_chat_stream(model, req, Some(&options)) => {
                                 r.map_err(|e| ProviderError::from_genai(&e, model))?
                             }
@@ -921,6 +945,16 @@ impl Live {
                                 biased;
                                 _ = wait_for_cancel() => {
                                     return Err(ProviderError::Cancelled("mid-stream"));
+                                }
+                                // Re-armed each loop iteration, so it is a
+                                // per-chunk idle timeout: a stream that stops
+                                // emitting events surfaces as a transient error
+                                // rather than blocking `next()` forever.
+                                _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
+                                    return Err(ProviderError::Transient {
+                                        cause: "stream idle: no event within timeout".into(),
+                                        attempts: 1,
+                                    });
                                 }
                                 ev = resp.stream.next() => match ev {
                                     Some(Ok(ev)) => ev,
@@ -1892,6 +1926,68 @@ mod tests {
             acc.cache_read,
             Some(2_000),
             "Some + None preserves the running total",
+        );
+    }
+
+    /// A stalled stream surfaces from `complete`'s select as a
+    /// `Transient` error *before* any token streamed — modelled here as
+    /// `Attempt::Failed(Transient)`.  Driven through the real retry loop
+    /// it must be re-issued up to `MAX_ATTEMPTS` and then surface `Err`
+    /// (bounded, never hanging) so the turn fails cleanly instead of
+    /// blocking until the harness wall.
+    #[test]
+    fn idle_timeout_before_token_is_retried_then_surfaced() {
+        let calls = std::cell::Cell::new(0u32);
+        let out: Result<(), ProviderError> =
+            make_runtime().block_on(retry_with_backoff("test", async |_attempt| {
+                calls.set(calls.get() + 1);
+                Attempt::Failed(ProviderError::Transient {
+                    cause: "stream idle: no event within timeout".into(),
+                    attempts: 1,
+                })
+            }));
+        assert_eq!(calls.get(), MAX_ATTEMPTS, "exhausts the transient budget");
+        match out {
+            Err(ProviderError::Transient { attempts, .. }) => {
+                assert_eq!(attempts, MAX_ATTEMPTS, "surfaced with the attempt count")
+            }
+            other => panic!("expected Transient after the budget, got {other:?}"),
+        }
+    }
+
+    /// Once tokens have streamed, `complete` reports the idle timeout as
+    /// `Attempt::Committed(Transient)`: a re-issue would double-render, so
+    /// the retry loop surfaces it immediately on the first attempt.
+    #[test]
+    fn idle_timeout_after_token_surfaces_without_retry() {
+        let calls = std::cell::Cell::new(0u32);
+        let out: Result<(), ProviderError> =
+            make_runtime().block_on(retry_with_backoff("test", async |_attempt| {
+                calls.set(calls.get() + 1);
+                Attempt::Committed(ProviderError::Transient {
+                    cause: "stream idle: no event within timeout".into(),
+                    attempts: 1,
+                })
+            }));
+        assert_eq!(calls.get(), 1, "committed output is not re-issued");
+        assert!(
+            matches!(out, Err(ProviderError::Transient { .. })),
+            "got {out:?}"
+        );
+    }
+
+    /// The idle timeout is an idle (between-events) bound, not a total
+    /// cap, and even the worst case — the full transient retry budget,
+    /// each attempt idling for the whole timeout — stays well under the
+    /// 900s terminal-bench harness wall.  This guards against a future
+    /// bump of `STREAM_IDLE_TIMEOUT` (or `MAX_ATTEMPTS`) that would
+    /// reintroduce the harness-kill hang.
+    #[test]
+    fn idle_timeout_budget_stays_under_harness_wall() {
+        let worst_case = STREAM_IDLE_TIMEOUT * MAX_ATTEMPTS;
+        assert!(
+            worst_case < Duration::from_secs(900),
+            "idle budget {worst_case:?} must stay under the 900s harness wall"
         );
     }
 }
