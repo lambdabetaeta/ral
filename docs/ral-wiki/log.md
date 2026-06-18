@@ -2828,3 +2828,18 @@ pages with still-resolving stamps untouched. 67 fields across ~38 pages
 moved; `--check` now reports zero dead stamps and doubles as a CI guard for
 the next rewrite. Inline prose hashes in `decisions/` and this log were left
 as-is.
+
+## [2026-06-18] lint | Semantic re-verify of internals/ and related/ after squash
+
+Followed the stamp re-baseline with a real semantic pass over the pages it
+reset to root. Confirmed every anchor on the eight flagged `internals/` pages
+still resolves in the source, and that no `decisions/` page supersedes the
+five `related/` pages' `against` design pages (all eight design pages exist,
+none superseded). Re-stamped the twelve confirmed pages to `a590f4f`. One
+genuine drift: [[internals/a-turn-end-to-end|a-turn-end-to-end]] still
+described the pre-unification two-evaluator spine; re-ingested it to the
+single `eval_turn` / `TurnFrame` / `TurnOutcome` model
+([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]), noting the
+`ral` batch path as the one un-unified entry. The live-stamped `internals/`
+pages (cancellation, capability-enforcement, pipeline-execution) were already
+current and left untouched.

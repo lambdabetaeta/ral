@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 7ba500b
-verified_at_date: 2026-06-17
+verified_at_commit: a590f4f
+verified_at_date: 2026-06-18
 anchors: [compile, compile_and_typecheck, CompileOutcome, SessionSchemes, bake_prelude, postcard, annotate, Wire]
 ---
 

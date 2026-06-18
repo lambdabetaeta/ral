@@ -41,10 +41,13 @@ The present TUI is a *narrative log*:
 Bertin's charge would be precise: the graphic possesses the variables to carry
 the data and declines to use them.
 
-## The decision: six moves
+## The decision: seven moves
 
-Each move binds one Bertin variable to one semantic dimension, on data the
-`Block` already holds. They compose; none requires a new event on the bus.
+Moves 1–6 bind one Bertin variable to one semantic dimension, on data the
+`Block` already holds. Move 7 extends the same principle — encode signal in the
+rendering medium rather than hiding it — into the *epistemic* register, where
+the signal is the model's own reliability. They compose; moves 1–6 need no new
+event on the bus, while move 7 can deepen with one.
 
 1. **The rail becomes a marginal index.** The left two columns, today uniform
    `❖`, encode three variables at once:
@@ -99,6 +102,23 @@ Each move binds one Bertin variable to one semantic dimension, on data the
    constructs the view by removing detail, the way one reduces a matrix to find
    its structure.
 
+7. **Coherent degradation: the interface's fidelity tracks the model's
+   capability.** Every agent TUI renders a degraded answer — one emitted under
+   context pressure, after retries, or with low confidence — identically to a
+   sound one, so the user trusts both the same. The interface lies about
+   reliability. Instead, let the rendering *degrade with* its source:
+   context-stressed responses render in a dimmer, lower-contrast typeface;
+   low-confidence ones waver (a subtle value oscillation); retried or
+   self-corrected passages carry a faint grain. The signal the model *has*
+   — logprobs, retry count, `last_input` against the context cap — drives the
+   rendering medium itself, not an icon beside it. The interface becomes
+   self-aware of its own unreliability: you stop trusting a confident-looking
+   answer that came from a degraded state. This extends the per-`Block` encoding
+   beyond Bertin's planar variables into the *epistemic* register — the medium
+   carries how-much-to-trust, not just what-happened. `last_input` against
+   `context_window` (already on `App`) is the seed signal; logprob or
+   retry-count exposure on `Kind` would deepen it.
+
 ## Why this shape
 
 - **The plane is reclaimed.** Position-y still defaults to time (narrative
@@ -117,6 +137,13 @@ Each move binds one Bertin variable to one semantic dimension, on data the
 - **Multi-agent legibility.** The matrix is the move that makes a fan-out of
   subagents readable — today a 1D tab bar loses the global picture the moment a
   second agent is born.
+- **The interface becomes honest about reliability.** Coherent degradation
+  makes the medium carry the model's own confidence, so a degraded answer no
+  longer borrows the visual authority of a sound one. This is the move that
+  cannot be argued against on Bertin's grounds — it is not a better encoding of
+  *what happened*, but the first encoding of *whether to trust it*. The seed
+  signal (`last_input` vs `context_window`) is already on `App`; the rendering
+  cost is a style modulation on the existing `Markdown`/`Chrome` paths.
 
 ## Sequencing
 
@@ -125,6 +152,9 @@ localised change to `tui/line.rs`'s rail construction, it makes the session
 scannable on its own, and it encodes the per-block variables every other
 projection reads. Move 3 (`rule_line`) is independent and can land in parallel.
 Moves 2 and 4–6 all consume the variables move 1 establishes, so they follow.
+Move 7 (coherent degradation) is independent of the rail and can land at any
+point; its seed signal is already present, and deeper signals (logprobs,
+retry count) arrive as `Kind` extensions without disturbing the other moves.
 
 ## Alternatives considered
 
@@ -151,6 +181,13 @@ Moves 2 and 4–6 all consume the variables move 1 establishes, so they follow.
   Move 1's value-ramp on tool calls may need a `Kind` extension or a derivation
   from `Kind::Usage`, or else defer tool-call magnitude to move 4's size bar
   keyed off the result.
+- **Degradation signal source.** Context pressure is derivable today; a richer
+  fidelity ramp wants logprob aggregates, retry counts, or self-correction
+  detection on `Kind`. The open question is which signal the provider exposes
+  cheaply enough to drive per-block rendering without stalling the stream, and
+  whether to degrade the *whole* turn (one fidelity) or per-paragraph (the
+  agent's confidence shifts mid-answer). Per-paragraph is more honest but needs
+  a stream-aligned signal; turn-level is the cheap seed.
 - **Projection switching surface.** The three projections need a keybinding and
   a default. The matrix and codebase map are views *over* the same buffer, not
   separate modes with separate state — the open question is the gesture, not
