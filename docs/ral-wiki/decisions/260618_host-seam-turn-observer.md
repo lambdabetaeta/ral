@@ -1,8 +1,18 @@
 ---
-status: proposed
+status: superseded
+superseded_by: decisions/260618_run-turn-host-loop
 ---
 
 # Both hosts drive a turn through one core entry; the surface is `!Send`
+
+> Superseded by
+> [[decisions/260618_run-turn-host-loop|a turn is a synchronous call; the host owns the loop]].
+> The diagnosis here stands, but making the surface `!Send` forces `Shell: !Send`,
+> which collides with exarch's `pump`/`Session` move (`session.rs:421`). The
+> successor deletes the channel-as-completion loop instead — completion becomes the
+> call returning, so the surface's thread-discipline stops mattering, `Shell` stays
+> `Send`, and `pump`/`drive`/`Emitter`-as-transport are removed rather than worked
+> around. The shared `run_turn` entry is kept.
 
 **The REPL and exarch must drive a turn the same way — through one core entry,
 `Shell::run_turn(src, TurnRequest) -> TurnReport`, supplying a single

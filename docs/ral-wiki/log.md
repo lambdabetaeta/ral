@@ -2863,3 +2863,28 @@ Ctrl-C and Ctrl-D quit only at idle, overlays close, and active-turn Ctrl-C/Esc
 drive the per-root-turn token. Removed the TUI kill-all binding and re-aligned
 [[internals/cancellation|cancellation]], [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]],
 and [[map/exarch/frontend|frontend]] with the smaller key algebra.
+
+## [2026-06-18] ingest | run-turn-host-loop supersedes host-seam-turn-observer
+
+Re-cut the daemon-task hang fix. [[decisions/260618_host-seam-turn-observer|host-seam-turn-observer]]
+had the diagnosis right — a detached `spawn` worker holds a clone of the turn's
+event `Sender` via the cloned `SurfaceSink`, so exarch's disconnect-gated `drive`
+never returns — but its fix (recast `SurfaceSink` to `Rc`, `!Send`) makes `Shell`
+`!Send`, which fails to compile against exarch's `pump`/`Session` move
+(`session.rs:421`, the `Send`-bounded scoped worker that owns the `Shell`). Verified
+the collision against the source, plus the rest of the mechanism (`bus.rs` `drive`,
+`inherit.rs:205/214` surface clone, `shell_eval.rs` frame build, the `surface`
+builtin at `misc.rs:530`), and that exarch already runs a tokio multi-thread runtime
+with `tokio::select!`/`spawn_blocking` (`provider.rs:591/621`).
+
+New decision [[decisions/260618_run-turn-host-loop|run-turn-host-loop]] (proposed):
+one synchronous, runtime-agnostic core entry `run_turn(src, &TurnRequest, &dyn
+EventSink) -> TurnReport`; the host owns the loop. Completion becomes the turn
+task's join future, not the channel's disconnect — so a detached worker holding a
+sender clone can no longer hang the turn, `Shell` stays `Send`, and `pump`/channel-
+`drive`/`Emitter`-transport are deleted rather than worked around. tokio never
+enters `ral_core` (the seam is a sync `EventSink` taking `Value`); the `surface`
+builtin is unchanged, only its carrier moves from a stored cloned closure to the
+borrowed turn sink. Completes [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]
+(REPL + exarch + the `main.rs` batch path become request suppliers) by removing a
+thread rather than adding a type. host-seam-turn-observer set to `superseded`.
