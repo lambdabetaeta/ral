@@ -1,13 +1,14 @@
 //! Collapsible scrollback blocks.
 //!
 //! A viewport's scrollback is a sequence of [`Block`]s, not a flat line
-//! buffer.  A tool call is the one interactive block — it renders as its
-//! summary when shut and as the full ral script when open — and every
-//! other block carries content that renders the same way every time:
-//! streamed markdown source, a diff, or pre-built chrome lines.  Each
+//! buffer.  Three block kinds are *dialable* — tool calls, patches, and
+//! markdown — each carrying a disclosure [`Block::level`] (0–3) that
+//! grades how much it reveals: from the rail glyph alone (L0) up through a
+//! one-line summary (L1) and a few lines of context (L2) to the full
+//! source (L3).  Chrome is already 1–few lines, so it stays full.  Each
 //! block memoises the lines it last produced, keyed by the width it was
 //! asked for, so re-flattening the buffer each frame re-renders only the
-//! block the user just toggled, or the whole buffer once on a resize.
+//! block the user just dialed, or the whole buffer once on a resize.
 
 use super::line::{self, READ_W, RAIL_W, is_blank};
 use super::md::{self, MD_INDENT};
@@ -38,17 +39,16 @@ pub(super) enum RailShape {
 }
 
 /// What a block carries.  Each variant renders as a pure function of its
-/// data and the target width — and, for a tool call, its open state.
+/// data, the target width, and the block's disclosure [`level`].
 pub(super) enum BlockKind {
     /// A tool call worth revealing: `summary` is the one-line label
-    /// shown shut, `cmd` the full ral source shown open.  Summary-less
-    /// calls (the `fff` query, an invalid-input header) have nothing to
-    /// reveal and arrive as [`BlockKind::Chrome`] instead.
+    /// shown reduced, `cmd` the full ral source shown revealed.
+    /// Summary-less calls (the `fff` query, an invalid-input header) have
+    /// nothing to reveal and arrive as [`BlockKind::Chrome`] instead.
     ToolCall {
         tool: &'static str,
         summary: String,
         cmd: String,
-        open: bool,
     },
     /// Streamed assistant prose; re-wrapped from source at every width.
     Markdown(String),
@@ -65,9 +65,19 @@ pub(super) enum BlockKind {
     },
 }
 
+/// Number of source/content lines L2 reveals around the summary — the
+/// `±N` context window for the partial views of every dialable kind.
+const N: usize = 3;
+
 /// A block paired with the lines it last rendered, memoised by width.
 pub(super) struct Block {
     kind: BlockKind,
+    /// Disclosure level, `0..=3`: L0 rail glyph alone, L1 summary, L2
+    /// summary + [`N`] lines of context, L3 full source.  Set at
+    /// construction per kind (conservative defaults preserve today's
+    /// rendering), dialed by [`Self::dial`].  Inert on chrome, which
+    /// always renders full.
+    level: u8,
     /// The producing agent's palette slot, stamped at push.
     agent: AgentSlot,
     /// A tool call's result magnitude — `text.lines().count()` of its
@@ -84,9 +94,18 @@ pub(super) struct Block {
 }
 
 impl Block {
+    /// Build a block at its kind's default level — conservative so
+    /// nothing changes visually until the user dials: `ToolCall` at L1
+    /// (today's collapsed view), every other kind at L3 (today's full
+    /// render).
     fn new(kind: BlockKind, agent: AgentSlot) -> Self {
+        let level = match kind {
+            BlockKind::ToolCall { .. } => 1,
+            _ => 3,
+        };
         Self {
             kind,
+            level,
             agent,
             result_size: None,
             cache: None,
@@ -100,15 +119,7 @@ impl Block {
         cmd: String,
         agent: AgentSlot,
     ) -> Self {
-        Self::new(
-            BlockKind::ToolCall {
-                tool,
-                summary,
-                cmd,
-                open: false,
-            },
-            agent,
-        )
+        Self::new(BlockKind::ToolCall { tool, summary, cmd }, agent)
     }
     pub(super) fn markdown(src: String, agent: AgentSlot) -> Self {
         Self::new(BlockKind::Markdown(src), agent)
@@ -125,6 +136,11 @@ impl Block {
         self.agent
     }
 
+    /// The block's current disclosure level (`0..=3`).
+    pub(super) fn level(&self) -> u8 {
+        self.level
+    }
+
     /// The block's magnitude, where defined: total changed lines
     /// (deletions + additions) for a patch, `None` elsewhere.  The rail's
     /// value-step and the header size-bar both read this.
@@ -135,9 +151,13 @@ impl Block {
         }
     }
 
-    /// True for the one block kind a click opens.
-    pub(super) fn expandable(&self) -> bool {
-        matches!(self.kind, BlockKind::ToolCall { .. })
+    /// True for the block kinds whose disclosure [`Self::level`] the user
+    /// can dial: tool calls, patches, and markdown.  Chrome is inert.
+    pub(super) fn dialable(&self) -> bool {
+        matches!(
+            self.kind,
+            BlockKind::ToolCall { .. } | BlockKind::Patch { .. } | BlockKind::Markdown(_)
+        )
     }
 
     /// True for a tool call — the one block kind a result magnitude
@@ -155,11 +175,29 @@ impl Block {
         self.cache = None;
     }
 
-    /// Flip a tool call between shut and open, dropping its memo; a
-    /// no-op on any other block.
-    pub(super) fn toggle(&mut self) {
-        if let BlockKind::ToolCall { open, .. } = &mut self.kind {
-            *open = !*open;
+    /// Dial the disclosure level by `delta`, clamped to `0..=3`, dropping
+    /// the memo when it changed so the body re-renders at the new level.
+    /// A no-op on a non-dialable block or when already at the clamp.
+    pub(super) fn dial(&mut self, delta: i8) {
+        if !self.dialable() {
+            return;
+        }
+        let next = (self.level as i8 + delta).clamp(0, 3) as u8;
+        if next != self.level {
+            self.level = next;
+            self.cache = None;
+        }
+    }
+
+    /// Cycle a dialable block between L1 (reduced) and L3 (revealed) —
+    /// the click-on-rail affordance, preserving today's click-to-expand.
+    pub(super) fn cycle(&mut self) {
+        if !self.dialable() {
+            return;
+        }
+        let next = if self.level >= 3 { 1 } else { 3 };
+        if next != self.level {
+            self.level = next;
             self.cache = None;
         }
     }
@@ -175,10 +213,10 @@ impl Block {
     }
 
     /// The block as it belongs in the session log: full content,
-    /// width-independent — a tool call always opened, so the script is
-    /// on the record even while shut on screen.  Routes through the same
-    /// rendering path as [`Self::render`] (rail included) with the tool
-    /// call forced open.
+    /// width-independent — every dialable block rendered at L3 regardless
+    /// of its live level, so the script / diff / prose is on the record
+    /// even while reduced on screen.  Routes through the same rendering
+    /// path as [`Self::render`] (rail included) with the level forced full.
     pub(super) fn log_lines(&self) -> Vec<Line<'static>> {
         self.render_with(READ_W, true)
     }
@@ -187,13 +225,26 @@ impl Block {
         self.render_with(width, false)
     }
 
+    /// The level at which to render: the live [`Self::level`], or L3 when
+    /// `force_full` — the log path, which records the complete block.
+    fn render_level(&self, force_full: bool) -> u8 {
+        if force_full { 3 } else { self.level }
+    }
+
     /// Build the block's body lines (rail-less) then prepend the
-    /// data-encoding rail span to the first content row.  `force_open`
-    /// reveals a tool call's full script regardless of its toggle — used
-    /// only by [`Self::log_lines`] so the on-disk transcript is complete.
-    fn render_with(&self, width: u16, force_open: bool) -> Vec<Line<'static>> {
-        let mut lines = self.body(width, force_open);
-        let kind = self.rail_kind(force_open);
+    /// data-encoding rail span to the first content row.  `force_full`
+    /// renders every dialable block at L3 regardless of its live level —
+    /// used only by [`Self::log_lines`] so the on-disk transcript is
+    /// complete.
+    fn render_with(&self, width: u16, force_full: bool) -> Vec<Line<'static>> {
+        let level = self.render_level(force_full);
+        let mut lines = self.body(width, level);
+        // L0 reduces the body to nothing; the rail glyph alone remains, so
+        // synthesise the single blank row it is prepended to.
+        if lines.is_empty() {
+            lines.push(Line::default());
+        }
+        let kind = self.rail_kind(level);
         let rail = rail::span(kind, self.agent, self.magnitude());
         // Markdown insets every row by `MD_INDENT`; the rail occupies the
         // first `RAIL_W` columns of that inset on the opening row, so shrink
@@ -209,33 +260,45 @@ impl Block {
         lines
     }
 
-    /// The rail-less body at `width`.
-    fn body(&self, width: u16, force_open: bool) -> Vec<Line<'static>> {
+    /// The rail-less body at `width`, graded by `level`.  L0 reveals
+    /// nothing (only the rail survives, prepended by [`Self::render_with`]);
+    /// L1 the one-line summary; L2 the summary plus [`N`] lines of context;
+    /// L3 the full source.  Chrome ignores the level — it is always full.
+    fn body(&self, width: u16, level: u8) -> Vec<Line<'static>> {
+        if level == 0 && self.dialable() {
+            return Vec::new();
+        }
         match &self.kind {
             BlockKind::ToolCall {
                 tool,
                 summary,
                 cmd,
-                open,
-            } => {
-                if *open || force_open {
-                    line::tool_call_expanded(summary, tool, cmd, width)
-                } else {
-                    line::tool_call_collapsed(summary, tool, self.result_size, width)
-                }
-            }
-            BlockKind::Markdown(src) => md::render_md(src, width, MD_INDENT),
-            BlockKind::Patch { path, hunks } => line::patch(path, hunks),
+            } => match level {
+                3 => line::tool_call_expanded(summary, tool, cmd, width),
+                2 => line::tool_call_context(summary, tool, cmd, N, width),
+                _ => line::tool_call_collapsed(summary, tool, self.result_size, width),
+            },
+            BlockKind::Markdown(src) => match level {
+                3 => md::render_md(src, width, MD_INDENT),
+                2 => first_rows(md::render_md(src, width, MD_INDENT), N),
+                _ => first_rows(md::render_md(src, width, MD_INDENT), 1),
+            },
+            BlockKind::Patch { path, hunks } => match level {
+                3 => line::patch(path, hunks),
+                2 => line::patch_context(path, hunks, N),
+                _ => line::patch_header_only(path, hunks),
+            },
             BlockKind::Chrome { lines, .. } => lines.clone(),
         }
     }
 
     /// The rail shape this block wears.  Chrome lifts its [`RailShape`]
     /// discriminant; patches, tool calls, and markdown derive theirs from
-    /// the variant.
-    fn rail_kind(&self, force_open: bool) -> RailKind {
+    /// the variant.  A tool call's disclosure triangle tracks the level:
+    /// `▾` once it reveals context (L2+), `▸` while reduced.
+    fn rail_kind(&self, level: u8) -> RailKind {
         match &self.kind {
-            BlockKind::ToolCall { open, .. } => RailKind::ToolCall(*open || force_open),
+            BlockKind::ToolCall { .. } => RailKind::ToolCall(level >= 2),
             BlockKind::Markdown(_) => RailKind::Markdown,
             BlockKind::Patch { .. } => RailKind::Patch,
             BlockKind::Chrome { shape, .. } => match shape {
@@ -245,6 +308,19 @@ impl Block {
             },
         }
     }
+}
+
+/// The first `k` rendered rows of `lines`, preserving leading blanks but
+/// keeping at least one row so the rail always has somewhere to land.
+/// Used for the partial markdown views (L1/L2): `render_md` lays out the
+/// whole block, and truncating its rows keeps a code fence's opening
+/// rows intact rather than re-parsing a prefix of the source.
+fn first_rows(mut lines: Vec<Line<'static>>, k: usize) -> Vec<Line<'static>> {
+    // Skip the leading blank `render_md` does not emit (markdown opens
+    // flush), so `k` counts content rows; a blank-only block keeps one row.
+    let lead = lines.iter().take_while(|l| is_blank(l)).count();
+    lines.truncate((lead + k).max(1));
+    lines
 }
 
 /// Shrink the leading whitespace of `line` by `n` cells, trimming the

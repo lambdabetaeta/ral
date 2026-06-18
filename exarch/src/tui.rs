@@ -65,7 +65,7 @@ use std::{
 
 use line::{
     AGENT_HUES, BANNER_CYAN, BANNER_GOLD, BANNER_LIME, BANNER_ORANGE, BANNER_PINK, BANNER_PURPLE,
-    BANNER_RED, CYAN, LIME, ORANGE, PINK, PURPLE, READ_W, SLATE, bold, slate, slate_owned,
+    BANNER_RED, CYAN, LIME, ORANGE, PINK, PURPLE, RAIL_W, READ_W, SLATE, bold, slate, slate_owned,
 };
 use viewport::{PhaseSeg, Viewport};
 
@@ -303,8 +303,11 @@ struct FrameGeom {
 struct Press {
     /// Buffer row under the press — the selection anchor.
     row: usize,
-    /// Block under the press, toggled on a click that never dragged.
+    /// Block under the press, cycled on a rail click that never dragged.
     block: Option<usize>,
+    /// Whether the press landed on the rail column (cols 0–1), where a
+    /// click cycles the block; a click off the rail stays selection.
+    on_rail: bool,
     dragged: bool,
 }
 
@@ -985,6 +988,11 @@ impl App {
     /// own selection, so we never see — or fight — it.
     pub fn mouse(&mut self, me: MouseEvent) {
         match me.kind {
+            // Over the rail and a dialable block, the wheel dials the
+            // block's disclosure level (up reveals, down reduces) and
+            // consumes the event; otherwise it scrolls the viewport.
+            MouseEventKind::ScrollUp if self.rail_dial(me, 1) => {}
+            MouseEventKind::ScrollDown if self.rail_dial(me, -1) => {}
             MouseEventKind::ScrollUp => self.scroll(-(SCROLL_STEP as isize)),
             MouseEventKind::ScrollDown => self.scroll(SCROLL_STEP as isize),
             MouseEventKind::Down(MouseButton::Left)
@@ -996,6 +1004,37 @@ impl App {
             MouseEventKind::Up(MouseButton::Left) => self.release(),
             _ => {}
         }
+    }
+
+    /// Map a mouse event over the rail column to its buffer row's block,
+    /// or `None` when the event falls outside the rail (cols 0–1 of the
+    /// content rect) or past the buffer.
+    fn rail_block(&self, me: MouseEvent) -> Option<usize> {
+        let frame = self.frame?;
+        let on_rail = me.column >= frame.text.x
+            && (me.column as usize) < frame.text.x as usize + RAIL_W
+            && me.row >= frame.text.y
+            && me.row < frame.text.y + frame.text.height;
+        if !on_rail {
+            return None;
+        }
+        let row = frame.offset + (me.row - frame.text.y) as usize;
+        self.viewports.get(&self.focused())?.block_at(row)
+    }
+
+    /// Dial the block under a rail-column wheel event by `delta`,
+    /// returning whether the event was consumed — `true` only when it sat
+    /// on the rail of a dialable block, leaving the wheel to scroll
+    /// otherwise.
+    fn rail_dial(&mut self, me: MouseEvent, delta: i8) -> bool {
+        let Some(idx) = self.rail_block(me) else {
+            return false;
+        };
+        let id = self.focused();
+        let Some(vp) = self.viewports.get_mut(&id) else {
+            return false;
+        };
+        vp.dial_block(idx, delta)
     }
 
     /// Scroll the focused pane by `delta` rows (negative = up).
@@ -1032,9 +1071,11 @@ impl App {
         let row = frame.offset + (me.row - frame.text.y) as usize;
         let id = self.focused();
         let block = self.viewports.get(&id).and_then(|vp| vp.block_at(row));
+        let on_rail = (me.column as usize) < frame.text.x as usize + RAIL_W;
         self.press = Some(Press {
             row,
             block,
+            on_rail,
             dragged: false,
         });
     }
@@ -1054,7 +1095,8 @@ impl App {
     }
 
     /// Finish a left-button gesture: a drag copies its selection, a bare
-    /// click opens the tool call it landed on.
+    /// click on the rail cycles the block it landed on (L1↔L3); a click
+    /// off the rail stays selection.
     fn release(&mut self) {
         let Some(press) = self.press.take() else {
             return;
@@ -1066,9 +1108,9 @@ impl App {
             {
                 let _ = osc52_copy(&vp.selection_text(a.min(b), a.max(b)));
             }
-        } else if let Some(idx) = press.block {
+        } else if press.on_rail && let Some(idx) = press.block {
             if let Some(vp) = self.viewports.get_mut(&id) {
-                vp.toggle_block(idx);
+                vp.cycle_block(idx);
             }
             self.selection = None;
         }

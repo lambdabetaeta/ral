@@ -279,7 +279,7 @@ pub(super) fn tool_call_collapsed(
     ls
 }
 
-/// Expanded tool call: the `▾` header followed by the full ral `cmd`.
+/// Expanded tool call (L3): the `▾` header followed by the full ral `cmd`.
 /// Both the header comment and source body wrap before the viewport edge:
 /// header continuations align under the comment, and source continuations
 /// align under the line's own opening indentation.
@@ -289,10 +289,38 @@ pub(super) fn tool_call_expanded(
     cmd: &str,
     width: u16,
 ) -> Vec<Line<'static>> {
+    tool_call_body(label, tool, cmd, None, width)
+}
+
+/// Tool call with context (L2): the header followed by the first `n`
+/// source lines of `cmd`.  The same layout as [`tool_call_expanded`],
+/// only the script is capped to `n` rows so the call reveals its head
+/// without unrolling a long block.
+pub(super) fn tool_call_context(
+    label: &str,
+    tool: &str,
+    cmd: &str,
+    n: usize,
+    width: u16,
+) -> Vec<Line<'static>> {
+    tool_call_body(label, tool, cmd, Some(n), width)
+}
+
+/// Shared body for the revealed tool-call views: the header, a blank, then
+/// `cmd`'s source rows — all of them when `cap` is `None` (L3), or the
+/// first `cap` source lines (L2).
+fn tool_call_body(
+    label: &str,
+    tool: &str,
+    cmd: &str,
+    cap: Option<usize>,
+    width: u16,
+) -> Vec<Line<'static>> {
     let mut ls = vec![Line::default()];
     ls.extend(tool_call_header(label, tool, None, width));
     ls.push(Line::default());
-    for l in cmd.lines() {
+    let take = cap.unwrap_or(usize::MAX);
+    for l in cmd.lines().take(take) {
         push_code_row(&mut ls, l, width);
     }
     ls
@@ -365,23 +393,49 @@ pub(super) fn error(msg: &str) -> Vec<Line<'static>> {
 /// plain text.  Patches are the canonical user-visible side effect of a
 /// tool call, so they always render.
 pub(super) fn patch(path: &str, hunks: &[Hunk]) -> Vec<Line<'static>> {
-    let mut ls: Vec<Line<'static>> = vec![
-        Line::default(),
-        Line::from(vec![
-            Span::styled("patch", Style::default().fg(SLATE)),
-            Span::raw("  "),
-            Span::styled(path.to_string(), Style::default().fg(Color::White)),
-            Span::raw("  "),
-            size_bar(patch_magnitude(hunks)),
-            Span::raw("  "),
-            grain_run(
-                hunks.iter().map(|h| h.add.len() as u32).sum(),
-                hunks.iter().map(|h| h.del.len() as u32).sum(),
-            ),
-        ]),
-    ];
-    // One gutter width for the whole block — the widest number any hunk
-    // will show — so every row's text column lines up under the header.
+    patch_capped(path, hunks, None)
+}
+
+/// Patch header only (L1): the `▎ patch <path>` row with its size-bar and
+/// grain (Phases 3–4), no hunk rows.
+pub(super) fn patch_header_only(path: &str, hunks: &[Hunk]) -> Vec<Line<'static>> {
+    vec![Line::default(), patch_header(path, hunks)]
+}
+
+/// Patch with context (L2): the header followed by the first hunk only —
+/// its leading/trailing context (already `±` source lines on the [`Hunk`])
+/// and changed rows — so the diff reveals its first change without
+/// unrolling every hunk.  `_n` is the disclosure context window; the
+/// hunk already carries its own located context, so the first hunk *is*
+/// the bounded view.
+pub(super) fn patch_context(path: &str, hunks: &[Hunk], _n: usize) -> Vec<Line<'static>> {
+    patch_capped(path, hunks, Some(1))
+}
+
+/// The `▎ patch <path>` header row: slate label, white path, the
+/// `log2`-scaled [`size_bar`] and the addition-ratio [`grain_run`].
+/// Shared by every patch view so the L1/L2/L3 headers never drift.
+fn patch_header(path: &str, hunks: &[Hunk]) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("patch", Style::default().fg(SLATE)),
+        Span::raw("  "),
+        Span::styled(path.to_string(), Style::default().fg(Color::White)),
+        Span::raw("  "),
+        size_bar(patch_magnitude(hunks)),
+        Span::raw("  "),
+        grain_run(
+            hunks.iter().map(|h| h.add.len() as u32).sum(),
+            hunks.iter().map(|h| h.del.len() as u32).sum(),
+        ),
+    ])
+}
+
+/// Shared patch body: the header, then `cap` hunks (all when `None`),
+/// elision-separated, numbered against one gutter sized for the whole
+/// block so every row's text column lines up under the header.
+fn patch_capped(path: &str, hunks: &[Hunk], cap: Option<usize>) -> Vec<Line<'static>> {
+    let mut ls: Vec<Line<'static>> = vec![Line::default(), patch_header(path, hunks)];
+    let shown = cap.unwrap_or(hunks.len()).min(hunks.len());
     let gutter = hunks
         .iter()
         .map(hunk_max_lineno)
@@ -390,7 +444,7 @@ pub(super) fn patch(path: &str, hunks: &[Hunk]) -> Vec<Line<'static>> {
         .to_string()
         .len()
         .max(3);
-    for (i, h) in hunks.iter().enumerate() {
+    for (i, h) in hunks[..shown].iter().enumerate() {
         if i > 0 {
             ls.push(Line::from(vec![
                 Span::raw("  "),

@@ -334,19 +334,35 @@ impl Viewport {
         self.flat.row_block.get(row).copied()
     }
 
-    /// Toggle the block at `idx` if it is expandable, returning whether
-    /// it changed — so the caller can tell a real toggle from a click on
-    /// inert chrome.
-    pub(super) fn toggle_block(&mut self, idx: usize) -> bool {
+    /// Dial the block at `idx` by `delta` if it is dialable, returning
+    /// whether it changed — so the caller can tell a real dial from a
+    /// gesture on inert chrome or a clamped level.
+    pub(super) fn dial_block(&mut self, idx: usize, delta: i8) -> bool {
+        self.mutate_block(idx, |b| b.dial(delta))
+    }
+
+    /// Cycle the block at `idx` between L1 and L3 — the click-on-rail
+    /// affordance — returning whether it changed.
+    pub(super) fn cycle_block(&mut self, idx: usize) -> bool {
+        self.mutate_block(idx, Block::cycle)
+    }
+
+    /// Apply `f` to the dialable block at `idx`, marking the flatten stale
+    /// when its memo actually dropped, and report whether it changed.
+    fn mutate_block(&mut self, idx: usize, f: impl FnOnce(&mut Block)) -> bool {
         let Some(block) = self.blocks.get_mut(idx) else {
             return false;
         };
-        if !block.expandable() {
+        if !block.dialable() {
             return false;
         }
-        block.toggle();
-        self.flat.dirty = true;
-        true
+        let before = block.level();
+        f(block);
+        let changed = block.level() != before;
+        if changed {
+            self.flat.dirty = true;
+        }
+        changed
     }
 
     pub(super) fn scroll_up(&mut self, n: usize) {
@@ -491,10 +507,10 @@ mod tests {
         assert_eq!(&s[..idx], "intro\n\n```\nx\n\ny\n```\n\n");
     }
 
-    /// A tool call shows only its summary shut, and reveals the full
-    /// script when toggled open — the click-to-expand contract.
+    /// A tool call shows only its summary at its default L1, and reveals
+    /// the full script when dialed up to L3 — the disclosure contract.
     #[test]
-    fn tool_call_expands_on_toggle() {
+    fn tool_call_expands_on_dial() {
         let mut vp = fresh();
         vp.push_tool_call(
             "ral",
@@ -504,10 +520,63 @@ mod tests {
         let shut = vp.flatten_text(READ_W);
         assert!(shut.iter().any(|t| t.contains("build the parser")));
         assert!(!shut.iter().any(|t| t.contains("cargo build")));
-        assert!(vp.toggle_block(0), "a tool call is expandable");
+        // Dial up to L3 (default L1 → +2 reaches full).
+        assert!(vp.dial_block(0, 2), "a tool call is dialable");
         let open = vp.flatten_text(READ_W);
         assert!(open.iter().any(|t| t.contains("cargo build")));
         assert!(open.iter().any(|t| t.contains("ral test")));
+    }
+
+    /// Dialing clamps at the ends of the `0..=3` range: a tool call at L1
+    /// reduces to L0 (rail glyph alone, no summary) and stops; revealed to
+    /// L3 it reaches the full script and stops.  A dial that does not move
+    /// the level reports no change so an inert wheel scrolls instead.
+    #[test]
+    fn dial_clamps_at_zero_and_three() {
+        let mut vp = fresh();
+        vp.push_tool_call("ral", "the summary".into(), "the script".into());
+        // Default L1 down to L0: the summary disappears, only the rail
+        // glyph remains.
+        assert!(vp.dial_block(0, -1), "L1 → L0 changes");
+        let l0 = vp.flatten_text(READ_W);
+        assert!(!l0.iter().any(|t| t.contains("the summary")));
+        // Already at the floor: a further reduction is a no-op.
+        assert!(!vp.dial_block(0, -1), "L0 clamps, no change");
+        // Up past L3 clamps: three +1 steps reach L3, a fourth is a no-op.
+        assert!(vp.dial_block(0, 1)); // L0 → L1
+        assert!(vp.dial_block(0, 1)); // L1 → L2
+        assert!(vp.dial_block(0, 1)); // L2 → L3
+        assert!(!vp.dial_block(0, 1), "L3 clamps, no change");
+        let l3 = vp.flatten_text(READ_W);
+        assert!(l3.iter().any(|t| t.contains("the script")));
+    }
+
+    /// A patch defaults to L3 (today's full diff); dialed down to L1 it
+    /// shows the `patch <path>` header but drops every hunk row, and
+    /// cycling it returns to the full diff.
+    #[test]
+    fn patch_reduces_to_header_only() {
+        let mut vp = fresh();
+        let hunk = Hunk {
+            start: 10,
+            before: vec![],
+            del: vec!["gone".into()],
+            add: vec!["fresh".into()],
+            after: vec![],
+        };
+        vp.push_patch("src/foo.rs".into(), vec![hunk]);
+        let full = vp.flatten_text(READ_W);
+        assert!(full.iter().any(|t| t.contains("patch")));
+        assert!(full.iter().any(|t| t.contains("fresh")), "L3 shows the hunk");
+        // L3 down to L1 (−2): header survives, hunk rows vanish.
+        assert!(vp.dial_block(0, -2), "patch is dialable");
+        let l1 = vp.flatten_text(READ_W);
+        assert!(l1.iter().any(|t| t.contains("patch")), "header survives");
+        assert!(!l1.iter().any(|t| t.contains("fresh")), "no hunk at L1");
+        // Cycling from L1 reveals the full diff again.
+        assert!(vp.cycle_block(0), "cycle L1 → L3");
+        let cycled = vp.flatten_text(READ_W);
+        assert!(cycled.iter().any(|t| t.contains("fresh")), "diff back at L3");
     }
 
     /// `Ctrl+Y` yanks the rail-stripped text of what is on screen — the
