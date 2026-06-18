@@ -6,7 +6,7 @@ status: fixed
 
 Two sibling bugs in how non-local escapes propagated through scope boundaries,
 fixed together and pinned by regression tests in `core/tests/scope_escapes.rs`
-(`3f042a4`, 2026-05-14).
+(`try_does_not_swallow_exit`, `grant_attenuates_across_tail_recursion`).
 
 **try swallows exit.** `try` caught more than it should: a genuine `exit`
 escaping through a `try` body was absorbed as if it were a recoverable failure,
