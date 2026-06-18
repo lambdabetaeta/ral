@@ -125,6 +125,36 @@ pub(super) fn size_bar(magnitude: u32) -> Span<'static> {
     Span::styled(bar, Style::default().fg(SLATE))
 }
 
+/// Width in cells of the header grain run — the patch's diff density
+/// (Bertin's grain), reading *what kind* of change beside the size-bar's
+/// *how much*.
+const GRAIN_W: usize = 4;
+
+/// The header grain span: a run of [`GRAIN_W`] braille cells whose
+/// density encodes the addition ratio `add / (add + del)` on the ramp
+/// `⣿⣶⣤⣀` — `⣿` (full) is all additions, `⣀` (sparse) is all deletions.
+/// The ratio is bucketed into quartiles so "mostly additions / balanced
+/// / mostly deletions" reads pre-attentively: `≥0.75 → ⣿`, `≥0.50 → ⣶`,
+/// `≥0.25 → ⣤`, else `⣀`.  Styled [`SLATE`] to match the size-bar — it is
+/// decorative ink, not a data colour that would collide with the `+`/`-`
+/// line colours.  A patch with no changed lines (`add + del == 0`) has no
+/// balance to show and renders blank.
+pub(super) fn grain_run(add: u32, del: u32) -> Span<'static> {
+    let total = add + del;
+    let cell = if total == 0 {
+        ' '
+    } else {
+        let ratio = add as f32 / total as f32;
+        match (ratio * GRAIN_W as f32) as usize {
+            3.. => '⣿',
+            2 => '⣶',
+            1 => '⣤',
+            _ => '⣀',
+        }
+    };
+    Span::styled(cell.to_string().repeat(GRAIN_W), Style::default().fg(SLATE))
+}
+
 // ── Public line builders ─────────────────────────────────────────────────────
 
 /// Step separator: one blank line.  The step number itself is recorded
@@ -343,6 +373,11 @@ pub(super) fn patch(path: &str, hunks: &[Hunk]) -> Vec<Line<'static>> {
             Span::styled(path.to_string(), Style::default().fg(Color::White)),
             Span::raw("  "),
             size_bar(patch_magnitude(hunks)),
+            Span::raw("  "),
+            grain_run(
+                hunks.iter().map(|h| h.add.len() as u32).sum(),
+                hunks.iter().map(|h| h.del.len() as u32).sum(),
+            ),
         ]),
     ];
     // One gutter width for the whole block — the widest number any hunk
@@ -795,6 +830,44 @@ mod tests {
             fill(&small),
         );
         assert_eq!(fill(&large), SIZE_BAR_W, "a 500-line patch fills the bar");
+    }
+
+    /// The patch header carries a grain run after the size-bar whose
+    /// braille density encodes the addition ratio: a mostly-additions
+    /// patch reads fuller (`⣿`) than a balanced one (`⣶`), which reads
+    /// fuller than a mostly-deletions patch (`⣀`).
+    #[test]
+    fn patch_header_grain_tracks_addition_ratio() {
+        let hunk = |del: usize, add: usize| Hunk {
+            start: 1,
+            before: vec![],
+            del: vec!["x".to_string(); del],
+            add: vec!["y".to_string(); add],
+            after: vec![],
+        };
+        let grain = |hunks: &[Hunk]| -> char {
+            patch("src/foo.rs", hunks)[1]
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+                .chars()
+                .find(|c| "⣿⣶⣤⣀".contains(*c))
+                .expect("header must carry a grain cell")
+        };
+        assert_eq!(grain(&[hunk(0, 10)]), '⣿', "all additions reads full");
+        assert_eq!(grain(&[hunk(5, 5)]), '⣶', "a balanced patch reads middle");
+        assert_eq!(grain(&[hunk(10, 0)]), '⣀', "all deletions reads sparse");
+        let denser = "⣿⣶⣤⣀";
+        let pos = |c: char| denser.find(c).unwrap();
+        assert!(
+            pos(grain(&[hunk(0, 10)])) < pos(grain(&[hunk(5, 5)])),
+            "more additions reads denser",
+        );
+        assert!(
+            pos(grain(&[hunk(5, 5)])) < pos(grain(&[hunk(10, 0)])),
+            "more deletions reads sparser",
+        );
     }
 
     /// A 400-character `cause` must wrap into many rows and every row
