@@ -38,5 +38,4 @@ page's own restraint principle — *types only where the compiler can prevent a
 realistic mistake* — once those boundaries held, the wrappers did not earn their
 place.
 
-Full study:
-`dev/docs/260430_flow.md`. See also [[map/core|core]], [[design/scoping|scoping]].
+See also [[map/core|core]], [[design/scoping|scoping]].
