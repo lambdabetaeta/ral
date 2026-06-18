@@ -2855,3 +2855,11 @@ discriminant on `tui/block.rs`), the data-encoding marginal rail (Move 1 —
 ribbon (Move 3 — spinner dropped, `phase` state moved off `App` onto
 `Viewport`). Decision status `proposed → active`; re-stamped
 [[map/exarch/frontend|frontend]] to `d8dbd81`. Phases 3–8 remain proposed.
+
+## [2026-06-18] ingest | exarch TUI key algebra collapsed
+
+Collapsed the TUI key surface to quit / close-overlay / active-turn interrupt:
+Ctrl-C and Ctrl-D quit only at idle, overlays close, and active-turn Ctrl-C/Esc
+drive the per-root-turn token. Removed the TUI kill-all binding and re-aligned
+[[internals/cancellation|cancellation]], [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]],
+and [[map/exarch/frontend|frontend]] with the smaller key algebra.

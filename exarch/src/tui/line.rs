@@ -104,7 +104,10 @@ const SIZE_BAR_W: usize = 8;
 /// header [`size_bar`] read.  One definition so the rail's value-step
 /// and the header bar never drift apart.
 pub(super) fn patch_magnitude(hunks: &[Hunk]) -> u32 {
-    hunks.iter().map(|h| (h.del.len() + h.add.len()) as u32).sum()
+    hunks
+        .iter()
+        .map(|h| (h.del.len() + h.add.len()) as u32)
+        .sum()
 }
 
 /// Map `magnitude` to a filled-cell count on a `log2` scale, clamped to
@@ -121,7 +124,11 @@ fn size_cells(magnitude: u32) -> usize {
 /// magnitude renders an all-empty bar.
 pub(super) fn size_bar(magnitude: u32) -> Span<'static> {
     let filled = size_cells(magnitude);
-    let bar: String = "█".repeat(filled).chars().chain("░".repeat(SIZE_BAR_W - filled).chars()).collect();
+    let bar: String = "█"
+        .repeat(filled)
+        .chars()
+        .chain("░".repeat(SIZE_BAR_W - filled).chars())
+        .collect();
     Span::styled(bar, Style::default().fg(SLATE))
 }
 
@@ -357,7 +364,12 @@ fn push_code_row(ls: &mut Vec<Line<'static>>, line: &str, width: u16) {
 /// is the label, any remainder follows 2-space indented.
 pub(super) fn tool_call_static(cmd: &str, tool: &str) -> Vec<Line<'static>> {
     let mut ls = vec![Line::default()];
-    ls.extend(tool_call_header(cmd.lines().next().unwrap_or(""), tool, None, READ_W));
+    ls.extend(tool_call_header(
+        cmd.lines().next().unwrap_or(""),
+        tool,
+        None,
+        READ_W,
+    ));
     for l in cmd.lines().skip(1) {
         ls.push(Line::from(vec![
             Span::raw("  "),

@@ -59,7 +59,10 @@ pub(crate) const BUNDLED_TOOL_FLAG: &str = "--ral-bundled-tool";
 /// immediately.  Mirrors [`ANCHOR_FD_ENV`]: the child reads the
 /// descriptor to EOF and proceeds.  Only the bundled-tool entrypoint
 /// reads it, so the const tracks the same feature gate.
-#[cfg(all(unix, any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")))]
+#[cfg(all(
+    unix,
+    any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
+))]
 pub(crate) const BUNDLED_TOOL_GATE_FD_ENV: &str = "RAL_BUNDLED_TOOL_GATE_FD";
 #[cfg(all(
     windows,
@@ -498,7 +501,10 @@ pub fn try_run_pipeline_stage_helper() -> Option<u8> {
 /// the whole pipeline joined the process group and the terminal handoff
 /// settled.  Absent descriptor → run immediately (a standalone bundled
 /// child has no gate).  Mirrors [`serve_anchor_from_env_fd`].
-#[cfg(all(unix, any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")))]
+#[cfg(all(
+    unix,
+    any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
+))]
 fn block_on_bundled_tool_gate() {
     use std::os::fd::FromRawFd;
     use std::os::unix::net::UnixStream;
@@ -519,7 +525,9 @@ fn block_on_bundled_tool_gate() {
 fn block_on_bundled_tool_gate() {
     use std::os::windows::io::FromRawHandle;
     match read_env_optional(BUNDLED_TOOL_GATE_HANDLE_ENV, "a handle", |s| {
-        s.parse::<usize>().ok().map(|v| v as std::os::windows::io::RawHandle)
+        s.parse::<usize>()
+            .ok()
+            .map(|v| v as std::os::windows::io::RawHandle)
     }) {
         Ok(Some(handle)) => {
             let mut reader = unsafe { os_pipe::PipeReader::from_raw_handle(handle) };

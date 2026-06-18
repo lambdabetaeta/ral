@@ -37,8 +37,8 @@ fn init_test_binary() {
     //      target (a `--ral-sandbox-exec` host binary or a
     //      `--ral-bundled-tool` tool).  Letting libtest see those flags
     //      would crash with "unknown argument".
-    if let Some(code) =
-        ral_core::try_run_pipeline_stage_helper().or_else(ral_core::sandbox::serve_sandbox_early_init)
+    if let Some(code) = ral_core::try_run_pipeline_stage_helper()
+        .or_else(ral_core::sandbox::serve_sandbox_early_init)
     {
         std::process::exit(code as i32);
     }

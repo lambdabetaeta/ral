@@ -80,8 +80,8 @@ pub use linux::make_command_with_policy;
 // bundled child through here when the process is not already confined and
 // a projection is active.  `serve_sandbox_exec` is the macOS post-Seatbelt
 // `execve` hook for the host re-exec tail.
-pub(crate) use launch::{LaunchTarget, sandboxed_command};
 pub use launch::serve_sandbox_exec;
+pub(crate) use launch::{LaunchTarget, sandboxed_command};
 
 /// Whether this platform's OS backend can actually enforce a network
 /// restriction (`net: false`).  Linux (`--unshare-net`) and macOS
@@ -108,8 +108,10 @@ fn net_enforced() -> bool {
 /// network enforcement must error rather than run where net is ignored.
 pub(crate) fn projection_enforceable(projection: &SandboxProjection) -> Result<(), &'static str> {
     if !projection.net && !net_enforced() {
-        return Err("offline mode (net: false) is unsupported on this platform: \
-                    no kernel network enforcement exists");
+        return Err(
+            "offline mode (net: false) is unsupported on this platform: \
+                    no kernel network enforcement exists",
+        );
     }
     Ok(())
 }

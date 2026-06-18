@@ -1,5 +1,5 @@
 ---
-generated_at_commit: d8dbd81
+generated_at_commit: 7950be9
 generated_at_date: 2026-06-18
 covers_paths: [exarch/src/bus.rs, exarch/src/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/host.rs]
 ---
@@ -75,15 +75,16 @@ Two `Sink` implementations:
 `cancel.rs` is the per-root-turn cancellation layered on ral's interrupt
 handling. A `run_turn` mints a `Token` (an `Arc<AtomicBool>`) and threads it
 through `apply` → dispatch → tools → child sessions; a sub-agent shares the
-parent's token, so one Esc cancels the whole tree
+parent's token, so one active-turn Ctrl-C or Esc cancels the whole tree
 ([[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]]). The token's
 flag is published into a lock-free `AtomicPtr` slot for the signal handler (a
 handler must not lock); `is_set` reads the same slot, so the provider's
 mid-stream cancel race — which holds no token — observes the same cancellation.
-A key-driven Esc sets the current root token *and* drives ral's non-escalating
-`process::interrupt`, so a single press both aborts the turn loop / in-flight
-HTTP future and unwinds the in-flight eval at its next `signal::check` — and,
-because that store never `fetch_add`s, repeated Esc cannot reach ral's
+The TUI key table keeps UI control separate from cancellation: idle Ctrl-C/Ctrl-D
+quit, overlays close, and only active-turn Ctrl-C/Esc set the root token and
+drive ral's non-escalating foreground cancel. A single press stops the turn loop /
+in-flight HTTP future and unwinds the in-flight eval at its next `signal::check`;
+because the path never `fetch_add`s, repeated presses cannot reach ral's
 third-signal `_exit` ([[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]).
 A genuine external signal still routes through ral's escalating handler.
 Minting is the reset, so the flag never clears at every `apply`; exarch session

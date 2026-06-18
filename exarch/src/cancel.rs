@@ -10,9 +10,9 @@
 //! parent's token rather than minting its own, so a single Ctrl-C / Esc
 //! cancels the whole call tree.  The token is cancelled by the chained
 //! signal handler and raced by the HTTP request future, so one signal
-//! aborts the turn and returns to the prompt.
+//! stops the turn and returns to the prompt.
 //!
-//! An Esc keypress is routed through [`raise_interrupt`], which cancels
+//! Ctrl-C and Esc route through [`raise_interrupt`], which cancels
 //! the per-turn token and asks ral to cancel the current turn's
 //! foreground scope with [`CancelCause::Interrupt`](ral_core::process::CancelCause):
 //! the foreground evaluation unwinds at its next poll, while detached
@@ -125,15 +125,6 @@ fn raise() {
 pub fn raise_interrupt() {
     raise();
     deliver_interrupt();
-}
-
-/// Ctrl-\ — reap the whole session. Cancels exarch's per-turn token (so
-/// the turn loop and provider streaming stop) and asks ral to cancel the
-/// durable root with RootAbort (reaping the foreground turn and every
-/// detached worker). A no-op on the ral side between turns.
-pub fn raise_root_abort() {
-    raise();
-    ral_core::process::request_root_cancel(ral_core::process::CancelCause::RootAbort);
 }
 
 /// Install the chained signal handler.  Must run *after*

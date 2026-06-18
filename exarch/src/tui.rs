@@ -37,6 +37,7 @@ use crate::session::Session;
 use crate::state;
 
 use crossterm::{
+    cursor::Show,
     event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
     execute,
     terminal::{
@@ -61,7 +62,11 @@ use std::{
     collections::HashMap,
     io::{self, Stdout},
     path::{Path, PathBuf},
-    sync::mpsc::{Receiver, TryRecvError},
+    sync::{
+        Once,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{Receiver, TryRecvError},
+    },
     time::{Duration, Instant},
 };
 
@@ -92,6 +97,45 @@ const SCROLL_STEP: usize = 3;
 /// the terminal accepts rather than silently drops the sequence.
 const YANK_CAP: usize = 6000;
 
+static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
+static PANIC_RESTORE_HOOK: Once = Once::new();
+
+fn install_panic_restore_hook() {
+    PANIC_RESTORE_HOOK.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if TUI_ACTIVE.swap(false, Ordering::AcqRel) {
+                restore_terminal_modes();
+            }
+            previous(info);
+        }));
+    });
+}
+
+fn enter_terminal_modes() -> io::Result<Term> {
+    enable_raw_mode()?;
+    execute!(
+        io::stdout(),
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )?;
+    let mut term = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+    term.hide_cursor()?;
+    Ok(term)
+}
+
+fn restore_terminal_modes() {
+    let _ = execute!(
+        io::stdout(),
+        Show,
+        DisableMouseCapture,
+        DisableBracketedPaste,
+        LeaveAlternateScreen
+    );
+    let _ = disable_raw_mode();
+}
+
 /// RAII guard for the raw-mode + bracketed-paste + alternate-screen +
 /// mouse-capture lifetime.  Cleanup is in `Drop` so it can't be skipped
 /// on unwind.
@@ -110,17 +154,28 @@ pub struct TerminalGuard {
 impl TerminalGuard {
     #[cfg_attr(not(unix), allow(unused_variables))]
     pub fn enter(stderr_log: &Path) -> io::Result<Self> {
+        install_panic_restore_hook();
+        TUI_ACTIVE.store(true, Ordering::Release);
         #[cfg(unix)]
-        let stderr_backup = Some(redirect_stderr_to_file(stderr_log)?);
-        enable_raw_mode()?;
-        execute!(
-            io::stdout(),
-            EnterAlternateScreen,
-            EnableBracketedPaste,
-            EnableMouseCapture
-        )?;
-        let mut term = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-        term.hide_cursor()?;
+        let mut stderr_backup = Some(match redirect_stderr_to_file(stderr_log) {
+            Ok(backup) => backup,
+            Err(e) => {
+                TUI_ACTIVE.store(false, Ordering::Release);
+                return Err(e);
+            }
+        });
+        let term = match enter_terminal_modes() {
+            Ok(term) => term,
+            Err(e) => {
+                restore_terminal_modes();
+                TUI_ACTIVE.store(false, Ordering::Release);
+                #[cfg(unix)]
+                if let Some(backup) = stderr_backup.take() {
+                    restore_stderr(backup);
+                }
+                return Err(e);
+            }
+        };
         Ok(Self {
             term,
             #[cfg(unix)]
@@ -135,17 +190,8 @@ impl TerminalGuard {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = self.term.show_cursor();
-        // Leaving the alternate screen restores the user's primary buffer
-        // intact, so there is nothing to clear; just unwind the modes in
-        // reverse.
-        let _ = execute!(
-            io::stdout(),
-            DisableMouseCapture,
-            DisableBracketedPaste,
-            LeaveAlternateScreen
-        );
-        let _ = disable_raw_mode();
+        restore_terminal_modes();
+        TUI_ACTIVE.store(false, Ordering::Release);
         // Restore stderr last — while teardown is running, any stray
         // diagnostics still belong in the log file, not on the user's
         // freshly-restored prompt row.
@@ -339,7 +385,10 @@ struct PatchBuf {
 impl App {
     pub fn new(root_id: SessionId, root_log_dir: &Path, context_window: Option<u64>) -> Self {
         let mut viewports = HashMap::new();
-        viewports.insert(root_id, Viewport::new(root_log_dir.join("user.log"), AgentSlot::default()));
+        viewports.insert(
+            root_id,
+            Viewport::new(root_log_dir.join("user.log"), AgentSlot::default()),
+        );
         let mut titles = HashMap::new();
         titles.insert(root_id, ROOT_TITLE.to_string());
         let mut textarea = TextArea::default();
@@ -454,9 +503,7 @@ impl App {
         match kind {
             Kind::Born { log_dir, title } => {
                 if let std::collections::hash_map::Entry::Vacant(slot) = self.viewports.entry(id) {
-                    let agent = AgentSlot(
-                        (self.tabs.len() as u8) % AGENT_HUES.len() as u8,
-                    );
+                    let agent = AgentSlot((self.tabs.len() as u8) % AGENT_HUES.len() as u8);
                     slot.insert(Viewport::new(log_dir.join("user.log"), agent));
                     self.dispatch_order.push(id);
                 }
@@ -525,11 +572,17 @@ impl App {
             // most-recent tool-call block as the collapsed header's
             // size-bar.
             Kind::ToolResult(text) => self.with_viewport(id, |vp| vp.set_result_size(&text)),
-            Kind::UserPromptEcho(text) => self.push_chrome(id, RailShape::Generic, line::user_prompt(&text)),
-            Kind::StopReason(raw) => self.push_chrome(id, RailShape::Generic, line::stop_reason(&raw)),
+            Kind::UserPromptEcho(text) => {
+                self.push_chrome(id, RailShape::Generic, line::user_prompt(&text))
+            }
+            Kind::StopReason(raw) => {
+                self.push_chrome(id, RailShape::Generic, line::stop_reason(&raw))
+            }
             Kind::Error(msg) => self.push_chrome(id, RailShape::Error, line::error(&msg)),
             Kind::Dim(text) => self.push_chrome(id, RailShape::Generic, line::dim(&text)),
-            Kind::ProviderError(error) => self.push_chrome(id, RailShape::Error, line::provider_error(&error)),
+            Kind::ProviderError(error) => {
+                self.push_chrome(id, RailShape::Error, line::provider_error(&error))
+            }
             Kind::SubagentDone {
                 title,
                 text,
@@ -570,7 +623,9 @@ impl App {
                 lines,
                 preview,
             } => self.push_chrome(id, RailShape::Generic, line::wrote(&path, lines, &preview)),
-            Kind::Task { status, desc } => self.push_chrome(id, RailShape::Generic, line::task(status, &desc)),
+            Kind::Task { status, desc } => {
+                self.push_chrome(id, RailShape::Generic, line::task(status, &desc))
+            }
             Kind::Meter { done, total, label } => {
                 self.push_chrome(id, RailShape::Generic, line::meter(done, total, &label))
             }
@@ -707,7 +762,12 @@ impl App {
         let (phase, phase_history) = self
             .viewports
             .get(&focused)
-            .map(|vp| (vp.phase_label().map(str::to_owned), vp.phase_history().to_vec()))
+            .map(|vp| {
+                (
+                    vp.phase_label().map(str::to_owned),
+                    vp.phase_history().to_vec(),
+                )
+            })
             .unwrap_or_default();
         let usage = self.total_usage;
         let last_input = self.last_input;
@@ -1172,7 +1232,9 @@ impl App {
             {
                 let _ = osc52_copy(&vp.selection_text(a.min(b), a.max(b)));
             }
-        } else if press.on_rail && let Some(idx) = press.block {
+        } else if press.on_rail
+            && let Some(idx) = press.block
+        {
             if let Some(vp) = self.viewports.get_mut(&id) {
                 vp.cycle_block(idx);
             }
@@ -1299,7 +1361,7 @@ impl App {
             Style::default().fg(BANNER_PURPLE),
         )));
         if let Some(vp) = self.viewports.get_mut(&self.root) {
-            vp.push_chrome(RailShape::Generic, ls);
+            vp.push_chrome(RailShape::Plain, ls);
         }
         self.draw(term)
     }
@@ -1410,7 +1472,7 @@ const CTX_BAR_W: usize = 10;
 
 /// Build the ctx% value-ramp: `filled` cells lightened toward white by
 /// [`rail::value_step`] of the percentage (so near-full glows), then
- /// `CTX_BAR_W - filled` dim slate cells.  Reuses the rail's ramp so the
+/// `CTX_BAR_W - filled` dim slate cells.  Reuses the rail's ramp so the
 /// bar and the marginal rail share one value scale.
 fn ctx_ramp(pct: u64, bar_w: usize) -> Vec<Span<'static>> {
     let pct = pct.min(100) as usize;
@@ -1460,8 +1522,7 @@ fn gantt_ribbon(
             if total_dur.is_zero() {
                 1
             } else {
-                ((((s.duration.as_secs_f64() / total_dur.as_secs_f64())
-                    * hist_budget as f64)
+                ((((s.duration.as_secs_f64() / total_dur.as_secs_f64()) * hist_budget as f64)
                     .round()) as usize)
                     .max(1)
             }
@@ -1478,10 +1539,7 @@ fn gantt_ribbon(
     for (seg, &w) in history.iter().zip(widths.iter()) {
         let step = rail::value_step(Some(seg.duration.as_millis() as u32));
         let col = rail::lighten(PURPLE, step);
-        spans.push(Span::styled(
-            "▌".repeat(w),
-            Style::default().fg(col),
-        ));
+        spans.push(Span::styled("▌".repeat(w), Style::default().fg(col)));
     }
     if phase.is_some() {
         // Pulse: alternate value-step every ~500 ms of busy elapsed.
@@ -1701,9 +1759,16 @@ fn matrix_row(
     let value = relative_value_step(tokens, max_tokens);
     let token_style = Style::default()
         .fg(rail::lighten(hue, value))
-        .add_modifier(if dim { Modifier::DIM } else { Modifier::empty() });
+        .add_modifier(if dim {
+            Modifier::DIM
+        } else {
+            Modifier::empty()
+        });
     spans.push(Span::raw("  "));
-    spans.push(Span::styled(format!("{:>6}", fmt_tokens(tokens)), token_style));
+    spans.push(Span::styled(
+        format!("{:>6}", fmt_tokens(tokens)),
+        token_style,
+    ));
 
     // Size readout: a `▓`-bar over lines touched (Phase 3's size-bar
     // idiom), then the step count as `Nst`.
@@ -1712,9 +1777,11 @@ fn matrix_row(
     spans.push(line::size_bar(touched));
     spans.push(Span::styled(
         format!("  {}st", vp.steps().len()),
-        Style::default()
-            .fg(SLATE)
-            .add_modifier(if dim { Modifier::DIM } else { Modifier::empty() }),
+        Style::default().fg(SLATE).add_modifier(if dim {
+            Modifier::DIM
+        } else {
+            Modifier::empty()
+        }),
     ));
 
     if dim {
@@ -2127,7 +2194,7 @@ impl Repl<'_> {
         // Publish a root token for the duration of the summarize, as
         // `run_turn` does: without it `cancel::is_set()` reads the null
         // slot and the provider's mid-stream cancel race never fires, so
-        // Esc could not abort the in-flight summarize request.
+        // Esc could not stop the in-flight summarize request.
         let _root = cancel::mint_root();
         let provider = &self.provider;
         let session = &mut *self.session;
@@ -2254,6 +2321,9 @@ impl Repl<'_> {
             if k.kind != KeyEventKind::Press {
                 continue;
             }
+            if key_action(KeyMode::Overlay, &k, false) == KeyAction::Cancel {
+                return None;
+            }
             let action = self.tui.app.picker_mut()?.key(k.code);
             match action {
                 picker::PickAction::None => {}
@@ -2302,6 +2372,56 @@ impl Repl<'_> {
     }
 }
 
+fn ctrl_key(k: &KeyEvent, c: char) -> bool {
+    k.code == KeyCode::Char(c) && k.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KeyMode {
+    Idle,
+    Running,
+    Overlay,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum KeyAction {
+    Edit,
+    Submit,
+    Quit,
+    Cancel,
+}
+
+fn key_action(mode: KeyMode, k: &KeyEvent, enter_submits: bool) -> KeyAction {
+    if ctrl_key(k, 'c') {
+        return match mode {
+            KeyMode::Idle => KeyAction::Quit,
+            KeyMode::Running | KeyMode::Overlay => KeyAction::Cancel,
+        };
+    }
+    if ctrl_key(k, 'd') {
+        return match mode {
+            KeyMode::Idle => KeyAction::Quit,
+            KeyMode::Overlay => KeyAction::Cancel,
+            KeyMode::Running => KeyAction::Edit,
+        };
+    }
+    if k.code == KeyCode::Esc {
+        return match mode {
+            KeyMode::Idle => KeyAction::Edit,
+            KeyMode::Running | KeyMode::Overlay => KeyAction::Cancel,
+        };
+    }
+    if enter_submits
+        && k.code == KeyCode::Enter
+        && !k.modifiers.contains(KeyModifiers::SHIFT)
+        && !k.modifiers.contains(KeyModifiers::ALT)
+    {
+        KeyAction::Submit
+    } else {
+        KeyAction::Edit
+    }
+}
+
 /// Drain `rx` and poll terminal keys at ~60 FPS until `rx`
 /// disconnects.  Keystrokes go into the input editor (the user composes a
 /// steering prompt during the turn); on the main tab Enter queues the draft
@@ -2343,23 +2463,13 @@ fn drive_events(term: &mut Term, app: &mut App, rx: Receiver<Event>) -> io::Resu
         if ct_poll(timeout)? {
             match ct_read()? {
                 CtEvent::Key(k) if k.kind == KeyEventKind::Press => {
-                    let ctrl_c =
-                        k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL);
-                    let queue_submit = k.code == KeyCode::Enter
-                        && app.focused() == app.root
-                        && !k.modifiers.contains(KeyModifiers::SHIFT)
-                        && !k.modifiers.contains(KeyModifiers::ALT);
-                    let ctrl_backslash = k.code == KeyCode::Char('\\')
-                        && k.modifiers.contains(KeyModifiers::CONTROL);
-                    if ctrl_backslash {
-                        // Reap the whole session: cancel the durable root.
-                        cancel::raise_root_abort();
-                    } else if ctrl_c || k.code == KeyCode::Esc {
-                        cancel::raise_interrupt();
-                    } else if queue_submit {
-                        app.enqueue();
-                    } else {
-                        app.key(k);
+                    match key_action(KeyMode::Running, &k, app.focused() == app.root) {
+                        KeyAction::Cancel => cancel::raise_interrupt(),
+                        KeyAction::Submit => {
+                            app.enqueue();
+                        }
+                        KeyAction::Edit => app.key(k),
+                        KeyAction::Quit => {}
                     }
                 }
                 CtEvent::Paste(s) => app.paste(&s),
@@ -2391,35 +2501,15 @@ fn read_prompt(term: &mut Term, app: &mut App) -> io::Result<Option<String>> {
                 if k.kind != KeyEventKind::Press {
                     continue;
                 }
-                // Ctrl-D quits from anywhere.
-                if k.code == KeyCode::Char('d') && k.modifiers.contains(KeyModifiers::CONTROL) {
-                    return Ok(None);
-                }
-                // Submit (Enter / Ctrl-C-as-submit) is gated on main:
-                // non-main tabs are watch-only and route everything but
-                // Tab through `app.key` (which itself ignores typing
-                // off-main).
-                if app.focused() != app.root {
-                    app.key(k);
-                    continue;
-                }
-                match (k.code, k.modifiers) {
-                    (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
-                        if app.submit().is_some() {
-                        } else {
-                            return Ok(None);
-                        }
-                    }
-                    (KeyCode::Enter, m)
-                        if !m.contains(KeyModifiers::SHIFT) && !m.contains(KeyModifiers::ALT) =>
-                    {
+                match key_action(KeyMode::Idle, &k, app.focused() == app.root) {
+                    KeyAction::Quit => return Ok(None),
+                    KeyAction::Submit => {
                         if let Some(s) = app.submit() {
                             return Ok(Some(s));
                         }
                     }
-                    _ => {
-                        app.key(k);
-                    }
+                    KeyAction::Edit => app.key(k),
+                    KeyAction::Cancel => {}
                 }
             }
             CtEvent::Paste(s) => app.paste(&s),
@@ -2446,6 +2536,55 @@ mod tests {
         assert!(!is_slash_command("/unknown"));
         assert!(!is_slash_command(""));
         assert!(!is_slash_command("hello"));
+    }
+
+    /// One key table covers idle prompts, active turns, and overlays.
+    #[test]
+    fn key_action_table_matches_modes() {
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+
+        assert_eq!(key_action(KeyMode::Idle, &ctrl('c'), true), KeyAction::Quit);
+        assert_eq!(key_action(KeyMode::Idle, &ctrl('d'), true), KeyAction::Quit);
+        assert_eq!(
+            key_action(KeyMode::Idle, &plain(KeyCode::Esc), true),
+            KeyAction::Edit
+        );
+        assert_eq!(
+            key_action(KeyMode::Idle, &plain(KeyCode::Enter), true),
+            KeyAction::Submit
+        );
+        assert_eq!(
+            key_action(KeyMode::Idle, &shift_enter, true),
+            KeyAction::Edit
+        );
+
+        assert_eq!(
+            key_action(KeyMode::Running, &ctrl('c'), true),
+            KeyAction::Cancel
+        );
+        assert_eq!(
+            key_action(KeyMode::Running, &plain(KeyCode::Esc), true),
+            KeyAction::Cancel
+        );
+        assert_eq!(
+            key_action(KeyMode::Running, &ctrl('d'), true),
+            KeyAction::Edit
+        );
+
+        assert_eq!(
+            key_action(KeyMode::Overlay, &ctrl('c'), false),
+            KeyAction::Cancel
+        );
+        assert_eq!(
+            key_action(KeyMode::Overlay, &ctrl('d'), false),
+            KeyAction::Cancel
+        );
+        assert_eq!(
+            key_action(KeyMode::Overlay, &plain(KeyCode::Esc), false),
+            KeyAction::Cancel
+        );
     }
 
     /// Every registry token is a distinct, well-formed slash command.
@@ -2635,9 +2774,18 @@ mod tests {
         let usage = Usage::default();
         // ~40% of a 100k window.
         let history = vec![
-            PhaseSeg { label: "thinking".into(), duration: Duration::from_millis(120) },
-            PhaseSeg { label: "tool".into(), duration: Duration::from_millis(80) },
-            PhaseSeg { label: "writing".into(), duration: Duration::from_millis(200) },
+            PhaseSeg {
+                label: "thinking".into(),
+                duration: Duration::from_millis(120),
+            },
+            PhaseSeg {
+                label: "tool".into(),
+                duration: Duration::from_millis(80),
+            },
+            PhaseSeg {
+                label: "writing".into(),
+                duration: Duration::from_millis(200),
+            },
         ];
         let line = rule_line(
             READ_W as usize,
@@ -2654,9 +2802,15 @@ mod tests {
         assert!(text.contains("ctx "), "ctx segment missing: {text:?}");
         assert!(text.contains("40%"), "ctx readout missing: {text:?}");
         // status model kept.
-        assert!(text.contains("openai gpt-4o"), "status model missing: {text:?}");
+        assert!(
+            text.contains("openai gpt-4o"),
+            "status model missing: {text:?}"
+        );
         // phase label kept as text.
-        assert!(text.contains("typechecking"), "phase label missing: {text:?}");
+        assert!(
+            text.contains("typechecking"),
+            "phase label missing: {text:?}"
+        );
         // One `▌` run per recorded phase + the live tip = 4 groups.
         let tip_count = text.matches('▌').count();
         assert!(
@@ -2675,8 +2829,15 @@ mod tests {
             None,
             "",
         );
-        let text_no_ctx: String = line_no_ctx.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(!text_no_ctx.contains("ctx "), "ctx segment should be absent when context_window is None: {text_no_ctx:?}");
+        let text_no_ctx: String = line_no_ctx
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            !text_no_ctx.contains("ctx "),
+            "ctx segment should be absent when context_window is None: {text_no_ctx:?}"
+        );
     }
 
     /// The ctx% ramp fills proportionally: 0% → no filled cells, ~100%
@@ -2686,18 +2847,38 @@ mod tests {
     fn ctx_ramp_fill_tracks_percentage() {
         let empty = ctx_ramp(0, 10);
         let empty_text: String = empty.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(empty_text.matches('█').count(), 0, "0% should have no filled cells");
-        assert_eq!(empty_text.matches('░').count(), 10, "0% should have 10 empty cells");
+        assert_eq!(
+            empty_text.matches('█').count(),
+            0,
+            "0% should have no filled cells"
+        );
+        assert_eq!(
+            empty_text.matches('░').count(),
+            10,
+            "0% should have 10 empty cells"
+        );
 
         let full = ctx_ramp(100, 10);
         let full_text: String = full.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(full_text.matches('█').count(), 10, "100% should fill all 10 cells");
-        assert_eq!(full_text.matches('░').count(), 0, "100% should have no empty cells");
+        assert_eq!(
+            full_text.matches('█').count(),
+            10,
+            "100% should fill all 10 cells"
+        );
+        assert_eq!(
+            full_text.matches('░').count(),
+            0,
+            "100% should have no empty cells"
+        );
 
         let half = ctx_ramp(50, 10);
         let half_text: String = half.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(half_text.matches('█').count(), 5, "50% should fill 5 cells");
-        assert_eq!(half_text.matches('░').count(), 5, "50% should leave 5 empty");
+        assert_eq!(
+            half_text.matches('░').count(),
+            5,
+            "50% should leave 5 empty"
+        );
     }
 
     /// `Viewport` owns phase state: `set_phase` records a live phase,
@@ -2824,7 +3005,11 @@ mod tests {
                 vp.push_tool_call("ral", "do".into(), "script".into());
             }
         }
-        vp.add_usage(Usage { input: tokens, output: 0, ..Usage::default() });
+        vp.add_usage(Usage {
+            input: tokens,
+            output: 0,
+            ..Usage::default()
+        });
         vp
     }
 
@@ -2863,7 +3048,10 @@ mod tests {
         assert!(plain_row(&spawn[0]).contains("main"));
         assert!(plain_row(&spawn[1]).contains("child"));
         let cost = matrix_bar(&rows, &titles, 1, &dying, MatrixSort::Cost);
-        assert!(plain_row(&cost[0]).contains("child"), "pricey row floats up");
+        assert!(
+            plain_row(&cost[0]).contains("child"),
+            "pricey row floats up"
+        );
         assert!(plain_row(&cost[1]).contains("main"));
     }
 
@@ -2879,7 +3067,10 @@ mod tests {
         let rows = [(1u64, &live), (2u64, &live)];
         let matrix = matrix_bar(&rows, &titles, 1, &dying, MatrixSort::Spawn);
         let main = plain_row(&matrix[0]);
-        assert!(main.contains("●○●"), "row carries the step glyph run: {main}");
+        assert!(
+            main.contains("●○●"),
+            "row carries the step glyph run: {main}"
+        );
         assert!(main.contains("3st"), "step count readout: {main}");
 
         // A dying session leads its cell run with `✓`.
@@ -2888,13 +3079,19 @@ mod tests {
         dying.insert(2u64, Instant::now());
         let rows = [(1u64, &live), (2u64, &done)];
         let matrix = matrix_bar(&rows, &titles, 1, &dying, MatrixSort::Spawn);
-        assert!(plain_row(&matrix[1]).contains('✓'), "dying row leads with ✓");
+        assert!(
+            plain_row(&matrix[1]).contains('✓'),
+            "dying row leads with ✓"
+        );
 
         // An errored tail renders `✗`.
         let mut failed = vp_with(0, &[true], 100);
         failed.push_chrome(RailShape::Error, vec![Line::from(Span::raw("boom"))]);
         let rows = [(1u64, &live), (2u64, &failed)];
         let matrix = matrix_bar(&rows, &titles, 1, &dying, MatrixSort::Spawn);
-        assert!(plain_row(&matrix[1]).contains('✗'), "errored dying row leads with ✗");
+        assert!(
+            plain_row(&matrix[1]).contains('✗'),
+            "errored dying row leads with ✗"
+        );
     }
 }

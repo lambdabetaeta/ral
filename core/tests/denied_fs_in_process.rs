@@ -511,10 +511,7 @@ fn grant_fs_read_allows_resolve_path_inside_set() {
 #[test]
 fn grant_fs_write_denies_temp_dir_outside_set() {
     let dir = scratch("tmpdir");
-    let script = format!(
-        "grant [fs: [write: ['{}']]] {{ temp-dir }}",
-        dir.display()
-    );
+    let script = format!("grant [fs: [write: ['{}']]] {{ temp-dir }}", dir.display());
     must_deny(&script);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -527,10 +524,7 @@ fn grant_fs_write_denies_temp_dir_outside_set() {
 #[test]
 fn grant_fs_write_allows_temp_dir_inside_set() {
     let root = std::env::temp_dir();
-    let script = format!(
-        "grant [fs: [write: ['{}']]] {{ temp-dir }}",
-        root.display()
-    );
+    let script = format!("grant [fs: [write: ['{}']]] {{ temp-dir }}", root.display());
     let out = must_succeed(&script);
     match out {
         Value::String(s) => {
@@ -551,10 +545,7 @@ fn grant_fs_write_allows_temp_dir_inside_set() {
 #[test]
 fn grant_fs_write_denies_temp_file_outside_set() {
     let dir = scratch("tmpfile");
-    let script = format!(
-        "grant [fs: [write: ['{}']]] {{ temp-file }}",
-        dir.display()
-    );
+    let script = format!("grant [fs: [write: ['{}']]] {{ temp-file }}", dir.display());
     must_deny(&script);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -852,7 +852,15 @@ mod tests {
     #[test]
     fn sound_fidelity_is_the_identity() {
         let plain = render_md("Some prose.", 80, 0, Fidelity::default());
-        let stressed = render_md("Some prose.", 80, 0, Fidelity { context: 0, echo: 0 });
+        let stressed = render_md(
+            "Some prose.",
+            80,
+            0,
+            Fidelity {
+                context: 0,
+                echo: 0,
+            },
+        );
         assert_eq!(plain, stressed);
         for line in &plain {
             for span in &line.spans {
@@ -866,21 +874,36 @@ mod tests {
     /// the seeded base foreground pulled toward the background.
     #[test]
     fn context_pressure_dims_and_pulls_contrast() {
-        let out = render_md("Some prose here.", 80, 0, Fidelity { context: 2, echo: 0 });
+        let out = render_md(
+            "Some prose here.",
+            80,
+            0,
+            Fidelity {
+                context: 2,
+                echo: 0,
+            },
+        );
         let span = out
             .iter()
             .flat_map(|l| &l.spans)
             .find(|s| !s.content.trim().is_empty())
             .expect("a text span");
-        assert!(span.style.add_modifier.contains(Modifier::DIM), "level 2 dims");
+        assert!(
+            span.style.add_modifier.contains(Modifier::DIM),
+            "level 2 dims"
+        );
         let pulled = span.style.fg.expect("a pulled foreground");
         // Pulled 40% from the base toward the dark background, so it sits
         // strictly between the two.
         let Color::Rgb(r, _, _) = pulled else {
             panic!("expected an RGB foreground");
         };
-        let Color::Rgb(br, _, _) = BASE_FG else { unreachable!() };
-        let Color::Rgb(cr, _, _) = CODE_BG else { unreachable!() };
+        let Color::Rgb(br, _, _) = BASE_FG else {
+            unreachable!()
+        };
+        let Color::Rgb(cr, _, _) = CODE_BG else {
+            unreachable!()
+        };
         assert!(cr < r && r < br, "fg pulled toward bg: {cr} < {r} < {br}");
     }
 
@@ -892,7 +915,15 @@ mod tests {
     fn echo_wavers_alternate_rows() {
         // Force several rows by wrapping at a narrow width.
         let src = "one two three four five six seven eight nine ten eleven twelve";
-        let out = render_md(src, 12, 0, Fidelity { context: 0, echo: 2 });
+        let out = render_md(
+            src,
+            12,
+            0,
+            Fidelity {
+                context: 0,
+                echo: 2,
+            },
+        );
         let fgs: Vec<Color> = out
             .iter()
             .filter(|l| !is_blank(l))

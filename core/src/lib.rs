@@ -158,9 +158,7 @@ pub fn compile_and_typecheck(source: &str, schemes: SessionSchemes) -> CompileOu
 fn init_lib_test_binary() {
     #[cfg(unix)]
     builtins::uutils::init_signal_dispositions();
-    if let Some(code) =
-        try_run_pipeline_stage_helper().or_else(sandbox::serve_sandbox_early_init)
-    {
+    if let Some(code) = try_run_pipeline_stage_helper().or_else(sandbox::serve_sandbox_early_init) {
         std::process::exit(code as i32);
     }
 }

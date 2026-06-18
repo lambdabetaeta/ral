@@ -596,8 +596,7 @@ mod tests {
     fn blank_doc_line_ends_the_summary() {
         let par_doc = prelude_doc("par").expect("par has a doc comment");
         assert_eq!(
-            par_doc,
-            "Parallel map over `items` with at most `jobs` concurrent blocks.",
+            par_doc, "Parallel map over `items` with at most `jobs` concurrent blocks.",
             "only the lead paragraph is the summary, got {par_doc:?}"
         );
     }

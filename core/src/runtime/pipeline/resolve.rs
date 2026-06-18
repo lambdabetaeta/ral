@@ -188,7 +188,10 @@ fn eval_external_stage(
         unreachable!("classify_stage yields an identity only for Exec stages")
     };
     let (args, redirects) = call::eval_call_parts(&e.args, &e.redirects, shell)?;
-    debug_assert!(redirects.is_empty(), "direct_spawnable gates on no redirects");
+    debug_assert!(
+        redirects.is_empty(),
+        "direct_spawnable gates on no redirects"
+    );
     Ok(ExternalStage { id, args })
 }
 

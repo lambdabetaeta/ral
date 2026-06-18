@@ -238,12 +238,12 @@ itself async-signal-safe:
   process groups still receive real SIGINT through the terminal / relay
   machinery; detached `spawn` and REPL `watch` workers are spared because they
   hang under the durable root.
-- **exarch Esc** cancels the exarch root `Token` and calls
+- **exarch active-turn Ctrl-C / Esc** cancels the exarch root `Token` and calls
   `request_foreground_cancel(Interrupt)` (`exarch/src/cancel.rs`,
   `deliver_interrupt`). The token stops provider streaming, staged tools, and
   sub-agent turns; the foreground cancel stops the current shell eval. The
-  raw-mode path does not tick the global `SIGNAL_COUNT`; repeated Esc is
-  non-escalating because it writes the same cause, not an incrementing counter.
+  raw-mode path does not tick the global `SIGNAL_COUNT`; repeated presses are
+  non-escalating because they write the same cause, not an incrementing counter.
 - **Explicit handle cancellation** — `cancel <handle>` and `race` loser
   cancellation — calls the worker scope with `Explicit`, so it uses decisive
   worker teardown without pretending to be a user interrupt or a timeout.
@@ -253,8 +253,8 @@ itself async-signal-safe:
 - **Ctrl-`\` / kill-all** calls `request_root_cancel(RootAbort)`, reaching the
   foreground and every detached worker. The REPL routes it through a SIGQUIT
   handler (`sigquit_handler` in `core/src/process/signal/unix.rs`, installed by
-  `jobs::setup_signals`); exarch routes the raw-mode Ctrl-`\` key through
-  `cancel::raise_root_abort` (`exarch/src/tui.rs`).
+  `jobs::setup_signals`). exarch's TUI does not bind a kill-all key: its raw-mode
+  table is idle quit, overlay close, or active-turn interrupt.
 
 Signal-safety is preserved. A Unix signal handler still does only
 async-signal-safe atomic work; the translation slot turns the pending event into

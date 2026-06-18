@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 478c977
+verified_at_commit: 7950be9
 verified_at_date: 2026-06-18
 anchors: [SIGNAL_COUNT, CancelScope, CancelCause, DurableRoot, ForegroundScope, request_foreground_cancel, request_root_cancel, sigint_relay, sigquit_handler, process::check, RunningChild::wait]
 ---
@@ -158,8 +158,9 @@ The same two mechanisms are driven by different keys on different surfaces.
 | **Ctrl-C** | ral REPL, idle prompt | line editor reads it as a byte | abandons the partial buffer, `process::clear()`; no signal |
 | **Ctrl-`\`** | ral REPL | SIGQUIT → `sigquit_handler` | `request_root_cancel(RootAbort)` — reaps foreground *and* every detached worker |
 | **Ctrl-C** | ral batch / `-c` | SIGINT → `handler` | counter `+1`; third press `_exit`s |
-| **Ctrl-C / Esc** | exarch TUI | `cancel::raise_interrupt` | cancels the per-turn `Token`, `interrupt_foreground_child`, `request_foreground_cancel(Interrupt)` |
-| **Ctrl-`\`** | exarch TUI | `cancel::raise_root_abort` | cancels the `Token` + `request_root_cancel(RootAbort)` |
+| **Ctrl-C / Esc** | exarch TUI, active turn | `cancel::raise_interrupt` | cancels the per-turn `Token`, `interrupt_foreground_child`, `request_foreground_cancel(Interrupt)` |
+| **Ctrl-C / Ctrl-D** | exarch TUI, idle prompt | key table → quit | drops the TUI guard; no cancellation |
+| **Ctrl-C / Ctrl-D / Esc** | exarch TUI overlay | key table → close overlay | returns to the underlying prompt / turn; no root cancel |
 | **async SIGINT** | exarch | `chained` handler | cancels the `Token`, then forwards into ral's escalating `handler` |
 
 ### ral interactive signal dispositions
@@ -189,8 +190,9 @@ fix the interactive dispositions:
 exarch layers a *per-root-turn* cancellation `Token` over ral's machinery
 ([[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]]).
 
-- **`Token`** is an `Arc<AtomicBool>`; a sub-agent shares a *clone*, so one Esc
-  halts the whole call tree (provider streaming, staged tools, child sessions).
+- **`Token`** is an `Arc<AtomicBool>`; a sub-agent shares a *clone*, so one
+  active-turn Ctrl-C or Esc halts the whole call tree (provider streaming,
+  staged tools, child sessions).
   The current root token's flag is published into exarch's own `CURRENT` slot —
   the same lock-free pattern as ral's — read by the provider's mid-stream cancel
   race, which holds no token.
@@ -199,23 +201,24 @@ exarch layers a *per-root-turn* cancellation `Token` over ral's machinery
   order matters — ral's handler first, then exarch's chain — and
   `bootstrap::boot_shell` re-establishes it after every `/clear` rebuild.
 - Raw mode disables `ISIG`, so a TUI keystroke is *not* a kernel signal. The TUI's
-  `drive_events` reads keys itself (`exarch/src/tui.rs`) and routes Ctrl-C/Esc to
-  `raise_interrupt` and Ctrl-`\` to `raise_root_abort`. `deliver_interrupt`
-  re-creates the SIGINT the kernel would have sent a foreground *external* child
-  via `interrupt_foreground_child` (Windows re-injects `CTRL_C_EVENT`). **Minting a
-  fresh token is the reset** — there is no clear-at-every-`apply`, so a just-pressed
-  Esc is never erased before a sub-agent observes it.
+  key table (`exarch/src/tui.rs`) separates UI shape from cancellation: idle
+  Ctrl-C/Ctrl-D quit, overlays close, and only active-turn Ctrl-C/Esc route to
+  `raise_interrupt`. `deliver_interrupt` re-creates the SIGINT the kernel would
+  have sent a foreground *external* child via `interrupt_foreground_child`
+  (Windows re-injects `CTRL_C_EVENT`). **Minting a fresh token is the reset** —
+  there is no clear-at-every-`apply`, so a just-pressed interrupt is never erased
+  before a sub-agent observes it.
 
 ## Why interactive Ctrl-C cannot force-exit
 
 A deliberate asymmetry worth stating plainly: **the third-signal `_exit` floor is
 unreachable from an interactive prompt.** Interactive SIGINT goes to the relay,
-which never increments the counter; the TUI's Ctrl-C goes to `raise_interrupt`,
-which writes a flag and a cause but never the counter. Repeated presses re-write
-the same cause (`fetch_max`), never escalate. The hard floor exists for batch
-scripts (`handler`) and for an async signal exarch forwards into ral. Interactive
-cancellation is cooperative by construction; the louder act is the *separate*
-gesture Ctrl-`\`, which reaps the durable root.
+which never increments the counter; the TUI's active-turn Ctrl-C goes to
+`raise_interrupt`, which writes a flag and a cause but never the counter.
+Repeated presses re-write the same cause (`fetch_max`), never escalate. The hard
+floor exists for batch scripts (`handler`) and for an async signal exarch forwards
+into ral. Interactive cancellation is cooperative by construction; the root-reap
+gesture is REPL Ctrl-`\`, not a TUI key.
 
 ## See also
 

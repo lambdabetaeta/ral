@@ -90,7 +90,11 @@ fn restrict_to(dir: &str) -> Capabilities {
 
 /// Compile `src` against `shell`'s live bindings, then route it through
 /// `eval_top_level` under `caps`, mirroring exarch's per-tool flow.
-fn top_level_under(shell: &mut Shell, caps: Capabilities, src: &str) -> ral_core::types::Settled<Value> {
+fn top_level_under(
+    shell: &mut Shell,
+    caps: Capabilities,
+    src: &str,
+) -> ral_core::types::Settled<Value> {
     let comp = match ral_core::compile_and_typecheck(src, shell.session_schemes()) {
         ral_core::CompileOutcome::Compiled(c) => std::sync::Arc::new(c),
         ral_core::CompileOutcome::Parse(e) => panic!("parse: {src:?}: {e}"),

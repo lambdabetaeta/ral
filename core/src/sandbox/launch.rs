@@ -34,7 +34,10 @@ pub(crate) enum LaunchTarget<'a> {
 /// into the bwrap argv as `--chdir`.
 #[cfg_attr(
     not(target_os = "linux"),
-    allow(unused_variables, reason = "shell.cwd() is only consumed for the bwrap --chdir")
+    allow(
+        unused_variables,
+        reason = "shell.cwd() is only consumed for the bwrap --chdir"
+    )
 )]
 pub(crate) fn sandboxed_command(
     projection: &crate::types::SandboxProjection,
@@ -280,10 +283,7 @@ mod tests {
         .expect("build macOS bundled command");
         let args = argv(&cmd);
         assert_eq!(args[0], super::super::SANDBOX_PROJECTION_FLAG);
-        assert_eq!(
-            args[2],
-            crate::runtime::pipeline::helper::BUNDLED_TOOL_FLAG
-        );
+        assert_eq!(args[2], crate::runtime::pipeline::helper::BUNDLED_TOOL_FLAG);
         assert_eq!(args[3], "ls");
         assert_eq!(args[4], "-l");
         assert!(
@@ -464,9 +464,15 @@ mod tests {
         .expect("build Linux host command");
         assert_eq!(cmd.get_program().to_string_lossy(), "bwrap");
         let args = argv(&cmd);
-        let chdir = args.iter().position(|a| a == "--chdir").expect("--chdir present");
+        let chdir = args
+            .iter()
+            .position(|a| a == "--chdir")
+            .expect("--chdir present");
         assert_eq!(args[chdir + 1], shell.cwd().to_string_lossy());
-        let sep = args.iter().position(|a| a == "--").expect("bwrap -- separator");
+        let sep = args
+            .iter()
+            .position(|a| a == "--")
+            .expect("bwrap -- separator");
         assert!(chdir < sep, "--chdir must precede the -- separator");
         assert_eq!(args[sep + 1], "/bin/sh");
         assert_eq!(&args[sep + 2..], ["-c", "echo x > /etc/ral_denied"]);

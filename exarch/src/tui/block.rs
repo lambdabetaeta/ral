@@ -11,7 +11,7 @@
 //! block the user just dialed, or the whole buffer once on a resize.
 
 use super::fidelity::Fidelity;
-use super::line::{self, READ_W, RAIL_W, is_blank};
+use super::line::{self, RAIL_W, READ_W, is_blank};
 use super::md::{self, MD_INDENT};
 use super::rail::{self, RailKind};
 use crate::bus::Hunk;
@@ -34,6 +34,8 @@ pub(super) enum RailShape {
     Step,
     /// An error — renders `✗`.
     Error,
+    /// Ambient chrome outside the transcript proper — no marginal rail.
+    Plain,
     /// Everything else — renders the static `❖`.
     #[default]
     Generic,
@@ -125,7 +127,11 @@ impl Block {
         cmd: String,
         agent: AgentSlot,
     ) -> Self {
-        Self::new(BlockKind::ToolCall { tool, summary, cmd }, agent, Fidelity::default())
+        Self::new(
+            BlockKind::ToolCall { tool, summary, cmd },
+            agent,
+            Fidelity::default(),
+        )
     }
     pub(super) fn markdown(src: String, agent: AgentSlot, fidelity: Fidelity) -> Self {
         Self::new(BlockKind::Markdown(src), agent, fidelity)
@@ -134,7 +140,11 @@ impl Block {
         Self::new(BlockKind::Patch { path, hunks }, agent, Fidelity::default())
     }
     pub(super) fn chrome(shape: RailShape, lines: Vec<Line<'static>>, agent: AgentSlot) -> Self {
-        Self::new(BlockKind::Chrome { shape, lines }, agent, Fidelity::default())
+        Self::new(
+            BlockKind::Chrome { shape, lines },
+            agent,
+            Fidelity::default(),
+        )
     }
 
     /// The producing agent's palette slot.
@@ -186,13 +196,25 @@ impl Block {
     /// True for a step-boundary chrome block — the column unit the
     /// matrix's per-agent step cells count.
     pub(super) fn is_step(&self) -> bool {
-        matches!(self.kind, BlockKind::Chrome { shape: RailShape::Step, .. })
+        matches!(
+            self.kind,
+            BlockKind::Chrome {
+                shape: RailShape::Step,
+                ..
+            }
+        )
     }
 
     /// True for an error chrome block — drives the matrix's `✗` cell when
     /// the session's last block is a failure.
     pub(super) fn is_error(&self) -> bool {
-        matches!(self.kind, BlockKind::Chrome { shape: RailShape::Error, .. })
+        matches!(
+            self.kind,
+            BlockKind::Chrome {
+                shape: RailShape::Error,
+                ..
+            }
+        )
     }
 
     /// Attach a tool call's result magnitude (`text.lines().count()`),
@@ -273,19 +295,20 @@ impl Block {
         if lines.is_empty() {
             lines.push(Line::default());
         }
-        let kind = self.rail_kind(level);
-        let rail = rail::span(kind, self.agent, self.magnitude());
-        // Markdown insets every row by `MD_INDENT`; the rail occupies the
-        // first `RAIL_W` columns of that inset on the opening row, so shrink
-        // the inset there to keep prose flush with the body.
-        let shrink = matches!(self.kind, BlockKind::Markdown(_))
-            .then_some(RAIL_W)
-            .unwrap_or(0);
-        let idx = lines.iter().position(|l| !is_blank(l)).unwrap_or(0);
-        if shrink > 0 {
-            shrink_leading_ws(&mut lines[idx], shrink);
+        if let Some(kind) = self.rail_kind(level) {
+            let rail = rail::span(kind, self.agent, self.magnitude());
+            // Markdown insets every row by `MD_INDENT`; the rail occupies the
+            // first `RAIL_W` columns of that inset on the opening row, so shrink
+            // the inset there to keep prose flush with the body.
+            let shrink = matches!(self.kind, BlockKind::Markdown(_))
+                .then_some(RAIL_W)
+                .unwrap_or(0);
+            let idx = lines.iter().position(|l| !is_blank(l)).unwrap_or(0);
+            if shrink > 0 {
+                shrink_leading_ws(&mut lines[idx], shrink);
+            }
+            lines[idx].spans.insert(0, rail);
         }
-        lines[idx].spans.insert(0, rail);
         lines
     }
 
@@ -298,11 +321,7 @@ impl Block {
             return Vec::new();
         }
         match &self.kind {
-            BlockKind::ToolCall {
-                tool,
-                summary,
-                cmd,
-            } => match level {
+            BlockKind::ToolCall { tool, summary, cmd } => match level {
                 3 => line::tool_call_expanded(summary, tool, cmd, width),
                 2 => line::tool_call_context(summary, tool, cmd, N, width),
                 _ => line::tool_call_collapsed(summary, tool, self.result_size, width),
@@ -323,17 +342,19 @@ impl Block {
 
     /// The rail shape this block wears.  Chrome lifts its [`RailShape`]
     /// discriminant; patches, tool calls, and markdown derive theirs from
-    /// the variant.  A tool call's disclosure triangle tracks the level:
-    /// `▾` once it reveals context (L2+), `▸` while reduced.
-    fn rail_kind(&self, level: u8) -> RailKind {
+    /// the variant.  Plain chrome is ambient frame text and carries no
+    /// rail.  A tool call's disclosure triangle tracks the level: `▾` once
+    /// it reveals context (L2+), `▸` while reduced.
+    fn rail_kind(&self, level: u8) -> Option<RailKind> {
         match &self.kind {
-            BlockKind::ToolCall { .. } => RailKind::ToolCall(level >= 2),
-            BlockKind::Markdown(_) => RailKind::Markdown,
-            BlockKind::Patch { .. } => RailKind::Patch,
+            BlockKind::ToolCall { .. } => Some(RailKind::ToolCall(level >= 2)),
+            BlockKind::Markdown(_) => Some(RailKind::Markdown),
+            BlockKind::Patch { .. } => Some(RailKind::Patch),
             BlockKind::Chrome { shape, .. } => match shape {
-                RailShape::Step => RailKind::Step,
-                RailShape::Error => RailKind::Error,
-                RailShape::Generic => RailKind::Generic,
+                RailShape::Step => Some(RailKind::Step),
+                RailShape::Error => Some(RailKind::Error),
+                RailShape::Plain => None,
+                RailShape::Generic => Some(RailKind::Generic),
             },
         }
     }

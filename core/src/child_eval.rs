@@ -222,7 +222,12 @@ fn eval_request(
     shell.turn.io.terminal = TerminalState::probe();
     shell.turn.io.job_control = crate::io::JobControl::pipeline_child();
     let captured = captured
-        .ok_or_else(|| Break::Error(Error::new("pipeline stage request carried no captured env", 1)))?
+        .ok_or_else(|| {
+            Break::Error(Error::new(
+                "pipeline stage request carried no captured env",
+                1,
+            ))
+        })?
         .into_runtime(&arcs)?;
     let mut child = Shell::child_of(&captured, &mut shell);
     // Helper-local absorption point: a tail call cannot cross the process

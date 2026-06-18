@@ -294,7 +294,11 @@ impl Viewport {
     /// Append pre-rendered chrome (step header, error, write, task,
     /// meter, banner, subagent breadcrumb, summary-less tool call).
     /// `shape` lets the rail dispatch on the chrome sub-kind.
-    pub(super) fn push_chrome(&mut self, shape: super::block::RailShape, lines: Vec<Line<'static>>) {
+    pub(super) fn push_chrome(
+        &mut self,
+        shape: super::block::RailShape,
+        lines: Vec<Line<'static>>,
+    ) {
         self.push_block(Block::chrome(shape, lines, self.agent));
     }
 
@@ -557,9 +561,15 @@ mod tests {
     #[test]
     fn step_then_chrome_collapses_to_single_blank() {
         let mut vp = fresh();
-        vp.push_chrome(RailShape::Generic, vec![Line::default(), Line::from(Span::raw("header1"))]);
+        vp.push_chrome(
+            RailShape::Generic,
+            vec![Line::default(), Line::from(Span::raw("header1"))],
+        );
         vp.push_chrome(RailShape::Generic, vec![Line::default()]);
-        vp.push_chrome(RailShape::Generic, vec![Line::default(), Line::from(Span::raw("header2"))]);
+        vp.push_chrome(
+            RailShape::Generic,
+            vec![Line::default(), Line::from(Span::raw("header2"))],
+        );
         // The lifted rail prepends a `❖ ` glyph to each chrome header
         // row (Phase 1), so flattened text carries that prefix; the
         // blank-collapse invariant under test is the single `""` between
@@ -570,6 +580,19 @@ mod tests {
         );
     }
 
+    /// Startup/banner chrome is ambient frame text, not a transcript
+    /// event, so it keeps its leading blank but does not wear the `❖`
+    /// rail that ordinary generic chrome uses.
+    #[test]
+    fn plain_chrome_renders_without_a_rail() {
+        let mut vp = fresh();
+        vp.push_chrome(
+            RailShape::Plain,
+            vec![Line::default(), Line::from(Span::raw("banner"))],
+        );
+        assert_eq!(vp.flatten_text(READ_W), vec!["", "banner"]);
+    }
+
     /// `add_usage` accumulates token spend across turns, and `reset`
     /// zeroes it alongside the block buffer — the matrix's value readout
     /// must start fresh after a `/clear`.
@@ -577,8 +600,16 @@ mod tests {
     fn usage_accumulates_and_reset_zeroes() {
         let mut vp = fresh();
         assert_eq!(vp.usage().input + vp.usage().output, 0);
-        vp.add_usage(Usage { input: 100, output: 20, ..Usage::default() });
-        vp.add_usage(Usage { input: 50, output: 5, ..Usage::default() });
+        vp.add_usage(Usage {
+            input: 100,
+            output: 20,
+            ..Usage::default()
+        });
+        vp.add_usage(Usage {
+            input: 50,
+            output: 5,
+            ..Usage::default()
+        });
         assert_eq!(vp.usage().input, 150);
         assert_eq!(vp.usage().output, 25);
         vp.reset();
@@ -685,7 +716,10 @@ mod tests {
         vp.push_patch("src/foo.rs".into(), vec![hunk]);
         let full = vp.flatten_text(READ_W);
         assert!(full.iter().any(|t| t.contains("patch")));
-        assert!(full.iter().any(|t| t.contains("fresh")), "L3 shows the hunk");
+        assert!(
+            full.iter().any(|t| t.contains("fresh")),
+            "L3 shows the hunk"
+        );
         // L3 down to L1 (−2): header survives, hunk rows vanish.
         assert!(vp.dial_block(0, -2), "patch is dialable");
         let l1 = vp.flatten_text(READ_W);
@@ -694,7 +728,10 @@ mod tests {
         // Cycling from L1 reveals the full diff again.
         assert!(vp.cycle_block(0), "cycle L1 → L3");
         let cycled = vp.flatten_text(READ_W);
-        assert!(cycled.iter().any(|t| t.contains("fresh")), "diff back at L3");
+        assert!(
+            cycled.iter().any(|t| t.contains("fresh")),
+            "diff back at L3"
+        );
     }
 
     /// `Ctrl+Y` yanks the rail-stripped text of what is on screen — the

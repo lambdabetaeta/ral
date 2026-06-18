@@ -77,7 +77,9 @@ pub(super) fn mix(from: Color, to: Color, t: f32) -> Color {
     };
     let t = t.clamp(0.0, 1.0);
     let lerp = |a: u8, b: u8| -> u8 {
-        (a as f32 + (b as f32 - a as f32) * t).round().clamp(0.0, 255.0) as u8
+        (a as f32 + (b as f32 - a as f32) * t)
+            .round()
+            .clamp(0.0, 255.0) as u8
     };
     Color::Rgb(lerp(fr, tr), lerp(fg, tg), lerp(fb, tb))
 }
@@ -134,7 +136,10 @@ mod tests {
             panic!("lighten must return RGB");
         };
         assert!(r3 >= r0 && g3 >= g0 && b3 >= b0, "step 3 must not darken");
-        assert!(r3 > r0 || g3 > g0 || b3 > b0, "step 3 must shift toward white");
+        assert!(
+            r3 > r0 || g3 > g0 || b3 > b0,
+            "step 3 must shift toward white"
+        );
         // Hue preserved: the channel ordering stays (pink stays red-dominant).
         assert!(r3 >= g3 && r3 >= b3);
     }
@@ -174,9 +179,17 @@ mod tests {
         ];
         let glyphs: Vec<&str> = kinds.iter().map(|k| k.glyph()).collect();
         let unique: std::collections::HashSet<&str> = glyphs.iter().copied().collect();
-        assert_eq!(unique.len(), kinds.len(), "glyphs must be distinct: {glyphs:?}");
+        assert_eq!(
+            unique.len(),
+            kinds.len(),
+            "glyphs must be distinct: {glyphs:?}"
+        );
         for g in &glyphs {
-            assert_eq!(unicode_width::UnicodeWidthStr::width(*g), 1, "{g:?} must be 1 cell");
+            assert_eq!(
+                unicode_width::UnicodeWidthStr::width(*g),
+                1,
+                "{g:?} must be 1 cell"
+            );
         }
     }
 }
