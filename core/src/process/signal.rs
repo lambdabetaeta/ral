@@ -8,8 +8,10 @@
 //!     a third forces process exit.  Polled via [`check`].
 //!   * **Cooperative cancellation.**  [`CancelScope`] is the structured-
 //!     concurrency primitive: a tree of Arc-shared flags whose
-//!     `is_cancelled` walk lets a `RunningPipeline::Drop` unwind every
-//!     thread that inherited the scope.
+//!     `is_cancelled` walk lets a cancelled scope unwind every worker that
+//!     inherited it at its next poll point — the foreground turn, a
+//!     detached `spawn`/`watch` worker, or a `RunningChild` whose wait loop
+//!     polls the scope and tears the child down by cause.
 //!   * **Process-group placement.**  [`PgidPolicy`] is the type-level
 //!     spelling of "stay in the parent's group / become a leader of a
 //!     fresh group / join an existing group as a non-leader" applied via
@@ -148,8 +150,9 @@ pub(crate) static SIGNAL_COUNT: AtomicU8 = AtomicU8::new(0);
 ///   * a process-level signal (SIGINT / SIGTERM / SIGHUP) — incremented
 ///     by the platform handler;
 ///   * a structured-concurrency cancel — the shell's [`CancelScope`] (or
-///     any of its ancestors) has been cancelled, e.g. by
-///     `RunningPipeline::Drop` on the abort path.
+///     any of its ancestors) has been cancelled, e.g. by a turn deadline
+///     ([`reaper`](crate::process::reaper)), an explicit `cancel <handle>`,
+///     or a Ctrl-\ root abort.
 ///
 /// Both unwind via the same `Break::Error` so callers don't need to
 /// distinguish them.  A pending signal reads "interrupted"; a cancelled
@@ -270,9 +273,9 @@ impl ForegroundGuard {
 //
 // A worker checks `is_cancelled` at well-defined poll points (the same
 // places `signal::check` is already called); cancelling an outer scope
-// propagates to every inner scope, so a top-level Ctrl-C — or a
-// `RunningPipeline::Drop` on the abort path — unwinds every thread that
-// inherited the scope at its next poll point.
+// propagates to every inner scope, so a top-level Ctrl-\ root abort — or a
+// turn deadline — unwinds every thread that inherited the scope at its next
+// poll point.
 //
 // The chain is walked, not flattened, so subscopes can carry their own
 // flag (cancelling only their subtree) while still observing parent
@@ -348,9 +351,10 @@ impl CancelScope {
     }
 
     /// A new scope nested under `self`.  Cancelling any ancestor (or
-    /// `self`) cancels the returned child.  `RunningPipeline` creates
-    /// one of these per pipeline so cancelling the pipeline doesn't
-    /// reach the parent shell.
+    /// `self`) cancels the returned child.  A turn mints one as its
+    /// foreground scope and a detached worker mints one off the durable
+    /// root, so cancelling a worker (or the foreground) doesn't reach the
+    /// parent shell.
     pub fn child(&self) -> Self {
         Self(std::sync::Arc::new(ScopeNode {
             flag: AtomicU8::new(0),

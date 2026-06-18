@@ -22,7 +22,9 @@ use crate::jobs;
 /// Unix disposition summary:
 /// - SIGINT  → relay handler (no-op when idle; forwards to external pipeline groups)
 /// - SIGTERM/SIGHUP → term handler (sets SIGNAL_COUNT for graceful unwind)
-/// - SIGQUIT → SIG_IGN  (Ctrl+\ must not kill or core-dump the shell)
+/// - SIGQUIT → quit handler (Ctrl+\ cancels the durable root — reaping the
+///   foreground turn and every detached worker — instead of core-dumping;
+///   installed by `jobs::setup_signals`, a no-op between turns)
 /// - SIGTSTP → SIG_IGN  (shell handles Ctrl+Z via waitpid, not self-stop)
 /// - SIGTTOU → SIG_IGN  (shell writes terminal settings without being stopped)
 /// - SIGTTIN → SIG_IGN  (shell reads stdin without being stopped if not fg)
@@ -45,12 +47,11 @@ pub(super) fn setup_signals() {
                 "ral: could not claim terminal: {msg}; job control may misbehave"
             ));
         }
-        jobs::setup_signals(); // SIGINT relay, SIGTSTP/SIGTTOU ignore
+        jobs::setup_signals(); // SIGINT relay, SIGQUIT root-abort, SIGTSTP/SIGTTOU ignore
         unsafe {
             let term = ral_core::process::term_handler() as *const () as libc::sighandler_t;
             libc::signal(libc::SIGTERM, term);
             libc::signal(libc::SIGHUP, term);
-            libc::signal(libc::SIGQUIT, libc::SIG_IGN);
             libc::signal(libc::SIGTTIN, libc::SIG_IGN);
             libc::signal(libc::SIGPIPE, libc::SIG_IGN);
         }

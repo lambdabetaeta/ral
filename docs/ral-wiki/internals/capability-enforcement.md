@@ -1,6 +1,6 @@
 ---
-verified_at_commit: df36715
-verified_at_date: 2026-06-17
+verified_at_commit: 478c977
+verified_at_date: 2026-06-18
 anchors: [check_exec_args, check_fs_op, sandbox_projection, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox]
 ---
 
@@ -95,6 +95,17 @@ ral stage still runs through `run_child_eval` over one request/response frame
 ([[internals/pipeline-execution|pipeline execution]];
 [[decisions/260610_child-eval-unification|child-eval-unification]]). That is a
 real process boundary, not a lexical grant body pretending to be one.
+
+**The hard rule for any such synchronous child wait: the host must own an
+out-of-band cancellation path.** A parent blocked in a request/response frame
+cannot observe its own foreground `CancelScope` by cooperative polling — the poll
+never runs while the read is parked. Deadline and Esc therefore cannot break a
+wedged frame unless the parent has a side channel that signals the confined child
+subtree from outside the wait. Extra signal authority *inside* the child is not a
+substitute: it lets a child signal its own descendants, but it does nothing to
+free a parent stuck on the IPC edge. This is why the surviving `run_child_eval`
+consumers keep teardown on the parent side rather than trusting the child to
+notice cancellation.
 
 A bundled coreutil's filesystem access has no in-process gate, so under a
 restrictive grant it is never inlined: it is spawned as a `ral --ral-bundled-tool
