@@ -197,6 +197,452 @@ retry count) arrive as `Kind` extensions without disturbing the other moves.
   with a shape or pattern secondary cue if agent count grows beyond two or
   three.
 
+## Implementation plan
+
+The seven moves decompose into eight phases. Phase 0 builds the per-`Block`
+substrate every move reads; Phase 1 is the keystone rail; Phase 2 is independent
+and parallel; Phases 3–6 consume the variables Phase 1 establishes; Phase 7 is
+freestanding; Phase 8 is the projection switch. Each phase is a landable parcel
+with its own test.
+
+**No new state on `App`.** Every piece of new state is either derivable at
+render time or session-scoped — and session-scoped state belongs on `Viewport`,
+which already owns the block buffer, scroll position, and log. `App` is the
+dispatch layer; it routes events to viewports. The current code violates this
+split by keeping `total_usage` and `phase` on `App` (they work only because root
+is the common case). The phases below push per-session figures to `Viewport`
+and leave `App` unchanged except for handler dispatch — one extra method call
+per `Kind`.
+
+```
+0  Substrate        per-Block agent + magnitude; rail-lift
+1  Move 1           data-encoding marginal rail (keystone)
+2  Move 3           rule_line value-ramp + Gantt ribbon        ∥ 1
+3  Move 4           size bars on collapsed blocks
+4  Move 5           grain for diff density
+5  Move 6           graded reduction (disclosure levels 0–3)
+6  Move 2           agent×step matrix
+7  Move 7           coherent degradation
+8  Projections      codebase map + switch keybinding          *(for later)*
+```
+
+Three forks, settled for Phase 1: the rail is **lifted to a per-`Block` method**
+(not extended in each builder); **every block kind carries the 2-col rail**
+(markdown included, replacing its bare indent); **step boundaries render a
+visible `━`** rail marker (overriding the blank-line-only convention).
+
+### Phase 0 — substrate
+
+The `Block` gains the two variables the rail encodes; the `Viewport` supplies
+them. `App` changes only its `Kind::Born` handler to pass a slot by value.
+
+- **`AgentSlot`** (`tui/block.rs`): a `u8` index into a rail palette. Root = 0.
+  Subagents are assigned the next index on `Kind::Born` — `slot =
+  (self.tabs.len() as u8) % AGENT_HUES.len()` at the moment the viewport is
+  created — wrapping modulo the palette length. No `HashMap` on `App`: the
+  slot is passed by value through `Viewport::new(log_path, agent)` and lives on
+  the viewport. The rail (Phase 1) reads it from `Block::agent`, stamped at
+  push; the matrix (Phase 6) reads it from `Viewport::agent` at render time.
+- **Rail palette** (`tui/line.rs`): `AGENT_HUES: [Color; 6] = [CYAN, PINK, LIME,
+  PURPLE, ORANGE, RED]`. Root stays `CYAN` — the existing rail accent — so a
+  root-only session is visually unchanged in hue.
+- **`Viewport::agent`**: each viewport owns its session's slot, set at
+  construction (`Viewport::new(log_path, agent)`). Every `push_*` stamps that
+  slot onto the block it mints. The one cross-agent block — the `SubagentDone`
+  breadcrumb landed in root's scrollback — stamps root's slot (the viewport's
+  own), not the child's. The child's identity is carried in the breadcrumb's
+  `↘ <title>` text; the rail hue is root's because the block lives in root's
+  buffer. Acceptable: the breadcrumb is root's *reception* of the child's
+  result, not the child's own utterance.
+- **`Block` fields**: `agent: AgentSlot`, plus a `shape` discriminant on chrome.
+  `BlockKind::Chrome(Vec<Line>)` becomes `BlockKind::Chrome { shape: RailShape,
+  lines: Vec<Line> }` so the rail (and moves 4–6) can dispatch on the chrome
+  sub-kind without re-parsing the built lines. `RailShape = Step | Error |
+  Generic` — the coarse set the rail needs; patches and tool calls derive their
+  shape from their own `BlockKind` variant.
+- **`Block::magnitude(&self) -> Option<u32>`**: `Some(del+add lines)` for
+  `Patch`, `None` elsewhere. No `Kind` change in Phase 0 — tool-call magnitude
+  defers to Phase 3 / a later `Kind` extension (the open question stands).
+
+### Phase 1 — Move 1, the data-encoding rail
+
+A new `tui/rail.rs` module owns the three-variable encoding; `Block::render`
+prepends the rail span to the block's first visual row, and nothing else.
+
+- **`rail::span(shape, agent, magnitude) -> Span<'static>`** returns
+  `Span::styled("{glyph} ", fg(lighten(AGENT_HUES[agent.0], value_step(magnitude))))`.
+  One cell carries shape (the glyph), hue (the agent palette), and value
+  (lightness toward white) — the keystone trick. The second column stays a
+  space, as today.
+- **Shape map**:
+  - `ToolCall { open: false }` → `▸`, `open: true }` → `▾` — the disclosure
+    triangle *is* the tool-call shape (no separate `◆`).
+  - `Patch` → `▎`; `Markdown` → `·`; `RailShape::Step` → `━`;
+    `RailShape::Error` → `✗`; `RailShape::Generic` → `❖`.
+- **`value_step(magnitude: Option<u32>) -> u8`** thresholds into `0..=3`:
+  `None` → 0; `Some(n)` bucketed on `log2` (≈ 1–4 → 0, 5–20 → 1, 21–80 → 2,
+  81+ → 3). Patches are the sole carrier in Phase 1; all other blocks render at
+  step 0 (base hue).
+- **`lighten(c: Color, step: u8) -> Color`** interpolates each RGB channel
+  toward 255 by `step / 3`, so step 3 is near-white. Brighter rail = larger
+  event; the ramp is comparable across the whole buffer at rest.
+- **Rail lift.** `Block::render` builds the body lines via the existing
+  `line::*` builders (now rail-less — they lose their hardcoded `RAIL` / `▸` /
+  `▾` first span), then prepends `rail::span(...)` to `lines[0]` only. Body rows
+  stay rail-less, exactly as today. `Block::log_lines` routes through the same
+  path with the tool call forced open, so `user.log` carries the new rail too.
+- **Builder changes.** `line::patch`/`wrote`/`task`/`meter`/`user_prompt`/
+  `queued_prompt` drop the leading `RAIL` span. `tool_call_header` drops its
+  `▸`/`▾`. `error` lifts `✗` out of the content span into the rail (content
+  becomes `error <msg>`). `step` keeps its single blank body line; the `━` rail
+  on that row is what makes the boundary visible.
+- **Markdown reconciliation.** `md::render_md` keeps its `MD_INDENT` inset on
+  every body row; the `·` rail prepends to the first row only. The first row's
+  text column is aligned to the body's by indenting the first row `MD_INDENT −
+  rail_width` after the rail, so prose stays flush across the block.
+- **Copy contract.** `RAIL_GLYPHS` (`tui/line.rs`) extends to the full shape
+  vocabulary — `["▎ ", "▸ ", "▾ ", "· ", "━ ", "✗ ", "❖ "]`. `plain` is
+  unchanged in spirit: drop a leading span whose content is a known rail token.
+  Selection and yank continue to copy rail-stripped text.
+- **Tests.** `line::tests` asserts `ls[0].spans[0].content == RAIL` and on
+  `plain()` output (`patch_numbers_gutter…`, `queued_prompt_*`); these move to
+  the post-lift rail and are re-grounded on `rail::span`. `viewport::tests`
+  `flatten_text` assertions update for the new first-row glyphs. A new test
+  pins the three-variable contract: a large patch renders a brighter `▎` than a
+  small one at the same agent hue.
+
+Phase 1 lands the keystone: the rail becomes a 2-column thumbnail whose shape is
+the session's shape, and the per-`Block` variables every later projection reads
+are in place. Phase 2 (Move 3) is independent and may proceed in parallel.
+
+### Phase 2 — Move 3, rule_line
+
+Independent of Phases 0–1: it reworks `rule_line` (`tui.rs:1214`) and the
+status row layout, not the rail. The motion spinner and `─` filler are replaced
+by two ordered variables — a value ramp for `ctx%` and a Gantt ribbon of
+completed phases — with the digits kept as a precise readout beneath the bar.
+
+**Layout reorder.** Today the vertical layout (`tui.rs:612`) is transcript →
+blank → tabs → *rule_line* → queued → prompt → footer. Phase 2 moves `rule_line`
+to sit immediately above the footer hint, below the prompt — so the two
+bottom rows are status then hints, with the prompt above both. The constraint
+vector and the destructure at `tui.rs:622` reorder; nothing about `rule_line`'s
+body depends on its row.
+
+```
+before:  transcript · blank · tabs · rule_line · queued · prompt · footer
+after:   transcript · blank · tabs · queued · prompt · rule_line · footer
+```
+
+- **Value-ramp `ctx%` bar.** The bare `ctx N%` digit (`tui.rs:1251`) becomes a
+  fixed-width lightness ramp (≈10 cells): filled cells step through
+  `value_step(pct)` toward white as `last_input / context_window` approaches
+  1.0, empty cells dim slate. The eye reads the fill level and *notices the
+  approach to full* — the one fact the gauge exists to surface. The `N%` digit
+  stays as a small readout beneath/after the bar: the graphic gives the
+  comparison, the legend gives the value. `value_step` and `lighten` are shared
+  with Phase 1's rail (`tui/rail.rs`) — same ramp, same scale.
+- **Gantt phase ribbon.** A row of segments, one per completed phase, segment
+  width ∝ wall-time duration, the live phase as the bright tip. Replaces the
+  `─` filler: the filler was non-data ink; the ribbon is a session-history
+  sparkline for free. Needs **new state on `Viewport`**, not `App`: a
+  `Vec<PhaseSeg { label, duration }>` accumulated as phases start/end. Today
+  `self.phase: Option<String>` lives on `App` (`tui.rs:265`) and is set/cleared
+  by `Kind::Phase` / any-other-event (`tui.rs:421`/`468`) — but phase is
+  per-session, so Phase 2 moves it: `App::handle` calls `vp.set_phase(label)`
+  / `vp.clear_phase()`, and `Viewport` owns both the live `Option<String>` and
+  the `Vec<PhaseSeg>` history (capped to last N). `App`'s `phase` field is
+  deleted; `rule_line` reads the focused viewport's phase. The live segment
+  pulses subtly to preserve the liveness signal the motion spinner carried — a
+  stopped phase is a solid segment, the live one breathes, so a hung turn is
+  still distinguishable from a quiet one.
+  - **Token cost is not per-phase today.** `Kind::Usage` fires per model
+    request (`session.rs:307`), and a phase ("typechecking") is a local op
+    between requests that carries no Usage of its own. So the ribbon encodes
+    *duration* (width) reliably; the decision's "value = token cost" per
+    segment defers until a phase-aligned cost signal exists (a `Kind` extension
+    or a derivation). Phase 2 ships duration-only; value is uniform. Noted as a
+    fork for a later phase.
+- **Spinner disposition.** The braille `SPIN` + colour-cycle (`tui.rs:70`) is
+  motion — Bertin's distrusted variable. Phase 2 drops it. Liveness migrates to
+  the Gantt's pulsing live tip (above) plus the `ctx%` bar's fill level
+  advancing. The phase label (`phase.as_deref()`, "typechecking…") stays as
+  text beside the ribbon — it names *what* is running, which the graphic
+  cannot.
+- **Tests.** `rule_line` is a pure `fn` over its args; the existing test shape
+  (build a `Line`, assert on spans) extends to assert the ramp fills with
+  `last_input` and the ribbon carries one segment per recorded phase. The
+  layout reorder is verified by the render snapshot tests in `tui.rs::tests`
+  (`2031+`) if present, else by a geometry assertion on `status_row.y`.
+
+### Phase 3 — Move 4, size as a quantitative variable
+
+The two collapsed headers — patch and tool call — gain a width-`log(magnitude)`
+bar, the second ordered variable (size) after the rail's value (lightness).
+Both read the per-`Block` magnitude Phase 0 exposes; the patch bar lands for
+free, the tool-call bar costs one wiring.
+
+- **Patch header** (`line::patch`, `tui/line.rs:290`): beside the path, a bar
+  of ≈8 cells, filled cells `█` / empty `░`, width ∝ `log(del+add)`. Reuses
+  `Block::magnitude` (Phase 0). A 500-line patch fills the bar; a 2-line patch
+  barely shows. The bar sits on the always-visible header — patches are not
+  collapsible yet, so the header *is* the summary.
+- **Tool-call magnitude source.** `Kind::ToolResult(text)` is emitted for every
+  call (`session.rs:613`, `tools.rs:110`, `tools/fff.rs:258`) but discarded by
+  the TUI (`tui.rs:482`). Phase 3 wires it to the viewport: the `Kind::ToolResult`
+  handler calls `vp.set_result_size(text)`, which captures
+  `text.lines().count()` and attaches it to the most-recent `ToolCall` block —
+  searched backward from the tail, since `Patch`/`Wrote` side effects may land
+  between a call and its result. `Block` gains `result_size: Option<u32>` (a
+  field on the block, not `App`); setting it invalidates the memo so the header
+  re-renders with the bar. The collapsed tool-call header (`▸ <summary>`) gains
+  the same `log` bar.
+  - `fff` results are clipped to `FFF_CAP` (`tools/fff.rs:258`); their bar tops
+    out at the cap — acceptable. The `agent` tool's result arrives as
+    `Kind::SubagentDone`, not `ToolResult`; its bar is keyed off the
+    breadcrumb's `text` length, or left at base. Small exception, noted.
+- **Two magnitudes, two granularities.** The rail's value-step (one cell) gives
+  the thumbnail; the header size-bar (≈8 cells) gives the readout. Both encode
+  magnitude without colliding — one scans, one reads.
+
+### Phase 4 — Move 5, grain for diff density
+
+The patch header gains a grain run beside the size bar: ≈4 braille cells
+(`⣿⣶⣤⣀`) whose density ∝ the addition ratio `add/(add+del)`. `⣿` = all
+additions (full), descending through `⣶`/`⣤` to `⣀` = all deletions. "Mostly
+additions / balanced / mostly deletions" reads pre-attentively — the one place
+a TUI surpasses a pixel grid, terminal cells mapping onto Bertin's grain.
+
+- Density is computed from the hunks' aggregate `del`/`add` counts — already
+  summed for magnitude in Phase 0. No new data.
+- Composes on the Phase 3 header: `▎ patch  <path>  <size-bar>  <grain-run>`.
+  Size carries *how much*; grain carries *what kind* (add/del balance). The
+  two answer different questions at a glance.
+
+### Phase 5 — Move 6, graded reduction
+
+The binary `open: bool` becomes a `level: u8` (0–3), and reduction — not
+toggle — becomes the interaction. Levels apply to `ToolCall`, `Patch`, and
+`Markdown`; chrome stays L3-only (it is already 1–few lines).
+
+- **`Block` gains `level: u8`**, default per kind: `ToolCall` L1 (today's
+  collapsed), `Patch` L3 (today's always-full), `Markdown` L3 (today's
+  always-full). The defaults preserve the current rendering until the user
+  dials — no regression on landing.
+  - L0 = rail glyph alone (the thumbnail row); L1 = glyph + one summary line;
+    L2 = summary + ±N lines of context; L3 = full source.
+  - `ToolCall`: L0 `▸` only; L1 `▸`+summary; L2 summary+cmd head ±N; L3 full cmd.
+  - `Patch`: L0 `▎` only; L1 `▎ patch <path>` + size bar + grain (Phases 3–4);
+    L2 header + first hunk ±N context; L3 full diff.
+  - `Markdown`: L0 `·` only; L1 first line; L2 ±N lines; L3 full paragraph.
+- **Interaction.** `mouse` (`tui.rs:968`) hit-tests `ScrollUp`/`ScrollDown`
+  against the rail column (cols 0–1) and an expandable block: a hit dials
+  `level` (ScrollUp ↑, ScrollDown ↓, clamped 0–3) and consumes the event;
+  otherwise the wheel scrolls as today. A click on the rail cycles L1↔L3,
+  preserving today's click-toggle affordance; clicks off the rail stay
+  selection. The dial is the gesture the decision's "open question: projection
+  switching surface" anticipated at the block scale.
+- **API.** `Block::toggle` → `Block::dial(delta: i8)`; `Viewport::toggle_block`
+  → `Viewport::dial_block(idx, delta)`. Memo invalidation as on toggle today.
+- **Default-level fork.** L3 for patches/markdown is conservative (no visual
+  change until the user dials). The decision's spirit favours a lower default
+  so the rail scans clean — but that is a visible behaviour change. Recommend
+  L3 default, revisit once the rail thumbnail (Phase 1) is proven in use.
+
+Phases 3–4 augment the always-visible patch header and the collapsed tool-call
+header; Phase 5 then makes those headers the L1 view of a dialable stack. Either
+order composes — Phase 5 first decorates L1 with Phases 3–4 after; Phases 3–4
+first land on today's headers and Phase 5 generalises. The decision sequences
+4 → 5 → 6, which we follow.
+
+### Phase 6 — Move 2, agent×step matrix
+
+The 1D `tab_bar` (`tui.rs:1327`) becomes a reorderable matrix when more than
+one session is live, so a fan-out of subagents reads as a comparable grid
+instead of a list of labels. Rows = agents, columns = wall-clock steps, cell
+glyph = state (running / done / failed) with **value** = cumulative token spend
+and **size** = lines touched. Collapses to the existing bar when only root is
+live — no change for the common case.
+
+**No `AgentRow`, no new state on `App`.** Every figure the matrix shows is
+either already on `App` (`tabs`/`titles`/`dying`, `tui.rs:229`/`232`/`236`) or
+derivable from a `Viewport` at render time. The one missing piece is per-agent
+token spend — `App::total_usage` (`tui.rs:266`) is global, and the `Kind::Usage`
+handler ignores `id` (`tui.rs:446`). Phase 6 pushes that to `Viewport`: the
+handler calls `vp.add_usage(u)` alongside the existing `self.total_usage += u`
+(which stays for `rule_line`). `Viewport` gains `usage: Usage` (one field, one
+method). Everything else is a render-time read:
+
+| figure | source | new state? |
+|--------|--------|------------|
+| title | `self.titles[id]` (App, existing) | no |
+| hue / slot | `Viewport::agent` (Phase 0) | no |
+| spawn order | `self.tabs` order (App, existing) | no |
+| state (running/dying) | `self.dying` + tab membership (App, existing) | no |
+| step count | count `Step` blocks in `Viewport::blocks` | no — derived |
+| lines touched | sum patch magnitudes in `Viewport::blocks` | no — derived |
+| token spend | `Viewport::usage` (new field) | **yes, on Viewport** |
+
+```
+main       ●○○○○  12k  ▓▓▓░░  4st
+refactor   ●●●○○  3.4k ▓░░░░  2st
+tests      ✓●○○○  880  ▓░░░░  1st
+```
+
+- **Row = agent.** Label (truncated `titles[id]`), hue from
+  `AGENT_HUES[vp.agent]` (Phase 0) — so the matrix's row colours match the
+  rail's per-block agent hue. One identity, one colour, everywhere.
+- **Step cells = columns.** Derived: scan the viewport's blocks, count `Step`
+  blocks; for each step, scan forward to the next step/boundary and note
+  whether a `ToolCall` block sits in between (`●` = step with a tool call,
+  `○` = without). `✓` = the session is done/dying, `✗` = last block was an
+  error. Capped to row width minus the label and two readouts; a long run
+  shows the most recent steps.
+- **Value readout = cumulative tokens.**
+  `fmt_tokens(vp.usage.input + vp.usage.output)` (`tui.rs:1204`), styled at a
+  lightness ∝ `value_step(usage)` (brighter = more spend) — reusing Phase 1's
+  ramp so "which child burned the budget" reads at a glance.
+- **Size readout = lines touched.** Derived: sum `Block::magnitude()` over the
+  viewport's `Patch` blocks (Phase 0's method, already on the block). A `▓`-bar
+  (Phase 3's idiom, reused), width ∝ `log(lines_touched)`. Empty for agents
+  that only read.
+- **Dying rows** carry the `LINGER` countdown (`tui.rs:1342`) as today,
+  rendered dim.
+
+**`Viewport::usage` — the one new field.** `Viewport` gains `usage: Usage`
+(`Default`), and `add_usage(&mut self, u: Usage)` called from the
+`Kind::Usage` handler. The handler changes from `self.total_usage += u` to
+`self.total_usage += u; if let Some(vp) = self.viewports.get_mut(&id) {
+vp.add_usage(u); }` — one extra line, no `App` field. `reset` clears it
+alongside the block buffer. Root's usage is its viewport's usage; the global
+`total_usage` stays for `rule_line` only.
+
+**Reordering.** The matrix is *reorderable*: the reordering *is* the analysis.
+Default sort = spawn order (`self.tabs` order). A keybinding re-sorts by cost
+(`Viewport::usage`) or lines touched (derived) — which child burned the budget
+surfaces to the top. This is the decision's "reorder rows by spawn-time *or* by
+cost".
+
+**Collapse.** When `self.tabs.len() == 1` (root only), `matrix_bar` returns
+the existing `tab_bar` output — the common case is unchanged. The matrix is a
+*projection* of existing data; it does not replace the tab model, it
+re-projects it.
+
+**Tests.** `Viewport::usage` accumulation is a pure update — unit test that
+`add_usage` sums correctly and `reset` zeroes it. `matrix_bar` is a pure `fn`
+over `&[(SessionId, &Viewport)]` + `&titles` + `&dying` + sort key — assert
+the row order under each sort, the step-cell glyphs by derived state, and that
+the single-agent case matches `tab_bar`'s output (collapse equivalence).
+
+### Phase 7 — Move 7, coherent degradation
+
+The interface stops lending a degraded answer the visual authority of a sound
+one. Two signals drive a per-`Block` **fidelity** ramp (0 = sound, 3 = most
+degraded): context pressure (turn-level, already on `App`) and echo similarity
+to the immediately preceding `ral` tool call (per-block, computed at commit).
+The rendering medium itself degrades with its source — dimmer typeface, lower
+contrast, a row-wise waver — so the user stops trusting a confident-looking
+answer that came from a stressed state.
+
+**Signal 1 — context pressure (turn-level floor).** `last_input` vs
+`context_window` is already on `App` (`tui.rs:270`/`272`, set at `Kind::Usage`
+`tui.rs:452`). It is a property of the whole turn, so it floors every block
+committed during that turn:
+
+```
+context_floor = match last_input / context_window {
+    < 0.50 => 0,  < 0.75 => 1,  < 0.90 => 2,  _ => 3,
+}
+```
+
+`context_window = None` (native providers) → floor 0, no signal. This is the
+decision's named seed, free.
+
+**Signal 2 — echo similarity (per-block delta).** When the assistant's prose
+closely echoes the `ral` script it just ran, the model is parroting rather than
+synthesising — a rubber-stamping failure mode that context pressure induces.
+High similarity → higher degradation. Computed at **block commit**, not per
+token (the decision's "without stalling the stream"): when a `Markdown` block
+commits in `Viewport` (`flush_complete_paragraphs` / `flush_open`,
+`tui/viewport.rs:180`/`193`), look back at the most recent `ToolCall` block in
+the same viewport; if its `tool == "ral"` (`tools/ral.rs:73`), compute the
+similarity of the committing text to that block's `cmd` (held on the block —
+free, no `Kind` change). Else no delta.
+
+- **Similarity = word-3-gram Jaccard.** `shingles(text) -> HashSet` of
+  lowercased word trigrams; `jaccard(a, b) = |a∩b| / |a∪b|`. Cheap, no deps,
+  allocation bounded by text length. Both inputs capped to their first 4 KB so
+  a giant script can't stall the commit.
+  ```
+  echo_delta = match jaccard {
+      < 0.20 => 0,  < 0.50 => 1,  _ => 2,
+  }
+  ```
+- **Direction.** High similarity = echo = *more* degraded. The defensible
+  reading: a model restating its own just-run script in prose is not adding
+  epistemic value. The alternative — that explaining one's script is healthy —
+  would invert the sign; rejected because the *verbatim* overlap Jaccard
+  measures is restatement, not explanation (explanation paraphrases, lowering
+  trigram overlap).
+- **cmd vs result.** The signal uses the call's `cmd` (the script the model
+  wrote), free on the block. The model *sees* the result, so echoing would
+  more often target the result — but `Kind::ToolResult` is discarded by the TUI
+  today (`tui.rs:482`). Phase 3 wires the result back in for the size bar; if
+  that lands first, the echo signal can switch to result-similarity as the
+  stronger measure. cmd-similarity is the seed; noted as a fork.
+
+**Fidelity.** `Block` gains `fidelity: u8` (default 0), set at markdown commit:
+
+```
+fidelity = (context_floor + echo_delta).min(3)
+```
+
+Turn-level floor + per-block delta — the decision's "turn-level is the cheap
+seed; per-paragraph is more honest" resolved as a hybrid: context is the floor
+every paragraph inherits, echo is the per-paragraph modifier.
+
+**Rendering modulation.** `md::render_md` gains a `fidelity: u8` param (the
+one insertion point: `Composer`'s `style: Style` field, `md.rs:102`, threads
+through every text span via `self.style`). Chrome that renders assistant-origin
+text — the `SubagentDone` breadcrumb (`tui.rs:1282`, which calls `render_md`) —
+passes the child's last fidelity. Two signals, two media, per the decision's
+spirit:
+
+- **Context pressure → value reduction (dimmer, lower contrast).** Folded into
+  `Composer::style` at commit:
+  - level 1: `add_modifier(DIM)`;
+  - level 2: DIM + interpolate span `fg` toward `bg` by ~40% (contrast
+    reduction);
+  - level 3: DIM + ~70% contrast pull (near-muted).
+  The fixed-colour spans (code `LIME`/`CODE_BG` `md.rs:129`, headings
+  `md.rs:485+`) are *not* exempt — a degraded answer degrades its code blocks
+  too, so the whole block reads as one fidelity.
+- **Echo similarity → waver (row-wise value oscillation).** A subtle
+  lightness oscillation across the block's rendered rows: alternate rows
+  shift `fg` lightness by ±1 `value_step` (reusing Phase 1's `lighten`). The
+  eye reads "unsteady" without parsing. Applied in `Composer::flush_line` by
+  post-mixing the row's spans when `echo_delta > 0`. This is the decision's
+  "low-confidence ones waver", driven by the echo signal specifically.
+- **Grain defers.** The decision's "retried or self-corrected passages carry a
+  faint grain" wants a third signal (retry count / self-correction) the bus
+  does not yet expose. Phase 4's braille-grain machinery could carry it when a
+  `Kind` extension arrives; Phase 7 ships the two signals above and leaves
+  grain as the slot for a future `Kind::Retried` or logprob aggregate.
+
+**Scope.** Phase 7 touches `md.rs` (the `fidelity` param + the two modulations),
+`viewport.rs` (compute + stamp fidelity at commit, from a `context_floor: u8`
+param passed by `App`), and one line in `App::handle` (pass `context_floor`,
+derived from its existing `last_input`/`context_window`). No new `App` field, no
+`Kind` change required for the seed; deeper signals (logprobs, retry count)
+arrive later as `Kind` extensions and deepen `fidelity` without disturbing the
+rendering path.
+
+**Tests.** `jaccard` is a pure `fn` — unit test: identical strings → 1.0,
+disjoint → 0.0, a script and its prose paraphrase → < 0.2, a script and its
+verbatim restatement → > 0.5. The fidelity→style path: assert a level-2 block's
+text spans carry `DIM` and a pulled `fg`; assert the waver alternates lightness
+across rows when `echo_delta > 0`.
+
 ## See also
 
 [[map/exarch/frontend|frontend]] (the `Block`/`Viewport`/`line` rendering arm
