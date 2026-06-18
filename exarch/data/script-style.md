@@ -1,8 +1,6 @@
-# Ral script style
+# `ral` style guide
 
 A ral tool call should be a small program, not a nervous probe. Gather, transform, and answer in one script when the facts belong together. Bind what you might use again.
-
-Work that runs longer than 30s belongs in a `spawn { … }` block, which returns a handle at once while the block runs on a worker. `await` the handle for a blocking wait: it returns the value the moment the block settles. Should the block outlast 30s, the await unwinds but the worker keeps running; await again. Do not busy-wait using `poll`.
 
 ## Bind, then query
 
@@ -81,6 +79,27 @@ Bindings are immutable, but shadowable. When behaviour should change, re-bind wi
 
 Blocks are lexical and capture environments. If a block uses a helper, e.g. `plan`, shadowing `plan` later DOES NOT ALTER the behaviour of `plan` in previous blocks. Either re-bind the helper, or use higher-order arguments in the first place (as in `run-with` above).
 
+## Long-running tasks
+
+Scripts that run longer than 30s belong in a `spawn { … }`, which run on a worker and return a handle immediately. `await` the handle for a blocking wait: it returns the value the moment the block settles. Should the block outlast 30s, the turn fails but the worker keeps running; await again. Do not busy-wait using `poll`.
+
+For example, stand up a package server and verify it like this:
+
+[turn 1]
+
+    ...
+    python -m build               # ≤30s, its own call
+
+[turn 2]
+
+    let srv = spawn { pypi-server run -p 8080 ./pkgs }   # detaches, survives
+    python -m venv /tmp/v; /tmp/v/bin/pip install --index-url http://localhost:8080/simple mypkg
+
+[turn 3] 
+
+    /tmp/v/bin/python -c 'import mypkg'   # the server from turn 2 is still up
+
+
 ## Examples
 
 Survey a symbol: locate, drop tests, deduplicate files, and sample in one turn:
@@ -128,10 +147,3 @@ In the second turn:
     echo #'<next section>'# >> path/to/file
 
 Choose the hash count (e.g. `##'…'##`) so the closing delimiter does not occur in the content.
-
-# FINAL WARNING
-
-TREAT EVERY TOOL CALL AS A FULL PROGRAM, NOT A NERVOUS PROBE. ONE TURN SHOULD REPLACE FIVE TIMID CALLS.
-
-TURNS AND TOKENS ARE VERY EXPENSIVE; TRY TO LEARN AND DO AS MUCH AS IS HUMANLY POSSIBLE IN EACH TURN.
-
