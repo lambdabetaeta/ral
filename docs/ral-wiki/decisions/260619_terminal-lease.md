@@ -341,6 +341,37 @@ turn.
   condition, its regimes are requested terminal access + internal terminal state
   plus `TurnStdin`, and its SIGTTOU-mask restore is retained verbatim.
 
+## Recorded deviation: the `_ed-tui` loan is a manual token, not RAII
+
+A review of the landed implementation flagged one deviation from §4 worth keeping
+on record for a future parcel. The loan is currently a *manual* token, not the
+drop-restoring guard the §4 sketch (`let _loan = terminal_lease.loan()`) implies:
+`Shell::begin_terminal_loan` (`core/src/types/shell/host.rs`) sets
+`TerminalAccess::ExplicitLoan` **unconditionally** and returns a `TerminalLoan`
+carrying the prior access; restoration is the caller's explicit
+`end_terminal_loan`, and `TerminalLoan` has no `Drop`. Two consequences follow,
+neither a live bug:
+
+- **Elevation from `Denied`.** Because the loan does not consult the current
+  access, a `Denied` turn that happens to sit on a session owning the lease could
+  be raised to `ExplicitLoan` and reach the handoff. §4 frames the loan as a
+  within-turn elevation of an *already-`Leased`* turn; the type does not yet
+  enforce that.
+- **Manual restore.** Without `Drop`, an early return between begin and end would
+  leak `ExplicitLoan` until turn teardown.
+
+Why it is not exploitable today: the sole caller is the REPL editor builtin
+(`ral/src/repl/plugin_ed_builtins.rs`), which runs inside a `Leased` interactive
+turn and always pairs `end_terminal_loan`; exarch installs `Denied` and never
+calls the loan. The weakness is type-level, not behavioural.
+
+A literal RAII guard is awkward in Rust here: a `Drop` impl cannot hold the
+`&mut Shell` it needs to restore access while the editor body also borrows
+`&mut Shell`. The actionable tightening, when a parcel revisits §4, is to refuse
+the elevation unless the turn is already `Leased` — so the loan can only *raise*
+an authorised turn, never mint authority — keeping the manual token but closing
+the `Denied` → `ExplicitLoan` door.
+
 ## Implementation plan
 
 Documentation of intended work, not a commitment to build now. Six parcels; each
