@@ -77,6 +77,11 @@ use line::{
 use viewport::Viewport;
 
 pub(super) const PROMPT_PAD_H: u16 = 1;
+
+/// Left gutter for the transcript, queued-prompt strip, and rule line.
+/// Gives the marginal rail breathing room from the terminal edge so it
+/// reads as a Bertin data column rather than frame chrome.
+const LEFT_MARGIN: u16 = 2;
 const ART: &str = include_str!("../data/banner.txt");
 const EAGLE: &str = include_str!("../data/eagle.txt");
 /// How long a subagent tab stays in the rotation after the session
@@ -711,7 +716,11 @@ impl App {
         let queued_lines = if queued.is_empty() {
             Vec::new()
         } else {
-            let w = area.width.saturating_sub(1).min(READ_W);
+            let w = area
+                .width
+                .saturating_sub(1)
+                .saturating_sub(LEFT_MARGIN)
+                .min(READ_W);
             line::queued_prompt(&queued, w, (area.height / 3).max(1) as usize)
         };
         let queued_h = queued_lines.len() as u16;
@@ -728,10 +737,29 @@ impl App {
         let (content, tab_row, queued_row, prompt_row, status_row, footer_row) = (
             layout[0], layout[2], layout[3], layout[4], layout[5], layout[6],
         );
-        // Reserve the rightmost column of the content area for the scrollbar.
-        let body = Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).split(content);
-        let (text_rect, sb_rect) = (body[0], body[1]);
-
+        // Reserve a left gutter and the rightmost scrollbar column of the
+        // content area; the gutter offsets the rail from the terminal edge.
+        let body = Layout::horizontal([
+            Constraint::Length(LEFT_MARGIN),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(content);
+        let (text_rect, sb_rect) = (body[1], body[2]);
+        // Inset the queued-prompt strip and rule line to share the
+        // transcript's left gutter.
+        let queued_rect = Rect::new(
+            queued_row.x + LEFT_MARGIN,
+            queued_row.y,
+            queued_row.width.saturating_sub(LEFT_MARGIN),
+            queued_row.height,
+        );
+        let status_rect = Rect::new(
+            status_row.x + LEFT_MARGIN,
+            status_row.y,
+            status_row.width.saturating_sub(LEFT_MARGIN),
+            status_row.height,
+        );
         let focused = self.focused();
         let (mut lines, offset, total) = match self.viewports.get_mut(&focused) {
             Some(vp) => {
@@ -787,7 +815,7 @@ impl App {
                 f.render_widget(Paragraph::new(matrix), tab_row);
             }
             if !queued_lines.is_empty() {
-                f.render_widget(Paragraph::new(queued_lines), queued_row);
+                f.render_widget(Paragraph::new(queued_lines), queued_rect);
             }
             f.render_widget(
                 Paragraph::new(rule_line(
@@ -801,7 +829,7 @@ impl App {
                         model: &status_model,
                     },
                 )),
-                status_row,
+                status_rect,
             );
             // The `/model` picker takes over the prompt region while open —
             // a flat strip, not a floating overlay. Input lives in main
@@ -1532,7 +1560,10 @@ fn wait_bar(elapsed: Duration) -> Vec<Span<'static>> {
     for _ in filled..WAIT_BAR_W {
         spans.push(Span::styled("░", Style::default().fg(SLATE)));
     }
-    spans.push(Span::styled(format!(" {secs}s "), Style::default().fg(SLATE)));
+    spans.push(Span::styled(
+        format!(" {secs}s "),
+        Style::default().fg(SLATE),
+    ));
     spans
 }
 
@@ -1760,9 +1791,7 @@ fn matrix_row(
         }),
     ));
 
-    if dim
-        && let Some(t) = dying.get(&id)
-    {
+    if dim && let Some(t) = dying.get(&id) {
         let left = LINGER.saturating_sub(t.elapsed()).as_secs();
         spans.push(Span::styled(
             format!(" ({left}s)"),
