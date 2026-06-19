@@ -2917,3 +2917,13 @@ Added proposed ADR [[decisions/260619_surface-carries-documents|surface-carries-
 
 Revised [[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]] after source review. The exec hook now sits after command resolution at the external/bundled completion doors, write/read events carry path/mode/outcome rather than file-size counts, and exarch keeps a raw `IoEvent` beside the rendered card for `events.json`.
 Updated [[index|index]] with the proposed ADR and its enforcement shape: bulk helper I/O sinks below the ral line, while the remaining doors are clippy-checked and outcome-fused.
+
+## [2026-06-19] ingest | terminal lease plan tightened
+
+Revised [[decisions/260619_terminal-lease|terminal-lease]] after source review of the SIGTTIN failure. The plan now parks one unforgeable lease in session state, separates `TerminalAccess` from `TurnStdin`, keeps `JobControl` until only process-group role remains, and treats `_ed-tui` as an explicit host loan rather than a capture exception.
+Updated [[index|index]] with the narrowed implementation parcels.
+
+## [2026-06-19] ingest | terminal lease public seam split
+
+Re-evaluated [[decisions/260619_terminal-lease|terminal-lease]] after the follow-up review. The plan now distinguishes the host-facing `RequestedTerminalAccess` from internal `TerminalAccess::ExplicitLoan`, and records that the parked session lease has no raw public getter: foreground handoff code gets a borrow only through an authorised turn.
+Updated [[index|index]] to reflect the public/internal terminal-access split.

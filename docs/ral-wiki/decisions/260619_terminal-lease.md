@@ -6,14 +6,17 @@ status: proposed
 
 **The authority to hand the controlling terminal to a child should be an
 unforgeable value a turn is *given* — a `TerminalLease` — not a predicate every
-launch path re-derives from process-global startup state.** Today three
-mechanisms encode that authority ambiently — `startup_foreground` (the
-capability), `JobControl` (orchestrator-vs-stage permission), and the
+launch path re-derives from process-global startup state.** Today three ambient
+facts stand in for that authority — `startup_foreground` (the capability),
+`JobControl`'s foreground role (orchestrator-vs-stage permission), and the
 `capture_depth`/`tui_active` pair (per-pipeline permission plus dynamic
 suppression) — and two launch paths (standalone, pipeline) re-infer the decision
-from them independently. The lease collapses all of that into one question asked
-at the one place a `tcsetpgrp` can happen: *do you hold the lease?* Code that was
-not handed it cannot construct the handoff, so an exarch tool turn that
+from them independently. The lease collapses those three into one question asked
+at the one place a child/job foreground handoff can happen after startup: *do you
+hold the lease?* It also disentangles a fourth concern the same `JobControl` value
+carries — the process-group topology role (`top_level` vs pipeline stage), which
+the lease leaves alone and a later cleanup narrows to a `LaunchRole`. Code that
+was not handed the lease cannot construct the handoff, so an exarch tool turn that
 foregrounds a child — the SIGTTIN crash this ADR is written against — becomes a
 state the type system refuses to represent. This supersedes
 [[decisions/260613_terminal-foreground-ownership|terminal-foreground-ownership]],
@@ -77,43 +80,49 @@ continuation of exactly this pattern, and it overloads a counter documented as
 "*depth of nested `with_capture` scopes*" (`core/src/io.rs:99`) to mean
 something it does not.
 
-### The one chokepoint already exists
+### The post-startup chokepoint already exists
 
-Every `tcsetpgrp` in the workspace funnels through a single RAII type,
-`ForegroundGuard::try_acquire(target, shell)` (`signal/unix.rs:533`), from all
-three callers — standalone (`foreground.rs:132`), pipeline launch
-(`launch.rs:322`), and `fg`-resume (`ral/src/jobs.rs:364`). The guard already
-snapshots and restores pgid + termios on `Drop` (`signal/unix.rs:613`) and
-already re-checks `startup_foreground` on acquire. There is exactly one door to
-gate; the lease is the key the door demands.
+Every child/job foreground handoff after REPL startup funnels through the same
+RAII type, `ForegroundGuard::try_acquire(target, shell)` (`signal/unix.rs:533`):
+standalone (`foreground.rs:132`), pipeline launch (`launch.rs:322`), and
+`fg`-resume (`ral/src/jobs.rs:364`). The REPL's initial job-control ceremony is
+separate (`ral/src/repl/session/boot.rs:85`) because it first becomes the
+foreground shell; the lease gates the later handoffs that a turn may attempt.
+The guard already snapshots and restores pgid + termios on `Drop`
+(`signal/unix.rs:613`). There is exactly one post-startup door to gate; the lease
+is the key the door demands.
 
 ## The decision
 
-### 1 — The token: an unforgeable, core-minted, linear value
+### 1 — The token: one session-owned witness
 
 ```rust
-// core::process — constructor private to this module
+// core::process — fields and constructor private to core
 pub struct TerminalLease { _seal: () }
 
 impl TerminalLease {
-    /// The one mint. Succeeds iff ral owns the controlling terminal's
-    /// foreground at process entry (tcgetpgrp(0) == getpgrp()); None on
-    /// Windows, a non-tty stdin, or a backgrounded launch. This is the body
-    /// of `probe_foreground` (io/terminal.rs:312), now producing a value
-    /// instead of a bool.
-    pub fn mint() -> Option<Self>;
+    pub(crate) fn mint_at_startup() -> Option<Self>;
+}
+
+pub(crate) struct SessionState {
+    terminal_lease: Option<TerminalLease>,
+    // …
 }
 ```
 
-`TerminalLease` is **not `Clone`, not `Copy`**, and constructible only inside
-`core::process`. Its *existence* is the capability — the host holds at most one,
-and only if ral genuinely owned the tty at boot. The `startup_foreground` bool
-(`io/terminal.rs:95`) is then deletable as authority: nothing reads it but the
-foreground decision (it is not in the `$TERMINAL` map exposed to scripts), so
-"a lease exists" carries its whole meaning. This is the witness discipline of
+`TerminalLease` is **not `Clone`, not `Copy`**, and has no public constructor or
+public `mint`. Core mints at most one token while constructing the session, from
+the same `tcgetpgrp(stdin) == getpgrp()` predicate that currently populates
+`startup_foreground` (`core/src/io/terminal.rs:312`). Hosts cannot re-run the
+predicate later and cannot forge a new proof; they can only ask core to run a
+turn with a stated terminal policy. The `startup_foreground` bool
+(`io/terminal.rs:95`) may survive the first parcel as compatibility data, but it
+is no longer an authority source once every handoff demands `&TerminalLease`.
+
+This is the witness discipline of
 [[decisions/260601_reduced-authority-witness|reduced-authority-witness]] applied
-to the terminal: a capability that was a readable flag becomes a value you must
-be handed.
+to the terminal: a readable flag becomes a capability value that only the runtime
+can hold.
 
 ### 2 — The chokepoint demands the lease
 
@@ -123,37 +132,60 @@ pub fn try_acquire(target: pid_t, _lease: &TerminalLease) -> Option<ForegroundGu
 ```
 
 With this one signature change it is *uncompilable* to hand off the terminal
-without a `&TerminalLease` in scope. Because there is one chokepoint, the
-type-level invariant the diagnosis wants — "code without a lease cannot steal the
-terminal" — costs one parameter, not a sweep. The guard's internal
+without a `&TerminalLease` in scope. The guard's internal
 `startup_foreground` re-check goes: holding a `&TerminalLease` *is* that proof.
+The three post-startup callers receive the borrow only through authorised code.
+Core provides a narrow handoff accessor that returns `Some(&TerminalLease)` only
+when the installed turn is `Leased` or `ExplicitLoan` and the session owns the
+lease. `fg` resume uses that same accessor; exarch tool turns install `Denied`,
+so the borrow is unavailable there.
 
-### 3 — A turn is granted access, not handed a pre-computed plan
+- standalone foreground commands;
+- foreground pipeline launch;
+- `fg` resume of a parked job.
+
+### 3 — Foreground authority and stdin policy are separate
 
 `TurnRequest` ([[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]])
-gains a field that states the host's intent for the turn:
+gains two independent host-facing fields: one says whether a turn may foreground
+children, the other says what byte source stdin should use. `TurnState` carries a
+richer internal access value because `_ed-tui` can temporarily elevate an already
+leased turn.
 
 ```rust
-pub enum TerminalAccess {
-    /// This turn may foreground children: its launchers can reach the lease.
-    Leased,
-    /// This turn never touches the controlling terminal: no lease, and a
-    /// null stdin source.
+pub enum RequestedTerminalAccess {
+    /// No child/job foreground handoff in this turn.
     Denied,
+    /// This turn may foreground terminal-bound children.
+    Leased,
+}
+
+pub enum TurnStdin {
+    /// Use the session stdin source. Today this is the inherited fd 0, which may
+    /// be a terminal, pipe, or redirected file.
+    Inherit,
+    /// Install an empty source; no fall-through to fd 0.
+    Empty,
+}
+
+pub(crate) enum TerminalAccess {
+    Denied,
+    Leased,
+    ExplicitLoan,
 }
 ```
 
-- **interactive REPL turn** → `Leased`.
-- **terminal-launched script** (`ral run-claude.ral`) → `Leased` (the second
-  regime of
-  [[decisions/260613_terminal-foreground-ownership|terminal-foreground-ownership]],
-  preserved).
-- **exarch tool turn** → `Denied`. No lease reaches the launcher, so no
+- **interactive REPL turn** → `Leased` + `Inherit`.
+- **terminal-launched script** (`ral run-claude.ral`) → `Leased` + `Inherit`,
+  preserving the second regime of
+  [[decisions/260613_terminal-foreground-ownership|terminal-foreground-ownership]].
+- **exarch tool turn** → `Denied` + `Empty`. No lease reaches the launcher, so no
   tool-turn pipeline can `tcsetpgrp` — **the SIGTTIN bug is unrepresentable** —
-  and `Denied` also routes a null stdin instead of `Source::Terminal`
-  (`host.rs:270`), closing the input-stealing half.
-- **piped `ral -c`, backgrounded `ral … &`** → `Denied` (and `mint` would
-  return `None` for them anyway).
+  and no tool command can read the TUI's controlling terminal.
+- **piped `ral -c`** → `Denied` + `Inherit`: it may read its pipe while lacking
+  foreground authority.
+- **backgrounded `ral … &`** → no lease; the host chooses stdin explicitly rather
+  than smuggling terminal-read permission through foreground denial.
 
 ### 4 — `_ed-tui` is an explicit loan, and `tui_active` dies
 
@@ -163,88 +195,89 @@ bolted onto the capture gate — `capture_depth > 0 && !tui_active`
 (`resolve.rs:320`) — with `tui_active` threaded across pipeline frames by the
 REPL scratch (`core/src/types/shell/repl.rs:59`, `:85`, `:96`) and set/cleared by
 the editor builtin (`ral/src/repl/plugin_ed_builtins.rs:238`). Under the lease it
-becomes a *positive* borrow:
+becomes a *positive* borrow. `_ed-tui` runs as a builtin *inside* an already
+`Leased` REPL turn, so the loan is a within-turn RAII elevation of the installed
+turn's access — mirroring exactly how `tui_active` is set and cleared mid-turn
+today — not a value a host passes at `run_turn`:
 
 ```rust
-let _loan = lease.loan();   // host suspends its own TUI; body draws on /dev/tty
-//   run the _ed-tui body with TerminalAccess::Leased
-// _loan drop → reclaim tty, restore termios + pgid, resume host TUI
+let _loan = terminal_lease.loan();   // host suspends its own terminal surface;
+//                                   // raises the installed turn to ExplicitLoan
+// run the editor body (e.g. fzf)
+// drop → restore the turn's access, reclaim tty, restore termios + pgid, resume host surface
 ```
 
-`tui_active`, its STT-in/out plumbing in `repl.rs`, and the `resolve.rs`
-exception all delete. The reason the current code cannot simply read the stdout
-sink shape — `_ed-tui` has a buffer sink yet *wants* foreground — is exactly what
-the loan states directly: this turn's body owns the tty regardless of where its
-bytes go.
+`TerminalAccess::ExplicitLoan` is the only state in which a foreground handoff
+fires while stdout is a buffer. The host-side loan guard must suspend any live
+terminal reader/renderer before the child owns `/dev/tty`, then restore pgid +
+termios and resume the host surface on drop. `tui_active`, its STT-in/out plumbing
+in `repl.rs`, and the `resolve.rs` exception all delete.
 
 ### 5 — What collapses into the lease
 
 | Ambient mechanism today | Becomes |
 | --- | --- |
-| `startup_foreground` bool (`terminal.rs:95`) | the lease's *existence* (`mint` is `probe_foreground`) |
-| `JobControl{top_level,pipeline_child}` (`io.rs:42`) | *who holds the `&lease`* — the pipeline launcher does, a stage never does |
-| `capture_depth`'s foreground gate (`resolve.rs:320`) | lease present ∧ final sink terminal-bound (the standalone path already reads the sink, `foreground.rs:57`) |
-| `tui_active` (`repl.rs:59`) | the explicit `lease.loan()` |
+| `startup_foreground` bool (`terminal.rs:95`) | the session's `Option<TerminalLease>` |
+| foreground part of `JobControl{top_level,pipeline_child}` (`io.rs:42`) | a borrow of `&TerminalLease` available only to launch orchestration |
+| process-group role part of `JobControl` | retained first, then renamed/narrowed to an explicit `LaunchRole` |
+| `capture_depth`'s foreground gate (`resolve.rs:320`) | final-sink policy: terminal-bound stdout, unless `ExplicitLoan` |
+| `tui_active` (`repl.rs:59`) | `TerminalAccess::ExplicitLoan` plus a host loan guard |
 
-`JobControl`'s job — "only the pipeline launcher may hand off the terminal"
-(`io.rs:38`) — is enforced by *ownership*: the launcher is handed the `&lease`,
-stages are not, and linearity keeps a stage from forging one. `capture_depth`
+`JobControl` is not deleted in the first pass: it also encodes process-group
+topology (`TopLevel` vs pipeline stage) and keeps pipeline helpers from becoming
+new leaders on their own. The lease removes terminal handoff authority from that
+type; a later cleanup can rename the remaining role to `LaunchRole`. `capture_depth`
 keeps its unrelated `Seq`-flush role (`io.rs:99`, `capture.rs`); only its
 consultation in `resolve_terminal_plan` is removed. The post-lease rule at the
-pipeline door is a single line:
+pipeline door is:
 
-> foreground iff the turn is `Leased` **and** (the pipeline's final stdout is
-> terminal-bound **or** the access is an explicit tty loan).
+> foreground iff the turn has a lease **and** (`stdout` is terminal-bound **or**
+> the turn is an explicit tty loan).
 
 ## Why this shape
 
 - **The authority is held, not inferred.** One value answers "may I foreground?"
   at the one door, so the standalone and pipeline paths cannot drift apart — the
   failure mode behind all three recorded regressions.
-- **It removes code.** The lease is not a fourth mechanism beside the three; it
-  *is* the three, unified, with `startup_foreground` (as authority), `JobControl`,
-  and `tui_active` deleted. Net subtraction, in the spirit of
-  [[decisions/260614_structural-bug-prevention|structural-bug-prevention]]:
-  make the bad state unconstructable with a type, do not guard it at dispatch.
-- **The chokepoint is already there.** One RAII type, one `try_acquire`, three
-  callers. The invariant is a one-parameter change, not a refactor of the
-  foreground machinery.
+- **It removes authority, then code.** The lease is not a fourth gate beside the
+  existing gates; it is the value the gates were approximating. The first parcels
+  keep process-group role plumbing where it still carries a distinct fact, then
+  delete `startup_foreground` as authority and `tui_active` outright.
+- **The chokepoint is already there.** One RAII type, one post-startup
+  `try_acquire`, three callers. The invariant is a one-parameter change, not a
+  refactor of the foreground machinery.
 - **It fits the turn-frame model.** Terminal access is turn-local state, exactly
   like the foreground `CancelScope` and `SurfaceSink` that already ride
   `TurnState` and are restored by `TurnGuard` on teardown
   ([[decisions/260617_turn-local-state|turn-local-state]],
   `core/src/turn.rs:96`).
-- **Windows is untouched.** `mint` returns `None` (no `tcsetpgrp`), so every turn
-  is effectively `Denied`; the helper protocol is unchanged, as in
-  [[decisions/260613_terminal-foreground-ownership|terminal-foreground-ownership]].
+- **Windows is untouched.** The startup mint produces no lease (no `tcsetpgrp`),
+  so every foreground handoff is unreachable; the helper protocol is unchanged,
+  as in [[decisions/260613_terminal-foreground-ownership|terminal-foreground-ownership]].
 
-## The one open decision: pure-linear vs. parked token
+## Carrier choice: parked token, not pure-linear threading
 
-The lease's linearity meets one real obstacle — the evaluator threads
-`&mut Shell` through a recursive trampoline, and the `Shell` outlives any single
-turn, so a `&'a TerminalLease` cannot be stored on it. Two ways to carry the
-lease to the deep launcher, and this is the decision left to the author:
+The chosen carrier is the **parked token + per-turn access** form. The single
+owned `TerminalLease` lives on session state; `TurnState` carries
+`TerminalAccess`, restored by `TurnGuard` like `cancel` and `surface` already
+are. A launcher obtains `&TerminalLease` only when the installed turn is
+authorised and the session actually owns a lease.
 
-- **Recommended — parked token + per-turn access.** The single owned
-  `TerminalLease` lives on `session`; `TurnState` carries the `TerminalAccess`
-  marker, restored by `TurnGuard` like `cancel`/`surface` already are. The
-  launcher obtains `&lease` only when its turn is `Leased`. This delivers the two
-  guarantees that matter — *type-level at the door* (`try_acquire` needs
-  `&TerminalLease`, unforgeable and core-private) and *structural for exarch*
-  (`Denied` produces no `&lease` for the launcher) — without touching evaluator
-  threading. It is lease-flavoured, not purely linear: the token is reachable via
-  `&session`, but it cannot be forged, cloned, or minted outside its capability.
+This is not fully linear in the type-theory sense: the token is parked in
+session state rather than moved down the evaluator spine. It still delivers the
+load-bearing guarantees:
 
-- **Alternative — pure linear.** Move the lease (and loans) by value through the
-  turn and the pipeline build, so the borrow checker enforces single-ownership
-  end to end with no parked token. This is the strongest invariant, but it fights
-  the `&mut Shell` recursion at every frame the evaluator descends and is a large,
-  invasive change for the increment over the parked form. Recommended only if a
-  future feature needs to *move* terminal ownership across components rather than
-  lend it for a turn.
+- `ForegroundGuard::try_acquire` is uncallable without an unforgeable
+  `&TerminalLease`.
+- Exarch installs `TerminalAccess::Denied`, so its tool turns cannot obtain that
+  borrow.
+- Evaluator threading stays unchanged; the recursive trampoline keeps carrying
+  `&mut Shell` instead of a moving terminal token.
 
-Everything else in this ADR is independent of the fork; the door, the
-`TerminalAccess` field, and the deletions are identical either way.
+The pure-linear alternative — move the lease and loans by value through the turn
+and pipeline build — is stronger but invasive. It should wait for a feature that
+needs to *move* terminal ownership between components rather than lend it for a
+turn.
 
 ## Alternatives considered
 
@@ -253,12 +286,19 @@ Everything else in this ADR is independent of the fork; the door, the
   (`io.rs:99`) to also mean "this turn's IO is captured," adds a fourth
   interacting condition to the heuristic that already produced three regressions,
   and does not touch the stdin half.
+- **Conflate `TerminalAccess::Denied` with empty stdin.** Rejected: it fixes
+  exarch but breaks the policy vocabulary. A piped `ral -c` should be denied
+  foreground authority while still reading its pipe. Foreground authority and
+  byte input are separate effects.
+- **Delete `JobControl` in the lease parcel.** Rejected: after the handoff door
+  moves to `&TerminalLease`, a role fact remains — top-level launch versus
+  pipeline stage — and still affects `PgidPolicy`. Rename/narrow it later rather
+  than losing that invariant.
 - **Explicit per-turn foreground policy, but keep `startup_foreground` /
-  `JobControl` as-is.** This is a way-station, not a rejection — it *is* steps
-  1–2 of the plan below stopping early. It fixes the live bug, but leaves the two
-  inference sites and the `tui_active` exception standing, so the
-  drift-between-paths failure mode survives. The lease is this idea carried to
-  the point where the ambient inputs are deleted.
+  `JobControl` as authority.** This is a way-station, not a rejection. It fixes
+  the live bug, but leaves the two inference sites and the `tui_active` exception
+  standing, so the drift-between-paths failure mode survives. The lease is this
+  idea carried to the point where the ambient inputs are deleted.
 - **Defensive `tcgetpgrp == getpgrp()` guard before `ct_read` in exarch.**
   Legitimate belt-and-suspenders hardening (the TUI input loop arguably should be
   SIGTTIN-robust regardless), but it papers over the symptom — it does not stop
@@ -267,48 +307,68 @@ Everything else in this ADR is independent of the fork; the door, the
 
 ## What changes, what stays
 
-- **New:** `TerminalLease` (`core::process`), `TerminalAccess` on `TurnRequest`,
-  `lease.loan()` for the `_ed-tui` borrow.
-- **Deleted:** `startup_foreground` as a field/authority (folded into `mint`),
-  `JobControl` (`io.rs:42`), `tui_active` and its `repl.rs` STT plumbing, the
-  `resolve.rs:320` capture exception.
-- **Narrowed:** `resolve_terminal_plan` to the one-line lease rule;
+- **New:** `TerminalLease` (`core::process`), session-owned
+  `Option<TerminalLease>`, host-facing `RequestedTerminalAccess` and `TurnStdin`
+  on `TurnRequest`, internal `TerminalAccess` on `TurnState`, a `Source::Empty`
+  variant (`source.rs` has no null source today), and an explicit loan guard for
+  `_ed-tui`.
+- **Deleted:** `tui_active` and its `repl.rs` STT plumbing; the `resolve.rs:320`
+  capture exception; `startup_foreground` as handoff authority once the lease
+  door is in place.
+- **Retained first:** `JobControl`'s process-group role; later narrowed or
+  renamed to `LaunchRole` after terminal authority is removed from it.
+- **Narrowed:** `resolve_terminal_plan` to the lease + final-sink/loan rule;
   `try_acquire` to take `&TerminalLease`; `ForegroundDecision` to consult the
-  lease instead of `job_control` + `startup_foreground`.
-- **Unchanged:** `ForegroundGuard`'s pgid/termios save-restore and SIGTTOU mask
-  (`signal/unix.rs:613`), the pipeline group/anchor/relay machinery, parking-on-stop
-  staying REPL-only, `capture_depth`'s `Seq`-flush role, and the helper protocol
-  on every platform.
+  lease/access policy instead of `job_control` + `startup_foreground`.
+- **Unchanged:** the REPL startup terminal claim, `ForegroundGuard`'s
+  pgid/termios save-restore and SIGTTOU mask (`signal/unix.rs:613`), the
+  pipeline group/anchor/relay machinery, parking-on-stop staying REPL-only,
+  `capture_depth`'s `Seq`-flush role, and the helper protocol on every platform.
 
 ## Consequences
 
 - The terminal-foreground decision has one source of truth (the lease at the
   door), so the standalone and pipeline paths cannot disagree about which shells
   own the terminal — the class behind all three recorded regressions closes.
-- An exarch tool turn that foregrounds a child, or reads the TUI's stdin, is no
-  longer a bug to guard against; it does not typecheck.
-- Three ambient inputs disappear; `resolve_terminal_plan` shrinks to one rule.
-- The fork (parked vs pure-linear) trades a small residual of reachable-but-
-  unforgeable state for not rewriting evaluator threading.
+- An exarch tool turn that foregrounds a child is no longer a bug to guard
+  against; it does not typecheck at the handoff door.
+- An exarch tool turn that reads stdin sees an explicit empty source, not the
+  controlling terminal; this is a separate `TurnStdin` guarantee, not a side
+  effect of foreground denial.
+- `tui_active` disappears; `_ed-tui` states its terminal borrow positively.
 - [[decisions/260613_terminal-foreground-ownership|terminal-foreground-ownership]]
   becomes *superseded* when this lands: its predicate is the lease's mint
-  condition, its regimes are the `TerminalAccess` values, and its SIGTTOU-mask
-  restore is retained verbatim.
+  condition, its regimes are requested terminal access + internal terminal state
+  plus `TurnStdin`, and its SIGTTOU-mask restore is retained verbatim.
 
 ## Implementation plan
 
-Documentation of intended work, not a commitment to build now. Five parcels;
-each compiles and tests alone. Parcels 1–2 are the high-value core and resolve
-the live crash; 3–4 pay down the three-regression debt; 0 picks the fork.
+Documentation of intended work, not a commitment to build now. Six parcels; each
+compiles and tests alone. Parcels 1–3 are the high-value path and resolve the
+live crash plus stdin stealing; parcels 4–6 pay down the three-regression debt.
 
 ```
-0  Fork         decide parked-token vs pure-linear (the open decision above); the rest is identical either way
-1  Token+door   introduce TerminalLease; mint() = probe_foreground body; try_acquire takes &TerminalLease;
-                thread the lease to the 3 callers (standalone, pipeline finish, fg-resume). Behaviour identical — capability is now type-level.
-2  Access       add TerminalAccess to TurnRequest; exarch passes Denied (+ null stdin); REPL/script pass Leased;
-                resolve_terminal_plan + ForegroundDecision consult it.  ← fixes the SIGTTIN + stdin bug
-3  Loan         convert _ed-tui to lease.loan(); delete tui_active, its repl.rs STT plumbing, and the resolve.rs:320 exception
-4  Cleanup      delete JobControl and startup_foreground (as authority); collapse resolve_terminal_plan to the one-line lease rule
+1  Token+door   add session-owned Option<TerminalLease>; no public mint/Clone/Copy;
+                change ForegroundGuard::try_acquire to require &TerminalLease;
+                thread the borrow to standalone, pipeline finish, and fg-resume.
+                Behaviour identical.
+2  Access       add RequestedTerminalAccess to TurnRequest and TerminalAccess to
+                TurnState; REPL and terminal scripts request Leased, exarch
+                requests Denied, no-lease launches install Denied; resolve_terminal_plan
+                and ForegroundDecision consult the installed access.
+3  Stdin        add Source::Empty (source.rs is {Terminal,Pipe,File} today — no
+                null source exists); add TurnStdin so Capture no longer implies
+                Source::Terminal; exarch passes Empty, ordinary batch/REPL paths
+                pass Inherit. Fixes tool stdin stealing without breaking piped ral -c.
+4  Loan         add ExplicitLoan + host loan guard; convert _ed-tui; delete
+                tui_active, its repl.rs STT plumbing, and the resolve.rs:320
+                capture exception.
+5  Role         narrow JobControl to process-group role or rename it LaunchRole;
+                prove pipeline stages cannot become foreground/new-leader
+                orchestrators independently.
+6  Cleanup      remove startup_foreground as authority (and as a field if no
+                UI/status consumer needs it); collapse resolve_terminal_plan to
+                the lease + final-sink/loan rule.
 ```
 
 ## Test plan
@@ -320,15 +380,21 @@ the live crash; 3–4 pay down the three-regression debt; 0 picks the fork.
   (no lease) does not.
 - **The bug, pinned.** An exarch tool turn running `git diff | from-string` issues
   no `tcsetpgrp` (a `Denied` turn cannot reach `try_acquire`); a tool command that
-  reads stdin sees an empty source, not the controlling terminal — the
+  reads stdin sees `TurnStdin::Empty`, not the controlling terminal — the
   `shell_eval.rs` harness asserts both.
+- **The split, pinned.** A piped `ral -c` can be `Denied` for foreground handoff
+  while still reading inherited pipe stdin; denial is not empty input.
 - **The capture cases.** Inside a `Leased` turn, `!{ git diff | grep x }` does not
   foreground (buffer sink, no loan); a top-level `claude` does (terminal sink);
   `_ed-tui` running `fzf` does (explicit loan, despite its captured stdout) — the
   CTRL-R regression, re-pinned without `tui_active`.
 - **Type-level door.** A compile-fail test (or a `// must not compile` note) that
-  `ForegroundGuard::try_acquire` cannot be called without a `&TerminalLease`, and
-  that `TerminalLease` has no public constructor outside `core::process`.
+  `ForegroundGuard::try_acquire` cannot be called without a `&TerminalLease`, that
+  `TerminalLease` has no public constructor outside `core::process`, and that a
+  host cannot seed `ExplicitLoan` through `TurnRequest`.
+- **Startup separated.** The direct REPL startup `tcsetpgrp` path remains covered
+  by its existing job-control startup tests; the lease gates only post-startup
+  child/job handoffs.
 - **Restore unchanged.** The pgid/termios round-trip and SIGTTOU mask behave as
   the [[decisions/260613_terminal-foreground-ownership|terminal-foreground-ownership]]
   tests already assert; the lease changes who may acquire, not how release works.
@@ -344,7 +410,7 @@ the bad state unconstructable with a type; lint as backstop),
 [[decisions/260617_turn-local-state|turn-local-state]] (terminal access rides
 `TurnState`, restored on teardown),
 [[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]] (`TurnRequest` is
-the host-intent seam `TerminalAccess` joins),
+the host-intent seam requested terminal access and `TurnStdin` join),
 [[internals/pipeline-execution|pipeline-execution]],
 [[map/core/io-process|io-process]], [[map/core/runtime|runtime]],
 [[map/repl/jobs|jobs]].
