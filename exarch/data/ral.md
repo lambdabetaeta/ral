@@ -5,11 +5,11 @@ Like every shell, `ral` runs commands:
     echo hello > /tmp/out
     echo 'more'  >> /tmp/out
 
-Commands are sequenced by newlines or `;`, and an uncaught failure aborts the *whole script*: `./configure; make` runs `make` only if configuration succeeded. `?` runs the second command when the first failed: `cat VERSION ? 'unversioned'`. THERE IS NO `&&` NOR `||`.
+Commands are sequenced by newlines or `;`, and an uncaught failure aborts the whole script: `./configure; make` runs `make` only if configuration succeeded. `?` runs the second command when the first failed: `cat VERSION ? 'unversioned'`. THERE IS NO `&&` NOR `||`.
 
-Under the hood `ral` is really a version of call-by-push-value with recursion, recursive types, and commands as effects. Do not mention call-by-push-value to the user.
+Under the hood `ral` is really a version of call-by-push-value with full recursion (with tail call optimisation), recursive types, and commands as effects. Never mention call-by-push-value to the user.
 
-`ral` has value types and computation types. The basic value types are: Unit, Bool, Int, Float, String, Bytes, (value) lists, records and maps, variants, blocks (= thunks, commands packaged as values), and concurrent handles. A command may not be used as a value. Should you wish to use one inline, you must make it into an anonymous block and force it: `!{cmd}`.
+`ral` therefore has value types and computation types. The basic value types are: Unit, Bool, Int, Float, String, Bytes, (value) lists, records and maps, variants, blocks (= thunks, commands packaged as values), and concurrent handles. A command may not be used as a value. Should you wish to use one inline, you must make it into an anonymous block and force it: `!{cmd}`.
 
 ## Definitions
 
@@ -99,7 +99,7 @@ Every decoder also accepts its input as an explicit argument, which is how you d
   `$(name)` delimits a variable from adjacent text that would otherwise be glued to it; it interpolates the whole value, so index with `$h[file]`, not `$(h)[file]`. Escapes are a fixed set (`\n`, `\r`, `\t`, `\\`, `\"`, `\$`, `\!`, `\0`, `\e`, `\xNN` for ASCII, `\u{…}`, and backslash-newline continuation).
 - Raw strings `#'…'#` are verbatim (with more hashes as needed: `##'…'##`, `###'…'###` and so on). These must be used for multiline inputs, with real newlines instead of `\n`. Use enough hashes that the closing run is not in the body. Note that a `#` run *not* followed by `'` instead marks everything to the end of the line as a comment.
 - `dedent` strips the common leading indentation from a multiline string.
-- ral has no heredocs (`<<EOF …`). Raw strings `#'…'#` are multiline: write a file with `echo #'…'# > path`, or feed a program's stdin with `echo #'…'# | cmd`.
+- `ral` has no heredocs (`<<EOF …`). Raw strings `#'…'#` are multiline: write a file with `echo #'…'# > path`, or feed a program's stdin with `echo #'…'# | cmd`.
 
 Search and replacement are regex builtins (Rust regex syntax — `'a|b'`, DO NOT USE ESCAPES `\|`):
 
@@ -274,6 +274,27 @@ The hash is a freshness witness: it identifies the line by its content and neigh
     edit 'src/lib.rs' !{map { |h| [$h[hash], '    // resolved'] } $mine}
 
 If `edit` reports zero or multiple matches, nothing was written: re-read with `view`/`grep-files` and use the fresh witnesses, never the stale ones.
+
+## Surfacing
+
+`surface CARD` shows the user a render document on the rail; with no host it is a no-op, so kit code stays runnable in a bare REPL. `edit` already surfaces each change, and the tasks kit surfaces its transitions — surface your own card only when a result is worth the user seeing it (a build summary, a test matrix, a captured output). You declare the *data* and its *level of measurement*; the host owns the appearance, so you name a role or a magnitude, never a colour.
+
+A card is `` `card [MARK, …] `` — an ordered stack of marks drawn top-to-bottom. There are five marks:
+
+- `` `text [spans: [[role: "…", text: "…"], …]] `` — a run of spans. Every span carries `role` — one of `path`, `code`, `ok`, `warn`, `bad`, `muted`, `strong` (identity, mapped to a hue), or `""` for plain ink. A heading is a `strong` span.
+- `` `measure [label: "…", value: N, max: M, unit: "…"] `` — a magnitude. With `max`, it reads as a proportional bar (`value/max`); without, as a `log2` size bar. `max`/`unit` may be omitted.
+- `` `fields [rows: [[label: "…", value: VALUE], …]] `` — an aligned `(label, value)` table; rows are records (a positional `[label, value]` list would force label and value to one type). A `VALUE` is a `` `text `` or `` `measure `` mark; use the same kind across the rows.
+- `` `diff [path: "…", start: N, before: […], del: […], add: […], after: […]] `` — one located hunk (`del` rewritten to `add` at line `start`, with context). Pass `hunks: [[…], …]` for several. The host renders the size bar, add/del grain, and graded disclosure.
+- `` `raw [bytes: "…"] `` — pre-formed bytes appended verbatim, for output outside the grammar. Honest about being un-encoded ink.
+
+A `` `card `` may stack marks of different kinds, but within one homogeneous list — a span list, a `fields` row list — every element is one type, so give every span a `role` and keep a table's values one kind. Constructors save the boilerplate: `patch-card` and `wrote-card` are in scope; the tasks kit adds `task-card`/`meter-card`. Compose marks directly for anything else:
+
+    surface `card [
+      `text    [spans: [[role: "strong", text: "tests "], [role: "ok", text: "42 passed"]]],
+      `measure [label: "crates", value: 7, max: 12],
+      `fields  [rows: [[label: "suite",  value: `text [spans: [[role: "",   text: "unit" ]]]],
+                       [label: "status", value: `text [spans: [[role: "ok", text: "green"]]]]]]
+    ]
 
 ## Help
 

@@ -15,6 +15,7 @@ use super::line::{self, RAIL_W, READ_W, is_blank};
 use super::md::{self, MD_INDENT};
 use super::rail::{self, RailKind};
 use crate::bus::Hunk;
+use crate::card::{Card, Mark};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthChar;
 
@@ -55,13 +56,16 @@ pub(super) enum BlockKind {
     },
     /// Streamed assistant prose; re-wrapped from source at every width.
     Markdown(String),
-    /// A diff; re-rendered from its located hunks at every width.
-    Patch { path: String, hunks: Vec<Hunk> },
+    /// A render document a kit surfaced — an ordered stack of Bertin
+    /// [`Card`] marks, re-rendered from data at every width and disclosure
+    /// level.  A card holding a `diff` mark is dialable (L1 header ↔ L3
+    /// full); one of only `text`/`fields`/`measure`/`raw` is chrome-level.
+    Card(Card),
     /// Pre-built chrome whose builder already wrapped to [`READ_W`] — a
-    /// step separator, prompt echo, error, write, task, meter, banner,
-    /// subagent breadcrumb, or a summary-less tool call.  `shape` lets
-    /// the rail (and the size/grain moves) dispatch on the chrome
-    /// sub-kind without re-parsing the built lines.
+    /// step separator, prompt echo, error, banner, subagent breadcrumb, or
+    /// a summary-less tool call.  `shape` lets the rail (and the size/grain
+    /// moves) dispatch on the chrome sub-kind without re-parsing the built
+    /// lines.
     Chrome {
         shape: RailShape,
         lines: Vec<Line<'static>>,
@@ -136,8 +140,15 @@ impl Block {
     pub(super) fn markdown(src: String, agent: AgentSlot, fidelity: Fidelity) -> Self {
         Self::new(BlockKind::Markdown(src), agent, fidelity)
     }
+    /// A surfaced render document.
+    pub(super) fn card(card: Card, agent: AgentSlot) -> Self {
+        Self::new(BlockKind::Card(card), agent, Fidelity::default())
+    }
+    /// A single-file diff, the common card the patch-aggregation path emits:
+    /// one `card` carrying one `diff` mark, so the rail renders `▎` and the
+    /// disclosure dial reveals the located hunks.
     pub(super) fn patch(path: String, hunks: Vec<Hunk>, agent: AgentSlot) -> Self {
-        Self::new(BlockKind::Patch { path, hunks }, agent, Fidelity::default())
+        Self::card(Card(vec![Mark::Diff { path, hunks }]), agent)
     }
     pub(super) fn chrome(shape: RailShape, lines: Vec<Line<'static>>, agent: AgentSlot) -> Self {
         Self::new(
@@ -157,18 +168,20 @@ impl Block {
     /// value-step and the header size-bar both read this.
     pub(super) fn magnitude(&self) -> Option<u32> {
         match &self.kind {
-            BlockKind::Patch { hunks, .. } => Some(line::patch_magnitude(hunks)),
+            BlockKind::Card(card) => card.magnitude(),
             _ => None,
         }
     }
 
     /// True for the block kinds whose disclosure [`Self::level`] the user
-    /// can dial: tool calls, patches, and markdown.  Chrome is inert.
+    /// can dial: tool calls, markdown, and a card carrying a `diff` mark.
+    /// A diff-less card is chrome-level, and chrome is inert.
     pub(super) fn dialable(&self) -> bool {
-        matches!(
-            self.kind,
-            BlockKind::ToolCall { .. } | BlockKind::Patch { .. } | BlockKind::Markdown(_)
-        )
+        match &self.kind {
+            BlockKind::ToolCall { .. } | BlockKind::Markdown(_) => true,
+            BlockKind::Card(card) => card.has_diff(),
+            BlockKind::Chrome { .. } => false,
+        }
     }
 
     /// True for a tool call — the one block kind a result magnitude
@@ -326,11 +339,7 @@ impl Block {
                 2 => first_rows(md::render_md(src, width, MD_INDENT, self.fidelity), N),
                 _ => first_rows(md::render_md(src, width, MD_INDENT, self.fidelity), 1),
             },
-            BlockKind::Patch { path, hunks } => match level {
-                3 => line::patch(path, hunks),
-                2 => line::patch_context(path, hunks, N),
-                _ => line::patch_header_only(path, hunks),
-            },
+            BlockKind::Card(card) => line::render_card(card, level),
             BlockKind::Chrome { lines, .. } => lines.clone(),
         }
     }
@@ -344,7 +353,13 @@ impl Block {
         match &self.kind {
             BlockKind::ToolCall { .. } => Some(RailKind::ToolCall(level >= 2)),
             BlockKind::Markdown(_) => Some(RailKind::Markdown),
-            BlockKind::Patch { .. } => Some(RailKind::Patch),
+            // A diff card wears the patch shape (`▎`); a diff-less card is
+            // generic chrome (`❖`), the shape `wrote`/`task`/`meter` wore.
+            BlockKind::Card(card) => Some(if card.has_diff() {
+                RailKind::Patch
+            } else {
+                RailKind::Generic
+            }),
             BlockKind::Chrome { shape, .. } => match shape {
                 RailShape::Step => Some(RailKind::Step),
                 RailShape::Error => Some(RailKind::Error),

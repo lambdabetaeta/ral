@@ -55,6 +55,30 @@ let view-around = { |line peek|
     view $lo $[$line + $peek + 1]
 }
 
+## Surfacing constructors.  The `surface` builtin carries a render
+## *document* — a `` `card `` of Bertin *marks* the host binds to visual
+## variables — so a card composes marks rather than naming a closed tag.
+## These build the two cards the agent library raises; compose your own
+## from the five marks (`text`/`measure`/`fields`/`diff`/`raw`) for
+## anything else (see the system prompt).
+##
+## `patch-card` — a single located diff: one `diff` mark in the flat
+## single-hunk form (`del` rewritten to `add` at `start`, with `before`
+## and `after` context).  The host renders the size bar, add/del grain,
+## numbered gutter, and graded disclosure from this data.
+let patch-card = { |path start before del add after|
+    `card [`diff [path: $path, start: $start, before: $before, del: $del, add: $add, after: $after]]
+}
+
+## `wrote-card` — a whole-file write: a heading naming the path and its
+## line count, then the written head as muted preview text.
+let wrote-card = { |path lines preview|
+    `card [
+        `text [spans: [[role: "strong", text: "wrote "], [role: "path", text: $path], [role: "muted", text: "  ($lines lines)"]]],
+        `text [spans: [[role: "muted", text: !{intercalate "\n" !{map { |l| "> $l" } $preview}}]]]
+    ]
+}
+
 ## Apply a batch of edits to `path` in a single read/write pass.  `edits`
 ## is a list of `[hash, new-text]` pairs: each replaces the one line whose
 ## window-hash is `hash` with `new-text`, taken verbatim — a real newline
@@ -109,7 +133,7 @@ let edit = { |path edits|
         }
     } !{range 0 $n}
     to-string !{intercalate "\n" $out} > $path
-    ## One `` `patch `` per edit, with context drawn from the original
+    ## One `diff` card per edit, with context drawn from the original
     ## snapshot, so the rail renders a hunk for each change.
     each { |r|
         let i = $r[at]
@@ -125,7 +149,7 @@ let edit = { |path edits|
         let m = if !{equal $last ''} { $[$n - 1] } else { $n }
         let ca-hi = if $[$line + $peek < $m] { $[$line + $peek] } else { $m }
         let ctx-after = take $[$ca-hi - $line] $after
-        surface `patch [path: $path, start: $line, before: $ctx-before, del: $del, add: $add, after: $ctx-after]
+        surface !{patch-card $path $line $ctx-before $del $add $ctx-after}
     } $resolved
 }
 

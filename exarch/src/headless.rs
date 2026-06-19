@@ -14,6 +14,7 @@
 //! de-multiplexes cleanly by id.
 
 use crate::bus::{Event, Kind, SessionId, Sink};
+use crate::card::{Card, FieldVal, Mark};
 use crate::provider::{Provider, Usage};
 use crate::session::Session;
 use crate::tui::SessionInfo;
@@ -134,30 +135,9 @@ fn event_record(t_ms: u128, id: SessionId, kind: &Kind) -> Option<serde_json::Va
                 "elapsed_ms": elapsed.as_millis() as u64,
             }),
         ),
-        Kind::Patch { path, hunk } => (
-            "patch",
-            json!({
-                "path": path,
-                "start": hunk.start,
-                "before": hunk.before,
-                "del": hunk.del,
-                "add": hunk.add,
-                "after": hunk.after,
-            }),
-        ),
-        Kind::Wrote {
-            path,
-            lines,
-            preview,
-        } => (
-            "wrote",
-            json!({ "path": path, "lines": lines, "preview": preview }),
-        ),
-        Kind::Task { status, desc } => ("task", json!({ "status": status.tag(), "desc": desc })),
-        Kind::Meter { done, total, label } => (
-            "meter",
-            json!({ "done": done, "total": total, "label": label }),
-        ),
+        // The whole mark tree, so the machine log stays structured; only a
+        // `raw` mark is opaque, and honestly so.
+        Kind::Card(card) => ("card", json!({ "card": card })),
         Kind::Phase(label) => ("phase", json!({ "label": label })),
         Kind::Token(_) | Kind::Boundary | Kind::UserPromptEcho(_) => return None,
     };
@@ -168,6 +148,58 @@ fn event_record(t_ms: u128, id: SessionId, kind: &Kind) -> Option<serde_json::Va
     map.insert("id".into(), json!(id));
     map.insert("kind".into(), json!(name));
     Some(obj)
+}
+
+/// Condense a surfaced [`Card`] to stderr lines — the human projection of
+/// the mark tree, walked generically: a `diff` reproduces the old patch
+/// lines, a `measure` its bracketed readout, `fields` its aligned pairs,
+/// `text` its plain prose, `raw` its bytes lossily.  The structured form
+/// stays in `transcript.jsonl`.
+fn card_stderr(card: &Card) -> Vec<String> {
+    let mut out = Vec::new();
+    for mark in card.marks() {
+        match mark {
+            Mark::Text { spans } => {
+                let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+                out.extend(text.lines().map(|l| format!("  {l}")));
+            }
+            Mark::Measure(m) => {
+                let bound = m.max.map(|mx| format!("/{mx}")).unwrap_or_default();
+                let unit = m.unit.as_deref().unwrap_or("");
+                out.push(format!("[{}: {}{bound}{unit}]", m.label, m.value));
+            }
+            Mark::Fields { rows } => {
+                for f in rows {
+                    out.push(format!("  {}: {}", f.label, field_value_text(&f.value)));
+                }
+            }
+            Mark::Diff { path, hunks } => {
+                out.push(format!("[diff: {path}]"));
+                for h in hunks {
+                    out.extend(h.before.iter().map(|l| format!("    {l}")));
+                    out.extend(h.del.iter().map(|l| format!("  - {l}")));
+                    out.extend(h.add.iter().map(|l| format!("  + {l}")));
+                    out.extend(h.after.iter().map(|l| format!("    {l}")));
+                }
+            }
+            Mark::Raw { bytes } => {
+                let text = String::from_utf8_lossy(bytes);
+                out.extend(text.lines().map(|l| format!("  {l}")));
+            }
+        }
+    }
+    out
+}
+
+/// The plain text of a fields-row value for the stderr condenser.
+fn field_value_text(v: &FieldVal) -> String {
+    match v {
+        FieldVal::Inline(spans) => spans.iter().map(|s| s.text.as_str()).collect(),
+        FieldVal::Measure(m) => match m.max {
+            Some(mx) => format!("{}/{mx}", m.value),
+            None => format!("{}{}", m.value, m.unit.as_deref().unwrap_or("")),
+        },
+    }
 }
 
 /// The `--output-format json` result object on stdout: the root's final
@@ -270,37 +302,13 @@ impl Sink for Headless {
             }
             Kind::Dim(text) => eprintln!("{text}"),
             Kind::ProviderError(error) => eprintln!("provider error: {error:?}"),
-            // Rail-surfaced kit events.  In headless we condense each
-            // to one or two stderr lines; the canonical structured
-            // form lives in the bus event (and the session log).
-            Kind::Patch { path, hunk } => {
-                eprintln!("[patch: {path}]");
-                for l in &hunk.before {
-                    eprintln!("    {l}");
+            // A surfaced render document.  In headless we condense its
+            // marks to stderr lines generically; the canonical structured
+            // form is the mark tree in `transcript.jsonl`.
+            Kind::Card(card) => {
+                for line in card_stderr(&card) {
+                    eprintln!("{line}");
                 }
-                for l in &hunk.del {
-                    eprintln!("  - {l}");
-                }
-                for l in &hunk.add {
-                    eprintln!("  + {l}");
-                }
-                for l in &hunk.after {
-                    eprintln!("    {l}");
-                }
-            }
-            Kind::Wrote {
-                path,
-                lines,
-                preview,
-            } => {
-                eprintln!("[wrote: {path} ({lines} lines)]");
-                for l in &preview {
-                    eprintln!("  > {l}");
-                }
-            }
-            Kind::Task { status, desc } => eprintln!("[task: {}] {desc}", status.tag()),
-            Kind::Meter { done, total, label } => {
-                eprintln!("[{label}: {done}/{total}]")
             }
             // A sub-agent finished.  Headless keeps sub-agents off the
             // main surface — their tokens never reach stdout — so this

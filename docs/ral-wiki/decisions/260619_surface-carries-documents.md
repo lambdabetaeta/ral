@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # `surface` carries a render document, not a closed tag set
@@ -20,7 +20,13 @@ declares data and whether it is *ordered* or *nominal*; exarch owns the binding 
 size/value/grain (magnitude) or hue/shape (identity). Core is untouched — it
 already carries raw `Value` ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]).
 
-This is a design proposal, not a landed change.
+This change has landed: the `Card`/`Mark` vocabulary and `value_to_card`
+decoder live in `exarch/src/card.rs`, the one generic `render_card`
+interpreter and the role binding table in `tui/line.rs`, `BlockKind::Card`
+with derived disclosure and single-`diff` aggregation in `tui/block.rs` and
+`tui.rs`, and the kit emits cards (`patch-card`/`wrote-card` in `agent.ral`,
+`task-card`/`meter-card` in `kit/tasks.ral`); `Kind::{Patch,Wrote,Task,Meter}`
+and `TaskStatus` are gone.
 
 ## The diagnosis
 

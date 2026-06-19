@@ -18,10 +18,11 @@
 #   save-/load-tasks, …) is side-effect-free and runs in a bare ral
 #   REPL with no host.
 # * The host-surfacing layer (add-task, transition, surface-progress)
-#   hands the host a tagged event with the `surface` builtin, which an
-#   exarch host renders as a typed rail event (a `` `task `` or
-#   `` `meter `` variant).  With no host installed `surface` is the
-#   identity, so the kit stays runnable in a bare ral REPL.
+#   hands the host a render document with the `surface` builtin — a
+#   `` `card `` of Bertin marks (`task-card` builds a roled `text`,
+#   `meter-card` a bounded `measure`) — which an exarch host renders on
+#   the rail.  With no host installed `surface` is the identity, so the
+#   kit stays runnable in a bare ral REPL.
 #
 # Id allocation: `add-task` calls `next-id`, which returns
 # `max(ids) + 1`.  Ids freed by `remove-task` are recycled.
@@ -97,7 +98,7 @@ let next-id = { |ts|
 ## list.  Canonical entry point for growing the task list.
 let add-task = { |ts desc|
   let new-ts = [...$ts, !{mk-task !{next-id $ts} $desc}]
-  surface `task [status: "open", desc: $desc]
+  surface !{task-card "open" $desc}
   surface-progress $new-ts
   __wd-reset
   $new-ts
@@ -142,9 +143,36 @@ let save-tasks = { |ts path| to-json   $ts > $path }
 let load-tasks = { |path|    from-json     < $path }
 
 # --- host-rail surfacing ---------------------------------------------------
-# `surface` hands the host a tagged variant; under exarch it renders as
-# a typed rail event, and with no host it is the identity.  See
-# `value_to_kind` in `exarch/src/shell_eval.rs` for the host's decoder.
+# `surface` hands the host a render document — a `` `card `` of Bertin
+# *marks* — and with no host it is the identity.  The kit declares data and
+# its level of measurement; the host binds it to visual variables.  See
+# `value_to_card` in `exarch/src/card.rs` for the host's decoder.
+
+## Map a task status to the nominal role its word wears on the rail.  The
+## host knows only the closed role set (ok/warn/bad/muted/strong), never
+## task vocabulary, so this domain mapping lives in the kit.
+let task-role = { |status|
+    if !{equal $status "done"} { return "ok" }
+    else {
+        if !{equal $status "blocked"} { return "warn" }
+        else {
+            if !{equal $status "doing"} { return "strong" }
+            else { return "muted" }
+        }
+    }
+}
+
+## A task transition as a one-mark card: a `text` mark whose first span is
+## the status word in its nominal role, then the plain description.
+let task-card = { |status desc|
+    `card [`text [spans: [[role: !{task-role $status}, text: $status], [role: "", text: "  $desc"]]]]
+}
+
+## A rollup as a one-mark card: a bounded `measure` (`value`/`max`), which
+## the host renders as a proportional progress bar with a lightness ramp.
+let meter-card = { |done total label|
+    `card [`measure [label: $label, value: $done, max: $total]]
+}
 
 ## Push a `tasks <done>/<total>` meter onto the host rail.  The label
 ## is the noun being counted; the kit fixes it to "tasks" so the
@@ -152,7 +180,7 @@ let load-tasks = { |path|    from-json     < $path }
 let surface-progress = { |ts|
     let done = !{length !{by-status $ts "done"}}
     let total = !{length $ts}
-    surface `meter [done: $done, total: $total, label: "tasks"]
+    surface !{meter-card $done $total "tasks"}
 }
 
 ## Transition a task's status and surface both the change (as a `task`
@@ -166,7 +194,7 @@ let transition = { |ts id new-status|
         if !{is-empty $matches} { return "task #$id" }
         else { return $matches[0][desc] }
     let new-ts = update-task $ts $id { |t| set-status $t $new-status }
-    surface `task [status: $new-status, desc: $desc]
+    surface !{task-card $new-status $desc}
     surface-progress $new-ts
     __wd-reset
     $new-ts

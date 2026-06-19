@@ -66,11 +66,13 @@ in the request; core installs it as the turn-local
 turn, since it is no longer stored on the persistent session. `AgentSink`
 decodes kit output into rail events in three steps:
 
-- a ral kit hands a tagged variant to the core `surface` builtin;
-- the sink runs `value_to_kind` to decode it into a typed rail `Kind` (`Patch` /
-  `Wrote` / `Task` / `Meter`);
+- a ral kit hands a `` `card `` render document — an ordered stack of Bertin
+  marks — to the core `surface` builtin;
+- the sink runs `value_to_card` (`exarch/src/card.rs`) to decode it into the
+  closed `Card`/`Mark` model and emits one `Kind::Card`;
 - it emits the `Kind` on the [[map/exarch/frontend|bus]] through a clone of the
-  call's `Emitter`.
+  call's `Emitter`, where one generic `render_card` interpreter binds the marks
+  to visual variables.
 
 The producer is a direct `surface` call at each kit site, with no cross-language
 sentinel constant. Same-thread children inherit the sink; detached workers do

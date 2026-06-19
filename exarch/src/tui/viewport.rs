@@ -18,6 +18,7 @@ use super::block::{AgentSlot, Block, RailShape, wrap_line};
 use super::fidelity::{self, Fidelity};
 use super::line::{READ_W, is_blank, plain};
 use crate::bus::Hunk;
+use crate::card::Card;
 use crate::provider::Usage;
 use ratatui::text::Line;
 use std::fs;
@@ -245,14 +246,22 @@ impl Viewport {
         self.push_block(Block::tool_call(tool, summary, cmd, self.agent));
     }
 
-    /// Append a diff block; it re-wraps with the terminal.
+    /// Append a single-file diff block; it re-renders from its hunks at
+    /// every width and disclosure level.
     pub(super) fn push_patch(&mut self, path: String, hunks: Vec<Hunk>) {
         self.push_block(Block::patch(path, hunks, self.agent));
     }
 
-    /// Append pre-rendered chrome (step header, error, write, task,
-    /// meter, banner, subagent breadcrumb, summary-less tool call).
-    /// `shape` lets the rail dispatch on the chrome sub-kind.
+    /// Append a surfaced render document as its own block — a `card` of
+    /// Bertin marks (roled text, a measure, a fields matrix, raw ink, or a
+    /// richer composite the single-`diff` aggregation path didn't claim).
+    pub(super) fn push_card(&mut self, card: Card) {
+        self.push_block(Block::card(card, self.agent));
+    }
+
+    /// Append pre-rendered chrome (step header, error, banner, subagent
+    /// breadcrumb, summary-less tool call).  `shape` lets the rail dispatch
+    /// on the chrome sub-kind.
     pub(super) fn push_chrome(&mut self, shape: RailShape, lines: Vec<Line<'static>>) {
         self.push_block(Block::chrome(shape, lines, self.agent));
     }
@@ -655,9 +664,9 @@ mod tests {
         assert!(l3.iter().any(|t| t.contains("the script")));
     }
 
-    /// A patch defaults to L3 (today's full diff); dialed down to L1 it
-    /// shows the `patch <path>` header but drops every hunk row, and
-    /// cycling it returns to the full diff.
+    /// A diff card defaults to L3 (full diff); dialed down to L1 it shows
+    /// the `diff <path>` header but drops every hunk row, and cycling it
+    /// returns to the full diff.
     #[test]
     fn patch_reduces_to_header_only() {
         let mut vp = fresh();
@@ -670,15 +679,15 @@ mod tests {
         };
         vp.push_patch("src/foo.rs".into(), vec![hunk]);
         let full = vp.flatten_text(READ_W);
-        assert!(full.iter().any(|t| t.contains("patch")));
+        assert!(full.iter().any(|t| t.contains("diff")));
         assert!(
             full.iter().any(|t| t.contains("fresh")),
             "L3 shows the hunk"
         );
         // L3 down to L1 (−2): header survives, hunk rows vanish.
-        assert!(vp.dial_block(0, -2), "patch is dialable");
+        assert!(vp.dial_block(0, -2), "a diff card is dialable");
         let l1 = vp.flatten_text(READ_W);
-        assert!(l1.iter().any(|t| t.contains("patch")), "header survives");
+        assert!(l1.iter().any(|t| t.contains("diff")), "header survives");
         assert!(!l1.iter().any(|t| t.contains("fresh")), "no hunk at L1");
         // Cycling from L1 reveals the full diff again.
         assert!(vp.cycle_block(0), "cycle L1 → L3");

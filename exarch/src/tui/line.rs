@@ -7,7 +7,8 @@
 //! the consumer ([`super::App::handle`]) calls into here to turn them
 //! into `Line`s.
 
-use crate::bus::{Hunk, TaskStatus};
+use crate::bus::Hunk;
+use crate::card::{Card, Field as CardField, FieldVal, Mark, Measure, Role, Span as CardSpan};
 use crate::event::ProviderErrorRecord;
 use crate::provider;
 use ratatui::{
@@ -100,17 +101,6 @@ pub(super) fn plain(line: &Line<'_>) -> String {
 /// cells, filled `█` / empty `░`, encodes `log2(magnitude)` so a
 /// 500-line event fills it and a 2-line event barely shows.
 const SIZE_BAR_W: usize = 8;
-
-/// Total changed lines (deletions + additions) across `hunks` — the
-/// patch magnitude both [`super::block::Block::magnitude`] and the
-/// header [`size_bar`] read.  One definition so the rail's value-step
-/// and the header bar never drift apart.
-pub(super) fn patch_magnitude(hunks: &[Hunk]) -> u32 {
-    hunks
-        .iter()
-        .map(|h| (h.del.len() + h.add.len()) as u32)
-        .sum()
-}
 
 /// Map `magnitude` to a filled-cell count on a `log2` scale, clamped to
 /// `0..=SIZE_BAR_W`: `0` reads empty, a 2-line event lights a cell or
@@ -396,46 +386,39 @@ pub(super) fn error(msg: &str) -> Vec<Line<'static>> {
     ]
 }
 
-/// Patch event: a header line naming the path, then one located hunk per
-/// `edit` — leading context (no sign), removed lines (red `-`), added
-/// lines (lime `+`), and trailing context — each row indented two columns,
-/// then prefixed with a right-aligned line number in [`SLATE`] so the diff
-/// sits under the header like a `wrote` block's preview.  Removed rows carry
-/// their pre-edit numbers; added and context rows carry their post-edit ones.
-/// Several hunks on one path are separated by an elision marker.  No rail
-/// glyph on the body, so dragging a selection through the block copies as
-/// plain text.  Patches are the canonical user-visible side effect of a
-/// tool call, so they always render.
-pub(super) fn patch(path: &str, hunks: &[Hunk]) -> Vec<Line<'static>> {
-    patch_capped(path, hunks, None)
+/// The body of a [`Mark::Diff`], graded by disclosure `level` and carrying
+/// *no* leading blank — [`render_card`] owns the one blank that opens the
+/// whole card.  L1 is the `▎ <path>` header alone; L2 adds the first hunk;
+/// L3 unrolls every hunk.  Each hunk row is leading context (no sign),
+/// removed lines (red `-`), added lines (lime `+`), and trailing context,
+/// indented two columns and prefixed with a right-aligned [`SLATE`] line
+/// number — removed rows keep their pre-edit numbers, added and context
+/// rows take their post-edit ones; several hunks are elision-separated.
+/// No rail glyph on the body, so a selection through the block copies as
+/// plain text.  This is the densest Bertin object: size (the header
+/// `size_bar`), grain (the addition-ratio `grain_run`), value (the rail
+/// lightness), shape (`▎`).
+fn diff_body(path: &str, hunks: &[Hunk], level: u8) -> Vec<Line<'static>> {
+    match level {
+        // L1: header only.  (L0 is the rail glyph alone, handled by the block.)
+        0 | 1 => vec![patch_header(path, hunks)],
+        // L2: header + the first hunk's located context and changes.
+        2 => diff_capped(path, hunks, Some(1)),
+        // L3: the full diff.
+        _ => diff_capped(path, hunks, None),
+    }
 }
 
-/// Patch header only (L1): the `▎ patch <path>` row with its size-bar and
-/// grain (Phases 3–4), no hunk rows.
-pub(super) fn patch_header_only(path: &str, hunks: &[Hunk]) -> Vec<Line<'static>> {
-    vec![Line::default(), patch_header(path, hunks)]
-}
-
-/// Patch with context (L2): the header followed by the first hunk only —
-/// its leading/trailing context (already `±` source lines on the [`Hunk`])
-/// and changed rows — so the diff reveals its first change without
-/// unrolling every hunk.  `_n` is the disclosure context window; the
-/// hunk already carries its own located context, so the first hunk *is*
-/// the bounded view.
-pub(super) fn patch_context(path: &str, hunks: &[Hunk], _n: usize) -> Vec<Line<'static>> {
-    patch_capped(path, hunks, Some(1))
-}
-
-/// The `▎ patch <path>` header row: slate label, white path, the
+/// The `▎ <path>` diff header row: slate label, white path, the
 /// `log2`-scaled [`size_bar`] and the addition-ratio [`grain_run`].
-/// Shared by every patch view so the L1/L2/L3 headers never drift.
+/// Shared by every disclosure level so the L1/L2/L3 headers never drift.
 fn patch_header(path: &str, hunks: &[Hunk]) -> Line<'static> {
     Line::from(vec![
-        Span::styled("patch", Style::default().fg(SLATE)),
+        Span::styled("diff", Style::default().fg(SLATE)),
         Span::raw("  "),
         Span::styled(path.to_string(), Style::default().fg(Color::White)),
         Span::raw("  "),
-        size_bar(patch_magnitude(hunks)),
+        size_bar(crate::card::hunk_magnitude(hunks)),
         Span::raw("  "),
         grain_run(
             hunks.iter().map(|h| h.add.len() as u32).sum(),
@@ -444,11 +427,12 @@ fn patch_header(path: &str, hunks: &[Hunk]) -> Line<'static> {
     ])
 }
 
-/// Shared patch body: the header, then `cap` hunks (all when `None`),
+/// Shared diff body: the header, then `cap` hunks (all when `None`),
 /// elision-separated, numbered against one gutter sized for the whole
-/// block so every row's text column lines up under the header.
-fn patch_capped(path: &str, hunks: &[Hunk], cap: Option<usize>) -> Vec<Line<'static>> {
-    let mut ls: Vec<Line<'static>> = vec![Line::default(), patch_header(path, hunks)];
+/// block so every row's text column lines up under the header.  No leading
+/// blank — see [`diff_body`].
+fn diff_capped(path: &str, hunks: &[Hunk], cap: Option<usize>) -> Vec<Line<'static>> {
+    let mut ls: Vec<Line<'static>> = vec![patch_header(path, hunks)];
     let shown = cap.unwrap_or(hunks.len()).min(hunks.len());
     let gutter = hunks
         .iter()
@@ -549,83 +533,176 @@ fn push_gutter_row(
     });
 }
 
-/// Whole-file write: header naming the path and total line count,
-/// followed by a dim-slate preview of the head.  The preview list is
-/// the producer's responsibility — typically the first half-dozen
-/// lines of the file with a `... (N more)` sentinel as the last entry.
-pub(super) fn wrote(path: &str, lines: u32, preview: &[String]) -> Vec<Line<'static>> {
-    let mut ls: Vec<Line<'static>> = vec![
-        Line::default(),
-        Line::from(vec![
-            Span::styled("wrote", Style::default().fg(SLATE)),
-            Span::raw("  "),
-            Span::styled(path.to_string(), Style::default().fg(Color::White)),
-            Span::styled(
-                format!("  ({lines} lines)"),
-                Style::default().fg(SLATE).add_modifier(Modifier::DIM),
-            ),
-        ]),
-    ];
-    for line in preview {
-        ls.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                format!("> {line}"),
-                Style::default().fg(SLATE).add_modifier(Modifier::DIM),
-            ),
-        ]));
+// ── Card rendering ───────────────────────────────────────────────────────────
+
+/// The one binding table: each nominal [`Role`] to the Bertin retinal
+/// variable that carries identity — hue, plus a weight/texture shift for
+/// `Strong`/`Code`.  This is the single place hue lives for kit *content*,
+/// so the kit can name a role but never a colour, and magnitude can never
+/// land on hue.  Themeable here, once.
+fn role_style(role: Role) -> Style {
+    match role {
+        Role::Path => Style::default().fg(Color::White),
+        Role::Code => Style::default().fg(Color::White).bg(CODE_BG),
+        Role::Ok => Style::default().fg(LIME).add_modifier(Modifier::BOLD),
+        Role::Warn => Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
+        Role::Bad => Style::default().fg(RED).add_modifier(Modifier::BOLD),
+        Role::Muted => Style::default().fg(SLATE).add_modifier(Modifier::DIM),
+        Role::Strong => Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+    }
+}
+
+/// The style of a span by its (optional) role: a roled span binds through
+/// [`role_style`]; a roleless one — and the degradation target of an
+/// unknown role — renders as plain content ink (white).
+fn span_style(role: Option<Role>) -> Style {
+    role.map(role_style)
+        .unwrap_or_else(|| Style::default().fg(Color::White))
+}
+
+/// Render a [`Card`] — the one generic interpreter the `surface` builtin
+/// feeds.  Opens with the single leading blank every block wears, then
+/// renders each mark top-to-bottom; the `diff` mark alone honours the
+/// disclosure `level` (the other marks are chrome-level and always render
+/// full).  The data-encoding rail span is prepended later by
+/// [`super::block::Block`] to the first content row.
+pub(super) fn render_card(card: &Card, level: u8) -> Vec<Line<'static>> {
+    let mut ls = vec![Line::default()];
+    for mark in card.marks() {
+        match mark {
+            Mark::Text { spans } => ls.extend(render_text(spans)),
+            Mark::Measure(m) => ls.push(render_measure(m)),
+            Mark::Fields { rows } => ls.extend(render_fields(rows)),
+            Mark::Diff { path, hunks } => ls.extend(diff_body(path, hunks, level)),
+            Mark::Raw { bytes } => ls.extend(render_raw(bytes)),
+        }
     }
     ls
 }
 
-/// Task transition: a single line `❖ task <status> <desc>` with the
-/// status coloured by role — open=slate, doing=cyan, blocked=orange,
-/// done=lime.  The status is a closed [`TaskStatus`], so every role has a
-/// colour and there is no unknown case to degrade.
-pub(super) fn task(status: TaskStatus, desc: &str) -> Vec<Line<'static>> {
-    let (col, style) = match status {
-        TaskStatus::Doing => (CYAN, Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
-        TaskStatus::Done => (LIME, Style::default().fg(LIME).add_modifier(Modifier::BOLD)),
-        TaskStatus::Blocked => (
-            ORANGE,
-            Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
-        ),
-        TaskStatus::Open => (SLATE, Style::default().fg(SLATE)),
-    };
-    let _ = col;
-    vec![Line::from(vec![
-        Span::styled("task", Style::default().fg(SLATE)),
-        Span::raw("  "),
-        Span::styled(status.tag().to_string(), style),
-        Span::raw("  "),
-        Span::styled(desc.to_string(), Style::default().fg(Color::White)),
-    ])]
+/// Render a `text` mark — a run of optionally-roled spans into one or more
+/// `Line`s, breaking on embedded newlines so a multi-line span stays
+/// faithful.  Width-folding happens later in `block::wrap_line`, which
+/// preserves each span's style.
+fn render_text(spans: &[CardSpan]) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut cur: Vec<Span<'static>> = Vec::new();
+    for cs in spans {
+        let style = span_style(cs.role);
+        let mut parts = cs.text.split('\n');
+        if let Some(first) = parts.next()
+            && !first.is_empty()
+        {
+            cur.push(Span::styled(first.to_string(), style));
+        }
+        for part in parts {
+            lines.push(Line::from(std::mem::take(&mut cur)));
+            if !part.is_empty() {
+                cur.push(Span::styled(part.to_string(), style));
+            }
+        }
+    }
+    lines.push(Line::from(cur));
+    lines
 }
 
-/// Progress meter: `❖ <label>  <done>/<total>  [██████░░░░]`.  The bar
-/// is 10 cells wide, lime for the filled portion and dim slate for the
-/// empty.  `total = 0` is treated as a degenerate "no progress yet"
-/// state (full slate bar) rather than a divide-by-zero error.
-pub(super) fn meter(done: u32, total: u32, label: &str) -> Vec<Line<'static>> {
+/// Render a `measure` mark as one line: the slate label, then the
+/// quantitative readout + bar ([`measure_value_spans`]).
+fn render_measure(m: &Measure) -> Line<'static> {
+    let mut spans = vec![
+        Span::styled(m.label.clone(), Style::default().fg(SLATE)),
+        Span::raw("  "),
+    ];
+    spans.extend(measure_value_spans(m));
+    Line::from(spans)
+}
+
+/// The quantitative value of a [`Measure`] — the readout then the bar,
+/// without the measure's own label (a fields row supplies its own label
+/// column).  A bounded measure (`max` present) reads as `value/max` with a
+/// proportional fill bar (subsuming the old progress meter); an unbounded
+/// one reads as `value[unit]` with a `log2` [`size_bar`].
+fn measure_value_spans(m: &Measure) -> Vec<Span<'static>> {
+    let white = Style::default().fg(Color::White);
+    match m.max {
+        Some(max) => {
+            let mut spans = vec![
+                Span::styled(format!("{}/{}", m.value, max), white),
+                Span::raw("  "),
+            ];
+            spans.extend(progress_bar(m.value, max));
+            spans
+        }
+        None => {
+            let readout = match &m.unit {
+                Some(u) => format!("{}{u}", m.value),
+                None => m.value.to_string(),
+            };
+            vec![
+                Span::styled(readout, white),
+                Span::raw("  "),
+                size_bar(m.value),
+            ]
+        }
+    }
+}
+
+/// A proportional fill bar `██████░░░░` of `done/total` — 10 cells, lime
+/// for the filled run and dim slate for the empty.  `total == 0` reads as
+/// no progress (all empty) rather than a divide-by-zero.  The bounded
+/// branch of [`measure_value_spans`]; subsumes the old `meter`.
+fn progress_bar(done: u32, total: u32) -> Vec<Span<'static>> {
     const W: u32 = 10;
     let filled = if total == 0 {
         0
     } else {
         ((done as u64 * W as u64) / total as u64).min(W as u64) as u32
     };
-    let bar_filled: String = "█".repeat(filled as usize);
-    let bar_empty: String = "░".repeat((W - filled) as usize);
-    vec![Line::from(vec![
-        Span::styled(label.to_string(), Style::default().fg(SLATE)),
-        Span::raw("  "),
-        Span::styled(format!("{done}/{total}"), Style::default().fg(Color::White)),
-        Span::raw("  "),
-        Span::styled(bar_filled, Style::default().fg(LIME)),
+    vec![
+        Span::styled("█".repeat(filled as usize), Style::default().fg(LIME)),
         Span::styled(
-            bar_empty,
+            "░".repeat((W - filled) as usize),
             Style::default().fg(SLATE).add_modifier(Modifier::DIM),
         ),
-    ])]
+    ]
+}
+
+/// Render a `fields` mark — Bertin's selective alignment: every value
+/// lands in one shared label column.  Each row's value is either inline
+/// roled text or a nested [`Measure`].  A single-span text value wraps
+/// under the value column; a multi-span value or a measure renders inline.
+fn render_fields(rows: &[CardField]) -> Vec<Line<'static>> {
+    let field_rows: Vec<FieldRow> = rows
+        .iter()
+        .map(|f| FieldRow {
+            label: f.label.clone(),
+            value: match &f.value {
+                FieldVal::Inline(spans) => match spans.as_slice() {
+                    [one] => FieldValue::Wrapped {
+                        text: one.text.clone(),
+                        style: span_style(one.role),
+                    },
+                    many => FieldValue::Inline(
+                        many.iter()
+                            .map(|s| Span::styled(s.text.clone(), span_style(s.role)))
+                            .collect(),
+                    ),
+                },
+                FieldVal::Measure(m) => FieldValue::Inline(measure_value_spans(m)),
+            },
+        })
+        .collect();
+    render_field_rows(&field_rows, READ_W as usize)
+}
+
+/// Render a `raw` mark — un-encoded ink appended verbatim, decoded lossily
+/// as UTF-8 and split into rows.  Honest about being outside Bertin's
+/// variables: it is an image, not an encoding, so it wears no role styling.
+fn render_raw(bytes: &[u8]) -> Vec<Line<'static>> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .map(|l| Line::from(Span::raw(l.to_string())))
+        .collect()
 }
 
 /// Dim slate text — used for informational messages.
@@ -705,34 +782,75 @@ fn push_wrapped(
     }
 }
 
-// ── Provider-error rendering ────────────────────────────────────────────────
+// ── Aligned-field rendering (the `fields` mark + provider errors) ────────────
 
-/// One rendered field of a provider-error block, ahead of layout.
-///
-/// Collecting the variant's fields into this ordered list first lets the
-/// renderer measure one shared label column across the whole block, so
-/// every value starts in the same column regardless of label length —
-/// Bertin's selective alignment, one ordered value column.
-enum Field {
-    /// A label + wrapped text value.
-    Text { label: String, value: String },
-    /// A label + a duration rendered as `<human>  <size_bar>` — the one
-    /// quantitative field (the rate-limit wait), so it earns the size
-    /// channel the other fields don't.
-    Wait { label: String, secs: u64 },
+/// A field value ahead of layout: text to wrap under the shared label
+/// column, or a row of pre-styled spans rendered inline on the value row
+/// (a measure's bar, a duration plus its `size_bar`).
+enum FieldValue {
+    Wrapped { text: String, style: Style },
+    Inline(Vec<Span<'static>>),
 }
 
-impl Field {
-    /// The field's label, regardless of variant — read once to size the
-    /// shared label column before any row is built.
-    fn label(&self) -> &str {
-        match self {
-            Field::Text { label, .. } | Field::Wait { label, .. } => label,
-        }
+/// One `(label, value)` row ahead of layout — the unit both the `fields`
+/// mark and [`provider_error`] feed into [`render_field_rows`].
+struct FieldRow {
+    label: String,
+    value: FieldValue,
+}
+
+/// A wrapped plain-text field row — the common case (a label and an
+/// unstyled value), used pervasively by [`provider_error`].
+fn text_field(label: impl Into<String>, value: impl Into<String>) -> FieldRow {
+    FieldRow {
+        label: label.into(),
+        value: FieldValue::Wrapped {
+            text: value.into(),
+            style: Style::default(),
+        },
     }
 }
 
-/// Body keys subsumed by the rendered [`Field::Wait`] row, so a body
+/// The slate-bold label lead for an aligned field row, left-padded into
+/// the shared `label_w` column.  One definition so the `fields` mark and
+/// `provider_error` size and colour their label column identically.
+fn field_label(label: &str, label_w: usize) -> Span<'static> {
+    Span::styled(
+        format!("{label:<label_w$}"),
+        Style::default().fg(SLATE).add_modifier(Modifier::BOLD),
+    )
+}
+
+/// Render aligned `(label, value)` rows into one shared label column —
+/// Bertin's selective alignment, the matrix primitive both the `fields`
+/// mark ([`render_fields`]) and [`provider_error`] feed.  The column width
+/// is the longest label plus its two-space gap, measured once so every
+/// value starts in the same column.  `Wrapped` values fold under that
+/// column; `Inline` values render their pre-styled spans on one row.
+fn render_field_rows(rows: &[FieldRow], width: usize) -> Vec<Line<'static>> {
+    let Some(label_w) = rows.iter().map(|r| r.label.chars().count()).max() else {
+        return Vec::new();
+    };
+    let label_w = label_w + 2; // "<label>  "
+    let mut ls: Vec<Line<'static>> = Vec::new();
+    for r in rows {
+        match &r.value {
+            FieldValue::Wrapped { text, style } => {
+                push_field(&mut ls, &r.label, text, *style, label_w, width)
+            }
+            FieldValue::Inline(spans) => {
+                let mut line = vec![field_label(&r.label, label_w)];
+                line.extend(spans.iter().cloned());
+                ls.push(Line::from(line));
+            }
+        }
+    }
+    ls
+}
+
+// ── Provider-error rendering ────────────────────────────────────────────────
+
+/// Body keys subsumed by the rendered retry-after row, so a body
 /// dump doesn't also print the raw retry-after value the wait field
 /// already shows as a human duration + bar.
 const WAIT_KEYS: &[&str] = &[
@@ -762,7 +880,7 @@ pub(super) fn provider_error(e: &ProviderErrorRecord) -> Vec<Line<'static>> {
     }
     ls.push(headline(error_kind(e)));
 
-    let fields: Vec<Field> = match e {
+    let fields: Vec<FieldRow> = match e {
         ProviderErrorRecord::Cancelled { .. } => unreachable!("handled above"),
         ProviderErrorRecord::RateLimited {
             retry_after_secs,
@@ -772,17 +890,11 @@ pub(super) fn provider_error(e: &ProviderErrorRecord) -> Vec<Line<'static>> {
             let mut fs = Vec::new();
             let wait = retry_after_secs.or_else(|| body.as_ref().and_then(wait_from_body));
             if let Some(secs) = wait {
-                fs.push(Field::Wait {
-                    label: "retry-after".into(),
-                    secs,
-                });
+                fs.push(wait_field(secs));
             }
             match body {
                 Some(b) => fs.extend(body_fields(b, WAIT_KEYS)),
-                None => fs.push(Field::Text {
-                    label: "cause".into(),
-                    value: prettify(cause),
-                }),
+                None => fs.push(text_field("cause", prettify(cause))),
             }
             fs
         }
@@ -791,16 +903,10 @@ pub(super) fn provider_error(e: &ProviderErrorRecord) -> Vec<Line<'static>> {
             attempts,
             body,
         } => {
-            let mut fs = vec![Field::Text {
-                label: "attempts".into(),
-                value: attempts.to_string(),
-            }];
+            let mut fs = vec![text_field("attempts", attempts.to_string())];
             match body {
                 Some(b) => fs.extend(body_fields(b, &[])),
-                None => fs.push(Field::Text {
-                    label: "cause".into(),
-                    value: prettify(cause),
-                }),
+                None => fs.push(text_field("cause", prettify(cause))),
             }
             fs
         }
@@ -813,67 +919,43 @@ pub(super) fn provider_error(e: &ProviderErrorRecord) -> Vec<Line<'static>> {
         } => {
             let mut fs = Vec::new();
             if let Some(s) = status {
-                fs.push(Field::Text {
-                    label: "status".into(),
-                    value: s.to_string(),
-                });
+                fs.push(text_field("status", s.to_string()));
             }
-            fs.push(Field::Text {
-                label: "model".into(),
-                value: model.clone(),
-            });
+            fs.push(text_field("model", model.clone()));
             if let Some(u) = url {
-                fs.push(Field::Text {
-                    label: "url".into(),
-                    value: u.clone(),
-                });
+                fs.push(text_field("url", u.clone()));
             }
             match body {
                 Some(b) => fs.extend(body_fields(b, &[])),
-                None => fs.push(Field::Text {
-                    label: "message".into(),
-                    value: message.clone(),
-                }),
+                None => fs.push(text_field("message", message.clone())),
             }
             fs
         }
         ProviderErrorRecord::Truncated { reason } => vec![
-            Field::Text {
-                label: "stop_reason".into(),
-                value: reason.clone(),
-            },
-            Field::Text {
-                label: "remedy".into(),
-                value: "raise `--max-tokens N` or split the turn into smaller writes".into(),
-            },
+            text_field("stop_reason", reason.clone()),
+            text_field(
+                "remedy",
+                "raise `--max-tokens N` or split the turn into smaller writes",
+            ),
         ],
-        ProviderErrorRecord::Other { cause } => vec![Field::Text {
-            label: "cause".into(),
-            value: prettify(cause),
-        }],
+        ProviderErrorRecord::Other { cause } => vec![text_field("cause", prettify(cause))],
     };
 
-    if let Some(label_w) = fields.iter().map(|f| f.label().chars().count()).max() {
-        let label_w = label_w + 2; // "<label>  "
-        for f in &fields {
-            match f {
-                Field::Text { label, value } => {
-                    push_field(&mut ls, label, value, label_w, READ_W as usize);
-                }
-                Field::Wait { label, secs } => {
-                    ls.push(Line::from(vec![
-                        Span::styled(
-                            format!("{label:<label_w$}"),
-                            Style::default().fg(SLATE).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(format!("{}  ", human_secs(*secs))),
-                        size_bar(u32::try_from(*secs).unwrap_or(u32::MAX)),
-                    ]));
-                }
-            }
-        }
-    }
+    ls.extend(render_field_rows(&fields, READ_W as usize));
     ls
+}
+
+/// The rate-limit wait as an aligned field: a human duration plus a
+/// `size_bar` of the seconds — the one quantitative provider-error field,
+/// so it earns the size channel the text fields don't.
+fn wait_field(secs: u64) -> FieldRow {
+    FieldRow {
+        label: "retry-after".into(),
+        value: FieldValue::Inline(vec![
+            Span::raw(format!("{}  ", human_secs(secs))),
+            size_bar(u32::try_from(secs).unwrap_or(u32::MAX)),
+        ]),
+    }
 }
 
 /// The `error: <kind>` headline row: a bold-red `error: ` lead-in then
@@ -902,28 +984,32 @@ fn error_kind(e: &ProviderErrorRecord) -> &'static str {
 }
 
 /// Append one labelled text field as one-or-more flush-left Lines, its
-/// value left-padded into the shared `label_w` column.
+/// value left-padded into the shared `label_w` column and styled with
+/// `value_style`.
 ///
-/// The first wrapped row carries the slate-bold label then the value;
-/// continuation rows blank the label so the value column lines up under
-/// itself.  `label_w` is the block-wide column width (the longest label
-/// plus its two-space gap), passed in so every field aligns to the same
-/// column rather than each measuring its own.  `value` is wrapped to
+/// The first wrapped row carries the slate-bold [`field_label`] then the
+/// value; continuation rows blank the label so the value column lines up
+/// under itself.  `label_w` is the block-wide column width (the longest
+/// label plus its two-space gap), passed in so every field aligns to the
+/// same column rather than each measuring its own.  `value` is wrapped to
 /// `width` columns via [`textwrap::wrap`] so long URLs and stack-like
-/// strings fold instead of clipping; it is already clean — prettifying
-/// happens at field-build time on fallback `cause` text alone, never here.
-fn push_field(ls: &mut Vec<Line<'static>>, label: &str, value: &str, label_w: usize, width: usize) {
+/// strings fold instead of clipping.
+fn push_field(
+    ls: &mut Vec<Line<'static>>,
+    label: &str,
+    value: &str,
+    value_style: Style,
+    label_w: usize,
+    width: usize,
+) {
     let body_w = width.saturating_sub(label_w).max(8);
     push_wrapped(ls, value, body_w, |chunk, first| {
         let lead = if first {
-            Span::styled(
-                format!("{label:<label_w$}"),
-                Style::default().fg(SLATE).add_modifier(Modifier::BOLD),
-            )
+            field_label(label, label_w)
         } else {
             Span::raw(" ".repeat(label_w))
         };
-        Line::from(vec![lead, Span::raw(chunk)])
+        Line::from(vec![lead, Span::styled(chunk, value_style)])
     });
 }
 
@@ -991,7 +1077,7 @@ fn value_display(v: &Value) -> Option<String> {
 /// by a dedicated field (e.g. the rate-limit wait), and null values — and
 /// `message` trails last because it is the one field that wraps.  A body
 /// with no error object yields no fields.
-fn body_fields(body: &Value, consumed: &[&str]) -> Vec<Field> {
+fn body_fields(body: &Value, consumed: &[&str]) -> Vec<FieldRow> {
     let Some(obj) = error_object(body) else {
         return vec![];
     };
@@ -1001,27 +1087,18 @@ fn body_fields(body: &Value, consumed: &[&str]) -> Vec<Field> {
         .or_else(|| obj.get("code"))
         .and_then(value_display)
     {
-        fs.push(Field::Text {
-            label: "type".into(),
-            value: v,
-        });
+        fs.push(text_field("type", v));
     }
     for (k, v) in obj {
         if matches!(k.as_str(), "type" | "code" | "message") || consumed.contains(&k.as_str()) {
             continue;
         }
         if let Some(v) = value_display(v) {
-            fs.push(Field::Text {
-                label: k.clone(),
-                value: v,
-            });
+            fs.push(text_field(k.clone(), v));
         }
     }
     if let Some(v) = obj.get("message").and_then(value_display) {
-        fs.push(Field::Text {
-            label: "message".into(),
-            value: v,
-        });
+        fs.push(text_field("message", v));
     }
     fs
 }
@@ -1069,7 +1146,7 @@ mod tests {
             add: vec!["new10".into()],
             after: vec!["ctx11".into(), "ctx12".into()],
         };
-        let rows: Vec<String> = patch("src/foo.rs", &[h]).iter().map(plain).collect();
+        let rows: Vec<String> = diff_body("src/foo.rs", &[h], 3).iter().map(plain).collect();
         let find = |needle: &str| {
             rows.iter()
                 .find(|r| r.contains(needle))
@@ -1092,7 +1169,7 @@ mod tests {
         );
         assert!(find("ctx12").contains("12"));
         // Every hunk row sits two columns in, so the diff reads as indented
-        // under the `❖ patch` header — the same body offset as `wrote`.
+        // under the `▎ diff` header.
         for needle in ["ctx8", "ctx9", "old10", "old11", "new10", "ctx11", "ctx12"] {
             assert!(
                 find(needle).starts_with("  "),
@@ -1116,9 +1193,9 @@ mod tests {
             after: vec![],
         };
         let bar = |hunks: &[Hunk]| -> String {
-            // The header is the second row (after the leading blank); the
-            // size-bar is its trailing `█`/`░` run.
-            patch("src/foo.rs", hunks)[1]
+            // `diff_body` carries no leading blank, so the header is the
+            // first row; the size-bar is its trailing `█`/`░` run.
+            diff_body("src/foo.rs", hunks, 3)[0]
                 .spans
                 .iter()
                 .map(|s| s.content.as_ref())
@@ -1155,7 +1232,7 @@ mod tests {
             after: vec![],
         };
         let grain = |hunks: &[Hunk]| -> char {
-            patch("src/foo.rs", hunks)[1]
+            diff_body("src/foo.rs", hunks, 3)[0]
                 .spans
                 .iter()
                 .map(|s| s.content.as_ref())
@@ -1232,5 +1309,96 @@ mod tests {
         assert_eq!(rows.len(), 3, "capped at max_rows: {rows:?}");
         // 10 messages, 2 shown, 8 folded into the remainder line.
         assert!(rows[2].contains("8 more"), "remainder count: {rows:?}");
+    }
+
+    /// The Bertin binding holds in both directions and never transposes: a
+    /// nominal role binds identity to a hue (a `text` span), a `measure`
+    /// binds magnitude to size (a fuller bar for a larger value), and a
+    /// roled text span carries no size glyph.  The kit names a role or a
+    /// magnitude; the renderer owns the one binding table.
+    #[test]
+    fn card_binds_identity_to_hue_and_magnitude_to_size() {
+        let text_card = |role: Role, text: &str| {
+            Card(vec![Mark::Text {
+                spans: vec![CardSpan {
+                    role: Some(role),
+                    text: text.into(),
+                }],
+            }])
+        };
+        let fg_of = |ls: &[Line<'static>], needle: &str| {
+            ls.iter()
+                .flat_map(|l| &l.spans)
+                .find(|s| s.content.contains(needle))
+                .and_then(|s| s.style.fg)
+        };
+        let ok = render_card(&text_card(Role::Ok, "done"), 3);
+        assert_eq!(fg_of(&ok, "done"), Some(LIME), "an `ok` role binds to lime");
+        let bad = render_card(&text_card(Role::Bad, "boom"), 3);
+        assert_eq!(fg_of(&bad, "boom"), Some(RED), "a `bad` role is a distinct hue");
+        // Identity is the hue channel only — a roled text span never grows
+        // a size bar (`█`/`░`), which is the measure/diff channel.
+        assert!(
+            !ok.iter()
+                .flat_map(|l| &l.spans)
+                .any(|s| s.content.contains('█') || s.content.contains('░')),
+            "a text role must not render a magnitude bar"
+        );
+
+        // A larger bounded `measure` fills more cells than a smaller one —
+        // magnitude on size, comparable across measures.
+        let fill = |done: u32, total: u32| {
+            let card = Card(vec![Mark::Measure(Measure {
+                label: "m".into(),
+                value: done,
+                max: Some(total),
+                unit: None,
+            })]);
+            render_card(&card, 3)
+                .iter()
+                .flat_map(|l| &l.spans)
+                .flat_map(|s| s.content.chars())
+                .filter(|c| *c == '█')
+                .count()
+        };
+        assert!(fill(8, 10) > fill(2, 10), "a larger measure fills more cells");
+    }
+
+    /// A `fields` mark aligns every value to one shared label column —
+    /// Bertin's selective alignment — regardless of label length.
+    #[test]
+    fn fields_align_to_one_label_column() {
+        let inline = |text: &str| {
+            FieldVal::Inline(vec![CardSpan {
+                role: None,
+                text: text.into(),
+            }])
+        };
+        let card = Card(vec![Mark::Fields {
+            rows: vec![
+                CardField {
+                    label: "a".into(),
+                    value: inline("x"),
+                },
+                CardField {
+                    label: "longer".into(),
+                    value: inline("y"),
+                },
+            ],
+        }]);
+        let lines = render_card(&card, 3);
+        let value_col = |needle: &str| {
+            let line = lines
+                .iter()
+                .find(|l| l.spans.iter().any(|s| s.content.contains(needle)))
+                .expect("a row carrying the value");
+            // The leading span is the padded label; the value starts after it.
+            UnicodeWidthStr::width(line.spans[0].content.as_ref())
+        };
+        assert_eq!(
+            value_col("x"),
+            value_col("y"),
+            "both values start in the same column"
+        );
     }
 }

@@ -334,15 +334,15 @@ pub struct App {
     /// behaviour (an early-return guard in [`Self::key`]), flat in
     /// rendering — a strip, not a floating overlay.
     picker: Option<Picker>,
-    /// In-flight aggregation of consecutive `Kind::Patch` events
-    /// targeting the same `(session, path)`.  Each `edit` invocation
-    /// emits its own `Kind::Patch` carrying one [`Hunk`]; without
-    /// grouping, ten consecutive edits to one file would render as ten
-    /// separate `❖ patch <path>` blocks rather than one block with ten
-    /// located hunks, the way a unified diff presents a single file.
-    /// The buffer accumulates hunks until any non-Patch chrome lands
-    /// (next tool call, assistant text, step boundary, session death),
-    /// at which point [`Self::flush_patch_buf`] emits one block.
+    /// In-flight aggregation of consecutive single-`diff` cards targeting
+    /// the same `(session, path)`.  Each `edit` invocation surfaces its own
+    /// `` `card `` carrying one `diff` mark; without grouping, ten
+    /// consecutive edits to one file would render as ten separate
+    /// `▎ diff <path>` blocks rather than one block with ten located hunks,
+    /// the way a unified diff presents a single file.  The buffer
+    /// accumulates hunks until any non-diff content lands (next tool call,
+    /// assistant text, step boundary, a richer card, session death), at
+    /// which point [`Self::flush_patch_buf`] emits one block.
     patch_buf: Option<PatchBuf>,
     /// Geometry of the content area as of the last [`Self::draw`], so a
     /// mouse event arriving between frames maps to a buffer row.
@@ -603,36 +603,31 @@ impl App {
                 let root = self.root;
                 self.push_chrome(root, RailShape::Generic, lines);
             }
-            // Rail-surfaced kit events.  A kit that raised one through the
-            // `surface` builtin made an explicit choice to communicate
-            // with the user, and patches / writes / task transitions are
-            // the canonical user-visible side effects of a tool call.
-            Kind::Patch { path, hunk } => {
+            // A surfaced render document.  A kit that raised a card through
+            // the `surface` builtin made an explicit choice to communicate
+            // with the user.  A single-`diff` card joins the patch-grouping
+            // buffer so consecutive edits to one file merge into one block,
+            // the way a unified diff presents one file; every other card is
+            // its own scrollback block.
+            Kind::Card(card) => {
                 ral_core::dbg_trace!(
                     "tui",
-                    "Patch id={id} viewports={:?} focus={} path={path}",
+                    "Card id={id} viewports={:?} focus={} diff={}",
                     self.viewports.keys().copied().collect::<Vec<_>>(),
-                    self.focus
+                    self.focus,
+                    card.single_diff().is_some()
                 );
-                self.absorb_patch(id, path, hunk);
-            }
-            Kind::Wrote {
-                path,
-                lines,
-                preview,
-            } => self.push_chrome(id, RailShape::Generic, line::wrote(&path, lines, &preview)),
-            Kind::Task { status, desc } => {
-                self.push_chrome(id, RailShape::Generic, line::task(status, &desc))
-            }
-            Kind::Meter { done, total, label } => {
-                self.push_chrome(id, RailShape::Generic, line::meter(done, total, &label))
+                match card.into_single_diff() {
+                    Ok((path, hunks)) => self.absorb_patch(id, path, hunks),
+                    Err(card) => self.with_viewport(id, |vp| vp.push_card(card)),
+                }
             }
         }
     }
 
     /// Commit any pending patch, then hand the session's viewport to `f`.
-    /// Any non-Patch content closes the patch grouping window: a pending
-    /// buffer must land before the new block, or the merged `❖ patch`
+    /// Any non-diff content closes the patch grouping window: a pending
+    /// buffer must land before the new block, or the merged `▎ diff`
     /// would appear *after* whatever follows it on the rail.
     fn with_viewport(&mut self, id: SessionId, f: impl FnOnce(&mut Viewport)) {
         self.flush_patch_buf();
@@ -652,31 +647,28 @@ impl App {
         self.with_viewport(id, |vp| vp.push_chrome(shape, lines));
     }
 
-    /// Absorb a `Kind::Patch`'s hunk into [`Self::patch_buf`], or flush +
-    /// open a fresh buffer when the path or session changes.  Consecutive
-    /// same-`(id, path)` events append their hunks into one buffer so they
-    /// later render as a single `❖ patch <path>` block of located hunks —
-    /// the way a unified diff presents several changes to one file.
-    fn absorb_patch(&mut self, id: SessionId, path: String, hunk: Hunk) {
+    /// Absorb a single-`diff` card's hunks into [`Self::patch_buf`], or
+    /// flush + open a fresh buffer when the path or session changes.
+    /// Consecutive same-`(id, path)` diff cards append their hunks into one
+    /// buffer so they later render as a single `▎ diff <path>` block of
+    /// located hunks — the way a unified diff presents several changes to
+    /// one file.
+    fn absorb_patch(&mut self, id: SessionId, path: String, hunks: Vec<Hunk>) {
         let same = self
             .patch_buf
             .as_ref()
             .is_some_and(|b| b.id == id && b.path == path);
         if same {
             let buf = self.patch_buf.as_mut().expect("same-path implies Some");
-            buf.hunks.push(hunk);
+            buf.hunks.extend(hunks);
         } else {
             self.flush_patch_buf();
-            self.patch_buf = Some(PatchBuf {
-                id,
-                path,
-                hunks: vec![hunk],
-            });
+            self.patch_buf = Some(PatchBuf { id, path, hunks });
         }
     }
 
-    /// Commit any pending [`PatchBuf`] as one `❖ patch` block.  Called
-    /// at every commit boundary that isn't another `Kind::Patch`
+    /// Commit any pending [`PatchBuf`] as one `▎ diff` block.  Called at
+    /// every commit boundary that isn't another single-`diff` card
     /// targeting the same `(id, path)`: `push_chrome`, the streaming
     /// token / boundary paths, session death, and `/clear`.
     fn flush_patch_buf(&mut self) {

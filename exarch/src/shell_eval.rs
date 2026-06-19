@@ -11,7 +11,8 @@
 //! the session log in full.  Nothing streams live to the user; the rail
 //! surfaces tool summaries, patches, writes, and tasks instead.
 
-use crate::bus::{Emitter, Hunk, Kind};
+use crate::bus::{Emitter, Kind};
+use crate::card::value_to_card;
 use ral_core::types::{Break, Escape};
 use ral_core::{
     EventSink, Shell, StaticDiagnostics, TurnIo, TurnReport, TurnRequest, Value as RalValue,
@@ -47,18 +48,21 @@ pub enum Outcome {
 
 /// The agent's structured-event surface: the turn-local [`EventSink`] exarch
 /// installs for a tool call.  It decodes each `Value` the `surface` builtin
-/// hands it into a rail [`Kind`] (via [`value_to_kind`]) and emits it on the
-/// presentation bus through a clone of the call's [`Emitter`].  An
-/// unrecognised value is dropped — the same graceful degradation the closure
-/// form had.  Detached workers never receive this sink: core buffers their
-/// `surface` calls and replays them on `await`, so a clone of the bus
-/// `Emitter` can never outlive the tool turn.
+/// hands it into a render document (a [`Card`] of Bertin marks, via
+/// [`value_to_card`]) and emits it on the presentation bus through a clone of
+/// the call's [`Emitter`].  A value that is not a card is dropped — the same
+/// graceful degradation the old tagged-variant decoder had.  Detached workers
+/// never receive this sink: core buffers their `surface` calls and replays
+/// them on `await`, so a clone of the bus `Emitter` can never outlive the
+/// tool turn.
+///
+/// [`Card`]: crate::card::Card
 struct AgentSink(Emitter);
 
 impl EventSink for AgentSink {
     fn emit(&self, ev: &RalValue) {
-        if let Some(kind) = value_to_kind(ev) {
-            self.0.emit(kind);
+        if let Some(card) = value_to_card(ev) {
+            self.0.emit(Kind::Card(card));
         }
     }
 }
@@ -212,72 +216,6 @@ pub fn run_shell(
     })
 }
 
-/// Decode an event a ral kit handed to the `surface` builtin into a rail
-/// [`Kind`].  The kit constructs a tagged variant — `` `task ``, `` `meter ``,
-/// `` `patch ``, `` `wrote `` — whose payload is a record; this reads the tag
-/// and the record's fields directly off the runtime [`RalValue`], with no
-/// intermediate serialisation.
-///
-/// A variant exarch doesn't recognise, or one whose payload is missing a
-/// field or carries the wrong type, decodes to `None` and is dropped — the
-/// graceful degradation the old sentinel got from "malformed → silent", now
-/// expressed against typed values rather than a re-lexed byte line.  Integer
-/// fields (`done` / `total` / `lines`) clamp into `u32`.
-fn value_to_kind(v: &RalValue) -> Option<Kind> {
-    let RalValue::Variant { label, payload } = v else {
-        return None;
-    };
-    let rec = match payload.as_deref() {
-        Some(RalValue::Map(m)) => m,
-        _ => return None,
-    };
-    let text = |field: &str| match rec.get(field) {
-        Some(RalValue::String(s)) => Some(s.clone()),
-        _ => None,
-    };
-    let count = |field: &str| match rec.get(field) {
-        Some(RalValue::Int(n)) => u32::try_from(*n).ok(),
-        _ => None,
-    };
-    let lines = |field: &str| match rec.get(field) {
-        Some(RalValue::List(items)) => items
-            .iter()
-            .map(|x| match x {
-                RalValue::String(s) => Some(s.clone()),
-                _ => None,
-            })
-            .collect::<Option<Vec<String>>>(),
-        _ => None,
-    };
-    match label.as_str() {
-        "patch" => Some(Kind::Patch {
-            path: text("path")?,
-            hunk: Hunk {
-                start: count("start")?,
-                before: lines("before")?,
-                del: lines("del")?,
-                add: lines("add")?,
-                after: lines("after")?,
-            },
-        }),
-        "wrote" => Some(Kind::Wrote {
-            path: text("path")?,
-            lines: count("lines")?,
-            preview: lines("preview")?,
-        }),
-        "task" => Some(Kind::Task {
-            status: crate::bus::TaskStatus::parse(&text("status")?)?,
-            desc: text("desc")?,
-        }),
-        "meter" => Some(Kind::Meter {
-            done: count("done")?,
-            total: count("total")?,
-            label: text("label")?,
-        }),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     //! Documented-semantics tests for exarch's tool-call evaluator.
@@ -303,73 +241,6 @@ mod tests {
     use crate::bus::Emitter;
     use ral_core::types::Capabilities;
     use std::sync::mpsc;
-
-    /// A `` `patch `` variant whose payload record carries the expected
-    /// fields decodes into a `Kind::Patch`, reading the tag and fields
-    /// straight off the runtime value.
-    #[test]
-    fn value_to_kind_decodes_patch() {
-        let event = RalValue::Variant {
-            label: "patch".into(),
-            payload: Some(Box::new(RalValue::map(vec![
-                ("path".into(), RalValue::String("a.txt".into())),
-                ("start".into(), RalValue::Int(7)),
-                (
-                    "before".into(),
-                    RalValue::list(vec![RalValue::String("ctx".into())]),
-                ),
-                (
-                    "del".into(),
-                    RalValue::list(vec![RalValue::String("x".into())]),
-                ),
-                (
-                    "add".into(),
-                    RalValue::list(vec![RalValue::String("y".into())]),
-                ),
-                (
-                    "after".into(),
-                    RalValue::list(vec![RalValue::String("tail".into())]),
-                ),
-            ]))),
-        };
-        match value_to_kind(&event) {
-            Some(Kind::Patch { path, hunk }) => {
-                assert_eq!(path, "a.txt");
-                assert_eq!(hunk.start, 7);
-                assert_eq!(hunk.before, vec!["ctx"]);
-                assert_eq!(hunk.del, vec!["x"]);
-                assert_eq!(hunk.add, vec!["y"]);
-                assert_eq!(hunk.after, vec!["tail"]);
-            }
-            _ => panic!("expected a Kind::Patch"),
-        }
-    }
-
-    /// A non-variant, an unrecognised tag, and a known tag missing a
-    /// field all decode to `None` and are dropped — never a panic.
-    #[test]
-    fn value_to_kind_rejects_malformed() {
-        assert!(value_to_kind(&RalValue::String("nope".into())).is_none());
-        assert!(
-            value_to_kind(&RalValue::Variant {
-                label: "bogus".into(),
-                payload: Some(Box::new(RalValue::map(vec![]))),
-            })
-            .is_none(),
-            "unknown tag must not decode"
-        );
-        assert!(
-            value_to_kind(&RalValue::Variant {
-                label: "task".into(),
-                payload: Some(Box::new(RalValue::map(vec![(
-                    "status".into(),
-                    RalValue::String("open".into()),
-                )]))),
-            })
-            .is_none(),
-            "missing field must not decode"
-        );
-    }
 
     /// Render a path without a trailing platform separator.  Some hosts
     /// return `"/tmp/"` from `std::env::temp_dir()`; `Shell::cwd()` never
@@ -753,14 +624,13 @@ keep-bottom
     }
 
     /// `edit` is the canonical witnessed rewrite entry point. Its body
-    /// in `agent.ral` hands a `` `patch `` variant to the `surface`
-    /// builtin after the write; `value_to_kind` decodes it into a
-    /// `Kind::Patch` on the bus. Pins two contracts: the edit reaches
-    /// the rail end-to-end across the sandbox boundary, and `del`
-    /// carries the literal removed rows so the rendered diff stays
-    /// human-readable.
+    /// in `agent.ral` hands a `` `card `` carrying one `diff` mark to the
+    /// `surface` builtin after the write; `value_to_card` decodes it into a
+    /// `Kind::Card` on the bus. Pins two contracts: the edit reaches the
+    /// rail end-to-end across the sandbox boundary, and `del` carries the
+    /// literal removed rows so the rendered diff stays human-readable.
     #[test]
-    fn edit_emits_kind_patch() {
+    fn edit_emits_kind_card() {
         use std::io::Write;
         let mut shell = fresh_shell();
         let (tx, rx) = mpsc::channel();
@@ -792,15 +662,19 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
             String::from_utf8_lossy(&r.stderr)
         );
 
-        let mut patch = None;
+        let mut found = None;
         while let Ok(ev) = rx.try_recv() {
-            if let crate::bus::Kind::Patch { path, hunk } = ev.kind {
-                patch = Some((path, hunk));
+            if let crate::bus::Kind::Card(card) = ev.kind {
+                found = Some(card);
                 break;
             }
         }
         let _ = std::fs::remove_dir_all(&tmp);
-        let (_got_path, hunk) = patch.expect("a Kind::Patch must reach the bus after edit");
+        let card = found.expect("a Kind::Card must reach the bus after edit");
+        let (_got_path, hunks) = card
+            .single_diff()
+            .expect("edit surfaces a card carrying one diff mark");
+        let hunk = &hunks[0];
         assert_eq!(
             hunk.del,
             vec!["unique target line"],

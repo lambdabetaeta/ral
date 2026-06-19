@@ -1,8 +1,10 @@
 //! Agent / frontend boundary.  Workers stamp [`Kind`]s with their
 //! [`SessionId`] through an [`Emitter`]; consumers implement [`Sink`].
 
+use crate::card::Card;
 use crate::event::ProviderErrorRecord;
 use crate::provider::Usage;
+use serde::Serialize;
 use std::collections::VecDeque;
 use std::io;
 use std::path::PathBuf;
@@ -99,42 +101,6 @@ pub struct Event {
 /// than a clean completion).
 pub const WORKER_PANIC_PREFIX: &str = "worker panicked: ";
 
-/// The role a `tasks`-kit work item occupies, surfaced by a `task`-tagged
-/// sentinel.  A closed set: an unknown tag is rejected at the sentinel
-/// boundary (`crate::shell_eval`) rather than carried as free text and
-/// degraded to a dim line at render time.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum TaskStatus {
-    Open,
-    Doing,
-    Blocked,
-    Done,
-}
-
-impl TaskStatus {
-    /// Parse a sentinel tag; `None` for an unrecognised role, which the
-    /// sentinel parser turns into a rejected (un-surfaced) event.
-    pub fn parse(tag: &str) -> Option<Self> {
-        match tag {
-            "open" => Some(Self::Open),
-            "doing" => Some(Self::Doing),
-            "blocked" => Some(Self::Blocked),
-            "done" => Some(Self::Done),
-            _ => None,
-        }
-    }
-
-    /// The wire tag, for the structured event log and `--output-format json`.
-    pub fn tag(self) -> &'static str {
-        match self {
-            Self::Open => "open",
-            Self::Doing => "doing",
-            Self::Blocked => "blocked",
-            Self::Done => "done",
-        }
-    }
-}
-
 pub enum Kind {
     Born {
         log_dir: PathBuf,
@@ -191,50 +157,26 @@ pub enum Kind {
         error: Option<String>,
         elapsed: Duration,
     },
-    /// A located diff hunk emitted by a ral kit (typically `edit` in
-    /// `agent.ral`).  The kit hands a
-    /// `` `patch `` variant to the `surface` builtin; [`shell_eval`]
-    /// decodes it onto the bus.  Always rendered on the rail; the user
-    /// always wants to see what the agent edited.
+    /// A render document a ral kit handed to the `surface` builtin: an
+    /// ordered stack of Bertin [`Card`] marks (a diff, a measure, a fields
+    /// matrix, roled text, raw ink) composed in ral and decoded once by
+    /// [`shell_eval`] onto the bus.  Always rendered — a surfaced card is a
+    /// deliberate user-facing act.  The open set of cards over a closed set
+    /// of marks is what keeps the renderer total while the kit invents new
+    /// cards in pure ral.
     ///
     /// [`shell_eval`]: crate::shell_eval
-    Patch {
-        path: String,
-        hunk: Hunk,
-    },
-    /// A whole-file write surfaced through a `wrote`-tagged sentinel
-    /// line on stderr.  `preview` is a small head of the written
-    /// body; `lines` is the total line count of the file as written.
-    /// Always shown.
-    Wrote {
-        path: String,
-        lines: u32,
-        preview: Vec<String>,
-    },
-    /// A task-status transition from the `tasks` kit (or any kit
-    /// modelling work-items) surfaced through a `task`-tagged
-    /// sentinel line.  Always shown.
-    Task {
-        status: TaskStatus,
-        desc: String,
-    },
-    /// A progress meter surfaced through a `meter`-tagged sentinel
-    /// line.  `label` is the noun being counted ("tasks", "tests",
-    /// "crates").  Always shown.
-    Meter {
-        done: u32,
-        total: u32,
-        label: String,
-    },
+    Card(Card),
 }
 
-/// One located change within a file, carried by [`Kind::Patch`]: the line
-/// range beginning at `start` is rewritten from `del` to `add`, with the
+/// One located change within a file, carried by a [`crate::card::Mark::Diff`]:
+/// the line range beginning at `start` is rewritten from `del` to `add`, with the
 /// unchanged `before` and `after` lines the kit captured as surrounding
 /// context.  `start` is the 1-indexed line where the change begins; the
 /// sink derives every rendered line number from it and the row counts, so
 /// removed lines keep their pre-edit numbers and added / context lines
 /// take their post-edit ones.
+#[derive(Clone, Debug, Serialize)]
 pub struct Hunk {
     pub start: u32,
     pub before: Vec<String>,
@@ -431,7 +373,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Emitter, Event, Kind, Pass, PromptQueue, Sink, TaskStatus, drain_pass, pump};
+    use super::{Emitter, Event, Kind, Pass, PromptQueue, Sink, drain_pass, pump};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::channel;
@@ -551,23 +493,6 @@ mod tests {
         // The detached sender is still alive — proof completion did not
         // depend on it dropping.
         assert!(holder.lock().unwrap().is_some());
-    }
-
-    /// Every known role round-trips through `parse`/`tag`, and an unknown
-    /// tag is rejected — the sentinel parser turns that `None` into a
-    /// dropped event rather than carrying free text downstream.
-    #[test]
-    fn task_status_parse_round_trips_and_rejects_unknown() {
-        for s in [
-            TaskStatus::Open,
-            TaskStatus::Doing,
-            TaskStatus::Blocked,
-            TaskStatus::Done,
-        ] {
-            assert_eq!(TaskStatus::parse(s.tag()), Some(s));
-        }
-        assert!(TaskStatus::parse("in-progress").is_none());
-        assert!(TaskStatus::parse("").is_none());
     }
 
     /// Steering drains only the non-command prefix.  Slash-prefixed prompts stay
