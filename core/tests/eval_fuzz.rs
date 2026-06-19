@@ -471,6 +471,11 @@ fn destructure_too_few_values() {
 }
 
 #[test]
+fn destructure_too_many_values() {
+    must_fail("let [a, b] = [1, 2, 3]");
+}
+
+#[test]
 fn not_callable_int() {
     must_fail("let f = 42\nf 1 2 3");
 }

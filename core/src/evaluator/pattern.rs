@@ -65,6 +65,18 @@ pub(crate) fn assign_pattern(
                     )
                     .into());
             }
+            // Without a `...rest` tail the pattern must cover the list
+            // exactly: a longer list would silently drop its extra
+            // elements, so reject it rather than bind partially.
+            if rest.is_none() && items.len() > elems.len() {
+                return Err(shell
+                    .err_hint(
+                        format!("need {} values, got {}", elems.len(), items.len()),
+                        "there are more elements; use [..., ...rest] to capture them",
+                        1,
+                    )
+                    .into());
+            }
             for (i, pat) in elems.iter().enumerate() {
                 assign_pattern(pat, &items[i], None, shell)?;
             }
@@ -141,6 +153,32 @@ mod tests {
             Err(Control::Break(Break::Error(e))) => {
                 assert!(
                     e.message.contains("need 2 values, got 1"),
+                    "expected length error, got {:?}",
+                    e.message,
+                );
+            }
+            other => panic!("expected length error, got {other:?}"),
+        }
+        assert!(shell.mobile.scope.get("a").is_none());
+        assert!(shell.mobile.scope.get("b").is_none());
+    }
+
+    /// Without a `...rest` tail the pattern must cover the list exactly:
+    /// `[a, b] = [x, y, z]` would otherwise drop `z` silently, so it errors.
+    #[test]
+    fn list_pattern_errors_when_list_longer_than_elems() {
+        let mut shell = Shell::new(Default::default());
+        let pat = list_pat(&["a", "b"], None);
+        let value = Value::list(vec![
+            Value::String("x".into()),
+            Value::String("y".into()),
+            Value::String("z".into()),
+        ]);
+        let result = assign_pattern(&pat, &value, None, &mut shell);
+        match result {
+            Err(Control::Break(Break::Error(e))) => {
+                assert!(
+                    e.message.contains("need 2 values, got 3"),
                     "expected length error, got {:?}",
                     e.message,
                 );
