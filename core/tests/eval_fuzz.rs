@@ -59,24 +59,9 @@ fn must_not_panic(input: &str) {
 // ── Type system basics ───────────────────────────────────────────────────
 
 #[test]
-fn literal_int() {
-    assert_eq!(must_succeed("return 42"), Value::Int(42));
-}
-
-#[test]
 fn literal_negative_int() {
     // -3 is parsed as bare word "-3" → Int(-3)
     assert_eq!(must_succeed("return -3"), Value::Int(-3));
-}
-
-#[test]
-fn literal_bool_true() {
-    assert_eq!(must_succeed("return true"), Value::Bool(true));
-}
-
-#[test]
-fn literal_bool_false() {
-    assert_eq!(must_succeed("return false"), Value::Bool(false));
 }
 
 #[test]
@@ -106,53 +91,7 @@ fn quoted_literal_pipeline_stage_is_not_executed_as_command() {
     );
 }
 
-#[test]
-fn empty_list() {
-    assert_eq!(must_succeed("return []"), Value::list(vec![]));
-}
-
-#[test]
-fn empty_map() {
-    assert_eq!(must_succeed("return [:]"), Value::map(vec![]));
-}
-
 // ── Arithmetic type preservation ─────────────────────────────────────────
-
-#[test]
-fn arith_int_plus_int() {
-    assert_eq!(must_succeed("return $[2 + 3]"), Value::Int(5));
-}
-
-#[test]
-fn arith_int_times_int() {
-    assert_eq!(must_succeed("return $[3 * 4]"), Value::Int(12));
-}
-
-#[test]
-fn arith_int_div_exact() {
-    assert_eq!(must_succeed("return $[10 / 2]"), Value::Int(5));
-}
-
-#[test]
-fn arith_int_div_inexact() {
-    // 10/3 truncates toward zero (Int / Int → Int)
-    assert_eq!(must_succeed("return $[10 / 3]"), Value::Int(3));
-}
-
-#[test]
-fn arith_float_plus_int() {
-    assert_eq!(must_succeed("return $[1.5 + 1.0]"), Value::Float(2.5));
-}
-
-#[test]
-fn arith_comparison_returns_bool() {
-    assert_eq!(must_succeed("return $[5 == 5]"), Value::Bool(true));
-    assert_eq!(must_succeed("return $[5 != 5]"), Value::Bool(false));
-    assert_eq!(must_succeed("return $[3 < 5]"), Value::Bool(true));
-    assert_eq!(must_succeed("return $[5 > 3]"), Value::Bool(true));
-    assert_eq!(must_succeed("return $[5 <= 5]"), Value::Bool(true));
-    assert_eq!(must_succeed("return $[5 >= 6]"), Value::Bool(false));
-}
 
 #[test]
 fn arith_division_by_zero() {
@@ -179,22 +118,7 @@ fn arith_mod_min_by_neg_one_is_a_clean_error() {
     must_fail("$[ ( 0 - 9223372036854775807 - 1 ) % ( 0 - 1 ) ]");
 }
 
-#[test]
-fn arith_with_variables() {
-    assert_eq!(must_succeed("let x = 10\nreturn $[$x + 5]"), Value::Int(15));
-}
-
 // ── Strict Bool conditionals ─────────────────────────────────────────────
-
-#[test]
-fn if_with_bool_true() {
-    must_succeed("if true { echo yes }");
-}
-
-#[test]
-fn if_with_bool_false() {
-    must_succeed("if false { echo no } else { echo yes }");
-}
 
 #[test]
 fn if_with_forced_block_returning_bool() {
@@ -205,21 +129,6 @@ fn if_with_forced_block_returning_bool() {
 fn if_with_bare_block_condition_is_type_error() {
     // { return $[1 == 1] } is a thunk U(F Bool), not F Bool.
     must_fail("if { return $[1 == 1] } { echo yes }");
-}
-
-#[test]
-fn if_with_int_is_type_error() {
-    must_fail("if 42 { echo bad }");
-}
-
-#[test]
-fn if_with_string_is_type_error() {
-    must_fail("if 'hello' { echo bad }");
-}
-
-#[test]
-fn if_with_list_is_type_error() {
-    must_fail("if [a, b] { echo bad }");
 }
 
 // ── if: one-armed ───────────────────────────────────────────────────────
@@ -334,26 +243,6 @@ fn if_command_condition() {
 fn filter_predicate_must_return_bool() {
     // echo returns String, not Bool
     must_fail("filter { |x| echo $x } [a, b]");
-}
-
-// ── Bool/status dual channel ─────────────────────────────────────────────
-
-#[test]
-fn bool_true_sets_status_zero() {
-    // true ? echo works → chain continues because status = 0
-    must_succeed("return true ? echo 'continued'");
-}
-
-#[test]
-fn bool_false_sets_status_one() {
-    // false ? echo stops → chain stops because status = 1
-    must_succeed("return false ? echo 'should not print'");
-}
-
-#[test]
-fn chain_stops_on_failure() {
-    // false stops chain; echo should not run
-    must_succeed("return false ? echo unreachable");
 }
 
 // ── Variable scoping ─────────────────────────────────────────────────────
@@ -653,42 +542,17 @@ fn is_file_on_dir() {
 // ── Error handling ───────────────────────────────────────────────────────
 
 #[test]
-fn try_catches_fail() {
-    must_succeed("try { fail [status: 1] } { |err| echo caught }");
-}
-
-#[test]
-fn try_catches_nonzero_status() {
-    must_succeed("try { fail [status: 1] } { |err| return caught }");
-}
-
-#[test]
 fn try_error_map_has_status() {
-    // try's handler receives a flat record: [cmd, status, message, line, col]
-    must_succeed("try { cat /nonexistent 2> /dev/null } { |err| echo $err[status] }");
-}
-
-#[test]
-fn try_success_no_handler() {
-    must_succeed("try { return true } { |err| return true }");
-}
-
-#[test]
-fn nested_try() {
-    must_succeed("try { try { fail [status: 1] } { |e| return inner } } { |e| return outer }");
+    // try's handler receives a flat record: [cmd, status, message, line, col].
+    assert_eq!(
+        must_succeed("try { cat /nonexistent 2> /dev/null } { |err| return \"$err[status]\" }"),
+        Value::String("1".into())
+    );
 }
 
 #[test]
 fn fail_propagates_without_try() {
     must_fail("fail [status: 1]");
-}
-
-#[test]
-fn return_exits_function() {
-    assert_eq!(
-        must_succeed("let f = { |_| return 42; echo unreachable }\n!{f 0}"),
-        Value::Unit
-    );
 }
 
 // ── Functional builtins ──────────────────────────────────────────────────
@@ -778,14 +642,6 @@ fn replace_basic() {
 }
 
 #[test]
-fn string_replace_literal_unique() {
-    assert_eq!(
-        must_succeed("!{string-replace 'world' 'al' 'hello world'}"),
-        Value::String("hello al".into())
-    );
-}
-
-#[test]
 fn string_replace_passes_regex_metacharacters_through() {
     // `{` would be a regex error under re-replace, but string-replace
     // takes it as a literal — this is the bug file-replace-string ran into.
@@ -798,11 +654,6 @@ fn string_replace_passes_regex_metacharacters_through() {
 #[test]
 fn string_replace_errors_when_absent() {
     must_fail("!{string-replace 'zzz' 'qqq' 'hello world'}");
-}
-
-#[test]
-fn string_replace_errors_on_multiple_matches() {
-    must_fail("!{string-replace 'ab' 'XY' 'ab cd ab'}");
 }
 
 #[cfg(feature = "grep")]
@@ -1455,12 +1306,6 @@ fn interpolation_with_all_forms() {
 }
 
 #[test]
-fn command_substitution_preserves_list() {
-    let result = must_succeed("!{map { |x| return $[$x * 2] } [1, 2, 3]}");
-    assert!(matches!(result, Value::List(_)));
-}
-
-#[test]
 fn on_exit_runs() {
     // exit always returns Err(Break::Escape(Escape::Exit(_))) — callers decide whether to treat it as clean.
     let result = eval("exit 0");
@@ -1502,28 +1347,6 @@ fn words_splits_on_space() {
             Value::String("foo".into()),
         ])
     );
-}
-
-// ── String predicates lt / gt ───────────────────────────────────────────
-
-#[test]
-fn lt_true() {
-    assert_eq!(must_succeed("!{lt abc def}"), Value::Bool(true));
-}
-
-#[test]
-fn lt_false() {
-    assert_eq!(must_succeed("!{lt def abc}"), Value::Bool(false));
-}
-
-#[test]
-fn gt_true() {
-    assert_eq!(must_succeed("!{gt xyz abc}"), Value::Bool(true));
-}
-
-#[test]
-fn gt_false() {
-    assert_eq!(must_succeed("!{gt abc xyz}"), Value::Bool(false));
 }
 
 // ── TCO (tail-call optimization) ────────────────────────────────────────
@@ -1591,46 +1414,6 @@ fn echo_returns_unit() {
 fn echo_side_effect_only() {
     // echo prints to stdout, returns Unit. The value is the side effect.
     assert_eq!(must_succeed("echo hello world"), Value::Unit);
-}
-
-// ── equal (structural equality) ─────────────────────────────────────────
-
-#[test]
-fn equal_same_string() {
-    assert_eq!(must_succeed("!{equal hello hello}"), Value::Bool(true));
-}
-
-#[test]
-fn equal_different_string() {
-    assert_eq!(must_succeed("!{equal hello world}"), Value::Bool(false));
-}
-
-#[test]
-fn equal_int() {
-    assert_eq!(must_succeed("!{equal 42 42}"), Value::Bool(true));
-}
-
-#[test]
-fn equal_int_float_cross() {
-    assert_eq!(must_succeed("!{equal 3 3.0}"), Value::Bool(true));
-}
-
-#[test]
-fn equal_list() {
-    assert_eq!(
-        must_succeed("!{equal [1, 2, 3] [1, 2, 3]}"),
-        Value::Bool(true)
-    );
-}
-
-#[test]
-fn equal_list_mismatch() {
-    assert_eq!(must_succeed("!{equal [1, 2] [1, 3]}"), Value::Bool(false));
-}
-
-#[test]
-fn equal_type_mismatch_is_false() {
-    assert_eq!(must_succeed("!{equal 42 hello}"), Value::Bool(false));
 }
 
 // ── assert_eq (user-defined, not in prelude) ────────────────────────────

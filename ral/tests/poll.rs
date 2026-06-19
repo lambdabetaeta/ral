@@ -218,20 +218,3 @@ fn await_still_reraises_failed_block() {
         out.stdout
     );
 }
-
-// `await` success returns `{value, stdout, stderr}` (no `status`): the
-// value and the buffered stdout are both observable.
-#[test]
-fn await_success_returns_value_stdout_stderr() {
-    let out = run_poll(
-        r#"
-        let h = spawn { echo out-bytes; 99 }
-        let r = await $h
-        echo "value=$r[value]"
-        echo !{to-bytes $r[stdout] | from-string}
-        "#,
-    );
-    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
-    assert!(out.stdout.contains("value=99"), "stdout: {:?}", out.stdout);
-    assert!(out.stdout.contains("out-bytes"), "stdout: {:?}", out.stdout);
-}

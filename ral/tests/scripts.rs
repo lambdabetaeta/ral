@@ -31,7 +31,6 @@ const GOLDEN_SKIP: &[&str] = &[
 const GREP_GATED: &[&str] = &[
     "split-regex",
     "strings",
-    "batch-convert",
     "log-processor",
     "dual-input-strings",
     "filesystem",
@@ -89,7 +88,6 @@ fn scripts() {
     let windows_skips = [
         "glob",
         "json",
-        "path-ops",
         "predicates",
         "stdin-redirect",
         "within",
@@ -97,15 +95,12 @@ fn scripts() {
         "indexing",
         "modules",
         "devops",
-        "file-ops",
-        "safety",
         "scripting",
         // Unix-only externals / filesystem layout: `/bin/echo`, coreutils
         // path and output assumptions that don't hold on Windows.
         "dual-input-strings",
         "filesystem",
         "stdlib",
-        "batch-convert",
         "log-processor",
     ];
 

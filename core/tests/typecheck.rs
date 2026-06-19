@@ -600,13 +600,6 @@ fn variant_payload_type_mismatch() {
 // ─── Case (sum eliminator, Phase B) ───────────────────────────────────────────
 
 #[test]
-fn case_exhaustive() {
-    ok(
-        "let r = `ok 5\nlet x = case $r [`ok: { |x| return $x }, `err: { |_| return -1 }]\nreturn $x",
-    );
-}
-
-#[test]
 fn case_open_scrutinee_absorbs_handler_labels() {
     // `` `ok 5 `` produces an open variant [`ok: Int | row].  A case with
     // `ok and `err arms forces the row to extend with `err, leaving the

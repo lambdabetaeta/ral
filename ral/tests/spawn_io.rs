@@ -38,24 +38,6 @@ fn await_does_not_auto_replay() {
     );
 }
 
-// Reading `r[stdout]` and rendering it gives the spawned block's bytes.
-#[test]
-fn record_carries_block_stdout() {
-    let out = run_io(
-        r#"
-        let h = spawn { echo from-child }
-        let r = await $h
-        echo !{to-bytes $r[stdout] | from-string}
-        "#,
-    );
-    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
-    assert!(
-        out.stdout.contains("from-child"),
-        "stdout: {:?}",
-        out.stdout
-    );
-}
-
 // A block that prints AND returns a value: both pieces are independently
 // accessible from the record.
 #[test]

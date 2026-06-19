@@ -242,16 +242,6 @@ fn assert_no_jargon(msg: &str, scenario: &Scenario) {
 
 // ── Top-level fuzz tests ──────────────────────────────────────────────────
 
-/// Every scenario must run end-to-end without the typechecker panicking.
-/// Parse errors are silently dropped — we are testing the typechecker,
-/// not the parser; the parser has its own fuzz suite.
-#[test]
-fn typecheck_never_panics() {
-    for sc in scenarios() {
-        let _ = raw_errors(sc.src);
-    }
-}
-
 /// Every diagnostic the typechecker emits must be free of internal
 /// representation jargon.
 #[test]

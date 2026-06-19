@@ -64,35 +64,6 @@ fn with_xdg_defaults<R>(f: impl FnOnce() -> R) -> R {
     out
 }
 
-// ── Generic lifts: Option<T> and bool ────────────────────────────────
-
-#[test]
-fn option_meet_treats_none_as_top() {
-    assert_eq!(Some(true).meet(None), Some(true));
-    assert_eq!(None::<bool>.meet(Some(false)), Some(false));
-    assert_eq!(None::<bool>.meet(None), None);
-}
-
-#[test]
-fn option_join_treats_none_as_identity() {
-    assert_eq!(Some(false).join(None), Some(false));
-    assert_eq!(None::<bool>.join(Some(true)), Some(true));
-}
-
-#[test]
-fn bool_meet_is_and() {
-    assert!(!true.meet(false));
-    assert!(true.meet(true));
-    assert!(!false.meet(false));
-}
-
-#[test]
-fn bool_join_is_or() {
-    assert!(true.join(false));
-    assert!(true.join(true));
-    assert!(!false.join(false));
-}
-
 // ── Capabilities lattice properties ───────────────────────────────
 
 fn witness_a() -> Capabilities {

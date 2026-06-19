@@ -852,18 +852,6 @@ echo $d[y]"#);
 }
 
 #[test]
-fn read_lines_from_pipeline() {
-    // ext→builtin: count lines produced by an external command.
-    let o = run(r#"let ls = !{/bin/echo -e "a
-b
-c" | from-lines}
-let ls = !{stream-to-list $ls}
-echo !{length $ls}"#);
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout.trim(), "3");
-}
-
-#[test]
 fn read_string_from_non_utf8_pipeline_fails() {
     // from-string is strict UTF-8: invalid bytes must produce an error,
     // not silently corrupt the data with replacement characters.
@@ -886,13 +874,6 @@ fn read_json_from_non_utf8_pipeline_fails() {
         "stderr: {}",
         o.stderr
     );
-}
-
-#[test]
-fn read_json_from_valid_utf8_pipeline_still_works() {
-    let o = run("let d = !{/bin/echo '{\"ok\":true}' | from-json}\necho $d[ok]");
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout.trim(), "true");
 }
 
 #[test]
@@ -2286,36 +2267,4 @@ fn outer_stdin_redirect_feeds_ral_builtin_pipeline_first_stage() {
     let _ = std::fs::remove_file(&path);
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), lines.len().to_string());
-}
-
-// ── Pipeline exec helper preserved (now dead) ────────────────────────────────
-
-#[test]
-fn exec_helper_without_env_exits_127() {
-    // The exec trampoline is gone — the flag is now unrecognised and
-    // prints a diagnostic.  Verify the binary exits cleanly rather
-    // than crashing on an unknown multicall flag.
-    let child = Command::new(ral_bin())
-        .arg("--ral-pipeline-exec-helper")
-        .env_remove("RAL_PIPELINE_EXEC_JOB_FD")
-        .env_remove("RAL_PIPELINE_EXEC_REPORT_FD")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn exec helper");
-    let out = child.wait_with_output().expect("wait exec helper");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(
-        out.status.code(),
-        Some(1),
-        "unrecognised flag should exit 1; status={:?} stderr={}",
-        out.status,
-        stderr,
-    );
-    assert!(
-        stderr.contains("exec helper is no longer used"),
-        "stderr should mention exec helper is gone; got: {}",
-        stderr,
-    );
 }

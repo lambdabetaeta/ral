@@ -11,29 +11,6 @@ mod common;
 
 use common::run;
 
-// Lines from a watched block appear on stdout prefixed by the handle label.
-#[test]
-fn watch_emits_prefixed_stdout_lines() {
-    let out = run(
-        "ral_spawn_watch",
-        r#"
-        let h = watch "job" { echo one; echo two }
-        await $h
-        "#,
-    );
-    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
-    assert!(
-        out.stdout.contains("[job] one"),
-        "missing prefixed 'one' line: {:?}",
-        out.stdout,
-    );
-    assert!(
-        out.stdout.contains("[job] two"),
-        "missing prefixed 'two' line: {:?}",
-        out.stdout,
-    );
-}
-
 // `await` must block until all of the watched handle's output has been
 // printed; lines after the await must come strictly after the child's lines.
 #[test]

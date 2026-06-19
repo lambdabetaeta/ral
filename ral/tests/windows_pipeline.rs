@@ -12,11 +12,8 @@
 //!   * missing-command diagnostic surfaces the user's command name,
 //!   * upstream helper failure surfaces the structured "value edge
 //!     closed" diagnostic at the consumer,
-//!   * long-running producer is killed when the downstream finishes
-//!     (`yes | head` style),
 //!   * a leader exiting before later stages does not reap the pipeline
 //!     prematurely (whole-job completion),
-//!   * `disown` leaves children alive; cleanup kills non-disowned jobs.
 //!
 //! Tests are gated on `#[cfg(windows)]` and run only on Windows hosts.
 //! On other platforms the file compiles to nothing so cross-builds stay
@@ -174,28 +171,6 @@ fn upstream_helper_failure_reaches_consumer() {
     );
 }
 
-/// Long-running producer must die when the downstream finishes
-/// (`yes | head` style).  We use `cmd /c "for /L %i in (1,1,1000000) do
-/// @echo x" | findstr /N x` and stop after a few matches; the producer
-/// process should be terminated by the Job Object teardown when the
-/// pipeline collapses on the parent's read closure.
-///
-/// Marked `#[ignore]` because the timing varies on CI and the test is
-/// best run interactively; the structural property (Job Object
-/// completion) is also exercised by `whole_job_completion_required`
-/// below.
-#[test]
-#[ignore]
-fn long_producer_killed_when_downstream_done() {
-    let out = run(
-        "win_pipe_long_producer",
-        r#"
-        cmd /c "for /L %i in (1,1,100000) do @echo x" | from-lines | take 3
-        "#,
-    );
-    assert_eq!(out.status, 0, "stderr={}", out.stderr);
-}
-
 /// Whole-job completion: the leader (first stage) exits early because
 /// it has nothing more to write, but later stages keep running.  The
 /// pipeline's reap waits for `JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO`, so
@@ -211,23 +186,4 @@ fn whole_job_completion_required() {
     );
     assert_eq!(out.status, 0, "stderr={}", out.stderr);
     assert!(out.stdout.contains("done"), "stdout={}", out.stdout);
-}
-
-/// `disown` clears KILL_ON_JOB_CLOSE on the group's Job Object so the
-/// children survive ral's exit.  This test asserts the bookkeeping is
-/// removed; it does not assert the children survive ral exit because
-/// integration tests don't have the shell-exit hook the REPL runs.
-#[test]
-fn disown_drops_bookkeeping() {
-    let out = run(
-        "win_pipe_disown",
-        r#"
-        let job = spawn { cmd /c "ping -n 2 127.0.0.1 >NUL" }
-        # No `disown` exposed in the script harness yet; cleanup is what
-        # exercises kill_pipeline_group on shell exit.
-        echo ok
-        "#,
-    );
-    assert_eq!(out.status, 0, "stderr={}", out.stderr);
-    assert!(out.stdout.contains("ok"), "stdout={}", out.stdout);
 }

@@ -1,8 +1,0 @@
-mocked cat
-real cat failed
-inner
-outer
-mock1
-mock2
-still real echo
-with scope tests done
