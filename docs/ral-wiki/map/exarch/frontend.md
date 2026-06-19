@@ -57,8 +57,9 @@ Two `Sink` implementations:
  carrying three of Bertin's variables (shape → kind, hue → agent, value →
  magnitude), the keystone of the *transcript as graphic* re-encoding
  ([[decisions/260618_tui-transcript-as-graphic|tui-transcript-as-graphic]],
- Phases 0–2 landed). The `rule_line` carries a value-ramp `ctx%` bar and a
- Gantt ribbon of completed phases; phase state lives on `Viewport`, not `App`.
+ Phases 0–2 landed). The `rule_line` carries a value-ramp `ctx%` bar and an
+ elapsed-wait bar (elapsed wall-time on the live phase, resetting per round-trip);
+ the live phase lives on `Viewport`, not `App`.
  Sub-agent sessions get tabs that linger after `Died`, each keeping its own
  scroll position. It owns the REPL loop and the raw-mode / bracketed-paste /
  alt-screen / mouse-capture guard. A prompt the user submits while a turn

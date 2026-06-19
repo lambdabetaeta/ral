@@ -74,7 +74,7 @@ use line::{
     AGENT_HUES, BANNER_CYAN, BANNER_GOLD, BANNER_LIME, BANNER_ORANGE, BANNER_PINK, BANNER_PURPLE,
     BANNER_RED, CYAN, LIME, ORANGE, PINK, PURPLE, RAIL_W, READ_W, SLATE, bold, slate, slate_owned,
 };
-use viewport::{PhaseSeg, Viewport};
+use viewport::Viewport;
 
 pub(super) const PROMPT_PAD_H: u16 = 1;
 const ART: &str = include_str!("../data/banner.txt");
@@ -313,7 +313,6 @@ pub struct App {
     /// the strip above the input ([`line::queued_prompt`]) and bare Up on an
     /// empty prompt pulls the newest one back for editing.
     queue: PromptQueue,
-    busy_since: Option<Instant>,
     total_usage: Usage,
     /// Last turn's prompt size (genai's `prompt_tokens`, which already
     /// folds the cache-read and cache-creation counts in); drives the
@@ -415,7 +414,6 @@ impl App {
             hist_pos: None,
             draft: String::new(),
             queue: PromptQueue::new(),
-            busy_since: None,
             total_usage: Usage::default(),
             patch_buf: None,
             last_input: 0,
@@ -452,14 +450,9 @@ impl App {
         self.picker.as_mut()
     }
 
-    pub fn busy_on(&mut self) {
-        self.busy_since = Some(Instant::now());
-    }
     pub fn busy_off(&mut self) {
-        self.busy_since = None;
-        // A turn ending supersedes any live phase label: finalise it
-        // into the focused viewport's Gantt history so the ribbon's
-        // bright tip drops back to a quiet state.
+        // A turn ending supersedes any live phase label: clear it on the
+        // focused viewport so the elapsed-wait bar disappears.
         let focused = self.focused();
         if let Some(vp) = self.viewports.get_mut(&focused) {
             vp.clear_phase();
@@ -492,9 +485,9 @@ impl App {
     /// one viewport via [`line`](mod@line).
     pub fn handle(&mut self, Event { id, kind }: Event) {
         // A phase label names the silent gap before the next thing
-        // happens, so any other event supersedes it.  Finalise the live
-        // phase into the event's viewport's Gantt history first, so the
-        // ribbon records the segment's wall-time rather than dropping it.
+        // happens, so any other event supersedes it.  Clear the live
+        // phase on the event's viewport first, resetting the elapsed-wait
+        // bar so it tracks only the gap before the *next* phase.
         if !matches!(kind, Kind::Phase(_))
             && let Some(vp) = self.viewports.get_mut(&id)
         {
@@ -551,9 +544,9 @@ impl App {
                 }
             }
             Kind::Step(n) => self.push_chrome(id, RailShape::Step, line::step(n as usize)),
-            // Route to the event's viewport; `set_phase` finalises any
-            // in-progress phase first, so consecutive Phase events hand
-            // off cleanly into the Gantt history.
+            // Route to the event's viewport; `set_phase` restarts the
+            // elapsed-wait clock, so a consecutive Phase event simply
+            // resets the bar to the new phase.
             Kind::Phase(label) => self.with_viewport(id, |vp| vp.set_phase(label)),
             Kind::ToolCall { tool, cmd, summary } => {
                 ral_core::dbg_trace!("tui", "ToolCall tool={tool} cmd={cmd:?}");
@@ -754,20 +747,13 @@ impl App {
         });
 
         self.style_prompt();
-        let busy = self.busy_since;
-        // The rule_line reads the focused viewport's phase + Gantt
-        // history.  Clone the label (an owned `String` outlives the
-        // borrow) and clone the history slice so the closure is 'static
-        // like the other extracted figures.
-        let (phase, phase_history) = self
+        // The rule_line reads the focused viewport's live phase: its label
+        // (cloned to outlive the borrow) and its elapsed wall-time, which the
+        // elapsed-wait bar encodes.
+        let (phase, wait_elapsed) = self
             .viewports
             .get(&focused)
-            .map(|vp| {
-                (
-                    vp.phase_label().map(str::to_owned),
-                    vp.phase_history().to_vec(),
-                )
-            })
+            .map(|vp| (vp.phase_label().map(str::to_owned), vp.phase_elapsed()))
             .unwrap_or_default();
         let usage = self.total_usage;
         let last_input = self.last_input;
@@ -806,9 +792,8 @@ impl App {
             f.render_widget(
                 Paragraph::new(rule_line(
                     text_rect.width.min(READ_W) as usize,
-                    busy,
                     phase.as_deref(),
-                    &phase_history,
+                    wait_elapsed,
                     StatusReadout {
                         usage: &usage,
                         last_input,
@@ -1412,9 +1397,8 @@ struct StatusReadout<'a> {
 
 fn rule_line(
     width: usize,
-    busy_since: Option<Instant>,
     phase: Option<&str>,
-    phase_history: &[PhaseSeg],
+    wait_elapsed: Option<Duration>,
     status: StatusReadout<'_>,
 ) -> Line<'static> {
     let StatusReadout {
@@ -1426,15 +1410,18 @@ fn rule_line(
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut left_w = 0usize;
 
-    // ── Gantt phase ribbon ────────────────────────────────────────────
-    // One segment per completed phase, width ∝ wall-time duration; the
-    // live phase is the bright pulsing tip.  Replaces the old `─` filler
-    // and the motion spinner — liveness now reads off the ribbon's tip
-    // and the ctx% ramp's fill level.
-    if !phase_history.is_empty() || phase.is_some() {
-        let ribbon = gantt_ribbon(phase_history, phase, busy_since, width / 3);
-        left_w += ribbon.iter().map(|s| s.width()).sum::<usize>();
-        spans.extend(ribbon);
+    // ── elapsed-wait bar ──────────────────────────────────────────────
+    // A single bar that grows with the current phase's elapsed wall-time
+    // and resets when the next phase starts. Size and value both encode
+    // elapsed (see `wait_bar`): a snappy phase is a short dim stub, a
+    // dragging one a long bright bar — so the row differs turn to turn and
+    // the exception flares rather than the constant baseline. The `Ns`
+    // digit ticks once per second: a calm, unmistakable liveness signal,
+    // and the bar ceasing to grow means the turn has wedged.
+    if let Some(elapsed) = wait_elapsed {
+        let bar = wait_bar(elapsed);
+        left_w += bar.iter().map(|s| s.width()).sum::<usize>();
+        spans.extend(bar);
     }
     if let Some(p) = phase {
         let label = Span::styled(format!("{p}… "), Style::default().fg(SLATE));
@@ -1507,71 +1494,45 @@ fn ctx_ramp(pct: u64, bar_w: usize) -> Vec<Span<'static>> {
     spans
 }
 
-/// Build the Gantt ribbon: one `▌`-cell per phase segment, width
-/// proportional to `duration`, plus a pulsing bright tip for the live
-/// phase.  `max_w` caps the total ribbon width so it never crowds the
-/// ctx% ramp or the usage readout off the row.
-///
-/// The live tip pulses by alternating its value-step every ~500 ms of
-/// elapsed busy time — a hung turn stays bright-and-dim oscillating
-/// rather than freezing at one shade, so it is distinguishable from a
-/// quiet (phase-less) turn.
-fn gantt_ribbon(
-    history: &[PhaseSeg],
-    phase: Option<&str>,
-    busy_since: Option<Instant>,
-    max_w: usize,
-) -> Vec<Span<'static>> {
-    // Allocate the ribbon budget across segments by duration.  Each
-    // completed segment gets at least one cell; the live phase reserves
-    // one cell for its pulsing tip.  Widths are scaled to fit `max_w`.
-    let mut total_dur: Duration = history.iter().map(|s| s.duration).sum();
-    if phase.is_some() {
-        total_dur += Duration::from_millis(1);
-    }
-    let live_budget = if phase.is_some() { 1 } else { 0 };
-    let hist_budget = max_w.saturating_sub(live_budget);
-    let mut widths: Vec<usize> = history
-        .iter()
-        .map(|s| {
-            if total_dur.is_zero() {
-                1
-            } else {
-                ((((s.duration.as_secs_f64() / total_dur.as_secs_f64()) * hist_budget as f64)
-                    .round()) as usize)
-                    .max(1)
-            }
-        })
-        .collect();
-    // Clamp the total to the budget, trimming from the rightmost
-    // (oldest-visible) segments if the rounding overflowed.
-    while widths.iter().sum::<usize>() > hist_budget && widths.iter().any(|&w| w > 1) {
-        let last_gt1 = widths.iter().rposition(|&w| w > 1).unwrap();
-        widths[last_gt1] -= 1;
-    }
+/// Width of the elapsed-wait bar, in cells.
+const WAIT_BAR_W: usize = 10;
 
-    let mut spans = Vec::new();
-    for (seg, &w) in history.iter().zip(widths.iter()) {
-        let step = rail::value_step(Some(seg.duration.as_millis() as u32));
-        let col = rail::lighten(PURPLE, step);
-        spans.push(Span::styled("▌".repeat(w), Style::default().fg(col)));
+/// Bucket whole seconds of elapsed phase time into a `0..=3` value step
+/// for the wait bar's colour: a normal sub-10s phase stays dim, a
+/// dragging one flares toward white past ~30s. Deliberately distinct
+/// from [`rail::value_step`], which is calibrated for line counts
+/// (4/20/80) — feeding that ramp milliseconds is what saturated the old
+/// duration ribbon to white on every turn.
+fn wait_step(secs: u64) -> u8 {
+    match secs {
+        0..=9 => 0,
+        10..=19 => 1,
+        20..=29 => 2,
+        _ => 3,
     }
-    if phase.is_some() {
-        // Pulse: alternate value-step every ~500 ms of busy elapsed.
-        let pulse_step = match busy_since {
-            Some(t0) => {
-                let ms = t0.elapsed().as_millis();
-                if (ms / 500) % 2 == 0 { 2 } else { 3 }
-            }
-            None => 3,
-        };
-        let tip_col = rail::lighten(CYAN, pulse_step);
-        spans.push(Span::styled(
-            "▌",
-            Style::default().fg(tip_col).add_modifier(Modifier::BOLD),
-        ));
+}
+
+/// Build the elapsed-wait bar: [`WAIT_BAR_W`] cells whose filled run
+/// grows on a `log2` scale with the current phase's elapsed seconds
+/// (empty at 0s, ~7 cells near 16s, full near a minute), then a ` Ns `
+/// readout. The fill colour is [`PURPLE`] lightened by [`wait_step`] —
+/// dim while the wait is normal, bright when it drags — so size and
+/// value agree, reusing the rail's [`rail::lighten`] ramp. PURPLE (not
+/// the ctx ramp's CYAN) keeps the two bottom bars visually distinct.
+fn wait_bar(elapsed: Duration) -> Vec<Span<'static>> {
+    let secs = elapsed.as_secs();
+    // log2 fill, scaled so a minute-long wait reaches the right edge:
+    // 0s → 0 cells, 3s → ~3, 16s → ~7, ~60s → full.
+    let filled = ((((secs + 1) as f64).log2() * 1.7).round() as usize).min(WAIT_BAR_W);
+    let fill_col = rail::lighten(PURPLE, wait_step(secs));
+    let mut spans = Vec::with_capacity(WAIT_BAR_W + 1);
+    for _ in 0..filled {
+        spans.push(Span::styled("█", Style::default().fg(fill_col)));
     }
-    spans.push(Span::styled(" ", Style::default().fg(SLATE)));
+    for _ in filled..WAIT_BAR_W {
+        spans.push(Span::styled("░", Style::default().fg(SLATE)));
+    }
+    spans.push(Span::styled(format!(" {secs}s "), Style::default().fg(SLATE)));
     spans
 }
 
@@ -1969,7 +1930,6 @@ impl Sink for Tui {
     }
 
     fn drive(&mut self, rx: Receiver<Event>, done: &AtomicBool) -> io::Result<()> {
-        self.app.busy_on();
         let r = drive_events(self.guard.term(), &mut self.app, rx, done);
         self.app.busy_off();
         r
@@ -2781,35 +2741,23 @@ mod tests {
         );
     }
 
-    // ── rule_line: ctx% ramp + Gantt ribbon ───────────────────────────
+    // ── rule_line: ctx% ramp + elapsed-wait bar ───────────────────────
 
     /// `rule_line` is a pure function over its args.  With a context
     /// window set and `last_input` at ~40% of it, the ctx segment must
-    /// appear and the rendered line must carry a `%` readout.  With a
-    /// `phase_history` of three segments and a live phase, the ribbon
-    /// must show one `▌` run per recorded phase plus the pulsing tip —
-    /// i.e. the line text contains four `▌` groups.  `context_window =
-    /// None` suppresses the ctx segment entirely.
+    /// appear and the rendered line must carry a `%` readout.  A live
+    /// phase with 5s elapsed must show its label, a filled `█` run in the
+    /// wait bar, and the `5s` readout.  With `phase: None` /
+    /// `wait_elapsed: None` / `context_window: None` neither the ctx
+    /// segment nor any wait-bar fill appears.
     #[test]
-    fn rule_line_ctx_ramp_fills_and_ribbon_carries_one_segment_per_phase() {
+    fn rule_line_carries_ctx_ramp_phase_label_and_wait_bar() {
         let usage = Usage::default();
         // ~40% of a 100k window.
-        let history = vec![
-            PhaseSeg {
-                duration: Duration::from_millis(120),
-            },
-            PhaseSeg {
-                duration: Duration::from_millis(80),
-            },
-            PhaseSeg {
-                duration: Duration::from_millis(200),
-            },
-        ];
         let line = rule_line(
             READ_W as usize,
-            Some(Instant::now()),
             Some("typechecking"),
-            &history,
+            Some(Duration::from_secs(5)),
             StatusReadout {
                 usage: &usage,
                 last_input: 40_000,
@@ -2831,19 +2779,20 @@ mod tests {
             text.contains("typechecking"),
             "phase label missing: {text:?}"
         );
-        // One `▌` run per recorded phase + the live tip = 4 groups.
-        let tip_count = text.matches('▌').count();
+        // The wait bar has at least one filled cell at 5s.
         assert!(
-            tip_count >= 4,
-            "expected ≥4 ▌ groups (3 history + 1 live tip); got {tip_count} in {text:?}"
+            text.matches('█').count() >= 1,
+            "wait bar fill missing at 5s: {text:?}"
         );
+        // The seconds readout is present.
+        assert!(text.contains("5s"), "wait readout missing: {text:?}");
 
-        // context_window = None → no ctx segment at all.
-        let line_no_ctx = rule_line(
+        // phase/wait absent and context_window = None → no ctx segment,
+        // no wait-bar fill.
+        let line_quiet = rule_line(
             READ_W as usize,
             None,
             None,
-            &history,
             StatusReadout {
                 usage: &usage,
                 last_input: 40_000,
@@ -2851,14 +2800,19 @@ mod tests {
                 model: "",
             },
         );
-        let text_no_ctx: String = line_no_ctx
+        let text_quiet: String = line_quiet
             .spans
             .iter()
             .map(|s| s.content.as_ref())
             .collect();
         assert!(
-            !text_no_ctx.contains("ctx "),
-            "ctx segment should be absent when context_window is None: {text_no_ctx:?}"
+            !text_quiet.contains("ctx "),
+            "ctx segment should be absent when context_window is None: {text_quiet:?}"
+        );
+        assert_eq!(
+            text_quiet.matches('█').count(),
+            0,
+            "no wait-bar fill when no phase is live: {text_quiet:?}"
         );
     }
 
@@ -2903,11 +2857,47 @@ mod tests {
         );
     }
 
-    /// `Viewport` owns phase state: `set_phase` records a live phase,
-    /// `clear_phase` finalises it into history with a duration, and a
-    /// second `set_phase` finalises the first before starting the next.
+    /// The elapsed-wait bar grows with seconds and its colour-step
+    /// brightens past the 10/20/30s thresholds: empty at 0s, full and
+    /// monotone-increasing toward a minute.
     #[test]
-    fn viewport_phase_lifecycle_finalises_into_history() {
+    fn wait_bar_and_step_track_elapsed() {
+        assert_eq!(wait_step(5), 0);
+        assert_eq!(wait_step(10), 1);
+        assert_eq!(wait_step(20), 2);
+        assert_eq!(wait_step(35), 3);
+
+        let text = |d| {
+            wait_bar(d)
+                .iter()
+                .map(|s| s.content.to_string())
+                .collect::<String>()
+        };
+        let zero = text(Duration::ZERO);
+        assert_eq!(zero.matches('█').count(), 0, "no fill at 0s: {zero:?}");
+        assert!(zero.contains("0s"), "0s readout missing: {zero:?}");
+
+        let minute = text(Duration::from_secs(60));
+        assert_eq!(
+            minute.matches('█').count(),
+            WAIT_BAR_W,
+            "full bar at 60s: {minute:?}"
+        );
+        assert!(minute.contains("60s"), "60s readout missing: {minute:?}");
+
+        // Monotone: a longer wait fills strictly more than a shorter one.
+        assert!(
+            text(Duration::from_secs(30)).matches('█').count()
+                > text(Duration::from_secs(3)).matches('█').count(),
+            "fill must grow with elapsed time"
+        );
+    }
+
+    /// `Viewport` owns the live phase: `set_phase` records a label and an
+    /// elapsed clock, a second `set_phase` restarts that clock under the
+    /// new label, and `clear_phase` drops both — hiding the wait bar.
+    #[test]
+    fn viewport_phase_lifecycle_tracks_the_live_phase() {
         let tmp = std::env::temp_dir().join(format!(
             "exarch-vp-phase-{}-{}",
             std::process::id(),
@@ -2919,21 +2909,19 @@ mod tests {
         let _ = std::fs::create_dir_all(&tmp);
         let mut vp = Viewport::new(tmp.join("user.log"), AgentSlot::default());
         assert!(vp.phase_label().is_none());
-        assert!(vp.phase_history().is_empty());
+        assert!(vp.phase_elapsed().is_none());
 
         vp.set_phase("first".into());
         assert_eq!(vp.phase_label(), Some("first"));
-        std::thread::sleep(Duration::from_millis(5));
-        // A second set_phase finalises the first into history.
+        assert!(vp.phase_elapsed().is_some());
+        // A second set_phase restarts the clock under the new label.
         vp.set_phase("second".into());
         assert_eq!(vp.phase_label(), Some("second"));
-        assert_eq!(vp.phase_history().len(), 1);
-        assert!(vp.phase_history()[0].duration > Duration::ZERO);
+        assert!(vp.phase_elapsed().is_some());
 
-        std::thread::sleep(Duration::from_millis(5));
         vp.clear_phase();
         assert!(vp.phase_label().is_none());
-        assert_eq!(vp.phase_history().len(), 2);
+        assert!(vp.phase_elapsed().is_none());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

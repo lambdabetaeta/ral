@@ -26,21 +26,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// One segment of the per-viewport Gantt ribbon: a completed phase and
-/// the wall-time it occupied.  The live (in-progress) phase is held
-/// separately on [`Viewport`] as `(label, start)`; `clear_phase` finalises
-/// it into one of these.  History is capped to [`PHASE_HISTORY_CAP`] most
-/// recent segments so the ribbon never grows unbounded across a long
-/// session.
-#[derive(Clone, Debug)]
-pub(super) struct PhaseSeg {
-    pub(super) duration: Duration,
-}
-
-/// How many completed phase segments the ribbon keeps.  Older segments
-/// drop off the left edge as new ones land, mirroring a rolling Gantt.
-const PHASE_HISTORY_CAP: usize = 12;
-
 pub(super) struct Viewport {
     /// The session's scrollback, oldest block first.
     blocks: Vec<Block>,
@@ -71,15 +56,12 @@ pub(super) struct Viewport {
     /// Whether the last line written to the log was blank, so leading
     /// block blanks collapse against it exactly as they do on screen.
     log_prev_blank: bool,
-    /// The worker's current phase label and its start instant, shown as
-    /// the pulsing bright tip of the Gantt ribbon.  Set by [`Self::set_phase`],
-    /// finalised into [`Self::phase_history`] by [`Self::clear_phase`] (or a
-    /// superseding `set_phase`).  `None` when the viewport is between phases.
+    /// The worker's current phase label and its start instant — the live
+    /// phase driving the status line's elapsed-wait bar.  Set by
+    /// [`Self::set_phase`], cleared by [`Self::clear_phase`] (or restarted by
+    /// a superseding `set_phase`).  `None` when the viewport is between
+    /// phases, leaving the bar hidden.
     phase: Option<(String, Instant)>,
-    /// Completed phase segments, oldest first, capped to
-    /// [`PHASE_HISTORY_CAP`].  The Gantt ribbon renders these left-to-right
-    /// with width proportional to `duration`.
-    phase_history: Vec<PhaseSeg>,
 }
 
 /// The visible slice of a viewport plus the figures the scrollbar needs.
@@ -160,7 +142,6 @@ impl Viewport {
             log_path,
             log_prev_blank: true,
             phase: None,
-            phase_history: Vec::new(),
         }
     }
 
@@ -211,48 +192,29 @@ impl Viewport {
     pub(super) fn last_is_error(&self) -> bool {
         self.blocks.last().is_some_and(Block::is_error)
     }
-    /// Begin a new phase, labelling the live segment of the Gantt
-    /// ribbon.  If a phase is already in progress it is finalised into
-    /// [`Self::phase_history`] first — phases never overlap, each hands
-    /// off cleanly to the next.
+    /// Begin a new phase, restarting the elapsed-wait clock from now.  A
+    /// superseding phase simply replaces the live slot — phases never
+    /// overlap, each restarts the bar.
     pub(super) fn set_phase(&mut self, label: String) {
-        self.finalise_phase();
         self.phase = Some((label, Instant::now()));
     }
 
-    /// End the live phase, if any, committing it to [`Self::phase_history`]
-    /// with its elapsed duration.  A no-op when no phase is live, so it is
-    /// safe to call on every non-`Phase` event.
+    /// Clear the live phase, hiding the elapsed-wait bar.  A no-op when no
+    /// phase is live, so it is safe to call on every non-`Phase` event.
     pub(super) fn clear_phase(&mut self) {
-        self.finalise_phase();
+        self.phase = None;
     }
 
-    /// The live phase label, if one is in progress.  Drives the pulsing
-    /// tip of the ribbon and the `phase…` text readout.
+    /// The live phase label, if one is in progress — the `phase…` text
+    /// readout alongside the elapsed-wait bar.
     pub(super) fn phase_label(&self) -> Option<&str> {
         self.phase.as_ref().map(|(label, _)| label.as_str())
     }
 
-    /// Completed phase segments, oldest first — the body of the Gantt
-    /// ribbon, width proportional to each segment's `duration`.
-    pub(super) fn phase_history(&self) -> &[PhaseSeg] {
-        &self.phase_history
-    }
-
-    /// Push the live phase (if any) onto the history with its elapsed
-    /// duration, capping to [`PHASE_HISTORY_CAP`], and clear the live
-    /// slot.  Shared by [`Self::set_phase`] (handoff) and
-    /// [`Self::clear_phase`] (finalisation).
-    fn finalise_phase(&mut self) {
-        if let Some((_label, start)) = self.phase.take() {
-            self.phase_history.push(PhaseSeg {
-                duration: start.elapsed(),
-            });
-            if self.phase_history.len() > PHASE_HISTORY_CAP {
-                let drop = self.phase_history.len() - PHASE_HISTORY_CAP;
-                self.phase_history.drain(..drop);
-            }
-        }
+    /// Wall-time elapsed in the current phase, if one is live — the
+    /// magnitude the elapsed-wait bar encodes. `None` between phases.
+    pub(super) fn phase_elapsed(&self) -> Option<Duration> {
+        self.phase.as_ref().map(|(_, start)| start.elapsed())
     }
 
     /// Wipe scrollback, scroll state, and streaming buffer, and truncate
@@ -267,7 +229,6 @@ impl Viewport {
         self.log = open_log(&self.log_path);
         self.log_prev_blank = true;
         self.phase = None;
-        self.phase_history.clear();
     }
 
     /// Final flush of the `user.log` at session end; lines are already

@@ -20,7 +20,9 @@ visual variables (shape, value, size, hue, grain, orientation).
 
 > **Landed: Phases 0–7.** The per-`Block` substrate (agent slot, magnitude,
 > `RailShape` discriminant), the data-encoding marginal rail (Move 1), the
-> `rule_line` value-ramp + Gantt phase ribbon (Move 3), the collapsed-header
+> `rule_line` ctx% value-ramp (Move 3 — the Gantt phase ribbon that shipped
+> alongside it was subsequently retired for an elapsed-wait bar; see the
+> amendment under Move 3), the collapsed-header
 > size bars (Move 4) and diff-density grain (Move 5), graded reduction (Move 6),
 > the agent×step matrix (Move 2), and coherent degradation (Move 7) are
 > implemented in `exarch/src/tui/`. Only Phase 8 (the projection switch — the
@@ -88,6 +90,47 @@ event on the bus, while move 7 can deepen with one.
      for free.
    Keep the digits as a precise readout *beneath* the bar: the graphic gives
    the comparison, the legend gives the value.
+
+   > **Amended 2026-06-19 — the Gantt ribbon is retired, the ctx% ramp stays.**
+   > Lived with, the ribbon failed on this ADR's own Bertin grounds. It encoded
+   > a near-constant quantity: per-phase duration history barely varies across
+   > agent turns — every turn is dominated by "waiting for model", so the
+   > ribbon's shape (a few bright blocks, a scatter of flecks) was the same
+   > every turn, and a visual variable that does not vary carries no
+   > information. Constant ink is decoration — the exact charge §"The diagnosis"
+   > levels at the motion spinner. Worse, it *clipped* the quantity that does
+   > vary: the ribbon drove its lightness through `value_step`, calibrated for
+   > *line counts* (buckets at 4/20/80), on *millisecond* inputs, so every phase
+   > running in seconds pinned past the 81 ms threshold to the brightest step.
+   > The ramp was saturated at the baseline, with no headroom left for the
+   > abnormal case (a stall, a heavy compaction) to flare — absolute wait time,
+   > the one figure you would act on, was thrown away. And it churned: a 2 Hz
+   > pulsing tip plus a full-width reflow on every phase boundary made the row
+   > change too fast to read while saying little.
+   >
+   > It is replaced by an **elapsed-wait bar** — *size-for-magnitude*, the
+   > Bertin-legal idiom, whose magnitude happens to be live:
+   > - A single fixed-width bar encodes elapsed wall-time on the *current* phase,
+   >   resetting when the next phase starts (i.e. per model round-trip). Size
+   >   (log2 fill) and value (a new seconds-calibrated `wait_step`: dim below
+   >   ~10 s, flaring past ~30 s) both encode elapsed, so the common case stays
+   >   quiet and a dragging wait flares — restoring the headroom the saturated
+   >   ribbon lacked.
+   > - An `Ns` seconds readout ticking once per second: a calm 1 Hz liveness
+   >   signal — the bar ceasing to grow means the turn has wedged — replacing the
+   >   2 Hz pulse.
+   > - Rendered in `PURPLE`, distinct from the ctx ramp's `CYAN`.
+   >
+   > The per-`Viewport` `PhaseSeg` / `phase_history` machinery (Phase 2) is
+   > removed; `value_step` is left untouched (the new bar runs on `wait_step`),
+   > so the rail's line-count ramp is unaffected. The ctx% value-ramp is kept as
+   > landed.
+   >
+   > The lesson, in one sentence: Bertin's distrust of motion is scoped to the
+   > *analytical*, read-at-rest register (maps, matrices), whereas a live status
+   > line also serves a *monitoring* register — "is it alive, and how long has
+   > this taken?" — in which a slowly-growing magnitude is legitimate, not the
+   > decorative motion Bertin (and this ADR) rightly reject.
 
 4. **Size as a quantitative variable on collapsed blocks.** A 500-line patch
    and a 2-line patch render at identical weight today (`patch()`,
@@ -382,6 +425,9 @@ after:   transcript · blank · tabs · queued · prompt · rule_line · footer
   `last_input` and the ribbon carries one segment per recorded phase. The
   layout reorder is verified by the render snapshot tests in `tui.rs::tests`
   (`2031+`) if present, else by a geometry assertion on `status_row.y`.
+
+*Amended 2026-06-19: the Gantt ribbon described here was retired in favour of an
+elapsed-wait bar — see the amendment under Move 3 above.*
 
 ### Phase 3 — Move 4, size as a quantitative variable
 
