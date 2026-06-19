@@ -45,7 +45,7 @@ pub struct Session {
     /// (`pump` → `Ok(None)`) to roll the panicking call's dynamic-context
     /// effects back: the field lives on `Session` precisely so it survives
     /// `pump`'s `catch_unwind` boundary (written by the worker, read by the
-    /// driver).  See `ral_core`'s `eval_turn` frame guard for the IO half
+    /// driver).  See `ral_core`'s `run_turn` frame guard for the IO half
     /// of the same panic-recovery contract.
     durable: ral_core::types::Mobile,
 }
@@ -424,7 +424,7 @@ impl Session {
                 }
             };
             // `None` is a worker panic — the error line is already out.
-            // `eval_turn`'s frame guard has self-healed the IO frame
+            // `run_turn`'s frame guard has self-healed the IO frame
             // on unwind; here we resume from the last committed `Mobile`
             // snapshot, rolling the whole dynamic state — grant frames,
             // env/cwd overrides, the handler stack, and any bindings the
@@ -753,7 +753,7 @@ mod tests {
     //! preserve the bindings completed tool calls left behind and leave
     //! the dynamic context clean for the next turn.  Driven through the
     //! scripted provider and `run_turn` — the real path: `pump` catches
-    //! the unwind, `eval_turn`'s frame guard self-heals the IO frame, and
+    //! the unwind, `run_turn`'s frame guard self-heals the IO frame, and
     //! `run_turn` rebuilds the live context from the durable snapshot.
 
     use super::*;

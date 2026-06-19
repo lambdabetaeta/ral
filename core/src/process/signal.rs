@@ -427,11 +427,11 @@ impl CancelScope {
 static FOREGROUND_SCOPE: AtomicPtr<AtomicU8> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Pointer to the session's durable-root-scope flag. Published per turn by
-/// `eval_turn`, alongside the foreground, for the turn's extent.
+/// `run_turn`, alongside the foreground, for the turn's extent.
 static DURABLE_ROOT_SCOPE: AtomicPtr<AtomicU8> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Publishes a scope's flag into [`FOREGROUND_SCOPE`] for its lifetime,
-/// restoring the previous publication on drop. Held by `eval_turn` for the
+/// restoring the previous publication on drop. Held by `run_turn` for the
 /// turn's extent; the scope it points at (the turn's `shell.turn.cancel`)
 /// must outlive the guard, which it does — the guard is dropped before the
 /// frame restores `turn.cancel`.
@@ -660,7 +660,7 @@ impl PgidPolicy {
 
 /// Serializes every publisher and asserter of the process-global cancel
 /// slots ([`FOREGROUND_SCOPE`], [`DURABLE_ROOT_SCOPE`]) across the ral-core
-/// test binary. The turn tests publish the slots too (every `eval_turn`
+/// test binary. The turn tests publish the slots too (every `run_turn`
 /// does), so the signal slot tests and the turn tests must share one lock to
 /// keep their publications and requests from interleaving.
 #[cfg(test)]

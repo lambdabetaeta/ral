@@ -59,7 +59,7 @@ impl ral_core::TurnLifecycle for ReplLifecycle<'_> {
 
     fn post_exec(&mut self, shell: &mut Shell, src: &str, status: i32) {
         // chpwd drain then post-exec — both side-effects; neither redefines
-        // the turn's status, which `eval_turn` already computed.
+        // the turn's status, which `run_turn` already computed.
         if let Some((old, new)) = shell.repl_mut().pending_chpwd.take() {
             run_lifecycle_hook(
                 self.runtime,

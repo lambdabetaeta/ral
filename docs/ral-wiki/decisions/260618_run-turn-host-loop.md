@@ -308,11 +308,11 @@ over `{input, inbox}`." The turn loop is the same shape one level in — the age
 
 1. Define `EventSink`, `SurfaceSink`, `TurnIo`, `TurnRequest`, the flat
    `TurnReport`, and `Captured` in `host.rs`. `emit(&Value)` carries raw
-   `Value`; core defines no taxonomy. Keep `TurnOutcome` as `eval_turn`'s
-   internal return.
-2. Add `Shell::run_turn`: translate `TurnIo::Inherit | Capture` into the
-   internal `IoFrame`, install `surface` on the turn frame, arm
-   `turn_limit`/`detached_limit` on `process::reaper`, call `eval_turn`, read
+   `Value`; core defines no taxonomy. The companion API cutover deletes core
+   `TurnOutcome` rather than keeping it as an internal mirror.
+2. Add `Shell::run_turn`: materialise `TurnIo::Inherit | Capture` into private
+   `Io`/`CaptureBuffers`, install `surface` on the new `TurnState`, arm
+   `turn_limit`/`detached_limit` on `process::reaper`, evaluate the turn, read
    `timed_out` from the foreground scope's `CancelCause::Deadline`, flatten into
    `TurnReport`, and drain captures when present. The limit arm/disarm dance
    leaves `shell_eval.rs`.
@@ -402,8 +402,10 @@ turn.
   TUI share the loop.
 - [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]] is completed:
   one `run_turn`, three hosts (REPL, exarch, batch) as request suppliers;
-  `shell_eval.rs`, `exec.rs`, and `main.rs` shrink to adapters. `TurnIo` is the
-  public IO policy; `TurnFrame`/`IoFrame` stay internal.
+  `shell_eval.rs`, `exec.rs`, and `main.rs` shrink to adapters.
+  [[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]] records the
+  companion API cutover: `TurnFrame`, `IoFrame`, and core `TurnOutcome` collapse
+  rather than surviving as a second host vocabulary.
 - `Shell` stays `Send`/`Sync`: no `Rc`, no borrowed sink lifetime in
   `TurnState`, and no false requirement that the current `Session` borrow become
   `'static`. The pump/`Session` collision the prior ADR hit (`session.rs:421`) is
@@ -487,6 +489,8 @@ See also
 this supersedes),
 [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]] (the unification
 this completes),
+[[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]] (the API collapse
+this unlocks),
 [[decisions/260610_host-embedding-api|host-embedding-api]] (the seam this extends),
 [[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-leak-into-exarch]]
 (the data-boundary rule, recorded not respent),

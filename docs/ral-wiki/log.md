@@ -2893,3 +2893,18 @@ thread rather than adding a type. host-seam-turn-observer set to `superseded`.
 
 Revised [[decisions/260618_run-turn-host-loop|run-turn-host-loop]] after review against the current source: the surface carrier is now a concrete turn-local `SurfaceSink` rather than an unplaceable borrow, exarch's first loop carrier preserves the existing borrowed `Session`/`Provider` shape with a scoped worker plus one-shot, and the event bus remains presentation rather than liveness.
 Also tightened deferred surface replay, backpressure, lifecycle/IO request fields, the test plan, and the [[index|index]] summary so the proposed implementation no longer relies on `spawn_blocking` ownership or dropped channels.
+
+## [2026-06-18] ingest | turn entry API boundary recorded
+
+Added [[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]] as the companion to [[decisions/260618_run-turn-host-loop|run-turn-host-loop]]. It decides the collapse boundary: public host policy/report types remain (`TurnRequest`, `TurnIo`, `SurfaceSink`, lifecycle, `TurnReport`), while `TurnFrame`, `IoFrame`, core `TurnOutcome`, and public `eval_turn` disappear rather than surviving as a second API.
+Updated the run-turn ADR and [[index|index]] to point at the collapse decision.
+
+## [2026-06-18] ingest | after-turn-api simplification draft
+
+Added draft ADR [[decisions/260618_after-turn-api-simplifications|after-turn-api-simplifications]] for the cleanup unlocked after the run-turn API cutover. The draft orders the next simplifications around visibility reduction first: close old core exports, migrate tests to `run_turn`, shrink the exarch ral adapter, share TUI/headless turn driving, narrow host accessors, and only then consider naming cleanup.
+Updated [[index|index]] with the open draft and kept the guardrails explicit: `Event`/`Kind` stay, bytes and surface stay separate, `set_stdout` stays until live-printer setup has a replacement, and tokio stays out of core.
+
+## [2026-06-18] ingest | after-turn diagnosis folded in
+
+Folded the architectural diagnosis into [[decisions/260618_after-turn-api-simplifications|after-turn-api-simplifications]]: the common error is turn-local facts leaking into long-lived or host-owned machinery (completion via presentation transport, surface as persistent cloned state, materialised frames as host API). The draft now frames the follow-on cleanup as boundary enforcement rather than a broader redesign.
+Updated [[index|index]] to carry the same root-error summary.
