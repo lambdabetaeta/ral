@@ -897,10 +897,18 @@ mod tests {
 
         // The first `await` replays the buffered card exactly once.
         await_handle(&handle, &mut shell).expect("await ok");
-        assert_eq!(log.lock().unwrap().len(), 1, "await replays the deferred card");
+        assert_eq!(
+            log.lock().unwrap().len(),
+            1,
+            "await replays the deferred card"
+        );
 
         // A second `await` reads the cache and must not duplicate it.
         await_handle(&handle, &mut shell).expect("await ok");
-        assert_eq!(log.lock().unwrap().len(), 1, "repeat await must not duplicate");
+        assert_eq!(
+            log.lock().unwrap().len(),
+            1,
+            "repeat await must not duplicate"
+        );
     }
 }

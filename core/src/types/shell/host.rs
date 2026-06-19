@@ -8,8 +8,8 @@
 //! REPL and exarch actually need — while [`Shell::mobile`](super::Shell) stays
 //! the public embedding seam.
 
-use super::repl::ReplScratch;
 use super::Shell;
+use super::repl::ReplScratch;
 use crate::diagnostic::SourceDb;
 use crate::exit_hints::ExitHints;
 use crate::io::{Sink, TerminalState};

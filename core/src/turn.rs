@@ -510,7 +510,10 @@ mod tests {
             },
         ) {
             TurnReport::Ran { timed_out, .. } => {
-                assert!(timed_out, "a Deadline foreground cancel must report timed_out");
+                assert!(
+                    timed_out,
+                    "a Deadline foreground cancel must report timed_out"
+                );
             }
             TurnReport::Static { .. } => panic!("valid source must reach evaluation"),
         }

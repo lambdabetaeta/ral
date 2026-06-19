@@ -106,7 +106,10 @@ mod tests {
                     /Users/me/My Documents/the file.txt";
         assert_eq!(
             parse_denial(line),
-            Some(("file-read-data", Some("/Users/me/My Documents/the file.txt")))
+            Some((
+                "file-read-data",
+                Some("/Users/me/My Documents/the file.txt")
+            ))
         );
     }
 

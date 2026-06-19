@@ -59,7 +59,11 @@ fn run(shell: &mut Shell, source: &str, surface: Option<SurfaceSink>) -> Settled
 #[test]
 fn surface_without_sink_is_identity() {
     let mut shell = fresh_shell();
-    let out = run(&mut shell, r#"surface `task [status: "open", desc: "x"]"#, None);
+    let out = run(
+        &mut shell,
+        r#"surface `task [status: "open", desc: "x"]"#,
+        None,
+    );
     assert_eq!(out.expect("surface should succeed"), Value::Unit);
 }
 

@@ -7,8 +7,8 @@
 //! captured builtins installed at boot (see [`super::host_handlers`]).
 
 use ral_core::types::{Break, Escape};
-use ral_core::{StaticDiagnostics, TurnIo, TurnReport, TurnRequest};
 use ral_core::{Shell, Value, builtins, diagnostic};
+use ral_core::{StaticDiagnostics, TurnIo, TurnReport, TurnRequest};
 use std::sync::{Arc, Mutex};
 
 use super::errfmt::{format_repl_parse_error, should_use_compact_parse_error};
