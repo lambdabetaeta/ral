@@ -12,10 +12,10 @@ prompt queue**, defined by `bus.rs`:
 - workers stamp a `Kind` with a `SessionId` through an `Emitter`; a `Sink`
   consumes them. A `Kind` is a token, boundary, usage, tool call/result,
   sub-agent lifecycle, a transient `Phase` label naming the worker's current
-  synchronous op (shown beside the spinner, recorded to `events.json`), or one
-  of the rail-decoration `Patch` / `Wrote` / `Task` / `Meter` variants a kit
-  raises through the `surface` builtin — decoded onto the bus by
-  [[map/exarch/shell-eval|shell-eval]]'s host sink.
+  synchronous op (shown beside the spinner, recorded to `events.json`), or a
+  `Card` — a render document a kit raises through the `surface` builtin, decoded
+  onto the bus by [[map/exarch/shell-eval|shell-eval]]'s host sink and drawn by
+  one generic interpreter ([[map/exarch/cards|cards]]).
 - `PromptQueue` is the narrow TUI→worker back-channel: `Sink::prompt_queue`
   hands `pump` a shared queue, `App::enqueue` pushes prompts typed while busy,
   and `Emitter::drain_prompt_queue` lets the root dispatch loop consume them at

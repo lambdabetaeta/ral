@@ -52,6 +52,9 @@ at `$XDG_STATE_HOME/exarch/<project>/<run>/`, keyed by a slug of the project cwd
   primitives and the `agent.ral` helpers ([[design/hash-addressed-editing|why]]).
 - [[map/exarch/frontend|frontend]] — the agent/UI boundary (event bus, session log) and
   the two frontends, the inline TUI and headless.
+- [[map/exarch/cards|cards]] — the render document `surface` carries: a `card` of closed
+  Bertin marks decoded once and drawn by one generic interpreter; open card set,
+  closed mark set.
 
 ## Sandbox
 

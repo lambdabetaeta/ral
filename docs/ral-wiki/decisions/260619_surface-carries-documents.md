@@ -330,8 +330,9 @@ Listed under **Test plan**.
 chrome-side Bertin encoding this extends to kit content — same variables, same
 bindings), [[decisions/260618_run-turn-host-loop|run-turn-host-loop]] (core
 carries raw `Value`; the surface is presentation, not liveness, so this change is
-exarch-only), [[map/exarch/frontend|frontend]] (the `Block`/`Viewport`/`line`
-arm this re-grounds), [[map/exarch|map: exarch]], and Jacques Bertin,
+exarch-only), [[map/exarch/cards|cards]] (the as-built map of this subsystem),
+[[map/exarch/frontend|frontend]] (the `Block`/`Viewport`/`line` arm this
+re-grounds), [[map/exarch|map: exarch]], and Jacques Bertin,
 *Sémiologie graphique* (1967): the plane and its retinal variables, ordered
 versus selective, and the rule that the variable must match the datum's level of
 measurement.
