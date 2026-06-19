@@ -30,8 +30,10 @@ every source the session has loaded, keyed by `FileId`; it lives on
 `Location` (with the active-source cache and the `current` id) and accumulates
 as scripts and modules install their context. `Location::install_script_context`
 registers each source and makes it `current`; `ScriptContextGuard` (module
-loads, the REPL plugin loader) and exarch's `IoGuard` save and restore
-`current` around the load, while the registered source stays in the db.
+loads, the REPL plugin loader) saves and restores `current` around a load, and
+core's per-turn `TurnGuard` does the same around a whole turn (the turn's
+`LocationCursor` is part of the `TurnState` it swaps), while the registered
+source stays in the db.
 
 This is the structural fix for the cross-source caret: a runtime error raised
 inside a `source`d module carries the module's `FileId`, so the renderer

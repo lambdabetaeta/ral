@@ -31,7 +31,8 @@ Three nested loops:
   last clean tool-call boundary, rolling the panicking call's grant/env/cwd/handler
   effects back while completed calls' bindings survive
   ([[decisions/260612_exarch-panic-recovery|panic-recovery]]; the IO half is
-  shell-eval's `IoGuard`).
+  core's `TurnGuard`, restored when `run_turn` unwinds —
+  [[internals/a-turn-end-to-end|a turn, end to end]]).
 - `apply` — one provider round-trip loop: render the transcript, stream a reply
   through `provider.complete`, **admit** then append the assistant message,
   dispatch any tool calls, append their results, optionally append a drained

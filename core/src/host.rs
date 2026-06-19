@@ -243,6 +243,17 @@ impl Shell {
     /// forever; it changes nothing, because nothing waits on that sink to
     /// decide the turn is over.
     pub fn run_turn(&mut self, src: &str, req: TurnRequest<'_>) -> TurnReport {
+        // Mint the turn's foreground scope and arm its wall *before* compiling,
+        // so the limit bounds the whole turn — compile and typecheck included,
+        // not only evaluation. `compile_turn`'s `process::clear` touches only
+        // the signal count, never the reaper, so an entry armed here survives
+        // the compile. The `Deadline` guard disarms when `wall` drops, so an
+        // early `Static` return leaves no pending reaper entry.
+        let foreground = self.durable_root().child();
+        let wall = req
+            .turn_limit
+            .map(|d| crate::process::arm_lifetime(foreground.as_scope().clone(), d));
+
         let (comp, single_command) = match crate::turn::compile_turn(self, src) {
             Ok(parts) => parts,
             Err(diagnostics) => return TurnReport::Static { diagnostics },
@@ -262,14 +273,6 @@ impl Shell {
             }
         };
 
-        // Mint the turn's foreground scope and arm its wall, if any. The
-        // `Deadline` guard disarms when `_wall` drops at end of turn, so an
-        // early-finishing turn does not leave a pending reaper entry.
-        let foreground = self.durable_root().child();
-        let _wall = req
-            .turn_limit
-            .map(|d| crate::process::arm_lifetime(foreground.as_scope().clone(), d));
-
         let next = crate::turn::build_turn(
             self,
             capture,
@@ -286,6 +289,14 @@ impl Shell {
             req.caps,
             req.lifecycle,
         );
+
+        // Disarm the wall before reading the cause. While it stays armed the
+        // reaper can still fire; classifying against a live ceiling lets a turn
+        // that finished inside its budget be misread as timed out should the
+        // reaper trip in the gap between eval returning and this read. Dropping
+        // the guard removes the entry, so `cause` is `Deadline` below only for a
+        // deadline that genuinely elapsed during the turn.
+        drop(wall);
 
         let timed_out = foreground.cause() == Some(CancelCause::Deadline);
         let captured = capture_bufs.map(|(out, err)| Captured {

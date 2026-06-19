@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: active
 supersedes: decisions/260618_host-seam-turn-observer
 ---
 
