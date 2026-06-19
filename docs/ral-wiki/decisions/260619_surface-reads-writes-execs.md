@@ -2,30 +2,33 @@
 status: proposed
 ---
 
-# Surface every read, write, and exec; sink library I/O below the ral line
+# Surface every redirect and exec image; sink library I/O below the ral line
 
-**Every read (`<`), write (`>`), and command (exec) the model issues should appear on
-the rail — surfaced at the core runtime chokepoints where the operation actually
-happens, not at kit call sites, so coverage is total rather than dependent on which
-helper was used.** Core emits a structural *I/O event* — the operation and its
-operands (a path, an argv, a byte count), never a card; exarch binds it to a card
-from the existing mark grammar, exactly as it already binds a kit `surface`
-([[decisions/260619_surface-carries-documents|surface-carries-documents]]). For this
-to stay honest there is one invariant: **a ral redirect means the model's own I/O and
-nothing else.** So the library's bulk plumbing — `grep-files`'s per-file reads, and the
-witness hashing it shares with `edit` — sinks below the ral line into exarch builtins,
-where the reads happen in Rust and never reach the redirect frame. The payoff is one
-surface per logical operation with **no suppression flag**: grep is a single "searched
-*here* for *this*" card because its reads are no longer ral reads, and `<`/`>`/exec
-become a clean, fully-surfaced model-I/O channel. That coverage is an *invariant*, not a
-convention: a `disallowed-methods` lint bans every filesystem and process constructor
-outside the handful of chokepoints, and each chokepoint *fuses* the surface into the
-operation — so nothing opens, writes, or spawns without surfacing (see **Enforcement**).
+**Every ral redirect read (`<`), redirect write (`>` family), and external or
+bundled exec image the model launches should appear on the rail — surfaced at
+the runtime doors where the operation actually happens, not at kit call sites,
+so coverage is total rather than dependent on which helper was used.** Core emits
+a structural *I/O event* — the operation and its operands (path, mode, argv,
+status, outcome), never a card and never a promised file-size count; exarch binds
+it to a card from the existing mark grammar, exactly as it already binds a kit
+`surface` ([[decisions/260619_surface-carries-documents|surface-carries-documents]]).
+For this to stay honest there is one invariant: **a ral redirect means the
+model's own I/O and nothing else.** So the library's bulk plumbing —
+`grep-files`'s per-file reads, and the witness hashing it shares with `edit` —
+sinks below the ral line into exarch builtins, where the reads happen in Rust and
+never reach the redirect frame. The payoff is one surface per logical operation
+with **no suppression flag**: grep is a single "searched *here* for *this*" card
+because its reads are no longer ral reads, and `<`/`>`/external exec become a
+clean, fully-surfaced model-I/O channel. That coverage is an *invariant*, not a
+convention: a `disallowed-methods` lint bans every filesystem and process
+constructor outside the handful of doors, and each door *fuses* the surface into
+the operation — so nothing opens, writes, or spawns without surfacing (see
+**Enforcement**).
 
 This is a proposal; nothing has landed. Today only `edit` (one `diff` card per change,
 `agent.ral:152`) and the tasks kit (`task`/`meter`, `kit/tasks.ral`) reach the rail.
 `wrote-card` is defined (`agent.ral:75`) but never called; there is no read card and no
-exec card. Reads, writes, and commands are invisible.
+exec-image card. Redirect reads, redirect writes, and external execs are invisible.
 
 ## The diagnosis
 
@@ -34,12 +37,11 @@ Surfacing is currently a **deliberate kit act**: the `surface` builtin
 (`core/src/types/shell/mod.rs:156`); exarch's `AgentSink::emit` (`shell_eval.rs:59`)
 runs `value_to_card` and emits `Kind::Card`. A thing surfaces only because a ral
 function *chose* to call `surface` — `edit` does, a bare `< file` does not. So "show
-every read/write/exec" cannot be met by adding more kit wrappers: a wrapper only sees
-the calls routed through it, and the model issues raw `<`, `>`, and bare commands
-directly. **Total coverage forces surfacing at the runtime, below the kit.**
+every read/write/exec image" cannot be met by adding more kit wrappers: a wrapper only
+sees the calls routed through it, and the model issues raw `<`, `>`, and bare external
+commands directly. **Total coverage forces surfacing at the runtime, below the kit.**
 
-There are exactly two runtime chokepoints, and they sit next to each other in the
-evaluator:
+There are two operation classes, and each has one runtime door:
 
 - **Redirects.** Every `<`, `>`, `>>`, `>|`, `2>`, `&>` funnels through one combinator
   pair — `within_redirect_frame` / `with_redirects` (`core/src/evaluator/redirect.rs`)
@@ -47,14 +49,20 @@ evaluator:
   targets and `install_stdin_redirect` (`:578`) for `< file` on fd 0. The mode set is
   closed and small: `RedirectMode::{Read, StreamWrite, Append, Write}`
   (`core/src/syntax/ast.rs:467`). One hook here is *every* redirect-based read and
-  write, exhaustively, and the frame holds the path and can stat the byte count.
-- **Exec.** Every command is a `CompKind::Exec`, evaluated in
-  `eval_call_parts` (`core/src/evaluator/call.rs`); it is spawned downstream in
-  `runtime/command/process.rs`, which is where the `ExecImage::Host` (spawned) vs
-  bundled-tool (in-process) split happens
+  write, exhaustively; the event names the path, mode, and terminal outcome, not a
+  guessed byte count.
+- **Exec images.** Surface command syntax reaches `CompKind::Exec`, but the hook is
+  *not* `eval_call_parts` (`core/src/evaluator/call.rs`): at that point the head may
+  still resolve to a ral closure, builtin, or handler. Resolution happens in
+  `run_call` (`core/src/runtime/command_call.rs`); only `Resolution::External` reaches
+  `run_external` / `command::run`, and bundled tools either complete through that
+  spawned `ExecImage::BundledTool` path or through the inline
+  `uutils::run_uutils_in_process` door
   ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]]).
-  Hook at the *eval*, before the split, and a bundled `cp`/`cat` is caught the same as
-  a spawned `cargo`.
+  Hook those completion doors, after resolution. Then `view 50 100 < foo.rs` is one
+  read card and no exec card; a bare external `cargo test` is one exec card; and
+  `cat < a` legitimately surfaces two model operations, the read redirect and the
+  external exec.
 
 ### Why not the capability gate
 
@@ -66,7 +74,7 @@ granularity in both directions: it **over-fires** on operations that are not dat
 predicates (`builtins/predicates.rs:91`), `list-dir` (`builtins/fs.rs:49`) — and it
 **under-fires** on bundled coreutils, whose internal `fs::read` (`builtins/uutils.rs:308`)
 never calls `check_fs_read` (it is gated at exec/sandbox time). The redirect-frame and
-exec-eval chokepoints, by contrast, name exactly the operators the model writes.
+external/bundled exec doors, by contrast, name exactly the operations the rail records.
 
 ### The one residual
 
@@ -76,29 +84,31 @@ chokepoints. That is code-loading, visible as its own statement, not turn-time d
 
 ## The decision
 
-### 1 — Core emits a structural I/O event; exarch binds it to a card
+### 1 — Core emits a structural I/O event; exarch binds it to a card and keeps the event
 
-At the redirect frame and the exec eval, core pushes onto the existing host channel a
-plain `Value` describing *what it did*:
+At the redirect doors and the external/bundled exec completion doors, core pushes onto
+the host channel a plain `Value` describing *what it did*:
 
 ```
-{io: "read",  path: "src/foo.rs", bytes: 1843}
-{io: "write", path: "out.json",   bytes: 512, mode: "write"}   # mode ∈ write|append|stream
-{io: "exec",  argv: ["cargo", "test"], status: 0, bytes: 9211}
+{io: "read",  path: "src/foo.rs"}
+{io: "write", path: "out.json", mode: "write", outcome: "committed"}  # mode ∈ write|append|stream
+{io: "exec",  argv: ["cargo", "test"], outcome: "ok", status: 0}
 ```
 
 This is **not** a card, and it does not name a mark. Core already names this vocabulary
 — `FsOp::{Read,Write}` and exec live in its capability layer — so reporting its own
 activity adds no new concept to core and does not breach
 [[decisions/260618_run-turn-host-loop|run-turn-host-loop]]'s rule that core carry raw
-`Value` and name no rail/card vocabulary, nor
-[[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-leak-into-exarch]] (the
-event is a public `Value`, decoded the way exarch already decodes a `surface`). exarch's
-decoder gains arms for the three `io` shapes and composes the cards; the division stays
-exactly as [[decisions/260619_surface-carries-documents|surface-carries-documents]] drew
-it — **core names the operation, exarch names its appearance.** The precise carrier
-(reuse the `surface` `EventSink`, or a dedicated telemetry seam) is an implementation
-detail to settle in parcel 0; the principle above is the commitment.
+`Value`, nor [[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-leak-into-exarch]]
+(the event is a public `Value`, not core's private representation). exarch decodes that
+shape into an `IoEvent`, composes a `Card` from the existing marks, and emits a bus event
+that carries both: the TUI renders the card through the generic card interpreter, while
+`events.json` serialises the raw event beside the rendered mark tree. If parcel 0 reuses
+the existing `surface` `EventSink`, `AgentSink::emit` dispatches `io` values through this
+adapter and ordinary `` `card `` values through `value_to_card`; if it uses a dedicated
+telemetry seam, the same `IoEvent -> Card` adapter is still the boundary. The division
+stays exactly as [[decisions/260619_surface-carries-documents|surface-carries-documents]]
+drew it — **core names the operation, exarch names its appearance.**
 
 ### 2 — One surface per logical operation, so bulk I/O sinks below the ral line
 
@@ -165,21 +175,20 @@ beside the diff is pure redundancy. Two ways to honour the invariant:
 This is the one decision the proposal leaves open for the author; everything else
 follows from it.
 
-### The three cards — composed from the existing marks, zero new vocabulary
+### The cards — composed from the existing marks, zero new mark vocabulary
 
 Per [[decisions/260619_surface-carries-documents|surface-carries-documents]], a card is a
 stack of the five marks (`text`/`measure`/`fields`/`diff`/`raw`) with nominal roles
 (`path`/`code`/`ok`/`warn`/`bad`/`muted`/`strong`). The new surfaces add no mark:
 
-- **read** (`<`): a `text` mark — a `muted` `<` glyph, a `path`-roled path — optionally a
-  `measure` of bytes/lines (magnitude on size + value, never on hue).
-- **write** (`>`): the dormant `wrote-card` (`agent.ral:75`), led by a `>` glyph, the
-  path, a `(N lines)` count, and a `muted` preview; `mode` distinguishes
-  write/append/stream.
-- **exec**: a `text` mark — the program as a `path`/`code` span, the args as `code` — and
-  on completion a `measure` of output size plus the exit status as a nominal role
-  (`ok`/`bad`). Bundled `cp`/`cat` surface here; their internal byte-shuffling rides the
-  visible call.
+- **read** (`<`): a `text` mark — a `muted` `<` glyph and a `path`-roled path.
+- **write** (`>` family): a `text` mark — a `>` glyph, a `path`-roled path, the mode,
+  and an outcome role (`ok` for committed, `bad` for failed, `warn` for aborted). The
+  old dormant `wrote-card` becomes a narrower write-card constructor; runtime redirects
+  do not carry written bytes or previews.
+- **exec**: a `text` mark — the program as a `path`/`code` span, the args as `code`,
+  and the exit outcome/status as a nominal role (`ok`/`bad`/`warn`). Bundled `cp`/`cat`
+  surface here; their internal byte-shuffling rides the visible call.
 - **grep**: a `text` mark — the cwd scope and the pattern — emitted once by the builtin.
 
 ## Why this shape
@@ -206,9 +215,9 @@ stack of the five marks (`text`/`measure`/`fields`/`diff`/`raw`) with nominal ro
 
 - **Moves below the line (exarch builtins):** `grep-files` (folding the witness stamp
   into `_search-files`'s pass) and `window-hash`. `edit` too, under the recommended fork.
-- **Gains:** exarch's decoder gains three `io` arms and the read/grep/exec card
-  composers; `wrote-card` is finally wired (to the write event). The system prompt
-  (`exarch/data/ral.md`, `system.md`) drops `window-hash`/`grep-files` as ral definitions
+- **Gains:** exarch's decoder gains three `io` arms and the read/write/grep/exec card
+  composers; the dormant `wrote-card` shape is narrowed into a write-event card. The
+  system prompt (`exarch/data/ral.md`, `system.md`) drops `window-hash`/`grep-files` as ral definitions
   and presents them as builtins.
 - **Stays untouched:** `view` (its `<` is the model's read at the call site — surfaces
   once, correctly), the mark grammar and renderer, the capability gate, and — modulo the
@@ -237,13 +246,14 @@ break, not a review note.
 allowlisted doors split in two, and the mandatory reason field records which:
 
 - **Surfacing doors fuse the surface into the operation.** `open_file` /
-  `install_stdin_redirect` (`runtime/command/redirect.rs`) for write/read, the spawn +
-  completion path (`runtime/command/process.rs`) for exec, the search builtin
-  (`agent_builtins.rs`, §2) for grep. The emission lives *inside* the door — for reads
-  and writes in the `RedirectFrame` RAII teardown (`redirect.rs`, `tear_down`), so it
-  fires on the error and unwind paths too; for exec at the one completion site, where the
-  status and output size are finally known. There is no open-, write-, or
-  spawn-without-surface API, because there is no open, write, or spawn *except* the door.
+  `install_stdin_redirect` (`runtime/command/redirect.rs`) record redirect read/write
+  attempts; the redirect frame emits their terminal outcome when the frame settles, with
+  atomic `>` marked committed only after `commit_atomics` succeeds and aborted when the
+  body failed before commit. The external completion path (`command::run`) and the inline
+  bundled-tool path (`uutils::run_uutils_in_process`) emit exec events when status or
+  spawn failure is known. The search builtin (`agent_builtins.rs`, §2) emits grep once
+  for the logical search. There is no open-, write-, or spawn-without-surface API,
+  because there is no open, write, or spawn *except* the door.
 - **Reasoned-silent fs sites** do filesystem work that is not the model's data I/O and
   raise no card by design: canonicalisation (`path/canon.rs`), `which` probes
   (`path/which.rs`), module loading (`builtins/modules.rs` — the `source`/`use` residual
@@ -266,8 +276,9 @@ the witness-marker discipline of
 single-door confinement, but it carries the invariant in the type where a refactor cannot
 silently drop it.
 
-**What the lint cannot reach.** It guarantees a surface is *emitted*, not that its path or
-byte count is *correct* (the test plan's burden), and it cannot see inside dependencies —
+**What the lint cannot reach.** It guarantees a surface is *emitted*, not that its path,
+mode, argv, status, or outcome is *correct* (the test plan's burden), and it cannot see
+inside dependencies —
 `ignore`/`grep` (under the grep door), `tempfile` (under the write door's atomic commit),
 bundled `uutils` (under the exec door). Those syscalls are confined by the OS sandbox
 ([[decisions/260617_sandbox-external-children|sandbox-external-children]]), not the lint —
@@ -279,8 +290,8 @@ the same boundary that alone can answer what *spawned children* did.
   granularity — over-fires on `source`/`use`/`exists`/`list-dir`, under-fires on bundled
   coreutils' internal reads. It records capability *checks*, not the model's *operations*.
 - **Kit wrappers only (`read`/`write`/`run` + a grep card), no runtime hook.** Rejected:
-  cannot capture *every* op — a raw `< file` or bare command the model writes directly
-  bypasses every wrapper. Fails the requirement outright.
+  cannot capture *every* op — a raw `< file` or bare external command the model writes
+  directly bypasses every wrapper. Fails the requirement outright.
 - **Keep all plumbing in ral, suppress with a `quiet` scope everywhere.** Rejected as the
   general mechanism: it leaves library reads as ral reads and depends on every present and
   future bulk helper marking itself; a forgotten marker is a silent rail leak. Retained
@@ -295,9 +306,9 @@ the same boundary that alone can answer what *spawned children* did.
 
 ## Consequences
 
-- The rail becomes a faithful provenance trace: every file the model read, every file it
-  wrote, every command it ran — one card each, at true cost. grep is one card, not one
-  per file.
+- The rail becomes a faithful provenance trace: every redirect target the model read,
+  every redirect target it wrote, and every external or bundled exec image it ran — one
+  card per operation. grep is one card, not one per file.
 - No suppression flag exists (recommended fork) — correctness by where code lives, not by
   a marker.
 - "All I/O surfaces" is build-time–checked — a `disallowed-methods` denylist (I/O only at
@@ -314,23 +325,25 @@ the same boundary that alone can answer what *spawned children* did.
 
 ## Implementation plan
 
-Documentation of intended work, not a commitment to build now. Five parcels; each
+Documentation of intended work, not a commitment to build now. Six parcels; each
 compiles and tests alone.
 
 ```
-0  I/O event      core emits {io:read|write|exec, …} Value at redirect frame + exec eval; pick the carrier
-1  Card binding   exarch decoder arms for the three io shapes; read/exec composers; wire wrote-card to write
+0  I/O event      core emits {io:read|write|exec, …} Value at redirect + external/bundled completion doors; pick carrier and Kind::Io shape
+1  Card binding   exarch IoEvent -> Card adapter; read/write/exec composers; events.json records raw event + card
 2  grep → builtin  fold witness stamp into _search-files's pass; builtin emits one grep surface
 3  window-hash     promote agent.ral:20 → exarch builtin; edit (:102) + grep call it; drop the ral def
 4  edit (fork)     recommended: edit → builtin surfacing its diff;  alt: quiet scope around its <,>
-5  Enforcement    disallowed-methods on fs/process constructors; #[allow]+reason per door (surfacing | reasoned-silent); RAII-fused emit; meta-test the allowlist; CI -D
+5  Enforcement    disallowed-methods on fs/process constructors; #[allow]+reason per door (surfacing | reasoned-silent); outcome-fused emit; meta-test the allowlist; CI -D
 ```
 
 ## Test plan
 
-- **Coverage.** A raw `cat < a`, a `… > b`, and a bare `cmd` — issued directly, through no
-  helper — each produce exactly one card. A nested redirect inside a model-defined closure
-  surfaces (it is the model's I/O).
+- **Coverage.** A raw `from-string < a`, a `to-string "x" > b`, and a bare external
+  `cmd` — issued directly, through no helper — produce read, write, and exec cards
+  respectively. `view 1 2 < a` produces the read card and no exec card, because `view`
+  is a ral helper, not an exec image. `cat < a` produces two cards: one read redirect
+  and one external exec.
 - **grep is one surface.** `grep-files pat` over a tree of N matching files emits one card
   (scope + pattern), not N reads; the witnesses it stamps still resolve in a subsequent
   `edit` (the round-trip the move must preserve).
@@ -339,15 +352,16 @@ compiles and tests alone.
   and `edit` still addresses a repeated line by it.
 - **edit is one surface.** Under either fork, an `edit` emits its `diff` and *no* separate
   read/write card.
-- **Card shape & Bertin.** read/write/exec cards compose only existing marks; a larger
-  byte count renders a fuller `measure` bar; exit status renders a nominal role, never a
-  size.
-- **events.json.** Each io event serialises structurally; a `raw`-bearing exec card keeps
-  its bytes.
+- **Card shape & Bertin.** read/write/exec cards compose only existing marks; path,
+  mode, argv, status, and outcome are nominal text roles. No file-size or byte-count
+  measure is surfaced.
+- **events.json.** Each io event serialises structurally beside the card exarch rendered
+  from it.
 - **Residual.** `source`/`use` produce no card (documented boundary).
-- **Totality.** Each surfacing door emits even on the error/unwind path (the
-  `RedirectFrame` teardown fires under a forced failure); under the type-half, a `File`
-  cannot be obtained without it.
+- **Totality.** Each surfacing door emits a terminal outcome on success and failure:
+  atomic writes say committed only after commit, aborted when the body failed before
+  commit, and failed when open/commit/spawn fails; under the type-half, a `File` cannot
+  be obtained without the door.
 - **Closed door set.** The meta-test — the fs/process `#[allow(clippy::disallowed_methods)]`
   sites equal the reviewed allowlist, so a new unaccounted constructor call fails CI.
 
