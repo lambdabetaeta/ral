@@ -14,6 +14,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
+use std::borrow::Cow;
 use unicode_width::UnicodeWidthStr;
 
 // ── Color palette ────────────────────────────────────────────────────────────
@@ -717,7 +718,7 @@ pub(super) fn provider_error(e: &ProviderErrorRecord) -> Vec<Line<'static>> {
     let kind = error_kind(e);
     ls.push(Line::from(vec![
         Span::styled(
-            "error ",
+            "error: ",
             Style::default().fg(RED).add_modifier(Modifier::BOLD),
         ),
         bold(kind.into(), RED),
@@ -793,7 +794,8 @@ fn error_kind(e: &ProviderErrorRecord) -> &'static str {
 fn push_field(ls: &mut Vec<Line<'static>>, label: &str, value: &str, width: usize) {
     let label_w = label.len() + 2; // "<label>  "
     let body_w = width.saturating_sub(label_w).max(8);
-    push_wrapped(ls, value, body_w, |chunk, first| {
+    let value = prettify_embedded_json(value);
+    push_wrapped(ls, &value, body_w, |chunk, first| {
         let lead = if first {
             Span::styled(
                 format!("{label}  "),
@@ -804,6 +806,29 @@ fn push_field(ls: &mut Vec<Line<'static>>, label: &str, value: &str, width: usiz
         };
         Line::from(vec![lead, Span::raw(chunk)])
     });
+}
+
+/// Reformat the first embedded JSON object/array in `s` with two-space
+/// indentation, leaving the surrounding text intact.  Provider errors
+/// often splice a raw, single-line JSON body into a free-text `cause`
+/// (`… Body: {"error":{…}}`); pretty-printing it turns an unreadable wall
+/// into a nested block whose newlines the wrapper honours as hard breaks.
+/// Returns the input unchanged (borrowed) when no parseable JSON value is
+/// found, so non-JSON fields pay only a scan for the first `{`/`[`.
+fn prettify_embedded_json(s: &str) -> Cow<'_, str> {
+    let Some(start) = s.find(['{', '[']) else {
+        return Cow::Borrowed(s);
+    };
+    let mut stream =
+        serde_json::Deserializer::from_str(&s[start..]).into_iter::<serde_json::Value>();
+    let Some(Ok(value)) = stream.next() else {
+        return Cow::Borrowed(s);
+    };
+    let Ok(pretty) = serde_json::to_string_pretty(&value) else {
+        return Cow::Borrowed(s);
+    };
+    let end = start + stream.byte_offset();
+    Cow::Owned(format!("{}{}{}", &s[..start], pretty, &s[end..]))
 }
 
 #[cfg(test)]
