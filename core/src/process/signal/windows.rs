@@ -710,7 +710,7 @@ pub(super) fn try_wait_handling_stop(
 pub struct ForegroundGuard;
 
 impl ForegroundGuard {
-    pub fn try_acquire(_target: i32, _shell: &crate::types::Shell) -> Option<Self> {
+    pub fn try_acquire(_target: i32, _lease: &crate::process::TerminalLease) -> Option<Self> {
         None
     }
 }

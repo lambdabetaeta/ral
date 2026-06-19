@@ -45,12 +45,22 @@ impl Shell {
                 cancel: root.child(),
                 loc: LocationCursor::default(),
                 detached_ceiling: None,
+                // The boot frame holds no terminal authority; a host states it
+                // per turn via `TurnRequest::terminal`. `Denied` is the safe
+                // default so a frame with no stated policy never foregrounds.
+                terminal_access: crate::types::TerminalAccess::Denied,
             },
             session: SessionState {
                 root,
                 sources: crate::diagnostic::SourceDb::default(),
                 exit_hints: crate::exit_hints::ExitHints::default(),
                 builtins: crate::types::BuiltinTable::default(),
+                // Mint the session's lease from the same predicate that
+                // populates `startup_foreground`. `None` off Unix and whenever
+                // ral did not own the terminal foreground at startup.
+                terminal_lease: crate::process::TerminalLease::mint_at_startup(
+                    terminal.startup_foreground,
+                ),
             },
             local: LocalState::default(),
         };

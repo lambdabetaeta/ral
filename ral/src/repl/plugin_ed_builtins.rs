@@ -206,15 +206,17 @@ pub fn builtin_ed_accept(args: &[Value], shell: &mut Shell) -> Settled<Value> {
 /// non-Unit value it wins; otherwise the captured bytes are decoded
 /// (trailing newline stripped).
 ///
-/// The re-entrancy guard and the pipeline foreground signal share one flag:
-/// `shell.repl().tui_active`.  It is set on entry and cleared on
-/// exit; pipeline analysis in core reads it to keep `_ed-tui`'s body in
-/// the foreground process group despite the captured stdout pipe.
+/// The re-entrancy guard and the pipeline foreground signal are now the
+/// turn's explicit terminal loan.  `begin_terminal_loan` raises the turn
+/// to `ExplicitLoan` — which the pipeline foreground rule honors, keeping
+/// `_ed-tui`'s body in the foreground process group despite the captured
+/// stdout pipe — and the matching `end_terminal_loan` restores it;
+/// `in_terminal_loan` is the re-entrancy guard.
 pub fn builtin_ed_tui(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "_ed-tui")?;
     require_interactive("_ed-tui", shell)?;
     shell.check_editor_tui()?;
-    if shell.repl().tui_active {
+    if shell.in_terminal_loan() {
         return Ok(Value::map(vec![
             (
                 "output".into(),
@@ -235,11 +237,11 @@ pub fn builtin_ed_tui(args: &[Value], shell: &mut Shell) -> Settled<Value> {
             ]));
         }
     }
-    shell.repl_mut().tui_active = true;
+    let loan = shell.begin_terminal_loan();
     let (result, bytes) = ral_core::evaluator::with_capture(shell, |shell| {
         ral_core::builtins::apply(&args[0], &[], shell)
     });
-    shell.repl_mut().tui_active = false;
+    shell.end_terminal_loan(loan);
     match result {
         Ok(v) => {
             let v = match v {

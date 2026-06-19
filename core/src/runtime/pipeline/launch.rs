@@ -40,6 +40,11 @@ pub(super) enum StageHandle {
 /// only in the inherit branch: a foreground pipeline's pgid is what
 /// owns the tty, so the permit kind reflects that.
 fn route_parent_stdin(group: &PipelineGroup, shell: &mut Shell) -> command::StdinRoute {
+    // An explicit empty source (an exarch tool turn) wires the boundary stage
+    // to `/dev/null` — no fd-0 fall-through, mirroring `command::wire_stdin`.
+    if matches!(shell.turn.io.stdin, crate::io::Source::Empty) {
+        return command::StdinRoute::Null;
+    }
     match shell.turn.io.stdin.take_reader() {
         Some(crate::io::SourceReader::Pipe(r)) => command::StdinRoute::Pipe(r),
         Some(crate::io::SourceReader::File(f)) => command::StdinRoute::File(f),

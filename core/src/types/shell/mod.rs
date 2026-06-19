@@ -41,6 +41,8 @@ pub(crate) mod modules;
 pub(crate) mod repl;
 mod scope;
 
+pub use host::TerminalLoan;
+
 use self::control::ControlState;
 use self::cwd::Cwd;
 use self::modules::Modules;
@@ -169,6 +171,32 @@ impl EventSink for () {
 /// clone can never decide that a turn is over.
 pub type SurfaceSink = Arc<dyn EventSink>;
 
+/// This turn's authority to hand the controlling terminal to a child.
+///
+/// The internal (per-turn) form of the host-facing
+/// [`RequestedTerminalAccess`](crate::host::RequestedTerminalAccess): it carries
+/// the extra `ExplicitLoan` state that `_ed-tui` raises mid-turn and that a host
+/// cannot request at `run_turn`. Read by
+/// [`Shell::terminal_lease`](Shell::terminal_lease), which yields the session's
+/// `&TerminalLease` only when this is `Leased` or `ExplicitLoan`. `Denied` is
+/// the default — the safe element — so a frame with no stated policy can never
+/// reach the foreground handoff.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum TerminalAccess {
+    /// No child/job foreground handoff in this turn (exarch tool turns, a
+    /// backgrounded launch, the boot frame before the first turn).
+    #[default]
+    Denied,
+    /// This turn may foreground terminal-bound children (the interactive REPL,
+    /// a terminal-launched script).
+    Leased,
+    /// A within-turn elevation of a `Leased` turn: a foreground handoff fires
+    /// even though stdout is a buffer, because the body (`_ed-tui`'s `fzf`)
+    /// draws on `/dev/tty` and must own the foreground pgid. Set by the host
+    /// loan token, never by a `TurnRequest`.
+    ExplicitLoan,
+}
+
 /// The whole dynamic frame a top-level turn installs.  A turn builds one,
 /// swaps it into `shell.turn`, runs, and restores the previous one on
 /// teardown; the field is the invariant "the turn-local part" used to be a
@@ -199,6 +227,14 @@ pub struct TurnState {
     /// flowed into same-thread bodies and spawned workers so a `spawn`
     /// nested in a thunk sees the same ceiling.
     pub(crate) detached_ceiling: Option<std::time::Duration>,
+    /// This turn's terminal-foreground authority. Gates whether a
+    /// child/job foreground handoff can borrow the session's
+    /// [`TerminalLease`](crate::process::TerminalLease); see
+    /// [`Shell::terminal_lease`]. Restored with the rest of the frame by the
+    /// turn guard; flows into same-thread bodies (so a pipeline launched inside
+    /// an `_ed-tui` loan still foregrounds) and is left `Denied` on a spawned
+    /// worker.
+    pub(crate) terminal_access: TerminalAccess,
 }
 
 impl TurnState {
@@ -211,6 +247,11 @@ impl TurnState {
         self.cancel = parent.cancel.clone();
         self.loc = parent.loc.clone();
         self.detached_ceiling = parent.detached_ceiling;
+        // Terminal access flows in so a pipeline launched inside an `_ed-tui`
+        // loan (or any same-thread body of a Leased turn) sees the parent's
+        // authority. It does not flow back in `return_to`: the parent retains
+        // its own access (it set the loan and will end it).
+        self.terminal_access = parent.terminal_access;
     }
 
     /// Same-thread child flow-out: return the read-once stdin to the parent
@@ -242,6 +283,14 @@ pub struct SessionState {
     /// serialised ral values, so the receiver of a wire mobile supplies its
     /// own rather than shipping it in a `WireMobile`.
     pub(crate) builtins: BuiltinTable,
+    /// The session's terminal-foreground witness, minted once at construction
+    /// from the startup `tcgetpgrp == getpgrp` predicate. `Some` when ral owns
+    /// the controlling terminal's foreground (interactive REPL, terminal-
+    /// launched script), `None` otherwise (piped/backgrounded/tty-less, and
+    /// every non-Unix platform). Lent — never moved or cloned — to the
+    /// foreground handoff via [`Shell::terminal_lease`], and only when the
+    /// installed turn's [`TerminalAccess`] permits.
+    pub(crate) terminal_lease: Option<crate::process::TerminalLease>,
 }
 
 /// Host-local scratch whose members carry their own flow rules — not a

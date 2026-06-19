@@ -35,24 +35,23 @@ pub(super) struct ForegroundDecision {
 impl ForegroundDecision {
     /// Decide foreground ownership for a standalone external command.
     ///
-    /// Foreground requires *both* the runtime conditions (ral owns the
-    /// controlling terminal's foreground, terminal-bound stdout, no
-    /// shell-side pump) AND an explicit permit from the caller's
-    /// [`crate::io::JobControl`].  The terminal-ownership predicate is
-    /// `startup_foreground`, not `interactive`: a non-interactive script
-    /// launched at a terminal owns the foreground exactly like the REPL
-    /// and must foreground its interactive children, or they raise SIGTTOU
-    /// on their first `tcsetattr` from a background pgroup.
-    /// An internal pipeline stage runs with
-    /// `JobControl::pipeline_child`, so even when its `shell.turn.io`
-    /// appears to satisfy the runtime conditions it cannot take
-    /// foreground — the orchestrator owns that decision.  Without this
-    /// positive whitelist, such a child would call `tcsetpgrp` from a
-    /// thread, putting ral into a background pgroup whose next read of
-    /// the tty raises EIO (SIGTTIN is ignored, see `repl.rs`).
+    /// Foreground requires *all three*: this caller is the top-level
+    /// orchestrator ([`LaunchRole::is_top_level`](crate::io::LaunchRole::is_top_level),
+    /// not a pipeline stage), the installed turn holds the terminal lease
+    /// ([`Shell::terminal_lease`] is `Some` — the authority the old
+    /// `startup_foreground` predicate stood in for), and stdout is terminal-
+    /// bound with no shell-side pump.  The lease — not `interactive` — is the
+    /// terminal-ownership oracle: a non-interactive script launched at a
+    /// terminal holds a `Leased` turn exactly like the REPL and must foreground
+    /// its interactive children, or they raise SIGTTOU on their first
+    /// `tcsetattr` from a background pgroup.  An internal pipeline stage runs
+    /// with [`LaunchRole::PipelineStage`](crate::io::LaunchRole), so even when
+    /// its `shell.turn.io` appears to satisfy the conditions it cannot take
+    /// foreground; an exarch tool turn installs `Denied`, so its lease borrow
+    /// is unavailable and the handoff cannot be constructed at all.
     pub(super) fn for_standalone(shell: &Shell, needs_pump: bool) -> Self {
-        let want_fg = shell.turn.io.job_control.may_foreground()
-            && shell.turn.io.terminal.startup_foreground
+        let want_fg = shell.turn.io.launch_role.is_top_level()
+            && shell.terminal_lease().is_some()
             && !needs_pump
             && matches!(
                 shell.turn.io.stdout,
@@ -65,7 +64,7 @@ impl ForegroundDecision {
             // it must join the pipeline's pgid) and there is no
             // interactive session whose terminal-foreground group the
             // child must stay consistent with.
-            own_group_when_background: shell.turn.io.job_control.may_foreground()
+            own_group_when_background: shell.turn.io.launch_role.is_top_level()
                 && !shell.turn.io.interactive,
             // Park only a foreground child of an interactive REPL — see
             // the field doc.
@@ -133,17 +132,20 @@ impl ForegroundDecision {
         if !self.want_fg {
             return None;
         }
+        // `want_fg` already required `terminal_lease().is_some()`, so the
+        // borrow is present; it is the unforgeable proof `try_acquire` demands.
+        let lease = shell.terminal_lease()?;
         #[cfg(unix)]
         {
-            ForegroundGuard::try_acquire(child_id as libc::pid_t, shell)
+            ForegroundGuard::try_acquire(child_id as libc::pid_t, lease)
         }
         #[cfg(windows)]
         {
-            ForegroundGuard::try_acquire(child_id as i32, shell)
+            ForegroundGuard::try_acquire(child_id as i32, lease)
         }
         #[cfg(not(any(unix, windows)))]
         {
-            let _ = (child_id, shell);
+            let _ = (child_id, lease);
             None
         }
     }

@@ -8,8 +8,8 @@
 use clap::{CommandFactory as _, Parser as _};
 use ral_core::types::{Break, Escape, Settled};
 use ral_core::{
-    Shell, TurnIo, TurnReport, TurnRequest, diagnostic, elaborator::elaborate,
-    syntax::parser::parse,
+    RequestedTerminalAccess, Shell, TurnIo, TurnReport, TurnRequest, TurnStdin, diagnostic,
+    elaborator::elaborate, syntax::parser::parse,
 };
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -479,6 +479,11 @@ fn run_batch(name: &str, source: String, script_args: Vec<String>, opts: BatchOp
     };
     tick!("typecheck");
 
+    let terminal_access = if shell.terminal().startup_foreground {
+        RequestedTerminalAccess::Leased
+    } else {
+        RequestedTerminalAccess::Denied
+    };
     let result = match shell.run_turn(
         source.as_str(),
         TurnRequest {
@@ -487,6 +492,8 @@ fn run_batch(name: &str, source: String, script_args: Vec<String>, opts: BatchOp
             turn_limit: None,
             detached_limit: None,
             io: TurnIo::Inherit,
+            terminal: terminal_access,
+            stdin: TurnStdin::Inherit,
             surface: None,
             lifecycle: Box::new(()),
         },

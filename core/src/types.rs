@@ -76,5 +76,6 @@ pub use audit::{
 mod shell;
 pub use shell::{
     Context, DEFAULT_RECURSION_LIMIT, EventSink, LocalState, Mobile, SessionState, Shell,
-    SurfaceSink, TurnState,
+    SurfaceSink, TerminalLoan, TurnState,
 };
+pub(crate) use shell::TerminalAccess;

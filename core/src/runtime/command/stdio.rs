@@ -164,6 +164,12 @@ pub(crate) fn classify_redirects(redirects: &[(u32, RedirectMode, EvalRedirect)]
 /// when fd 0 is not actually a tty (`for_non_tty_stdin`).  Both are issued
 /// here.
 pub(super) fn wire_stdin(shell: &mut Shell) -> StdinRoute {
+    // An explicit empty source (an exarch tool turn) wires to `/dev/null`,
+    // never inheriting fd 0 — denial of byte input is its own effect, not a
+    // consequence of foreground denial.
+    if matches!(shell.turn.io.stdin, crate::io::Source::Empty) {
+        return StdinRoute::Null;
+    }
     match shell.turn.io.stdin.take_reader() {
         Some(crate::io::SourceReader::Pipe(r)) => StdinRoute::Pipe(r),
         Some(crate::io::SourceReader::File(f)) => StdinRoute::File(f),
@@ -307,5 +313,37 @@ pub(super) fn announce_command_title(cmd: &str, shell: &Shell) {
         use std::io::Write;
         let _ = std::io::stdout().write_all(crate::ansi::osc_set_title(cmd).as_bytes());
         let _ = std::io::stdout().flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{StdinRoute, wire_stdin};
+    use crate::io::Source;
+    use crate::types::Shell;
+
+    /// The foreground/input split, at the wiring level: an explicit empty
+    /// stdin source wires a child to `/dev/null` (no fd-0 fall-through), while
+    /// the ambient terminal source still inherits fd 0. Denial of byte input
+    /// (`Empty`) is its own effect — a piped `ral -c` is denied foreground yet
+    /// keeps reading its inherited pipe through the `Terminal` (inherit) route.
+    #[test]
+    fn empty_stdin_wires_null_but_terminal_inherits() {
+        let mut shell = Shell::default();
+
+        shell.turn.io.stdin = Source::Empty;
+        assert!(
+            matches!(wire_stdin(&mut shell), StdinRoute::Null),
+            "Empty stdin must wire to /dev/null"
+        );
+
+        // The ambient terminal/pipe source falls through to fd 0 (inherit),
+        // independent of any foreground decision.
+        shell.turn.io.stdin = Source::Terminal;
+        shell.turn.io.terminal.startup_stdin_tty = false;
+        assert!(
+            matches!(wire_stdin(&mut shell), StdinRoute::Inherit(_)),
+            "Terminal stdin still inherits fd 0"
+        );
     }
 }

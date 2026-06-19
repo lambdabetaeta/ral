@@ -211,7 +211,7 @@ fn eval_request(
     );
 
     shell.turn.io.terminal = TerminalState::probe();
-    shell.turn.io.job_control = crate::io::JobControl::pipeline_child();
+    shell.turn.io.launch_role = crate::io::LaunchRole::PipelineStage;
     let captured = captured
         .ok_or_else(|| {
             Break::Error(Error::new(

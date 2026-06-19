@@ -1,9 +1,12 @@
 //! Byte input for a pipeline stage.
 //!
 //! [`Source`] is the per-stage input slot ("upstream pipe", "redirected
-//! file", or "fall through to fd 0").  [`SourceReader`] is the owning
-//! handle returned once the source has been claimed: callers then use it as
-//! a `Read`, an `AsRawFd`, or convert into a `process::Stdio` for spawn.
+//! file", "fall through to fd 0", or "no input at all").  [`SourceReader`]
+//! is the owning handle returned once a *resource* source (pipe / file) has
+//! been claimed: callers then use it as a `Read`, an `AsRawFd`, or convert
+//! into a `process::Stdio` for spawn.  The two fd-less markers — `Terminal`
+//! and `Empty` — yield no reader; a consumer that must tell them apart reads
+//! the `Source` directly.
 
 use std::io::{self, Read};
 
@@ -13,9 +16,15 @@ use std::io::{self, Read};
 /// has been opened upstream and parked here so consumers see all redirected
 /// input through one channel rather than racing the cached `stdin_tty` against
 /// a `dup2`'d fd 0.  `Terminal` means "no redirect — fall through to whatever
-/// fd 0 of the shell process is".
+/// fd 0 of the shell process is".  `Empty` means "no input at all" — an
+/// explicit empty source that reads as immediate EOF and wires a child's stdin
+/// to `/dev/null`, with *no* fall-through to fd 0.  It is what an exarch tool
+/// turn installs so a tool command can never steal the TUI's controlling
+/// terminal; it is distinct from `Terminal` precisely so denial of foreground
+/// authority and denial of byte input stay separate effects.
 pub enum Source {
     Terminal,
+    Empty,
     Pipe(os_pipe::PipeReader),
     File(std::fs::File),
 }
@@ -32,24 +41,22 @@ pub enum SourceReader {
 }
 
 impl Source {
-    /// Consume any non-terminal source, leaving `Terminal` in place.  Returns
-    /// `None` when already `Terminal`.
+    /// Claim a *resource* source (pipe / file), leaving `Terminal` in place.
+    ///
+    /// Returns `None` for both fd-less markers: `Terminal` (fall through to
+    /// fd 0) and `Empty` (no input). `Empty` is restored in place rather than
+    /// collapsing to `Terminal`, so a second read in the same turn still sees
+    /// no fd-0 fall-through; a consumer that must distinguish the two markers
+    /// inspects the `Source` itself.
     pub fn take_reader(&mut self) -> Option<SourceReader> {
         match std::mem::replace(self, Source::Terminal) {
             Source::Terminal => None,
+            Source::Empty => {
+                *self = Source::Empty;
+                None
+            }
             Source::Pipe(r) => Some(SourceReader::Pipe(r)),
             Source::File(f) => Some(SourceReader::File(f)),
-        }
-    }
-
-    /// Inverse of [`Source::take_reader`]: rebuild a `Source` from an
-    /// optional owned reader.  `None` becomes `Terminal`.  Sole point where
-    /// the `Source ↔ SourceReader` round-trip is encoded.
-    pub fn from_reader(r: Option<SourceReader>) -> Self {
-        match r {
-            None => Source::Terminal,
-            Some(SourceReader::Pipe(r)) => Source::Pipe(r),
-            Some(SourceReader::File(f)) => Source::File(f),
         }
     }
 }

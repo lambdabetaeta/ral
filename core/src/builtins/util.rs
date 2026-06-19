@@ -206,6 +206,11 @@ pub fn arg0_str(args: &[Value], name: &str) -> Settled<String> {
 /// ([`for_each_stdin_line`]) drain through it, so the three-arm policy
 /// lives in one place.  `name` rides the no-input error.
 pub(crate) fn stdin_reader(name: &str, shell: &mut Shell) -> Settled<Box<dyn std::io::BufRead>> {
+    // An explicit empty source reads as immediate EOF — no fd-0 fall-through,
+    // and no "no input" error (the turn deliberately installed no input).
+    if matches!(shell.turn.io.stdin, crate::io::Source::Empty) {
+        return Ok(Box::new(std::io::empty()));
+    }
     if let Some(reader) = shell.turn.io.stdin.take_reader() {
         return Ok(Box::new(std::io::BufReader::new(reader)));
     }
@@ -357,5 +362,31 @@ pub fn value_to_json_lossy_bytes(v: &Value) -> serde_json::Value {
             }
             serde_json::Value::Object(obj)
         }
+    }
+}
+
+#[cfg(test)]
+mod stdin_tests {
+    use super::stdin_reader;
+    use crate::io::Source;
+    use crate::types::Shell;
+    use std::io::Read;
+
+    /// An explicit empty stdin source reads as immediate EOF — not the "no
+    /// input" error and, crucially, *not* a fall-through to fd 0. This is the
+    /// guarantee an exarch tool turn (`TurnStdin::Empty`) relies on so a tool
+    /// command that reads stdin can never steal the TUI's controlling terminal.
+    #[test]
+    fn empty_source_reads_as_eof() {
+        let mut shell = Shell::default();
+        shell.turn.io.stdin = Source::Empty;
+        let mut reader = stdin_reader("test", &mut shell).expect("Empty must not error");
+        let mut buf = Vec::new();
+        let n = reader.read_to_end(&mut buf).expect("read");
+        assert_eq!(n, 0, "Empty source yields no bytes");
+        assert!(buf.is_empty());
+        // The source is a persistent marker: a second read still sees Empty,
+        // never collapsing to `Terminal` (fd-0 fall-through).
+        assert!(matches!(shell.turn.io.stdin, Source::Empty));
     }
 }

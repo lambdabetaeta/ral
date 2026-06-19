@@ -8,7 +8,10 @@
 mod common;
 
 use ral_core::types::{Capabilities, Settled, Shell, Value};
-use ral_core::{EventSink, SurfaceSink, TurnIo, TurnReport, TurnRequest, builtins};
+use ral_core::{
+    EventSink, RequestedTerminalAccess, SurfaceSink, TurnIo, TurnReport, TurnRequest, TurnStdin,
+    builtins,
+};
 use std::sync::{Arc, Mutex};
 
 fn fresh_shell() -> Shell {
@@ -46,6 +49,8 @@ fn run(shell: &mut Shell, source: &str, surface: Option<SurfaceSink>) -> Settled
             turn_limit: None,
             detached_limit: None,
             io: TurnIo::Inherit,
+            terminal: RequestedTerminalAccess::Leased,
+            stdin: TurnStdin::Inherit,
             surface,
             lifecycle: Box::new(()),
         },

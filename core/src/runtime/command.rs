@@ -213,10 +213,10 @@ pub(crate) fn run(
     waited.drain();
     let code = outcome.to_user_exit_code();
     shell.mobile.control.last_status = code;
-    // A child whose `JobControl` is `pipeline_child` (pipeline stages,
-    // the pipeline helper subprocess) cannot claim the foreground and
-    // forgives SIGPIPE — the reader ended the pipe, not a real error.
-    let forgive_sigpipe = !shell.turn.io.job_control.may_foreground();
+    // A child whose `LaunchRole` is `PipelineStage` (pipeline stages, the
+    // pipeline helper subprocess) forgives SIGPIPE — the reader ended the
+    // pipe, not a real error.
+    let forgive_sigpipe = !shell.turn.io.launch_role.is_top_level();
     match crate::process::CommandFailure::from_outcome(outcome, forgive_sigpipe) {
         None => Ok(Value::Unit),
         Some(failure) => {

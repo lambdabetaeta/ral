@@ -123,13 +123,19 @@ impl Drop for TurnGuard<'_> {
 /// Build the [`TurnState`] a turn installs, seeded from the ambient `shell`.
 ///
 /// `capture` is `Some` only under [`TurnIo::Capture`](crate::host::TurnIo),
-/// where the turn's byte streams are redirected into host-read buffers; under
-/// `Inherit` it is `None` and the ambient streams flow through unchanged. The
+/// where the turn's byte *output* streams are redirected into host-read
+/// buffers; under `Inherit` it is `None` and the ambient streams flow through
+/// unchanged. `stdin` and `terminal_access` are supplied independently of the
+/// output regime (the host's [`TurnStdin`](crate::host::TurnStdin) and
+/// [`RequestedTerminalAccess`](crate::host::RequestedTerminalAccess)): stdin is
+/// always installed, so `Capture` no longer implies `Source::Terminal`. The
 /// `surface` is always the request's turn-local sink — it is no longer carried
 /// on the persistent session, so it has no liveness role.
 pub(crate) fn build_turn(
     shell: &Shell,
-    capture: Option<(Sink, Sink, Source)>,
+    capture: Option<(Sink, Sink)>,
+    stdin: Source,
+    terminal_access: crate::types::TerminalAccess,
     foreground: ForegroundScope,
     detached_ceiling: Option<std::time::Duration>,
     surface: Option<SurfaceSink>,
@@ -137,13 +143,13 @@ pub(crate) fn build_turn(
     let mut turn_io = shell.turn.io.try_clone().unwrap_or_else(|_| Io {
         terminal: shell.turn.io.terminal,
         interactive: shell.turn.io.interactive,
-        job_control: shell.turn.io.job_control,
+        launch_role: shell.turn.io.launch_role,
         ..Io::default()
     });
-    if let Some((stdout, stderr, stdin)) = capture {
+    turn_io.stdin = stdin;
+    if let Some((stdout, stderr)) = capture {
         turn_io.stdout = stdout;
         turn_io.stderr = stderr;
-        turn_io.stdin = stdin;
     }
     TurnState {
         io: turn_io,
@@ -151,6 +157,7 @@ pub(crate) fn build_turn(
         cancel: foreground,
         loc: LocationCursor::default(),
         detached_ceiling,
+        terminal_access,
     }
 }
 
@@ -232,12 +239,13 @@ mod tests {
     use crate::io::ByteBuffer;
     use std::sync::{Arc, Mutex};
 
-    use crate::host::{TurnIo, TurnReport, TurnRequest};
+    use crate::host::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
 
     /// A capturing request under the ⊤ capability ceiling with no surface
     /// sink and no lifecycle hooks — the minimal request a host with no
-    /// surface decoder or plugin policy supplies. Core mints the capture
-    /// buffers and returns them in `TurnReport::Ran { captured, .. }`.
+    /// surface decoder or plugin policy supplies. Mirrors exarch's tool turn:
+    /// foreground `Denied`, stdin `Empty`. Core mints the capture buffers and
+    /// returns them in `TurnReport::Ran { captured, .. }`.
     fn capture_req<'a>() -> TurnRequest<'a> {
         TurnRequest {
             script_name: "<test>",
@@ -245,6 +253,8 @@ mod tests {
             turn_limit: None,
             detached_limit: None,
             io: TurnIo::Capture,
+            terminal: RequestedTerminalAccess::Denied,
+            stdin: TurnStdin::Empty,
             surface: None,
             lifecycle: Box::new(()),
         }

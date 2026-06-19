@@ -358,10 +358,13 @@ pub fn wait_foreground(pgid: i32, shell: &Shell) -> ForegroundWait {
     #[cfg(unix)]
     {
         // RAII handoff: tcsetpgrp + termios snapshot on acquire,
-        // restored on drop.  `None` when stdin isn't a tty or the
-        // shell isn't interactive — we still SIGCONT and wait, but
+        // restored on drop.  `None` when the turn holds no terminal
+        // lease (e.g. a non-interactive resume) — exactly when there
+        // is no tty handoff to do, so we still SIGCONT and wait but
         // skip the tty dance.
-        let _fg_guard = ral_core::process::ForegroundGuard::try_acquire(pgid as libc::pid_t, shell);
+        let _fg_guard = shell
+            .terminal_lease()
+            .and_then(|lease| ral_core::process::ForegroundGuard::try_acquire(pgid as libc::pid_t, lease));
         // SIGCONT after the tty handoff: the kernel-level race that
         // would otherwise drop the group back into Stopped is gone by
         // construction.  Sending to the whole pgid (not just the

@@ -16,12 +16,15 @@
 //!     in [`signal`] alongside the handlers they cooperate with at
 //!     fork / spawn time.
 
+pub mod lease;
 pub mod outcome;
 pub mod reaper;
 pub mod signal;
 
 pub(crate) use outcome::not_found_hint;
 pub use outcome::{CommandFailure, Signal, SpawnFailure, WaitOutcome};
+
+pub use lease::TerminalLease;
 
 pub use reaper::arm_lifetime;
 

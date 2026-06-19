@@ -129,11 +129,15 @@ impl PipelineGroup {
     }
 
     pub(super) fn claim_foreground(&mut self, shell: &Shell) {
+        // The terminal plan was already resolved against the lease, so a
+        // `ForegroundExternalGroup` here implies the turn holds one; the
+        // borrow is the unforgeable proof `try_acquire` now demands.
         if self.terminal.owns_tty()
             && self.foreground.is_none()
             && let Some(Pgid(leader)) = self.leader
+            && let Some(lease) = shell.terminal_lease()
         {
-            self.foreground = crate::process::ForegroundGuard::try_acquire(leader, shell);
+            self.foreground = crate::process::ForegroundGuard::try_acquire(leader, lease);
         }
     }
 }

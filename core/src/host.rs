@@ -168,9 +168,41 @@ pub enum TurnIo {
     /// the external printer) and batch (the process streams).
     Inherit,
     /// Mint fresh stdout/stderr buffers core returns in
-    /// [`TurnReport::Ran`]'s `captured`; stdin falls through to the terminal
-    /// the shell already holds. exarch's tool capture.
+    /// [`TurnReport::Ran`]'s `captured`. Independent of [`TurnStdin`]: byte
+    /// output regime and byte input source are separate choices. exarch's tool
+    /// capture.
     Capture,
+}
+
+/// Whether a turn may hand the controlling terminal to a child.
+///
+/// The host-facing half of the terminal lease: the host states the turn's
+/// authority, and core decides whether the session's
+/// [`TerminalLease`](crate::process::TerminalLease) is reachable from it (see
+/// [`Shell::terminal_lease`]). `ExplicitLoan` is deliberately absent — a host
+/// cannot seed it; it is a within-turn elevation a loan token raises.
+pub enum RequestedTerminalAccess {
+    /// No child/job foreground handoff in this turn. exarch tool turns and any
+    /// launch that does not own the terminal foreground.
+    Denied,
+    /// This turn may foreground terminal-bound children. The interactive REPL
+    /// and a terminal-launched script.
+    Leased,
+}
+
+/// The byte source a turn's stdin reads from.
+///
+/// Orthogonal to [`TurnIo`] (the *output* regime) and to
+/// [`RequestedTerminalAccess`] (foreground authority): a piped `ral -c` is
+/// `Denied` foreground yet still reads its inherited pipe (`Inherit`), while an
+/// exarch tool turn is `Denied` *and* reads no terminal (`Empty`).
+pub enum TurnStdin {
+    /// Use the session stdin source — the inherited fd 0, which may be a
+    /// terminal, a pipe, or a redirected file.
+    Inherit,
+    /// Install an empty source: reads as immediate EOF, a child's stdin wires
+    /// to `/dev/null`, and there is no fall-through to fd 0.
+    Empty,
 }
 
 /// The host's per-turn policy. Everything a turn needs that is *not* a core
@@ -196,6 +228,15 @@ pub struct TurnRequest<'a> {
     pub detached_limit: Option<Duration>,
     /// The byte IO regime; see [`TurnIo`].
     pub io: TurnIo,
+    /// Whether this turn may hand the controlling terminal to a child; see
+    /// [`RequestedTerminalAccess`]. `Leased` for the interactive REPL and a
+    /// terminal-launched script, `Denied` for an exarch tool turn or any
+    /// launch that does not own the terminal foreground.
+    pub terminal: RequestedTerminalAccess,
+    /// The byte source for this turn's stdin; see [`TurnStdin`]. `Inherit` for
+    /// the REPL and batch (fall through to fd 0), `Empty` for an exarch tool
+    /// turn (no terminal read).
+    pub stdin: TurnStdin,
     /// The turn-local structured-event sink, installed only for this turn.
     /// `None` is the identity (a bare REPL). Same-thread children inherit it;
     /// detached workers buffer into bounded deferred storage instead.
@@ -266,16 +307,27 @@ impl Shell {
             TurnIo::Capture => {
                 let (stdout_sink, stdout_buf) = crate::io::new_buffer();
                 let (stderr_sink, stderr_buf) = crate::io::new_buffer();
-                (
-                    Some((stdout_sink, stderr_sink, Source::Terminal)),
-                    Some((stdout_buf, stderr_buf)),
-                )
+                (Some((stdout_sink, stderr_sink)), Some((stdout_buf, stderr_buf)))
             }
+        };
+
+        // Stdin source and terminal authority are independent of the output
+        // regime: `Capture` no longer implies `Source::Terminal`. A tool turn
+        // is `Denied` + `Empty`; a piped `ral -c` is `Denied` + `Inherit`.
+        let stdin = match req.stdin {
+            TurnStdin::Inherit => Source::Terminal,
+            TurnStdin::Empty => Source::Empty,
+        };
+        let terminal_access = match req.terminal {
+            RequestedTerminalAccess::Leased => crate::types::TerminalAccess::Leased,
+            RequestedTerminalAccess::Denied => crate::types::TerminalAccess::Denied,
         };
 
         let next = crate::turn::build_turn(
             self,
             capture,
+            stdin,
+            terminal_access,
             foreground.clone(),
             req.detached_limit,
             req.surface,

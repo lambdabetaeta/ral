@@ -8,10 +8,13 @@
 //! `crate::io::TerminalState`, etc.
 //!
 //! This file holds [`Io`] — the per-Shell IO bundle (stdin / stdout /
-//! stderr / interactive / terminal / job_control / capture_outer /
+//! stderr / interactive / terminal / launch_role / capture_outer /
 //! capture_depth) — and
-//! [`JobControl`], the foreground-eligibility token that distinguishes the
-//! orchestrator from pipeline-local children.
+//! [`LaunchRole`], the process-group role that distinguishes the top-level
+//! orchestrator from a pipeline-local child. Terminal-foreground authority is
+//! no longer carried here — that is the session's
+//! [`TerminalLease`](crate::process::TerminalLease); this type only governs
+//! process-group placement.
 
 mod sink;
 mod source;
@@ -30,45 +33,31 @@ pub(crate) use terminal::{STD_ERROR_HANDLE, is_console};
 
 use std::io;
 
-/// Whether the current shell context may hand the controlling terminal
-/// to a spawned external child.
+/// The process-group role of the current shell context: the top-level
+/// orchestrator, or a pipeline-local child.
 ///
-/// Constructed only via the named methods so the discipline is grep-able:
-/// the orchestrator (top-level call, single-command exec) issues
-/// `Eligible`; pipeline helpers and their nested children issue
-/// `Forbidden`. The common point is simple: only the pipeline launcher may
-/// hand off the terminal.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct JobControl {
-    foreground_eligible: bool,
+/// This is the residue of the former `JobControl` once terminal-foreground
+/// authority moved to the session's
+/// [`TerminalLease`](crate::process::TerminalLease). It still decides
+/// process-group *placement* — a top-level standalone external may lead its
+/// own group (so a watchdog cancel can `kill(-pgid, …)` the whole subtree),
+/// while a pipeline stage must join the pipeline's pgid and never become a
+/// new-leader orchestrator on its own — and it forgives SIGPIPE on pipeline
+/// children. It no longer says anything about who may foreground.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum LaunchRole {
+    /// The orchestrator: a top-level eval or single-command exec.
+    #[default]
+    TopLevel,
+    /// A pipeline-local child. Joins the pipeline's pgid; never leads its own
+    /// group independently.
+    PipelineStage,
 }
 
-impl JobControl {
-    /// The orchestrator (top-level eval, single-command exec).  May
-    /// foreground a spawned child when other conditions are met
-    /// (interactive shell, tty stdin, terminal stdout, no shell pump).
-    pub fn top_level() -> Self {
-        Self {
-            foreground_eligible: true,
-        }
-    }
-
-    /// Pipeline-local child. Must never take foreground — the pipeline
-    /// launcher owns that decision.
-    pub fn pipeline_child() -> Self {
-        Self {
-            foreground_eligible: false,
-        }
-    }
-
-    pub fn may_foreground(&self) -> bool {
-        self.foreground_eligible
-    }
-}
-
-impl Default for JobControl {
-    fn default() -> Self {
-        Self::top_level()
+impl LaunchRole {
+    /// Whether this is the top-level orchestrator (not a pipeline stage).
+    pub fn is_top_level(self) -> bool {
+        matches!(self, Self::TopLevel)
     }
 }
 
@@ -86,12 +75,11 @@ pub struct Io {
     pub interactive: bool,
     /// Cached isatty results from shell startup.
     pub terminal: TerminalState,
-    /// Whether this shell context may take terminal foreground. `top_level`
-    /// for orchestrator paths; `pipeline_child` inside helper-owned pipeline
-    /// code. Independent of the `interactive`/`terminal` checks: those
-    /// describe the *capability*, this describes whether *this caller* is
-    /// permitted to use it.
-    pub job_control: JobControl,
+    /// This shell context's process-group role. `TopLevel` for orchestrator
+    /// paths; `PipelineStage` inside helper-owned pipeline code. Governs pgid
+    /// placement and SIGPIPE forgiveness, not terminal foreground — that is the
+    /// session [`TerminalLease`](crate::process::TerminalLease).
+    pub launch_role: LaunchRole,
     /// The stdout that was active before the current `with_capture` installed
     /// its buffer.  `Comp::Seq` flushes non-final commands' bytes here so
     /// side-effects remain visible rather than being silently discarded.
@@ -118,7 +106,7 @@ impl Io {
             stderr: self.stderr.try_clone()?,
             interactive: self.interactive,
             terminal: self.terminal,
-            job_control: self.job_control,
+            launch_role: self.launch_role,
             capture_outer: self
                 .capture_outer
                 .as_ref()
@@ -145,14 +133,17 @@ impl Io {
         self.capture_depth = parent.capture_depth;
         self.terminal = parent.terminal;
         self.interactive = parent.interactive;
-        self.job_control = parent.job_control;
-        self.stdin = Source::from_reader(parent.stdin.take_reader());
+        self.launch_role = parent.launch_role;
+        // Move the whole source so every marker (`Empty` as well as a `Pipe` /
+        // `File`) reaches the child: a child of an `Empty`-stdin turn must also
+        // see no fall-through to fd 0, not silently revert to `Terminal`.
+        self.stdin = std::mem::replace(&mut parent.stdin, Source::Terminal);
     }
 
     /// STT-out: return the read-once stdin to `parent` so subsequent
     /// sibling calls see the unconsumed pipe.  Mirror of `inherit_from`.
     pub fn return_to(&mut self, parent: &mut Io) {
-        parent.stdin = Source::from_reader(self.stdin.take_reader());
+        parent.stdin = std::mem::replace(&mut self.stdin, Source::Terminal);
     }
 }
 
@@ -164,7 +155,7 @@ impl Default for Io {
             stderr: Sink::Stderr,
             interactive: false,
             terminal: TerminalState::default(),
-            job_control: JobControl::default(),
+            launch_role: LaunchRole::default(),
             capture_outer: None,
             capture_depth: 0,
         }

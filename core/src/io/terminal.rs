@@ -73,13 +73,14 @@ impl InteractiveMode {
 /// abstractions instead of consulting these fields.
 ///
 /// `startup_foreground` records whether ral's process group *owned* the
-/// controlling terminal's foreground at process entry — the predicate that
-/// decides whether ral may hand the terminal to a child via `tcsetpgrp`.
-/// It is the right oracle for that handoff regardless of whether ral is an
-/// interactive REPL or a non-interactive script launched at a terminal:
-/// both own the foreground and both may foreground their interactive
-/// children; an exarch tool-eval, a piped `ral -c`, or a backgrounded
-/// `ral … &` does not, and must not.
+/// controlling terminal's foreground at process entry.  It is no longer
+/// consulted as a per-handoff authority — that role moved to the session's
+/// [`TerminalLease`](crate::process::TerminalLease).  It survives as the
+/// lease's *mint condition*: core mints the session lease iff this is true at
+/// construction (see `TerminalLease::mint_at_startup`).  True for an
+/// interactive REPL and a non-interactive script launched at a terminal — both
+/// own the foreground and so get a lease; an exarch tool-eval, a piped
+/// `ral -c`, or a backgrounded `ral … &` does not.
 ///
 /// The remaining fields record whether the terminal is known to accept ANSI
 /// escape sequences and which "hostile but common" environment we are running

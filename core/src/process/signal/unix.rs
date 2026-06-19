@@ -516,11 +516,15 @@ pub fn termios_snapshot() -> Option<libc::termios> {
 ///
 /// `try_acquire` performs `tcsetpgrp(STDIN_FILENO, target)`, snapshots the
 /// current termios, and remembers the previous foreground pgid; `drop`
-/// restores both.  Returns `None` when ral does not own the controlling
-/// terminal's foreground (`startup_foreground`) or the pgid handoff fails —
-/// in those cases there's nothing to restore.  Termios snapshot may itself
-/// fail (ENOTTY on an exotic fd);
-/// that is non-fatal and only the pgid half is restored on Drop.
+/// restores both.  It is *uncallable* without a [`TerminalLease`] borrow:
+/// holding `&TerminalLease` is the proof that ral owns the controlling
+/// terminal's foreground, replacing the old internal `startup_foreground`
+/// re-check.  Returns `None` only when the pgid handoff itself fails (target
+/// `0`, or `tcsetpgrp` errors) — in which case there is nothing to restore.
+/// Termios snapshot may itself fail (ENOTTY on an exotic fd); that is
+/// non-fatal and only the pgid half is restored on Drop.
+///
+/// [`TerminalLease`]: crate::process::TerminalLease
 pub struct ForegroundGuard {
     saved_pgid: libc::pid_t,
     saved_termios: Option<libc::termios>,
@@ -530,8 +534,11 @@ impl ForegroundGuard {
     /// Hand the controlling tty to `target`, recording the prior pgid and
     /// termios for the eventual restore.  Returns `None` when no handoff is
     /// appropriate.
-    pub fn try_acquire(target: libc::pid_t, shell: &crate::types::Shell) -> Option<Self> {
-        if !shell.turn.io.terminal.startup_foreground || target == 0 {
+    pub fn try_acquire(
+        target: libc::pid_t,
+        _lease: &crate::process::TerminalLease,
+    ) -> Option<Self> {
+        if target == 0 {
             return None;
         }
         let saved = unsafe { libc::getpgrp() };

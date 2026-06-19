@@ -15,8 +15,8 @@ use crate::bus::{Emitter, Kind};
 use crate::card::value_to_card;
 use ral_core::types::{Break, Escape};
 use ral_core::{
-    EventSink, Shell, StaticDiagnostics, TurnIo, TurnReport, TurnRequest, Value as RalValue,
-    diagnostic,
+    EventSink, RequestedTerminalAccess, Shell, StaticDiagnostics, TurnIo, TurnReport, TurnRequest,
+    TurnStdin, Value as RalValue, diagnostic,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -102,6 +102,8 @@ pub fn run_shell(
             turn_limit: Some(Duration::from_secs(timeout_secs)),
             detached_limit: Some(DETACHED_WORKER_CEILING),
             io: TurnIo::Capture,
+            terminal: RequestedTerminalAccess::Denied,
+            stdin: TurnStdin::Empty,
             surface: Some(Arc::new(AgentSink(emit.clone()))),
             lifecycle: Box::new(()),
         },
