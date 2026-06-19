@@ -25,6 +25,53 @@ detached workers replace with bounded deferred storage. This completes
 hosts are request suppliers) by making completion explicit, not by adding an
 observer.
 
+## As built
+
+The **invariant** of this ADR shipped exactly — completion is an explicit
+control-flow fact, never event-channel disconnect — but through a *different
+mechanism* than the `tokio::select!` + `oneshot` driver sketched in Decision
+part 2. The `select!`/`oneshot` code below, and the `AgentSink`/`blocking_send`
+of part 4, are the **proposal shape**, not the code. What shipped:
+
+- **Completion is a worker-set `AtomicBool`, polled — not a `oneshot` future.**
+  `pump` (`exarch/src/bus.rs`) declares `done: AtomicBool`, runs the turn on a
+  `std::thread::scope` worker that borrows `&mut Session`/`&Provider`, and the
+  worker `store`s `done = true` after `work` returns or unwinds (`bus.rs:366`).
+  `Sink::drive` (`bus.rs:303`) loops `recv_timeout(DRAIN_POLL)` and returns when
+  `done` is set (disconnect is only a safety net); the TUI overrides `drive`
+  with `drive_events` (`tui.rs:2432`), which polls `done` at ~60 fps between
+  key/render work. `pump` and `drive` are **retained and re-pointed**, not
+  deleted.
+- **No tokio in the turn loop at all.** The event channel stays `std::sync::mpsc`
+  (unbounded); tokio remains only in `provider.rs` for LLM transport. This
+  *strengthens* this ADR's own "tokio out of core" goal — the runtime never even
+  enters the host's turn loop, let alone core.
+
+Why the mechanism was not adopted as literally sketched — established when the
+`select!` driver was actually attempted:
+
+- **The `oneshot` buys no correctness the flag lacks.** Both make completion a
+  control-flow fact a detached worker cannot influence; the daemon hang is dead
+  identically. The flag is the load-bearing decision in a smaller encoding.
+- **The async loop needs a second crossterm input owner.** A `select!` input arm
+  means a reader thread or `EventStream` alongside the synchronous idle/picker
+  reads — a new concurrency surface (and a keystroke-loss boundary race unless
+  *all* input is rerouted through one owner) that the single-threaded synchronous
+  `drive_events` avoids by construction.
+- **`blocking_send` would panic.** Token events are emitted from a callback that
+  fires *inside* the provider's `runtime.block_on` (`session.rs:273`), i.e. in a
+  runtime context, where `tokio::sync::mpsc::Sender::blocking_send` panics. The
+  sound async equivalent is an *unbounded* `UnboundedSender::send` — which means
+  the **bounded backpressure / meter-phase coalescing of part 4 is unreachable**
+  without restructuring provider streaming. The proposal's headline reliability
+  feature does not survive contact with the streaming path.
+
+Net: the `select!` rewrite's only reachable wins over the as-built are literal
+ADR fidelity and a modest TUI/headless driver DRY — neither a correctness gain,
+paid for with tokio plumbing and a second input owner. The flag-based design is
+kept. The Decision/Implementation sections below are preserved as the proposal
+and its reasoning; read them against this note.
+
 ## Context
 
 A Terminal-Bench run (`exarch-bench/.../2026-06-18__13-40-33`) hangs on the two
