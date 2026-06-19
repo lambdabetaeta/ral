@@ -237,6 +237,7 @@ mod tests {
         let attempt = Err(ProviderError::RateLimited {
             retry_after: Some(Duration::from_secs(5)),
             cause: "429".into(),
+            body: None,
         });
         assert!(matches!(
             reg.react(
@@ -262,6 +263,7 @@ mod tests {
         let attempt = Err(ProviderError::Transient {
             cause: "web stream error".into(),
             attempts: 3,
+            body: None,
         });
         assert!(matches!(
             reg.react(

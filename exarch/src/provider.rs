@@ -269,13 +269,25 @@ pub enum ProviderError {
     /// Network/stream/5xx error — the request can be retried with the
     /// same payload.  `attempts` is the total number of attempts made
     /// before giving up (always `>= 1`).
-    Transient { cause: String, attempts: u32 },
+    Transient {
+        cause: String,
+        attempts: u32,
+        /// The parsed JSON error body when the provider returned one (the
+        /// HTTP 5xx path); `None` for transport / parse faults that never
+        /// produced a JSON body.  The renderer uses it for a structured
+        /// display.
+        body: Option<serde_json::Value>,
+    },
     /// Rate-limited (HTTP 429).  Honoured by the retry loop with a
     /// dedicated sleep tier; if `retry_after` is present the server
     /// asked for that wait explicitly.
     RateLimited {
         retry_after: Option<Duration>,
         cause: String,
+        /// The parsed JSON error body when the provider returned one (the
+        /// HTTP 429 path); `None` for a 429 surfaced without a JSON body.
+        /// The renderer uses it for a structured display.
+        body: Option<serde_json::Value>,
     },
     /// 4xx response from the provider (auth, bad request, model not
     /// found, etc.).  Not retried — the user has to change something.
@@ -284,6 +296,10 @@ pub enum ProviderError {
         model: String,
         message: String,
         url: Option<String>,
+        /// The parsed JSON error body when the provider returned one (the
+        /// HTTP 4xx path); `None` when no JSON body was carried.  The
+        /// renderer uses it for a structured display.
+        body: Option<serde_json::Value>,
     },
     /// The turn finished with a non-success `StopReason` — most
     /// commonly `max_tokens`, where the provider truncated the response
@@ -312,7 +328,7 @@ impl ProviderError {
     /// no status can be recovered does the classifier fall back to the
     /// `Display` string and the transport-transient heuristic.
     pub fn from_genai(err: &genai::Error, model: &str) -> Self {
-        if let Some((status, headers)) = status_of(err) {
+        if let Some((status, headers, body)) = status_of(err) {
             let msg = err.to_string();
             if status == StatusCode::TOO_MANY_REQUESTS {
                 let retry_after = headers
@@ -321,12 +337,14 @@ impl ProviderError {
                 return ProviderError::RateLimited {
                     retry_after,
                     cause: msg,
+                    body,
                 };
             }
             if status.is_server_error() {
                 return ProviderError::Transient {
                     cause: msg,
                     attempts: 1,
+                    body,
                 };
             }
             // Any remaining non-success status (4xx, redirects) is a
@@ -336,6 +354,7 @@ impl ProviderError {
                 model: model.to_string(),
                 message: msg.clone(),
                 url: extract_url(&msg),
+                body,
             };
         }
 
@@ -346,6 +365,7 @@ impl ProviderError {
             return ProviderError::Transient {
                 cause: err.to_string(),
                 attempts: 1,
+                body: None,
             };
         }
 
@@ -364,6 +384,7 @@ impl ProviderError {
             return ProviderError::Transient {
                 cause: msg,
                 attempts: 1,
+                body: None,
             };
         }
 
@@ -371,37 +392,61 @@ impl ProviderError {
     }
 }
 
-/// Recover the HTTP status (and its response headers, when carried) from
-/// a genai error's typed variants, covering all three paths a non-2xx
-/// status reaches us by:
+/// Recover the HTTP status, its response headers (when carried), and the
+/// parsed JSON error body from a genai error's typed variants, covering
+/// all three paths a non-2xx status reaches us by:
 ///
-/// * `HttpError` — the raw HTTP-level error (streaming initial response).
+/// * `HttpError` — the raw HTTP-level error (streaming initial response);
+///   its `body: String` is parsed best-effort.
 /// * `WebModelCall(ResponseFailedStatus)` — the non-streamed `exec_chat`
-///   path (the compaction summary); the `headers` carry `retry-after`.
+///   path (the compaction summary); the `headers` carry `retry-after` and
+///   the `body: String` is parsed best-effort.
 /// * `WebStream { error, .. }` — the streaming path boxes the typed
-///   `HttpError` as the `BoxError` cause; downcast to recover its status.
+///   `HttpError` as the `BoxError` cause; downcast to recover its status
+///   and parse its `body: String` best-effort.
 /// * `ChatResponse { body, .. }` — a mid-stream JSON error frame whose
-///   status lives in `body["error"]["code"]` / `body["code"]`.
-fn status_of(err: &genai::Error) -> Option<(StatusCode, Option<&HeaderMap>)> {
+///   status lives in `body["error"]["code"]` / `body["code"]`; the body is
+///   already a `serde_json::Value`, so it is cloned.
+///
+/// A non-JSON body (e.g. an HTML 5xx page) yields `None` for the body and
+/// the caller falls back to the textual `cause`.
+fn status_of(
+    err: &genai::Error,
+) -> Option<(StatusCode, Option<&HeaderMap>, Option<serde_json::Value>)> {
     match err {
-        genai::Error::HttpError { status, .. } => Some((*status, None)),
+        genai::Error::HttpError { status, body, .. } => {
+            Some((*status, None, parse_json_body(body)))
+        }
         genai::Error::WebModelCall { webc_error, .. }
         | genai::Error::WebAdapterCall { webc_error, .. } => match webc_error {
             genai::webc::Error::ResponseFailedStatus {
-                status, headers, ..
-            } => Some((*status, Some(headers))),
+                status,
+                headers,
+                body,
+            } => Some((*status, Some(headers), parse_json_body(body))),
             _ => None,
         },
         genai::Error::WebStream { error, .. } => match error.downcast_ref::<genai::Error>() {
-            Some(genai::Error::HttpError { status, .. }) => Some((*status, None)),
+            Some(genai::Error::HttpError { status, body, .. }) => {
+                Some((*status, None, parse_json_body(body)))
+            }
             _ => None,
         },
         genai::Error::ChatResponse { body, .. } => {
             let code = json_status_code(body)?;
-            StatusCode::from_u16(code).ok().map(|s| (s, None))
+            StatusCode::from_u16(code)
+                .ok()
+                .map(|s| (s, None, Some(body.clone())))
         }
         _ => None,
     }
+}
+
+/// Parse a provider error body string as JSON, best-effort.  A non-JSON
+/// body (e.g. an HTML 5xx page) yields `None` so the caller falls back to
+/// the textual `cause`.
+fn parse_json_body(s: &str) -> Option<serde_json::Value> {
+    serde_json::from_str(s).ok()
 }
 
 /// Read a status code from a provider JSON error body, accepting both the
@@ -445,7 +490,9 @@ impl fmt::Display for ProviderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ProviderError::Cancelled(where_) => write!(f, "cancelled {where_}"),
-            ProviderError::Transient { cause, attempts } => {
+            ProviderError::Transient {
+                cause, attempts, ..
+            } => {
                 if *attempts > 1 {
                     write!(f, "transient error after {attempts} attempts: {cause}")
                 } else {
@@ -934,6 +981,7 @@ impl Live {
                                 return Err(ProviderError::Transient {
                                     cause: "stream idle: no response within timeout".into(),
                                     attempts: 1,
+                                    body: None,
                                 });
                             }
                             r = self.client.exec_chat_stream(model, req, Some(&options)) => {
@@ -954,6 +1002,7 @@ impl Live {
                                     return Err(ProviderError::Transient {
                                         cause: "stream idle: no event within timeout".into(),
                                         attempts: 1,
+                                        body: None,
                                     });
                                 }
                                 ev = resp.stream.next() => match ev {
@@ -1044,6 +1093,7 @@ impl Live {
                             return Attempt::Failed(ProviderError::Transient {
                                 cause: "summary request: no response within timeout".into(),
                                 attempts: 1,
+                                body: None,
                             });
                         }
                         r = self.client.exec_chat(model, req, Some(&options)) => r,
@@ -1078,7 +1128,11 @@ impl Live {
 /// actually loop.
 fn stamp_attempts(err: ProviderError, attempts: u32) -> ProviderError {
     match err {
-        ProviderError::Transient { cause, .. } => ProviderError::Transient { cause, attempts },
+        ProviderError::Transient { cause, body, .. } => ProviderError::Transient {
+            cause,
+            attempts,
+            body,
+        },
         other => other,
     }
 }
@@ -1530,7 +1584,9 @@ mod tests {
             "gpt-5.4",
         );
         match e {
-            ProviderError::Transient { cause, attempts } => {
+            ProviderError::Transient {
+                cause, attempts, ..
+            } => {
                 assert!(cause.contains("Web stream error"));
                 assert_eq!(attempts, 1, "from_genai stamps the first attempt");
             }
@@ -1805,6 +1861,7 @@ mod tests {
         let e = ProviderError::Transient {
             cause: "boom".into(),
             attempts: 1,
+            body: None,
         };
         let stamped = stamp_attempts(e, 3);
         match stamped {
@@ -1822,10 +1879,12 @@ mod tests {
         let (rl_attempts, rl_ceiling) = retry_limits(&ProviderError::RateLimited {
             retry_after: None,
             cause: "429".into(),
+            body: None,
         });
         let (tr_attempts, tr_ceiling) = retry_limits(&ProviderError::Transient {
             cause: "boom".into(),
             attempts: 1,
+            body: None,
         });
         assert_eq!(rl_attempts, RATE_LIMIT_MAX_ATTEMPTS);
         assert_eq!(rl_ceiling, RATE_LIMIT_MAX_DELAY_MS);
@@ -1958,6 +2017,7 @@ mod tests {
                 Attempt::Failed(ProviderError::Transient {
                     cause: "stream idle: no event within timeout".into(),
                     attempts: 1,
+                    body: None,
                 })
             }));
         assert_eq!(calls.get(), MAX_ATTEMPTS, "exhausts the transient budget");
@@ -1981,6 +2041,7 @@ mod tests {
                 Attempt::Committed(ProviderError::Transient {
                     cause: "stream idle: no event within timeout".into(),
                     attempts: 1,
+                    body: None,
                 })
             }));
         assert_eq!(calls.get(), 1, "committed output is not re-issued");

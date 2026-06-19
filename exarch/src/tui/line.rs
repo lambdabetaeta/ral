@@ -14,6 +14,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
+use serde_json::{Map, Value};
 use std::borrow::Cow;
 use unicode_width::UnicodeWidthStr;
 
@@ -706,70 +707,186 @@ fn push_wrapped(
 
 // ── Provider-error rendering ────────────────────────────────────────────────
 
-/// Render a [`ProviderErrorRecord`] as a wrapped multi-line block.
+/// One rendered field of a provider-error block, ahead of layout.
 ///
-/// Header: blank line + bold red `error <kind>` (the `✗` shape lives in
-/// the lifted rail, Error shape).  Body: flush-left rows for each
-/// populated field (bold slate label, plain value), with `cause` text
-/// wrapped to `READ_W` columns so long URLs and stack-like strings
-/// don't clip at the viewport edge.
+/// Collecting the variant's fields into this ordered list first lets the
+/// renderer measure one shared label column across the whole block, so
+/// every value starts in the same column regardless of label length —
+/// Bertin's selective alignment, one ordered value column.
+enum Field {
+    /// A label + wrapped text value.
+    Text { label: String, value: String },
+    /// A label + a duration rendered as `<human>  <size_bar>` — the one
+    /// quantitative field (the rate-limit wait), so it earns the size
+    /// channel the other fields don't.
+    Wait { label: String, secs: u64 },
+}
+
+impl Field {
+    /// The field's label, regardless of variant — read once to size the
+    /// shared label column before any row is built.
+    fn label(&self) -> &str {
+        match self {
+            Field::Text { label, .. } | Field::Wait { label, .. } => label,
+        }
+    }
+}
+
+/// Body keys subsumed by the rendered [`Field::Wait`] row, so a body
+/// dump doesn't also print the raw retry-after value the wait field
+/// already shows as a human duration + bar.
+const WAIT_KEYS: &[&str] = &[
+    "resets_in_seconds",
+    "resets_at",
+    "retry_after",
+    "retry_after_seconds",
+];
+
+/// Render a [`ProviderErrorRecord`] as a structured multi-line block.
+///
+/// Header: blank line + bold-red `error: <kind>` (the `✗` shape lives in
+/// the lifted rail, Error shape).  Body: an ordered field list rendered
+/// into one shared, slate-bold label column with a single aligned value
+/// column — JSON syntax stripped, null fields dropped.  When a parsed
+/// `body` is present the fields come from it ([`body_fields`]); otherwise
+/// the renderer falls back to the free-text `cause`/`message`, honestly
+/// rendered rather than dressed as structure.  The rate-limit wait is the
+/// one quantitative field, rendered as a human duration plus a [`size_bar`].
 pub(super) fn provider_error(e: &ProviderErrorRecord) -> Vec<Line<'static>> {
     let mut ls: Vec<Line<'static>> = vec![Line::default()];
-    let kind = error_kind(e);
-    ls.push(Line::from(vec![
-        Span::styled(
-            "error: ",
-            Style::default().fg(RED).add_modifier(Modifier::BOLD),
-        ),
-        bold(kind.into(), RED),
-    ]));
-    let width = READ_W as usize;
-    match e {
-        ProviderErrorRecord::Cancelled { where_ } => {
-            push_field(&mut ls, "where", where_, width);
-        }
-        ProviderErrorRecord::Transient { cause, attempts } => {
-            push_field(&mut ls, "attempts", &attempts.to_string(), width);
-            push_field(&mut ls, "cause", cause, width);
-        }
+    // Cancellation folds its site into the headline and carries no body —
+    // there is nothing to align, so it returns after the header alone.
+    if let ProviderErrorRecord::Cancelled { where_ } = e {
+        ls.push(headline(&format!("cancelled ({where_})")));
+        return ls;
+    }
+    ls.push(headline(error_kind(e)));
+
+    let fields: Vec<Field> = match e {
+        ProviderErrorRecord::Cancelled { .. } => unreachable!("handled above"),
         ProviderErrorRecord::RateLimited {
             retry_after_secs,
             cause,
+            body,
         } => {
-            if let Some(secs) = retry_after_secs {
-                push_field(&mut ls, "retry-after", &format!("{secs}s"), width);
+            let mut fs = Vec::new();
+            let wait = retry_after_secs.or_else(|| body.as_ref().and_then(wait_from_body));
+            if let Some(secs) = wait {
+                fs.push(Field::Wait {
+                    label: "retry-after".into(),
+                    secs,
+                });
             }
-            push_field(&mut ls, "cause", cause, width);
+            match body {
+                Some(b) => fs.extend(body_fields(b, WAIT_KEYS)),
+                None => fs.push(Field::Text {
+                    label: "cause".into(),
+                    value: prettify(cause),
+                }),
+            }
+            fs
+        }
+        ProviderErrorRecord::Transient {
+            cause,
+            attempts,
+            body,
+        } => {
+            let mut fs = vec![Field::Text {
+                label: "attempts".into(),
+                value: attempts.to_string(),
+            }];
+            match body {
+                Some(b) => fs.extend(body_fields(b, &[])),
+                None => fs.push(Field::Text {
+                    label: "cause".into(),
+                    value: prettify(cause),
+                }),
+            }
+            fs
         }
         ProviderErrorRecord::Api {
             status,
             model,
             message,
             url,
+            body,
         } => {
+            let mut fs = Vec::new();
             if let Some(s) = status {
-                push_field(&mut ls, "status", &s.to_string(), width);
+                fs.push(Field::Text {
+                    label: "status".into(),
+                    value: s.to_string(),
+                });
             }
-            push_field(&mut ls, "model", model, width);
+            fs.push(Field::Text {
+                label: "model".into(),
+                value: model.clone(),
+            });
             if let Some(u) = url {
-                push_field(&mut ls, "url", u, width);
+                fs.push(Field::Text {
+                    label: "url".into(),
+                    value: u.clone(),
+                });
             }
-            push_field(&mut ls, "message", message, width);
+            match body {
+                Some(b) => fs.extend(body_fields(b, &[])),
+                None => fs.push(Field::Text {
+                    label: "message".into(),
+                    value: message.clone(),
+                }),
+            }
+            fs
         }
-        ProviderErrorRecord::Truncated { reason } => {
-            push_field(&mut ls, "stop_reason", reason, width);
-            push_field(
-                &mut ls,
-                "remedy",
-                "raise `--max-tokens N` or split the turn into smaller writes",
-                width,
-            );
-        }
-        ProviderErrorRecord::Other { cause } => {
-            push_field(&mut ls, "cause", cause, width);
+        ProviderErrorRecord::Truncated { reason } => vec![
+            Field::Text {
+                label: "stop_reason".into(),
+                value: reason.clone(),
+            },
+            Field::Text {
+                label: "remedy".into(),
+                value: "raise `--max-tokens N` or split the turn into smaller writes".into(),
+            },
+        ],
+        ProviderErrorRecord::Other { cause } => vec![Field::Text {
+            label: "cause".into(),
+            value: prettify(cause),
+        }],
+    };
+
+    if let Some(label_w) = fields.iter().map(|f| f.label().chars().count()).max() {
+        let label_w = label_w + 2; // "<label>  "
+        for f in &fields {
+            match f {
+                Field::Text { label, value } => {
+                    push_field(&mut ls, label, value, label_w, READ_W as usize);
+                }
+                Field::Wait { label, secs } => {
+                    ls.push(Line::from(vec![
+                        Span::styled(
+                            format!("{label:<label_w$}"),
+                            Style::default().fg(SLATE).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(format!("{}  ", human_secs(*secs))),
+                        size_bar(u32::try_from(*secs).unwrap_or(u32::MAX)),
+                    ]));
+                }
+            }
         }
     }
     ls
+}
+
+/// The `error: <kind>` headline row: a bold-red `error: ` lead-in then
+/// the bold-red kind.  Shared by every block so the chrome never drifts —
+/// the only variation is the kind string the caller folds in.
+fn headline(kind: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            "error: ",
+            Style::default().fg(RED).add_modifier(Modifier::BOLD),
+        ),
+        bold(kind.into(), RED),
+    ])
 }
 
 /// Short human label for the error header line.
@@ -784,21 +901,23 @@ fn error_kind(e: &ProviderErrorRecord) -> &'static str {
     }
 }
 
-/// Append one labelled field as one-or-more flush-left Lines.
+/// Append one labelled text field as one-or-more flush-left Lines, its
+/// value left-padded into the shared `label_w` column.
 ///
-/// The first wrapped row carries `<label>  <value>`; continuation rows
-/// drop the label so the value column lines up under itself.  `value`
-/// is wrapped to `width` columns via [`textwrap::wrap`] so anything
-/// longer than the viewport — long URLs, stack traces, JSON blobs —
-/// wraps cleanly instead of clipping.
-fn push_field(ls: &mut Vec<Line<'static>>, label: &str, value: &str, width: usize) {
-    let label_w = label.len() + 2; // "<label>  "
+/// The first wrapped row carries the slate-bold label then the value;
+/// continuation rows blank the label so the value column lines up under
+/// itself.  `label_w` is the block-wide column width (the longest label
+/// plus its two-space gap), passed in so every field aligns to the same
+/// column rather than each measuring its own.  `value` is wrapped to
+/// `width` columns via [`textwrap::wrap`] so long URLs and stack-like
+/// strings fold instead of clipping; it is already clean — prettifying
+/// happens at field-build time on fallback `cause` text alone, never here.
+fn push_field(ls: &mut Vec<Line<'static>>, label: &str, value: &str, label_w: usize, width: usize) {
     let body_w = width.saturating_sub(label_w).max(8);
-    let value = prettify_embedded_json(value);
-    push_wrapped(ls, &value, body_w, |chunk, first| {
+    push_wrapped(ls, value, body_w, |chunk, first| {
         let lead = if first {
             Span::styled(
-                format!("{label}  "),
+                format!("{label:<label_w$}"),
                 Style::default().fg(SLATE).add_modifier(Modifier::BOLD),
             )
         } else {
@@ -806,6 +925,105 @@ fn push_field(ls: &mut Vec<Line<'static>>, label: &str, value: &str, width: usiz
         };
         Line::from(vec![lead, Span::raw(chunk)])
     });
+}
+
+/// Convenience over [`prettify_embedded_json`] that hands back an owned
+/// `String`, for the few field-build sites that feed free-text `cause`
+/// values into the structured field list.
+fn prettify(s: &str) -> String {
+    prettify_embedded_json(s).into_owned()
+}
+
+/// Format `s` seconds as a compact human duration: `12s`, `12m 46s`, or
+/// `2h 05m`.  The rate-limit wait is the one quantity a reader acts on,
+/// so it reads as a duration rather than a raw second count.
+fn human_secs(s: u64) -> String {
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3600 {
+        format!("{}m {:02}s", s / 60, s % 60)
+    } else {
+        format!("{}h {:02}m", s / 3600, (s % 3600) / 60)
+    }
+}
+
+/// The error payload object inside a parsed `body`.  Providers wrap
+/// differently — OpenAI nests the detail under `error`, Anthropic sends
+/// `{"type":"error","error":{…}}` — so prefer the inner `error` object,
+/// falling back to the body itself when there is no such nesting.
+fn error_object(body: &Value) -> Option<&Map<String, Value>> {
+    body.get("error")
+        .and_then(Value::as_object)
+        .or_else(|| body.as_object())
+}
+
+/// The retry-after wait carried by a parsed `body`, if any: the first of
+/// the recognised second-count keys whose value reads as a number.  Used
+/// only when the response header didn't already supply the wait.
+fn wait_from_body(body: &Value) -> Option<u64> {
+    let obj = error_object(body)?;
+    ["resets_in_seconds", "retry_after_seconds", "retry_after"]
+        .iter()
+        .find_map(|k| {
+            obj.get(*k)
+                .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f as u64)))
+        })
+}
+
+/// One JSON value as the plain text a field row should show, with JSON
+/// syntax stripped: strings unquoted, scalars stringified, and the rare
+/// nested array/object compacted as a last resort.  `Null` carries no
+/// action, so it renders as nothing and the field is dropped.
+fn value_display(v: &Value) -> Option<String> {
+    match v {
+        Value::Null => None,
+        Value::String(s) => Some(s.clone()),
+        Value::Bool(_) | Value::Number(_) => Some(v.to_string()),
+        Value::Array(_) | Value::Object(_) => Some(serde_json::to_string(v).unwrap_or_default()),
+    }
+}
+
+/// Flatten a parsed error `body` into ordered fields, JSON syntax stripped.
+///
+/// The error object's `type`/`code` leads (the machine-readable class),
+/// then its remaining keys in the `Map`'s deterministic (sorted) order —
+/// skipping the framed `type`/`code`/`message`, any key already `consumed`
+/// by a dedicated field (e.g. the rate-limit wait), and null values — and
+/// `message` trails last because it is the one field that wraps.  A body
+/// with no error object yields no fields.
+fn body_fields(body: &Value, consumed: &[&str]) -> Vec<Field> {
+    let Some(obj) = error_object(body) else {
+        return vec![];
+    };
+    let mut fs = Vec::new();
+    if let Some(v) = obj
+        .get("type")
+        .or_else(|| obj.get("code"))
+        .and_then(value_display)
+    {
+        fs.push(Field::Text {
+            label: "type".into(),
+            value: v,
+        });
+    }
+    for (k, v) in obj {
+        if matches!(k.as_str(), "type" | "code" | "message") || consumed.contains(&k.as_str()) {
+            continue;
+        }
+        if let Some(v) = value_display(v) {
+            fs.push(Field::Text {
+                label: k.clone(),
+                value: v,
+            });
+        }
+    }
+    if let Some(v) = obj.get("message").and_then(value_display) {
+        fs.push(Field::Text {
+            label: "message".into(),
+            value: v,
+        });
+    }
+    fs
 }
 
 /// Reformat the first embedded JSON object/array in `s` with two-space
@@ -970,6 +1188,7 @@ mod tests {
         let e = ProviderErrorRecord::Transient {
             cause: "x".repeat(400),
             attempts: 3,
+            body: None,
         };
         let ls = provider_error(&e);
         assert!(ls.len() >= 5, "expected at least 5 lines, got {}", ls.len());

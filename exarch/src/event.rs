@@ -83,16 +83,27 @@ pub enum ProviderErrorRecord {
     Transient {
         cause: String,
         attempts: u32,
+        /// The parsed JSON error body the provider returned, mirrored from
+        /// [`crate::provider::ProviderError`].  `default` lets old
+        /// `events.json` files — written before this field existed —
+        /// deserialise (missing field → `None`); `skip_serializing_if`
+        /// keeps new logs lean by omitting it when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<serde_json::Value>,
     },
     RateLimited {
         retry_after_secs: Option<u64>,
         cause: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<serde_json::Value>,
     },
     Api {
         status: Option<u16>,
         model: String,
         message: String,
         url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<serde_json::Value>,
     },
     Truncated {
         reason: String,
@@ -108,24 +119,36 @@ impl From<&ProviderError> for ProviderErrorRecord {
             ProviderError::Cancelled(w) => Self::Cancelled {
                 where_: (*w).to_string(),
             },
-            ProviderError::Transient { cause, attempts } => Self::Transient {
+            ProviderError::Transient {
+                cause,
+                attempts,
+                body,
+            } => Self::Transient {
                 cause: cause.clone(),
                 attempts: *attempts,
+                body: body.clone(),
             },
-            ProviderError::RateLimited { retry_after, cause } => Self::RateLimited {
+            ProviderError::RateLimited {
+                retry_after,
+                cause,
+                body,
+            } => Self::RateLimited {
                 retry_after_secs: retry_after.map(|d| d.as_secs()),
                 cause: cause.clone(),
+                body: body.clone(),
             },
             ProviderError::Api {
                 status,
                 model,
                 message,
                 url,
+                body,
             } => Self::Api {
                 status: *status,
                 model: model.clone(),
                 message: message.clone(),
                 url: url.clone(),
+                body: body.clone(),
             },
             ProviderError::Truncated { reason } => Self::Truncated {
                 reason: reason.clone(),
