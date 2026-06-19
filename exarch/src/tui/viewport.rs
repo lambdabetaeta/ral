@@ -190,10 +190,10 @@ impl Viewport {
         for block in &self.blocks {
             if block.is_step() {
                 steps.push(false);
-            } else if block.is_tool_call() {
-                if let Some(last) = steps.last_mut() {
-                    *last = true;
-                }
+            } else if block.is_tool_call()
+                && let Some(last) = steps.last_mut()
+            {
+                *last = true;
             }
         }
         steps

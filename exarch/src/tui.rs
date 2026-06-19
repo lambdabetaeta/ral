@@ -495,10 +495,10 @@ impl App {
         // happens, so any other event supersedes it.  Finalise the live
         // phase into the event's viewport's Gantt history first, so the
         // ribbon records the segment's wall-time rather than dropping it.
-        if !matches!(kind, Kind::Phase(_)) {
-            if let Some(vp) = self.viewports.get_mut(&id) {
-                vp.clear_phase();
-            }
+        if !matches!(kind, Kind::Phase(_))
+            && let Some(vp) = self.viewports.get_mut(&id)
+        {
+            vp.clear_phase();
         }
         match kind {
             Kind::Born { log_dir, title } => {
@@ -809,10 +809,12 @@ impl App {
                     busy,
                     phase.as_deref(),
                     &phase_history,
-                    &usage,
-                    last_input,
-                    context_window,
-                    &status_model,
+                    StatusReadout {
+                        usage: &usage,
+                        last_input,
+                        context_window,
+                        model: &status_model,
+                    },
                 )),
                 status_row,
             );
@@ -1398,16 +1400,29 @@ fn fmt_tokens(n: u64) -> String {
     }
 }
 
+/// The rule line's right-side status readout: model name, the ctx%
+/// value-ramp inputs (`last_input` against `context_window`), and the
+/// running token `usage` figures.
+struct StatusReadout<'a> {
+    usage: &'a Usage,
+    last_input: u64,
+    context_window: Option<u64>,
+    model: &'a str,
+}
+
 fn rule_line(
     width: usize,
     busy_since: Option<Instant>,
     phase: Option<&str>,
     phase_history: &[PhaseSeg],
-    usage: &Usage,
-    last_input: u64,
-    context_window: Option<u64>,
-    status_model: &str,
+    status: StatusReadout<'_>,
 ) -> Line<'static> {
+    let StatusReadout {
+        usage,
+        last_input,
+        context_window,
+        model: status_model,
+    } = status;
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut left_w = 0usize;
 
@@ -1784,14 +1799,14 @@ fn matrix_row(
         }),
     ));
 
-    if dim {
-        if let Some(t) = dying.get(&id) {
-            let left = LINGER.saturating_sub(t.elapsed()).as_secs();
-            spans.push(Span::styled(
-                format!(" ({left}s)"),
-                Style::default().fg(SLATE).add_modifier(Modifier::DIM),
-            ));
-        }
+    if dim
+        && let Some(t) = dying.get(&id)
+    {
+        let left = LINGER.saturating_sub(t.elapsed()).as_secs();
+        spans.push(Span::styled(
+            format!(" ({left}s)"),
+            Style::default().fg(SLATE).add_modifier(Modifier::DIM),
+        ));
     }
     Line::from(spans)
 }
@@ -1822,7 +1837,7 @@ fn relative_value_step(tokens: u64, max_tokens: u64) -> u8 {
     if max_tokens == 0 {
         return 0;
     }
-    ((tokens * 3 + max_tokens - 1) / max_tokens).min(3) as u8
+    (tokens * 3).div_ceil(max_tokens).min(3) as u8
 }
 
 /// Emit `text` to the host terminal's system clipboard via OSC 52.
@@ -2795,10 +2810,12 @@ mod tests {
             Some(Instant::now()),
             Some("typechecking"),
             &history,
-            &usage,
-            40_000,
-            Some(100_000),
-            "openai gpt-4o",
+            StatusReadout {
+                usage: &usage,
+                last_input: 40_000,
+                context_window: Some(100_000),
+                model: "openai gpt-4o",
+            },
         );
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         // ctx ramp present with a 40% readout.
@@ -2827,10 +2844,12 @@ mod tests {
             None,
             None,
             &history,
-            &usage,
-            40_000,
-            None,
-            "",
+            StatusReadout {
+                usage: &usage,
+                last_input: 40_000,
+                context_window: None,
+                model: "",
+            },
         );
         let text_no_ctx: String = line_no_ctx
             .spans
