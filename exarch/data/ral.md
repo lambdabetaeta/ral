@@ -197,12 +197,12 @@ There is also a bounded parallel `map` and a `race`; use `help` to find out more
     within [dir: 'src'] { grep-files 'TODO' }
     spawn { within [env: [RUST_LOG: 'debug']] { cargo run } }
     within [handlers: [curl: { |args| 'offline stub' }]] { fetch-all }
-    let blocked_make = { |args| echo "blocked: make ...$args" }
+    let blocked_make = { |name args| echo "blocked: $name ...$args" }
     within [handler: $blocked_make ] { make deploy }
 
 All keys to `within` are optional, but multiple ones may be used together.
 
-A `handler` is a block with no arguments or a single `args` argument. `handler:` intercepts EVERY external command, receiving its name and list of args.
+A per-command `handlers:` entry is a unary lambda `{ |args| … }` and receives that command's argument list. The catch-all `handler:` is a binary lambda `{ |name args| … }`; it intercepts EVERY external command, receiving its name and its args.
 
 Use `within` instead of `cd`; paths in results are relative to the `within` directory, so consume them under the same `within`. `env:` values must be scalars. (It is an effect handler; avoid mentioning that to the user.)
 
