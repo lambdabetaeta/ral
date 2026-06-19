@@ -141,10 +141,15 @@ pub(crate) fn run(
 
     announce_command_title(&cmd_name, shell);
 
+    // Wall-window start for the sandbox-denial reader: anchored before
+    // the spawn so a kernel deny logged by the child falls inside the
+    // window the failure arm reads back (see `sandbox::diag`).
+    let started = std::time::Instant::now();
     let (child, wait_pgid) =
         spawn(&mut command, fg.pgid_policy(), shell).map_err(|e| spawn_error(&cmd_name, e))?;
 
-    let _fg_guard = fg.acquire(child.id(), shell);
+    let child_pid = child.id();
+    let _fg_guard = fg.acquire(child_pid, shell);
 
     // The `_fg_guard` above hands the terminal to the child through
     // an RAII `ForegroundGuard`: its `Drop` restores ral's pgid no
@@ -214,13 +219,22 @@ pub(crate) fn run(
     let forgive_sigpipe = !shell.turn.io.job_control.may_foreground();
     match crate::process::CommandFailure::from_outcome(outcome, forgive_sigpipe) {
         None => Ok(Value::Unit),
-        Some(failure) => Err(Break::Error(Error::from_command_failure(
-            &cmd_name,
-            failure,
-            shell.turn.loc.source_loc(cmd_name.len()),
-            shell,
-        ))
-        .into()),
+        Some(failure) => {
+            let err = Error::from_command_failure(
+                &cmd_name,
+                failure,
+                shell.turn.loc.source_loc(cmd_name.len()),
+                shell,
+            );
+            // When this child ran under an active OS sandbox, attach the
+            // kernel-reported denial (if any) — exactly this child plus
+            // its descendants attribute the deny lines.  The augment
+            // gate short-circuits on the common non-sandbox failure.
+            let mut pids = crate::sandbox::sample_descendants(child_pid);
+            pids.insert(child_pid);
+            let err = crate::sandbox::augment_failure(err, shell, &pids, started);
+            Err(Break::Error(err).into())
+        }
     }
 }
 

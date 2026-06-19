@@ -23,6 +23,7 @@ fn observe_external_stage(
     running: command::RunningChild,
     is_last: bool,
     shell: &Shell,
+    started: std::time::Instant,
 ) -> Settled<StageObservation> {
     let name = running.name.clone();
     let (code, failure) = match running.observe(!is_last) {
@@ -36,6 +37,7 @@ fn observe_external_stage(
     if let Some(failure) = failure {
         let loc = shell.turn.loc.source_loc(name.len());
         let err = Error::from_command_failure(&name, failure, loc, shell);
+        let err = super::augment_stage_failure(err, shell, started);
         Ok(StageObservation::failure(err).with_audit(audit))
     } else {
         Ok(StageObservation::ok(effective).with_audit(audit))
@@ -304,7 +306,11 @@ impl RunningPipeline {
         self.handles.push(handle);
     }
 
-    pub(super) fn collect(mut self, shell: &mut Shell) -> PipelineCollector {
+    pub(super) fn collect(
+        mut self,
+        shell: &mut Shell,
+        started: std::time::Instant,
+    ) -> PipelineCollector {
         let handles = std::mem::take(&mut self.handles);
         let mut collector = PipelineCollector::new();
         let last_idx = handles.len().saturating_sub(1);
@@ -325,8 +331,10 @@ impl RunningPipeline {
             }
             let is_pipeline_final = idx == last_idx;
             let result = match handle {
-                StageHandle::External(h) => observe_external_stage(h, is_pipeline_final, shell),
-                StageHandle::Helper(h) => h.observe(shell, is_pipeline_final),
+                StageHandle::External(h) => {
+                    observe_external_stage(h, is_pipeline_final, shell, started)
+                }
+                StageHandle::Helper(h) => h.observe(shell, is_pipeline_final, started),
             };
             // An `Err` from observing a stage is a protocol-layer
             // failure (report pipe, frame decode, waitpid): classified

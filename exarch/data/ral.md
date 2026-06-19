@@ -7,9 +7,9 @@ Like every shell, `ral` runs commands:
 
 Commands are sequenced by newlines or `;`, and an uncaught failure aborts the *whole script*: `./configure; make` runs `make` only if configuration succeeded. `?` runs the second command when the first failed: `cat VERSION ? 'unversioned'`. THERE IS NO `&&` NOR `||`.
 
-## Values and commands
+Under the hood `ral` is really a version of call-by-push-value with recursion, recursive types, and commands as effects. Do not mention call-by-push-value to the user.
 
-Values and commands are separate categories: a value *is*; a command *does*. The value types are: Unit, Bool, Int, Float, String, Bytes, lists, records and maps, variants, blocks (commands packaged as values), and concurrent handles. A command may not be used as a value. Should you wish to use one inline, you must make it into an anonymous block and force it: `!{cmd}`.
+`ral` has value types and computation types. The basic value types are: Unit, Bool, Int, Float, String, Bytes, (value) lists, records and maps, variants, blocks (= thunks, commands packaged as values), and concurrent handles. A command may not be used as a value. Should you wish to use one inline, you must make it into an anonymous block and force it: `!{cmd}`.
 
 ## Bindings
 
@@ -40,8 +40,6 @@ Blocks take space-separated parameters and are lexically scoped and curried:
     { |a b| $[$a + $b] }         # two parameters
     { |a, b| … }                 # PARSE ERROR — no commas
 
-If a value reads as a block where you expected a list, you under-applied a function.
-
 Blocks create scopes: in `!{ let x = 5; f $x }` the variable `x` is gone after the block.
 
 Blocks can be used with higher-order functions, such as `map`, `filter`, `each`, `fold`, `flat-map`, `sort-list-by`, …. Examples:
@@ -51,7 +49,7 @@ Blocks can be used with higher-order functions, such as `map`, `filter`, `each`,
     fold { |acc x| $[$acc + $x[size]] } 0 !{list-dir '.'}
     for $hits { |h| echo "$h[file]:$h[line]" }
 
-You have the standard prelude found in functional programming:: `take`, `drop`, `length`, `elem`, `concat`, `intercalate`, `sum`, `zip`, `enumerate`, `first`, `reverse`, `sort-list`. For example, use `fold { |acc x| if !{elem $x $acc} { $acc } else { [...$acc, $x] } } [] $xs` for de-duplication.
+You have the standard prelude found in functional programming: `take`, `drop`, `length`, `elem`, `concat`, `intercalate`, `sum`, `zip`, `enumerate`, `first`, `reverse`, `sort-list`. For example, use `fold { |acc x| if !{elem $x $acc} { $acc } else { [...$acc, $x] } } [] $xs` for de-duplication.
 
 Blocks are ordinary values. Define reusable functions pass them with `$`:
 
@@ -59,6 +57,8 @@ Blocks are ordinary values. Define reusable functions pass them with `$`:
     filter $in-src $hits
 
 NB: omitting the `$` in `$in-src` makes `in-src` just a string argument in the above.
+
+Finally, blocks support recursive definitions.
 
 ## Pipelines
 

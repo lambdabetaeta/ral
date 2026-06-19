@@ -24,7 +24,6 @@ pub mod policy;
 pub mod pricing;
 pub mod prompt;
 pub mod provider;
-pub mod sandbox_diag;
 pub mod session;
 pub mod shell_eval;
 pub mod state;

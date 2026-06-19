@@ -56,7 +56,12 @@ impl HelperStageHandle {
     /// parked foreground jobs become control outcomes; helper semantic
     /// errors become failures; audit nodes ride along in the fragment
     /// for the collector to merge into the surrounding scope.
-    pub(super) fn observe(self, shell: &Shell, is_last: bool) -> Settled<StageObservation> {
+    pub(super) fn observe(
+        self,
+        shell: &Shell,
+        is_last: bool,
+        started: std::time::Instant,
+    ) -> Settled<StageObservation> {
         let HelperStageHandle {
             running,
             loc,
@@ -122,6 +127,7 @@ impl HelperStageHandle {
         // stage) is success with status 0.
         if let Some(failure) = failure {
             let err = Error::from_command_failure("ral pipeline stage", failure, loc, shell);
+            let err = super::augment_stage_failure(err, shell, started);
             return Ok(StageObservation::failure(err));
         }
         Ok(StageObservation::ok(0))

@@ -59,3 +59,19 @@ pub(super) fn extract_pid(line: &str) -> Option<u32> {
         .unwrap_or(after_pid.len());
     after_pid[..end].parse().ok()
 }
+
+/// Split a denial line into `(operation, path)`.  The `type=1326`
+/// seccomp audit record names the blocked syscall but carries no path,
+/// so the operation is the `syscall=<n>` token and the path is always
+/// `None`; the hint degrades to a pathless explanation accordingly.
+pub(super) fn parse_denial(line: &str) -> Option<(&str, Option<&str>)> {
+    let after = line.split_once("syscall=")?.1;
+    let end = after
+        .find(|c: char| c.is_whitespace())
+        .unwrap_or(after.len());
+    let syscall = &after[..end];
+    if syscall.is_empty() {
+        return None;
+    }
+    Some((syscall, None))
+}

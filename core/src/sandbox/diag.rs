@@ -1,32 +1,36 @@
 //! Sandbox diagnostics: harvest kernel-reported sandbox denials and
-//! attribute them to the current tool call's descendant tree.
+//! turn them into an actionable hint on the failing command's [`Error`].
 //!
 //! Kernel sandbox enforcement (Seatbelt on macOS, the seccomp BPF
 //! filter inside the bwrap envelope on Linux) reports denied syscalls
-//! into a system log keyed by `(comm, pid)`.  This module reads that
-//! log over a tool call's wall window, keeps only lines whose PID was
-//! observed in the call's descendant tree, and appends them to the
-//! call's stderr between marker lines.
+//! into a system log keyed by `(comm, pid)`, while the caller sees only
+//! an opaque `EPERM` / non-zero exit.  When an external command run
+//! under an active OS-sandbox grant fails, this module reads that log
+//! over the call's wall window, keeps only lines whose PID was in the
+//! call's descendant tree, and appends the denial — the kernel line,
+//! the exact path to grant, and the symlink caveat — to the error's
+//! `hint`.  Both the `ral-sh` REPL and `exarch` render that hint, so a
+//! single augmentation surfaces in both hosts.
 //!
-//! Each platform's [`platform`] submodule supplies a reader
-//! for the kernel-log window plus a small parser pair that recognises
-//! a denial line and extracts its attributed PID.  The harvester
-//! [`append_denials_for_failed_call`] composes them with the PID set
-//! produced by [`DescendantTracker`].  Platforms without a denial
-//! source (everything except macOS and Linux) get a stub `platform`
-//! module that reports no denials.
+//! Each platform's [`platform`] submodule supplies a reader for the
+//! kernel-log window plus a small parser triple: recognise a denial
+//! line, extract its attributed PID, and split it into `(operation,
+//! path)`.  Platforms without a denial source (everything except macOS
+//! and Linux) get a stub `platform` module that reports no denials.
+//! macOS logs the fully-resolved path of the denied access, so the
+//! path the user must grant is exactly the path in the line; Linux's
+//! `type=1326` audit record carries no path, so the hint there degrades
+//! to "a sandboxed syscall was denied" with no path or symlink note.
 
+use crate::types::{Error, Shell};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::Instant;
 
 #[cfg(target_os = "macos")]
-#[path = "sandbox_diag/macos.rs"]
+#[path = "diag/macos.rs"]
 mod platform;
 #[cfg(target_os = "linux")]
-#[path = "sandbox_diag/linux.rs"]
+#[path = "diag/linux.rs"]
 mod platform;
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod platform {
@@ -40,122 +44,123 @@ mod platform {
     pub(super) fn extract_pid(_: &str) -> Option<u32> {
         None
     }
+    pub(super) fn parse_denial(_: &str) -> Option<(&str, Option<&str>)> {
+        None
+    }
 }
 
-/// Read the kernel sandbox-denial log over the tool call's wall
-/// window, keep only lines attributed to the descendant tree, and
-/// append them to `stderr_bytes` between marker lines.
+/// Cap on how many denial lines the hint reproduces verbatim.  A failed
+/// command typically trips one or two distinct denials; reproducing more
+/// would bury the actionable guidance under kernel noise.
+const MAX_DENIAL_LINES: usize = 3;
+
+/// Attach a kernel-denial diagnostic to `err` when an external command
+/// failed under an active OS sandbox.
 ///
-/// No-op when `descendant_pids` is empty (i.e. unrestricted policy,
-/// or polling found nothing) or when the platform has no denial
-/// source.  Concurrent denials from processes outside this turn's
-/// subtree are filtered out by the PID set.
-pub(crate) fn append_denials_for_failed_call(
-    elapsed: Duration,
-    descendant_pids: &HashSet<u32>,
-    stderr_bytes: &mut Vec<u8>,
-) {
-    if descendant_pids.is_empty() {
-        return;
+/// No-op — returns `err` unchanged — when the process did not run under
+/// the OS sandbox (`shell.sandbox_projection().is_none()`), when `pids`
+/// is empty, when the platform has no denial source, or when no denial
+/// line in the window is attributable to a PID in `pids`.  Only the
+/// failure arms of the command runners call this, and its gate
+/// short-circuits before the expensive kernel-log read on every
+/// non-sandboxed failure.
+///
+/// When a denial is found, the kernel line(s), the path to grant, and
+/// the symlink caveat are appended to any existing `err.hint` (an
+/// exit-code hint, say) below a blank line; an absent hint is set
+/// outright.
+pub(crate) fn augment_failure(
+    mut err: Error,
+    shell: &Shell,
+    pids: &HashSet<u32>,
+    since: Instant,
+) -> Error {
+    if shell.sandbox_projection().is_none() || pids.is_empty() {
+        return err;
     }
-    let Some(text) = platform::read_window(elapsed) else {
-        return;
+    let Some(text) = platform::read_window(since.elapsed()) else {
+        return err;
     };
     let denials: Vec<&str> = text
         .lines()
         .filter(|l| platform::is_denial_line(l))
-        .filter(|l| platform::extract_pid(l).is_some_and(|p| descendant_pids.contains(&p)))
+        .filter(|l| platform::extract_pid(l).is_some_and(|p| pids.contains(&p)))
         .collect();
     if denials.is_empty() {
-        return;
+        return err;
     }
-    stderr_bytes.extend_from_slice(b"\n--- kernel-reported sandbox denials during this turn ---\n");
-    for line in &denials {
-        stderr_bytes.extend_from_slice(line.as_bytes());
-        stderr_bytes.push(b'\n');
-    }
-    stderr_bytes.extend_from_slice(b"--- end sandbox denials ---\n");
+    let diagnostic = build_hint(&denials);
+    let hint = match err.hint.take() {
+        Some(existing) => format!("{existing}\n\n{diagnostic}"),
+        None => diagnostic,
+    };
+    err.with_hint(hint)
 }
 
-/// Background sampler that records every PID descended from this
-/// process for the lifetime of a tool call.  Kernel denial records
-/// carry only `(comm, pid)`, so a post-hoc PID set is the only way
-/// to attribute a denial to "our" subprocess tree rather than to a
-/// concurrent system service that happened to be running during the
-/// same wall second.
+/// Compose the denial hint from the attributed kernel lines.
 ///
-/// Tick cadence is ~100 ms — fast enough to catch typical child
-/// lifetimes (rustc, ld, git, cargo build scripts) and slow enough
-/// that the polling cost stays inside single-digit-percent CPU even
-/// during long calls.  Sub-100 ms processes that fork-exec-exit in
-/// one tick window are missed; in practice they don't have time to
-/// hit sandbox-relevant syscalls anyway.
-pub(crate) struct DescendantTracker {
-    pids: Arc<Mutex<HashSet<u32>>>,
-    stop: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
-}
+/// Pure: takes the already-filtered denial lines and returns the hint
+/// text, so the parsing and wording are unit-testable without shelling
+/// out to the kernel log.  No ANSI codes — the diagnostic formatter
+/// colorises the `hint:` line as a whole.
+fn build_hint(denials: &[&str]) -> String {
+    let mut out = String::from(
+        "the OS sandbox blocked a filesystem access this command needs — the kernel reported:",
+    );
+    for line in denials.iter().take(MAX_DENIAL_LINES) {
+        out.push_str("\n  ");
+        out.push_str(line.trim());
+    }
+    if denials.len() > MAX_DENIAL_LINES {
+        out.push_str(&format!("\n  ({} more)", denials.len() - MAX_DENIAL_LINES));
+    }
 
-impl DescendantTracker {
-    pub(crate) fn start() -> Self {
-        let root_pid = std::process::id();
-        let pids: Arc<Mutex<HashSet<u32>>> = Arc::new(Mutex::new(HashSet::new()));
-        let stop = Arc::new(AtomicBool::new(false));
-        let handle = {
-            let pids = pids.clone();
-            let stop = stop.clone();
-            thread::spawn(move || {
-                while !stop.load(Ordering::Relaxed) {
-                    let live = sample_descendants(root_pid);
-                    if !live.is_empty() {
-                        let mut p = pids.lock().unwrap();
-                        for pid in live {
-                            p.insert(pid);
-                        }
-                    }
-                    thread::sleep(Duration::from_millis(100));
-                }
-            })
-        };
-        Self {
-            pids,
-            stop,
-            handle: Some(handle),
+    // Prefer a concrete path from the first parseable denial; macOS
+    // logs the fully-resolved path, Linux carries none.
+    let path = denials
+        .iter()
+        .find_map(|l| platform::parse_denial(l).and_then(|(_, p)| p));
+    match path {
+        Some(path) => {
+            out.push_str(&format!(
+                "\n\nthe path `{path}` is outside the active grant's fs.read, so the access was \
+                 denied. To allow it, add this path (or a parent directory) to the grant's read \
+                 set: the `grant [ fs: [read: ['{path}']] ] {{ … }}` block in ral, or \
+                 `--extend-base` for exarch."
+            ));
+            out.push_str(
+                "\n\nNote: the sandbox matches fully-resolved paths. If this path was reached \
+                 through a symlink inside a granted directory (e.g. ~/.config), granting the \
+                 link's directory will not help — grant the resolved path shown above.",
+            );
+        }
+        None => {
+            out.push_str(
+                "\n\nA sandboxed syscall was denied (the kernel record carries no path here). The \
+                 access lies outside the active grant; widen the grant's fs read set — the \
+                 `grant [ fs: [read: […]] ] { … }` block in ral, or `--extend-base` for exarch.",
+            );
         }
     }
-
-    /// Stop the polling thread, join it, and return the union of
-    /// every descendant PID observed across all ticks.
-    pub(crate) fn finish(mut self) -> HashSet<u32> {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
-        self.pids.lock().unwrap().clone()
-    }
-}
-
-impl Drop for DescendantTracker {
-    fn drop(&mut self) {
-        // Belt-and-braces against an early return from the caller
-        // skipping the explicit `finish`: signal the thread to stop
-        // so it doesn't outlive its caller.  We deliberately don't
-        // join here — Drop must not block on a slow `ps`.
-        self.stop.store(true, Ordering::Relaxed);
-    }
+    out
 }
 
 /// One sample of the descendant set: shell out to `/bin/ps` for every
 /// live `(pid, ppid)` pair, then BFS from `root` through the inverted
 /// parent map.  Returns descendants only — `root` itself is excluded.
-fn sample_descendants(root: u32) -> Vec<u32> {
+///
+/// Kernel denial records carry only `(comm, pid)`, so a PID set is the
+/// only way to attribute a denial to "our" subprocess tree rather than
+/// to a concurrent system service that happened to run during the same
+/// wall second.
+pub(crate) fn sample_descendants(root: u32) -> HashSet<u32> {
     let Ok(out) = std::process::Command::new("/bin/ps")
         .args(["-axo", "pid=,ppid="])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .output()
     else {
-        return Vec::new();
+        return HashSet::new();
     };
     let text = String::from_utf8_lossy(&out.stdout);
     let mut children_of: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -186,5 +191,61 @@ fn sample_descendants(root: u32) -> Vec<u32> {
             }
         }
     }
-    seen.into_iter().collect()
+    seen
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The hint names the denied path verbatim and carries the symlink
+    /// caveat and the grant guidance for both surfaces.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hint_names_path_and_symlink_caveat() {
+        let line = "2026-06-19 12:00:00.000 kernel[0] (Sandbox) Sandbox: cat(69436) deny(1) \
+                    file-read-data /private/var/folders/ab/secret/data.txt";
+        let hint = build_hint(&[line]);
+        assert!(
+            hint.contains("/private/var/folders/ab/secret/data.txt"),
+            "hint must name the denied path; got {hint:?}"
+        );
+        assert!(
+            hint.contains("symlink") && hint.contains("resolved"),
+            "hint must carry the symlink caveat; got {hint:?}"
+        );
+        assert!(
+            hint.contains("fs.read") && hint.contains("--extend-base"),
+            "hint must name both grant surfaces; got {hint:?}"
+        );
+        assert!(hint.contains("deny(1)"), "hint must show the kernel line");
+    }
+
+    /// More than [`MAX_DENIAL_LINES`] denials reproduce the cap plus an
+    /// "(N more)" tail rather than the whole stream.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hint_caps_reproduced_lines() {
+        let mk = |n: u32| {
+            format!(
+                "kernel[0] (Sandbox) Sandbox: cat({n}) deny(1) file-read-data /private/tmp/f{n}.txt"
+            )
+        };
+        let lines: Vec<String> = (0..5).map(mk).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let hint = build_hint(&refs);
+        assert!(
+            hint.contains("(2 more)"),
+            "five denials over a cap of three must note two more; got {hint:?}"
+        );
+    }
+
+    /// A descendant sample of our own process never reports our own PID
+    /// and parses the `ps` tree without panicking.
+    #[test]
+    fn sample_descendants_excludes_root() {
+        let me = std::process::id();
+        let kids = sample_descendants(me);
+        assert!(!kids.contains(&me), "root pid must be excluded");
+    }
 }

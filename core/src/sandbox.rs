@@ -24,6 +24,7 @@
 //! - [`apply_child_limits`] — post-spawn resource caps (Windows only;
 //!   no-op on Unix where limits are set via `pre_exec`).
 
+mod diag;
 mod launch;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -82,6 +83,11 @@ pub use linux::make_command_with_policy;
 // `execve` hook for the host re-exec tail.
 pub use launch::serve_sandbox_exec;
 pub(crate) use launch::{LaunchTarget, sandboxed_command};
+
+// Kernel-denial diagnostics: the command runners call these on a failure
+// that ran under an active OS sandbox to attach an actionable hint
+// naming the denied path and how to grant it.
+pub(crate) use diag::{augment_failure, sample_descendants};
 
 /// Whether this platform's OS backend can actually enforce a network
 /// restriction (`net: false`).  Linux (`--unshare-net`) and macOS

@@ -12,7 +12,6 @@
 //! surfaces tool summaries, patches, writes, and tasks instead.
 
 use crate::bus::{Emitter, Hunk, Kind};
-use crate::sandbox_diag;
 use ral_core::types::{Break, Escape};
 use ral_core::{
     EventSink, Shell, StaticDiagnostics, TurnIo, TurnReport, TurnRequest, Value as RalValue,
@@ -78,16 +77,6 @@ pub fn run_shell(
 ) -> Outcome {
     let name = "<tool>";
 
-    // Whenever the active grant engages the OS sandbox, poll for
-    // descendant PIDs of this exarch process throughout the eval.
-    // The kernel logs sandbox denials by PID; without a recorded set
-    // we couldn't tell our subprocess tree apart from concurrent
-    // system-service denials.  Off the restrictive path we skip the
-    // polling thread entirely.
-    let descendant_tracker = caps
-        .engages_sandbox()
-        .then(sandbox_diag::DescendantTracker::start);
-
     emit.emit(Kind::Phase("evaluating".into()));
 
     // One synchronous turn: core captures stdout/stderr into buffers it
@@ -95,6 +84,11 @@ pub fn run_shell(
     // surface for this turn only, and reaps detached workers at the 1 h
     // ceiling.  Completion is this call returning — a detached server worker
     // holds a bounded deferred surface, never a clone of the bus `Emitter`.
+    //
+    // Trace-only timing: the kernel-denial window now lives in core
+    // (`sandbox::diag`), so this instant feeds the debug trace alone and
+    // is gated to that build — release otherwise sees an unused binding.
+    #[cfg(debug_assertions)]
     let tool_start = std::time::Instant::now();
     let report = shell.run_turn(
         cmd,
@@ -191,15 +185,6 @@ pub fn run_shell(
         #[cfg(unix)]
         Err(Break::Escape(Escape::Stopped { .. })) => (1, None),
     };
-
-    let descendant_pids = descendant_tracker.map(|t| t.finish()).unwrap_or_default();
-    if exit != 0 {
-        sandbox_diag::append_denials_for_failed_call(
-            tool_start.elapsed(),
-            &descendant_pids,
-            &mut stderr_bytes,
-        );
-    }
 
     let value_str = match value {
         // A top-level string is the result of stringly tools like

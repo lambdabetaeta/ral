@@ -63,6 +63,14 @@ pub(crate) fn run_pipeline(
         return run_value_fold(stages, tail, shell);
     }
 
+    // Wall-window start for the sandbox-denial reader, anchored before
+    // any stage spawns so a kernel deny logged by a stage falls inside
+    // the window a failing stage reads back (see `sandbox::diag`).
+    // Pipeline-stage attribution is best-effort: there is no exact
+    // per-stage PID at the collect layer, so the reader uses a one-shot
+    // descendant sample taken at failure time.
+    let started = std::time::Instant::now();
+
     // The pipeline group's SIGINT-forwarding relay slot is claimed
     // inside `PipelineGroup::spawn` once the first real child has
     // joined the pgid (see `group.rs`'s SIGINT/relay invariant).
@@ -82,9 +90,25 @@ pub(crate) fn run_pipeline(
     // ran in its own helper subprocess — so `finish`'s `Settled` widens
     // losslessly into the evaluator's `Raw` carrier via `Into`.
     running
-        .collect(shell)
+        .collect(shell, started)
         .finish(shell, plan.last_output)
         .map_err(Into::into)
+}
+
+/// Attach a kernel-denial diagnostic to a failed pipeline stage's error.
+///
+/// Best-effort attribution: unlike the standalone runner, the collect
+/// layer holds no exact per-stage child PID (sibling stages share the
+/// pipeline group and may still be alive at failure time), so the
+/// reader scopes deny lines to a one-shot descendant sample of *this*
+/// process taken now.  `started` is the pipeline-wide window start.
+/// `augment_failure`'s own gate makes this a no-op off the sandbox path.
+fn augment_stage_failure(err: Error, shell: &Shell, started: std::time::Instant) -> Error {
+    if shell.sandbox_projection().is_none() {
+        return err;
+    }
+    let pids = crate::sandbox::sample_descendants(std::process::id());
+    crate::sandbox::augment_failure(err, shell, &pids, started)
 }
 
 /// Sequential data-last fold for pure-value pipelines.
