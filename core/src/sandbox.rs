@@ -131,6 +131,7 @@ const SANDBOX_PROJECTION_FLAG: &str = "--sandbox-projection";
 /// After `early_init` enters Seatbelt, [`serve_sandbox_exec`] `execve`s the
 /// program inside that Seatbelt.  Distinct from `--ral-bundled-tool`, which
 /// runs a bundled tool in-process confined instead of execing a host binary.
+#[cfg(target_os = "macos")]
 const SANDBOX_EXEC_FLAG: &str = "--ral-sandbox-exec";
 
 /// Undocumented debug switch.  When set (any value), front-ends call

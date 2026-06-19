@@ -207,7 +207,7 @@ pub fn serve_sandbox_exec(args: &[String]) -> Option<u8> {
     Some(127)
 }
 
-/// Off-macOS the [`super::SANDBOX_EXEC_FLAG`] tail is never emitted (Linux
+/// Off-macOS the `--ral-sandbox-exec` tail is never emitted (Linux
 /// expands the host target into the bwrap argv directly; Windows fails
 /// closed), so the hook is a no-op that always declines.
 #[cfg(not(target_os = "macos"))]

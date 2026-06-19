@@ -25,6 +25,7 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+#[cfg(target_os = "macos")]
 use crate::types::Error;
 
 // ── SandboxSelf ──────────────────────────────────────────────────────────
@@ -168,69 +169,38 @@ fn ntfs_stat(path: &std::path::Path) -> Option<(u32, u32, u32)> {
 /// Refuse to spawn if our executable on disk has been swapped since
 /// registration.  Called by the per-command self re-exec before spawning
 /// `--sandbox-projection` so a mid-session binary swap is caught rather
-/// than silently re-execing a foreign build.  `Pin::Fd` is a no-op — the
-/// fd-derived exec path makes swaps irrelevant.
-// Per-command self-reexec swap guard: live on macOS/Linux (called from
-// `macos_sandboxed_command`), unreachable on Windows which has no
-// parent-side self re-exec.
-#[cfg_attr(windows, allow(dead_code))]
+/// than silently re-execing a foreign build.
+///
+/// macOS-only: it is the lone platform with a parent-side per-command self
+/// re-exec (Seatbelt entry).  Linux re-execs through the fd-pinned
+/// `/proc/self/fd/N` so a swap is already irrelevant and bwrap is launched
+/// directly, never via this guard; Windows has no parent-side self re-exec.
+/// macOS pins via `(dev, ino)` ([`Pin::Stat`], the only variant compiled
+/// here), so the guard re-stats and compares.
+#[cfg(target_os = "macos")]
 pub(super) fn verify_unswapped(s: &SandboxSelf) -> Result<(), Error> {
-    match &s.pin {
-        #[cfg(target_os = "linux")]
-        Pin::Fd(_) => Ok(()),
-        #[cfg(all(unix, not(target_os = "linux")))]
-        Pin::Stat { dev, ino } => {
-            use std::os::unix::fs::MetadataExt;
-            let meta = std::fs::metadata(&s.arg0).map_err(|e| {
-                Error::new(
-                    format!(
-                        "sandbox eval: verify self: cannot stat {}: {e}",
-                        s.arg0.display()
-                    ),
-                    1,
-                )
-            })?;
-            if meta.dev() == *dev && meta.ino() == *ino {
-                Ok(())
-            } else {
-                Err(Error::new(
-                    format!(
-                        "exarch binary at {} changed since startup; \
-                         restart exarch to pick up the new build",
-                        s.arg0.display()
-                    ),
-                    1,
-                ))
-            }
-        }
-        #[cfg(windows)]
-        Pin::NtfsStat {
-            volume_serial,
-            index_high,
-            index_low,
-        } => {
-            let Some(stat) = ntfs_stat(&s.arg0) else {
-                return Err(Error::new(
-                    format!(
-                        "sandbox eval: verify self: cannot stat {}",
-                        s.arg0.display()
-                    ),
-                    1,
-                ));
-            };
-            if stat == (*volume_serial, *index_high, *index_low) {
-                Ok(())
-            } else {
-                Err(Error::new(
-                    format!(
-                        "exarch binary at {} changed since startup; \
-                         restart exarch to pick up the new build",
-                        s.arg0.display()
-                    ),
-                    1,
-                ))
-            }
-        }
+    use std::os::unix::fs::MetadataExt;
+    let Pin::Stat { dev, ino } = &s.pin;
+    let meta = std::fs::metadata(&s.arg0).map_err(|e| {
+        Error::new(
+            format!(
+                "sandbox eval: verify self: cannot stat {}: {e}",
+                s.arg0.display()
+            ),
+            1,
+        )
+    })?;
+    if meta.dev() == *dev && meta.ino() == *ino {
+        Ok(())
+    } else {
+        Err(Error::new(
+            format!(
+                "exarch binary at {} changed since startup; \
+                 restart exarch to pick up the new build",
+                s.arg0.display()
+            ),
+            1,
+        ))
     }
 }
 
