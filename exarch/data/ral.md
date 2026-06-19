@@ -11,9 +11,9 @@ Under the hood `ral` is really a version of call-by-push-value with recursion, r
 
 `ral` has value types and computation types. The basic value types are: Unit, Bool, Int, Float, String, Bytes, (value) lists, records and maps, variants, blocks (= thunks, commands packaged as values), and concurrent handles. A command may not be used as a value. Should you wish to use one inline, you must make it into an anonymous block and force it: `!{cmd}`.
 
-## Bindings
+## Definitions
 
-`let x = 42` is an immutable (but shadowable) binding. When used with a command it captures stdout:
+`let x = 42` is an immutable (but shadowable) definition. When used with a command it captures stdout:
 
     let branch = git branch --show-current
     let body   = from-string < notes.txt

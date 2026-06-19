@@ -1,29 +1,26 @@
 # `ral` style guide
 
-A ral tool call should be a small program, not a nervous probe. Gather, transform, and answer in one script when the facts belong together. Bind what you might use again.
+A ral tool call should be a small program, not a nervous probe. Gather, transform, and answer in one script when the facts belong together. Define what you might use again.
 
-## Bind, then query
+## Define, then query
 
-Capture every query in a `let`, then read from the binding:
+Capture every query in a `let`, then read from the definition:
 
     let hits = grep-files 'register_handler'
     let live = filter { |h| $[not !{re-match '^tests/' $h[file]}] } $hits
     let few  = take 5 $live
     [total: !{length $hits}, live: !{length $live}, sample: $few]
 
-An unbound result is shown once and gone. A bound result persists for the whole session, so later calls can slice, filter, or count it without recomputing.
+In later turns you can reuse all of `hits`, `live` and `few` again.
 
-## Name reusable values and blocks
+## Define reusable blocks
 
-`let` bindings persist. Bind the stable parts of a script to be reused later (predicates, mappers, parsers, formatters, path filters, file lists, and blocks that are likely to recur in a session):
+Define useful functions, such as predicates, mappers, file lists, path filters, that you may re-use again later. For example, `in-src` can be re-used later:
 
     let in-src = { |h| re-match '^src/' $h[file] }
     let live   = filter $in-src $hits
 
-Use judgment to bind the block that removes as much future repetition as possible.
-Do not abstract for ceremony: instead, bind the block that removes future repetition.
-
-Use a named block when later calls only vary arguments:
+Define a parameterised block when later calls only vary arguments:
 
     let cargo-in = { |root args| within [dir: $root] { cargo ...$args } }
     cargo-in 'exarch' ['test', '--test', 'session_apply']
