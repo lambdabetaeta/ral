@@ -28,7 +28,7 @@ use fidelity::Fidelity;
 use line::usage_text;
 
 use crate::bootstrap::Scratch;
-use crate::bus::{Event, Hunk, Kind, PromptQueue, SessionId, Sink, pump};
+use crate::bus::{Event, Hunk, Kind, Pass, PromptQueue, SessionId, Sink, drain_pass, pump};
 use crate::cancel;
 use crate::credential::CredentialStore;
 use crate::models::{LiveSource, ModelCatalog, ModelSource};
@@ -65,7 +65,7 @@ use std::{
     sync::{
         Once,
         atomic::{AtomicBool, Ordering},
-        mpsc::{Receiver, TryRecvError},
+        mpsc::Receiver,
     },
     time::{Duration, Instant},
 };
@@ -2438,30 +2438,21 @@ fn drive_events(
     const BATCH: usize = 64;
     const MIN_FRAME_MS: u64 = 16; // ~60 FPS max
     loop {
-        let mut more = true;
-        for _ in 0..BATCH {
-            match rx.try_recv() {
-                Ok(ev) => app.handle(ev),
-                Err(TryRecvError::Empty) => {
-                    more = false;
-                    break;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    app.draw(term)?;
-                    return Ok(());
-                }
+        // The explicit-done completion contract, shared with the headless
+        // default `Sink::drive`: drain a batch, then stop only when the worker
+        // is *done* — never when the channel disconnects, so a detached worker
+        // holding a sender forever cannot keep this loop (hence the turn) from
+        // ending. The batch cap bounds how long a token flood can starve the
+        // input poll below; `More` means events are still queued, so the frame
+        // does not wait for one.
+        let more = match drain_pass(&rx, done, Some(BATCH), |ev| app.handle(ev)) {
+            Pass::Stop => {
+                app.draw(term)?;
+                return Ok(());
             }
-        }
-        // The worker finished: completion is that fact, not the channel
-        // disconnecting (a detached worker may hold a sender forever). Drain
-        // the remaining backlog, paint a final frame, and return.
-        if !more && done.load(Ordering::Acquire) {
-            while let Ok(ev) = rx.try_recv() {
-                app.handle(ev);
-            }
-            app.draw(term)?;
-            return Ok(());
-        }
+            Pass::More => true,
+            Pass::Idle => false,
+        };
         app.tick();
         app.draw(term)?;
         // Poll for input every iteration, even with events still

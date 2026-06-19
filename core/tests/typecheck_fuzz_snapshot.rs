@@ -9,7 +9,7 @@ mod common;
 
 use ral_core::diagnostic::format_type_error_ariadne;
 use ral_core::typecheck::{TypeError, fmt_ty};
-use ral_core::{elaborate, parse, typecheck};
+use ral_core::{elaborator::elaborate, syntax::parser::parse, typecheck};
 
 fn raw_errors(src: &str) -> Vec<TypeError> {
     let ast = match parse(src) {

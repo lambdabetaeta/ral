@@ -8,7 +8,7 @@
 mod common;
 
 use ral_core::typecheck::{CompTy, CompTyVar, Scheme, Ty, fmt_scheme};
-use ral_core::{TypeError, elaborate, parse, typecheck};
+use ral_core::{TypeError, elaborator::elaborate, syntax::parser::parse, typecheck};
 
 fn raw_errors(src: &str) -> Vec<TypeError> {
     let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
@@ -1381,7 +1381,7 @@ fn letrec_slot0(body: CompKind) -> Comp {
     });
     let bindings = Arc::new(vec![(
         "only".to_string(),
-        ral_core::Val::Thunk(Arc::new(lam)),
+        ral_core::ir::Val::Thunk(Arc::new(lam)),
     )]);
     Spanned::synthetic(CompKind::LetRec {
         slot: Some(0),
@@ -1405,7 +1405,7 @@ fn typecheck_comp(comp: &Comp) -> Vec<String> {
 /// forces an `Int`, which is not a thunk.
 #[test]
 fn letrec_slot_body_type_error_surfaces() {
-    let comp = letrec_slot0(CompKind::Force(ral_core::Val::Int(1)));
+    let comp = letrec_slot0(CompKind::Force(ral_core::ir::Val::Int(1)));
     let errs = typecheck_comp(&comp);
     assert!(
         !errs.is_empty(),
@@ -1417,7 +1417,7 @@ fn letrec_slot_body_type_error_surfaces() {
 /// parameter.
 #[test]
 fn letrec_slot_well_typed_group_ok() {
-    let comp = letrec_slot0(CompKind::Return(ral_core::Val::Variable("x".into())));
+    let comp = letrec_slot0(CompKind::Return(ral_core::ir::Val::Variable("x".into())));
     let errs = typecheck_comp(&comp);
     assert!(
         errs.is_empty(),

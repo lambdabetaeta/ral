@@ -23,10 +23,11 @@ impl Shell {
         &self.session.sources
     }
 
-    /// The session's durable cancel root.  A host mints a turn's foreground
-    /// scope from it (`shell.durable_root().child()`); the typed relation
-    /// keeps that scope rooted here.
-    pub fn durable_root(&self) -> &DurableRoot {
+    /// The session's durable cancel root.  `run_turn` mints a turn's
+    /// foreground scope from it (`self.durable_root().child()`); the typed
+    /// relation keeps that scope rooted here.  No longer a host accessor —
+    /// frame assembly moved behind `run_turn`, so this is `pub(crate)`.
+    pub(crate) fn durable_root(&self) -> &DurableRoot {
         &self.session.root
     }
 

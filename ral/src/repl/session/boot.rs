@@ -7,7 +7,7 @@
 //! machine itself focused on the run/turn/eval loop.
 
 use ral_core::types::{Break, Escape};
-use ral_core::{Shell, diagnostic, evaluate};
+use ral_core::{Shell, diagnostic, evaluator::evaluate};
 use rustyline::config::{BellStyle, EditMode};
 use std::sync::{Arc, Mutex};
 
@@ -290,7 +290,7 @@ fn source_config_inner(path: &str, ctx: &mut RcCtx<'_>) -> Result<(), String> {
     if let Some(block) = super::super::config::apply_rc_config(config, ctx, Some(&src)) {
         // `apply` returns `Settled<Value>`; tail calls are absorbed by
         // the trampoline before reaching here.
-        match ral_core::apply(block, vec![], ctx.shell) {
+        match ral_core::evaluator::apply(block, vec![], ctx.shell) {
             Ok(_) | Err(Break::Escape(Escape::Exit(_))) => {}
             Err(Break::Error(e)) => return Err(format!("{path}: startup: {}", e.message)),
             #[cfg(unix)]

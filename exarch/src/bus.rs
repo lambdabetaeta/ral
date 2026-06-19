@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -285,14 +285,76 @@ impl Emitter {
 /// promptly after its worker finishes, large enough not to spin.
 const DRAIN_POLL: Duration = Duration::from_millis(10);
 
+/// The verdict of one [`drain_pass`]: the explicit-done completion contract,
+/// shared by every driver.
+pub(crate) enum Pass {
+    /// The worker is done (or the channel disconnected) and every buffered
+    /// event has been handled — render a final frame and return.
+    Stop,
+    /// The channel went empty and the worker is not done: the loop is idle
+    /// until the next event arrives.
+    Idle,
+    /// The batch cap was reached before the channel emptied: more events are
+    /// already queued, so drain again without waiting.
+    More,
+}
+
+/// One pass of the explicit-done completion contract — the single place that
+/// decides when a turn's event loop ends, shared by the headless default
+/// [`Sink::drive`] and the TUI's `drive_events`.
+///
+/// Drains up to `max` available events through `handle`, then reports the
+/// channel's state. **Completion is `done` being set — the worker finished —
+/// never the channel disconnecting:** a detached worker (a `spawn`ed server)
+/// may hold a sender clone forever, but it never decides the turn is over,
+/// because the loop stops on the explicit `done` flag, not on the last sender
+/// dropping. This is the daemon-task-hang fix, factored so the two drivers
+/// cannot drift on it.
+///
+/// `None` `max` drains the channel empty (headless, which has nothing to
+/// render between events); `Some(n)` caps one pass so a flood of streamed
+/// tokens cannot starve the TUI's input poll between passes. The `done` check
+/// fires only once the channel is momentarily empty, so a full batch returns
+/// [`Pass::More`] and the caller drains again. Disconnect is a safety net —
+/// the common case now that detachment holds no sender — and also stops.
+pub(crate) fn drain_pass(
+    rx: &Receiver<Event>,
+    done: &AtomicBool,
+    max: Option<usize>,
+    mut handle: impl FnMut(Event),
+) -> Pass {
+    let mut n = 0usize;
+    loop {
+        if max.is_some_and(|m| n >= m) {
+            return Pass::More;
+        }
+        match rx.try_recv() {
+            Ok(ev) => {
+                handle(ev);
+                n += 1;
+            }
+            Err(TryRecvError::Empty) => {
+                return if done.load(Ordering::Acquire) {
+                    Pass::Stop
+                } else {
+                    Pass::Idle
+                };
+            }
+            Err(TryRecvError::Disconnected) => return Pass::Stop,
+        }
+    }
+}
+
 /// One presentation surface.  [`Self::handle`] consumes a single event
 /// synchronously; [`Self::drive`] drains the channel until the worker signals
 /// completion through `done`.  Completion is an explicit control-flow fact —
 /// the worker finished — *not* the channel disconnecting: a detached worker
 /// (a `spawn`ed server) may outlive the turn, but it holds bounded deferred
 /// surface storage in core, never a clone of this channel's sender, so it
-/// cannot keep the loop alive.  The default `drive` polls for `done` between
-/// events; the TUI overrides it to interleave redraws and key polls.
+/// cannot keep the loop alive.  Both drivers route their completion decision
+/// through the shared [`drain_pass`]; the only difference is the *frame timer*
+/// — the default `drive` blocks on the channel between passes, while the TUI
+/// renders and polls keys (see `tui::drive_events`).
 pub trait Sink {
     fn handle(&mut self, e: Event);
 
@@ -302,25 +364,21 @@ pub trait Sink {
 
     fn drive(&mut self, rx: Receiver<Event>, done: &AtomicBool) -> io::Result<()> {
         loop {
-            match rx.recv_timeout(DRAIN_POLL) {
-                Ok(ev) => self.handle(ev),
-                // The worker finished: drain anything it buffered, then stop —
-                // regardless of senders still held by detached workers.
-                Err(RecvTimeoutError::Timeout) if done.load(Ordering::Acquire) => {
-                    while let Ok(ev) = rx.try_recv() {
-                        self.handle(ev);
-                    }
-                    return Ok(());
-                }
-                Err(RecvTimeoutError::Timeout) => {}
-                // Safety net: every sender dropped (the common case now that
-                // detachment holds no sender).  Drain and finish.
-                Err(RecvTimeoutError::Disconnected) => {
-                    while let Ok(ev) = rx.try_recv() {
-                        self.handle(ev);
-                    }
-                    return Ok(());
-                }
+            // The shared completion contract. `None` max drains every buffered
+            // event — headless has nothing to render between them, so it never
+            // needs the TUI's batch cap.
+            match drain_pass(&rx, done, None, |ev| self.handle(ev)) {
+                Pass::Stop => return Ok(()),
+                // Idle (an uncapped pass never reports `More`): block on the
+                // channel for the next event, waking each `DRAIN_POLL` to
+                // re-check `done`. A detached worker's sender keeps the channel
+                // from disconnecting, so the timeout — not disconnect — is what
+                // lets the next `done` re-check run.
+                Pass::Idle | Pass::More => match rx.recv_timeout(DRAIN_POLL) {
+                    Ok(ev) => self.handle(ev),
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => return Ok(()),
+                },
             }
         }
     }
@@ -373,9 +431,87 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Emitter, Event, Kind, PromptQueue, Sink, TaskStatus, pump};
+    use super::{Emitter, Event, Kind, Pass, PromptQueue, Sink, TaskStatus, drain_pass, pump};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::channel;
     use std::time::{Duration, Instant};
+
+    /// The headless default [`Sink::drive`] and the TUI's `drive_events` share
+    /// one completion contract: [`drain_pass`]. It stops when the worker is
+    /// *done*, never when the channel disconnects — so a detached worker
+    /// holding a sender clone cannot keep a turn alive. Pinning the shared
+    /// primitive directly is what keeps the two drivers from drifting on the
+    /// daemon-task-hang fix.
+    #[test]
+    fn drain_pass_stops_on_done_with_a_live_detached_sender() {
+        let (tx, rx) = channel::<Event>();
+        let done = AtomicBool::new(false);
+        // A detached holder keeps a sender clone alive forever — the channel
+        // never disconnects, exactly as a `spawn`ed server would.
+        let holder = tx.clone();
+
+        tx.send(Event {
+            id: 0,
+            kind: Kind::Step(1),
+        })
+        .unwrap();
+        tx.send(Event {
+            id: 0,
+            kind: Kind::Step(2),
+        })
+        .unwrap();
+        done.store(true, Ordering::Release);
+
+        let mut seen = 0usize;
+        // `None` max is the headless drain; `Some(BATCH)` would be the TUI's.
+        // Both reach `Stop` here: `done` is set and the buffered events drain.
+        assert!(
+            matches!(drain_pass(&rx, &done, None, |_| seen += 1), Pass::Stop),
+            "must stop once the worker is done"
+        );
+        assert_eq!(seen, 2, "every buffered event is handled before stopping");
+        // The detached sender is still alive — completion did not depend on it.
+        assert!(
+            holder
+                .send(Event {
+                    id: 0,
+                    kind: Kind::Died
+                })
+                .is_ok(),
+            "the detached sender outlived the stop"
+        );
+    }
+
+    /// The batch cap bounds one pass (TUI policy: don't let a token flood
+    /// starve the input poll), reporting `More`; an empty channel with the
+    /// worker not done reports `Idle` (the headless wait state).
+    #[test]
+    fn drain_pass_caps_batch_as_more_and_reports_idle_when_empty() {
+        let (tx, rx) = channel::<Event>();
+        let done = AtomicBool::new(false);
+        for _ in 0..3 {
+            tx.send(Event {
+                id: 0,
+                kind: Kind::Boundary,
+            })
+            .unwrap();
+        }
+
+        let mut seen = 0usize;
+        // Cap below the queue depth: the cap is hit before the channel empties.
+        assert!(
+            matches!(drain_pass(&rx, &done, Some(2), |_| seen += 1), Pass::More),
+            "a full batch reports More"
+        );
+        assert_eq!(seen, 2, "the batch cap bounds one pass");
+        // Drain the remainder: the channel empties with the worker not done.
+        assert!(
+            matches!(drain_pass(&rx, &done, Some(2), |_| seen += 1), Pass::Idle),
+            "an empty channel with no done reports Idle"
+        );
+        assert_eq!(seen, 3, "the rest drains on the next pass");
+    }
 
     /// Completion is the worker finishing, not the channel disconnecting.
     /// A "detached holder" keeps a clone of the worker's [`Emitter`] (hence a

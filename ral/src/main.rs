@@ -7,7 +7,10 @@
 
 use clap::{CommandFactory as _, Parser as _};
 use ral_core::types::{Break, Escape, Settled};
-use ral_core::{Shell, TurnIo, TurnReport, TurnRequest, diagnostic, elaborate, parse};
+use ral_core::{
+    Shell, TurnIo, TurnReport, TurnRequest, diagnostic, elaborator::elaborate,
+    syntax::parser::parse,
+};
 use std::process::ExitCode;
 use std::sync::Arc;
 

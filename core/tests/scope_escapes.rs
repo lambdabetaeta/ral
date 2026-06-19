@@ -13,7 +13,7 @@ mod common;
 
 use ral_core::evaluator;
 use ral_core::types::{Escape, Shell};
-use ral_core::{Break, Comp, CompileOutcome, Value, builtins, compile_and_typecheck};
+use ral_core::{Break, CompileOutcome, Value, builtins, compile_and_typecheck, ir::Comp};
 
 // ── Harness (same shape as `top_level_vs_block.rs`) ─────────────────────
 

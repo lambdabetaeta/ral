@@ -317,9 +317,9 @@ mod tests {
     fn apply_rc_inner(rc_src: &str, pass_source: bool) -> (Shell, Arc<Mutex<PluginRuntime>>) {
         let mut shell = Shell::new(Default::default());
         ral_core::builtins::register(&mut shell, crate::PRELUDE.comp());
-        let ast = ral_core::parse(rc_src).unwrap();
+        let ast = ral_core::syntax::parser::parse(rc_src).unwrap();
         let comp = std::sync::Arc::new(ral_core::elaborator::elaborate(&ast, Default::default()));
-        let config = ral_core::evaluate(&comp, &mut shell).unwrap();
+        let config = ral_core::evaluator::evaluate(&comp, &mut shell).unwrap();
         let mut mode = EditMode::Emacs;
         let mut bell = BellStyle::None;
         let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
@@ -346,7 +346,7 @@ mod tests {
 
     /// Typecheck `src` against the baked prelude; return the errors.
     fn typecheck_src(src: &str) -> Vec<ral_core::TypeError> {
-        let ast = ral_core::parse(src).unwrap();
+        let ast = ral_core::syntax::parser::parse(src).unwrap();
         let comp = ral_core::elaborator::elaborate(&ast, Default::default());
         let schemes = ral_core::SessionSchemes::from_schemes(crate::PRELUDE.schemes());
         ral_core::typecheck(&comp, schemes)
@@ -539,7 +539,7 @@ mod tests {
     /// Typecheck `src` against `shell`'s live session schemes — the same
     /// seed a real prompt turn uses — and return the errors.
     fn typecheck_against_session(shell: &Shell, src: &str) -> Vec<ral_core::TypeError> {
-        let ast = ral_core::parse(src).unwrap();
+        let ast = ral_core::syntax::parser::parse(src).unwrap();
         let comp = ral_core::elaborator::elaborate(&ast, Default::default());
         ral_core::typecheck(&comp, shell.session_schemes())
             .err()

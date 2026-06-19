@@ -159,7 +159,7 @@ fn eval_plugin_file(path: &str, source: &str, shell: &mut Shell) -> Settled<Valu
         .push(path_owned);
     ctx.shell_mut().mobile.scope.push_scope();
     // `evaluate` returns `Settled<Value>` directly.
-    let result = ral_core::evaluate(&comp, ctx.shell_mut());
+    let result = ral_core::evaluator::evaluate(&comp, ctx.shell_mut());
     ctx.shell_mut().mobile.scope.pop_scope();
     ctx.shell_mut().mobile.context.modules.stack.pop();
     result

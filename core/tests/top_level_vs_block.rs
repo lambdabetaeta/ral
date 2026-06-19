@@ -25,7 +25,7 @@ use ral_core::evaluator;
 use ral_core::types::Shell;
 #[cfg(unix)]
 use ral_core::types::{Capabilities, FsPolicy};
-use ral_core::{Comp, CompileOutcome, Value, compile_and_typecheck};
+use ral_core::{CompileOutcome, Value, compile_and_typecheck, ir::Comp};
 
 // ── Harness ─────────────────────────────────────────────────────────────
 

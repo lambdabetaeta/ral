@@ -57,17 +57,28 @@ pub mod turn;
 pub mod typecheck;
 pub mod types;
 
-pub use diagnostic::SourceLoc;
-pub use elaborator::elaborate;
-pub use evaluator::{apply, evaluate};
-pub use ir::{Comp, Val};
-pub use runtime::pipeline::helper::{try_run_bundled_tool, try_run_pipeline_stage_helper};
-pub use syntax::ast::Ast;
-pub use syntax::parser::{ParseError, parse};
+// The crate-root host surface: the turn seam, the host-embedding re-exec
+// helpers, the typed-compile API, and ordinary value / rendering / diagnostic
+// types.  A host imports a turn from here; it does not reach the evaluator or
+// syntax layers through the crate root.
 pub use host::{Captured, TurnIo, TurnReport, TurnRequest};
+pub use runtime::pipeline::helper::{try_run_bundled_tool, try_run_pipeline_stage_helper};
 pub use turn::{StaticDiagnostics, TurnLifecycle};
 pub use typecheck::{Scheme, SessionSchemes, TypeError, bake_prelude, typecheck};
-pub use types::{Break, Error, EventSink, Escape, Map, Settled, Shell, SurfaceSink, Value};
+pub use types::{Break, Error, Escape, EventSink, Map, Settled, Shell, SurfaceSink, Value};
+
+// Compile-pipeline internals: reachable inside the crate (and used by
+// `compile` / `compile_and_typecheck` below), but no longer crate-root
+// re-exports.  A host that needs raw parse / elaborate / evaluate reaches the
+// owning module explicitly — `ral_core::syntax::parser::parse`,
+// `ral_core::elaborator::elaborate`, `ral_core::evaluator::evaluate`,
+// `ral_core::ir::Comp` — which reads as deliberately stepping past the
+// `run_turn` seam rather than as part of it.  See
+// decisions/260618_after-turn-api-simplifications.
+pub(crate) use elaborator::elaborate;
+pub(crate) use evaluator::evaluate;
+pub(crate) use ir::Comp;
+pub(crate) use syntax::parser::{ParseError, parse};
 
 /// The two ahead-of-time phases — parse and elaborate — that every entry
 /// point (script, `-c`, REPL line, rc file, plugin module) performs before

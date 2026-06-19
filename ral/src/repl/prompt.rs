@@ -242,9 +242,9 @@ mod tests {
     fn evaluate_prompt_src(src: &str) -> (Shell, Value) {
         let mut shell = Shell::new(Default::default());
         ral_core::builtins::register(&mut shell, crate::PRELUDE.comp());
-        let ast = ral_core::parse(src).unwrap();
+        let ast = ral_core::syntax::parser::parse(src).unwrap();
         let comp = std::sync::Arc::new(ral_core::elaborator::elaborate(&ast, Default::default()));
-        let prompt = ral_core::evaluate(&comp, &mut shell).unwrap();
+        let prompt = ral_core::evaluator::evaluate(&comp, &mut shell).unwrap();
         assert!(
             matches!(prompt, Value::Lambda { .. } | Value::Block { .. }),
             "expected thunk"

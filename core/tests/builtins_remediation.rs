@@ -14,7 +14,7 @@ mod common;
 
 use ral_core::evaluator;
 use ral_core::types::{Break, Escape, Shell, Status, Value};
-use ral_core::{Comp, CompileOutcome, builtins, compile_and_typecheck};
+use ral_core::{CompileOutcome, builtins, compile_and_typecheck, ir::Comp};
 
 fn fresh_shell() -> Shell {
     let mut shell = Shell::default();

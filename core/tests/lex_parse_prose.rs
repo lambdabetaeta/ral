@@ -27,8 +27,8 @@
 //! — refactors that silently lose a message will fail loudly.
 
 use ral_core::diagnostic::format_parse_error_ariadne;
-use ral_core::parse;
 use ral_core::syntax::parser::ParseError;
+use ral_core::syntax::parser::parse;
 
 // ── Prose policy ──────────────────────────────────────────────────────────
 

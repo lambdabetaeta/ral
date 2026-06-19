@@ -24,7 +24,7 @@ use std::io::Write;
 
 use ral_core::evaluator;
 use ral_core::types::{Break, Shell};
-use ral_core::{Comp, CompileOutcome, Value, builtins, compile_and_typecheck, diagnostic};
+use ral_core::{CompileOutcome, Value, builtins, compile_and_typecheck, diagnostic, ir::Comp};
 
 // ── Harness (same shape as `top_level_vs_block.rs`) ─────────────────────
 

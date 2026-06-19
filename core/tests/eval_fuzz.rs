@@ -8,13 +8,17 @@ mod common;
 use ral_core::builtins;
 #[cfg(unix)]
 use ral_core::types::{Capabilities, ExecMap, ExecPolicy};
-use ral_core::{Break, Error, Shell, Value, elaborate, evaluate, parse, typecheck};
+use ral_core::{
+    Break, Error, Shell, Value, elaborator::elaborate, evaluator::evaluate, syntax::parser::parse,
+    typecheck,
+};
 #[cfg(unix)]
 use std::collections::{BTreeMap, BTreeSet};
 
 fn eval(input: &str) -> ral_core::types::Settled<Value> {
-    let ast = parse(input)
-        .map_err(|e: ral_core::ParseError| Break::Error(Error::new(e.to_string(), 2)))?;
+    let ast = parse(input).map_err(|e: ral_core::syntax::parser::ParseError| {
+        Break::Error(Error::new(e.to_string(), 2))
+    })?;
     let comp = elaborate(&ast, Default::default());
     // The evaluator reads its mode wires off the annotated comp, so it
     // must run the checked IR, not the bare elaboration whose wires are
@@ -3280,7 +3284,7 @@ fn elaborator_never_wraps_exec_in_redirect() {
         "cmd < in.txt > out.txt 2>&1",
     ];
 
-    fn walk(comp: &ral_core::Comp, saw_exec_with_redirects: &mut bool) {
+    fn walk(comp: &ral_core::ir::Comp, saw_exec_with_redirects: &mut bool) {
         match &comp.item {
             CompKind::Exec(e) if !e.redirects.is_empty() => {
                 *saw_exec_with_redirects = true;
@@ -3315,8 +3319,9 @@ fn elaborator_never_wraps_exec_in_redirect() {
     }
 
     for src in sources {
-        let ast = ral_core::parse(src).unwrap_or_else(|e| panic!("parse {src:?}: {e}"));
-        let comp = Arc::new(ral_core::elaborate(&ast, Default::default()));
+        let ast =
+            ral_core::syntax::parser::parse(src).unwrap_or_else(|e| panic!("parse {src:?}: {e}"));
+        let comp = Arc::new(ral_core::elaborator::elaborate(&ast, Default::default()));
         let mut saw = false;
         walk(&comp, &mut saw);
         assert!(

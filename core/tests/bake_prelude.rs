@@ -17,19 +17,19 @@ use ral_core::typecheck::fmt_scheme;
 
 /// Re-bake the prelude from source so the test owns both the annotated
 /// comp and the schemes harvested off its `Bind` nodes.
-fn rebake() -> (ral_core::Comp, Vec<(String, ral_core::Scheme)>) {
+fn rebake() -> (ral_core::ir::Comp, Vec<(String, ral_core::Scheme)>) {
     let src = include_str!("../src/prelude.ral");
-    let ast = ral_core::parse(src).expect("prelude parse");
-    let comp = ral_core::elaborate(&ast, Default::default());
+    let ast = ral_core::syntax::parser::parse(src).expect("prelude parse");
+    let comp = ral_core::elaborator::elaborate(&ast, Default::default());
     ral_core::bake_prelude(&comp)
 }
 
 /// Read the (name, scheme) pairs off an annotated comp's top-level `Bind`
 /// nodes — the spine the harvest walks (a `Seq`'s parts and a `Bind`'s
 /// `rest`).  Builtin names are filtered exactly as `bake_prelude` does.
-fn schemes_on_binds(comp: &ral_core::Comp) -> Vec<(String, String)> {
+fn schemes_on_binds(comp: &ral_core::ir::Comp) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    fn walk(comp: &ral_core::Comp, out: &mut Vec<(String, String)>) {
+    fn walk(comp: &ral_core::ir::Comp, out: &mut Vec<(String, String)>) {
         match &comp.item {
             CompKind::Seq(parts) => {
                 for part in parts {
@@ -120,8 +120,9 @@ fn baked_prelude_carries_interior_rhs_modes() {
 #[test]
 fn bake_annotates_interior_pipeline_wires() {
     use ral_core::mode::ByteMode;
-    let ast = ral_core::parse("let tag = { cat -n | head -n 1 }").expect("fixture parse");
-    let comp = ral_core::elaborate(&ast, Default::default());
+    let ast =
+        ral_core::syntax::parser::parse("let tag = { cat -n | head -n 1 }").expect("fixture parse");
+    let comp = ral_core::elaborator::elaborate(&ast, Default::default());
     let (annotated, _) = ral_core::bake_prelude(&comp);
     let mut wires = false;
     common::walk_comp(&annotated, &mut |c| {

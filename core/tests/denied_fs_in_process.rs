@@ -29,14 +29,18 @@
 mod common;
 
 use ral_core::builtins;
-use ral_core::{Break, Error, Shell, Value, elaborate, evaluate, parse, typecheck};
+use ral_core::{
+    Break, Error, Shell, Value, elaborator::elaborate, evaluator::evaluate, syntax::parser::parse,
+    typecheck,
+};
 
 /// Evaluate a ral script through the public API, exactly as `eval_fuzz.rs`
 /// does: parse, elaborate, typecheck against the prelude schemes (so the
 /// evaluator's mode wires are written), then evaluate in a fresh shell.
 fn eval(input: &str) -> ral_core::types::Settled<Value> {
-    let ast = parse(input)
-        .map_err(|e: ral_core::ParseError| Break::Error(Error::new(e.to_string(), 2)))?;
+    let ast = parse(input).map_err(|e: ral_core::syntax::parser::ParseError| {
+        Break::Error(Error::new(e.to_string(), 2))
+    })?;
     let comp = elaborate(&ast, Default::default());
     let comp = match typecheck(
         &comp,

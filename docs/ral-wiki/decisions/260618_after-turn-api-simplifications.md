@@ -1,5 +1,5 @@
 ---
-status: open
+status: accepted
 ---
 
 # After the turn API cutover, simplify by enforcing turn boundaries
@@ -74,6 +74,54 @@ Do not collapse distinct channels just because the code is shorter:
 - Is `ProviderTurnOutcome` worth the churn, or does deleting core `TurnOutcome`
   make the remaining name unambiguous enough?
 - Which `Shell` host accessors survive once all hosts are request suppliers?
+
+## Resolution (as built)
+
+The open questions resolved as follows; the two prior cutovers had already made
+the turn-assembly names un-callable, so this pass was the enforcement-and-tidy
+it set out to be, not a re-architecture.
+
+1. **Close the old core exports — done, the aggressive cut.** `core/src/lib.rs`
+   no longer re-exports the evaluator/syntax/IR layer: `apply`, `evaluate`,
+   `elaborate`, `parse`, `ParseError`, `Comp`, `Val`, `Ast`, and `SourceLoc`
+   leave the crate root. The ones core still needs internally
+   (`elaborate`/`evaluate`/`parse`/`ParseError`/`Comp`, used by `compile` /
+   `compile_and_typecheck`) became `pub(crate) use`; the rest were dropped. A
+   host or test that needs raw compile/eval reaches the owning module
+   (`ral_core::syntax::parser::parse`, `ral_core::evaluator::evaluate`,
+   `ral_core::ir::Comp`, …), which now reads as deliberately stepping past the
+   `run_turn` seam. The crate root keeps the seam (`run_turn`, `TurnRequest`,
+   `TurnIo`, `TurnReport`, `Captured`, `StaticDiagnostics`, `TurnLifecycle`,
+   `SurfaceSink`/`EventSink`), the typed-compile API
+   (`typecheck`/`Scheme`/`SessionSchemes`/`TypeError`/`bake_prelude`), the
+   host-embedding re-exec helpers, and ordinary value/rendering types.
+2. **Tests on the public seam — already held.** `core/src/turn.rs`'s
+   host-behaviour tests drive `Shell::run_turn`; the eval-semantics integration
+   tests (`sandbox_fail_closed`, `scope_escapes`, …) legitimately use the
+   evaluator entry `eval_top_level`, which is core mechanics, not a host turn.
+   No host crate assembles a turn by hand — `ral/tests/seam_guards.rs` enforces
+   it.
+3. **`shell_eval.rs` kept.** It is still a real boundary, not an empty adapter:
+   it owns `AgentSink` (the `EventSink` impl) and `value_to_kind` (the rail
+   vocabulary the host-loop ADR keeps in exarch). Per this decision's own
+   conservative rule it stays; folding it into `session.rs` or renaming to
+   `tool_turn.rs` would not have removed a boundary, only moved a name.
+4. **Shared turn driver — done.** The explicit-done completion contract is one
+   primitive, `bus::drain_pass`, called by both the headless default
+   `Sink::drive` and the TUI's `drive_events`; the only difference is the frame
+   timer (the default blocks on the channel between passes, the TUI renders and
+   polls keys). Completion stays "the worker set `done`," never channel
+   disconnect, in one place the two drivers cannot drift on. Pinned by
+   `bus::tests::drain_pass_stops_on_done_with_a_live_detached_sender`.
+5. **Host accessors narrowed.** `Shell::durable_root` is `pub(crate)` — only
+   `run_turn` mints the foreground scope now, no host does. The others have live
+   host uses and stay: `foreground` (exarch cancel-poll tests), `stderr_mut`
+   (exarch diagnostics), `set_stdout` (the REPL's ambient external printer),
+   `sources`/`terminal`/`is_interactive`/`enable_audit`/`take_audit_fragment`/
+   `builtin_names`/`repl`/`repl_mut`.
+6. **`session::TurnOutcome` kept.** With core `TurnOutcome` gone there is no
+   collision, so the provider-round-trip name is unambiguous in context; the
+   `ProviderTurnOutcome`/`AgentTurnOutcome` rename was not worth the churn.
 
 ## Test notes
 

@@ -21,6 +21,12 @@
 use std::path::{Path, PathBuf};
 
 /// The workspace root: the parent of this crate's manifest directory.
+///
+/// Lifts the compile-time `CARGO_MANIFEST_DIR` literal into a path — the
+/// "env-var lifting" adapter site the path-construction discipline in
+/// `clippy.toml` exempts. Test scaffolding for a source scan, not a shell
+/// path-resolution site, so the named `crate::path` helpers do not apply.
+#[allow(clippy::disallowed_methods)]
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
