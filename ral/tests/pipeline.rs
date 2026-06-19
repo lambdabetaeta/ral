@@ -260,7 +260,7 @@ fn pipeline_stage_handler_intercepts_unknown_external() {
     // stage as External and the launcher tries to spawn `mycmd`, failing
     // with ENOENT before the handler can run.
     let o = run(
-        "within [handlers: [mycmd-pipeline-test: { /bin/echo handled }]] \
+        "within [handlers: [mycmd-pipeline-test: { |args| /bin/echo handled }]] \
             { mycmd-pipeline-test | cat }",
     );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
@@ -284,8 +284,10 @@ fn pipeline_stage_caret_still_fires_per_name_handler() {
     // with the single-command path — otherwise `^cat X | cat` would
     // bypass the handler when the same call outside a pipeline would
     // honor it.  Locked in via the shared resolve_command_word.
-    let o = run("within [handlers: [cat: { /bin/echo via-handler }]] \
-            { ^cat IGNORED | cat }");
+    let o = run(
+        "within [handlers: [cat: { |args| /bin/echo via-handler }]] \
+            { ^cat IGNORED | cat }",
+    );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "via-handler");
 }
@@ -452,7 +454,7 @@ fn handler_mock_redirect_captures_builtin_stdout() {
     let _ = std::fs::remove_file(&path);
 
     let o = run(&format!(
-        "within [handlers: [foo: {{ echo mock_marker }}]] {{ foo > '{path_str}' }}\n"
+        "within [handlers: [foo: {{ |args| echo mock_marker }}]] {{ foo > '{path_str}' }}\n"
     ));
     let body = std::fs::read_to_string(&path).ok();
     let _ = std::fs::remove_file(&path);
@@ -505,7 +507,7 @@ fn pipeline_stage_handler_redirect_to_file_is_honored() {
     let _ = std::fs::remove_file(&path);
 
     let o = run(&format!(
-        "within [handlers: [foo: {{ /bin/echo stage_marker }}]] {{ foo > '{path_str}' | cat }}\n/bin/echo done\n"
+        "within [handlers: [foo: {{ |args| /bin/echo stage_marker }}]] {{ foo > '{path_str}' | cat }}\n/bin/echo done\n"
     ));
     let body = std::fs::read_to_string(&path).ok();
     let _ = std::fs::remove_file(&path);

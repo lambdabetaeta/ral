@@ -566,13 +566,15 @@ mod tests {
         );
     }
 
-    /// The same callable under `aliases:` installs as an argv-handler
-    /// alias (a handler frame, not a scope binding), so the heterogeneous
-    /// call fails the homogeneous-argv unification with a [T0010]
-    /// mismatch — confirming the by-key split actually changes behaviour.
+    /// A callable under `aliases:` installs as an argv-handler alias (a
+    /// handler frame, not a scope binding).  An alias is a unary lambda
+    /// whose single parameter binds the argv list, so the heterogeneous
+    /// call `ws 'x' { echo lol }` forces the homogeneous argv element type
+    /// to be both String and Block — a [T0010] mismatch, confirming the
+    /// by-key split actually changes behaviour.
     #[test]
     fn rc_aliases_callable_is_argv_alias() {
-        let src = "return [\n    aliases: [\n        ws: { |name body| echo $name; !$body },\n    ],\n]\n";
+        let src = "return [\n    aliases: [\n        ws: { |args| echo $args },\n    ],\n]\n";
         let (shell, _) = apply_rc_inner(src, true);
         // Alias handler frame, not a scope binding.
         assert!(shell.has_alias("ws"));

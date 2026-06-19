@@ -229,7 +229,7 @@ fn pattern_binds_carry_no_scheme() {
 
 // ─── (7) alias visibility ────────────────────────────────────────────────────
 
-/// `alias three { echo 3; return 3 }` is visible to the next turn's
+/// `alias three { |args| echo 3; return 3 }` is visible to the next turn's
 /// check: the arm preserves `three`'s external byte-output mode while its
 /// scheme records the `Int` value type, so `$[!{three} + 0]` typechecks
 /// (the scheme says `Int`), while `three` alone is clean too.  After
@@ -238,7 +238,7 @@ fn pattern_binds_carry_no_scheme() {
 #[test]
 fn alias_visible_to_next_turn() {
     let mut sh = shell();
-    turn(&mut sh, "alias three { echo 3; return 3 }").unwrap();
+    turn(&mut sh, "alias three { |args| echo 3; return 3 }").unwrap();
     assert!(
         check_errors(&sh, "three").is_empty(),
         "expected the alias used alone to be clean, got: {:?}",
@@ -271,7 +271,7 @@ fn alias_visible_to_next_turn() {
 #[test]
 fn value_output_alias_is_use_site_mode_mismatch() {
     let sh = shell();
-    let errs = check_errors(&sh, "alias three { return 3 }\nreturn unit");
+    let errs = check_errors(&sh, "alias three { |args| return 3 }\nreturn unit");
     assert!(
         !is_mode_mismatch(&errs),
         "expected no ModeMismatch defining a value-output alias, got: {:?}",
@@ -279,7 +279,7 @@ fn value_output_alias_is_use_site_mode_mismatch() {
             .map(|e| e.kind.render_message())
             .collect::<Vec<_>>()
     );
-    let errs = check_errors(&sh, "alias three { return 3 }\nthree | from-json");
+    let errs = check_errors(&sh, "alias three { |args| return 3 }\nthree | from-json");
     assert!(
         is_mode_mismatch(&errs),
         "expected a ModeMismatch (T0012) where the value-output alias feeds from-json, got: {:?}",

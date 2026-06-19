@@ -551,7 +551,7 @@ mod tests {
         // shell, and confirm the alias is both visible (`has_alias`) and
         // removable (`remove_alias`).
         let mut parent = Shell::default();
-        let thunk = eval_value("return { echo aliased }", &mut parent);
+        let thunk = eval_value("return { |args| echo aliased }", &mut parent);
         parent
             .install_alias("ll".to_string(), thunk)
             .expect("install alias");

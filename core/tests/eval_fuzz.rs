@@ -822,13 +822,13 @@ fn has_on_map() {
 #[test]
 fn with_overrides_command() {
     // within handlers replace commands at head-dispatch (SPEC §4.1)
-    must_succeed("within [handlers: [cat: { echo mocked }]] { cat /nonexistent }");
+    must_succeed("within [handlers: [cat: { |args| echo mocked }]] { cat /nonexistent }");
 }
 
 #[test]
 fn with_does_not_leak() {
     // After within block, the handler is gone
-    must_succeed("within [handlers: [mytest: { echo mock }]] { mytest }\necho 'after with'");
+    must_succeed("within [handlers: [mytest: { |args| echo mock }]] { mytest }\necho 'after with'");
 }
 
 #[cfg(unix)]
@@ -870,7 +870,7 @@ fn grant_exec_thunk_form_errors_with_clear_message() {
 fn within_handler_applies_inside_pipeline() {
     assert_eq!(
         must_succeed(
-            "within [handlers: [cat: { echo mocked }]] { let n = !{cat /nonexistent | from-string | length}; return $n }"
+            "within [handlers: [cat: { |args| echo mocked }]] { let n = !{cat /nonexistent | from-string | length}; return $n }"
         ),
         Value::Int(7)
     );
@@ -1227,7 +1227,7 @@ fn within_handler_inner_shadows_outer_same_name() {
     // Innermost per-name handler wins when both frames name the same command.
     assert_eq!(
         must_succeed(
-            "within [handlers: [cmd: { echo outer; return 'outer' }]] { within [handlers: [cmd: { echo inner; return 'inner' }]] { cmd } }"
+            "within [handlers: [cmd: { |args| echo outer; return 'outer' }]] { within [handlers: [cmd: { |args| echo inner; return 'inner' }]] { cmd } }"
         ),
         Value::String("inner".into())
     );
@@ -1238,7 +1238,7 @@ fn within_handler_outer_fires_when_inner_does_not_match() {
     // Inner frame has no entry for cmd2; outer frame fires.
     assert_eq!(
         must_succeed(
-            "within [handlers: [cmd2: { echo outer; return 'outer' }]] { within [handlers: [cmd1: { echo inner; return 'inner' }]] { cmd2 } }"
+            "within [handlers: [cmd2: { |args| echo outer; return 'outer' }]] { within [handlers: [cmd1: { |args| echo inner; return 'inner' }]] { cmd2 } }"
         ),
         Value::String("outer".into())
     );
@@ -1250,7 +1250,7 @@ fn outer_per_name_beats_inner_catch_all() {
     // `other` is preferred over an inner frame's catch-all.
     assert_eq!(
         must_succeed(
-            "within [handlers: [other: { echo outer; return 'outer' }]] { within [handler: { |n _a| return 'catch' }] { other } }"
+            "within [handlers: [other: { |args| echo outer; return 'outer' }]] { within [handler: { |n _a| return 'catch' }] { other } }"
         ),
         Value::String("outer".into())
     );
@@ -1273,7 +1273,7 @@ fn alias_inside_within_shadows_within_per_name() {
     // the alias under the within and the within's entry won.
     assert_eq!(
         must_succeed(
-            "within [handlers: [foo: { echo A; return 'A' }]] { alias foo { echo B; return 'B' }; foo }"
+            "within [handlers: [foo: { |args| echo A; return 'A' }]] { alias foo { |args| echo B; return 'B' }; foo }"
         ),
         Value::String("B".into())
     );
@@ -1293,7 +1293,7 @@ fn alias_inside_within_shadows_within_per_name() {
 #[test]
 fn computed_within_value_output_arm_runs() {
     assert_eq!(
-        must_succeed("let h = [foo: { return 3 }]; within [handlers: $h] { foo }"),
+        must_succeed("let h = [foo: { |args| return 3 }]; within [handlers: $h] { foo }"),
         Value::Int(3)
     );
 }
@@ -1304,7 +1304,7 @@ fn computed_within_value_output_arm_runs() {
 fn computed_within_byte_output_arm_runs() {
     // `foo` emits bytes; the block captures nothing and yields unit.
     assert_eq!(
-        must_succeed("let h = [foo: { echo hi }]; within [handlers: $h] { foo }"),
+        must_succeed("let h = [foo: { |args| echo hi }]; within [handlers: $h] { foo }"),
         Value::Unit
     );
 }
@@ -1313,7 +1313,7 @@ fn computed_within_byte_output_arm_runs() {
 /// the install guard in `Shell::install_alias` accepts it.
 #[test]
 fn value_output_alias_installs() {
-    assert_eq!(must_succeed("alias foo { return 3 }"), Value::Unit);
+    assert_eq!(must_succeed("alias foo { |args| return 3 }"), Value::Unit);
 }
 
 #[cfg(unix)]
@@ -1540,7 +1540,9 @@ fn tco_deep_recursion() {
 fn tco_within_handler_non_tail() {
     // handler called NOT in tail position must execute, not escape as TailCall.
     assert_eq!(
-        must_succeed("within [handlers: [cmd: { echo 6; return 6 }]] { let y = cmd; return $y }"),
+        must_succeed(
+            "within [handlers: [cmd: { |args| echo 6; return 6 }]] { let y = cmd; return $y }"
+        ),
         Value::Int(6)
     );
 }

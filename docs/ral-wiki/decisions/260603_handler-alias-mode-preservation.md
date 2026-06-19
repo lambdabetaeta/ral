@@ -5,6 +5,16 @@ superseded_by: decisions/260606_alias-head-defines-its-modes
 
 > Superseded by [[decisions/260606_alias-head-defines-its-modes|a fresh head defines its own modes]].
 
+> **2026-06-19.** The bare-block handler and alias examples below
+> (`{ return 3 }`, `{ echo hi }`) are no longer valid surface forms.
+> A per-name handler and every alias must be a unary lambda
+> `{ |args| … }`, and a catch-all must be a binary lambda
+> `{ |name args| … }`; a bare block, a non-lambda, or a wrong-arity
+> lambda is rejected at install time (`docs/SPEC.md` §3.2,
+> [[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
+> The mode-preservation analysis here is unaffected — read its examples
+> with the argument-binding form supplied.
+
 # Handlers and aliases preserve a head's pipe signature
 
 A handler reinterprets an operation; it does not retype it. The

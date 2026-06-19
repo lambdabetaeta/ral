@@ -34,8 +34,8 @@ if !{equal $original $after} { echo 'cwd restored' } else { echo 'cwd leaked!' }
 
 # handlers key (per-name)
 
-# Simple nullary handler
-within [handlers: [mycmd: { echo 'handled' }]] {
+# Simple handler ignoring args
+within [handlers: [mycmd: { |args| echo 'handled' }]] {
     mycmd
 }
 
@@ -48,8 +48,8 @@ within [handlers: [mycmd: { |args| echo 'got' ...$args }]] {
 try { mycmd 2> /dev/null } { |_| echo 'mycmd gone' }
 
 # Nesting: inner wins
-within [handlers: [mycmd: { echo 'outer' }]] {
-    within [handlers: [mycmd: { echo 'inner' }]] {
+within [handlers: [mycmd: { |args| echo 'outer' }]] {
+    within [handlers: [mycmd: { |args| echo 'inner' }]] {
         mycmd
     }
     mycmd
@@ -77,14 +77,14 @@ let result = ^echo 'from external'
 echo $result
 
 # Containment: ^name does NOT escape within [handlers:]
-within [handlers: [cat: { echo 'handler-cat' }]] {
+within [handlers: [cat: { |args| echo 'handler-cat' }]] {
     # Even ^cat triggers the handler (containment property)
     ^cat anything
 }
 
 # Combined keys
 
-within [env: [MY_VAR: scoped], handlers: [mycmd: { echo "env=$env[MY_VAR]" }]] {
+within [env: [MY_VAR: scoped], handlers: [mycmd: { |args| echo "env=$env[MY_VAR]" }]] {
     mycmd
 }
 

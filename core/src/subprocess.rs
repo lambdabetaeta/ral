@@ -35,9 +35,12 @@ use serde::{Deserialize, Serialize};
 /// Wire mirror of a user-installed [`HandlerFrame`].
 ///
 /// Builtins are not wired as handlers: the receiver installs its own
-/// builtin table during shell construction.  Per-name arity is recomputed
-/// at the receiver from the [`Value`]'s variant
-/// ([`HandlerEntry::ral_per_name`]).
+/// builtin table during shell construction.  Per-name arity is not
+/// re-derived at the receiver — a per-name entry is always
+/// [`HandlerArity::Unary`](crate::types::HandlerArity::Unary) by
+/// construction ([`HandlerEntry::ral_per_name`]), and hydration does not
+/// re-validate:
+/// the values already passed install-time arity validation on the sender.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct WireHandlerFrame {
     pub entries: Vec<(String, SerialValue, Option<typecheck::Scheme>)>,

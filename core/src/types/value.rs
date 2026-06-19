@@ -234,6 +234,28 @@ impl Value {
             Value::Handle(_) => "Handle",
         }
     }
+
+    /// Curry-chain depth of a lambda value — the number of arguments
+    /// `apply` will consume — or `None` if this is not a lambda.
+    ///
+    /// The outer [`Value::Lambda`] counts as one; each nested
+    /// [`crate::ir::CompKind::Lam`] reached through `body.item` adds
+    /// another.  This is exactly the operational arity that
+    /// [`crate::evaluator::apply`] consumes before reaching the body, so
+    /// it is the principled arity to validate against at the install
+    /// boundary.
+    pub fn lambda_arity(&self) -> Option<usize> {
+        let Value::Lambda { body, .. } = self else {
+            return None;
+        };
+        let mut arity = 1;
+        let mut comp = body;
+        while let crate::ir::CompKind::Lam { body, .. } = &comp.item {
+            arity += 1;
+            comp = body;
+        }
+        Some(arity)
+    }
 }
 
 /// Shared handle to a spawned computation.
@@ -441,14 +463,16 @@ pub fn fmt_lambda(param: &crate::ir::IrPattern, body: &crate::ir::Comp) -> Strin
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameHandle(pub(crate) u64);
 
-/// Calling convention of a handler invocation — fixed at install time so
-/// the command site does not have to introspect the thunk body.  A
-/// per-name handler is [`Unary`] when its thunk is a lambda
-/// (`{ |args| … }`) and [`Nullary`] otherwise (`{ … }`); a catch-all is
-/// always [`CatchAll`] regardless of body.
+/// Calling convention of a handler invocation — fixed by the surface
+/// form at install time, never inferred from the value's runtime shape.
+/// A per-name handler (`within [handlers: …]`) and an alias are always
+/// [`Unary`]: a unary lambda `{ |args| … }` invoked with the command's
+/// argument list.  A catch-all (`within [handler: …]`) is always
+/// [`CatchAll`]: a binary lambda `{ |name args| … }` invoked with the
+/// command name and the argument list.  The install boundary rejects any
+/// value that does not match the required arity.
 ///
 /// [`Unary`]: HandlerArity::Unary
-/// [`Nullary`]: HandlerArity::Nullary
 /// [`CatchAll`]: HandlerArity::CatchAll
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HandlerArity {
@@ -456,8 +480,6 @@ pub enum HandlerArity {
     CatchAll,
     /// Per-name lambda: thunk receives `(args)`.
     Unary,
-    /// Per-name block: thunk receives `()`.
-    Nullary,
 }
 
 /// One user handler entry — the unit of installation in a
@@ -479,21 +501,45 @@ pub struct HandlerEntry {
 
 impl HandlerEntry {
     /// Build a per-name entry for a user-defined `within [handlers: …]`
-    /// or `alias` thunk.  A [`Value::Lambda`] is [`HandlerArity::Unary`]
-    /// (its body takes the args list); anything else is
-    /// [`HandlerArity::Nullary`].  Typecheck / doc / hint default to
-    /// the "user code" values.
+    /// or `alias` thunk.  Always [`HandlerArity::Unary`]: a per-name
+    /// handler's calling convention is fixed by its surface form, so its
+    /// thunk is a unary lambda `{ |args| … }` invoked with the command's
+    /// argument list.  The caller validates at the install boundary that
+    /// the thunk is in fact a unary lambda.
     pub fn ral_per_name(name: String, thunk: Value) -> Self {
-        let arity = match &thunk {
-            Value::Lambda { .. } => HandlerArity::Unary,
-            _ => HandlerArity::Nullary,
-        };
         Self {
             name: Cow::Owned(name),
-            arity,
+            arity: HandlerArity::Unary,
             thunk,
             scheme: None,
         }
+    }
+}
+
+/// Validate that a handler thunk's surface form matches the required
+/// calling convention: it must be a lambda of exactly `arity` arguments.
+///
+/// The calling convention of a handler is fixed by its surface form, not
+/// inferred from its runtime shape, so this is the single gate at every
+/// install boundary (`alias`, `within [handlers: …]`, `within [handler:
+/// …]`).  A non-lambda value or a lambda of the wrong arity is rejected
+/// with a message that names what was wrong and `context` (e.g. ``alias:
+/// `greet` ``) so the diagnostic points at the offending install site.
+pub fn validate_handler_arity(value: &Value, arity: usize, context: &str) -> Settled<()> {
+    let form = match arity {
+        1 => "a unary lambda `{ |args| ... }`",
+        2 => "a binary lambda `{ |name args| ... }`",
+        n => unreachable!("handler arity must be 1 or 2, got {n}"),
+    };
+    match value.lambda_arity() {
+        Some(found) if found == arity => Ok(()),
+        Some(found) => Err(super::coerce::sig(format!(
+            "{context} must be {form}, got a lambda taking {found} argument(s)"
+        ))),
+        None => Err(super::coerce::sig(format!(
+            "{context} must be {form}, got a {}",
+            value.type_name()
+        ))),
     }
 }
 

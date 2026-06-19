@@ -327,9 +327,14 @@ tail-resumptive with no first-class `resume`, and so less than
 algebraic-effect handlers usually offer.
 
 `within [handlers: …, handler: …]` installs effect handlers on a
-dynamic stack.  Two independent design questions then arise, often
-conflated under one 'deep vs shallow' heading; we commit to a definite
-answer to each.
+dynamic stack.  Each per-name handler (and every alias) is a unary
+lambda `{ |args| … }` invoked with the command's argument list, and
+the catch-all `handler:` is a binary lambda `{ |name args| … }`
+invoked with the command's name and arguments; the calling convention
+is fixed by the surface form, so a bare block or a wrong-arity lambda
+is rejected at install time rather than coerced.  Two independent
+design questions then arise, often conflated under one 'deep vs
+shallow' heading; we commit to a definite answer to each.
 
 Handlers interpret open operation names after the language binding
 namespace has declined the name.  Lexical bindings, prelude names, and

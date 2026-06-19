@@ -13,7 +13,7 @@ fn spawn_inherits_within_handlers() {
     let out = run(
         "ral_spawn_dyn",
         r#"
-        within [handlers: [mycmd: { echo "handled" }]] {
+        within [handlers: [mycmd: { |args| echo "handled" }]] {
             let h = spawn { mycmd }
             let r = await $h
             echo !{to-bytes $r[stdout] | from-string}
@@ -102,7 +102,7 @@ fn spawn_handler_does_not_leak_to_parent() {
         "ral_spawn_dyn",
         r#"
         let h = spawn {
-            within [handlers: [localcmd: { echo "child-handler" }]] {
+            within [handlers: [localcmd: { |args| echo "child-handler" }]] {
                 localcmd
             }
         }

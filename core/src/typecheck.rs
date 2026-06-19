@@ -470,7 +470,7 @@ pub fn bake_prelude(comp: &Comp) -> (Comp, Vec<(String, Scheme)>) {
 /// at use.
 pub fn alias_arm_scheme(
     head: &str,
-    param: Option<&crate::ir::IrPattern>,
+    param: &crate::ir::IrPattern,
     body: &Comp,
     schemes: SessionSchemes,
 ) -> Result<Scheme, crate::mode::ModeMismatch> {
@@ -481,7 +481,7 @@ pub fn alias_arm_scheme(
         ctx: &mut ctx,
         env: &mut env,
     };
-    let cty = inferencer.infer_alias_arm(param, body);
+    let cty = inferencer.infer_alias_arm(Some(param), body);
     inferencer.pin_arm_to_head(head, &cty)?;
     let thunk_ty = Ty::Thunk(Box::new(cty));
     let scheme = generalize(&mut ctx.unifier, &TyEnv::new(), &thunk_ty);

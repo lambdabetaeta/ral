@@ -848,17 +848,17 @@ fn is_mode_mismatch(src: &str) -> bool {
 #[test]
 fn within_handler_value_output_pipes_byte_consumer_is_mismatch() {
     assert!(
-        is_mode_mismatch(r#"within [handlers: [foo: { return 3 }]] { foo | from-json }"#),
+        is_mode_mismatch(r#"within [handlers: [foo: { |args| return 3 }]] { foo | from-json }"#),
         "expected a ModeMismatch where the value-output handler arm feeds the from-json decoder"
     );
-    ok(r#"within [handlers: [foo: { return 3 }]] { foo }"#);
+    ok(r#"within [handlers: [foo: { |args| return 3 }]] { foo }"#);
 }
 
 /// A byte-output `within` handler arm defines the unknown head as
 /// byte-output and typechecks.
 #[test]
 fn within_handler_byte_output_arm_ok() {
-    ok(r#"within [handlers: [foo: { echo hi }]] { foo }"#);
+    ok(r#"within [handlers: [foo: { |args| echo hi }]] { foo }"#);
 }
 
 /// A byte-output forwarding alias defines the unknown head as byte-output and
@@ -872,7 +872,7 @@ fn alias_byte_output_forwarder_typechecks() {
 /// definition typechecks on its own.
 #[test]
 fn alias_value_output_body_typechecks() {
-    ok("alias foo { return 3 }\nreturn unit");
+    ok("alias foo { |args| return 3 }\nreturn unit");
 }
 
 /// The value-output head's `∅` output is rejected where it feeds a byte
@@ -881,7 +881,7 @@ fn alias_value_output_body_typechecks() {
 #[test]
 fn alias_value_output_piped_into_byte_consumer_is_mismatch() {
     assert!(
-        is_mode_mismatch("alias foo { return 3 }\nfoo | from-json"),
+        is_mode_mismatch("alias foo { |args| return 3 }\nfoo | from-json"),
         "expected a ModeMismatch where the value-output alias feeds the from-json decoder"
     );
 }
@@ -891,7 +891,7 @@ fn alias_value_output_piped_into_byte_consumer_is_mismatch() {
 /// byte output.
 #[test]
 fn alias_over_mode_preserving_alias_typechecks() {
-    ok(r#"alias one { echo one }; alias two { one }; two"#);
+    ok(r#"alias one { |args| echo one }; alias two { |args| one }; two"#);
 }
 
 /// The catch-all `handler: { comp }` names no specific head, so the
@@ -905,14 +905,14 @@ fn catch_all_handler_arm_is_not_mode_pinned() {
 #[test]
 fn local_binding_beats_handler() {
     ok(
-        r#"within [handlers: [foo: { echo handler }]] { let foo = { return 41 }; let r = !{foo}; return $[$r + 1] }"#,
+        r#"within [handlers: [foo: { |args| echo handler }]] { let foo = { return 41 }; let r = !{foo}; return $[$r + 1] }"#,
     );
 }
 
 #[test]
 fn caret_skips_binding_but_not_handler() {
     has_error(
-        r#"within [handlers: [cat: { return "mocked" }]] { let r = !{^cat nope}; return $[$r + 0] }"#,
+        r#"within [handlers: [cat: { |args| return "mocked" }]] { let r = !{^cat nope}; return $[$r + 0] }"#,
         "couldn't match",
     );
 }
@@ -961,32 +961,34 @@ fn within_env_and_dir_still_typecheck() {
 // frame so aliases do not leak past the Seq's scope.  Aliases inside
 // conditionals / function bodies are NOT at Seq level and do not leak.
 //
-// Nullary aliases are typed as handler entries, not nullary CBPV functions:
-// extra argv is inferred for local errors and then ignored by the static
-// handler-call rule. The handler's return type is still pinned.
+// An args-ignoring alias is still typed as a handler entry, not a CBPV
+// function: the arm is a unary lambda whose argv parameter the body
+// ignores; extra argv is inferred for local errors and then consumed by
+// the static handler-call rule. The handler's return type is still pinned.
 
-/// Nullary alias binds in TyEnv: `alias greet { return "hi" }; greet`
-/// typechecks without error.  If the body returned an Int, using the result
-/// in a String context (e.g. `str_concat "x" (greet)`) would be a type error;
-/// here we verify the positive case and probe the inferred type by checking
-/// that using the result in Int arithmetic IS a type error (because it's a
-/// String, not an Int).
+/// An args-ignoring alias binds in TyEnv:
+/// `alias greet { |args| return "hi" }; greet` typechecks without error.
+/// If the body returned an Int, using the result in a String context
+/// (e.g. `str_concat "x" (greet)`) would be a type error; here we verify
+/// the positive case and probe the inferred type by checking that using
+/// the result in Int arithmetic IS a type error (because it's a String,
+/// not an Int).
 #[test]
-fn alias_nullary_binds_in_tyenv() {
+fn alias_ignoring_args_binds_in_tyenv() {
     // Positive: the seq typechecks.  The arm is byte-output (`echo`),
     // preserving the head's `F[μ, Bytes]` spec, while its value type stays
     // String — a handler reinterprets a head without retyping its modes.
-    ok(r#"alias greet { echo hi; return "hi" }; greet"#);
+    ok(r#"alias greet { |args| echo hi; return "hi" }; greet"#);
     // Probe: the result is String, so using it in Int arithmetic is a type
     // error.  This would NOT error if the alias binding were absent (the
     // call would fall through to the external dispatcher and get a fresh
     // type variable).
     has_error(
-        r#"let r = !{ alias greet { echo hi; return "hi" }; greet }; return $[$r + 0]"#,
+        r#"let r = !{ alias greet { |args| echo hi; return "hi" }; greet }; return $[$r + 0]"#,
         "couldn't match",
     );
     has_error(
-        r#"let r = !{ alias greet { echo hi; return "hi" }; greet extra args }; return $[$r + 0]"#,
+        r#"let r = !{ alias greet { |args| echo hi; return "hi" }; greet extra args }; return $[$r + 0]"#,
         "couldn't match",
     );
 }
@@ -994,7 +996,7 @@ fn alias_nullary_binds_in_tyenv() {
 #[test]
 fn value_lookup_does_not_reify_aliases_or_command_only_builtins() {
     has_error(
-        r#"alias greet { return "hi" }; let f = $greet; return $f"#,
+        r#"alias greet { |args| return "hi" }; let f = $greet; return $f"#,
         "handler entry",
     );
     has_error("let f = $echo; return $f", "builtin command");
@@ -1036,7 +1038,7 @@ fn alias_last_pushed_shadows_earlier() {
     // Positive: Int arithmetic on the second alias's return value is fine
     // (verifies the second binding actually wins and returns Int).
     ok(
-        r#"alias greet { echo hi; return "hi" }; alias greet { echo 42; return 42 }; let r = !{greet}; return $[$r + 0]"#,
+        r#"alias greet { |args| echo hi; return "hi" }; alias greet { |args| echo 42; return 42 }; let r = !{greet}; return $[$r + 0]"#,
     );
     // Negative: if only the first alias (String) won, the Int arithmetic
     // would error.  Since the second wins (Int), arithmetic succeeds — and
@@ -1044,7 +1046,7 @@ fn alias_last_pushed_shadows_earlier() {
     // Use `return $[$r + 0]` vs `return $[$r + true]` (Bool vs Int mismatch)
     // to confirm the type is pinned to Int, not a free variable.
     has_error(
-        r#"alias greet { echo hi; return "hi" }; alias greet { echo 42; return 42 }; let r = !{greet}; return $[$r + true]"#,
+        r#"alias greet { |args| echo hi; return "hi" }; alias greet { |args| echo 42; return 42 }; let r = !{greet}; return $[$r + true]"#,
         "couldn't match",
     );
 }
@@ -1059,7 +1061,7 @@ fn alias_inside_conditional_does_not_leak() {
     // The alias is inside the `then` branch — not at the enclosing Seq level.
     // The subsequent `greet` should NOT see the binding.  Compilation must
     // not panic; the type of `greet` is left free (external dispatch).
-    ok("if true { alias greet { return \"hi\" } } else { return unit }; greet");
+    ok("if true { alias greet { |args| return \"hi\" } } else { return unit }; greet");
 }
 
 /// Multi-statement Seq: bindings from an alias are visible to all subsequent
@@ -1068,10 +1070,10 @@ fn alias_inside_conditional_does_not_leak() {
 fn alias_binding_visible_to_all_subsequent_statements() {
     // `r` is bound to the result of `greet` (String); the final `greet` also
     // sees the binding.  Both should typecheck without error.
-    ok(r#"alias greet { echo hi; return "hi" }; let r = !{greet}; greet"#);
+    ok(r#"alias greet { |args| echo hi; return "hi" }; let r = !{greet}; greet"#);
     // Verify `r` really has String type by checking arithmetic on it errors.
     has_error(
-        r#"let _ = !{ alias greet { echo hi; return "hi" }; let r = !{greet}; return $[$r + 0] }; return unit"#,
+        r#"let _ = !{ alias greet { |args| echo hi; return "hi" }; let r = !{greet}; return $[$r + 0] }; return unit"#,
         "couldn't match",
     );
 }
@@ -1084,10 +1086,10 @@ fn alias_binding_visible_to_all_subsequent_statements() {
 #[test]
 fn alias_ir_shape_round_trips() {
     // Canonical alias shape: recognised and bound.
-    ok("alias g { echo 42; return 42 }; return $[!{g} + 1]");
+    ok("alias g { |args| echo 42; return 42 }; return $[!{g} + 1]");
 
     // Unalias recognised.
-    ok("alias g { echo 42; return 42 }; unalias g; g");
+    ok("alias g { |args| echo 42; return 42 }; unalias g; g");
 
     // Spread in alias position is a static error (would silently
     // fall through to external exec without the explicit check).
@@ -1103,11 +1105,11 @@ fn alias_ir_shape_round_trips() {
 #[test]
 fn unalias_removes_only_static_alias_binding() {
     has_error(
-        r#"alias greet { echo 41; return 41 }; unalias greet; let r = !{greet}; return $[$r + 0]"#,
+        r#"alias greet { |args| echo 41; return 41 }; unalias greet; let r = !{greet}; return $[$r + 0]"#,
         "couldn't match",
     );
     ok(
-        r#"within [handlers: [greet: { echo 41; return 41 }]] { unalias greet; let r = !{greet}; return $[$r + 1] }"#,
+        r#"within [handlers: [greet: { |args| echo 41; return 41 }]] { unalias greet; let r = !{greet}; return $[$r + 1] }"#,
     );
 }
 

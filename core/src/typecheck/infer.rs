@@ -1093,10 +1093,14 @@ impl Inferencer<'_> {
     /// bodies aren't at Seq level, so they don't leak — documented
     /// behaviour.
     ///
-    /// Nullary aliases are bound: the doc's
-    /// `alias greet { return "hi" }; greet` example requires it, and
-    /// `greet x` becoming a static mismatch is preferable to silently
-    /// discarding `x` at runtime.
+    /// An alias whose thunk is not a literal lambda is still bound, typed
+    /// by its body — `handler_comp_scheme` falls to the nullary arm when
+    /// the thunk IR is not a `Lam` (e.g. a computed thunk `alias g $h`).
+    /// Binding it means `g x` is a static arity mismatch rather than a
+    /// silently discarded `x`.  A bare-block alias (`alias g { ... }`) is
+    /// rejected at runtime install — the canonical form is `{ |args| … }`
+    /// — but the static layer stays lenient here, since a thunk's runtime
+    /// value is not known statically.
     pub(super) fn infer_seq_with_alias_bindings(
         &mut self,
         parts: &[Arc<Comp>],

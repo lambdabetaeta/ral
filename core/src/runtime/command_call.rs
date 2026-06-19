@@ -212,7 +212,6 @@ fn run_handler(entry: HandlerEntry, depth: usize, args: &[Value], shell: &mut Sh
             vec![Value::String(name.into_owned()), Value::list(args.to_vec())]
         }
         HandlerArity::Unary => vec![Value::list(args.to_vec())],
-        HandlerArity::Nullary => vec![],
     };
     let masked = MaskedHandler::strip(shell, depth);
     let result = crate::evaluator::apply(thunk, call_args, masked.shell);

@@ -30,7 +30,7 @@ mod value;
 pub use value::{
     BuiltinBody, BuiltinEntry, BuiltinTable, CompletedHandle, FrameHandle, HandleInner,
     HandleState, HandlerArity, HandlerEntry, HandlerFrame, HandlerStack, SurfaceBuffer, Value,
-    fmt_lambda,
+    fmt_lambda, validate_handler_arity,
 };
 
 // List (Value::List inner), opaque newtype around imbl::Vector<Value>.

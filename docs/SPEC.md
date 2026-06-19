@@ -397,12 +397,22 @@ Keys:
 - `dir:` — set the working directory for the body;
 - `env:` — overlay environment variables for the body; values must be
   scalars (string, int, float, or bool); lists and maps are rejected;
-- `handlers:` — a map from command names to handler blocks (per-name
-  effect handlers);
-- `handler:` — a single catch-all handler block that intercepts
-  **external commands only**. Lexical names and builtins are
-  language-internal and run normally; any external calls they make
-  will still hit the handler.
+- `handlers:` — a map from command names to per-name effect handlers,
+  each a **unary lambda** `{ |args| … }`;
+- `handler:` — a single catch-all **binary lambda** `{ |name args| … }`
+  that intercepts **external commands only**. Lexical names and
+  builtins are language-internal and run normally; any external calls
+  they make will still hit the handler.
+
+**Handlers and aliases are lambdas, and the calling convention is fixed
+by surface form.** A per-name handler (and every alias, §9) must be a
+unary lambda `{ |args| … }`, invoked with the intercepted command's
+argument list; the catch-all `handler:` must be a binary lambda
+`{ |name args| … }`, invoked with the command's name and its argument
+list. A bare block `{ … }`, any non-lambda value, or a lambda of the
+wrong arity is **rejected at install time** with a clear error. The
+convention follows the surface position — per-name versus catch-all —
+and is never inferred from the value's runtime shape.
 
 Per-name handlers (`handlers:`) may handle only names not claimed by
 the lexical/prelude/builtin binding namespace at the installation

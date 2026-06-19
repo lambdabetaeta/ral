@@ -158,15 +158,13 @@ impl WithinScope {
                     entries = map
                         .into_iter()
                         .map(|(cmd, thunk_val)| {
-                            let arm = match &thunk_val {
-                                Value::Lambda { param, body, .. } => (Some(param), body),
-                                Value::Block { body, .. } => (None, body),
-                                other => {
-                                    return Err(sig(format!(
-                                        "within handlers: value for '{cmd}' must be a block, got {}",
-                                        other.type_name()
-                                    )));
-                                }
+                            validate_handler_arity(
+                                &thunk_val,
+                                1,
+                                &format!("within handlers: `{cmd}`"),
+                            )?;
+                            let Value::Lambda { param, body, .. } = &thunk_val else {
+                                unreachable!("validate_handler_arity guarantees a unary lambda");
                             };
                             if shell.mobile.scope.get(&cmd).is_some()
                                 || crate::builtins::is_builtin(&cmd)
@@ -175,7 +173,6 @@ impl WithinScope {
                                     "within handlers: cannot install handler for binding `{cmd}`"
                                 )));
                             }
-                            let (param, body) = arm;
                             crate::typecheck::alias_arm_scheme(
                                 &cmd,
                                 param,
@@ -198,15 +195,8 @@ impl WithinScope {
                     saw_handlers = true;
                 }
                 "handler" => {
-                    catch_all = Some(match v {
-                        Value::Lambda { .. } | Value::Block { .. } => v.clone(),
-                        other => {
-                            return Err(sig(format!(
-                                "within handler: must be a block, got {}",
-                                other.type_name()
-                            )));
-                        }
-                    });
+                    validate_handler_arity(v, 2, "within handler: catch-all")?;
+                    catch_all = Some(v.clone());
                     saw_handlers = true;
                 }
                 _ => return Err(sig(format!("within: unknown key '{k}'"))),

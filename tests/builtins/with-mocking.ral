@@ -3,25 +3,25 @@
 # Basic override — cat is external, can be mocked.  A mock reinterprets the
 # external head and so preserves its byte-output mode (F[μ, Bytes]): it writes
 # to the byte stream, exactly as the real command would.
-within [handlers: [cat: { echo mocked-cat }]] {
+within [handlers: [cat: { |args| echo mocked-cat }]] {
     cat /dev/null
 }
 
 # Nesting: inner override wins for same name
-within [handlers: [cat: { echo mock1 }]] {
-    within [handlers: [cat: { echo mock2 }]] {
+within [handlers: [cat: { |args| echo mock1 }]] {
+    within [handlers: [cat: { |args| echo mock2 }]] {
         cat /dev/null
     }
 }
 
 # Nesting: different names coexist
-within [handlers: [mycmd1: { echo mock-a }, mycmd2: { echo mock-b }]] {
+within [handlers: [mycmd1: { |args| echo mock-a }, mycmd2: { |args| echo mock-b }]] {
     mycmd1
     mycmd2
 }
 
 # Scope: override gone after block
-within [handlers: [cat: { echo gone }]] {
+within [handlers: [cat: { |args| echo gone }]] {
     let x = cat /dev/null
 }
 echo 'still normal'

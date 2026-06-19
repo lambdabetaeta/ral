@@ -542,7 +542,7 @@ fn handler_self_mask_survives_panic_mid_body() {
     let mut shell = fresh_shell();
     builtins::register_builtins(PANIC_BUILTIN);
     shell.install_builtins(PANIC_BUILTIN);
-    let _ = top_level(&mut shell, "alias boom { __test-panic }")
+    let _ = top_level(&mut shell, "alias boom { |args| __test-panic }")
         .expect("installing the alias must succeed");
     assert!(
         shell.has_alias("boom"),

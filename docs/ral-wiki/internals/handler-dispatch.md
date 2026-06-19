@@ -1,6 +1,6 @@
 ---
 verified_at_commit: a590f4f
-verified_at_date: 2026-06-18
+verified_at_date: 2026-06-19
 anchors: [HandlerStack, lookup, strip_matched, restore_matched]
 ---
 
@@ -22,6 +22,14 @@ frames innermost-first for an explicit per-name entry; only if none exists
 anywhere does a second innermost-first pass take the first catch-all (`handler:`).
 It returns the matched entry with a `depth` — the count of frames from the top
 down to and including the match.
+
+**The calling convention is fixed by surface form, not value shape.** A per-name
+entry (and every alias) is a unary lambda `{ |args| … }`, applied to the command's
+argument list; a catch-all is a binary lambda `{ |name args| … }`, applied to the
+name and the argument list. Dispatch invokes the matched entry under the
+convention its install site demands rather than inspecting the stored value; a
+bare block, a non-lambda, or a wrong-arity lambda is rejected at install time
+(`docs/SPEC.md` §3.2), so no malformed entry ever reaches lookup.
 
 **Self-masking is a strip-and-restore of one frame.** For the dynamic extent of
 the matched handler's body, `strip_matched(depth)` lifts *only that frame* off the

@@ -8,9 +8,16 @@ ral takes the smallest on both: a restricted, continuation-free fragment.
 
 ral installs effect handlers over a dynamic frame stack with
 `within [handlers: [name: handler], handler: fallback] { body }`. A handler maps
-an operation name to a block; the catch-all `handler:` applies when no per-name
+an operation name to a lambda; the catch-all `handler:` applies when no per-name
 entry matches. Handlers intercept **external commands only** — lexical bindings,
 builtins, and the prelude are not shell aliases and cannot be overridden.
+
+A per-name handler (and every alias) must be a **unary lambda** `{ |args| … }`,
+applied to the intercepted command's argument list; the catch-all must be a
+**binary lambda** `{ |name args| … }`, applied to the command's name and its
+argument list. The calling convention is fixed by the surface position, not the
+value's runtime shape: a bare block `{ … }`, a non-lambda value, or a lambda of
+the wrong arity is rejected at install time.
 
 ral's handlers are the **tail-resumptive fragment** of algebraic-effect handlers,
 along three axes — the first two recorded in
