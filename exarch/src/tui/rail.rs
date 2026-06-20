@@ -48,7 +48,7 @@ impl RailKind {
             RailKind::Markdown => "·",
             RailKind::Subagent => "↘",
             RailKind::Step => "━",
-            RailKind::Error => "✗",
+            RailKind::Error => "╳",
             RailKind::Generic => "❖",
         }
     }

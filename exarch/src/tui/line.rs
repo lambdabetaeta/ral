@@ -80,7 +80,7 @@ pub(super) fn is_blank(l: &Line<'_>) -> bool {
 /// [`plain`] drops a leading span whose content matches one of these so
 /// copied text carries the content, not the chrome glyph; [`super::block::wrap_line`]
 /// reuses the set to detect a rail-led row and indent its continuations.
-pub(super) const RAIL_GLYPHS: [&str; 8] = ["▎ ", "▸ ", "▽ ", "· ", "↘ ", "━ ", "✗ ", RAIL];
+pub(super) const RAIL_GLYPHS: [&str; 8] = ["▎ ", "▸ ", "▽ ", "· ", "↘ ", "━ ", "╳ ", RAIL];
 
 /// One scrollback line as the plain text a reader would copy: span
 /// contents joined, with a leading rail glyph dropped.
@@ -439,7 +439,7 @@ pub(super) fn subagent_header(
     vec![Line::default(), Line::from(spans)]
 }
 
-/// Error line: the `✗` shape lives in the lifted rail (Error shape); the
+/// Error line: the `╳` shape lives in the lifted rail (Error shape); the
 /// content is a bold red `error <msg>`.
 pub(super) fn error(msg: &str) -> Vec<Line<'static>> {
     vec![
@@ -937,7 +937,7 @@ const WAIT_KEYS: &[&str] = &[
 
 /// Render a [`ProviderErrorRecord`] as a structured multi-line block.
 ///
-/// Header: blank line + bold-red `error: <kind>` (the `✗` shape lives in
+/// Header: blank line + bold-red `error: <kind>` (the `╳` shape lives in
 /// the lifted rail, Error shape).  Body: an ordered field list rendered
 /// into one shared, slate-bold label column with a single aligned value
 /// column — JSON syntax stripped, null fields dropped.  When a parsed

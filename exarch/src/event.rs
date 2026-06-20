@@ -214,7 +214,7 @@ pub enum SessionEvent {
         after_bytes: usize,
         summary: String,
     },
-    /// User-facing error diagnostic — surfaced as a red `✗ error` block
+    /// User-facing error diagnostic — surfaced as a red `╳ error` block
     /// in the rendered log.  Not visible to the model: errors are about
     /// the orchestration, not the conversation.
     Error { text: String },

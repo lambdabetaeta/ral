@@ -36,7 +36,7 @@ pub(super) struct AgentSlot(pub u8);
 pub(super) enum RailShape {
     /// A step boundary — renders the `━` rail marker.
     Step,
-    /// An error — renders `✗`.
+    /// An error — renders `╳`.
     Error,
     /// Ambient chrome outside the transcript proper — no marginal rail.
     Plain,
