@@ -521,7 +521,7 @@ impl Block {
     /// The rail shape this block wears.  Chrome lifts its [`RailShape`]
     /// discriminant; patches, tool calls, and markdown derive theirs from
     /// the variant.  Plain chrome is ambient frame text and carries no
-    /// rail.  A tool call's disclosure triangle tracks the level: `▾` once
+    /// rail.  A tool call's disclosure triangle tracks the level: `▽` once
     /// it reveals context (L2+), `▸` while reduced.
     fn rail_kind(&self, level: u8) -> Option<RailKind> {
         match &self.kind {
@@ -591,45 +591,50 @@ fn shrink_leading_ws(line: &mut Line<'static>, n: usize) {
 /// lay content out within [`READ_W`], so on a terminal at least that wide
 /// this hands the line straight back; it only folds on a narrower one.
 ///
-/// When the line is rail-led — its first span is one of the [`RAIL_GLYPHS`]
-/// the rail prepends ([`Block::render_with`]) — continuations re-indent to
-/// the body column (the rail's [`RAIL_W`] width) so a wrapped prompt echo
-/// or io surface reads as a paragraph under its head rather than sliding
-/// back beneath the rail.  A rail-less line (a [`RailShape::Plain`] banner)
-/// indents to `0` and wraps flush.  The greedy placement breaks between
-/// words, dropping the inter-word gap at the break; a single word wider
-/// than the body column is hard-broken char-by-char.
+/// Continuations re-indent to the line's leading indentation — an optional
+/// [`RAIL_GLYPHS`] rail glyph (prepended by [`Block::render_with`]) plus any
+/// leading whitespace the builders inset content with — so a wrapped prompt
+/// echo, code row, or io effect folds under its own indent rather than
+/// sliding back to column zero.  A line with no leading indent wraps flush at
+/// `0`.  The greedy placement breaks between words, dropping the inter-word
+/// gap at the break; a single word wider than the body column is hard-broken
+/// char-by-char.
 pub(super) fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
     if width == 0 || line.width() <= width {
         return vec![line.clone()];
     }
-    // A rail glyph leads the row when its first span is one of the glyphs
-    // the rail prepends.  Continuations re-indent to the body column (the
-    // glyph's display width); the glyph span itself is carried verbatim onto
-    // row 0 so the copy contract still recognises and strips it intact.
-    let rail_led = line
-        .spans
+    // The hang column is the line's leading indentation: an optional rail
+    // glyph (the first span, when it is one the rail prepends) followed by any
+    // whitespace-only spans the builders inset with.  Carrying the indent into
+    // the head — rather than leaving it in the body — is what keeps it on a
+    // wrapped row 0: the body's leading whitespace would otherwise be dropped
+    // as a row-leading gap.  The head spans ride row 0 verbatim (so the copy
+    // contract still strips a leading rail glyph), and continuations re-indent
+    // to their summed width.
+    let spans = line.spans.as_slice();
+    let rail = spans
         .first()
-        .is_some_and(|s| RAIL_GLYPHS.contains(&s.content.as_ref()));
-    let (head, body) = match rail_led {
-        true => {
-            let (h, b) = line.spans.split_first().expect("first span exists");
-            (Some(h), b)
-        }
-        false => (None, line.spans.as_slice()),
-    };
-    let indent: usize = head.map_or(0, |h| {
-        h.content
-            .chars()
-            .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
-            .sum()
-    });
+        .is_some_and(|s| RAIL_GLYPHS.contains(&s.content.as_ref())) as usize;
+    let mut head_len = rail;
+    while spans
+        .get(head_len)
+        .is_some_and(|s| !s.content.is_empty() && s.content.chars().all(|c| c == ' '))
+    {
+        head_len += 1;
+    }
+    let head = &spans[..head_len];
+    let body = &spans[head_len..];
+    let indent: usize = head
+        .iter()
+        .flat_map(|s| s.content.chars())
+        .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+        .sum();
 
     let mut rows: Vec<Line<'static>> = Vec::new();
-    // Row 0 opens carrying the rail glyph verbatim (occupying columns
-    // `0..indent`) when rail-led, else empty; continuation rows are seeded
-    // with the indent.
-    let mut row: Vec<Span<'static>> = head.map(|h| vec![h.clone()]).unwrap_or_default();
+    // Row 0 opens carrying the head spans verbatim (the rail glyph and indent,
+    // occupying columns `0..indent`); continuation rows are seeded with the
+    // indent.
+    let mut row: Vec<Span<'static>> = head.to_vec();
     let mut col = indent;
     // Whether a word has landed on the current row's body.  A pending gap
     // before the first body word of a row is leading whitespace and is
@@ -707,6 +712,66 @@ fn push_char(row: &mut Vec<Span<'static>>, ch: char, style: Style) {
     match row.last_mut() {
         Some(last) if last.style == style => last.content.to_mut().push(ch),
         _ => row.push(Span::styled(ch.to_string(), style)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plain(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    fn indent_of(s: &str) -> usize {
+        s.len() - s.trim_start().len()
+    }
+
+    /// A wrapped, indented, rail-less line (a source or io-effect row) keeps
+    /// its indent on row 0 and hangs every continuation under it — the leading
+    /// whitespace is the hang column, not a row-leading gap to drop.
+    #[test]
+    fn wrap_hangs_indented_line_under_its_indent() {
+        let line = Line::from(vec![
+            Span::raw("    "),
+            Span::raw("let paper_candidates = filter re-match candidates over the files"),
+        ]);
+        let rows = wrap_line(&line, 24);
+        assert!(rows.len() > 1, "expected a fold at width 24");
+        for row in &rows {
+            assert_eq!(indent_of(&plain(row)), 4, "row lost its indent: {:?}", plain(row));
+        }
+    }
+
+    /// A rail-led line still hangs continuations two columns under the glyph,
+    /// and the colour-styled glyph rides row 0 as its own span — what the copy
+    /// contract ([`plain`]) keys off to strip the chrome.
+    #[test]
+    fn wrap_hangs_rail_led_line_under_the_glyph() {
+        let rail = Span::styled("▸ ", Style::default().fg(ratatui::style::Color::Cyan));
+        let line = Line::from(vec![
+            rail,
+            Span::raw("alpha beta gamma delta epsilon zeta eta theta iota"),
+        ]);
+        let rows = wrap_line(&line, 20);
+        assert!(rows.len() > 1);
+        assert!(RAIL_GLYPHS.contains(&rows[0].spans[0].content.as_ref()));
+        for row in &rows[1..] {
+            let text = plain(row);
+            assert_eq!(indent_of(&text), 2);
+            assert!(!text.starts_with('▸'));
+        }
+    }
+
+    /// A flush, unindented line wraps back to column zero — no spurious indent.
+    #[test]
+    fn wrap_keeps_flush_line_flush() {
+        let line = Line::from(Span::raw("one two three four five six seven eight nine ten"));
+        let rows = wrap_line(&line, 16);
+        assert!(rows.len() > 1);
+        for row in &rows {
+            assert_eq!(indent_of(&plain(row)), 0);
+        }
     }
 }
 

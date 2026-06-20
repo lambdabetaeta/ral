@@ -529,7 +529,7 @@ impl Viewport {
             let (anchor, lines) = if self.blocks[i].observation() {
                 let end = self.observation_run_end(i);
                 let anchor = self.group_anchor(i, end);
-                let segment = (anchor, self.render_group(i, end, anchor));
+                let segment = (anchor, self.render_group(i, end, anchor, content_w));
                 i = end;
                 segment
             } else {
@@ -596,10 +596,10 @@ impl Viewport {
     /// disclosure triangle, the agent hue, the run's aggregate magnitude —
     /// to the first content row.  The level lives on the run's `anchor` call
     /// ([`Self::group_anchor`]); a run is opened by a call, so it has one.
-    fn render_group(&self, start: usize, end: usize, anchor: usize) -> Vec<Line<'static>> {
+    fn render_group(&self, start: usize, end: usize, anchor: usize, width: u16) -> Vec<Line<'static>> {
         let level = self.blocks[anchor].level().max(1);
         let calls = self.group_calls(start, end);
-        let mut lines = group::body(&calls, level);
+        let mut lines = group::body(&calls, level, width as usize);
         let open = level >= 2;
         let magnitude = group::aggregate_magnitude(&calls);
         let rail = rail::span(RailKind::ToolCall(open), self.agent, magnitude);

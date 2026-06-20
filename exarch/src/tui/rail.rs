@@ -43,7 +43,7 @@ impl RailKind {
     fn glyph(self) -> &'static str {
         match self {
             RailKind::Patch => "▎",
-            RailKind::ToolCall(true) => "▾",
+            RailKind::ToolCall(true) => "▽",
             RailKind::ToolCall(false) => "▸",
             RailKind::Markdown => "·",
             RailKind::Subagent => "↘",

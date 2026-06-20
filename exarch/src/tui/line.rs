@@ -80,7 +80,7 @@ pub(super) fn is_blank(l: &Line<'_>) -> bool {
 /// [`plain`] drops a leading span whose content matches one of these so
 /// copied text carries the content, not the chrome glyph; [`super::block::wrap_line`]
 /// reuses the set to detect a rail-led row and indent its continuations.
-pub(super) const RAIL_GLYPHS: [&str; 8] = ["▎ ", "▸ ", "▾ ", "· ", "↘ ", "━ ", "✗ ", RAIL];
+pub(super) const RAIL_GLYPHS: [&str; 8] = ["▎ ", "▸ ", "▽ ", "· ", "↘ ", "━ ", "✗ ", RAIL];
 
 /// One scrollback line as the plain text a reader would copy: span
 /// contents joined, with a leading rail glyph dropped.
@@ -248,7 +248,7 @@ pub(super) fn queued_prompt(
 }
 
 /// Tool-call header rows: the slate tool name then the white one-line
-/// `label`. The disclosure triangle (`▸`/`▾`) lives in the lifted rail,
+/// `label`. The disclosure triangle (`▸`/`▽`) lives in the lifted rail,
 /// prepended by [`super::block::Block::render`], not here — so this
 /// builder is rail-less. Long labels wrap under the label's own first
 /// column (rail width + tool prefix), so the rail + tool prefix stays
@@ -304,7 +304,7 @@ pub(super) fn tool_call_collapsed(
     ls
 }
 
-/// Expanded tool call (L3): the `▾` header followed by the full ral `cmd`.
+/// Expanded tool call (L3): the `▽` header followed by the full ral `cmd`.
 /// Both the header comment and source body wrap before the viewport edge:
 /// header continuations align under the comment, and source continuations
 /// align under the line's own opening indentation.
@@ -844,7 +844,7 @@ pub(super) fn bold(c: String, col: Color) -> Span<'static> {
 /// an empty input wraps to a single empty chunk — so a blank value still
 /// renders its marker faithfully via `row("", true)`.  This is the one
 /// wrap-and-emit discipline every chrome builder in this module shares.
-fn push_wrapped(
+pub(super) fn push_wrapped(
     out: &mut Vec<Line<'static>>,
     text: &str,
     body_w: usize,
