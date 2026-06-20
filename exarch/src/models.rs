@@ -13,7 +13,7 @@
 //! in-memory fake and never touches the network.
 
 use crate::credential::{Credential, CredentialStore};
-use crate::provider::ProviderKind;
+use crate::provider::{ProviderId, ProviderKind};
 use genai::Client;
 use genai::resolver::{AuthData, Endpoint, ProviderConfig};
 use serde::{Deserialize, Serialize};
@@ -30,10 +30,10 @@ const TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// implementation talks to genai; tests substitute an in-memory fake so no
 /// suite ever reaches the network.
 pub trait ModelSource {
-    /// Fetch the full model-name list for `kind`, or an error message
+    /// Fetch the full model-name list for `id`, or an error message
     /// describing why the fetch failed (the caller degrades to manual
     /// entry).
-    fn list(&self, kind: ProviderKind) -> Result<Vec<String>, String>;
+    fn list(&self, id: &ProviderId) -> Result<Vec<String>, String>;
 }
 
 /// The live source: builds a genai client per provider from the in-memory
@@ -52,7 +52,7 @@ pub struct LiveSource {
     /// login carries no listable key — its Codex backend exposes no catalog —
     /// so that provider is absent here and the picker falls back to manual
     /// entry.
-    keys: BTreeMap<ProviderKind, String>,
+    keys: BTreeMap<ProviderId, String>,
     /// One genai client, reused across every provider's listing call — the
     /// per-provider endpoint and key ride the per-call `ProviderConfig`.
     client: Client,
@@ -63,8 +63,8 @@ impl LiveSource {
         let keys = store
             .available()
             .into_iter()
-            .filter_map(|k| match store.get(k) {
-                Some(Credential::ApiKey(key)) => Some((k, key.clone())),
+            .filter_map(|id| match store.get(&id) {
+                Some(Credential::ApiKey(key)) => Some((id, key.clone())),
                 _ => None,
             })
             .collect();
@@ -76,18 +76,19 @@ impl LiveSource {
 }
 
 impl ModelSource for LiveSource {
-    fn list(&self, kind: ProviderKind) -> Result<Vec<String>, String> {
+    fn list(&self, id: &ProviderId) -> Result<Vec<String>, String> {
         let key = self
             .keys
-            .get(&kind)
-            .ok_or_else(|| format!("{} has no resolved credential", kind.info().0))?;
+            .get(id)
+            .ok_or_else(|| format!("{} has no resolved credential", id.label()))?;
         // Pass the provider's endpoint (when it has a custom one) and the
         // in-memory key explicitly, so listing does not depend on the
         // client's auth resolver being consulted for a catalog request. The
-        // endpoint comes from `ProviderKind` — the single source — so this
-        // does not restate provider knowledge.
+        // endpoint comes from the `ProviderId` — the single source — so this
+        // does not restate provider knowledge. A custom provider lists through
+        // its declared endpoint and adapter exactly as a famous one does.
         let provider_config = ProviderConfig {
-            endpoint: kind.endpoint().map(Endpoint::from_static),
+            endpoint: id.endpoint().map(Endpoint::from_owned),
             auth: Some(AuthData::from_single(key.clone())),
         };
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -97,9 +98,9 @@ impl ModelSource for LiveSource {
         runtime
             .block_on(
                 self.client
-                    .all_model_names(kind.default_adapter(), provider_config),
+                    .all_model_names(id.default_adapter(), provider_config),
             )
-            .map_err(|e| format!("list models for {}: {e}", kind.info().0))
+            .map_err(|e| format!("list models for {}: {e}", id.label()))
     }
 }
 
@@ -129,7 +130,7 @@ pub struct ModelCatalog<S: ModelSource> {
     /// `None` disables the disk cache (tests); `Some` is the JSON cache
     /// file path under `$XDG_CACHE_HOME/exarch/models.json`.
     cache_path: Option<PathBuf>,
-    memo: BTreeMap<ProviderKind, Vec<String>>,
+    memo: BTreeMap<ProviderId, Vec<String>>,
 }
 
 impl<S: ModelSource> ModelCatalog<S> {
@@ -154,33 +155,33 @@ impl<S: ModelSource> ModelCatalog<S> {
         }
     }
 
-    /// `kind`'s model list. Served from the in-memory memo, then a fresh
+    /// `id`'s model list. Served from the in-memory memo, then a fresh
     /// disk-cache entry, then a live fetch (which refreshes both caches).
     /// `None` when the fetch fails — callers degrade to manual entry.
-    pub fn list(&mut self, kind: ProviderKind) -> Option<Vec<String>> {
-        if let Some(models) = self.memo.get(&kind) {
+    pub fn list(&mut self, id: &ProviderId) -> Option<Vec<String>> {
+        if let Some(models) = self.memo.get(id) {
             return Some(models.clone());
         }
-        if let Some(models) = self.fresh_from_disk(kind) {
-            self.memo.insert(kind, models.clone());
+        if let Some(models) = self.fresh_from_disk(id) {
+            self.memo.insert(id.clone(), models.clone());
             return Some(models);
         }
-        let models = self.source.list(kind).ok()?;
-        self.write_disk(kind, &models);
-        self.memo.insert(kind, models.clone());
+        let models = self.source.list(id).ok()?;
+        self.write_disk(id, &models);
+        self.memo.insert(id.clone(), models.clone());
         Some(models)
     }
 
-    /// `kind`'s list if it is already cached (in-memory memo or a fresh
+    /// `id`'s list if it is already cached (in-memory memo or a fresh
     /// disk entry), without ever fetching. The picker calls this on open to
     /// fill instantly from cache and spawns a background fetch only for the
     /// providers this returns `None` for.
-    pub fn cached(&mut self, kind: ProviderKind) -> Option<Vec<String>> {
-        if let Some(models) = self.memo.get(&kind) {
+    pub fn cached(&mut self, id: &ProviderId) -> Option<Vec<String>> {
+        if let Some(models) = self.memo.get(id) {
             return Some(models.clone());
         }
-        let models = self.fresh_from_disk(kind)?;
-        self.memo.insert(kind, models.clone());
+        let models = self.fresh_from_disk(id)?;
+        self.memo.insert(id.clone(), models.clone());
         Some(models)
     }
 
@@ -188,9 +189,9 @@ impl<S: ModelSource> ModelCatalog<S> {
     /// background threads (so the UI shows "loading…" rather than freezing)
     /// and hands the results back here, on the main thread, so the disk
     /// write stays single-threaded.
-    pub fn record(&mut self, kind: ProviderKind, models: Vec<String>) {
-        self.write_disk(kind, &models);
-        self.memo.insert(kind, models);
+    pub fn record(&mut self, id: &ProviderId, models: Vec<String>) {
+        self.write_disk(id, &models);
+        self.memo.insert(id.clone(), models);
     }
 
     /// The source, cloned, for a background fetch thread. The thread fetches
@@ -200,12 +201,12 @@ impl<S: ModelSource> ModelCatalog<S> {
         &self.source
     }
 
-    /// A non-stale disk-cache entry for `kind`, or `None` when the cache is
+    /// A non-stale disk-cache entry for `id`, or `None` when the cache is
     /// absent, unreadable, missing this provider, or stale.
-    fn fresh_from_disk(&self, kind: ProviderKind) -> Option<Vec<String>> {
+    fn fresh_from_disk(&self, id: &ProviderId) -> Option<Vec<String>> {
         let path = self.cache_path.as_ref()?;
         let file = read_cache(path)?;
-        let entry = file.providers.get(kind.info().0)?;
+        let entry = file.providers.get(id.label())?;
         let age = crate::bootstrap::now_secs().saturating_sub(entry.fetched_at);
         (age < TTL.as_secs()).then(|| entry.models.clone())
     }
@@ -217,13 +218,13 @@ impl<S: ModelSource> ModelCatalog<S> {
         clippy::disallowed_methods,
         reason = "[io-door:silent:models-cache-write] persists the model catalog cache; registry infra, not turn-time data I/O"
     )]
-    fn write_disk(&self, kind: ProviderKind, models: &[String]) {
+    fn write_disk(&self, id: &ProviderId, models: &[String]) {
         let Some(path) = self.cache_path.as_ref() else {
             return;
         };
         let mut file = read_cache(path).unwrap_or_default();
         file.providers.insert(
-            kind.info().0.to_string(),
+            id.label().to_string(),
             CacheEntry {
                 fetched_at: crate::bootstrap::now_secs(),
                 models: models.to_vec(),
@@ -266,19 +267,19 @@ fn read_cache(path: &PathBuf) -> Option<CacheFile> {
 /// never on the common path.
 pub fn resolve_model_provider<S: ModelSource>(
     name: &str,
-    available: &[ProviderKind],
+    available: &[ProviderId],
     catalog: &mut ModelCatalog<S>,
-) -> Result<ProviderKind, String> {
+) -> Result<ProviderId, String> {
     if available.is_empty() {
         return Err(
             "no provider available — set a provider API key (e.g. ANTHROPIC_API_KEY)".into(),
         );
     }
-    for &kind in available {
-        if let Some(models) = catalog.list(kind)
+    for id in available {
+        if let Some(models) = catalog.list(id)
             && models.iter().any(|m| m == name)
         {
-            return Ok(kind);
+            return Ok(id.clone());
         }
     }
     // No listed match — fall back to the name's shape. A `vendor/model`
@@ -286,19 +287,21 @@ pub fn resolve_model_provider<S: ModelSource>(
     // available provider when there is exactly one, so a scripted run with
     // one key set need not name the provider.
     if name.contains('/')
-        && let Some(&kind) = available.iter().find(|&&k| k == ProviderKind::Openrouter)
+        && let Some(id) = available
+            .iter()
+            .find(|id| id.famous() == Some(ProviderKind::Openrouter))
     {
-        return Ok(kind);
+        return Ok(id.clone());
     }
     if let [only] = available {
-        return Ok(*only);
+        return Ok(only.clone());
     }
     Err(format!(
         "model '{name}' is not listed by any available provider ({}); \
          pass a model that one of them serves",
         available
             .iter()
-            .map(|k| k.info().0)
+            .map(|id| id.label())
             .collect::<Vec<_>>()
             .join(", ")
     ))
@@ -307,17 +310,35 @@ pub fn resolve_model_provider<S: ModelSource>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use genai::adapter::AdapterKind;
     use std::cell::Cell;
+    use std::sync::Arc;
+
+    /// A famous provider's id — the common case in these tests.
+    fn fam(kind: ProviderKind) -> ProviderId {
+        ProviderId::Famous(kind)
+    }
+
+    /// A custom provider's id with `label`; the other facts are immaterial to
+    /// the catalog/resolver (they key on the label).
+    fn custom(label: &str) -> ProviderId {
+        ProviderId::Custom(Arc::new(crate::provider::CustomProvider {
+            label: label.into(),
+            key_env: format!("{}_KEY", label.to_uppercase()),
+            endpoint: format!("https://{label}.example/v1/"),
+            adapter: AdapterKind::OpenAI,
+        }))
+    }
 
     /// A fake source returning canned lists and counting fetches, so tests
     /// can assert the memo and TTL prevent redundant network calls.
     struct FakeSource {
-        lists: BTreeMap<ProviderKind, Result<Vec<String>, String>>,
+        lists: BTreeMap<ProviderId, Result<Vec<String>, String>>,
         calls: Cell<usize>,
     }
 
     impl FakeSource {
-        fn new(lists: BTreeMap<ProviderKind, Result<Vec<String>, String>>) -> Self {
+        fn new(lists: BTreeMap<ProviderId, Result<Vec<String>, String>>) -> Self {
             Self {
                 lists,
                 calls: Cell::new(0),
@@ -326,21 +347,18 @@ mod tests {
     }
 
     impl ModelSource for FakeSource {
-        fn list(&self, kind: ProviderKind) -> Result<Vec<String>, String> {
+        fn list(&self, id: &ProviderId) -> Result<Vec<String>, String> {
             self.calls.set(self.calls.get() + 1);
             self.lists
-                .get(&kind)
+                .get(id)
                 .cloned()
                 .unwrap_or_else(|| Err("no fake list".into()))
         }
     }
 
-    fn one(
-        kind: ProviderKind,
-        models: &[&str],
-    ) -> BTreeMap<ProviderKind, Result<Vec<String>, String>> {
+    fn one(id: ProviderId, models: &[&str]) -> BTreeMap<ProviderId, Result<Vec<String>, String>> {
         let mut m = BTreeMap::new();
-        m.insert(kind, Ok(models.iter().map(|s| s.to_string()).collect()));
+        m.insert(id, Ok(models.iter().map(|s| s.to_string()).collect()));
         m
     }
 
@@ -349,19 +367,32 @@ mod tests {
     #[test]
     fn lists_then_memoises() {
         let source = FakeSource::new(one(
-            ProviderKind::Anthropic,
+            fam(ProviderKind::Anthropic),
             &["claude-opus-4", "claude-haiku-4"],
         ));
         let mut cat = ModelCatalog::in_memory(source);
-        match cat.list(ProviderKind::Anthropic) {
+        match cat.list(&fam(ProviderKind::Anthropic)) {
             Some(m) => assert_eq!(m, vec!["claude-opus-4", "claude-haiku-4"]),
             None => panic!("expected a list"),
         }
-        let _ = cat.list(ProviderKind::Anthropic);
+        let _ = cat.list(&fam(ProviderKind::Anthropic));
         assert_eq!(
             cat.source.calls.get(),
             1,
             "memo must prevent a second fetch"
+        );
+    }
+
+    /// A custom provider lists through the same catalog/source seam as a
+    /// famous one, keyed by its label.
+    #[test]
+    fn custom_provider_lists_through_catalog() {
+        let id = custom("local-llama");
+        let source = FakeSource::new(one(id.clone(), &["llama-3", "llama-3-instruct"]));
+        let mut cat = ModelCatalog::in_memory(source);
+        assert_eq!(
+            cat.list(&id),
+            Some(vec!["llama-3".to_string(), "llama-3-instruct".to_string()])
         );
     }
 
@@ -371,12 +402,12 @@ mod tests {
     #[test]
     fn failed_fetch_is_none_with_reason_at_the_source() {
         let mut lists = BTreeMap::new();
-        lists.insert(ProviderKind::Deepseek, Err("network down".to_string()));
+        lists.insert(fam(ProviderKind::Deepseek), Err("network down".to_string()));
         let mut cat = ModelCatalog::in_memory(FakeSource::new(lists));
-        assert!(cat.list(ProviderKind::Deepseek).is_none());
+        assert!(cat.list(&fam(ProviderKind::Deepseek)).is_none());
         assert!(
             cat.source()
-                .list(ProviderKind::Deepseek)
+                .list(&fam(ProviderKind::Deepseek))
                 .unwrap_err()
                 .contains("network down")
         );
@@ -386,13 +417,29 @@ mod tests {
     #[test]
     fn resolve_prefers_listing_match() {
         let mut lists = BTreeMap::new();
-        lists.insert(ProviderKind::Anthropic, Ok(vec!["claude-opus-4".into()]));
-        lists.insert(ProviderKind::Deepseek, Ok(vec!["deepseek-chat".into()]));
+        lists.insert(fam(ProviderKind::Anthropic), Ok(vec!["claude-opus-4".into()]));
+        lists.insert(fam(ProviderKind::Deepseek), Ok(vec!["deepseek-chat".into()]));
         let mut cat = ModelCatalog::in_memory(FakeSource::new(lists));
-        let available = [ProviderKind::Anthropic, ProviderKind::Deepseek];
+        let available = [fam(ProviderKind::Anthropic), fam(ProviderKind::Deepseek)];
         assert_eq!(
             resolve_model_provider("deepseek-chat", &available, &mut cat).unwrap(),
-            ProviderKind::Deepseek
+            fam(ProviderKind::Deepseek)
+        );
+    }
+
+    /// `--model` resolves to a custom provider whose live list contains the
+    /// name, exactly as it does for a famous one.
+    #[test]
+    fn resolve_prefers_custom_listing_match() {
+        let llama = custom("local-llama");
+        let mut lists = BTreeMap::new();
+        lists.insert(fam(ProviderKind::Anthropic), Ok(vec!["claude-opus-4".into()]));
+        lists.insert(llama.clone(), Ok(vec!["llama-3".into()]));
+        let mut cat = ModelCatalog::in_memory(FakeSource::new(lists));
+        let available = [fam(ProviderKind::Anthropic), llama.clone()];
+        assert_eq!(
+            resolve_model_provider("llama-3", &available, &mut cat).unwrap(),
+            llama
         );
     }
 
@@ -400,10 +447,10 @@ mod tests {
     #[test]
     fn resolve_slug_falls_back_to_openrouter() {
         let mut cat = ModelCatalog::in_memory(FakeSource::new(BTreeMap::new()));
-        let available = [ProviderKind::Anthropic, ProviderKind::Openrouter];
+        let available = [fam(ProviderKind::Anthropic), fam(ProviderKind::Openrouter)];
         assert_eq!(
             resolve_model_provider("x-ai/grok-9", &available, &mut cat).unwrap(),
-            ProviderKind::Openrouter
+            fam(ProviderKind::Openrouter)
         );
     }
 
@@ -412,10 +459,10 @@ mod tests {
     #[test]
     fn resolve_bare_name_to_sole_provider() {
         let mut cat = ModelCatalog::in_memory(FakeSource::new(BTreeMap::new()));
-        let available = [ProviderKind::Anthropic];
+        let available = [fam(ProviderKind::Anthropic)];
         assert_eq!(
             resolve_model_provider("claude-future", &available, &mut cat).unwrap(),
-            ProviderKind::Anthropic
+            fam(ProviderKind::Anthropic)
         );
     }
 
@@ -424,7 +471,7 @@ mod tests {
     #[test]
     fn resolve_unknown_with_many_providers_errors() {
         let mut cat = ModelCatalog::in_memory(FakeSource::new(BTreeMap::new()));
-        let available = [ProviderKind::Anthropic, ProviderKind::Deepseek];
+        let available = [fam(ProviderKind::Anthropic), fam(ProviderKind::Deepseek)];
         let err = resolve_model_provider("mystery", &available, &mut cat).unwrap_err();
         assert!(err.contains("not listed"), "got: {err}");
     }

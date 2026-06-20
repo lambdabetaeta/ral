@@ -1972,7 +1972,7 @@ enum Slash {
 
 /// Channel carrying `(provider, fetched models or failure)` from the
 /// per-provider background fetch threads back to the picker loop.
-type FetchRx = std::sync::mpsc::Receiver<(provider::ProviderKind, Result<Vec<String>, String>)>;
+type FetchRx = std::sync::mpsc::Receiver<(provider::ProviderId, Result<Vec<String>, String>)>;
 
 struct Repl<'a> {
     tui: Tui,
@@ -2240,8 +2240,8 @@ impl Repl<'_> {
         let available = self.store.available();
         let subscription = available
             .iter()
-            .copied()
-            .filter(|&k| self.store.get(k).is_some_and(|c| c.is_subscription()))
+            .filter(|id| self.store.get(id).is_some_and(|c| c.is_subscription()))
+            .cloned()
             .collect();
         let mut picker = Picker::new(available, subscription);
         // Seed each provider from the catalog's cache instantly; spawn a
@@ -2253,18 +2253,18 @@ impl Repl<'_> {
         let to_fetch: Vec<_> = picker
             .loading_providers()
             .into_iter()
-            .filter(|&k| {
-                if self.store.get(k).is_some_and(|c| c.is_subscription()) {
+            .filter(|id| {
+                if self.store.get(id).is_some_and(|c| c.is_subscription()) {
                     let models = crate::oauth::PLAN_MODELS
                         .iter()
                         .map(|s| s.to_string())
                         .collect();
-                    picker.set_models(k, picker::ModelsState::Loaded(models));
+                    picker.set_models(id, picker::ModelsState::Loaded(models));
                     return false;
                 }
-                match self.catalog.cached(k) {
+                match self.catalog.cached(id) {
                     Some(models) => {
-                        picker.set_models(k, picker::ModelsState::Loaded(models));
+                        picker.set_models(id, picker::ModelsState::Loaded(models));
                         false
                     }
                     None => true,
@@ -2273,12 +2273,12 @@ impl Repl<'_> {
             .collect();
         if !to_fetch.is_empty() {
             let (tx, recv) = std::sync::mpsc::channel();
-            for kind in to_fetch {
+            for id in to_fetch {
                 let source = self.catalog.source().clone();
                 let tx = tx.clone();
                 std::thread::spawn(move || {
-                    let result = source.list(kind);
-                    let _ = tx.send((kind, result));
+                    let result = source.list(&id);
+                    let _ = tx.send((id, result));
                 });
             }
             rx = Some(recv);
@@ -2286,29 +2286,29 @@ impl Repl<'_> {
         self.tui.app.picker = Some(picker);
         let outcome = self.drive_picker(rx);
         self.tui.app.picker = None;
-        if let Some((kind, model)) = outcome {
-            self.apply_model_switch(kind, model);
+        if let Some((id, model)) = outcome {
+            self.apply_model_switch(id, model);
         }
     }
 
     /// Poll keys and background-fetch results until the picker resolves.
     /// Returns the chosen `(provider, model)`, or `None` on cancel.
-    fn drive_picker(&mut self, rx: Option<FetchRx>) -> Option<(provider::ProviderKind, String)> {
+    fn drive_picker(&mut self, rx: Option<FetchRx>) -> Option<(provider::ProviderId, String)> {
         loop {
             // Fold any landed fetch results into the picker (and the
             // catalog's caches), on this thread, so the disk write stays
             // single-threaded.
             if let Some(rx) = &rx {
-                while let Ok((kind, result)) = rx.try_recv() {
+                while let Ok((id, result)) = rx.try_recv() {
                     let state = match result {
                         Ok(models) => {
-                            self.catalog.record(kind, models.clone());
+                            self.catalog.record(&id, models.clone());
                             picker::ModelsState::Loaded(models)
                         }
                         Err(reason) => picker::ModelsState::Failed(reason),
                     };
                     if let Some(p) = self.tui.app.picker_mut() {
-                        p.set_models(kind, state);
+                        p.set_models(&id, state);
                     }
                 }
             }
@@ -2331,11 +2331,11 @@ impl Repl<'_> {
             match action {
                 picker::PickAction::None => {}
                 picker::PickAction::Cancelled => return None,
-                picker::PickAction::Selected(kind, model) => return Some((kind, model)),
+                picker::PickAction::Selected(id, model) => return Some((id, model)),
                 picker::PickAction::Manual(query) => {
                     let available = self.store.available();
                     match crate::models::resolve_model_provider(&query, &available, self.catalog) {
-                        Ok(kind) => return Some((kind, query)),
+                        Ok(id) => return Some((id, query)),
                         Err(e) => self.note_error(self.session.id, e),
                     }
                 }
@@ -2347,18 +2347,22 @@ impl Repl<'_> {
     /// transcript, persist the selection to the project state dir, and
     /// update the live status bar. A persistence failure is noted but does
     /// not undo the in-memory switch.
-    fn apply_model_switch(&mut self, kind: provider::ProviderKind, model: String) {
+    fn apply_model_switch(&mut self, provider_id: provider::ProviderId, model: String) {
         let id = self.session.id;
-        let Some(cred) = self.store.get(kind).cloned() else {
-            self.note_error(id, format!("{} has no resolved credential", kind.info().0));
+        let Some(cred) = self.store.get(&provider_id).cloned() else {
+            self.note_error(
+                id,
+                format!("{} has no resolved credential", provider_id.label()),
+            );
             return;
         };
-        self.provider = Provider::build(kind, model.clone(), &cred, self.info.max_tokens_override);
-        let label = kind.info().0;
+        self.provider =
+            Provider::build(&provider_id, model.clone(), &cred, self.info.max_tokens_override);
+        let label = provider_id.label();
         let status_provider = crate::oauth::provider_label(self.provider.is_subscription(), label);
         self.tui.app.set_status_model(&status_provider, &model);
         let state_dir = crate::bootstrap::project_dir(self.info.cwd);
-        if let Err(e) = state::save(&state_dir, &state::State::new(kind, &model)) {
+        if let Err(e) = state::save(&state_dir, &state::State::new(&provider_id, &model)) {
             self.note_error(id, format!("could not persist selection: {e}"));
         }
         self.tui.handle(Event {

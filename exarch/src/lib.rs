@@ -13,6 +13,7 @@ pub mod bus;
 pub mod cancel;
 pub mod card;
 pub mod cli;
+pub mod config;
 pub mod credential;
 pub mod digest;
 pub mod event;
@@ -102,13 +103,18 @@ pub fn run() -> Result<(), String> {
     }
     let seed = cli::load_seed(c.prompt, c.file)?;
 
+    // Load the unusual-provider config (custom endpoints) from the trusted
+    // XDG config home, evaluated under a no-authority grant. Absent → none.
+    let custom = config::load()?;
+
     // Auto-discover providers and resolve their keys into the in-memory
-    // store, scrubbing every key var from the environment.
+    // store, scrubbing every key var from the environment. The custom
+    // providers join the famous ones in the same sweep.
     // SAFETY: startup is still single-threaded here — the tokio runtime
     // and the session's worker threads are created below — so no other
     // thread can race this env mutation. This is the only credential scrub;
     // every spawned child therefore inherits an environment free of keys.
-    let store = credential::CredentialStore::resolve_and_scrub();
+    let store = credential::CredentialStore::resolve_and_scrub(custom);
     let available = store.available();
     if available.is_empty() {
         return Err(
@@ -128,11 +134,11 @@ pub fn run() -> Result<(), String> {
     // the persisted selection (when its provider is available),
     // else the first available provider's default model.
     let mut catalog = models::ModelCatalog::new(models::LiveSource::new(&store));
-    let (kind, model) =
+    let (id, model) =
         resolve_initial_selection(c.model.as_deref(), &state_dir, &available, &mut catalog)?;
-    let label = kind.info().0;
+    let label = id.label();
     let cred = store
-        .get(kind)
+        .get(&id)
         .expect("selected provider must be available")
         .clone();
 
@@ -156,7 +162,7 @@ pub fn run() -> Result<(), String> {
     let system = prompt::assemble(&c.system_files, &caps, scratch.path(), c.headless)?;
     let system_size = system.len();
 
-    let provider = Provider::build(kind, model.clone(), &cred, c.max_tokens);
+    let provider = Provider::build(&id, model.clone(), &cred, c.max_tokens);
     let mut session = Session::root(
         system,
         caps,
@@ -206,22 +212,33 @@ pub fn run() -> Result<(), String> {
 /// else the first available provider's default model. The selection always
 /// names an *available* provider — a saved selection naming a provider whose
 /// key is no longer set falls through to the default rather than failing.
+///
+/// A custom provider has no built-in default model (its `config.ral` declares
+/// only the endpoint, key, and protocol), so when the default would fall to a
+/// custom provider with no saved selection and no `--model`, the user is
+/// asked to name a model — there is nothing to assume.
 fn resolve_initial_selection(
     model_override: Option<&str>,
     state_dir: &std::path::Path,
-    available: &[provider::ProviderKind],
+    available: &[provider::ProviderId],
     catalog: &mut models::ModelCatalog<models::LiveSource>,
-) -> Result<(provider::ProviderKind, String), String> {
+) -> Result<(provider::ProviderId, String), String> {
     if let Some(name) = model_override {
-        let kind = models::resolve_model_provider(name, available, catalog)?;
-        return Ok((kind, name.to_string()));
+        let id = models::resolve_model_provider(name, available, catalog)?;
+        return Ok((id, name.to_string()));
     }
     if let Some(saved) = state::load(state_dir)
-        && let Some(kind) = saved.provider_kind()
-        && available.contains(&kind)
+        && let Some(id) = saved.provider_id(available)
     {
-        return Ok((kind, saved.model));
+        return Ok((id, saved.model));
     }
-    let kind = available[0];
-    Ok((kind, kind.info().1.to_string()))
+    let id = available[0].clone();
+    match id.famous() {
+        Some(kind) => Ok((id, kind.info().1.to_string())),
+        None => Err(format!(
+            "custom provider '{}' has no default model — pass --model NAME \
+             (it will be remembered) or open the /model picker",
+            id.label()
+        )),
+    }
 }

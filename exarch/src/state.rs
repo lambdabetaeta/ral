@@ -13,8 +13,7 @@
 //! The format is JSON: this is state, not config-as-code, so a simple
 //! robust serialisation is right.
 
-use crate::provider::ProviderKind;
-use clap::ValueEnum;
+use crate::provider::ProviderId;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -28,7 +27,9 @@ const STATE_FILE: &str = "state.json";
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct State {
     /// The active provider, by its stable label
-    /// ([`ProviderKind::info`]`.0`) so the file is human-readable.
+    /// ([`ProviderId::label`]) so the file is human-readable. A famous
+    /// provider stores its `ProviderKind` label; a custom provider stores its
+    /// `config.ral` map key.
     pub provider: String,
     /// The active model name.
     pub model: String,
@@ -36,21 +37,23 @@ pub struct State {
 
 impl State {
     /// Build state from a resolved selection.
-    pub fn new(provider: ProviderKind, model: &str) -> Self {
+    pub fn new(provider: &ProviderId, model: &str) -> Self {
         Self {
-            provider: provider.info().0.to_string(),
+            provider: provider.label().to_string(),
             model: model.to_string(),
         }
     }
 
-    /// Resolve the stored provider label back to a [`ProviderKind`].
-    /// `None` when the label names no known provider (a hand-edited or
-    /// future-version file) — the caller then falls back to a default.
-    pub fn provider_kind(&self) -> Option<ProviderKind> {
-        ProviderKind::value_variants()
+    /// Resolve the stored provider label back to a live [`ProviderId`] among
+    /// the `available` providers. `None` when the label names no available
+    /// provider — a key no longer set, a custom provider no longer in
+    /// `config.ral`, or a hand-edited / future-version file — so the caller
+    /// falls back to a default.
+    pub fn provider_id(&self, available: &[ProviderId]) -> Option<ProviderId> {
+        available
             .iter()
-            .copied()
-            .find(|k| k.info().0 == self.provider)
+            .find(|id| id.label() == self.provider)
+            .cloned()
     }
 }
 
@@ -103,15 +106,45 @@ mod tests {
         dir
     }
 
+    /// A famous provider's id, for the round-trip tests.
+    fn fam(kind: crate::provider::ProviderKind) -> ProviderId {
+        ProviderId::Famous(kind)
+    }
+
     /// Save then load round-trips the exact selection.
     #[test]
     fn save_load_round_trip() {
+        use crate::provider::ProviderKind;
         let dir = tmp_dir();
-        let state = State::new(ProviderKind::Deepseek, "deepseek-reasoner");
+        let state = State::new(&fam(ProviderKind::Deepseek), "deepseek-reasoner");
         save(&dir, &state).unwrap();
         let loaded = load(&dir).expect("state should load");
         assert_eq!(loaded, state);
-        assert_eq!(loaded.provider_kind(), Some(ProviderKind::Deepseek));
+        let available = [fam(ProviderKind::Anthropic), fam(ProviderKind::Deepseek)];
+        assert_eq!(
+            loaded.provider_id(&available),
+            Some(fam(ProviderKind::Deepseek))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A custom provider's selection round-trips by label and resolves back
+    /// to the matching live `ProviderId`.
+    #[test]
+    fn custom_provider_round_trips_by_label() {
+        let dir = tmp_dir();
+        let custom = ProviderId::Custom(std::sync::Arc::new(crate::provider::CustomProvider {
+            label: "local-llama".into(),
+            key_env: "LOCAL_LLAMA_KEY".into(),
+            endpoint: "https://llama.example/v1/".into(),
+            adapter: genai::adapter::AdapterKind::OpenAI,
+        }));
+        let state = State::new(&custom, "llama-3");
+        save(&dir, &state).unwrap();
+        let loaded = load(&dir).expect("state should load");
+        assert_eq!(loaded.provider, "local-llama");
+        let available = [custom.clone()];
+        assert_eq!(loaded.provider_id(&available), Some(custom));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -135,10 +168,12 @@ mod tests {
     /// An unknown provider label resolves to `None` so the caller defaults.
     #[test]
     fn unknown_provider_label_is_none() {
+        use crate::provider::ProviderKind;
         let state = State {
             provider: "mistral".into(),
             model: "m".into(),
         };
-        assert!(state.provider_kind().is_none());
+        let available = [fam(ProviderKind::Anthropic)];
+        assert!(state.provider_id(&available).is_none());
     }
 }

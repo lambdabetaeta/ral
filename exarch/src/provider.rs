@@ -121,6 +121,123 @@ impl ProviderKind {
     }
 }
 
+/// An unusual provider declared in `config.ral`: a custom endpoint exarch
+/// has no built-in knowledge of. It carries the same four facts the rest of
+/// the code reads off a famous [`ProviderKind`] — label, key env var,
+/// endpoint, wire adapter — but as owned, runtime data rather than the
+/// `'static` table baked into the enum. Slice 3 of the provider-config ADR.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CustomProvider {
+    /// The provider's display label and stable identity (the config map key).
+    pub label: String,
+    /// The environment variable its API key is read from.
+    pub key_env: String,
+    /// The base URL genai's [`ServiceTargetResolver`] points traffic at.
+    /// Always a custom endpoint — that a custom provider has one is the
+    /// whole reason it needs a config entry.
+    pub endpoint: String,
+    /// The wire protocol, one of the three the config admits, already mapped
+    /// onto genai's `AdapterKind` at decode time.
+    pub adapter: AdapterKind,
+}
+
+/// A provider identity: a famous [`ProviderKind`] or a custom-declared one.
+///
+/// This is the single abstraction credential resolution, model listing, and
+/// transport building consume, so a custom provider flows through exactly the
+/// same machinery as a famous one. Each downstream call site reads the four
+/// facts it needs through [`Self::label`] / [`Self::key_env`] /
+/// [`Self::endpoint`] / [`Self::adapter`] and never matches on the
+/// famous-vs-custom distinction. The `Custom` arm holds an [`Arc`] so the id
+/// stays cheap to clone and to use as a map key.
+///
+/// Identity (`Eq`/`Ord`/`Hash`) is keyed on the label alone — a provider's
+/// label is its unique key in the credential store, the model catalog, and
+/// the picker — so the wrapping `AdapterKind` (no `Ord`) need not order.
+#[derive(Clone, Debug)]
+pub enum ProviderId {
+    /// A built-in famous provider.
+    Famous(ProviderKind),
+    /// An unusual provider declared in `config.ral`.
+    Custom(Arc<CustomProvider>),
+}
+
+impl ProviderId {
+    /// The stable label — `ProviderKind::info().0` for a famous provider, the
+    /// config map key for a custom one.
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Famous(kind) => kind.info().0,
+            Self::Custom(c) => &c.label,
+        }
+    }
+
+    /// The environment variable this provider's API key is read from.
+    pub fn key_env(&self) -> &str {
+        match self {
+            Self::Famous(kind) => kind.info().2,
+            Self::Custom(c) => &c.key_env,
+        }
+    }
+
+    /// The base URL for a provider that needs a custom endpoint, or `None`
+    /// when the native adapter's default target is used. A custom provider
+    /// always has one.
+    pub fn endpoint(&self) -> Option<&str> {
+        match self {
+            Self::Famous(kind) => kind.endpoint(),
+            Self::Custom(c) => Some(&c.endpoint),
+        }
+    }
+
+    /// The genai adapter this provider speaks by default. For a famous
+    /// provider this is the per-kind default; a custom provider names its
+    /// wire protocol in the config and carries the resolved adapter.
+    pub fn default_adapter(&self) -> AdapterKind {
+        match self {
+            Self::Famous(kind) => kind.default_adapter(),
+            Self::Custom(c) => c.adapter,
+        }
+    }
+
+    /// The famous kind, when this is a built-in provider — the few sites that
+    /// genuinely need the enum (the OpenAI per-model adapter refinement, the
+    /// persisted-selection round-trip) ask for it; everything else reads the
+    /// four facts above.
+    pub fn famous(&self) -> Option<ProviderKind> {
+        match self {
+            Self::Famous(kind) => Some(*kind),
+            Self::Custom(_) => None,
+        }
+    }
+}
+
+impl PartialEq for ProviderId {
+    fn eq(&self, other: &Self) -> bool {
+        self.label() == other.label()
+    }
+}
+
+impl Eq for ProviderId {}
+
+impl std::hash::Hash for ProviderId {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.label().hash(state);
+    }
+}
+
+impl PartialOrd for ProviderId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ProviderId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.label().cmp(other.label())
+    }
+}
+
 #[derive(Default, Clone, Copy)]
 pub struct Usage {
     pub input: u64,
@@ -694,15 +811,15 @@ fn make_runtime() -> tokio::runtime::Runtime {
         .expect("build tokio multi-thread runtime")
 }
 
-fn adapter_for_provider_model(kind: ProviderKind, model: &str) -> AdapterKind {
-    match kind {
-        ProviderKind::Openai => {
+fn adapter_for_provider_model(id: &ProviderId, model: &str) -> AdapterKind {
+    match id {
+        ProviderId::Famous(ProviderKind::Openai) => {
             match AdapterKind::from_model(model).unwrap_or(AdapterKind::OpenAIResp) {
                 adapter @ (AdapterKind::OpenAI | AdapterKind::OpenAIResp) => adapter,
                 _ => AdapterKind::OpenAIResp,
             }
         }
-        _ => kind.default_adapter(),
+        _ => id.default_adapter(),
     }
 }
 
@@ -727,7 +844,7 @@ fn adapter_for_provider_model(kind: ProviderKind, model: &str) -> AdapterKind {
 /// names; the provider is the authority instead, so a misspelled DeepSeek
 /// model fails at DeepSeek rather than being silently sent to
 /// `localhost:11434`.
-fn build_client(kind: ProviderKind, model: &str, cred: &Credential) -> (Client, AdapterKind) {
+fn build_client(id: &ProviderId, model: &str, cred: &Credential) -> (Client, AdapterKind) {
     let key = match cred {
         Credential::ApiKey(k) => k.clone(),
         // A ChatGPT login does not bind a bearer the adapter resolves
@@ -738,12 +855,13 @@ fn build_client(kind: ProviderKind, model: &str, cred: &Credential) -> (Client, 
             return (build_oauth_client(cell.clone()), AdapterKind::OpenAIResp);
         }
     };
-    let adapter = adapter_for_provider_model(kind, model);
-    let client = match kind.endpoint() {
+    let adapter = adapter_for_provider_model(id, model);
+    let client = match id.endpoint() {
         Some(base_url) => {
+            let endpoint = Endpoint::from_owned(base_url);
             let resolver = ServiceTargetResolver::from_resolver_fn(move |t: ServiceTarget| {
                 Ok(ServiceTarget {
-                    endpoint: Endpoint::from_static(base_url),
+                    endpoint: endpoint.clone(),
                     auth: AuthData::from_single(key.clone()),
                     model: ModelIden::new(adapter, t.model.model_name),
                 })
@@ -801,7 +919,7 @@ impl Provider {
     /// for the starting selection, and a `/model` switch calls it again for
     /// the chosen provider+model over the same transcript.
     pub fn build(
-        kind: ProviderKind,
+        id: &ProviderId,
         model: String,
         cred: &Credential,
         max_tokens_override: Option<u32>,
@@ -812,7 +930,7 @@ impl Provider {
             Credential::OAuth(cell) => Some(cell.clone()),
             Credential::ApiKey(_) => None,
         };
-        let (client, adapter) = build_client(kind, &model, cred);
+        let (client, adapter) = build_client(id, &model, cred);
         Self {
             backend: Backend::Live(Live {
                 client,
@@ -1523,7 +1641,7 @@ mod tests {
     #[test]
     fn deepseek_provider_binds_deepseek_adapter_for_bare_provider_name() {
         assert_eq!(
-            adapter_for_provider_model(ProviderKind::Deepseek, "deepseek"),
+            adapter_for_provider_model(&ProviderId::Famous(ProviderKind::Deepseek), "deepseek"),
             AdapterKind::DeepSeek,
         );
     }
@@ -1531,12 +1649,35 @@ mod tests {
     #[test]
     fn openai_provider_keeps_openai_adapter_split() {
         assert_eq!(
-            adapter_for_provider_model(ProviderKind::Openai, "gpt-4.1"),
+            adapter_for_provider_model(&ProviderId::Famous(ProviderKind::Openai), "gpt-4.1"),
             AdapterKind::OpenAI,
         );
         assert_eq!(
-            adapter_for_provider_model(ProviderKind::Openai, "gpt-5.5"),
+            adapter_for_provider_model(&ProviderId::Famous(ProviderKind::Openai), "gpt-5.5"),
             AdapterKind::OpenAIResp,
+        );
+    }
+
+    /// A custom provider's id reports the four facts its config declares,
+    /// and `adapter_for_provider_model` returns the declared adapter
+    /// verbatim — the OpenAI per-model refinement applies only to the
+    /// famous OpenAI kind, never to a custom OpenAI-compatible endpoint.
+    #[test]
+    fn custom_provider_id_reports_declared_facts() {
+        let id = ProviderId::Custom(Arc::new(CustomProvider {
+            label: "local-llama".into(),
+            key_env: "LOCAL_LLAMA_KEY".into(),
+            endpoint: "https://llama.example/v1/".into(),
+            adapter: AdapterKind::OpenAI,
+        }));
+        assert_eq!(id.label(), "local-llama");
+        assert_eq!(id.key_env(), "LOCAL_LLAMA_KEY");
+        assert_eq!(id.endpoint(), Some("https://llama.example/v1/"));
+        assert_eq!(id.default_adapter(), AdapterKind::OpenAI);
+        assert_eq!(id.famous(), None);
+        assert_eq!(
+            adapter_for_provider_model(&id, "gpt-5.5"),
+            AdapterKind::OpenAI,
         );
     }
 
