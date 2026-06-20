@@ -13,8 +13,13 @@
 //! `run`: it now sweeps every [`ProviderKind`] rather than the one a
 //! `--provider` flag named, with provider knowledge still sourced once
 //! from [`ProviderKind::info`].
+//!
+//! Custom providers declared in `config.ral` ([`crate::config`]) flow through
+//! the same sweep: each is keyed by its [`ProviderId`] and its declared key
+//! env var is read and scrubbed exactly like a famous provider's, so a custom
+//! endpoint becomes available the moment its key is in the environment.
 
-use crate::provider::ProviderKind;
+use crate::provider::{CustomProvider, ProviderId, ProviderKind};
 use clap::ValueEnum;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -46,37 +51,50 @@ impl Credential {
     }
 }
 
-/// The in-memory store of resolved credentials, keyed by [`ProviderKind`].
+/// The in-memory store of resolved credentials, keyed by [`ProviderId`].
 /// Built once at startup; a turn draws exactly one credential from it.
 pub struct CredentialStore {
-    ready: BTreeMap<ProviderKind, Credential>,
+    ready: BTreeMap<ProviderId, Credential>,
+    /// The famous providers, in [`ProviderKind`] declaration order, then the
+    /// custom providers in config order — the order [`Self::available`]
+    /// preserves. Holds every swept provider, available or not, so iteration
+    /// order is stable regardless of which keys happen to be set.
+    all: Vec<ProviderId>,
 }
 
 impl CredentialStore {
-    /// Sweep every known provider: read its conventional key variable, and
-    /// resolve a usable value into the store. Then scrub every key variable
-    /// that was *present* — whether or not it yielded a usable key — from
-    /// the environment. Scrubbing the set-but-malformed variable too (a key
-    /// with a pasted newline, say) matters: leaving it set would let a child
-    /// a tool call spawns inherit the live secret.
+    /// Sweep every known provider — the famous [`ProviderKind`]s and the
+    /// `custom` providers from `config.ral` — reading each one's conventional
+    /// key variable and resolving a usable value into the store. Then scrub
+    /// every key variable that was *present* — whether or not it yielded a
+    /// usable key — from the environment. Scrubbing the set-but-malformed
+    /// variable too (a key with a pasted newline, say) matters: leaving it set
+    /// would let a child a tool call spawns inherit the live secret.
     ///
     /// SAFETY: the caller must invoke this while the process is still
     /// single-threaded (before any session worker thread is created), so
     /// the env scrub cannot race another thread.
-    pub fn resolve_and_scrub() -> Self {
-        let mut ready = BTreeMap::new();
-        let mut scrub: Vec<&'static str> = Vec::new();
+    pub fn resolve_and_scrub(custom: Vec<CustomProvider>) -> Self {
+        let all: Vec<ProviderId> = ProviderKind::value_variants()
+            .iter()
+            .copied()
+            .map(ProviderId::Famous)
+            .chain(custom.into_iter().map(|c| ProviderId::Custom(Arc::new(c))))
+            .collect();
 
-        for kind in ProviderKind::value_variants() {
-            let var = kind.info().2;
+        let mut ready = BTreeMap::new();
+        let mut scrub: Vec<String> = Vec::new();
+
+        for id in &all {
+            let var = id.key_env();
             // Scrub any var that is *present*, valid or not — a malformed
             // key is still a live secret in the child env.
             #[allow(clippy::disallowed_methods)]
             if std::env::var(var).is_ok() {
-                scrub.push(var);
+                scrub.push(var.to_string());
             }
             if let EnvKey::Valid(key) = read_env_key(var) {
-                ready.insert(*kind, Credential::ApiKey(key));
+                ready.insert(id.clone(), Credential::ApiKey(key));
             }
         }
 
@@ -95,31 +113,32 @@ impl CredentialStore {
         // scrubbed above), so a present login always wins for that provider.
         if let Some(token) = crate::oauth::load() {
             ready.insert(
-                ProviderKind::Openai,
+                ProviderId::Famous(ProviderKind::Openai),
                 Credential::OAuth(Arc::new(Mutex::new(token))),
             );
         }
 
-        Self { ready }
+        Self { ready, all }
     }
 
     /// The credential for an available provider, or `None` when its key was
     /// absent or malformed.
-    pub fn get(&self, kind: ProviderKind) -> Option<&Credential> {
-        self.ready.get(&kind)
+    pub fn get(&self, id: &ProviderId) -> Option<&Credential> {
+        self.ready.get(id)
     }
 
-    /// Whether `kind`'s credential is in the store.
-    pub fn is_available(&self, kind: ProviderKind) -> bool {
-        self.ready.contains_key(&kind)
+    /// Whether `id`'s credential is in the store.
+    pub fn is_available(&self, id: &ProviderId) -> bool {
+        self.ready.contains_key(id)
     }
 
-    /// The available providers, in [`ProviderKind`] declaration order.
-    pub fn available(&self) -> Vec<ProviderKind> {
-        ProviderKind::value_variants()
+    /// The available providers, in declaration order (famous first, then
+    /// custom).
+    pub fn available(&self) -> Vec<ProviderId> {
+        self.all
             .iter()
-            .copied()
-            .filter(|k| self.ready.contains_key(k))
+            .filter(|id| self.ready.contains_key(id))
+            .cloned()
             .collect()
     }
 }
@@ -154,6 +173,11 @@ fn read_env_key(var: &str) -> EnvKey {
 #[allow(clippy::disallowed_methods, reason = "[io-door:test] test fs/process scaffolding")]
 mod tests {
     use super::*;
+
+    /// A famous provider's id — the common case in these tests.
+    fn fam(kind: ProviderKind) -> ProviderId {
+        ProviderId::Famous(kind)
+    }
 
     /// `resolve_and_scrub` is process-global (it mutates the real
     /// environment), so each scenario uses a guard that snapshots every
@@ -238,8 +262,8 @@ mod tests {
                 ("DEEPSEEK_API_KEY", None),
             ],
             || {
-                let store = CredentialStore::resolve_and_scrub();
-                match store.get(ProviderKind::Anthropic) {
+                let store = CredentialStore::resolve_and_scrub(Vec::new());
+                match store.get(&fam(ProviderKind::Anthropic)) {
                     Some(Credential::ApiKey(k)) => assert_eq!(k, "sk-secret", "key is trimmed"),
                     _ => panic!("anthropic should resolve to an ApiKey"),
                 }
@@ -250,8 +274,8 @@ mod tests {
                         "a resolved provider's key var must be scrubbed"
                     );
                 }
-                assert!(!store.is_available(ProviderKind::Openai));
-                assert_eq!(store.available(), vec![ProviderKind::Anthropic]);
+                assert!(!store.is_available(&fam(ProviderKind::Openai)));
+                assert_eq!(store.available(), vec![fam(ProviderKind::Anthropic)]);
             },
         );
     }
@@ -269,8 +293,8 @@ mod tests {
                 ("DEEPSEEK_API_KEY", None),
             ],
             || {
-                let store = CredentialStore::resolve_and_scrub();
-                assert!(!store.is_available(ProviderKind::Openai));
+                let store = CredentialStore::resolve_and_scrub(Vec::new());
+                assert!(!store.is_available(&fam(ProviderKind::Openai)));
                 #[allow(clippy::disallowed_methods)]
                 {
                     assert!(
@@ -293,13 +317,13 @@ mod tests {
                 ("DEEPSEEK_API_KEY", Some("d")),
             ],
             || {
-                let store = CredentialStore::resolve_and_scrub();
+                let store = CredentialStore::resolve_and_scrub(Vec::new());
                 assert_eq!(
                     store.available(),
                     vec![
-                        ProviderKind::Anthropic,
-                        ProviderKind::Openrouter,
-                        ProviderKind::Deepseek
+                        fam(ProviderKind::Anthropic),
+                        fam(ProviderKind::Openrouter),
+                        fam(ProviderKind::Deepseek)
                     ]
                 );
             },
@@ -329,9 +353,12 @@ mod tests {
                     expires_at: u64::MAX,
                 })
                 .expect("save token");
-                let store = CredentialStore::resolve_and_scrub();
+                let store = CredentialStore::resolve_and_scrub(Vec::new());
                 assert!(
-                    matches!(store.get(ProviderKind::Openai), Some(Credential::OAuth(_))),
+                    matches!(
+                        store.get(&fam(ProviderKind::Openai)),
+                        Some(Credential::OAuth(_))
+                    ),
                     "a stored login must win over OPENAI_API_KEY"
                 );
                 #[allow(clippy::disallowed_methods)]
@@ -344,5 +371,46 @@ mod tests {
             },
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A custom provider from `config.ral` is swept exactly like a famous one:
+    /// its declared key env var is read into the store, scrubbed from the
+    /// environment, and it appears in `available()` after the famous
+    /// providers. An absent custom key leaves it unavailable while the famous
+    /// providers still resolve — the config is additive, never a precondition.
+    #[test]
+    fn custom_provider_resolves_and_scrubs_its_key() {
+        let custom = CustomProvider {
+            label: "local-llama".into(),
+            key_env: "LOCAL_LLAMA_KEY".into(),
+            endpoint: "https://llama.example/v1/".into(),
+            adapter: genai::adapter::AdapterKind::OpenAI,
+        };
+        with_env(
+            &[
+                ("ANTHROPIC_API_KEY", Some("a")),
+                ("OPENAI_API_KEY", None),
+                ("OPENROUTER_API_KEY", None),
+                ("DEEPSEEK_API_KEY", None),
+                ("LOCAL_LLAMA_KEY", Some("  llama-secret  ")),
+            ],
+            || {
+                let store = CredentialStore::resolve_and_scrub(vec![custom.clone()]);
+                let id = ProviderId::Custom(std::sync::Arc::new(custom.clone()));
+                match store.get(&id) {
+                    Some(Credential::ApiKey(k)) => assert_eq!(k, "llama-secret"),
+                    _ => panic!("custom provider should resolve to a trimmed ApiKey"),
+                }
+                #[allow(clippy::disallowed_methods)]
+                {
+                    assert!(
+                        std::env::var("LOCAL_LLAMA_KEY").is_err(),
+                        "a custom provider's key var must be scrubbed too"
+                    );
+                }
+                // Famous first, then the custom provider.
+                assert_eq!(store.available(), vec![fam(ProviderKind::Anthropic), id]);
+            },
+        );
     }
 }

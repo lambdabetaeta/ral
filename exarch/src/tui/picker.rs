@@ -15,7 +15,7 @@
 //! a provider's list shows "loading…" until its background fetch lands.
 
 use super::{CYAN, SLATE};
-use crate::provider::ProviderKind;
+use crate::provider::ProviderId;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -40,7 +40,7 @@ pub enum PickAction {
     /// Keep the picker open; redraw.
     None,
     /// A listed `provider / model` row was chosen.
-    Selected(ProviderKind, String),
+    Selected(ProviderId, String),
     /// Enter on the synthetic manual row: take the raw query as a model
     /// name and let the REPL resolve its provider (the listing-or-name
     /// fallback) — the escape hatch when a fetch failed or the wanted model
@@ -53,7 +53,7 @@ pub enum PickAction {
 /// A row in the rendered list: either a listed model or the synthetic
 /// manual-entry row.
 enum Row {
-    Model(ProviderKind, String),
+    Model(ProviderId, String),
     Manual(String),
 }
 
@@ -61,11 +61,11 @@ pub struct Picker {
     query: String,
     /// Available providers in declaration order; their lists fill in as
     /// fetches land.
-    providers: Vec<ProviderKind>,
+    providers: Vec<ProviderId>,
     /// Providers authenticated off a ChatGPT plan login; their rows and
     /// the status bar render the subscription-decorated label.
-    subscription: BTreeSet<ProviderKind>,
-    models: BTreeMap<ProviderKind, ModelsState>,
+    subscription: BTreeSet<ProviderId>,
+    models: BTreeMap<ProviderId, ModelsState>,
     /// Index into the current filtered [`Self::rows`].
     selected: usize,
 }
@@ -79,10 +79,10 @@ impl Picker {
     /// Open over `providers`, all initially loading until the REPL feeds
     /// cached or fetched lists. `subscription` names the providers backed
     /// by a ChatGPT plan login, whose rows read as the subscription.
-    pub fn new(providers: Vec<ProviderKind>, subscription: BTreeSet<ProviderKind>) -> Self {
+    pub fn new(providers: Vec<ProviderId>, subscription: BTreeSet<ProviderId>) -> Self {
         let models = providers
             .iter()
-            .map(|&k| (k, ModelsState::Loading))
+            .map(|id| (id.clone(), ModelsState::Loading))
             .collect();
         Self {
             query: String::new(),
@@ -96,24 +96,24 @@ impl Picker {
     /// The display label for `kind`'s rows: the plain provider name, or
     /// the subscription-decorated form when it authenticates off a
     /// ChatGPT plan login.
-    fn label(&self, kind: ProviderKind) -> String {
-        crate::oauth::provider_label(self.subscription.contains(&kind), kind.info().0)
+    fn label(&self, id: &ProviderId) -> String {
+        crate::oauth::provider_label(self.subscription.contains(id), id.label())
     }
 
     /// The providers whose lists are not yet known — the REPL spawns a
     /// background fetch for each on open.
-    pub fn loading_providers(&self) -> Vec<ProviderKind> {
+    pub fn loading_providers(&self) -> Vec<ProviderId> {
         self.providers
             .iter()
-            .copied()
-            .filter(|k| matches!(self.models.get(k), Some(ModelsState::Loading)))
+            .filter(|id| matches!(self.models.get(id), Some(ModelsState::Loading)))
+            .cloned()
             .collect()
     }
 
     /// Record a provider's resolved (or failed) list. Clamps the selection
     /// in case the visible list shrank.
-    pub fn set_models(&mut self, kind: ProviderKind, state: ModelsState) {
-        self.models.insert(kind, state);
+    pub fn set_models(&mut self, id: &ProviderId, state: ModelsState) {
+        self.models.insert(id.clone(), state);
         self.clamp_selection();
     }
 
@@ -121,7 +121,7 @@ impl Picker {
     pub fn is_loading(&self) -> bool {
         self.providers
             .iter()
-            .any(|k| matches!(self.models.get(k), Some(ModelsState::Loading)))
+            .any(|id| matches!(self.models.get(id), Some(ModelsState::Loading)))
     }
 
     /// Handle one key press. Typing filters; Up/Down move; Enter selects
@@ -167,13 +167,13 @@ impl Picker {
     fn rows(&self) -> Vec<Row> {
         let q = self.query.trim().to_lowercase();
         let mut rows = Vec::new();
-        for &kind in &self.providers {
-            if let Some(ModelsState::Loaded(models)) = self.models.get(&kind) {
-                let label = self.label(kind);
+        for id in &self.providers {
+            if let Some(ModelsState::Loaded(models)) = self.models.get(id) {
+                let label = self.label(id);
                 for m in models {
                     let hay = format!("{label} / {m}").to_lowercase();
                     if q.is_empty() || hay.contains(&q) {
-                        rows.push(Row::Model(kind, m.clone()));
+                        rows.push(Row::Model(id.clone(), m.clone()));
                     }
                 }
             }
@@ -234,7 +234,7 @@ impl Picker {
         let start = self.selected.saturating_sub(window.saturating_sub(1));
         for (i, row) in rows.iter().enumerate().skip(start).take(window) {
             let text = match row {
-                Row::Model(kind, m) => format!("{} / {m}", self.label(*kind)),
+                Row::Model(id, m) => format!("{} / {m}", self.label(id)),
                 Row::Manual(q) => format!("use “{q}” as a manual model"),
             };
             let mut style = match row {
@@ -250,12 +250,12 @@ impl Picker {
         // Note any provider whose fetch failed, with its reason, so the
         // absent models are explained and the manual-entry fallback is
         // obvious. Informational, not selectable.
-        for &kind in &self.providers {
-            if let Some(ModelsState::Failed(reason)) = self.models.get(&kind) {
+        for id in &self.providers {
+            if let Some(ModelsState::Failed(reason)) = self.models.get(id) {
                 lines.push(Line::from(Span::styled(
                     format!(
                         "{} — fetch failed: {reason} (type a model to enter manually)",
-                        kind.info().0
+                        id.label()
                     ),
                     Style::default()
                         .fg(SLATE)
@@ -276,19 +276,35 @@ impl Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ProviderKind;
     use ratatui::crossterm::event::KeyCode;
+
+    /// A famous provider's id — the common case in these tests.
+    fn fam(kind: ProviderKind) -> ProviderId {
+        ProviderId::Famous(kind)
+    }
+
+    /// A custom provider's id with `label`.
+    fn custom(label: &str) -> ProviderId {
+        ProviderId::Custom(std::sync::Arc::new(crate::provider::CustomProvider {
+            label: label.into(),
+            key_env: format!("{}_KEY", label.to_uppercase()),
+            endpoint: format!("https://{label}.example/v1/"),
+            adapter: genai::adapter::AdapterKind::OpenAI,
+        }))
+    }
 
     fn loaded_picker() -> Picker {
         let mut p = Picker::new(
-            vec![ProviderKind::Anthropic, ProviderKind::Deepseek],
+            vec![fam(ProviderKind::Anthropic), fam(ProviderKind::Deepseek)],
             BTreeSet::new(),
         );
         p.set_models(
-            ProviderKind::Anthropic,
+            &fam(ProviderKind::Anthropic),
             ModelsState::Loaded(vec!["claude-opus-4".into(), "claude-haiku-4".into()]),
         );
         p.set_models(
-            ProviderKind::Deepseek,
+            &fam(ProviderKind::Deepseek),
             ModelsState::Loaded(vec!["deepseek-chat".into()]),
         );
         p
@@ -302,7 +318,7 @@ mod tests {
             .rows()
             .into_iter()
             .filter_map(|r| match r {
-                Row::Model(k, m) => Some(format!("{} / {m}", k.info().0)),
+                Row::Model(id, m) => Some(format!("{} / {m}", id.label())),
                 Row::Manual(_) => None,
             })
             .collect();
@@ -323,18 +339,18 @@ mod tests {
     #[test]
     fn subscription_provider_rows_carry_decorated_label() {
         let mut p = Picker::new(
-            vec![ProviderKind::Openai],
-            BTreeSet::from([ProviderKind::Openai]),
+            vec![fam(ProviderKind::Openai)],
+            BTreeSet::from([fam(ProviderKind::Openai)]),
         );
         p.set_models(
-            ProviderKind::Openai,
+            &fam(ProviderKind::Openai),
             ModelsState::Loaded(vec!["gpt-5.5".into()]),
         );
         let labels: Vec<String> = p
             .rows()
             .into_iter()
             .filter_map(|r| match r {
-                Row::Model(k, m) => Some(format!("{} / {m}", p.label(k))),
+                Row::Model(id, m) => Some(format!("{} / {m}", p.label(&id))),
                 Row::Manual(_) => None,
             })
             .collect();
@@ -381,7 +397,7 @@ mod tests {
         assert_eq!(model_rows.len(), 1);
         assert!(matches!(
             &model_rows[0],
-            Row::Model(ProviderKind::Deepseek, _)
+            Row::Model(id, _) if id.famous() == Some(ProviderKind::Deepseek)
         ));
     }
 
@@ -392,8 +408,29 @@ mod tests {
         // Move to the second row (anthropic / claude-haiku-4).
         p.key(KeyCode::Down);
         match p.key(KeyCode::Enter) {
-            PickAction::Selected(ProviderKind::Anthropic, m) => assert_eq!(m, "claude-haiku-4"),
+            PickAction::Selected(id, m) if id.famous() == Some(ProviderKind::Anthropic) => {
+                assert_eq!(m, "claude-haiku-4")
+            }
             _ => panic!("expected Selected(anthropic, claude-haiku-4)"),
+        }
+    }
+
+    /// A custom provider's models list and select through the picker exactly
+    /// like a famous one: its declared label decorates the row and Enter
+    /// yields the custom `ProviderId`.
+    #[test]
+    fn custom_provider_lists_and_selects() {
+        let llama = custom("local-llama");
+        let mut p = Picker::new(vec![llama.clone()], BTreeSet::new());
+        p.set_models(&llama, ModelsState::Loaded(vec!["llama-3".into()]));
+        let rows = p.rows();
+        assert!(matches!(&rows[0], Row::Model(id, m) if id == &llama && m == "llama-3"));
+        match p.key(KeyCode::Enter) {
+            PickAction::Selected(id, m) => {
+                assert_eq!(id, llama);
+                assert_eq!(m, "llama-3");
+            }
+            _ => panic!("expected Selected(local-llama, llama-3)"),
         }
     }
 
@@ -424,13 +461,13 @@ mod tests {
     #[test]
     fn height_reserves_a_row_per_failed_provider() {
         let mut p = Picker::new(
-            vec![ProviderKind::Anthropic, ProviderKind::Deepseek],
+            vec![fam(ProviderKind::Anthropic), fam(ProviderKind::Deepseek)],
             BTreeSet::new(),
         );
         let base = p.height(u16::MAX);
-        p.set_models(ProviderKind::Anthropic, ModelsState::Failed("x".into()));
+        p.set_models(&fam(ProviderKind::Anthropic), ModelsState::Failed("x".into()));
         assert_eq!(p.height(u16::MAX), base + 1);
-        p.set_models(ProviderKind::Deepseek, ModelsState::Failed("y".into()));
+        p.set_models(&fam(ProviderKind::Deepseek), ModelsState::Failed("y".into()));
         assert_eq!(p.height(u16::MAX), base + 2);
     }
 
@@ -438,17 +475,17 @@ mod tests {
     #[test]
     fn loading_until_all_lists_land() {
         let mut p = Picker::new(
-            vec![ProviderKind::Anthropic, ProviderKind::Deepseek],
+            vec![fam(ProviderKind::Anthropic), fam(ProviderKind::Deepseek)],
             BTreeSet::new(),
         );
         assert!(p.is_loading());
         assert_eq!(p.loading_providers().len(), 2);
         p.set_models(
-            ProviderKind::Anthropic,
+            &fam(ProviderKind::Anthropic),
             ModelsState::Loaded(vec!["m".into()]),
         );
         assert!(p.is_loading());
-        p.set_models(ProviderKind::Deepseek, ModelsState::Failed("x".into()));
+        p.set_models(&fam(ProviderKind::Deepseek), ModelsState::Failed("x".into()));
         assert!(!p.is_loading());
     }
 }
