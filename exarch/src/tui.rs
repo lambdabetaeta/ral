@@ -1484,17 +1484,18 @@ impl App {
 
         if let Some(vp) = self.viewports.get_mut(&self.root) {
             vp.push_chrome(RailShape::Plain, splash);
-            vp.push_card(session_card(s));
+            vp.push_chrome(RailShape::Plain, line::render_card(&session_card(s), 3));
         }
         self.draw(term)
     }
 }
 
 /// The startup session metadata as a Bertin matrix — one `fields` mark the
-/// banner pushes through the shared aligned-column renderer, so it sits on
-/// the rail and in the muted palette like every other block.  Hue is spent
-/// only where it names something: a path carries the Path identity, a
-/// `dangerous` base alarms; names and quantities stay plain ink.
+/// banner pushes through the shared aligned-column renderer, so it reads in
+/// the muted palette like every other block.  It is ambient startup chrome,
+/// rail-less Plain like the splash above it.  Hue is spent only where it
+/// names something: a path carries the Path identity, a `dangerous` base
+/// alarms; names and quantities stay plain ink.
 fn session_card(s: &SessionInfo<'_>) -> Card {
     let mut rows: Vec<Field> = vec![
         meta_field("cwd", vec![meta_span(Role::Path, s.cwd)]),
