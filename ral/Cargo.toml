@@ -18,7 +18,7 @@ coreutils  = ["ral-core/coreutils"]
 diffutils  = ["ral-core/diffutils"]
 grep       = ["ral-core/grep"]
 ripgrep    = ["ral-core/ripgrep"]
-structural = ["dep:ratatui", "dep:ansi-to-tui"]
+structural = ["dep:ratatui", "dep:ansi-to-tui", "dep:ratatui-textarea"]
 
 [dependencies]
 # default-features = false so ral's own `grep` feature actually governs
@@ -31,6 +31,7 @@ rustyline  = "=18.0.0"
 # as exarch's, so the workspace resolves one build.
 ratatui    = { version = "0.30", optional = true }
 ansi-to-tui = { version = "8.0.1", optional = true }
+ratatui-textarea = { version = "0.9", optional = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 clap       = { workspace = true }
