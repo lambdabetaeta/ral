@@ -80,8 +80,9 @@ pub(super) fn is_blank(l: &Line<'_>) -> bool {
 
 /// The full rail shape vocabulary: one glyph + space per block kind.
 /// [`plain`] drops a leading span whose content matches one of these so
-/// copied text carries the content, not the chrome glyph.
-const RAIL_GLYPHS: [&str; 7] = ["▎ ", "▸ ", "▾ ", "· ", "━ ", "✗ ", RAIL];
+/// copied text carries the content, not the chrome glyph; [`super::block::wrap_line`]
+/// reuses the set to detect a rail-led row and indent its continuations.
+pub(super) const RAIL_GLYPHS: [&str; 7] = ["▎ ", "▸ ", "▾ ", "· ", "━ ", "✗ ", RAIL];
 
 /// One scrollback line as the plain text a reader would copy: span
 /// contents joined, with a leading rail glyph dropped.

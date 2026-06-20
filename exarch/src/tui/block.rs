@@ -11,11 +11,12 @@
 //! block the user just dialed, or the whole buffer once on a resize.
 
 use super::fidelity::Fidelity;
-use super::line::{self, RAIL_W, READ_W, is_blank};
+use super::line::{self, RAIL_GLYPHS, RAIL_W, READ_W, is_blank};
 use super::md::{self, MD_INDENT};
 use super::rail::{self, RailKind};
 use crate::bus::Hunk;
 use crate::card::{Card, Mark};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthChar;
 
@@ -410,37 +411,161 @@ fn shrink_leading_ws(line: &mut Line<'static>, n: usize) {
 }
 
 /// Fold one logical line into visual rows no wider than `width`,
-/// preserving each span's style.  The line builders already lay content
-/// out within [`READ_W`], so on a terminal at least that wide this hands
-/// the line straight back; it only folds — at the column, since the
-/// content is already-laid-out chrome or source — on a narrower one.
+/// word-aware and preserving each span's style.  The line builders already
+/// lay content out within [`READ_W`], so on a terminal at least that wide
+/// this hands the line straight back; it only folds on a narrower one.
+///
+/// When the line is rail-led — its first span is one of the [`RAIL_GLYPHS`]
+/// the rail prepends ([`Block::render_with`]) — continuations re-indent to
+/// the body column (the rail's [`RAIL_W`] width) so a wrapped prompt echo
+/// or io surface reads as a paragraph under its head rather than sliding
+/// back beneath the rail.  A rail-less line (a [`RailShape::Plain`] banner)
+/// indents to `0` and wraps flush.  The greedy placement breaks between
+/// words, dropping the inter-word gap at the break; a single word wider
+/// than the body column is hard-broken char-by-char.
 pub(super) fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
     if width == 0 || line.width() <= width {
         return vec![line.clone()];
     }
-    let mut rows: Vec<Line<'static>> = Vec::new();
-    let mut row: Vec<Span<'static>> = Vec::new();
-    let mut col = 0;
-    for span in &line.spans {
-        let mut buf = String::new();
-        for ch in span.content.chars() {
-            let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
-            if col + cw > width && col > 0 {
-                if !buf.is_empty() {
-                    row.push(Span::styled(std::mem::take(&mut buf), span.style));
-                }
-                rows.push(Line::from(std::mem::take(&mut row)));
-                col = 0;
-            }
-            buf.push(ch);
-            col += cw;
+    // A rail glyph leads the row when its first span is one of the glyphs
+    // the rail prepends.  Continuations re-indent to the body column (the
+    // glyph's display width); the glyph span itself is carried verbatim onto
+    // row 0 so the copy contract still recognises and strips it intact.
+    let rail_led = line
+        .spans
+        .first()
+        .is_some_and(|s| RAIL_GLYPHS.contains(&s.content.as_ref()));
+    let (head, body) = match rail_led {
+        true => {
+            let (h, b) = line.spans.split_first().expect("first span exists");
+            (Some(h), b)
         }
-        if !buf.is_empty() {
-            row.push(Span::styled(buf, span.style));
+        false => (None, line.spans.as_slice()),
+    };
+    let indent: usize = head.map_or(0, |h| {
+        h.content
+            .chars()
+            .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+            .sum()
+    });
+
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    // Row 0 opens carrying the rail glyph verbatim (occupying columns
+    // `0..indent`) when rail-led, else empty; continuation rows are seeded
+    // with the indent.
+    let mut row: Vec<Span<'static>> = head.map(|h| vec![h.clone()]).unwrap_or_default();
+    let mut col = indent;
+    // Whether a word has landed on the current row's body.  A pending gap
+    // before the first body word of a row is leading whitespace and is
+    // dropped; once a word lands the row may break and gaps become
+    // inter-word separators.
+    let mut started = false;
+    // The whitespace pending between the last word and the next: carried as
+    // style-runs so a styled gap survives, or dropped at a break / row start.
+    let mut gap: Vec<(String, Style)> = Vec::new();
+    let mut gap_w = 0;
+
+    for (word, ww) in words(body) {
+        // A whitespace run is held as the pending gap, never placed eagerly.
+        if word.iter().all(|(s, _)| s.chars().all(char::is_whitespace)) {
+            gap = word;
+            gap_w = ww;
+            continue;
+        }
+        // Break before a word that overflows once this row carries one; the
+        // pending gap is dropped at the break.
+        if started && col + gap_w + ww > width {
+            rows.push(Line::from(std::mem::take(&mut row)));
+            row = seed(indent);
+            col = indent;
+            started = false;
+            gap.clear();
+            gap_w = 0;
+        }
+        // Place the pending gap only between words on a started row; drop it
+        // when it would lead the row.
+        if started {
+            for (s, style) in gap.drain(..) {
+                row.push(Span::styled(s, style));
+            }
+            col += gap_w;
+        } else {
+            gap.clear();
+        }
+        gap_w = 0;
+        // Place the word, hard-breaking it char-by-char when it alone is
+        // wider than the body column.
+        for (s, style) in word {
+            for ch in s.chars() {
+                let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if started && col + cw > width {
+                    rows.push(Line::from(std::mem::take(&mut row)));
+                    row = seed(indent);
+                    col = indent;
+                }
+                push_char(&mut row, ch, style);
+                col += cw;
+                started = true;
+            }
         }
     }
-    if !row.is_empty() || rows.is_empty() {
+    if started || rows.is_empty() {
         rows.push(Line::from(row));
     }
     rows
+}
+
+/// A fresh continuation row seeded with `indent` spaces, or empty when the
+/// line wraps flush — the body column every wrapped row re-indents to.
+fn seed(indent: usize) -> Vec<Span<'static>> {
+    if indent == 0 {
+        Vec::new()
+    } else {
+        vec![Span::raw(" ".repeat(indent))]
+    }
+}
+
+/// Append `ch` to `row`, extending the trailing span when it shares `ch`'s
+/// style so a word does not fragment into one span per character.
+fn push_char(row: &mut Vec<Span<'static>>, ch: char, style: Style) {
+    match row.last_mut() {
+        Some(last) if last.style == style => last.content.to_mut().push(ch),
+        _ => row.push(Span::styled(ch.to_string(), style)),
+    }
+}
+
+/// Tokenise a span stream into maximal whitespace / non-whitespace runs,
+/// paired with each run's display width.  A run carries its style-fragments
+/// so a word that crosses a span seam (a style change mid-word) keeps each
+/// fragment's [`Style`].  Mirrors `md`'s word/space split, but span-aware.
+fn words(spans: &[Span<'static>]) -> Vec<(Vec<(String, Style)>, usize)> {
+    let mut out: Vec<(Vec<(String, Style)>, usize)> = Vec::new();
+    let mut run: Vec<(String, Style)> = Vec::new();
+    let mut run_w = 0;
+    // Whether the run accumulated so far is whitespace — `None` until the
+    // first char fixes its kind.
+    let mut ws: Option<bool> = None;
+    let mut flush = |run: &mut Vec<(String, Style)>, run_w: &mut usize, ws: &mut Option<bool>| {
+        if !run.is_empty() {
+            out.push((std::mem::take(run), std::mem::replace(run_w, 0)));
+        }
+        *ws = None;
+    };
+    for span in spans {
+        for ch in span.content.chars() {
+            let is_ws = ch.is_whitespace();
+            if ws.is_some_and(|prev| prev != is_ws) {
+                flush(&mut run, &mut run_w, &mut ws);
+            }
+            ws = Some(is_ws);
+            let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+            match run.last_mut() {
+                Some((s, st)) if *st == span.style => s.push(ch),
+                _ => run.push((ch.to_string(), span.style)),
+            }
+            run_w += cw;
+        }
+    }
+    flush(&mut run, &mut run_w, &mut ws);
+    out
 }
