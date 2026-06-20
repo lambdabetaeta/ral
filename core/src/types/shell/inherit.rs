@@ -230,6 +230,15 @@ impl Shell {
         self.local.repl.inherit_from(&mut parent.local.repl);
         self.session.builtins = parent.session.builtins.clone();
         self.session.root = parent.session.root.clone();
+        // The terminal lease is session-owned and non-`Clone`, but a same-thread
+        // body of a `Leased` turn must still hold it. `turn.inherit_from` flows the
+        // `TerminalAccess` in, yet `terminal_lease()` also demands the session own
+        // the witness — and `child_of` builds a fresh `SessionState`. Without this
+        // move, a foreground external inside a lambda body (a function, alias, or
+        // handler) finds no lease and cannot take the controlling terminal, even
+        // though its access is `Leased`. Lent to the child and returned in
+        // `return_to`, mirroring how the read-once stdin is moved across the boundary.
+        self.session.terminal_lease = parent.session.terminal_lease.take();
     }
 
     /// Flow mutations made by a child computation back to `parent`.
@@ -245,7 +254,49 @@ impl Shell {
         self.local.audit.return_to(&mut parent.local.audit);
         self.local.repl.return_to(&mut parent.local.repl);
         self.turn.return_to(&mut parent.turn);
+        // Return the lent terminal lease to the parent (see `inherit_from`). The
+        // turn's `terminal_access` deliberately does *not* flow back, but the
+        // session witness must, or the parent loses the terminal after a thunk.
+        parent.session.terminal_lease = self.session.terminal_lease.take();
         parent.mobile.context.cwd.current = self.mobile.context.cwd.current.take();
         parent.mobile.context.cwd.previous = self.mobile.context.cwd.previous.take();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::process::TerminalLease;
+    use crate::types::shell::TerminalAccess;
+
+    /// A lambda body runs in a [`Shell::child_of`] shell whose `SessionState` is
+    /// freshly defaulted. The session-owned terminal lease must still reach it,
+    /// or a foreground external inside a function / alias / handler body could
+    /// not take the controlling terminal — even though `terminal_access` flows
+    /// in as `Leased`. The witness is lent to the child and returned to the
+    /// parent on [`Shell::return_to`].
+    #[test]
+    #[cfg(unix)]
+    fn terminal_lease_reaches_same_thread_child_and_returns() {
+        let mut parent = Shell::default();
+        parent.session.terminal_lease = TerminalLease::mint_at_startup(true);
+        parent.turn.terminal_access = TerminalAccess::Leased;
+        assert!(
+            parent.terminal_lease().is_some(),
+            "precondition: the parent holds a Leased lease",
+        );
+
+        let captured = parent.mobile.scope.clone();
+        parent.with_child(&captured, |child| {
+            assert!(
+                child.terminal_lease().is_some(),
+                "a Leased lambda body must hold the session lease",
+            );
+        });
+
+        assert!(
+            parent.terminal_lease().is_some(),
+            "the lease returns to the parent after the child body",
+        );
     }
 }
