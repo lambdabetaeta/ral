@@ -348,7 +348,7 @@ impl Block {
         )
     }
 
-    /// True for an error chrome block — drives the matrix's `✗` cell when
+    /// True for an error chrome block — drives the matrix's `╳` cell when
     /// the session's last block is a failure.
     pub(super) fn is_error(&self) -> bool {
         matches!(

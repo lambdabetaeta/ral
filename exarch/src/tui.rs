@@ -1916,7 +1916,7 @@ fn matrix_row(
 
     // Step cells: `●` step-with-tool-call, `○` without; the most-recent
     // window so a long run never overruns the row.  A done/dying session
-    // leads with `✓`, an errored one with `✗`.
+    // leads with `√`, an errored one with `╳`.
     spans.push(Span::styled(step_cells(vp, dim), Style::default().fg(hue)));
 
     // Token readout: cumulative spend, lightened toward white in
@@ -1963,8 +1963,8 @@ fn matrix_row(
     Line::from(spans)
 }
 
-/// The matrix row's step glyphs: `done` leads the cell run with `✓`
-/// (session in its linger window) or `✗` (last block an error); otherwise
+/// The matrix row's step glyphs: `done` leads the cell run with `√`
+/// (session in its linger window) or `╳` (last block an error); otherwise
 /// each step renders `●` (a tool call landed within it) or `○` (none).
 /// Capped to [`MATRIX_STEPS_W`] keeping the most-recent steps.
 fn step_cells(vp: &Viewport, dying: bool) -> String {
@@ -1972,7 +1972,7 @@ fn step_cells(vp: &Viewport, dying: bool) -> String {
     let tail = steps.len().saturating_sub(MATRIX_STEPS_W);
     let mut s = String::new();
     if dying {
-        s.push(if vp.last_is_error() { '✗' } else { '✓' });
+        s.push(if vp.last_is_error() { '╳' } else { '√' });
     }
     let room = MATRIX_STEPS_W.saturating_sub(s.chars().count());
     for &had_call in steps[tail..].iter().rev().take(room).rev() {

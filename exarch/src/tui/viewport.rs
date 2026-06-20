@@ -195,7 +195,7 @@ impl Viewport {
     }
 
     /// Whether the session's last block is an error — the matrix renders
-    /// the row's leading cell as `✗` rather than the done/running glyph.
+    /// the row's leading cell as `╳` rather than the done/running glyph.
     pub(super) fn last_is_error(&self) -> bool {
         self.blocks.last().is_some_and(Block::is_error)
     }
