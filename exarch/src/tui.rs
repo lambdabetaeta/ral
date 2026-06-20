@@ -1510,12 +1510,17 @@ fn session_card(s: &SessionInfo<'_>) -> Card {
     rows.push(meta_field("model", model_val));
 
     if let Some(ctx) = s.context_window {
-        rows.push(meta_field("context", vec![meta_plain(fmt_tokens(ctx))]));
+        rows.push(meta_field(
+            "context",
+            vec![meta_plain(provider::humanize_tokens(ctx))],
+        ));
     }
 
     let max_t = match (s.max_tokens_override, s.max_output_tokens) {
         (Some(n), _) => n.to_string(),
-        (None, Some(catalog)) => format!("auto (≤{})", fmt_tokens(catalog as u64)),
+        (None, Some(catalog)) => {
+            format!("auto (≤{})", provider::humanize_tokens(catalog as u64))
+        }
         (None, None) => "auto".into(),
     };
     rows.push(meta_field("max-tokens", vec![meta_plain(max_t)]));
@@ -1580,16 +1585,6 @@ pub struct SessionInfo<'a> {
     pub restrict_files: &'a [PathBuf],
     pub scratch: &'a Path,
     pub cwd: &'a str,
-}
-
-fn fmt_tokens(n: u64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{}k", n / 1_000)
-    } else {
-        n.to_string()
-    }
 }
 
 /// A roled value span for the startup metadata matrix — names a nominal
@@ -1939,7 +1934,7 @@ fn matrix_row(
         });
     spans.push(Span::raw("  "));
     spans.push(Span::styled(
-        format!("{:>6}", fmt_tokens(tokens)),
+        format!("{:>6}", provider::humanize_tokens(tokens)),
         token_style,
     ));
 

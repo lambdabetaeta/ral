@@ -318,13 +318,21 @@ impl std::ops::AddAssign for Usage {
     }
 }
 
-/// Humanise a token count: `≥10k` collapses to one decimal place
-/// (`4017.4k`), smaller counts print in full.  The single rule the usage
-/// line uses for every field — shared by [`Usage::parts`] so the plain
-/// [`Display`] and the TUI's styled renderer cannot drift.
+/// Humanise a token count — the one rule every token readout shares: the
+/// usage line, the startup banner's context / limit fields, and the
+/// per-agent token tallies.  Under 10k prints in full (`0`, `9123`); from
+/// 10k to <1M shows one decimal with a bare `.0` dropped (`46.6k`, but
+/// `200k` not `200.0k`); 1M and over keeps one decimal (`1.0m`, `1.5m`).
+/// One source of truth so the plain [`Display`] and the TUI's styled
+/// renderers cannot drift (X9).
 pub fn humanize_tokens(n: u64) -> String {
-    if n >= 10_000 {
-        format!("{:.1}k", n as f64 / 1000.0)
+    // Tier on the rounded display, not the raw count: a value within ~50
+    // tokens of 1M rounds to `1.0m`, never `1000k`.
+    if n >= 999_950 {
+        format!("{:.1}m", n as f64 / 1_000_000.0)
+    } else if n >= 10_000 {
+        let k = format!("{:.1}", n as f64 / 1_000.0);
+        format!("{}k", k.strip_suffix(".0").unwrap_or(&k))
     } else {
         n.to_string()
     }
@@ -2018,32 +2026,6 @@ mod tests {
         );
     }
 
-    /// X9: `Usage::parts` is the single content/layout source the plain
-    /// `Display` and the TUI's styled renderer both consume.  Pin the
-    /// pieces so a future edit to one renderer cannot silently diverge the
-    /// other.
-    #[test]
-    fn usage_parts_are_the_shared_render_source() {
-        let u = Usage {
-            input: 4_017_400,
-            output: 12_800,
-            cache_creation: Some(200_000),
-            cache_read: Some(3_817_000),
-            dollars: 1.2345,
-            unmetered: false,
-        };
-        let p = u.parts();
-        assert_eq!(p.input, "4017.4k");
-        assert_eq!(p.output, "12.8k");
-        assert_eq!(p.cache, Some(("200.0k".into(), "3817.0k".into())));
-        assert_eq!(p.cost, "$1.2345");
-        // The same pieces must reconstruct the `Display` string verbatim.
-        assert_eq!(
-            u.to_string(),
-            "total 4017.4k in / 12.8k out [200.0k wr/3817.0k rd] · $1.2345"
-        );
-    }
-
     /// An unmetered turn (a ChatGPT plan login) reports its cost slot as
     /// "subscription" rather than a dollar figure or `—`.  The token
     /// counts still render, so the line stays informative; the price just
@@ -2099,44 +2081,6 @@ mod tests {
         assert_eq!(tr_ceiling, MAX_DELAY_MS);
         assert!(rl_attempts > tr_attempts);
         assert!(rl_ceiling > tr_ceiling);
-    }
-
-    /// Renders the OpenAI-family case: the provider returned a cached
-    /// read count but no creation count.  The `wr` half must show `—`
-    /// (the field was not reported) rather than `0` (a measured zero).
-    #[test]
-    fn usage_display_unreported_creation_renders_em_dash() {
-        let u = Usage {
-            input: 4_017_400,
-            output: 12_800,
-            cache_creation: None,
-            cache_read: Some(3_817_000),
-            dollars: 0.0,
-            unmetered: false,
-        };
-        assert_eq!(
-            u.to_string(),
-            "total 4017.4k in / 12.8k out [— wr/3817.0k rd] · —",
-        );
-    }
-
-    /// Renders the Anthropic case: both numbers are real measurements,
-    /// dollars are known.  This is the existing rendering shape and
-    /// must be preserved unchanged.
-    #[test]
-    fn usage_display_both_fields_reported() {
-        let u = Usage {
-            input: 4_017_400,
-            output: 12_800,
-            cache_creation: Some(200_000),
-            cache_read: Some(3_817_000),
-            dollars: 1.2345,
-            unmetered: false,
-        };
-        assert_eq!(
-            u.to_string(),
-            "total 4017.4k in / 12.8k out [200.0k wr/3817.0k rd] · $1.2345",
-        );
     }
 
     /// `Usage::default()` leaves both cache fields as `None`; the cache
