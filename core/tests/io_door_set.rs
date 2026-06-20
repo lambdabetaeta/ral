@@ -105,6 +105,7 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("exarch/src/bootstrap.rs", "io-door:silent:log-run-dir"),
     ("exarch/src/bootstrap.rs", "io-door:silent:scratch-bootstrap"),
     ("exarch/src/cli.rs", "io-door:silent:seed-file"),
+    ("exarch/src/config.rs", "io-door:silent:provider-config"),
     ("exarch/src/event.rs", "io-door:silent:events-file"),
     ("exarch/src/event.rs", "io-door:silent:session-dir"),
     ("exarch/src/headless.rs", "io-door:silent:transcript-file"),
