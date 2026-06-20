@@ -9,7 +9,7 @@
 //! computation.  Self-scheduling is gated behind `--allow-schedule`: an
 //! agent that can wake itself indefinitely holds real authority.
 
-use super::{Tool, invalid_input};
+use super::{Tool, invalid_input, u64_field};
 use crate::bus::{Emitter, Kind};
 use crate::event::ToolResult as SessionToolResult;
 use crate::provider::Provider;
@@ -278,7 +278,7 @@ no schedule has that id."
         emit: &Emitter,
         _scope: &'scope thread::Scope<'scope, 'env>,
     ) -> Staged<'scope> {
-        let sid = match input.as_object().and_then(|o| o.get("id")).and_then(Value::as_u64) {
+        let sid = match u64_field(&input, "id") {
             Some(n) => n,
             None => {
                 return invalid_input(

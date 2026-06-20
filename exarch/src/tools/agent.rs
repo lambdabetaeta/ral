@@ -6,7 +6,7 @@
 //! The full prompt — every line — is rendered to the rail before spawn, so the
 //! user can see what the child was asked to do.
 
-use super::{Tool, invalid_input};
+use super::{Tool, invalid_input, u64_field};
 use crate::bus::{AgentOutcome, AgentResult, Emitter, InboxMsg, Kind};
 use crate::cancel::Token;
 use crate::event::ToolResult as SessionToolResult;
@@ -474,7 +474,7 @@ A no-op if no live agent has that id."
         emit: &Emitter,
         _scope: &'scope thread::Scope<'scope, 'env>,
     ) -> Staged<'scope> {
-        let agent_id = match input.as_object().and_then(|o| o.get("id")).and_then(Value::as_u64) {
+        let agent_id = match u64_field(&input, "id") {
             Some(n) => n,
             None => {
                 return invalid_input(

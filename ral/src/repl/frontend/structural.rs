@@ -43,9 +43,8 @@ use std::collections::HashSet;
 use std::io;
 use std::time::Duration;
 
-use super::super::config::dirs_history;
 use super::super::prompt::PromptText;
-use super::{EditBuffer, Frontend, Read};
+use super::{EditBuffer, Frontend, History, Read};
 
 // ── Palette ───────────────────────────────────────────────────────────────
 
@@ -60,9 +59,7 @@ const HANDLE_RUN: Color = Color::Rgb(220, 140, 175); // pink — running handle
 const TICK: Duration = Duration::from_millis(120);
 
 pub(in crate::repl) struct StructuralFrontend {
-    history: Vec<String>,
-    persisted: usize,
-    history_path: Option<String>,
+    history: History,
     /// The set of binding names present at the first `read` — the prelude
     /// and prompt bindings — so the worksheet shows only what the user has
     /// since defined.  Captured lazily because `new` has no shell.
@@ -73,26 +70,13 @@ impl StructuralFrontend {
     /// Construct the frontend, verifying the terminal supports raw mode (so
     /// the boot selector can fall back when it does not).  Loads persisted
     /// history like the other frontends.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[io-door:silent:history-read] loads persisted repl history at construction; not turn-time model I/O"
-    )]
     pub(in crate::repl) fn new() -> io::Result<Self> {
         // Probe raw mode once: if the terminal cannot do it, the structural
         // surface cannot run and the caller degrades to a line editor.
         enable_raw_mode()?;
         disable_raw_mode()?;
-        let history_path = dirs_history();
-        let history: Vec<String> = history_path
-            .as_deref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .map(|s| s.lines().map(String::from).collect())
-            .unwrap_or_default();
-        let persisted = history.len();
         Ok(Self {
-            history,
-            persisted,
-            history_path,
+            history: History::load(),
             baseline: None,
         })
     }
@@ -108,9 +92,12 @@ impl StructuralFrontend {
     ) -> io::Result<Read> {
         // The worksheet and matrix read the env, which does not change while
         // the user composes (no evaluation happens here), so build them once.
+        // Both project the same user bindings, so fold the scope once and
+        // derive both from that single snapshot.
         let baseline = self.baseline.get_or_insert_with(|| binding_names(shell));
-        let worksheet = worksheet_rows(shell, baseline);
-        let matrix = matrix_rows(shell, baseline);
+        let user = user_bindings(shell, baseline);
+        let worksheet = worksheet_rows(&user, shell);
+        let matrix = matrix_rows(&user);
 
         enable_raw_mode()?;
         let (_cols, rows) = size().unwrap_or((80, 24));
@@ -143,7 +130,7 @@ impl StructuralFrontend {
                 last_buf = Some(s.clone());
             }
             terminal.draw(|frame| {
-                render(frame, prompt, &buf, cursor, &spine, &worksheet, &matrix);
+                render(frame, prompt, &buf, &s, cursor, &spine, &worksheet, &matrix);
             })?;
 
             if !event::poll(TICK)? {
@@ -233,19 +220,20 @@ impl StructuralFrontend {
         pos: &mut Option<usize>,
         draft: &mut Vec<char>,
     ) {
-        if self.history.is_empty() {
+        let entries = self.history.entries();
+        if entries.is_empty() {
             return;
         }
         let next = match *pos {
             None => {
                 *draft = buf.clone();
-                self.history.len() - 1
+                entries.len() - 1
             }
             Some(0) => 0,
             Some(i) => i - 1,
         };
         *pos = Some(next);
-        *buf = self.history[next].chars().collect();
+        *buf = entries[next].chars().collect();
         *cursor = buf.len();
     }
 
@@ -258,9 +246,9 @@ impl StructuralFrontend {
     ) {
         match *pos {
             None => {}
-            Some(i) if i + 1 < self.history.len() => {
+            Some(i) if i + 1 < self.history.entries().len() => {
                 *pos = Some(i + 1);
-                *buf = self.history[i + 1].chars().collect();
+                *buf = self.history.entries()[i + 1].chars().collect();
                 *cursor = buf.len();
             }
             Some(_) => {
@@ -287,34 +275,11 @@ impl Frontend for StructuralFrontend {
     }
 
     fn add_history(&mut self, entry: &str) {
-        if self.history.last().is_none_or(|s| s != entry) {
-            self.history.push(entry.to_string());
-        }
+        self.history.add(entry);
     }
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[io-door:silent:history-append] appends this session's repl history to its log file; not turn-time model I/O"
-    )]
     fn save_history(&mut self) {
-        let Some(path) = &self.history_path else {
-            return;
-        };
-        let fresh = &self.history[self.persisted..];
-        if fresh.is_empty() {
-            return;
-        }
-        use std::io::Write;
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            for entry in fresh {
-                let _ = writeln!(file, "{entry}");
-            }
-        }
-        self.persisted = self.history.len();
+        self.history.save();
     }
 }
 
@@ -332,11 +297,10 @@ struct SpineRow {
 enum Spine {
     /// A pipeline: one typed row per stage.
     Stages(Vec<SpineRow>),
-    /// The buffer compiles but is not a pipeline.
-    Ok,
     /// A type error — the flare.
     Flare(String),
-    /// Nothing to show (empty or still-incomplete buffer).
+    /// Nothing to show: an empty or still-incomplete buffer, or a buffer
+    /// that compiles but is not a pipeline.
     Empty,
 }
 
@@ -348,7 +312,7 @@ fn build_spine(src: &str, shell: &Shell) -> Spine {
     match ral_core::compile_and_typecheck(src, shell.session_schemes()) {
         CompileOutcome::Compiled(comp) => match pipeline_stage_rows(&comp, src) {
             Some(rows) => Spine::Stages(rows),
-            None => Spine::Ok,
+            None => Spine::Empty,
         },
         // A parse error mid-typing is an incomplete line, not a real error:
         // show nothing rather than flare on every keystroke.
@@ -429,26 +393,34 @@ fn binding_names(shell: &Shell) -> HashSet<String> {
         .collect()
 }
 
-/// The user's bindings (those added since the baseline), as worksheet rows.
-fn worksheet_rows(shell: &Shell, baseline: &HashSet<String>) -> Vec<WsRow> {
-    let schemes: std::collections::HashMap<String, Option<Scheme>> =
-        shell.mobile.scope.binding_schemes().into_iter().collect();
-    let mut rows: Vec<WsRow> = shell
+/// The user's bindings — those added since the baseline — as a single
+/// snapshot the worksheet and matrix projections share.
+fn user_bindings(shell: &Shell, baseline: &HashSet<String>) -> Vec<(String, Value)> {
+    shell
         .mobile
         .scope
         .all_bindings()
         .into_iter()
         .filter(|(n, _)| !baseline.contains(n))
+        .collect()
+}
+
+/// The user's bindings rendered as worksheet rows, each with its scheme.
+fn worksheet_rows(user: &[(String, Value)], shell: &Shell) -> Vec<WsRow> {
+    let schemes: std::collections::HashMap<String, Option<Scheme>> =
+        shell.mobile.scope.binding_schemes().into_iter().collect();
+    let mut rows: Vec<WsRow> = user
+        .iter()
         .map(|(name, value)| {
             let ty = schemes
-                .get(&name)
+                .get(name)
                 .and_then(|s| s.as_ref())
                 .map(fmt_scheme)
                 .unwrap_or_else(|| "?".into());
             WsRow {
                 ty,
-                preview: preview(&value),
-                name,
+                preview: preview(value),
+                name: name.clone(),
             }
         })
         .collect();
@@ -457,16 +429,12 @@ fn worksheet_rows(shell: &Shell, baseline: &HashSet<String>) -> Vec<WsRow> {
 }
 
 /// The user's live spawn handles, as matrix rows.
-fn matrix_rows(shell: &Shell, baseline: &HashSet<String>) -> Vec<MxRow> {
-    let mut rows: Vec<MxRow> = shell
-        .mobile
-        .scope
-        .all_bindings()
-        .into_iter()
-        .filter(|(n, _)| !baseline.contains(n))
+fn matrix_rows(user: &[(String, Value)]) -> Vec<MxRow> {
+    let mut rows: Vec<MxRow> = user
+        .iter()
         .filter_map(|(name, value)| match value {
             Value::Handle(h) => Some(MxRow {
-                name,
+                name: name.clone(),
                 state: *h.state.lock().unwrap_or_else(|e| e.into_inner()),
                 cmd: h.cmd.clone(),
             }),
@@ -513,18 +481,18 @@ fn render(
     frame: &mut ratatui::Frame,
     prompt: &PromptText,
     buf: &[char],
+    buf_string: &str,
     cursor: usize,
     spine: &Spine,
     worksheet: &[WsRow],
     matrix: &[MxRow],
 ) {
     let area = frame.area();
-    let buf_string: String = buf.iter().collect();
     let prompt_lines = buf_string.lines().count().max(1) as u16;
 
     let spine_rows = match spine {
         Spine::Stages(rows) => rows.len() as u16,
-        Spine::Ok | Spine::Empty => 0,
+        Spine::Empty => 0,
         Spine::Flare(_) => 1,
     };
 
@@ -536,7 +504,7 @@ fn render(
     .areas(area);
 
     render_spine(frame, spine_area, spine);
-    render_prompt(frame, prompt_area, prompt, buf, &buf_string, cursor);
+    render_prompt(frame, prompt_area, prompt, buf, buf_string, cursor);
     render_projections(frame, rest, worksheet, matrix);
 }
 
@@ -560,7 +528,7 @@ fn render_spine(frame: &mut ratatui::Frame, area: Rect, spine: &Spine) {
             format!("✗ {msg}"),
             Style::default().fg(FLARE_HUE),
         ))],
-        Spine::Ok | Spine::Empty => return,
+        Spine::Empty => return,
     };
     frame.render_widget(Paragraph::new(lines), area);
 }

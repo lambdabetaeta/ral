@@ -116,3 +116,11 @@ pub(super) fn invalid_input<'scope>(
     emit.emit(Kind::ToolResult(msg.clone()));
     Staged::Done(SessionToolResult { id, content: msg })
 }
+
+/// Pull a required `u64` field out of a tool's JSON input object.
+pub(super) fn u64_field(input: &Value, field: &str) -> Option<u64> {
+    input
+        .as_object()
+        .and_then(|o| o.get(field))
+        .and_then(Value::as_u64)
+}
