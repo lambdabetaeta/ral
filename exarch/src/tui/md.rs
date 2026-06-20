@@ -143,6 +143,11 @@ struct Composer {
     rail_depth: usize,
     /// Open inline links — pop on `TagEnd::Link` to maybe emit `(url)`.
     links: Vec<(LinkType, String)>,
+    /// True when the last pushed token abuts the next with no intervening
+    /// whitespace — the on-screen word is still open.  Suppresses the
+    /// pre-append soft wrap so punctuation fused to a styled span breaks
+    /// with it, not at the seam.  Cleared by whitespace and line breaks.
+    mid_word: bool,
 }
 
 struct ListCtx {
@@ -168,6 +173,7 @@ impl Composer {
             list_stack: Vec::new(),
             rail_depth: 0,
             links: Vec::new(),
+            mid_word: false,
         }
     }
 
@@ -337,10 +343,13 @@ impl Composer {
                 self.list_stack.pop();
                 self.blank_separator();
             }
-            TagEnd::Item => {
-                self.flush_line();
-                self.blank_separator();
-            }
+            // A tight list (pulldown-cmark emits its item text bare, with
+            // no enclosing `Paragraph`) renders single-spaced: just flush
+            // the item's last row, no inter-item blank.  A loose list wraps
+            // each item's content in `Paragraph` events, whose `block_break`
+            // already inserts the inter-item blank, so loose spacing is
+            // preserved without any work here.
+            TagEnd::Item => self.flush_line(),
 
             TagEnd::Link => {
                 self.pop_style();
@@ -379,15 +388,26 @@ impl Composer {
         }
     }
 
+    /// Pre-append soft wrap: flush the current row when `w` columns won't
+    /// fit — UNLESS we are mid-word, i.e. the token abuts the previous one
+    /// with no intervening whitespace.  A glued unit (a styled span and the
+    /// punctuation fused to it, like `` `code`. `` or `**bold**.`) must
+    /// break together, never at its seam, so its trailing punctuation never
+    /// detaches onto its own visual line.
+    fn wrap_before(&mut self, w: usize) {
+        if !self.mid_word && self.cur_w + w > self.budget() && !self.cur.is_empty() {
+            self.flush_line();
+        }
+    }
+
     fn push_word(&mut self, word: &str) {
         let w = UnicodeWidthStr::width(word);
         let budget = self.budget();
-        if self.cur_w + w > budget && !self.cur.is_empty() {
-            self.flush_line();
-        }
+        self.wrap_before(w);
         if w <= budget {
             self.cur.push(Span::styled(word.to_string(), self.style));
             self.cur_w += w;
+            self.mid_word = true;
             return;
         }
         // Word exceeds the budget on its own; break by char.
@@ -409,9 +429,11 @@ impl Composer {
             self.cur.push(Span::styled(buf, self.style));
             self.cur_w += bw;
         }
+        self.mid_word = true;
     }
 
     fn push_space(&mut self) {
+        self.mid_word = false;
         if self.cur.is_empty() || self.cur_w >= self.budget() {
             return;
         }
@@ -421,11 +443,10 @@ impl Composer {
 
     fn push_span(&mut self, span: Span<'static>) {
         let w = UnicodeWidthStr::width(span.content.as_ref());
-        if self.cur_w + w > self.budget() && !self.cur.is_empty() {
-            self.flush_line();
-        }
+        self.wrap_before(w);
         self.cur.push(span);
         self.cur_w += w;
+        self.mid_word = true;
     }
 
     fn rule(&mut self) {
@@ -458,6 +479,7 @@ impl Composer {
     }
 
     fn flush_line(&mut self) {
+        self.mid_word = false;
         if self.cur.is_empty() {
             return;
         }
