@@ -364,12 +364,7 @@ pub fn io_card(event: &IoEvent) -> Card {
             path,
             mode,
             outcome,
-        } => vec![
-            span(Role::Muted, "Write: "),
-            span(Role::Path, path),
-            span_plain(&format!(" ({}) ", mode.label())),
-            span(outcome.role(), outcome.label()),
-        ],
+        } => write_spans(path, *mode, *outcome),
         // `$ prog arg arg → status` — the program as a path, its args as
         // code, and the exit status roled ok/bad.
         IoEvent::Exec {
@@ -378,29 +373,141 @@ pub fn io_card(event: &IoEvent) -> Card {
             status,
         } => {
             let mut spans = vec![span_plain("$ ")];
-            match argv.split_first() {
-                Some((prog, args)) => {
-                    spans.push(span(Role::Path, prog));
-                    for arg in args {
-                        spans.push(span(Role::Code, &format!(" {arg}")));
-                    }
-                }
-                None => spans.push(span_plain("(no command)")),
-            }
+            spans.extend(exec_cmd_spans(argv));
             let role = if *status == 0 { Role::Ok } else { Role::Bad };
             spans.push(span_plain(" → "));
             spans.push(span(role, &status.to_string()));
             spans
         }
         // `grep pattern in scope` — the pattern as code, the scope as path.
-        IoEvent::Grep { scope, pattern } => vec![
-            span(Role::Muted, "grep "),
-            span(Role::Code, pattern),
-            span_plain(" in "),
-            span(Role::Path, scope),
-        ],
+        IoEvent::Grep { scope, pattern } => {
+            let mut spans = vec![span(Role::Muted, "grep ")];
+            spans.extend(grep_spans(scope, pattern));
+            spans
+        }
     };
     Card(vec![Mark::Text { spans }])
+}
+
+/// The command of an exec, *without* its `$ ` prefix or `→ status` tail —
+/// the program as a [`Role::Path`] span and each arg as a [`Role::Code`]
+/// span (a missing command degrades to plain ink).  Shared by [`io_card`]
+/// (which frames it with the prompt and status) and [`io_group_card`] (which
+/// comma-joins several, dropping the per-event status — see its docs).
+fn exec_cmd_spans(argv: &[String]) -> Vec<Span> {
+    match argv.split_first() {
+        Some((prog, args)) => {
+            let mut spans = vec![span(Role::Path, prog)];
+            for arg in args {
+                spans.push(span(Role::Code, &format!(" {arg}")));
+            }
+            spans
+        }
+        None => vec![span_plain("(no command)")],
+    }
+}
+
+/// A grep's `pattern in scope` — the pattern as [`Role::Code`], the scope as
+/// [`Role::Path`] — *without* the leading `grep ` verb, so the group head can
+/// carry one shared verb over a comma-joined run.
+fn grep_spans(scope: &str, pattern: &str) -> Vec<Span> {
+    vec![
+        span(Role::Code, pattern),
+        span_plain(" in "),
+        span(Role::Path, scope),
+    ]
+}
+
+/// A write's full `Write: path (mode) outcome` — the verb, the path, the mode
+/// in parentheses, then the outcome roled by how it settled.  Reused verbatim
+/// per entry in [`io_group_card`]'s comma-joined write run.
+fn write_spans(path: &str, mode: WriteMode, outcome: WriteOutcome) -> Vec<Span> {
+    vec![
+        span(Role::Muted, "Write: "),
+        span(Role::Path, path),
+        span_plain(&format!(" ({}) ", mode.label())),
+        span(outcome.role(), outcome.label()),
+    ]
+}
+
+/// Compose a run of buffered I/O surfaces — even interleaved, grouped by the
+/// TUI into per-kind buckets — into one [`Card`] *per non-empty kind*, in a
+/// fixed Read → Exec → Grep → Write order.  Each card is a single
+/// [`Mark::Text`] reusing the exact `io_card` span vocabulary, so hues match;
+/// a lone surface (a group of one) renders identically to its `io_card`,
+/// modulo the deliberate exec departure below — no special case.
+///
+/// The exec group **drops the `→ status` tail** that single `io_card` exec
+/// rows carry: a comma-joined run of commands reads as the *set of commands
+/// run* (`$ wc -l, grep -rn, git status`), and a per-command status would be
+/// per-event noise on that line.  The status is not lost — it rides the bus
+/// in each `Kind::Io`'s structured event and reaches the transcript via
+/// `headless::event_record`; only this grouped *presentation* omits it.
+pub fn io_group_card(
+    reads: &[String],
+    execs: &[IoEvent],
+    greps: &[IoEvent],
+    writes: &[IoEvent],
+) -> Vec<Card> {
+    let mut cards = Vec::new();
+    // Read: `Read: p1, p2, …` — one muted verb, the paths comma-joined.
+    if !reads.is_empty() {
+        let mut spans = vec![span(Role::Muted, "Read: ")];
+        join_spans(&mut spans, reads, |spans, path| {
+            spans.push(span(Role::Path, path))
+        });
+        cards.push(Card(vec![Mark::Text { spans }]));
+    }
+    // Exec: `$ cmd1, cmd2, …` — one prompt, the commands comma-joined, each
+    // dropping its status tail (see the doc comment above).
+    if !execs.is_empty() {
+        let mut spans = vec![span_plain("$ ")];
+        join_spans(&mut spans, execs, |spans, e| {
+            if let IoEvent::Exec { argv, .. } = e {
+                spans.extend(exec_cmd_spans(argv));
+            }
+        });
+        cards.push(Card(vec![Mark::Text { spans }]));
+    }
+    // Grep: `grep p1 in s1, p2 in s2, …` — one verb, the `pattern in scope`
+    // entries comma-joined.
+    if !greps.is_empty() {
+        let mut spans = vec![span(Role::Muted, "grep ")];
+        join_spans(&mut spans, greps, |spans, e| {
+            if let IoEvent::Grep { scope, pattern } = e {
+                spans.extend(grep_spans(scope, pattern));
+            }
+        });
+        cards.push(Card(vec![Mark::Text { spans }]));
+    }
+    // Write: `Write: p1 (mode) outcome, Write: p2 …` — each entry the full
+    // write row, comma-joined.
+    if !writes.is_empty() {
+        let mut spans = Vec::new();
+        join_spans(&mut spans, writes, |spans, e| {
+            if let IoEvent::Write {
+                path,
+                mode,
+                outcome,
+            } = e
+            {
+                spans.extend(write_spans(path, *mode, *outcome));
+            }
+        });
+        cards.push(Card(vec![Mark::Text { spans }]));
+    }
+    cards
+}
+
+/// Append each of `items` to `spans` via `each`, separating entries with a
+/// plain `", "` — the comma-join shared by every [`io_group_card`] bucket.
+fn join_spans<T>(spans: &mut Vec<Span>, items: &[T], each: impl Fn(&mut Vec<Span>, &T)) {
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            spans.push(span_plain(", "));
+        }
+        each(spans, item);
+    }
 }
 
 /// A roled span carrying `text`.

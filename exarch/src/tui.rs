@@ -30,6 +30,7 @@ use line::usage_text;
 use crate::bootstrap::Scratch;
 use crate::bus::{Event, Hunk, Kind, Pass, PromptQueue, SessionId, Sink, drain_pass, pump};
 use crate::cancel;
+use crate::card::IoEvent;
 use crate::credential::CredentialStore;
 use crate::models::{LiveSource, ModelCatalog, ModelSource};
 use crate::provider::{self, Provider, Usage};
@@ -348,6 +349,15 @@ pub struct App {
     /// assistant text, step boundary, a richer card, session death), at
     /// which point [`Self::flush_patch_buf`] emits one block.
     patch_buf: Option<PatchBuf>,
+    /// In-flight aggregation of consecutive structural I/O surfaces — even
+    /// interleaved — into one block *per kind*.  Core emits one
+    /// `Kind::Io { event, .. }` per effect; a burst of reads and execs would
+    /// otherwise render as `Read…, $…, Read…, $…` clutter.  The buffer
+    /// buckets events by kind (reads, execs, greps, writes), deduped and
+    /// order-independent, until any non-io content lands (the shared
+    /// [`Self::flush_surfaces`] boundary, or a session change), at which point
+    /// [`Self::flush_io_buf`] emits one block per non-empty bucket.
+    io_buf: Option<IoBuf>,
     /// Geometry of the content area as of the last [`Self::draw`], so a
     /// mouse event arriving between frames maps to a buffer row.
     frame: Option<FrameGeom>,
@@ -390,6 +400,24 @@ struct PatchBuf {
     hunks: Vec<Hunk>,
 }
 
+/// Accumulator backing [`App::io_buf`].  Buckets consecutive structural I/O
+/// surfaces by kind, deduped and order-independent (the user does not care
+/// about interleave order); flushed as one block per non-empty bucket.  The
+/// exec/grep/write buckets keep the typed [`IoEvent`] rather than pre-rendered
+/// spans so flush-time rendering can reuse the exact `io_card` span idioms via
+/// [`crate::card::io_group_card`].
+struct IoBuf {
+    id: SessionId,
+    /// Read paths, first-seen order, deduped.
+    reads: Vec<String>,
+    /// `Exec` events, deduped by `argv`.
+    execs: Vec<IoEvent>,
+    /// `Grep` events, deduped by `(scope, pattern)`.
+    greps: Vec<IoEvent>,
+    /// `Write` events, deduped by `path` (keeping the latest outcome).
+    writes: Vec<IoEvent>,
+}
+
 impl App {
     pub fn new(root_id: SessionId, root_log_dir: &Path, context_window: Option<u64>) -> Self {
         let mut viewports = HashMap::new();
@@ -425,6 +453,7 @@ impl App {
             queue: PromptQueue::new(),
             total_usage: Usage::default(),
             patch_buf: None,
+            io_buf: None,
             last_input: 0,
             context_window,
             status_model: String::new(),
@@ -484,6 +513,7 @@ impl App {
         self.total_usage = Usage::default();
         self.last_input = 0;
         self.patch_buf = None;
+        self.io_buf = None;
         self.selection = None;
         self.press = None;
         self.banner(term, info)
@@ -515,7 +545,7 @@ impl App {
                 }
             }
             Kind::Died => {
-                self.flush_patch_buf();
+                self.flush_surfaces();
                 let floor = self.context_floor();
                 if let Some(vp) = self.viewports.get_mut(&id) {
                     vp.flush_open(floor);
@@ -539,14 +569,14 @@ impl App {
                 }
             }
             Kind::Token(text) => {
-                self.flush_patch_buf();
+                self.flush_surfaces();
                 let floor = self.context_floor();
                 if let Some(vp) = self.viewports.get_mut(&id) {
                     vp.push_token(&text, floor);
                 }
             }
             Kind::Boundary => {
-                self.flush_patch_buf();
+                self.flush_surfaces();
                 let floor = self.context_floor();
                 if let Some(vp) = self.viewports.get_mut(&id) {
                     vp.close_boundary(floor);
@@ -608,16 +638,13 @@ impl App {
                     vp.push_subagent(title, text, error, elapsed, fidelity)
                 });
             }
-            // A surfaced render document, or a structural I/O event paired
-            // with the card composed from it: a kit that raised a card through
-            // the `surface` builtin, or core that surfaced an effect, made an
-            // explicit choice to communicate with the user.  Both carry a
-            // [`Card`] to draw, so they render through the one path (the raw
-            // `event` is the transcript's business, not the rail's).  A
-            // single-`diff` card joins the patch-grouping buffer so consecutive
-            // edits to one file merge into one block, the way a unified diff
-            // presents one file; every other card is its own scrollback block.
-            Kind::Card(card) | Kind::Io { card, .. } => {
+            // A surfaced render document: a kit raised a card through the
+            // `surface` builtin — a deliberate choice to communicate with the
+            // user.  A single-`diff` card joins the patch-grouping buffer so
+            // consecutive edits to one file merge into one block, the way a
+            // unified diff presents one file; every other card is its own
+            // scrollback block.
+            Kind::Card(card) => {
                 ral_core::dbg_trace!(
                     "tui",
                     "Card id={id} viewports={:?} focus={} diff={}",
@@ -630,15 +657,24 @@ impl App {
                     Err(card) => self.with_viewport(id, |vp| vp.push_card(card)),
                 }
             }
+            // A structural I/O effect core surfaced: a read, write, exec, or
+            // grep.  Each lands as its own `Kind::Io`, so a burst reads as
+            // `Read…, $…, Read…, $…` clutter — the io buffer collapses a run
+            // (even interleaved) into one block per kind, flushed at the next
+            // boundary.  The per-event `card` is dropped on the render path; it
+            // is reconstructed grouped at flush, and the structured per-event
+            // record already reached the transcript via `headless::event_record`
+            // upstream of `handle`, so nothing is lost.
+            Kind::Io { event, .. } => self.absorb_io(id, event),
         }
     }
 
-    /// Commit any pending patch, then hand the session's viewport to `f`.
-    /// Any non-diff content closes the patch grouping window: a pending
-    /// buffer must land before the new block, or the merged `▎ diff`
+    /// Commit any pending grouped surfaces, then hand the session's viewport
+    /// to `f`.  Any other content closes both grouping windows: a pending io
+    /// group or `▎ diff` must land before the new block, or the merged block
     /// would appear *after* whatever follows it on the rail.
     fn with_viewport(&mut self, id: SessionId, f: impl FnOnce(&mut Viewport)) {
-        self.flush_patch_buf();
+        self.flush_surfaces();
         match self.viewports.get_mut(&id) {
             Some(vp) => f(vp),
             None => {
@@ -686,6 +722,105 @@ impl App {
         if let Some(vp) = self.viewports.get_mut(&buf.id) {
             vp.push_patch(buf.path, buf.hunks);
         }
+    }
+
+    /// Bucket a structural I/O `event` into [`Self::io_buf`] by kind, deduped
+    /// and order-independent (the user does not care about interleave order).
+    /// A session change flushes the in-flight buffer and opens a fresh one, so
+    /// a cross-session burst never merges two sessions' surfaces into one
+    /// block.  Unlike [`Self::with_viewport`], this accumulates directly: the
+    /// shared [`Self::flush_surfaces`] boundary is what would flush the very
+    /// buffer being filled, so routing through it would defeat the grouping.
+    fn absorb_io(&mut self, id: SessionId, event: IoEvent) {
+        if self.io_buf.as_ref().is_some_and(|b| b.id != id) {
+            self.flush_io_buf();
+        }
+        let buf = self.io_buf.get_or_insert_with(|| IoBuf {
+            id,
+            reads: Vec::new(),
+            execs: Vec::new(),
+            greps: Vec::new(),
+            writes: Vec::new(),
+        });
+        match event {
+            IoEvent::Read { path } => {
+                if !buf.reads.contains(&path) {
+                    buf.reads.push(path);
+                }
+            }
+            IoEvent::Exec {
+                argv,
+                outcome,
+                status,
+            } => {
+                let dup = buf
+                    .execs
+                    .iter()
+                    .any(|e| matches!(e, IoEvent::Exec { argv: a, .. } if *a == argv));
+                if !dup {
+                    buf.execs.push(IoEvent::Exec {
+                        argv,
+                        outcome,
+                        status,
+                    });
+                }
+            }
+            grep @ IoEvent::Grep { .. } => {
+                if !buf.greps.contains(&grep) {
+                    buf.greps.push(grep);
+                }
+            }
+            IoEvent::Write {
+                path,
+                mode,
+                outcome,
+            } => {
+                // Keep the latest outcome: a re-write of the same path replaces
+                // the buffered entry rather than stacking a duplicate.
+                let event = IoEvent::Write {
+                    path: path.clone(),
+                    mode,
+                    outcome,
+                };
+                match buf
+                    .writes
+                    .iter_mut()
+                    .find(|e| matches!(e, IoEvent::Write { path: p, .. } if *p == path))
+                {
+                    Some(slot) => *slot = event,
+                    None => buf.writes.push(event),
+                }
+            }
+        }
+    }
+
+    /// Commit any pending [`IoBuf`] as one block *per non-empty kind*, in a
+    /// fixed Read → Exec → Grep → Write order, reusing the exact `io_card` span
+    /// idioms via [`crate::card::io_group_card`].  No-op when the buffer is
+    /// empty.  Called at every commit boundary that isn't another io surface
+    /// in the same session, through the shared [`Self::flush_surfaces`].
+    fn flush_io_buf(&mut self) {
+        let Some(buf) = self.io_buf.take() else {
+            return;
+        };
+        if let Some(vp) = self.viewports.get_mut(&buf.id) {
+            for card in
+                crate::card::io_group_card(&buf.reads, &buf.execs, &buf.greps, &buf.writes)
+            {
+                vp.push_card(card);
+            }
+        }
+    }
+
+    /// The shared external commit boundary: flush both grouping buffers, io
+    /// first so an io group lands before any diff that the same boundary
+    /// commits.  Every non-io, non-diff surface funnels here (the
+    /// [`Self::with_viewport`] chokepoint, plus session death, the streaming
+    /// token, and the turn boundary), so the two separate buffers — keyed
+    /// differently, never generalised into one — share only this boundary.
+    fn flush_surfaces(&mut self) {
+        self.flush_io_buf();
+        self.flush_patch_buf();
     }
 
     /// Redraw the whole frame: the focused session's visible rows and a
