@@ -5,6 +5,7 @@
 //! plugins remain source/alias/hook loaders; this module only publishes
 //! the resident agent surface that core should not own.
 
+use crate::bus::{Hunk, Row};
 use grep::regex::RegexMatcherBuilder;
 use grep::searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
 use ignore::WalkBuilder;
@@ -278,9 +279,9 @@ struct ResolvedEdit {
 }
 
 /// `edit PATH EDITS` — apply a batch of `[hash, new-text]` pairs in one
-/// read/rebuild/write pass, then surface one diff card per change.  All of it
+/// read/rebuild/write pass, then surface one whole-file diff card.  All of it
 /// runs in Rust — the read is not a redirect and the write is atomic — so `edit`
-/// is a single logical surface emitting only its diff cards, never a read or
+/// is a single logical surface emitting only its diff card, never a read or
 /// write io card.
 ///
 /// Every hash resolves against the file as read, before anything is written, so
@@ -374,52 +375,89 @@ fn builtin_edit(args: &[Value], shell: &mut Shell) -> Settled<Value> {
             Some(r) => out.extend(rows_of(&r.new)),
         }
     }
-    write_file_atomic(shell, &path, out.join("\n").as_bytes())?;
+    let final_text = out.join("\n");
+    write_file_atomic(shell, &path, final_text.as_bytes())?;
 
-    // One diff card per edit, with ±2 lines of context drawn from the original
-    // snapshot, so the rail renders a hunk for each change.
-    for r in &resolved {
-        shell.surface(diff_card(&path, &rows, n, r));
+    // One canonical whole-file diff (original vs final), grouped into hunks by
+    // `similar` with ±2 lines of context.  A no-op edit yields no hunks and so
+    // surfaces nothing; otherwise the rail draws a single card for the file.
+    let hunks = whole_file_hunks(&body, &final_text);
+    if !hunks.is_empty() {
+        shell.surface(diff_card_value(&path, hunks));
     }
     Ok(Value::Unit)
 }
 
-/// Build the `` `card [`diff …] `` value `edit` surfaces for one change, with
-/// the before/del/add/after context computed exactly as `agent.ral`'s `each`
-/// block did: ±2 lines clamped at the file bounds, and the phantom trailing
-/// empty row a terminal newline produces excluded from trailing context.
-fn diff_card(path: &str, rows: &[String], n: usize, r: &ResolvedEdit) -> Value {
-    let i = r.at;
-    let line = i + 1;
-    let peek = 2;
-    let ctx_drop = i.saturating_sub(peek);
-    let ctx_before: Vec<Value> = rows[ctx_drop..i]
-        .iter()
-        .map(|s| Value::String(s.clone()))
-        .collect();
-    let del = vec![Value::String(rows[i].clone())];
-    let add: Vec<Value> = if r.new.is_empty() {
-        Vec::new()
-    } else {
-        rows_of(&r.new).into_iter().map(Value::String).collect()
-    };
-    // A trailing newline leaves a phantom empty last row; drop it from the
-    // trailing-context bound so the diff does not show a spurious blank line.
-    let m = if rows[n - 1].is_empty() { n - 1 } else { n };
-    let ca_hi = (line + peek).min(m);
-    let ctx_after: Vec<Value> = rows[line..ca_hi]
-        .iter()
-        .map(|s| Value::String(s.clone()))
+/// Compute the whole-file line-level diff of `old` vs `new`, grouped into
+/// hunks with ±2 lines of context (matching the kit's former `peek`).  Each
+/// hunk's `start` is the 1-indexed original line of its first row, and its
+/// rows are the unified context / deletion / insertion list `similar` yields.
+fn whole_file_hunks(old: &str, new: &str) -> Vec<Hunk> {
+    use similar::{ChangeTag, TextDiff};
+    let diff = TextDiff::from_lines(old, new);
+    let mut hunks = Vec::new();
+    for group in diff.grouped_ops(2) {
+        let first = group
+            .first()
+            .expect("grouped_ops yields non-empty groups");
+        let start = first.old_range().start as u32 + 1;
+        let mut rows = Vec::new();
+        for op in &group {
+            for change in diff.iter_changes(op) {
+                // `from_lines` keeps a trailing `\n` on each change value;
+                // strip exactly one so the row carries the bare line, the way
+                // `rows_of` splits the file.
+                let text = change
+                    .value()
+                    .strip_suffix('\n')
+                    .unwrap_or(change.value())
+                    .to_string();
+                rows.push(match change.tag() {
+                    ChangeTag::Equal => Row::Context(text),
+                    ChangeTag::Delete => Row::Del(text),
+                    ChangeTag::Insert => Row::Add(text),
+                });
+            }
+        }
+        hunks.push(Hunk { start, rows });
+    }
+    hunks
+}
+
+/// Build the `` `card [`diff …] `` value `edit` surfaces for the whole-file
+/// diff: the `path` and the grouped `hunks`, each hunk a `start` line and a
+/// `rows` list of `{ tag, text }` records the card decoder lifts back into
+/// [`Row`]s.
+fn diff_card_value(path: &str, hunks: Vec<Hunk>) -> Value {
+    let hunk_values: Vec<Value> = hunks
+        .into_iter()
+        .map(|h| {
+            let rows: Vec<Value> = h
+                .rows
+                .into_iter()
+                .map(|row| {
+                    let (tag, text) = match row {
+                        Row::Context(t) => ("context", t),
+                        Row::Del(t) => ("del", t),
+                        Row::Add(t) => ("add", t),
+                    };
+                    Value::map(vec![
+                        ("tag".into(), Value::String(tag.into())),
+                        ("text".into(), Value::String(text)),
+                    ])
+                })
+                .collect();
+            Value::map(vec![
+                ("start".into(), Value::Int(h.start as i64)),
+                ("rows".into(), Value::list(rows)),
+            ])
+        })
         .collect();
     let diff = Value::Variant {
         label: "diff".into(),
         payload: Some(Box::new(Value::map(vec![
             ("path".into(), Value::String(path.to_string())),
-            ("start".into(), Value::Int(line as i64)),
-            ("before".into(), Value::list(ctx_before)),
-            ("del".into(), Value::list(del)),
-            ("add".into(), Value::list(add)),
-            ("after".into(), Value::list(ctx_after)),
+            ("hunks".into(), Value::list(hunk_values)),
         ]))),
     };
     Value::Variant {
@@ -619,7 +657,7 @@ pub static EXARCH_BUILTINS: &[BuiltinEntry] = &[
     BuiltinEntry {
         name: Cow::Borrowed("edit"),
         type_rule: BuiltinTypeRule::Scheme(Some(2), scheme_edit),
-        doc: "edit <path> <edits>  — apply a batch of [hash, new-text] pairs in one read/write pass: each replaces the line whose window-hash is HASH (NEW-TEXT is verbatim — a real newline inside '…' splits the line, \\n does not; empty deletes). Atomic — all hashes resolve against the file as read, so edits never interfere; fails writing nothing unless every hash picks exactly one line and no two pairs name the same one. Surfaces one diff card per change.",
+        doc: "edit <path> <edits>  — apply a batch of [hash, new-text] pairs in one read/write pass: each replaces the line whose window-hash is HASH (NEW-TEXT is verbatim — a real newline inside '…' splits the line, \\n does not; empty deletes). Atomic — all hashes resolve against the file as read, so edits never interfere; fails writing nothing unless every hash picks exactly one line and no two pairs name the same one. Surfaces one whole-file diff card.",
         body: BuiltinBody::Static(builtin_edit),
     },
     BuiltinEntry {

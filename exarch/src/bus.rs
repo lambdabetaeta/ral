@@ -178,20 +178,28 @@ pub enum Kind {
     Io { event: IoEvent, card: Card },
 }
 
-/// One located change within a file, carried by a [`crate::card::Mark::Diff`]:
-/// the line range beginning at `start` is rewritten from `del` to `add`, with the
-/// unchanged `before` and `after` lines the kit captured as surrounding
-/// context.  `start` is the 1-indexed line where the change begins; the
-/// sink derives every rendered line number from it and the row counts, so
-/// removed lines keep their pre-edit numbers and added / context lines
-/// take their post-edit ones.
+/// One grouped hunk of a whole-file diff, carried by a
+/// [`crate::card::Mark::Diff`]: a flat unified list of [`Row`]s — context,
+/// deletions, and insertions interleaved exactly as `similar`'s grouped ops
+/// yield them.  `start` is the 1-indexed original line of the hunk's first
+/// row; the sink walks the rows from there, advancing an old- and a
+/// new-side counter — a `Context` advances both, a `Del` advances the old
+/// counter (and keeps its pre-edit number), an `Add` advances the new
+/// counter (and takes its post-edit number).
 #[derive(Clone, Debug, Serialize)]
 pub struct Hunk {
     pub start: u32,
-    pub before: Vec<String>,
-    pub del: Vec<String>,
-    pub add: Vec<String>,
-    pub after: Vec<String>,
+    pub rows: Vec<Row>,
+}
+
+/// One row of a [`Hunk`]'s unified line list: unchanged context, a removed
+/// line, or an inserted line.  Line-level only — no inline word spans.
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "tag", content = "text", rename_all = "snake_case")]
+pub enum Row {
+    Context(String),
+    Del(String),
+    Add(String),
 }
 
 #[derive(Clone)]

@@ -13,7 +13,7 @@
 //! human stdout/stderr projection shows, and sub-agent output
 //! de-multiplexes cleanly by id.
 
-use crate::bus::{Event, Kind, SessionId, Sink};
+use crate::bus::{Event, Kind, Row, SessionId, Sink};
 use crate::card::{Card, FieldVal, Mark};
 use crate::provider::{Provider, Usage};
 use crate::session::Session;
@@ -180,10 +180,13 @@ fn card_stderr(card: &Card) -> Vec<String> {
             Mark::Diff { path, hunks } => {
                 out.push(format!("[diff: {path}]"));
                 for h in hunks {
-                    out.extend(h.before.iter().map(|l| format!("    {l}")));
-                    out.extend(h.del.iter().map(|l| format!("  - {l}")));
-                    out.extend(h.add.iter().map(|l| format!("  + {l}")));
-                    out.extend(h.after.iter().map(|l| format!("    {l}")));
+                    for row in &h.rows {
+                        out.push(match row {
+                            Row::Context(l) => format!("    {l}"),
+                            Row::Del(l) => format!("  - {l}"),
+                            Row::Add(l) => format!("  + {l}"),
+                        });
+                    }
                 }
             }
             Mark::Raw { bytes } => {

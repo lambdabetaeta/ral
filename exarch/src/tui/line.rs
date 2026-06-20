@@ -7,7 +7,7 @@
 //! the consumer ([`super::App::handle`]) calls into here to turn them
 //! into `Line`s.
 
-use crate::bus::Hunk;
+use crate::bus::{Hunk, Row};
 use crate::card::{Card, Field as CardField, FieldVal, Mark, Measure, Role, Span as CardSpan};
 use crate::event::ProviderErrorRecord;
 use crate::provider;
@@ -398,8 +398,8 @@ pub(super) fn error(msg: &str) -> Vec<Line<'static>> {
 /// The body of a [`Mark::Diff`], graded by disclosure `level` and carrying
 /// *no* leading blank — [`render_card`] owns the one blank that opens the
 /// whole card.  L1 is the `▎ <path>` header alone; L2 adds the first hunk;
-/// L3 unrolls every hunk.  Each hunk row is leading context (no sign),
-/// removed lines (red `-`), added lines (lime `+`), and trailing context,
+/// L3 unrolls every hunk.  Each hunk is a unified row list — context rows
+/// (no sign), removed lines (red `-`), added lines (lime `+`) interleaved —
 /// indented two columns and prefixed with a right-aligned [`SLATE`] line
 /// number — removed rows keep their pre-edit numbers, added and context
 /// rows take their post-edit ones; several hunks are elision-separated.
@@ -418,6 +418,16 @@ fn diff_body(path: &str, hunks: &[Hunk], level: u8) -> Vec<Line<'static>> {
     }
 }
 
+/// Count the rows across every hunk that satisfy `pred` — the addition /
+/// deletion tallies the header's grain run reads.
+fn count_rows(hunks: &[Hunk], pred: impl Fn(&Row) -> bool) -> u32 {
+    hunks
+        .iter()
+        .flat_map(|h| h.rows.iter())
+        .filter(|r| pred(r))
+        .count() as u32
+}
+
 /// The `▎ <path>` diff header row: slate label, white path, the
 /// `log2`-scaled [`size_bar`] and the addition-ratio [`grain_run`].
 /// Shared by every disclosure level so the L1/L2/L3 headers never drift.
@@ -430,8 +440,8 @@ fn patch_header(path: &str, hunks: &[Hunk]) -> Line<'static> {
         size_bar(crate::card::hunk_magnitude(hunks)),
         Span::raw("  "),
         grain_run(
-            hunks.iter().map(|h| h.add.len() as u32).sum(),
-            hunks.iter().map(|h| h.del.len() as u32).sum(),
+            count_rows(hunks, |r| matches!(r, Row::Add(_))),
+            count_rows(hunks, |r| matches!(r, Row::Del(_))),
         ),
     ])
 }
@@ -463,49 +473,57 @@ fn diff_capped(path: &str, hunks: &[Hunk], cap: Option<usize>) -> Vec<Line<'stat
     ls
 }
 
-/// The largest line number [`patch`] will render for `h`, used to size
-/// the gutter: the last trailing-context row when present, else the last
-/// added or removed row.
+/// The largest line number [`patch`] will render for `h`, used to size the
+/// gutter: walk the unified rows from `h.start`, advancing an old- and a
+/// new-side counter the way [`push_hunk`] does, and take the largest number
+/// any row is stamped with.
 fn hunk_max_lineno(h: &Hunk) -> u32 {
-    let mut m = h.start;
-    if !h.del.is_empty() {
-        m = m.max(h.start + h.del.len() as u32 - 1);
+    let (mut old, mut new) = (h.start, h.start);
+    let mut max = h.start;
+    for row in &h.rows {
+        match row {
+            Row::Context(_) => {
+                max = max.max(new);
+                old += 1;
+                new += 1;
+            }
+            Row::Del(_) => {
+                max = max.max(old);
+                old += 1;
+            }
+            Row::Add(_) => {
+                max = max.max(new);
+                new += 1;
+            }
+        }
     }
-    let add_base = h.start + h.add.len() as u32;
-    if !h.after.is_empty() {
-        m = m.max(add_base + h.after.len() as u32 - 1);
-    } else if !h.add.is_empty() {
-        m = m.max(add_base - 1);
-    }
-    m
+    max
 }
 
-/// Render one hunk's rows into `ls`: leading context, deletions,
-/// additions, then trailing context.  Context and additions are numbered
-/// in the post-edit file (`before` sits just above `start`, `after` just
-/// below the inserted block); deletions keep their pre-edit numbers from
-/// `start`.
+/// Render one hunk's unified rows into `ls`, walking an old- and a new-side
+/// counter from `h.start`: a context row carries the new-side number (it
+/// exists in both files), a deletion keeps its pre-edit (old) number, an
+/// insertion takes its post-edit (new) number.  This is the numbering
+/// invariant the diff shows — removed rows in red `-`, added rows in lime
+/// `+`, context in slate.
 fn push_hunk(ls: &mut Vec<Line<'static>>, h: &Hunk, gutter: usize) {
-    let cb = h.before.len() as u32;
-    for (i, line) in h.before.iter().enumerate() {
-        push_gutter_row(
-            ls,
-            gutter,
-            h.start.saturating_sub(cb) + i as u32,
-            ' ',
-            line,
-            SLATE,
-        );
-    }
-    for (j, line) in h.del.iter().enumerate() {
-        push_gutter_row(ls, gutter, h.start + j as u32, '-', line, RED);
-    }
-    for (k, line) in h.add.iter().enumerate() {
-        push_gutter_row(ls, gutter, h.start + k as u32, '+', line, LIME);
-    }
-    let after_base = h.start + h.add.len() as u32;
-    for (m, line) in h.after.iter().enumerate() {
-        push_gutter_row(ls, gutter, after_base + m as u32, ' ', line, SLATE);
+    let (mut old, mut new) = (h.start, h.start);
+    for row in &h.rows {
+        match row {
+            Row::Context(line) => {
+                push_gutter_row(ls, gutter, new, ' ', line, SLATE);
+                old += 1;
+                new += 1;
+            }
+            Row::Del(line) => {
+                push_gutter_row(ls, gutter, old, '-', line, RED);
+                old += 1;
+            }
+            Row::Add(line) => {
+                push_gutter_row(ls, gutter, new, '+', line, LIME);
+                new += 1;
+            }
+        }
     }
 }
 
@@ -1149,11 +1167,16 @@ mod tests {
     #[test]
     fn patch_numbers_gutter_and_renumbers_after_edit() {
         let h = Hunk {
-            start: 10,
-            before: vec!["ctx8".into(), "ctx9".into()],
-            del: vec!["old10".into(), "old11".into()],
-            add: vec!["new10".into()],
-            after: vec!["ctx11".into(), "ctx12".into()],
+            start: 8,
+            rows: vec![
+                Row::Context("ctx8".into()),
+                Row::Context("ctx9".into()),
+                Row::Del("old10".into()),
+                Row::Del("old11".into()),
+                Row::Add("new10".into()),
+                Row::Context("ctx11".into()),
+                Row::Context("ctx12".into()),
+            ],
         };
         let rows: Vec<String> = diff_body("src/foo.rs", &[h], 3).iter().map(plain).collect();
         let find = |needle: &str| {
@@ -1196,10 +1219,9 @@ mod tests {
     fn patch_header_size_bar_scales_with_magnitude() {
         let hunk = |del: usize, add: usize| Hunk {
             start: 1,
-            before: vec![],
-            del: vec!["x".to_string(); del],
-            add: vec!["y".to_string(); add],
-            after: vec![],
+            rows: std::iter::repeat_n(Row::Del("x".to_string()), del)
+                .chain(std::iter::repeat_n(Row::Add("y".to_string()), add))
+                .collect(),
         };
         let bar = |hunks: &[Hunk]| -> String {
             // `diff_body` carries no leading blank, so the header is the
@@ -1235,10 +1257,9 @@ mod tests {
     fn patch_header_grain_tracks_addition_ratio() {
         let hunk = |del: usize, add: usize| Hunk {
             start: 1,
-            before: vec![],
-            del: vec!["x".to_string(); del],
-            add: vec!["y".to_string(); add],
-            after: vec![],
+            rows: std::iter::repeat_n(Row::Del("x".to_string()), del)
+                .chain(std::iter::repeat_n(Row::Add("y".to_string()), add))
+                .collect(),
         };
         let grain = |hunks: &[Hunk]| -> char {
             diff_body("src/foo.rs", hunks, 3)[0]

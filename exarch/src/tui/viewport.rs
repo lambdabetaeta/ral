@@ -517,6 +517,7 @@ impl Viewport {
 #[allow(clippy::disallowed_methods, reason = "[io-door:test] test fs/process scaffolding")]
 mod tests {
     use super::*;
+    use crate::bus::Row;
     use ratatui::text::Span;
 
     fn fresh() -> Viewport {
@@ -603,10 +604,11 @@ mod tests {
         assert_eq!(vp.steps(), vec![true, false]);
         let hunk = Hunk {
             start: 1,
-            before: vec![],
-            del: vec!["x".into()],
-            add: vec!["a".into(), "b".into()],
-            after: vec![],
+            rows: vec![
+                Row::Del("x".into()),
+                Row::Add("a".into()),
+                Row::Add("b".into()),
+            ],
         };
         vp.push_patch("src/foo.rs".into(), vec![hunk]);
         assert_eq!(vp.lines_touched(), 3);
@@ -677,10 +679,7 @@ mod tests {
         let mut vp = fresh();
         let hunk = Hunk {
             start: 10,
-            before: vec![],
-            del: vec!["gone".into()],
-            add: vec!["fresh".into()],
-            after: vec![],
+            rows: vec![Row::Del("gone".into()), Row::Add("fresh".into())],
         };
         vp.push_patch("src/foo.rs".into(), vec![hunk]);
         let full = vp.flatten_text(READ_W);
@@ -725,10 +724,7 @@ mod tests {
         vp.push_tool_call("ral", "edit the file".into(), "script".into());
         let hunk = Hunk {
             start: 1,
-            before: vec![],
-            del: vec![],
-            add: vec!["a".into(), "b".into()],
-            after: vec![],
+            rows: vec![Row::Add("a".into()), Row::Add("b".into())],
         };
         vp.push_patch("src/foo.rs".into(), vec![hunk]);
         // The call header carries no result bar yet — only the patch's own

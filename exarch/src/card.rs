@@ -16,7 +16,7 @@
 //! is correct by construction.  See
 //! `docs/ral-wiki/decisions/260619_surface-carries-documents.md`.
 
-use crate::bus::Hunk;
+use crate::bus::{Hunk, Row};
 use ral_core::Value as RalValue;
 use serde::Serialize;
 
@@ -181,11 +181,13 @@ impl Card {
 
 /// Total changed lines (deletions + additions) across `hunks` — the diff
 /// magnitude, shared by [`Card::magnitude`] and the renderer's size-bar.
+/// Context rows are unchanged, so they do not count.
 pub fn hunk_magnitude(hunks: &[Hunk]) -> u32 {
     hunks
         .iter()
-        .map(|h| (h.del.len() + h.add.len()) as u32)
-        .sum()
+        .flat_map(|h| h.rows.iter())
+        .filter(|r| matches!(r, Row::Del(_) | Row::Add(_)))
+        .count() as u32
 }
 
 // ── I/O events: structural shapes core emits onto the `surface` sink ─────────
@@ -581,29 +583,42 @@ fn decode_field(v: &RalValue) -> Field {
     Field { label, value }
 }
 
-/// Decode a `diff` record.  Accepts either a `hunks` list of hunk records
-/// or the flat single-hunk shape (`start`/`before`/`del`/`add`/`after` on
-/// the record itself), the form `agent.ral`'s `edit` emits per change.
-/// `None` (→ plain-text fallback) when there is no `path`.
+/// Decode a `diff` record: its `path` and a `hunks` list of hunk records,
+/// the whole-file shape `edit` emits.  A missing `hunks` lifts to an empty
+/// vec so a bare diff still renders; `None` (→ plain-text fallback) only
+/// when there is no `path`.
 fn decode_diff(m: &ral_core::types::Map) -> Option<Mark> {
     let path = str_field(m, "path")?;
     let hunks = match m.get("hunks") {
         Some(RalValue::List(items)) => items.iter().filter_map(map_of).map(decode_hunk).collect(),
-        _ => vec![decode_hunk(m)],
+        _ => Vec::new(),
     };
     Some(Mark::Diff { path, hunks })
 }
 
-/// Decode one hunk record; missing context lists default to empty and a
-/// missing `start` defaults to line 1, so a partially-formed diff still
-/// renders rather than dropping.
+/// Decode one hunk record: a `start` line (defaulting to 1) and its `rows`
+/// list of `{ tag, text }` records.  A missing `rows` defaults to empty, so
+/// a partially-formed hunk still renders rather than dropping.
 fn decode_hunk(m: &ral_core::types::Map) -> Hunk {
+    let rows = match m.get("rows") {
+        Some(RalValue::List(items)) => items.iter().filter_map(map_of).map(decode_row).collect(),
+        _ => Vec::new(),
+    };
     Hunk {
         start: count_field(m, "start").unwrap_or(1),
-        before: lines_field(m, "before"),
-        del: lines_field(m, "del"),
-        add: lines_field(m, "add"),
-        after: lines_field(m, "after"),
+        rows,
+    }
+}
+
+/// Decode one row record: its `tag` (`context` / `del` / `add`) and `text`.
+/// An unrecognized or missing tag degrades to context — the row is never
+/// dropped or panicked on, so the whole diff still renders.
+fn decode_row(m: &ral_core::types::Map) -> Row {
+    let text = str_field(m, "text").unwrap_or_default();
+    match str_field(m, "tag").as_deref() {
+        Some("del") => Row::Del(text),
+        Some("add") => Row::Add(text),
+        _ => Row::Context(text),
     }
 }
 
@@ -723,9 +738,25 @@ mod tests {
                 "diff",
                 vec![
                     ("path", s("a.rs")),
-                    ("start", RalValue::Int(7)),
-                    ("del", list(vec![s("x")])),
-                    ("add", list(vec![s("y")])),
+                    (
+                        "hunks",
+                        list(vec![RalValue::map(vec![
+                            ("start".into(), RalValue::Int(7)),
+                            (
+                                "rows".into(),
+                                list(vec![
+                                    RalValue::map(vec![
+                                        ("tag".into(), s("del")),
+                                        ("text".into(), s("x")),
+                                    ]),
+                                    RalValue::map(vec![
+                                        ("tag".into(), s("add")),
+                                        ("text".into(), s("y")),
+                                    ]),
+                                ]),
+                            ),
+                        ])]),
+                    ),
                 ],
             ),
             mark(
@@ -752,7 +783,8 @@ mod tests {
         assert_eq!(marks.len(), 5);
         assert!(matches!(&marks[0], Mark::Text { spans } if spans[0].role == Some(Role::Strong)));
         assert!(matches!(&marks[1], Mark::Diff { path, hunks }
-            if path == "a.rs" && hunks[0].start == 7 && hunks[0].del == ["x"] && hunks[0].add == ["y"]));
+            if path == "a.rs" && hunks[0].start == 7
+                && matches!(hunks[0].rows.as_slice(), [Row::Del(d), Row::Add(a)] if d == "x" && a == "y")));
         assert!(matches!(&marks[2], Mark::Fields { rows } if rows[0].label == "tests"));
         assert!(matches!(&marks[3], Mark::Measure(m) if m.value == 7 && m.max == Some(12)));
         assert!(matches!(&marks[4], Mark::Raw { bytes } if bytes == b"hi"));
@@ -1036,10 +1068,11 @@ mod tests {
             path: "a.rs".into(),
             hunks: vec![Hunk {
                 start: 1,
-                before: vec![],
-                del: vec!["x".into()],
-                add: vec!["y".into(), "z".into()],
-                after: vec![],
+                rows: vec![
+                    Row::Del("x".into()),
+                    Row::Add("y".into()),
+                    Row::Add("z".into()),
+                ],
             }],
         }]);
         assert_eq!(one.single_diff().map(|(p, _)| p), Some("a.rs"));

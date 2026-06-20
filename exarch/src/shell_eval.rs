@@ -253,7 +253,7 @@ mod tests {
 
     use super::*;
     use crate::agent_builtins;
-    use crate::bus::Emitter;
+    use crate::bus::{Emitter, Row};
     use ral_core::types::Capabilities;
     use std::sync::mpsc;
 
@@ -698,22 +698,22 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
             .single_diff()
             .expect("edit surfaces a card carrying one diff mark");
         let hunk = &hunks[0];
-        assert_eq!(
-            hunk.del,
-            vec!["unique target line"],
-            "del must carry the literal replaced line, not the hash"
-        );
-        assert_eq!(hunk.add, vec!["REPLACED"]);
-        assert_eq!(hunk.start, 2, "the edit begins at line 2");
-        assert_eq!(
-            hunk.before,
-            vec!["alpha"],
-            "the line above the edit is carried as leading context"
-        );
-        assert_eq!(
-            hunk.after,
-            vec!["omega"],
-            "the line below the edit is carried as trailing context"
+        // The whole-file diff groups the lone change with its ±2 context, so
+        // the hunk begins at the file's first line and carries the unified
+        // row list: context, the deletion (the literal removed line, not the
+        // hash), the insertion, then trailing context.
+        assert_eq!(hunk.start, 1, "the hunk begins at line 1 with leading context");
+        assert!(
+            matches!(
+                hunk.rows.as_slice(),
+                [Row::Context(a), Row::Del(d), Row::Add(b), Row::Context(o)]
+                    if a == "alpha"
+                        && d == "unique target line"
+                        && b == "REPLACED"
+                        && o == "omega"
+            ),
+            "rows must be context/del/add/context with literal text, got {:?}",
+            hunk.rows
         );
     }
 

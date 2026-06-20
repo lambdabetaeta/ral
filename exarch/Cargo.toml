@@ -51,6 +51,11 @@ tempfile   = "3.27"
 base64     = { workspace = true }
 sha2       = "0.10"
 getrandom  = "0.2"
+# Line-level structured diffing: `edit` computes one canonical whole-file
+# diff (original vs final) and emits a single grouped-hunk card.  Default
+# features only — `from_lines`/`grouped_ops`/`iter_changes` are line-level;
+# `inline`/`unicode`/`bytes` are not pulled in.
+similar    = "2"
 
 # Unix-only bundled tools (id / kill / stat / timeout / test / tac).  Pulled
 # in through `ral-core/coreutils-unix-only` only on Unix targets — the
