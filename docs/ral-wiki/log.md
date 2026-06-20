@@ -2927,3 +2927,8 @@ Updated [[index|index]] with the narrowed implementation parcels.
 
 Re-evaluated [[decisions/260619_terminal-lease|terminal-lease]] after the follow-up review. The plan now distinguishes the host-facing `RequestedTerminalAccess` from internal `TerminalAccess::ExplicitLoan`, and records that the parked session lease has no raw public getter: foreground handoff code gets a borrow only through an authorised turn.
 Updated [[index|index]] to reflect the public/internal terminal-access split.
+
+## [2026-06-20] ingest | same-thread body plan tightened
+
+Revised [[decisions/260620_same-thread-body-shares-the-session|same-thread-body-shares-the-session]] after source review. The implementation plan now preserves lambda `$?` entry semantics explicitly, ties pipeline-stage copying to `child_eval` rather than `spawn_thread`, includes `exit_hints` in the `SessionState` inventory, and makes the flow-matrix tests concrete.
+
