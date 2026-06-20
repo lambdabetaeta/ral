@@ -22,12 +22,12 @@ use unicode_width::UnicodeWidthStr;
 
 // ── Color palette ────────────────────────────────────────────────────────────
 
-/// Muted vaporwave palette for the per-step chrome — same hue
-/// identities as the bright banner set, pulled toward dusty pastels so
-/// the repeating chrome reads as accent rather than alarm.  The bright
-/// counterparts (`BANNER_*`) are used only by the one-shot startup
-/// banner + eagle so the splash carries the neon punch without
-/// bleeding into the rest of the session.
+/// Muted vaporwave palette for the per-step chrome — dusty pastels so the
+/// repeating chrome reads as accent rather than alarm.  The only louder
+/// ink in the app is the splash's `BANNER_*` pair (wordmark + eagle), kept
+/// saturated so the one-shot banner carries a neon punch without bleeding
+/// into the session below — the metadata matrix and everything else draw
+/// from this muted set through their nominal [`Role`].
 pub(super) const PINK: Color = Color::Rgb(220, 140, 175);
 pub(super) const CYAN: Color = Color::Rgb(135, 200, 215);
 pub(super) const LIME: Color = Color::Rgb(165, 210, 155);
@@ -43,16 +43,13 @@ pub(super) const CODE_BG: Color = Color::Rgb(36, 38, 46);
 /// stays the identity channel and value stays the magnitude channel.
 pub(super) const AGENT_HUES: [Color; 6] = [CYAN, PINK, LIME, PURPLE, ORANGE, RED];
 
-/// Saturated banner-only palette — restricted to the startup
-/// banner + eagle so the splash reads as neon while the chrome below
-/// stays muted.
+/// Saturated splash-only palette — the wordmark (pink) and the eagle
+/// (gold) of the one-shot startup banner.  These two are the only neon ink
+/// in the app; all session data, the metadata matrix included, renders
+/// through the muted palette above so nothing else competes with the
+/// splash.
 pub(super) const BANNER_PINK: Color = Color::Rgb(255, 20, 147);
-pub(super) const BANNER_CYAN: Color = Color::Rgb(0, 240, 255);
-pub(super) const BANNER_LIME: Color = Color::Rgb(57, 255, 20);
 pub(super) const BANNER_GOLD: Color = Color::Rgb(255, 191, 0);
-pub(super) const BANNER_PURPLE: Color = Color::Rgb(191, 64, 255);
-pub(super) const BANNER_ORANGE: Color = Color::Rgb(255, 95, 31);
-pub(super) const BANNER_RED: Color = Color::Rgb(255, 50, 80);
 
 // ── Layout constants ─────────────────────────────────────────────────────────
 
@@ -839,17 +836,6 @@ pub(super) fn usage_text(usage: &provider::Usage) -> Vec<Span<'static>> {
 /// Bold coloured span.
 pub(super) fn bold(c: String, col: Color) -> Span<'static> {
     Span::styled(c, Style::default().fg(col).add_modifier(Modifier::BOLD))
-}
-
-/// Static slate-coloured span.
-pub(super) fn slate(s: &'static str) -> Span<'static> {
-    Span::styled(s, Style::default().fg(SLATE))
-}
-
-/// Slate-coloured span over an owned string (banner-side dynamic
-/// labels like `canonical_slug`).
-pub(super) fn slate_owned(s: String) -> Span<'static> {
-    Span::styled(s, Style::default().fg(SLATE))
 }
 
 /// Wrap `text` to `body_w` columns and push one [`Line`] per chunk into

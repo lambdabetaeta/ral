@@ -32,7 +32,7 @@ use crate::bootstrap::Scratch;
 use crate::bus::{Event, Hunk, Inbox, Kind, Pass, SessionId, Sink, drain_pass, pump};
 use std::sync::Arc;
 use crate::cancel;
-use crate::card::IoEvent;
+use crate::card::{Card, Field, FieldVal, IoEvent, Mark, Role, Span as CardSpan};
 use crate::credential::CredentialStore;
 use crate::models::{LiveSource, ModelCatalog, ModelSource};
 use crate::provider::{self, Provider, Usage};
@@ -75,8 +75,7 @@ use std::{
 };
 
 use line::{
-    AGENT_HUES, BANNER_CYAN, BANNER_GOLD, BANNER_LIME, BANNER_ORANGE, BANNER_PINK, BANNER_PURPLE,
-    BANNER_RED, CYAN, PINK, PURPLE, RAIL_W, READ_W, SLATE, bold, slate, slate_owned,
+    AGENT_HUES, BANNER_GOLD, BANNER_PINK, CYAN, PINK, PURPLE, RAIL_W, READ_W, SLATE, bold,
 };
 use viewport::Viewport;
 
@@ -1471,107 +1470,95 @@ impl App {
     }
 
     pub fn banner(&mut self, term: &mut Term, s: &SessionInfo<'_>) -> io::Result<()> {
-        let (tw, _) = size().unwrap_or((READ_W, 24));
-        let cap = tw.min(READ_W) as usize;
-        let mut ls: Vec<Line<'static>> = vec![Line::default()];
+        // The wordmark + eagle: a branded splash, an image outside Bertin's
+        // data variables, so it alone keeps the saturated palette and reads
+        // as neon. It carries no rail — it is not a row on the plane.
+        let mut splash: Vec<Line<'static>> = vec![Line::default()];
         for (a, e) in ART.lines().zip(EAGLE.lines()) {
-            ls.push(Line::from(vec![
+            splash.push(Line::from(vec![
                 bold(a.to_string(), BANNER_PINK),
                 Span::raw("  "),
                 bold(e.to_string(), BANNER_GOLD),
             ]));
         }
-        ls.push(Line::from(Span::styled(
-            format!(" {}", s.cwd),
-            Style::default().fg(SLATE).add_modifier(Modifier::ITALIC),
-        )));
-        let max_t = match (s.max_tokens_override, s.max_output_tokens) {
-            (Some(n), _) => n.to_string(),
-            (None, Some(catalog)) => format!("auto (≤{})", fmt_tokens(catalog as u64)),
-            (None, None) => "auto".into(),
-        };
-        let mut line2 = vec![
-            slate("provider "),
-            bold(s.provider.into(), BANNER_CYAN),
-            slate("    model "),
-            bold(s.model.into(), BANNER_LIME),
-        ];
-        if let Some(slug) = s.canonical_slug
-            && slug != s.model
-        {
-            line2.push(slate(" ("));
-            line2.push(slate_owned(slug.to_string()));
-            line2.push(slate(")"));
-        }
-        ls.push(Line::from(line2));
-        ls.push(Line::from(vec![
-            slate("max-tokens "),
-            bold(max_t, BANNER_LIME),
-        ]));
-        if let Some(ctx) = s.context_window {
-            ls.push(Line::from(vec![
-                slate("context "),
-                bold(fmt_tokens(ctx), BANNER_LIME),
-            ]));
-        }
-        let bc = if s.base == "dangerous" {
-            BANNER_RED
-        } else {
-            BANNER_ORANGE
-        };
-        let ext = s
-            .extend_base
-            .map(|p| bold(p.display().to_string(), BANNER_ORANGE))
-            .unwrap_or(slate("none"));
-        let restr = if s.restrict_files.is_empty() {
-            slate("none")
-        } else {
-            Span::raw(
-                s.restrict_files
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            )
-        };
-        ls.push(Line::from(vec![
-            slate("base "),
-            bold(s.base.into(), bc),
-            slate("    extend-base "),
-            ext,
-            slate("    restrict "),
-            restr,
-        ]));
-        let sz = format!("{:.1} kB", s.system_size as f64 / 1024.0);
-        ls.push(Line::from(vec![
-            slate("system prompt "),
-            bold(sz, BANNER_LIME),
-            slate(" · "),
-            if s.system_files.is_empty() {
-                slate("default")
-            } else {
-                Span::raw(
-                    s.system_files
-                        .iter()
-                        .map(|p| p.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                )
-            },
-        ]));
-        ls.push(Line::from(vec![
-            slate("scratch "),
-            bold(s.scratch.display().to_string(), BANNER_ORANGE),
-        ]));
-        ls.push(Line::from(Span::styled(
-            "━".repeat(cap),
-            Style::default().fg(BANNER_PURPLE),
-        )));
+
         if let Some(vp) = self.viewports.get_mut(&self.root) {
-            vp.push_chrome(RailShape::Plain, ls);
+            vp.push_chrome(RailShape::Plain, splash);
+            vp.push_card(session_card(s));
         }
         self.draw(term)
     }
+}
+
+/// The startup session metadata as a Bertin matrix — one `fields` mark the
+/// banner pushes through the shared aligned-column renderer, so it sits on
+/// the rail and in the muted palette like every other block.  Hue is spent
+/// only where it names something: a path carries the Path identity, a
+/// `dangerous` base alarms; names and quantities stay plain ink.
+fn session_card(s: &SessionInfo<'_>) -> Card {
+    let mut rows: Vec<Field> = vec![
+        meta_field("cwd", vec![meta_span(Role::Path, s.cwd)]),
+        meta_field("provider", vec![meta_span(Role::Strong, s.provider)]),
+    ];
+
+    let mut model_val = vec![meta_span(Role::Strong, s.model)];
+    if let Some(slug) = s.canonical_slug
+        && slug != s.model
+    {
+        model_val.push(meta_span(Role::Muted, format!(" ({slug})")));
+    }
+    rows.push(meta_field("model", model_val));
+
+    if let Some(ctx) = s.context_window {
+        rows.push(meta_field("context", vec![meta_plain(fmt_tokens(ctx))]));
+    }
+
+    let max_t = match (s.max_tokens_override, s.max_output_tokens) {
+        (Some(n), _) => n.to_string(),
+        (None, Some(catalog)) => format!("auto (≤{})", fmt_tokens(catalog as u64)),
+        (None, None) => "auto".into(),
+    };
+    rows.push(meta_field("max-tokens", vec![meta_plain(max_t)]));
+
+    let base_role = if s.base == "dangerous" {
+        Role::Bad
+    } else {
+        Role::Strong
+    };
+    rows.push(meta_field("base", vec![meta_span(base_role, s.base)]));
+
+    rows.push(meta_field(
+        "extend-base",
+        match s.extend_base {
+            Some(p) => vec![meta_span(Role::Path, p.display().to_string())],
+            None => vec![meta_span(Role::Muted, "none")],
+        },
+    ));
+
+    rows.push(meta_field(
+        "restrict",
+        if s.restrict_files.is_empty() {
+            vec![meta_span(Role::Muted, "none")]
+        } else {
+            vec![meta_span(Role::Path, join_paths(s.restrict_files))]
+        },
+    ));
+
+    let sz = format!("{:.1} kB", s.system_size as f64 / 1024.0);
+    let mut sys_val = vec![meta_plain(sz), meta_span(Role::Muted, " · ")];
+    if s.system_files.is_empty() {
+        sys_val.push(meta_span(Role::Muted, "default"));
+    } else {
+        sys_val.push(meta_span(Role::Path, join_paths(s.system_files)));
+    }
+    rows.push(meta_field("system prompt", sys_val));
+
+    rows.push(meta_field(
+        "scratch",
+        vec![meta_span(Role::Path, s.scratch.display().to_string())],
+    ));
+
+    Card(vec![Mark::Fields { rows }])
 }
 
 /// Metadata shown in the startup banner.
@@ -1603,6 +1590,41 @@ fn fmt_tokens(n: u64) -> String {
     } else {
         n.to_string()
     }
+}
+
+/// A roled value span for the startup metadata matrix — names a nominal
+/// [`Role`] (the renderer binds it to a hue), never a colour.
+fn meta_span(role: Role, text: impl Into<String>) -> CardSpan {
+    CardSpan {
+        role: Some(role),
+        text: text.into(),
+    }
+}
+
+/// A roleless value span — a quantity readout the matrix renders as plain
+/// ink, carrying no nominal identity.
+fn meta_plain(text: impl Into<String>) -> CardSpan {
+    CardSpan {
+        role: None,
+        text: text.into(),
+    }
+}
+
+/// One `(label, value)` row of the startup metadata matrix.
+fn meta_field(label: &str, value: Vec<CardSpan>) -> Field {
+    Field {
+        label: label.to_string(),
+        value: FieldVal::Inline(value),
+    }
+}
+
+/// A comma-joined display of `paths` for a single matrix value cell.
+fn join_paths(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The rule line's right-side status readout: model name, the ctx%
@@ -2722,6 +2744,163 @@ fn read_prompt(term: &mut Term, app: &mut App) -> io::Result<Idle> {
             CtEvent::Paste(s) => app.paste(&s),
             CtEvent::Mouse(m) => app.mouse(m),
             _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod banner_tests {
+    use super::{SessionInfo, line, session_card};
+    use crate::card::{FieldVal, Mark, Role};
+    use std::path::{Path, PathBuf};
+
+    /// A representative session: a fetched-catalog model (distinct slug,
+    /// known context window), default system prompt, no extend/restrict.
+    #[allow(clippy::disallowed_methods)] // test scaffolding: a fixed literal scratch path, no path semantics to get wrong
+    fn sample(base: &'static str) -> SessionInfo<'static> {
+        SessionInfo {
+            provider: "anthropic",
+            model: "claude-opus-4-8",
+            canonical_slug: Some("claude-opus-4-8-20260101"),
+            max_tokens_override: None,
+            context_window: Some(200_000),
+            max_output_tokens: Some(64_000),
+            system_size: 4096,
+            system_files: &[],
+            base,
+            extend_base: None,
+            restrict_files: &[],
+            scratch: Path::new("/tmp/scratch"),
+            cwd: "/Users/me/projects/ral",
+        }
+    }
+
+    /// The `(label, value)` rows of the single `fields` mark the card carries.
+    fn rows(s: &SessionInfo<'_>) -> Vec<(String, FieldVal)> {
+        let card = session_card(s);
+        match card.marks() {
+            [Mark::Fields { rows }] => {
+                rows.iter().map(|f| (f.label.clone(), f.value.clone())).collect()
+            }
+            other => panic!("session card must be one fields mark, got {other:?}"),
+        }
+    }
+
+    /// The nominal role of a row's leading value span — `None` for a plain
+    /// (roleless) quantity readout or a measure.
+    fn lead_role(v: &FieldVal) -> Option<Role> {
+        match v {
+            FieldVal::Inline(spans) => spans.first().and_then(|sp| sp.role),
+            FieldVal::Measure(_) => None,
+        }
+    }
+
+    /// The matrix orders location → identity → capacity → security → prompt,
+    /// roles paths as Path, and leaves quantities as plain ink (no hue).
+    #[test]
+    fn session_card_orders_and_roles_fields() {
+        let rs = rows(&sample("read-only"));
+        let labels: Vec<&str> = rs.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "cwd", "provider", "model", "context", "max-tokens", "base", "extend-base",
+                "restrict", "system prompt", "scratch",
+            ]
+        );
+        let role = |label: &str| lead_role(&rs.iter().find(|(l, _)| l == label).unwrap().1);
+        assert_eq!(role("cwd"), Some(Role::Path), "cwd is a path");
+        assert_eq!(role("scratch"), Some(Role::Path), "scratch is a path");
+        assert_eq!(role("provider"), Some(Role::Strong), "provider is a name");
+        assert_eq!(role("model"), Some(Role::Strong), "model is a name");
+        assert_eq!(role("context"), None, "a quantity carries no hue");
+        assert_eq!(role("max-tokens"), None, "a quantity carries no hue");
+    }
+
+    /// Hue is spent on `base` only when it alarms: `dangerous` → Bad (red),
+    /// every safe base → Strong (plain bold).
+    #[test]
+    fn dangerous_base_is_the_one_field_that_earns_a_hue() {
+        let base_role = |b: &'static str| {
+            let rs = rows(&sample(b));
+            lead_role(&rs.iter().find(|(l, _)| l == "base").unwrap().1)
+        };
+        assert_eq!(base_role("dangerous"), Some(Role::Bad));
+        assert_eq!(base_role("read-only"), Some(Role::Strong));
+        assert_eq!(base_role("confined"), Some(Role::Strong));
+    }
+
+    /// A distinct canonical slug rides the model row as a muted suffix; an
+    /// absent or identical slug leaves the row a single span.
+    #[test]
+    fn model_slug_is_a_muted_suffix_only_when_distinct() {
+        let rs = rows(&sample("read-only"));
+        let FieldVal::Inline(spans) = &rs.iter().find(|(l, _)| l == "model").unwrap().1 else {
+            panic!("model is an inline value");
+        };
+        assert_eq!(spans.len(), 2, "distinct slug appends a suffix span");
+        assert_eq!(spans[1].role, Some(Role::Muted));
+        assert!(spans[1].text.contains("claude-opus-4-8-20260101"));
+
+        let mut same = sample("read-only");
+        same.canonical_slug = Some("claude-opus-4-8");
+        let rs = rows(&same);
+        let FieldVal::Inline(spans) = &rs.iter().find(|(l, _)| l == "model").unwrap().1 else {
+            panic!("model is an inline value");
+        };
+        assert_eq!(spans.len(), 1, "an identical slug adds nothing");
+    }
+
+    /// Present extend-base / restrict paths carry the Path identity; absent
+    /// ones read as a muted "none" rather than borrowing a hue.
+    #[test]
+    fn security_paths_are_roled_present_and_muted_when_absent() {
+        let rs = rows(&sample("read-only"));
+        assert_eq!(
+            lead_role(&rs.iter().find(|(l, _)| l == "extend-base").unwrap().1),
+            Some(Role::Muted),
+            "absent extend-base is muted none"
+        );
+
+        let ext = PathBuf::from("/policy/base.ral");
+        let restr = vec![PathBuf::from("src/lib.rs")];
+        let mut s = sample("read-only");
+        s.extend_base = Some(ext.as_path());
+        s.restrict_files = &restr;
+        let rs = rows(&s);
+        assert_eq!(
+            lead_role(&rs.iter().find(|(l, _)| l == "extend-base").unwrap().1),
+            Some(Role::Path)
+        );
+        assert_eq!(
+            lead_role(&rs.iter().find(|(l, _)| l == "restrict").unwrap().1),
+            Some(Role::Path)
+        );
+    }
+
+    /// The Bertin claim: rendered, every value lands in one shared column —
+    /// each field line opens with a label cell of identical width.
+    #[test]
+    fn rendered_matrix_aligns_every_value_in_one_column() {
+        let card = session_card(&sample("dangerous"));
+        let lines = line::render_card(&card, 3);
+        let label_w = rows(&sample("dangerous"))
+            .iter()
+            .map(|(l, _)| l.chars().count())
+            .max()
+            .unwrap()
+            + 2;
+        for l in &lines {
+            // Dump so the column is eyeballable under `--nocapture`.
+            eprintln!("[{:>2}] {}", l.spans.first().map_or(0, |s| s.content.chars().count()), line::plain(l));
+        }
+        for l in &lines {
+            let Some(first) = l.spans.first() else { continue };
+            assert_eq!(
+                first.content.chars().count(),
+                label_w,
+                "every field line opens with a label cell of width {label_w}"
+            );
         }
     }
 }
