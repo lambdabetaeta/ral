@@ -344,24 +344,26 @@ pub fn value_to_io(v: &RalValue) -> Option<IoEvent> {
 }
 
 /// Compose an [`IoEvent`] into a [`Card`] using only the existing marks — one
-/// [`Mark::Text`] of roled spans, zero new mark vocabulary.  The glyphs and
-/// spacing mirror how a `text`-mark card reads: a leading glyph, the path or
-/// program as the subject, the outcome roled by its level.
+/// [`Mark::Text`] of roled spans, zero new mark vocabulary.  Each row reads as
+/// a dim verb naming the operation (a nominal category, carried by a word
+/// rather than a mirror-orientation glyph) followed by the path or program as
+/// the subject — lifted by [`Role::Path`]'s hue against the muted label — and
+/// the outcome roled by its level.
 pub fn io_card(event: &IoEvent) -> Card {
     let spans = match event {
-        // `< path` — a muted inward glyph, then the path.
+        // `Read: path` — a muted verb, then the path as subject.
         IoEvent::Read { path } => vec![
-            span(Role::Muted, "< "),
+            span(Role::Muted, "Read: "),
             span(Role::Path, path),
         ],
-        // `> path (mode) outcome` — outward glyph, path, the mode in
+        // `Write: path (mode) outcome` — verb, path, the mode in
         // parentheses, then the outcome roled by how it settled.
         IoEvent::Write {
             path,
             mode,
             outcome,
         } => vec![
-            span(Role::Muted, "> "),
+            span(Role::Muted, "Write: "),
             span(Role::Path, path),
             span_plain(&format!(" ({}) ", mode.label())),
             span(outcome.role(), outcome.label()),
@@ -899,15 +901,15 @@ mod tests {
         );
     }
 
-    /// A read card is a muted `<` glyph followed by the `Path`-roled path.
+    /// A read card is a muted `Read:` label followed by the `Path`-roled path.
     #[test]
-    fn io_card_read_is_muted_glyph_and_path() {
+    fn io_card_read_is_muted_label_and_path() {
         let card = io_card(&IoEvent::Read {
             path: "a.rs".into(),
         });
         let spans = only_text(&card);
         assert_eq!(spans[0].role, Some(Role::Muted));
-        assert!(spans[0].text.contains('<'));
+        assert!(spans[0].text.contains("Read"));
         assert_eq!(spans[1].role, Some(Role::Path));
         assert_eq!(spans[1].text, "a.rs");
     }

@@ -1253,8 +1253,8 @@ return !{{length $hits}}"#
             &IoEvent::Read { path: path.clone() },
             "the one io event is a read of the redirect path"
         );
-        // The card composed beside the event is the read card: a muted `<`
-        // glyph, then the path roled `Path`.
+        // The card composed beside the event is the read card: a muted `Read:`
+        // label, then the path roled `Path`.
         let Kind::Io { card, .. } = kinds
             .iter()
             .find(|k| matches!(k, Kind::Io { .. }))
@@ -1266,7 +1266,7 @@ return !{{length $hits}}"#
             panic!("a read card is one text mark, got {:?}", card.marks())
         };
         assert_eq!(spans[0].role, Some(Role::Muted));
-        assert!(spans[0].text.contains('<'), "the read glyph is `<`");
+        assert!(spans[0].text.contains("Read"), "the read label is `Read:`");
         assert_eq!(spans[1].role, Some(Role::Path));
         assert_eq!(spans[1].text, path);
     }
