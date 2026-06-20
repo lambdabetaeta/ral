@@ -14,7 +14,7 @@
 
 #![allow(dead_code)] // not every test file uses every helper
 
-use ral_core::host::BakedPrelude;
+use ral_core::driver::BakedPrelude;
 use ral_core::{Scheme, ir::Comp};
 use std::sync::{Arc, OnceLock};
 

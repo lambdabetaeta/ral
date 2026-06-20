@@ -23,7 +23,7 @@ pub(crate) use platform::{load_exit_hints, probe_terminal};
 // ── Baked prelude ─────────────────────────────────────────────────────────
 
 /// The prelude baked into this binary at build time by `build.rs`.
-pub(crate) static PRELUDE: ral_core::host::BakedPrelude = ral_core::baked_prelude!();
+pub(crate) static PRELUDE: ral_core::driver::BakedPrelude = ral_core::baked_prelude!();
 
 // ── Mode / options ────────────────────────────────────────────────────────
 
@@ -436,7 +436,7 @@ fn run_batch(name: &str, source: String, script_args: Vec<String>, opts: BatchOp
         return ExitCode::SUCCESS;
     }
 
-    let mut shell = ral_core::host::boot_shell(terminal, &PRELUDE);
+    let mut shell = ral_core::driver::boot_shell(terminal, &PRELUDE);
     // `watch` is core-implemented but host-installed: a batch script's
     // stdout is the real terminal or pipe, a durable sink a detached
     // watcher can outlive the turn writing to.  Registered process-wide for

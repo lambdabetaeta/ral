@@ -8,13 +8,13 @@
 //! # Hosting a `Shell`
 //!
 //! Embedding the language in a host process — the interactive `ral`
-//! REPL, `exarch`, a test binary — goes through [`host`].  The prelude
+//! REPL, `exarch`, a test binary — goes through [`driver`].  The prelude
 //! is baked ahead of time into a [`postcard`] blob (the annotated IR plus
 //! the typed [`typecheck::Scheme`] list) by the host's build script and
-//! embedded at compile time; [`host::boot_shell`] then constructs, seeds,
+//! embedded at compile time; [`driver::boot_shell`] then constructs, seeds,
 //! and loads it into a fresh [`Shell`].  The single encode site
-//! ([`host::bake_prelude_to_out_dir`]) and the single decode site
-//! ([`host::BakedPrelude`]) live next to one rerun-if-changed list, so
+//! ([`driver::bake_prelude_to_out_dir`]) and the single decode site
+//! ([`driver::BakedPrelude`]) live next to one rerun-if-changed list, so
 //! the schema-evolution hazard — postcard carries no schema, and a field
 //! added to the IR or scheme vocabulary silently invalidates an old bake
 //! — is contained in one file rather than spread across each host.
@@ -24,6 +24,7 @@ pub mod builtins;
 pub mod capability;
 pub(crate) mod child_eval;
 pub mod diagnostic;
+pub mod driver;
 pub mod elaborator;
 pub mod evaluator;
 pub mod exit_hints;
@@ -61,7 +62,7 @@ pub mod types;
 // helpers, the typed-compile API, and ordinary value / rendering / diagnostic
 // types.  A host imports a turn from here; it does not reach the evaluator or
 // syntax layers through the crate root.
-pub use host::{Captured, RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
+pub use driver::{Captured, RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
 pub use runtime::pipeline::helper::{try_run_bundled_tool, try_run_pipeline_stage_helper};
 pub use turn::{StaticDiagnostics, TurnLifecycle};
 pub use typecheck::{Scheme, SessionSchemes, TypeError, bake_prelude, typecheck};

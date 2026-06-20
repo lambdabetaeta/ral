@@ -35,7 +35,7 @@ use ral_core::{CompileOutcome, Value, compile_and_typecheck, ir::Comp};
 /// `exarch::bootstrap::boot_shell()` without the TUI / signal-handler
 /// pieces, which are irrelevant to boundary semantics.
 fn fresh_shell() -> Shell {
-    ral_core::host::boot_shell(Default::default(), common::prelude())
+    ral_core::driver::boot_shell(Default::default(), common::prelude())
 }
 
 /// Parse + elaborate + typecheck `source` against the live `shell`'s

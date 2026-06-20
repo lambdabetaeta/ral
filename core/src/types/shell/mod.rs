@@ -175,7 +175,7 @@ pub type SurfaceSink = Arc<dyn EventSink>;
 /// This turn's authority to hand the controlling terminal to a child.
 ///
 /// The internal (per-turn) form of the host-facing
-/// [`RequestedTerminalAccess`](crate::host::RequestedTerminalAccess): it carries
+/// [`RequestedTerminalAccess`](crate::driver::RequestedTerminalAccess): it carries
 /// the extra `ExplicitLoan` state that `_ed-tui` raises mid-turn and that a host
 /// cannot request at `run_turn`. Read by
 /// [`Shell::terminal_lease`](Shell::terminal_lease), which yields the session's

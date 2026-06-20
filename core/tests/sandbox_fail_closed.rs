@@ -55,7 +55,7 @@ use ral_core::types::{Break, Capabilities, FsPolicy, Shell, Value};
 /// A `Shell` matching what every front end ends up with after bootstrap:
 /// prelude registered, default env, root capabilities.
 fn boot() -> Shell {
-    ral_core::host::boot_shell(Default::default(), common::prelude())
+    ral_core::driver::boot_shell(Default::default(), common::prelude())
 }
 
 /// A process-unique work directory under the system temp root, created on

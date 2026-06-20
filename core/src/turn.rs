@@ -122,12 +122,12 @@ impl Drop for TurnGuard<'_> {
 
 /// Build the [`TurnState`] a turn installs, seeded from the ambient `shell`.
 ///
-/// `capture` is `Some` only under [`TurnIo::Capture`](crate::host::TurnIo),
+/// `capture` is `Some` only under [`TurnIo::Capture`](crate::driver::TurnIo),
 /// where the turn's byte *output* streams are redirected into host-read
 /// buffers; under `Inherit` it is `None` and the ambient streams flow through
 /// unchanged. `stdin` and `terminal_access` are supplied independently of the
-/// output regime (the host's [`TurnStdin`](crate::host::TurnStdin) and
-/// [`RequestedTerminalAccess`](crate::host::RequestedTerminalAccess)): stdin is
+/// output regime (the host's [`TurnStdin`](crate::driver::TurnStdin) and
+/// [`RequestedTerminalAccess`](crate::driver::RequestedTerminalAccess)): stdin is
 /// always installed, so `Capture` no longer implies `Source::Terminal`. The
 /// `surface` is always the request's turn-local sink — it is no longer carried
 /// on the persistent session, so it has no liveness role.
@@ -239,7 +239,7 @@ mod tests {
     use crate::io::ByteBuffer;
     use std::sync::{Arc, Mutex};
 
-    use crate::host::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
+    use crate::driver::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
 
     /// A capturing request under the ⊤ capability ceiling with no surface
     /// sink and no lifecycle hooks — the minimal request a host with no

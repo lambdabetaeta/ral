@@ -1,3 +1,3 @@
 fn main() {
-    ral_core::host::bake_prelude_to_out_dir();
+    ral_core::driver::bake_prelude_to_out_dir();
 }

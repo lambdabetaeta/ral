@@ -28,7 +28,7 @@ use std::time::Duration;
 const DETACHED_WORKER_CEILING: Duration = Duration::from_secs(60 * 60);
 
 /// The prelude baked into this binary at build time by `build.rs`.
-pub static PRELUDE: ral_core::host::BakedPrelude = ral_core::baked_prelude!();
+pub static PRELUDE: ral_core::driver::BakedPrelude = ral_core::baked_prelude!();
 
 /// A successful tool run, broken into named pieces so the caller can
 /// render twice (full / capped) without parsing the rendered form.
@@ -276,7 +276,7 @@ mod tests {
     /// signal-handler installation (which is global, racey under
     /// `cargo test`, and not under test here).
     fn fresh_shell() -> Shell {
-        let mut shell = ral_core::host::boot_shell(Default::default(), &PRELUDE);
+        let mut shell = ral_core::driver::boot_shell(Default::default(), &PRELUDE);
         agent_builtins::install_on(&mut shell);
         agent_builtins::install_agent_library(&mut shell).expect("embedded agent library");
         crate::bootstrap::seed_no_color(&mut shell);

@@ -72,7 +72,7 @@ impl Session {
         boot::setup_signals();
         let (interactive_mode, terminal) = crate::probe_terminal(true);
         ral_core::dbg_trace!("repl", "before register");
-        let mut shell = ral_core::host::boot_shell(terminal, &crate::PRELUDE);
+        let mut shell = ral_core::driver::boot_shell(terminal, &crate::PRELUDE);
         ral_core::dbg_trace!("repl", "after register");
         shell.set_exit_hints(crate::load_exit_hints());
         boot::setup_panic_hook();

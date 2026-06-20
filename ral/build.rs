@@ -18,5 +18,5 @@ fn main() {
         .unwrap_or_else(|| "unknown".into());
     println!("cargo:rustc-env=RAL_GIT_HASH={hash}");
 
-    ral_core::host::bake_prelude_to_out_dir();
+    ral_core::driver::bake_prelude_to_out_dir();
 }

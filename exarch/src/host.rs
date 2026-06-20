@@ -3,8 +3,11 @@
 //! is on, where it stands on disk, and when "now" is.  Each probe is
 //! best-effort: missing values silently drop their line rather than
 //! erroring, so the prompt stays well-formed on bare or exotic hosts.
-
-use std::process::Command;
+//!
+//! The probes themselves live in [`ral_core::host`]; this module only
+//! formats them into the markdown snapshot, except for [`os_line`],
+//! which uses `os_info` for a richer version/codename string than the
+//! std target constants can provide.
 
 /// Multi-line markdown list — `os`, `now`, `cwd`, `user`, `home`, and
 /// (when cwd is inside a repo) `git`.  Stable for the process
@@ -12,17 +15,17 @@ use std::process::Command;
 pub fn snapshot() -> String {
     let mut out = String::new();
     out.push_str(&format!("- os: {}\n", os_line()));
-    if let Some(d) = date_line() {
+    if let Some(d) = ral_core::host::now() {
         out.push_str(&format!("- now: {d}\n"));
     }
-    if let Some(cwd) = ral_core::path::process_cwd() {
+    if let Some(cwd) = ral_core::host::cwd() {
         out.push_str(&format!("- cwd: {}\n", cwd.display()));
     }
-    let user = ral_core::path::user_name_from_env();
+    let user = ral_core::host::user();
     if user != "?" {
         out.push_str(&format!("- user: {user}\n"));
     }
-    let home = ral_core::path::home_from_env();
+    let home = ral_core::host::home();
     if !home.is_empty() {
         out.push_str(&format!("- home: {home}\n"));
     }
@@ -51,48 +54,9 @@ fn os_line() -> String {
     }
 }
 
-/// Local date, time, and timezone via `date(1)` — shelling out is
-/// cheaper than dragging in `chrono`/`time` for a single string.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:silent:date-launch] shells out to date(1) for the host info line; not turn-time data I/O"
-)]
-fn date_line() -> Option<String> {
-    let out = Command::new("date")
-        .arg("+%Y-%m-%d %H:%M:%S %Z")
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8(out.stdout).ok())
-        .flatten()
-        .map(|s| s.trim().to_string())
-}
-
 /// `branch (clean)` or `branch (dirty)` when cwd is inside a git
-/// working tree; `None` otherwise.  Two cheap subprocesses; `--porcelain`
-/// short-circuits on the first untracked or modified path.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:silent:git-launch] shells out to git(1) for the host info line; not turn-time data I/O"
-)]
+/// working tree; `None` otherwise.  Formats [`ral_core::host::git`]'s
+/// structured probe.
 fn git_line() -> Option<String> {
-    let head = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .output()
-        .ok()?;
-    if !head.status.success() {
-        return None;
-    }
-    let branch = String::from_utf8(head.stdout).ok()?.trim().to_string();
-    let porcelain = Command::new("git")
-        .args(["status", "--porcelain"])
-        .output()
-        .ok()?;
-    let state = if porcelain.stdout.is_empty() {
-        "clean"
-    } else {
-        "dirty"
-    };
-    Some(format!("{branch} ({state})"))
+    ral_core::host::git().map(|g| format!("{} ({})", g.branch, if g.dirty { "dirty" } else { "clean" }))
 }

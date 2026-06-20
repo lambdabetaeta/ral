@@ -158,5 +158,15 @@ impl Shell {
             .saturating_add(1)
             .to_string();
         self.mobile.context.set_env_var("SHLVL", shlvl);
+
+        // Machine facts (compile-time constants): exposed via `$env` so rc
+        // can branch on the OS/arch without shelling out to `uname`.
+        for (k, v) in [
+            ("OS_NAME", crate::host::os_name()),
+            ("OS_ARCH", crate::host::arch()),
+            ("OS_FAMILY", crate::host::family()),
+        ] {
+            self.mobile.context.set_env_var(k, v);
+        }
     }
 }
