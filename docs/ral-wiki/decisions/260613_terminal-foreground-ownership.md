@@ -1,8 +1,11 @@
 ---
-status: active
+status: superseded
+superseded_by: decisions/260619_terminal-lease
 ---
 
 # Terminal-foreground ownership, not interactivity, gates the handoff
+
+> Superseded by [[decisions/260619_terminal-lease|a held terminal lease gates the foreground handoff]].
 
 **A shell hands the controlling terminal to a child exactly when it owns the
 terminal's foreground process group — `startup_foreground` — not when it is an

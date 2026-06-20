@@ -21,11 +21,12 @@ use crate::types::AuditFragment;
 /// surrendered to [`Shell::end_terminal_loan`].
 ///
 /// Opaque to hosts: it carries the prior [`TerminalAccess`] to restore but
-/// exposes no way to read or forge one. Obtaining it raises the installed turn
-/// to [`TerminalAccess::ExplicitLoan`]; surrendering it restores the prior
-/// access. This is the only path to an `ExplicitLoan` — a `TurnRequest` cannot
-/// seed it — so the elevation is always a within-turn loan held by the host
-/// that suspended its own terminal surface.
+/// exposes no way to read or forge one. Obtaining it raises an already-`Leased`
+/// turn to [`TerminalAccess::ExplicitLoan`] (a `Denied` turn is left untouched,
+/// so the loan can only raise authority, never mint it); surrendering it
+/// restores the prior access. This is the only path to an `ExplicitLoan` — a
+/// `TurnRequest` cannot seed it — so the elevation is always a within-turn loan
+/// held by the host that suspended its own terminal surface.
 pub struct TerminalLoan(TerminalAccess);
 
 impl Shell {
@@ -137,12 +138,19 @@ impl Shell {
     /// case): a foreground handoff may now fire even though stdout is captured,
     /// because the body draws on `/dev/tty` and must own the foreground pgid.
     /// The host must have suspended its own terminal reader/renderer first. The
-    /// returned [`TerminalLoan`] restores the prior access when surrendered to
-    /// [`Self::end_terminal_loan`]. Mirrors the within-turn set/clear of the
-    /// retired `tui_active` flag.
+    /// loan only *raises* an already-`Leased` turn to [`TerminalAccess::ExplicitLoan`];
+    /// a `Denied` turn is left untouched, so the loan can only raise an
+    /// authorised turn, never mint authority. The returned [`TerminalLoan`]
+    /// restores the prior access when surrendered to [`Self::end_terminal_loan`].
+    /// Mirrors the within-turn set/clear of the retired `tui_active` flag.
     pub fn begin_terminal_loan(&mut self) -> TerminalLoan {
         let prev = self.turn.terminal_access;
-        self.turn.terminal_access = TerminalAccess::ExplicitLoan;
+        // The loan may only *raise* an already-authorised turn; it never mints
+        // authority. A `Denied` turn is left untouched, closing the
+        // `Denied → ExplicitLoan` door the manual token previously left open.
+        if matches!(prev, TerminalAccess::Leased) {
+            self.turn.terminal_access = TerminalAccess::ExplicitLoan;
+        }
         TerminalLoan(prev)
     }
 
@@ -216,5 +224,27 @@ mod tests {
             TerminalAccess::Leased,
             "ending the loan restores the pre-loan access"
         );
+    }
+
+    /// The loan only *raises* an authorised turn; it never mints authority.
+    /// A `Denied` turn calling `begin_terminal_loan` is left `Denied` — the
+    /// `Denied → ExplicitLoan` door is closed — so even with a session lease the
+    /// foreground borrow stays unreachable.
+    #[test]
+    #[cfg(unix)]
+    fn denied_turn_loan_does_not_elevate() {
+        let mut shell = Shell::default();
+        shell.session.terminal_lease = TerminalLease::mint_at_startup(true);
+        shell.turn.terminal_access = TerminalAccess::Denied;
+
+        let loan = shell.begin_terminal_loan();
+        assert!(!shell.in_terminal_loan(), "a Denied turn is not raised to ExplicitLoan");
+        assert!(
+            shell.terminal_lease().is_none(),
+            "no foreground borrow: the loan cannot mint authority from Denied"
+        );
+
+        shell.end_terminal_loan(loan);
+        assert_eq!(shell.turn.terminal_access, TerminalAccess::Denied);
     }
 }

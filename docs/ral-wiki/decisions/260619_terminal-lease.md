@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: active
 ---
 
 # A held terminal lease, not an inferred predicate, gates the foreground handoff
@@ -343,34 +343,31 @@ turn.
 
 ## Recorded deviation: the `_ed-tui` loan is a manual token, not RAII
 
-A review of the landed implementation flagged one deviation from §4 worth keeping
-on record for a future parcel. The loan is currently a *manual* token, not the
-drop-restoring guard the §4 sketch (`let _loan = terminal_lease.loan()`) implies:
-`Shell::begin_terminal_loan` (`core/src/types/shell/host.rs`) sets
-`TerminalAccess::ExplicitLoan` **unconditionally** and returns a `TerminalLoan`
+The landed implementation deviates from the §4 sketch in one respect, now
+recorded accurately. The loan is a *manual* token, not the drop-restoring guard
+the §4 sketch (`let _loan = terminal_lease.loan()`) implies:
+`Shell::begin_terminal_loan` (`core/src/types/shell/host.rs`) raises the
+installed turn to `TerminalAccess::ExplicitLoan` and returns a `TerminalLoan`
 carrying the prior access; restoration is the caller's explicit
-`end_terminal_loan`, and `TerminalLoan` has no `Drop`. Two consequences follow,
-neither a live bug:
+`end_terminal_loan`, and `TerminalLoan` has no `Drop`.
 
-- **Elevation from `Denied`.** Because the loan does not consult the current
-  access, a `Denied` turn that happens to sit on a session owning the lease could
-  be raised to `ExplicitLoan` and reach the handoff. §4 frames the loan as a
-  within-turn elevation of an *already-`Leased`* turn; the type does not yet
-  enforce that.
-- **Manual restore.** Without `Drop`, an early return between begin and end would
-  leak `ExplicitLoan` until turn teardown.
-
-Why it is not exploitable today: the sole caller is the REPL editor builtin
-(`ral/src/repl/plugin_ed_builtins.rs`), which runs inside a `Leased` interactive
-turn and always pairs `end_terminal_loan`; exarch installs `Denied` and never
-calls the loan. The weakness is type-level, not behavioural.
+- **The elevation door is closed.** `begin_terminal_loan` only elevates an
+  already-`Leased` turn — `if matches!(prev, TerminalAccess::Leased) { … =
+  ExplicitLoan }` — so a `Denied` turn that happens to sit on a session owning
+  the lease is left at `Denied` and never reaches the handoff. The loan can only
+  *raise* an authorised turn; it can no longer mint authority from `Denied`, the
+  §4 invariant the type now enforces.
+- **Manual restore, retained intentionally.** The token is still begin/end, not
+  `Drop`-based RAII. Without `Drop`, an early return between begin and end would
+  leak `ExplicitLoan` until turn teardown. This is acknowledged and accepted: the
+  sole caller is the REPL editor builtin (`ral/src/repl/plugin_ed_builtins.rs`),
+  which runs inside a `Leased` interactive turn and always pairs
+  `end_terminal_loan`, so the leak is unreachable in practice.
 
 A literal RAII guard is awkward in Rust here: a `Drop` impl cannot hold the
 `&mut Shell` it needs to restore access while the editor body also borrows
-`&mut Shell`. The actionable tightening, when a parcel revisits §4, is to refuse
-the elevation unless the turn is already `Leased` — so the loan can only *raise*
-an authorised turn, never mint authority — keeping the manual token but closing
-the `Denied` → `ExplicitLoan` door.
+`&mut Shell`. That is why the token stays manual rather than becoming a
+drop-restoring guard.
 
 ## Implementation plan
 
