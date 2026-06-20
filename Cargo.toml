@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "ral", "ral-sh", "exarch", "vendor/ripgrep-core"]
+members = ["core", "ral", "ral-sh", "exarch", "textarea-vim", "vendor/ripgrep-core"]
 exclude = ["vendor/genai"]
 
 # Shared third-party versions.  Member crates point at these with
