@@ -708,11 +708,15 @@ fn main() -> ExitCode {
 ///   trailing arguments are not re-parsed as flags.
 ///
 /// All option flags before that point are parsed by clap normally (with
-/// typo suggestions etc.).  The long flags `--recursion-limit` and
-/// `--capabilities` take a separate value token; we skip those values so
-/// they are not mistaken for the positional that triggers injection.
+/// typo suggestions etc.).  A long flag that takes a *separate* value token
+/// (`--surface readline`, `--recursion-limit 4096`) carries that value past
+/// the flag; we skip it so it is not mistaken for the positional that
+/// triggers injection.  Which flags those are is read from clap's own model
+/// ([`value_taking_longs`]) rather than hand-listed, so it can never drift
+/// from the `Cli` definition — that drift is exactly what made `--surface
+/// readline` inject the terminator between the flag and its value.
 fn inject_arg_terminator(raw: Vec<String>) -> Vec<String> {
-    const LONG_WITH_VALUE: &[&str] = &["--recursion-limit", "--capabilities"];
+    let value_longs = value_taking_longs();
     let mut out = Vec::with_capacity(raw.len() + 1);
     let mut i = 0;
     while i < raw.len() {
@@ -722,7 +726,7 @@ fn inject_arg_terminator(raw: Vec<String>) -> Vec<String> {
             return out;
         }
         if arg.starts_with('-') {
-            let is_value_flag = LONG_WITH_VALUE.contains(&arg.as_str());
+            let is_value_flag = value_longs.iter().any(|f| f == arg);
             out.push(arg.clone());
             i += 1;
             // `-c` switches to inline-code mode: the remainder is the code
@@ -746,6 +750,19 @@ fn inject_arg_terminator(raw: Vec<String>) -> Vec<String> {
         }
     }
     out
+}
+
+/// The `--long` flags that take a separate value token, read from clap's own
+/// argument model so [`inject_arg_terminator`] can never disagree with the
+/// `Cli` definition about which flags consume the next token.  ral's
+/// value-taking flags are all long-only (`-c` is the special inline-code
+/// case, handled separately), so a short-only flag does not arise here.
+fn value_taking_longs() -> Vec<String> {
+    Cli::command()
+        .get_arguments()
+        .filter(|arg| arg.get_action().takes_values())
+        .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
+        .collect()
 }
 
 /// Whether `arg` is the `-c` inline-code flag, alone or as the trailing
@@ -880,5 +897,32 @@ mod tests {
             inject(&["-l", "script.ral"]),
             vec!["-l", "--", "script.ral"]
         );
+    }
+
+    /// Regression: a value-taking flag added to `Cli` works in its space-
+    /// separated form without anyone updating a hand-list.  `--surface` (the
+    /// flag whose omission from the old hardcoded list forced the `=` form)
+    /// must keep its value rather than have a `--` fenced between them, and so
+    /// parse to an interactive surface choice.
+    #[test]
+    fn value_flag_space_form_derived_from_clap() {
+        assert!(
+            value_taking_longs().iter().any(|f| f == "--surface"),
+            "clap reports --surface as value-taking; the injector must see it"
+        );
+        assert_eq!(
+            inject(&["--surface", "readline"]),
+            vec!["--surface", "readline"],
+            "the value must stay with its flag, no terminator between them"
+        );
+        match mode_of(&["--surface", "readline"]) {
+            Mode::Interactive(o) => {
+                assert!(matches!(o.surface, Some(crate::repl::Surface::Readline)));
+            }
+            m => panic!(
+                "`--surface readline` should be Interactive, got {}",
+                mode_name(&m)
+            ),
+        }
     }
 }
