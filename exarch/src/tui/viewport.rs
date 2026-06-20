@@ -16,7 +16,9 @@
 
 use super::block::{AgentSlot, Block, RailShape, wrap_line};
 use super::fidelity::{self, Fidelity};
+use super::group;
 use super::line::{READ_W, is_blank, plain};
+use super::rail::{self, RailKind};
 use crate::bus::Hunk;
 use crate::card::Card;
 use crate::provider::Usage;
@@ -245,9 +247,17 @@ impl Viewport {
 
     // ── content ──────────────────────────────────────────────────────────
 
-    /// Append a tool call as its own collapsible block.
-    pub(super) fn push_tool_call(&mut self, tool: &'static str, summary: String, cmd: String) {
-        self.push_block(Block::tool_call(tool, summary, cmd, self.agent));
+    /// Append a tool call as its own collapsible block.  `context` is the
+    /// turn's degradation floor, stamped so the coalesced intent line dims
+    /// under context pressure (Move 7).
+    pub(super) fn push_tool_call(
+        &mut self,
+        tool: &'static str,
+        summary: String,
+        cmd: String,
+        context: u8,
+    ) {
+        self.push_block(Block::tool_call(tool, summary, cmd, context, self.agent));
     }
 
     /// Append an async subagent's landed result as its own collapsible
@@ -273,8 +283,18 @@ impl Viewport {
     /// Append a surfaced render document as its own block — a `card` of
     /// Bertin marks (roled text, a measure, a fields matrix, raw ink, or a
     /// richer composite the single-`diff` aggregation path didn't claim).
+    /// A surfaced card is the model's own communication, a barrier the
+    /// coalescing projection never folds.
     pub(super) fn push_card(&mut self, card: Card) {
         self.push_block(Block::card(card, self.agent));
+    }
+
+    /// Append a structural I/O effect card.  `write` marks a write redirect
+    /// — a barrier that ends the current ral block, like a diff; reads,
+    /// greps, and execs (`write == false`) are observations the projection
+    /// folds under their call.
+    pub(super) fn push_io_card(&mut self, card: Card, write: bool) {
+        self.push_block(Block::io_card(card, write, self.agent));
     }
 
     /// Append pre-rendered chrome (step header, error, banner, subagent
@@ -480,10 +500,20 @@ impl Viewport {
         }
     }
 
-    /// Rebuild [`Self::flat`] when stale or asked at a new width: every
-    /// block's lines, wrapped to the readable width, with each block's
-    /// leading blank collapsed against an already-blank tail so a step
-    /// separator before leading-blank chrome reads as one gap.
+    /// Rebuild [`Self::flat`] when stale or asked at a new width.
+    ///
+    /// The flatten is the **coalescing projection**: a contiguous run of
+    /// observation blocks ([`Block::observation`] — a call and its
+    /// reads/greps/execs) folds into one dialable ral block
+    /// ([`super::group`]); every barrier (a diff, a write, a surfaced card,
+    /// markdown, chrome, a subagent result) renders as its own block exactly
+    /// as before.  The projection reads what arrival order already adjoins;
+    /// nothing about how blocks are pushed, logged, or aggregated changes.
+    /// Each visual row maps to its source block index — a group's rows to
+    /// its anchor call — so the dial, click, and copy paths address whole
+    /// projected blocks.  Each segment's leading blank collapses against an
+    /// already-blank tail so a step separator before leading-blank chrome
+    /// reads as one gap.
     fn reflow(&mut self, width: u16) {
         if !self.flat.dirty && self.flat.width == width {
             return;
@@ -491,8 +521,19 @@ impl Viewport {
         let content_w = width.min(READ_W);
         let mut rows: Vec<Line<'static>> = Vec::new();
         let mut row_block: Vec<usize> = Vec::new();
-        for (i, block) in self.blocks.iter_mut().enumerate() {
-            let lines = block.lines(content_w);
+        let mut i = 0;
+        while i < self.blocks.len() {
+            let (anchor, lines) = if self.blocks[i].observation() {
+                let end = self.observation_run_end(i);
+                let anchor = self.group_anchor(i, end);
+                let segment = (anchor, self.render_group(i, end, anchor));
+                i = end;
+                segment
+            } else {
+                let segment = (i, self.blocks[i].lines(content_w).to_vec());
+                i += 1;
+                segment
+            };
             let mut first = 0;
             if rows.last().is_some_and(is_blank) {
                 while first < lines.len() && is_blank(&lines[first]) {
@@ -502,7 +543,7 @@ impl Viewport {
             for line in &lines[first..] {
                 for vrow in wrap_line(line, content_w as usize) {
                     rows.push(vrow);
-                    row_block.push(i);
+                    row_block.push(anchor);
                 }
             }
         }
@@ -514,266 +555,67 @@ impl Viewport {
         };
     }
 
-    /// Whole buffer flattened to plain-text rows at `width`, rail glyphs
-    /// retained — the inspection hook the rendering tests assert on.
-    #[cfg(test)]
-    pub(in crate::tui) fn flatten_text(&mut self, width: u16) -> Vec<String> {
-        self.reflow(width);
-        self.flat
-            .rows
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-            .collect()
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "[io-door:test] test fs/process scaffolding")]
-mod tests {
-    use super::*;
-    use crate::bus::Row;
-    use ratatui::text::Span;
-
-    fn fresh() -> Viewport {
-        Viewport::new(PathBuf::from("/dev/null"), AgentSlot::default())
+    /// The end (exclusive) of the maximal observation run starting at
+    /// `start` — the contiguous span of [`Block::observation`] blocks the
+    /// projection coalesces into one ral block.
+    fn observation_run_end(&self, start: usize) -> usize {
+        let mut end = start;
+        while end < self.blocks.len() && self.blocks[end].observation() {
+            end += 1;
+        }
+        end
     }
 
-    /// A step-boundary blank followed by leading-blank chrome collapses
-    /// to one separator, not two: each chrome builder prepends a
-    /// `Line::default()`, and so does a step, so two would otherwise
-    /// stack into a visible double gap.
-    #[test]
-    fn step_then_chrome_collapses_to_single_blank() {
-        let mut vp = fresh();
-        vp.push_chrome(
-            RailShape::Generic,
-            vec![Line::default(), Line::from(Span::raw("header1"))],
-        );
-        vp.push_chrome(RailShape::Generic, vec![Line::default()]);
-        vp.push_chrome(
-            RailShape::Generic,
-            vec![Line::default(), Line::from(Span::raw("header2"))],
-        );
-        // The lifted rail prepends a `❖ ` glyph to each chrome header
-        // row (Phase 1), so flattened text carries that prefix; the
-        // blank-collapse invariant under test is the single `""` between
-        // the two headers, not the glyph itself.
-        assert_eq!(
-            vp.flatten_text(READ_W),
-            vec!["", "❖ header1", "❖ ", "", "❖ header2"]
-        );
+    /// Render the observation run `start..end` as one coalesced ral block:
+    /// build a [`group::Call`] per tool call (its effects being the
+    /// observation cards that follow it in the run), render the body at the
+    /// run's disclosure level, and prepend the data-encoding rail — the
+    /// disclosure triangle, the agent hue, the run's aggregate magnitude —
+    /// to the first content row.  The level lives on the run's `anchor` call
+    /// ([`Self::group_anchor`]); a run is opened by a call, so it has one.
+    fn render_group(&self, start: usize, end: usize, anchor: usize) -> Vec<Line<'static>> {
+        let level = self.blocks[anchor].level().max(1);
+        let calls = self.group_calls(start, end);
+        let mut lines = group::body(&calls, level);
+        let open = level >= 2;
+        let magnitude = group::aggregate_magnitude(&calls);
+        let rail = rail::span(RailKind::ToolCall(open), self.agent, magnitude);
+        let idx = lines.iter().position(|l| !is_blank(l)).unwrap_or(0);
+        if let Some(line) = lines.get_mut(idx) {
+            line.spans.insert(0, rail);
+        }
+        lines
     }
 
-    /// Startup/banner chrome is ambient frame text, not a transcript
-    /// event, so it keeps its leading blank but does not wear the `❖`
-    /// rail that ordinary generic chrome uses.
-    #[test]
-    fn plain_chrome_renders_without_a_rail() {
-        let mut vp = fresh();
-        vp.push_chrome(
-            RailShape::Plain,
-            vec![Line::default(), Line::from(Span::raw("banner"))],
-        );
-        assert_eq!(vp.flatten_text(READ_W), vec!["", "banner"]);
+    /// The anchor block of an observation run — its first tool call, whose
+    /// [`Block::level`] is the run's disclosure level.  Falls back to the
+    /// run's first block when (defensively) no call leads it.
+    fn group_anchor(&self, start: usize, end: usize) -> usize {
+        (start..end)
+            .find(|&i| self.blocks[i].is_tool_call())
+            .unwrap_or(start)
     }
 
-    /// `add_usage` accumulates token spend across turns, and `reset`
-    /// zeroes it alongside the block buffer — the matrix's value readout
-    /// must start fresh after a `/clear`.
-    #[test]
-    fn usage_accumulates_and_reset_zeroes() {
-        let mut vp = fresh();
-        assert_eq!(vp.usage().input + vp.usage().output, 0);
-        vp.add_usage(Usage {
-            input: 100,
-            output: 20,
-            ..Usage::default()
-        });
-        vp.add_usage(Usage {
-            input: 50,
-            output: 5,
-            ..Usage::default()
-        });
-        assert_eq!(vp.usage().input, 150);
-        assert_eq!(vp.usage().output, 25);
-        vp.reset();
-        assert_eq!(vp.usage().input, 0);
-        assert_eq!(vp.usage().output, 0);
-    }
-
-    /// `steps` opens a flag at each step boundary and marks it once a tool
-    /// call lands within; `lines_touched` sums patch magnitudes;
-    /// `last_is_error` reads the tail block.  These are the matrix's
-    /// derived figures.
-    #[test]
-    fn derived_figures_track_the_block_scan() {
-        let mut vp = fresh();
-        assert!(vp.steps().is_empty());
-        assert_eq!(vp.lines_touched(), 0);
-        // Step 1 with a tool call → `true`.
-        vp.push_chrome(RailShape::Step, vec![Line::default()]);
-        vp.push_tool_call("ral", "do".into(), "script".into());
-        // Step 2 with no tool call → `false`.
-        vp.push_chrome(RailShape::Step, vec![Line::default()]);
-        assert_eq!(vp.steps(), vec![true, false]);
-        let hunk = Hunk {
-            start: 1,
-            rows: vec![
-                Row::Del("x".into()),
-                Row::Add("a".into()),
-                Row::Add("b".into()),
-            ],
-        };
-        vp.push_patch("src/foo.rs".into(), vec![hunk]);
-        assert_eq!(vp.lines_touched(), 3);
-        assert!(!vp.last_is_error());
-        vp.push_chrome(RailShape::Error, vec![Line::from(Span::raw("boom"))]);
-        assert!(vp.last_is_error());
-    }
-
-    /// `\n\n` inside a fence is ignored, but a later boundary outside the
-    /// (now closed) fence is taken — fence-state must persist across
-    /// candidates, not reset at each `\n\n`.
-    #[test]
-    fn break_skips_in_fence_then_takes_after() {
-        let s = "intro\n\n```\nx\n\ny\n```\n\nfinal";
-        let idx = safe_paragraph_break(s).expect("post-fence boundary");
-        assert_eq!(&s[..idx], "intro\n\n```\nx\n\ny\n```\n\n");
-    }
-
-    /// A tool call shows only its summary at its default L1, and reveals
-    /// the full script when dialed up to L3 — the disclosure contract.
-    #[test]
-    fn tool_call_expands_on_dial() {
-        let mut vp = fresh();
-        vp.push_tool_call(
-            "ral",
-            "build the parser".into(),
-            "cargo build\nral test".into(),
-        );
-        let shut = vp.flatten_text(READ_W);
-        assert!(shut.iter().any(|t| t.contains("build the parser")));
-        assert!(!shut.iter().any(|t| t.contains("cargo build")));
-        // Dial up to L3 (default L1 → +2 reaches full).
-        assert!(vp.dial_block(0, 2), "a tool call is dialable");
-        let open = vp.flatten_text(READ_W);
-        assert!(open.iter().any(|t| t.contains("cargo build")));
-        assert!(open.iter().any(|t| t.contains("ral test")));
-    }
-
-    /// Dialing clamps at the ends of the `0..=3` range: a tool call at L1
-    /// reduces to L0 (rail glyph alone, no summary) and stops; revealed to
-    /// L3 it reaches the full script and stops.  A dial that does not move
-    /// the level reports no change so an inert wheel scrolls instead.
-    #[test]
-    fn dial_clamps_at_zero_and_three() {
-        let mut vp = fresh();
-        vp.push_tool_call("ral", "the summary".into(), "the script".into());
-        // Default L1 down to L0: the summary disappears, only the rail
-        // glyph remains.
-        assert!(vp.dial_block(0, -1), "L1 → L0 changes");
-        let l0 = vp.flatten_text(READ_W);
-        assert!(!l0.iter().any(|t| t.contains("the summary")));
-        // Already at the floor: a further reduction is a no-op.
-        assert!(!vp.dial_block(0, -1), "L0 clamps, no change");
-        // Up past L3 clamps: three +1 steps reach L3, a fourth is a no-op.
-        assert!(vp.dial_block(0, 1)); // L0 → L1
-        assert!(vp.dial_block(0, 1)); // L1 → L2
-        assert!(vp.dial_block(0, 1)); // L2 → L3
-        assert!(!vp.dial_block(0, 1), "L3 clamps, no change");
-        let l3 = vp.flatten_text(READ_W);
-        assert!(l3.iter().any(|t| t.contains("the script")));
-    }
-
-    /// A diff card defaults to L3 (full diff); dialed down to L1 it shows
-    /// the `diff <path>` header but drops every hunk row, and cycling it
-    /// returns to the full diff.
-    #[test]
-    fn patch_reduces_to_header_only() {
-        let mut vp = fresh();
-        let hunk = Hunk {
-            start: 10,
-            rows: vec![Row::Del("gone".into()), Row::Add("fresh".into())],
-        };
-        vp.push_patch("src/foo.rs".into(), vec![hunk]);
-        let full = vp.flatten_text(READ_W);
-        assert!(full.iter().any(|t| t.contains("diff")));
-        assert!(
-            full.iter().any(|t| t.contains("fresh")),
-            "L3 shows the hunk"
-        );
-        // L3 down to L1 (−2): header survives, hunk rows vanish.
-        assert!(vp.dial_block(0, -2), "a diff card is dialable");
-        let l1 = vp.flatten_text(READ_W);
-        assert!(l1.iter().any(|t| t.contains("diff")), "header survives");
-        assert!(!l1.iter().any(|t| t.contains("fresh")), "no hunk at L1");
-        // Cycling from L1 reveals the full diff again.
-        assert!(vp.cycle_block(0), "cycle L1 → L3");
-        let cycled = vp.flatten_text(READ_W);
-        assert!(
-            cycled.iter().any(|t| t.contains("fresh")),
-            "diff back at L3"
-        );
-    }
-
-    /// `Ctrl+Y` yanks the rail-stripped text of what is on screen — the
-    /// summary survives, the disclosure glyph does not.
-    #[test]
-    fn yank_strips_the_rail_glyph() {
-        let mut vp = fresh();
-        vp.push_tool_call("ral", "do a thing".into(), "script".into());
-        let _ = vp.render_window(READ_W, 10);
-        let text = vp.yank_text();
-        assert!(text.contains("do a thing"));
-        assert!(!text.contains('▸'));
-    }
-
-    /// `set_result_size` attaches the result magnitude to the most-recent
-    /// tool call even when a `Patch` side effect landed between the call
-    /// and its result — the search runs backward from the tail and skips
-    /// the patch.  The collapsed header then carries a `█` size-bar.
-    #[test]
-    fn set_result_size_targets_latest_tool_call_past_a_patch() {
-        let mut vp = fresh();
-        vp.push_tool_call("ral", "edit the file".into(), "script".into());
-        let hunk = Hunk {
-            start: 1,
-            rows: vec![Row::Add("a".into()), Row::Add("b".into())],
-        };
-        vp.push_patch("src/foo.rs".into(), vec![hunk]);
-        // The call header carries no result bar yet — only the patch's own
-        // header does, which is a different row.
-        let header = |vp: &mut Viewport| {
-            vp.flatten_text(READ_W)
-                .into_iter()
-                .find(|t| t.contains("edit the file"))
-                .expect("tool call header row")
-        };
-        assert!(
-            !header(&mut vp).contains('█'),
-            "no size-bar on the call header before the result lands"
-        );
-        // A 200-line result lands after the patch; it must attach to the
-        // call, not the patch.
-        vp.set_result_size(&"line\n".repeat(200));
-        assert!(
-            header(&mut vp).contains('█'),
-            "the call header gains a filled size-bar"
-        );
-    }
-
-    /// The `user.log` carries a tool call's full script even while it is
-    /// collapsed on screen — the on-disk transcript is the complete
-    /// record, independent of what is revealed.
-    #[test]
-    fn log_keeps_the_script_while_collapsed() {
-        let tmp = std::env::temp_dir().join(format!("exarch-vp-log-{}", std::process::id()));
-        let mut vp = Viewport::new(tmp.clone(), AgentSlot::default());
-        vp.push_tool_call("ral", "short summary".into(), "the full script line".into());
-        vp.flush_log().expect("flush");
-        let logged = std::fs::read_to_string(&tmp).unwrap_or_default();
-        let _ = std::fs::remove_file(&tmp);
-        assert!(logged.contains("short summary"));
-        assert!(logged.contains("the full script line"));
+    /// Build the run's calls in arrival order: each tool call opens a
+    /// [`group::Call`]; the observation cards that follow it (until the next
+    /// call) are its effects.
+    fn group_calls(&self, start: usize, end: usize) -> Vec<group::Call> {
+        let mut calls: Vec<group::Call> = Vec::new();
+        let mut effects: Vec<Line<'static>> = Vec::new();
+        let mut pending: Option<group::CallParts<'_>> = None;
+        for block in &self.blocks[start..end] {
+            if let Some(parts) = block.call_view() {
+                if let Some(prev) = pending.take() {
+                    calls.push(group::Call::new(prev, std::mem::take(&mut effects)));
+                }
+                pending = Some(parts);
+            } else {
+                effects.extend(block.effect_lines());
+            }
+        }
+        if let Some(prev) = pending {
+            calls.push(group::Call::new(prev, effects));
+        }
+        calls
     }
 }

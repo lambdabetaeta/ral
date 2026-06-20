@@ -11,6 +11,7 @@
 //! block the user just dialed, or the whole buffer once on a resize.
 
 use super::fidelity::Fidelity;
+use super::group;
 use super::line::{self, RAIL_GLYPHS, RAIL_W, READ_W, is_blank};
 use super::md::{self, MD_INDENT};
 use super::rail::{self, RailKind};
@@ -44,6 +45,23 @@ pub(super) enum RailShape {
     Generic,
 }
 
+/// Where a [`BlockKind::Card`] came from — the distinction the coalescing
+/// projection ([`super::group`]) reads to tell an *effect* it may fold into
+/// a ral block from a *barrier* that splits one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum CardOrigin {
+    /// A read / grep / exec the model's call produced — an observation
+    /// effect, foldable into the call's coalesced block.
+    Observation,
+    /// A write redirect — an effect, but never folded: a write ends the
+    /// current ral block exactly as a diff does, and renders standalone.
+    Write,
+    /// A diff (`edit`'s `▎ diff`) or a deliberately `surface`d rich card —
+    /// the model's own communication, a barrier that splits the block and
+    /// stays standalone.
+    Surfaced,
+}
+
 /// What a block carries.  Each variant renders as a pure function of its
 /// data, the target width, and the block's disclosure [`level`].
 pub(super) enum BlockKind {
@@ -75,7 +93,9 @@ pub(super) enum BlockKind {
     /// [`Card`] marks, re-rendered from data at every width and disclosure
     /// level.  A card holding a `diff` mark is dialable (L1 header ↔ L3
     /// full); one of only `text`/`fields`/`measure`/`raw` is chrome-level.
-    Card(Card),
+    /// `origin` tells the coalescing projection whether the card is a model
+    /// *effect* it may fold into a ral block or a *barrier* that splits one.
+    Card { card: Card, origin: CardOrigin },
     /// Pre-built chrome whose builder already wrapped to [`READ_W`] — a
     /// step separator, prompt echo, error, banner, subagent breadcrumb, or
     /// a summary-less tool call.  `shape` lets the rail (and the size/grain
@@ -140,16 +160,21 @@ impl Block {
         }
     }
 
+    /// `context` is the turn's degradation floor, stamped onto the call so
+    /// its coalesced intent line dims under context pressure exactly as
+    /// committed prose does (Move 7); echo does not apply — an intent is the
+    /// model's stated purpose, not committed prose.
     pub(super) fn tool_call(
         tool: &'static str,
         summary: String,
         cmd: String,
+        context: u8,
         agent: AgentSlot,
     ) -> Self {
         Self::new(
             BlockKind::ToolCall { tool, summary, cmd },
             agent,
-            Fidelity::default(),
+            Fidelity { context, echo: 0 },
         )
     }
     pub(super) fn markdown(src: String, agent: AgentSlot, fidelity: Fidelity) -> Self {
@@ -177,13 +202,34 @@ impl Block {
             fidelity,
         )
     }
-    /// A surfaced render document.
+    /// A surfaced render document — the model's own communication, a
+    /// barrier the coalescing projection never folds.
     pub(super) fn card(card: Card, agent: AgentSlot) -> Self {
-        Self::new(BlockKind::Card(card), agent, Fidelity::default())
+        Self::card_with(card, CardOrigin::Surfaced, agent)
+    }
+    /// A structural I/O effect: a read / grep / exec (foldable
+    /// [`CardOrigin::Observation`]) or a write ([`CardOrigin::Write`], a
+    /// barrier).  Distinct from [`Self::card`] so the projection can fold an
+    /// observation into its call yet keep a write standalone.
+    pub(super) fn io_card(card: Card, write: bool, agent: AgentSlot) -> Self {
+        let origin = if write {
+            CardOrigin::Write
+        } else {
+            CardOrigin::Observation
+        };
+        Self::card_with(card, origin, agent)
+    }
+    fn card_with(card: Card, origin: CardOrigin, agent: AgentSlot) -> Self {
+        Self::new(
+            BlockKind::Card { card, origin },
+            agent,
+            Fidelity::default(),
+        )
     }
     /// A single-file diff, the common card the patch-aggregation path emits:
     /// one `card` carrying one `diff` mark, so the rail renders `▎` and the
-    /// disclosure dial reveals the located hunks.
+    /// disclosure dial reveals the located hunks.  A diff is a barrier, so it
+    /// carries [`CardOrigin::Surfaced`] — the projection never folds it.
     pub(super) fn patch(path: String, hunks: Vec<Hunk>, agent: AgentSlot) -> Self {
         Self::card(Card(vec![Mark::Diff { path, hunks }]), agent)
     }
@@ -205,7 +251,7 @@ impl Block {
     /// value-step and the header size-bar both read this.
     pub(super) fn magnitude(&self) -> Option<u32> {
         match &self.kind {
-            BlockKind::Card(card) => card.magnitude(),
+            BlockKind::Card { card, .. } => card.magnitude(),
             BlockKind::Subagent { text, .. } => Some(text.lines().count() as u32),
             _ => None,
         }
@@ -219,7 +265,7 @@ impl Block {
             BlockKind::ToolCall { .. } | BlockKind::Markdown(_) | BlockKind::Subagent { .. } => {
                 true
             }
-            BlockKind::Card(card) => card.has_diff(),
+            BlockKind::Card { card, .. } => card.has_diff(),
             BlockKind::Chrome { .. } => false,
         }
     }
@@ -228,6 +274,51 @@ impl Block {
     /// attaches to via [`Self::set_result_size`].
     pub(super) fn is_tool_call(&self) -> bool {
         matches!(self.kind, BlockKind::ToolCall { .. })
+    }
+
+    /// True for a block the coalescing projection folds into a ral block —
+    /// a tool call, or a read / grep / exec effect.  Everything else (a
+    /// diff, a write, a surfaced card, markdown, chrome, a subagent result)
+    /// is a *barrier* that splits one block from the next.
+    pub(super) fn observation(&self) -> bool {
+        matches!(
+            self.kind,
+            BlockKind::ToolCall { .. }
+                | BlockKind::Card {
+                    origin: CardOrigin::Observation,
+                    ..
+                }
+        )
+    }
+
+    /// This call's projected view for the coalesced ral block: its intent
+    /// (`summary`), tool, script (`cmd`), result magnitude, and the turn's
+    /// context floor (distress on the intent line).  `None` on any block
+    /// that is not a tool call, so only a call opens a slot in the group.
+    pub(super) fn call_view(&self) -> Option<group::CallParts<'_>> {
+        match &self.kind {
+            BlockKind::ToolCall { tool, summary, cmd } => Some(group::CallParts {
+                intent: summary,
+                tool,
+                cmd,
+                magnitude: self.result_size,
+                context: self.fidelity.context,
+            }),
+            _ => None,
+        }
+    }
+
+    /// An observation effect's rail-less rows, rendered as the io card it
+    /// carries, for folding under its call's intent in the coalesced block.
+    /// Empty for any non-observation block.
+    pub(super) fn effect_lines(&self) -> Vec<Line<'static>> {
+        match &self.kind {
+            BlockKind::Card {
+                card,
+                origin: CardOrigin::Observation,
+            } => line::render_card(card, 3),
+            _ => Vec::new(),
+        }
     }
 
     /// The `ral` script this block ran, if it is a `ral` tool call — the
@@ -274,27 +365,43 @@ impl Block {
         self.cache = None;
     }
 
-    /// Dial the disclosure level by `delta`, clamped to `0..=3`, dropping
-    /// the memo when it changed so the body re-renders at the new level.
-    /// A no-op on a non-dialable block or when already at the clamp.
+    /// The lowest level this block dials to.  A tool call is always the
+    /// head of a coalesced ral block ([`super::group`]), whose floor is
+    /// **L1, the live tip** — there is no L0 for a call block.  Every other
+    /// dialable kind reduces to L0 (rail glyph alone).
+    fn level_floor(&self) -> u8 {
+        match self.kind {
+            BlockKind::ToolCall { .. } => 1,
+            _ => 0,
+        }
+    }
+
+    /// Dial the disclosure level by `delta`, clamped to `level_floor..=3`,
+    /// dropping the memo when it changed so the body re-renders at the new
+    /// level.  A no-op on a non-dialable block or when already at the clamp.
     pub(super) fn dial(&mut self, delta: i8) {
         if !self.dialable() {
             return;
         }
-        let next = (self.level as i8 + delta).clamp(0, 3) as u8;
+        let next = (self.level as i8 + delta).clamp(self.level_floor() as i8, 3) as u8;
         if next != self.level {
             self.level = next;
             self.cache = None;
         }
     }
 
-    /// Cycle a dialable block between L1 (reduced) and L3 (revealed) —
+    /// Cycle a dialable block between its floor (reduced) and L3 (revealed) —
     /// the click-on-rail affordance, preserving today's click-to-expand.
+    /// A tool call's floor is L1, every other kind's is L0.
     pub(super) fn cycle(&mut self) {
         if !self.dialable() {
             return;
         }
-        let next = if self.level >= 3 { 1 } else { 3 };
+        let next = if self.level >= 3 {
+            self.level_floor()
+        } else {
+            3
+        };
         if next != self.level {
             self.level = next;
             self.cache = None;
@@ -402,7 +509,7 @@ impl Block {
                 }
                 ls
             }
-            BlockKind::Card(card) => line::render_card(card, level),
+            BlockKind::Card { card, .. } => line::render_card(card, level),
             BlockKind::Chrome { lines, .. } => lines.clone(),
         }
     }
@@ -421,7 +528,7 @@ impl Block {
             BlockKind::Subagent { .. } => Some(RailKind::Subagent),
             // A diff card wears the patch shape (`▎`); a diff-less card is
             // generic chrome (`❖`), the shape `wrote`/`task`/`meter` wore.
-            BlockKind::Card(card) => Some(if card.has_diff() {
+            BlockKind::Card { card, .. } => Some(if card.has_diff() {
                 RailKind::Patch
             } else {
                 RailKind::Generic

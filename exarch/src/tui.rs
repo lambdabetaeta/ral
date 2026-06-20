@@ -17,6 +17,7 @@
 
 mod block;
 mod fidelity;
+mod group;
 mod line;
 mod md;
 mod picker;
@@ -627,11 +628,12 @@ impl App {
             Kind::Phase(label) => self.with_viewport(id, |vp| vp.set_phase(label)),
             Kind::ToolCall { tool, cmd, summary } => {
                 ral_core::dbg_trace!("tui", "ToolCall tool={tool} cmd={cmd:?}");
+                let floor = self.context_floor();
                 self.with_viewport(id, |vp| match summary {
                     // A summary marks a call worth revealing: the label
                     // shows shut, the script on a click.  Summary-less
                     // calls (`fff`, invalid input) have nothing to open.
-                    Some(s) => vp.push_tool_call(tool, s, cmd),
+                    Some(s) => vp.push_tool_call(tool, s, cmd, floor),
                     None => vp.push_chrome(RailShape::Generic, line::tool_call_static(&cmd, tool)),
                 });
             }
@@ -842,10 +844,15 @@ impl App {
             return;
         };
         if let Some(vp) = self.viewports.get_mut(&buf.id) {
-            for card in
-                crate::card::io_group_card(&buf.reads, &buf.execs, &buf.greps, &buf.writes)
-            {
-                vp.push_card(card);
+            // Reads / greps / execs are *observations* the coalescing
+            // projection folds under their call; writes are *barriers* that
+            // end the ral block, so they push on a separate path even though
+            // both reconstruct from the same `io_group_card` span idioms.
+            for card in crate::card::io_group_card(&buf.reads, &buf.execs, &buf.greps, &[]) {
+                vp.push_io_card(card, false);
+            }
+            for card in crate::card::io_group_card(&[], &[], &[], &buf.writes) {
+                vp.push_io_card(card, true);
             }
         }
     }
