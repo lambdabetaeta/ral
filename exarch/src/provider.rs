@@ -82,6 +82,10 @@ pub enum ProviderKind {
     Openai,
     Openrouter,
     Deepseek,
+    OpencodeZen,
+    OpencodeGo,
+    Xai,
+    Qwen,
 }
 
 impl ProviderKind {
@@ -96,6 +100,14 @@ impl ProviderKind {
                 "OPENROUTER_API_KEY",
             ),
             Self::Deepseek => ("deepseek", "deepseek-chat", "DEEPSEEK_API_KEY"),
+            // opencode issues one key per account and tells Zen from Go apart
+            // by endpoint, so both read the same `OPENCODE_API_KEY`.
+            Self::OpencodeZen => ("opencode-zen", "glm-5.1", "OPENCODE_API_KEY"),
+            Self::OpencodeGo => ("opencode-go", "glm-5.2", "OPENCODE_API_KEY"),
+            Self::Xai => ("xai", "grok-4.3", "XAI_API_KEY"),
+            // DashScope's float alias for the current Qwen-Plus, reached over
+            // the international OpenAI-compatible endpoint (see `endpoint`).
+            Self::Qwen => ("qwen", "qwen3.6-plus", "DASHSCOPE_API_KEY"),
         }
     }
 
@@ -105,6 +117,9 @@ impl ProviderKind {
     pub fn endpoint(self) -> Option<&'static str> {
         match self {
             Self::Openrouter => Some("https://openrouter.ai/api/v1/"),
+            Self::OpencodeZen => Some("https://opencode.ai/zen/v1/"),
+            Self::OpencodeGo => Some("https://opencode.ai/zen/go/v1/"),
+            Self::Qwen => Some("https://dashscope-intl.aliyuncs.com/compatible-mode/v1/"),
             _ => None,
         }
     }
@@ -117,7 +132,19 @@ impl ProviderKind {
             Self::Openai => AdapterKind::OpenAIResp,
             Self::Openrouter => AdapterKind::OpenAI,
             Self::Deepseek => AdapterKind::DeepSeek,
+            Self::OpencodeZen | Self::OpencodeGo => AdapterKind::OpenAI,
+            Self::Xai => AdapterKind::Xai,
+            Self::Qwen => AdapterKind::OpenAI,
         }
+    }
+
+    /// Whether this provider bills as a flat subscription rather than per
+    /// token. opencode Go is a flat $10/mo plan over an OpenAI-compatible
+    /// gateway; opencode Zen on the same gateway is pay-as-you-go. A ChatGPT
+    /// plan login is a flat subscription too, but it rides the OAuth
+    /// credential rather than this `ProviderKind` property.
+    pub fn flat_rate(self) -> bool {
+        matches!(self, Self::OpencodeGo)
     }
 }
 
@@ -197,6 +224,17 @@ impl ProviderId {
         match self {
             Self::Famous(kind) => kind.default_adapter(),
             Self::Custom(c) => c.adapter,
+        }
+    }
+
+    /// Whether this provider bills as a flat subscription rather than per
+    /// token. A famous provider delegates to [`ProviderKind::flat_rate`]; a
+    /// custom provider is never flat-rate yet — the `config.ral` schema does
+    /// not declare it, so this is a future slice's extension point.
+    pub fn flat_rate(&self) -> bool {
+        match self {
+            Self::Famous(kind) => kind.flat_rate(),
+            Self::Custom(_) => false,
         }
     }
 
@@ -794,6 +832,11 @@ struct Live {
     /// plan; `None` for an API-key provider.  A turn refreshes through it
     /// before a request when the access token is near expiry.
     token_cell: Option<Arc<Mutex<oauth::OAuthToken>>>,
+    /// Whether this provider's plan is a flat subscription declared by its
+    /// [`ProviderId`] (opencode Go's $10/mo gateway) rather than by an OAuth
+    /// login.  Combined with [`Self::token_cell`] it is the second way a
+    /// provider's turns can be unmetered — see [`Live::metered`].
+    flat_rate: bool,
     /// The genai adapter this provider speaks, fixed at build time.  It
     /// decides where the system prompt rides on the wire: the Responses
     /// API takes it as top-level `instructions`, every other adapter as a
@@ -938,6 +981,7 @@ impl Provider {
                 runtime,
                 cache_key: fresh_cache_key(),
                 token_cell,
+                flat_rate: id.flat_rate(),
                 adapter,
             }),
             model,
@@ -971,12 +1015,18 @@ impl Provider {
         &self.model
     }
 
-    /// True when this provider authenticates off a ChatGPT plan login
-    /// rather than an API key — a flat subscription whose turns carry no
-    /// per-token price. The login cell is present only for an OAuth
-    /// credential; a scripted backend is never a subscription.
-    pub fn is_subscription(&self) -> bool {
-        matches!(&self.backend, Backend::Live(live) if live.token_cell.is_some())
+    /// How this provider's plan reads — a flat subscription (and which
+    /// flavour) or a metered API key. A subscription's turns carry no
+    /// per-token price; the flavour drives the status/picker label
+    /// ([`oauth::provider_label`]). A ChatGPT plan login is the OAuth
+    /// flavour (login cell present), an [`ProviderId::flat_rate`] provider
+    /// the generic flavour; a scripted backend is never a subscription.
+    pub fn subscription(&self) -> oauth::Subscription {
+        match &self.backend {
+            Backend::Live(live) if live.token_cell.is_some() => oauth::Subscription::ChatGpt,
+            Backend::Live(live) if live.flat_rate => oauth::Subscription::FlatRate,
+            _ => oauth::Subscription::Metered,
+        }
     }
 
     /// Stream one assistant response for an already-rendered message list.
@@ -1035,10 +1085,11 @@ impl Provider {
 
 impl Live {
     /// Whether this backend's turns are billed per token. An API-key
-    /// provider is metered; a ChatGPT plan login is a flat subscription
-    /// and so unmetered.
+    /// provider is metered; a flat subscription — a ChatGPT plan login
+    /// ([`Self::token_cell`]) or an [`ProviderId::flat_rate`] plan
+    /// ([`Self::flat_rate`]) — is unmetered.
     fn metered(&self) -> bool {
-        self.token_cell.is_none()
+        self.token_cell.is_none() && !self.flat_rate
     }
 
     /// Renew the ChatGPT access token when it is near expiry, so the request

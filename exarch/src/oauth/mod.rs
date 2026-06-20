@@ -33,15 +33,30 @@ pub(crate) const RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/re
 /// API-key path lists live via genai instead.
 pub(crate) const PLAN_MODELS: &[&str] = &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"];
 
-/// A provider's status/picker label: the subscription-decorated form when
-/// it authenticates off a ChatGPT plan login, else the bare provider name.
-/// The single place the "decorate when subscription" decision is made, so
-/// the status bar, the `/model` switch, and the picker rows cannot drift.
-pub(crate) fn provider_label(is_subscription: bool, base: &str) -> String {
-    if is_subscription {
-        format!("{base} (ChatGPT subscription)")
-    } else {
-        base.to_string()
+/// How a provider's plan reads, for both metering and labelling. A turn
+/// under either subscription flavour is unmetered; the flavour only changes
+/// the decoration [`provider_label`] applies.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Subscription {
+    /// A metered API key — turns are billed per token.
+    Metered,
+    /// A ChatGPT plan login authorised over OAuth.
+    ChatGpt,
+    /// A flat-rate plan declared by the provider's [`crate::provider::ProviderId`]
+    /// (opencode Go's $10/mo gateway).
+    FlatRate,
+}
+
+/// A provider's status/picker label: the subscription-decorated form when it
+/// is on a plan, else the bare provider name. The single place the "decorate
+/// when subscription" decision is made — and the only place the per-flavour
+/// suffix is spelled — so the status bar, the `/model` switch, and the picker
+/// rows cannot drift.
+pub(crate) fn provider_label(subscription: Subscription, base: &str) -> String {
+    match subscription {
+        Subscription::Metered => base.to_string(),
+        Subscription::ChatGpt => format!("{base} (ChatGPT subscription)"),
+        Subscription::FlatRate => format!("{base} (subscription)"),
     }
 }
 
@@ -376,5 +391,22 @@ mod tests {
         let jwt = format!("hdr.{payload}.sig");
         assert_eq!(account_id_from_jwt(&jwt).as_deref(), Some("acc_123"));
         assert_eq!(jwt_exp(&jwt), Some(1893456000));
+    }
+
+    /// The single source of truth for the subscription decoration: a metered
+    /// provider keeps its bare name, a ChatGPT login carries the OpenAI plan
+    /// suffix, and a flat-rate plan the generic one — so the status bar, the
+    /// `/model` switch, and the picker cannot drift across flavours.
+    #[test]
+    fn provider_label_decorates_per_flavour() {
+        assert_eq!(provider_label(Subscription::Metered, "deepseek"), "deepseek");
+        assert_eq!(
+            provider_label(Subscription::ChatGpt, "openai"),
+            "openai (ChatGPT subscription)"
+        );
+        assert_eq!(
+            provider_label(Subscription::FlatRate, "opencode-go"),
+            "opencode-go (subscription)"
+        );
     }
 }

@@ -15,13 +15,14 @@
 //! a provider's list shows "loading…" until its background fetch lands.
 
 use super::{CYAN, SLATE};
+use crate::oauth::Subscription;
 use crate::provider::ProviderId;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// One provider's model-list fetch state.
 pub enum ModelsState {
@@ -62,9 +63,10 @@ pub struct Picker {
     /// Available providers in declaration order; their lists fill in as
     /// fetches land.
     providers: Vec<ProviderId>,
-    /// Providers authenticated off a ChatGPT plan login; their rows and
-    /// the status bar render the subscription-decorated label.
-    subscription: BTreeSet<ProviderId>,
+    /// Each subscription-backed provider's plan flavour; their rows render
+    /// the subscription-decorated label. A provider absent from the map is
+    /// metered and renders its bare name.
+    subscription: BTreeMap<ProviderId, Subscription>,
     models: BTreeMap<ProviderId, ModelsState>,
     /// Index into the current filtered [`Self::rows`].
     selected: usize,
@@ -77,9 +79,9 @@ const VISIBLE_ROWS: u16 = 10;
 
 impl Picker {
     /// Open over `providers`, all initially loading until the REPL feeds
-    /// cached or fetched lists. `subscription` names the providers backed
-    /// by a ChatGPT plan login, whose rows read as the subscription.
-    pub fn new(providers: Vec<ProviderId>, subscription: BTreeSet<ProviderId>) -> Self {
+    /// cached or fetched lists. `subscription` maps each plan-backed provider
+    /// to its flavour, whose rows read as the subscription.
+    pub fn new(providers: Vec<ProviderId>, subscription: BTreeMap<ProviderId, Subscription>) -> Self {
         let models = providers
             .iter()
             .map(|id| (id.clone(), ModelsState::Loading))
@@ -94,10 +96,14 @@ impl Picker {
     }
 
     /// The display label for `kind`'s rows: the plain provider name, or
-    /// the subscription-decorated form when it authenticates off a
-    /// ChatGPT plan login.
+    /// the subscription-decorated form when it is on a plan.
     fn label(&self, id: &ProviderId) -> String {
-        crate::oauth::provider_label(self.subscription.contains(id), id.label())
+        let subscription = self
+            .subscription
+            .get(id)
+            .copied()
+            .unwrap_or(Subscription::Metered);
+        crate::oauth::provider_label(subscription, id.label())
     }
 
     /// The providers whose lists are not yet known — the REPL spawns a
@@ -297,7 +303,7 @@ mod tests {
     fn loaded_picker() -> Picker {
         let mut p = Picker::new(
             vec![fam(ProviderKind::Anthropic), fam(ProviderKind::Deepseek)],
-            BTreeSet::new(),
+            BTreeMap::new(),
         );
         p.set_models(
             &fam(ProviderKind::Anthropic),
@@ -340,7 +346,7 @@ mod tests {
     fn subscription_provider_rows_carry_decorated_label() {
         let mut p = Picker::new(
             vec![fam(ProviderKind::Openai)],
-            BTreeSet::from([fam(ProviderKind::Openai)]),
+            BTreeMap::from([(fam(ProviderKind::Openai), Subscription::ChatGpt)]),
         );
         p.set_models(
             &fam(ProviderKind::Openai),
@@ -365,6 +371,31 @@ mod tests {
             .filter(|r| matches!(r, Row::Model(..)))
             .collect();
         assert_eq!(model_rows.len(), 1);
+    }
+
+    /// A flat-rate provider (opencode Go) renders the generic
+    /// `(subscription)` suffix — distinct from the ChatGPT plan's decoration
+    /// — so the picker reads its plan correctly without claiming it is a
+    /// ChatGPT login.
+    #[test]
+    fn flat_rate_provider_rows_carry_generic_subscription_label() {
+        let mut p = Picker::new(
+            vec![fam(ProviderKind::OpencodeGo)],
+            BTreeMap::from([(fam(ProviderKind::OpencodeGo), Subscription::FlatRate)]),
+        );
+        p.set_models(
+            &fam(ProviderKind::OpencodeGo),
+            ModelsState::Loaded(vec!["glm-5.2".into()]),
+        );
+        let labels: Vec<String> = p
+            .rows()
+            .into_iter()
+            .filter_map(|r| match r {
+                Row::Model(id, m) => Some(format!("{} / {m}", p.label(&id))),
+                Row::Manual(_) => None,
+            })
+            .collect();
+        assert_eq!(labels, vec!["opencode-go (subscription) / glm-5.2"]);
     }
 
     /// Typing filters by substring over the `provider / model` label, and a
@@ -421,7 +452,7 @@ mod tests {
     #[test]
     fn custom_provider_lists_and_selects() {
         let llama = custom("local-llama");
-        let mut p = Picker::new(vec![llama.clone()], BTreeSet::new());
+        let mut p = Picker::new(vec![llama.clone()], BTreeMap::new());
         p.set_models(&llama, ModelsState::Loaded(vec!["llama-3".into()]));
         let rows = p.rows();
         assert!(matches!(&rows[0], Row::Model(id, m) if id == &llama && m == "llama-3"));
@@ -462,7 +493,7 @@ mod tests {
     fn height_reserves_a_row_per_failed_provider() {
         let mut p = Picker::new(
             vec![fam(ProviderKind::Anthropic), fam(ProviderKind::Deepseek)],
-            BTreeSet::new(),
+            BTreeMap::new(),
         );
         let base = p.height(u16::MAX);
         p.set_models(&fam(ProviderKind::Anthropic), ModelsState::Failed("x".into()));
@@ -476,7 +507,7 @@ mod tests {
     fn loading_until_all_lists_land() {
         let mut p = Picker::new(
             vec![fam(ProviderKind::Anthropic), fam(ProviderKind::Deepseek)],
-            BTreeSet::new(),
+            BTreeMap::new(),
         );
         assert!(p.is_loading());
         assert_eq!(p.loading_providers().len(), 2);

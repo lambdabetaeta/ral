@@ -42,10 +42,12 @@ pub enum Credential {
 }
 
 impl Credential {
-    /// Whether this credential is a ChatGPT plan login (a flat subscription)
-    /// rather than an API key. The single spelling of the OAuth-vs-key
-    /// distinction the store answers; the provider it builds carries the
-    /// same distinction via [`crate::provider::Provider::is_subscription`].
+    /// Whether this credential is a ChatGPT plan login rather than an API
+    /// key. This is the OAuth-vs-key distinction the store answers — narrower
+    /// than "is a flat subscription", since a flat rate can also be a
+    /// `ProviderId` property (opencode Go) with an ordinary API key. It marks
+    /// exactly the credential that carries no listable catalog (the Codex
+    /// backend), which is why the picker keys its plan-model seeding on it.
     pub fn is_subscription(&self) -> bool {
         matches!(self, Credential::OAuth(_))
     }
@@ -315,6 +317,7 @@ mod tests {
                 ("OPENAI_API_KEY", None),
                 ("OPENROUTER_API_KEY", Some("o")),
                 ("DEEPSEEK_API_KEY", Some("d")),
+                ("OPENCODE_API_KEY", None),
             ],
             || {
                 let store = CredentialStore::resolve_and_scrub(Vec::new());
@@ -325,6 +328,103 @@ mod tests {
                         fam(ProviderKind::Openrouter),
                         fam(ProviderKind::Deepseek)
                     ]
+                );
+            },
+        );
+    }
+
+    /// The two opencode providers share one `OPENCODE_API_KEY`: setting it
+    /// makes both opencode-zen and opencode-go available off the single key,
+    /// each resolving to the same trimmed bearer, and the one shared var is
+    /// scrubbed (deduped) afterwards. They follow the other famous providers
+    /// in declaration order.
+    #[test]
+    fn shared_opencode_key_makes_both_zen_and_go_available() {
+        with_env(
+            &[
+                ("ANTHROPIC_API_KEY", None),
+                ("OPENAI_API_KEY", None),
+                ("OPENROUTER_API_KEY", None),
+                ("DEEPSEEK_API_KEY", None),
+                ("OPENCODE_API_KEY", Some("  oc-secret  ")),
+            ],
+            || {
+                let store = CredentialStore::resolve_and_scrub(Vec::new());
+                for kind in [ProviderKind::OpencodeZen, ProviderKind::OpencodeGo] {
+                    match store.get(&fam(kind)) {
+                        Some(Credential::ApiKey(k)) => assert_eq!(k, "oc-secret", "key is trimmed"),
+                        _ => panic!("{kind:?} should resolve off the shared OPENCODE_API_KEY"),
+                    }
+                }
+                #[allow(clippy::disallowed_methods)]
+                {
+                    assert!(
+                        std::env::var("OPENCODE_API_KEY").is_err(),
+                        "the shared opencode key var must be scrubbed"
+                    );
+                }
+                assert_eq!(
+                    store.available(),
+                    vec![
+                        fam(ProviderKind::OpencodeZen),
+                        fam(ProviderKind::OpencodeGo)
+                    ]
+                );
+            },
+        );
+    }
+
+    /// opencode Go is a flat-rate subscription (unmetered) while opencode Zen
+    /// on the same gateway and key is pay-as-you-go (metered). The split is a
+    /// `ProviderId` property, independent of the credential — both authenticate
+    /// off the same API key.
+    #[test]
+    fn opencode_go_is_flat_rate_zen_is_metered() {
+        assert!(
+            ProviderId::Famous(ProviderKind::OpencodeGo).flat_rate(),
+            "opencode-go is a flat subscription"
+        );
+        assert!(
+            !ProviderId::Famous(ProviderKind::OpencodeZen).flat_rate(),
+            "opencode-zen is metered"
+        );
+        assert!(
+            !ProviderId::Famous(ProviderKind::Openai).flat_rate(),
+            "an API-key OpenAI provider is metered; its plan rides OAuth, not flat_rate"
+        );
+    }
+
+    /// xAI and Qwen are ordinary metered API-key providers, each resolving
+    /// off its own conventional key var (`XAI_API_KEY`, `DASHSCOPE_API_KEY`)
+    /// and neither flat-rate — they bill per token like the other API-key
+    /// providers.
+    #[test]
+    fn xai_and_qwen_resolve_as_metered_api_key_providers() {
+        with_env(
+            &[
+                ("ANTHROPIC_API_KEY", None),
+                ("OPENAI_API_KEY", None),
+                ("OPENROUTER_API_KEY", None),
+                ("DEEPSEEK_API_KEY", None),
+                ("OPENCODE_API_KEY", None),
+                ("XAI_API_KEY", Some("x-secret")),
+                ("DASHSCOPE_API_KEY", Some("q-secret")),
+            ],
+            || {
+                let store = CredentialStore::resolve_and_scrub(Vec::new());
+                for kind in [ProviderKind::Xai, ProviderKind::Qwen] {
+                    assert!(
+                        matches!(store.get(&fam(kind)), Some(Credential::ApiKey(_))),
+                        "{kind:?} should resolve to an ApiKey credential"
+                    );
+                    assert!(
+                        !ProviderId::Famous(kind).flat_rate(),
+                        "{kind:?} bills per token, not flat-rate"
+                    );
+                }
+                assert_eq!(
+                    store.available(),
+                    vec![fam(ProviderKind::Xai), fam(ProviderKind::Qwen)]
                 );
             },
         );

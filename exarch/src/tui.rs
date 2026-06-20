@@ -2167,7 +2167,7 @@ pub fn run(
         vi,
     )
     .map_err(|e| format!("ratatui init: {e}"))?;
-    let status_provider = crate::oauth::provider_label(provider.is_subscription(), info.provider);
+    let status_provider = crate::oauth::provider_label(provider.subscription(), info.provider);
     tui.app.set_status_model(&status_provider, info.model);
     let mut r = Repl {
         tui,
@@ -2398,17 +2398,31 @@ impl Repl<'_> {
     /// and the status bar follows.
     fn pick_model(&mut self) {
         let available = self.store.available();
+        // Each plan-backed provider's flavour, for the picker's labels: a
+        // ChatGPT login (the OAuth credential) reads as the ChatGPT plan, an
+        // otherwise-metered provider whose `ProviderId` declares a flat rate
+        // (opencode Go) as the generic subscription. A provider absent from
+        // the map is metered.
         let subscription = available
             .iter()
-            .filter(|id| self.store.get(id).is_some_and(|c| c.is_subscription()))
-            .cloned()
+            .filter_map(|id| {
+                let kind = if self.store.get(id).is_some_and(|c| c.is_subscription()) {
+                    crate::oauth::Subscription::ChatGpt
+                } else if id.flat_rate() {
+                    crate::oauth::Subscription::FlatRate
+                } else {
+                    return None;
+                };
+                Some((id.clone(), kind))
+            })
             .collect();
         let mut picker = Picker::new(available, subscription);
         // Seed each provider from the catalog's cache instantly; spawn a
         // background fetch for the rest so the UI shows "loading…" rather
-        // than freezing on the network. A subscription provider has no
-        // catalog endpoint, so its curated plan models are seeded directly
-        // and it is excluded from the fetch.
+        // than freezing on the network. A ChatGPT plan login has no catalog
+        // endpoint, so its curated plan models are seeded directly and it is
+        // excluded from the fetch; a flat-rate gateway (opencode Go) lists
+        // live through genai like any other API-key provider.
         let mut rx = None;
         let to_fetch: Vec<_> = picker
             .loading_providers()
@@ -2523,7 +2537,7 @@ impl Repl<'_> {
             self.info.max_tokens_override,
         ));
         let label = provider_id.label();
-        let status_provider = crate::oauth::provider_label(self.provider.is_subscription(), label);
+        let status_provider = crate::oauth::provider_label(self.provider.subscription(), label);
         self.tui.app.set_status_model(&status_provider, &model);
         let state_dir = crate::bootstrap::project_dir(self.info.cwd);
         if let Err(e) = state::save(&state_dir, &state::State::new(&provider_id, &model)) {
