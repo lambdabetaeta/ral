@@ -81,11 +81,55 @@ config file or a shell script.
   Modal in behaviour (an early-return guard in `App::key`), flat in
   rendering. Search matters because a provider list can run to hundreds
   (OpenRouter).
-- **A secondary tuning picker** sets temperature / effort / verbosity /
-  max-tokens, reachable from the model picker or via `/tune`. Both pickers
-  write `.exarch`; switching rebuilds the provider over the same transcript
-  (a switch rebuilds the transport, not the history), and the live model
-  shows in the per-frame status bar.
+- **Switching is cheap and sticky.** `/model` writes the selection to the
+  per-project `state.json`, then rebuilds the provider over the same
+  transcript — a switch rebuilds the transport, not the history — and the
+  live model shows in the per-frame status bar. Tuning is its own surface,
+  below.
+
+## The tuning picker
+
+- **Tuning is *ordered* data, so it is not the model list.** `/model` is a
+  *nominal* pick — interchangeable labels, searched and selected. The four
+  knobs are not: temperature and max-tokens are quantitative, reasoning
+  effort (`None < Low < Medium < High < XHigh < Max`) and verbosity
+  (`Low < Medium < High`) are ordinal. By Bertin's discipline — already the
+  TUI's idiom for level of measurement — ordered data wants an ordered
+  visual variable, not a flat list. So `/tune` is a small fixed stack of
+  *knob rows*: each encodes its value by position, the quantitative knobs as
+  a handle/fill bar scaled to the knob's range, the ordinal knobs as a
+  sequence of cells with the current one marked. There is no search box —
+  one does not filter four fixed knobs, one steps them.
+- **Stepper-only, no free entry.** `←/→` steps the focused knob, `↑/↓`
+  moves between knobs, `⏎` applies, `Esc` reverts. Quantitative knobs step
+  by a fixed increment (temperature by tenths; max-tokens against the
+  model's `max_output_tokens`, which is the bar's full extent); ordinal
+  knobs walk their enum. Raw numeric entry is deliberately withheld — the
+  stepper keeps the surface keyboard-trivial and the encoding honest, since
+  a value reachable only by stepping is one the bar can always render.
+- **`auto` is a first-class state, distinct from zero.** A knob left unset
+  sends *nothing* and genai applies the adapter default — not the same as
+  sending `0.0`. The distinction is load-bearing: over-asserting
+  `temperature` at a reasoning model can 400, so the unset state must be
+  representable and visible (a ghost track), and stepping promotes
+  `auto → set` with a path back. This is the rendering counterpart of
+  *Reasoning is never stripped* below — exarch declines to assert tuning it
+  was not asked to assert.
+- **Unsupported knobs are dimmed, not hidden.** Which knobs apply is
+  model-specific — reasoning effort only where the model advertises it,
+  verbosity only for OpenAI *Responses*. `/tune` becomes the first consumer
+  of `ModelCaps::supported_parameters` (scraped from the catalog today, read
+  by nothing). An inapplicable knob renders dimmed with its reason rather
+  than vanishing, so the pane teaches the model's shape instead of
+  concealing it.
+- **One command, its own surface.** `/tune` is the sole entry; the model
+  picker stays a pure nominal pick and does not hand off to it. The picker
+  writes the same per-project `state.json` — tuning fields added with
+  `#[serde(default)]` so an older binary tolerates a newer file — startup
+  loads it, and a compact tuning glyph joins the live model in the status
+  bar. Structurally it mirrors `/model`: the same modal drive-loop and
+  state-write path, diverging only where the level of measurement demands a
+  different encoding and different keys.
 
 ## Reasoning is never stripped
 
@@ -114,7 +158,9 @@ config file or a shell script.
 1. **Auto-discovery + live models + the `/model` searchable picker +
    `.exarch` model persistence + startup load.** Replaces the
    provider/model flag surface; no config file needed in this slice.
-2. **The tuning picker + tuning in `.exarch`.**
+2. **The `/tune` tuning picker + tuning in `state.json`** — stepper-only;
+   `auto`/unset kept distinct from zero; unsupported knobs dimmed via
+   `ModelCaps::supported_parameters`; new fields `#[serde(default)]`.
 3. **Unusual-provider `config.ral`** (XDG, no-authority eval, the three
    protocols).
 4. **OAuth** (token cache, refresh at genai's per-request `AuthResolver`,
