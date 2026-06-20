@@ -336,8 +336,17 @@ struct SpineRow {
 enum Spine {
     /// A pipeline: one typed row per stage.
     Stages(Vec<SpineRow>),
-    /// A type error — the flare.
-    Flare(String),
+    /// A type error — underlined in place on the prompt, ariadne-style.
+    /// `span` is a half-open CHAR range into the prompt buffer (the same
+    /// coordinate system the TextArea's char cursor uses); `None` when the
+    /// error carries no location, in which case only the dim headline shows.
+    TypeError {
+        span: Option<(usize, usize)>,
+        code: String,
+        headline: String,
+        label: String,
+        hint: Option<String>,
+    },
     /// Nothing to show: an empty or still-incomplete buffer, or a buffer
     /// that compiles but is not a pipeline.
     Empty,
@@ -356,11 +365,24 @@ fn build_spine(src: &str, shell: &Shell) -> Spine {
         // A parse error mid-typing is an incomplete line, not a real error:
         // show nothing rather than flare on every keystroke.
         CompileOutcome::Parse(_) => Spine::Empty,
-        CompileOutcome::Types(errs) => Spine::Flare(
-            errs.first()
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "type error".into()),
-        ),
+        CompileOutcome::Types(errs) => match errs.first() {
+            // Reuse core's diagnostic phrasing verbatim — the headline, the
+            // under-caret label, and the code are exactly what the post-Enter
+            // ariadne report uses, so the two agree word for word.
+            Some(err) => Spine::TypeError {
+                span: err.pos.map(|sp| {
+                    (
+                        ral_core::diagnostic::byte_to_char(src, sp.start as usize),
+                        ral_core::diagnostic::byte_to_char(src, sp.end as usize),
+                    )
+                }),
+                code: err.kind.code().to_string(),
+                headline: err.kind.render_message(),
+                label: ral_core::diagnostic::label_message_for_kind(&err.kind),
+                hint: err.hint.clone(),
+            },
+            None => Spine::Empty,
+        },
     }
 }
 
@@ -529,11 +551,14 @@ fn viewport_height(
     // The spine is empty at entry (inference runs only inside the loop), so
     // the content is the prompt rows plus the taller projection column.  Each
     // column shows a header row plus one row per entry — an empty column still
-    // shows its header and a placeholder row.
+    // shows its header and a placeholder row.  One extra row is reserved for
+    // the caret/label row of a type error, which can flare on any keystroke:
+    // the viewport is sized once per read, so it must afford that row up front
+    // rather than steal it from the projections when the error appears.
     let prompt = prompt_rows(textarea);
     let ws = 1 + worksheet.len().max(1) as u16;
     let mx = 1 + matrix.len().max(1) as u16;
-    let needed = prompt + ws.max(mx);
+    let needed = prompt + 1 + ws.max(mx);
     needed.clamp(1, MAX_VIEWPORT).min(rows.saturating_sub(1).max(1))
 }
 
@@ -550,21 +575,28 @@ fn render(
     let area = frame.area();
     let prompt_lines = prompt_rows(textarea);
 
-    let spine_rows = match spine {
-        Spine::Stages(rows) => rows.len() as u16,
-        Spine::Empty => 0,
-        Spine::Flare(_) => 1,
+    // A type error replaces the per-stage rows above the prompt with a single
+    // caret/label row beneath it; the stage spine keeps its rows above and
+    // claims no row below.
+    let (spine_rows, caret_rows) = match spine {
+        Spine::Stages(rows) => (rows.len() as u16, 0),
+        Spine::TypeError { .. } => (0, 1),
+        Spine::Empty => (0, 0),
     };
 
-    let [spine_area, prompt_area, rest] = Layout::vertical([
+    let [spine_area, prompt_area, caret_area, rest] = Layout::vertical([
         Constraint::Length(spine_rows),
         Constraint::Length(prompt_lines),
+        Constraint::Length(caret_rows),
         Constraint::Min(0),
     ])
     .areas(area);
 
     render_spine(frame, spine_area, spine);
     render_prompt(frame, prompt_area, prefix, prefix_w, textarea);
+    // The underline overlay reads the cells the TextArea just painted, so it
+    // runs after `render_prompt`; the caret row sits in its own area below.
+    overlay_type_error(frame, prompt_area, caret_area, prefix_w, textarea, spine);
     render_projections(frame, rest, worksheet, matrix);
 }
 
@@ -584,13 +616,108 @@ fn render_spine(frame: &mut ratatui::Frame, area: Rect, spine: &Spine) {
                 ])
             })
             .collect(),
-        Spine::Flare(msg) => vec![Line::from(Span::styled(
-            format!("✗ {msg}"),
-            Style::default().fg(FLARE_HUE),
-        ))],
-        Spine::Empty => return,
+        // The type error draws below the prompt, not here.
+        Spine::TypeError { .. } | Spine::Empty => return,
     };
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// Underline the offending span in place on the prompt (ariadne's squiggle),
+/// then draw a caret-and-label row directly beneath it, aligned under the
+/// span.  Char offsets, not bytes — they match the TextArea's char cursor.
+///
+/// The underline is overlaid onto the cells the TextArea already painted:
+/// for each char of the span on the prompt's first row, we add
+/// [`Modifier::UNDERLINED`] and the flare hue to the existing cell rather
+/// than fighting the widget's styling API.  The common one-line prompt is
+/// handled precisely; a span that escapes the first row (multi-line buffer)
+/// degrades to the caret/label row alone.
+fn overlay_type_error(
+    frame: &mut ratatui::Frame,
+    prompt_area: Rect,
+    caret_area: Rect,
+    prefix_w: u16,
+    textarea: &TextArea<'static>,
+    spine: &Spine,
+) {
+    let Spine::TypeError {
+        span,
+        code,
+        headline,
+        label,
+        ..
+    } = spine
+    else {
+        return;
+    };
+    if caret_area.height == 0 {
+        return;
+    }
+
+    // The editor text begins `prefix_w` columns into the prompt row.  In the
+    // common single-line buffer the span's char offsets map straight onto
+    // columns past the prefix; a span starting beyond the first row belongs
+    // to a continuation line we do not underline.
+    let first_row_len = textarea.lines().first().map_or(0, |l| l.chars().count());
+
+    match span {
+        // A located error on the (single-line) prompt: underline it in place
+        // and point a caret row at it.
+        Some((start, end)) if *start <= first_row_len => {
+            let span_start_col = *start as u16;
+            // Clamp the span's end to the first row — a span running past the
+            // editor's first line still gets a sensible underline/caret.
+            let span_end_col = (*end).min(first_row_len) as u16;
+            let span_w = span_end_col.saturating_sub(span_start_col).max(1);
+
+            underline_cells(frame, prompt_area, prefix_w + span_start_col, span_w);
+            render_caret_row(frame, caret_area, prefix_w + span_start_col, span_w, label, code);
+        }
+        // No span (or it escaped the first row): no underline, just the dim
+        // headline beneath the prompt — the messageless fallback.
+        _ => {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!("✗ {headline}"),
+                    Style::default().fg(FLARE_HUE).add_modifier(Modifier::DIM),
+                ))),
+                caret_area,
+            );
+        }
+    }
+}
+
+/// Overlay the flare hue and an underline onto `span_w` already-painted cells
+/// of the prompt row, starting at column `col` within `area`.
+fn underline_cells(frame: &mut ratatui::Frame, area: Rect, col: u16, span_w: u16) {
+    let buf = frame.buffer_mut();
+    let y = area.y;
+    let x0 = area.x + col;
+    let max_x = area.x + area.width;
+    let flare = Style::default().fg(FLARE_HUE).add_modifier(Modifier::UNDERLINED);
+    for x in x0..(x0 + span_w).min(max_x) {
+        buf[(x, y)].set_style(flare);
+    }
+}
+
+/// Draw the caret-and-label row: pad to the span's start column, lay down
+/// `^` under each span char in the flare hue, then the under-caret label and
+/// the dim error code.
+fn render_caret_row(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    col: u16,
+    span_w: u16,
+    label: &str,
+    code: &str,
+) {
+    let line = Line::from(vec![
+        Span::raw(" ".repeat(col as usize)),
+        Span::styled("^".repeat(span_w as usize), Style::default().fg(FLARE_HUE)),
+        Span::styled(format!(" {label}"), Style::default().fg(FLARE_HUE)),
+        Span::styled(format!(" [{code}]"), Style::default().fg(SLATE)),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 /// Render the styled prompt prefix at column 0 of the prompt row, then the
@@ -701,6 +828,28 @@ fn commit_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A buffer the checker rejects with a located error builds the
+    /// `TypeError` spine: a char span to underline and the exact under-caret
+    /// label core's diagnostic uses — so the inline flare and the post-Enter
+    /// report agree word for word.  `if "x" { … }` mismatches the condition's
+    /// `String` against the expected `Bool`, pointing at the `"x"` literal.
+    #[test]
+    fn build_spine_locates_type_error() {
+        let shell = Shell::new(Default::default());
+        let spine = build_spine("if \"x\" { 1 } else { 2 }", &shell);
+        let Spine::TypeError {
+            span, label, code, ..
+        } = spine
+        else {
+            panic!("a located type error yields the TypeError spine");
+        };
+        // The span points at the `"x"` condition (chars 3..6), to underline.
+        assert_eq!(span, Some((3, 6)));
+        assert!(!label.is_empty(), "carries an under-caret label");
+        assert_eq!(label, "String doesn't match Bool");
+        assert_eq!(code, "T0010");
+    }
 
     /// The spine extracts a typed row per pipeline stage from the retained
     /// per-stage value types — the keystone projection, end to end.
