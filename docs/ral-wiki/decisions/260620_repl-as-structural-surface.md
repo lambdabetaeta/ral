@@ -59,9 +59,15 @@ success.
 
 A new `StructuralFrontend` implements the `Frontend` trait. Where
 `RustylineFrontend` is a line editor that hands a single row to the terminal,
-the structural frontend is a **full-screen ratatui application** (the same
-crate exarch uses) that owns the whole frame: raw mode, the alternate screen,
-and a layout that places the prompt and the three projections on one canvas.
+the structural frontend is a **ratatui application drawing into an inline
+viewport** (the same crate exarch uses) pinned to the bottom of the screen:
+raw mode and the viewport are entered per `read` and dropped before the line
+is returned, the prompt and the three projections share that bottom band, and
+the scrollback above it stays the *terminal's* — committed with `insert_before`,
+never owned by ratatui. The surface deliberately does **not** take the
+alternate screen or own the whole frame; that the inline viewport is the right
+substrate, and the full-screen block-shell the wrong one, is argued in *What
+was rejected: the scrollback as owned blocks* below.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -93,8 +99,8 @@ and a layout that places the prompt and the three projections on one canvas.
   `Env::all_bindings()` from it for the Worksheet, and reads handle values
   for the Matrix. The Typed Spine re-runs `compile_and_typecheck` on the
   partial prompt buffer against those schemes.
-- **Degradation is structural.** If the terminal cannot do raw mode or the
-  alternate screen, or `RAL_INTERACTIVE_MODE` selects it, the session falls
+- **Degradation is structural.** If the terminal cannot do raw mode, or
+  `RAL_INTERACTIVE_MODE` selects it, the session falls
   back to `MinimalFrontend` (the existing canonical-stdin path). The
   projections are additive chrome; the `Frontend` trait and both existing
   backends are unchanged. A `RAL_SURFACE=minimal|rustyline|structural` switch
@@ -367,18 +373,23 @@ The mouse's job is to **point at the structural objects the three projections
 render**, not to chase references through text. The REPL rendered those
 objects, so it knows what each one is — a value, a binding node, a handle row
 — and pointing at a known object is faster than keyboard-navigating a graph.
-Three interactions, no more:
 
-- **Click a rendered value → insert its reference at the prompt.** A handle
+A single left-click **copies** the object under the pointer — the universal,
+read-only gesture, with the toast and mechanics under *Pointer on the
+projections* below. The three *structural* gestures, which edit the program
+rather than read it, move onto a **double-click** — still a bare second click,
+no modifier or middle button (the plumber rejection below holds):
+
+- **Double-click a rendered value → insert its reference at the prompt.** A handle
   inserts `$h0`; a binding inserts `$name`; a click-drag over a slice of a
   list inserts `$dirs[0:3]`; a map entry inserts `$m[size]`. The frontend
   keeps a hit-map from rendered cell to the `Value` it depicts (exarch's
   element-identification machinery already does this), so the reference is
   exact — the value's `Value` variant is known, not guessed from text.
-- **Click a worksheet node → load its source into the prompt** to edit and
+- **Double-click a worksheet node → load its source into the prompt** to edit and
   rebind it, triggering re-flow. Graph navigation by pointing, which is what
   graphs want; arrow-key traversal of a DAG is the clunky alternative.
-- **Click a matrix row → focus it; drag two rows together → `race`.** Spatial
+- **Double-click a matrix row → focus it; drag two rows together → `race`.** Spatial
   actions on a spatial layout. Row verbs (`await` / `cancel` / `fg` / `bg`)
   remain on the keyboard.
 
@@ -409,6 +420,191 @@ points at known objects. Cross-turn copy falls to the system clipboard; no
 typed buffer is built. Plain click is the only button the trackpad needs;
 the structural gestures (drag-slice, drag-to-race) are native trackpad
 moves, and no middle button or modifier substitute is required.
+
+### What was rejected: the scrollback as owned blocks (the Warp move)
+
+A later draft proposed taking the pointer one step further: commit each
+command **and its output** to the scrollback as a first-class *block* the
+surface owns — subtly highlit as the pointer crosses it, copied to the
+clipboard on a click (with a transient `[copied 1512 characters]` toast), the
+Warp/block-shell model. To *own* a block is to repaint it, hit-test a click
+against it, and read its text back; under the inline viewport none of that is
+possible, because the instant `commit_line` hands a line to `insert_before` it
+belongs to the *terminal emulator*, not to ratatui. The block model therefore
+demands the full-screen alternate-screen surface that owns the whole frame —
+and that is what is rejected, on four grounds.
+
+**Warp owns the PTY; ral rents it.** A shell's defining activity is running
+foreign programs that take the terminal — `vim`, `less`, `fzf`, a pager, a
+curses app — which ral hands inherited file descriptors (`Stdio::inherit`,
+`runtime/command/stdio.rs`) precisely so they get a real TTY. To own their
+output as blocks the surface would have to *capture* every child's bytes — to
+become a PTY-owning terminal emulator. Warp is one; ral runs *inside* one.
+Blocks are an emulator feature, and reimplementing the emulator is a different
+(enormous) project, not a frontend.
+
+**The least-bad compromise leaves the valuable target un-clickable.** Short of
+a PTY layer the surface could suspend itself for each external child (leave the
+band, run with inherited fds, re-enter) — interactive children survive, but
+then their output never enters a ratatui-owned block. The only blocks left to
+click are the committed command line and ral's *own* typed value output; the
+external bytes — the SHA, the path, the URL, the error from `rg` or `git`, the
+thing one actually reaches for — stay raw and unowned. Full cost, wrong half.
+
+**The terminal already does selection and copy, and does it better.** Native
+double-click-word, line select, rectangular and semantic selection, scrollback
+search, copy-mode, and the user's muscle memory all live in the host terminal.
+Capturing the mouse to reimplement copy *replaces* that with a weaker version
+— the exact trade exarch declined when it left Shift+drag to fall through to
+"native" selection
+([[decisions/260618_tui-transcript-as-graphic|tui-transcript-as-graphic]]).
+And owning the frame costs the *real* scrollback: the alternate screen has no
+history above the band, so the session's past — and the shell history before
+it — vanishes from the terminal's own scrollbuffer.
+
+**It contradicts this document's thesis.** ral's bet is that the interesting
+shell UX lives at the *language* layer, not the *terminal* layer; the worksheet
+is "the un-Warp move." Reconstructing blocks from inherited byte streams is the
+block-shell approach this surface defines itself against — the same objection
+raised against the plumber, that "command output … is untyped bytes with no
+`Value` behind it." A block built over `ls`'s bytes is exactly that: chrome
+with no structure under it.
+
+**What survives.** The inline viewport stays. The pointer acts only on the
+objects the surface *rendered* — the projections — never on terminal-owned
+scrollback, and cross-turn copy of command output falls to the terminal's
+native selection, which is better at it. The highlight-on-hover, the
+click-to-copy, and the `[copied N characters]` toast the block draft wanted are
+kept — *moved onto the projections*, where ral owns the cells and knows what
+each one is. That surface is specified next.
+
+## Pointer on the projections — implementation
+
+The pointer surface the block draft wanted, kept but moved off the scrollback
+onto the projections the inline viewport already owns. Two halves: the **live
+projection render** (already implemented in `repl/frontend/structural.rs`) and
+the **pointer layer** built on top of it. Each compiles and is testable alone.
+
+### The live projection render (point 1, implemented)
+
+The substrate is in place and is the plan of record, recorded here so the
+pointer layer has a fixed target:
+
+- **Layout.** `compose` enters raw mode and an inline viewport, laid out
+  top-to-bottom by `render` as the typed spine, the prompt row(s), an optional
+  caret/flare row, then the projections band (`render_projections`): the
+  worksheet on the left, the handles matrix on the right. The *live stuff* the
+  user composes against sits directly below the prompt, in that band.
+- **Refresh.** The loop polls keys on a `TICK` (120 ms) idle cadence and
+  redraws every tick, so the projections stay live without a keystroke. The
+  spine is the only per-keystroke cost: `build_spine` re-runs
+  `compile_and_typecheck` against `session_schemes` only when the buffer text
+  changes (`last_buf`), reusing the cached spine on an idle redraw. The
+  worksheet and matrix read a single env snapshot taken once per `read` — no
+  evaluation happens while composing, so the env is constant across the band's
+  lifetime.
+- **What the band renders is what the pointer acts on.** Each worksheet row is
+  one `WsRow` (`name : type = preview`); each matrix row is one `MxRow` (a
+  handle or pgid job). Both are laid out one screen-row per entry inside known
+  `Rect`s — the property the hit-map below relies on.
+
+The one render change the pointer wants: the loop must **retain** the worksheet
+and matrix `Rect`s after `terminal.draw` returns, so a mouse event arriving
+between frames can be tested against them.
+
+### Enabling the mouse without surrendering the terminal
+
+Mouse capture is orthogonal to the inline viewport: events carry absolute
+screen coordinates, and the surface acts only on those landing inside the
+band's `Rect`s, ignoring the rest. Capture is scoped to `compose`:
+
+- On entering raw mode, also `execute!(stdout, EnableMouseCapture)`; on every
+  exit path (including the IO-error path) `DisableMouseCapture` — so capture is
+  live **only while the user composes**, never while a command runs. This is
+  the division the rejection above relies on: during composition the surface
+  owns the pointer and acts on its projections; during execution the pointer is
+  the *terminal's*, and native selection of command output works as always.
+- The loop's event match currently drops everything but `Event::Key` (the
+  `let Event::Key(k) = … else { continue }` arm). Add an `Event::Mouse(me)`
+  arm dispatching to the pointer handler.
+- **Shift falls through.** A `Down`/`Drag` carrying `KeyModifiers::SHIFT` is
+  left unhandled, so the host terminal's own selection still works inside the
+  band — mirroring exarch's "⇧ native" footer.
+- **Degradation.** If `EnableMouseCapture` fails the band still renders and the
+  keyboard path is unchanged; the pointer layer is additive chrome, exactly as
+  colour is.
+
+### The hit-map: from cell to projection object
+
+After `render_projections` draws the band, the loop holds the worksheet and
+matrix `Rect`s and the ordered `WsRow`/`MxRow` slices. A mouse event at
+`(col, row)` maps to an object by the same row arithmetic exarch's `block_at`
+uses: the row within `ws_area` (or `mx_area`), minus the one-row header,
+indexes its slice. The result is a small enum:
+
+```
+enum Hit { Worksheet(usize), Handle(usize) }   // index into the rendered slice
+```
+
+Row-granular to start (a whole binding node, a whole handle row). The
+finer-grained targets §Pointer interaction describes — a drag over a list
+*slice* yielding `$dirs[0:3]`, a click on a *map entry* yielding `$m[size]` —
+need column ranges per rendered value and are a follow-on; they reuse the same
+element-identification machinery exarch already has, and do not block the
+row-granular cut.
+
+### The three gestures
+
+Driven from the `Event::Mouse` arm, tracking a little pointer state across
+frames (`hovered: Option<Hit>`, a `Press` like exarch's, and the toast):
+
+- **Hover → subtle highlight.** On `MouseEventKind::Moved`, recompute `Hit` and
+  store it as `hovered`; `render_projections` paints that one row with a faint
+  background (a lightened `SLATE`), nothing more. The next `TICK` redraw shows
+  it; moving off clears it. No copy, no mutation — just "the pointer is here."
+- **Single click → copy + toast.** On `MouseEventKind::Down(Left)` without
+  Shift, resolve `Hit` and copy the object's text to the clipboard via OSC 52,
+  then raise the toast. *What* is copied is typed, because the surface rendered
+  it: a worksheet node copies its full value (the un-truncated `Value`, not the
+  `preview`) — or its `name : type = value` line, a config choice; a handle row
+  copies its settled value, or its label while still running. Copy reuses
+  exarch's `osc52_copy` + `tail_bytes` size cap; see the DRY note below.
+- **Double-click → the structural gesture** (insert-ref for a value,
+  load-source for a node, focus for a row), as §Pointer interaction specifies —
+  a bare second click, no modifier, so single-click stays copy everywhere.
+
+`Down`/`Drag`/`Up` are tracked exactly as exarch tracks `Press` (anchor row,
+`dragged` flag), so a *drag* inside the band can later select-and-copy a range;
+the row-granular single-click is the first cut.
+
+### The toast
+
+A `[copied N characters]` flash, where *N* is the `chars().count()` of the
+copied text:
+
+- **State:** `toast: Option<(String, Instant)>`, set on every copy.
+- **Render:** overlaid onto the **top-right cells of the band**, written
+  directly into the frame buffer after the projections draw — the same
+  direct-cell technique `overlay_type_error`/`underline_cells` already use — in
+  a dim positive hue. It is *top-right of the inline band*, not of the screen:
+  the surface owns only the band, and a screen-top-right toast is one of the
+  affordances the full-screen block-shell would have bought and the rejection
+  above declined. The band's top-right is the honest place for it.
+- **Expiry:** cleared when `Instant::now()` passes the stamp by ~1.5 s, checked
+  on the `TICK` poll the loop already runs; the redraw removes it.
+  (`std::time::Instant` is ordinary application state.)
+
+### DRY: the shared pointer vocabulary
+
+`osc52_copy`, `tail_bytes`, the `Press`/hover state machine, and the
+`block_at`-style hit arithmetic already exist in `exarch/src/tui.rs`, and *The
+shared visual system* above already commits ral and exarch to one component
+vocabulary (the rail, the value-ramp, collapsible blocks, the matrix, OSC-52
+yank). Rather than copy them, **lift the pointer-and-clipboard primitives into
+a crate both consume** (a small `tui-surface` or similar), so the OSC-52 emit,
+the size cap, and the hit/press helpers have one home. This is the one piece of
+non-trivial structural work the pointer layer adds; the rest is wiring it into
+`compose`.
 
 ## The substrate, not the wrapper
 
@@ -443,7 +639,10 @@ These are the changes beyond the new frontend. Each is small and local:
 
 - **New:** `StructuralFrontend` — a ratatui `Frontend` impl rendering the
   three projections; a `RAL_SURFACE` selector at boot; the worksheet model
-  (nodes + edges + pin/fork state); the matrix's handle/job dashboard.
+  (nodes + edges + pin/fork state); the matrix's handle/job dashboard; a
+  pointer layer over the projection `Rect`s (hover highlight, single-click
+  OSC-52 copy + toast, double-click structural gesture), its OSC-52 and hit
+  primitives lifted to a crate shared with exarch.
 - **Changed:** the session loop feeds the frontend the same compile/scheme
   results it already computes; `Frontend::read` may gain a job-table
   argument; the annotation pass retains per-stage types; the prompt render
@@ -478,12 +677,18 @@ own.
                    substrate ext #2 (edge retention); transitive re-flow
                    with pinning; effectful-by-default classification via
                    mode system; worksheet fork.
+4  Pointer          mouse capture inside the inline viewport; hit-map over
+   on projections    the worksheet/matrix Rects; hover highlight; single-click
+                   OSC-52 copy + `[copied N]` toast; double-click structural
+                   gesture; osc52/hit primitives lifted to a shared crate.
 ```
 
 Phase 0 and the Typed Spine (1) land first. The Handles Matrix (2) is
 independent and follows. The Worksheet (3) is last: its re-flow semantics
 are the most subtle and it depends on the edge-retention substrate change.
-Type holes are a follow-on to the spine, not a blocker.
+Type holes are a follow-on to the spine, not a blocker. The pointer layer (4)
+sits on whichever projections have landed, touches no core substrate, and can
+land any time after the matrix.
 
 ## Test plan
 
@@ -501,6 +706,11 @@ Type holes are a follow-on to the spine, not a blocker.
 - **The worksheet forks.** A forked worksheet holds an independent
   environment; edits in one branch do not mutate the other; both render
   simultaneously.
+- **The pointer copies what it points at.** Hovering a worksheet node
+  highlights it; a single click copies its value and flashes
+  `[copied N characters]` with *N* the copied char count; a double-click loads
+  its source into the prompt. Shift+drag falls through to the terminal's own
+  selection. No core substrate is touched.
 - **Degradation.** Under `RAL_SURFACE=minimal` and on a dumb terminal, every
   projection collapses and the prompt behaves as the existing line-editor.
 
