@@ -153,6 +153,42 @@ event on the bus, while move 7 can deepen with one.
    constructs the view by removing detail, the way one reduces a matrix to find
    its structure.
 
+   > **Amended 2026-06-20 — observation calls coalesce into dialable
+   > blocks; diffs and writes are barriers.** Graded reduction as landed
+   > dials *one block at a time*: each `ral` call is its own collapsible
+   > block, so a turn that greps, reads a dozen files, then edits reads as a
+   > stack of a dozen near-identical `▸ ral` headers — the rail's thumbnail
+   > drowns in repetition, the exact charge §"The diagnosis" levels at the
+   > uniform `❖`. The fix is a render-time **projection in the flatten**
+   > (`tui/group.rs`, consumed by `tui/viewport.rs::reflow`), not a change to
+   > how blocks are pushed, logged, or aggregated: a contiguous run of
+   > *observation-only* calls — calls whose effects are only reads, greps, or
+   > execs — folds into **one** dialable object, while a call that writes
+   > (`>` redirect) or produces a `▎ diff` (`edit`) is a **barrier** that
+   > ends the block and renders standalone, the way a unified diff breaks a
+   > file from the next. A deliberately `surface`d rich card is the model's
+   > own communication, so it is a barrier too. The grouping reads what
+   > arrival order already adjoins (`ToolCall · io · diff · ToolCall · …`),
+   > so headless and the per-session `user.log` — which print arrival order,
+   > block by block — are unchanged.
+   >
+   > The coalesced block dials through **three levels, with no L0 and L1 the
+   > floor** (a block always shows at least its live tip):
+   > - **L1, the live tip** — the *latest* call's intent beside a *vertical*
+   >   sparkline (one `▁▂▃▄▅▆▇█` bar per call, height ∝ its result magnitude
+   >   on the same `log2` scale as the rail's `value_step`, left→right in call
+   >   order), then that call's coalesced reads/greps/execs. Earlier calls are
+   >   just their bar; the bar *count* stands in for an `×N`.
+   > - **L2** — every call: its intent, its effects, and its right-aligned bar.
+   > - **L3** — L2 plus each call's full ral `cmd` source.
+   >
+   > The dial extends the existing `level` machinery: the run's level lives on
+   > its anchor call's `Block::level`, clamped to a per-kind floor of L1 for a
+   > call (every other dialable kind keeps its L0 floor). Move 7's distress
+   > modulates the *intent line's* value — the same dim/contrast-pull
+   > committed prose carries, threaded through the call's `fidelity.context` —
+   > never a bar's height, so magnitude and trust stay separate channels.
+
 7. **Coherent degradation: the interface's fidelity tracks the model's
    capability.** Every agent TUI renders a degraded answer — one emitted under
    context pressure, after retries, or with low confidence — identically to a

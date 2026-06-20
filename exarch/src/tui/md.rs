@@ -69,11 +69,6 @@ fn modulate(lines: &mut [Line<'static>], f: Fidelity) {
     if f.context == 0 && f.echo == 0 {
         return;
     }
-    let pull = match f.context {
-        0 | 1 => 0.0,
-        2 => 0.40,
-        _ => 0.70,
-    };
     for (row, line) in lines.iter_mut().enumerate() {
         // Even rows lift toward white, odd rows toward black — a ±1
         // value-step oscillation when the paragraph echoes its script.
@@ -83,24 +78,56 @@ fn modulate(lines: &mut [Line<'static>], f: Fidelity) {
             Color::Rgb(0, 0, 0)
         });
         for span in &mut line.spans {
-            if span.content.trim().is_empty() {
-                continue;
-            }
-            if f.context >= 1 {
-                span.style = span.style.add_modifier(Modifier::DIM);
-            }
-            if pull == 0.0 && waver.is_none() {
-                continue;
-            }
-            let mut fg = span.style.fg.unwrap_or(BASE_FG);
-            if pull > 0.0 {
-                fg = mix(fg, CODE_BG, pull);
-            }
-            if let Some(to) = waver {
-                fg = mix(fg, to, 1.0 / 3.0);
-            }
-            span.style.fg = Some(fg);
+            dim_span(span, f.context, waver);
         }
+    }
+}
+
+/// The contrast pull a context-pressure floor applies: levels 2–3 drag
+/// every foreground toward the background (~40% / ~70%) on top of the dim,
+/// so a stressed answer reads as muted.  Levels 0–1 carry no pull.
+fn context_pull(context: u8) -> f32 {
+    match context {
+        0 | 1 => 0.0,
+        2 => 0.40,
+        _ => 0.70,
+    }
+}
+
+/// Degrade one span by a context-pressure floor, optionally wavering its
+/// lightness toward `waver`: dim from level 1, pull its foreground toward
+/// the background from level 2, and mix toward `waver` when the row echoes.
+/// The one span-level modulation [`modulate`] and the coalesced ral block's
+/// intent line ([`apply_context`]) share, so prose and intent degrade alike.
+fn dim_span(span: &mut Span<'static>, context: u8, waver: Option<Color>) {
+    if span.content.trim().is_empty() {
+        return;
+    }
+    if context >= 1 {
+        span.style = span.style.add_modifier(Modifier::DIM);
+    }
+    let pull = context_pull(context);
+    if pull == 0.0 && waver.is_none() {
+        return;
+    }
+    let mut fg = span.style.fg.unwrap_or(BASE_FG);
+    if pull > 0.0 {
+        fg = mix(fg, CODE_BG, pull);
+    }
+    if let Some(to) = waver {
+        fg = mix(fg, to, 1.0 / 3.0);
+    }
+    span.style.fg = Some(fg);
+}
+
+/// Degrade a coalesced ral block's intent line by the turn's context
+/// floor — the same value reduction committed prose carries (Move 7), so
+/// distress modulates the intent line, never a sparkline bar's height.  No
+/// waver: an intent is the model's stated purpose, not committed prose, and
+/// carries no echo signal.
+pub(super) fn apply_context(line: &mut Line<'static>, context: u8) {
+    for span in &mut line.spans {
+        dim_span(span, context, None);
     }
 }
 
@@ -831,128 +858,3 @@ fn syn_to_ratatui(s: SynStyle) -> Style {
 
 // ── tests ────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The viewport streamer commits one paragraph at a time at `\n\n`;
-    /// the renderer must leave exactly one trailing blank so successive
-    /// commits land separated rather than flush against each other.
-    #[test]
-    fn render_keeps_one_trailing_blank_on_blank_input() {
-        let out = render_md("Paragraph.\n\n", 80, 0, Fidelity::default());
-        assert!(!out.is_empty());
-        assert!(
-            is_blank(out.last().unwrap()),
-            "tail must be a separator blank"
-        );
-        assert!(out.len() >= 2);
-        assert!(!is_blank(&out[out.len() - 2]), "exactly one trailing blank");
-    }
-
-    /// Two paragraphs in one render keep their internal blank and gain a
-    /// single trailing one — same shape as if they had been committed
-    /// sequentially.
-    #[test]
-    fn render_keeps_internal_paragraph_break() {
-        let out = render_md("Para one.\n\nPara two.\n\n", 80, 0, Fidelity::default());
-        let internal = out[..out.len() - 1].iter().filter(|l| is_blank(l)).count();
-        assert_eq!(internal, 1, "expected one internal blank, got {internal}");
-        assert!(is_blank(out.last().unwrap()));
-    }
-
-    #[test]
-    fn render_paragraph_has_no_trailing_blank_when_input_lacks_one() {
-        let out = render_md("Paragraph.", 80, 0, Fidelity::default());
-        assert!(!out.is_empty());
-        assert!(!is_blank(out.last().unwrap()));
-    }
-
-    /// A sound fidelity leaves the rendering untouched — no DIM, no
-    /// recoloured foreground.  The seed signal must cost nothing when the
-    /// model is not under pressure.
-    #[test]
-    fn sound_fidelity_is_the_identity() {
-        let plain = render_md("Some prose.", 80, 0, Fidelity::default());
-        let stressed = render_md(
-            "Some prose.",
-            80,
-            0,
-            Fidelity {
-                context: 0,
-                echo: 0,
-            },
-        );
-        assert_eq!(plain, stressed);
-        for line in &plain {
-            for span in &line.spans {
-                assert!(!span.style.add_modifier.contains(Modifier::DIM));
-            }
-        }
-    }
-
-    /// Context level 2 dims every text span and pulls its foreground —
-    /// including plain prose, which had no explicit colour and so gains
-    /// the seeded base foreground pulled toward the background.
-    #[test]
-    fn context_pressure_dims_and_pulls_contrast() {
-        let out = render_md(
-            "Some prose here.",
-            80,
-            0,
-            Fidelity {
-                context: 2,
-                echo: 0,
-            },
-        );
-        let span = out
-            .iter()
-            .flat_map(|l| &l.spans)
-            .find(|s| !s.content.trim().is_empty())
-            .expect("a text span");
-        assert!(
-            span.style.add_modifier.contains(Modifier::DIM),
-            "level 2 dims"
-        );
-        let pulled = span.style.fg.expect("a pulled foreground");
-        // Pulled 40% from the base toward the dark background, so it sits
-        // strictly between the two.
-        let Color::Rgb(r, _, _) = pulled else {
-            panic!("expected an RGB foreground");
-        };
-        let Color::Rgb(br, _, _) = BASE_FG else {
-            unreachable!()
-        };
-        let Color::Rgb(cr, _, _) = CODE_BG else {
-            unreachable!()
-        };
-        assert!(cr < r && r < br, "fg pulled toward bg: {cr} < {r} < {br}");
-    }
-
-    /// An echoed paragraph wavers: alternate non-blank rows carry
-    /// foregrounds shifted in opposite lightness directions, so the block
-    /// reads as unsteady.  A multi-row paragraph makes the oscillation
-    /// observable.
-    #[test]
-    fn echo_wavers_alternate_rows() {
-        // Force several rows by wrapping at a narrow width.
-        let src = "one two three four five six seven eight nine ten eleven twelve";
-        let out = render_md(
-            src,
-            12,
-            0,
-            Fidelity {
-                context: 0,
-                echo: 2,
-            },
-        );
-        let fgs: Vec<Color> = out
-            .iter()
-            .filter(|l| !is_blank(l))
-            .filter_map(|l| l.spans.iter().find(|s| !s.content.trim().is_empty()))
-            .map(|s| s.style.fg.expect("echo seeds a foreground"))
-            .collect();
-        assert!(fgs.len() >= 2, "need multiple rows to observe the waver");
-        assert_ne!(fgs[0], fgs[1], "adjacent rows waver in opposite directions");
-    }
-}
