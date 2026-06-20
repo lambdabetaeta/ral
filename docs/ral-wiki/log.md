@@ -2927,3 +2927,18 @@ Updated [[index|index]] with the narrowed implementation parcels.
 
 Re-evaluated [[decisions/260619_terminal-lease|terminal-lease]] after the follow-up review. The plan now distinguishes the host-facing `RequestedTerminalAccess` from internal `TerminalAccess::ExplicitLoan`, and records that the parked session lease has no raw public getter: foreground handoff code gets a borrow only through an authorised turn.
 Updated [[index|index]] to reflect the public/internal terminal-access split.
+
+## [2026-06-20] ingest | terminal lease landed; loan elevation door closed; foreground-ownership superseded
+
+The lease implementation has landed, so [[decisions/260619_terminal-lease|terminal-lease]]
+is marked **active**. The `_ed-tui` loan was tightened to match §4:
+`begin_terminal_loan` now refuses the `Denied → ExplicitLoan` elevation, raising
+only an already-`Leased` turn (`if matches!(prev, TerminalAccess::Leased) { … }`),
+so the loan can only *raise* an authorised turn and can no longer mint authority
+from `Denied` — closing the deviation the ADR recorded. The loan stays a manual
+begin/end token rather than a `Drop`-based RAII guard (a `Drop` impl cannot hold
+the `&mut Shell` it needs while the editor body also borrows it); the manual-restore
+consequence is acknowledged and intentionally retained. With the lease in place,
+[[decisions/260613_terminal-foreground-ownership|terminal-foreground-ownership]] is
+**superseded**: its `startup_foreground` predicate is the lease's mint condition.
+Updated [[index|index]]: terminal-lease → active, terminal-foreground-ownership → superseded.
