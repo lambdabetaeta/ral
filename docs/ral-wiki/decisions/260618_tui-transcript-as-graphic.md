@@ -162,13 +162,17 @@ event on the bus, while move 7 can deepen with one.
    > `ral` calls, and a call's file I/O is not a sibling of the next call — it is
    > that call's own effect. Each call's reads, execs, and writes surface as their
    > own blocks ([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-
-   > execs]]) and land *between* the calls: arrival order is
-   > `ToolCall_N · io_N · diff_N · ToolCall_{N+1} · …`, because the surface buffers
-   > flush at the call's own result (`tui.rs:706`/`772` io, `:685`/`:738` patch,
-   > both through `flush_surfaces` at `:715`; `set_result_size` searches back past
-   > them, `viewport.rs:293`). So coalescing "a contiguous run of `ToolCall`
-   > blocks" is the wrong cut twice over: the blocks are not contiguous, and folding
-   > across them would swallow the reads and writes — the loudest signal.
+   > execs]]) and land *between* the calls. And each `ral` call is its own provider
+   > round-trip, so the turn loop emits a `Kind::Step` (the `━` boundary) between
+   > consecutive calls as well: the real arrival order is
+   > `Step · ToolCall_N · io_N · diff_N · Step · ToolCall_{N+1} · …` (the io and patch
+   > buffers flush at the call's own result through `flush_surfaces`;
+   > `set_result_size` searches back past them). So coalescing "a contiguous run of
+   > `ToolCall` blocks" is the wrong cut twice over: the blocks are not contiguous,
+   > and folding across them would swallow the reads and writes — the loudest signal.
+   > The first build read the formula without the `Step` and so never coalesced
+   > anything: every interior `Step` cut each burst back to a single call (fixed by
+   > bridging, below).
    >
    > The transcript instead reads as `block · diff · block · diff · …`. A **block**
    > coalesces a run of observation-only calls (those whose effects are only reads,
@@ -176,7 +180,13 @@ event on the bus, while move 7 can deepen with one.
    > the current block, renders as its own always-visible block (keeping its own
    > header↔hunks dial), and a fresh block starts after it. A write is the
    > codebase's audit trail and can never be folded away; observation is recoverable
-   > context and compresses hard. This is a *projection*, not a stored object
+   > context and compresses hard. The interior `Step` boundaries are neither: a step
+   > is provider bookkeeping, not content, so the run **bridges** it — a `Step`
+   > between two observations is subsumed into the block and never drawn, while a
+   > `Step` at a run's edge (before genuine content, or live at the tail before the
+   > next call lands) still renders as the `━` boundary it is. The matrix's
+   > per-`Step` columns (Move 2) read the unchanged block buffer, so bridging is a
+   > render-time decision only. This is a *projection*, not a stored object
    > (§"Why this shape": the same buffer re-read) — the flatten groups what arrival
    > order already adjoins, so push, `user.log`, aggregation, and `set_result_size`
    > are untouched. (A deliberately `surface`d `text`/`fields`/`measure` card is the

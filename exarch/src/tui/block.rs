@@ -279,7 +279,11 @@ impl Block {
     /// True for a block the coalescing projection folds into a ral block —
     /// a tool call, or a read / grep / exec effect.  Everything else (a
     /// diff, a write, a surfaced card, markdown, chrome, a subagent result)
-    /// is a *barrier* that splits one block from the next.
+    /// is a *barrier* that splits one block from the next — except a step
+    /// boundary interior to a run, which is neither content (it is not an
+    /// observation here) nor a barrier: the viewport's run scan
+    /// ([`super::viewport::Viewport::observation_run_end`]) bridges it as
+    /// provider bookkeeping.
     pub(super) fn observation(&self) -> bool {
         matches!(
             self.kind,

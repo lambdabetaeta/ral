@@ -502,13 +502,16 @@ impl Viewport {
 
     /// Rebuild [`Self::flat`] when stale or asked at a new width.
     ///
-    /// The flatten is the **coalescing projection**: a contiguous run of
-    /// observation blocks ([`Block::observation`] — a call and its
-    /// reads/greps/execs) folds into one dialable ral block
-    /// ([`super::group`]); every barrier (a diff, a write, a surfaced card,
-    /// markdown, chrome, a subagent result) renders as its own block exactly
-    /// as before.  The projection reads what arrival order already adjoins;
-    /// nothing about how blocks are pushed, logged, or aggregated changes.
+    /// The flatten is the **coalescing projection**: an observation run
+    /// ([`Block::observation`] — a call and its reads/greps/execs, bridged
+    /// across the interior step boundaries between consecutive calls,
+    /// [`Self::observation_run_end`]) folds into one dialable ral block
+    /// ([`super::group`]); every genuine barrier — a diff, a write, a
+    /// surfaced card, markdown, a subagent result, or chrome — renders as its
+    /// own block exactly as before, save a step boundary interior to a run,
+    /// which is folded away.  The projection reads what arrival order already
+    /// adjoins; nothing about how blocks are pushed, logged, or aggregated
+    /// changes.
     /// Each visual row maps to its source block index — a group's rows to
     /// its anchor call — so the dial, click, and copy paths address whole
     /// projected blocks.  Each segment's leading blank collapses against an
@@ -556,12 +559,32 @@ impl Viewport {
     }
 
     /// The end (exclusive) of the maximal observation run starting at
-    /// `start` — the contiguous span of [`Block::observation`] blocks the
-    /// projection coalesces into one ral block.
+    /// `start` — the span of [`Block::observation`] blocks the projection
+    /// coalesces into one ral block, **bridged across the step boundaries
+    /// interior to it**.  Each `ral` call is its own provider round-trip, so
+    /// a [`Block::is_step`] chrome (`Kind::Step`) lands between consecutive
+    /// calls; left a barrier it would cut every burst back to a single call.
+    /// A step boundary is provider bookkeeping, not content: when it falls
+    /// *between* observations it is subsumed into the run (and never
+    /// rendered); a step at the run's tail — before genuine content
+    /// (markdown, a diff, a surfaced card, other chrome) or at the buffer's
+    /// end — is left out, so it still renders as the boundary it is.
     fn observation_run_end(&self, start: usize) -> usize {
+        // `end` advances only past an observation, so a trailing step (whose
+        // following observation has not arrived) stays outside the run; an
+        // interior step is folded in once a later observation commits `end`
+        // past it.
         let mut end = start;
-        while end < self.blocks.len() && self.blocks[end].observation() {
-            end += 1;
+        let mut i = start;
+        while i < self.blocks.len() {
+            if self.blocks[i].observation() {
+                i += 1;
+                end = i;
+            } else if self.blocks[i].is_step() {
+                i += 1;
+            } else {
+                break;
+            }
         }
         end
     }
