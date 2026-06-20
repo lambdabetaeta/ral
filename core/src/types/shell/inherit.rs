@@ -1,36 +1,41 @@
 //! State transfer between parent and child interpreter states.
 //!
-//! Three modes carve up how a child [`Shell`] is derived from its
-//! parent:
+//! A same-thread β-step — forcing a block or applying a lambda — runs the
+//! body *in* the caller's [`Shell`] ([`Shell::with_thunk_body`]): only the
+//! [`Mobile`] is swapped for one rescoped to the closure's captured
+//! environment, while [`TurnState`](super::TurnState),
+//! [`SessionState`](super::SessionState), and
+//! [`LocalState`](super::LocalState) are shared by identity.  The body
+//! therefore observes the caller's audit trail, byte sinks, builtin table,
+//! cancel root, and terminal lease without any of them being copied or
+//! re-attached — there is no second store to drift from the first.
+//! [`ThunkBody`] fixes the only two places a block and a lambda differ: the
+//! entry `last_status` and the fold-back set.
 //!
-//! - **Thunk body** (same thread): [`Shell::child_of`] clones the
-//!   parent's [`Context`](super::Context), moves the read-once local
-//!   bits (pipe stdin, audit trail, REPL editor context) out of
-//!   parent, and lends them to the child.
-//!   [`Shell::with_child`] is the combinator that pairs this with
-//!   [`Shell::return_to`] so child mutations flow back.
-//! - **Spawned thread** (`spawn`, `par`, pipeline stage):
-//!   [`Shell::spawn_thread`] snapshots the parent's [`Context`] and
-//!   ships it to a fresh thread that owns its own IO; nothing flows
+//! The owned-[`Shell`] modes below are *genuine* runtime forks — a
+//! different store — and so copy state explicitly:
+//!
+//! - **Spawned thread** (`spawn`, `par`, detached worker):
+//!   [`Shell::spawn_thread`] snapshots the parent's [`Context`](super::Context)
+//!   and ships it to a fresh OS thread that owns its own IO; nothing flows
 //!   back.
+//! - **Cross-process pipeline stage**: [`Shell::child_of`] builds a child
+//!   over a throwaway parent in the helper process (see
+//!   [`crate::child_eval`]) and folds its result back with
+//!   [`Shell::return_to`].
 //! - **REPL aside** (prompt, hook): [`Shell::child_from`] clones the
-//!   parent's [`Context`] without touching its local machinery; the
-//!   child is an independent sibling with no flow-back.
+//!   parent's [`Context`](super::Context) without touching its local
+//!   machinery; the child is an independent sibling with no flow-back.
 //!
-//! Plus a fourth, finer-grained variant that swaps state on the
-//! *same* shell rather than building a new one:
+//! Each fork starts from a freshly-defaulted
+//! [`SessionState`](super::SessionState) and so holds no terminal authority
+//! — `TerminalAccess::Denied`, no lease — the safe default for a store that
+//! is not the session's.
 //!
-//! - **Block body**: [`Shell::with_block`] installs a fresh mobile
-//!   built from the captured closure scope (a freshly-pushed frame on
-//!   top of `captured`), runs `f` with that mobile in hand, and
-//!   restores the parent's REPL scratch on return.  Local machinery
-//!   is shared with the parent, so the body's writes and audit nodes
-//!   land where every other body's would.
-//!
-//! [`Shell::inherit_from`] and [`Shell::return_to`] are the
-//! per-substate manifests the first three modes lean on: `mobile.context`
-//! clones whole; `mobile.control`, the [`TurnState`](super::TurnState)
-//! substates (via [`TurnState::inherit_from`](super::TurnState::inherit_from)
+//! [`Shell::inherit_from`] and [`Shell::return_to`] are the per-substate
+//! manifests the cross-process stage leans on: `mobile.context` clones
+//! whole; `mobile.control`, the [`TurnState`](super::TurnState) substates
+//! (via [`TurnState::inherit_from`](super::TurnState::inherit_from)
 //! / [`return_to`](super::TurnState::return_to)), `local.audit`, and
 //! `local.repl` each carry their own inherit / return rule; `session.builtins`
 //! and `session.root` are shared so dispatch and the cancel root reach the
@@ -39,8 +44,34 @@
 //! back, but `context.cwd` does.
 
 use super::{Mobile, Shell};
-use crate::types::Env;
+use crate::types::{ControlState, Env};
 use std::sync::Arc;
+
+/// Which same-thread thunk body [`Shell::with_thunk_body`] is eliminating,
+/// and the asymmetry that distinguishes the two forms.
+///
+/// Both run on the caller's live [`Shell`]: the turn, session, and local
+/// state are shared by identity, so the body sees the same audit trail,
+/// byte sinks, builtin table, cancel root, and terminal lease the caller
+/// holds — nothing is copied or re-attached.  Only the [`Mobile`] is
+/// swapped for a clone whose scope is the closure's captured environment
+/// plus a fresh frame.  The kind fixes the two places the forms differ: the
+/// entry `last_status` and the fold-back set.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ThunkBody {
+    /// `!{ … }` — force a block (or apply one as a function).  Enters with
+    /// the caller's `last_status` (cloned with the mobile) and folds only
+    /// `last_status` back: a block's `let` / `cd` and any `chpwd` it queues
+    /// die with the body mobile.
+    Block,
+    /// `λx. …` applied to an argument.  Enters with a *fresh* `last_status`
+    /// — a lambda body does not inherit the caller's `$?` — and folds
+    /// `{last_status, cwd}` back, so a `cd` inside a function, alias, or
+    /// handler persists like every other shell.  The bound parameter is
+    /// installed by the caller's closure, since pattern binding lives in the
+    /// evaluator, a layer above `Shell`.
+    Lambda,
+}
 
 impl Shell {
     /// Snapshot the persistable half of this shell's state.
@@ -98,26 +129,56 @@ impl Shell {
         (post, result)
     }
 
-    /// Run `f` over a block-body [`Mobile`] derived from this shell
-    /// and `captured`.
+    /// Evaluate a same-thread thunk body — a forced block or an applied
+    /// lambda — in place on this shell.
     ///
-    /// Builds a mobile from a clone of `self.mobile`, replaces its
-    /// lexical scope with `captured`, and pushes a fresh frame on top
-    /// — so the body's own `let` bindings live above the captured
-    /// closure scope.  The mobile is handed to `f`; the caller passes
-    /// it to `dispatch`, which threads its own swap-in / swap-out
-    /// around the body.  Local machinery (IO, audit, cancel) stays on
-    /// the parent — the block shares it rather than carving out its
-    /// own — but `local.repl.pending_chpwd` is saved and restored
-    /// here so the block has no business persisting a REPL-local
-    /// notification that the parent would replay on its next prompt.
-    pub fn with_block<R>(&mut self, captured: &Env, f: impl FnOnce(&mut Self, Mobile) -> R) -> R {
+    /// Builds the body's [`Mobile`] from a clone of `self.mobile`, rescoped
+    /// to `captured` plus a fresh frame so the body's own `let` bindings
+    /// live above the captured closure scope, and hands it to `f` together
+    /// with `&mut self`.  `f` installs the mobile for the body's duration
+    /// (via [`Self::run_with_mobile`] for a lambda, or
+    /// [`dispatch`](crate::runtime::transport::dispatch) for a block) and
+    /// returns the post-body mobile alongside its result; this routine then
+    /// folds the [`ThunkBody`]-specific set back onto the caller's mobile.
+    ///
+    /// The store — `turn`, `session`, `local` — is shared by identity, so
+    /// there is no second [`SessionState`](super::SessionState) to drift
+    /// from the first and no session-global datum (the terminal lease among
+    /// them) can be silently severed.  This is the single in-place routine
+    /// block and lambda elimination meet at.
+    ///
+    /// `local.repl.pending_chpwd` is bracketed for a [`ThunkBody::Block`] —
+    /// a block has no business persisting a REPL notification the parent
+    /// would replay — but left to ride the shared `local.repl` for a
+    /// [`ThunkBody::Lambda`], where a body `cd` is a real process-state
+    /// change: the REPL-notification analogue of the `cwd` fold-back.
+    pub(crate) fn with_thunk_body<R>(
+        &mut self,
+        kind: ThunkBody,
+        captured: &Env,
+        f: impl FnOnce(&mut Self, Mobile) -> (Mobile, R),
+    ) -> R {
         let mut mobile = self.mobile.clone();
         mobile.scope = captured.clone();
         mobile.scope.push_scope();
-        let saved_pending_chpwd = self.local.repl.pending_chpwd.take();
-        let result = f(self, mobile);
-        self.local.repl.pending_chpwd = saved_pending_chpwd;
+        if let ThunkBody::Lambda = kind {
+            // A lambda body enters with a fresh `$?`; a block keeps the
+            // caller's, cloned above.
+            mobile.control.last_status = ControlState::default().last_status;
+        }
+        let saved_pending_chpwd = match kind {
+            ThunkBody::Block => self.local.repl.pending_chpwd.take(),
+            ThunkBody::Lambda => None,
+        };
+        let (post, result) = f(self, mobile);
+        if let ThunkBody::Block = kind {
+            self.local.repl.pending_chpwd = saved_pending_chpwd;
+        }
+        self.mobile.control.last_status = post.control.last_status;
+        if let ThunkBody::Lambda = kind {
+            self.mobile.context.cwd.current = post.context.cwd.current;
+            self.mobile.context.cwd.previous = post.context.cwd.previous;
+        }
         result
     }
 
@@ -133,19 +194,18 @@ impl Shell {
         shell
     }
 
-    /// Thunk body: inherit context state from `parent` *and* move the
-    /// read-once same-thread bits (pipe stdin, audit trail, REPL
-    /// editor context) out of parent for the duration of the child's
-    /// life.  Pair with [`Shell::return_to`] to fold the mutations
-    /// back, lest the lent state die with the child.
+    /// Cross-process pipeline-stage child: inherit context state from
+    /// `parent` *and* move the read-once bits (pipe stdin, audit trail,
+    /// REPL editor context) out of parent for the duration of the child's
+    /// life.  Pair with [`Shell::return_to`] to fold the mutations back,
+    /// lest the lent state die with the child.
     ///
-    /// [`Shell::with_child`] is the paired lend-and-return entry and
-    /// the form same-thread callers want: it brackets `child_of` with
-    /// `return_to` so the loan is always repaid.  The open form here is
-    /// for callers with no live parent to repay — the cross-process
-    /// pipeline-stage child in [`crate::child_eval`], whose `parent` is
-    /// a throwaway in the helper process, and the per-call overhead
-    /// benchmark that measures the bracket directly.
+    /// Unlike a same-thread β-step (which runs in place via
+    /// [`Shell::with_thunk_body`]), this builds a *new* `Shell` because the
+    /// pipeline stage runs in a separate helper process: its `parent` is a
+    /// throwaway reconstructed there ([`crate::child_eval`]), so the loan is
+    /// repaid into that throwaway, not a live caller.  The per-call overhead
+    /// benchmark also drives it directly to measure the bracket.
     pub fn child_of(captured: &Env, parent: &mut Shell) -> Self {
         let mut child = Self::from_captured(captured);
         child.inherit_from(parent);
@@ -164,17 +224,6 @@ impl Shell {
         child.turn.loc = parent.turn.loc.clone();
         child.session.builtins = parent.session.builtins.clone();
         child
-    }
-
-    /// Run `f` in a child shell derived from `captured` and this
-    /// shell (via [`Self::child_of`]), then fold side-effects back
-    /// via [`Self::return_to`].  The canonical same-thread thunk
-    /// call.
-    pub fn with_child<R>(&mut self, captured: &Env, f: impl FnOnce(&mut Shell) -> R) -> R {
-        let mut child = Shell::child_of(captured, self);
-        let result = f(&mut child);
-        child.return_to(self);
-        result
     }
 
     /// Spawn `f` on a fresh OS thread with a cloned child shell.  The
@@ -230,15 +279,6 @@ impl Shell {
         self.local.repl.inherit_from(&mut parent.local.repl);
         self.session.builtins = parent.session.builtins.clone();
         self.session.root = parent.session.root.clone();
-        // The terminal lease is session-owned and non-`Clone`, but a same-thread
-        // body of a `Leased` turn must still hold it. `turn.inherit_from` flows the
-        // `TerminalAccess` in, yet `terminal_lease()` also demands the session own
-        // the witness — and `child_of` builds a fresh `SessionState`. Without this
-        // move, a foreground external inside a lambda body (a function, alias, or
-        // handler) finds no lease and cannot take the controlling terminal, even
-        // though its access is `Leased`. Lent to the child and returned in
-        // `return_to`, mirroring how the read-once stdin is moved across the boundary.
-        self.session.terminal_lease = parent.session.terminal_lease.take();
     }
 
     /// Flow mutations made by a child computation back to `parent`.
@@ -254,10 +294,6 @@ impl Shell {
         self.local.audit.return_to(&mut parent.local.audit);
         self.local.repl.return_to(&mut parent.local.repl);
         self.turn.return_to(&mut parent.turn);
-        // Return the lent terminal lease to the parent (see `inherit_from`). The
-        // turn's `terminal_access` deliberately does *not* flow back, but the
-        // session witness must, or the parent loses the terminal after a thunk.
-        parent.session.terminal_lease = self.session.terminal_lease.take();
         parent.mobile.context.cwd.current = self.mobile.context.cwd.current.take();
         parent.mobile.context.cwd.previous = self.mobile.context.cwd.previous.take();
     }
@@ -269,34 +305,37 @@ mod tests {
     use crate::process::TerminalLease;
     use crate::types::shell::TerminalAccess;
 
-    /// A lambda body runs in a [`Shell::child_of`] shell whose `SessionState` is
-    /// freshly defaulted. The session-owned terminal lease must still reach it,
-    /// or a foreground external inside a function / alias / handler body could
-    /// not take the controlling terminal — even though `terminal_access` flows
-    /// in as `Leased`. The witness is lent to the child and returned to the
-    /// parent on [`Shell::return_to`].
+    /// A same-thread lambda body runs in place on the caller's shell, so it
+    /// observes the session-owned terminal lease *by identity* — not by a
+    /// manifest remembering to copy a witness into a fresh `SessionState`.
+    /// A foreground external inside a function / alias / handler body can
+    /// therefore take the controlling terminal whenever the turn is
+    /// `Leased`, and the lease is plainly still held after the body since it
+    /// never moved.
     #[test]
     #[cfg(unix)]
-    fn terminal_lease_reaches_same_thread_child_and_returns() {
-        let mut parent = Shell::default();
-        parent.session.terminal_lease = TerminalLease::mint_at_startup(true);
-        parent.turn.terminal_access = TerminalAccess::Leased;
+    fn lambda_body_shares_the_session_terminal_lease() {
+        let mut shell = Shell::default();
+        shell.session.terminal_lease = TerminalLease::mint_at_startup(true);
+        shell.turn.terminal_access = TerminalAccess::Leased;
         assert!(
-            parent.terminal_lease().is_some(),
-            "precondition: the parent holds a Leased lease",
+            shell.terminal_lease().is_some(),
+            "precondition: the session holds a Leased lease",
         );
 
-        let captured = parent.mobile.scope.clone();
-        parent.with_child(&captured, |child| {
-            assert!(
-                child.terminal_lease().is_some(),
-                "a Leased lambda body must hold the session lease",
-            );
+        let captured = shell.mobile.scope.clone();
+        shell.with_thunk_body(ThunkBody::Lambda, &captured, |shell, mobile| {
+            shell.run_with_mobile(mobile, |body| {
+                assert!(
+                    body.terminal_lease().is_some(),
+                    "a Leased lambda body shares the session lease",
+                );
+            })
         });
 
         assert!(
-            parent.terminal_lease().is_some(),
-            "the lease returns to the parent after the child body",
+            shell.terminal_lease().is_some(),
+            "the session still holds the lease after the body — it never moved",
         );
     }
 }
