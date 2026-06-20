@@ -128,11 +128,11 @@ impl StructuralFrontend {
         let jobs_snapshot = Vec::new();
         let matrix = matrix_rows(&user, jobs_snapshot);
 
-        // The styled prompt prefix, parsed into spans once: ansi-to-tui turns
-        // the SGR escapes into ratatui styling.  A parse failure degrades to
-        // the ANSI-stripped raw text — never to a blank prompt.
-        let prefix = prompt_prefix(prompt);
-        let prefix_w = prompt.raw().chars().count() as u16;
+        // The styled prompt, parsed into spans once and split on its newlines:
+        // ansi-to-tui turns the SGR escapes into ratatui styling.  A parse
+        // failure degrades to the ANSI-stripped raw text — never to a blank
+        // prompt.  A multi-line prompt draws its lead rows above the editor.
+        let prompt_lines = split_prompt(prompt);
 
         let mut textarea = new_textarea();
         if let Some(p) = &pending {
@@ -156,7 +156,7 @@ impl StructuralFrontend {
         // own (possibly multi-line) rows, and the projections.  Clamping to
         // `rows - 1` hugs the bottom — the prompt sits where a shell prompt
         // always sits — and `MAX_VIEWPORT` keeps scrollback in view.
-        let height = viewport_height(&textarea, &ws_rows, &matrix, rows);
+        let height = viewport_height(prompt_lines.lead.len() as u16, &textarea, &ws_rows, &matrix, rows);
         let backend = CrosstermBackend::new(io::stdout());
         let mut terminal = Terminal::with_options(
             backend,
@@ -177,7 +177,7 @@ impl StructuralFrontend {
                 last_buf = Some(s.clone());
             }
             terminal.draw(|frame| {
-                render(frame, &prefix, prefix_w, &textarea, &spine, &ws_rows, &matrix);
+                render(frame, &prompt_lines, &textarea, &spine, &ws_rows, &matrix);
             })?;
 
             if !event::poll(TICK)? {
@@ -240,7 +240,7 @@ impl StructuralFrontend {
             // followed by the submitted text, in the live prompt's colours.
             // `insert_before` leaves the now-cleared viewport right below the
             // committed line.
-            Read::Line(text) => commit_line(&mut terminal, &prefix, text)?,
+            Read::Line(text) => commit_line(&mut terminal, &prompt_lines, text)?,
             // No line to commit (Interrupt / Eof): just clear the viewport so
             // the next prompt — or the shell's exit — starts on a clean band.
             _ => terminal.clear()?,
@@ -759,16 +759,36 @@ fn preview(v: &Value) -> String {
 
 // ── Rendering ───────────────────────────────────────────────────────────────
 
-/// Parse the styled prompt into ratatui spans, falling back to the
-/// ANSI-stripped raw text when the escapes do not parse — never to nothing.
-fn prompt_prefix(prompt: &PromptText) -> Line<'static> {
-    match prompt.styled().into_text() {
-        Ok(text) => text
-            .lines
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| Line::from(Span::raw(prompt.raw().to_string()))),
-        Err(_) => Line::from(Span::raw(prompt.raw().to_string())),
+/// A prompt split into its rendered rows.  A prompt may carry newlines
+/// (`\n`): every line but the last is a *lead* row drawn above the editor,
+/// and the last line is the inline prefix the editor's first row sits beside
+/// — mirroring how a terminal lays a multi-line prompt out.  A plain
+/// single-line prompt has an empty `lead` and is entirely its `last` line.
+struct PromptLines {
+    /// Lines before the last, drawn as standalone rows above the editor.
+    lead: Vec<Line<'static>>,
+    /// The final prompt line: the inline prefix the editor begins after.
+    last: Line<'static>,
+    /// Display width of `last` — the column the editor's first row begins at.
+    last_w: u16,
+}
+
+/// Parse the styled prompt into ratatui spans, split on its newlines, falling
+/// back to the ANSI-stripped raw text when the escapes do not parse — never to
+/// nothing.  ansi-to-tui carries SGR state across the newlines, so a colour
+/// opened before a `\n` still styles the line after it.
+fn split_prompt(prompt: &PromptText) -> PromptLines {
+    let text = prompt
+        .styled()
+        .into_text()
+        .unwrap_or_else(|_| Text::from(prompt.raw().to_string()));
+    let mut lines = text.lines;
+    let last = lines.pop().unwrap_or_default();
+    let last_w = last.width() as u16;
+    PromptLines {
+        lead: lines,
+        last,
+        last_w,
     }
 }
 
@@ -781,37 +801,38 @@ fn prompt_rows(textarea: &TextArea<'static>) -> u16 {
 /// Size the inline viewport to its content at entry — spine, prompt, and the
 /// projections' header-plus-rows — clamped to hug the bottom of the screen.
 fn viewport_height(
+    lead: u16,
     textarea: &TextArea<'static>,
     worksheet: &[WsRow],
     matrix: &[MxRow],
     rows: u16,
 ) -> u16 {
     // The spine is empty at entry (inference runs only inside the loop), so
-    // the content is the prompt rows plus the taller projection column.  Each
-    // column shows a header row plus one row per entry — an empty column still
-    // shows its header and a placeholder row.  One extra row is reserved for
-    // the caret/label row of a type error, which can flare on any keystroke:
-    // the viewport is sized once per read, so it must afford that row up front
-    // rather than steal it from the projections when the error appears.
-    let prompt = prompt_rows(textarea);
+    // the content is the prompt's lead rows plus its editor rows, plus the
+    // taller projection column.  Each column shows a header row plus one row
+    // per entry — an empty column still shows its header and a placeholder
+    // row.  One extra row is reserved for the caret/label row of a type error,
+    // which can flare on any keystroke: the viewport is sized once per read,
+    // so it must afford that row up front rather than steal it from the
+    // projections when the error appears.
+    let prompt = lead + prompt_rows(textarea);
     let ws = 1 + worksheet.len().max(1) as u16;
     let mx = 1 + matrix.len().max(1) as u16;
     let needed = prompt + 1 + ws.max(mx);
     needed.clamp(1, MAX_VIEWPORT).min(rows.saturating_sub(1).max(1))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render(
     frame: &mut ratatui::Frame,
-    prefix: &Line<'static>,
-    prefix_w: u16,
+    prompt: &PromptLines,
     textarea: &TextArea<'static>,
     spine: &Spine,
     worksheet: &[WsRow],
     matrix: &[MxRow],
 ) {
     let area = frame.area();
-    let prompt_lines = prompt_rows(textarea);
+    let lead_rows = prompt.lead.len() as u16;
+    let editor_rows = prompt_rows(textarea);
 
     // A type error replaces the per-stage rows above the prompt with a single
     // caret/label row beneath it; the stage spine keeps its rows above and
@@ -824,17 +845,24 @@ fn render(
 
     let [spine_area, prompt_area, caret_area, rest] = Layout::vertical([
         Constraint::Length(spine_rows),
-        Constraint::Length(prompt_lines),
+        Constraint::Length(lead_rows + editor_rows),
         Constraint::Length(caret_rows),
         Constraint::Min(0),
     ])
     .areas(area);
 
+    // Within the prompt block: a multi-line prompt's lead rows above, then the
+    // editable band where the last prompt line is the inline prefix the editor
+    // sits beside.
+    let [lead_area, editor_band] =
+        Layout::vertical([Constraint::Length(lead_rows), Constraint::Length(editor_rows)])
+            .areas(prompt_area);
+
     render_spine(frame, spine_area, spine);
-    render_prompt(frame, prompt_area, prefix, prefix_w, textarea);
+    render_prompt(frame, lead_area, editor_band, prompt, textarea);
     // The underline overlay reads the cells the TextArea just painted, so it
     // runs after `render_prompt`; the caret row sits in its own area below.
-    overlay_type_error(frame, prompt_area, caret_area, prefix_w, textarea, spine);
+    overlay_type_error(frame, editor_band, caret_area, prompt.last_w, textarea, spine);
     render_projections(frame, rest, worksheet, matrix);
 }
 
@@ -872,9 +900,9 @@ fn render_spine(frame: &mut ratatui::Frame, area: Rect, spine: &Spine) {
 /// degrades to the caret/label row alone.
 fn overlay_type_error(
     frame: &mut ratatui::Frame,
-    prompt_area: Rect,
+    editor_area: Rect,
     caret_area: Rect,
-    prefix_w: u16,
+    last_w: u16,
     textarea: &TextArea<'static>,
     spine: &Spine,
 ) {
@@ -892,10 +920,10 @@ fn overlay_type_error(
         return;
     }
 
-    // The editor text begins `prefix_w` columns into the prompt row.  In the
-    // common single-line buffer the span's char offsets map straight onto
-    // columns past the prefix; a span starting beyond the first row belongs
-    // to a continuation line we do not underline.
+    // The editor text begins `last_w` columns into the editable band's first
+    // row.  In the common single-line buffer the span's char offsets map
+    // straight onto columns past the prefix; a span starting beyond the first
+    // row belongs to a continuation line we do not underline.
     let first_row_len = textarea.lines().first().map_or(0, |l| l.chars().count());
 
     match span {
@@ -908,8 +936,8 @@ fn overlay_type_error(
             let span_end_col = (*end).min(first_row_len) as u16;
             let span_w = span_end_col.saturating_sub(span_start_col).max(1);
 
-            underline_cells(frame, prompt_area, prefix_w + span_start_col, span_w);
-            render_caret_row(frame, caret_area, prefix_w + span_start_col, span_w, label, code);
+            underline_cells(frame, editor_area, last_w + span_start_col, span_w);
+            render_caret_row(frame, caret_area, last_w + span_start_col, span_w, label, code);
         }
         // No span (or it escaped the first row): no underline, just the dim
         // headline beneath the prompt — the messageless fallback.
@@ -958,28 +986,34 @@ fn render_caret_row(
     frame.render_widget(Paragraph::new(line), area);
 }
 
-/// Render the styled prompt prefix at column 0 of the prompt row, then the
-/// editor in a sub-area offset to its right.  The textarea paints its own
-/// cursor into that sub-area, so the cursor lands correctly past the prefix;
-/// continuation rows indent under the editable text, which reads fine.
+/// Render a (possibly multi-line) prompt: its lead rows fill `lead_area`
+/// above, then the last prompt line is the inline prefix at column 0 of the
+/// editable band's first row, with the editor in a sub-area offset to its
+/// right.  The textarea paints its own cursor into that sub-area, so the
+/// cursor lands correctly past the prefix; continuation rows indent under the
+/// editable text, which reads fine.
 fn render_prompt(
     frame: &mut ratatui::Frame,
-    area: Rect,
-    prefix: &Line<'static>,
-    prefix_w: u16,
+    lead_area: Rect,
+    editor_band: Rect,
+    prompt: &PromptLines,
     textarea: &TextArea<'static>,
 ) {
-    if area.height == 0 {
+    if lead_area.height > 0 {
+        frame.render_widget(Paragraph::new(prompt.lead.clone()), lead_area);
+    }
+    if editor_band.height == 0 {
         return;
     }
-    // The prefix occupies only the first row; render it there.
-    let prefix_area = Rect { height: 1, ..area };
-    frame.render_widget(Paragraph::new(prefix.clone()), prefix_area);
+    // The last prompt line occupies only the first row of the band; render it
+    // there, then the editor in the sub-area offset to its right.
+    let prefix_area = Rect { height: 1, ..editor_band };
+    frame.render_widget(Paragraph::new(prompt.last.clone()), prefix_area);
 
     let editor_area = Rect {
-        x: area.x + prefix_w,
-        width: area.width.saturating_sub(prefix_w),
-        ..area
+        x: editor_band.x + prompt.last_w,
+        width: editor_band.width.saturating_sub(prompt.last_w),
+        ..editor_band
     };
     frame.render_widget(textarea, editor_area);
 }
@@ -1049,18 +1083,20 @@ fn render_projections(frame: &mut ratatui::Frame, area: Rect, worksheet: &[WsRow
 }
 
 /// Commit the submitted line into scrollback above the viewport: the styled
-/// prompt prefix followed by the entered text, in the live prompt's colours.
+/// prompt — its lead rows and last-line prefix — followed by the entered
+/// text, in the live prompt's colours.
 fn commit_line(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    prefix: &Line<'static>,
+    prompt: &PromptLines,
     text: &str,
 ) -> io::Result<()> {
-    // Prepend the styled prefix spans to the command's first line so the
-    // committed scrollback line reads exactly like the live prompt did.
-    let mut lines: Vec<Line> = Vec::new();
+    // Replay the full prompt — its lead rows, then the last line's spans
+    // prepended to the command's first line — so the committed scrollback
+    // reads exactly like the live prompt did.
+    let mut lines: Vec<Line> = prompt.lead.clone();
     for (i, line) in text.split('\n').enumerate() {
         if i == 0 {
-            let mut spans = prefix.spans.clone();
+            let mut spans = prompt.last.spans.clone();
             spans.push(Span::raw(line.to_string()));
             lines.push(Line::from(spans));
         } else {
