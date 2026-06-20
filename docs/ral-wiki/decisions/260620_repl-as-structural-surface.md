@@ -141,6 +141,12 @@ variable that unifies but is not generalised, and to report its inferred
 constraint. A small extension; flag it as a follow-on, not a blocker for the
 basic spine.
 
+The same span-underlining the flare uses generalises to a hole: a `?` whose
+inferred constraint the checker reports as a located note underlines on the
+prompt with that constraint as the caret label (`^ : map → bool`), in a
+non-error hue. The hole is then a render variant of the flare, not a separate
+surface.
+
 ### Interaction and render
 
 - **Debounce.** Re-inference runs on an idle timer (~80ms after the last
@@ -148,9 +154,24 @@ basic spine.
   `compile_and_typecheck` is cheap, but a parse-partial line produces a parse
   error; the spine suppresses render on parse failure and shows the last good
   spine dimmed.
-- **Flare.** A stage whose output type does not unify with the next stage's
-  input renders in the rail's error hue; the join between them carries a
-  short mismatch note (`list<path> ≠ map`).
+- **Flare — underline the span, do not summarise it.** A buffer that fails to
+  typecheck does not collapse to a single red message. The checker's
+  `TypeError` already carries a byte span into the buffer the user is editing,
+  a structured `kind` (a stable `T####` code, a headline via `render_message`,
+  and a short under-caret label via `label_message_for_kind`), and an optional
+  hint — the data the ordinary REPL already renders with `ariadne`. The
+  structural surface reuses that *data* but not ariadne's *frame*: rather than
+  re-printing the source inside a gutter-numbered box — five to nine lines
+  duplicating the prompt already on screen — it underlines the offending span
+  *in place* on the prompt line, drawn in the error hue, and draws a single
+  caret-and-label row directly beneath it, aligned under the span
+  (`^^^^ list<map> doesn't match map`). This is the ariadne reading experience
+  — squiggle, caret, label on the exact characters — at the cost of one
+  viewport row, which the inline viewport affords where a full ariadne block
+  cannot. The inline label is the one the post-Enter diagnostic uses, so the
+  two agree word for word. The only substrate change is promoting
+  `label_message_for_kind` to public; the span is buffer-relative (the same
+  coordinate system the spine already slices for per-stage source).
 - **Layout.** One rail row per stage, left of the prompt, the cursor's stage
   highlighted. The rail is two columns wide (shape + type), matching
   exarch's marginal rail.
