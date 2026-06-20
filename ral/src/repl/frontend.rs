@@ -14,10 +14,12 @@
 
 mod minimal;
 mod rustyline;
+#[cfg(feature = "structural")]
 mod structural;
 
 pub(super) use minimal::MinimalFrontend;
 pub(super) use rustyline::RustylineFrontend;
+#[cfg(feature = "structural")]
 pub(super) use structural::StructuralFrontend;
 
 use ral_core::Shell;
@@ -129,6 +131,7 @@ impl History {
     }
 
     /// The entries available for navigation, oldest first.
+    #[cfg(feature = "structural")]
     pub(super) fn entries(&self) -> &[String] {
         &self.entries
     }

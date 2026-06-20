@@ -3841,6 +3841,7 @@ dependencies = [
 name = "ral"
 version = "0.1.0"
 dependencies = [
+ "ansi-to-tui",
  "base64",
  "clap",
  "libc",

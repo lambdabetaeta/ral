@@ -12,7 +12,9 @@ use rustyline::config::{BellStyle, EditMode};
 use std::sync::{Arc, Mutex};
 
 use super::super::config::{RcCtx, create_default_rc, find_ralrc};
-use super::super::frontend::{Frontend, MinimalFrontend, RustylineFrontend, StructuralFrontend};
+use super::super::frontend::{Frontend, MinimalFrontend, RustylineFrontend};
+#[cfg(feature = "structural")]
+use super::super::frontend::StructuralFrontend;
 use super::super::plugin::PluginRuntime;
 #[cfg(unix)]
 use crate::jobs;
@@ -225,6 +227,7 @@ pub(super) fn create_frontend(
         Some("minimal") => return Box::new(MinimalFrontend::new()),
         // The structural surface needs raw mode; its `new` probes for it and
         // errors when unavailable, so a failure degrades to rustyline below.
+        #[cfg(feature = "structural")]
         Some("structural") => {
             if let Ok(fe) = StructuralFrontend::new() {
                 return Box::new(fe);

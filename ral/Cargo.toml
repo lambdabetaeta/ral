@@ -13,11 +13,12 @@ name = "ral"
 path = "src/main.rs"
 
 [features]
-default    = ["grep"]
+default    = ["grep", "structural"]
 coreutils  = ["ral-core/coreutils"]
 diffutils  = ["ral-core/diffutils"]
 grep       = ["ral-core/grep"]
 ripgrep    = ["ral-core/ripgrep"]
+structural = ["dep:ratatui", "dep:ansi-to-tui"]
 
 [dependencies]
 # default-features = false so ral's own `grep` feature actually governs
@@ -28,7 +29,8 @@ rustyline  = "=18.0.0"
 # The structural frontend (RAL_SURFACE=structural): a ratatui inline-viewport
 # app projecting the live shell's types, bindings, and handles.  Same major
 # as exarch's, so the workspace resolves one build.
-ratatui    = "0.30"
+ratatui    = { version = "0.30", optional = true }
+ansi-to-tui = { version = "8.0.1", optional = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 clap       = { workspace = true }
