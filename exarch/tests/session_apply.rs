@@ -13,7 +13,7 @@
 //! round-tripping the committed messages through the same genai
 //! `ChatMessage` serialisation the live request uses.
 
-use exarch::bus::{Emitter, Event, Kind, PromptQueue, SessionId, Sink};
+use exarch::bus::{Emitter, Event, Inbox, Kind, SessionId, Sink};
 use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{Provider, ProviderError};
 use exarch::session::{Session, TurnOutcome};
@@ -55,7 +55,7 @@ impl Sink for Recorder {
 }
 
 struct SteeringSink {
-    queue: PromptQueue,
+    inbox: Inbox,
     kinds: Vec<Kind>,
     queued: bool,
 }
@@ -63,7 +63,7 @@ struct SteeringSink {
 impl Default for SteeringSink {
     fn default() -> Self {
         Self {
-            queue: PromptQueue::new(),
+            inbox: Inbox::new(),
             kinds: Vec::new(),
             queued: false,
         }
@@ -75,15 +75,15 @@ impl Sink for SteeringSink {
         let should_queue = !self.queued
             && matches!(&e.kind, Kind::ToolCall { cmd, .. } if cmd.contains("sleep 0.1"));
         if should_queue {
-            self.queue
-                .push("steer: revise after the current batch".into());
+            self.inbox
+                .push_user("steer: revise after the current batch".into());
             self.queued = true;
         }
         self.kinds.push(e.kind);
     }
 
-    fn prompt_queue(&self) -> PromptQueue {
-        self.queue.clone()
+    fn inbox(&self) -> Inbox {
+        self.inbox.clone()
     }
 }
 

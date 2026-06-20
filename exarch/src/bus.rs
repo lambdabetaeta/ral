@@ -15,76 +15,262 @@ use std::time::Duration;
 
 pub type SessionId = u64;
 
-/// Prompts submitted while a root turn is already running.
+/// The identity of an async agent worker.  An async `agent` call forks a
+/// child [`Session`](crate::session::Session); its child id *is* its
+/// `AgentId`, so the `agents` listing and `agent_cancel` reuse the session
+/// identity rather than minting a parallel one.  Opaque: a capability for
+/// status and cancellation, not a content hash.
+pub type AgentId = SessionId;
+
+/// When a message in the inbox may be drained into the model's context.
 ///
-/// The TUI owns the producer side (`Enter` while busy); the turn worker owns the
-/// consumer side at safe transcript boundaries.  A shared queue keeps the
-/// pending strip and the model-visible drain in one place: when the worker drains
-/// a prompt, it disappears from the strip and cannot be sent again at the next
-/// turn boundary.
-#[derive(Clone, Default)]
-pub struct PromptQueue {
-    inner: Arc<Mutex<VecDeque<String>>>,
+/// The boundary is a *per-message* property, not a global rule: user
+/// steering may barge in at the next tool-call boundary (mid-turn
+/// redirection), while a scheduled wakeup or a finished agent is a *fresh*
+/// turn and must wait for the turn boundary so it never pollutes the
+/// context of a turn already in motion.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Boundary {
+    /// May drain mid-turn, at a tool-call boundary (user steering).
+    Tool,
+    /// Drains only at the turn boundary, as its own fresh turn.
+    Turn,
 }
 
-impl PromptQueue {
+/// How an async agent settled, already reduced to what the parent's
+/// synthetic turn needs to say.  The provider-message detail stays in the
+/// child's own log; this is the digest delivered through the inbox.
+#[derive(Clone, Debug)]
+pub enum AgentOutcome {
+    /// Finished with a final answer (carried in [`AgentResult::text`]).
+    Complete,
+    /// Finished but produced no text.
+    Empty,
+    /// Stopped for a non-routine reason (content filter, step cap, …).
+    Stopped(String),
+    /// Cancelled — by `agent_cancel`, `/clear`, or the worker ceiling.
+    Cancelled,
+    /// The run errored (provider error, panic).
+    Failed(String),
+}
+
+/// The settle record an async agent posts to its parent's inbox.
+///
+/// It is *not* raw `<agent=…>` text in a prompt queue: the source tag and
+/// drain boundary are data, and the model boundary is the only place this
+/// renders to prose ([`AgentResult::render`]).
+#[derive(Clone, Debug)]
+pub struct AgentResult {
+    pub id: AgentId,
+    pub title: String,
+    pub outcome: AgentOutcome,
+    pub text: String,
+    pub log_dir: PathBuf,
+    pub elapsed: Duration,
+    /// The session generation that owned the worker.  A result whose
+    /// generation is older than the live session (a worker that settled
+    /// after a `/clear`) is rejected at drain rather than delivered into a
+    /// rebuilt context.
+    pub generation: u64,
+}
+
+impl AgentResult {
+    /// The marked synthetic-turn text the model sees when this is drained.
+    fn render(&self) -> String {
+        match &self.outcome {
+            AgentOutcome::Complete => format!("[agent '{}' finished]\n{}", self.title, self.text),
+            AgentOutcome::Empty => {
+                format!("[agent '{}' finished with no output]", self.title)
+            }
+            AgentOutcome::Stopped(r) => format!("[agent '{}' stopped: {r}]", self.title),
+            AgentOutcome::Cancelled => format!("[agent '{}' was cancelled]", self.title),
+            AgentOutcome::Failed(e) => format!("[agent '{}' failed: {e}]", self.title),
+        }
+    }
+}
+
+/// One typed message waiting in a session's [`Inbox`].
+///
+/// This is the inbound twin of the outbound [`Kind`] event stream: where
+/// the old prompt queue held bare user `String`s, the inbox holds every
+/// producer's message, each carrying its *source* (the variant itself) and
+/// its *drain boundary* ([`InboxMsg::boundary`]).  A cancellation is
+/// deliberately **not** a variant: the control plane (cancel a scope) and
+/// the data plane (deliver a message) ride separate rails, so a
+/// cancellation is unconstructable here by type.
+#[derive(Clone, Debug)]
+pub enum InboxMsg {
+    /// The user typed a prompt while a turn was running.  Drains at the
+    /// tool boundary, except a slash command, which waits for the turn
+    /// boundary so the REPL command path interprets it.
+    UserSteering(String),
+    /// A scheduled wakeup fired (cron / after).  A fresh, *marked* turn at
+    /// the turn boundary — never mid-turn.
+    ScheduledWakeup {
+        /// The human label the schedule was given (or its id).
+        label: String,
+        /// The trigger as text — a cron expression or `after <dur>` — for
+        /// the marked render and the events record.
+        trigger: String,
+        /// The natural-language instructions the model acts on.
+        prompt: String,
+    },
+    /// An async agent settled.  A fresh, *marked* turn at the turn boundary.
+    AgentResult(AgentResult),
+}
+
+impl InboxMsg {
+    /// Where this message may be drained.
+    pub fn boundary(&self) -> Boundary {
+        match self {
+            InboxMsg::UserSteering(s) if !s.trim_start().starts_with('/') => Boundary::Tool,
+            _ => Boundary::Turn,
+        }
+    }
+
+    /// The text the model sees when this message is drained into context.
+    /// User steering is verbatim; the rest render with their source marker
+    /// so the model can tell a wakeup or an agent reply from a human.
+    fn render(&self) -> String {
+        match self {
+            InboxMsg::UserSteering(s) => s.clone(),
+            InboxMsg::ScheduledWakeup {
+                label,
+                trigger,
+                prompt,
+            } => format!("[scheduled '{label}' · {trigger}] {prompt}"),
+            InboxMsg::AgentResult(r) => r.render(),
+        }
+    }
+
+    /// The single-line label for the pending strip the TUI draws above the
+    /// prompt: user prompts show their text, the rest show a glyph + source.
+    fn strip_label(&self) -> String {
+        match self {
+            InboxMsg::UserSteering(s) => s.clone(),
+            InboxMsg::ScheduledWakeup { label, .. } => format!("⏰ {label}"),
+            InboxMsg::AgentResult(r) => format!("● agent {}", r.title),
+        }
+    }
+}
+
+/// A session's inbox: the typed, multi-producer queue the turn driver pulls
+/// its next prompt from.
+///
+/// The TUI owns one producer side (`Enter` while busy); a cron wakeup and a
+/// finishing async agent are other producers, each capturing a clone (the
+/// inner `Arc` makes a clone share the same queue).  The turn worker drains
+/// tool-boundary messages mid-turn; the driver drains the rest at the turn
+/// boundary.  A drained message disappears from the pending strip and
+/// cannot be delivered twice.
+#[derive(Clone, Default)]
+pub struct Inbox {
+    inner: Arc<Mutex<VecDeque<InboxMsg>>>,
+}
+
+impl Inbox {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn push(&self, prompt: String) {
+    /// Post any message (cron wakeup, agent result, …).
+    pub fn push(&self, msg: InboxMsg) {
         self.inner
             .lock()
-            .expect("prompt queue lock poisoned")
-            .push_back(prompt);
+            .expect("inbox lock poisoned")
+            .push_back(msg);
+    }
+
+    /// Post a user-typed steering prompt — the TUI `Enter`-while-busy path.
+    pub fn push_user(&self, prompt: String) {
+        self.push(InboxMsg::UserSteering(prompt));
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inner
-            .lock()
-            .expect("prompt queue lock poisoned")
-            .is_empty()
+        self.inner.lock().expect("inbox lock poisoned").is_empty()
     }
 
+    /// One strip label per pending message, oldest first, for the TUI's
+    /// pending-prompt strip.
     pub fn snapshot(&self) -> Vec<String> {
         self.inner
             .lock()
-            .expect("prompt queue lock poisoned")
+            .expect("inbox lock poisoned")
             .iter()
-            .cloned()
+            .map(InboxMsg::strip_label)
             .collect()
     }
-    pub fn pop_back(&self) -> Option<String> {
-        self.inner
-            .lock()
-            .expect("prompt queue lock poisoned")
-            .pop_back()
+
+    /// Pull the newest pending *user* prompt back out for editing — but
+    /// only if the tail is user steering.  A pending wakeup or agent result
+    /// is not the user's draft and is never pulled into the editor.
+    pub fn pop_back_user(&self) -> Option<String> {
+        let mut q = self.inner.lock().expect("inbox lock poisoned");
+        match q.back() {
+            Some(InboxMsg::UserSteering(_)) => match q.pop_back() {
+                Some(InboxMsg::UserSteering(s)) => Some(s),
+                _ => unreachable!("tail just checked to be user steering"),
+            },
+            _ => None,
+        }
     }
 
-    pub fn drain_joined(&self) -> Option<String> {
-        self.drain_prefix(|_| true)
+    /// Mid-turn drain at a tool-call boundary: take the leading run of
+    /// tool-boundary messages (user steering that is not a slash command),
+    /// rendered and joined.  Stops at the first turn-boundary message.
+    pub fn drain_tool(&self) -> Option<String> {
+        self.drain_run(|msg| msg.boundary() == Boundary::Tool)
     }
 
-    /// Drain the prefix that may be shown to the model mid-turn.  Slash-prefixed
-    /// prompts stay queued for the REPL command path at the outer turn boundary.
-    fn drain_steering_joined(&self) -> Option<String> {
-        self.drain_prefix(|prompt| !prompt.trim_start().starts_with('/'))
+    /// Turn-boundary drain: the next deliverable.  A leading run of *user*
+    /// steering coalesces into one prompt (preserving the old whole-queue
+    /// join, so a lone `/clear` still reaches the command path); a wakeup or
+    /// agent result is delivered on its own, rendered with its marker.
+    pub fn drain_turn(&self) -> Option<String> {
+        let mut q = self.inner.lock().expect("inbox lock poisoned");
+        match q.front()? {
+            InboxMsg::UserSteering(_) => {
+                let mut text = String::new();
+                while matches!(q.front(), Some(InboxMsg::UserSteering(_))) {
+                    let s = match q.pop_front() {
+                        Some(InboxMsg::UserSteering(s)) => s,
+                        _ => unreachable!("front just checked to be user steering"),
+                    };
+                    if !text.is_empty() {
+                        text.push_str("\n\n");
+                    }
+                    text.push_str(&s);
+                }
+                Some(text)
+            }
+            _ => Some(
+                q.pop_front()
+                    .expect("front checked present")
+                    .render(),
+            ),
+        }
     }
 
-    fn drain_prefix(&self, keep: impl Fn(&str) -> bool) -> Option<String> {
-        let mut queue = self.inner.lock().expect("prompt queue lock poisoned");
-        if queue.front().is_none_or(|prompt| !keep(prompt)) {
+    /// Drop every pending message — `/clear` rebuilds the root, so neither
+    /// queued user prompts nor stale non-human deliveries carry across.
+    pub fn clear(&self) {
+        self.inner.lock().expect("inbox lock poisoned").clear();
+    }
+
+    /// Take the leading run of messages matching `keep`, rendered and joined
+    /// by a blank line.  `None` when the front does not match.
+    fn drain_run(&self, keep: impl Fn(&InboxMsg) -> bool) -> Option<String> {
+        let mut q = self.inner.lock().expect("inbox lock poisoned");
+        if q.front().is_none_or(|m| !keep(m)) {
             return None;
         }
         let mut text = String::new();
-        while queue.front().is_some_and(|prompt| keep(prompt)) {
-            let prompt = queue
-                .pop_front()
-                .expect("front checked before prompt queue pop");
+        while q.front().is_some_and(&keep) {
+            let msg = q.pop_front().expect("front checked before pop");
             if !text.is_empty() {
                 text.push_str("\n\n");
             }
-            text.push_str(&prompt);
+            text.push_str(&msg.render());
         }
         Some(text)
     }
@@ -198,27 +384,23 @@ pub struct Hunk {
 pub struct Emitter {
     tx: Sender<Event>,
     id: SessionId,
-    prompt_queue: PromptQueue,
+    inbox: Inbox,
 }
 
 impl Emitter {
     pub fn new(tx: Sender<Event>, id: SessionId) -> Self {
-        Self::with_prompt_queue(tx, id, PromptQueue::new())
+        Self::with_inbox(tx, id, Inbox::new())
     }
 
-    pub fn with_prompt_queue(tx: Sender<Event>, id: SessionId, prompt_queue: PromptQueue) -> Self {
-        Self {
-            tx,
-            id,
-            prompt_queue,
-        }
+    pub fn with_inbox(tx: Sender<Event>, id: SessionId, inbox: Inbox) -> Self {
+        Self { tx, id, inbox }
     }
 
     pub fn child(&self, id: SessionId) -> Self {
         Self {
             tx: self.tx.clone(),
             id,
-            prompt_queue: self.prompt_queue.clone(),
+            inbox: self.inbox.clone(),
         }
     }
 
@@ -226,8 +408,16 @@ impl Emitter {
         let _ = self.tx.send(Event { id: self.id, kind });
     }
 
-    pub fn drain_prompt_queue(&self) -> Option<String> {
-        self.prompt_queue.drain_steering_joined()
+    /// The session inbox, for a producer the turn starts (a cron schedule,
+    /// an async agent) that must post to it after the turn ends — it
+    /// captures this clone, which shares the same queue.
+    pub fn inbox(&self) -> Inbox {
+        self.inbox.clone()
+    }
+
+    /// Mid-turn tool-boundary drain of user steering.
+    pub fn drain_tool_steering(&self) -> Option<String> {
+        self.inbox.drain_tool()
     }
 }
 
@@ -309,8 +499,8 @@ pub(crate) fn drain_pass(
 pub trait Sink {
     fn handle(&mut self, e: Event);
 
-    fn prompt_queue(&self) -> PromptQueue {
-        PromptQueue::new()
+    fn inbox(&self) -> Inbox {
+        Inbox::new()
     }
 
     fn drive(&mut self, rx: Receiver<Event>, done: &AtomicBool) -> io::Result<()> {
@@ -358,9 +548,9 @@ where
     let done_ref = &done;
     std::thread::scope(|s| -> io::Result<Option<R>> {
         let (tx, rx) = channel();
-        let prompt_queue = sink.prompt_queue();
+        let inbox = sink.inbox();
         let h = s.spawn(move || {
-            let emit = Emitter::with_prompt_queue(tx, root_id, prompt_queue);
+            let emit = Emitter::with_inbox(tx, root_id, inbox);
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&emit)));
             if let Err(p) = &r {
                 let msg = p
@@ -382,7 +572,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Emitter, Event, Kind, Pass, PromptQueue, Sink, drain_pass, pump};
+    use super::{Boundary, Emitter, Event, Inbox, InboxMsg, Kind, Pass, Sink, drain_pass, pump};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::channel;
@@ -504,24 +694,68 @@ mod tests {
         assert!(holder.lock().unwrap().is_some());
     }
 
-    /// Steering drains only the non-command prefix.  Slash-prefixed prompts stay
-    /// queued for the REPL boundary, where `/clear`, `/model`, and friends are
-    /// interpreted by `handle_slash` instead of being shown to the model.
+    /// Tool-boundary steering drains only the non-command prefix.  Slash
+    /// prompts stay for the turn boundary, where `/clear`, `/model`, and
+    /// friends are interpreted by `handle_slash` instead of shown to the
+    /// model.  The whole leading user run then coalesces at the turn
+    /// boundary, preserving the old prompt-queue join.
     #[test]
-    fn prompt_queue_steering_drain_stops_before_slash_command() {
-        let queue = PromptQueue::new();
-        queue.push("steer first".into());
-        queue.push("/clear".into());
-        queue.push("after clear".into());
+    fn inbox_tool_drain_stops_before_slash_command() {
+        let inbox = Inbox::new();
+        inbox.push_user("steer first".into());
+        inbox.push_user("/clear".into());
+        inbox.push_user("after clear".into());
 
+        assert_eq!(inbox.drain_tool().as_deref(), Some("steer first"));
+        assert_eq!(inbox.drain_tool(), None);
+        assert_eq!(inbox.drain_turn().as_deref(), Some("/clear\n\nafter clear"));
+        assert!(inbox.is_empty());
+    }
+
+    /// A scheduled wakeup is a turn-boundary message: it never drains at a
+    /// tool boundary, and at the turn boundary it renders marked, on its
+    /// own, so the model can tell it from a human prompt.
+    #[test]
+    fn inbox_wakeup_is_turn_boundary_and_marked() {
+        let inbox = Inbox::new();
+        inbox.push_user("steer".into());
+        inbox.push(InboxMsg::ScheduledWakeup {
+            label: "nightly".into(),
+            trigger: "0 3 * * *".into(),
+            prompt: "run the tests".into(),
+        });
+
+        // Tool boundary takes the user prefix only, stopping at the wakeup.
+        assert_eq!(inbox.drain_tool().as_deref(), Some("steer"));
+        assert_eq!(inbox.drain_tool(), None);
+        // Turn boundary delivers the wakeup, rendered marked.
         assert_eq!(
-            queue.drain_steering_joined().as_deref(),
-            Some("steer first")
+            inbox.drain_turn().as_deref(),
+            Some("[scheduled 'nightly' · 0 3 * * *] run the tests"),
         );
-        assert_eq!(queue.drain_steering_joined(), None);
+        assert!(inbox.is_empty());
+    }
+
+    /// A non-user tail is never pulled into the editor by `pop_back_user`,
+    /// and a wakeup is reported at the turn boundary only.
+    #[test]
+    fn inbox_pop_back_user_ignores_non_user_tail() {
+        let inbox = Inbox::new();
+        inbox.push_user("draft".into());
+        inbox.push(InboxMsg::ScheduledWakeup {
+            label: "x".into(),
+            trigger: "@".into(),
+            prompt: "p".into(),
+        });
+        assert_eq!(inbox.pop_back_user(), None, "tail is a wakeup, not a draft");
         assert_eq!(
-            queue.drain_joined().as_deref(),
-            Some("/clear\n\nafter clear")
+            InboxMsg::ScheduledWakeup {
+                label: "x".into(),
+                trigger: "@".into(),
+                prompt: "p".into(),
+            }
+            .boundary(),
+            Boundary::Turn,
         );
     }
 }

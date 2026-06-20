@@ -28,7 +28,7 @@ use fidelity::Fidelity;
 use line::usage_text;
 
 use crate::bootstrap::Scratch;
-use crate::bus::{Event, Hunk, Kind, Pass, PromptQueue, SessionId, Sink, drain_pass, pump};
+use crate::bus::{Event, Hunk, Inbox, Kind, Pass, SessionId, Sink, drain_pass, pump};
 use crate::cancel;
 use crate::credential::CredentialStore;
 use crate::models::{LiveSource, ModelCatalog, ModelSource};
@@ -321,7 +321,7 @@ pub struct App {
     /// boundary ([`Self::take_queue`]). Until then, pending messages render in
     /// the strip above the input ([`line::queued_prompt`]) and bare Up on an
     /// empty prompt pulls the newest one back for editing.
-    queue: PromptQueue,
+    inbox: Inbox,
     total_usage: Usage,
     /// Last turn's prompt size (genai's `prompt_tokens`, which already
     /// folds the cache-read and cache-creation counts in); drives the
@@ -422,7 +422,7 @@ impl App {
             history: Vec::new(),
             hist_pos: None,
             draft: String::new(),
-            queue: PromptQueue::new(),
+            inbox: Inbox::new(),
             total_usage: Usage::default(),
             patch_buf: None,
             last_input: 0,
@@ -486,6 +486,9 @@ impl App {
         self.patch_buf = None;
         self.selection = None;
         self.press = None;
+        // A fresh root: drop queued user prompts and any stale non-human
+        // deliveries (a wakeup or agent result that has not been drained).
+        self.inbox.clear();
         self.banner(term, info)
     }
 
@@ -711,7 +714,7 @@ impl App {
         // width matches the content column (the scrollbar's column reserved),
         // and its height is capped at a third of the screen so a long queue can
         // never crowd the transcript off-screen.
-        let queued = self.queue.snapshot();
+        let queued = self.inbox.snapshot();
         let queued_lines = if queued.is_empty() {
             Vec::new()
         } else {
@@ -939,19 +942,19 @@ impl App {
     pub fn enqueue(&mut self) -> bool {
         match self.submit() {
             Some(p) => {
-                self.queue.push(p);
+                self.inbox.push_user(p);
                 true
             }
             None => false,
         }
     }
 
-    /// Coalesce and take the queued prompts still waiting at the turn boundary
-    /// — oldest first, joined by a blank line — or `None` when nothing is
-    /// queued. Prompts drained by the worker between tool calls have already
-    /// left the shared queue.
-    pub fn take_queue(&mut self) -> Option<String> {
-        self.queue.drain_joined()
+    /// Take the next deliverable from the inbox at the turn boundary — a
+    /// coalesced run of queued user prompts, or one wakeup / agent result
+    /// rendered with its marker — or `None` when the inbox is empty. User
+    /// prompts the worker drained between tool calls have already left it.
+    pub fn take_inbox(&mut self) -> Option<String> {
+        self.inbox.drain_turn()
     }
 
     /// Pull the newest pending prompt back into the editor for revision.
@@ -961,7 +964,7 @@ impl App {
         if self.hist_pos.is_some() || self.textarea.lines().iter().any(|line| !line.is_empty()) {
             return false;
         }
-        let Some(prompt) = self.queue.pop_back() else {
+        let Some(prompt) = self.inbox.pop_back_user() else {
             return false;
         };
         self.set_prompt(&prompt);
@@ -1953,8 +1956,8 @@ impl Sink for Tui {
         self.app.handle(e);
     }
 
-    fn prompt_queue(&self) -> PromptQueue {
-        self.app.queue.clone()
+    fn inbox(&self) -> Inbox {
+        self.app.inbox.clone()
     }
 
     fn drive(&mut self, rx: Receiver<Event>, done: &AtomicBool) -> io::Result<()> {
@@ -2127,13 +2130,17 @@ impl Repl<'_> {
             // still works when it reaches the ordinary turn boundary.
             let prompt = match pending.take() {
                 Some(p) => Some(p),
-                None => match self.tui.app.take_queue() {
+                None => match self.tui.app.take_inbox() {
                     Some(q) => Some(q),
                     None => match read_prompt(self.tui.guard.term(), &mut self.tui.app)
                         .map_err(|e| e.to_string())?
                     {
-                        Some(s) => Some(s),
-                        None => return Ok(()),
+                        Idle::Prompt(s) => Some(s),
+                        // A non-human message (a wakeup, a finished agent)
+                        // landed in the inbox while idle: loop so the
+                        // `take_inbox` arm above delivers it as a fresh turn.
+                        Idle::Inbox => continue,
+                        Idle::Quit => return Ok(()),
                     },
                 },
             };
@@ -2502,8 +2509,29 @@ fn drive_events(
     }
 }
 
-fn read_prompt(term: &mut Term, app: &mut App) -> io::Result<Option<String>> {
+/// The outcome of the idle wait between turns — a multi-source select over
+/// `{ user input, inbox }`.  The TUI realises the select by polling: it
+/// redraws each tick anyway, so checking the inbox costs a comparison, and
+/// a wakeup or finished agent surfaces within one poll interval.
+enum Idle {
+    /// The user submitted a prompt.
+    Prompt(String),
+    /// A turn-boundary message is waiting in the inbox; the driver should
+    /// drain and deliver it.
+    Inbox,
+    /// The user asked to quit.
+    Quit,
+}
+
+fn read_prompt(term: &mut Term, app: &mut App) -> io::Result<Idle> {
     loop {
+        // The second source of the select: a wakeup or a finished agent
+        // posted to the inbox while we sat idle.  Hand back at once so the
+        // driver delivers it as a fresh turn; a half-typed draft survives in
+        // the textarea and reappears on the next idle read.
+        if !app.inbox.is_empty() {
+            return Ok(Idle::Inbox);
+        }
         app.tick();
         app.draw(term)?;
         if !ct_poll(Duration::from_millis(100))? {
@@ -2515,10 +2543,10 @@ fn read_prompt(term: &mut Term, app: &mut App) -> io::Result<Option<String>> {
                     continue;
                 }
                 match key_action(KeyMode::Idle, &k, app.focused() == app.root) {
-                    KeyAction::Quit => return Ok(None),
+                    KeyAction::Quit => return Ok(Idle::Quit),
                     KeyAction::Submit => {
                         if let Some(s) = app.submit() {
-                            return Ok(Some(s));
+                            return Ok(Idle::Prompt(s));
                         }
                     }
                     KeyAction::Edit => app.key(k),

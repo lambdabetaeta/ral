@@ -532,7 +532,7 @@ impl Session {
         if self.is_subagent {
             None
         } else {
-            emit.drain_prompt_queue()
+            emit.drain_tool_steering()
         }
     }
 
