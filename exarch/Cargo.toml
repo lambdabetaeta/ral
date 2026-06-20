@@ -56,6 +56,11 @@ getrandom  = "0.2"
 # features only — `from_lines`/`grouped_ops`/`iter_changes` are line-level;
 # `inline`/`unicode`/`bytes` are not pulled in.
 similar    = "2"
+# Calendar arithmetic for scheduled-wakeup cron evaluation (next occurrence
+# in the host-local timezone, DST-aware).  Already compiled in transitively
+# via ral-core -> uu_date -> jiff-icu -> jiff; declaring it directly resolves
+# to the same built crate at zero marginal cost.
+jiff       = "0.2"
 
 # Unix-only bundled tools (id / kill / stat / timeout / test / tac).  Pulled
 # in through `ral-core/coreutils-unix-only` only on Unix targets — the

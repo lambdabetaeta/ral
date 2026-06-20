@@ -23,9 +23,10 @@
 //! The signal handler cannot hold a token by value, so the root turn
 //! publishes its token's flag into a process-global *slot* (an
 //! `AtomicPtr`, the lock-free ArcSwap analogue — a signal handler must
-//! not lock) for the handler to set.  `is_set` reads the same slot, so
-//! the provider's mid-stream cancel check (which has no token in scope)
-//! observes the same cancellation the threaded token does.  The slot is
+//! not lock) for the handler to set.  The slot points into the live
+//! token's own `Arc<AtomicBool>`, so a signal-driven cancellation is
+//! observed through the threaded [`Token`] every cancel check already
+//! holds (`is_set` reads the slot directly, but only in tests).  The slot is
 //! published by [`mint_root`]'s RAII guard and cleared on its drop, so a
 //! sub-agent turn (which runs `apply` directly, not `run_turn`) never
 //! touches it: minting is the *only* reset, replacing X5's clear-at-every-
@@ -43,10 +44,19 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 /// A per-root-turn cancellation handle.  Cloning shares the same flag
 /// (an `Arc<AtomicBool>`), so a child session handed a clone is cancelled
 /// the instant the root token is — the whole tree halts on one Esc.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Token(Arc<AtomicBool>);
 
 impl Token {
+    /// A fresh, un-cancelled token that is **not** published to the signal
+    /// slot.  This is the handle a background worker (an async `agent`)
+    /// receives: its cancellation is its own — `agent_cancel`, `/clear`, or
+    /// its worker ceiling — never an Esc, which targets the foreground turn
+    /// alone through [`mint_root`]'s published slot.
+    pub fn new() -> Self {
+        Token(Arc::new(AtomicBool::new(false)))
+    }
+
     /// True once this token (or, since clones share the flag, any of its
     /// shares) has been cancelled.
     pub fn is_cancelled(&self) -> bool {
@@ -99,11 +109,12 @@ impl Drop for RootGuard {
     }
 }
 
-/// True if the current root turn's token is cancelled.  Reads the
-/// published slot so call sites with no token in scope — chiefly the
-/// provider's mid-stream cancel race — observe the same state the
-/// threaded [`Token`] does.  False when no root turn is active.
-pub fn is_set() -> bool {
+/// True if the current root turn's published slot reads cancelled.  A test
+/// probe for the signal-handler slot: production code observes cancellation
+/// through the threaded [`Token`] directly, so the slot's boolean is read
+/// only here.  False when no root turn is active.
+#[cfg(test)]
+pub(crate) fn is_set() -> bool {
     let p = CURRENT.load(Ordering::Acquire);
     // SAFETY: a non-null slot points into the `Arc<AtomicBool>` the live
     // `RootGuard` holds; the guard nulls the slot on drop before the
@@ -116,8 +127,9 @@ pub fn is_set() -> bool {
 fn raise() {
     let p = CURRENT.load(Ordering::Acquire);
     if !p.is_null() {
-        // SAFETY: see `is_set` — a non-null slot is live for the duration
-        // of the read.
+        // SAFETY: a non-null slot points into the `Arc<AtomicBool>` the live
+        // `RootGuard` holds; the guard nulls the slot on drop before the
+        // `Arc` can be freed, so a non-null read is always live.
         unsafe { (*p).store(true, Ordering::Relaxed) };
     }
 }

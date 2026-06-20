@@ -149,7 +149,7 @@ pub fn byte_to_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
 /// Convert a byte offset to a character offset.  Ariadne uses character
 /// offsets, so every byte offset must pass through this before being handed
 /// to the rendering layer.
-fn byte_to_char(source: &str, byte_offset: usize) -> usize {
+pub fn byte_to_char(source: &str, byte_offset: usize) -> usize {
     source[..floor_char_boundary(source, byte_offset)]
         .chars()
         .count()
@@ -482,7 +482,7 @@ fn lex_error_report(source: &str, kind: &LexErrorKind) -> Option<LexErrorReport>
 /// `TypeErrorKind::render_message` for why.  Variables get the same
 /// Greek letters as the surrounding message (shared `FmtCtx`) so a
 /// reader who sees `α` in the message can find `α` in the label.
-fn label_message_for_kind(kind: &crate::typecheck::TypeErrorKind) -> String {
+pub fn label_message_for_kind(kind: &crate::typecheck::TypeErrorKind) -> String {
     use crate::typecheck::{FmtCtx, TypeErrorKind as K, fmt_ty_ctx};
     match kind {
         K::RecursiveRow => "the type loops back into itself here".into(),

@@ -14,13 +14,24 @@
 
 mod minimal;
 mod rustyline;
+#[cfg(feature = "structural")]
+mod structural;
 
 pub(super) use minimal::MinimalFrontend;
 pub(super) use rustyline::RustylineFrontend;
+#[cfg(feature = "structural")]
+pub(super) use structural::StructuralFrontend;
 
 use ral_core::Shell;
+#[cfg(unix)]
+use std::sync::{Arc, Mutex};
 
+use super::config::dirs_history;
 use super::prompt::PromptText;
+#[cfg(feature = "structural")]
+use super::worksheet::Worksheet;
+#[cfg(unix)]
+use crate::jobs::JobTable;
 
 // ── Event types ───────────────────────────────────────────────────────────
 
@@ -82,6 +93,82 @@ pub(super) fn join_continuation(first: String, mut next: impl FnMut() -> Continu
     buf
 }
 
+// ── Persisted history ───────────────────────────────────────────────────────
+
+/// Persisted REPL history shared by the non-rustyline frontends.
+///
+/// Entries loaded from disk at construction are counted in `persisted`;
+/// everything past it is this session's contribution, appended (not
+/// rewritten) on save so concurrent sessions do not clobber each other's
+/// history.  ([`RustylineFrontend`] uses rustyline's own `DefaultHistory`
+/// instead, so it does not use this.)
+pub(super) struct History {
+    entries: Vec<String>,
+    persisted: usize,
+    path: Option<String>,
+}
+
+impl History {
+    /// Load persisted history from the configured history file.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:silent:history-read] loads persisted repl history at construction; not turn-time model I/O"
+    )]
+    pub(super) fn load() -> Self {
+        let path = dirs_history();
+        let entries: Vec<String> = path
+            .as_deref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|s| s.lines().map(String::from).collect())
+            .unwrap_or_default();
+        let persisted = entries.len();
+        Self {
+            entries,
+            persisted,
+            path,
+        }
+    }
+
+    /// Append `entry` unless it repeats the most recent one.
+    pub(super) fn add(&mut self, entry: &str) {
+        if self.entries.last().is_none_or(|s| s != entry) {
+            self.entries.push(entry.to_string());
+        }
+    }
+
+    /// The entries available for navigation, oldest first.
+    #[cfg(feature = "structural")]
+    pub(super) fn entries(&self) -> &[String] {
+        &self.entries
+    }
+
+    /// Append this session's new entries to the history file.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:silent:history-append] appends this session's repl history to its log file; not turn-time model I/O"
+    )]
+    pub(super) fn save(&mut self) {
+        let Some(path) = &self.path else {
+            return;
+        };
+        let fresh = &self.entries[self.persisted..];
+        if fresh.is_empty() {
+            return;
+        }
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            for entry in fresh {
+                let _ = writeln!(file, "{entry}");
+            }
+        }
+        self.persisted = self.entries.len();
+    }
+}
+
 pub(super) trait Frontend {
     /// Read one logical input from the user.
     ///
@@ -91,8 +178,30 @@ pub(super) trait Frontend {
     /// (e.g. `_ed-push`).  The frontend is responsible for plugin sync,
     /// keybinding dispatch, continuation reads, line-erase escapes, and
     /// flushing deferred plugin diagnostics before returning.
-    fn read(&mut self, shell: &mut Shell, prompt: &PromptText, pending: Option<EditBuffer>)
-    -> Read;
+    ///
+    /// `jobs` is the session's shared [`JobTable`] (Unix only — pgid jobs
+    /// are a Unix concept), threaded so the structural surface can project
+    /// stopped/running pgid jobs in its handles matrix alongside the
+    /// env-held [`Value::Handle`](ral_core::Value::Handle) spawns.  Passed
+    /// as the shared `Arc<Mutex<…>>` rather than a held guard, mirroring
+    /// [`super::exec::step`]: the frontend takes its own short-lived lock,
+    /// copies what it renders, and drops the guard before drawing.  The
+    /// line-editor backends ignore it.
+    ///
+    /// `worksheet` is the session's [`Worksheet`] model (the `structural`
+    /// build only), threaded so the structural surface can draw each user
+    /// binding's dependency edges and pure/effectful verdict — the data the
+    /// live env cannot reconstruct.  The session owns it so it accumulates
+    /// across turns; the frontend reads it.  The line-editor backends ignore
+    /// it, exactly as they ignore `jobs`.
+    fn read(
+        &mut self,
+        shell: &mut Shell,
+        prompt: &PromptText,
+        pending: Option<EditBuffer>,
+        #[cfg(unix)] jobs: &Arc<Mutex<JobTable>>,
+        #[cfg(feature = "structural")] worksheet: &Worksheet,
+    ) -> Read;
 
     fn add_history(&mut self, entry: &str);
     fn save_history(&mut self);

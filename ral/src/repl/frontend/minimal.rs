@@ -9,36 +9,17 @@
 use ral_core::{Shell, diagnostic};
 use std::io::{BufRead, Write};
 
-use super::super::config::dirs_history;
 use super::super::prompt::PromptText;
-use super::{EditBuffer, Frontend, Read};
+use super::{EditBuffer, Frontend, History, Read};
 
 pub(in crate::repl) struct MinimalFrontend {
-    history: Vec<String>,
-    /// Count of entries loaded from disk at construction; everything past
-    /// it is this session's contribution, appended (not rewritten) on save
-    /// so concurrent sessions do not clobber each other's history.
-    persisted: usize,
-    history_path: Option<String>,
+    history: History,
 }
 
 impl MinimalFrontend {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[io-door:silent:history-read] loads persisted repl history at construction; not turn-time model I/O"
-    )]
     pub(in crate::repl) fn new() -> Self {
-        let history_path = dirs_history();
-        let history: Vec<String> = history_path
-            .as_deref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .map(|s| s.lines().map(String::from).collect())
-            .unwrap_or_default();
-        let persisted = history.len();
         Self {
-            history,
-            persisted,
-            history_path,
+            history: History::load(),
         }
     }
 }
@@ -49,6 +30,8 @@ impl Frontend for MinimalFrontend {
         _shell: &mut Shell,
         prompt: &PromptText,
         _pending: Option<EditBuffer>,
+        #[cfg(unix)] _jobs: &std::sync::Arc<std::sync::Mutex<crate::jobs::JobTable>>,
+        #[cfg(feature = "structural")] _worksheet: &crate::repl::worksheet::Worksheet,
     ) -> Read {
         let stdin = std::io::stdin();
         let write_prompt = |s: &[u8]| {
@@ -92,33 +75,10 @@ impl Frontend for MinimalFrontend {
     }
 
     fn add_history(&mut self, entry: &str) {
-        if self.history.last().is_none_or(|s| s != entry) {
-            self.history.push(entry.to_string());
-        }
+        self.history.add(entry);
     }
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[io-door:silent:history-append] appends this session's repl history to its log file; not turn-time model I/O"
-    )]
     fn save_history(&mut self) {
-        let Some(path) = &self.history_path else {
-            return;
-        };
-        let fresh = &self.history[self.persisted..];
-        if fresh.is_empty() {
-            return;
-        }
-        use std::io::Write;
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            for entry in fresh {
-                let _ = writeln!(file, "{entry}");
-            }
-        }
-        self.persisted = self.history.len();
+        self.history.save();
     }
 }

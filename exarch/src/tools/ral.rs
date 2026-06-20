@@ -9,7 +9,7 @@ use crate::bus::{Emitter, Kind};
 use crate::provider::Provider;
 use crate::session::{Session, Staged};
 use serde_json::{Value, json};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 
 pub(super) struct RalTool;
@@ -106,7 +106,7 @@ impl Tool for RalTool {
         id: String,
         input: Value,
         session: &mut Session,
-        _provider: &'env Provider,
+        _provider: &'env Arc<Provider>,
         _token: &'env crate::cancel::Token,
         emit: &Emitter,
         _scope: &'scope thread::Scope<'scope, 'env>,

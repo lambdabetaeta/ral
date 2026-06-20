@@ -18,12 +18,13 @@ use crate::event::ToolResult as SessionToolResult;
 use crate::provider::Provider;
 use crate::session::{Session, Staged};
 use serde_json::Value;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 
 mod agent;
 mod fff;
 mod ral;
+mod schedule;
 
 /// One registered tool.  The registry stores `Box<dyn Tool>` and
 /// dispatches by name; [`Session`] holds no tool-specific knowledge.
@@ -63,7 +64,7 @@ pub(crate) trait Tool: Send + Sync {
         id: String,
         input: Value,
         session: &mut Session,
-        provider: &'env Provider,
+        provider: &'env Arc<Provider>,
         token: &'env crate::cancel::Token,
         emit: &Emitter,
         scope: &'scope thread::Scope<'scope, 'env>,
@@ -77,6 +78,11 @@ pub(crate) fn registry() -> &'static [Box<dyn Tool>] {
         vec![
             Box::new(ral::RalTool),
             Box::new(agent::AgentTool),
+            Box::new(agent::AgentsTool),
+            Box::new(agent::AgentCancelTool),
+            Box::new(schedule::ScheduleTool),
+            Box::new(schedule::SchedulesTool),
+            Box::new(schedule::UnscheduleTool),
             Box::new(fff::FffTool),
         ]
     })
@@ -109,4 +115,12 @@ pub(super) fn invalid_input<'scope>(
     let msg = format!("tool input error: {reason}\nexpected an object matching the tool's schema");
     emit.emit(Kind::ToolResult(msg.clone()));
     Staged::Done(SessionToolResult { id, content: msg })
+}
+
+/// Pull a required `u64` field out of a tool's JSON input object.
+pub(super) fn u64_field(input: &Value, field: &str) -> Option<u64> {
+    input
+        .as_object()
+        .and_then(|o| o.get(field))
+        .and_then(Value::as_u64)
 }

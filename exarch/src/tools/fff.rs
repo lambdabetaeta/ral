@@ -19,6 +19,7 @@ use crate::digest::{FFF_CAP, clip};
 use crate::event::ToolResult as SessionToolResult;
 use crate::provider::Provider;
 use crate::session::{Session, Staged};
+use std::sync::Arc;
 use fff_search::file_picker::FilePicker;
 use fff_search::{
     FFFMode, FilePickerOptions, FrecencyTracker, FuzzySearchOptions, PaginationArgs, QueryParser,
@@ -239,7 +240,7 @@ grepping their contents."
         id: String,
         input: Value,
         session: &mut Session,
-        _provider: &'env Provider,
+        _provider: &'env Arc<Provider>,
         _token: &'env crate::cancel::Token,
         emit: &Emitter,
         _scope: &'scope thread::Scope<'scope, 'env>,

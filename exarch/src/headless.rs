@@ -360,7 +360,7 @@ impl Sink for Headless {
 )]
 pub fn run(
     session: &mut Session,
-    provider: &Provider,
+    provider: &std::sync::Arc<Provider>,
     info: &SessionInfo<'_>,
     seed: Option<String>,
     format: OutputFormat,

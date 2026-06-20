@@ -309,6 +309,13 @@ pub struct InferCtx {
     /// recorded modes may still be variables — they resolve at
     /// annotation time, after the whole walk.
     pub stage_specs: HashMap<usize, PipeSpec>,
+    /// The inferred *value* type of each pipeline stage — the data flowing
+    /// out of it — keyed by the stage `Comp`'s address.  Written at the end
+    /// of `infer_pipeline` alongside `stage_specs`; read by the annotation
+    /// pass, which resolves each against the final unifier and writes the
+    /// `Vec<Ty>` onto the `Pipeline` node.  Retained for the structural
+    /// REPL's typed spine; the evaluator never reads it.
+    pub stage_types: HashMap<usize, Ty>,
     /// The output mode of each `Bind` node's RHS, keyed by the `Bind`
     /// `Comp`'s address.  Written by the `Bind` rule for every pattern;
     /// read by the annotation pass, which grounds it into the node's
@@ -330,6 +337,7 @@ impl InferCtx {
             pos: None,
             bind_tys: HashMap::new(),
             stage_specs: HashMap::new(),
+            stage_types: HashMap::new(),
             bind_outputs: HashMap::new(),
         }
     }

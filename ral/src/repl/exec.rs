@@ -100,6 +100,7 @@ pub(super) fn execute_input(
     shell: &mut Shell,
     #[cfg(unix)] job_table: &Arc<Mutex<crate::jobs::JobTable>>,
     runtime: &Arc<Mutex<PluginRuntime>>,
+    #[cfg(feature = "structural")] worksheet: &mut super::worksheet::Worksheet,
 ) -> Option<u8> {
     let req = TurnRequest {
         script_name: "<stdin>",
@@ -141,6 +142,13 @@ pub(super) fn execute_input(
         } => match result {
             Ok(val) => {
                 print_result(&val);
+                // The turn installed its bindings: record their dependency
+                // edges and effect verdict into the worksheet model, off the
+                // now-updated live session.  Only a successful turn reaches
+                // here, so a binding that failed to evaluate is never
+                // recorded.
+                #[cfg(feature = "structural")]
+                worksheet.record(trimmed, shell);
                 None
             }
             Err(Break::Escape(Escape::Exit(code))) => Some(code.clamp(0, 255) as u8),
@@ -175,6 +183,7 @@ pub(super) fn step(
     shell: &mut Shell,
     #[cfg(unix)] job_table: &Arc<Mutex<crate::jobs::JobTable>>,
     runtime: &Arc<Mutex<PluginRuntime>>,
+    #[cfg(feature = "structural")] worksheet: &mut super::worksheet::Worksheet,
 ) -> Step {
     match execute_input(
         trimmed,
@@ -182,6 +191,8 @@ pub(super) fn step(
         #[cfg(unix)]
         job_table,
         runtime,
+        #[cfg(feature = "structural")]
+        worksheet,
     ) {
         Some(code) => Step::Exit(code),
         None => Step::Continue,

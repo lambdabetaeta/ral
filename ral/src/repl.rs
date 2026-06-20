@@ -23,6 +23,9 @@
 //! - [`prompt`]   -- Prompt construction and thunk evaluation.
 //! - [`session`]  -- The REPL state machine driving the loop.
 //! - [`theme`]    -- REPL value-output styling (configurable from rc).
+//! - [`worksheet`] -- The REPL-side worksheet model: per-binding
+//!   dependency edges and the pure/effectful verdict, retained across turns
+//!   for the structural surface's reactive worksheet.
 
 mod complete;
 mod config;
@@ -39,6 +42,8 @@ mod keybinding;
 mod prompt;
 mod session;
 mod theme;
+#[cfg(feature = "structural")]
+mod worksheet;
 
 use session::Session;
 use std::process::ExitCode;

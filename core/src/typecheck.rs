@@ -180,7 +180,11 @@ fn annotate(comp: &Comp, ctx: &mut InferCtx, spine: bool) -> Comp {
                 rhs_output,
             }
         }
-        CompKind::Pipeline { stages, wires } => {
+        CompKind::Pipeline {
+            stages,
+            wires,
+            stage_types,
+        } => {
             let wires = stages
                 .iter()
                 .zip(wires)
@@ -194,12 +198,26 @@ fn annotate(comp: &Comp, ctx: &mut InferCtx, spine: bool) -> Comp {
                         })
                 })
                 .collect();
+            // Resolve each stage's recorded value type against the final
+            // unifier; a stage inference never visited keeps the elaborator's
+            // `Unit` placeholder.
+            let stage_types = stages
+                .iter()
+                .zip(stage_types)
+                .map(|(stage, placeholder)| {
+                    ctx.stage_types
+                        .get(&(stage.as_ref() as *const Comp as usize))
+                        .cloned()
+                        .map_or_else(|| placeholder.clone(), |ty| ctx.unifier.resolve_ty(&ty))
+                })
+                .collect();
             CompKind::Pipeline {
                 stages: stages
                     .iter()
                     .map(|stage| Arc::new(annotate(stage, ctx, false)))
                     .collect(),
                 wires,
+                stage_types,
             }
         }
         CompKind::Lam { param, body } => CompKind::Lam {

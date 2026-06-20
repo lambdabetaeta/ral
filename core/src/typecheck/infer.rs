@@ -1502,14 +1502,15 @@ impl Inferencer<'_> {
             self.ctx.unify_comp_ty(&last, &bound);
         }
 
-        // Record each stage's byte channels for the annotation pass.
-        // The modes may still be variables; they resolve once the whole
-        // walk's constraints are in.
+        // Record each stage's byte channels and value type for the
+        // annotation pass.  The modes and type vars may still be
+        // unresolved; they resolve once the whole walk's constraints are in.
         for (i, (stage, ty)) in stages.iter().zip(&stage_tys).enumerate() {
             let spec = self.stage_own_spec(ty, consumed_as_value[i]);
-            self.ctx
-                .stage_specs
-                .insert(stage.as_ref() as *const Comp as usize, spec);
+            let value_ty = self.comp_return_ty(ty);
+            let key = stage.as_ref() as *const Comp as usize;
+            self.ctx.stage_specs.insert(key, spec);
+            self.ctx.stage_types.insert(key, value_ty);
         }
 
         CompTy::Return(PipeSpec { input, output }, Box::new(ret_ty))
