@@ -1,4 +1,4 @@
-//! The structural frontend (`RAL_SURFACE=structural`).
+//! The structural frontend (`--surface structural`).
 //!
 //! A third [`Frontend`] alongside [`super::MinimalFrontend`] and
 //! [`super::RustylineFrontend`].  Where those render a single editable row,

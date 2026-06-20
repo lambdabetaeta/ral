@@ -2,12 +2,13 @@
 //!
 //! An rc file is ral source whose return value is a map.  Recognised keys
 //! map to REPL state: `env`, `prompt`, `bindings`, `aliases`, `edit_mode`,
-//! `bell`, `recursion_limit`, `plugins`, `startup`, `theme`.  Unknown keys
-//! are silently ignored so future versions can add knobs without breaking
-//! older configs.
+//! `bell`, `surface`, `recursion_limit`, `plugins`, `startup`, `theme`.
+//! Unknown keys are silently ignored so future versions can add knobs without
+//! breaking older configs.
 
 use ral_core::{Map, Shell, Value};
 
+use super::frontend::Surface;
 use super::theme::{OutputTheme, named_color, set_output_theme};
 use rustyline::config::{BellStyle, EditMode};
 use std::sync::{Arc, Mutex};
@@ -24,6 +25,7 @@ pub(crate) struct RcCtx<'a> {
     pub shell: &'a mut Shell,
     pub edit_mode: &'a mut EditMode,
     pub bell: &'a mut BellStyle,
+    pub surface: &'a mut Surface,
     pub runtime: &'a Arc<Mutex<PluginRuntime>>,
 }
 
@@ -38,6 +40,7 @@ const DEFAULT_RC: &str = "\
 return [
     # edit_mode:        vi,          # emacs (default) or vi
     # bell:             false,       # audible bell on readline error (default false)
+    # surface:          readline,    # readline (default), minimal, or structural
     # recursion_limit:  1024,        # maximum function-call recursion depth
 
     # prompt: {
@@ -177,6 +180,16 @@ pub(crate) fn apply_rc_config(
                     } else {
                         BellStyle::None
                     };
+                }
+            }
+            "surface" => {
+                if let Value::String(s) = val {
+                    match <Surface as clap::ValueEnum>::from_str(&s, true) {
+                        Ok(surface) => *ctx.surface = surface,
+                        Err(_) => ral_core::diagnostic::shell_warning(&format!(
+                            "ralrc: unknown surface '{s}'; expected minimal, readline, or structural"
+                        )),
+                    }
                 }
             }
             "recursion_limit" => {
@@ -331,6 +344,7 @@ mod tests {
         let config = ral_core::evaluator::evaluate(&comp, &mut shell).unwrap();
         let mut mode = EditMode::Emacs;
         let mut bell = BellStyle::None;
+        let mut surface = Surface::default();
         let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
         apply_rc_config(
             config,
@@ -338,6 +352,7 @@ mod tests {
                 shell: &mut shell,
                 edit_mode: &mut mode,
                 bell: &mut bell,
+                surface: &mut surface,
                 runtime: &runtime,
             },
             if pass_source { Some(rc_src) } else { None },
@@ -502,6 +517,7 @@ mod tests {
         let mut shell = Shell::new(Default::default());
         let mut mode = EditMode::Emacs;
         let mut bell = BellStyle::None;
+        let mut surface = Surface::default();
         let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
         apply_rc_config(
             config,
@@ -509,11 +525,53 @@ mod tests {
                 shell: &mut shell,
                 edit_mode: &mut mode,
                 bell: &mut bell,
+                surface: &mut surface,
                 runtime: &runtime,
             },
             None,
         );
         shell
+    }
+
+    /// Apply an rc map and return the resolved [`Surface`] (the default
+    /// when the rc does not set one).
+    fn apply_rc_surface(rc_src: &str) -> Surface {
+        let mut shell = Shell::new(Default::default());
+        ral_core::builtins::register(&mut shell, crate::PRELUDE.comp());
+        let ast = ral_core::syntax::parser::parse(rc_src).unwrap();
+        let comp = std::sync::Arc::new(ral_core::elaborator::elaborate(&ast, Default::default()));
+        let config = ral_core::evaluator::evaluate(&comp, &mut shell).unwrap();
+        let mut mode = EditMode::Emacs;
+        let mut bell = BellStyle::None;
+        let mut surface = Surface::default();
+        let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
+        apply_rc_config(
+            config,
+            &mut RcCtx {
+                shell: &mut shell,
+                edit_mode: &mut mode,
+                bell: &mut bell,
+                surface: &mut surface,
+                runtime: &runtime,
+            },
+            None,
+        );
+        surface
+    }
+
+    /// rc `surface:` selects the frontend, case-insensitively.
+    #[test]
+    fn rc_surface_selects_frontend() {
+        assert_eq!(apply_rc_surface("return [surface: 'structural']\n"), Surface::Structural);
+        assert_eq!(apply_rc_surface("return [surface: 'minimal']\n"), Surface::Minimal);
+        assert_eq!(apply_rc_surface("return [surface: 'Readline']\n"), Surface::Readline);
+    }
+
+    /// An unset or unknown `surface:` leaves the default in place.
+    #[test]
+    fn rc_surface_defaults_and_ignores_unknown() {
+        assert_eq!(apply_rc_surface("return [env: [X: 'y']]\n"), Surface::default());
+        assert_eq!(apply_rc_surface("return [surface: 'bogus']\n"), Surface::default());
     }
 
     #[test]

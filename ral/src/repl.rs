@@ -45,6 +45,7 @@ mod theme;
 #[cfg(feature = "structural")]
 mod worksheet;
 
+pub(crate) use frontend::Surface;
 use session::Session;
 use std::process::ExitCode;
 

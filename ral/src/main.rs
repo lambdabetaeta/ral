@@ -82,6 +82,9 @@ pub(crate) struct InteractiveOpts {
     /// `-s` — read stdin as a batch script even when a script positional
     /// is present or stdin is a tty.  Takes precedence over `force_interactive`.
     pub force_stdin: bool,
+    /// `--surface` — the interactive frontend to present.  `None` leaves the
+    /// choice to the rc `surface:` key, falling back to the default surface.
+    pub surface: Option<crate::repl::Surface>,
     pub run: RunOpts,
 }
 
@@ -188,6 +191,10 @@ struct Cli {
     #[arg(long, visible_alias = "noprofile")]
     norc: bool,
 
+    /// Interactive surface: readline (default), minimal, or structural; overrides rc surface:
+    #[arg(long, value_enum, value_name = "SURFACE")]
+    surface: Option<crate::repl::Surface>,
+
     /// Script path + trailing args, or (with -c) inline code + trailing args.
     /// Supply after `--` explicitly, or let the binary inject it for you.
     #[arg(last = true, value_name = "ARG")]
@@ -271,6 +278,7 @@ impl Cli {
             no_rc: self.norc,
             force_interactive: self.force_interactive,
             force_stdin: self.force_stdin,
+            surface: self.surface,
             run,
         };
         if is_login {

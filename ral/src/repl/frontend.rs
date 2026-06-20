@@ -33,6 +33,29 @@ use super::worksheet::Worksheet;
 #[cfg(unix)]
 use crate::jobs::JobTable;
 
+// ── Surface selection ───────────────────────────────────────────────────────
+
+/// Which interactive surface the REPL presents, chosen by the `--surface`
+/// flag or the rc `surface:` key (flag wins).
+///
+/// Distinct from [`InteractiveMode`](ral_core::io::InteractiveMode): that
+/// records what the terminal *can* do (ANSI, round-trips) and is the escape
+/// hatch for hostile setups; this records which frontend the user *wants*.
+/// The capability gate overrides this — a terminal resolved to
+/// [`Minimal`](ral_core::io::InteractiveMode::Minimal) gets the canonical
+/// editor whatever surface was asked for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum Surface {
+    /// Canonical-stdin line editor; no raw mode, no plugin features.
+    Minimal,
+    /// Full readline-style line editor: completion, history, plugin
+    /// keybindings, ghost text, highlights.  The default.
+    #[default]
+    Readline,
+    /// The ratatui projection surface (`structural` builds only).
+    Structural,
+}
+
 // ── Event types ───────────────────────────────────────────────────────────
 
 /// Buffer state to pre-fill the editor with on the next [`Frontend::read`].

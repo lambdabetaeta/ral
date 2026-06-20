@@ -26,7 +26,7 @@ structural = ["dep:ratatui", "dep:ansi-to-tui", "dep:ratatui-textarea", "dep:tex
 # `grep` stays on and `--no-default-features` only flips the test cfg.
 ral-core  = { path = "../core", default-features = false }
 rustyline  = "=18.0.0"
-# The structural frontend (RAL_SURFACE=structural): a ratatui inline-viewport
+# The structural frontend (--surface structural): a ratatui inline-viewport
 # app projecting the live shell's types, bindings, and handles.  Same major
 # as exarch's, so the workspace resolves one build.
 ratatui    = { version = "0.30", optional = true }

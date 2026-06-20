@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use super::config::RcCtx;
 use super::exec::{Step, step};
-use super::frontend::{EditBuffer, Frontend, Read};
+use super::frontend::{EditBuffer, Frontend, Read, Surface};
 use super::plugin::PluginRuntime;
 use super::prompt::{render as render_prompt, write_terminal_title};
 
@@ -88,6 +88,7 @@ impl Session {
         boot::setup_terminal(&mut shell);
         let mut edit_mode = EditMode::Emacs;
         let mut bell = BellStyle::None;
+        let mut surface = Surface::default();
         boot::install_default_prompt(&mut shell);
 
         let jobs = Arc::new(Mutex::new(jobs::JobTable::new()));
@@ -100,12 +101,16 @@ impl Session {
                 shell: &mut shell,
                 edit_mode: &mut edit_mode,
                 bell: &mut bell,
+                surface: &mut surface,
                 runtime: &runtime,
             },
         );
         // CLI flag wins over rc — apply after load_profiles.
         if let Some(n) = opts.run.recursion_limit {
             shell.mobile.control.recursion_limit = n;
+        }
+        if let Some(s) = opts.surface {
+            surface = s;
         }
         // `--capabilities` applies after rc files: rc is operator-trusted
         // session bootstrap, the user-supplied ceiling narrows from there.
@@ -126,6 +131,7 @@ impl Session {
 
         let frontend = boot::create_frontend(
             interactive_mode,
+            surface,
             &mut shell,
             edit_mode,
             bell,
