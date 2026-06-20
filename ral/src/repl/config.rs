@@ -336,7 +336,10 @@ mod tests {
     /// files can use `get`, `has`, etc. — the same environment they see at
     /// real startup.  When `pass_source` is set, the rc text is forwarded
     /// to `apply_rc_config` so alias source extraction is exercised.
-    fn apply_rc_inner(rc_src: &str, pass_source: bool) -> (Shell, Arc<Mutex<PluginRuntime>>) {
+    fn apply_rc_inner(
+        rc_src: &str,
+        pass_source: bool,
+    ) -> (Shell, Surface, Arc<Mutex<PluginRuntime>>) {
         let mut shell = Shell::new(Default::default());
         ral_core::builtins::register(&mut shell, crate::PRELUDE.comp());
         let ast = ral_core::syntax::parser::parse(rc_src).unwrap();
@@ -357,7 +360,7 @@ mod tests {
             },
             if pass_source { Some(rc_src) } else { None },
         );
-        (shell, runtime)
+        (shell, surface, runtime)
     }
 
     fn apply_rc(rc_src: &str) -> Shell {
@@ -365,7 +368,8 @@ mod tests {
     }
 
     fn apply_rc_with_runtime(rc_src: &str) -> (Shell, Arc<Mutex<PluginRuntime>>) {
-        apply_rc_inner(rc_src, false)
+        let (shell, _, runtime) = apply_rc_inner(rc_src, false);
+        (shell, runtime)
     }
 
     /// Typecheck `src` against the baked prelude; return the errors.
@@ -484,7 +488,7 @@ mod tests {
     #[test]
     fn aliases_install_as_handler_frames() {
         let src = "return [\n    aliases: [\n        greet: { |args| echo hello ...$args },\n        ll: { |args| ls -lh ...$args },\n    ],\n]\n";
-        let (shell, _) = apply_rc_inner(src, true);
+        let (shell, _, _) = apply_rc_inner(src, true);
         assert!(shell.has_alias("greet"));
         assert!(shell.has_alias("ll"));
         // Aliases live in the handler stack, not in scope.
@@ -536,27 +540,7 @@ mod tests {
     /// Apply an rc map and return the resolved [`Surface`] (the default
     /// when the rc does not set one).
     fn apply_rc_surface(rc_src: &str) -> Surface {
-        let mut shell = Shell::new(Default::default());
-        ral_core::builtins::register(&mut shell, crate::PRELUDE.comp());
-        let ast = ral_core::syntax::parser::parse(rc_src).unwrap();
-        let comp = std::sync::Arc::new(ral_core::elaborator::elaborate(&ast, Default::default()));
-        let config = ral_core::evaluator::evaluate(&comp, &mut shell).unwrap();
-        let mut mode = EditMode::Emacs;
-        let mut bell = BellStyle::None;
-        let mut surface = Surface::default();
-        let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
-        apply_rc_config(
-            config,
-            &mut RcCtx {
-                shell: &mut shell,
-                edit_mode: &mut mode,
-                bell: &mut bell,
-                surface: &mut surface,
-                runtime: &runtime,
-            },
-            None,
-        );
-        surface
+        apply_rc_inner(rc_src, false).1
     }
 
     /// rc `surface:` selects the frontend, case-insensitively.
@@ -622,7 +606,7 @@ mod tests {
     #[test]
     fn rc_bindings_callable_typechecks_heterogeneous_call() {
         let src = "return [\n    bindings: [\n        ws: { |name body| echo $name; !$body },\n    ],\n]\n";
-        let (shell, _) = apply_rc_inner(src, true);
+        let (shell, _, _) = apply_rc_inner(src, true);
         // Lexical binding, not an alias handler frame.
         assert!(shell.mobile.scope.get("ws").is_some());
         assert!(!shell.has_alias("ws"));
@@ -642,7 +626,7 @@ mod tests {
     #[test]
     fn rc_aliases_callable_is_argv_alias() {
         let src = "return [\n    aliases: [\n        ws: { |args| echo $args },\n    ],\n]\n";
-        let (shell, _) = apply_rc_inner(src, true);
+        let (shell, _, _) = apply_rc_inner(src, true);
         // Alias handler frame, not a scope binding.
         assert!(shell.has_alias("ws"));
         assert!(shell.mobile.scope.get("ws").is_none());
