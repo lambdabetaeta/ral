@@ -250,6 +250,20 @@ impl Viewport {
         self.push_block(Block::tool_call(tool, summary, cmd, self.agent));
     }
 
+    /// Append an async subagent's landed result as its own collapsible
+    /// block — collapsed to a one-line header, dialed open to the full
+    /// result rendered as markdown.
+    pub(super) fn push_subagent(
+        &mut self,
+        title: String,
+        text: String,
+        error: Option<String>,
+        elapsed: Duration,
+        fidelity: Fidelity,
+    ) {
+        self.push_block(Block::subagent(title, text, error, elapsed, fidelity, self.agent));
+    }
+
     /// Append a single-file diff block; it re-renders from its hunks at
     /// every width and disclosure level.
     pub(super) fn push_patch(&mut self, path: String, hunks: Vec<Hunk>) {

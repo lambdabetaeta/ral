@@ -30,6 +30,8 @@ pub(super) enum RailKind {
     /// tool-call shape, so no separate `◆`.
     ToolCall(bool),
     Markdown,
+    /// An async subagent's landed result — the `↘` delegated-result shape.
+    Subagent,
     Step,
     Error,
     Generic,
@@ -44,6 +46,7 @@ impl RailKind {
             RailKind::ToolCall(true) => "▾",
             RailKind::ToolCall(false) => "▸",
             RailKind::Markdown => "·",
+            RailKind::Subagent => "↘",
             RailKind::Step => "━",
             RailKind::Error => "✗",
             RailKind::Generic => "❖",
@@ -173,6 +176,7 @@ mod tests {
             RailKind::ToolCall(false),
             RailKind::ToolCall(true),
             RailKind::Markdown,
+            RailKind::Subagent,
             RailKind::Step,
             RailKind::Error,
             RailKind::Generic,

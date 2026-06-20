@@ -17,6 +17,7 @@ use ratatui::{
 };
 use serde_json::{Map, Value};
 use std::borrow::Cow;
+use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
 
 // ── Color palette ────────────────────────────────────────────────────────────
@@ -82,7 +83,7 @@ pub(super) fn is_blank(l: &Line<'_>) -> bool {
 /// [`plain`] drops a leading span whose content matches one of these so
 /// copied text carries the content, not the chrome glyph; [`super::block::wrap_line`]
 /// reuses the set to detect a rail-led row and indent its continuations.
-pub(super) const RAIL_GLYPHS: [&str; 7] = ["▎ ", "▸ ", "▾ ", "· ", "━ ", "✗ ", RAIL];
+pub(super) const RAIL_GLYPHS: [&str; 8] = ["▎ ", "▸ ", "▾ ", "· ", "↘ ", "━ ", "✗ ", RAIL];
 
 /// One scrollback line as the plain text a reader would copy: span
 /// contents joined, with a leading rail glyph dropped.
@@ -379,6 +380,48 @@ pub(super) fn tool_call_static(cmd: &str, tool: &str) -> Vec<Line<'static>> {
         ]));
     }
     ls
+}
+
+/// The one-line header for an async subagent's landed result: a leading
+/// blank (like [`tool_call_collapsed`]), then the bold `title` (LIME, or
+/// the error hue when `error` is set), a [`SLATE`]-dim ` {elapsed}s `
+/// readout, a [`size_bar`] for the result `size` (lines of `text`), and an
+/// error suffix when one applies.  The `↘` shape arrives via the lifted
+/// rail ([`super::block::Block::render`], `Subagent` shape), so this
+/// builder is rail-less.
+pub(super) fn subagent_header(
+    title: &str,
+    size: u32,
+    error: Option<&str>,
+    elapsed: Duration,
+) -> Vec<Line<'static>> {
+    let secs = elapsed.as_secs();
+    let title_color = if error.is_some() { ORANGE } else { LIME };
+    let mut spans = vec![
+        bold(title.to_string(), title_color),
+        Span::styled(
+            format!(" {secs}s "),
+            Style::default().fg(SLATE).add_modifier(Modifier::DIM),
+        ),
+        size_bar(size),
+    ];
+    // The error / empty suffix the breadcrumb carried, less the `[done in
+    // Ns]` case the elapsed readout now subsumes.
+    let suffix = match error {
+        None if size == 0 => Some("[done, no output]".to_string()),
+        None => None,
+        Some(reason) if reason.eq_ignore_ascii_case("cancelled") => Some("[cancelled]".to_string()),
+        Some(reason) => Some(format!("[failed: {reason}]")),
+    };
+    if let Some(suffix) = suffix {
+        let suffix_color = if error.is_some() { ORANGE } else { SLATE };
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            suffix,
+            Style::default().fg(suffix_color).add_modifier(Modifier::DIM),
+        ));
+    }
+    vec![Line::default(), Line::from(spans)]
 }
 
 /// Error line: the `✗` shape lives in the lifted rail (Error shape); the

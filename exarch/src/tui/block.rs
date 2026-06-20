@@ -18,6 +18,7 @@ use crate::bus::Hunk;
 use crate::card::{Card, Mark};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
+use std::time::Duration;
 use unicode_width::UnicodeWidthChar;
 
 /// Index into the agent rail palette (`line::AGENT_HUES`). Root is `0`;
@@ -57,6 +58,19 @@ pub(super) enum BlockKind {
     },
     /// Streamed assistant prose; re-wrapped from source at every width.
     Markdown(String),
+    /// An async subagent's final result, landed in root's scrollback.
+    /// Dialable like a tool call: collapsed (L1) to a one-line header
+    /// (`title` · `elapsed` · a size-bar for `text` length, plus an error
+    /// suffix when `error` is set), dialed open (L3) to the full `text`
+    /// rendered as markdown.  Carries its own `title`/`elapsed`/`error`
+    /// because `Markdown` can't, and keeps the `↘` rail identity a `Card`
+    /// would lose.
+    Subagent {
+        title: String,
+        text: String,
+        error: Option<String>,
+        elapsed: Duration,
+    },
     /// A render document a kit surfaced — an ordered stack of Bertin
     /// [`Card`] marks, re-rendered from data at every width and disclosure
     /// level.  A card holding a `diff` mark is dialable (L1 header ↔ L3
@@ -112,7 +126,7 @@ impl Block {
     /// render).
     fn new(kind: BlockKind, agent: AgentSlot, fidelity: Fidelity) -> Self {
         let level = match kind {
-            BlockKind::ToolCall { .. } => 1,
+            BlockKind::ToolCall { .. } | BlockKind::Subagent { .. } => 1,
             _ => 3,
         };
         Self {
@@ -140,6 +154,28 @@ impl Block {
     }
     pub(super) fn markdown(src: String, agent: AgentSlot, fidelity: Fidelity) -> Self {
         Self::new(BlockKind::Markdown(src), agent, fidelity)
+    }
+    /// An async subagent's final result. `fidelity` rides the existing
+    /// [`Block::fidelity`] field so the revealed markdown degrades with
+    /// root's context floor exactly as committing prose does.
+    pub(super) fn subagent(
+        title: String,
+        text: String,
+        error: Option<String>,
+        elapsed: Duration,
+        fidelity: Fidelity,
+        agent: AgentSlot,
+    ) -> Self {
+        Self::new(
+            BlockKind::Subagent {
+                title,
+                text,
+                error,
+                elapsed,
+            },
+            agent,
+            fidelity,
+        )
     }
     /// A surfaced render document.
     pub(super) fn card(card: Card, agent: AgentSlot) -> Self {
@@ -170,6 +206,7 @@ impl Block {
     pub(super) fn magnitude(&self) -> Option<u32> {
         match &self.kind {
             BlockKind::Card(card) => card.magnitude(),
+            BlockKind::Subagent { text, .. } => Some(text.lines().count() as u32),
             _ => None,
         }
     }
@@ -179,7 +216,9 @@ impl Block {
     /// A diff-less card is chrome-level, and chrome is inert.
     pub(super) fn dialable(&self) -> bool {
         match &self.kind {
-            BlockKind::ToolCall { .. } | BlockKind::Markdown(_) => true,
+            BlockKind::ToolCall { .. } | BlockKind::Markdown(_) | BlockKind::Subagent { .. } => {
+                true
+            }
             BlockKind::Card(card) => card.has_diff(),
             BlockKind::Chrome { .. } => false,
         }
@@ -340,6 +379,29 @@ impl Block {
                 2 => first_rows(md::render_md(src, width, MD_INDENT, self.fidelity), N),
                 _ => first_rows(md::render_md(src, width, MD_INDENT, self.fidelity), 1),
             },
+            BlockKind::Subagent {
+                title,
+                text,
+                error,
+                elapsed,
+            } => {
+                let size = text.lines().count() as u32;
+                let mut ls = line::subagent_header(title, size, error.as_deref(), *elapsed);
+                // L1 (and L0, handled above) is the header alone; L2/L3 extend
+                // it with the rendered body. Build the header first so the
+                // markdown rows append after it intact — the header is row 0
+                // and the markdown's own first-rows/leading-blank logic never
+                // touches it.
+                match level {
+                    3 => ls.extend(md::render_md(text, width, MD_INDENT, self.fidelity)),
+                    2 => ls.extend(first_rows(
+                        md::render_md(text, width, MD_INDENT, self.fidelity),
+                        N,
+                    )),
+                    _ => {}
+                }
+                ls
+            }
             BlockKind::Card(card) => line::render_card(card, level),
             BlockKind::Chrome { lines, .. } => lines.clone(),
         }
@@ -354,6 +416,9 @@ impl Block {
         match &self.kind {
             BlockKind::ToolCall { .. } => Some(RailKind::ToolCall(level >= 2)),
             BlockKind::Markdown(_) => Some(RailKind::Markdown),
+            // The `↘` keeps the delegated-result identity even on error; the
+            // failure reads in the header suffix, not a swapped glyph.
+            BlockKind::Subagent { .. } => Some(RailKind::Subagent),
             // A diff card wears the patch shape (`▎`); a diff-less card is
             // generic chrome (`❖`), the shape `wrote`/`task`/`meter` wore.
             BlockKind::Card(card) => Some(if card.has_diff() {

@@ -72,7 +72,7 @@ use std::{
 
 use line::{
     AGENT_HUES, BANNER_CYAN, BANNER_GOLD, BANNER_LIME, BANNER_ORANGE, BANNER_PINK, BANNER_PURPLE,
-    BANNER_RED, CYAN, LIME, ORANGE, PINK, PURPLE, RAIL_W, READ_W, SLATE, bold, slate, slate_owned,
+    BANNER_RED, CYAN, PINK, PURPLE, RAIL_W, READ_W, SLATE, bold, slate, slate_owned,
 };
 use viewport::Viewport;
 
@@ -600,12 +600,13 @@ impl App {
                     context: self.context_floor(),
                     echo: 0,
                 };
-                let lines = subagent_breadcrumb(&title, &text, error.as_deref(), elapsed, fidelity);
                 // Always lands in root, regardless of which nesting
                 // level emitted — main is the permanent record of
                 // delegated work.
                 let root = self.root;
-                self.push_chrome(root, RailShape::Generic, lines);
+                self.with_viewport(root, |vp| {
+                    vp.push_subagent(title, text, error, elapsed, fidelity)
+                });
             }
             // A surfaced render document, or a structural I/O event paired
             // with the card composed from it: a kit that raised a card through
@@ -1564,54 +1565,6 @@ fn wait_bar(elapsed: Duration) -> Vec<Span<'static>> {
         Style::default().fg(SLATE),
     ));
     spans
-}
-
-/// Build the breadcrumb that lands in root's scrollback when a
-/// subagent finishes.  Layout:
-///
-/// ```text
-/// ↘ refactor-output  [done in 47s]
-/// <the subagent's final assistant message, rendered as markdown>
-///                                   ← trailing blank for separation
-/// ```
-///
-/// On failure / cancel the body is omitted and the header carries
-/// `[failed: <reason>]` or `[cancelled]` instead.
-fn subagent_breadcrumb(
-    title: &str,
-    text: &str,
-    error: Option<&str>,
-    elapsed: Duration,
-    fidelity: Fidelity,
-) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let secs = elapsed.as_secs();
-    let suffix = match error {
-        None if text.is_empty() => "[done, no output]".to_string(),
-        None => format!("[done in {secs}s]"),
-        Some(reason) if reason.eq_ignore_ascii_case("cancelled") => "[cancelled]".to_string(),
-        Some(reason) => format!("[failed: {reason}]"),
-    };
-    let (title_color, suffix_style) = if error.is_some() {
-        (
-            ORANGE,
-            Style::default().fg(ORANGE).add_modifier(Modifier::DIM),
-        )
-    } else {
-        (LIME, Style::default().fg(SLATE).add_modifier(Modifier::DIM))
-    };
-    lines.push(Line::from(vec![
-        Span::styled("↘ ", Style::default().fg(SLATE)),
-        bold(title.to_string(), title_color),
-        Span::raw("  "),
-        Span::styled(suffix, suffix_style),
-    ]));
-    if error.is_none() && !text.is_empty() {
-        let (tw, _) = size().unwrap_or((READ_W, 24));
-        lines.extend(md::render_md(text, tw.min(READ_W), md::MD_INDENT, fidelity));
-    }
-    lines.push(Line::default());
-    lines
 }
 
 /// Whether the cell `(col, row)` lies inside `rect`.
