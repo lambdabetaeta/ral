@@ -21,9 +21,9 @@
 //!   `capability::check_*(&Context, …)` decisions.
 //! - `cwd` — logical working directory and path resolution.
 //! - `inherit` — state transfer between parent and child Shells
-//!   ([`Shell::with_child`], [`Shell::spawn_thread`],
-//!   [`Shell::child_from`], [`Shell::with_block`], plus
-//!   [`Shell::inherit_from`] / [`Shell::return_to`]).
+//!   ([`Shell::with_thunk_body`] for same-thread bodies;
+//!   [`Shell::spawn_thread`], [`Shell::child_of`], [`Shell::child_from`]
+//!   for forks, plus [`Shell::inherit_from`] / [`Shell::return_to`]).
 //!
 //! The small primitives that don't fit a concern — error
 //! construction, stdout writes, status writes, `$env` / `$args`
@@ -42,6 +42,7 @@ pub(crate) mod repl;
 mod scope;
 
 pub use host::TerminalLoan;
+pub(crate) use inherit::ThunkBody;
 
 use self::control::ControlState;
 use self::cwd::Cwd;

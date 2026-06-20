@@ -78,4 +78,4 @@ pub use shell::{
     Context, DEFAULT_RECURSION_LIMIT, EventSink, LocalState, Mobile, SessionState, Shell,
     SurfaceSink, TerminalLoan, TurnState,
 };
-pub(crate) use shell::TerminalAccess;
+pub(crate) use shell::{TerminalAccess, ThunkBody};

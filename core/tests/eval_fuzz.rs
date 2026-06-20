@@ -1237,7 +1237,7 @@ fn assign_block_does_not_execute() {
 #[test]
 fn deeply_nested_calls() {
     // Tree-walker uses Rust's call stack — deep recursion is limited.
-    // Each level uses eval_stmts → eval_command → apply_lambda → Shell::with_child → eval_stmts.
+    // Each level uses eval_stmts → eval_command → apply_lambda_frame → Shell::with_thunk_body → eval_stmts.
     must_succeed(
         "let f = { |n| if $[$n == 0] { return 0 } else { let prev = f $[$n - 1]; return $prev } }\nf 10",
     );

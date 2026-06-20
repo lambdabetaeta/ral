@@ -4,24 +4,31 @@
 //! public entry into evaluation (`evaluate`, [`apply`]) hands back a
 //! [`Settled<Value>`] — [`Tail`] cannot escape this module.
 
-use super::comp::{eval_comp, with_scope};
+use super::comp::eval_comp;
 use super::pattern::assign_pattern;
 use crate::ir::{CompKind, IrPattern};
 use crate::types::*;
 
-/// One lambda call frame: install the lambda's `captured`
-/// environment, push a fresh scope, bind `pat` to `arg`, then evaluate
-/// `body`. The single call site supplies one `body` closure that
-/// branches internally on `if let CompKind::Lam`: a curried inner
-/// `Lam` is closed into a fresh `Value::Lambda`, otherwise the body is
-/// evaluated via [`eval_comp`].
+/// One lambda call frame: evaluate the body *in place* on the caller's
+/// shell via [`Shell::with_thunk_body`] — the body shares the caller's
+/// turn, session, and local state by identity, swapping in only a mobile
+/// rescoped to the lambda's `captured` environment plus a fresh frame.
+/// `pat` is bound to `arg` in that frame (pattern binding lives in this
+/// evaluator layer, not on `Shell`), then `body` runs. As a
+/// [`ThunkBody::Lambda`] the frame enters with a fresh `$?` and folds
+/// `{last_status, cwd}` back. The single call site supplies one `body`
+/// closure that branches internally on `if let CompKind::Lam`: a curried
+/// inner `Lam` is closed into a fresh `Value::Lambda`, otherwise the body
+/// is evaluated via [`eval_comp`].
 ///
 /// `is_last` is the lambda body's tail position — true when this is the
 /// final argument of the call, so the body's final computation sits
 /// under the trivial continuation that returns from the call. The
 /// trampoline is the sole mint point for [`Tail::Yes`] besides an
 /// eliminator forwarding its own tail-ness; `body` consults `is_last`
-/// to decide what tail to grant its computation.
+/// to decide what tail to grant its computation. A tail call escapes as
+/// `Err(Control::Tail)` past the in-place run (the fold-back has already
+/// happened) and lands in the trampoline loop below.
 fn apply_lambda_frame(
     captured: &Env,
     pat: &IrPattern,
@@ -29,10 +36,10 @@ fn apply_lambda_frame(
     shell: &mut Shell,
     body: impl FnOnce(&mut Shell) -> Raw<Value>,
 ) -> Raw<Value> {
-    shell.with_child(captured, |child| {
-        with_scope(child, |child| {
-            assign_pattern(pat, arg, None, child)?;
-            body(child)
+    shell.with_thunk_body(ThunkBody::Lambda, captured, |shell, mobile| {
+        shell.run_with_mobile(mobile, |shell| {
+            assign_pattern(pat, arg, None, shell)?;
+            body(shell)
         })
     })
 }

@@ -40,7 +40,7 @@ pub(crate) mod trampoline;
 pub(crate) mod val;
 
 use crate::ir::Comp;
-use crate::types::{Control, Env, Settled, Shell, Tail, TailCall, Value};
+use crate::types::{Control, Env, Settled, Shell, Tail, TailCall, ThunkBody, Value};
 use std::sync::Arc;
 
 pub(crate) use capture::with_audit_capture;
@@ -100,15 +100,16 @@ pub fn eval_top_level(comp: &Arc<Comp>, shell: &mut Shell) -> Settled<Value> {
 
 /// Run a thunk body as a block: scope-isolated, mobile discarded on
 /// exit.  `let`, `cd`, module loads, plugin registrations, env-var
-/// changes — none propagate.  Only `last_status` (installed on
-/// `shell.mobile`) and audit nodes (merged into the active trail)
-/// cross the boundary.
+/// changes — none propagate.  Only `last_status` (folded onto
+/// `shell.mobile`) and audit nodes (which the body posts straight to the
+/// shared trail) cross the boundary.
 ///
 /// `captured` is the closure's lexical environment — the snapshot a
-/// `Value::Thunk` carries.  [`Shell::with_block`] builds the body's
-/// mobile from the parent's, swapping the scope for `captured` plus a
-/// fresh frame for the body's own `let` bindings, and brackets the
-/// call with a save / restore of the parent's `repl.pending_chpwd`.
+/// `Value::Thunk` carries.  [`Shell::with_thunk_body`] runs the body in
+/// place: it swaps in a mobile rescoped to `captured` plus a fresh frame
+/// for the body's own `let` bindings, brackets the parent's
+/// `repl.pending_chpwd`, and — as a [`ThunkBody::Block`] — folds only
+/// `last_status` back, discarding the body's `cd`.
 ///
 /// `tail` forwards the block's own tail position to its body: a block
 /// applied in tail position (the trampoline's final argument) grants
@@ -125,10 +126,8 @@ pub(crate) fn eval_block(
     tail: Tail,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    shell.with_block(&captured, |shell, mobile| {
-        let (post, outcome) = crate::runtime::transport::dispatch(body, mobile, tail, shell);
-        shell.mobile.control.last_status = post.control.last_status;
-        outcome
+    shell.with_thunk_body(ThunkBody::Block, &captured, |shell, mobile| {
+        crate::runtime::transport::dispatch(body, mobile, tail, shell)
     })
 }
 

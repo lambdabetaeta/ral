@@ -529,3 +529,141 @@ fn sandbox_parity_top_level_cd() {
         "cwd after cd under projection: expected {tmp_disp:?} or {canon:?}, got {got:?}"
     );
 }
+
+// ── (9) Same-thread β-step flow matrix: lambda vs forced block ───────────
+//
+// A forced block (`!{ … }`) and an applied lambda (`f x`) both run their
+// body in place on the caller's shell, sharing turn / session / local
+// state by identity
+// (`decisions/260620_same-thread-body-shares-the-session`).  They differ in
+// exactly two observable places — the entry `$?` and the fold-back set —
+// which these tests pin.
+
+/// A lambda body enters with a *fresh* `$?`, not the caller's: define a
+/// function whose body sets no status, prime the caller's `$?` to a
+/// non-zero sentinel, call it, and observe `$?` come back 0 — the lambda
+/// reset it on entry and folded the (untouched) 0 back.
+#[test]
+fn lambda_enters_with_fresh_status() {
+    let mut shell = fresh_shell();
+    top_level(&mut shell, "let f = { |_| return unit }").expect("define f");
+    shell.mobile.control.last_status = 7;
+    top_level(&mut shell, "f unit").expect("call f");
+    assert_eq!(
+        shell.mobile.control.last_status, 0,
+        "a lambda body enters with a fresh $? (0), not the caller's 7; its \
+         body set none, so 0 folds back"
+    );
+}
+
+/// A forced block, by contrast, inherits the caller's `$?` (it clones the
+/// caller's mobile) and — with a body that sets none — folds it back
+/// unchanged.  Same body shape as the lambda above, opposite outcome.
+#[test]
+fn forced_block_keeps_caller_status_when_body_sets_none() {
+    let mut shell = fresh_shell();
+    shell.mobile.control.last_status = 7;
+    top_level(&mut shell, "!{ return unit }").expect("forced block");
+    assert_eq!(
+        shell.mobile.control.last_status, 7,
+        "a forced block keeps the caller's $? when its body sets none"
+    );
+}
+
+/// A lambda folds its body's final status back to the caller, replacing
+/// whatever the caller held.  `return $[1 == 2]` returns a false Bool,
+/// which the evaluator records as `$? = 1`.
+#[test]
+fn lambda_folds_back_body_status() {
+    let mut shell = fresh_shell();
+    top_level(&mut shell, "let g = { |_| return $[1 == 2] }").expect("define g");
+    shell.mobile.control.last_status = 5;
+    top_level(&mut shell, "g unit").expect("call g");
+    assert_eq!(
+        shell.mobile.control.last_status, 1,
+        "the lambda body's status (1, from a false comparison) folds back, \
+         replacing the caller's 5"
+    );
+}
+
+/// A forced block likewise folds its body's final status back.
+#[test]
+fn forced_block_folds_back_body_status() {
+    let mut shell = fresh_shell();
+    shell.mobile.control.last_status = 5;
+    top_level(&mut shell, "!{ $[1 == 2] }").expect("forced block");
+    assert_eq!(
+        shell.mobile.control.last_status, 1,
+        "the block body's status (1, from a false comparison) folds back, \
+         replacing the caller's 5"
+    );
+}
+
+/// A `cd` inside a lambda body PERSISTS after the call: `cwd` is part of
+/// the lambda fold-back set.  Checked against the same canonicalisation a
+/// plain top-level `cd` produces.
+#[test]
+fn lambda_cd_persists() {
+    let tmp = std::env::temp_dir();
+    let tmp_disp = display_no_trailing_sep(&tmp);
+
+    let mut shell = fresh_shell();
+    let before = shell.cwd();
+    top_level(
+        &mut shell,
+        &format!("let h = {{ |_| cd '{tmp_disp}'; return unit }}\nh unit"),
+    )
+    .expect("lambda body cd");
+    let after = shell.cwd();
+
+    assert_ne!(before, after, "a `cd` inside a lambda body must persist");
+    let canon = display_no_trailing_sep(&tmp.canonicalize().unwrap_or(tmp.clone()));
+    assert!(
+        after == tmp_disp || after == canon,
+        "lambda `cd` must land in the temp dir: expected {tmp_disp:?} or {canon:?}, got {after:?}"
+    );
+}
+
+/// A `cd` inside a forced block is DISCARDED — the block's mobile (cwd and
+/// all) dies on exit; only `$?` folds back.  The direct-force analogue of
+/// `block_grant_does_not_leak_cd`.
+#[test]
+fn forced_block_discards_cd() {
+    let tmp = std::env::temp_dir();
+    let tmp_disp = display_no_trailing_sep(&tmp);
+
+    let mut shell = fresh_shell();
+    let before = shell.cwd();
+    top_level(&mut shell, &format!("!{{ cd '{tmp_disp}' }}")).expect("forced block cd");
+    assert_eq!(
+        before,
+        shell.cwd(),
+        "a `cd` inside a forced block must not persist"
+    );
+}
+
+/// A command run inside a lambda body is recorded into the *enclosing*
+/// `audit { … }` trail: the body shares the active audit trail by identity,
+/// exactly as a forced block does.
+#[test]
+fn function_body_records_into_enclosing_audit() {
+    let mut shell = fresh_shell();
+    top_level(&mut shell, "let emit = { |_| echo audited-from-fn }").expect("define emit");
+    let tree = top_level(&mut shell, "audit { emit unit }").expect("audit body");
+    let children = match &tree {
+        Value::Map(m) => match m.get("children") {
+            Some(Value::List(ch)) => ch.iter().cloned().collect::<Vec<_>>(),
+            other => panic!("audit tree must have a list `children` field; got {other:?}"),
+        },
+        other => panic!("audit {{ … }} must return a Map; got {other:?}"),
+    };
+    let saw_echo = children.iter().any(|c| match c {
+        Value::Map(m) => matches!(m.get("cmd"), Some(Value::String(s)) if s == "echo"),
+        _ => false,
+    });
+    assert!(
+        saw_echo,
+        "the `echo` inside the function body must appear in the enclosing \
+         audit tree; children = {children:?}"
+    );
+}
