@@ -12,3 +12,6 @@ workspace = true
 
 [dependencies]
 ratatui-textarea = "0.9"
+# For the shared cursor presentation: the per-mode `Style`, and positioning the
+# terminal's native cursor at the editor's edit point on a `Frame`.
+ratatui = "0.30"

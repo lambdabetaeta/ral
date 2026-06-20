@@ -61,7 +61,7 @@ use ratatui::{
     widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
 use ratatui_textarea::TextArea;
-use textarea_vim::{Mode, Transition, Vim};
+use textarea_vim::{Mode, Vim, cursor_style, native_cursor, place_native_cursor};
 use std::{
     collections::HashMap,
     io::{self, Stdout},
@@ -427,21 +427,6 @@ struct IoBuf {
     writes: Vec<IoEvent>,
 }
 
-/// The prompt cursor style for a vi [`Mode`].  Insert keeps the textarea's
-/// default bar cursor; every other mode draws a reversed block — the
-/// conventional vim "you are not inserting text here" signal — in exarch's
-/// own palette (a plain `REVERSED` modifier over the prompt's white text).
-/// Presentation lives per-frontend, so this mapping is local to the TUI
-/// rather than vendored from the shared crate.
-fn cursor_style(mode: Mode) -> Style {
-    match mode {
-        Mode::Insert => Style::default(),
-        Mode::Normal | Mode::Visual | Mode::Operator(_) | Mode::Replace(_) => {
-            Style::default().add_modifier(Modifier::REVERSED)
-        }
-    }
-}
-
 impl App {
     pub fn new(
         root_id: SessionId,
@@ -460,6 +445,11 @@ impl App {
         textarea.set_wrap_mode(ratatui_textarea::WrapMode::WordOrGlyph);
         textarea.set_style(Style::default().fg(Color::White));
         textarea.set_cursor_line_style(Style::default().fg(Color::White));
+        // No painted cursor cell: the prompt shows the terminal's own (native,
+        // blinking) cursor, positioned each frame by `place_native_cursor`.  Vi
+        // modal modes re-enable a painted reversed block via `cursor_style` as a
+        // mode indicator; the start mode (insert, or emacs) is the plain cell.
+        textarea.set_cursor_style(cursor_style(Mode::Insert));
         textarea.set_block(
             ratatui::widgets::Block::default()
                 .borders(ratatui::widgets::Borders::ALL)
@@ -468,11 +458,8 @@ impl App {
                 .padding(ratatui::widgets::Padding::horizontal(PROMPT_PAD_H)),
         );
         // Vi mode opens in insert, so editing starts where an emacs user
-        // would expect; the cursor style is set to match the start mode.
+        // would expect.
         let vim = vi.then(|| Vim::new(Mode::Insert));
-        if vim.is_some() {
-            textarea.set_cursor_style(cursor_style(Mode::Insert));
-        }
         Self {
             viewports,
             dispatch_order: vec![root_id],
@@ -1026,7 +1013,20 @@ impl App {
                         .padding(ratatui::widgets::Padding::horizontal(PROMPT_PAD_H));
                     f.render_widget(Paragraph::new(line).block(block), prompt_row);
                 }
-                (None, None) => f.render_widget(&self.textarea, prompt_row),
+                (None, None) => {
+                    f.render_widget(&self.textarea, prompt_row);
+                    // Show the terminal's native cursor at the edit point for
+                    // emacs/vi-insert; vi modal modes keep the painted block.
+                    // The textarea's block (border + horizontal padding) insets
+                    // the text, so position within that inner rect.
+                    if native_cursor(self.vim.as_ref()) {
+                        let inner = ratatui::widgets::Block::default()
+                            .borders(ratatui::widgets::Borders::ALL)
+                            .padding(ratatui::widgets::Padding::horizontal(PROMPT_PAD_H))
+                            .inner(prompt_row);
+                        place_native_cursor(f, inner, &self.textarea);
+                    }
+                }
             }
             f.render_widget(Paragraph::new(footer_hint()), footer_row);
         })?;
@@ -1304,25 +1304,17 @@ impl App {
     /// Route a plain text-input key into the editable prompt — the single
     /// dispatch point for the three [`Self::key`] arms that previously each
     /// called `self.textarea.input(k)` directly.  In the default emacs mode
-    /// (`self.vim == None`) it is byte-for-byte that call.  In vi mode it
-    /// drives the shared [`textarea_vim`] state machine over the textarea
-    /// (the canonical upstream fold), re-styling the cursor on a mode change
-    /// and treating [`Transition::Quit`] as a no-op (a REPL prompt has no
-    /// editor to quit).
+    /// (`self.vim == None`) it is byte-for-byte that call.  In vi mode it folds
+    /// the key through the shared [`textarea_vim::Vim::advance`] driver, which
+    /// re-styles the cursor on a mode change and treats `Quit` as a no-op (a
+    /// REPL prompt has no editor to quit).
     fn edit_input(&mut self, k: KeyEvent) {
-        let Some(vim) = self.vim.take() else {
-            self.textarea.input(k);
-            return;
-        };
-        self.vim = Some(match vim.transition(k.into(), &mut self.textarea) {
-            Transition::Mode(m) if vim.mode() != m => {
-                self.textarea.set_cursor_style(cursor_style(m));
-                Vim::new(m)
+        match self.vim.take() {
+            None => {
+                self.textarea.input(k);
             }
-            Transition::Nop | Transition::Mode(_) => vim,
-            Transition::Pending(p) => vim.with_pending(p),
-            Transition::Quit => vim,
-        });
+            Some(vim) => self.vim = Some(vim.advance(k.into(), &mut self.textarea)),
+        }
     }
 
     /// Route a mouse event: the wheel scrolls, a left-drag selects (and

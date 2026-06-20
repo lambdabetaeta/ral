@@ -40,6 +40,13 @@ dumb terminals whatever was asked):
   worksheet, and handles matrix around the prompt, plus Tab completion (below).
   See [[decisions/260620_repl-as-structural-surface|repl-as-structural-surface]].
 
+The structural surface and exarch's TUI share their editor-cursor handling
+through the `textarea-vim` crate: the vi dispatch fold (`Vim::advance`), the
+per-mode `cursor_style`, and `place_native_cursor` (which positions the
+terminal's own cursor at the edit point via the widget's `screen_cursor`). Both
+show the **native** blinking cursor in emacs / vi-insert and a painted reversed
+block only as the vi modal indicator — one implementation, not a copy each.
+
 ## Completion
 
 The completion *engine* is frontend-neutral: `completion.rs` classifies the

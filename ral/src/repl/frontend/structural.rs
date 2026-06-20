@@ -41,7 +41,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget, Wrap};
 use ratatui::{TerminalOptions, Viewport};
 use ratatui_textarea::{CursorMove, DataCursor, TextArea};
-use textarea_vim::{Mode, Transition, Vim};
+use textarea_vim::{Mode, Vim, cursor_style, native_cursor, place_native_cursor};
 
 use std::collections::HashSet;
 use std::io;
@@ -207,9 +207,16 @@ impl StructuralFrontend {
                 spine = build_spine(&s, shell);
                 last_buf = Some(s.clone());
             }
-            terminal.draw(|frame| {
-                render(frame, &prompt_lines, &textarea, &spine, &ws_rows, &matrix, menu.as_ref());
-            })?;
+            let scene = Scene {
+                prompt: &prompt_lines,
+                textarea: &textarea,
+                native_cursor: native_cursor(vim.as_ref()),
+                spine: &spine,
+                worksheet: &ws_rows,
+                matrix: &matrix,
+                menu: menu.as_ref(),
+            };
+            terminal.draw(|frame| render(frame, &scene))?;
 
             if !event::poll(TICK)? {
                 continue;
@@ -426,50 +433,34 @@ impl Frontend for StructuralFrontend {
 // ── The editor ──────────────────────────────────────────────────────────────
 
 /// A fresh editor: flat styling, no cursor-line underline (matching the
-/// surrounding chrome), so the prompt reads as one continuous line of text.
+/// surrounding chrome), and no painted cursor cell — the prompt shows the
+/// terminal's own (native, blinking) cursor instead, positioned each frame by
+/// [`render_prompt`].  Vi *modal* modes re-enable a painted reversed block via
+/// [`cursor_style`] as a mode indicator, since the native cursor alone does not
+/// distinguish normal from insert.
 fn new_textarea() -> TextArea<'static> {
     let mut ta = TextArea::default();
     ta.set_cursor_line_style(Style::default());
+    ta.set_cursor_style(Style::default());
     ta
 }
 
-/// The cursor style for a Vim [`Mode`]: a reversed block in the modal modes
-/// (Normal/Visual/Operator/Replace), the editor default in Insert.  Tasteful
-/// and palette-neutral — the loud per-mode colours of the upstream example are
-/// deliberately not carried over; this presentation mapping is per-frontend.
-fn cursor_style(mode: Mode) -> Style {
-    match mode {
-        Mode::Insert => Style::default(),
-        _ => Style::default().add_modifier(Modifier::REVERSED),
-    }
-}
-
 /// Apply one keystroke to the editor.  With vi keys on (`vim` is `Some`) it
-/// runs the canonical `textarea-vim` driver fold — feeding the key through the
-/// state machine, re-styling the cursor on a mode change, and treating `Quit`
-/// as a no-op (a REPL prompt has no editor to quit; Ctrl-D remains the eof
-/// path).  Off, it is plain `textarea.input(k)`, leaving the emacs path
-/// untouched.  The single dispatch point both fallthrough arms and the final
-/// `_` arm route through, so the fold lives in one place.
+/// folds the key through the shared [`textarea_vim::Vim::advance`] driver,
+/// which re-styles the cursor on a mode change; off, it is plain
+/// `textarea.input(k)`, leaving the emacs path untouched.  The single dispatch
+/// point both fallthrough arms and the final `_` arm route through.
 fn edit_key(
     vim: &mut Option<Vim>,
     textarea: &mut TextArea<'static>,
     k: ratatui::crossterm::event::KeyEvent,
 ) {
-    let Some(v) = vim.take() else {
-        textarea.input(k);
-        return;
-    };
-    *vim = Some(match v.transition(k.into(), textarea) {
-        Transition::Mode(m) if v.mode() != m => {
-            textarea.set_cursor_style(cursor_style(m));
-            Vim::new(m)
+    match vim.take() {
+        None => {
+            textarea.input(k);
         }
-        Transition::Nop | Transition::Mode(_) => v,
-        Transition::Pending(p) => v.with_pending(p),
-        // No editor to quit in a REPL prompt: a no-op.
-        Transition::Quit => v,
-    });
+        Some(v) => *vim = Some(v.advance(k.into(), textarea)),
+    }
 }
 
 /// Whether the editor holds no text at all (every line empty).
@@ -960,15 +951,29 @@ fn viewport_height(
     needed.clamp(1, MAX_VIEWPORT).min(rows.saturating_sub(1).max(1))
 }
 
-fn render(
-    frame: &mut ratatui::Frame,
-    prompt: &PromptLines,
-    textarea: &TextArea<'static>,
-    spine: &Spine,
-    worksheet: &[WsRow],
-    matrix: &[MxRow],
-    menu: Option<&Menu>,
-) {
+/// One frame's render inputs, assembled per draw in `compose`: the prompt, the
+/// editor and whether its cursor is the native terminal one, the typed spine,
+/// the two projections, and any open completion menu.
+struct Scene<'a> {
+    prompt: &'a PromptLines,
+    textarea: &'a TextArea<'static>,
+    native_cursor: bool,
+    spine: &'a Spine,
+    worksheet: &'a [WsRow],
+    matrix: &'a [MxRow],
+    menu: Option<&'a Menu>,
+}
+
+fn render(frame: &mut ratatui::Frame, scene: &Scene) {
+    let &Scene {
+        prompt,
+        textarea,
+        native_cursor,
+        spine,
+        worksheet,
+        matrix,
+        menu,
+    } = scene;
     let area = frame.area();
     let lead_rows = prompt.lead.len() as u16;
     let editor_rows = prompt_rows(textarea);
@@ -998,7 +1003,7 @@ fn render(
             .areas(prompt_area);
 
     render_spine(frame, spine_area, spine);
-    render_prompt(frame, lead_area, editor_band, prompt, textarea);
+    render_prompt(frame, lead_area, editor_band, prompt, textarea, native_cursor);
     // The underline overlay reads the cells the TextArea just painted, so it
     // runs after `render_prompt`; the caret row sits in its own area below.
     overlay_type_error(frame, editor_band, caret_area, prompt.last_w, textarea, spine);
@@ -1134,15 +1139,17 @@ fn render_caret_row(
 /// Render a (possibly multi-line) prompt: its lead rows fill `lead_area`
 /// above, then the last prompt line is the inline prefix at column 0 of the
 /// editable band's first row, with the editor in a sub-area offset to its
-/// right.  The textarea paints its own cursor into that sub-area, so the
-/// cursor lands correctly past the prefix; continuation rows indent under the
-/// editable text, which reads fine.
+/// right.  When `native_cursor` is set the terminal's own cursor is positioned
+/// at the edit point (the editor sub-area's origin already includes the prompt
+/// prefix, so it is just that origin plus the editor's row/col); otherwise the
+/// widget's painted block — a vi modal-mode indicator — is the cursor.
 fn render_prompt(
     frame: &mut ratatui::Frame,
     lead_area: Rect,
     editor_band: Rect,
     prompt: &PromptLines,
     textarea: &TextArea<'static>,
+    native_cursor: bool,
 ) {
     if lead_area.height > 0 {
         frame.render_widget(Paragraph::new(prompt.lead.clone()), lead_area);
@@ -1161,6 +1168,11 @@ fn render_prompt(
         ..editor_band
     };
     frame.render_widget(textarea, editor_area);
+
+    if native_cursor {
+        // No block on this editor, so the render area is the text rect.
+        place_native_cursor(frame, editor_area, textarea);
+    }
 }
 
 fn render_projections(frame: &mut ratatui::Frame, area: Rect, worksheet: &[WsRow], matrix: &[MxRow]) {

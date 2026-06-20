@@ -6,23 +6,28 @@
 //! `TextArea` (ral's structural worksheet and exarch's TUI prompt) share one
 //! implementation instead of each carrying a copy.
 //!
-//! Usage mirrors the upstream example's driver loop: each keystroke, feed
-//! [`Vim::transition`] the [`Input`] and the live `TextArea`, then fold the
-//! returned [`Transition`] back into the `Vim` state:
+//! Each keystroke folds through [`Vim::advance`], which feeds
+//! [`Vim::transition`] the [`Input`] and the live `TextArea` and keeps the
+//! painted cursor style in sync with the mode:
 //!
 //! ```ignore
-//! vim = match vim.transition(key_event.into(), &mut textarea) {
-//!     Transition::Mode(m) if vim.mode() != m => Vim::new(m),
-//!     Transition::Nop | Transition::Mode(_) => vim,
-//!     Transition::Pending(p) => vim.with_pending(p),
-//!     Transition::Quit => vim, // no editor to quit in a REPL: a no-op
-//! };
+//! match vim.take() {
+//!     None => textarea.input(key_event),          // emacs: plain insert
+//!     Some(v) => vim = Some(v.advance(key_event.into(), &mut textarea)),
+//! }
 //! ```
 //!
-//! The presentation concerns the upstream example bundled in — the mode-named
-//! `Block` border and the per-mode cursor `Style` — are intentionally *not*
-//! vendored: each frontend owns its own chrome and maps [`Mode`] to a cursor
-//! style in its own palette.
+//! ## Shared cursor presentation
+//!
+//! The mode-named `Block` border from the upstream example is *not* vendored —
+//! each frontend draws its own prompt chrome.  The **cursor**, however, is
+//! shared: ral's structural surface and exarch's TUI converged on the same
+//! mapping ([`cursor_style`]) and the same rule — the terminal's own (native,
+//! blinking) cursor for emacs and vi-insert, a painted reversed block as the
+//! vi *modal* indicator.  [`native_cursor`] decides which applies and
+//! [`place_native_cursor`] positions the native one (wrap-aware via the
+//! widget's `screen_cursor`, clamped into the visible prompt), so both surfaces
+//! read as one design system rather than each carrying a copy.
 //!
 //! ## Attribution
 //!
@@ -35,6 +40,9 @@
 //! and a [`Vim::mode`] accessor is added (the example reached the field
 //! directly from its own module).
 
+use ratatui::Frame;
+use ratatui::layout::{Position, Rect};
+use ratatui::style::{Modifier, Style};
 use ratatui_textarea::{CursorMove, Key, Scrolling, TextArea};
 
 pub use ratatui_textarea::Input;
@@ -102,6 +110,23 @@ impl Vim {
     /// The mode the emulation is currently in.
     pub fn mode(&self) -> Mode {
         self.mode
+    }
+
+    /// Drive the emulation one keystroke over `textarea`, returning the next
+    /// state and keeping the painted cursor style in sync with the mode (a
+    /// reversed block in modal modes, nothing in insert — see [`cursor_style`]).
+    /// `Quit` is a no-op: a REPL prompt has no editor to quit.  Callers handle
+    /// the emacs (`vim == None`) case with a plain `textarea.input(key)`.
+    pub fn advance(self, input: Input, textarea: &mut TextArea<'_>) -> Vim {
+        match self.transition(input, textarea) {
+            Transition::Mode(m) if self.mode() != m => {
+                textarea.set_cursor_style(cursor_style(m));
+                Vim::new(m)
+            }
+            Transition::Nop | Transition::Mode(_) => self,
+            Transition::Pending(p) => self.with_pending(p),
+            Transition::Quit => self,
+        }
     }
 
     fn is_before_line_end(textarea: &TextArea<'_>) -> bool {
@@ -532,6 +557,49 @@ impl Vim {
             },
         }
     }
+}
+
+// ── Shared cursor presentation ───────────────────────────────────────────────
+
+/// The painted cursor style for a [`Mode`]: a reversed block in the modal modes
+/// (Normal / Visual / Operator / Replace) as the "you are not inserting here"
+/// indicator, and *nothing* in Insert — where the native terminal cursor
+/// (positioned by [`place_native_cursor`]) is the only cursor, exactly as in
+/// emacs.  Both surfaces map the mode this way, so it lives here.
+pub fn cursor_style(mode: Mode) -> Style {
+    match mode {
+        Mode::Insert => Style::default(),
+        _ => Style::default().add_modifier(Modifier::REVERSED),
+    }
+}
+
+/// Whether the terminal's native cursor should be shown for this editor state:
+/// true in emacs (`vim` is `None`) and in vi-insert, false in a vi modal mode —
+/// where the painted reversed block ([`cursor_style`]) is the cursor instead.
+pub fn native_cursor(vim: Option<&Vim>) -> bool {
+    vim.is_none_or(|v| v.mode() == Mode::Insert)
+}
+
+/// Position the terminal's native cursor at the textarea's edit point, given
+/// the text rect it was rendered into — `inner` must already have any block
+/// border/padding removed (`block.inner(area)`), since the widget renders text
+/// there.  Call after rendering the textarea and only when [`native_cursor`]
+/// holds; the native cursor is hidden on any frame that does not set it.
+///
+/// [`TextArea::screen_cursor`] is wrap- and tab/wide-char-aware but counts from
+/// the text origin without the scroll offset (which the widget keeps private),
+/// so the position is clamped into `inner`.  For an append-style prompt this
+/// matches the widget: it pins the cursor at/after the last visible row and
+/// never scrolls back up, and a horizontally scrolled `WrapMode::None` line
+/// lands at the right edge — where the cursor sits while typing past the end.
+pub fn place_native_cursor(frame: &mut Frame, inner: Rect, textarea: &TextArea<'_>) {
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let sc = textarea.screen_cursor();
+    let x = inner.x + (sc.col as u16).min(inner.width - 1);
+    let y = inner.y + (sc.row as u16).min(inner.height - 1);
+    frame.set_cursor_position(Position::new(x, y));
 }
 
 #[cfg(test)]
