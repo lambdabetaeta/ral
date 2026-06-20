@@ -2946,3 +2946,8 @@ Updated [[index|index]]: terminal-lease → active, terminal-foreground-ownershi
 ## [2026-06-20] ingest | same-thread body plan tightened
 
 Revised [[decisions/260620_same-thread-body-shares-the-session|same-thread-body-shares-the-session]] after source review. The implementation plan now preserves lambda `$?` entry semantics explicitly, ties pipeline-stage copying to `child_eval` rather than `spawn_thread`, includes `exit_hints` in the `SessionState` inventory, and makes the flow-matrix tests concrete.
+
+## [2026-06-20] ingest | binding reaper plan simplified
+
+Revised [[decisions/260616_exarch-binding-reaping|exarch-binding-reaping]] after design review. The first implementation now uses only ral-tool-call epochs, baseline pins, live-handle pins, static turn read/write sets, and generation-guarded idle pruning; tombstones, retained-size eviction, wall-clock expiry, explicit pin syntax, and callable-specific TTL are deferred.
+Updated [[index|index]] with the smaller v1 contract.
