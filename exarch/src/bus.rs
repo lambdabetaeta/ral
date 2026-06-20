@@ -114,6 +114,12 @@ pub enum InboxMsg {
         trigger: String,
         /// The natural-language instructions the model acts on.
         prompt: String,
+        /// The schedule's "a wakeup is unconsumed" flag: set when this
+        /// message is posted, cleared when it drains.  The next occurrence
+        /// reads it for the overlap-skip rule (at most one pending wakeup
+        /// per schedule), so a tick arriving while the previous wakeup still
+        /// waits is dropped rather than stacked.
+        pending: Arc<AtomicBool>,
     },
     /// An async agent settled.  A fresh, *marked* turn at the turn boundary.
     AgentResult(AgentResult),
@@ -138,8 +144,19 @@ impl InboxMsg {
                 label,
                 trigger,
                 prompt,
+                ..
             } => format!("[scheduled '{label}' · {trigger}] {prompt}"),
             InboxMsg::AgentResult(r) => r.render(),
+        }
+    }
+
+    /// The side effect of draining this message into context.  A scheduled
+    /// wakeup clears its pending flag here, re-opening its schedule for the
+    /// next occurrence — the overlap-skip holds only until the wakeup is
+    /// taken.  Other messages have none.
+    fn on_drain(&self) {
+        if let InboxMsg::ScheduledWakeup { pending, .. } = self {
+            pending.store(false, Ordering::Release);
         }
     }
 
@@ -243,11 +260,11 @@ impl Inbox {
                 }
                 Some(text)
             }
-            _ => Some(
-                q.pop_front()
-                    .expect("front checked present")
-                    .render(),
-            ),
+            _ => {
+                let msg = q.pop_front().expect("front checked present");
+                msg.on_drain();
+                Some(msg.render())
+            }
         }
     }
 
@@ -573,6 +590,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::{Boundary, Emitter, Event, Inbox, InboxMsg, Kind, Pass, Sink, drain_pass, pump};
+    use std::sync::Arc;
+
+    /// A scheduled-wakeup message with a fresh pending flag, for the inbox
+    /// drain tests.
+    fn wakeup(label: &str, trigger: &str, prompt: &str) -> InboxMsg {
+        InboxMsg::ScheduledWakeup {
+            label: label.into(),
+            trigger: trigger.into(),
+            prompt: prompt.into(),
+            pending: Arc::new(AtomicBool::new(true)),
+        }
+    }
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::channel;
@@ -719,11 +748,7 @@ mod tests {
     fn inbox_wakeup_is_turn_boundary_and_marked() {
         let inbox = Inbox::new();
         inbox.push_user("steer".into());
-        inbox.push(InboxMsg::ScheduledWakeup {
-            label: "nightly".into(),
-            trigger: "0 3 * * *".into(),
-            prompt: "run the tests".into(),
-        });
+        inbox.push(wakeup("nightly", "0 3 * * *", "run the tests"));
 
         // Tool boundary takes the user prefix only, stopping at the wakeup.
         assert_eq!(inbox.drain_tool().as_deref(), Some("steer"));
@@ -742,20 +767,28 @@ mod tests {
     fn inbox_pop_back_user_ignores_non_user_tail() {
         let inbox = Inbox::new();
         inbox.push_user("draft".into());
-        inbox.push(InboxMsg::ScheduledWakeup {
-            label: "x".into(),
-            trigger: "@".into(),
-            prompt: "p".into(),
-        });
+        inbox.push(wakeup("x", "@", "p"));
         assert_eq!(inbox.pop_back_user(), None, "tail is a wakeup, not a draft");
-        assert_eq!(
-            InboxMsg::ScheduledWakeup {
-                label: "x".into(),
-                trigger: "@".into(),
-                prompt: "p".into(),
-            }
-            .boundary(),
-            Boundary::Turn,
+        assert_eq!(wakeup("x", "@", "p").boundary(), Boundary::Turn);
+    }
+
+    /// A wakeup's pending flag clears when it drains, re-opening its
+    /// schedule for the next occurrence (the overlap-skip mechanism).
+    #[test]
+    fn inbox_wakeup_clears_its_pending_flag_on_drain() {
+        let pending = Arc::new(AtomicBool::new(true));
+        let inbox = Inbox::new();
+        inbox.push(InboxMsg::ScheduledWakeup {
+            label: "n".into(),
+            trigger: "* * * * *".into(),
+            prompt: "go".into(),
+            pending: pending.clone(),
+        });
+        assert!(pending.load(std::sync::atomic::Ordering::Acquire));
+        let _ = inbox.drain_turn();
+        assert!(
+            !pending.load(std::sync::atomic::Ordering::Acquire),
+            "draining the wakeup re-opens its schedule"
         );
     }
 }

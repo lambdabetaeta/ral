@@ -24,6 +24,7 @@ use std::thread;
 mod agent;
 mod fff;
 mod ral;
+mod schedule;
 
 /// One registered tool.  The registry stores `Box<dyn Tool>` and
 /// dispatches by name; [`Session`] holds no tool-specific knowledge.
@@ -79,6 +80,9 @@ pub(crate) fn registry() -> &'static [Box<dyn Tool>] {
             Box::new(agent::AgentTool),
             Box::new(agent::AgentsTool),
             Box::new(agent::AgentCancelTool),
+            Box::new(schedule::ScheduleTool),
+            Box::new(schedule::SchedulesTool),
+            Box::new(schedule::UnscheduleTool),
             Box::new(fff::FffTool),
         ]
     })

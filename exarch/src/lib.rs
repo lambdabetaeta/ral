@@ -27,6 +27,7 @@ pub mod policy;
 pub mod pricing;
 pub mod prompt;
 pub mod provider;
+pub mod schedule;
 pub mod session;
 pub mod shell_eval;
 pub mod state;
@@ -175,6 +176,7 @@ pub fn run() -> Result<(), String> {
         &model,
         label,
         c.expect_action,
+        c.allow_schedule,
     )
     .map_err(|e| format!("session init: {e}"))?;
 

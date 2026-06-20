@@ -56,6 +56,14 @@ pub struct Session {
     /// settles after the clear (holding a clone of this same registry) finds
     /// its generation stale and drops its result.
     pub(crate) agents: crate::agent_registry::AgentRegistry,
+    /// Live scheduled wakeups (cron / after).  Like [`Self::agents`], only
+    /// the root uses it; `/clear` drops every schedule (disarming its reaper
+    /// deadline).
+    pub(crate) schedules: crate::schedule::ScheduleRegistry,
+    /// Whether self-scheduling is authorised this session.  Off by default:
+    /// an agent that can wake itself indefinitely holds real authority, so
+    /// the `schedule` tool refuses unless `--allow-schedule` granted it.
+    pub(crate) schedule_authority: bool,
 }
 
 /// Outcome of one [`Session::apply`].  Degenerate cases (`Empty`,
@@ -111,6 +119,8 @@ impl Session {
             acted: false,
             durable,
             agents: crate::agent_registry::AgentRegistry::new(),
+            schedules: crate::schedule::ScheduleRegistry::new(),
+            schedule_authority: false,
         }
     }
 
@@ -120,6 +130,7 @@ impl Session {
         self.shell = shell;
     }
 
+    #[allow(clippy::too_many_arguments)] // launch config, threaded once at boot
     pub(crate) fn root(
         system: String,
         caps: ral_core::types::Capabilities,
@@ -128,19 +139,15 @@ impl Session {
         model: &str,
         provider_label: &str,
         expect_action: bool,
+        allow_schedule: bool,
     ) -> io::Result<Self> {
         let shell = boot_root_shell(scratch);
         let sessions_root = run_dir.join("sessions");
         let id = fresh_id();
         let log = SessionLog::root(&sessions_root, id, model, provider_label, system.len())?;
-        Ok(Self::assemble(
-            system,
-            caps,
-            shell,
-            log,
-            false,
-            expect_action,
-        ))
+        let mut s = Self::assemble(system, caps, shell, log, false, expect_action);
+        s.schedule_authority = allow_schedule;
+        Ok(s)
     }
 
     pub(crate) fn clear(&mut self, scratch: &Scratch) -> io::Result<()> {
@@ -154,6 +161,8 @@ impl Session {
         // worker that settles after this clear drops its result rather than
         // delivering it into the rebuilt context.
         self.agents.clear();
+        // Drop every schedule too: a fresh root carries no pending wakeups.
+        self.schedules.clear();
         Ok(())
     }
 
