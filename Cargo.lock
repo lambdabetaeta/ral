@@ -1231,6 +1231,7 @@ dependencies = [
  "similar",
  "syntect",
  "tempfile",
+ "textarea-vim",
  "textwrap",
  "tokio",
  "two-face",
@@ -3853,6 +3854,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "textarea-vim",
  "windows-sys 0.61.2",
 ]
 
@@ -5076,6 +5078,13 @@ dependencies = [
  "wezterm-dynamic",
  "wezterm-input-types",
  "winapi",
+]
+
+[[package]]
+name = "textarea-vim"
+version = "0.1.0"
+dependencies = [
+ "ratatui-textarea",
 ]
 
 [[package]]

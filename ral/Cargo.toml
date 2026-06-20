@@ -18,7 +18,7 @@ coreutils  = ["ral-core/coreutils"]
 diffutils  = ["ral-core/diffutils"]
 grep       = ["ral-core/grep"]
 ripgrep    = ["ral-core/ripgrep"]
-structural = ["dep:ratatui", "dep:ansi-to-tui", "dep:ratatui-textarea"]
+structural = ["dep:ratatui", "dep:ansi-to-tui", "dep:ratatui-textarea", "dep:textarea-vim"]
 
 [dependencies]
 # default-features = false so ral's own `grep` feature actually governs
@@ -32,6 +32,9 @@ rustyline  = "=18.0.0"
 ratatui    = { version = "0.30", optional = true }
 ansi-to-tui = { version = "8.0.1", optional = true }
 ratatui-textarea = { version = "0.9", optional = true }
+# Vim-mode state machine shared with exarch's TUI prompt; only pulled in with
+# the structural surface, which is the only frontend that edits in a TextArea.
+textarea-vim = { path = "../textarea-vim", optional = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 clap       = { workspace = true }

@@ -41,6 +41,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 use ratatui::{TerminalOptions, Viewport};
 use ratatui_textarea::{CursorMove, TextArea};
+use textarea_vim::{Mode, Transition, Vim};
 
 use std::collections::HashSet;
 use std::io;
@@ -77,13 +78,18 @@ pub(in crate::repl) struct StructuralFrontend {
     /// and prompt bindings — so the worksheet shows only what the user has
     /// since defined.  Captured lazily because `new` has no shell.
     baseline: Option<HashSet<String>>,
+    /// Whether the user asked for vi keys (`edit_mode: vi` in their ralrc).
+    /// Reduced from `rustyline::config::EditMode` at construction so the rest
+    /// of this frontend never sees rustyline's type.
+    vi: bool,
 }
 
 impl StructuralFrontend {
     /// Construct the frontend, verifying the terminal supports raw mode (so
     /// the boot selector can fall back when it does not).  Loads persisted
-    /// history like the other frontends.
-    pub(in crate::repl) fn new() -> io::Result<Self> {
+    /// history like the other frontends.  `edit_mode` selects emacs vs. vi
+    /// keybindings, reduced here to a plain flag.
+    pub(in crate::repl) fn new(edit_mode: rustyline::config::EditMode) -> io::Result<Self> {
         // Probe raw mode once: if the terminal cannot do it, the structural
         // surface cannot run and the caller degrades to a line editor.
         enable_raw_mode()?;
@@ -91,6 +97,7 @@ impl StructuralFrontend {
         Ok(Self {
             history: History::load(),
             baseline: None,
+            vi: matches!(edit_mode, rustyline::config::EditMode::Vi),
         })
     }
 
@@ -131,6 +138,14 @@ impl StructuralFrontend {
         if let Some(p) = &pending {
             textarea.insert_str(&p.text);
             place_cursor(&mut textarea, p.cursor);
+        }
+        // Vim emulation, only when the user runs vi keys.  A REPL prompt is a
+        // line you type into straight away, so the start mode is Insert (else
+        // every command would need a leading `i`).  Off (emacs), `vim` is
+        // `None` and the dispatch falls through to plain `textarea.input(k)`.
+        let mut vim: Option<Vim> = self.vi.then(|| Vim::new(Mode::Insert));
+        if let Some(v) = &vim {
+            textarea.set_cursor_style(cursor_style(v.mode()));
         }
         let mut hist_pos: Option<usize> = None;
         let mut draft = String::new();
@@ -195,14 +210,14 @@ impl StructuralFrontend {
                     if textarea.cursor().0 == 0 {
                         self.history_prev(&mut textarea, &mut hist_pos, &mut draft);
                     } else {
-                        textarea.input(k);
+                        edit_key(&mut vim, &mut textarea, k);
                     }
                 }
                 KeyCode::Down if k.modifiers.is_empty() => {
                     if textarea.cursor().0 == textarea.lines().len() - 1 {
                         self.history_next(&mut textarea, &mut hist_pos, &mut draft);
                     } else {
-                        textarea.input(k);
+                        edit_key(&mut vim, &mut textarea, k);
                     }
                 }
                 KeyCode::Enter => {
@@ -214,7 +229,7 @@ impl StructuralFrontend {
                     }
                 }
                 _ => {
-                    textarea.input(k);
+                    edit_key(&mut vim, &mut textarea, k);
                 }
             }
         };
@@ -326,6 +341,45 @@ fn new_textarea() -> TextArea<'static> {
     let mut ta = TextArea::default();
     ta.set_cursor_line_style(Style::default());
     ta
+}
+
+/// The cursor style for a Vim [`Mode`]: a reversed block in the modal modes
+/// (Normal/Visual/Operator/Replace), the editor default in Insert.  Tasteful
+/// and palette-neutral — the loud per-mode colours of the upstream example are
+/// deliberately not carried over; this presentation mapping is per-frontend.
+fn cursor_style(mode: Mode) -> Style {
+    match mode {
+        Mode::Insert => Style::default(),
+        _ => Style::default().add_modifier(Modifier::REVERSED),
+    }
+}
+
+/// Apply one keystroke to the editor.  With vi keys on (`vim` is `Some`) it
+/// runs the canonical `textarea-vim` driver fold — feeding the key through the
+/// state machine, re-styling the cursor on a mode change, and treating `Quit`
+/// as a no-op (a REPL prompt has no editor to quit; Ctrl-D remains the eof
+/// path).  Off, it is plain `textarea.input(k)`, leaving the emacs path
+/// untouched.  The single dispatch point both fallthrough arms and the final
+/// `_` arm route through, so the fold lives in one place.
+fn edit_key(
+    vim: &mut Option<Vim>,
+    textarea: &mut TextArea<'static>,
+    k: ratatui::crossterm::event::KeyEvent,
+) {
+    let Some(v) = vim.take() else {
+        textarea.input(k);
+        return;
+    };
+    *vim = Some(match v.transition(k.into(), textarea) {
+        Transition::Mode(m) if v.mode() != m => {
+            textarea.set_cursor_style(cursor_style(m));
+            Vim::new(m)
+        }
+        Transition::Nop | Transition::Mode(_) => v,
+        Transition::Pending(p) => v.with_pending(p),
+        // No editor to quit in a REPL prompt: a no-op.
+        Transition::Quit => v,
+    });
 }
 
 /// Whether the editor holds no text at all (every line empty).

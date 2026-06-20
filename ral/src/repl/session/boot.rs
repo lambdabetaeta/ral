@@ -229,7 +229,7 @@ pub(super) fn create_frontend(
         // errors when unavailable, so a failure degrades to rustyline below.
         #[cfg(feature = "structural")]
         Some("structural") => {
-            if let Ok(fe) = StructuralFrontend::new() {
+            if let Ok(fe) = StructuralFrontend::new(edit_mode) {
                 return Box::new(fe);
             }
         }
