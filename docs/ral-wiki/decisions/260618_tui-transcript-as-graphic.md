@@ -26,7 +26,10 @@ visual variables (shape, value, size, hue, grain, orientation).
 > size bars (Move 4) and diff-density grain (Move 5), graded reduction (Move 6),
 > the agent×step matrix (Move 2), and coherent degradation (Move 7) are
 > implemented in `exarch/src/tui/`. Only Phase 8 (the projection switch — the
-> codebase map and a keybinding to cycle projections) remains `proposed`.
+> codebase map and a keybinding to cycle projections) remains `proposed`. A later
+> amendment under Move 6 (2026-06-20) proposes coalescing observation-only `ral`
+> calls into a dialable *block* (a live-tip L1, no L0), with each `diff` an
+> always-visible barrier between blocks, and is not yet built.
 ## The diagnosis
 
 The present TUI is a *narrative log*:
@@ -152,6 +155,54 @@ event on the bus, while move 7 can deepen with one.
    instead of a click flipping state. Reduction *is* the interaction — the user
    constructs the view by removing detail, the way one reduces a matrix to find
    its structure.
+
+   > **Amended 2026-06-20 — the unit of reduction is the observation *block*; a
+   > write is the barrier that breaks it.**
+   > Move 6 dials a single `Block`, but the noise it must quiet is a *burst* of
+   > `ral` calls, and a call's file I/O is not a sibling of the next call — it is
+   > that call's own effect. Each call's reads, execs, and writes surface as their
+   > own blocks ([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-
+   > execs]]) and land *between* the calls: arrival order is
+   > `ToolCall_N · io_N · diff_N · ToolCall_{N+1} · …`, because the surface buffers
+   > flush at the call's own result (`tui.rs:706`/`772` io, `:685`/`:738` patch,
+   > both through `flush_surfaces` at `:715`; `set_result_size` searches back past
+   > them, `viewport.rs:293`). So coalescing "a contiguous run of `ToolCall`
+   > blocks" is the wrong cut twice over: the blocks are not contiguous, and folding
+   > across them would swallow the reads and writes — the loudest signal.
+   >
+   > The transcript instead reads as `block · diff · block · diff · …`. A **block**
+   > coalesces a run of observation-only calls (those whose effects are only reads,
+   > greps, and execs) into one dialable object; a **diff is the barrier** — it ends
+   > the current block, renders as its own always-visible block (keeping its own
+   > header↔hunks dial), and a fresh block starts after it. A write is the
+   > codebase's audit trail and can never be folded away; observation is recoverable
+   > context and compresses hard. This is a *projection*, not a stored object
+   > (§"Why this shape": the same buffer re-read) — the flatten groups what arrival
+   > order already adjoins, so push, `user.log`, aggregation, and `set_result_size`
+   > are untouched. (A deliberately `surface`d `text`/`fields`/`measure` card is the
+   > model's own communication, not an effect, and stays a standalone block.)
+   >
+   > The block carries a three-level dial — **there is no L0; L1 is the floor:**
+   > - **L1, the live tip.** One line — the *latest* call's intent and the
+   >   sparkline (Move 4's size bars drawn *vertically*, one bar per call,
+   >   `▁▂▃▄▅▆▇█`, sequence on x and magnitude on y; the bar count *is* the call
+   >   count, so the `×N` digit is dropped) — then, on the next line, that latest
+   >   call's reads / greps / execs, coalesced. Only the newest call shows as text;
+   >   every earlier call is its bar alone, and the line refreshes to the newest
+   >   call as the block grows. It is a monitoring read (cf. the Move 3 amendment):
+   >   what the model is doing *now*, over the shape of what it has done.
+   > - **L2, the full list.** The block unfolds to every call — each with its
+   >   intent, its reads/greps/execs, and its bar.
+   > - **L3, everything.** The above plus each call's full ral source.
+   >
+   > The sparkline obeys the Gantt lesson (Move 3 amendment): it is ink only where
+   > the magnitudes vary; a flat burst still earns its single live-tip line and its
+   > de-duplicated `ral` token, just not a legible bar profile. Two boundaries
+   > against the rest of the ADR: magnitude rides the bars, **distress does not** —
+   > fidelity (Move 7) modulates the *intent line's* value, never a bar's height, so
+   > a short bar can never be misread as a stressed call. And this is a TUI
+   > projection only — headless prints each call and its effects in arrival order,
+   > unchanged.
 
 7. **Coherent degradation: the interface's fidelity tracks the model's
    capability.** Every agent TUI renders a degraded answer — one emitted under
