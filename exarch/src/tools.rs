@@ -18,7 +18,7 @@ use crate::event::ToolResult as SessionToolResult;
 use crate::provider::Provider;
 use crate::session::{Session, Staged};
 use serde_json::Value;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 
 mod agent;
@@ -63,7 +63,7 @@ pub(crate) trait Tool: Send + Sync {
         id: String,
         input: Value,
         session: &mut Session,
-        provider: &'env Provider,
+        provider: &'env Arc<Provider>,
         token: &'env crate::cancel::Token,
         emit: &Emitter,
         scope: &'scope thread::Scope<'scope, 'env>,
@@ -77,6 +77,8 @@ pub(crate) fn registry() -> &'static [Box<dyn Tool>] {
         vec![
             Box::new(ral::RalTool),
             Box::new(agent::AgentTool),
+            Box::new(agent::AgentsTool),
+            Box::new(agent::AgentCancelTool),
             Box::new(fff::FffTool),
         ]
     })

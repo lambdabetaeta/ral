@@ -26,7 +26,7 @@ pub use outcome::{CommandFailure, Signal, SpawnFailure, WaitOutcome};
 
 pub use lease::TerminalLease;
 
-pub use reaper::{arm_callback, arm_lifetime};
+pub use reaper::{Deadline, arm_callback, arm_lifetime};
 
 pub use signal::{
     CancelCause, CancelScope, ChildHandle, DurableRoot, ForegroundCancelSlot, ForegroundScope,

@@ -8,6 +8,7 @@
 //! provider (see [`provider::Provider::scripted`]).
 
 pub mod agent_builtins;
+pub mod agent_registry;
 pub mod bootstrap;
 pub mod bus;
 pub mod cancel;
@@ -162,7 +163,10 @@ pub fn run() -> Result<(), String> {
     let system = prompt::assemble(&c.system_files, &caps, scratch.path(), c.headless)?;
     let system_size = system.len();
 
-    let provider = Provider::build(&id, model.clone(), &cred, c.max_tokens);
+    // Behind an `Arc` from the start: an async `agent` worker captures a
+    // clone to outlive its spawning turn, and a `/model` switch swaps this
+    // for a fresh one without disturbing children already running.
+    let provider = std::sync::Arc::new(Provider::build(&id, model.clone(), &cred, c.max_tokens));
     let mut session = Session::root(
         system,
         caps,

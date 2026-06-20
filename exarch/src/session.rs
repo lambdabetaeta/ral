@@ -15,6 +15,7 @@ use crate::provider::{Provider, ProviderError, StepOut, StopReason, ToolCall};
 use crate::shell_eval;
 use ral_core::Shell;
 use std::io;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
@@ -48,6 +49,13 @@ pub struct Session {
     /// driver).  See `ral_core`'s `run_turn` frame guard for the IO half
     /// of the same panic-recovery contract.
     durable: ral_core::types::Mobile,
+    /// Live async `agent` workers spawned this session.  Only the root
+    /// populates it (`agent` is root-only); a forked child carries an empty
+    /// one it never uses.  Survives `/clear`: `clear` bumps its generation
+    /// and cancels its workers rather than replacing it, so a worker that
+    /// settles after the clear (holding a clone of this same registry) finds
+    /// its generation stale and drops its result.
+    pub(crate) agents: crate::agent_registry::AgentRegistry,
 }
 
 /// Outcome of one [`Session::apply`].  Degenerate cases (`Empty`,
@@ -102,6 +110,7 @@ impl Session {
             expect_action,
             acted: false,
             durable,
+            agents: crate::agent_registry::AgentRegistry::new(),
         }
     }
 
@@ -141,6 +150,10 @@ impl Session {
         let shell = boot_root_shell(scratch);
         self.log.clear(self.system.len())?;
         self.replace_shell(shell);
+        // Cancel every live async agent and advance the generation so any
+        // worker that settles after this clear drops its result rather than
+        // delivering it into the rebuilt context.
+        self.agents.clear();
         Ok(())
     }
 
@@ -216,7 +229,7 @@ impl Session {
 
     pub fn apply(
         &mut self,
-        provider: &Provider,
+        provider: &Arc<Provider>,
         prompt: Option<String>,
         token: &cancel::Token,
         emit: &Emitter,
@@ -234,7 +247,7 @@ impl Session {
         // Every provider round-trip — each user turn, each nudge iteration —
         // passes through here, so long autonomous and headless runs stay
         // bounded.
-        self.compact(provider, emit, false);
+        self.compact(provider, emit, false, token);
         if let Some(p) = prompt {
             self.log
                 .append_user(p)
@@ -271,14 +284,20 @@ impl Session {
             emit.emit(Kind::Phase("waiting for model".into()));
             let step_out = {
                 let token_emit = emit.clone();
-                provider.complete(&self.system, messages, !self.is_subagent, &mut |t: &str| {
-                    #[cfg(debug_assertions)]
-                    if first_token.is_none() {
-                        first_token = Some(t_req.elapsed());
-                    }
-                    last_text.push_str(t);
-                    token_emit.emit(Kind::Token(t.to_string()));
-                })
+                provider.complete(
+                    &self.system,
+                    messages,
+                    !self.is_subagent,
+                    &mut |t: &str| {
+                        #[cfg(debug_assertions)]
+                        if first_token.is_none() {
+                            first_token = Some(t_req.elapsed());
+                        }
+                        last_text.push_str(t);
+                        token_emit.emit(Kind::Token(t.to_string()));
+                    },
+                    token,
+                )
             };
             ral_core::dbg_trace!(
                 "turn",
@@ -397,7 +416,7 @@ impl Session {
     pub fn run_turn<S: Sink>(
         &mut self,
         sink: &mut S,
-        provider: &Provider,
+        provider: &Arc<Provider>,
         prompt: Option<String>,
     ) -> Result<(), String> {
         let id = self.id;
@@ -458,7 +477,13 @@ impl Session {
         outcome
     }
 
-    pub(crate) fn compact(&mut self, provider: &Provider, emit: &Emitter, requested: bool) {
+    pub(crate) fn compact(
+        &mut self,
+        provider: &Arc<Provider>,
+        emit: &Emitter,
+        requested: bool,
+        token: &cancel::Token,
+    ) {
         if !self.log.can_compact() {
             if requested {
                 self.note_error("cannot compact while tool results are pending".into(), emit);
@@ -472,7 +497,7 @@ impl Session {
         // A turn-boundary Esc must not kick off a summarize request we'd
         // only instantly cancel; bail before the work and let `apply`'s
         // post-compact check return to the prompt.
-        if cancel::is_set() {
+        if token.is_cancelled() {
             return;
         }
         self.note_dim(
@@ -480,7 +505,7 @@ impl Session {
             emit,
         );
         emit.emit(Kind::Phase("compacting history".into()));
-        match provider.summarize(&self.system, self.log.history_messages()) {
+        match provider.summarize(&self.system, self.log.history_messages(), token) {
             Ok(summary) => {
                 if let Err(e) = self.log.record_usage(summary.usage.into()) {
                     self.note_error(format!("compact failed: {e}"), emit);
@@ -504,7 +529,7 @@ impl Session {
 
     fn dispatch(
         &mut self,
-        provider: &Provider,
+        provider: &Arc<Provider>,
         tool_calls: Vec<ToolCall>,
         token: &cancel::Token,
         emit: &Emitter,
@@ -538,7 +563,7 @@ impl Session {
 
     fn stage<'scope, 'env: 'scope>(
         &mut self,
-        provider: &'env Provider,
+        provider: &'env Arc<Provider>,
         call: ToolCall,
         token: &'env cancel::Token,
         emit: &Emitter,
@@ -766,6 +791,11 @@ mod tests {
     use ral_core::types::{BuiltinBody, BuiltinEntry, Settled};
     use std::borrow::Cow;
 
+    /// A scripted provider behind the `Arc` the turn driver threads.
+    fn scripted(model: &str, script: Script) -> Arc<Provider> {
+        Arc::new(Provider::scripted(model, script))
+    }
+
     /// A nullary builtin whose body panics — stands in for any Rust panic
     /// the evaluator can raise mid-tool-eval.
     fn builtin_panic_now(_args: &[Value], _shell: &mut Shell) -> Settled<Value> {
@@ -821,7 +851,7 @@ mod tests {
         let baseline_grant_depth = session.shell.mobile.context.grants.iter().count();
 
         // 1st call binds `a4_x` (completes); 2nd call panics mid-eval.
-        let provider = Provider::scripted(
+        let provider = scripted(
             "test-model",
             Script::new()
                 .then(Reply::tool_calls(vec![ral_call("c1", "let a4_x = 7")]))
@@ -852,7 +882,7 @@ mod tests {
 
         // The next turn is admissible and runs to completion on the
         // healed shell.
-        let provider2 = Provider::scripted("test-model", Script::new().then(Reply::text("ok")));
+        let provider2 = scripted("test-model", Script::new().then(Reply::text("ok")));
         let (tx, _rx) = std::sync::mpsc::channel();
         let emit = Emitter::new(tx, session.id);
         let root = cancel::mint_root();
@@ -884,7 +914,7 @@ mod tests {
 
         // The child would complete with "leaked" on the scripted provider;
         // honouring the shared token, it must cancel instead.
-        let provider = Provider::scripted("test-model", Script::new().then(Reply::text("leaked")));
+        let provider = scripted("test-model", Script::new().then(Reply::text("leaked")));
         let (tx, _rx) = std::sync::mpsc::channel();
         let emit = Emitter::new(tx, child.id);
         match child.apply(&provider, Some("do work".into()), &child_token, &emit) {

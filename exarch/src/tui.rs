@@ -29,6 +29,7 @@ use line::usage_text;
 
 use crate::bootstrap::Scratch;
 use crate::bus::{Event, Hunk, Inbox, Kind, Pass, SessionId, Sink, drain_pass, pump};
+use std::sync::Arc;
 use crate::cancel;
 use crate::credential::CredentialStore;
 use crate::models::{LiveSource, ModelCatalog, ModelSource};
@@ -1980,9 +1981,11 @@ type FetchRx = std::sync::mpsc::Receiver<(provider::ProviderId, Result<Vec<Strin
 struct Repl<'a> {
     tui: Tui,
     session: &'a mut Session,
-    /// The active provider, owned so a `/model` switch can rebuild it in
-    /// place — a swappable field rather than a launch-time `&Provider`.
-    provider: Provider,
+    /// The active provider behind an `Arc`, so a `/model` switch can swap in
+    /// a freshly built one while any already-running async agent keeps the
+    /// clone it captured at spawn (the switch replaces this field, not the
+    /// child's transport).
+    provider: Arc<Provider>,
     info: &'a SessionInfo<'a>,
     /// The auto-discovered credentials a `/model` switch draws the chosen
     /// provider's key from, and the live model catalog the picker fetches
@@ -1998,7 +2001,7 @@ struct Repl<'a> {
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     session: &mut Session,
-    provider: Provider,
+    provider: Arc<Provider>,
     info: &SessionInfo<'_>,
     store: &CredentialStore,
     catalog: &mut ModelCatalog<LiveSource>,
@@ -2202,14 +2205,15 @@ impl Repl<'_> {
     fn cmd_compact(&mut self) -> Slash {
         let id = self.session.id;
         // Publish a root token for the duration of the summarize, as
-        // `run_turn` does: without it `cancel::is_set()` reads the null
-        // slot and the provider's mid-stream cancel race never fires, so
-        // Esc could not stop the in-flight summarize request.
-        let _root = cancel::mint_root();
+        // `run_turn` does, and hand its clone to `compact` so the
+        // provider's request-local cancel sees an Esc — the signal handler
+        // sets this published slot's flag, which is the token we pass.
+        let root = cancel::mint_root();
+        let token = root.token().clone();
         let provider = &self.provider;
         let session = &mut *self.session;
         let _ = pump(&mut self.tui, id, |emit| {
-            session.compact(provider, emit, true)
+            session.compact(provider, emit, true, &token)
         });
         Slash::Continue
     }
@@ -2363,8 +2367,12 @@ impl Repl<'_> {
             );
             return;
         };
-        self.provider =
-            Provider::build(&provider_id, model.clone(), &cred, self.info.max_tokens_override);
+        self.provider = Arc::new(Provider::build(
+            &provider_id,
+            model.clone(),
+            &cred,
+            self.info.max_tokens_override,
+        ));
         let label = provider_id.label();
         let status_provider = crate::oauth::provider_label(self.provider.is_subscription(), label);
         self.tui.app.set_status_model(&status_provider, &model);
