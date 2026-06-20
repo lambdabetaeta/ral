@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 7ba500b
-generated_at_date: 2026-06-17
-covers_paths: [ral/src/repl/frontend.rs, ral/src/repl/frontend/, ral/src/repl/complete.rs]
+generated_at_commit: 738fa73
+generated_at_date: 2026-06-20
+covers_paths: [ral/src/repl/frontend.rs, ral/src/repl/frontend/, ral/src/repl/completion.rs, ral/src/repl/complete.rs]
 ---
 
 # Map: repl / frontend
@@ -25,20 +25,44 @@ Ctrl-D kill the shell from the rustyline path). History saves *append* the
 session's own entries rather than rewriting the file, so concurrent sessions do
 not clobber each other.
 
-Two implementations live in `frontend/`:
+Three implementations live in `frontend/`, selected by `Surface`
+(`--surface` flag or rc `surface:`; the capability gate forces `minimal` on
+dumb terminals whatever was asked):
 
 - `minimal.rs::MinimalFrontend` — canonical-stdin fallback for dumb terminals
   and `RAL_INTERACTIVE_MODE=minimal`. No raw mode, no DECSET, no plugin
   features; just `read_line` with a `> ` continuation prompt.
-- `rustyline.rs::RustylineFrontend` — the real editor: completion, plugin
+- `rustyline.rs::RustylineFrontend` — the default editor: completion, plugin
   keybindings, ghost text, highlights, and rustyline history, on TTYs that
   support raw mode and ANSI.
+- `structural.rs::StructuralFrontend` — the ratatui inline-viewport projection
+  surface (`structural` feature, `--surface structural`): the typed spine,
+  worksheet, and handles matrix around the prompt, plus Tab completion (below).
+  See [[decisions/260620_repl-as-structural-surface|repl-as-structural-surface]].
 
 ## Completion
 
-`complete.rs::RalHelper` implements rustyline's `Completer`, `Hinter`, and
-`Highlighter`. Completion classifies the token under the cursor as
-variable / command / path and offers candidates accordingly. Ghost text and
-syntax highlights are *not* computed here — they come from plugin
-`buffer-change` hooks recorded in the [[map/repl/plugins|`PluginRuntime`]], and
-`RalHelper` only paints what the runtime last produced.
+The completion *engine* is frontend-neutral: `completion.rs` classifies the
+token under the cursor (`$`-variable / command-position name / path), gathers
+candidates from a `Sources` snapshot of the live shell (PATH commands +
+builtins + handlers + bindings; cwd-anchored path entries), and ranks them.
+`completion::complete(line, pos, &Sources) -> (replace_from, Vec<Candidate>)`
+is the single entry point both surfaces call. Ranking is `nucleo` fuzzy
+matching for every surface — path-tuned for path entries, ties broken
+alphabetically.
+
+- `complete.rs::RalHelper` is the **rustyline adapter**: it holds the `Sources`
+  snapshot (rebuilt each prompt via `refresh`), delegates `Completer::complete`
+  to the engine, and maps each `Candidate` to a rustyline `Pair`. It also
+  implements `Hinter`/`Highlighter` — ghost text and syntax highlights are *not*
+  computed here; they come from plugin `buffer-change` hooks recorded in the
+  [[map/repl/plugins|`PluginRuntime`]], and `RalHelper` only paints what the
+  runtime last produced. `style_ansi` is the source of truth for the legal
+  highlight-style vocabulary `_ed-highlight` validates against.
+- `structural.rs` drives the engine as a **drop-down menu band**: Tab completes
+  the token under the cursor — a unique match is spliced in place
+  (`apply_candidate`), several open a bordered popup (`render_menu`) over the
+  top of the projection band, anchored under the token. Tab/↓ and ⇧Tab/↑ cycle
+  the selection, Enter accepts, Esc (or any editing key) dismisses. The lower
+  band reserves room for the menu so a fresh session still has space to drop it
+  down.

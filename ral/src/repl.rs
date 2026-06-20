@@ -5,7 +5,10 @@
 //! runs the loop.  This file is the entry point and module-tree root.
 //!
 //! Submodules factor out orthogonal concerns:
-//! - [`complete`] -- Tab completion (commands, variables, paths).
+//! - [`completion`] -- Frontend-neutral completion engine (classification,
+//!   candidate sources, fuzzy/prefix ranking) shared by every surface.
+//! - [`complete`] -- The rustyline adapter over [`completion`]: completer,
+//!   ghost-text hinter, and plugin syntax highlighting.
 //! - [`config`]   -- RC file discovery, parsing, and application.
 //! - [`cursor`]   -- ANSI cursor-position queries (Unix only).
 //! - [`errfmt`]   -- REPL-specific error formatting helpers.
@@ -28,6 +31,7 @@
 //!   for the structural surface's reactive worksheet.
 
 mod complete;
+mod completion;
 mod config;
 mod plugin;
 mod plugin_ed_builtins;

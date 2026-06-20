@@ -35,6 +35,9 @@ ratatui-textarea = { version = "0.9", optional = true }
 # Vim-mode state machine shared with exarch's TUI prompt; only pulled in with
 # the structural surface, which is the only frontend that edits in a TextArea.
 textarea-vim = { path = "../textarea-vim", optional = true }
+# Fuzzy matcher (the Helix team's) behind the shared completion engine; every
+# frontend ranks completions fuzzily through it.
+nucleo-matcher = "0.3"
 serde      = { workspace = true }
 serde_json = { workspace = true }
 clap       = { workspace = true }

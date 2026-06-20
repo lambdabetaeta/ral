@@ -38,9 +38,9 @@ use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Paragraph, Widget, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget, Wrap};
 use ratatui::{TerminalOptions, Viewport};
-use ratatui_textarea::{CursorMove, TextArea};
+use ratatui_textarea::{CursorMove, DataCursor, TextArea};
 use textarea_vim::{Mode, Transition, Vim};
 
 use std::collections::HashSet;
@@ -53,6 +53,8 @@ use super::super::prompt::PromptText;
 use super::{EditBuffer, Frontend, History, Read};
 #[cfg(unix)]
 use crate::jobs::JobTable;
+use crate::repl::completion::{self, Candidate, Sources};
+use crate::repl::plugin_editor::char_to_byte;
 use crate::repl::worksheet::Worksheet;
 
 // ── Palette ───────────────────────────────────────────────────────────────
@@ -71,6 +73,29 @@ const TICK: Duration = Duration::from_millis(120);
 /// Upper bound on the inline viewport's height, so a session with many
 /// bindings never swallows the whole screen — scrollback must stay visible.
 const MAX_VIEWPORT: u16 = 18;
+
+/// The completion menu shows at most this many candidate rows at once,
+/// scrolling within them.  The lower band reserves room for this many rows so
+/// a menu opened on a fresh session (empty worksheet) still has space to drop
+/// down rather than being clipped to a two-row projection band.
+const MENU_MAX_ROWS: u16 = 6;
+
+/// An open completion menu: the ranked candidates from [`completion::complete`]
+/// and the buffer span they replace.  Tab opens it (when more than one
+/// candidate matches), Tab/↓ and ⇧Tab/↑ cycle the selection, Enter accepts the
+/// selected candidate, and Esc — or any editing key — dismisses it.
+struct Menu {
+    candidates: Vec<Candidate>,
+    selected: usize,
+    /// Byte offset into the trigger row where the chosen replacement starts.
+    replace_from: usize,
+    /// The editor row the menu was opened on; accept aborts if the cursor has
+    /// since left it.
+    row: usize,
+    /// Screen column the popup drops down under: the prompt prefix width plus
+    /// the token's start column, so the list aligns under what is being typed.
+    anchor_col: u16,
+}
 
 pub(in crate::repl) struct StructuralFrontend {
     history: History,
@@ -149,6 +174,12 @@ impl StructuralFrontend {
         }
         let mut hist_pos: Option<usize> = None;
         let mut draft = String::new();
+        // Lazily-built completion candidate snapshot, and the open menu (if
+        // any).  The snapshot is built on the first Tab and reused for the rest
+        // of this compose — no evaluation happens while composing, so the
+        // commands/variables/cwd it captures cannot change underfoot.
+        let mut sources: Option<Sources> = None;
+        let mut menu: Option<Menu> = None;
 
         enable_raw_mode()?;
         let (_cols, rows) = size().unwrap_or((80, 24));
@@ -177,7 +208,7 @@ impl StructuralFrontend {
                 last_buf = Some(s.clone());
             }
             terminal.draw(|frame| {
-                render(frame, &prompt_lines, &textarea, &spine, &ws_rows, &matrix);
+                render(frame, &prompt_lines, &textarea, &spine, &ws_rows, &matrix, menu.as_ref());
             })?;
 
             if !event::poll(TICK)? {
@@ -190,6 +221,41 @@ impl StructuralFrontend {
                 continue;
             }
             let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+
+            // While the completion menu is open it owns the keys: ↓/Tab and
+            // ↑/⇧Tab cycle the selection, Enter accepts, Esc or Ctrl-C dismiss.
+            // Any other key dismisses the menu and falls through to ordinary
+            // editing, so typing continues seamlessly.  Handled before the
+            // normal dispatch so Tab/Enter/Esc mean menu actions here.
+            if menu.is_some() {
+                let n = menu.as_ref().map_or(0, |m| m.candidates.len());
+                match k.code {
+                    KeyCode::Tab | KeyCode::Down => {
+                        let m = menu.as_mut().unwrap();
+                        m.selected = (m.selected + 1) % n;
+                        continue;
+                    }
+                    KeyCode::BackTab | KeyCode::Up => {
+                        let m = menu.as_mut().unwrap();
+                        m.selected = (m.selected + n - 1) % n;
+                        continue;
+                    }
+                    KeyCode::Enter => {
+                        accept_completion(&mut textarea, &menu.take().unwrap());
+                        continue;
+                    }
+                    KeyCode::Esc => {
+                        menu = None;
+                        continue;
+                    }
+                    KeyCode::Char('c') if ctrl => {
+                        menu = None;
+                        continue;
+                    }
+                    _ => menu = None, // dismiss, then edit normally below
+                }
+            }
+
             match k.code {
                 KeyCode::Char('c') if ctrl => {
                     if is_empty(&textarea) {
@@ -218,6 +284,30 @@ impl StructuralFrontend {
                         self.history_next(&mut textarea, &mut hist_pos, &mut draft);
                     } else {
                         edit_key(&mut vim, &mut textarea, k);
+                    }
+                }
+                KeyCode::Tab => {
+                    // Build the candidate snapshot once, then complete the
+                    // token under the cursor.  A unique match is applied in
+                    // place; several open the menu; none is a no-op.
+                    let DataCursor(row, col) = textarea.cursor();
+                    let line = textarea.lines()[row].clone();
+                    let cursor_byte = char_to_byte(&line, col);
+                    let src = sources.get_or_insert_with(|| Sources::from_shell(shell));
+                    let (start, candidates) = completion::complete(&line, cursor_byte, src);
+                    match candidates.as_slice() {
+                        [] => {}
+                        [only] => apply_candidate(&mut textarea, row, start, cursor_byte, &only.replacement),
+                        _ => {
+                            let anchor_col = prompt_lines.last_w + line[..start].chars().count() as u16;
+                            menu = Some(Menu {
+                                candidates,
+                                selected: 0,
+                                replace_from: start,
+                                row,
+                                anchor_col,
+                            });
+                        }
                     }
                 }
                 KeyCode::Enter => {
@@ -404,6 +494,49 @@ fn place_cursor(ta: &mut TextArea<'static>, char_offset: usize) {
     for _ in 0..char_offset {
         ta.move_cursor(CursorMove::Forward);
     }
+}
+
+// ── Completion ───────────────────────────────────────────────────────────────
+
+/// Apply the selected candidate of an open [`Menu`]: replace the token from
+/// the menu's `replace_from` to the current cursor (which has not moved while
+/// the menu owned the keys) with the chosen replacement.  Aborts if the cursor
+/// has left the trigger row.
+fn accept_completion(ta: &mut TextArea<'static>, menu: &Menu) {
+    let DataCursor(row, col) = ta.cursor();
+    if row != menu.row {
+        return;
+    }
+    let end = char_to_byte(&ta.lines()[row], col);
+    let replacement = menu.candidates[menu.selected].replacement.clone();
+    apply_candidate(ta, row, menu.replace_from, end, &replacement);
+}
+
+/// Replace bytes `[start, end)` of editor row `row` with `replacement`, then
+/// park the cursor at the end of the inserted text.  Rebuilds the buffer
+/// through the same primitives history recall uses ([`set_text`] +
+/// [`place_cursor`]), so no row-local TextArea edit API is needed; a stale
+/// offset (not on a char boundary, or out of range) is a no-op.
+fn apply_candidate(ta: &mut TextArea<'static>, row: usize, start: usize, end: usize, replacement: &str) {
+    let lines: Vec<String> = ta.lines().to_vec();
+    let (new_row, abs) = {
+        let Some(r) = lines.get(row) else {
+            return;
+        };
+        if start > end || !r.is_char_boundary(start) || !r.is_char_boundary(end) {
+            return;
+        }
+        let new_col = r[..start].chars().count() + replacement.chars().count();
+        let new_row = format!("{}{replacement}{}", &r[..start], &r[end..]);
+        // Absolute char offset across the buffer: every prior row plus its
+        // newline, then the cursor's column within the rebuilt row.
+        let prior: usize = lines.iter().take(row).map(|l| l.chars().count() + 1).sum();
+        (new_row, prior + new_col)
+    };
+    let mut lines = lines;
+    lines[row] = new_row;
+    set_text(ta, &lines.join("\n"));
+    place_cursor(ta, abs);
 }
 
 // ── Projection 1: the typed spine ───────────────────────────────────────────
@@ -818,7 +951,12 @@ fn viewport_height(
     let prompt = lead + prompt_rows(textarea);
     let ws = 1 + worksheet.len().max(1) as u16;
     let mx = 1 + matrix.len().max(1) as u16;
-    let needed = prompt + 1 + ws.max(mx);
+    // The lower band holds either the projections or a completion menu,
+    // whichever is taller, so a menu opened on a fresh session (empty
+    // worksheet) still has room to drop down rather than being clipped to the
+    // two-row projection placeholder.
+    let lower = ws.max(mx).max(MENU_MAX_ROWS + 2);
+    let needed = prompt + 1 + lower;
     needed.clamp(1, MAX_VIEWPORT).min(rows.saturating_sub(1).max(1))
 }
 
@@ -829,6 +967,7 @@ fn render(
     spine: &Spine,
     worksheet: &[WsRow],
     matrix: &[MxRow],
+    menu: Option<&Menu>,
 ) {
     let area = frame.area();
     let lead_rows = prompt.lead.len() as u16;
@@ -864,6 +1003,12 @@ fn render(
     // runs after `render_prompt`; the caret row sits in its own area below.
     overlay_type_error(frame, editor_band, caret_area, prompt.last_w, textarea, spine);
     render_projections(frame, rest, worksheet, matrix);
+    // The completion menu drops down over the top of the projection band,
+    // anchored under the token being completed; it owns the keys while open,
+    // so the projections beneath it are inert and may be covered.
+    if let Some(m) = menu {
+        render_menu(frame, rest, m);
+    }
 }
 
 fn render_spine(frame: &mut ratatui::Frame, area: Rect, spine: &Spine) {
@@ -1082,6 +1227,58 @@ fn render_projections(frame: &mut ratatui::Frame, area: Rect, worksheet: &[WsRow
     frame.render_widget(Paragraph::new(mx_lines), mx_area);
 }
 
+/// Draw the completion menu as a bordered popup dropping down over the top of
+/// the projection band, its left edge anchored under the token being completed
+/// (clamped to stay within the band).  The selected row is reversed; the list
+/// scrolls within [`MENU_MAX_ROWS`] so a long candidate set stays navigable.
+fn render_menu(frame: &mut ratatui::Frame, area: Rect, menu: &Menu) {
+    if area.height < 3 || menu.candidates.is_empty() {
+        return;
+    }
+    // Width fits the widest candidate plus borders; height fits the visible
+    // rows plus borders.  Both clamp to the band.
+    let widest = menu
+        .candidates
+        .iter()
+        .map(|c| c.display.chars().count() as u16)
+        .max()
+        .unwrap_or(0);
+    let pop_w = (widest + 2).clamp(10, area.width);
+    let visible = (menu.candidates.len() as u16)
+        .min(MENU_MAX_ROWS)
+        .min(area.height - 2);
+    let rect = Rect {
+        x: area.x + menu.anchor_col.min(area.width.saturating_sub(pop_w)),
+        y: area.y,
+        width: pop_w,
+        height: visible + 2,
+    };
+
+    // Scroll the window so the selected row stays visible.
+    let window = visible as usize;
+    let start = menu.selected.saturating_sub(window.saturating_sub(1));
+    let lines: Vec<Line> = menu
+        .candidates
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(window)
+        .map(|(i, c)| {
+            let mut style = Style::default().fg(NAME_HUE);
+            if i == menu.selected {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+            Line::from(Span::styled(c.display.clone(), style))
+        })
+        .collect();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(SLATE));
+    frame.render_widget(Clear, rect);
+    frame.render_widget(Paragraph::new(lines).block(block), rect);
+}
+
 /// Commit the submitted line into scrollback above the viewport: the styled
 /// prompt — its lead rows and last-line prefix — followed by the entered
 /// text, in the live prompt's colours.
@@ -1203,6 +1400,42 @@ mod tests {
         // A multi-line recall round-trips its newlines.
         set_text(&mut ta, "a\nb");
         assert_eq!(ta.lines(), ["a", "b"]);
+    }
+
+    /// Applying a completion splices the chosen replacement over the token's
+    /// byte span and lands the cursor just past it — the path case: `re`
+    /// becomes `repl/` inside `cd src/re`.
+    #[test]
+    fn apply_candidate_splices_path_token() {
+        let mut ta = new_textarea();
+        ta.insert_str("cd src/re");
+        // The name needle `re` occupies bytes 7..9; the engine's replacement
+        // for a directory carries the trailing slash.
+        apply_candidate(&mut ta, 0, 7, 9, "repl/");
+        assert_eq!(ta.lines(), ["cd src/repl/"]);
+        assert_eq!(ta.cursor(), (0, "cd src/repl/".chars().count()));
+    }
+
+    /// A completion on a continuation row replaces only that row and places the
+    /// cursor on it — the absolute offset accounts for the rows above.
+    #[test]
+    fn apply_candidate_targets_the_right_row() {
+        let mut ta = new_textarea();
+        ta.insert_str("ls |\nca");
+        // Replace `ca` (bytes 0..2 of row 1) with the command `cat`.
+        apply_candidate(&mut ta, 1, 0, 2, "cat");
+        assert_eq!(ta.lines(), ["ls |", "cat"]);
+        assert_eq!(ta.cursor(), (1, 3));
+    }
+
+    /// A stale span (offsets past the row, or off a char boundary) is a no-op
+    /// rather than a panic.
+    #[test]
+    fn apply_candidate_ignores_a_stale_span() {
+        let mut ta = new_textarea();
+        ta.insert_str("hi");
+        apply_candidate(&mut ta, 0, 1, 99, "xyz");
+        assert_eq!(ta.lines(), ["hi"]);
     }
 
     /// A long value preview is truncated with an ellipsis.

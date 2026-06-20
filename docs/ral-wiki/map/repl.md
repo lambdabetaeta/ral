@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 7ba500b
-generated_at_date: 2026-06-17
+generated_at_commit: 738fa73
+generated_at_date: 2026-06-20
 covers_paths: [ral/src/]
 ---
 
@@ -28,8 +28,10 @@ thing the loop threads.
 - [[map/repl/loop|loop]] — the `Session` state machine and one-turn cycle: boot,
   prompt, rc/profile sourcing, value printing (`ral/src/repl/session*`,
   `exec.rs`, `prompt.rs`, `config.rs`, `theme.rs`).
-- [[map/repl/frontend|frontend]] — the `Frontend` trait and its two implementations,
-  plus tab completion (`ral/src/repl/frontend*`, `complete.rs`).
+- [[map/repl/frontend|frontend]] — the `Frontend` trait and its three
+  implementations (minimal, rustyline, structural), plus the frontend-neutral
+  tab/menu completion engine (`ral/src/repl/frontend*`, `completion.rs`,
+  `complete.rs`).
 - [[map/repl/plugins|plugins]] — the plugin runtime, the `_ed-*` editor builtins, and
   the captured job/plugin commands (`ral/src/repl/plugin*`,
   `plugin_ed_builtins.rs`, `host_handlers.rs`, `keybinding.rs`).
