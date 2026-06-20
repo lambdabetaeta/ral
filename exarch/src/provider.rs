@@ -724,12 +724,13 @@ enum Attempt<T> {
 /// attempt number and performs exactly one request.
 async fn retry_with_backoff<T>(
     cancel_site: &'static str,
+    cancel: &cancel::Token,
     mut one: impl AsyncFnMut(u32) -> Attempt<T>,
 ) -> Result<T, ProviderError> {
     let mut attempt: u32 = 0;
     loop {
         attempt += 1;
-        if cancel::is_set() {
+        if cancel.is_cancelled() {
             return Err(ProviderError::Cancelled(cancel_site));
         }
         let err = match one(attempt).await {
@@ -754,7 +755,7 @@ async fn retry_with_backoff<T>(
         };
         tokio::select! {
             biased;
-            _ = wait_for_cancel() => return Err(ProviderError::Cancelled(cancel_site)),
+            _ = wait_for_cancel(cancel) => return Err(ProviderError::Cancelled(cancel_site)),
             _ = backoff_sleep(attempt, retry_after, max_delay_ms) => {}
         }
     }
@@ -985,12 +986,20 @@ impl Provider {
     /// attempt** — once any token has flowed to `on_text` the UI has
     /// committed to a partial render, and re-streaming the request
     /// would double tokens.  See the design doc's option (A).
+    /// Run one provider round-trip, streaming assistant text through
+    /// `on_text`.  `cancel` is the *request-local* cancellation handle: the
+    /// foreground turn passes its root token (linked to the signal slot, so
+    /// Esc cancels it), and an async agent passes its registry token (so
+    /// `agent_cancel` / `/clear` / the worker ceiling cancel it without
+    /// touching the foreground request).  Two concurrent requests no longer
+    /// share the one process-global slot.
     pub fn complete<F: FnMut(&str)>(
         &self,
         system: &str,
         messages: Vec<ChatMessage>,
         advertise_root_only: bool,
         on_text: &mut F,
+        cancel: &cancel::Token,
     ) -> Result<StepOut, ProviderError> {
         match &self.backend {
             Backend::Live(live) => live.complete(
@@ -1000,6 +1009,7 @@ impl Provider {
                 messages,
                 advertise_root_only,
                 on_text,
+                cancel,
             ),
             Backend::Scripted(s) => s.complete(&self.model, on_text),
         }
@@ -1008,14 +1018,16 @@ impl Provider {
     /// Summarise already-rendered transcript messages.
     ///
     /// Retries unconditionally on Transient/RateLimited — there is no
-    /// streamed side effect to worry about.
+    /// streamed side effect to worry about.  `cancel` is the request-local
+    /// handle, as for [`Provider::complete`].
     pub fn summarize(
         &self,
         system: &str,
         messages: Vec<ChatMessage>,
+        cancel: &cancel::Token,
     ) -> Result<SummaryOut, ProviderError> {
         match &self.backend {
-            Backend::Live(live) => live.summarize(&self.model, system, messages),
+            Backend::Live(live) => live.summarize(&self.model, system, messages, cancel),
             Backend::Scripted(s) => s.summarize(&self.model),
         }
     }
@@ -1055,6 +1067,7 @@ impl Live {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn complete<F: FnMut(&str)>(
         &self,
         model: &str,
@@ -1063,6 +1076,7 @@ impl Live {
         messages: Vec<ChatMessage>,
         advertise_root_only: bool,
         on_text: &mut F,
+        cancel: &cancel::Token,
     ) -> Result<StepOut, ProviderError> {
         self.refresh_if_stale();
         let req_template = build_cached_request(self.adapter, system, messages);
@@ -1081,14 +1095,14 @@ impl Live {
 
         let end =
             self.runtime
-                .block_on(retry_with_backoff("before request", async |_attempt| {
+                .block_on(retry_with_backoff("before request", cancel, async |_attempt| {
                     let mut req = req_template.clone();
                     req.tools = Some(tool_defs(advertise_root_only));
                     let mut seen_any_token = false;
                     let attempt_result: Result<StreamEnd, ProviderError> = async {
                         let mut resp = tokio::select! {
                             biased;
-                            _ = wait_for_cancel() => {
+                            _ = wait_for_cancel(cancel) => {
                                 return Err(ProviderError::Cancelled("before request"));
                             }
                             // A fresh `sleep` per select entry bounds connect +
@@ -1109,7 +1123,7 @@ impl Live {
                         loop {
                             let event = tokio::select! {
                                 biased;
-                                _ = wait_for_cancel() => {
+                                _ = wait_for_cancel(cancel) => {
                                     return Err(ProviderError::Cancelled("mid-stream"));
                                 }
                                 // Re-armed each loop iteration, so it is a
@@ -1177,6 +1191,7 @@ impl Live {
         model: &str,
         system: &str,
         mut messages: Vec<ChatMessage>,
+        cancel: &cancel::Token,
     ) -> Result<SummaryOut, ProviderError> {
         self.refresh_if_stale();
         messages.push(ChatMessage::user(
@@ -1192,11 +1207,11 @@ impl Live {
 
         let resp =
             self.runtime
-                .block_on(retry_with_backoff("during summary", async |_attempt| {
+                .block_on(retry_with_backoff("during summary", cancel, async |_attempt| {
                     let req = req_template.clone();
                     let r = tokio::select! {
                         biased;
-                        _ = wait_for_cancel() => {
+                        _ = wait_for_cancel(cancel) => {
                             return Attempt::Failed(ProviderError::Cancelled("during summary"));
                         }
                         // `summarize` is non-streaming, so there are no
@@ -1334,8 +1349,8 @@ fn tool_defs(advertise_root_only: bool) -> Vec<Tool> {
         .collect()
 }
 
-async fn wait_for_cancel() {
-    while !cancel::is_set() {
+async fn wait_for_cancel(cancel: &cancel::Token) {
+    while !cancel.is_cancelled() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
@@ -2153,7 +2168,7 @@ mod tests {
     fn idle_timeout_before_token_is_retried_then_surfaced() {
         let calls = std::cell::Cell::new(0u32);
         let out: Result<(), ProviderError> =
-            make_runtime().block_on(retry_with_backoff("test", async |_attempt| {
+            make_runtime().block_on(retry_with_backoff("test", &cancel::Token::new(), async |_attempt| {
                 calls.set(calls.get() + 1);
                 Attempt::Failed(ProviderError::Transient {
                     cause: "stream idle: no event within timeout".into(),
@@ -2177,7 +2192,7 @@ mod tests {
     fn idle_timeout_after_token_surfaces_without_retry() {
         let calls = std::cell::Cell::new(0u32);
         let out: Result<(), ProviderError> =
-            make_runtime().block_on(retry_with_backoff("test", async |_attempt| {
+            make_runtime().block_on(retry_with_backoff("test", &cancel::Token::new(), async |_attempt| {
                 calls.set(calls.get() + 1);
                 Attempt::Committed(ProviderError::Transient {
                     cause: "stream idle: no event within timeout".into(),

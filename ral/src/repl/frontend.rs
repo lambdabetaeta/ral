@@ -14,9 +14,11 @@
 
 mod minimal;
 mod rustyline;
+mod structural;
 
 pub(super) use minimal::MinimalFrontend;
 pub(super) use rustyline::RustylineFrontend;
+pub(super) use structural::StructuralFrontend;
 
 use ral_core::Shell;
 

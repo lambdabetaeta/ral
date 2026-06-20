@@ -13,13 +13,21 @@
 //! round-tripping the committed messages through the same genai
 //! `ChatMessage` serialisation the live request uses.
 
-use exarch::bus::{Emitter, Event, Kind, PromptQueue, SessionId, Sink};
+use exarch::bus::{Emitter, Event, Inbox, Kind, SessionId, Sink};
 use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{Provider, ProviderError};
 use exarch::session::{Session, TurnOutcome};
 use genai::chat::{ChatRole, ContentPart, ToolCall};
+use std::sync::Arc;
 use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
+
+/// A scripted provider behind the `Arc` the turn driver threads — the same
+/// shape the live driver holds so an async `agent` worker could capture a
+/// clone.
+fn scripted(model: &str, script: Script) -> Arc<Provider> {
+    Arc::new(Provider::scripted(model, script))
+}
 
 /// Mirror the binary's pre-`main` re-exec dispatch — helper re-exec
 /// dispatch, then the OS-sandbox stage — before libtest sees the flags
@@ -55,7 +63,7 @@ impl Sink for Recorder {
 }
 
 struct SteeringSink {
-    queue: PromptQueue,
+    inbox: Inbox,
     kinds: Vec<Kind>,
     queued: bool,
 }
@@ -63,7 +71,7 @@ struct SteeringSink {
 impl Default for SteeringSink {
     fn default() -> Self {
         Self {
-            queue: PromptQueue::new(),
+            inbox: Inbox::new(),
             kinds: Vec::new(),
             queued: false,
         }
@@ -75,15 +83,15 @@ impl Sink for SteeringSink {
         let should_queue = !self.queued
             && matches!(&e.kind, Kind::ToolCall { cmd, .. } if cmd.contains("sleep 0.1"));
         if should_queue {
-            self.queue
-                .push("steer: revise after the current batch".into());
+            self.inbox
+                .push_user("steer: revise after the current batch".into());
             self.queued = true;
         }
         self.kinds.push(e.kind);
     }
 
-    fn prompt_queue(&self) -> PromptQueue {
-        self.queue.clone()
+    fn inbox(&self) -> Inbox {
+        self.inbox.clone()
     }
 }
 
@@ -91,7 +99,7 @@ impl Sink for SteeringSink {
 /// the outcome plus every event the worker emitted.
 fn drive_apply(
     session: &mut Session,
-    provider: &Provider,
+    provider: &Arc<Provider>,
     prompt: Option<&str>,
 ) -> (Result<TurnOutcome, ProviderError>, Vec<Kind>) {
     let id: SessionId = session.id;
@@ -130,6 +138,20 @@ fn agent_call(id: &str, title: &str, prompt: &str) -> ToolCall {
     }
 }
 
+/// An async `agent` tool call — the orchestration-edge mode.
+fn agent_async_call(id: &str, title: &str, prompt: &str) -> ToolCall {
+    ToolCall {
+        call_id: id.into(),
+        fn_name: "agent".into(),
+        fn_arguments: serde_json::json!({
+            "title": title,
+            "prompt": prompt,
+            "mode": "async",
+        }),
+        thought_signatures: None,
+    }
+}
+
 /// Assert every committed model-view message serialises (the proxy for
 /// "every provider accepts the request") and that no assistant message
 /// is empty.
@@ -149,7 +171,7 @@ fn assert_admissible(session: &Session) {
 fn plain_text_turn_completes() {
     let dir = tmp("plain-text");
     let mut session = Session::for_test(&dir, "system").unwrap();
-    let provider = Provider::scripted("test-model", Script::new().then(Reply::text("hello")));
+    let provider = scripted("test-model", Script::new().then(Reply::text("hello")));
 
     let (outcome, _kinds) = drive_apply(&mut session, &provider, Some("hi"));
 
@@ -165,7 +187,7 @@ fn plain_text_turn_completes() {
 fn tool_call_then_completion() {
     let dir = tmp("tool-then-complete");
     let mut session = Session::for_test(&dir, "system").unwrap();
-    let provider = Provider::scripted(
+    let provider = scripted(
         "test-model",
         Script::new()
             .then(Reply::tool_calls(vec![ral_call("c1", "let x = 41")]))
@@ -193,7 +215,7 @@ fn tool_call_then_completion() {
 fn queued_prompt_steers_after_current_tool_batch() {
     let dir = tmp("tool-steering");
     let mut session = Session::for_test(&dir, "system").unwrap();
-    let provider = Provider::scripted(
+    let provider = scripted(
         "test-model",
         Script::new()
             .then(Reply::tool_calls(vec![
@@ -267,7 +289,7 @@ fn queued_prompt_steers_after_current_tool_batch() {
 fn same_batch_agents_run_concurrently() {
     let dir = tmp("same-batch-agents");
     let mut session = Session::for_test(&dir, "system").unwrap();
-    let provider = Provider::scripted(
+    let provider = scripted(
         "test-model",
         Script::new()
             .then(Reply::tool_calls(vec![
@@ -302,13 +324,67 @@ fn same_batch_agents_run_concurrently() {
     assert_admissible(&session);
 }
 
+/// An async `agent` dispatch returns a start receipt now (not the child's
+/// answer) and the child's reply arrives later through the session inbox as
+/// a marked turn — the orchestration edge.  The root turn does not wait for
+/// the child.
+#[test]
+fn async_agent_returns_a_receipt_and_delivers_through_the_inbox() {
+    let dir = tmp("async-agent");
+    let mut session = Session::for_test(&dir, "system").unwrap();
+    // Three replies, consumed across the root and the detached child: the
+    // root's async dispatch, then a text reply each for whichever of the two
+    // turns reaches the provider next.  The assertions do not depend on that
+    // order — only that the root completes and the child posts a result.
+    let provider = scripted(
+        "test-model",
+        Script::new()
+            .then(Reply::tool_calls(vec![agent_async_call(
+                "bg",
+                "background",
+                "do background work",
+            )]))
+            .then(Reply::text("first"))
+            .then(Reply::text("second")),
+    );
+
+    // Hold the inbox so we can observe the worker's delivery; `drive_apply`
+    // builds its own, so drive `apply` directly here.
+    let inbox = Inbox::new();
+    let (tx, _rx) = channel();
+    let emit = Emitter::with_inbox(tx, session.id, inbox.clone());
+    let root = exarch::cancel::mint_root();
+    let outcome = session.apply(&provider, Some("dispatch async".into()), root.token(), &emit);
+    assert!(
+        matches!(outcome, Ok(TurnOutcome::Complete(_))),
+        "the root turn completes without waiting for the child"
+    );
+
+    // The detached worker settles on its own thread; poll the inbox for its
+    // delivery, then drain it as the driver would at the turn boundary.
+    let mut delivered = None;
+    for _ in 0..200 {
+        if let Some(text) = inbox.drain_turn() {
+            delivered = Some(text);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let text = delivered.expect("the async agent must post its result to the inbox");
+    assert!(
+        text.starts_with("[agent 'background'"),
+        "delivered as a marked agent turn, got {text:?}"
+    );
+    assert!(session.is_ready());
+}
+
 /// A `let` binding committed by an earlier tool call survives into the
 /// next tool call — the persistent-shell contract `apply` relies on.
 #[test]
 fn bindings_persist_across_tool_calls() {
     let dir = tmp("bindings-persist");
     let mut session = Session::for_test(&dir, "system").unwrap();
-    let provider = Provider::scripted(
+    let provider = scripted(
         "test-model",
         Script::new()
             .then(Reply::tool_calls(vec![ral_call("c1", "let x = 41")]))
@@ -355,7 +431,7 @@ fn compaction_fires_at_the_threshold() {
 
     // A reply that serialises well past the 500 KiB threshold.
     let huge = "x".repeat(exarch::digest::COMPACT_THRESHOLD + 64 * 1024);
-    let provider = Provider::scripted(
+    let provider = scripted(
         "test-model",
         Script::new()
             .then(Reply::text(&huge))
@@ -396,7 +472,7 @@ fn truncated_summary_preserves_history() {
     let mut session = Session::for_test(&dir, "system").unwrap();
 
     let huge = "x".repeat(exarch::digest::COMPACT_THRESHOLD + 64 * 1024);
-    let provider = Provider::scripted(
+    let provider = scripted(
         "test-model",
         Script::new()
             .then(Reply::text(&huge))
@@ -429,7 +505,7 @@ fn truncated_summary_preserves_history() {
 fn truncated_with_tool_calls_dispatches_and_continues() {
     let dir = tmp("truncated-with-tools");
     let mut session = Session::for_test(&dir, "system").unwrap();
-    let provider = Provider::scripted(
+    let provider = scripted(
         "test-model",
         Script::new()
             .then(Reply::truncated_with_tool_calls(vec![ral_call(
@@ -461,7 +537,7 @@ fn truncated_with_tool_calls_dispatches_and_continues() {
 fn empty_reply_commits_a_stub_not_empty_content() {
     let dir = tmp("empty-reply");
     let mut session = Session::for_test(&dir, "system").unwrap();
-    let provider = Provider::scripted("test-model", Script::new().then(Reply::empty()));
+    let provider = scripted("test-model", Script::new().then(Reply::empty()));
 
     let (outcome, _kinds) = drive_apply(&mut session, &provider, Some("say nothing"));
     assert!(
@@ -496,7 +572,7 @@ fn malformed_tool_arguments_are_normalised_to_object() {
         fn_arguments: serde_json::json!("not an object"),
         thought_signatures: None,
     };
-    let provider = Provider::scripted(
+    let provider = scripted(
         "test-model",
         Script::new()
             .then(Reply::tool_calls(vec![bad_call]))

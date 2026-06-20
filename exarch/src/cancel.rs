@@ -43,10 +43,19 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 /// A per-root-turn cancellation handle.  Cloning shares the same flag
 /// (an `Arc<AtomicBool>`), so a child session handed a clone is cancelled
 /// the instant the root token is — the whole tree halts on one Esc.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Token(Arc<AtomicBool>);
 
 impl Token {
+    /// A fresh, un-cancelled token that is **not** published to the signal
+    /// slot.  This is the handle a background worker (an async `agent`)
+    /// receives: its cancellation is its own — `agent_cancel`, `/clear`, or
+    /// its worker ceiling — never an Esc, which targets the foreground turn
+    /// alone through [`mint_root`]'s published slot.
+    pub fn new() -> Self {
+        Token(Arc::new(AtomicBool::new(false)))
+    }
+
     /// True once this token (or, since clones share the flag, any of its
     /// shares) has been cancelled.
     pub fn is_cancelled(&self) -> bool {

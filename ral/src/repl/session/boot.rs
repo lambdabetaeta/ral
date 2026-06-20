@@ -12,7 +12,7 @@ use rustyline::config::{BellStyle, EditMode};
 use std::sync::{Arc, Mutex};
 
 use super::super::config::{RcCtx, create_default_rc, find_ralrc};
-use super::super::frontend::{Frontend, MinimalFrontend, RustylineFrontend};
+use super::super::frontend::{Frontend, MinimalFrontend, RustylineFrontend, StructuralFrontend};
 use super::super::plugin::PluginRuntime;
 #[cfg(unix)]
 use crate::jobs;
@@ -200,7 +200,11 @@ pub(super) fn load_profiles(is_login: bool, no_rc: bool, ctx: &mut RcCtx<'_>) {
     }
 }
 
-/// Build the line-editing frontend: minimal (dumb) or rustyline.
+/// Build the line-editing frontend: minimal (dumb), structural, or
+/// rustyline.  `RAL_SURFACE` selects the surface, mirroring the
+/// `RAL_INTERACTIVE_MODE` probe: `minimal` forces the line editor,
+/// `structural` selects the projection surface (degrading to rustyline if
+/// the terminal cannot do raw mode), and anything else keeps rustyline.
 ///
 /// For the rustyline path, also wires up an `ExternalPrinter` sink on
 /// stdout via `shell.set_stdout(…)` so background output from `watch` blocks appears above
@@ -212,8 +216,21 @@ pub(super) fn create_frontend(
     bell: BellStyle,
     runtime: Arc<Mutex<PluginRuntime>>,
 ) -> Box<dyn Frontend> {
+    // A dumb terminal can only do the canonical-stdin editor, whatever
+    // RAL_SURFACE asks for.
     if matches!(interactive_mode, ral_core::io::InteractiveMode::Minimal) {
         return Box::new(MinimalFrontend::new());
+    }
+    match std::env::var("RAL_SURFACE").ok().as_deref() {
+        Some("minimal") => return Box::new(MinimalFrontend::new()),
+        // The structural surface needs raw mode; its `new` probes for it and
+        // errors when unavailable, so a failure degrades to rustyline below.
+        Some("structural") => {
+            if let Ok(fe) = StructuralFrontend::new() {
+                return Box::new(fe);
+            }
+        }
+        _ => {}
     }
     let mut rl_fe = RustylineFrontend::new(shell, edit_mode, bell, runtime);
 

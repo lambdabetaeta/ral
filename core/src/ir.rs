@@ -306,6 +306,14 @@ pub enum CompKind {
         /// channels, which pipeline staging then reads to wire each stage.
         /// A `Wire` is `Copy` and rides unboxed.
         wires: Vec<Wire>,
+        /// One inferred *value* type per stage — the data flowing out of
+        /// it — parallel to `stages`/`wires`.  The elaborator emits a
+        /// `Unit` placeholder; the annotation pass overwrites it with the
+        /// resolved per-stage types.  Retained for the structural REPL's
+        /// typed spine; the evaluator never reads it, so an un-annotated
+        /// pipeline (which never reaches the evaluator) keeps the
+        /// placeholder harmlessly.
+        stage_types: Vec<crate::typecheck::Ty>,
     },
     /// Binary primitive on already-evaluated values (`$[a + b]`,
     /// `$[a == b]`, …).  Arity-correct by construction — the inner

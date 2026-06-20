@@ -89,6 +89,12 @@ pub struct Cli {
     /// plain question-answering (the common headless use) is unaffected.
     #[arg(long = "expect-action", requires = "headless")]
     pub expect_action: bool,
+
+    /// Authorise the agent to schedule its own wakeups (the `schedule`,
+    /// `schedules`, `unschedule` tools).  Off by default: an agent that can
+    /// wake itself indefinitely holds real authority, so opt in explicitly.
+    #[arg(long = "allow-schedule")]
+    pub allow_schedule: bool,
 }
 
 /// An out-of-band action that runs and exits instead of starting a session.

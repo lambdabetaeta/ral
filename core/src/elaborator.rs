@@ -547,11 +547,15 @@ impl Elaborator {
                 // mode to.  The checker runs on every evaluated comp, so an
                 // un-annotated pipeline never reaches the evaluator.
                 let wires = vec![crate::mode::Wire::EMPTY; comps.len()];
+                // A `Unit` placeholder per stage, overwritten by the
+                // annotation pass with each stage's resolved value type.
+                let stage_types = vec![crate::typecheck::Ty::Unit; comps.len()];
                 comp!(
                     self,
                     CompKind::Pipeline {
                         stages: comps,
-                        wires
+                        wires,
+                        stage_types
                     }
                 )
             }

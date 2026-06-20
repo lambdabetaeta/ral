@@ -104,7 +104,7 @@ pub(crate) fn eval_comp(comp: &Arc<Comp>, shell: &mut Shell, tail: Tail) -> Raw<
         // so `tail` flows through to the application eliminator.
         CompKind::App { .. } | CompKind::Exec(_) => call::invoke(comp, None, tail, shell),
 
-        CompKind::Pipeline { stages, wires } => eval_pipeline(stages, wires, tail, shell),
+        CompKind::Pipeline { stages, wires, .. } => eval_pipeline(stages, wires, tail, shell),
 
         CompKind::Chain(parts) => eval_chain(parts, tail, shell),
 

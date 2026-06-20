@@ -137,6 +137,8 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("ral/src/repl/config.rs", "io-door:silent:rc-write"),
     ("ral/src/repl/frontend/minimal.rs", "io-door:silent:history-append"),
     ("ral/src/repl/frontend/minimal.rs", "io-door:silent:history-read"),
+    ("ral/src/repl/frontend/structural.rs", "io-door:silent:history-append"),
+    ("ral/src/repl/frontend/structural.rs", "io-door:silent:history-read"),
     ("ral/src/repl/plugin/load.rs", "io-door:silent:plugin-read"),
     ("ral/src/repl/session/boot.rs", "io-door:silent:config-read"),
     ("ral/src/repl/session/boot.rs", "io-door:silent:crashlog-write"),
