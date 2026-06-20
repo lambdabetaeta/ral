@@ -29,15 +29,17 @@ use ral_core::typecheck::{Scheme, fmt_scheme, fmt_ty};
 use ral_core::types::HandleState;
 use ral_core::{CompileOutcome, Value};
 
+use ansi_to_tui::IntoText;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 use ratatui::{TerminalOptions, Viewport};
+use ratatui_textarea::{CursorMove, TextArea};
 
 use std::collections::HashSet;
 use std::io;
@@ -57,6 +59,10 @@ const HANDLE_RUN: Color = Color::Rgb(220, 140, 175); // pink — running handle
 /// Idle redraw cadence: the structural surface polls keys and redraws the
 /// (constant, between-keystroke) projections at this interval.
 const TICK: Duration = Duration::from_millis(120);
+
+/// Upper bound on the inline viewport's height, so a session with many
+/// bindings never swallows the whole screen — scrollback must stay visible.
+const MAX_VIEWPORT: u16 = 18;
 
 pub(in crate::repl) struct StructuralFrontend {
     history: History,
@@ -99,9 +105,27 @@ impl StructuralFrontend {
         let worksheet = worksheet_rows(&user, shell);
         let matrix = matrix_rows(&user);
 
+        // The styled prompt prefix, parsed into spans once: ansi-to-tui turns
+        // the SGR escapes into ratatui styling.  A parse failure degrades to
+        // the ANSI-stripped raw text — never to a blank prompt.
+        let prefix = prompt_prefix(prompt);
+        let prefix_w = prompt.raw().chars().count() as u16;
+
+        let mut textarea = new_textarea();
+        if let Some(p) = &pending {
+            textarea.insert_str(&p.text);
+            place_cursor(&mut textarea, p.cursor);
+        }
+        let mut hist_pos: Option<usize> = None;
+        let mut draft = String::new();
+
         enable_raw_mode()?;
         let (_cols, rows) = size().unwrap_or((80, 24));
-        let height = (rows / 2).clamp(8, 18);
+        // Size the viewport to its content at entry: the spine, the prompt's
+        // own (possibly multi-line) rows, and the projections.  Clamping to
+        // `rows - 1` hugs the bottom — the prompt sits where a shell prompt
+        // always sits — and `MAX_VIEWPORT` keeps scrollback in view.
+        let height = viewport_height(&textarea, &worksheet, &matrix, rows);
         let backend = CrosstermBackend::new(io::stdout());
         let mut terminal = Terminal::with_options(
             backend,
@@ -110,27 +134,19 @@ impl StructuralFrontend {
             },
         )?;
 
-        let mut buf: Vec<char> = pending
-            .as_ref()
-            .map(|p| p.text.chars().collect())
-            .unwrap_or_default();
-        let mut cursor = pending.as_ref().map_or(buf.len(), |p| p.cursor.min(buf.len()));
-        let mut hist_pos: Option<usize> = None;
-        let mut draft: Vec<char> = Vec::new();
-
         // The spine is recomputed only when the buffer changes; an idle
         // redraw reuses the cached one.
         let mut spine = Spine::Empty;
         let mut last_buf: Option<String> = None;
 
         let result = loop {
-            let s: String = buf.iter().collect();
+            let s = textarea.lines().join("\n");
             if last_buf.as_deref() != Some(s.as_str()) {
                 spine = build_spine(&s, shell);
                 last_buf = Some(s.clone());
             }
             terminal.draw(|frame| {
-                render(frame, prompt, &buf, &s, cursor, &spine, &worksheet, &matrix);
+                render(frame, &prefix, prefix_w, &textarea, &spine, &worksheet, &matrix);
             })?;
 
             if !event::poll(TICK)? {
@@ -145,117 +161,106 @@ impl StructuralFrontend {
             let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
             match k.code {
                 KeyCode::Char('c') if ctrl => {
-                    if buf.is_empty() {
+                    if is_empty(&textarea) {
                         break Read::Interrupt;
                     }
-                    buf.clear();
-                    cursor = 0;
+                    textarea.select_all();
+                    textarea.cut();
                 }
                 KeyCode::Char('d') if ctrl => {
-                    if buf.is_empty() {
+                    if is_empty(&textarea) {
                         break Read::Eof;
                     }
                 }
-                KeyCode::Char('u') if ctrl => {
-                    buf.drain(..cursor);
-                    cursor = 0;
-                }
-                KeyCode::Char('a') if ctrl => cursor = 0,
-                KeyCode::Char('e') if ctrl => cursor = buf.len(),
-                KeyCode::Char(c) => {
-                    buf.insert(cursor, c);
-                    cursor += 1;
-                }
-                KeyCode::Backspace => {
-                    if cursor > 0 {
-                        buf.remove(cursor - 1);
-                        cursor -= 1;
+                // Up/Down walk history only from the prompt's edge rows: with
+                // the cursor mid-text in a multi-line draft they fall through
+                // to the textarea and move the cursor instead.
+                KeyCode::Up if k.modifiers.is_empty() => {
+                    if textarea.cursor().0 == 0 {
+                        self.history_prev(&mut textarea, &mut hist_pos, &mut draft);
+                    } else {
+                        textarea.input(k);
                     }
                 }
-                KeyCode::Delete => {
-                    if cursor < buf.len() {
-                        buf.remove(cursor);
+                KeyCode::Down if k.modifiers.is_empty() => {
+                    if textarea.cursor().0 == textarea.lines().len() - 1 {
+                        self.history_next(&mut textarea, &mut hist_pos, &mut draft);
+                    } else {
+                        textarea.input(k);
                     }
                 }
-                KeyCode::Left => cursor = cursor.saturating_sub(1),
-                KeyCode::Right => cursor = (cursor + 1).min(buf.len()),
-                KeyCode::Home => cursor = 0,
-                KeyCode::End => cursor = buf.len(),
-                KeyCode::Up => self.history_prev(&mut buf, &mut cursor, &mut hist_pos, &mut draft),
-                KeyCode::Down => self.history_next(&mut buf, &mut cursor, &mut hist_pos, &mut draft),
                 KeyCode::Enter => {
-                    let line: String = buf.iter().collect();
+                    let line = textarea.lines().join("\n");
                     if ral_core::syntax::parser::needs_continuation(&line) {
-                        buf.insert(cursor, '\n');
-                        cursor += 1;
+                        textarea.insert_newline();
                     } else {
                         break Read::Line(line);
                     }
                 }
-                _ => {}
+                _ => {
+                    textarea.input(k);
+                }
             }
         };
 
-        // Commit the entered command into scrollback above the viewport (so
-        // it reads like an ordinary shell), then clear the viewport and hand
-        // the terminal back for the command's own output.
-        if let Read::Line(text) = &result {
-            let committed = format!("{}{}", prompt.raw(), text);
-            let lines = committed.lines().count().max(1) as u16;
-            let _ = terminal.insert_before(lines, |b| {
-                Paragraph::new(committed.clone())
-                    .wrap(Wrap { trim: false })
-                    .render(b.area, b);
-            });
+        match &result {
+            // Commit the entered command into scrollback above the viewport
+            // (so it reads like an ordinary shell): the styled prompt prefix
+            // followed by the submitted text, in the live prompt's colours.
+            // `insert_before` leaves the now-cleared viewport right below the
+            // committed line.
+            Read::Line(text) => commit_line(&mut terminal, &prefix, text)?,
+            // No line to commit (Interrupt / Eof): just clear the viewport so
+            // the next prompt — or the shell's exit — starts on a clean band.
+            _ => terminal.clear()?,
         }
-        terminal.clear()?;
+        // Park the cursor at the viewport's top-left origin before leaving raw
+        // mode.  Otherwise it sits wherever the last draw left it — mid-band —
+        // and the command's output starts there, with a blank gap above it and
+        // the committed line scrolled off the top.  Setting it here makes the
+        // output flow from directly under the committed line, nothing lost.
+        let origin = terminal.get_frame().area();
+        terminal.set_cursor_position(Position::new(origin.x, origin.y))?;
         disable_raw_mode()?;
         Ok(result)
     }
 
-    fn history_prev(
-        &self,
-        buf: &mut Vec<char>,
-        cursor: &mut usize,
-        pos: &mut Option<usize>,
-        draft: &mut Vec<char>,
-    ) {
+    /// Recall the previous history entry (Up from the first row).  The live
+    /// draft is stashed on entry and navigation clamps at the oldest entry;
+    /// a no-op when history is empty.
+    fn history_prev(&self, textarea: &mut TextArea<'static>, pos: &mut Option<usize>, draft: &mut String) {
         let entries = self.history.entries();
         if entries.is_empty() {
             return;
         }
         let next = match *pos {
             None => {
-                *draft = buf.clone();
+                *draft = textarea.lines().join("\n");
                 entries.len() - 1
             }
             Some(0) => 0,
             Some(i) => i - 1,
         };
         *pos = Some(next);
-        *buf = entries[next].chars().collect();
-        *cursor = buf.len();
+        set_text(textarea, &entries[next]);
     }
 
-    fn history_next(
-        &self,
-        buf: &mut Vec<char>,
-        cursor: &mut usize,
-        pos: &mut Option<usize>,
-        draft: &mut Vec<char>,
-    ) {
+    /// Recall the next history entry (Down from the last row), or restore the
+    /// stashed draft once browsing walks past the newest entry.  A no-op when
+    /// not browsing history.
+    fn history_next(&self, textarea: &mut TextArea<'static>, pos: &mut Option<usize>, draft: &mut String) {
         match *pos {
             None => {}
             Some(i) if i + 1 < self.history.entries().len() => {
                 *pos = Some(i + 1);
-                *buf = self.history.entries()[i + 1].chars().collect();
-                *cursor = buf.len();
+                let entry = self.history.entries()[i + 1].clone();
+                set_text(textarea, &entry);
             }
             Some(_) => {
                 // Past the newest entry: restore the in-progress draft.
                 *pos = None;
-                *buf = std::mem::take(draft);
-                *cursor = buf.len();
+                let draft = std::mem::take(draft);
+                set_text(textarea, &draft);
             }
         }
     }
@@ -280,6 +285,40 @@ impl Frontend for StructuralFrontend {
 
     fn save_history(&mut self) {
         self.history.save();
+    }
+}
+
+// ── The editor ──────────────────────────────────────────────────────────────
+
+/// A fresh editor: flat styling, no cursor-line underline (matching the
+/// surrounding chrome), so the prompt reads as one continuous line of text.
+fn new_textarea() -> TextArea<'static> {
+    let mut ta = TextArea::default();
+    ta.set_cursor_line_style(Style::default());
+    ta
+}
+
+/// Whether the editor holds no text at all (every line empty).
+fn is_empty(ta: &TextArea<'static>) -> bool {
+    ta.lines().iter().all(|l| l.is_empty())
+}
+
+/// Replace the editor's contents, leaving the cursor at the end — the unit of
+/// every history recall and draft restore.
+fn set_text(ta: &mut TextArea<'static>, s: &str) {
+    ta.select_all();
+    ta.cut();
+    ta.insert_str(s);
+}
+
+/// Move the cursor to a character offset into the (just-filled) buffer,
+/// clamped to its length — restores an [`EditBuffer`]'s saved cursor as
+/// closely as the row/col editor allows.
+fn place_cursor(ta: &mut TextArea<'static>, char_offset: usize) {
+    ta.move_cursor(CursorMove::Top);
+    ta.move_cursor(CursorMove::Head);
+    for _ in 0..char_offset {
+        ta.move_cursor(CursorMove::Forward);
     }
 }
 
@@ -460,35 +499,56 @@ fn preview(v: &Value) -> String {
 
 // ── Rendering ───────────────────────────────────────────────────────────────
 
-/// Map a character index in `buf` to a (row, column) within the rendered
-/// prompt, accounting for the prompt prefix on the first line.
-fn cursor_rc(buf: &[char], cursor: usize, prefix_w: u16) -> (u16, u16) {
-    let mut row = 0u16;
-    let mut col = prefix_w;
-    for &c in &buf[..cursor.min(buf.len())] {
-        if c == '\n' {
-            row += 1;
-            col = 0;
-        } else {
-            col += 1;
-        }
+/// Parse the styled prompt into ratatui spans, falling back to the
+/// ANSI-stripped raw text when the escapes do not parse — never to nothing.
+fn prompt_prefix(prompt: &PromptText) -> Line<'static> {
+    match prompt.styled().into_text() {
+        Ok(text) => text
+            .lines
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| Line::from(Span::raw(prompt.raw().to_string()))),
+        Err(_) => Line::from(Span::raw(prompt.raw().to_string())),
     }
-    (row, col)
+}
+
+/// The editor's own visible row count: one row per logical line.  (The
+/// `WrapMode::None` editor does not soft-wrap, so logical lines are rows.)
+fn prompt_rows(textarea: &TextArea<'static>) -> u16 {
+    textarea.lines().len().max(1) as u16
+}
+
+/// Size the inline viewport to its content at entry — spine, prompt, and the
+/// projections' header-plus-rows — clamped to hug the bottom of the screen.
+fn viewport_height(
+    textarea: &TextArea<'static>,
+    worksheet: &[WsRow],
+    matrix: &[MxRow],
+    rows: u16,
+) -> u16 {
+    // The spine is empty at entry (inference runs only inside the loop), so
+    // the content is the prompt rows plus the taller projection column.  Each
+    // column shows a header row plus one row per entry — an empty column still
+    // shows its header and a placeholder row.
+    let prompt = prompt_rows(textarea);
+    let ws = 1 + worksheet.len().max(1) as u16;
+    let mx = 1 + matrix.len().max(1) as u16;
+    let needed = prompt + ws.max(mx);
+    needed.clamp(1, MAX_VIEWPORT).min(rows.saturating_sub(1).max(1))
 }
 
 #[allow(clippy::too_many_arguments)]
 fn render(
     frame: &mut ratatui::Frame,
-    prompt: &PromptText,
-    buf: &[char],
-    buf_string: &str,
-    cursor: usize,
+    prefix: &Line<'static>,
+    prefix_w: u16,
+    textarea: &TextArea<'static>,
     spine: &Spine,
     worksheet: &[WsRow],
     matrix: &[MxRow],
 ) {
     let area = frame.area();
-    let prompt_lines = buf_string.lines().count().max(1) as u16;
+    let prompt_lines = prompt_rows(textarea);
 
     let spine_rows = match spine {
         Spine::Stages(rows) => rows.len() as u16,
@@ -504,7 +564,7 @@ fn render(
     .areas(area);
 
     render_spine(frame, spine_area, spine);
-    render_prompt(frame, prompt_area, prompt, buf, buf_string, cursor);
+    render_prompt(frame, prompt_area, prefix, prefix_w, textarea);
     render_projections(frame, rest, worksheet, matrix);
 }
 
@@ -533,30 +593,30 @@ fn render_spine(frame: &mut ratatui::Frame, area: Rect, spine: &Spine) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
+/// Render the styled prompt prefix at column 0 of the prompt row, then the
+/// editor in a sub-area offset to its right.  The textarea paints its own
+/// cursor into that sub-area, so the cursor lands correctly past the prefix;
+/// continuation rows indent under the editable text, which reads fine.
 fn render_prompt(
     frame: &mut ratatui::Frame,
     area: Rect,
-    prompt: &PromptText,
-    buf: &[char],
-    buf_string: &str,
-    cursor: usize,
+    prefix: &Line<'static>,
+    prefix_w: u16,
+    textarea: &TextArea<'static>,
 ) {
-    let prefix = prompt.raw();
-    let prefix_w = prefix.chars().count() as u16;
-    let mut lines: Vec<Line> = Vec::new();
-    for (i, line) in buf_string.split('\n').enumerate() {
-        if i == 0 {
-            lines.push(Line::from(vec![
-                Span::styled(prefix.to_string(), Style::default().fg(SLATE)),
-                Span::raw(line.to_string()),
-            ]));
-        } else {
-            lines.push(Line::from(Span::raw(line.to_string())));
-        }
+    if area.height == 0 {
+        return;
     }
-    frame.render_widget(Paragraph::new(lines), area);
-    let (r, c) = cursor_rc(buf, cursor, prefix_w);
-    frame.set_cursor_position((area.x + c, area.y + r));
+    // The prefix occupies only the first row; render it there.
+    let prefix_area = Rect { height: 1, ..area };
+    frame.render_widget(Paragraph::new(prefix.clone()), prefix_area);
+
+    let editor_area = Rect {
+        x: area.x + prefix_w,
+        width: area.width.saturating_sub(prefix_w),
+        ..area
+    };
+    frame.render_widget(textarea, editor_area);
 }
 
 fn render_projections(frame: &mut ratatui::Frame, area: Rect, worksheet: &[WsRow], matrix: &[MxRow]) {
@@ -611,6 +671,33 @@ fn render_projections(frame: &mut ratatui::Frame, area: Rect, worksheet: &[WsRow
     frame.render_widget(Paragraph::new(mx_lines), mx_area);
 }
 
+/// Commit the submitted line into scrollback above the viewport: the styled
+/// prompt prefix followed by the entered text, in the live prompt's colours.
+fn commit_line(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    prefix: &Line<'static>,
+    text: &str,
+) -> io::Result<()> {
+    // Prepend the styled prefix spans to the command's first line so the
+    // committed scrollback line reads exactly like the live prompt did.
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, line) in text.split('\n').enumerate() {
+        if i == 0 {
+            let mut spans = prefix.spans.clone();
+            spans.push(Span::raw(line.to_string()));
+            lines.push(Line::from(spans));
+        } else {
+            lines.push(Line::from(Span::raw(line.to_string())));
+        }
+    }
+    let height = lines.len().max(1) as u16;
+    terminal.insert_before(height, |b| {
+        Paragraph::new(Text::from(lines))
+            .wrap(Wrap { trim: false })
+            .render(b.area, b);
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -649,15 +736,38 @@ mod tests {
         assert!(pipeline_stage_rows(&comp, "/bin/echo hi").is_none());
     }
 
-    /// The cursor maps past a newline onto the next rendered row at column 0.
+    /// Pre-filling the editor from an [`EditBuffer`] restores the text and
+    /// lands the cursor at the saved char offset — across a newline, the
+    /// row/col cursor sits on the right row and column.
     #[test]
-    fn cursor_rc_tracks_newlines() {
-        let buf: Vec<char> = "ab\ncd".chars().collect();
-        // Prefix width 2 ("❯ "), cursor at index 4 (the 'd').
-        assert_eq!(cursor_rc(&buf, 0, 2), (0, 2));
-        assert_eq!(cursor_rc(&buf, 2, 2), (0, 4)); // before the newline
-        assert_eq!(cursor_rc(&buf, 3, 2), (1, 0)); // after the newline
-        assert_eq!(cursor_rc(&buf, 4, 2), (1, 1));
+    fn place_cursor_restores_offset_across_newlines() {
+        let mut ta = new_textarea();
+        ta.insert_str("ab\ncd");
+        place_cursor(&mut ta, 0);
+        assert_eq!(ta.cursor(), (0, 0));
+        place_cursor(&mut ta, 2);
+        assert_eq!(ta.cursor(), (0, 2)); // before the newline
+        place_cursor(&mut ta, 3);
+        assert_eq!(ta.cursor(), (1, 0)); // the newline counts as one forward step
+        place_cursor(&mut ta, 4);
+        assert_eq!(ta.cursor(), (1, 1));
+        // An over-range offset clamps at the end rather than panicking.
+        place_cursor(&mut ta, 99);
+        assert_eq!(ta.cursor(), (1, 2));
+    }
+
+    /// Replacing the editor's contents (history recall / draft restore)
+    /// swaps the text wholesale and parks the cursor at the end.
+    #[test]
+    fn set_text_replaces_contents() {
+        let mut ta = new_textarea();
+        ta.insert_str("first draft");
+        set_text(&mut ta, "recalled entry");
+        assert_eq!(ta.lines(), ["recalled entry"]);
+        assert_eq!(ta.cursor(), (0, "recalled entry".chars().count()));
+        // A multi-line recall round-trips its newlines.
+        set_text(&mut ta, "a\nb");
+        assert_eq!(ta.lines(), ["a", "b"]);
     }
 
     /// A long value preview is truncated with an ellipsis.
