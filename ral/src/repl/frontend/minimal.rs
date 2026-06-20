@@ -31,6 +31,7 @@ impl Frontend for MinimalFrontend {
         prompt: &PromptText,
         _pending: Option<EditBuffer>,
         #[cfg(unix)] _jobs: &std::sync::Arc<std::sync::Mutex<crate::jobs::JobTable>>,
+        #[cfg(feature = "structural")] _worksheet: &crate::repl::worksheet::Worksheet,
     ) -> Read {
         let stdin = std::io::stdin();
         let write_prompt = |s: &[u8]| {

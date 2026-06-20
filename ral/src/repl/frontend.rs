@@ -28,6 +28,8 @@ use std::sync::{Arc, Mutex};
 
 use super::config::dirs_history;
 use super::prompt::PromptText;
+#[cfg(feature = "structural")]
+use super::worksheet::Worksheet;
 #[cfg(unix)]
 use crate::jobs::JobTable;
 
@@ -185,12 +187,20 @@ pub(super) trait Frontend {
     /// [`super::exec::step`]: the frontend takes its own short-lived lock,
     /// copies what it renders, and drops the guard before drawing.  The
     /// line-editor backends ignore it.
+    ///
+    /// `worksheet` is the session's [`Worksheet`] model (the `structural`
+    /// build only), threaded so the structural surface can draw each user
+    /// binding's dependency edges and pure/effectful verdict — the data the
+    /// live env cannot reconstruct.  The session owns it so it accumulates
+    /// across turns; the frontend reads it.  The line-editor backends ignore
+    /// it, exactly as they ignore `jobs`.
     fn read(
         &mut self,
         shell: &mut Shell,
         prompt: &PromptText,
         pending: Option<EditBuffer>,
         #[cfg(unix)] jobs: &Arc<Mutex<JobTable>>,
+        #[cfg(feature = "structural")] worksheet: &Worksheet,
     ) -> Read;
 
     fn add_history(&mut self, entry: &str);

@@ -50,6 +50,13 @@ pub(super) struct Session {
     /// handler that returned [`Read::Edit`]).  The frontend may still drain
     /// its own internal stack when this is `None`.
     pending: Option<EditBuffer>,
+    /// The reactive-worksheet model: per-binding dependency edges and the
+    /// pure/effectful verdict, accumulated across turns and projected by the
+    /// structural surface.  Owned here so it persists; recorded after a
+    /// successful top-level bind and read by `frontend.read`.  Only the
+    /// `structural` build constructs and reads it.
+    #[cfg(feature = "structural")]
+    worksheet: super::worksheet::Worksheet,
     /// Exit status to return when the loop ends.  Set by `exit` inside
     /// the evaluator; otherwise stays 0 on a clean EOF.
     exit_code: u8,
@@ -131,6 +138,8 @@ impl Session {
             frontend,
             runtime,
             pending: None,
+            #[cfg(feature = "structural")]
+            worksheet: super::worksheet::Worksheet::default(),
             exit_code: 0,
         })
     }
@@ -165,6 +174,8 @@ impl Session {
             self.pending.take(),
             #[cfg(unix)]
             &self.jobs,
+            #[cfg(feature = "structural")]
+            &self.worksheet,
         ) {
             Read::Line(input) => {
                 let trimmed = input.trim();
@@ -195,6 +206,8 @@ impl Session {
             #[cfg(unix)]
             &self.jobs,
             &self.runtime,
+            #[cfg(feature = "structural")]
+            &mut self.worksheet,
         ) {
             Step::Continue => Flow::Continue,
             Step::Exit(c) => {

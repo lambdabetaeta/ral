@@ -52,6 +52,7 @@ use super::super::prompt::PromptText;
 use super::{EditBuffer, Frontend, History, Read};
 #[cfg(unix)]
 use crate::jobs::JobTable;
+use crate::repl::worksheet::Worksheet;
 
 // ── Palette ───────────────────────────────────────────────────────────────
 
@@ -60,6 +61,7 @@ const NAME_HUE: Color = Color::Rgb(165, 210, 155); // lime — binding names
 const FLARE_HUE: Color = Color::Rgb(215, 110, 125); // red — type-error flare
 const SLATE: Color = Color::Rgb(140, 150, 170); // dim chrome
 const HANDLE_RUN: Color = Color::Rgb(220, 140, 175); // pink — running handle
+const EFFECT_HUE: Color = Color::Rgb(225, 170, 110); // amber — effectful binding
 
 /// Idle redraw cadence: the structural surface polls keys and redraws the
 /// (constant, between-keystroke) projections at this interval.
@@ -101,6 +103,7 @@ impl StructuralFrontend {
         prompt: &PromptText,
         pending: Option<EditBuffer>,
         #[cfg(unix)] jobs: &Arc<Mutex<JobTable>>,
+        worksheet: &Worksheet,
     ) -> io::Result<Read> {
         // The worksheet and matrix read the env, which does not change while
         // the user composes (no evaluation happens here), so build them once.
@@ -111,7 +114,7 @@ impl StructuralFrontend {
         // rendering.
         let baseline = self.baseline.get_or_insert_with(|| binding_names(shell));
         let user = user_bindings(shell, baseline);
-        let worksheet = worksheet_rows(&user, shell);
+        let ws_rows = worksheet_rows(&user, shell, worksheet);
         #[cfg(unix)]
         let jobs_snapshot = job_rows(jobs);
         #[cfg(not(unix))]
@@ -138,7 +141,7 @@ impl StructuralFrontend {
         // own (possibly multi-line) rows, and the projections.  Clamping to
         // `rows - 1` hugs the bottom — the prompt sits where a shell prompt
         // always sits — and `MAX_VIEWPORT` keeps scrollback in view.
-        let height = viewport_height(&textarea, &worksheet, &matrix, rows);
+        let height = viewport_height(&textarea, &ws_rows, &matrix, rows);
         let backend = CrosstermBackend::new(io::stdout());
         let mut terminal = Terminal::with_options(
             backend,
@@ -159,7 +162,7 @@ impl StructuralFrontend {
                 last_buf = Some(s.clone());
             }
             terminal.draw(|frame| {
-                render(frame, &prefix, prefix_w, &textarea, &spine, &worksheet, &matrix);
+                render(frame, &prefix, prefix_w, &textarea, &spine, &ws_rows, &matrix);
             })?;
 
             if !event::poll(TICK)? {
@@ -286,6 +289,7 @@ impl Frontend for StructuralFrontend {
         prompt: &PromptText,
         pending: Option<EditBuffer>,
         #[cfg(unix)] jobs: &Arc<Mutex<JobTable>>,
+        #[cfg(feature = "structural")] worksheet: &Worksheet,
     ) -> Read {
         match self.compose(
             shell,
@@ -293,6 +297,7 @@ impl Frontend for StructuralFrontend {
             pending,
             #[cfg(unix)]
             jobs,
+            worksheet,
         ) {
             Ok(r) => r,
             Err(_) => {
@@ -454,11 +459,21 @@ fn pipeline_stage_rows(comp: &Comp, src: &str) -> Option<Vec<SpineRow>> {
 
 // ── Projections 2 & 3: worksheet and handles matrix ─────────────────────────
 
-/// One worksheet node: a user binding with its type and value preview.
+/// One worksheet node: a user binding with its type and value preview, its
+/// nesting `depth` in the dependency tree, and its pure/effectful verdict.
+///
+/// `name`/`ty`/`preview` come from the live env each `read`; `depth` and
+/// `effectful` come from the session's [`Worksheet`] model (the retained
+/// dependency edges and the checker's effect verdict).  A node with no model
+/// entry — a binding that predates the model, or whose record was dropped —
+/// renders as a depth-0, pure node, so the projection never goes blank on
+/// missing edge data.
 struct WsRow {
     name: String,
     ty: String,
     preview: String,
+    depth: usize,
+    effectful: bool,
 }
 
 /// One matrix row's lifecycle state, unifying the two kinds of live work the
@@ -524,26 +539,116 @@ fn user_bindings(shell: &Shell, baseline: &HashSet<String>) -> Vec<(String, Valu
         .collect()
 }
 
-/// The user's bindings rendered as worksheet rows, each with its scheme.
-fn worksheet_rows(user: &[(String, Value)], shell: &Shell) -> Vec<WsRow> {
+/// The user's bindings rendered as worksheet rows, laid out as an indented
+/// dependency tree: a binding nests under the binding it depends on, so
+/// dependents read downstream of what feeds them.
+///
+/// Name, type, and value preview come from the live env (`user` +
+/// `binding_schemes`); the dependency edges and the pure/effectful verdict
+/// come from the session's [`Worksheet`] model.  The two are joined by name:
+/// only bindings present in the *live env* are nodes (a model entry whose
+/// binding is gone is skipped); the model supplies each present node's depth
+/// and effect glyph.
+///
+/// The dependency relation is a DAG, but the render is a tree, so each node
+/// hangs under one chosen parent — the *latest-recorded* of its dependencies
+/// that is itself a live node — which keeps the indentation reading as the
+/// data-flow chain.  A node with no live-binding dependency is a root.
+fn worksheet_rows(user: &[(String, Value)], shell: &Shell, model: &Worksheet) -> Vec<WsRow> {
     let schemes: std::collections::HashMap<String, Option<Scheme>> =
         shell.mobile.scope.binding_schemes().into_iter().collect();
-    let mut rows: Vec<WsRow> = user
+    let live: HashSet<&str> = user.iter().map(|(n, _)| n.as_str()).collect();
+
+    // Record order indexes the model entries; a node's "latest dependency"
+    // is the one with the greatest record index, so the tree nests along the
+    // direction definitions were added.
+    let order: std::collections::HashMap<&str, usize> = model
+        .entries()
         .iter()
-        .map(|(name, value)| {
+        .enumerate()
+        .map(|(i, e)| (e.name.as_str(), i))
+        .collect();
+
+    // Per live node: its model entry's effect verdict, and its chosen parent
+    // (the latest-recorded live dependency, or none → root).  Children are
+    // grouped under each parent, roots under the `None` key.
+    let mut effectful: std::collections::HashMap<&str, bool> = std::collections::HashMap::new();
+    let mut children: std::collections::HashMap<Option<&str>, Vec<&str>> =
+        std::collections::HashMap::new();
+    let mut rooted: Vec<&str> = Vec::new();
+
+    for (name, _) in user {
+        let name = name.as_str();
+        let entry = model.entries().iter().find(|e| e.name == name);
+        effectful.insert(name, entry.is_some_and(|e| e.effectful));
+        // The parent is the live dependency recorded latest; a node may
+        // depend on several, but the tree picks one to hang it under.
+        let parent = entry.and_then(|e| {
+            e.free_refs
+                .iter()
+                .map(String::as_str)
+                .filter(|d| live.contains(d) && *d != name)
+                .max_by_key(|d| order.get(d).copied().unwrap_or(0))
+        });
+        match parent {
+            Some(p) => children.entry(Some(p)).or_default().push(name),
+            None => rooted.push(name),
+        }
+    }
+
+    // Order roots and each child group by record index, then alphabetically,
+    // for a stable layout.
+    let sort_key = |n: &&str| (order.get(*n).copied().unwrap_or(usize::MAX), n.to_string());
+    rooted.sort_by_key(sort_key);
+    for kids in children.values_mut() {
+        kids.sort_by_key(sort_key);
+    }
+
+    // Preorder DFS over the forest.  Seed the worklist with the roots (in
+    // order), then sweep any node the root walk missed — a dependency cycle
+    // (mutually recursive lambdas) leaves every member with a parent and so
+    // out of `rooted`, but it must still render.  A visited set guards the
+    // cycle so the walk always terminates.  A stack `(name, depth)` gives the
+    // depth a node inherits from its parent.
+    let mut rows = Vec::with_capacity(user.len());
+    let mut visited: HashSet<&str> = HashSet::new();
+    let seeds = rooted
+        .iter()
+        .copied()
+        .chain(user.iter().map(|(n, _)| n.as_str()));
+    for seed in seeds {
+        if visited.contains(seed) {
+            continue;
+        }
+        let mut stack: Vec<(&str, usize)> = vec![(seed, 0)];
+        while let Some((name, depth)) = stack.pop() {
+            if !visited.insert(name) {
+                continue;
+            }
+            let value = user
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v)
+                .expect("a tree node is a live user binding");
             let ty = schemes
                 .get(name)
                 .and_then(|s| s.as_ref())
                 .map(fmt_scheme)
                 .unwrap_or_else(|| "?".into());
-            WsRow {
+            rows.push(WsRow {
+                name: name.to_string(),
                 ty,
                 preview: preview(value),
-                name: name.clone(),
+                depth,
+                effectful: effectful.get(name).copied().unwrap_or(false),
+            });
+            if let Some(kids) = children.get(&Some(name)) {
+                for kid in kids.iter().rev() {
+                    stack.push((*kid, depth + 1));
+                }
             }
-        })
-        .collect();
-    rows.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+    }
     rows
 }
 
@@ -844,8 +949,19 @@ fn render_projections(frame: &mut ratatui::Frame, area: Rect, worksheet: &[WsRow
         )));
     } else {
         for r in worksheet.iter().take(area.height.saturating_sub(1) as usize) {
+            // Indent by depth so dependents sit under what they depend on; a
+            // distinct glyph and hue mark effectful nodes (which would not
+            // re-flow freely) apart from pure ones.
+            let indent = "  ".repeat(r.depth);
+            let (glyph, hue) = if r.effectful {
+                ("◆", EFFECT_HUE)
+            } else {
+                ("●", NAME_HUE)
+            };
             ws_lines.push(Line::from(vec![
-                Span::styled(format!("● {}", r.name), Style::default().fg(NAME_HUE)),
+                Span::raw(indent),
+                Span::styled(format!("{glyph} "), Style::default().fg(hue)),
+                Span::styled(r.name.clone(), Style::default().fg(NAME_HUE)),
                 Span::styled(" : ", Style::default().fg(SLATE)),
                 Span::styled(r.ty.clone(), Style::default().fg(TYPE_HUE)),
                 Span::styled(format!(" = {}", r.preview), Style::default().fg(SLATE)),
@@ -1006,5 +1122,63 @@ mod tests {
         let p = preview(&v);
         assert!(p.chars().count() <= 40);
         assert!(p.ends_with('…'));
+    }
+
+    /// The worksheet rows nest dependents under what they depend on: with
+    /// `b = $a` and `c = $b`, the tree reads `a` (depth 0) ▸ `b` (1) ▸ `c`
+    /// (2), so the indentation traces the data-flow chain.  Names/values come
+    /// from the `user` list (the live env stand-in); edges from the model.
+    #[test]
+    fn worksheet_rows_nest_dependents_under_dependencies() {
+        let shell = Shell::new(Default::default());
+        let mut model = Worksheet::default();
+        model.record("let a = 1", &shell);
+        model.record("let b = $a", &shell);
+        model.record("let c = $b", &shell);
+        let user = vec![
+            ("a".to_string(), Value::Int(1)),
+            ("b".to_string(), Value::Int(1)),
+            ("c".to_string(), Value::Int(1)),
+        ];
+        let rows = worksheet_rows(&user, &shell, &model);
+        let shape: Vec<(&str, usize)> = rows.iter().map(|r| (r.name.as_str(), r.depth)).collect();
+        assert_eq!(shape, vec![("a", 0), ("b", 1), ("c", 2)]);
+    }
+
+    /// An effectful binding (an external command) carries the effect flag on
+    /// its row; a pure one does not — the marker the render distinguishes.
+    #[test]
+    fn worksheet_rows_carry_the_effect_verdict() {
+        let shell = Shell::new(Default::default());
+        let mut model = Worksheet::default();
+        model.record("let n = $[1 + 2]", &shell);
+        model.record("let p = /bin/echo hi", &shell);
+        let user = vec![
+            ("n".to_string(), Value::Int(3)),
+            ("p".to_string(), Value::Unit),
+        ];
+        let rows = worksheet_rows(&user, &shell, &model);
+        let n = rows.iter().find(|r| r.name == "n").unwrap();
+        let p = rows.iter().find(|r| r.name == "p").unwrap();
+        assert!(!n.effectful, "arithmetic is pure");
+        assert!(p.effectful, "an external command is effectful");
+        // Both are roots: `p` has no dependency on `n`.
+        assert_eq!(n.depth, 0);
+        assert_eq!(p.depth, 0);
+    }
+
+    /// A live binding with no model entry (it predates the model) still
+    /// renders — as a depth-0, pure node — so missing edge data never blanks
+    /// the projection.
+    #[test]
+    fn worksheet_row_without_a_model_entry_renders_as_a_pure_root() {
+        let shell = Shell::new(Default::default());
+        let model = Worksheet::default();
+        let user = vec![("legacy".to_string(), Value::Int(7))];
+        let rows = worksheet_rows(&user, &shell, &model);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "legacy");
+        assert_eq!(rows[0].depth, 0);
+        assert!(!rows[0].effectful);
     }
 }
