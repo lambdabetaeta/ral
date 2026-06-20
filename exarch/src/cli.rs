@@ -95,6 +95,13 @@ pub struct Cli {
     /// wake itself indefinitely holds real authority, so opt in explicitly.
     #[arg(long = "allow-schedule")]
     pub allow_schedule: bool,
+
+    /// Edit the TUI prompt in vi mode (the shared `textarea-vim` state
+    /// machine, the same one the ral worksheet uses).  Off by default —
+    /// the prompt edits emacs-style.  With vi mode on the prompt opens in
+    /// insert mode; Esc drops to normal mode for motions and operators.
+    #[arg(long = "vi")]
+    pub vi: bool,
 }
 
 /// An out-of-band action that runs and exits instead of starting a session.

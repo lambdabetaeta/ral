@@ -208,6 +208,7 @@ pub fn run() -> Result<(), String> {
             &scratch,
             &run_dir,
             seed,
+            c.vi,
         )
     }
 }
