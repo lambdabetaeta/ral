@@ -188,6 +188,233 @@ pub fn hunk_magnitude(hunks: &[Hunk]) -> u32 {
         .sum()
 }
 
+// ── I/O events: structural shapes core emits onto the `surface` sink ─────────
+
+/// How a write reached the file: a one-shot `write`, an `append`, or a
+/// `stream` of bytes.  Nominal, like a [`Role`] — the card maps it to text,
+/// never to appearance.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteMode {
+    Write,
+    Append,
+    Stream,
+}
+
+impl WriteMode {
+    /// Parse a write-mode tag; `None` for an unrecognised mode.
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "write" => Self::Write,
+            "append" => Self::Append,
+            "stream" => Self::Stream,
+            _ => return None,
+        })
+    }
+
+    /// The word shown in a write card's text.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Write => "write",
+            Self::Append => "append",
+            Self::Stream => "stream",
+        }
+    }
+}
+
+/// How a write settled: `committed` to disk, `aborted` before commit, or
+/// `failed`.  The card roles the outcome span by this (committed→`Ok`,
+/// aborted→`Warn`, failed→`Bad`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteOutcome {
+    Committed,
+    Aborted,
+    Failed,
+}
+
+impl WriteOutcome {
+    /// Parse a write-outcome tag; `None` for an unrecognised outcome.
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "committed" => Self::Committed,
+            "aborted" => Self::Aborted,
+            "failed" => Self::Failed,
+            _ => return None,
+        })
+    }
+
+    /// The word shown in a write card's outcome span, and its nominal role.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Committed => "committed",
+            Self::Aborted => "aborted",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn role(self) -> Role {
+        match self {
+            Self::Committed => Role::Ok,
+            Self::Aborted => Role::Warn,
+            Self::Failed => Role::Bad,
+        }
+    }
+}
+
+/// Whether an exec ran cleanly (`ok`) or not (`bad`).  The exec card pairs
+/// this with the numeric status; the status span is roled by the status code
+/// (0→`Ok`, nonzero→`Bad`), so the outcome tag is the structural twin of that
+/// readout in the recorded event.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecOutcome {
+    Ok,
+    Bad,
+}
+
+impl ExecOutcome {
+    /// Parse an exec-outcome tag; `None` for an unrecognised outcome.
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "ok" => Self::Ok,
+            "bad" => Self::Bad,
+            _ => return None,
+        })
+    }
+}
+
+/// A structural I/O event core surfaces onto the `surface` sink: a read, a
+/// write, an exec, or a grep.  Unlike a [`Card`] (which the kit composes in
+/// ral and exarch only renders), an `IoEvent` is the raw effect record —
+/// `surface` decodes it once ([`value_to_io`]) and composes the matching card
+/// ([`io_card`]).  Both ride the bus together (`Kind::Io`) so the recorded
+/// event keeps the structure the rendered mark tree erases.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize)]
+#[serde(tag = "io", rename_all = "snake_case")]
+pub enum IoEvent {
+    Read {
+        path: String,
+    },
+    Write {
+        path: String,
+        mode: WriteMode,
+        outcome: WriteOutcome,
+    },
+    Exec {
+        argv: Vec<String>,
+        outcome: ExecOutcome,
+        status: i64,
+    },
+    Grep {
+        scope: String,
+        pattern: String,
+    },
+}
+
+/// Decode a runtime `Value` core surfaced into a structural [`IoEvent`].
+///
+/// An io event is a `Map` whose `io` field names one of `read`/`write`/`exec`/
+/// `grep` — the contract core emits.  Anything else (a `` `card `` variant, a
+/// plain string, a map without a recognised `io` tag) returns `None`, the same
+/// graceful degradation as [`value_to_card`]; the sink then falls through to
+/// the card decoder.
+pub fn value_to_io(v: &RalValue) -> Option<IoEvent> {
+    let m = map_of(v)?;
+    Some(match str_field(m, "io")?.as_str() {
+        "read" => IoEvent::Read {
+            path: str_field(m, "path")?,
+        },
+        "write" => IoEvent::Write {
+            path: str_field(m, "path")?,
+            mode: WriteMode::parse(&str_field(m, "mode")?)?,
+            outcome: WriteOutcome::parse(&str_field(m, "outcome")?)?,
+        },
+        "exec" => IoEvent::Exec {
+            argv: strings_field(m, "argv"),
+            outcome: ExecOutcome::parse(&str_field(m, "outcome")?)?,
+            status: int_field(m, "status")?,
+        },
+        "grep" => IoEvent::Grep {
+            scope: str_field(m, "scope")?,
+            pattern: str_field(m, "pattern")?,
+        },
+        _ => return None,
+    })
+}
+
+/// Compose an [`IoEvent`] into a [`Card`] using only the existing marks — one
+/// [`Mark::Text`] of roled spans, zero new mark vocabulary.  The glyphs and
+/// spacing mirror how a `text`-mark card reads: a leading glyph, the path or
+/// program as the subject, the outcome roled by its level.
+pub fn io_card(event: &IoEvent) -> Card {
+    let spans = match event {
+        // `< path` — a muted inward glyph, then the path.
+        IoEvent::Read { path } => vec![
+            span(Role::Muted, "< "),
+            span(Role::Path, path),
+        ],
+        // `> path (mode) outcome` — outward glyph, path, the mode in
+        // parentheses, then the outcome roled by how it settled.
+        IoEvent::Write {
+            path,
+            mode,
+            outcome,
+        } => vec![
+            span(Role::Muted, "> "),
+            span(Role::Path, path),
+            span_plain(&format!(" ({}) ", mode.label())),
+            span(outcome.role(), outcome.label()),
+        ],
+        // `$ prog arg arg → status` — the program as a path, its args as
+        // code, and the exit status roled ok/bad.
+        IoEvent::Exec {
+            argv,
+            outcome: _,
+            status,
+        } => {
+            let mut spans = vec![span_plain("$ ")];
+            match argv.split_first() {
+                Some((prog, args)) => {
+                    spans.push(span(Role::Path, prog));
+                    for arg in args {
+                        spans.push(span(Role::Code, &format!(" {arg}")));
+                    }
+                }
+                None => spans.push(span_plain("(no command)")),
+            }
+            let role = if *status == 0 { Role::Ok } else { Role::Bad };
+            spans.push(span_plain(" → "));
+            spans.push(span(role, &status.to_string()));
+            spans
+        }
+        // `grep pattern in scope` — the pattern as code, the scope as path.
+        IoEvent::Grep { scope, pattern } => vec![
+            span(Role::Muted, "grep "),
+            span(Role::Code, pattern),
+            span_plain(" in "),
+            span(Role::Path, scope),
+        ],
+    };
+    Card(vec![Mark::Text { spans }])
+}
+
+/// A roled span carrying `text`.
+fn span(role: Role, text: &str) -> Span {
+    Span {
+        role: Some(role),
+        text: text.to_string(),
+    }
+}
+
+/// A roleless (plain-ink) span carrying `text`.
+fn span_plain(text: &str) -> Span {
+    Span {
+        role: None,
+        text: text.to_string(),
+    }
+}
+
 // ── Decode: runtime `Value` → `Card` ────────────────────────────────────────
 
 /// Decode the value a ral kit handed to `surface` into a [`Card`].
@@ -419,6 +646,22 @@ fn count_field(m: &ral_core::types::Map, field: &str) -> Option<u32> {
     }
 }
 
+/// An integer-typed field, unclamped — an exec status carries the full signed
+/// range a process exit can name (negatives for signal-coded exits).
+fn int_field(m: &ral_core::types::Map, field: &str) -> Option<i64> {
+    match m.get(field) {
+        Some(RalValue::Int(n)) => Some(*n),
+        _ => None,
+    }
+}
+
+/// A list-of-strings field; non-string elements render as their display so a
+/// partially-formed `argv` stays faithful, and a missing or non-list field is
+/// empty.
+fn strings_field(m: &ral_core::types::Map, field: &str) -> Vec<String> {
+    lines_field(m, field)
+}
+
 /// A list-of-strings field; non-string elements render as their display so
 /// the row stays faithful, and a missing or non-list field is empty.
 fn lines_field(m: &ral_core::types::Map, field: &str) -> Vec<String> {
@@ -576,6 +819,211 @@ mod tests {
         assert_eq!(marks[1]["max"], 12);
         assert_eq!(marks[2]["mark"], "raw");
         assert_eq!(marks[2]["bytes"], serde_json::json!([255, 104]));
+    }
+
+    /// Build a `Value::Map` of `(field, value)` pairs the way core does.
+    fn io_value(fields: Vec<(&str, RalValue)>) -> RalValue {
+        RalValue::map(fields.into_iter().map(|(k, v)| (k.into(), v)).collect())
+    }
+
+    /// The single `text` mark of a one-mark card, for asserting on io cards.
+    fn only_text(card: &Card) -> &[Span] {
+        match card.marks() {
+            [Mark::Text { spans }] => spans,
+            other => panic!("expected a one-mark text card, got {other:?}"),
+        }
+    }
+
+    /// Each of the four io shapes decodes into its typed [`IoEvent`].
+    #[test]
+    fn value_to_io_decodes_each_shape() {
+        assert_eq!(
+            value_to_io(&io_value(vec![("io", s("read")), ("path", s("a.rs"))])),
+            Some(IoEvent::Read {
+                path: "a.rs".into()
+            })
+        );
+        assert_eq!(
+            value_to_io(&io_value(vec![
+                ("io", s("write")),
+                ("path", s("b.rs")),
+                ("mode", s("append")),
+                ("outcome", s("committed")),
+            ])),
+            Some(IoEvent::Write {
+                path: "b.rs".into(),
+                mode: WriteMode::Append,
+                outcome: WriteOutcome::Committed,
+            })
+        );
+        assert_eq!(
+            value_to_io(&io_value(vec![
+                ("io", s("exec")),
+                ("argv", list(vec![s("git"), s("status"), s("-s")])),
+                ("outcome", s("bad")),
+                ("status", RalValue::Int(128)),
+            ])),
+            Some(IoEvent::Exec {
+                argv: vec!["git".into(), "status".into(), "-s".into()],
+                outcome: ExecOutcome::Bad,
+                status: 128,
+            })
+        );
+        assert_eq!(
+            value_to_io(&io_value(vec![
+                ("io", s("grep")),
+                ("scope", s("src/")),
+                ("pattern", s("TODO")),
+            ])),
+            Some(IoEvent::Grep {
+                scope: "src/".into(),
+                pattern: "TODO".into(),
+            })
+        );
+    }
+
+    /// A non-io value is not an io event: a `` `card `` variant, a plain
+    /// string, and a map without a recognised `io` tag all return `None`,
+    /// so the sink falls through to the card decoder.
+    #[test]
+    fn value_to_io_rejects_non_io_values() {
+        assert!(value_to_io(&card_value(vec![])).is_none(), "a card is not io");
+        assert!(value_to_io(&s("plain")).is_none(), "a string is not io");
+        assert!(
+            value_to_io(&io_value(vec![("io", s("teleport"))])).is_none(),
+            "an unknown io tag is not an io event"
+        );
+        assert!(
+            value_to_io(&io_value(vec![("path", s("a.rs"))])).is_none(),
+            "a map without an io field is not an io event"
+        );
+    }
+
+    /// A read card is a muted `<` glyph followed by the `Path`-roled path.
+    #[test]
+    fn io_card_read_is_muted_glyph_and_path() {
+        let card = io_card(&IoEvent::Read {
+            path: "a.rs".into(),
+        });
+        let spans = only_text(&card);
+        assert_eq!(spans[0].role, Some(Role::Muted));
+        assert!(spans[0].text.contains('<'));
+        assert_eq!(spans[1].role, Some(Role::Path));
+        assert_eq!(spans[1].text, "a.rs");
+    }
+
+    /// A write card roles its outcome span by how the write settled:
+    /// committed→`Ok`, aborted→`Warn`, failed→`Bad`.  The path is `Path`,
+    /// and the mode word is carried in the card.
+    #[test]
+    fn io_card_write_roles_outcome_by_settling() {
+        for (outcome, role) in [
+            (WriteOutcome::Committed, Role::Ok),
+            (WriteOutcome::Aborted, Role::Warn),
+            (WriteOutcome::Failed, Role::Bad),
+        ] {
+            let card = io_card(&IoEvent::Write {
+                path: "b.rs".into(),
+                mode: WriteMode::Stream,
+                outcome,
+            });
+            let spans = only_text(&card);
+            assert!(
+                spans.iter().any(|sp| sp.role == Some(Role::Path) && sp.text == "b.rs"),
+                "the path is roled Path"
+            );
+            assert!(
+                spans.iter().any(|sp| sp.text.contains("stream")),
+                "the mode word is shown"
+            );
+            let outcome_span = spans.last().expect("a write card ends on its outcome");
+            assert_eq!(outcome_span.role, Some(role), "{outcome:?} roles the outcome span");
+            assert!(outcome_span.text.contains(match outcome {
+                WriteOutcome::Committed => "committed",
+                WriteOutcome::Aborted => "aborted",
+                WriteOutcome::Failed => "failed",
+            }));
+        }
+    }
+
+    /// An exec card carries the program as a `Path` span, each arg as a
+    /// `Code` span, and a status span roled `Ok` at status 0, `Bad`
+    /// otherwise.
+    #[test]
+    fn io_card_exec_roles_status_by_code() {
+        let ok = io_card(&IoEvent::Exec {
+            argv: vec!["ls".into(), "-la".into()],
+            outcome: ExecOutcome::Ok,
+            status: 0,
+        });
+        let spans = only_text(&ok);
+        assert!(
+            spans.iter().any(|sp| sp.role == Some(Role::Path) && sp.text == "ls"),
+            "the program is a Path span"
+        );
+        assert!(
+            spans.iter().any(|sp| sp.role == Some(Role::Code) && sp.text.contains("-la")),
+            "each arg is a Code span"
+        );
+        let status = spans.last().expect("exec ends on its status");
+        assert_eq!(status.role, Some(Role::Ok), "status 0 is Ok");
+        assert_eq!(status.text, "0");
+
+        let bad = io_card(&IoEvent::Exec {
+            argv: vec!["false".into()],
+            outcome: ExecOutcome::Bad,
+            status: 1,
+        });
+        let status = only_text(&bad).last().expect("exec ends on its status");
+        assert_eq!(status.role, Some(Role::Bad), "a nonzero status is Bad");
+        assert_eq!(status.text, "1");
+    }
+
+    /// A grep card carries the scope as a `Path` span and the pattern as a
+    /// `Code` span.
+    #[test]
+    fn io_card_grep_codes_the_pattern() {
+        let card = io_card(&IoEvent::Grep {
+            scope: "src/".into(),
+            pattern: "fn main".into(),
+        });
+        let spans = only_text(&card);
+        assert!(
+            spans.iter().any(|sp| sp.role == Some(Role::Code) && sp.text == "fn main"),
+            "the pattern is a Code span"
+        );
+        assert!(
+            spans.iter().any(|sp| sp.role == Some(Role::Path) && sp.text == "src/"),
+            "the scope is a Path span"
+        );
+    }
+
+    /// An `IoEvent` serialises structurally — tagged by its `io` field, with
+    /// the mode/outcome enums as snake_case strings — so the raw effect is
+    /// recorded beside the card in `transcript.jsonl`.
+    #[test]
+    fn io_event_serialises_structurally() {
+        let v = serde_json::to_value(IoEvent::Write {
+            path: "b.rs".into(),
+            mode: WriteMode::Append,
+            outcome: WriteOutcome::Failed,
+        })
+        .expect("an io event serialises");
+        assert_eq!(v["io"], "write");
+        assert_eq!(v["path"], "b.rs");
+        assert_eq!(v["mode"], "append");
+        assert_eq!(v["outcome"], "failed");
+
+        let v = serde_json::to_value(IoEvent::Exec {
+            argv: vec!["git".into(), "log".into()],
+            outcome: ExecOutcome::Ok,
+            status: 0,
+        })
+        .expect("an exec event serialises");
+        assert_eq!(v["io"], "exec");
+        assert_eq!(v["argv"], serde_json::json!(["git", "log"]));
+        assert_eq!(v["outcome"], "ok");
+        assert_eq!(v["status"], 0);
     }
 
     /// `single_diff` keys aggregation: exactly one diff mark yields its

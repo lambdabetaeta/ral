@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+
 //! Architecture grep guards for the run-turn host-API cutover.
 //!
 //! [[decisions/260618_run-turn-is-host-api]] makes `Shell::run_turn` /

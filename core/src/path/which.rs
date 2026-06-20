@@ -90,6 +90,10 @@ fn anchor_to_cwd(p: PathBuf, cwd: Option<&Path>) -> PathBuf {
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:which-stat] `which`/PATH probe: stats a candidate to read its executable bit; an executable-probe predicate, not turn-time model data I/O, raises no surface card."
+)]
 fn is_executable_file(p: &Path) -> bool {
     if !p.is_file() {
         return false;
@@ -118,6 +122,10 @@ fn is_executable_file(p: &Path) -> bool {
 /// the shell can actually run.  Callers that want stable order or
 /// deduplication should sort/dedup the result; doing so here would be
 /// premature for hot paths that only sample a prefix.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:which-readdir] `which`/completion probe: enumerates each PATH directory to list executable names; an executable-probe scan, not turn-time model data I/O, raises no surface card."
+)]
 pub fn commands_on_path(path_value: &str, cwd: Option<&Path>) -> Vec<String> {
     let mut out = Vec::new();
     for dir in std::env::split_paths(&std::ffi::OsString::from(path_value)) {
@@ -157,6 +165,7 @@ pub fn file_exists_on_path(name: &str, path: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 #[cfg(unix)]
+#[allow(clippy::disallowed_methods, reason = "[io-door:test] test fs/process scaffolding")]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

@@ -23,6 +23,10 @@ pub(in crate::repl) struct MinimalFrontend {
 }
 
 impl MinimalFrontend {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:silent:history-read] loads persisted repl history at construction; not turn-time model I/O"
+    )]
     pub(in crate::repl) fn new() -> Self {
         let history_path = dirs_history();
         let history: Vec<String> = history_path
@@ -93,6 +97,10 @@ impl Frontend for MinimalFrontend {
         }
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:silent:history-append] appends this session's repl history to its log file; not turn-time model I/O"
+    )]
     fn save_history(&mut self) {
         let Some(path) = &self.history_path else {
             return;

@@ -39,6 +39,10 @@ pub(crate) fn user_name() -> String {
 static DEFAULT_EXIT_HINTS: &str = include_str!("../../data/exit-hints.txt");
 
 /// Load exit-code hints: user override in data dir, else the embedded default.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:exit-hints-read] startup read of the optional exit-hints override file; not turn-time model I/O"
+)]
 pub(crate) fn load_exit_hints() -> ExitHints {
     let text = ral_core::path::config::xdg_data_subpath("ral/exit-hints.txt")
         .and_then(|p| std::fs::read_to_string(p).ok())

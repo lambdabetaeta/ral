@@ -46,8 +46,9 @@ Composability is one rule at three scales: the plane stacks marks (`card`),
 
 ## Decode — `value_to_card`
 
-`value_to_card` (`card.rs`) is the one decoder, reading marks off the runtime
-`Value` the way the old `value_to_kind` read fields. The wire shape is
+`value_to_card` (`card.rs`) is the card decoder, reading marks off the runtime
+`Value` the way the old `value_to_kind` read fields (a sibling `value_to_io`
+decodes core's I/O events — [[map/exarch/io-surface|io-surface]]). The wire shape is
 `Variant{label:"card", payload: List<mark>}`; each mark is `Variant{label,
 payload: Map}`. A bare known mark surfaced unwrapped (`` `diff [...] ``) is
 lifted into a one-mark card for convenience; any other top-level value is
@@ -55,12 +56,14 @@ dropped, exactly as the old decoder dropped an unrecognised variant. Decoding
 never fails *within* a recognised card: an unknown mark label or role degrades
 to plain `text`, because a card is a deliberate user-facing act, not a sentinel
 that might be malformed. The `diff` mark accepts either a `hunks` list or the
-flat single-hunk fields (`start`/`before`/`del`/`add`/`after`), the form
-`agent.ral`'s `edit` emits.
+flat single-hunk fields (`start`/`before`/`del`/`add`/`after`), the form the
+`edit` builtin emits.
 
-`AgentSink::emit` ([[map/exarch/shell-eval|shell-eval]]) runs `value_to_card` and
-emits one `Kind::Card` on the [[map/exarch/frontend|bus]]; detached workers buffer
-their `surface` calls and replay them on `await`, so a card replays for free.
+`AgentSink::emit` ([[map/exarch/shell-eval|shell-eval]]) is a two-decoder sink: an
+`io`-keyed value goes through `value_to_io`/`io_card` to a `Kind::Io`
+([[map/exarch/io-surface|io-surface]]), otherwise `value_to_card` runs and emits one
+`Kind::Card` on the [[map/exarch/frontend|bus]]; detached workers buffer their
+`surface` calls and replay them on `await`, so a card replays for free.
 
 ## Render — one interpreter, one binding table
 
@@ -102,12 +105,14 @@ honestly so. The stderr condenser (`card_stderr`) walks marks generically.
 
 ## Kit side
 
-The agent and tasks libraries hold small constructors so the mark grammar lives
-in one ral place: `patch-card`/`wrote-card` in `exarch/data/agent.ral`,
-`task-card`/`meter-card` in `kit/tasks.ral` (the kit owns the status→role
-mapping, since the host knows only the closed role set). `edit` surfaces one
-`patch-card` per change; the tasks kit surfaces a `task-card` + `meter-card` per
-transition.
+The tasks library holds small constructors so the mark grammar lives in one ral
+place: `task-card`/`meter-card` in `kit/tasks.ral` (the kit owns the status→role
+mapping, since the host knows only the closed role set), surfaced per transition.
+The agent library's `edit` is now a Rust builtin
+([[map/exarch/io-surface|io-surface]]) that builds its own `diff` card Rust-side;
+the read/write redirect and exec cards are likewise composed from core's I/O
+events, not by ral constructors — so the dormant `patch-card`/`wrote-card` ral
+helpers are gone.
 
 One ral constraint shapes the wire format: lists and records are statically
 **homogeneous**. Heterogeneous *variant* lists are fine (ral unifies them into a

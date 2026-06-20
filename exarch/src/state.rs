@@ -63,6 +63,10 @@ fn path_in(dir: &Path) -> PathBuf {
 /// absent or unreadable as state. A malformed file is treated as absent
 /// (the default selection applies) rather than failing startup — the
 /// selection is recoverable state, not load-bearing config.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:state-read] reads the persisted picker selection; recoverable session state, not turn-time data I/O"
+)]
 pub fn load(dir: &Path) -> Option<State> {
     let bytes = std::fs::read(path_in(dir)).ok()?;
     serde_json::from_slice(&bytes).ok()
@@ -72,6 +76,10 @@ pub fn load(dir: &Path) -> Option<State> {
 /// message on failure so the picker can note it without aborting the
 /// switch — the switch already took effect in memory; only its persistence
 /// failed.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:state-write] persists the picker selection; recoverable session state, not turn-time data I/O"
+)]
 pub fn save(dir: &Path, state: &State) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let path = path_in(dir);
@@ -81,6 +89,7 @@ pub fn save(dir: &Path, state: &State) -> Result<(), String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "[io-door:test] test fs/process scaffolding")]
 mod tests {
     use super::*;
 

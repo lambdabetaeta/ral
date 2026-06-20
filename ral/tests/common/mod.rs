@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+
 //! Shared scaffolding for `ral` integration tests.
 //!
 //! Each integration file used to rebuild the same skeleton: locate the

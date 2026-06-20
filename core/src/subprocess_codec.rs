@@ -170,6 +170,10 @@ fn decode_body<T>(
 /// Write a post-mortem frame dump to `path`.  On Unix the file is created
 /// with owner-only permissions rather than the process umask's default.
 #[cfg(unix)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:frame-dump] subprocess codec (helper IPC): writes a post-mortem frame dump for debugging the helper protocol; an IPC diagnostic artifact, not turn-time model data I/O, raises no surface card."
+)]
 fn dump_frame(path: &std::path::Path, body: &[u8]) -> io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     let mut file = std::fs::OpenOptions::new()
@@ -182,11 +186,16 @@ fn dump_frame(path: &std::path::Path, body: &[u8]) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:frame-dump-nonunix] subprocess codec (helper IPC): writes a post-mortem frame dump for debugging the helper protocol; an IPC diagnostic artifact, not turn-time model data I/O, raises no surface card."
+)]
 fn dump_frame(path: &std::path::Path, body: &[u8]) -> io::Result<()> {
     std::fs::write(path, body)
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "[io-door:test] test fs/process scaffolding")]
 mod tests {
     use super::*;
 

@@ -12,7 +12,7 @@
 //! surfaces tool summaries, patches, writes, and tasks instead.
 
 use crate::bus::{Emitter, Kind};
-use crate::card::value_to_card;
+use crate::card::{io_card, value_to_card, value_to_io};
 use ral_core::types::{Break, Escape};
 use ral_core::{
     EventSink, RequestedTerminalAccess, Shell, StaticDiagnostics, TurnIo, TurnReport, TurnRequest,
@@ -48,20 +48,32 @@ pub enum Outcome {
 
 /// The agent's structured-event surface: the turn-local [`EventSink`] exarch
 /// installs for a tool call.  It decodes each `Value` the `surface` builtin
-/// hands it into a render document (a [`Card`] of Bertin marks, via
-/// [`value_to_card`]) and emits it on the presentation bus through a clone of
-/// the call's [`Emitter`].  A value that is not a card is dropped — the same
-/// graceful degradation the old tagged-variant decoder had.  Detached workers
-/// never receive this sink: core buffers their `surface` calls and replays
-/// them on `await`, so a clone of the bus `Emitter` can never outlive the
-/// tool turn.
+/// hands it and emits it on the presentation bus through a clone of the call's
+/// [`Emitter`].  Two shapes arrive at this one sink:
+///
+///   * a structural I/O event core emits (a read, write, exec, or grep) — a
+///     `Map` tagged by its `io` field, decoded into a typed [`IoEvent`] and
+///     paired with the [`Card`] composed from it ([`Kind::Io`]); and
+///   * a render document a ral kit composed (a `` `card `` variant of Bertin
+///     marks), decoded into a [`Card`] ([`Kind::Card`]).
+///
+/// They cannot collide — an io value is a `Map`, a card a `Variant` — but the
+/// io path is tried first, so the raw effect record always reaches the bus
+/// beside its rendering.  A value that is neither is dropped, the same
+/// graceful degradation as [`value_to_card`].  Detached workers never receive
+/// this sink: core buffers their `surface` calls and replays them on `await`,
+/// so a clone of the bus `Emitter` can never outlive the tool turn.
 ///
 /// [`Card`]: crate::card::Card
+/// [`IoEvent`]: crate::card::IoEvent
 struct AgentSink(Emitter);
 
 impl EventSink for AgentSink {
     fn emit(&self, ev: &RalValue) {
-        if let Some(card) = value_to_card(ev) {
+        if let Some(event) = value_to_io(ev) {
+            let card = io_card(&event);
+            self.0.emit(Kind::Io { event, card });
+        } else if let Some(card) = value_to_card(ev) {
             self.0.emit(Kind::Card(card));
         }
     }
@@ -219,6 +231,7 @@ pub fn run_shell(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "[io-door:test] test fs/process scaffolding")]
 mod tests {
     //! Documented-semantics tests for exarch's tool-call evaluator.
     //!
@@ -434,18 +447,26 @@ mod tests {
     }
 
     /// Exarch sources agent helpers at boot and registers the Rust
-    /// atoms they depend on as host builtins.  This test also locks in
-    /// `run_shell` passing live bindings into elaboration:
-    /// `view` / `view-around` / `edit` are source-loaded names, not core
-    /// prelude exports.
+    /// atoms they depend on as host builtins.  `view` / `view-around` are
+    /// source-loaded ral names (in `mobile.scope`); `window-hash` /
+    /// `grep-files` / `edit` are now host builtins (reachable by name via the
+    /// builtin registry, not bound in lexical scope).  This test also locks in
+    /// `run_shell` passing live bindings into elaboration.
     #[test]
     fn agent_helpers_are_loaded_into_tool_shell() {
         let mut shell = fresh_shell();
-        assert!(shell.mobile.scope.get("window-hash").is_some());
         assert!(shell.mobile.scope.get("view").is_some());
         assert!(shell.mobile.scope.get("view-around").is_some());
-        assert!(shell.mobile.scope.get("grep-files").is_some());
-        assert!(shell.mobile.scope.get("edit").is_some());
+        for builtin in ["window-hash", "grep-files", "edit"] {
+            assert!(
+                shell.lookup_value_name(builtin).is_some(),
+                "{builtin} must resolve as a host builtin"
+            );
+            assert!(
+                shell.mobile.scope.get(builtin).is_none(),
+                "{builtin} is a builtin, not a lexical binding"
+            );
+        }
         let result = run_once(
             &mut shell,
             r#"
@@ -785,6 +806,53 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
         assert_round_trips("leading-zero", &line_with_digit_digest(true));
     }
 
+    /// `AgentSink` routes each surfaced value to the right bus event: a
+    /// structural io value (a `Map` tagged by its `io` field) becomes a
+    /// `Kind::Io` carrying both the typed event and the card composed from
+    /// it; an ordinary `` `card `` value becomes a `Kind::Card`.  The two
+    /// shapes never collide — io is a `Map`, a card a `Variant` — and the
+    /// io path is tried first.
+    #[test]
+    fn agent_sink_routes_io_and_card_distinctly() {
+        use crate::card::IoEvent;
+        let (emit, rx) = dummy_emitter();
+        let sink = AgentSink(emit);
+
+        // An io value routes to Kind::Io, carrying the decoded event and a
+        // card rendered from it.
+        sink.emit(&RalValue::map(vec![
+            ("io".into(), RalValue::String("read".into())),
+            ("path".into(), RalValue::String("a.rs".into())),
+        ]));
+        match rx.try_recv().expect("an io value emits an event").kind {
+            Kind::Io { event, card } => {
+                assert_eq!(event, IoEvent::Read { path: "a.rs".into() });
+                assert!(!card.marks().is_empty(), "the io card is composed");
+            }
+            _ => panic!("an io value must route to Kind::Io"),
+        }
+
+        // An ordinary card value routes to Kind::Card.
+        sink.emit(&RalValue::Variant {
+            label: "card".into(),
+            payload: Some(Box::new(RalValue::list(vec![]))),
+        });
+        assert!(
+            matches!(
+                rx.try_recv().expect("a card value emits an event").kind,
+                Kind::Card(_)
+            ),
+            "a card value must route to Kind::Card"
+        );
+
+        // A value that is neither is dropped.
+        sink.emit(&RalValue::String("nope".into()));
+        assert!(
+            rx.try_recv().is_err(),
+            "a non-io, non-card value emits nothing"
+        );
+    }
+
     /// Colour suppression reaches spawned commands through the
     /// environment: a child shell must see `NO_COLOR=1` and
     /// `CLICOLOR_FORCE=0` (see `bootstrap::seed_no_color`).
@@ -1002,32 +1070,534 @@ return [count: !{length $hits}, hits: $hits]
         );
     }
 
-    /// `grep-files`' lossy scan can match a file the strict `from-string`
-    /// re-read then rejects.  The failure must name that file and point at
-    /// the search scope — not surface a bare `from-string: … use from-bytes`
-    /// the model never called and could not slot into a `grep-files` call.
-    /// A file holding "match " plus a stray 0xff matches the scan but is not
-    /// valid UTF-8.
+    /// `grep-files`' lossy scan can match a file that is not valid UTF-8 —
+    /// one `edit` can never witness (no row split is possible).  Rather than
+    /// failing the whole search, the builtin returns such a hit with its hash
+    /// flagged as the empty string: a value no `window-hash` produces, so it
+    /// resolves to no line and is unmistakably "no witness".  A file holding
+    /// "match " plus a stray 0xff matches the scan but is not valid UTF-8.
     #[test]
-    fn grep_files_localizes_a_non_utf8_file() {
+    fn grep_files_flags_a_non_utf8_hit_without_failing() {
         let mut shell = fresh_shell();
         let r = run_once(
             &mut shell,
             r#"let dir = temp-dir
 to-bytes [109, 97, 116, 99, 104, 32, 255, 10] > "$dir/bad.txt"
 cd $dir
-grep-files 'match'
+return !{grep-files 'match'}
 "#,
         );
-        assert_ne!(r.exit, 0, "a non-UTF-8 matched file must fail the call");
-        let stderr = String::from_utf8_lossy(&r.stderr);
+        assert_eq!(
+            r.exit, 0,
+            "a non-UTF-8 matched file must not fail the call; stderr was: {}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        let value: serde_json::Value =
+            serde_json::from_str(r.value.as_deref().expect("structured result"))
+                .expect("json tool value");
+        let hits = value.as_array().expect("grep-files returns a list");
+        assert_eq!(hits.len(), 1, "the un-witnessable file still matches");
+        assert_eq!(hits[0]["file"], "bad.txt");
+        assert_eq!(
+            hits[0]["hash"], "",
+            "an un-witnessable hit carries the empty-string flag, not a hash"
+        );
+    }
+
+    /// `grep-files` over a tree of N matching files emits *exactly one* grep
+    /// surface (the search is one logical effect, not one per file), returns N
+    /// stamped hits, and the witnesses it stamps RESOLVE in a subsequent
+    /// `edit` — the search→edit round-trip the move below the redirect frame
+    /// must preserve.
+    #[test]
+    fn grep_files_emits_one_surface_and_witnesses_resolve() {
+        use crate::card::IoEvent;
+        let mut shell = fresh_shell();
+        let (tx, rx) = mpsc::channel();
+        let emit = Emitter::new(tx, 0);
+
+        let tmp =
+            std::env::temp_dir().join(format!("exarch-grep-one-surface-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create temp tree");
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(tmp.join(name), "head\nTARGET line\ntail\n").expect("write fixture");
+        }
+        let tmp_str = display_no_trailing_sep(&tmp);
+
+        // Search, then edit every hit by the witness grep stamped. If any
+        // witness were stale, the edit would fail writing nothing.
+        let src = format!(
+            r#"cd '{tmp_str}'
+let hits = grep-files 'TARGET'
+each {{ |h| edit $h[file] [[$h[hash], 'REPLACED']] }} $hits
+return !{{length $hits}}"#
+        );
+        let r = match run_shell(&mut shell, &Capabilities::root(), &src, 30, &emit) {
+            Outcome::Ran(r) => r,
+            Outcome::Static(s) => panic!("static failure: {s}"),
+        };
+        assert_eq!(
+            r.exit,
+            0,
+            "grep→edit round-trip must succeed; stderr was {:?}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        assert_eq!(r.value.as_deref(), Some("3"), "three files matched");
+
+        // Every matched file is now rewritten — proof the witnesses resolved.
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            assert_eq!(
+                std::fs::read_to_string(tmp.join(name)).expect("read after edit"),
+                "head\nREPLACED\ntail\n",
+                "{name} must have its TARGET line replaced"
+            );
+        }
+
+        let mut grep_surfaces = 0;
+        while let Ok(ev) = rx.try_recv() {
+            if let crate::bus::Kind::Io {
+                event: IoEvent::Grep { scope, pattern },
+                ..
+            } = ev.kind
+            {
+                grep_surfaces += 1;
+                assert_eq!(scope, ".", "the grep scope is the search root");
+                assert_eq!(pattern, "TARGET");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert_eq!(
+            grep_surfaces, 1,
+            "one logical search emits exactly one grep surface, not one per file"
+        );
+    }
+
+    /// Drive one tool call through `run_shell` with a real bus `Emitter`,
+    /// returning the result alongside every `Kind` event captured off the
+    /// channel.  The end-to-end coverage harness: it exercises the whole
+    /// `core surface → AgentSink::emit → Kind` path the gap tests assert on,
+    /// the same wiring `edit_emits_kind_card` and friends use, hoisted so the
+    /// coverage tests share it rather than re-threading the channel each time.
+    fn run_capturing(shell: &mut Shell, cmd: &str) -> (ToolResult, Vec<crate::bus::Kind>) {
+        let (tx, rx) = mpsc::channel();
+        let emit = Emitter::new(tx, 0);
+        let result = match run_shell(shell, &Capabilities::root(), cmd, 30, &emit) {
+            Outcome::Ran(r) => r,
+            Outcome::Static(s) => panic!("static (parse/type) failure: {s}"),
+        };
+        // Drop the emitter so the channel disconnects and `try_recv` drains
+        // cleanly to empty rather than blocking.
+        drop(emit);
+        let kinds: Vec<crate::bus::Kind> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|ev| ev.kind)
+            .collect();
+        (result, kinds)
+    }
+
+    /// The `IoEvent`s carried by the captured `Kind::Io` events, in order —
+    /// the structural effect records the gap tests assert on without caring
+    /// about the card composed beside each.
+    fn io_events(kinds: &[crate::bus::Kind]) -> Vec<&crate::card::IoEvent> {
+        kinds
+            .iter()
+            .filter_map(|k| match k {
+                Kind::Io { event, .. } => Some(event),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Write `body` into a fresh per-test temp dir and return both the dir and
+    /// the display path of the file inside it (no trailing separator), the
+    /// fixture shape the redirect/exec coverage tests need.  Mirrors the
+    /// scratch-dir pattern the surrounding edit/grep tests already use.
+    fn scratch_file(tag: &str, name: &str, body: &str) -> (std::path::PathBuf, String) {
+        let dir = std::env::temp_dir().join(format!("exarch-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        let path = dir.join(name);
+        std::fs::write(&path, body).expect("write scratch fixture");
+        let disp = display_no_trailing_sep(&path);
+        (dir, disp)
+    }
+
+    /// Coverage — the READ door end-to-end: a bare `from-string < a` reads
+    /// stdin through one `<` redirect, so exactly one `Kind::Io` carrying a
+    /// `Read` event for that path reaches the bus, and the composed card is the
+    /// muted-glyph-then-path read card.  No exec card: `from-string` is a
+    /// builtin, not an external image.
+    #[test]
+    fn bare_read_redirect_surfaces_one_read_card() {
+        use crate::card::{IoEvent, Mark, Role};
+        let mut shell = fresh_shell();
+        let (dir, path) = scratch_file("cov-read", "a", "hello\n");
+
+        let (r, kinds) = run_capturing(&mut shell, &format!("from-string < '{path}'"));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            r.exit,
+            0,
+            "the read redirect must succeed; stderr was {:?}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+
+        let ios = io_events(&kinds);
+        assert_eq!(
+            ios.len(),
+            1,
+            "a bare `from-string < a` raises exactly one io card, got {ios:?}"
+        );
+        assert_eq!(
+            ios[0],
+            &IoEvent::Read { path: path.clone() },
+            "the one io event is a read of the redirect path"
+        );
+        // The card composed beside the event is the read card: a muted `<`
+        // glyph, then the path roled `Path`.
+        let Kind::Io { card, .. } = kinds
+            .iter()
+            .find(|k| matches!(k, Kind::Io { .. }))
+            .expect("the read event rode the bus")
+        else {
+            unreachable!("filtered to Kind::Io")
+        };
+        let [Mark::Text { spans }] = card.marks() else {
+            panic!("a read card is one text mark, got {:?}", card.marks())
+        };
+        assert_eq!(spans[0].role, Some(Role::Muted));
+        assert!(spans[0].text.contains('<'), "the read glyph is `<`");
+        assert_eq!(spans[1].role, Some(Role::Path));
+        assert_eq!(spans[1].text, path);
+    }
+
+    /// Coverage — the WRITE door end-to-end: a bare `to-string "x" > b`
+    /// commits an atomic write through one `>` redirect, so exactly one
+    /// `Kind::Io` carrying a committed `Write` event reaches the bus, and the
+    /// composed card roles its outcome span `Ok`.
+    #[test]
+    fn bare_write_redirect_surfaces_one_committed_write_card() {
+        use crate::card::{IoEvent, Mark, Role, WriteMode, WriteOutcome};
+        let mut shell = fresh_shell();
+        // A fresh dir with no fixture file: the write creates the target.
+        let dir = std::env::temp_dir().join(format!("exarch-cov-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        let path = display_no_trailing_sep(&dir.join("b"));
+
+        let (r, kinds) = run_capturing(&mut shell, &format!("to-string 'x' > '{path}'"));
+        let wrote = std::fs::read_to_string(dir.join("b")).ok();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            r.exit,
+            0,
+            "the write redirect must succeed; stderr was {:?}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        assert_eq!(wrote.as_deref(), Some("x"), "the write committed to disk");
+
+        let ios = io_events(&kinds);
+        assert_eq!(
+            ios.len(),
+            1,
+            "a bare `to-string > b` raises exactly one io card, got {ios:?}"
+        );
+        assert_eq!(
+            ios[0],
+            &IoEvent::Write {
+                path: path.clone(),
+                mode: WriteMode::Write,
+                outcome: WriteOutcome::Committed,
+            },
+            "the one io event is a committed write of the redirect path"
+        );
+        let Kind::Io { card, .. } = kinds
+            .iter()
+            .find(|k| matches!(k, Kind::Io { .. }))
+            .expect("the write event rode the bus")
+        else {
+            unreachable!("filtered to Kind::Io")
+        };
+        let [Mark::Text { spans }] = card.marks() else {
+            panic!("a write card is one text mark, got {:?}", card.marks())
+        };
         assert!(
-            stderr.contains("bad.txt") && stderr.contains("not valid UTF-8"),
-            "the error names the offending file and why, got {stderr:?}"
+            spans.iter().any(|s| s.role == Some(Role::Path) && s.text == path),
+            "the path is roled Path"
+        );
+        let outcome = spans.last().expect("a write card ends on its outcome");
+        assert_eq!(outcome.role, Some(Role::Ok), "committed roles the outcome Ok");
+        assert!(outcome.text.contains("committed"));
+    }
+
+    /// Coverage — the EXEC door end-to-end: a bare external command raises
+    /// exactly one `Kind::Io` carrying an `Exec` event with the resolved argv
+    /// and exit status, and the composed card carries the program as a `Path`
+    /// span and the status roled by its code.  `/usr/bin/true` is the
+    /// deterministic, always-present image the core suite already leans on.
+    #[cfg(unix)]
+    #[test]
+    fn bare_external_surfaces_one_exec_card() {
+        use crate::card::{ExecOutcome, IoEvent, Mark, Role};
+        let mut shell = fresh_shell();
+
+        let (r, kinds) = run_capturing(&mut shell, "/usr/bin/true");
+        assert_eq!(
+            r.exit,
+            0,
+            "/usr/bin/true must exit zero; stderr was {:?}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+
+        let ios = io_events(&kinds);
+        assert_eq!(
+            ios.len(),
+            1,
+            "a bare external raises exactly one io card, got {ios:?}"
+        );
+        assert_eq!(
+            ios[0],
+            &IoEvent::Exec {
+                argv: vec!["/usr/bin/true".into()],
+                outcome: ExecOutcome::Ok,
+                status: 0,
+            },
+            "the one io event is a successful exec of the image"
+        );
+        let Kind::Io { card, .. } = kinds
+            .iter()
+            .find(|k| matches!(k, Kind::Io { .. }))
+            .expect("the exec event rode the bus")
+        else {
+            unreachable!("filtered to Kind::Io")
+        };
+        let [Mark::Text { spans }] = card.marks() else {
+            panic!("an exec card is one text mark, got {:?}", card.marks())
+        };
+        assert!(
+            spans.iter().any(|s| s.role == Some(Role::Path) && s.text == "/usr/bin/true"),
+            "the program is a Path span"
+        );
+        let status = spans.last().expect("an exec card ends on its status");
+        assert_eq!(status.role, Some(Role::Ok), "status 0 roles the status Ok");
+        assert_eq!(status.text, "0");
+    }
+
+    /// `view` is a ral closure that reads stdin, NOT an external image: a
+    /// `view 1 2 < a` reads its input through the `<` redirect, so the door
+    /// raises one READ card and no exec card — the closure dispatches in
+    /// process, never spawning a command.
+    #[cfg(unix)]
+    #[test]
+    fn view_is_a_helper_not_an_exec_image() {
+        use crate::card::IoEvent;
+        let mut shell = fresh_shell();
+        let (dir, path) = scratch_file("cov-view", "a", "alpha\nbeta\ngamma\n");
+
+        let (r, kinds) = run_capturing(&mut shell, &format!("view 1 2 < '{path}'"));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            r.exit,
+            0,
+            "view must read the fixture; stderr was {:?}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+
+        let ios = io_events(&kinds);
+        let reads = ios
+            .iter()
+            .filter(|e| matches!(e, IoEvent::Read { .. }))
+            .count();
+        let execs = ios
+            .iter()
+            .filter(|e| matches!(e, IoEvent::Exec { .. }))
+            .count();
+        assert_eq!(reads, 1, "view's `< a` raises one read card");
+        assert_eq!(
+            execs, 0,
+            "view is a ral closure, not an external image — no exec card, got {ios:?}"
+        );
+    }
+
+    /// Two model operations in one command: `cat < a` installs a `<` redirect
+    /// (one READ card) and then runs the external `cat` over that stdin (one
+    /// EXEC card) — exactly two io cards, in that order, because the read door
+    /// announces eagerly on install, before the body it feeds runs.
+    #[cfg(unix)]
+    #[test]
+    fn cat_redirect_surfaces_read_then_exec_in_order() {
+        use crate::card::{ExecOutcome, IoEvent};
+        let mut shell = fresh_shell();
+        let (dir, path) = scratch_file("cov-cat", "a", "one\ntwo\n");
+
+        let (r, kinds) = run_capturing(&mut shell, &format!("/bin/cat < '{path}'"));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            r.exit,
+            0,
+            "cat must read the fixture; stderr was {:?}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&r.stdout),
+            "one\ntwo\n",
+            "cat echoes the redirected stdin"
+        );
+
+        let ios = io_events(&kinds);
+        assert_eq!(
+            ios.len(),
+            2,
+            "cat < a is two logical operations — one read, one exec — got {ios:?}"
+        );
+        assert_eq!(
+            ios[0],
+            &IoEvent::Read { path: path.clone() },
+            "the read installs first, before the body runs"
+        );
+        assert_eq!(
+            ios[1],
+            &IoEvent::Exec {
+                argv: vec!["/bin/cat".into()],
+                outcome: ExecOutcome::Ok,
+                status: 0,
+            },
+            "then cat execs over that stdin"
+        );
+    }
+
+    /// Documented boundary — code loading is not turn-time data I/O: sourcing
+    /// a small ral file (and `use`-ing one) loads it through `std::fs` below
+    /// the redirect frame, so it raises NO io card.  Only the file's own
+    /// effects, if any, would surface — here the file is pure bindings, so the
+    /// bus stays silent of io events.
+    #[test]
+    fn sourcing_a_ral_file_raises_no_io_card() {
+        let mut shell = fresh_shell();
+        let (dir, path) = scratch_file("cov-source", "lib.ral", "let answer = 42\n");
+
+        let (sr, source_kinds) = run_capturing(&mut shell, &format!("source '{path}'"));
+        assert_eq!(
+            sr.exit,
+            0,
+            "source must load the file; stderr was {:?}",
+            String::from_utf8_lossy(&sr.stderr)
         );
         assert!(
-            !stderr.contains("from-string"),
-            "the error must not name an internal codec the model never called, got {stderr:?}"
+            io_events(&source_kinds).is_empty(),
+            "code loading is not data I/O — source raises no io card, got {:?}",
+            io_events(&source_kinds)
+        );
+
+        let (ur, use_kinds) = run_capturing(&mut shell, &format!("use '{path}'"));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            ur.exit,
+            0,
+            "use must load the file; stderr was {:?}",
+            String::from_utf8_lossy(&ur.stderr)
+        );
+        assert!(
+            io_events(&use_kinds).is_empty(),
+            "use is code loading too — no io card, got {:?}",
+            io_events(&use_kinds)
+        );
+    }
+
+    /// The transcript seam (`headless::event_record`) records the raw
+    /// structural `event` STRUCTURALLY beside the rendered `card` mark tree:
+    /// a `Kind::Io` projects to `("io", { event, card })`, so a post-mortem
+    /// reader keeps the effect's shape the rendered card erases.  Driven
+    /// against `event_record` directly — not a TUI render.
+    #[test]
+    fn io_event_record_carries_event_and_card_structurally() {
+        use crate::card::{io_card, IoEvent};
+        let event = IoEvent::Write {
+            path: "b.rs".into(),
+            mode: crate::card::WriteMode::Append,
+            outcome: crate::card::WriteOutcome::Committed,
+        };
+        let card = io_card(&event);
+        let kind = Kind::Io {
+            event: event.clone(),
+            card,
+        };
+        let rec = crate::headless::event_record(7, 3, &kind).expect("an io event records");
+
+        assert_eq!(rec["kind"], "io", "the record is tagged io");
+        // The raw structural event survives, tagged by its `io` field with the
+        // mode/outcome enums as snake_case strings.
+        assert_eq!(rec["event"]["io"], "write");
+        assert_eq!(rec["event"]["path"], "b.rs");
+        assert_eq!(rec["event"]["mode"], "append");
+        assert_eq!(rec["event"]["outcome"], "committed");
+        // The rendered card rides beside it as a structured mark tree.
+        let marks = rec["card"]
+            .as_array()
+            .expect("the card serialises to a JSON array of marks");
+        assert_eq!(marks[0]["mark"], "text", "the io card is one text mark");
+        assert!(
+            !marks[0]["spans"].as_array().expect("spans").is_empty(),
+            "the composed card carries its spans beside the raw event"
+        );
+    }
+
+    /// `edit` does all its file I/O in Rust, below the redirect frame, so it is
+    /// a single logical surface: it emits its diff card(s) and NO read/write io
+    /// card. Capturing the sink, only the diff card appears — never a
+    /// `{io: read}` or `{io: write}`.
+    #[test]
+    fn edit_emits_only_its_diff_card_no_io_card() {
+        use crate::card::IoEvent;
+        let mut shell = fresh_shell();
+        let (tx, rx) = mpsc::channel();
+        let emit = Emitter::new(tx, 0);
+
+        let tmp = std::env::temp_dir().join(format!("exarch-edit-one-surface-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let path = tmp.join("f.txt");
+        std::fs::write(&path, "alpha\nunique target line\nomega\n").expect("write fixture");
+        let tmp_str = display_no_trailing_sep(&tmp);
+
+        // Acquire the witness through `grep-files`, whose read is also in Rust
+        // (it raises a grep io card, never a read/write one), so the only
+        // read/write io that *could* appear would be edit's — and there is
+        // none. A redirect `< path` here would raise its own read card and
+        // confound the assertion.
+        let src = format!(
+            r#"cd '{tmp_str}'
+let hits = grep-files 'unique target'
+edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
+        );
+        let r = match run_shell(&mut shell, &Capabilities::root(), &src, 30, &emit) {
+            Outcome::Ran(r) => r,
+            Outcome::Static(s) => panic!("static failure: {s}"),
+        };
+        assert_eq!(
+            r.exit,
+            0,
+            "edit must succeed; stderr was {:?}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+
+        let mut diff_cards = 0;
+        let mut io_cards = 0;
+        while let Ok(ev) = rx.try_recv() {
+            match ev.kind {
+                crate::bus::Kind::Card(card) if card.has_diff() => diff_cards += 1,
+                crate::bus::Kind::Io {
+                    event: IoEvent::Read { .. } | IoEvent::Write { .. },
+                    ..
+                } => io_cards += 1,
+                _ => {}
+            }
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert_eq!(diff_cards, 1, "edit surfaces exactly one diff card");
+        assert_eq!(
+            io_cards, 0,
+            "edit's read and write happen in Rust, so no read/write io card is raised"
         );
     }
 }

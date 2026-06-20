@@ -383,6 +383,10 @@ pub(crate) fn self_reexec(flag: &str) -> std::io::Result<Command> {
 /// on-disk binary between launch and exec is not a risk we
 /// guard against here.
 #[cfg(windows)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:self-reexec-windows] Builds the ral-re-exec Command for Windows pipeline-helper / bundled-tool multicall subprocesses. Infrastructure spawn, not a model exec image — the model's exec surfaces at command::run, not here."
+)]
 pub(crate) fn self_reexec(flag: &str) -> std::io::Result<Command> {
     let exe = std::env::current_exe()?;
     let mut cmd = Command::new(exe);

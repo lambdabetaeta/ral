@@ -29,6 +29,10 @@ use std::process::{Command, Stdio};
 /// re-exec and profile-dump call sites pass `None` (the re-exec'd ral
 /// inherits the launcher cwd and threads logical cwd into its own
 /// children).
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:surface:bwrap-launch] Builds the bwrap-wrapped external exec image the model launches under a Linux sandbox projection. The exec card is fused onto this image at command::run, which emits the exec event with the resolved argv and exit status when the spawn/wait completes."
+)]
 pub fn make_command_with_policy(
     name: &str,
     args: &[String],
@@ -307,6 +311,10 @@ fn default_ro_binds() -> Vec<String> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:test] test fs/process scaffolding"
+)]
 mod tests {
     use super::make_command_with_policy;
     use crate::types::{FsPolicy, FsProjection, SandboxProjection};

@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+
 //! End-to-end tests for [`exarch::session::Session::apply`] and
 //! [`Session::run_turn`] driven through a scripted provider backend
 //! (`exarch::provider::Provider::scripted`).  This is the composition

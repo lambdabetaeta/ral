@@ -212,6 +212,7 @@ fn deliver_interrupt() {
 fn deliver_interrupt() {}
 
 #[cfg(all(test, unix))]
+#[allow(clippy::disallowed_methods, reason = "[io-door:test] test fs/process scaffolding")]
 mod tests {
     //! Tests for exarch's raw-mode cancel path.
     //!

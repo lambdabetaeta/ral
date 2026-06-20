@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+
 //! Grant-policy admittance rules at the `Shell` boundary.
 //!
 //! Each test drives `Shell::with_capabilities` (and its companions

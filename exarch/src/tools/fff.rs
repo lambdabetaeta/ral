@@ -116,6 +116,10 @@ fn index_for(base: &Path) -> Result<&'static Index, String> {
     Ok(idx)
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:fff-db-dir] creates the fff index's temp db dir; tool cache infra, not turn-time data I/O"
+)]
 fn build_index(base: &Path) -> Result<Index, String> {
     let db_root = std::env::temp_dir().join(format!(
         "exarch-fff-{}-{:016x}",

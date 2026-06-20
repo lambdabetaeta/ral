@@ -110,6 +110,10 @@ pub enum Command {
 /// or whitespace-only) collapses to `None` here, so the frontends do not
 /// each re-filter: the headless frontend rejects a missing seed, the TUI
 /// simply opens to a prompt.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:seed-file] reads the --file seed prompt at CLI parse time; not a turn-time door"
+)]
 pub fn load_seed(
     prompt: Option<String>,
     file: Option<std::path::PathBuf>,

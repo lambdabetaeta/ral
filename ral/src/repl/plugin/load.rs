@@ -51,6 +51,10 @@ pub(crate) fn load_plugin(
     let path = resolve_plugin_path(name_or_path)?;
     let rp = shell.resolve(&path);
     shell.check_fs_read(&rp)?;
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:silent:plugin-read] reads plugin source for loading; not turn-time model I/O"
+    )]
     let source = std::fs::read_to_string(&path).map_err(|e| load_err(format!("{path}: {e}")))?;
     let source = ral_core::source::normalize_source_text(source);
     let value = eval_plugin_file(&path, &source, shell)?;

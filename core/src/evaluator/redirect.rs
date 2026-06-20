@@ -14,6 +14,7 @@ use super::absorb_tail;
 use super::val::eval_val;
 use crate::io::Sink;
 use crate::ir::{RedirectV, ValRedirectTarget};
+use crate::runtime::command::io_event::{self, WriteOutcome};
 use crate::runtime::command::{self, EvalRedirect};
 use crate::syntax::ast::RedirectMode;
 use crate::types::*;
@@ -75,11 +76,23 @@ where
     })
 }
 
+/// One fd-1/2 file write target opened inside the frame, carried until
+/// the frame settles so its outcome (`committed` / `aborted` / `failed`)
+/// can be surfaced as a write event. `commit` is `Some` only for an
+/// atomic `>` to a regular file (fd 1); it is fired in `settle_writes`,
+/// where its success decides between `committed` and `failed`.
+struct WriteIntent {
+    path: String,
+    mode: RedirectMode,
+    commit: Option<command::AtomicCommit>,
+}
+
 /// RAII frame holding the redirect state [`with_redirects`] installs:
-/// the stdin guard, any residual fd guard, pending atomic commits, and
-/// the prior `stdout` / `stderr` sinks. Restoration runs through
-/// `tear_down`, which is also called by `Drop` on the panic path so a
-/// body that unwinds still leaves the shell clean.
+/// the stdin guard, any residual fd guard, pending atomic commits, the
+/// prior `stdout` / `stderr` sinks, and the fd-1/2 write intents whose
+/// outcome is surfaced at settle. Restoration runs through `tear_down`,
+/// which is also called by `Drop` on the panic path so a body that
+/// unwinds still leaves the shell clean.
 struct RedirectFrame<'a> {
     shell: &'a mut Shell,
     stdin_guard: Option<command::StdinRedirectGuard>,
@@ -87,11 +100,11 @@ struct RedirectFrame<'a> {
     commits: Vec<command::AtomicCommit>,
     prev_stdout: Option<Sink>,
     prev_stderr: Option<Sink>,
+    write_intents: Vec<WriteIntent>,
 }
 
 struct SinkRedirects {
     unhandled: Vec<(u32, RedirectMode, EvalRedirect)>,
-    commits: Vec<command::AtomicCommit>,
     prev_stdout: Option<Sink>,
     prev_stderr: Option<Sink>,
 }
@@ -101,40 +114,51 @@ fn clone_redirect_sink(sink: &Sink, context: &str) -> Raw<Sink> {
         .map_err(|e| Break::Error(Error::new(format!("{context}: {e}"), 1)).into())
 }
 
+/// Open one fd-1/2 file write target and record its write intent. The
+/// intent is pushed *before* the open is consulted for a failure so the
+/// open-error path (handled by the caller) can surface a `failed` write
+/// event for the same path; on success the intent picks up the atomic
+/// commit (if any) so `settle_writes` can fire it and decide the outcome.
 fn open_redirect_sink(
     path: &str,
-    mode: &RedirectMode,
+    mode: RedirectMode,
     shell: &mut Shell,
-    commits: &mut Vec<command::AtomicCommit>,
+    intents: &mut Vec<WriteIntent>,
 ) -> Raw<Sink> {
-    let (file, commit) = command::open_file(path, mode, shell)?;
-    if let Some(commit) = commit {
-        commits.push(commit);
-    }
+    intents.push(WriteIntent {
+        path: path.to_string(),
+        mode,
+        commit: None,
+    });
+    let (file, commit) = command::open_file(path, &mode, shell)?;
+    intents
+        .last_mut()
+        .expect("intent pushed above")
+        .commit = commit;
     Ok(Sink::File(file))
 }
 
 fn install_sink_redirects(
     redirects: &[(u32, RedirectMode, EvalRedirect)],
     shell: &mut Shell,
+    intents: &mut Vec<WriteIntent>,
 ) -> Raw<SinkRedirects> {
     let mut stdout = clone_redirect_sink(&shell.turn.io.stdout, "redirect: duplicate stdout")?;
     let mut stderr = clone_redirect_sink(&shell.turn.io.stderr, "redirect: duplicate stderr")?;
     let mut stdout_changed = false;
     let mut stderr_changed = false;
-    let mut commits = Vec::new();
     let mut unhandled = Vec::new();
 
     for (fd, mode, target) in redirects {
         match (*fd, target) {
             (0, EvalRedirect::File(_)) if matches!(mode, RedirectMode::Read) => {}
             (1, EvalRedirect::File(path)) => {
-                stdout = open_redirect_sink(path, mode, shell, &mut commits)?;
+                stdout = open_redirect_sink(path, *mode, shell, intents)?;
                 stdout_changed = true;
             }
             (2, EvalRedirect::File(path)) => {
                 let mode = command::stderr_mode(mode);
-                stderr = open_redirect_sink(path, &mode, shell, &mut commits)?;
+                stderr = open_redirect_sink(path, mode, shell, intents)?;
                 stderr_changed = true;
             }
             (1, EvalRedirect::Fd(1)) => {
@@ -172,10 +196,18 @@ fn install_sink_redirects(
 
     Ok(SinkRedirects {
         unhandled,
-        commits,
         prev_stdout,
         prev_stderr,
     })
+}
+
+/// Surface every recorded write intent as a `failed` write event and
+/// drop it — the door for the open-error and frame-entry-error paths,
+/// where no body runs and any already-opened atomic temp is discarded.
+fn emit_writes_failed(shell: &Shell, intents: Vec<WriteIntent>) {
+    for intent in intents {
+        shell.emit_io(io_event::write(&intent.path, intent.mode, WriteOutcome::Failed));
+    }
 }
 
 impl<'a> RedirectFrame<'a> {
@@ -187,9 +219,14 @@ impl<'a> RedirectFrame<'a> {
         // The stdin guard is not yet attached to a `RedirectFrame`,
         // so an error from `apply_redirects` will not trigger its
         // Drop. Restore it manually before propagating.
-        let sink_redirects = match install_sink_redirects(redirects, shell) {
+        let mut write_intents = Vec::new();
+        let sink_redirects = match install_sink_redirects(redirects, shell, &mut write_intents) {
             Ok(r) => r,
             Err(e) => {
+                // A write target failed to open (or a later one did,
+                // after this one opened): no body runs, so every
+                // recorded intent is a failed write.
+                emit_writes_failed(shell, write_intents);
                 stdin_guard.restore(shell);
                 return Err(e);
             }
@@ -197,6 +234,7 @@ impl<'a> RedirectFrame<'a> {
         let fd_guard = match command::apply_redirects(&sink_redirects.unhandled, shell) {
             Ok(g) => g,
             Err(e) => {
+                emit_writes_failed(shell, write_intents);
                 if let Some(s) = sink_redirects.prev_stdout {
                     shell.turn.io.stdout = s;
                 }
@@ -211,10 +249,47 @@ impl<'a> RedirectFrame<'a> {
             shell,
             stdin_guard: Some(stdin_guard),
             fd_guard: Some(fd_guard),
-            commits: sink_redirects.commits,
+            commits: Vec::new(),
             prev_stdout: sink_redirects.prev_stdout,
             prev_stderr: sink_redirects.prev_stderr,
+            write_intents,
         })
+    }
+
+    /// Settle the fd-1/2 write intents after the body has finished and
+    /// the sinks are restored: fire each atomic commit, surface one
+    /// write event per intent, and return the first commit failure (if
+    /// any) so the caller can propagate it.
+    ///
+    /// - body errored → every intent is `aborted` (its atomic temp drops
+    ///   here, discarded);
+    /// - body ok, non-atomic target → `committed`;
+    /// - body ok, atomic target → fire the commit: `committed` on
+    ///   success, `failed` on a rename/fsync error (the first such error
+    ///   is returned for propagation).
+    fn settle_writes(&mut self, body_ok: bool) -> Settled<()> {
+        let mut commit_err: Settled<()> = Ok(());
+        for intent in std::mem::take(&mut self.write_intents) {
+            let outcome = if !body_ok {
+                WriteOutcome::Aborted
+            } else if let Some(commit) = intent.commit {
+                match commit.commit() {
+                    Ok(()) => WriteOutcome::Committed,
+                    Err(e) => {
+                        if commit_err.is_ok() {
+                            commit_err =
+                                Err(Break::Error(Error::new(format!("atomic write: {e}"), 1)));
+                        }
+                        WriteOutcome::Failed
+                    }
+                }
+            } else {
+                WriteOutcome::Committed
+            };
+            self.shell
+                .emit_io(io_event::write(&intent.path, intent.mode, outcome));
+        }
+        commit_err
     }
 
     /// Unwinds the frame: flush, restore sinks, take `fd_guard` (its
@@ -301,8 +376,15 @@ where
     // `commit_atomics` has a clean shell to write through on the
     // success path and `?` has a clean shell on the error path.
     let commits = frame.tear_down();
+    // Settle the fd-1/2 write intents once the body result is known and
+    // sinks are restored: this fires the per-intent atomic commits and
+    // surfaces one write event per target. `frame` then drops as a
+    // no-op (its slots are zeroed). The body error takes priority over
+    // a commit failure, which in turn precedes the unhandled-fd commits.
+    let write_result = frame.settle_writes(result.is_ok());
     drop(frame);
     let v = result?;
+    write_result?;
     command::commit_atomics(commits)?;
     Ok(v)
 }

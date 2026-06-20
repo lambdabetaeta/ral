@@ -14,6 +14,10 @@
 
 use std::time::Duration;
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:journal-read] Spawns journalctl/dmesg to harvest the kernel's seccomp-denial audit window for a sandbox diagnostic. A post-mortem diagnostic probe, not the model's exec image — raises no exec card."
+)]
 pub(super) fn read_window(elapsed: Duration) -> Option<String> {
     // `journalctl --since` accepts relative strings like "2 seconds
     // ago"; pad by one second to cover sub-second calls, mirroring

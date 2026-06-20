@@ -537,6 +537,10 @@ pub(super) fn builtin_surface(args: &[Value], shell: &mut Shell) -> Settled<Valu
 // Print prompt to the console and read one line from the console.
 // Bypasses stdin/stdout redirection so it always talks to the user.
 // Errors on EOF (Ctrl+D / Ctrl+Z).
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:ask-tty] `ask` builtin opens the controlling terminal device (/dev/tty or CON) to prompt and read one line direct from the user, bypassing redirection; a terminal-device interaction, not turn-time model data I/O."
+)]
 pub(super) fn builtin_ask(args: &[Value]) -> Result<Value, Error> {
     let prompt = args
         .first()

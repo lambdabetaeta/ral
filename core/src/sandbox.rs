@@ -213,6 +213,10 @@ pub(crate) fn register_self_for_helpers() {
 /// Prefers the pinned sandbox self-path when available so helper subprocesses
 /// stay bound to the boot-time binary even if the on-disk path changes.
 #[cfg(unix)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:self-reexec] Builds the ral-re-exec Command for sandbox helper subprocesses (pipeline helper, bundled-tool multicall). Infrastructure spawn, not a model exec image — the model's exec surfaces at command::run, not here."
+)]
 pub(crate) fn self_command() -> std::io::Result<Command> {
     use std::os::unix::process::CommandExt;
 
@@ -336,6 +340,10 @@ pub(crate) fn apply_resource_limits(cmd: &mut Command) {
 pub(crate) fn apply_resource_limits(_cmd: &mut Command) {}
 
 /// Build a [`Command`] for an external program.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:surface:make-command] Builds the external exec image (ExecImage::Host) the model launches. The exec card is fused onto this image at command::run, which emits the exec event with the resolved argv and exit status when the spawn/wait completes."
+)]
 pub fn make_command(name: &str, args: &[String], shell: &Shell) -> Command {
     let mut c = Command::new(name);
     c.args(args);

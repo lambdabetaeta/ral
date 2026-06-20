@@ -336,6 +336,28 @@ impl Shell {
             .with_hint(hint)
     }
 
+    /// Forward any structured-event [`Value`] onto this turn's surface sink, if
+    /// one is installed; inert when none is.  The public door host builtins use
+    /// to surface their own events — a Rust exarch `edit` raising a diff card, a
+    /// `grep-files` announcing its search — since `turn.surface` is `pub(crate)`
+    /// and so unreachable from a host crate.  Core names no event shape here: the
+    /// caller hands a fully-formed `Value` the installed sink decodes.
+    pub fn surface(&self, ev: Value) {
+        if let Some(sink) = self.turn.surface.as_ref() {
+            sink.emit(&ev);
+        }
+    }
+
+    /// Emit a structural I/O event onto this turn's surface sink, if one is
+    /// installed.  This is the single door through which every redirect
+    /// read/write and every exec completion announces itself to the host;
+    /// with no surface installed it is inert.  The event is a plain
+    /// [`Value::Map`] whose shape (`{io: …, …}`) the host decodes — core
+    /// names no card type.
+    pub(crate) fn emit_io(&self, ev: Value) {
+        self.surface(ev);
+    }
+
     /// Install a script context: set the active script name on both the
     /// cursor's `script` and `call_site.script`, register the source text in
     /// the session registry, and make the registered source the active one

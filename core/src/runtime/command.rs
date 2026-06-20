@@ -34,6 +34,7 @@ use crate::types::*;
 mod child;
 mod foreground;
 mod identity;
+pub(crate) mod io_event;
 mod process;
 mod redirect;
 mod stdio;
@@ -145,8 +146,22 @@ pub(crate) fn run(
     // the spawn so a kernel deny logged by the child falls inside the
     // window the failure arm reads back (see `sandbox::diag`).
     let started = std::time::Instant::now();
-    let (child, wait_pgid) =
-        spawn(&mut command, fg.pgid_policy(), shell).map_err(|e| spawn_error(&cmd_name, e))?;
+    let (child, wait_pgid) = match spawn(&mut command, fg.pgid_policy(), shell) {
+        Ok(pair) => pair,
+        Err(e) => {
+            // Door 3 — EXEC (spawn failure): the synthesized exit code is
+            // exactly the status the resulting failure yields (NotFound→127,
+            // PermissionDenied→126, else 127), so read it off the very Break
+            // we are about to propagate.  Outcome is "bad" (nonzero status).
+            let failure = spawn_error(&cmd_name, e);
+            let status = match &failure {
+                Break::Error(err) => err.exit_code(),
+                _ => 127,
+            };
+            shell.emit_io(io_event::exec(&cmd_name, &rc.args, status));
+            return Err(failure.into());
+        }
+    };
 
     let child_pid = child.id();
     let _fg_guard = fg.acquire(child_pid, shell);
@@ -213,6 +228,11 @@ pub(crate) fn run(
     waited.drain();
     let code = outcome.to_user_exit_code();
     shell.mobile.control.last_status = code;
+    // Door 3 — EXEC (external + spawned-bundled completion): the inline
+    // bundled fast path returned long before the spawn above, so this door
+    // covers only the Host and spawned `BundledTool` images.  `code` is the
+    // user-visible exit status; outcome is "ok" iff it is zero.
+    shell.emit_io(io_event::exec(&cmd_name, &rc.args, code));
     // A child whose `LaunchRole` is `PipelineStage` (pipeline stages, the
     // pipeline helper subprocess) forgives SIGPIPE — the reader ended the
     // pipe, not a real error.

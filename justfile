@@ -36,7 +36,13 @@ test:
 fmt:
     cargo fmt
 
-# Clippy across the workspace (the Cargo.toml workspace lints fire here, not under build).
+# Clippy across the workspace (the Cargo.toml workspace lints fire here, not
+# under build).  `[workspace.lints.clippy] disallowed_methods = "deny"` makes
+# the fs/process I/O-door denylist (clippy.toml) a hard error here, so a stray
+# open/spawn outside a known door breaks the lint — no `-- -D` flag is needed,
+# and using one would wrongly override the vendored ral-ripgrep-core's
+# deliberate `[lints.clippy] all = "allow"` opt-out.  CI runs this exact
+# command (.github/workflows/ci.yml).
 lint:
     cargo clippy --workspace --all-targets
 

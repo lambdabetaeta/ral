@@ -215,6 +215,10 @@ impl Drop for TerminalGuard {
 /// pick up the redirected fd, so their `dbg_trace!` output flows into
 /// the same log.
 #[cfg(unix)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:stderr-log] opens the TUI debug log for fd-2 redirect; trace infra, not turn-time data I/O"
+)]
 fn redirect_stderr_to_file(path: &Path) -> io::Result<std::os::fd::RawFd> {
     use std::fs::OpenOptions;
     use std::os::fd::AsRawFd;
@@ -603,13 +607,16 @@ impl App {
                 let root = self.root;
                 self.push_chrome(root, RailShape::Generic, lines);
             }
-            // A surfaced render document.  A kit that raised a card through
-            // the `surface` builtin made an explicit choice to communicate
-            // with the user.  A single-`diff` card joins the patch-grouping
-            // buffer so consecutive edits to one file merge into one block,
-            // the way a unified diff presents one file; every other card is
-            // its own scrollback block.
-            Kind::Card(card) => {
+            // A surfaced render document, or a structural I/O event paired
+            // with the card composed from it: a kit that raised a card through
+            // the `surface` builtin, or core that surfaced an effect, made an
+            // explicit choice to communicate with the user.  Both carry a
+            // [`Card`] to draw, so they render through the one path (the raw
+            // `event` is the transcript's business, not the rail's).  A
+            // single-`diff` card joins the patch-grouping buffer so consecutive
+            // edits to one file merge into one block, the way a unified diff
+            // presents one file; every other card is its own scrollback block.
+            Kind::Card(card) | Kind::Io { card, .. } => {
                 ral_core::dbg_trace!(
                     "tui",
                     "Card id={id} viewports={:?} focus={} diff={}",

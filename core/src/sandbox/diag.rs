@@ -153,6 +153,10 @@ fn build_hint(denials: &[&str]) -> String {
 /// only way to attribute a denial to "our" subprocess tree rather than
 /// to a concurrent system service that happened to run during the same
 /// wall second.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:ps-sample] sandbox diagnostics: shells out to `/bin/ps` to sample the live process tree for denial attribution; a diagnostic probe, not turn-time model data I/O, raises no surface card."
+)]
 pub(crate) fn sample_descendants(root: u32) -> HashSet<u32> {
     let Ok(out) = std::process::Command::new("/bin/ps")
         .args(["-axo", "pid=,ppid="])

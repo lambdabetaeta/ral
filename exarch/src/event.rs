@@ -619,6 +619,10 @@ impl SessionLog {
 
     // ── Internal helpers ──────────────────────────────────────────────────
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:silent:session-dir] (re)creates the session log dir; event-log infra, not turn-time data I/O"
+    )]
     fn open_fresh(
         sessions_root: PathBuf,
         session_id: SessionId,
@@ -698,6 +702,10 @@ impl SessionLog {
 
 /// Always-open `events.json` writer.  Truncate-on-open — callers use
 /// this from constructors and `clear`, both of which want a fresh file.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:events-file] opens events.json for the session event log; infra, not turn-time data I/O"
+)]
 fn open_events_file(dir: &Path) -> io::Result<BufWriter<File>> {
     let f = OpenOptions::new()
         .write(true)
@@ -729,6 +737,7 @@ fn validate_result_ids(pending_ids: &[String], results: &[ToolResult]) -> Result
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "[io-door:test] test fs/process scaffolding")]
 mod tests {
     use super::*;
     use genai::chat::{ContentPart, ToolCall};

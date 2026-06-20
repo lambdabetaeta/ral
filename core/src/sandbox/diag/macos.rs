@@ -11,6 +11,10 @@
 
 use std::time::Duration;
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:log-show] macOS sandbox diagnostics: shells out to `/usr/bin/log show` to read Seatbelt denial records from the unified log; a diagnostic probe, not turn-time model data I/O, raises no surface card."
+)]
 pub(super) fn read_window(elapsed: Duration) -> Option<String> {
     // `log show --last <N>s` is whole-second granularity; pad by one
     // second so a sub-second call still catches its denials.

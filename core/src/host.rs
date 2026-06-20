@@ -120,6 +120,10 @@ pub fn boot_shell(terminal: TerminalState, prelude: &BakedPrelude) -> Shell {
 /// [`Pattern`](crate::syntax::ast::Pattern), or the scheme's type
 /// vocabulary silently invalidates a previously-emitted bake; the rerun
 /// lines force a re-bake when any of those files change.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:prelude-bake] build-script prelude bake: writes the postcard IR/scheme blobs to OUT_DIR during host setup; build-time artifact emission, not turn-time model data I/O, raises no surface card."
+)]
 pub fn bake_prelude_to_out_dir() {
     let core = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     for shape_file in [

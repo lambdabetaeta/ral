@@ -139,6 +139,10 @@ fn check_source(source: &str, shell: &Shell) -> Settled<std::sync::Arc<Comp>> {
 /// `check_fs_read` and the error messages are keyed on `abs_path` (the
 /// path as the caller resolved it); `who` (`"source"` / `"use"`) prefixes
 /// the surfaced errors so each verb keeps its own identity.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:module-load] `source`/`use` module loading reads program text from disk, gated by `check_fs_read`. The documented reasoned-silent residual: code-loading is visible as its own statement, not turn-time model data I/O, so it raises no surface card."
+)]
 fn read_and_normalize(
     resolved: &Path,
     abs_path: &str,

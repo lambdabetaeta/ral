@@ -748,6 +748,7 @@ fn admit_assistant(msg: &mut genai::chat::ChatMessage) {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "[io-door:test] test fs/process scaffolding")]
 mod tests {
     //! Panic-recovery integrity (A4): a worker panic mid-tool-eval must
     //! preserve the bindings completed tool calls left behind and leave

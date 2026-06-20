@@ -137,6 +137,20 @@ A *map* is the homogeneous cousin (all values one type); only maps support `keys
 
 `range 1 11` returns the list `[1, …, 10]` (`seq` is the external coreutil, and prints bytes).
 
+## Case
+
+`case` eliminates a variant: a tag-keyed table of handler blocks, each binding that tag's payload; the matching label runs.
+
+    case !{poll $h} [
+      `pending: { |_| 'running' },
+      `settled: { |s| case $s[outcome] [
+          `ok:  { |v| "done: $v"            },
+          `err: { |e| "failed: $e[message]" }
+      ]}
+    ]
+
+The table must cover every tag. A nullary tag still hands its block a value — ignore it with `_`.
+
 ## Failure
 
 `try` catches a failed command; without it, a non-zero exit aborts the entire script. When a tool reports through its exit code rather than failing (`grep`, `diff`, `test`, `valgrind --error-exitcode`), wrap it in `audit` to read its output as data instead of raising.
@@ -287,7 +301,7 @@ A card is `` `card [MARK, …] `` — an ordered stack of marks drawn top-to-bot
 - `` `diff [path: "…", start: N, before: […], del: […], add: […], after: […]] `` — one located hunk (`del` rewritten to `add` at line `start`, with context). Pass `hunks: [[…], …]` for several. The host renders the size bar, add/del grain, and graded disclosure.
 - `` `raw [bytes: "…"] `` — pre-formed bytes appended verbatim, for output outside the grammar. Honest about being un-encoded ink.
 
-A `` `card `` may stack marks of different kinds, but within one homogeneous list — a span list, a `fields` row list — every element is one type, so give every span a `role` and keep a table's values one kind. Constructors save the boilerplate: `patch-card` and `wrote-card` are in scope; the tasks kit adds `task-card`/`meter-card`. Compose marks directly for anything else:
+A `` `card `` may stack marks of different kinds, but within one homogeneous list — a span list, a `fields` row list — every element is one type, so give every span a `role` and keep a table's values one kind. `edit` builds and surfaces its own diff card; the tasks kit adds `task-card`/`meter-card` constructors. Compose marks directly for anything else:
 
     surface `card [
       `text    [spans: [[role: "strong", text: "tests "], [role: "ok", text: "42 passed"]]],
@@ -303,3 +317,5 @@ When you are unsure of the signature of something you always call `help <name>`.
     let h = spawn { audit { make } }
     let x = help 'view-around'
     [view-around-help: $x]
+
+Many builtins are not covered above; call `help` on any of: `ask`, `watch`, `alias`/`unalias`, `source`, `use`, `shell-quote`/`shell-split`, `upper`/`lower`/`slice`, `str`, `re-split`/`re-find-match`/`re-find-matches`/`re-replace`, `resolve-path`/`cwd`/`cd`/`temp-dir`/`temp-file`, `is-link`/`is-readable`/`is-writable`/`is-empty`, `fold-lines`, `clear`/`reset`, `reduce`, `last`, `take-while`/`drop-while`, `words`, `intersection`/`difference`, `stream-cons`/`stream-nil`/`stream-take`/`stream-drop`, `map-lines`/`filter-lines`/`each-line`, `file-empty`, `par`, `ansi-…`/`styled`.

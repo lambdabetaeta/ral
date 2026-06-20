@@ -55,6 +55,9 @@ at `$XDG_STATE_HOME/exarch/<project>/<run>/`, keyed by a slug of the project cwd
 - [[map/exarch/cards|cards]] — the render document `surface` carries: a `card` of closed
   Bertin marks decoded once and drawn by one generic interpreter; open card set,
   closed mark set.
+- [[map/exarch/io-surface|io-surface]] — every redirect read/write and exec image as one
+  card: core emits an I/O event at the runtime doors, exarch binds it to a mark; the
+  closed door set is clippy- and meta-test-enforced.
 
 ## Sandbox
 

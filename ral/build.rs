@@ -1,5 +1,9 @@
 use std::process::Command;
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:git-probe] build-time git probe for the version hash; not turn-time model I/O"
+)]
 fn main() {
     println!("cargo:rerun-if-changed=../.git/HEAD");
     println!("cargo:rerun-if-changed=../.git/refs/heads");

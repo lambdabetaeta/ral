@@ -667,6 +667,10 @@ fn main() -> ExitCode {
             script_args,
             batch,
         } => {
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "[io-door:silent:script-read] startup read of the script file path; not turn-time model I/O"
+            )]
             let source = match std::fs::read_to_string(&path) {
                 Ok(s) => s,
                 Err(e) => {

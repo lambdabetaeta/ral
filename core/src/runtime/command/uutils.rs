@@ -119,7 +119,10 @@ pub(crate) fn run_uutils_in_process(
     // unchanged cwd.  Snapshot it anyway: a misbehaving tool that
     // internally `chdir`s would otherwise leak its change into the
     // next builtin's process-cwd read.
-    #[allow(clippy::disallowed_methods)]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:silent:uutils-cwd-save] Defensive process-cwd snapshot around a third-party uutils tool that might internally chdir; restored below. Process-cwd bookkeeping, not the model's data I/O — the bundled exec surfaces via emit_io(exec) further down."
+    )]
     let saved_cwd = std::env::current_dir().ok();
 
     let os_args: Vec<std::ffi::OsString> = std::iter::once(std::ffi::OsString::from(tool))
@@ -131,7 +134,10 @@ pub(crate) fn run_uutils_in_process(
     }));
 
     if let Some(cwd) = saved_cwd {
-        #[allow(clippy::disallowed_methods)]
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "[io-door:silent:uutils-cwd-restore] Restores the pre-call process cwd after a third-party uutils tool that might internally chdir. Process-cwd bookkeeping, not the model's data I/O."
+        )]
         let _ = std::env::set_current_dir(cwd);
     }
 
@@ -145,6 +151,12 @@ pub(crate) fn run_uutils_in_process(
             if global == 0 { code } else { global }
         }
         Err(_) => {
+            // Door 3 — EXEC (inline bundled, panic branch): a panicking tool
+            // surfaces as status 1, outcome "bad".  Emit before propagating
+            // so this completion door fires exactly once, like the normal
+            // branch below.
+            drop(_exit_code_guard);
+            shell.emit_io(super::io_event::exec(tool, arg_strs, 1));
             return Err(Break::Error(
                 Error::new(format!("bundled tool '{tool}' panicked"), 1)
                     .at_loc(shell.turn.loc.source_loc(0)),
@@ -156,6 +168,10 @@ pub(crate) fn run_uutils_in_process(
     // status bookkeeping below so unrelated inline work does not wait.
     drop(_exit_code_guard);
 
+    // Door 3 — EXEC (inline bundled completion): the sole inline-uutils
+    // door.  The caller (`command::run`) returns before its spawn path for
+    // this image, so no external exec event double-fires for this call.
+    shell.emit_io(super::io_event::exec(tool, arg_strs, exit_code));
     shell.mobile.control.last_status = exit_code;
     if exit_code == 0 {
         Ok(Value::Unit)

@@ -93,6 +93,10 @@ const LEGACY_TOOL_HOMES: &[(&str, &str)] = &[
 ];
 
 impl Scratch {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:silent:scratch-bootstrap] disposable scratch-dir setup; not turn-time data I/O"
+    )]
     pub fn new() -> io::Result<Self> {
         let dir = std::env::temp_dir().join(format!("exarch-scratch-{}", std::process::id()));
         if dir.exists() {
@@ -131,6 +135,10 @@ impl Scratch {
 /// `sessions/<id>/{events.json,user.log}`.  Unlike the disposable
 /// [`Scratch`] this is durable state under the user's XDG state home, so
 /// it survives an abnormal exit and stays findable without a symlink.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:log-run-dir] per-run log dir under XDG state; infra, not turn-time data I/O"
+)]
 pub fn log_run_dir(cwd: &str) -> io::Result<PathBuf> {
     let stamp = format!("{}-{}", now_secs(), std::process::id());
     let dir = project_dir(cwd).join(stamp);

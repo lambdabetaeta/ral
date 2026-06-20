@@ -111,6 +111,10 @@ fn claim_terminal() -> Result<(), String> {
 }
 
 /// Save terminal state and install a panic hook that restores it and writes a crash log.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:crashlog-write] panic hook creates the state dir and writes a crash log; not turn-time model I/O"
+)]
 pub(super) fn setup_panic_hook() {
     #[cfg(unix)]
     {
@@ -249,6 +253,10 @@ fn source_config_file(path: &str, ctx: &mut RcCtx<'_>) {
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:config-read] reads an rc/config file during session boot; not turn-time model I/O"
+)]
 fn source_config_inner(path: &str, ctx: &mut RcCtx<'_>) -> Result<(), String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let src = ral_core::source::normalize_source_text(src);

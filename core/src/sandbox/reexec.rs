@@ -89,6 +89,10 @@ pub(super) fn register_sandbox_self() {
 /// protection.  Returns `None` on any failure; the caller treats that as
 /// "binary not sandbox-capable."
 #[cfg(target_os = "linux")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:pin-open] Opens the boot-time ral binary to pin it (by fd) for the Linux sandbox respawn, immune to on-disk swaps. Sandbox exe-pinning infrastructure, not the model's data I/O — raises no card."
+)]
 fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
     use std::os::fd::{AsRawFd, OwnedFd};
 
@@ -106,6 +110,10 @@ fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:pin-stat] sandbox respawn exe-pinning: stats the running executable to capture (dev, ino) so a mid-session binary swap is detectable; a self-path stat at respawn setup, not turn-time model data I/O, raises no surface card."
+)]
 fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
     use std::os::unix::fs::MetadataExt;
 
@@ -178,6 +186,10 @@ fn ntfs_stat(path: &std::path::Path) -> Option<(u32, u32, u32)> {
 /// macOS pins via `(dev, ino)` ([`Pin::Stat`], the only variant compiled
 /// here), so the guard re-stats and compares.
 #[cfg(target_os = "macos")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:verify-stat] sandbox respawn guard: re-stats the pinned executable and compares (dev, ino) to catch a mid-session binary swap before re-exec; a self-path stat at respawn setup, not turn-time model data I/O, raises no surface card."
+)]
 pub(super) fn verify_unswapped(s: &SandboxSelf) -> Result<(), Error> {
     use std::os::unix::fs::MetadataExt;
     let Pin::Stat { dev, ino } = &s.pin;

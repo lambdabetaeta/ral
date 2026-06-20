@@ -1,7 +1,7 @@
 //! Agent / frontend boundary.  Workers stamp [`Kind`]s with their
 //! [`SessionId`] through an [`Emitter`]; consumers implement [`Sink`].
 
-use crate::card::Card;
+use crate::card::{Card, IoEvent};
 use crate::event::ProviderErrorRecord;
 use crate::provider::Usage;
 use serde::Serialize;
@@ -167,6 +167,15 @@ pub enum Kind {
     ///
     /// [`shell_eval`]: crate::shell_eval
     Card(Card),
+    /// A structural I/O event core surfaced (a read, write, exec, or grep),
+    /// decoded once by [`shell_eval`] into a typed [`IoEvent`] and paired with
+    /// the [`Card`] composed from it.  The bus carries *both*: the rendered
+    /// card is what the rail draws, while the raw `event` keeps the structure
+    /// the mark tree erases, so `transcript.jsonl` records the effect itself
+    /// beside its presentation.
+    ///
+    /// [`shell_eval`]: crate::shell_eval
+    Io { event: IoEvent, card: Card },
 }
 
 /// One located change within a file, carried by a [`crate::card::Mark::Diff`]:

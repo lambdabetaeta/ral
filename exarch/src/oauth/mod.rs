@@ -96,6 +96,10 @@ pub fn login(device: bool) -> Result<(), String> {
 }
 
 /// Delete the persisted token. Succeeds when no token is stored.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:token-remove] deletes the stored OAuth token; credential store infra, not turn-time data I/O"
+)]
 pub fn logout() -> Result<(), String> {
     let path = token_path();
     match std::fs::remove_file(&path) {
@@ -106,12 +110,20 @@ pub fn logout() -> Result<(), String> {
 }
 
 /// Load the persisted token, or `None` if absent or unparseable.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:token-read] reads the persisted OAuth token; credential store infra, not turn-time data I/O"
+)]
 pub fn load() -> Option<OAuthToken> {
     let bytes = std::fs::read(token_path()).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
 /// Persist a token. On Unix the file is created with mode 0600.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:token-dir] creates the OAuth token store dir; credential store infra, not turn-time data I/O"
+)]
 pub(crate) fn save(token: &OAuthToken) -> Result<(), String> {
     let path = token_path();
     if let Some(parent) = path.parent() {
@@ -319,6 +331,10 @@ fn token_path() -> PathBuf {
 }
 
 #[cfg(unix)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:token-write] opens the OAuth token file 0600 for write; credential store infra, not turn-time data I/O"
+)]
 fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
@@ -332,6 +348,10 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:token-write-nonunix] oauth token store write on non-unix (no owner-only mode to set); credential persistence infrastructure, not turn-time model data I/O."
+)]
 fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::write(path, bytes)
 }

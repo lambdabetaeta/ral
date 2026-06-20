@@ -127,6 +127,10 @@ fn dispatch() -> ! {
 }
 
 #[cfg(unix)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:respawn-ral] login-shell bridge re-execs into the ral binary; infra wrapper, not a model exec image"
+)]
 fn exec_ral(is_login: bool, args: &[OsString]) -> ! {
     // Find the ral binary in the same directory as ral-sh.
     let ral = std::env::current_exe()
@@ -151,6 +155,10 @@ fn exec_ral(_is_login: bool, _args: &[OsString]) -> ! {
     std::process::exit(127)
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:respawn-posix-sh] login-shell bridge re-execs into /bin/sh; infra wrapper, not a model exec image"
+)]
 fn exec_posix_sh(is_login: bool, args: &[OsString]) -> ! {
     let mut cmd = std::process::Command::new("/bin/sh");
     #[cfg(unix)]

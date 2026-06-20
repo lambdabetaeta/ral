@@ -25,10 +25,21 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "stable"
-          components: rustfmt
+          components: rustfmt, clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+
+      # Enforces the fs/process I/O-door denylist (clippy.toml): every read,
+      # write, spawn, and exec must go through a known door or carry an
+      # #[allow(clippy::disallowed_methods, reason = "[io-door:…]")].  The
+      # `[workspace.lints.clippy] disallowed_methods = "deny"` table makes a
+      # stray constructor a build break, so no `-- -D` flag is needed (one would
+      # also override the vendored ral-ripgrep-core's `all = "allow"` opt-out).
+      # The closed-door-set meta-test (core/tests/io_door_set.rs) runs under
+      # `cargo test` below and pins the reviewed allow set.
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets
 
       - name: cargo build
         run: cargo build --workspace --all-targets

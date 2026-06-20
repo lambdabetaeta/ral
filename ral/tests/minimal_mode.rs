@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+
 // Regression tests for the capability-gated interactive frontend.
 //
 // Covers the non-REPL paths (NO_COLOR, TERM=dumb) that produce visible

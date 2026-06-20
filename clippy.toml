@@ -73,6 +73,33 @@
 # one-shot sandbox/bwrap respawn, anchor subprocess waited after
 # SIGCONT, test harnesses) carry an `#[allow]` with a reason at the
 # call site.
+#
+# I/O-door discipline: every filesystem and process *constructor* the
+# model can reach is banned so that all I/O passes through a known door
+# (see decisions/260619_surface-reads-writes-execs).  The handle is the
+# capability, so banning construction suffices — once the only way to get
+# a `File`, a `ReadDir`, or a `Command` is a door, every read, write,
+# spawn, and exec is accounted for.  Each banned constructor's call sites
+# split in two, and the `#[allow]`'s `reason` records which:
+#   * SURFACING door — the model's own turn-time I/O, fused with a
+#     surface card.  Redirect read/write in `runtime/command/redirect.rs`
+#     (`open_file`, `install_stdin_redirect`, the atomic-commit dir fsync
+#     and mode-preservation stat); external exec in `runtime/command.rs`
+#     (`build_command`); bundled exec in `runtime/command/uutils.rs`
+#     (`run_uutils_in_process`); grep + edit in `exarch/agent_builtins.rs`
+#     (`search_tree`, the edit read/write-atomic helpers).
+#   * REASONED-SILENT — fs/process work that is *not* the model's
+#     turn-time data I/O and raises no card by design: canonicalisation,
+#     `which`/PATH probes, module loading (`source`/`use`), stat
+#     predicates (`exists`/`list-dir`), capability-policy loading, sandbox
+#     respawn/exec, the prelude bake, and exarch/ral infrastructure.  The
+#     `reason` states *why* it is silent, so silence is a written decision.
+# A `disallowed_methods` is enforced workspace-wide via
+# `[workspace.lints.clippy]` in the root Cargo.toml; the vendored
+# `ral-ripgrep-core` opts out with its own `[lints.clippy] all = "allow"`
+# to stay upstream-diffable, so it is exempt by design.  A meta-test
+# (`core/tests/io_door_set.rs`) pins the production allow set so a new,
+# unaccounted door fails CI.
 disallowed-methods = [
     { path = "std::fs::canonicalize", reason = "Use crate::path::canon::canonicalise_strict (file must exist) or canonicalise_lenient (ancestor-walk fallback). Both name the call-site intent and keep the discipline of one canonicaliser per shape." },
     { path = "std::env::current_dir", reason = "Use Shell::cwd() — process CWD must not be cached in any shell-scoped store; that's how PWD went stale across thunks." },
@@ -82,4 +109,23 @@ disallowed-methods = [
     { path = "std::process::Child::try_wait", reason = "Use crate::process::ChildHandle::try_wait_handling_stop — Child::try_wait reports a stopped child as still running (no WUNTRACED), so cancel-aware polling spins forever." },
     { path = "std::env::var_os", reason = "An XDG basedir read goes through crate::path::basedir::resolve_xdg, which ignores relative overrides per the spec. Other path-valued env reads (terminal/sandbox/PATH probes, helper env snapshot, tests) #[allow] explicitly with a reason." },
     { path = "ignore::WalkBuilder::build", reason = "Directory walks go through exarch::agent_builtins::cancellable, the single sanctioned build() site (it carries the one #[allow(clippy::disallowed_methods)]); each walk loop polls ral_core::process::check per raw entry so a long walk honours the tool-timeout / Esc cancel the bare ignore::Walk ignores." },
+    { path = "std::fs::File::open", reason = "I/O goes through a known door (see surface-reads-writes-execs). A model read is a redirect door in runtime/command/redirect.rs that surfaces a read card; every other open is a reasoned-silent site that #[allow]s with a reason saying why it raises no card." },
+    { path = "std::fs::File::create", reason = "I/O goes through a known door. A model write is a redirect door in runtime/command/redirect.rs that surfaces a write card; other creates #[allow] with a silence reason." },
+    { path = "std::fs::File::create_new", reason = "I/O goes through a known door. Exclusive create is a door or a reasoned-silent site; #[allow] at the call site with a reason naming which." },
+    { path = "std::fs::OpenOptions::open", reason = "I/O goes through a known door. The redirect doors build their OpenOptions; any other OpenOptions::open #[allow]s with a reason saying it is a surfacing door or a reasoned-silent site." },
+    { path = "std::fs::read", reason = "I/O goes through a known door. grep + edit read in exarch::agent_builtins (surfacing); every other one-shot read is a reasoned-silent site that #[allow]s with a reason." },
+    { path = "std::fs::read_to_string", reason = "I/O goes through a known door. Module loading (source/use) is the documented reasoned-silent residual; other read_to_string sites #[allow] with a reason naming the door or the silence." },
+    { path = "std::fs::write", reason = "I/O goes through a known door. A model write surfaces at the redirect / edit doors; every other one-shot write #[allow]s with a silence reason." },
+    { path = "std::fs::read_dir", reason = "I/O goes through a known door. `list-dir` and other directory reads are reasoned-silent stat sites; each #[allow]s with a reason saying why it is not turn-time data I/O." },
+    { path = "std::fs::metadata", reason = "I/O goes through a known door. The atomic-write mode-preservation stat is a surfacing door's sub-step; `exists`/predicate stats are reasoned-silent. #[allow] with a reason naming which." },
+    { path = "std::fs::symlink_metadata", reason = "I/O goes through a known door. The atomic-commit mode-preservation stat is a door sub-step; other symlink stats are reasoned-silent. #[allow] with a reason." },
+    { path = "std::fs::read_link", reason = "I/O goes through a known door. Symlink reads are reasoned-silent path-resolution work; #[allow] with a reason." },
+    { path = "std::fs::remove_file", reason = "I/O goes through a known door. File removal is a reasoned-silent infrastructure act (temp cleanup, atomic-write rollback), not turn-time model I/O; #[allow] with a reason." },
+    { path = "std::fs::remove_dir_all", reason = "I/O goes through a known door. Recursive removal is reasoned-silent infrastructure; #[allow] with a reason." },
+    { path = "std::fs::create_dir_all", reason = "I/O goes through a known door. Directory creation is reasoned-silent infrastructure (basedir/scratch setup), not model I/O; #[allow] with a reason." },
+    { path = "std::fs::rename", reason = "I/O goes through a known door. The atomic-commit rename is a surfacing write door's commit step; other renames are reasoned-silent. #[allow] with a reason naming which." },
+    { path = "std::fs::copy", reason = "I/O goes through a known door. A file copy is reasoned-silent infrastructure unless it is the model's own exec image; #[allow] with a reason." },
+    { path = "std::fs::set_permissions", reason = "I/O goes through a known door. The atomic-commit mode restore is a surfacing write door's sub-step; other chmods are reasoned-silent. #[allow] with a reason naming which." },
+    { path = "std::process::Command::new", reason = "Process spawning goes through a known door. The model's external exec is the door in runtime/command.rs (build_command) that surfaces an exec card; every other Command::new (sandbox respawn, which probes, infra subprocesses) is reasoned-silent and #[allow]s with a reason." },
+    { path = "std::os::unix::process::CommandExt::exec", reason = "An exec image replaces the process and must be a known door. The sandbox respawn exec is reasoned-silent (the surface fired before the handoff); #[allow] with a reason." },
 ]

@@ -210,6 +210,10 @@ fn expand_tilde(dir: &str) -> Option<String> {
 /// List entries of `dir` whose names start with `prefix` (case-sensitive),
 /// skipping dotfiles unless the prefix itself starts with `.`.
 /// Returns `(name, is_dir)` pairs.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:complete-readdir] directory listing for tab-completion candidates; not turn-time model I/O"
+)]
 fn dir_entries(dir: &Path, prefix: &str) -> Vec<(String, bool)> {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return vec![];
@@ -435,6 +439,7 @@ pub(super) fn style_ansi(style: &str) -> Option<&'static str> {
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "[io-door:test] test fs/process scaffolding")]
 mod tests {
     use super::*;
     use crate::repl::plugin_editor::Span;

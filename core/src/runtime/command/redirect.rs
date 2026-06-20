@@ -7,6 +7,7 @@
 use crate::syntax::ast::RedirectMode;
 use crate::types::*;
 
+use super::io_event;
 use super::process::io_error;
 use super::stdio::EvalRedirect;
 #[cfg(any(unix, windows))]
@@ -137,6 +138,10 @@ pub(crate) struct AtomicCommit {
 }
 
 impl AtomicCommit {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:surface:atomic-commit] The atomic `>` write door's commit step: re-open the target's parent directory only to fsync the rename durable. The write surface fires when the redirect frame settles (committed once this returns Ok); this open carries written bytes to disk, it is not a separate model read."
+    )]
     pub fn commit(self) -> std::io::Result<()> {
         // (4b) Durably commit data blocks before any directory entry change.
         self.tmp.as_file().sync_all()?;
@@ -158,6 +163,10 @@ impl AtomicCommit {
 
 /// True for non-existent paths or regular files.  Non-regular files (TTYs,
 /// /dev/null, named pipes) get streaming semantics — atomicity is meaningless.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:surface:atomic-eligible] Stat of the `>` write door's target to choose atomic vs. streaming semantics. A sub-step of the surfacing write door (open_file), not a model read; the write card is the operation's surface."
+)]
 fn atomic_eligible(path: &std::path::Path) -> bool {
     match std::fs::symlink_metadata(path) {
         Ok(meta) => meta.file_type().is_file(),
@@ -165,6 +174,10 @@ fn atomic_eligible(path: &std::path::Path) -> bool {
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:surface:open-atomic] The `>` write door's tmp-file recipe: stat the target only to preserve its mode onto the tmp. A sub-step of the surfacing write door (open_file); the write card is the operation's surface, not this mode-preservation stat."
+)]
 fn open_atomic(
     path: &str,
     target: &crate::path::ResolvedPath,
@@ -220,6 +233,10 @@ fn open_atomic(
 /// Relative paths are resolved against the shell's scoped cwd so that
 /// `within [dir: ...]` redirects target the right directory even from
 /// builtins, where the host process cwd is not changed.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:surface:open-file] The redirect read/write door for `<`/`>`/`>>`/`>|` on fd 1/2: every model redirect opens here. The read/write card is fused onto the operation by the redirect frame that wraps this open (committed/aborted/failed outcome on settle)."
+)]
 pub(crate) fn open_file(
     path: &str,
     mode: &RedirectMode,
@@ -575,6 +592,10 @@ pub(crate) fn commit_atomics(commits: Vec<AtomicCommit>) -> Settled<()> {
 /// cached `startup_stdin_tty` from lying to downstream consumers (codecs,
 /// `lines`): they consult the cache only when `Source` is `Terminal`, and
 /// `Terminal` truly does mean "fall through to the inherited fd 0".
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:surface:stdin-redirect] The `< file` read door on fd 0: opens the model's stdin redirect and emits the read card eagerly (so the read precedes the body/exec it feeds, e.g. `cat < a`). The open IS the surfaced read."
+)]
 pub(crate) fn install_stdin_redirect(
     redirects: &[(u32, RedirectMode, EvalRedirect)],
     shell: &mut Shell,
@@ -589,6 +610,10 @@ pub(crate) fn install_stdin_redirect(
     shell.check_fs_read(&rp)?;
     let f = std::fs::File::open(rp.as_path()).map_err(|e| io_error(path, e))?;
     let prior = std::mem::replace(&mut shell.turn.io.stdin, crate::io::Source::File(f));
+    // Door 1 — READ: announce the open eagerly so the read event precedes the
+    // body/exec it feeds (e.g. the read card before exec in `cat < a`).  Read
+    // has no outcome: a failed open returns above before this point.
+    shell.emit_io(io_event::read(path));
     Ok(StdinRedirectGuard::Installed(prior))
 }
 

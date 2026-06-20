@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Surface every redirect and exec image; sink library I/O below the ral line
@@ -25,10 +25,14 @@ constructor outside the handful of doors, and each door *fuses* the surface into
 the operation — so nothing opens, writes, or spawns without surfacing (see
 **Enforcement**).
 
-This is a proposal; nothing has landed. Today only `edit` (one `diff` card per change,
-`agent.ral:152`) and the tasks kit (`task`/`meter`, `kit/tasks.ral`) reach the rail.
-`wrote-card` is defined (`agent.ral:75`) but never called; there is no read card and no
-exec-image card. Redirect reads, redirect writes, and external execs are invisible.
+**Implemented** as built — the chosen fork is `edit` → builtin (see §3), so no
+suppression flag exists anywhere; the subsystem map is
+[[map/exarch/io-surface|io-surface]]. The diagnosis below records the
+pre-implementation state that motivated it: at proposal time only `edit` (one
+`diff` card per change) and the tasks kit (`task`/`meter`, `kit/tasks.ral`)
+reached the rail; `wrote-card` was defined but never called; there was no read
+card and no exec-image card; redirect reads, redirect writes, and external execs
+were invisible.
 
 ## The diagnosis
 

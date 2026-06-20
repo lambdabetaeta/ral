@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+
 //! Regression tests for the builtins remediation (260611 deep-review §6):
 //! `dedent` multibyte slicing (B3), `range` overflow (B4), `fail`/`exit`
 //! status truncation (B6), `int` on a large Float (B7), `to-json` of

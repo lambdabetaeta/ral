@@ -57,6 +57,10 @@ pub fn assemble(
 
 /// Concatenate `--system` files with blank-line separators, in the
 /// order given on the command line.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:system-prompt-files] reads the --system prompt files at load time; not a turn-time door"
+)]
 fn read_files(files: &[PathBuf]) -> Result<String, String> {
     let mut buf = String::new();
     for path in files {

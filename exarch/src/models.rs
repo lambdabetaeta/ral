@@ -213,6 +213,10 @@ impl<S: ModelSource> ModelCatalog<S> {
     /// Merge `models` into the disk cache under `kind`, stamping the fetch
     /// time. Best-effort: a cache the process cannot write is not fatal —
     /// the in-memory memo still serves the session.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:silent:models-cache-write] persists the model catalog cache; registry infra, not turn-time data I/O"
+    )]
     fn write_disk(&self, kind: ProviderKind, models: &[String]) {
         let Some(path) = self.cache_path.as_ref() else {
             return;
@@ -242,6 +246,10 @@ fn cache_path() -> Option<PathBuf> {
     dir.is_absolute().then(|| dir.join("models.json"))
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:models-cache-read] reads the model catalog cache; registry infra, not turn-time data I/O"
+)]
 fn read_cache(path: &PathBuf) -> Option<CacheFile> {
     let bytes = std::fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()

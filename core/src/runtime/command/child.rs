@@ -607,6 +607,7 @@ impl Drop for RunningChild {
 
 #[cfg(unix)]
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "[io-door:test] test fs/process scaffolding")]
 mod tests {
     use super::*;
     use crate::process::*;

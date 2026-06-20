@@ -53,6 +53,10 @@ fn os_line() -> String {
 
 /// Local date, time, and timezone via `date(1)` — shelling out is
 /// cheaper than dragging in `chrono`/`time` for a single string.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:date-launch] shells out to date(1) for the host info line; not turn-time data I/O"
+)]
 fn date_line() -> Option<String> {
     let out = Command::new("date")
         .arg("+%Y-%m-%d %H:%M:%S %Z")
@@ -68,6 +72,10 @@ fn date_line() -> Option<String> {
 /// `branch (clean)` or `branch (dirty)` when cwd is inside a git
 /// working tree; `None` otherwise.  Two cheap subprocesses; `--porcelain`
 /// short-circuits on the first untracked or modified path.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:git-launch] shells out to git(1) for the host info line; not turn-time data I/O"
+)]
 fn git_line() -> Option<String> {
     let head = Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])

@@ -69,7 +69,9 @@ decodes kit output into rail events in three steps:
 - a ral kit hands a `` `card `` render document — an ordered stack of Bertin
   marks — to the core `surface` builtin;
 - the sink runs `value_to_card` (`exarch/src/card.rs`) to decode it into the
-  closed `Card`/`Mark` model and emits one `Kind::Card`;
+  closed `Card`/`Mark` model and emits one `Kind::Card` — or, for an `io`-keyed
+  value core emits at a redirect/exec door, the sibling `value_to_io`/`io_card`
+  produce a `Kind::Io { event, card }` ([[map/exarch/io-surface|io-surface]]);
 - it emits the `Kind` on the [[map/exarch/frontend|bus]] through a clone of the
   call's `Emitter`, where one generic `render_card` interpreter binds the marks
   to visual variables.
@@ -82,9 +84,11 @@ boundary the events are buffered in the confined child and replayed through the
 parent's sink ([[map/core/capabilities|carried on the IPC response]]), so they
 are batched rather than live under the sandbox.
 
-`agent_builtins.rs` registers exarch's resident host atoms (line witnesses, grep
-helpers) and sources the embedded `data/agent.ral` helper library into the shell
-at boot ([[map/exarch/builtins|builtins]]). The Rust atoms — but not the sourced
+`agent_builtins.rs` registers exarch's resident host atoms — the line/window
+witnesses and the `grep-files` search and hash-addressed `edit` that moved below
+the ral line ([[map/exarch/io-surface|io-surface]]) — and sources the now-smaller
+embedded `data/agent.ral` helper library (`view`) into the shell at boot
+([[map/exarch/builtins|builtins]]). The Rust atoms — but not the sourced
 library — also dress the [[map/core/capabilities|sandbox-IPC child]]'s fresh
 shell, installed through `set_child_shell_extension`.
 

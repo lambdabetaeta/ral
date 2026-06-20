@@ -34,6 +34,10 @@ fn secs_since_epoch(t: std::io::Result<SystemTime>) -> i64 {
         .unwrap_or(0)
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:list-dir] `list-dir` builtin: reads a directory's entries as a stat/listing predicate, gated by `check_fs_read`; not turn-time model data I/O, raises no surface card."
+)]
 pub(super) fn builtin_list_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "list-dir")?;
     let path = checked_read_path(shell, &args[0].to_string())?;
@@ -176,6 +180,10 @@ fn dir_entry_value(entry: fs::DirEntry) -> Settled<(String, Value)> {
 /// `cfg(unix)` companion).  Uses `symlink_metadata` so a symlink
 /// reports `type: "symlink"` and a non-empty `target`; follow with
 /// `resolve-path` if the caller wants the target's stat instead.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:file-info] `file-info` builtin: `symlink_metadata`/`read_link` stat a path and read a symlink target as a metadata predicate, gated by `check_fs_read`; not turn-time model data I/O, raises no surface card."
+)]
 pub(super) fn builtin_file_info(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "file-info")?;
     let path_arg = args[0].to_string();

@@ -116,6 +116,10 @@ fn safe_paragraph_break(open: &str) -> Option<usize> {
 /// Open `path` as the session's rendered-text log, truncating any prior
 /// content.  Falls back to a discarding sink when the file can't be
 /// opened, so a log-path failure never disables the viewport.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:viewport-log] opens the viewport's rendered-text log; render dump infra, not turn-time data I/O"
+)]
 fn open_log(path: &Path) -> io::BufWriter<Box<dyn io::Write + Send>> {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -510,6 +514,7 @@ impl Viewport {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "[io-door:test] test fs/process scaffolding")]
 mod tests {
     use super::*;
     use ratatui::text::Span;

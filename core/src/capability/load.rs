@@ -42,6 +42,10 @@ pub fn load_capabilities_from_str(
 /// A missing file is reported as `file not found`; any other IO failure is
 /// wrapped with the file path so the user sees which profile could not be
 /// opened.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:cap-load] reads a capability-policy file from disk to configure the sandbox; policy/configuration loading at setup, not turn-time model data I/O, raises no surface card."
+)]
 pub fn load_capabilities_from_path(
     shell: &mut Shell,
     path: &Path,

@@ -98,6 +98,10 @@ fn fs_probe_with(
 /// Probe that *does not* follow symlinks (uses `symlink_metadata`).  A
 /// dangling symlink still satisfies `exists`; a symlink to a regular file
 /// reports `is-link` true.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:stat-nofollow] `exists`/stat predicates: `symlink_metadata` stats a path without following symlinks, gated by `check_fs_read`; a metadata predicate, not turn-time model data I/O, raises no surface card."
+)]
 fn fs_probe(
     args: &[Value],
     shell: &mut Shell,
@@ -110,6 +114,10 @@ fn fs_probe(
 /// Probe that *does* follow symlinks (uses `metadata`).  Mirrors `test -f` /
 /// `test -d` / `test -r` semantics: a symlink-to-a-file satisfies `is-file`,
 /// a dangling symlink fails every probe.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:stat-follow] `is-file`/`is-dir` predicates: `metadata` stats a path following symlinks, gated by `check_fs_read`; a metadata predicate, not turn-time model data I/O, raises no surface card."
+)]
 fn fs_probe_follow(
     args: &[Value],
     shell: &mut Shell,
@@ -185,6 +193,10 @@ fn is_writable_path(path: &Path) -> bool {
 /// metadata is the portable test there (the OS governs writes by the
 /// read-only attribute, not a uid/gid mode).
 #[cfg(not(unix))]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:writable-stat-nonunix] Stat behind the `is-writable` predicate on non-unix (readonly-attribute test). A stat predicate, not turn-time model data I/O — raises no card, like its unix sibling."
+)]
 fn is_writable_path(path: &Path) -> bool {
     std::fs::metadata(path)
         .map(|m| !m.permissions().readonly())

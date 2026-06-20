@@ -68,6 +68,10 @@ fn open_browser(url: &str) {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:browser-launch] opens the OAuth authorize URL in the platform browser; not turn-time data I/O"
+)]
 fn launch_browser(url: &str) -> Result<(), String> {
     std::process::Command::new("open")
         .arg(url)
@@ -77,6 +81,10 @@ fn launch_browser(url: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:browser-launch-linux] opens the OAuth authorize URL via xdg-open; not turn-time data I/O"
+)]
 fn launch_browser(url: &str) -> Result<(), String> {
     std::process::Command::new("xdg-open")
         .arg(url)

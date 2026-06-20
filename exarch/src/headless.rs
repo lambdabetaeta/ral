@@ -93,7 +93,7 @@ impl Headless {
 /// prose is already on stdout) and the interactive-only `Boundary` and
 /// `UserPromptEcho`. The exhaustive match means a new [`Kind`] variant
 /// won't silently fall out of the trace.
-fn event_record(t_ms: u128, id: SessionId, kind: &Kind) -> Option<serde_json::Value> {
+pub(crate) fn event_record(t_ms: u128, id: SessionId, kind: &Kind) -> Option<serde_json::Value> {
     use serde_json::json;
     let (name, mut obj) = match kind {
         Kind::Born { log_dir, title } => (
@@ -138,6 +138,10 @@ fn event_record(t_ms: u128, id: SessionId, kind: &Kind) -> Option<serde_json::Va
         // The whole mark tree, so the machine log stays structured; only a
         // `raw` mark is opaque, and honestly so.
         Kind::Card(card) => ("card", json!({ "card": card })),
+        // The raw structural effect beside the mark tree composed from it:
+        // the log keeps the io event's structure (which the rendered card
+        // erases) for a post-mortem, alongside the card the rail drew.
+        Kind::Io { event, card } => ("io", json!({ "event": event, "card": card })),
         Kind::Phase(label) => ("phase", json!({ "label": label })),
         Kind::Token(_) | Kind::Boundary | Kind::UserPromptEcho(_) => return None,
     };
@@ -302,10 +306,12 @@ impl Sink for Headless {
             }
             Kind::Dim(text) => eprintln!("{text}"),
             Kind::ProviderError(error) => eprintln!("provider error: {error:?}"),
-            // A surfaced render document.  In headless we condense its
-            // marks to stderr lines generically; the canonical structured
-            // form is the mark tree in `transcript.jsonl`.
-            Kind::Card(card) => {
+            // A surfaced render document, or a structural I/O event paired
+            // with the card composed from it.  In headless we condense the
+            // card's marks to stderr lines generically; the canonical
+            // structured form (the mark tree, and for io the raw event
+            // beside it) is in `transcript.jsonl`.
+            Kind::Card(card) | Kind::Io { card, .. } => {
                 for line in card_stderr(&card) {
                     eprintln!("{line}");
                 }
@@ -345,6 +351,10 @@ impl Sink for Headless {
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:transcript-file] creates the headless run's transcript.jsonl; output infra, not turn-time data I/O"
+)]
 pub fn run(
     session: &mut Session,
     provider: &Provider,
@@ -386,6 +396,7 @@ pub fn run(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "[io-door:test] test fs/process scaffolding")]
 mod tests {
     use super::*;
 

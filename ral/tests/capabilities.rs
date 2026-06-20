@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+
 //! Integration tests for `ral --capabilities a.ral[,b.ral...]`.
 //!
 //! The flag loads each `.ral` capability profile, left-to-right `meet`s
