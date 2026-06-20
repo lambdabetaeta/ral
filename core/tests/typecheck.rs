@@ -1153,11 +1153,42 @@ fn annotated(src: &str) -> Comp {
 fn all_pipeline_wires(comp: &Comp) -> Vec<(usize, Vec<Wire>)> {
     let mut out = Vec::new();
     common::walk_comp(comp, &mut |c| {
-        if let CompKind::Pipeline { stages, wires } = &c.item {
+        if let CompKind::Pipeline { stages, wires, .. } = &c.item {
             out.push((stages.len(), wires.clone()));
         }
     });
     out
+}
+
+/// Every `Pipeline` node's `stage_types` slot, reachable anywhere.
+fn all_pipeline_stage_types(comp: &Comp) -> Vec<(usize, Vec<Ty>)> {
+    let mut out = Vec::new();
+    common::walk_comp(comp, &mut |c| {
+        if let CompKind::Pipeline {
+            stages,
+            stage_types,
+            ..
+        } = &c.item
+        {
+            out.push((stages.len(), stage_types.clone()));
+        }
+    });
+    out
+}
+
+#[test]
+fn top_level_pipeline_retains_per_stage_value_types() {
+    let comp = annotated(r#"/bin/echo hi | /bin/cat"#);
+    let pipelines = all_pipeline_stage_types(&comp);
+    assert_eq!(pipelines.len(), 1, "expected exactly one pipeline node");
+    let (stage_count, types) = &pipelines[0];
+    assert_eq!(*stage_count, 2, "two-stage pipeline");
+    assert_eq!(types.len(), *stage_count, "one value type per stage");
+    // The annotation pass overwrote the elaborator's `Unit` placeholders
+    // with each external command's resolved value type (`String`), proving
+    // the per-stage types are retained rather than discarded.
+    assert_eq!(types[0], Ty::String, "stage 0 value type retained");
+    assert_eq!(types[1], Ty::String, "stage 1 value type retained");
 }
 
 #[test]
