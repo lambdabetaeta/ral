@@ -242,7 +242,16 @@ pub(super) fn queued_prompt(
 /// `None` (no result yet, or the expanded / static headers) omits it.
 fn tool_call_header(label: &str, tool: &str, size: Option<u32>, width: u16) -> Vec<Line<'static>> {
     let prefix_w = RAIL_W + UnicodeWidthStr::width(tool) + UnicodeWidthStr::width("  ");
-    let body_w = (width as usize).saturating_sub(prefix_w).max(8);
+    // Reserve the size-bar's gutter (`  ` gap + the bar) so the label wraps
+    // *before* it. The bar is the row's one quantitative readout (length =
+    // magnitude); pinning it to a fixed right column is what makes magnitudes
+    // comparable down the page, so it must never spill onto a wrapped row.
+    let bar_w = if size.is_some() {
+        UnicodeWidthStr::width("  ") + SIZE_BAR_W
+    } else {
+        0
+    };
+    let body_w = (width as usize).saturating_sub(prefix_w + bar_w).max(8);
     let mut out = Vec::new();
     push_wrapped(&mut out, label, body_w, |chunk, first| {
         if first {
@@ -542,7 +551,7 @@ fn push_gutter_row(
 /// land on hue.  Themeable here, once.
 fn role_style(role: Role) -> Style {
     match role {
-        Role::Path => Style::default().fg(Color::White),
+        Role::Path => Style::default().fg(CYAN),
         Role::Code => Style::default().fg(Color::White).bg(CODE_BG),
         Role::Ok => Style::default().fg(LIME).add_modifier(Modifier::BOLD),
         Role::Warn => Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
