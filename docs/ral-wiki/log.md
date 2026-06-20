@@ -2942,3 +2942,7 @@ consequence is acknowledged and intentionally retained. With the lease in place,
 [[decisions/260613_terminal-foreground-ownership|terminal-foreground-ownership]] is
 **superseded**: its `startup_foreground` predicate is the lease's mint condition.
 Updated [[index|index]]: terminal-lease → active, terminal-foreground-ownership → superseded.
+
+## [2026-06-20] ingest | same-thread body plan tightened
+
+Revised [[decisions/260620_same-thread-body-shares-the-session|same-thread-body-shares-the-session]] after source review. The implementation plan now preserves lambda `$?` entry semantics explicitly, ties pipeline-stage copying to `child_eval` rather than `spawn_thread`, includes `exit_hints` in the `SessionState` inventory, and makes the flow-matrix tests concrete.
