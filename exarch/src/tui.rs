@@ -61,7 +61,7 @@ use ratatui::{
     widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
 use ratatui_textarea::TextArea;
-use textarea_vim::{Mode, Vim, cursor_style, native_cursor, place_native_cursor};
+use textarea_vim::{Mode, Vim, place_native_cursor};
 use std::{
     collections::HashMap,
     io::{self, Stdout},
@@ -445,11 +445,10 @@ impl App {
         textarea.set_wrap_mode(ratatui_textarea::WrapMode::WordOrGlyph);
         textarea.set_style(Style::default().fg(Color::White));
         textarea.set_cursor_line_style(Style::default().fg(Color::White));
-        // No painted cursor cell: the prompt shows the terminal's own (native,
-        // blinking) cursor, positioned each frame by `place_native_cursor`.  Vi
-        // modal modes re-enable a painted reversed block via `cursor_style` as a
-        // mode indicator; the start mode (insert, or emacs) is the plain cell.
-        textarea.set_cursor_style(cursor_style(Mode::Insert));
+        // Suppress the widget's painted cursor cell (plain style): the prompt
+        // shows the terminal's own (native, blinking) cursor in every mode,
+        // positioned each frame by `place_native_cursor`.
+        textarea.set_cursor_style(Style::default());
         textarea.set_block(
             ratatui::widgets::Block::default()
                 .borders(ratatui::widgets::Borders::ALL)
@@ -1015,17 +1014,14 @@ impl App {
                 }
                 (None, None) => {
                     f.render_widget(&self.textarea, prompt_row);
-                    // Show the terminal's native cursor at the edit point for
-                    // emacs/vi-insert; vi modal modes keep the painted block.
-                    // The textarea's block (border + horizontal padding) insets
-                    // the text, so position within that inner rect.
-                    if native_cursor(self.vim.as_ref()) {
-                        let inner = ratatui::widgets::Block::default()
-                            .borders(ratatui::widgets::Borders::ALL)
-                            .padding(ratatui::widgets::Padding::horizontal(PROMPT_PAD_H))
-                            .inner(prompt_row);
-                        place_native_cursor(f, inner, &self.textarea);
-                    }
+                    // Show the terminal's native cursor at the edit point, every
+                    // mode.  The textarea's block (border + horizontal padding)
+                    // insets the text, so position within that inner rect.
+                    let inner = ratatui::widgets::Block::default()
+                        .borders(ratatui::widgets::Borders::ALL)
+                        .padding(ratatui::widgets::Padding::horizontal(PROMPT_PAD_H))
+                        .inner(prompt_row);
+                    place_native_cursor(f, inner, &self.textarea);
                 }
             }
             f.render_widget(Paragraph::new(footer_hint()), footer_row);

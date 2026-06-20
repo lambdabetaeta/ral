@@ -41,11 +41,12 @@ dumb terminals whatever was asked):
   See [[decisions/260620_repl-as-structural-surface|repl-as-structural-surface]].
 
 The structural surface and exarch's TUI share their editor-cursor handling
-through the `textarea-vim` crate: the vi dispatch fold (`Vim::advance`), the
-per-mode `cursor_style`, and `place_native_cursor` (which positions the
-terminal's own cursor at the edit point via the widget's `screen_cursor`). Both
-show the **native** blinking cursor in emacs / vi-insert and a painted reversed
-block only as the vi modal indicator — one implementation, not a copy each.
+through the `textarea-vim` crate: the vi dispatch fold (`Vim::advance`) and
+`place_native_cursor`, which positions the terminal's own (native, blinking)
+cursor at the edit point via the widget's wrap-aware `screen_cursor`. Both show
+that native cursor in **every** mode, the same shape throughout (no painted
+vi modal-mode block); the widget's own painted cursor cell is suppressed with a
+plain `set_cursor_style` at construction. One implementation, not a copy each.
 
 ## Completion
 

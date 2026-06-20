@@ -20,14 +20,14 @@
 //! ## Shared cursor presentation
 //!
 //! The mode-named `Block` border from the upstream example is *not* vendored —
-//! each frontend draws its own prompt chrome.  The **cursor**, however, is
-//! shared: ral's structural surface and exarch's TUI converged on the same
-//! mapping ([`cursor_style`]) and the same rule — the terminal's own (native,
-//! blinking) cursor for emacs and vi-insert, a painted reversed block as the
-//! vi *modal* indicator.  [`native_cursor`] decides which applies and
-//! [`place_native_cursor`] positions the native one (wrap-aware via the
-//! widget's `screen_cursor`, clamped into the visible prompt), so both surfaces
-//! read as one design system rather than each carrying a copy.
+//! each frontend draws its own prompt chrome.  The **cursor** is shared: ral's
+//! structural surface and exarch's TUI both show the terminal's own (native,
+//! blinking) cursor at the edit point in every mode, positioned by
+//! [`place_native_cursor`] (wrap-aware via the widget's `screen_cursor`, clamped
+//! into the visible prompt).  There is no per-mode block indicator — the cursor
+//! is the same shape in normal and insert; suppress the widget's own painted
+//! cursor cell with a plain `set_cursor_style(Style::default())` at
+//! construction so it does not double up.
 //!
 //! ## Attribution
 //!
@@ -42,7 +42,6 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
-use ratatui::style::{Modifier, Style};
 use ratatui_textarea::{CursorMove, Key, Scrolling, TextArea};
 
 pub use ratatui_textarea::Input;
@@ -113,16 +112,11 @@ impl Vim {
     }
 
     /// Drive the emulation one keystroke over `textarea`, returning the next
-    /// state and keeping the painted cursor style in sync with the mode (a
-    /// reversed block in modal modes, nothing in insert — see [`cursor_style`]).
-    /// `Quit` is a no-op: a REPL prompt has no editor to quit.  Callers handle
-    /// the emacs (`vim == None`) case with a plain `textarea.input(key)`.
+    /// state.  `Quit` is a no-op: a REPL prompt has no editor to quit.  Callers
+    /// handle the emacs (`vim == None`) case with a plain `textarea.input(key)`.
     pub fn advance(self, input: Input, textarea: &mut TextArea<'_>) -> Vim {
         match self.transition(input, textarea) {
-            Transition::Mode(m) if self.mode() != m => {
-                textarea.set_cursor_style(cursor_style(m));
-                Vim::new(m)
-            }
+            Transition::Mode(m) if self.mode() != m => Vim::new(m),
             Transition::Nop | Transition::Mode(_) => self,
             Transition::Pending(p) => self.with_pending(p),
             Transition::Quit => self,
@@ -561,30 +555,16 @@ impl Vim {
 
 // ── Shared cursor presentation ───────────────────────────────────────────────
 
-/// The painted cursor style for a [`Mode`]: a reversed block in the modal modes
-/// (Normal / Visual / Operator / Replace) as the "you are not inserting here"
-/// indicator, and *nothing* in Insert — where the native terminal cursor
-/// (positioned by [`place_native_cursor`]) is the only cursor, exactly as in
-/// emacs.  Both surfaces map the mode this way, so it lives here.
-pub fn cursor_style(mode: Mode) -> Style {
-    match mode {
-        Mode::Insert => Style::default(),
-        _ => Style::default().add_modifier(Modifier::REVERSED),
-    }
-}
-
-/// Whether the terminal's native cursor should be shown for this editor state:
-/// true in emacs (`vim` is `None`) and in vi-insert, false in a vi modal mode —
-/// where the painted reversed block ([`cursor_style`]) is the cursor instead.
-pub fn native_cursor(vim: Option<&Vim>) -> bool {
-    vim.is_none_or(|v| v.mode() == Mode::Insert)
-}
-
 /// Position the terminal's native cursor at the textarea's edit point, given
 /// the text rect it was rendered into — `inner` must already have any block
 /// border/padding removed (`block.inner(area)`), since the widget renders text
-/// there.  Call after rendering the textarea and only when [`native_cursor`]
-/// holds; the native cursor is hidden on any frame that does not set it.
+/// there.  Call after rendering the textarea, every frame: the native cursor is
+/// hidden on any frame that does not set it.
+///
+/// Both surfaces show this native (blinking) cursor in *every* mode, the same
+/// shape throughout — there is no per-mode block indicator.  To stop the
+/// widget's own painted cursor cell doubling up, set its style to a plain
+/// `Style::default()` once at construction.
 ///
 /// [`TextArea::screen_cursor`] is wrap- and tab/wide-char-aware but counts from
 /// the text origin without the scroll offset (which the widget keeps private),
