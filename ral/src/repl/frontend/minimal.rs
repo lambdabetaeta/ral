@@ -30,6 +30,7 @@ impl Frontend for MinimalFrontend {
         _shell: &mut Shell,
         prompt: &PromptText,
         _pending: Option<EditBuffer>,
+        #[cfg(unix)] _jobs: &std::sync::Arc<std::sync::Mutex<crate::jobs::JobTable>>,
     ) -> Read {
         let stdin = std::io::stdin();
         let write_prompt = |s: &[u8]| {

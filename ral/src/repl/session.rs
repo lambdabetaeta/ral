@@ -159,10 +159,13 @@ impl Session {
         write_terminal_title(&self.shell);
         let prompt = render_prompt(&mut self.shell, &self.runtime);
 
-        match self
-            .frontend
-            .read(&mut self.shell, &prompt, self.pending.take())
-        {
+        match self.frontend.read(
+            &mut self.shell,
+            &prompt,
+            self.pending.take(),
+            #[cfg(unix)]
+            &self.jobs,
+        ) {
             Read::Line(input) => {
                 let trimmed = input.trim();
                 if trimmed.is_empty() {

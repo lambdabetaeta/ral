@@ -23,9 +23,13 @@ pub(super) use rustyline::RustylineFrontend;
 pub(super) use structural::StructuralFrontend;
 
 use ral_core::Shell;
+#[cfg(unix)]
+use std::sync::{Arc, Mutex};
 
 use super::config::dirs_history;
 use super::prompt::PromptText;
+#[cfg(unix)]
+use crate::jobs::JobTable;
 
 // ── Event types ───────────────────────────────────────────────────────────
 
@@ -172,8 +176,22 @@ pub(super) trait Frontend {
     /// (e.g. `_ed-push`).  The frontend is responsible for plugin sync,
     /// keybinding dispatch, continuation reads, line-erase escapes, and
     /// flushing deferred plugin diagnostics before returning.
-    fn read(&mut self, shell: &mut Shell, prompt: &PromptText, pending: Option<EditBuffer>)
-    -> Read;
+    ///
+    /// `jobs` is the session's shared [`JobTable`] (Unix only — pgid jobs
+    /// are a Unix concept), threaded so the structural surface can project
+    /// stopped/running pgid jobs in its handles matrix alongside the
+    /// env-held [`Value::Handle`](ral_core::Value::Handle) spawns.  Passed
+    /// as the shared `Arc<Mutex<…>>` rather than a held guard, mirroring
+    /// [`super::exec::step`]: the frontend takes its own short-lived lock,
+    /// copies what it renders, and drops the guard before drawing.  The
+    /// line-editor backends ignore it.
+    fn read(
+        &mut self,
+        shell: &mut Shell,
+        prompt: &PromptText,
+        pending: Option<EditBuffer>,
+        #[cfg(unix)] jobs: &Arc<Mutex<JobTable>>,
+    ) -> Read;
 
     fn add_history(&mut self, entry: &str);
     fn save_history(&mut self);
