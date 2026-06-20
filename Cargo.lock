@@ -3845,6 +3845,7 @@ dependencies = [
  "clap",
  "libc",
  "ral-core",
+ "ratatui",
  "rustyline",
  "serde",
  "serde_json",
