@@ -354,6 +354,17 @@ impl Block {
         }
     }
 
+    /// The raw markdown source of a prose block, `None` on every other
+    /// kind.  `/copy` walks the trailing run of these to reassemble the
+    /// assistant's latest reply verbatim — each fence-safe paragraph
+    /// commits as its own block, so the run is the multi-paragraph answer.
+    pub(super) fn markdown_src(&self) -> Option<&str> {
+        match &self.kind {
+            BlockKind::Markdown(src) => Some(src),
+            _ => None,
+        }
+    }
+
     /// True for a step-boundary chrome block — the column unit the
     /// matrix's per-agent step cells count.
     pub(super) fn is_step(&self) -> bool {

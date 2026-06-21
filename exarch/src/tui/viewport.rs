@@ -466,6 +466,24 @@ impl Viewport {
             .join("\n")
     }
 
+    /// The assistant's latest reply as raw markdown: the trailing
+    /// contiguous run of [`Block::markdown_src`] prose blocks, concatenated
+    /// in order.  Each fence-safe paragraph commits as its own block, so
+    /// the run reassembles the multi-paragraph answer verbatim; a tool
+    /// call, card, or chrome block bounds it.  Edges trimmed; empty when
+    /// the last block is not prose (the turn ended on a diff or a card).
+    /// What `/copy` puts on the clipboard.
+    pub(super) fn latest_reply_md(&self) -> String {
+        let mut tail: Vec<&str> = self
+            .blocks
+            .iter()
+            .rev()
+            .map_while(Block::markdown_src)
+            .collect();
+        tail.reverse();
+        tail.concat().trim().to_owned()
+    }
+
     /// Plain text of the whole buffer, the projection `Ctrl+Y` yanks.
     pub(super) fn yank_text(&self) -> String {
         self.flat

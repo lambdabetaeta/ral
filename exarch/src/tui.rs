@@ -39,6 +39,7 @@ use crate::models::{LiveSource, ModelCatalog, ModelSource};
 use crate::provider::{self, Provider, Usage};
 use crate::session::Session;
 use crate::state;
+use ral_core::path::sigil::expand_path_prefix;
 
 use crossterm::{
     cursor::Show,
@@ -1156,8 +1157,8 @@ impl App {
         self.textarea.lines().join("\n")
     }
 
-    /// Recolor the prompt text in place: a line that exactly matches a known
-    /// slash command (so [`Repl::handle_slash`] will dispatch it) glows cyan
+    /// Recolor the prompt text in place: a line that names a known slash
+    /// command (so [`Repl::echo_prompt`] will dispatch it) glows cyan
     /// and bold; anything else stays plain white. Driven once per frame from
     /// [`App::draw`], so it tracks every edit — typing, paste, history recall.
     fn style_prompt(&mut self) {
@@ -1473,6 +1474,32 @@ impl App {
             }
         }
         Ok(paths)
+    }
+
+    /// The focused tab's latest assistant reply as raw markdown — the
+    /// trailing run of prose blocks (see [`Viewport::latest_reply_md`]).
+    /// Empty when the tab has no viewport or its last block is not prose.
+    /// `/copy` reads this; the focused tab matches `Ctrl+Y`'s target.
+    pub(in crate::tui) fn latest_reply(&self) -> String {
+        self.viewports
+            .get(&self.focused())
+            .map(Viewport::latest_reply_md)
+            .unwrap_or_default()
+    }
+
+    /// Flush the focused tab's `user.log` and return its path, so `/export`
+    /// can copy the rendered transcript elsewhere.  Flushes the open
+    /// markdown buffer first, mirroring [`Self::flush_logs`], so a trailing
+    /// streamed paragraph reaches the file before the copy.
+    pub(in crate::tui) fn flush_focused_log(&mut self) -> io::Result<PathBuf> {
+        let focused = self.focused();
+        let floor = self.context_floor();
+        let vp = self
+            .viewports
+            .get_mut(&focused)
+            .expect("focused tab always has a viewport");
+        vp.flush_open(floor);
+        Ok(vp.flush_log()?.to_path_buf())
     }
 
     pub fn banner(&mut self, term: &mut Term, s: &SessionInfo<'_>) -> io::Result<()> {
@@ -2172,6 +2199,16 @@ fn tail_bytes(text: &str, cap: usize) -> &str {
     &text[start..]
 }
 
+/// Resolve a user-typed `/export` path: expand a leading `~`/`xdg:` sigil
+/// against the home dir, then anchor a still-relative path at `cwd` (where
+/// exarch was launched) so `/export notes.md` lands there rather than in
+/// whatever directory the process happens to sit in.  [`resolve_str`] folds
+/// `.`/`..` and joins the cwd.
+fn resolve_export_path(arg: &str, cwd: &str) -> PathBuf {
+    let expanded = expand_path_prefix(arg, &ral_core::host::home());
+    ral_core::path::resolve_str(Some(cwd), &expanded)
+}
+
 fn footer_hint() -> Line<'static> {
     let st = Style::default()
         .fg(SLATE)
@@ -2366,16 +2403,22 @@ pub fn run(
 }
 
 /// One row of the slash-command registry: the canonical token, any aliases,
-/// a one-line description for `/help`, and the handler that runs it.
+/// the argument it consumes (if any), a one-line description for `/help`,
+/// and the handler that runs it.
 struct SlashCommand {
     name: &'static str,
     aliases: &'static [&'static str],
+    /// The trailing argument the command consumes, e.g. `Some("<path>")`
+    /// for `/export`.  `None` marks an argument-less command, which
+    /// [`lookup_command`] matches only when typed alone — trailing text
+    /// means the user meant a prompt, not the command.  Shown in `/help`.
+    arg: Option<&'static str>,
     help: &'static str,
-    run: fn(&mut Repl<'_>) -> Slash,
+    run: fn(&mut Repl<'_>, &str) -> Slash,
 }
 
 /// The slash-command registry — the single source of truth. Dispatch
-/// ([`Repl::handle_slash`]), the prompt-box highlight ([`is_slash_command`]),
+/// ([`Repl::echo_prompt`]), the prompt-box highlight ([`is_slash_command`]),
 /// and the `/help` listing all read from here, so they cannot drift.
 ///
 /// Each `run` wraps its method in a non-capturing closure rather than naming
@@ -2388,50 +2431,85 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "/help",
         aliases: &[],
+        arg: None,
         help: "List the available commands.",
-        run: |r| r.cmd_help(),
+        run: |r, _| r.cmd_help(),
     },
     SlashCommand {
         name: "/legend",
         aliases: &[],
+        arg: None,
         help: "Decode the rail, bars, grain, and fidelity treatments.",
-        run: |r| r.cmd_legend(),
+        run: |r, _| r.cmd_legend(),
     },
     SlashCommand {
         name: "/clear",
         aliases: &[],
+        arg: None,
         help: "Forget the conversation and clear the screen.",
-        run: |r| r.cmd_clear(),
+        run: |r, _| r.cmd_clear(),
+    },
+    SlashCommand {
+        name: "/copy",
+        aliases: &[],
+        arg: None,
+        help: "Copy the latest reply to the clipboard.",
+        run: |r, _| r.cmd_copy(),
+    },
+    SlashCommand {
+        name: "/export",
+        aliases: &[],
+        arg: Some("<path>"),
+        help: "Write the user view to a file.",
+        run: |r, arg| r.cmd_export(arg),
     },
     SlashCommand {
         name: "/model",
         aliases: &[],
+        arg: None,
         help: "Switch the model or provider.",
-        run: |r| r.cmd_model(),
+        run: |r, _| r.cmd_model(),
     },
     SlashCommand {
         name: "/compact",
         aliases: &[],
+        arg: None,
         help: "Summarize the conversation to reclaim context.",
-        run: |r| r.cmd_compact(),
+        run: |r, _| r.cmd_compact(),
     },
     SlashCommand {
         name: "/quit",
         aliases: &["/exit"],
+        arg: None,
         help: "Leave exarch.",
-        run: |r| r.cmd_quit(),
+        run: |r, _| r.cmd_quit(),
     },
 ];
 
-/// The command whose name or alias exactly equals `trimmed`, if any.
-fn lookup_command(trimmed: &str) -> Option<&'static SlashCommand> {
-    SLASH_COMMANDS
+/// The command named by `trimmed`'s first token together with the trailing
+/// argument it consumes, if any.  The first whitespace-delimited token is
+/// matched against each command's name and aliases; the remainder, trimmed,
+/// is the argument.  An argument-less command ([`SlashCommand::arg`] `None`)
+/// matches only when typed alone — trailing text means the user meant a
+/// prompt, so it declines and the line proceeds to the model.
+fn lookup_command(trimmed: &str) -> Option<(&'static SlashCommand, &str)> {
+    let (head, rest) = match trimmed.split_once(char::is_whitespace) {
+        Some((h, r)) => (h, r.trim()),
+        None => (trimmed, ""),
+    };
+    let cmd = SLASH_COMMANDS
         .iter()
-        .find(|c| c.name == trimmed || c.aliases.contains(&trimmed))
+        .find(|c| c.name == head || c.aliases.contains(&head))?;
+    if cmd.arg.is_none() && !rest.is_empty() {
+        return None;
+    }
+    Some((cmd, rest))
 }
 
-/// Whether `text`, as typed, is a recognized slash command — trimmed and
-/// matched whole, mirroring [`Repl::handle_slash`]'s exact-match dispatch.
+/// Whether `text`, as typed, is a recognized slash command — its first
+/// token matched, mirroring [`lookup_command`]'s dispatch (so an
+/// argument-less command with trailing text reads as a prompt, not a
+/// command).
 fn is_slash_command(text: &str) -> bool {
     lookup_command(text.trim()).is_some()
 }
@@ -2519,8 +2597,8 @@ impl Repl<'_> {
         if trimmed.is_empty() {
             return Slash::Continue;
         }
-        if let Some(cmd) = lookup_command(trimmed) {
-            return (cmd.run)(self);
+        if let Some((cmd, arg)) = lookup_command(trimmed) {
+            return (cmd.run)(self, arg);
         }
         let id = self.session.id;
         self.tui
@@ -2541,6 +2619,71 @@ impl Repl<'_> {
         }
         if let Err(e) = self.tui.app.clear(self.info, self.tui.guard.term()) {
             self.note_error(id, format!("could not redraw after /clear: {e}"));
+        }
+        Slash::Continue
+    }
+
+    /// Copy the latest assistant reply — the focused tab's trailing prose,
+    /// as raw markdown — to the system clipboard via OSC 52.  An oversized
+    /// reply exceeds the terminal's per-sequence limit, so copy its tail
+    /// (the same bound `Ctrl+Y` uses) and say so, rather than let the
+    /// terminal drop the whole sequence and copy nothing silently.
+    fn cmd_copy(&mut self) -> Slash {
+        let id = self.session.id;
+        let reply = self.tui.app.latest_reply();
+        if reply.is_empty() {
+            self.note_error(id, "no reply to copy yet".into());
+            return Slash::Continue;
+        }
+        let payload = tail_bytes(&reply, YANK_CAP);
+        if let Err(e) = osc52_copy(payload) {
+            self.note_error(id, format!("clipboard write failed: {e}"));
+            return Slash::Continue;
+        }
+        let note = if payload.len() < reply.len() {
+            format!("[reply exceeds the clipboard limit — copied its last {YANK_CAP} bytes]")
+        } else {
+            format!("[copied the latest reply — {} lines]", reply.lines().count())
+        };
+        self.tui.handle(Event {
+            id,
+            kind: Kind::Dim(note),
+        });
+        Slash::Continue
+    }
+
+    /// Write the focused tab's user view — its rendered `user.log` — to
+    /// `arg`, a path that may be absolute, relative to the launch cwd, or
+    /// `~`/`xdg:`-prefixed.  Refuses to overwrite an existing file so an
+    /// export never clobbers; an empty argument prints the usage line.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:silent:export] copies the rendered user.log to the user-chosen export path; output infra, not turn-time data I/O"
+    )]
+    fn cmd_export(&mut self, arg: &str) -> Slash {
+        let id = self.session.id;
+        if arg.is_empty() {
+            self.note_error(id, "usage: /export <path>".into());
+            return Slash::Continue;
+        }
+        let dest = resolve_export_path(arg, self.info.cwd);
+        if dest.exists() {
+            self.note_error(id, format!("refusing to overwrite {}", dest.display()));
+            return Slash::Continue;
+        }
+        let src = match self.tui.app.flush_focused_log() {
+            Ok(p) => p,
+            Err(e) => {
+                self.note_error(id, format!("could not flush transcript: {e}"));
+                return Slash::Continue;
+            }
+        };
+        match std::fs::copy(&src, &dest) {
+            Ok(_) => self.tui.handle(Event {
+                id,
+                kind: Kind::Dim(format!("[exported user view to {}]", dest.display())),
+            }),
+            Err(e) => self.note_error(id, format!("could not write {}: {e}", dest.display())),
         }
         Slash::Continue
     }
@@ -2584,11 +2727,15 @@ impl Repl<'_> {
         let names: Vec<String> = SLASH_COMMANDS
             .iter()
             .map(|c| {
-                if c.aliases.is_empty() {
-                    c.name.to_string()
-                } else {
-                    format!("{} ({})", c.name, c.aliases.join(", "))
+                let mut s = c.name.to_string();
+                if let Some(arg) = c.arg {
+                    s.push(' ');
+                    s.push_str(arg);
                 }
+                if !c.aliases.is_empty() {
+                    s.push_str(&format!(" ({})", c.aliases.join(", ")));
+                }
+                s
             })
             .collect();
         let width = names.iter().map(String::len).max().unwrap_or(0);
@@ -3123,5 +3270,62 @@ mod banner_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::{lookup_command, resolve_export_path};
+
+    /// The matched command's canonical name plus the argument
+    /// `lookup_command` peeled off — `None` when nothing matched.
+    fn dispatch(input: &str) -> Option<(&'static str, String)> {
+        lookup_command(input).map(|(c, arg)| (c.name, arg.to_string()))
+    }
+
+    #[test]
+    fn argless_command_matches_alone_but_not_with_trailing_text() {
+        assert_eq!(dispatch("/copy"), Some(("/copy", String::new())));
+        // Trailing text on an argument-less command is not that command: it
+        // falls through to the model as a prompt rather than running /copy.
+        assert_eq!(dispatch("/copy this"), None);
+        // An alias resolves to its canonical entry.
+        assert_eq!(dispatch("/exit"), Some(("/quit", String::new())));
+    }
+
+    #[test]
+    fn export_consumes_its_path_argument() {
+        assert_eq!(
+            dispatch("/export ~/notes.md"),
+            Some(("/export", "~/notes.md".to_string()))
+        );
+        // Whitespace around the argument is trimmed.
+        assert_eq!(
+            dispatch("/export   /tmp/a.txt  "),
+            Some(("/export", "/tmp/a.txt".to_string()))
+        );
+        // A bare /export still matches, with the empty argument its handler
+        // turns into the usage hint.
+        assert_eq!(dispatch("/export"), Some(("/export", String::new())));
+    }
+
+    #[test]
+    fn unknown_token_is_not_a_command() {
+        assert_eq!(dispatch("/bogus"), None);
+        assert_eq!(dispatch("just a prompt"), None);
+    }
+
+    #[test]
+    fn export_path_resolves_absolute_and_relative() {
+        // An absolute path passes through (dots folded, cwd ignored).
+        assert_eq!(
+            resolve_export_path("/tmp/out.txt", "/Users/me/proj").to_str(),
+            Some("/tmp/out.txt")
+        );
+        // A relative path anchors at the launch cwd, not the process cwd.
+        assert_eq!(
+            resolve_export_path("notes.md", "/Users/me/proj").to_str(),
+            Some("/Users/me/proj/notes.md")
+        );
     }
 }
