@@ -91,6 +91,13 @@ pub(super) const RAIL: &str = "❖ ";
 /// not, so a selection through the block copies as plain text.
 pub(super) const RAIL_W: usize = 2;
 
+/// Width of the wheel-dialable rail target: the shape glyph alone, not
+/// the trailing space. The glyph is the cell that *bears* the mark, so
+/// the wheel dials the block's disclosure level only when it sits on it;
+/// the blank second column is inert margin that falls through to
+/// page-scroll, so resting the pointer there never traps the wheel.
+pub(super) const RAIL_DIAL_W: usize = 1;
+
 /// True when every span in `l` is empty or whitespace-only — i.e. the
 /// line carries no glyphs and reads as a vertical separator rather
 /// than a row of content.  Shared with `md` (trailing-blank collapse)

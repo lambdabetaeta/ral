@@ -75,7 +75,8 @@ use std::{
 };
 
 use line::{
-    AGENT_HUES, BANNER_GOLD, BANNER_PINK, CYAN, PINK, PURPLE, RAIL_W, READ_W, SLATE, bold,
+    AGENT_HUES, BANNER_GOLD, BANNER_PINK, CYAN, PINK, PURPLE, RAIL_DIAL_W, RAIL_W, READ_W, SLATE,
+    bold,
 };
 use viewport::Viewport;
 
@@ -1318,7 +1319,7 @@ impl App {
     /// own selection, so we never see — or fight — it.
     pub fn mouse(&mut self, me: MouseEvent) {
         match me.kind {
-            // Over the rail and a dialable block, the wheel dials the
+            // Over the rail glyph of a dialable block, the wheel dials the
             // block's disclosure level (up reveals, down reduces) and
             // consumes the event; otherwise it scrolls the viewport.
             MouseEventKind::ScrollUp if self.rail_dial(me, 1) => {}
@@ -1336,26 +1337,29 @@ impl App {
         }
     }
 
-    /// Map a mouse event over the rail column to its buffer row's block,
-    /// or `None` when the event falls outside the rail (cols 0–1 of the
-    /// content rect) or past the buffer.
+    /// Map a wheel event over the rail *glyph* to its buffer row's block,
+    /// or `None` when the event falls outside the glyph cell (col 0 of the
+    /// content rect — the [`RAIL_DIAL_W`] target, not the full rail) or
+    /// past the buffer.  The trailing rail space (col 1) is inert margin:
+    /// a wheel resting there scrolls the page rather than dialing, so the
+    /// left margin never traps a scroll.
     fn rail_block(&self, me: MouseEvent) -> Option<usize> {
         let frame = self.frame?;
-        let on_rail = me.column >= frame.text.x
-            && (me.column as usize) < frame.text.x as usize + RAIL_W
+        let on_glyph = me.column >= frame.text.x
+            && (me.column as usize) < frame.text.x as usize + RAIL_DIAL_W
             && me.row >= frame.text.y
             && me.row < frame.text.y + frame.text.height;
-        if !on_rail {
+        if !on_glyph {
             return None;
         }
         let row = frame.offset + (me.row - frame.text.y) as usize;
         self.viewports.get(&self.focused())?.block_at(row)
     }
 
-    /// Dial the block under a rail-column wheel event by `delta`,
+    /// Dial the block under a rail-glyph wheel event by `delta`,
     /// returning whether the event was consumed — `true` only when it sat
-    /// on the rail of a dialable block, leaving the wheel to scroll
-    /// otherwise.
+    /// on the glyph of a dialable block at an unclamped level, leaving the
+    /// wheel to scroll otherwise.
     fn rail_dial(&mut self, me: MouseEvent, delta: i8) -> bool {
         let Some(idx) = self.rail_block(me) else {
             return false;
@@ -2030,7 +2034,7 @@ fn footer_hint() -> Line<'static> {
     let st = Style::default()
         .fg(SLATE)
         .add_modifier(Modifier::DIM | Modifier::ITALIC);
-    let hint = " Tab pane • ⇧Tab reorder • click ▸ expand • drag copy (⇧ native) • wheel/PgUp scroll • Ctrl-Y yank • Ctrl-C cancel • Ctrl-D quit ";
+    let hint = " Tab pane • ⇧Tab reorder • click ▸ expand • wheel ▸ dial • drag copy (⇧ native) • wheel/PgUp scroll • Ctrl-Y yank • Ctrl-C cancel • Ctrl-D quit ";
     Line::from(Span::styled(hint, st))
 }
 
