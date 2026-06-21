@@ -74,7 +74,7 @@ pub use types::{Break, Error, Escape, EventSink, Map, Settled, Shell, SurfaceSin
 // owning module explicitly — `ral_core::syntax::parser::parse`,
 // `ral_core::elaborator::elaborate`, `ral_core::evaluator::evaluate`,
 // `ral_core::ir::Comp` — which reads as deliberately stepping past the
-// `run_turn` seam rather than as part of it.  See
+// turn-door seam rather than as part of it.  See
 // decisions/260618_after-turn-api-simplifications.
 pub(crate) use elaborator::elaborate;
 pub(crate) use evaluator::evaluate;

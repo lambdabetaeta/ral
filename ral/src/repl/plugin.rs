@@ -25,8 +25,10 @@
 pub(super) mod load;
 pub(super) mod manifest;
 
-use ral_core::types::{Break, Settled};
-use ral_core::{Shell, Value};
+use ral_core::types::{Break, Capabilities, Settled};
+use ral_core::{
+    RequestedTerminalAccess, Shell, TurnIo, TurnReport, TurnRequest, TurnStdin, Value,
+};
 
 use self::manifest::LoadedPlugin;
 use super::errfmt::{format_plugin_error, plugin_error, plugin_warning};
@@ -243,12 +245,42 @@ pub(super) struct HookResult {
     pub(super) ctx: Option<PluginContext>,
 }
 
-/// The single primitive for invoking a plugin hook.  In order:
+/// How a hook call is framed against the turn machinery.
+///
+/// A hook handler is a thunk applied to argument values, so it runs through
+/// the value turn door — but only when there is no turn frame around it yet.
+/// The three hook contexts differ exactly here:
+///
+///   - [`HookFraming::Framed`] — keybinding dispatch, buffer-change, and
+///     prompt hooks fire during the frontend `read`, *outside* any turn frame.
+///     They must establish one, so a hook that runs `_ed-tui` (a keybinding
+///     handler) lands under [`RequestedTerminalAccess::Leased`] and its
+///     terminal loan can elevate to foreground the body's pipeline; the others
+///     pass `Denied`, since they never hand the terminal to a child.
+///   - [`HookFraming::InFrame`] — lifecycle hooks (`pre-exec`, `post-exec`,
+///     `chpwd`) fire from inside the command's own turn frame. A second frame
+///     would nest, so the handler is applied in place.
+pub(super) enum HookFraming {
+    /// Establish a fresh turn frame with this terminal authority before
+    /// applying the handler. Inherits the session streams; no capability
+    /// attenuation (plugins run with host authority); no lifecycle hooks.
+    Framed(RequestedTerminalAccess),
+    /// Apply the handler in place — already inside the command's turn frame.
+    InFrame,
+}
+
+/// The single primitive for running a plugin hook.  In order:
 ///   1. take any pre-existing `shell.repl().plugin_context` aside
 ///   2. install `ctx_in` (when `Some`) so `_ed-*` builtins resolve correctly
-///   3. call the handler with `args` (no capability attenuation; plugins run with host authority)
+///   3. apply the handler to `args`, framed per `framing` (no capability
+///      attenuation; plugins run with host authority)
 ///   4. take the context back out (now carrying outputs and any state_cell mutation)
 ///   5. restore the pre-existing context
+///
+/// The context install/restore is local-state bookkeeping that a turn frame
+/// does not swap, so it brackets the framing decision: a [`HookFraming::Framed`]
+/// handler sees the same `plugin_context` whether the value turn door installs
+/// a frame or not.
 ///
 /// State cell flows through `ctx_in.state_cell` / `result.ctx.state_cell`
 /// — the helper does not touch the plugin record itself, so it works
@@ -261,13 +293,25 @@ pub(super) fn call_plugin_hook(
     hook: &Value,
     args: &[Value],
     ctx_in: Option<PluginContext>,
+    framing: HookFraming,
 ) -> HookResult {
     let _ = plugin.name; // reserved for future error-context use
     let prev = shell.repl_mut().plugin_context.take();
     if let Some(ctx) = ctx_in {
         shell.repl_mut().plugin_context = Some(Box::new(ctx));
     }
-    let result = ral_core::evaluator::apply(hook.clone(), args.to_vec(), shell);
+    let result = match framing {
+        HookFraming::InFrame => ral_core::builtins::apply(hook, args, shell),
+        HookFraming::Framed(terminal) => {
+            let req = framed_turn_request("<hook>", terminal);
+            match shell.run_value_turn(hook.clone(), args.to_vec(), req) {
+                TurnReport::Ran { result, .. } => result,
+                // A thunk hook never reaches the parse/typecheck phase, so the
+                // value turn door cannot return `Static`.
+                TurnReport::Static { .. } => unreachable!("a thunk hook never compiles source"),
+            }
+        }
+    };
     let ctx = shell
         .repl_mut()
         .plugin_context
@@ -275,6 +319,29 @@ pub(super) fn call_plugin_hook(
         .and_then(|b| b.downcast::<PluginContext>().ok().map(|b| *b));
     shell.repl_mut().plugin_context = prev;
     HookResult { result, ctx }
+}
+
+/// The per-turn policy for a turn the REPL host runs from a `Value` it already
+/// holds — a plugin hook, the `RAL_PROMPT` body, an rc startup block, a plugin
+/// factory: the session's live streams, host authority, no limits, no surface,
+/// no lifecycle. `script_name` labels the root source context; `terminal`
+/// varies (keybinding dispatch leases it; every other site denies it, never
+/// handing the terminal to a child).
+pub(super) fn framed_turn_request(
+    script_name: &'static str,
+    terminal: RequestedTerminalAccess,
+) -> TurnRequest<'static> {
+    TurnRequest {
+        script_name,
+        caps: Capabilities::root(),
+        turn_limit: None,
+        detached_limit: None,
+        io: TurnIo::Inherit,
+        terminal,
+        stdin: TurnStdin::Inherit,
+        surface: None,
+        lifecycle: Box::new(()),
+    }
 }
 
 // ── Buffer-change hooks ─────────────────────────────────────────────────
@@ -362,6 +429,10 @@ pub(super) fn run_buffer_change_hooks(runtime: &Arc<Mutex<PluginRuntime>>, line:
             &handler,
             &args,
             Some(ctx_in),
+            // Buffer-change hooks fire per keystroke outside any frame and
+            // never hand the terminal to a child (`_ed-tui` is forbidden here),
+            // so they frame with `Denied`.
+            HookFraming::Framed(RequestedTerminalAccess::Denied),
         );
 
         if let Err(Break::Error(e)) = &hr.result {
@@ -682,6 +753,10 @@ pub(crate) fn fold_hook<T>(
 }
 
 /// Run a named lifecycle hook on all plugins, passing `args` to each handler.
+///
+/// Lifecycle hooks (`pre-exec`, `post-exec`, `chpwd`) fire from inside the
+/// command's own turn frame, so the handler is applied in place
+/// ([`HookFraming::InFrame`]) — a fresh frame would nest inside the live one.
 pub(crate) fn run_lifecycle_hook(
     runtime: &Arc<Mutex<PluginRuntime>>,
     shell: &mut Shell,
@@ -695,7 +770,7 @@ pub(crate) fn run_lifecycle_hook(
         (),
         |shell, plugin, handler, ()| {
             let plugin_name = plugin.name.to_string();
-            let hr = call_plugin_hook(shell, plugin, handler, args, None);
+            let hr = call_plugin_hook(shell, plugin, handler, args, None, HookFraming::InFrame);
             if let Err(Break::Error(e)) = &hr.result {
                 plugin_error(&plugin_name, &format!("hook '{hook_name}' failed"), e);
             }

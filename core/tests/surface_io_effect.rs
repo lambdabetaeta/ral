@@ -2,7 +2,7 @@
 
 //! Structural I/O events: core pushes a plain `Value` onto the turn's
 //! `surface` sink at every redirect read/write door and every exec
-//! completion door.  These tests drive the public `Shell::run_turn`
+//! completion door.  These tests drive the public `Shell::run_source_turn`
 //! boundary (exactly as `surface_effect.rs` does) with a recording sink
 //! and assert the emitted `{io: …}` maps.  Decoding these into cards is
 //! exarch's job and out of scope here — we only check the wire shape.
@@ -45,7 +45,7 @@ fn recording() -> (Arc<Mutex<Vec<Value>>>, SurfaceSink) {
 /// error.
 fn run(shell: &mut Shell, source: &str) -> (Settled<Value>, Vec<Value>) {
     let (log, sink) = recording();
-    let result = match shell.run_turn(
+    let result = match shell.run_source_turn(
         source,
         TurnRequest {
             script_name: "<test>",

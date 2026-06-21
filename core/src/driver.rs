@@ -160,16 +160,23 @@ pub fn bake_prelude_to_out_dir() {
         .expect("failed to write prelude_schemes.bin");
 }
 
-// ── The turn entry: one synchronous, runtime-agnostic host seam ────────────
+// ── The turn entries: two synchronous, runtime-agnostic host seams ─────────
 //
-// `Shell::run_turn(src, TurnRequest) -> TurnReport` is the only host-facing
-// evaluation seam. Hosts describe *policy* (`TurnRequest`, `TurnIo`,
-// `SurfaceSink`, lifecycle hooks); core owns *resources* (`Sink`, `Source`,
-// `TurnState`, guards, buffers, signal slots). Completion is the call
-// returning — never a channel disconnecting — so a detached worker holding a
-// surface clone cannot keep a turn from ending.
+// Hosts start an evaluation through exactly one of two doors:
+// `Shell::run_source_turn(src, TurnRequest)` runs a turn from source text;
+// `Shell::run_value_turn(thunk, args, TurnRequest)` runs a turn from an
+// already-evaluated thunk applied to argument values (a REPL plugin hook, a
+// prompt body, an rc startup block). Both return one flat `TurnReport`. Hosts
+// describe *policy* (`TurnRequest`, `TurnIo`, `SurfaceSink`, lifecycle hooks);
+// core owns *resources* (`Sink`, `Source`, `TurnState`, guards, buffers,
+// signal slots). Completion is the call returning — never a channel
+// disconnecting — so a detached worker holding a surface clone cannot keep a
+// turn from ending. These doors are the only way into evaluation: the
+// reduction primitive behind them is crate-private, so a host cannot start an
+// unframed evaluation that would foreground or capture against a stale frame.
 
-/// The IO regime of a turn: intent, materialised into resources by `run_turn`.
+/// The IO regime of a turn: intent, materialised into resources by the turn
+/// doors.
 pub enum TurnIo {
     /// Run on the session's live streams: the turn's byte sinks are cloned
     /// from the ambient `shell.turn`. The interactive REPL (whose stdout is
@@ -281,17 +288,18 @@ pub enum TurnReport {
 
 impl Shell {
     /// Run one top-level turn of `src` under `req`, synchronously, and return
-    /// one flat [`TurnReport`]. The single host evaluation seam: it compiles
-    /// and typechecks against the live session, materialises the IO regime,
-    /// mints the turn's foreground scope and arms its wall, installs the
-    /// turn-local surface, evaluates under the capability ceiling, and folds
-    /// the captured bytes and `timed_out` it alone knows into the report.
+    /// one flat [`TurnReport`]. The source door: it compiles and typechecks
+    /// against the live session, then runs the compiled program through the
+    /// shared framed scaffold ([`Self::run_built`]) — materialising the IO
+    /// regime, minting the turn's foreground scope and arming its wall,
+    /// installing the turn-local surface, evaluating under the capability
+    /// ceiling, and folding in the captured bytes and `timed_out`.
     ///
     /// Turn completion is *this call returning* — never a channel
     /// disconnecting. A detached worker may hold a clone of the surface sink
     /// forever; it changes nothing, because nothing waits on that sink to
     /// decide the turn is over.
-    pub fn run_turn(&mut self, src: &str, req: TurnRequest<'_>) -> TurnReport {
+    pub fn run_source_turn(&mut self, src: &str, req: TurnRequest<'_>) -> TurnReport {
         // Mint the turn's foreground scope and arm its wall *before* compiling,
         // so the limit bounds the whole turn — compile and typecheck included,
         // not only evaluation. `compile_turn`'s `process::clear` touches only
@@ -308,6 +316,56 @@ impl Shell {
             Err(diagnostics) => return TurnReport::Static { diagnostics },
         };
 
+        self.run_built(req, foreground, wall, single_command, src, |s| {
+            crate::evaluator::eval_top_level(&comp, s)
+        })
+    }
+
+    /// Run one top-level turn that applies an already-evaluated `thunk`
+    /// (a `Block` or `Lambda`) to `args`, synchronously, under `req`. The
+    /// value door: a REPL plugin hook, a prompt body, or an rc startup block —
+    /// a program the host already holds as a [`Value`], not as source text.
+    ///
+    /// It shares the framed scaffold with [`Self::run_source_turn`]: the only
+    /// difference is the turn's program. Here that program is the in-frame
+    /// reduction [`crate::builtins::apply`], which applies a thunk while the
+    /// frame is installed and rejects a non-thunk `Value` with the same
+    /// descriptive error reduction raises — so the door never starts an
+    /// evaluation that escapes the frame. A turn run from a thunk is not a
+    /// single command, so the report carries `single_command: false`; the
+    /// empty source label keeps the root context honest (there is no text to
+    /// render an error against).
+    pub fn run_value_turn(
+        &mut self,
+        thunk: Value,
+        args: Vec<Value>,
+        req: TurnRequest<'_>,
+    ) -> TurnReport {
+        let foreground = self.durable_root().child();
+        let wall = req
+            .turn_limit
+            .map(|d| crate::process::arm_lifetime(foreground.as_scope().clone(), d));
+
+        self.run_built(req, foreground, wall, false, "", |s| {
+            crate::builtins::apply(&thunk, &args, s)
+        })
+    }
+
+    /// The framed scaffold shared by both turn doors: materialise the IO
+    /// regime from `req`, build and install the turn frame on the pre-minted
+    /// `foreground`, evaluate `body` under the capability ceiling and lifecycle
+    /// hooks, then disarm the `wall` and fold the captured bytes and
+    /// `timed_out` into the report. `body` is the turn's program — the source
+    /// door's `eval_top_level`, the value door's in-frame `apply`.
+    fn run_built(
+        &mut self,
+        req: TurnRequest<'_>,
+        foreground: crate::process::ForegroundScope,
+        wall: Option<crate::process::Deadline>,
+        single_command: bool,
+        src: &str,
+        body: impl FnOnce(&mut Shell) -> Settled<Value>,
+    ) -> TurnReport {
         // Materialise the IO regime: `Capture` mints buffers we read back,
         // `Inherit` leaves the ambient streams to flow through `build_turn`.
         let (capture, capture_bufs) = match req.io {
@@ -340,15 +398,8 @@ impl Shell {
             req.detached_limit,
             req.surface,
         );
-        let (result, status) = crate::turn::run_compiled(
-            self,
-            comp,
-            next,
-            req.script_name,
-            src,
-            req.caps,
-            req.lifecycle,
-        );
+        let (result, status) =
+            crate::turn::run_framed(self, next, req.script_name, src, req.caps, req.lifecycle, body);
 
         // Disarm the wall before reading the cause. While it stays armed the
         // reaper can still fire; classifying against a live ceiling lets a turn

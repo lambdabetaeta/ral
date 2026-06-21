@@ -1,19 +1,20 @@
 //! One top-level turn lifted into core, behind one host entry.
 //!
 //! A turn is the unit a host runs over a persistent [`Shell`]: clear the
-//! signal state, compile and typecheck the source against the live
-//! session, install the turn's dynamic frame, evaluate the compiled
-//! computation, and classify the [`Settled<Value>`] into a transport
-//! status. The hosts that drive this — the interactive REPL, exarch's tool
-//! evaluator, batch — all go through one entry,
-//! [`Shell::run_turn`](crate::Shell::run_turn), and diverge only on the
-//! policy carried in its [`TurnRequest`](crate::TurnRequest): where the byte
-//! streams go, whether a capability frame is pushed, the wall and detached
-//! limits, and which lifecycle hooks fire.
+//! signal state, fix the turn's program (compiled from source, or an
+//! already-evaluated thunk applied to argument values), install the turn's
+//! dynamic frame, evaluate, and classify the [`Settled<Value>`] into a
+//! transport status. The hosts that drive this — the interactive REPL,
+//! exarch's tool evaluator, batch — go through one of two doors,
+//! [`Shell::run_source_turn`](crate::Shell::run_source_turn) and
+//! [`Shell::run_value_turn`](crate::Shell::run_value_turn), and diverge only
+//! on the policy carried in the [`TurnRequest`](crate::TurnRequest): where the
+//! byte streams go, whether a capability frame is pushed, the wall and
+//! detached limits, and which lifecycle hooks fire.
 //!
-//! This module owns the spine `run_turn` orchestrates: [`compile_turn`]
+//! This module owns the spine the turn doors orchestrate: [`compile_turn`]
 //! (parse/typecheck), [`build_turn`] (materialise the [`TurnState`]), and
-//! [`run_compiled`] (install, hook, evaluate, classify). The whole turn-local
+//! [`run_framed`] (install, hook, evaluate, classify). The whole turn-local
 //! part of a [`Shell`] is one field — [`TurnState`] — so installing a turn is
 //! a single swap: [`TurnGuard`] moves the new frame into `shell.turn`, runs,
 //! and restores the previous frame on `Drop`, even when the evaluation unwinds
@@ -23,7 +24,6 @@
 //! `Capture` they are the fresh set the host reads back. The swap is total in
 //! both cases — only the seed differs.
 
-use crate::evaluator::eval_top_level;
 use crate::io::{Io, Sink, Source};
 use crate::process::{ForegroundCancelSlot, ForegroundScope, RootCancelSlot};
 use crate::syntax::parser::ParseError;
@@ -202,19 +202,24 @@ pub(crate) fn compile_turn(
     Ok((comp, single_command))
 }
 
-/// Install the built turn state, fire the lifecycle hooks around evaluation
-/// under `capabilities`, compute the transport status, and tear the frame down
-/// before returning `(result, status)`. The `TurnGuard` restores the prior
-/// frame on `Drop`, even on unwind. Caller (`Shell::run_turn`) owns IO
-/// materialisation, limit arming, and `timed_out`/capture classification.
-pub(crate) fn run_compiled<'a>(
+/// Install the built turn state, fire the lifecycle hooks around the eval
+/// `body` under `capabilities`, compute the transport status, and tear the
+/// frame down before returning `(result, status)`. The `body` is the turn's
+/// program: the source door evaluates a compiled [`Comp`](crate::ir::Comp)
+/// (`eval_top_level`); the value door applies an already-evaluated thunk in
+/// place (`builtins::apply`). Both settle to one [`Settled<Value>`], so the
+/// lifecycle/capability/status spine is shared verbatim. The `TurnGuard`
+/// restores the prior frame on `Drop`, even on unwind. The caller (the
+/// `run_*_turn` doors) owns IO materialisation, limit arming, and the
+/// `timed_out`/capture classification.
+pub(crate) fn run_framed<'a>(
     shell: &mut Shell,
-    comp: Arc<crate::ir::Comp>,
     next: TurnState,
     script_name: &str,
     src: &str,
     capabilities: Capabilities,
     mut lifecycle: Box<dyn TurnLifecycle + 'a>,
+    body: impl FnOnce(&mut Shell) -> Settled<Value>,
 ) -> (Settled<Value>, i32) {
     let mut guard = TurnGuard::install(shell, next);
     let shell = guard.shell_mut();
@@ -222,7 +227,7 @@ pub(crate) fn run_compiled<'a>(
 
     lifecycle.pre_exec(shell, src);
 
-    let result = shell.with_capabilities(capabilities, |s| eval_top_level(&comp, s));
+    let result = shell.with_capabilities(capabilities, body);
 
     let status = eval_status(&result, shell);
 
@@ -266,7 +271,7 @@ mod tests {
     fn clean_turn_runs_with_zero_status() {
         let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
         let mut shell = Shell::new(Default::default());
-        match shell.run_turn("$[1 + 1]", capture_req()) {
+        match shell.run_source_turn("$[1 + 1]", capture_req()) {
             TurnReport::Ran { result, status, .. } => {
                 assert_eq!(status, 0);
                 assert!(result.is_ok(), "expected Ok, got {result:?}");
@@ -281,7 +286,7 @@ mod tests {
     fn parse_failure_is_static() {
         let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
         let mut shell = Shell::new(Default::default());
-        match shell.run_turn("let = ", capture_req()) {
+        match shell.run_source_turn("let = ", capture_req()) {
             TurnReport::Static { diagnostics } => {
                 assert!(
                     matches!(diagnostics, StaticDiagnostics::Parse(_)),
@@ -297,7 +302,7 @@ mod tests {
     fn type_failure_is_static() {
         let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
         let mut shell = Shell::new(Default::default());
-        match shell.run_turn("$[1 + true]", capture_req()) {
+        match shell.run_source_turn("$[1 + true]", capture_req()) {
             TurnReport::Static { diagnostics } => {
                 assert!(
                     matches!(diagnostics, StaticDiagnostics::Types(_)),
@@ -314,7 +319,7 @@ mod tests {
     fn exit_escape_reports_code() {
         let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
         let mut shell = Shell::new(Default::default());
-        match shell.run_turn("exit 3", capture_req()) {
+        match shell.run_source_turn("exit 3", capture_req()) {
             TurnReport::Ran { result, status, .. } => {
                 assert_eq!(status, 3);
                 assert!(
@@ -331,7 +336,7 @@ mod tests {
     fn capture_returns_stdout_bytes() {
         let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
         let mut shell = Shell::new(Default::default());
-        match shell.run_turn("echo hi", capture_req()) {
+        match shell.run_source_turn("echo hi", capture_req()) {
             TurnReport::Ran { captured, .. } => {
                 let captured = captured.expect("Capture must return buffers");
                 assert!(
@@ -345,7 +350,7 @@ mod tests {
     }
 
     /// The turn's foreground scope and turn-local surface are torn down
-    /// before `run_turn` returns: the surface is restored to its pre-turn
+    /// before `run_source_turn` returns: the surface is restored to its pre-turn
     /// value, and cancelling the restored `shell.turn.cancel` reaches the
     /// pre-turn scope (proving the guard swapped the pre-turn frame back in,
     /// not the turn's internally-minted child).
@@ -360,7 +365,7 @@ mod tests {
         assert!(!shell.turn.cancel.is_cancelled(), "pre-turn scope is live");
         let pre = shell.foreground().clone();
 
-        let _ = shell.run_turn(
+        let _ = shell.run_source_turn(
             "$[1 + 1]",
             TurnRequest {
                 surface: Some(Arc::new(())),
@@ -408,7 +413,7 @@ mod tests {
             pre: Arc::new(Mutex::new(false)),
             post_status: Arc::new(Mutex::new(None)),
         };
-        let _ = shell.run_turn(
+        let _ = shell.run_source_turn(
             "exit 7",
             TurnRequest {
                 lifecycle: Box::new(spy.clone()),
@@ -424,7 +429,7 @@ mod tests {
         );
     }
 
-    /// `run_turn` publishes the installed foreground scope into the
+    /// `run_source_turn` publishes the installed foreground scope into the
     /// signal-reachable slot for the eval's extent: a lifecycle hook that
     /// requests a foreground cancel (the role a signal handler plays) reaches
     /// `shell.turn.cancel`, and the trampoline's `process::check` unwinds
@@ -440,7 +445,7 @@ mod tests {
         }
 
         let mut shell = Shell::new(Default::default());
-        match shell.run_turn(
+        match shell.run_source_turn(
             "let x = 42\nreturn $x",
             TurnRequest {
                 lifecycle: Box::new(CancelInPreExec),
@@ -461,7 +466,7 @@ mod tests {
         }
     }
 
-    /// `run_turn` publishes the durable root into the signal-reachable
+    /// `run_source_turn` publishes the durable root into the signal-reachable
     /// root slot for the turn's extent: a lifecycle hook that requests a
     /// root abort (the role a SIGQUIT handler plays) reaches the root, and
     /// the foreground scope — a child of the root — observes the abort
@@ -478,7 +483,7 @@ mod tests {
         }
 
         let mut shell = Shell::new(Default::default());
-        match shell.run_turn(
+        match shell.run_source_turn(
             "let x = 42\nreturn $x",
             TurnRequest {
                 lifecycle: Box::new(AbortInPreExec),
@@ -511,7 +516,7 @@ mod tests {
         }
 
         let mut shell = Shell::new(Default::default());
-        match shell.run_turn(
+        match shell.run_source_turn(
             "let x = 42\nreturn $x",
             TurnRequest {
                 turn_limit: Some(std::time::Duration::from_secs(30)),
@@ -541,7 +546,7 @@ mod tests {
         let marker: ByteBuffer = Arc::new(Mutex::new(Vec::new()));
         shell.turn.io.stdout = Sink::Buffer(marker.clone());
 
-        let _ = shell.run_turn(
+        let _ = shell.run_source_turn(
             "echo hi",
             TurnRequest {
                 io: TurnIo::Inherit,

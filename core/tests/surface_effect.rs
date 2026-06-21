@@ -2,8 +2,8 @@
 
 //! The `surface` effect: a value handed to the builtin reaches the
 //! host-installed sink unchanged, and with no sink installed the builtin
-//! is the identity.  Drives the public `Shell::run_turn` boundary the same
-//! way `ral` and `exarch` do.
+//! is the identity.  Drives the public `Shell::run_source_turn` boundary the
+//! same way `ral` and `exarch` do.
 
 mod common;
 
@@ -41,7 +41,7 @@ fn recording() -> (Arc<Mutex<Vec<Value>>>, SurfaceSink) {
 /// settled value.  These sources are well-formed, so a static diagnostic is
 /// a test bug.
 fn run(shell: &mut Shell, source: &str, surface: Option<SurfaceSink>) -> Settled<Value> {
-    match shell.run_turn(
+    match shell.run_source_turn(
         source,
         TurnRequest {
             script_name: "<test>",

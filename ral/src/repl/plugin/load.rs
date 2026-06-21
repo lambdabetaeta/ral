@@ -8,11 +8,11 @@
 
 use ral_core::builtins::modules::ScriptContextGuard;
 use ral_core::types::{Break, Error, Settled};
-use ral_core::{Shell, Value};
+use ral_core::{RequestedTerminalAccess, Shell, TurnReport, Value};
 use std::sync::{Arc, Mutex};
 
 use super::manifest::LoadedPlugin;
-use super::{PluginRuntime, lock};
+use super::{PluginRuntime, framed_turn_request, lock};
 
 fn load_err(msg: impl std::fmt::Display) -> Error {
     Error::new(format!("load-plugin: {msg}"), 1)
@@ -182,7 +182,16 @@ fn instantiate(
     match val {
         val @ (Value::Lambda { .. } | Value::Block { .. }) => {
             let arg = options.cloned().unwrap_or(empty);
-            ral_core::evaluator::apply(val, vec![arg], shell)
+            // The plugin factory runs through the value turn door: a fresh
+            // frame with the session's live streams and `Denied` terminal
+            // authority — instantiating a plugin must not foreground a child.
+            let req = framed_turn_request("<plugin>", RequestedTerminalAccess::Denied);
+            match shell.run_value_turn(val, vec![arg], req) {
+                TurnReport::Ran { result, .. } => result,
+                TurnReport::Static { .. } => {
+                    unreachable!("a thunk plugin factory never compiles source")
+                }
+            }
         }
         _ if matches!(options, Some(Value::Map(e)) if !e.is_empty()) => {
             Err(Break::Error(load_err(format!(
@@ -194,9 +203,9 @@ fn instantiate(
     }
 }
 
-/// Error if `val` is still callable after instantiation.  A `Lambda`
-/// means the plugin's one options parameter was not supplied; a `Block`
-/// means the plugin returned a block instead of a map.
+/// Error if `val` is still a thunk after instantiation.  A `Lambda` means the
+/// plugin's one options parameter was not supplied; a `Block` means the plugin
+/// returned a block instead of a map.
 fn check_is_manifest(val: &Value, name: &str) -> Result<(), Error> {
     match val {
         Value::Lambda { .. } => Err(load_err(format!(

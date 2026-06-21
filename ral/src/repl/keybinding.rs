@@ -7,14 +7,14 @@
 //! editor state.  The handler may mutate the buffer, accept the line, or
 //! push a new buffer onto the stack.
 
-use ral_core::Shell;
 use ral_core::types::Break;
+use ral_core::{RequestedTerminalAccess, Shell};
 use std::sync::{Arc, Mutex};
 
 use super::frontend::EditBuffer;
 use super::plugin::{
-    HookFor, Keymap, PendingKeybinding, PluginRuntime, call_plugin_hook, defer_plugin_error,
-    keymap_name, lock,
+    HookFor, HookFraming, Keymap, PendingKeybinding, PluginRuntime, call_plugin_hook,
+    defer_plugin_error, keymap_name, lock,
 };
 use super::plugin_editor::{EditorState, PluginContext, PluginInputs, PluginOutputs, byte_to_char};
 
@@ -86,12 +86,18 @@ pub(super) fn dispatch_keybinding(
         state_default_used: state_loaded,
     };
 
+    // Keybinding dispatch runs outside any turn frame (the frontend `read` is
+    // not a turn), so the hook must establish one. `Leased` is the load-bearing
+    // choice: a handler that runs `_ed-tui { … | fzf }` can then raise its
+    // terminal loan to `ExplicitLoan` and foreground the captured pipeline,
+    // rather than backgrounding it where `fzf` would block reading `/dev/tty`.
     let hr = call_plugin_hook(
         shell,
         HookFor { name: &pk.plugin },
         &handler,
         &[],
         Some(ctx_in),
+        HookFraming::Framed(RequestedTerminalAccess::Leased),
     );
 
     if let Err(Break::Error(e)) = hr.result {

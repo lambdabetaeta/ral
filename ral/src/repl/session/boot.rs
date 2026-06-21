@@ -7,7 +7,7 @@
 //! machine itself focused on the run/turn/eval loop.
 
 use ral_core::types::{Break, Escape};
-use ral_core::{Shell, diagnostic, evaluator::evaluate};
+use ral_core::{RequestedTerminalAccess, Shell, TurnReport, diagnostic, evaluator::evaluate};
 use rustyline::config::{BellStyle, EditMode};
 use std::sync::{Arc, Mutex};
 
@@ -15,7 +15,7 @@ use super::super::config::{RcCtx, create_default_rc, find_ralrc};
 use super::super::frontend::{Frontend, MinimalFrontend, RustylineFrontend, Surface};
 #[cfg(feature = "structural")]
 use super::super::frontend::StructuralFrontend;
-use super::super::plugin::PluginRuntime;
+use super::super::plugin::{PluginRuntime, framed_turn_request};
 #[cfg(unix)]
 use crate::jobs;
 
@@ -327,16 +327,25 @@ fn source_config_inner(path: &str, ctx: &mut RcCtx<'_>) -> Result<(), String> {
         }
     };
     if let Some(block) = super::super::config::apply_rc_config(config, ctx, Some(&src)) {
-        // `apply` returns `Settled<Value>`; tail calls are absorbed by
-        // the trampoline before reaching here.
-        match ral_core::evaluator::apply(block, vec![], ctx.shell) {
-            Ok(_) | Err(Break::Escape(Escape::Exit(_))) => {}
-            Err(Break::Error(e)) => return Err(format!("{path}: startup: {}", e.message)),
-            #[cfg(unix)]
-            Err(Break::Escape(Escape::Stopped { .. })) => {
-                return Err(format!(
-                    "{path}: startup: a stop signal escaped — rc files cannot park jobs"
-                ));
+        // The startup block runs through the value turn door: a fresh frame
+        // with the session's live streams and `Denied` terminal authority (an
+        // rc block must not foreground a child). `Block` discards its mobile on
+        // exit, so `let`s inside it do not leak — the prior in-place `apply`
+        // behaviour, now properly framed.
+        let req = framed_turn_request("<startup>", RequestedTerminalAccess::Denied);
+        match ctx.shell.run_value_turn(block, vec![], req) {
+            TurnReport::Ran { result, .. } => match result {
+                Ok(_) | Err(Break::Escape(Escape::Exit(_))) => {}
+                Err(Break::Error(e)) => return Err(format!("{path}: startup: {}", e.message)),
+                #[cfg(unix)]
+                Err(Break::Escape(Escape::Stopped { .. })) => {
+                    return Err(format!(
+                        "{path}: startup: a stop signal escaped — rc files cannot park jobs"
+                    ));
+                }
+            },
+            TurnReport::Static { .. } => {
+                unreachable!("a thunk startup block never compiles source")
             }
         }
     }

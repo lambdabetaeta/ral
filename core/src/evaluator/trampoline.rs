@@ -53,7 +53,7 @@ fn apply_lambda_frame(
 /// against the cap. The cap defaults to `DEFAULT_RECURSION_LIMIT`
 /// and is overridden by the rc `recursion_limit:` key or the
 /// `--recursion-limit` flag.
-pub fn apply(callee: Value, args: Vec<Value>, shell: &mut Shell) -> Settled<Value> {
+pub(crate) fn apply(callee: Value, args: Vec<Value>, shell: &mut Shell) -> Settled<Value> {
     if shell.mobile.control.call_depth >= shell.mobile.control.recursion_limit {
         return Err(Break::Error(
             Error::new(

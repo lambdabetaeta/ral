@@ -492,7 +492,7 @@ fn run_batch(name: &str, source: String, script_args: Vec<String>, opts: BatchOp
     } else {
         RequestedTerminalAccess::Denied
     };
-    let result = match shell.run_turn(
+    let result = match shell.run_source_turn(
         source.as_str(),
         TurnRequest {
             script_name: name,

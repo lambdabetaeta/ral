@@ -106,7 +106,7 @@ pub fn run_shell(
     // is gated to that build — release otherwise sees an unused binding.
     #[cfg(debug_assertions)]
     let tool_start = std::time::Instant::now();
-    let report = shell.run_turn(
+    let report = shell.run_source_turn(
         cmd,
         TurnRequest {
             script_name: name,

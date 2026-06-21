@@ -2,10 +2,11 @@
 
 //! Architecture grep guards for the run-turn host-API cutover.
 //!
-//! [[decisions/260618_run-turn-is-host-api]] makes `Shell::run_turn` /
-//! `TurnRequest` / `TurnReport` the only host-facing evaluation seam and
-//! collapses the old turn-assembly vocabulary. These source-text scans hold
-//! that boundary lexically:
+//! [[decisions/260618_run-turn-is-host-api]] makes the turn doors
+//! (`Shell::run_source_turn` / `Shell::run_value_turn`) / `TurnRequest` /
+//! `TurnReport` the only host-facing evaluation seam and collapses the old
+//! turn-assembly vocabulary. These source-text scans hold that boundary
+//! lexically:
 //!
 //!   - `ral_core` names no async runtime — tokio never enters core; the seam
 //!     is a synchronous `EventSink` taking a `Value`, and the host owns its
@@ -115,7 +116,7 @@ fn ral_core_names_no_async_runtime() {
     assert_absent("core/src", "spawn_blocking");
 }
 
-/// Hosts are request suppliers: they build a `TurnRequest`, call `run_turn`,
+/// Hosts are request suppliers: they build a `TurnRequest`, call a turn door,
 /// and render a `TurnReport`. None of the collapsed internal turn types, nor
 /// the core helpers a host once used to assemble a turn, may reappear.
 #[test]

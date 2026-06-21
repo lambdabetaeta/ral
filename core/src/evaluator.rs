@@ -1,19 +1,25 @@
 //! CBPV evaluator for `ral`.
 //!
-//! Three verbs reach outside this module:
+//! Two verbs reach outside the crate; [`apply`] is crate-private.
 //!
 //! - [`eval_top_level`] — a tool call, a REPL turn, a script line.
 //!   The post-run [`Mobile`] is *installed* on the parent shell on
 //!   every outcome (Ok / Error / Exit); a top-level turn is a resume
 //!   point, so every persistable state change must survive.
-//! - [`apply`] — call a [`Value`] (closure or thunk) with arguments,
-//!   absorbing tail signals through the trampoline.  Blocks reach
-//!   their contract through this verb: the trampoline pattern-matches
-//!   `Value::Thunk` and delegates to the internal [`eval_block`].
 //! - [`evaluate`] — bare tail-absorbed run with no mobile contract.
 //!   For callers already inside an active session: module loading,
 //!   prelude bootstrap, capability profiles, REPL plugin / config
 //!   loading.
+//!
+//! [`apply`] (`pub(crate)`) reduces a thunk applied to arguments,
+//! absorbing tail signals through the trampoline.  Blocks reach their
+//! contract through it: the trampoline pattern-matches `Value::Thunk`
+//! and delegates to the internal [`eval_block`].  It is reached from
+//! outside the evaluator only through the host turn doors
+//! ([`crate::Shell::run_value_turn`]) and the in-frame builtin wrapper
+//! [`crate::builtins::apply`], so a host cannot start an unframed
+//! reduction; the in-crate callers ([`crate::runtime`]) already hold a
+//! turn frame.
 //!
 //! [`eval_block`] (`pub(crate)`) is the block contract: scope-isolated
 //! body, mobile discarded on exit, local scratch reset, audit fragment
@@ -45,7 +51,7 @@ use std::sync::Arc;
 
 pub(crate) use capture::with_audit_capture;
 pub use capture::with_capture;
-pub use trampoline::apply;
+pub(crate) use trampoline::apply;
 
 // ── Tail absorption ──────────────────────────────────────────────────────
 

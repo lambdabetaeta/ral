@@ -710,8 +710,10 @@ pub fn register(shell: &mut Shell, prelude_comp: &Arc<crate::ir::Comp>) {
 
 pub use misc::pretty_print;
 
-/// Apply `val` as a callable (thunk/lambda).  Non-callable values produce
-/// a descriptive error.  Used by builtins that accept function arguments.
+/// Apply a thunk (`Block` or `Lambda`) `val` to `args` while a turn frame is
+/// already installed.  Any other `Value` produces a descriptive error.  Used
+/// by builtins that accept function arguments and by the value turn door
+/// ([`crate::Shell::run_value_turn`]), which establishes the frame first.
 pub fn apply(val: &Value, args: &[Value], shell: &mut Shell) -> Settled<Value> {
     match val {
         Value::Lambda { .. } | Value::Block { .. } => {

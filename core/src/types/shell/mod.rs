@@ -167,9 +167,10 @@ impl EventSink for () {
 }
 
 /// Shared handle to the turn-local structured-event sink.  Turn-scoped, not a
-/// persistent `Shell` capability: installed only by
-/// [`Shell::run_turn`](crate::Shell::run_turn), it has no liveness role, so a
-/// clone can never decide that a turn is over.
+/// persistent `Shell` capability: installed only by a turn door
+/// ([`Shell::run_source_turn`](crate::Shell::run_source_turn) /
+/// [`Shell::run_value_turn`](crate::Shell::run_value_turn)), it has no liveness
+/// role, so a clone can never decide that a turn is over.
 pub type SurfaceSink = Arc<dyn EventSink>;
 
 /// This turn's authority to hand the controlling terminal to a child.
@@ -177,7 +178,7 @@ pub type SurfaceSink = Arc<dyn EventSink>;
 /// The internal (per-turn) form of the host-facing
 /// [`RequestedTerminalAccess`](crate::driver::RequestedTerminalAccess): it carries
 /// the extra `ExplicitLoan` state that `_ed-tui` raises mid-turn and that a host
-/// cannot request at `run_turn`. Read by
+/// cannot request at a turn door. Read by
 /// [`Shell::terminal_lease`](Shell::terminal_lease), which yields the session's
 /// `&TerminalLease` only when this is `Leased` or `ExplicitLoan`. `Denied` is
 /// the default — the safe element — so a frame with no stated policy can never

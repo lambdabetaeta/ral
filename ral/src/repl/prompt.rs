@@ -5,12 +5,12 @@
 //! the `prompt` lifecycle hook.
 
 use ral_core::types::{Break, Env};
-use ral_core::{Shell, Value, diagnostic};
+use ral_core::{RequestedTerminalAccess, Shell, TurnReport, Value, diagnostic};
 use std::sync::{Arc, Mutex};
 
 use super::errfmt::plugin_error;
 
-use super::plugin::{PluginRuntime, call_plugin_hook, fold_hook};
+use super::plugin::{HookFraming, PluginRuntime, call_plugin_hook, fold_hook, framed_turn_request};
 
 /// The default prompt.  Session boot templates it into the thunk it
 /// binds to `RAL_PROMPT` (`install_default_prompt`); the failure arms in
@@ -114,8 +114,8 @@ pub(super) fn eval_prompt(prompt: &Value, shell: &mut Shell, bindings: &PromptBi
     // USER / CWD / STATUS are dynamic per-call values; the closure's
     // lexical capture doesn't know about them.  Push a frame onto a
     // clone of `captured` and rebuild the thunk so the prompt body
-    // resolves them through the same `apply` path every other
-    // lifecycle hook in ral uses.
+    // resolves them through the value turn door, the same way every
+    // other plugin hook in ral applies a thunk.
     let mut env: Env = (**captured).clone();
     env.push_scope();
     for (k, v, _) in bindings.entries() {
@@ -126,12 +126,21 @@ pub(super) fn eval_prompt(prompt: &Value, shell: &mut Shell, bindings: &PromptBi
         captured: Arc::new(env),
     };
 
-    // Save and restore `last_status` so the prompt body's own status
-    // does not clobber the user's previous-command exit code visible
-    // at the next prompt cycle (`PromptBindings::collect` reads it).
+    // The prompt body's stdout is the prompt when it returns unit, so capture
+    // it. `with_capture` carries the let-binding Seq semantics (non-final
+    // stages flush to the visible stdout via `capture_outer`); `build_turn`
+    // clones that capture context into the value turn's frame, so the body
+    // runs under it. The prompt runs `Denied`: it must never foreground a
+    // child. Save and restore `last_status` so the prompt body's own status
+    // does not clobber the user's previous-command exit code visible at the
+    // next prompt cycle (`PromptBindings::collect` reads it).
     let saved_status = shell.mobile.control.last_status;
     let (result, out) = ral_core::evaluator::with_capture(shell, |shell| {
-        ral_core::evaluator::apply(synthetic, vec![], shell)
+        let req = framed_turn_request("<prompt>", RequestedTerminalAccess::Denied);
+        match shell.run_value_turn(synthetic, vec![], req) {
+            TurnReport::Ran { result, .. } => result,
+            TurnReport::Static { .. } => unreachable!("a thunk prompt body never compiles source"),
+        }
     });
     shell.mobile.control.last_status = saved_status;
 
@@ -204,12 +213,16 @@ pub(super) fn render(shell: &mut Shell, runtime: &Arc<Mutex<PluginRuntime>>) -> 
         base,
         |shell, plugin, handler, prompt| {
             let plugin_name = plugin.name.to_string();
+            // The prompt hook runs during `read`, outside any frame, and only
+            // transforms the prompt string — it never foregrounds a child, so
+            // it frames with `Denied`.
             let hr = call_plugin_hook(
                 shell,
                 plugin,
                 handler,
                 &[Value::String(prompt.clone())],
                 None,
+                HookFraming::Framed(RequestedTerminalAccess::Denied),
             );
             match hr.result {
                 Ok(Value::String(s)) => s,
