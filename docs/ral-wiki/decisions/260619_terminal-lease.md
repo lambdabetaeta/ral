@@ -1,33 +1,36 @@
 ---
-status: active
+status: fixed
 ---
 
 # A held terminal lease, not an inferred predicate, gates the foreground handoff
 
 **The authority to hand the controlling terminal to a child should be an
 unforgeable value a turn is *given* — a `TerminalLease` — not a predicate every
-launch path re-derives from process-global startup state.** Today three ambient
-facts stand in for that authority — `startup_foreground` (the capability),
+launch path re-derives from process-global startup state.** Before this, three
+ambient facts stood in for that authority — `startup_foreground` (the capability),
 `JobControl`'s foreground role (orchestrator-vs-stage permission), and the
 `capture_depth`/`tui_active` pair (per-pipeline permission plus dynamic
-suppression) — and two launch paths (standalone, pipeline) re-infer the decision
+suppression) — and two launch paths (standalone, pipeline) re-inferred the decision
 from them independently. The lease collapses those three into one question asked
 at the one place a child/job foreground handoff can happen after startup: *do you
-hold the lease?* It also disentangles a fourth concern the same `JobControl` value
-carries — the process-group topology role (`top_level` vs pipeline stage), which
-the lease leaves alone and a later cleanup narrows to a `LaunchRole`. Code that
+hold the lease?* It also disentangled a fourth concern the same `JobControl` value
+carried — the process-group topology role (`top_level` vs pipeline stage), which
+the lease left alone and a follow-up cleanup narrowed to a `LaunchRole`. Code that
 was not handed the lease cannot construct the handoff, so an exarch tool turn that
 foregrounds a child — the SIGTTIN crash this ADR is written against — becomes a
 state the type system refuses to represent. This supersedes
 [[decisions/260613_terminal-foreground-ownership|terminal-foreground-ownership]],
 whose `startup_foreground` predicate the lease reifies as a value.
 
-This is a proposal; nothing has landed. Today the handoff is gated by reading
+This landed in `295fe5b` ("Gate the foreground handoff on a held TerminalLease,
+not an inferred predicate"), with two ADR follow-ups: `d11467e` recorded the
+`_ed-tui` loan deviation and `b44c614` closed the loan's `Denied → ExplicitLoan`
+door. The diagnosis below describes the *prior* state — handoff gated by reading
 `shell.turn.io.terminal.startup_foreground` at two decision sites and authorised
-again inside `ForegroundGuard::try_acquire` (`core/src/process/signal/unix.rs:534`);
-`resolve_terminal_plan` (`core/src/runtime/pipeline/resolve.rs:302`) bolts on a
-`capture_depth > 0 && !tui_active` exception; exarch tool turns inherit
-`startup_foreground = true` and so foreground their pipelines.
+again inside `ForegroundGuard::try_acquire`, `resolve_terminal_plan` bolting on a
+`capture_depth > 0 && !tui_active` exception, and exarch tool turns inheriting
+`startup_foreground = true` and so foregrounding their pipelines. None of that is
+true anymore; the §"Implementation plan" parcels are all in `core`.
 
 ## The diagnosis
 
@@ -223,13 +226,13 @@ in `repl.rs`, and the `resolve.rs` exception all delete.
 | `capture_depth`'s foreground gate (`resolve.rs:320`) | final-sink policy: terminal-bound stdout, unless `ExplicitLoan` |
 | `tui_active` (`repl.rs:59`) | `TerminalAccess::ExplicitLoan` plus a host loan guard |
 
-`JobControl` is not deleted in the first pass: it also encodes process-group
+`JobControl` was not deleted in the first pass: it also encoded process-group
 topology (`TopLevel` vs pipeline stage) and keeps pipeline helpers from becoming
-new leaders on their own. The lease removes terminal handoff authority from that
-type; a later cleanup can rename the remaining role to `LaunchRole`. `capture_depth`
-keeps its unrelated `Seq`-flush role (`io.rs:99`, `capture.rs`); only its
-consultation in `resolve_terminal_plan` is removed. The post-lease rule at the
-pipeline door is:
+new leaders on their own. The lease removed terminal handoff authority from that
+type, and the follow-up cleanup renamed the remaining role to `LaunchRole`
+(`core/src/io.rs`). `capture_depth` keeps its unrelated `Seq`-flush role
+(`io.rs:99`, `capture.rs`); only its consultation in `resolve_terminal_plan` was
+removed. The post-lease rule at the pipeline door is:
 
 > foreground iff the turn has a lease **and** (`stdout` is terminal-bound **or**
 > the turn is an explicit tty loan).
@@ -315,8 +318,9 @@ turn.
 - **Deleted:** `tui_active` and its `repl.rs` STT plumbing; the `resolve.rs:320`
   capture exception; `startup_foreground` as handoff authority once the lease
   door is in place.
-- **Retained first:** `JobControl`'s process-group role; later narrowed or
-  renamed to `LaunchRole` after terminal authority is removed from it.
+- **Retained, then narrowed:** `JobControl`'s process-group role was kept while
+  terminal authority moved to the lease, then renamed to `LaunchRole`
+  (`core/src/io.rs`) once the lease owned the handoff — both steps landed.
 - **Narrowed:** `resolve_terminal_plan` to the lease + final-sink/loan rule;
   `try_acquire` to take `&TerminalLease`; `ForegroundDecision` to consult the
   lease/access policy instead of `job_control` + `startup_foreground`.
@@ -369,11 +373,12 @@ A literal RAII guard is awkward in Rust here: a `Drop` impl cannot hold the
 `&mut Shell`. That is why the token stays manual rather than becoming a
 drop-restoring guard.
 
-## Implementation plan
+## Implementation plan (landed)
 
-Documentation of intended work, not a commitment to build now. Six parcels; each
-compiles and tests alone. Parcels 1–3 are the high-value path and resolve the
-live crash plus stdin stealing; parcels 4–6 pay down the three-regression debt.
+All six parcels landed in `295fe5b`; each compiles and tests alone. Parcels 1–3
+are the high-value path and resolved the live crash plus stdin stealing; parcels
+4–6 paid down the three-regression debt. The plan is kept verbatim as the record
+of what was built.
 
 ```
 1  Token+door   add session-owned Option<TerminalLease>; no public mint/Clone/Copy;
@@ -399,9 +404,11 @@ live crash plus stdin stealing; parcels 4–6 pay down the three-regression debt
                 the lease + final-sink/loan rule.
 ```
 
-## Test plan
+## Test plan (landed)
 
-- **Regression port.** The three `resolve.rs` foreground tests are rewritten in
+The tests below are in tree and green.
+
+- **Regression port.** The `resolve.rs` foreground tests are rewritten in
   lease terms and stay green: an interactive `Leased` turn foregrounds a
   terminal-bound pipeline; a `Denied` (exarch) turn never does; a terminal-launched
   script (`Leased`) still foregrounds an interactive child; a backgrounded shell
