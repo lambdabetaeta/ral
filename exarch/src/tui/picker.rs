@@ -81,7 +81,10 @@ impl Picker {
     /// Open over `providers`, all initially loading until the REPL feeds
     /// cached or fetched lists. `subscription` maps each plan-backed provider
     /// to its flavour, whose rows read as the subscription.
-    pub fn new(providers: Vec<ProviderId>, subscription: BTreeMap<ProviderId, Subscription>) -> Self {
+    pub fn new(
+        providers: Vec<ProviderId>,
+        subscription: BTreeMap<ProviderId, Subscription>,
+    ) -> Self {
         let models = providers
             .iter()
             .map(|id| (id.clone(), ModelsState::Loading))
@@ -496,9 +499,15 @@ mod tests {
             BTreeMap::new(),
         );
         let base = p.height(u16::MAX);
-        p.set_models(&fam(ProviderKind::Anthropic), ModelsState::Failed("x".into()));
+        p.set_models(
+            &fam(ProviderKind::Anthropic),
+            ModelsState::Failed("x".into()),
+        );
         assert_eq!(p.height(u16::MAX), base + 1);
-        p.set_models(&fam(ProviderKind::Deepseek), ModelsState::Failed("y".into()));
+        p.set_models(
+            &fam(ProviderKind::Deepseek),
+            ModelsState::Failed("y".into()),
+        );
         assert_eq!(p.height(u16::MAX), base + 2);
     }
 
@@ -516,7 +525,10 @@ mod tests {
             ModelsState::Loaded(vec!["m".into()]),
         );
         assert!(p.is_loading());
-        p.set_models(&fam(ProviderKind::Deepseek), ModelsState::Failed("x".into()));
+        p.set_models(
+            &fam(ProviderKind::Deepseek),
+            ModelsState::Failed("x".into()),
+        );
         assert!(!p.is_loading());
     }
 }

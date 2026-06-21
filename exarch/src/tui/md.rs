@@ -914,7 +914,15 @@ mod tests {
     /// suspect answer must read as important, not minor.
     #[test]
     fn context_drains_without_dim() {
-        let lines = render_md("plain prose here", 80, MD_INDENT, Fidelity { context: 2, echo: 0 });
+        let lines = render_md(
+            "plain prose here",
+            80,
+            MD_INDENT,
+            Fidelity {
+                context: 2,
+                echo: 0,
+            },
+        );
         let spans = ink(&lines);
         assert!(!spans.is_empty());
         for span in spans {
@@ -941,20 +949,32 @@ mod tests {
             "first line is long enough to wrap onto a second rendered row here please",
             40,
             MD_INDENT,
-            Fidelity { context: 0, echo: 2 },
+            Fidelity {
+                context: 0,
+                echo: 2,
+            },
         );
         let spans = ink(&lines);
-        assert!(spans.len() >= 2, "needs multiple rows to test row-invariance");
+        assert!(
+            spans.len() >= 2,
+            "needs multiple rows to test row-invariance"
+        );
         let washes: Vec<Color> = spans
             .iter()
             .map(|s| s.style.bg.expect("echoed span carries a wash"))
             .collect();
         let first = washes[0];
-        assert!(washes.iter().all(|&w| w == first), "wash is static across rows");
-        assert_eq!(first, mix(Color::Rgb(0, 0, 0), ECHO_WASH, 1.0), "wash is the full echo shade");
+        assert!(
+            washes.iter().all(|&w| w == first),
+            "wash is static across rows"
+        );
+        assert_eq!(
+            first,
+            mix(Color::Rgb(0, 0, 0), ECHO_WASH, 1.0),
+            "wash is the full echo shade"
+        );
         for s in &spans {
             assert_eq!(s.style.fg, None, "echo leaves the foreground untouched");
         }
     }
 }
-

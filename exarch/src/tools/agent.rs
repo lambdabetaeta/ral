@@ -80,7 +80,11 @@ fn parse_args(input: &Value) -> Result<Args, String> {
     let mode = match obj.get("mode").and_then(Value::as_str) {
         None | Some("sync") => Mode::Sync,
         Some("async") => Mode::Async,
-        Some(other) => return Err(format!("`mode` must be \"sync\" or \"async\", got {other:?}")),
+        Some(other) => {
+            return Err(format!(
+                "`mode` must be \"sync\" or \"async\", got {other:?}"
+            ));
+        }
     };
     Ok(Args {
         prompt,
@@ -234,7 +238,12 @@ fn dispatch_sync<'scope, 'env: 'scope>(
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             child.apply(provider, Some(prompt), &child_token, &child_emit)
         }))
-        .unwrap_or_else(|p| Err(ProviderError::Other(format!("sub-agent panicked: {}", panic_msg(&p)))));
+        .unwrap_or_else(|p| {
+            Err(ProviderError::Other(format!(
+                "sub-agent panicked: {}",
+                panic_msg(&p)
+            )))
+        });
         child_emit.emit(Kind::Died);
         let (text, error) = match &r {
             Ok(TurnOutcome::Complete(s)) => (s.clone(), None),
@@ -349,7 +358,10 @@ fn to_outcome(r: Result<TurnOutcome, ProviderError>) -> (AgentOutcome, String) {
         Ok(TurnOutcome::Empty) => (AgentOutcome::Empty, String::new()),
         Ok(TurnOutcome::Stopped { reason }) => (AgentOutcome::Stopped(reason), String::new()),
         Ok(TurnOutcome::Cancelled) => (AgentOutcome::Cancelled, String::new()),
-        Ok(TurnOutcome::Capped) => (AgentOutcome::Stopped("step cap reached".into()), String::new()),
+        Ok(TurnOutcome::Capped) => (
+            AgentOutcome::Stopped("step cap reached".into()),
+            String::new(),
+        ),
         Err(e) => (AgentOutcome::Failed(e.to_string()), String::new()),
     }
 }

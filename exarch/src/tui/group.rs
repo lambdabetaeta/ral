@@ -246,14 +246,20 @@ fn head_span(calls: &[Call]) -> Span<'static> {
 /// order, as one slate span — decorative ink reading as a bar chart of how
 /// much each call moved, the bar count standing in for an `×N`.
 fn sparkline(calls: &[Call]) -> Span<'static> {
-    let glyphs: String = calls.iter().map(|c| line::spark_glyph(c.magnitude)).collect();
+    let glyphs: String = calls
+        .iter()
+        .map(|c| line::spark_glyph(c.magnitude))
+        .collect();
     Span::styled(glyphs, Style::default().fg(SLATE))
 }
 
 /// One call's single sparkline bar — the same glyph as the whole-block
 /// sparkline, for the right-aligned per-row column in the list views.
 fn bar(magnitude: Option<u32>) -> Span<'static> {
-    Span::styled(line::spark_glyph(magnitude).to_string(), Style::default().fg(SLATE))
+    Span::styled(
+        line::spark_glyph(magnitude).to_string(),
+        Style::default().fg(SLATE),
+    )
 }
 
 /// Re-indent a call's pre-rendered effect rows by `indent`, dropping the
@@ -339,10 +345,7 @@ mod tests {
         let rows = nonblank(&body(&[call(LONG, Some(12))], 2, width));
 
         assert_eq!(rows[0], "ral");
-        assert_eq!(
-            UnicodeWidthStr::width(rows[1].as_str()),
-            bar_col(width) + 1
-        );
+        assert_eq!(UnicodeWidthStr::width(rows[1].as_str()), bar_col(width) + 1);
         assert_eq!(indent_of(&rows[2]), GAP);
     }
 }

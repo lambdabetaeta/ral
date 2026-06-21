@@ -354,7 +354,12 @@ fn async_agent_returns_a_receipt_and_delivers_through_the_inbox() {
     let (tx, _rx) = channel();
     let emit = Emitter::with_inbox(tx, session.id, inbox.clone());
     let root = exarch::cancel::mint_root();
-    let outcome = session.apply(&provider, Some("dispatch async".into()), root.token(), &emit);
+    let outcome = session.apply(
+        &provider,
+        Some("dispatch async".into()),
+        root.token(),
+        &emit,
+    );
     assert!(
         matches!(outcome, Ok(TurnOutcome::Complete(_))),
         "the root turn completes without waiting for the child"

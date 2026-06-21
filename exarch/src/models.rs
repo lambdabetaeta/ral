@@ -417,8 +417,14 @@ mod tests {
     #[test]
     fn resolve_prefers_listing_match() {
         let mut lists = BTreeMap::new();
-        lists.insert(fam(ProviderKind::Anthropic), Ok(vec!["claude-opus-4".into()]));
-        lists.insert(fam(ProviderKind::Deepseek), Ok(vec!["deepseek-chat".into()]));
+        lists.insert(
+            fam(ProviderKind::Anthropic),
+            Ok(vec!["claude-opus-4".into()]),
+        );
+        lists.insert(
+            fam(ProviderKind::Deepseek),
+            Ok(vec!["deepseek-chat".into()]),
+        );
         let mut cat = ModelCatalog::in_memory(FakeSource::new(lists));
         let available = [fam(ProviderKind::Anthropic), fam(ProviderKind::Deepseek)];
         assert_eq!(
@@ -433,7 +439,10 @@ mod tests {
     fn resolve_prefers_custom_listing_match() {
         let llama = custom("local-llama");
         let mut lists = BTreeMap::new();
-        lists.insert(fam(ProviderKind::Anthropic), Ok(vec!["claude-opus-4".into()]));
+        lists.insert(
+            fam(ProviderKind::Anthropic),
+            Ok(vec!["claude-opus-4".into()]),
+        );
         lists.insert(llama.clone(), Ok(vec!["llama-3".into()]));
         let mut cat = ModelCatalog::in_memory(FakeSource::new(lists));
         let available = [fam(ProviderKind::Anthropic), llama.clone()];

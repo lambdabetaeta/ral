@@ -31,7 +31,6 @@ use line::usage_text;
 
 use crate::bootstrap::Scratch;
 use crate::bus::{Event, Hunk, Inbox, Kind, Pass, SessionId, Sink, Turn, drain_pass, pump};
-use std::sync::Arc;
 use crate::cancel;
 use crate::card::{Card, Field, FieldVal, IoEvent, Mark, Role, Span as CardSpan};
 use crate::credential::CredentialStore;
@@ -40,6 +39,7 @@ use crate::provider::{self, Provider, Usage};
 use crate::session::Session;
 use crate::state;
 use ral_core::path::sigil::expand_path_prefix;
+use std::sync::Arc;
 
 use crossterm::{
     cursor::Show,
@@ -63,7 +63,6 @@ use ratatui::{
     widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
 use ratatui_textarea::TextArea;
-use textarea_vim::{Mode, Vim, place_native_cursor};
 use std::{
     collections::HashMap,
     io::{self, Stdout},
@@ -75,6 +74,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use textarea_vim::{Mode, Vim, place_native_cursor};
 
 use line::{
     AGENT_HUES, BANNER_GOLD, BANNER_PINK, CYAN, PINK, PURPLE, RAIL_DIAL_W, RAIL_W, READ_W, SLATE,
@@ -1678,7 +1678,10 @@ fn legend_panel() -> Vec<Line<'static>> {
     };
     let note = |s: &str| Span::styled(s.to_string(), Style::default().fg(SLATE));
 
-    let mut ls: Vec<Line<'static>> = vec![Line::default(), head("legend — the transcript as a graphic")];
+    let mut ls: Vec<Line<'static>> = vec![
+        Line::default(),
+        head("legend — the transcript as a graphic"),
+    ];
 
     // ── rail: one cell, three variables ───────────────────────────────
     ls.push(Line::default());
@@ -1695,7 +1698,10 @@ fn legend_panel() -> Vec<Line<'static>> {
         (0..AGENT_HUES.len())
             .map(|slot| {
                 let label = if slot == 0 { "root" } else { "subagent" };
-                (label, vec![rail::span(RailKind::Generic, AgentSlot(slot as u8), None)])
+                (
+                    label,
+                    vec![rail::span(RailKind::Generic, AgentSlot(slot as u8), None)],
+                )
             })
             .collect(),
     ));
@@ -1746,27 +1752,23 @@ fn legend_panel() -> Vec<Line<'static>> {
     ls.push(Line::default());
     ls.push(head("status line · the two bars under the transcript"));
     ls.extend(line::legend_rows(vec![
-        (
-            "window",
-            {
-                let mut v = ctx_ramp(72, CTX_BAR_W);
-                v.push(note("fills and brightens toward a full context window"));
-                v
-            },
-        ),
-        (
-            "elapsed",
-            {
-                let mut v = wait_bar(Duration::from_secs(18));
-                v.push(note("grows with the current phase's wall-time"));
-                v
-            },
-        ),
+        ("window", {
+            let mut v = ctx_ramp(72, CTX_BAR_W);
+            v.push(note("fills and brightens toward a full context window"));
+            v
+        }),
+        ("elapsed", {
+            let mut v = wait_bar(Duration::from_secs(18));
+            v.push(note("grows with the current phase's wall-time"));
+            v
+        }),
     ]));
 
     // ── coherent degradation: how much to trust a passage ──────────────
     ls.push(Line::default());
-    ls.push(head("fidelity · a shaky answer renders drained, not authoritative"));
+    ls.push(head(
+        "fidelity · a shaky answer renders drained, not authoritative",
+    ));
     // Real prose through the real `render_md`, so the drain and wash are
     // exactly what a degraded block wears — never a re-derived colour.
     let prose = "An answer the model committed to the transcript.";
@@ -1779,8 +1781,20 @@ fn legend_panel() -> Vec<Line<'static>> {
     };
     ls.extend(line::legend_rows(vec![
         ("sound", sample(Fidelity::default())),
-        ("drained", sample(Fidelity { context: 2, echo: 0 })),
-        ("echoed", sample(Fidelity { context: 0, echo: 2 })),
+        (
+            "drained",
+            sample(Fidelity {
+                context: 2,
+                echo: 0,
+            }),
+        ),
+        (
+            "echoed",
+            sample(Fidelity {
+                context: 0,
+                echo: 2,
+            }),
+        ),
     ]));
     ls.push(Line::from(note(
         "  context pressure drains the ink; echoing its own script washes the field behind it",
@@ -2601,9 +2615,7 @@ impl Repl<'_> {
             return (cmd.run)(self, arg);
         }
         let id = self.session.id;
-        self.tui
-            .app
-            .push_chrome(id, RailShape::Generic, lines);
+        self.tui.app.push_chrome(id, RailShape::Generic, lines);
         Slash::Prompt
     }
 
@@ -2643,7 +2655,10 @@ impl Repl<'_> {
         let note = if payload.len() < reply.len() {
             format!("[reply exceeds the clipboard limit — copied its last {YANK_CAP} bytes]")
         } else {
-            format!("[copied the latest reply — {} lines]", reply.lines().count())
+            format!(
+                "[copied the latest reply — {} lines]",
+                reply.lines().count()
+            )
         };
         self.tui.handle(Event {
             id,
@@ -3119,9 +3134,10 @@ mod banner_tests {
     fn rows(s: &SessionInfo<'_>) -> Vec<(String, FieldVal)> {
         let card = session_card(s);
         match card.marks() {
-            [Mark::Fields { rows }] => {
-                rows.iter().map(|f| (f.label.clone(), f.value.clone())).collect()
-            }
+            [Mark::Fields { rows }] => rows
+                .iter()
+                .map(|f| (f.label.clone(), f.value.clone()))
+                .collect(),
             other => panic!("session card must be one fields mark, got {other:?}"),
         }
     }
@@ -3144,8 +3160,16 @@ mod banner_tests {
         assert_eq!(
             labels,
             [
-                "cwd", "provider", "model", "context", "max-tokens", "base", "extend-base",
-                "restrict", "system prompt", "scratch",
+                "cwd",
+                "provider",
+                "model",
+                "context",
+                "max-tokens",
+                "base",
+                "extend-base",
+                "restrict",
+                "system prompt",
+                "scratch",
             ]
         );
         let role = |label: &str| lead_role(&rs.iter().find(|(l, _)| l == label).unwrap().1);
@@ -3232,10 +3256,16 @@ mod banner_tests {
             + 2;
         for l in &lines {
             // Dump so the column is eyeballable under `--nocapture`.
-            eprintln!("[{:>2}] {}", l.spans.first().map_or(0, |s| s.content.chars().count()), line::plain(l));
+            eprintln!(
+                "[{:>2}] {}",
+                l.spans.first().map_or(0, |s| s.content.chars().count()),
+                line::plain(l)
+            );
         }
         for l in &lines {
-            let Some(first) = l.spans.first() else { continue };
+            let Some(first) = l.spans.first() else {
+                continue;
+            };
             assert_eq!(
                 first.content.chars().count(),
                 label_w,
@@ -3249,7 +3279,11 @@ mod banner_tests {
     /// cannot land on the rail without showing up in the legend.
     #[test]
     fn legend_names_every_rail_shape() {
-        let text: String = legend_panel().iter().map(line::plain).collect::<Vec<_>>().join("\n");
+        let text: String = legend_panel()
+            .iter()
+            .map(line::plain)
+            .collect::<Vec<_>>()
+            .join("\n");
         for (_, name) in rail::RAIL_SHAPES {
             assert!(text.contains(name), "legend omits the {name:?} shape row");
         }

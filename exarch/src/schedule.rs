@@ -244,7 +244,10 @@ fn resolve(tok: &str, min: u8, max: u8, names: &[(&str, u8)]) -> Result<u8, Stri
 pub enum Trigger {
     /// A recurring cron, with the source expression kept for display and the
     /// marked render.
-    Cron { schedule: CronSchedule, expr: String },
+    Cron {
+        schedule: CronSchedule,
+        expr: String,
+    },
     /// A one-shot relative delay from arming time.
     After(Duration),
 }

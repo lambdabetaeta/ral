@@ -354,10 +354,7 @@ pub fn value_to_io(v: &RalValue) -> Option<IoEvent> {
 pub fn io_card(event: &IoEvent) -> Card {
     let spans = match event {
         // `Read: path` — a muted verb, then the path as subject.
-        IoEvent::Read { path } => vec![
-            span(Role::Muted, "Read: "),
-            span(Role::Path, path),
-        ],
+        IoEvent::Read { path } => vec![span(Role::Muted, "Read: "), span(Role::Path, path)],
         // `Write: path (mode) outcome` — verb, path, the mode in
         // parentheses, then the outcome roled by how it settled.
         IoEvent::Write {
@@ -910,7 +907,10 @@ mod tests {
             .is_none(),
             "an unknown top-level variant is not a card"
         );
-        let bare = mark("diff", vec![("path", s("a.rs")), ("start", RalValue::Int(1))]);
+        let bare = mark(
+            "diff",
+            vec![("path", s("a.rs")), ("start", RalValue::Int(1))],
+        );
         let Card(marks) = value_to_card(&bare).expect("a bare diff lifts");
         assert_eq!(marks.len(), 1);
         assert!(matches!(&marks[0], Mark::Diff { .. }));
@@ -1028,7 +1028,10 @@ mod tests {
     /// so the sink falls through to the card decoder.
     #[test]
     fn value_to_io_rejects_non_io_values() {
-        assert!(value_to_io(&card_value(vec![])).is_none(), "a card is not io");
+        assert!(
+            value_to_io(&card_value(vec![])).is_none(),
+            "a card is not io"
+        );
         assert!(value_to_io(&s("plain")).is_none(), "a string is not io");
         assert!(
             value_to_io(&io_value(vec![("io", s("teleport"))])).is_none(),
@@ -1070,7 +1073,9 @@ mod tests {
             });
             let spans = only_text(&card);
             assert!(
-                spans.iter().any(|sp| sp.role == Some(Role::Path) && sp.text == "b.rs"),
+                spans
+                    .iter()
+                    .any(|sp| sp.role == Some(Role::Path) && sp.text == "b.rs"),
                 "the path is roled Path"
             );
             assert!(
@@ -1078,7 +1083,11 @@ mod tests {
                 "the mode word is shown"
             );
             let outcome_span = spans.last().expect("a write card ends on its outcome");
-            assert_eq!(outcome_span.role, Some(role), "{outcome:?} roles the outcome span");
+            assert_eq!(
+                outcome_span.role,
+                Some(role),
+                "{outcome:?} roles the outcome span"
+            );
             assert!(outcome_span.text.contains(match outcome {
                 WriteOutcome::Committed => "committed",
                 WriteOutcome::Aborted => "aborted",
@@ -1099,11 +1108,15 @@ mod tests {
         });
         let spans = only_text(&ok);
         assert!(
-            spans.iter().any(|sp| sp.role == Some(Role::Path) && sp.text == "ls"),
+            spans
+                .iter()
+                .any(|sp| sp.role == Some(Role::Path) && sp.text == "ls"),
             "the program is a Path span"
         );
         assert!(
-            spans.iter().any(|sp| sp.role == Some(Role::Code) && sp.text.contains("-la")),
+            spans
+                .iter()
+                .any(|sp| sp.role == Some(Role::Code) && sp.text.contains("-la")),
             "each arg is a Code span"
         );
         let status = spans.last().expect("exec ends on its status");
@@ -1130,11 +1143,15 @@ mod tests {
         });
         let spans = only_text(&card);
         assert!(
-            spans.iter().any(|sp| sp.role == Some(Role::Code) && sp.text == "fn main"),
+            spans
+                .iter()
+                .any(|sp| sp.role == Some(Role::Code) && sp.text == "fn main"),
             "the pattern is a Code span"
         );
         assert!(
-            spans.iter().any(|sp| sp.role == Some(Role::Path) && sp.text == "src/"),
+            spans
+                .iter()
+                .any(|sp| sp.role == Some(Role::Path) && sp.text == "src/"),
             "the scope is a Path span"
         );
     }

@@ -56,7 +56,10 @@ pub fn load() -> Result<Vec<CustomProvider>, String> {
     let source = ral_core::source::normalize_source_text(source);
     let display = path.to_string_lossy().into_owned();
     let mut shell = Shell::new(Default::default());
-    decode(evaluate_no_authority(&mut shell, &source, &display)?, &display)
+    decode(
+        evaluate_no_authority(&mut shell, &source, &display)?,
+        &display,
+    )
 }
 
 /// Read the config file: `Ok(None)` when it is absent (a no-op), `Ok(Some)`
@@ -79,13 +82,14 @@ fn read_config(path: &std::path::Path) -> Result<Option<String>, String> {
 /// [`Capabilities::deny_all`] frame, so the config can compute a value but
 /// reach no effect. Errors are surfaced with the file path for provenance.
 fn evaluate_no_authority(shell: &mut Shell, source: &str, display: &str) -> Result<Value, String> {
-    shell.with_capabilities(Capabilities::deny_all(), |sh| {
-        ral_core::builtins::modules::evaluate_source(sh, source, display)
-    })
-    .map_err(|e| match e {
-        Break::Error(err) => format!("exarch config {display}: {}", err.message),
-        other => format!("exarch config {display}: {other:?}"),
-    })
+    shell
+        .with_capabilities(Capabilities::deny_all(), |sh| {
+            ral_core::builtins::modules::evaluate_source(sh, source, display)
+        })
+        .map_err(|e| match e {
+            Break::Error(err) => format!("exarch config {display}: {}", err.message),
+            other => format!("exarch config {display}: {other:?}"),
+        })
 }
 
 /// Decode the config's terminal value — a map of `name → declaration` — into
@@ -200,10 +204,8 @@ mod tests {
     /// An unknown protocol name is a hard error naming the provider.
     #[test]
     fn unknown_protocol_errors() {
-        let err = parse(
-            "return [weird: [endpoint: 'https://w/', key: 'W', protocol: 'grpc']]",
-        )
-        .unwrap_err();
+        let err = parse("return [weird: [endpoint: 'https://w/', key: 'W', protocol: 'grpc']]")
+            .unwrap_err();
         assert!(err.contains("unknown protocol 'grpc'"), "got: {err}");
         assert!(err.contains("weird"), "should name the provider: {err}");
     }
@@ -211,7 +213,8 @@ mod tests {
     /// A missing required field is a hard error.
     #[test]
     fn missing_field_errors() {
-        let err = parse("return [x: [endpoint: 'https://x/', protocol: 'completions']]").unwrap_err();
+        let err =
+            parse("return [x: [endpoint: 'https://x/', protocol: 'completions']]").unwrap_err();
         assert!(err.contains("missing 'key'"), "got: {err}");
     }
 

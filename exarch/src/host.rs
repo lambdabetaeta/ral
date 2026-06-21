@@ -58,5 +58,6 @@ fn os_line() -> String {
 /// working tree; `None` otherwise.  Formats [`ral_core::host::git`]'s
 /// structured probe.
 fn git_line() -> Option<String> {
-    ral_core::host::git().map(|g| format!("{} ({})", g.branch, if g.dirty { "dirty" } else { "clean" }))
+    ral_core::host::git()
+        .map(|g| format!("{} ({})", g.branch, if g.dirty { "dirty" } else { "clean" }))
 }

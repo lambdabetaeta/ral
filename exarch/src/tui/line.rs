@@ -167,8 +167,8 @@ const SPARK_GLYPHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇'
 /// resolution than the rail's four [`super::rail::value_step`] buckets while
 /// tracking the same scale.
 pub(super) fn spark_glyph(magnitude: Option<u32>) -> char {
-    let step = (((magnitude.unwrap_or(0) + 1) as f32).log2().round() as usize)
-        .min(SPARK_GLYPHS.len() - 1);
+    let step =
+        (((magnitude.unwrap_or(0) + 1) as f32).log2().round() as usize).min(SPARK_GLYPHS.len() - 1);
     SPARK_GLYPHS[step]
 }
 
@@ -489,7 +489,9 @@ pub(super) fn subagent_header(
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
             suffix,
-            Style::default().fg(suffix_color).add_modifier(Modifier::DIM),
+            Style::default()
+                .fg(suffix_color)
+                .add_modifier(Modifier::DIM),
         ));
     }
     vec![Line::default(), Line::from(spans)]
@@ -690,7 +692,9 @@ fn role_style(role: Role) -> Style {
         Role::Warn => Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
         Role::Bad => Style::default().fg(RED).add_modifier(Modifier::BOLD),
         Role::Muted => Style::default().fg(SLATE).add_modifier(Modifier::DIM),
-        Role::Strong => Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        Role::Strong => Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
     }
 }
 
@@ -1275,4 +1279,3 @@ fn prettify_embedded_json(s: &str) -> Cow<'_, str> {
     let end = start + stream.byte_offset();
     Cow::Owned(format!("{}{}{}", &s[..start], pretty, &s[end..]))
 }
-

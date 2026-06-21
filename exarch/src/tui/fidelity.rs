@@ -105,4 +105,3 @@ fn cap(s: &str) -> &str {
     }
     &s[..end]
 }
-

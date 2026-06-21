@@ -222,11 +222,7 @@ impl Block {
         Self::card_with(card, origin, agent)
     }
     fn card_with(card: Card, origin: CardOrigin, agent: AgentSlot) -> Self {
-        Self::new(
-            BlockKind::Card { card, origin },
-            agent,
-            Fidelity::default(),
-        )
+        Self::new(BlockKind::Card { card, origin }, agent, Fidelity::default())
     }
     /// A single-file diff, the common card the patch-aggregation path emits:
     /// one `card` carrying one `diff` mark, so the rail renders `▎` and the
@@ -785,7 +781,13 @@ mod tests {
     /// never reduces below its one-line summary.
     #[test]
     fn dialable_kinds_floor_at_l1() {
-        let tool = Block::tool_call("ral", "read lib".into(), "read src/lib.rs".into(), 0, AgentSlot(0));
+        let tool = Block::tool_call(
+            "ral",
+            "read lib".into(),
+            "read src/lib.rs".into(),
+            0,
+            AgentSlot(0),
+        );
         for mut block in [tool, diff_block(), subagent_block()] {
             assert!(block.dialable());
             // Dial hard down: the level pins at the floor, never below it.
@@ -812,7 +814,12 @@ mod tests {
         let rows = wrap_line(&line, 24);
         assert!(rows.len() > 1, "expected a fold at width 24");
         for row in &rows {
-            assert_eq!(indent_of(&plain(row)), 4, "row lost its indent: {:?}", plain(row));
+            assert_eq!(
+                indent_of(&plain(row)),
+                4,
+                "row lost its indent: {:?}",
+                plain(row)
+            );
         }
     }
 
@@ -839,7 +846,9 @@ mod tests {
     /// A flush, unindented line wraps back to column zero — no spurious indent.
     #[test]
     fn wrap_keeps_flush_line_flush() {
-        let line = Line::from(Span::raw("one two three four five six seven eight nine ten"));
+        let line = Line::from(Span::raw(
+            "one two three four five six seven eight nine ten",
+        ));
         let rows = wrap_line(&line, 16);
         assert!(rows.len() > 1);
         for row in &rows {

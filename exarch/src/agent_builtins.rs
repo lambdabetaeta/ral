@@ -337,10 +337,7 @@ fn builtin_edit(args: &[Value], shell: &mut Shell) -> Settled<Value> {
                     "edit: no line in {path} hashes to {want} — did the file change? Re-read with view/grep-files before editing."
                 )));
             }
-            1 => resolved.push(ResolvedEdit {
-                at: idxs[0],
-                new,
-            }),
+            1 => resolved.push(ResolvedEdit { at: idxs[0], new }),
             _ => {
                 let at: Vec<String> = idxs.iter().map(|i| (i + 1).to_string()).collect();
                 let r#where = at.join(", ");
@@ -397,9 +394,7 @@ fn whole_file_hunks(old: &str, new: &str) -> Vec<Hunk> {
     let diff = TextDiff::from_lines(old, new);
     let mut hunks = Vec::new();
     for group in diff.grouped_ops(2) {
-        let first = group
-            .first()
-            .expect("grouped_ops yields non-empty groups");
+        let first = group.first().expect("grouped_ops yields non-empty groups");
         let start = first.old_range().start as u32 + 1;
         let mut rows = Vec::new();
         for op in &group {
@@ -477,7 +472,8 @@ fn diff_card_value(path: &str, hunks: Vec<Hunk>) -> Value {
 fn read_file_string(shell: &mut Shell, path: &str) -> Settled<String> {
     let rp = shell.resolve(path);
     shell.check_fs_read(&rp)?;
-    let bytes = fs::read(rp.as_path()).map_err(|e| sig(format!("edit: cannot read {path}: {e}")))?;
+    let bytes =
+        fs::read(rp.as_path()).map_err(|e| sig(format!("edit: cannot read {path}: {e}")))?;
     String::from_utf8(bytes).map_err(|_| {
         sig(format!(
             "edit: '{path}' is not valid UTF-8, so its lines cannot be witnessed for editing."
@@ -498,9 +494,11 @@ fn write_file_atomic(shell: &mut Shell, path: &str, bytes: &[u8]) -> Settled<()>
     // `resolve` returns a cwd-anchored, collapsed path, so a regular file
     // always has a parent directory to stage the temp file in; the only
     // parent-less path is the filesystem root, which is not an editable file.
-    let parent = target
-        .parent()
-        .ok_or_else(|| sig(format!("edit: {path} has no parent directory to write into")))?;
+    let parent = target.parent().ok_or_else(|| {
+        sig(format!(
+            "edit: {path} has no parent directory to write into"
+        ))
+    })?;
     let mut tmp = tempfile::Builder::new()
         .prefix(".ral-edit-")
         .tempfile_in(parent)
@@ -720,7 +718,11 @@ mod tests {
         .iter()
         .map(|s| s.to_string())
         .collect();
-        assert_eq!(line_hash(&rows[1]), line_hash(&rows[5]), "same line content");
+        assert_eq!(
+            line_hash(&rows[1]),
+            line_hash(&rows[5]),
+            "same line content"
+        );
         assert_ne!(
             window_hash(&rows, 1),
             window_hash(&rows, 5),

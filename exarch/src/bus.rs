@@ -438,7 +438,10 @@ pub enum Kind {
     /// beside its presentation.
     ///
     /// [`shell_eval`]: crate::shell_eval
-    Io { event: IoEvent, card: Card },
+    Io {
+        event: IoEvent,
+        card: Card,
+    },
 }
 
 /// One grouped hunk of a whole-file diff, carried by a

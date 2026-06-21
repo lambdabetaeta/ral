@@ -231,7 +231,10 @@ pub fn run_shell(
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "[io-door:test] test fs/process scaffolding")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:test] test fs/process scaffolding"
+)]
 mod tests {
     //! Documented-semantics tests for exarch's tool-call evaluator.
     //!
@@ -702,7 +705,10 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
         // the hunk begins at the file's first line and carries the unified
         // row list: context, the deletion (the literal removed line, not the
         // hash), the insertion, then trailing context.
-        assert_eq!(hunk.start, 1, "the hunk begins at line 1 with leading context");
+        assert_eq!(
+            hunk.start, 1,
+            "the hunk begins at line 1 with leading context"
+        );
         assert!(
             matches!(
                 hunk.rows.as_slice(),
@@ -826,7 +832,12 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
         ]));
         match rx.try_recv().expect("an io value emits an event").kind {
             Kind::Io { event, card } => {
-                assert_eq!(event, IoEvent::Read { path: "a.rs".into() });
+                assert_eq!(
+                    event,
+                    IoEvent::Read {
+                        path: "a.rs".into()
+                    }
+                );
                 assert!(!card.marks().is_empty(), "the io card is composed");
             }
             _ => panic!("an io value must route to Kind::Io"),
@@ -1088,7 +1099,8 @@ return !{grep-files 'match'}
 "#,
         );
         assert_eq!(
-            r.exit, 0,
+            r.exit,
+            0,
             "a non-UTF-8 matched file must not fail the call; stderr was: {}",
             String::from_utf8_lossy(&r.stderr)
         );
@@ -1322,11 +1334,17 @@ return !{{length $hits}}"#
             panic!("a write card is one text mark, got {:?}", card.marks())
         };
         assert!(
-            spans.iter().any(|s| s.role == Some(Role::Path) && s.text == path),
+            spans
+                .iter()
+                .any(|s| s.role == Some(Role::Path) && s.text == path),
             "the path is roled Path"
         );
         let outcome = spans.last().expect("a write card ends on its outcome");
-        assert_eq!(outcome.role, Some(Role::Ok), "committed roles the outcome Ok");
+        assert_eq!(
+            outcome.role,
+            Some(Role::Ok),
+            "committed roles the outcome Ok"
+        );
         assert!(outcome.text.contains("committed"));
     }
 
@@ -1375,7 +1393,9 @@ return !{{length $hits}}"#
             panic!("an exec card is one text mark, got {:?}", card.marks())
         };
         assert!(
-            spans.iter().any(|s| s.role == Some(Role::Path) && s.text == "/usr/bin/true"),
+            spans
+                .iter()
+                .any(|s| s.role == Some(Role::Path) && s.text == "/usr/bin/true"),
             "the program is a Path span"
         );
         let status = spans.last().expect("an exec card ends on its status");
@@ -1511,7 +1531,7 @@ return !{{length $hits}}"#
     /// against `event_record` directly — not a TUI render.
     #[test]
     fn io_event_record_carries_event_and_card_structurally() {
-        use crate::card::{io_card, IoEvent};
+        use crate::card::{IoEvent, io_card};
         let event = IoEvent::Write {
             path: "b.rs".into(),
             mode: crate::card::WriteMode::Append,
@@ -1553,7 +1573,8 @@ return !{{length $hits}}"#
         let (tx, rx) = mpsc::channel();
         let emit = Emitter::new(tx, 0);
 
-        let tmp = std::env::temp_dir().join(format!("exarch-edit-one-surface-{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("exarch-edit-one-surface-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).expect("create temp dir");
         let path = tmp.join("f.txt");

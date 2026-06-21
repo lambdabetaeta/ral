@@ -162,7 +162,10 @@ mod tests {
                 "partial drain shifted luma of {c:?}"
             );
             let full = desaturate(c, 1.0);
-            assert!((luma(full) - before).abs() <= 1.0, "full drain shifted luma");
+            assert!(
+                (luma(full) - before).abs() <= 1.0,
+                "full drain shifted luma"
+            );
             let Color::Rgb(r, g, b) = full else {
                 unreachable!()
             };
@@ -176,4 +179,3 @@ mod tests {
         assert_eq!(desaturate(AGENT_HUES[0], 0.0), AGENT_HUES[0]);
     }
 }
-

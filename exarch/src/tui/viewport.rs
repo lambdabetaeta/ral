@@ -271,7 +271,9 @@ impl Viewport {
         elapsed: Duration,
         fidelity: Fidelity,
     ) {
-        self.push_block(Block::subagent(title, text, error, elapsed, fidelity, self.agent));
+        self.push_block(Block::subagent(
+            title, text, error, elapsed, fidelity, self.agent,
+        ));
     }
 
     /// Append a single-file diff block; it re-renders from its hunks at
@@ -614,7 +616,13 @@ impl Viewport {
     /// disclosure triangle, the agent hue, the run's aggregate magnitude —
     /// to the first content row.  The level lives on the run's `anchor` call
     /// ([`Self::group_anchor`]); a run is opened by a call, so it has one.
-    fn render_group(&self, start: usize, end: usize, anchor: usize, width: u16) -> Vec<Line<'static>> {
+    fn render_group(
+        &self,
+        start: usize,
+        end: usize,
+        anchor: usize,
+        width: u16,
+    ) -> Vec<Line<'static>> {
         let level = self.blocks[anchor].level().max(1);
         let calls = self.group_calls(start, end);
         let mut lines = group::body(&calls, level, width as usize);

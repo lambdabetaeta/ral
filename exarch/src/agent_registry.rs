@@ -94,13 +94,7 @@ impl AgentRegistry {
     /// Register a freshly spawned worker.  Arms its ceiling on the reaper (a
     /// `Run` deadline that cancels `cancel` when it elapses) and returns the
     /// birth generation the worker carries into its result.
-    pub fn register(
-        &self,
-        id: AgentId,
-        title: String,
-        log_dir: PathBuf,
-        cancel: Token,
-    ) -> u64 {
+    pub fn register(&self, id: AgentId, title: String, log_dir: PathBuf, cancel: Token) -> u64 {
         let ceiling = process::arm_callback(AGENT_CEILING, {
             let t = cancel.clone();
             move || t.cancel()

@@ -19,7 +19,6 @@ use crate::digest::{FFF_CAP, clip};
 use crate::event::ToolResult as SessionToolResult;
 use crate::provider::Provider;
 use crate::session::{Session, Staged};
-use std::sync::Arc;
 use fff_search::file_picker::FilePicker;
 use fff_search::{
     FFFMode, FilePickerOptions, FrecencyTracker, FuzzySearchOptions, PaginationArgs, QueryParser,
@@ -30,6 +29,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
