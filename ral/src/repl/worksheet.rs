@@ -282,7 +282,10 @@ mod tests {
         ws.record("let p = /bin/echo hi", &shell);
         assert!(!entry(&ws, "n").effectful, "arithmetic is pure");
         assert!(!entry(&ws, "xs").effectful, "a list literal is pure");
-        assert!(entry(&ws, "p").effectful, "an external command is effectful");
+        assert!(
+            entry(&ws, "p").effectful,
+            "an external command is effectful"
+        );
     }
 
     /// An input that does not typecheck records nothing — the checker

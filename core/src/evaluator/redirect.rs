@@ -131,10 +131,7 @@ fn open_redirect_sink(
         commit: None,
     });
     let (file, commit) = command::open_file(path, &mode, shell)?;
-    intents
-        .last_mut()
-        .expect("intent pushed above")
-        .commit = commit;
+    intents.last_mut().expect("intent pushed above").commit = commit;
     Ok(Sink::File(file))
 }
 
@@ -206,7 +203,11 @@ fn install_sink_redirects(
 /// where no body runs and any already-opened atomic temp is discarded.
 fn emit_writes_failed(shell: &Shell, intents: Vec<WriteIntent>) {
     for intent in intents {
-        shell.emit_io(io_event::write(&intent.path, intent.mode, WriteOutcome::Failed));
+        shell.emit_io(io_event::write(
+            &intent.path,
+            intent.mode,
+            WriteOutcome::Failed,
+        ));
     }
 }
 

@@ -1,5 +1,4 @@
 #![allow(clippy::disallowed_methods)]
-
 // Integration tests for `await`'s record return.
 //
 // `await h` resolves a handle to `{ value, stdout, stderr }`.

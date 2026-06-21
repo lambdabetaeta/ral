@@ -14,9 +14,7 @@
 mod common;
 
 use ral_core::types::{Capabilities, Shell, Value};
-use ral_core::{
-    RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin, builtins,
-};
+use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin, builtins};
 
 fn fresh_shell() -> Shell {
     let mut shell = Shell::default();
@@ -26,7 +24,7 @@ fn fresh_shell() -> Shell {
 }
 
 fn top_level(shell: &mut Shell, source: &str) -> Value {
-    match shell.run_turn(
+    match shell.run_source_turn(
         source,
         TurnRequest {
             script_name: "<test>",

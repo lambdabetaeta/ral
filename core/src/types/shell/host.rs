@@ -9,8 +9,8 @@
 //! the public embedding seam.
 
 use super::Shell;
-use super::repl::ReplScratch;
 use super::TerminalAccess;
+use super::repl::ReplScratch;
 use crate::diagnostic::SourceDb;
 use crate::exit_hints::ExitHints;
 use crate::io::{Sink, TerminalState};
@@ -182,7 +182,10 @@ mod tests {
     fn terminal_lease_gated_by_access_and_session() {
         let mut shell = Shell::default();
         shell.session.terminal_lease = TerminalLease::mint_at_startup(true);
-        assert!(shell.session.terminal_lease.is_some(), "session owns a lease");
+        assert!(
+            shell.session.terminal_lease.is_some(),
+            "session owns a lease"
+        );
 
         shell.turn.terminal_access = TerminalAccess::Denied;
         assert!(
@@ -215,7 +218,10 @@ mod tests {
         assert!(!shell.in_terminal_loan());
 
         let loan = shell.begin_terminal_loan();
-        assert!(shell.in_terminal_loan(), "loan raises the turn to ExplicitLoan");
+        assert!(
+            shell.in_terminal_loan(),
+            "loan raises the turn to ExplicitLoan"
+        );
 
         shell.end_terminal_loan(loan);
         assert!(!shell.in_terminal_loan());
@@ -238,7 +244,10 @@ mod tests {
         shell.turn.terminal_access = TerminalAccess::Denied;
 
         let loan = shell.begin_terminal_loan();
-        assert!(!shell.in_terminal_loan(), "a Denied turn is not raised to ExplicitLoan");
+        assert!(
+            !shell.in_terminal_loan(),
+            "a Denied turn is not raised to ExplicitLoan"
+        );
         assert!(
             shell.terminal_lease().is_none(),
             "no foreground borrow: the loan cannot mint authority from Denied"

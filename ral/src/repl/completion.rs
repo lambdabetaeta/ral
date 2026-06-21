@@ -234,7 +234,11 @@ pub(super) fn dotfile_visible(name: &str, needle: &str) -> bool {
 // the "user-input literal paths" adapter case clippy.toml sanctions for a
 // local `Path::new` with a reason.
 #[allow(clippy::disallowed_methods)]
-pub(super) fn complete_path(token: &str, token_start: usize, cwd: &Path) -> (usize, Vec<Candidate>) {
+pub(super) fn complete_path(
+    token: &str,
+    token_start: usize,
+    cwd: &Path,
+) -> (usize, Vec<Candidate>) {
     // Bare `~`: list home directory with `~/` prefix on replacements.  The
     // replacement must include `~/` because a frontend replaces from
     // `token_start`; quoting it would suppress tilde expansion, so names with
@@ -244,7 +248,10 @@ pub(super) fn complete_path(token: &str, token_start: usize, cwd: &Path) -> (usi
         if home == "." {
             return (token_start, vec![]);
         }
-        return (token_start, ranked_entries(Path::new(&home), "", "~/", false));
+        return (
+            token_start,
+            ranked_entries(Path::new(&home), "", "~/", false),
+        );
     }
 
     // Split at last `/` to obtain the directory to read and the name needle.
@@ -348,7 +355,10 @@ mod rank {
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "[io-door:test] test fs scaffolding")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:test] test fs scaffolding"
+)]
 mod tests {
     use super::*;
 
@@ -367,7 +377,14 @@ mod tests {
     #[test]
     fn cmd_pos_recognises_command_boundaries() {
         for s in [
-            "", "foo |", "if true {", "x?", "foo;", "(", "foo &&", "foo ||",
+            "",
+            "foo |",
+            "if true {",
+            "x?",
+            "foo;",
+            "(",
+            "foo &&",
+            "foo ||",
         ] {
             assert!(is_cmd_pos(s), "expected cmd pos at {s:?}");
         }

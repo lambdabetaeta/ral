@@ -5,7 +5,7 @@
 //! bindings (and the alias arms' schemes on the persistent handler frames),
 //! so turn *N+1*'s check sees them.  The harness mirrors the REPL loop in
 //! `ral/src/repl/exec.rs`: `check` seeds `compile_and_typecheck` from the
-//! live `session_schemes()`, and `turn` drives the public `run_turn` door.
+//! live `session_schemes()`, and `turn` drives the public `run_source_turn` door.
 
 mod common;
 
@@ -22,12 +22,12 @@ fn shell() -> Shell {
     s
 }
 
-/// One REPL turn through the public `run_turn` door, which checks `src`
+/// One REPL turn through the public `run_source_turn` door, which checks `src`
 /// against the live session before evaluating it.  Panics on parse / type
 /// failure — callers that expect a clean turn pick source that compiles;
 /// callers probing an *eval* failure get the body's `Settled` back.
 fn turn(shell: &mut Shell, src: &str) -> Settled<Value> {
-    match shell.run_turn(
+    match shell.run_source_turn(
         src,
         TurnRequest {
             script_name: "<test>",

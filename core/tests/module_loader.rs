@@ -16,7 +16,7 @@
 //!
 //! The harness mirrors `top_level_vs_block.rs`: bootstrap a `Shell` with
 //! the prelude registered, then drive each source string through the
-//! public `run_turn` door like a REPL turn would.
+//! public `run_source_turn` door like a REPL turn would.
 
 mod common;
 
@@ -37,11 +37,11 @@ fn fresh_shell() -> Shell {
     shell
 }
 
-/// Run one top-level turn of `source` through the public `run_turn` door
+/// Run one top-level turn of `source` through the public `run_source_turn` door
 /// and return the body's `Settled<Value>`.  Every test below picks source
 /// it expects to compile, so a static diagnostic is a test bug.
 fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
-    match shell.run_turn(
+    match shell.run_source_turn(
         source,
         TurnRequest {
             script_name: "<test>",

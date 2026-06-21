@@ -390,7 +390,10 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(ran, "a Run deadline must invoke its closure after the ceiling");
+        assert!(
+            ran,
+            "a Run deadline must invoke its closure after the ceiling"
+        );
     }
 
     /// Dropping a `Run` guard disarms it just like a `Cancel` guard: the

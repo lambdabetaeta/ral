@@ -5,7 +5,7 @@
 //! - [`eval_top_level`] (`pub(crate)`) — the turn-evaluation verb a
 //!   tool call, a REPL turn, or a script line settles through.  Hosts do
 //!   not call it directly; they enter through the framed
-//!   [`Shell::run_turn`](crate::Shell::run_turn) door, which drives it.
+//!   [`Shell::run_source_turn`](crate::Shell::run_source_turn) door, which drives it.
 //!   The post-run [`Mobile`] is *installed* on the parent shell on
 //!   every outcome (Ok / Error / Exit); a top-level turn is a resume
 //!   point, so every persistable state change must survive.
@@ -98,7 +98,7 @@ pub fn evaluate(comp: &Arc<Comp>, shell: &mut Shell) -> Settled<Value> {
 ///
 /// The turn's program is its sole computation, evaluated under a
 /// trivial continuation ([`Tail::Yes`]): its value is handed straight
-/// back to the [`Shell::run_turn`](crate::Shell::run_turn) door that
+/// back to the [`Shell::run_source_turn`](crate::Shell::run_source_turn) door that
 /// drove it, which relays it to the host.  `dispatch` absorbs any
 /// terminal tail call inside the swapped-in mobile.
 pub(crate) fn eval_top_level(comp: &Arc<Comp>, shell: &mut Shell) -> Settled<Value> {

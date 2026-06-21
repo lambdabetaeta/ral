@@ -7,7 +7,7 @@
 //!
 //! These tests exercise the **documented** semantics of the top-level
 //! turn and the block contract beneath it.  They drive the public
-//! `run_turn` door the same way a REPL turn (`ral`), a tool call
+//! `run_source_turn` door the same way a REPL turn (`ral`), a tool call
 //! (`exarch`), or a forced thunk inside a `grant { ... }` body would —
 //! never reach into internal types.
 //!
@@ -15,13 +15,13 @@
 //! does between consecutive tool calls and what the ral REPL's
 //! `execute_input` does between consecutive prompt turns: hold a single
 //! [`Shell`] across calls and route each body through the public
-//! `run_turn` door, which checks against the live session before running.
+//! `run_source_turn` door, which checks against the live session before running.
 
 mod common;
 
-use ral_core::types::{Capabilities, Settled, Shell};
 #[cfg(unix)]
 use ral_core::types::FsPolicy;
+use ral_core::types::{Capabilities, Settled, Shell};
 use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin, Value};
 
 // ── Harness ─────────────────────────────────────────────────────────────
@@ -35,7 +35,7 @@ fn fresh_shell() -> Shell {
     ral_core::driver::boot_shell(Default::default(), common::prelude())
 }
 
-/// Run one top-level turn against `shell` through the public `run_turn`
+/// Run one top-level turn against `shell` through the public `run_source_turn`
 /// door, matching exarch's per-tool flow: the door checks `source`
 /// against the live env, then evaluates it.  Returns whatever the body
 /// returned (or the body's error).  Every test below picks source it
@@ -45,7 +45,7 @@ fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
 }
 
 /// Run one top-level turn under an attenuated `Capabilities` frame,
-/// carried into the `run_turn` door's [`TurnRequest`] exactly as exarch
+/// carried into the `run_source_turn` door's [`TurnRequest`] exactly as exarch
 /// attenuates its tool turns.  Used by the sandbox-parity tests below.
 #[cfg(unix)]
 fn top_level_under(shell: &mut Shell, caps: Capabilities, source: &str) -> Settled<Value> {
@@ -53,9 +53,9 @@ fn top_level_under(shell: &mut Shell, caps: Capabilities, source: &str) -> Settl
 }
 
 /// Shared body of [`top_level`] and [`top_level_under`]: drive the public
-/// `run_turn` door under `caps` and return the body's `Settled<Value>`.
+/// `run_source_turn` door under `caps` and return the body's `Settled<Value>`.
 fn top_level_under_request(shell: &mut Shell, caps: Capabilities, source: &str) -> Settled<Value> {
-    match shell.run_turn(
+    match shell.run_source_turn(
         source,
         TurnRequest {
             script_name: "<test>",

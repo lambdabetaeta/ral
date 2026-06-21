@@ -475,7 +475,10 @@ mod tests {
     fn denied_turn_skips_foreground() {
         let mut shell = leased_shell();
         shell.turn.terminal_access = TerminalAccess::Denied;
-        assert!(shell.session.terminal_lease.is_some(), "session owns a lease");
+        assert!(
+            shell.session.terminal_lease.is_some(),
+            "session owns a lease"
+        );
         assert_eq!(resolve_terminal_plan(&shell), TerminalPlan::NoTerminal);
     }
 

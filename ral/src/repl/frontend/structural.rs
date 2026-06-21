@@ -228,7 +228,13 @@ impl StructuralFrontend {
         // own (possibly multi-line) rows, and the projections.  Clamping to
         // `rows - 1` hugs the bottom — the prompt sits where a shell prompt
         // always sits — and `MAX_VIEWPORT` keeps scrollback in view.
-        let height = viewport_height(prompt_lines.lead.len() as u16, &textarea, &ws_rows, &matrix, rows);
+        let height = viewport_height(
+            prompt_lines.lead.len() as u16,
+            &textarea,
+            &ws_rows,
+            &matrix,
+            rows,
+        );
         let backend = CrosstermBackend::new(io::stdout());
         let mut terminal = Terminal::with_options(
             backend,
@@ -358,9 +364,16 @@ impl StructuralFrontend {
                     let (start, candidates) = completion::complete(&line, cursor_byte, src);
                     match candidates.as_slice() {
                         [] => {}
-                        [only] => apply_candidate(&mut textarea, row, start, cursor_byte, &only.replacement),
+                        [only] => apply_candidate(
+                            &mut textarea,
+                            row,
+                            start,
+                            cursor_byte,
+                            &only.replacement,
+                        ),
                         _ => {
-                            let anchor_col = prompt_lines.last_w + line[..start].chars().count() as u16;
+                            let anchor_col =
+                                prompt_lines.last_w + line[..start].chars().count() as u16;
                             menu = Some(Menu {
                                 candidates,
                                 selected: 0,
@@ -393,10 +406,11 @@ impl StructuralFrontend {
                     // viewport; anything else is ordinary editing.  Built-in
                     // editing keys above take precedence, so a plugin cannot
                     // shadow Ctrl-C/Ctrl-D/history/Tab/Enter.
-                    let chords = chords.get_or_insert_with(|| lock(&self.runtime).keybinding_chords());
-                    let hit = chords
-                        .iter()
-                        .find_map(|(name, bi, chord)| key_matches(&k, chord).then(|| (name.clone(), *bi)));
+                    let chords =
+                        chords.get_or_insert_with(|| lock(&self.runtime).keybinding_chords());
+                    let hit = chords.iter().find_map(|(name, bi, chord)| {
+                        key_matches(&k, chord).then(|| (name.clone(), *bi))
+                    });
                     if let Some((plugin, binding_idx)) = hit {
                         break Composed::Keybinding(PendingKeybinding {
                             plugin,
@@ -444,7 +458,9 @@ impl StructuralFrontend {
                 let buf = textarea.lines().join("\n");
                 match dispatch_keybinding(pk, &buf, shell, &self.runtime, keymap) {
                     KeybindingOutcome::Accept(line) => Read::Line(line),
-                    KeybindingOutcome::Edit(text, cursor) => Read::Edit(EditBuffer { text, cursor }),
+                    KeybindingOutcome::Edit(text, cursor) => {
+                        Read::Edit(EditBuffer { text, cursor })
+                    }
                 }
             }
         };
@@ -457,7 +473,12 @@ impl StructuralFrontend {
     /// Recall the previous history entry (Up from the first row).  The live
     /// draft is stashed on entry and navigation clamps at the oldest entry;
     /// a no-op when history is empty.
-    fn history_prev(&self, textarea: &mut TextArea<'static>, pos: &mut Option<usize>, draft: &mut String) {
+    fn history_prev(
+        &self,
+        textarea: &mut TextArea<'static>,
+        pos: &mut Option<usize>,
+        draft: &mut String,
+    ) {
         let entries = self.history.entries();
         if entries.is_empty() {
             return;
@@ -477,7 +498,12 @@ impl StructuralFrontend {
     /// Recall the next history entry (Down from the last row), or restore the
     /// stashed draft once browsing walks past the newest entry.  A no-op when
     /// not browsing history.
-    fn history_next(&self, textarea: &mut TextArea<'static>, pos: &mut Option<usize>, draft: &mut String) {
+    fn history_next(
+        &self,
+        textarea: &mut TextArea<'static>,
+        pos: &mut Option<usize>,
+        draft: &mut String,
+    ) {
         match *pos {
             None => {}
             Some(i) if i + 1 < self.history.entries().len() => {
@@ -654,7 +680,13 @@ fn accept_completion(ta: &mut TextArea<'static>, menu: &Menu) {
 /// through the same primitives history recall uses ([`set_text`] +
 /// [`place_cursor`]), so no row-local TextArea edit API is needed; a stale
 /// offset (not on a char boundary, or out of range) is a no-op.
-fn apply_candidate(ta: &mut TextArea<'static>, row: usize, start: usize, end: usize, replacement: &str) {
+fn apply_candidate(
+    ta: &mut TextArea<'static>,
+    row: usize,
+    start: usize,
+    end: usize,
+    replacement: &str,
+) {
     let lines: Vec<String> = ta.lines().to_vec();
     let (new_row, abs) = {
         let Some(r) = lines.get(row) else {
@@ -746,9 +778,9 @@ fn find_pipeline(comp: &Comp) -> Option<&Comp> {
     match &comp.item {
         CompKind::Pipeline { .. } => Some(comp),
         CompKind::Seq(parts) => parts.iter().find_map(|p| find_pipeline(p)),
-        CompKind::Bind { comp: bound, rest, .. } => {
-            find_pipeline(bound).or_else(|| find_pipeline(rest))
-        }
+        CompKind::Bind {
+            comp: bound, rest, ..
+        } => find_pipeline(bound).or_else(|| find_pipeline(rest)),
         _ => None,
     }
 }
@@ -1094,7 +1126,9 @@ fn viewport_height(
     // two-row projection placeholder.
     let lower = ws.max(mx).max(MENU_MAX_ROWS + 2);
     let needed = prompt + 1 + lower;
-    needed.clamp(1, MAX_VIEWPORT).min(rows.saturating_sub(1).max(1))
+    needed
+        .clamp(1, MAX_VIEWPORT)
+        .min(rows.saturating_sub(1).max(1))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1133,9 +1167,11 @@ fn render(
     // Within the prompt block: a multi-line prompt's lead rows above, then the
     // editable band where the last prompt line is the inline prefix the editor
     // sits beside.
-    let [lead_area, editor_band] =
-        Layout::vertical([Constraint::Length(lead_rows), Constraint::Length(editor_rows)])
-            .areas(prompt_area);
+    let [lead_area, editor_band] = Layout::vertical([
+        Constraint::Length(lead_rows),
+        Constraint::Length(editor_rows),
+    ])
+    .areas(prompt_area);
 
     render_spine(frame, spine_area, spine);
     render_prompt(frame, lead_area, editor_band, prompt, textarea);
@@ -1145,7 +1181,14 @@ fn render(
     // type-error flare last so it wins any cell a highlight also claimed.
     overlay_highlights(frame, editor_band, prompt.last_w, textarea, highlights);
     overlay_ghost(frame, editor_band, prompt.last_w, textarea, ghost);
-    overlay_type_error(frame, editor_band, caret_area, prompt.last_w, textarea, spine);
+    overlay_type_error(
+        frame,
+        editor_band,
+        caret_area,
+        prompt.last_w,
+        textarea,
+        spine,
+    );
     render_projections(frame, rest, worksheet, matrix);
     // The completion menu drops down over the top of the projection band,
     // anchored under the token being completed; it owns the keys while open,
@@ -1226,7 +1269,14 @@ fn overlay_type_error(
             let span_w = span_end_col.saturating_sub(span_start_col).max(1);
 
             underline_cells(frame, editor_area, last_w + span_start_col, span_w);
-            render_caret_row(frame, caret_area, last_w + span_start_col, span_w, label, code);
+            render_caret_row(
+                frame,
+                caret_area,
+                last_w + span_start_col,
+                span_w,
+                label,
+                code,
+            );
         }
         // No span (or it escaped the first row): no underline, just the dim
         // headline beneath the prompt — the messageless fallback.
@@ -1249,7 +1299,9 @@ fn underline_cells(frame: &mut ratatui::Frame, area: Rect, col: u16, span_w: u16
     let y = area.y;
     let x0 = area.x + col;
     let max_x = area.x + area.width;
-    let flare = Style::default().fg(FLARE_HUE).add_modifier(Modifier::UNDERLINED);
+    let flare = Style::default()
+        .fg(FLARE_HUE)
+        .add_modifier(Modifier::UNDERLINED);
     for x in x0..(x0 + span_w).min(max_x) {
         buf[(x, y)].set_style(flare);
     }
@@ -1389,7 +1441,10 @@ fn render_prompt(
     }
     // The last prompt line occupies only the first row of the band; render it
     // there, then the editor in the sub-area offset to its right.
-    let prefix_area = Rect { height: 1, ..editor_band };
+    let prefix_area = Rect {
+        height: 1,
+        ..editor_band
+    };
     frame.render_widget(Paragraph::new(prompt.last.clone()), prefix_area);
 
     let editor_area = Rect {
@@ -1404,7 +1459,12 @@ fn render_prompt(
     place_native_cursor(frame, editor_area, textarea);
 }
 
-fn render_projections(frame: &mut ratatui::Frame, area: Rect, worksheet: &[WsRow], matrix: &[MxRow]) {
+fn render_projections(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    worksheet: &[WsRow],
+    matrix: &[MxRow],
+) {
     if area.height == 0 {
         return;
     }
@@ -1422,7 +1482,10 @@ fn render_projections(frame: &mut ratatui::Frame, area: Rect, worksheet: &[WsRow
             Style::default().fg(SLATE),
         )));
     } else {
-        for r in worksheet.iter().take(area.height.saturating_sub(1) as usize) {
+        for r in worksheet
+            .iter()
+            .take(area.height.saturating_sub(1) as usize)
+        {
             // Indent by depth so dependents sit under what they depend on; a
             // distinct glyph and hue mark effectful nodes (which would not
             // re-flow freely) apart from pure ones.
@@ -1452,7 +1515,10 @@ fn render_projections(frame: &mut ratatui::Frame, area: Rect, worksheet: &[WsRow
     if matrix.is_empty() {
         mx_lines.push(Line::from(Span::styled("  —", Style::default().fg(SLATE))));
     } else {
-        for r in matrix.iter().take(mx_area.height.saturating_sub(1) as usize) {
+        for r in matrix
+            .iter()
+            .take(mx_area.height.saturating_sub(1) as usize)
+        {
             let (glyph, hue) = match r.state {
                 MxState::Running => ("●", HANDLE_RUN),
                 MxState::Completed => ("✓", NAME_HUE),
@@ -1800,17 +1866,32 @@ mod tests {
             alt: false,
         };
         let ev = |code, mods| KeyEvent::new(code, mods);
-        assert!(key_matches(&ev(KeyCode::Char('r'), KeyModifiers::CONTROL), &ctrl_r));
+        assert!(key_matches(
+            &ev(KeyCode::Char('r'), KeyModifiers::CONTROL),
+            &ctrl_r
+        ));
         // Wrong char, a missing modifier, or an extra alt all miss.
-        assert!(!key_matches(&ev(KeyCode::Char('t'), KeyModifiers::CONTROL), &ctrl_r));
-        assert!(!key_matches(&ev(KeyCode::Char('r'), KeyModifiers::NONE), &ctrl_r));
         assert!(!key_matches(
-            &ev(KeyCode::Char('r'), KeyModifiers::CONTROL | KeyModifiers::ALT),
+            &ev(KeyCode::Char('t'), KeyModifiers::CONTROL),
+            &ctrl_r
+        ));
+        assert!(!key_matches(
+            &ev(KeyCode::Char('r'), KeyModifiers::NONE),
+            &ctrl_r
+        ));
+        assert!(!key_matches(
+            &ev(
+                KeyCode::Char('r'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT
+            ),
             &ctrl_r
         ));
         // Shift alongside ctrl is tolerated — no bindable chord carries shift.
         assert!(key_matches(
-            &ev(KeyCode::Char('r'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+            &ev(
+                KeyCode::Char('r'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            ),
             &ctrl_r
         ));
     }

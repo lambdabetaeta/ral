@@ -327,7 +327,10 @@ pub(super) fn dirs_history() -> Option<String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "[io-door:test] test fs/process scaffolding")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:test] test fs/process scaffolding"
+)]
 mod tests {
     use super::*;
 
@@ -546,16 +549,31 @@ mod tests {
     /// rc `surface:` selects the frontend, case-insensitively.
     #[test]
     fn rc_surface_selects_frontend() {
-        assert_eq!(apply_rc_surface("return [surface: 'structural']\n"), Surface::Structural);
-        assert_eq!(apply_rc_surface("return [surface: 'minimal']\n"), Surface::Minimal);
-        assert_eq!(apply_rc_surface("return [surface: 'Readline']\n"), Surface::Readline);
+        assert_eq!(
+            apply_rc_surface("return [surface: 'structural']\n"),
+            Surface::Structural
+        );
+        assert_eq!(
+            apply_rc_surface("return [surface: 'minimal']\n"),
+            Surface::Minimal
+        );
+        assert_eq!(
+            apply_rc_surface("return [surface: 'Readline']\n"),
+            Surface::Readline
+        );
     }
 
     /// An unset or unknown `surface:` leaves the default in place.
     #[test]
     fn rc_surface_defaults_and_ignores_unknown() {
-        assert_eq!(apply_rc_surface("return [env: [X: 'y']]\n"), Surface::default());
-        assert_eq!(apply_rc_surface("return [surface: 'bogus']\n"), Surface::default());
+        assert_eq!(
+            apply_rc_surface("return [env: [X: 'y']]\n"),
+            Surface::default()
+        );
+        assert_eq!(
+            apply_rc_surface("return [surface: 'bogus']\n"),
+            Surface::default()
+        );
     }
 
     #[test]

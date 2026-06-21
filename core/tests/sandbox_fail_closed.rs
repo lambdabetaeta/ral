@@ -88,11 +88,11 @@ fn restrict_to(dir: &str) -> Capabilities {
     }
 }
 
-/// Route `src` through the public `run_turn` door under `caps`, mirroring
+/// Route `src` through the public `run_source_turn` door under `caps`, mirroring
 /// exarch's per-tool flow: the turn carries the attenuated capability
 /// ceiling in its request and compiles against the live bindings.
 fn top_level_under(shell: &mut Shell, caps: Capabilities, src: &str) -> Settled<Value> {
-    match shell.run_turn(
+    match shell.run_source_turn(
         src,
         TurnRequest {
             script_name: "<test>",

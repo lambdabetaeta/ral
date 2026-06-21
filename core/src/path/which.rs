@@ -165,7 +165,10 @@ pub fn file_exists_on_path(name: &str, path: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 #[cfg(unix)]
-#[allow(clippy::disallowed_methods, reason = "[io-door:test] test fs/process scaffolding")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:test] test fs/process scaffolding"
+)]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

@@ -3,16 +3,14 @@
 //! `lt`/`gt`/`sort-list`/`sort-list-by` and the `$[…]` ordering operators.
 //!
 //! The harness mirrors `scope_escapes.rs`: bootstrap a prelude-registered
-//! `Shell`, then drive each source string through the public `run_turn`
+//! `Shell`, then drive each source string through the public `run_source_turn`
 //! door like a REPL turn.  The defects below all passed `--check` and the
 //! prior suite, so each test is a coverage gap the doc facet let drift.
 
 mod common;
 
 use ral_core::types::{Break, Capabilities, Settled, Shell, Value};
-use ral_core::{
-    RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin, builtins,
-};
+use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin, builtins};
 
 fn fresh_shell() -> Shell {
     let mut shell = Shell::default();
@@ -21,11 +19,11 @@ fn fresh_shell() -> Shell {
     shell
 }
 
-/// Run one top-level turn of `source` through the public `run_turn` door
+/// Run one top-level turn of `source` through the public `run_source_turn` door
 /// and return the body's `Settled<Value>`.  Every test below picks source
 /// it expects to compile, so a static diagnostic is a test bug.
 fn eval(shell: &mut Shell, source: &str) -> Settled<Value> {
-    match shell.run_turn(
+    match shell.run_source_turn(
         source,
         TurnRequest {
             script_name: "<test>",

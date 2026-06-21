@@ -195,7 +195,10 @@ fn dump_frame(path: &std::path::Path, body: &[u8]) -> io::Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "[io-door:test] test fs/process scaffolding")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:test] test fs/process scaffolding"
+)]
 mod tests {
     use super::*;
 
