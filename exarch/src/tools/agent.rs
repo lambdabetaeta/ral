@@ -221,11 +221,11 @@ fn dispatch_sync<'scope, 'env: 'scope>(
         log_dir: child.log_dir().to_path_buf(),
         title: title.clone(),
     });
-    // Children do not nudge — the top-level driver owns that.  Collapse the
-    // child outcome to a reply string here so the parent's join phase sees a
-    // single shape, and emit a final `SubagentDone` on the parent's channel
-    // so the TUI can land a completion breadcrumb in root's scrollback (where
-    // subagent tabs leave no trace once their linger window expires).
+    // Children do not nudge — the top-level driver owns that.  Settle the
+    // child to its `(outcome, text)` digest here so the parent's join phase
+    // sees a single shape, and emit a final `SubagentDone` on the parent's
+    // channel so the TUI can land a completion breadcrumb in root's scrollback
+    // (where subagent tabs leave no trace once their linger window expires).
     let parent_emit = emit.clone();
     let started = Instant::now();
     let child_token = token.clone();
@@ -233,39 +233,19 @@ fn dispatch_sync<'scope, 'env: 'scope>(
         // A child's `apply` runs on this scoped thread, outside the root
         // turn's `catch_unwind` (`bus::pump`), so a mid-eval panic here would
         // otherwise skip the two emits below — leaking the child's TUI tab (no
-        // `Died` to age it out) and dropping the breadcrumb.  Recover the
-        // panic into an `Err` so `Died`/`SubagentDone` always fire.
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            child.apply(provider, Some(prompt), &child_token, &child_emit)
-        }))
-        .unwrap_or_else(|p| {
-            Err(ProviderError::Other(format!(
-                "sub-agent panicked: {}",
-                panic_msg(&p)
-            )))
-        });
+        // `Died` to age it out) and dropping the breadcrumb.  `run_child`
+        // recovers the panic into a `Failed` outcome so `Died`/`SubagentDone`
+        // always fire.
+        let (outcome, text) = run_child(&mut child, prompt, provider, &child_token, &child_emit);
         child_emit.emit(Kind::Died);
-        let (text, error) = match &r {
-            Ok(TurnOutcome::Complete(s)) => (s.clone(), None),
-            Ok(TurnOutcome::Empty) => (String::new(), None),
-            Ok(TurnOutcome::Stopped { reason }) => (String::new(), Some(reason.clone())),
-            Ok(TurnOutcome::Cancelled) => (String::new(), Some("cancelled".into())),
-            Ok(TurnOutcome::Capped) => (String::new(), Some("step cap reached".into())),
-            Err(e) => (String::new(), Some(e.to_string())),
-        };
+        let reply = outcome.reply(&text);
         parent_emit.emit(Kind::SubagentDone {
             title,
+            outcome,
             text,
-            error,
             elapsed: started.elapsed(),
         });
-        r.map(|outcome| match outcome {
-            TurnOutcome::Complete(s) => s,
-            TurnOutcome::Empty => "(child returned empty reply)".into(),
-            TurnOutcome::Stopped { reason } => format!("(child stopped: {reason})"),
-            TurnOutcome::Cancelled => "(child cancelled)".into(),
-            TurnOutcome::Capped => "(child stopped: step cap reached)".into(),
-        })
+        reply
     });
     Staged::Spawned { id, handle }
 }
@@ -312,16 +292,7 @@ fn dispatch_async<'scope>(
             // the inbox.
             let (tx, _rx) = std::sync::mpsc::channel();
             let muted = Emitter::new(tx, agent_id);
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                child.apply(&provider, Some(prompt), &cancel, &muted)
-            }))
-            .unwrap_or_else(|p| {
-                Err(ProviderError::Other(format!(
-                    "sub-agent panicked: {}",
-                    panic_msg(&p)
-                )))
-            });
-            let (outcome, text) = to_outcome(r);
+            let (outcome, text) = run_child(&mut child, prompt, &provider, &cancel, &muted);
             // Deliver only if still the live worker of the current generation;
             // a result from before a `/clear` is dropped, not posted into a
             // rebuilt context.
@@ -350,8 +321,31 @@ fn dispatch_async<'scope>(
     })
 }
 
-/// Reduce a child's turn outcome to the inbox digest: the outcome tag and,
-/// for a completed run, its final text.
+/// Run a forked child's single turn to a settled digest: apply the prompt,
+/// recover a panic into [`AgentOutcome::Failed`], and reduce the
+/// [`TurnOutcome`] through [`to_outcome`].  Both dispatchers funnel through
+/// here, so the panic-recovery and the outcome reduction live in one place.
+fn run_child(
+    child: &mut Session,
+    prompt: String,
+    provider: &Arc<Provider>,
+    token: &Token,
+    emit: &Emitter,
+) -> (AgentOutcome, String) {
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        child.apply(provider, Some(prompt), token, emit)
+    }))
+    .unwrap_or_else(|p| {
+        Err(ProviderError::Other(format!(
+            "sub-agent panicked: {}",
+            panic_msg(&p)
+        )))
+    });
+    to_outcome(r)
+}
+
+/// The single place a child's turn outcome collapses to the inbox digest: the
+/// outcome tag and, for a completed run, its final text.
 fn to_outcome(r: Result<TurnOutcome, ProviderError>) -> (AgentOutcome, String) {
     match r {
         Ok(TurnOutcome::Complete(s)) => (AgentOutcome::Complete, s),

@@ -123,18 +123,21 @@ pub(crate) fn event_record(t_ms: u128, id: SessionId, kind: &Kind) -> Option<ser
         Kind::ProviderError(error) => ("provider_error", json!({ "error": error })),
         Kind::SubagentDone {
             title,
+            outcome,
             text,
-            error,
             elapsed,
-        } => (
-            "subagent_done",
-            json!({
-                "title": title,
-                "text": text,
-                "error": error,
-                "elapsed_ms": elapsed.as_millis() as u64,
-            }),
-        ),
+        } => {
+            let (text, error) = outcome.breadcrumb(text);
+            (
+                "subagent_done",
+                json!({
+                    "title": title,
+                    "text": text,
+                    "error": error,
+                    "elapsed_ms": elapsed.as_millis() as u64,
+                }),
+            )
+        }
         // The whole mark tree, so the machine log stays structured; only a
         // `raw` mark is opaque, and honestly so.
         Kind::Card(card) => ("card", json!({ "card": card })),
@@ -325,12 +328,12 @@ impl Sink for Headless {
             // sub-agent transcript lives in its own session log dir.
             Kind::SubagentDone {
                 title,
-                text: _,
-                error,
+                outcome,
+                text,
                 elapsed,
             } => {
                 let secs = elapsed.as_secs_f64();
-                match error {
+                match outcome.breadcrumb(&text).1 {
                     Some(reason) => {
                         eprintln!("[agent: {title} failed in {secs:.1}s — {reason}]")
                     }

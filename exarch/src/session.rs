@@ -690,13 +690,13 @@ struct Dispatch {
 
 pub(crate) enum Staged<'scope> {
     Done(SessionToolResult),
-    /// `agent` collapses the child's outcome to a reply string at the spawn
-    /// site; dispatch joins every same-batch child before the next provider
-    /// request, so same-batch agents may run concurrently but never outlive
-    /// the parent turn.
+    /// `agent` collapses the child's outcome to its reply string at the spawn
+    /// site (an errored run already folds to `call error: …`); dispatch joins
+    /// every same-batch child before the next provider request, so same-batch
+    /// agents may run concurrently but never outlive the parent turn.
     Spawned {
         id: String,
-        handle: thread::ScopedJoinHandle<'scope, Result<String, ProviderError>>,
+        handle: thread::ScopedJoinHandle<'scope, String>,
     },
 }
 
@@ -706,8 +706,7 @@ impl<'scope> Staged<'scope> {
             Staged::Done(r) => r,
             Staged::Spawned { id, handle } => {
                 let content = match handle.join() {
-                    Ok(Ok(reply)) => clip(&reply, AGENT_REPLY_CAP),
-                    Ok(Err(e)) => format!("call error: {e}"),
+                    Ok(reply) => clip(&reply, AGENT_REPLY_CAP),
                     Err(_) => "call panicked".into(),
                 };
                 SessionToolResult { id, content }

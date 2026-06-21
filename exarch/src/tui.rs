@@ -645,10 +645,11 @@ impl App {
             }
             Kind::SubagentDone {
                 title,
+                outcome,
                 text,
-                error,
                 elapsed,
             } => {
+                let (text, error) = outcome.breadcrumb(&text);
                 // The event carries no child session id, so the child's own
                 // per-block fidelity is unreachable here; the breadcrumb is
                 // root's reception of the result, so it degrades with root's
@@ -2587,13 +2588,12 @@ impl Repl<'_> {
             Turn::Human(text) => self.echo_prompt(text, line::user_prompt(text)),
             Turn::Wakeup(text) => self.echo_prompt(text, line::wakeup(text)),
             Turn::Agent(r) => {
-                let (text, error) = r.breadcrumb();
                 self.tui.handle(Event {
                     id,
                     kind: Kind::SubagentDone {
                         title: r.title.clone(),
-                        text,
-                        error,
+                        outcome: r.outcome.clone(),
+                        text: r.text.clone(),
                         elapsed: r.elapsed,
                     },
                 });

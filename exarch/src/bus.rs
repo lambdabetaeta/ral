@@ -54,6 +54,45 @@ pub enum AgentOutcome {
     Failed(String),
 }
 
+impl AgentOutcome {
+    /// The `(body, error)` a `↘` subagent breadcrumb shows: body text on a
+    /// completed run, the reason in the header suffix otherwise.  Used by both
+    /// the synchronous child's `Kind::SubagentDone` and the async result's
+    /// fresh turn, so the two render as the identical dialable block.
+    pub fn breadcrumb(&self, text: &str) -> (String, Option<String>) {
+        match self {
+            AgentOutcome::Complete => (text.to_string(), None),
+            AgentOutcome::Empty => (String::new(), None),
+            AgentOutcome::Stopped(r) => (String::new(), Some(r.clone())),
+            AgentOutcome::Cancelled => (String::new(), Some("cancelled".into())),
+            AgentOutcome::Failed(e) => (String::new(), Some(e.clone())),
+        }
+    }
+
+    /// The synchronous `agent` tool_result text the parent sees in this turn.
+    pub fn reply(&self, text: &str) -> String {
+        match self {
+            AgentOutcome::Complete => text.to_string(),
+            AgentOutcome::Empty => "(child returned empty reply)".into(),
+            AgentOutcome::Stopped(r) => format!("(child stopped: {r})"),
+            AgentOutcome::Cancelled => "(child cancelled)".into(),
+            AgentOutcome::Failed(e) => format!("call error: {e}"),
+        }
+    }
+
+    /// The marked synthetic-turn text the model sees when an async result is
+    /// drained, titled with the child's tab label.
+    pub fn marked_turn(&self, title: &str, text: &str) -> String {
+        match self {
+            AgentOutcome::Complete => format!("[agent '{title}' finished]\n{text}"),
+            AgentOutcome::Empty => format!("[agent '{title}' finished with no output]"),
+            AgentOutcome::Stopped(r) => format!("[agent '{title}' stopped: {r}]"),
+            AgentOutcome::Cancelled => format!("[agent '{title}' was cancelled]"),
+            AgentOutcome::Failed(e) => format!("[agent '{title}' failed: {e}]"),
+        }
+    }
+}
+
 /// The settle record an async agent posts to its parent's inbox.
 ///
 /// It is *not* raw `<agent=…>` text in a prompt queue: the source tag and
@@ -77,30 +116,7 @@ pub struct AgentResult {
 impl AgentResult {
     /// The marked synthetic-turn text the model sees when this is drained.
     fn render(&self) -> String {
-        match &self.outcome {
-            AgentOutcome::Complete => format!("[agent '{}' finished]\n{}", self.title, self.text),
-            AgentOutcome::Empty => {
-                format!("[agent '{}' finished with no output]", self.title)
-            }
-            AgentOutcome::Stopped(r) => format!("[agent '{}' stopped: {r}]", self.title),
-            AgentOutcome::Cancelled => format!("[agent '{}' was cancelled]", self.title),
-            AgentOutcome::Failed(e) => format!("[agent '{}' failed: {e}]", self.title),
-        }
-    }
-
-    /// The `(text, error)` a `↘` subagent breadcrumb shows for this result —
-    /// the same reduction a *synchronous* child's `Kind::SubagentDone` makes
-    /// from its `TurnOutcome`, so an async result renders as the identical
-    /// dialable block: body text on success, the reason in the header suffix
-    /// on a non-routine settle.
-    pub fn breadcrumb(&self) -> (String, Option<String>) {
-        match &self.outcome {
-            AgentOutcome::Complete => (self.text.clone(), None),
-            AgentOutcome::Empty => (String::new(), None),
-            AgentOutcome::Stopped(r) => (String::new(), Some(r.clone())),
-            AgentOutcome::Cancelled => (String::new(), Some("cancelled".into())),
-            AgentOutcome::Failed(e) => (String::new(), Some(e.clone())),
-        }
+        self.outcome.marked_turn(&self.title, &self.text)
     }
 }
 
@@ -412,12 +428,14 @@ pub enum Kind {
     /// otherwise lives only in its own tab and ages out at `LINGER`.
     SubagentDone {
         title: String,
+        /// How the child settled.  The sink reduces this with `text` through
+        /// [`AgentOutcome::breadcrumb`] to the body / header-suffix split —
+        /// the same reduction an async result makes — so sync and async land
+        /// the identical dialable block.
+        outcome: AgentOutcome,
         /// The subagent's final assistant text — empty when the run
         /// failed or was cancelled.
         text: String,
-        /// `None` on success; `Some(reason)` on failure / cancel /
-        /// stop, where reason is rendered next to the title.
-        error: Option<String>,
         elapsed: Duration,
     },
     /// A render document a ral kit handed to the `surface` builtin: an
