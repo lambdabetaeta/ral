@@ -2951,3 +2951,7 @@ Revised [[decisions/260620_same-thread-body-shares-the-session|same-thread-body-
 
 Revised [[decisions/260616_exarch-binding-reaping|exarch-binding-reaping]] after design review. The first implementation now uses only ral-tool-call epochs, baseline pins, live-handle pins, static turn read/write sets, and generation-guarded idle pruning; tombstones, retained-size eviction, wall-clock expiry, explicit pin syntax, and callable-specific TTL are deferred.
 Updated [[index|index]] with the smaller v1 contract.
+
+## [2026-06-21] ingest | sync/async agent paths studied; bus-lifetime decision filed
+
+Studied the sync/async `agent` asymmetry and unified the incidental duplication in code: one `run_child` + `to_outcome` reduction, `Kind::SubagentDone` now carries `outcome: AgentOutcome`, and the settle breadcrumb is a single `AgentOutcome::breadcrumb` path across [[map/exarch/tools|tools]], [[map/exarch/frontend|frontend]], and headless. Filed [[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]] proposing the remaining, essential change — lifting the per-turn bus to session lifetime so a background child streams a live tab — which answers [[decisions/260617_async-agent-tool|async-agent-tool]]'s deferred "lift the bus" open question and rests on [[decisions/260618_run-turn-host-loop|run-turn-host-loop]]'s completion-as-control-flow-fact invariant. Updated [[index|index]].
