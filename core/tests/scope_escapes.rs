@@ -5,15 +5,16 @@
 //!
 //! The harness mirrors `top_level_vs_block.rs` exactly — bootstrap a
 //! `Shell` with the prelude registered, then drive each source string
-//! through `eval_top_level` like a REPL turn would.  We deliberately do
-//! not reach into internal types: the bugs are observable at the public
-//! evaluator API.
+//! through the public `run_turn` door like a REPL turn would.  We
+//! deliberately do not reach into internal types: the bugs are observable
+//! at the public turn-door API.
 
 mod common;
 
-use ral_core::evaluator;
-use ral_core::types::{Escape, Shell};
-use ral_core::{Break, CompileOutcome, Value, builtins, compile_and_typecheck, ir::Comp};
+use ral_core::types::{Capabilities, Escape, Settled, Shell};
+use ral_core::{
+    Break, RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin, Value, builtins,
+};
 
 // ── Harness (same shape as `top_level_vs_block.rs`) ─────────────────────
 
@@ -27,24 +28,27 @@ fn fresh_shell() -> Shell {
     shell
 }
 
-/// Parse + elaborate + typecheck `source` against the live `shell`'s
-/// bindings, exactly as the REPL does between turns.  Panics on parse
-/// or type failure — every test below picks source it expects to compile.
-fn compile_against(shell: &Shell, source: &str) -> std::sync::Arc<Comp> {
-    match compile_and_typecheck(source, shell.session_schemes()) {
-        CompileOutcome::Compiled(c) => std::sync::Arc::new(c),
-        CompileOutcome::Parse(e) => panic!("parse: {source:?}: {e}"),
-        CompileOutcome::Types(errs) => {
-            let msgs: Vec<_> = errs.iter().map(|e| e.kind.render_message()).collect();
-            panic!("type: {source:?}: {}", msgs.join("; "));
-        }
+/// Run one top-level turn of `source` through the public `run_turn` door
+/// and return the body's `Settled<Value>`.  Every test below picks source
+/// it expects to compile, so a static diagnostic is a test bug.
+fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
+    match shell.run_turn(
+        source,
+        TurnRequest {
+            script_name: "<test>",
+            caps: Capabilities::root(),
+            turn_limit: None,
+            detached_limit: None,
+            io: TurnIo::Inherit,
+            terminal: RequestedTerminalAccess::Leased,
+            stdin: TurnStdin::Inherit,
+            surface: None,
+            lifecycle: Box::new(()),
+        },
+    ) {
+        TurnReport::Ran { result, .. } => result,
+        TurnReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
     }
-}
-
-/// Run one top-level turn; returns the body's `Settled<Value>`.
-fn top_level(shell: &mut Shell, source: &str) -> ral_core::types::Settled<Value> {
-    let comp = compile_against(shell, source);
-    evaluator::eval_top_level(&comp, shell)
 }
 
 // ── (1) `try` must not swallow `exit` ────────────────────────────────────

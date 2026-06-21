@@ -5,15 +5,14 @@
 //! bindings (and the alias arms' schemes on the persistent handler frames),
 //! so turn *N+1*'s check sees them.  The harness mirrors the REPL loop in
 //! `ral/src/repl/exec.rs`: `check` seeds `compile_and_typecheck` from the
-//! live `session_schemes()`, and `turn` evaluates the annotated comp as a
-//! top-level turn.
+//! live `session_schemes()`, and `turn` drives the public `run_turn` door.
 
 mod common;
 
-use ral_core::evaluator::eval_top_level;
-use ral_core::types::Settled;
+use ral_core::types::{Capabilities, Settled};
 use ral_core::{
-    CompileOutcome, Shell, TypeError, Value, builtins, compile_and_typecheck,
+    CompileOutcome, RequestedTerminalAccess, Shell, TurnIo, TurnReport, TurnRequest, TurnStdin,
+    TypeError, Value, builtins, compile_and_typecheck,
     typecheck::{TypeErrorKind, fmt_scheme},
 };
 
@@ -23,20 +22,28 @@ fn shell() -> Shell {
     s
 }
 
-/// One REPL turn: check seeded from the live session, then evaluate the
-/// annotated comp as a top-level turn.  Panics on parse / type failure —
-/// callers that expect a clean turn pick source that compiles; callers
-/// probing an *eval* failure get the body's `Settled` back.
+/// One REPL turn through the public `run_turn` door, which checks `src`
+/// against the live session before evaluating it.  Panics on parse / type
+/// failure — callers that expect a clean turn pick source that compiles;
+/// callers probing an *eval* failure get the body's `Settled` back.
 fn turn(shell: &mut Shell, src: &str) -> Settled<Value> {
-    let comp = match compile_and_typecheck(src, shell.session_schemes()) {
-        CompileOutcome::Compiled(c) => std::sync::Arc::new(c),
-        CompileOutcome::Parse(e) => panic!("parse: {src:?}: {e}"),
-        CompileOutcome::Types(errs) => {
-            let msgs: Vec<_> = errs.iter().map(|e| e.kind.render_message()).collect();
-            panic!("type: {src:?}: {}", msgs.join("; "));
-        }
-    };
-    eval_top_level(&comp, shell)
+    match shell.run_turn(
+        src,
+        TurnRequest {
+            script_name: "<test>",
+            caps: Capabilities::root(),
+            turn_limit: None,
+            detached_limit: None,
+            io: TurnIo::Inherit,
+            terminal: RequestedTerminalAccess::Leased,
+            stdin: TurnStdin::Inherit,
+            surface: None,
+            lifecycle: Box::new(()),
+        },
+    ) {
+        TurnReport::Ran { result, .. } => result,
+        TurnReport::Static { .. } => panic!("well-formed source must run: {src:?}"),
+    }
 }
 
 /// Check `src` against the live session without evaluating it — the

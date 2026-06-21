@@ -13,9 +13,10 @@
 
 mod common;
 
-use ral_core::evaluator;
-use ral_core::types::{Shell, Value};
-use ral_core::{CompileOutcome, builtins, compile_and_typecheck, ir::Comp};
+use ral_core::types::{Capabilities, Shell, Value};
+use ral_core::{
+    RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin, builtins,
+};
 
 fn fresh_shell() -> Shell {
     let mut shell = Shell::default();
@@ -25,15 +26,23 @@ fn fresh_shell() -> Shell {
 }
 
 fn top_level(shell: &mut Shell, source: &str) -> Value {
-    let comp: std::sync::Arc<Comp> = match compile_and_typecheck(source, shell.session_schemes()) {
-        CompileOutcome::Compiled(c) => std::sync::Arc::new(c),
-        CompileOutcome::Parse(e) => panic!("parse: {source:?}: {e}"),
-        CompileOutcome::Types(errs) => {
-            let msgs: Vec<_> = errs.iter().map(|e| e.kind.render_message()).collect();
-            panic!("type: {source:?}: {}", msgs.join("; "));
-        }
-    };
-    evaluator::eval_top_level(&comp, shell).expect("evaluation succeeds")
+    match shell.run_turn(
+        source,
+        TurnRequest {
+            script_name: "<test>",
+            caps: Capabilities::root(),
+            turn_limit: None,
+            detached_limit: None,
+            io: TurnIo::Inherit,
+            terminal: RequestedTerminalAccess::Leased,
+            stdin: TurnStdin::Inherit,
+            surface: None,
+            lifecycle: Box::new(()),
+        },
+    ) {
+        TurnReport::Ran { result, .. } => result.expect("evaluation succeeds"),
+        TurnReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
+    }
 }
 
 /// `within [dir: X] { resolve-path 'leaf' }` returns a path under `X`

@@ -2,7 +2,10 @@
 //!
 //! Two verbs reach outside the crate; [`apply`] is crate-private.
 //!
-//! - [`eval_top_level`] — a tool call, a REPL turn, a script line.
+//! - [`eval_top_level`] (`pub(crate)`) — the turn-evaluation verb a
+//!   tool call, a REPL turn, or a script line settles through.  Hosts do
+//!   not call it directly; they enter through the framed
+//!   [`Shell::run_turn`](crate::Shell::run_turn) door, which drives it.
 //!   The post-run [`Mobile`] is *installed* on the parent shell on
 //!   every outcome (Ok / Error / Exit); a top-level turn is a resume
 //!   point, so every persistable state change must survive.
@@ -86,7 +89,7 @@ pub fn evaluate(comp: &Arc<Comp>, shell: &mut Shell) -> Settled<Value> {
     absorb_tail(comp::eval_comp(comp, shell, Tail::No), shell)
 }
 
-// ── Public boundary verbs ────────────────────────────────────────────────
+// ── Boundary verbs ───────────────────────────────────────────────────────
 
 /// Run `comp` as a top-level turn.  Installs the post-run [`Mobile`]
 /// on `shell` for every outcome — Ok, Error, Exit — so a `let`
@@ -95,9 +98,10 @@ pub fn evaluate(comp: &Arc<Comp>, shell: &mut Shell) -> Settled<Value> {
 ///
 /// The turn's program is its sole computation, evaluated under a
 /// trivial continuation ([`Tail::Yes`]): its value is handed straight
-/// back to the host.  `dispatch` absorbs any terminal tail call inside
-/// the swapped-in mobile.
-pub fn eval_top_level(comp: &Arc<Comp>, shell: &mut Shell) -> Settled<Value> {
+/// back to the [`Shell::run_turn`](crate::Shell::run_turn) door that
+/// drove it, which relays it to the host.  `dispatch` absorbs any
+/// terminal tail call inside the swapped-in mobile.
+pub(crate) fn eval_top_level(comp: &Arc<Comp>, shell: &mut Shell) -> Settled<Value> {
     let mobile = shell.mobile();
     let (post, outcome) = crate::runtime::transport::dispatch(comp, mobile, Tail::Yes, shell);
     shell.install_mobile(post);

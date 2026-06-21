@@ -54,8 +54,8 @@
 
 mod common;
 
-use ral_core::evaluator;
-use ral_core::types::{Break, Capabilities, FsPolicy, Shell, Value};
+use ral_core::types::{Break, Capabilities, FsPolicy, Settled, Shell, Value};
+use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
 
 /// A `Shell` matching what every front end ends up with after bootstrap:
 /// prelude registered, default env, root capabilities.
@@ -99,22 +99,27 @@ fn restrict_to(dir: &str) -> Capabilities {
     }
 }
 
-/// Compile `src` against `shell`'s live bindings, then route it through
-/// `eval_top_level` under `caps`, mirroring exarch's per-tool flow.
-fn top_level_under(
-    shell: &mut Shell,
-    caps: Capabilities,
-    src: &str,
-) -> ral_core::types::Settled<Value> {
-    let comp = match ral_core::compile_and_typecheck(src, shell.session_schemes()) {
-        ral_core::CompileOutcome::Compiled(c) => std::sync::Arc::new(c),
-        ral_core::CompileOutcome::Parse(e) => panic!("parse: {src:?}: {e}"),
-        ral_core::CompileOutcome::Types(errs) => {
-            let msgs: Vec<_> = errs.iter().map(|e| e.kind.render_message()).collect();
-            panic!("type: {src:?}: {}", msgs.join("; "));
-        }
-    };
-    shell.with_capabilities(caps, |s| evaluator::eval_top_level(&comp, s))
+/// Route `src` through the public `run_turn` door under `caps`, mirroring
+/// exarch's per-tool flow: the turn carries the attenuated capability
+/// ceiling in its request and compiles against the live bindings.
+fn top_level_under(shell: &mut Shell, caps: Capabilities, src: &str) -> Settled<Value> {
+    match shell.run_turn(
+        src,
+        TurnRequest {
+            script_name: "<test>",
+            caps,
+            turn_limit: None,
+            detached_limit: None,
+            io: TurnIo::Inherit,
+            terminal: RequestedTerminalAccess::Denied,
+            stdin: TurnStdin::Empty,
+            surface: None,
+            lifecycle: Box::new(()),
+        },
+    ) {
+        TurnReport::Ran { result, .. } => result,
+        TurnReport::Static { .. } => panic!("well-formed source must run: {src:?}"),
+    }
 }
 
 /// Assert that a confined child failed closed (the eval surfaced an

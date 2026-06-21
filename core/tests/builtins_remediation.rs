@@ -8,15 +8,16 @@
 //! `from-json` u64 overflow (B12).
 //!
 //! The harness mirrors `comparison.rs`: bootstrap a prelude-registered
-//! `Shell`, then drive each source string through `eval_top_level` like a
-//! REPL turn.  Each defect passed `--check` and the prior suite, so every
-//! test below is a coverage gap the doc facet let drift.
+//! `Shell`, then drive each source string through the public `run_turn`
+//! door like a REPL turn.  Each defect passed `--check` and the prior
+//! suite, so every test below is a coverage gap the doc facet let drift.
 
 mod common;
 
-use ral_core::evaluator;
-use ral_core::types::{Break, Escape, Shell, Status, Value};
-use ral_core::{CompileOutcome, builtins, compile_and_typecheck, ir::Comp};
+use ral_core::types::{Break, Capabilities, Escape, Settled, Shell, Status, Value};
+use ral_core::{
+    RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin, builtins,
+};
 
 fn fresh_shell() -> Shell {
     let mut shell = Shell::default();
@@ -25,20 +26,27 @@ fn fresh_shell() -> Shell {
     shell
 }
 
-fn compile_against(shell: &Shell, source: &str) -> std::sync::Arc<Comp> {
-    match compile_and_typecheck(source, shell.session_schemes()) {
-        CompileOutcome::Compiled(c) => std::sync::Arc::new(c),
-        CompileOutcome::Parse(e) => panic!("parse: {source:?}: {e}"),
-        CompileOutcome::Types(errs) => {
-            let msgs: Vec<_> = errs.iter().map(|e| e.kind.render_message()).collect();
-            panic!("type: {source:?}: {}", msgs.join("; "));
-        }
+/// Run one top-level turn of `source` through the public `run_turn` door
+/// and return the body's `Settled<Value>`.  Every test below picks source
+/// it expects to compile, so a static diagnostic is a test bug.
+fn eval(shell: &mut Shell, source: &str) -> Settled<Value> {
+    match shell.run_turn(
+        source,
+        TurnRequest {
+            script_name: "<test>",
+            caps: Capabilities::root(),
+            turn_limit: None,
+            detached_limit: None,
+            io: TurnIo::Inherit,
+            terminal: RequestedTerminalAccess::Leased,
+            stdin: TurnStdin::Inherit,
+            surface: None,
+            lifecycle: Box::new(()),
+        },
+    ) {
+        TurnReport::Ran { result, .. } => result,
+        TurnReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
     }
-}
-
-fn eval(shell: &mut Shell, source: &str) -> ral_core::types::Settled<Value> {
-    let comp = compile_against(shell, source);
-    evaluator::eval_top_level(&comp, shell)
 }
 
 /// Run `source`, expecting it to return `Value::String(expected)`.

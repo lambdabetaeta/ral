@@ -5,27 +5,24 @@
 //! `within`, `try`, `guard`, `audit`), and what stays consistent between
 //! local and sandbox-confined transport.
 //!
-//! These tests exercise the **documented** semantics of
-//! [`ral_core::evaluator::eval_top_level`] and
-//! [`ral_core::evaluator::eval_block`].  They drive the public API
-//! the same way a REPL turn (`ral`), a tool call (`exarch`), or a forced
-//! thunk inside a `grant { ... }` body would — never reach into
-//! internal types.
+//! These tests exercise the **documented** semantics of the top-level
+//! turn and the block contract beneath it.  They drive the public
+//! `run_turn` door the same way a REPL turn (`ral`), a tool call
+//! (`exarch`), or a forced thunk inside a `grant { ... }` body would —
+//! never reach into internal types.
 //!
 //! The two-call harness mirrors what exarch's `shell_eval::run_shell`
 //! does between consecutive tool calls and what the ral REPL's
 //! `execute_input` does between consecutive prompt turns: hold a single
-//! [`Shell`] across calls, recompute the typechecker's `bindings` from
-//! the live env between calls, and route the body through
-//! `eval_top_level`.
+//! [`Shell`] across calls and route each body through the public
+//! `run_turn` door, which checks against the live session before running.
 
 mod common;
 
-use ral_core::evaluator;
-use ral_core::types::Shell;
+use ral_core::types::{Capabilities, Settled, Shell};
 #[cfg(unix)]
-use ral_core::types::{Capabilities, FsPolicy};
-use ral_core::{CompileOutcome, Value, compile_and_typecheck, ir::Comp};
+use ral_core::types::FsPolicy;
+use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin, Value};
 
 // ── Harness ─────────────────────────────────────────────────────────────
 
@@ -38,42 +35,43 @@ fn fresh_shell() -> Shell {
     ral_core::driver::boot_shell(Default::default(), common::prelude())
 }
 
-/// Parse + elaborate + typecheck `source` against the live `shell`'s
-/// bindings, exactly as the REPL and exarch's tool harness do between
-/// turns.  Panics on parse / type failure — every test below picks
-/// source it expects to compile.
-fn compile_against(shell: &Shell, source: &str) -> std::sync::Arc<Comp> {
-    match compile_and_typecheck(source, shell.session_schemes()) {
-        CompileOutcome::Compiled(c) => std::sync::Arc::new(c),
-        CompileOutcome::Parse(e) => panic!("parse: {source:?}: {e}"),
-        CompileOutcome::Types(errs) => {
-            let msgs: Vec<_> = errs.iter().map(|e| e.kind.render_message()).collect();
-            panic!("type: {source:?}: {}", msgs.join("; "));
-        }
-    }
-}
-
-/// Run one top-level turn against `shell`, matching exarch's per-tool
-/// flow: compile against the live env, then route through the
-/// `eval_top_level` boundary.  Returns whatever the body returned (or
-/// the body's error).
-fn top_level(shell: &mut Shell, source: &str) -> ral_core::types::Settled<Value> {
-    let comp = compile_against(shell, source);
-    evaluator::eval_top_level(&comp, shell)
+/// Run one top-level turn against `shell` through the public `run_turn`
+/// door, matching exarch's per-tool flow: the door checks `source`
+/// against the live env, then evaluates it.  Returns whatever the body
+/// returned (or the body's error).  Every test below picks source it
+/// expects to compile, so a static diagnostic is a test bug.
+fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
+    top_level_under_request(shell, Capabilities::root(), source)
 }
 
 /// Run one top-level turn under an attenuated `Capabilities` frame,
-/// mirroring how exarch wraps its call in `with_capabilities(...)`
-/// before handing off to `eval_top_level`.  Used by the sandbox-parity
-/// tests below.
+/// carried into the `run_turn` door's [`TurnRequest`] exactly as exarch
+/// attenuates its tool turns.  Used by the sandbox-parity tests below.
 #[cfg(unix)]
-fn top_level_under(
-    shell: &mut Shell,
-    caps: Capabilities,
-    source: &str,
-) -> ral_core::types::Settled<Value> {
-    let comp = compile_against(shell, source);
-    shell.with_capabilities(caps, |s| evaluator::eval_top_level(&comp, s))
+fn top_level_under(shell: &mut Shell, caps: Capabilities, source: &str) -> Settled<Value> {
+    top_level_under_request(shell, caps, source)
+}
+
+/// Shared body of [`top_level`] and [`top_level_under`]: drive the public
+/// `run_turn` door under `caps` and return the body's `Settled<Value>`.
+fn top_level_under_request(shell: &mut Shell, caps: Capabilities, source: &str) -> Settled<Value> {
+    match shell.run_turn(
+        source,
+        TurnRequest {
+            script_name: "<test>",
+            caps,
+            turn_limit: None,
+            detached_limit: None,
+            io: TurnIo::Inherit,
+            terminal: RequestedTerminalAccess::Leased,
+            stdin: TurnStdin::Inherit,
+            surface: None,
+            lifecycle: Box::new(()),
+        },
+    ) {
+        TurnReport::Ran { result, .. } => result,
+        TurnReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
+    }
 }
 
 /// Capability frame that actually triggers `sandbox_projection()` to
@@ -112,8 +110,8 @@ fn display_no_trailing_sep(path: &std::path::Path) -> String {
 
 /// Two sequential top-level calls share state: a `let` from the first
 /// call is visible in the second.  This is the load-bearing property of
-/// `eval_top_level`'s install-mobile-on-Ok rule, and the whole reason
-/// exarch's tool-call harness routes through this boundary instead of
+/// the turn's install-mobile-on-Ok rule, and the whole reason exarch's
+/// tool-call harness routes through the top-level turn door instead of
 /// the block boundary.
 #[test]
 fn top_level_let_persists_across_calls() {
@@ -126,16 +124,16 @@ fn top_level_let_persists_across_calls() {
 // ── (2) Top-level partial effects ───────────────────────────────────────
 
 /// A top-level turn that fails partway through still installs the
-/// mobile mutations made before the failure.  This locks in the
-/// install-on-Error rule documented on `eval_top_level`: bindings made
-/// before a fatal command survive into the next turn; bindings *after*
-/// the failure do not exist because that line never ran.
+/// mobile mutations made before the failure.  This locks in the turn's
+/// install-on-Error rule: bindings made before a fatal command survive
+/// into the next turn; bindings *after* the failure do not exist because
+/// that line never ran.
 #[test]
 fn top_level_partial_effects_persist_on_error() {
     let mut shell = fresh_shell();
     // `cat /nonexistent` fails between the two `let` lines.  The whole
     // turn returns Err, but the pre-failure binding is in the mobile,
-    // which `eval_top_level` installs unconditionally.
+    // which the top-level turn installs unconditionally.
     let _ = top_level(
         &mut shell,
         "let pre_fail_x = 1\ncat /nonexistent\nlet post_fail_y = 2",
