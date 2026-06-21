@@ -856,9 +856,16 @@ impl Lexer {
                     break;
                 }
                 Some('\\') => {
-                    literal_start.get_or_insert(cursor);
+                    let before = literal.len();
                     self.bump();
                     self.scan_double_quoted_escape(cursor, &mut literal)?;
+                    // A `\<newline>` continuation emits nothing.  Anchor the
+                    // literal run's start only when the escape actually
+                    // produced a char, so a leading continuation does not
+                    // stretch the following literal's span back over itself.
+                    if literal.len() > before {
+                        literal_start.get_or_insert(cursor);
+                    }
                 }
                 Some('$') => {
                     self.bump();
@@ -1255,19 +1262,13 @@ impl Lexer {
                 {
                     return Ok(tokens);
                 }
+                // EOF inside an open group is unreachable: `next_token`
+                // routes end of input through `eof_or_unterminated`, which
+                // returns `Err(UnterminatedBalanced …)` whenever a delim is
+                // open — and our own group delim is always open here.  That
+                // `Err` is caught above, so the loop never sees an `Eof`.
                 (Token::Eof, _) => {
-                    // Reached the end of input without a matching
-                    // close — anchor the error at the opener so users
-                    // see where the group started.
-                    self.delim_stack.pop();
-                    return Err(self.typed_error(
-                        opener,
-                        LexErrorKind::UnterminatedBalanced {
-                            open,
-                            close,
-                            opened: opener,
-                        },
-                    ));
+                    unreachable!("next_token cannot yield Eof while a delim is open")
                 }
                 _ => tokens.push((tok, span)),
             }
@@ -1306,7 +1307,10 @@ impl Lexer {
                 let fd = Some(self.parse_fd(&fd_digits, span)?);
                 self.scan_redirect_lt(fd, span)
             }
-            _ => Ok((Token::Word(Word::Plain(fd_digits)), self.finish(span))),
+            // `scan_fd_redirect` is only entered after `is_fd_redirect_start`
+            // confirmed a `>`/`<` follows the digit run, and `take_while`
+            // consumed exactly that run — so the next char is always one of them.
+            _ => unreachable!("scan_fd_redirect entered without a trailing '>' or '<'"),
         }
     }
 
@@ -1511,6 +1515,22 @@ mod tests {
         assert_eq!((var.start, var.end), (3, 5));
         assert_eq!(parts[1].item, StringPart::Literal(" y".into()));
         assert_eq!((lit.start, lit.end), (5, 7));
+    }
+
+    /// The same rule when the continuation is *adjacent* to literal text
+    /// with no intervening flush: a leading `\`-continuation emits nothing,
+    /// so the literal run must start at the first real char.  In
+    /// `"\<nl>abc"` the literal `abc` is at bytes 3..6, not 1..6.
+    #[test]
+    fn line_continuation_does_not_stretch_following_literal() {
+        let toks = lex("\"\\\nabc\"").unwrap();
+        let Token::DoubleQuoted(parts) = &toks[0].0 else {
+            panic!("expected DoubleQuoted");
+        };
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].item, StringPart::Literal("abc".into()));
+        let lit = parts[0].span.unwrap();
+        assert_eq!((lit.start, lit.end), (3, 6));
     }
 
     #[test]
