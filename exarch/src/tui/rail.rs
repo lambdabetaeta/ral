@@ -95,6 +95,21 @@ pub(super) fn lighten(c: Color, step: u8) -> Color {
     mix(c, Color::Rgb(255, 255, 255), step as f32 / 3.0)
 }
 
+/// Drain an RGB colour's saturation toward grey by `t` (clamped to
+/// `0.0..=1.0`), holding its luminance: mix toward the grey of the
+/// colour's own Rec. 601 luma, so the result keeps its lightness but loses
+/// its hue. This is the fidelity drain ([`super::md`]) — distrust reads as
+/// "the colour has gone out of it" without touching the value (lightness)
+/// channel magnitude rides, so a degraded passage stays as legible as a
+/// sound one. Non-RGB colours pass through unchanged.
+pub(super) fn desaturate(c: Color, t: f32) -> Color {
+    let Color::Rgb(r, g, b) = c else {
+        return c;
+    };
+    let luma = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32).round() as u8;
+    mix(c, Color::Rgb(luma, luma, luma), t)
+}
+
 /// Build the 2-column rail span — one shape glyph styled with the
 /// agent's hue lightened by its magnitude's value-step, then a space.
 /// This is the keystone: one cell, three variables.
@@ -105,5 +120,44 @@ pub(super) fn span(kind: RailKind, agent: AgentSlot, magnitude: Option<u32>) -> 
         .unwrap_or(AGENT_HUES[0]);
     let fg = lighten(hue, value_step(magnitude));
     Span::styled(format!("{} ", kind.glyph()), Style::default().fg(fg))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn luma(c: Color) -> f32 {
+        let Color::Rgb(r, g, b) = c else {
+            unreachable!("test colours are RGB")
+        };
+        0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32
+    }
+
+    /// The drain holds luminance — the property that keeps the fidelity
+    /// signal off the value (lightness) channel magnitude rides. A fully
+    /// drained colour collapses to its own grey; a partially drained one
+    /// stays within a rounding step of its original luma.
+    #[test]
+    fn desaturate_holds_luminance() {
+        for &c in &AGENT_HUES {
+            let before = luma(c);
+            assert!(
+                (luma(desaturate(c, 0.45)) - before).abs() <= 1.0,
+                "partial drain shifted luma of {c:?}"
+            );
+            let full = desaturate(c, 1.0);
+            assert!((luma(full) - before).abs() <= 1.0, "full drain shifted luma");
+            let Color::Rgb(r, g, b) = full else {
+                unreachable!()
+            };
+            assert_eq!((r, r), (g, b), "full drain is grey");
+        }
+    }
+
+    /// `t == 0` is a no-op: a sound passage's ink is untouched.
+    #[test]
+    fn desaturate_zero_is_identity() {
+        assert_eq!(desaturate(AGENT_HUES[0], 0.0), AGENT_HUES[0]);
+    }
 }
 

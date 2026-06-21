@@ -248,8 +248,8 @@ impl Viewport {
     // ── content ──────────────────────────────────────────────────────────
 
     /// Append a tool call as its own collapsible block.  `context` is the
-    /// turn's degradation floor, stamped so the coalesced intent line dims
-    /// under context pressure (Move 7).
+    /// turn's degradation floor, stamped so the coalesced intent line
+    /// drains its saturation under context pressure (Move 7).
     pub(super) fn push_tool_call(
         &mut self,
         tool: &'static str,

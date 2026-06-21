@@ -178,7 +178,7 @@ fn intent_row(call: &Call, width: usize) -> Vec<Line<'static>> {
 /// width and `bar_last` the column its final glyph lands in.  The intent wraps
 /// to clear the bar band on every row, and the turn's `context` floor
 /// distress-modulates each row (the bar's height stays the magnitude it
-/// encodes; only its ink dims).
+/// encodes; only the intent ink drains its saturation).
 #[allow(clippy::too_many_arguments)]
 fn pinned_intent(
     lead: Vec<Span<'static>>,

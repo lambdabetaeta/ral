@@ -13,25 +13,28 @@
 //!   restates the `ral` script the model just ran — verbatim restatement
 //!   is rubber-stamping, not synthesis ([`echo_delta`]).
 //!
-//! The renderer ([`super::md`]) turns these into a dimmer, lower-contrast
-//! typeface (context) and a row-wise waver (echo), so a degraded answer no
-//! longer borrows the visual authority of a sound one.
+//! The renderer ([`super::md`]) turns these into a foreground saturation
+//! drain (context) and a flat background wash (echo), so a degraded answer
+//! no longer borrows the visual authority of a sound one — and neither
+//! treatment touches the value (lightness) channel that carries magnitude.
 
 use std::collections::HashSet;
 
 /// The two epistemic signals a [`super::block::Block`] carries, each a
 /// small ordered level.  Default is *sound* — `context` and `echo` both
 /// `0`, no modulation.  The two are kept separate rather than summed
-/// because they drive two distinct media (value reduction vs waver), so a
-/// single combined level could not reconstruct which treatment to apply.
+/// because they drive two disjoint colour axes (foreground drain vs
+/// background wash), so a single combined level could not reconstruct
+/// which treatment to apply.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub(super) struct Fidelity {
-    /// Turn-level context-pressure floor, `0..=3`: drives value reduction
-    /// (dim + contrast pull).  `0` when the provider exposes no context
-    /// window.
+    /// Turn-level context-pressure floor, `0..=3`: drains the foreground's
+    /// saturation toward grey at held luminance.  `0` when the provider
+    /// exposes no context window.
     pub(super) context: u8,
     /// Per-block echo delta, `0..=2`: trigram overlap of the committing
-    /// prose with the most-recent `ral` script.  Drives the row waver.
+    /// prose with the most-recent `ral` script.  Shades the field behind
+    /// the prose with a flat wash.
     pub(super) echo: u8,
 }
 

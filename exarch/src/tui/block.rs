@@ -161,9 +161,9 @@ impl Block {
     }
 
     /// `context` is the turn's degradation floor, stamped onto the call so
-    /// its coalesced intent line dims under context pressure exactly as
-    /// committed prose does (Move 7); echo does not apply — an intent is the
-    /// model's stated purpose, not committed prose.
+    /// its coalesced intent line drains its saturation under context
+    /// pressure exactly as committed prose does (Move 7); echo does not
+    /// apply — an intent is the model's stated purpose, not committed prose.
     pub(super) fn tool_call(
         tool: &'static str,
         summary: String,

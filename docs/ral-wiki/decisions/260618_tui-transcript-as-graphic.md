@@ -231,6 +231,47 @@ event on the bus, while move 7 can deepen with one.
    `context_window` (already on `App`) is the seed signal; logprob or
    retry-count exposure on `Kind` would deepen it.
 
+   > **Amended 2026-06-21 — the two media move off the value channel; the
+   > waver is retired.** As first built (Phase 7 below), context pressure
+   > degraded prose with `Modifier::DIM` plus a contrast pull toward the
+   > background, and echo wavered alternate rows ±1 value-step. Lived with,
+   > both failed on this ADR's own grounds:
+   > - **`DIM` + the background pull *is* the minor-chrome idiom.** The same
+   >   treatment renders help text, stop reasons, and the watching-hint
+   >   (`line::dim`), so a degraded answer — important, to be read warily —
+   >   converged on the exact look of ignorable chrome. The learned reading
+   >   "dim = minor" inverts the intended "dim = distrust this."
+   > - **It spent the value channel on distrust.** Pulling the foreground
+   >   toward the background lowers luminance — the very channel the rail and
+   >   the bars reserve for *magnitude* (the "encode magnitude in hue"
+   >   alternative was rejected precisely to keep value free). A degraded
+   >   passage and a small one then drift toward the same lightness, and the
+   >   text that most warrants scrutiny becomes the hardest to read.
+   > - **The waver is motion-adjacent.** Per-row value oscillation in static
+   >   prose reads as a render glitch, the decoration §"The diagnosis" and the
+   >   Move 3 amendment reject — and it, too, lived on the value channel.
+   >
+   > The two signals are re-encoded onto two disjoint colour axes, **neither
+   > the value channel:**
+   > - **Context pressure → foreground saturation drain.** Each foreground
+   >   mixes toward the grey of its *own* Rec. 601 luma (`rail::desaturate`),
+   >   by ~45% / ~70% / ~90% at levels 1–3. Luminance is held, so the prose
+   >   loses its hue — "drained of confidence" — yet stays as legible as the
+   >   sound answer beside it, and never collides with magnitude. No `DIM`.
+   > - **Echo → flat background wash.** A static `ECHO_WASH` field sits behind
+   >   every span, deepening one step per echo level — a flagged passage, not
+   >   a glitch. Background axis, apart from the drain's foreground axis, so
+   >   the two signals stay separable (the reason `Fidelity` keeps them
+   >   distinct). Grain stays the reserved slot for a future third signal.
+   >
+   > The exact hues, drain depths, and `ECHO_WASH` value are a first cut and
+   > **provisional — the final visual is the owner's call**, to be judged
+   > against real degraded turns in a live terminal. What is settled is the
+   > principle: distrust rides saturation and the background field, never the
+   > lightness that means magnitude. (The Phase 7 plan below still records the
+   > original DIM/pull/waver build; this amendment supersedes its "Rendering
+   > modulation" bullet.)
+
 ## Why this shape
 
 - **The plane is reclaimed.** Position-y still defaults to time (narrative

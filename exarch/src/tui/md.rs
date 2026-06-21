@@ -19,7 +19,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::fidelity::Fidelity;
 use super::line::{CYAN, LIME, READ_W, SLATE, is_blank};
-use super::rail::mix;
+use super::rail::{desaturate, mix};
 
 /// Left inset for assistant markdown lines, marking the model's voice
 /// against the column-0 chrome.
@@ -28,11 +28,20 @@ pub(super) const MD_INDENT: u16 = 4;
 const CODE_BG: Color = Color::Rgb(28, 32, 42);
 
 /// The foreground assumed for spans with no explicit colour (plain prose
-/// rendered at the terminal default), so the fidelity contrast pull and
-/// echo waver have a concrete value to interpolate. A degraded answer's
-/// prose must visibly lose contrast, so it cannot stay at the bare
-/// terminal default once modulation kicks in.
+/// rendered at the terminal default), so the fidelity drain has a concrete
+/// colour to desaturate. A degraded answer's prose must visibly lose its
+/// hue, so it cannot stay at the bare terminal default once modulation
+/// kicks in.
 const BASE_FG: Color = Color::Rgb(208, 213, 224);
+
+/// The flat background wash an echoed paragraph wears: a faint neutral
+/// block behind every span, deepening one step per echo level. It is a
+/// *background* treatment, categorically apart from the foreground
+/// saturation drain context pressure applies, so the two epistemic
+/// signals never collide on one axis — distress drains the ink, echo
+/// shades the field behind it. Static (no row-wise oscillation), so it
+/// reads as a flagged passage, never as a render glitch.
+const ECHO_WASH: Color = Color::Rgb(46, 40, 54);
 
 // ── public entry points ──────────────────────────────────────────────────
 
@@ -40,8 +49,8 @@ const BASE_FG: Color = Color::Rgb(208, 213, 224);
 /// shrinks the wrap budget and prepends that many spaces to every non-blank
 /// emitted line, so the prose sits inset from the surrounding chrome.
 /// `fidelity` degrades the rendering medium with its source (Move 7): a
-/// context-stressed turn dims and loses contrast, an echoed paragraph
-/// wavers.
+/// context-stressed turn drains the prose's saturation toward grey, an
+/// echoed paragraph wears a flat background wash.
 pub(super) fn render_md(text: &str, w: u16, indent: u16, fidelity: Fidelity) -> Vec<Line<'static>> {
     let body_w = w.min(READ_W).saturating_sub(indent).max(1) as usize;
     let mut comp = Composer::new(body_w, indent as usize);
@@ -58,76 +67,86 @@ pub(super) fn render_md(text: &str, w: u16, indent: u16, fidelity: Fidelity) -> 
 /// (Move 7, coherent degradation).  Both treatments walk the already-built
 /// spans — fixed-colour code, headings, and tables are *not* exempt, so the
 /// whole block reads as one fidelity rather than a mix of degraded prose
-/// and confident code:
+/// and confident code.  The two epistemic signals ride two disjoint colour
+/// axes, neither of which is the value (lightness) channel that carries
+/// magnitude on the rail and the bars — so a degraded answer can never be
+/// misread as a small one, nor a small one as degraded:
 ///
-/// - **context pressure → value reduction.** Level 1 dims; levels 2–3 dim
-///   and pull every foreground toward the background (~40% / ~70%), so a
-///   stressed answer reads as muted.
-/// - **echo similarity → waver.** Alternate rows oscillate ±1 value-step in
-///   lightness, so an echoed paragraph reads as unsteady without parsing.
+/// - **context pressure → foreground drain.** Every foreground desaturates
+///   toward its own luma-grey (~45% / ~70% / ~90% at levels 1–3) at held
+///   luminance, so the prose loses its hue — "drained of confidence" — yet
+///   stays as legible as the sound answer beside it.  No `DIM`: that is the
+///   app's idiom for minor chrome ([`super::line::dim`]), and a suspect
+///   answer is important, not ignorable.
+/// - **echo similarity → background wash.** A flat [`ECHO_WASH`] field sits
+///   behind every span, deepening one step per echo level, so an echoed
+///   paragraph reads as flagged.  It is static and on the background axis,
+///   apart from the drain's foreground axis, so the two signals stay
+///   separable and neither reads as motion.
 fn modulate(lines: &mut [Line<'static>], f: Fidelity) {
     if f.context == 0 && f.echo == 0 {
         return;
     }
-    for (row, line) in lines.iter_mut().enumerate() {
-        // Even rows lift toward white, odd rows toward black — a ±1
-        // value-step oscillation when the paragraph echoes its script.
-        let waver = (f.echo > 0).then_some(if row % 2 == 0 {
-            Color::Rgb(255, 255, 255)
-        } else {
-            Color::Rgb(0, 0, 0)
-        });
+    for line in lines.iter_mut() {
         for span in &mut line.spans {
-            dim_span(span, f.context, waver);
+            drain_span(span, f.context, f.echo);
         }
     }
 }
 
-/// The contrast pull a context-pressure floor applies: levels 2–3 drag
-/// every foreground toward the background (~40% / ~70%) on top of the dim,
-/// so a stressed answer reads as muted.  Levels 0–1 carry no pull.
-fn context_pull(context: u8) -> f32 {
+/// The saturation a context-pressure floor drains from a foreground:
+/// levels 1–3 desaturate toward the colour's own luma-grey by ~45% / ~70%
+/// / ~90%, holding luminance so legibility survives.  Level 0 carries no
+/// drain.
+fn drain(context: u8) -> f32 {
     match context {
-        0 | 1 => 0.0,
-        2 => 0.40,
-        _ => 0.70,
+        0 => 0.0,
+        1 => 0.45,
+        2 => 0.70,
+        _ => 0.90,
     }
 }
 
-/// Degrade one span by a context-pressure floor, optionally wavering its
-/// lightness toward `waver`: dim from level 1, pull its foreground toward
-/// the background from level 2, and mix toward `waver` when the row echoes.
-/// The one span-level modulation [`modulate`] and the coalesced ral block's
-/// intent line ([`apply_context`]) share, so prose and intent degrade alike.
-fn dim_span(span: &mut Span<'static>, context: u8, waver: Option<Color>) {
+/// Degrade one span by a context-pressure floor and an echo level: drain
+/// its foreground's saturation toward grey from level 1 (held luminance),
+/// and shade the field behind it with [`ECHO_WASH`] when the block echoes,
+/// one step per echo level.  The one span-level modulation [`modulate`] and
+/// the coalesced ral block's intent line ([`apply_context`]) share, so
+/// prose and intent degrade alike.
+fn drain_span(span: &mut Span<'static>, context: u8, echo: u8) {
     if span.content.trim().is_empty() {
         return;
     }
-    if context >= 1 {
-        span.style = span.style.add_modifier(Modifier::DIM);
+    let drain = drain(context);
+    if drain > 0.0 {
+        let fg = span.style.fg.unwrap_or(BASE_FG);
+        span.style.fg = Some(desaturate(fg, drain));
     }
-    let pull = context_pull(context);
-    if pull == 0.0 && waver.is_none() {
-        return;
+    if echo > 0 {
+        span.style.bg = Some(mix(wash_from(span.style.bg), ECHO_WASH, echo as f32 / 2.0));
     }
-    let mut fg = span.style.fg.unwrap_or(BASE_FG);
-    if pull > 0.0 {
-        fg = mix(fg, CODE_BG, pull);
+}
+
+/// The concrete background a span's echo wash interpolates from: a span
+/// with no explicit field (the common case — plain prose, `Reset`) starts
+/// at black, so the wash reads at its full depth; one that already carries
+/// a field (a code span's `CODE_BG`) washes from that field, so the echo
+/// shade composes over the code colour rather than erasing it.
+fn wash_from(bg: Option<Color>) -> Color {
+    match bg {
+        Some(c) if c != Color::Reset => c,
+        _ => Color::Rgb(0, 0, 0),
     }
-    if let Some(to) = waver {
-        fg = mix(fg, to, 1.0 / 3.0);
-    }
-    span.style.fg = Some(fg);
 }
 
 /// Degrade a coalesced ral block's intent line by the turn's context
-/// floor — the same value reduction committed prose carries (Move 7), so
+/// floor — the same saturation drain committed prose carries (Move 7), so
 /// distress modulates the intent line, never a sparkline bar's height.  No
-/// waver: an intent is the model's stated purpose, not committed prose, and
-/// carries no echo signal.
+/// echo wash: an intent is the model's stated purpose, not committed prose,
+/// and carries no echo signal.
 pub(super) fn apply_context(line: &mut Line<'static>, context: u8) {
     for span in &mut line.spans {
-        dim_span(span, context, None);
+        drain_span(span, context, 0);
     }
 }
 
@@ -857,4 +876,85 @@ fn syn_to_ratatui(s: SynStyle) -> Style {
 }
 
 // ── tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn luma(c: Color) -> f32 {
+        let Color::Rgb(r, g, b) = c else {
+            unreachable!("test colours are RGB")
+        };
+        0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32
+    }
+
+    /// The non-blank content spans of a rendered block, flattened across
+    /// rows — the ink the modulation acts on.
+    fn ink<'a>(lines: &'a [Line<'static>]) -> Vec<&'a Span<'static>> {
+        lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .filter(|s| !s.content.trim().is_empty())
+            .collect()
+    }
+
+    /// A sound block (fidelity 0) is left untouched: no drained ink, no
+    /// wash behind it, no carried-over `DIM`.
+    #[test]
+    fn sound_prose_is_untouched() {
+        let lines = render_md("plain prose here", 80, MD_INDENT, Fidelity::default());
+        for span in ink(&lines) {
+            assert!(span.style.bg.is_none(), "sound prose wears no wash");
+            assert!(!span.style.add_modifier.contains(Modifier::DIM));
+        }
+    }
+
+    /// Context pressure drains saturation at held luminance and adds **no**
+    /// `DIM` — the modifier the app reserves for ignorable chrome. A
+    /// suspect answer must read as important, not minor.
+    #[test]
+    fn context_drains_without_dim() {
+        let lines = render_md("plain prose here", 80, MD_INDENT, Fidelity { context: 2, echo: 0 });
+        let spans = ink(&lines);
+        assert!(!spans.is_empty());
+        for span in spans {
+            let fg = span.style.fg.expect("drained span carries an explicit fg");
+            assert!(
+                (luma(fg) - luma(BASE_FG)).abs() <= 1.0,
+                "drain held luminance"
+            );
+            assert_ne!(fg, BASE_FG, "drain desaturated the ink");
+            assert!(
+                !span.style.add_modifier.contains(Modifier::DIM),
+                "drain must not borrow the minor-chrome DIM idiom"
+            );
+        }
+    }
+
+    /// Echo shades the field behind every span with a static wash — the
+    /// same background on every row, so it reads as a flagged passage, not
+    /// a render glitch. The foreground is left alone: echo and context ride
+    /// disjoint axes.
+    #[test]
+    fn echo_washes_background_statically() {
+        let lines = render_md(
+            "first line is long enough to wrap onto a second rendered row here please",
+            40,
+            MD_INDENT,
+            Fidelity { context: 0, echo: 2 },
+        );
+        let spans = ink(&lines);
+        assert!(spans.len() >= 2, "needs multiple rows to test row-invariance");
+        let washes: Vec<Color> = spans
+            .iter()
+            .map(|s| s.style.bg.expect("echoed span carries a wash"))
+            .collect();
+        let first = washes[0];
+        assert!(washes.iter().all(|&w| w == first), "wash is static across rows");
+        assert_eq!(first, mix(Color::Rgb(0, 0, 0), ECHO_WASH, 1.0), "wash is the full echo shade");
+        for s in &spans {
+            assert_eq!(s.style.fg, None, "echo leaves the foreground untouched");
+        }
+    }
+}
 
