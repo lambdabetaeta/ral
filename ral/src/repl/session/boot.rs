@@ -233,7 +233,7 @@ pub(super) fn create_frontend(
         // errors when unavailable, so a failure warns and falls through.
         Surface::Structural => {
             #[cfg(feature = "structural")]
-            match StructuralFrontend::new(edit_mode) {
+            match StructuralFrontend::new(edit_mode, runtime.clone()) {
                 Ok(fe) => return Box::new(fe),
                 Err(_) => diagnostic::shell_warning(
                     "ral: structural surface needs a raw-mode terminal; using readline",

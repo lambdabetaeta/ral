@@ -193,6 +193,36 @@ pub(super) fn style_ansi(style: &str) -> Option<&'static str> {
     })
 }
 
+/// Map a highlight style name to a ratatui [`Style`](ratatui::style::Style),
+/// or `None` for an unknown name — the structural surface's analogue of
+/// [`style_ansi`], which paints into a terminal cell rather than emitting an
+/// ANSI escape.  Kept adjacent and arm-for-arm with `style_ansi` so the two
+/// stay in lockstep: a style added to the vocabulary must be given both an
+/// escape and a cell style.
+#[cfg(feature = "structural")]
+pub(super) fn style_ratatui(style: &str) -> Option<ratatui::style::Style> {
+    use ratatui::style::{Color, Modifier, Style};
+    let s = Style::default();
+    Some(match style {
+        "command" => s.fg(Color::Green).add_modifier(Modifier::BOLD),
+        "builtin" => s.fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        "prelude" => s.fg(Color::Blue).add_modifier(Modifier::BOLD),
+        "argument" => s,
+        "option" => s.fg(Color::Cyan),
+        "path-exists" => s.add_modifier(Modifier::UNDERLINED),
+        "path-missing" => s.fg(Color::Red).add_modifier(Modifier::UNDERLINED),
+        "string" => s.fg(Color::Yellow),
+        "number" => s.fg(Color::Magenta),
+        "comment" => s.add_modifier(Modifier::DIM),
+        "error" => s.fg(Color::Red).add_modifier(Modifier::BOLD),
+        "match" => s.add_modifier(Modifier::BOLD),
+        "bracket-1" => s.fg(Color::Cyan),
+        "bracket-2" => s.fg(Color::Magenta),
+        "bracket-3" => s.fg(Color::Yellow),
+        _ => return None,
+    })
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

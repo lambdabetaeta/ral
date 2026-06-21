@@ -14,8 +14,8 @@ use super::super::complete::RalHelper;
 use super::super::config::dirs_history;
 use super::super::keybinding::{KeybindingOutcome, dispatch_keybinding};
 use super::super::plugin::{
-    HookEnvGuard, PluginRuntime, flush_pending_messages, lock, prepare_hook_env, snapshot_history,
-    sync_plugins,
+    HookEnvGuard, PluginRuntime, flush_pending_messages, lock, pop_buffer_stack, prepare_hook_env,
+    snapshot_history, sync_plugins,
 };
 use super::super::plugin_editor::char_to_byte;
 use super::super::prompt::PromptText;
@@ -67,11 +67,6 @@ impl RustylineFrontend {
             edit_mode,
             history_path,
         }
-    }
-
-    /// Drain one entry from the plugin buffer stack (`_ed-push`).
-    fn pop_buffer_stack(&self) -> Option<EditBuffer> {
-        lock(&self.runtime).keybindings.buffers.pop()
     }
 
     /// Run rustyline's `readline` (with or without an initial buffer) and
@@ -150,12 +145,12 @@ impl Frontend for RustylineFrontend {
         sync_plugins(&self.runtime, &mut self.rl);
         snapshot_history(&self.rl, &self.runtime);
 
-        prepare_hook_env(shell, &self.runtime, self.edit_mode);
+        prepare_hook_env(shell, &self.runtime, self.edit_mode.into());
         let _guard = HookEnvGuard(self.runtime.clone());
 
         // Caller-supplied pending wins; otherwise fall through to a buffer
         // pushed onto the stack by `_ed-push`.
-        let initial = pending.or_else(|| self.pop_buffer_stack());
+        let initial = pending.or_else(|| pop_buffer_stack(&self.runtime));
 
         let raw = match self.readline_with_continuation(prompt, initial) {
             Ok(s) => s,
@@ -173,7 +168,7 @@ impl Frontend for RustylineFrontend {
             flush_pending_messages(&self.runtime);
             return Read::Line(raw);
         };
-        match dispatch_keybinding(pk, &raw, shell, &self.runtime, self.edit_mode) {
+        match dispatch_keybinding(pk, &raw, shell, &self.runtime, self.edit_mode.into()) {
             KeybindingOutcome::Accept(line) => {
                 flush_pending_messages(&self.runtime);
                 Read::Line(line)
