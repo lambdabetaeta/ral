@@ -30,6 +30,54 @@ visual variables (shape, value, size, hue, grain, orientation).
 > L1), the agent×step matrix (Move 2), and coherent degradation (Move 7) are
 > implemented in `exarch/src/tui/`. Only Phase 8 (the projection switch — the
 > codebase map and a keybinding to cycle projections) remains `proposed`.
+
+## Primer: Bertin, and the Moves in plain terms
+
+Jacques Bertin's *Sémiologie graphique* (1967) treats a graphic as an
+*encoding*, not decoration: the page is a plane, and a few **visual variables**
+— position, size, value (lightness), hue (colour), grain (texture), shape —
+each carry one datum. The load-bearing rule is that variables differ in what
+they can *say*: some can be **ranked** (value, size, grain — "more/less"),
+others only **told apart** (hue, shape — "different", not "more"). So magnitude
+belongs on a rankable variable and identity on a tell-apart one, and the two
+must never swap — a "heat" colour ramp fails because hue cannot be ranked.
+
+Applied here, the **transcript stops being a log and becomes that graphic**:
+rather than bury token counts and line-changes in prose and spend the left
+margin on a decorative glyph, each block carries its data on these variables, so
+the session's shape reads at a glance. The seven "Moves" are where that lands:
+
+- **Move 1 — the rail.** The left two columns become a per-block index: one cell
+  carries *shape* (block kind), *hue* (which agent), and *value* (magnitude —
+  brighter is bigger). The keystone everything else builds on.
+- **Move 2 — the matrix.** With more than one agent live, the tab bar becomes an
+  agents×steps grid: row hue is the agent, brightness is token spend, so "who's
+  burning the budget" is seen, not read.
+- **Move 3 — the status line earns its ink.** A bare `ctx N%` becomes a
+  lightness ramp toward full, and a size-for-time *elapsed-wait bar* replaces the
+  spinner. (A Gantt ribbon was tried here and retired — it encoded a
+  near-constant, so it said nothing; see its amendment.)
+- **Move 4 — size bars.** A collapsed header gets a bar whose *length* is its
+  magnitude (log-scaled), so a 500-line change and a 2-line one differ at a
+  glance.
+- **Move 5 — grain.** A diff header gets a braille *texture* whose density is the
+  add/delete ratio — "mostly additions / balanced / mostly deletions" without
+  counting.
+- **Move 6 — graded reduction.** Collapse is a 0–3 ramp (rail-glyph → full
+  source), so detail is something you *dial*. (Amended: prose is exempt — it has
+  no summary to collapse to — and per-block L0 is gone; see its amendment.)
+- **Move 7 — coherent degradation.** The medium carries *how much to trust* a
+  passage: an answer written under context pressure, or merely echoing its own
+  script, renders drained, so a shaky answer stops borrowing a sound one's
+  authority. (Amended: distrust rides saturation and a background wash, never
+  lightness; see its amendment.)
+
+One caveat the body elaborates: Bertin's only strictly *quantitative* variable
+is **size**; value and grain are merely **ordered**, and the bars are
+log-scaled — so every bar here reads as a *rank*, not a measurement, and the
+digits stay the source of exact numbers. Hue-for-identity is not colour-blind
+safe on its own, so the agent palette is chosen to separate by lightness too.
+
 ## The diagnosis
 
 The present TUI is a *narrative log*:
