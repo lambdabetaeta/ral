@@ -2,13 +2,16 @@
 //!
 //! A viewport's scrollback is a sequence of [`Block`]s, not a flat line
 //! buffer.  Three block kinds are *dialable* — tool calls, patches, and
-//! markdown — each carrying a disclosure [`Block::level`] (0–3) that
-//! grades how much it reveals: from the rail glyph alone (L0) up through a
-//! one-line summary (L1) and a few lines of context (L2) to the full
-//! source (L3).  Chrome is already 1–few lines, so it stays full.  Each
-//! block memoises the lines it last produced, keyed by the width it was
-//! asked for, so re-flattening the buffer each frame re-renders only the
-//! block the user just dialed, or the whole buffer once on a resize.
+//! subagent results — each carrying a disclosure [`Block::level`] (1–3)
+//! that grades how much it reveals: from a one-line summary (L1) through a
+//! few lines of context (L2) to the full source (L3).  A block is dialable
+//! only if it has a real summary to collapse to; model prose ([`BlockKind::
+//! Markdown`]) has none — its answer is product to read, not process to
+//! reduce — so it always renders full and is inert to the dial.  Chrome is
+//! already 1–few lines, so it too stays full.  Each block memoises the lines
+//! it last produced, keyed by the width it was asked for, so re-flattening
+//! the buffer each frame re-renders only the block the user just dialed, or
+//! the whole buffer once on a resize.
 
 use super::fidelity::Fidelity;
 use super::group;
@@ -114,11 +117,10 @@ const N: usize = 3;
 /// A block paired with the lines it last rendered, memoised by width.
 pub(super) struct Block {
     kind: BlockKind,
-    /// Disclosure level, `0..=3`: L0 rail glyph alone, L1 summary, L2
-    /// summary + [`N`] lines of context, L3 full source.  Set at
-    /// construction per kind (conservative defaults preserve today's
-    /// rendering), dialed by [`Self::dial`].  Inert on chrome, which
-    /// always renders full.
+    /// Disclosure level, `1..=3`: L1 summary, L2 summary + [`N`] lines of
+    /// context, L3 full source.  Set at construction per kind (conservative
+    /// defaults preserve today's rendering), dialed by [`Self::dial`].  Inert
+    /// on prose and chrome, which always render full.
     level: u8,
     /// The producing agent's palette slot, stamped at push.
     agent: AgentSlot,
@@ -141,9 +143,9 @@ pub(super) struct Block {
 
 impl Block {
     /// Build a block at its kind's default level — conservative so
-    /// nothing changes visually until the user dials: `ToolCall` at L1
-    /// (today's collapsed view), every other kind at L3 (today's full
-    /// render).
+    /// nothing changes visually until the user dials: `ToolCall` and
+    /// `Subagent` at L1 (their collapsed headers), every other kind at L3
+    /// (today's full render).
     fn new(kind: BlockKind, agent: AgentSlot, fidelity: Fidelity) -> Self {
         let level = match kind {
             BlockKind::ToolCall { .. } | BlockKind::Subagent { .. } => 1,
@@ -274,15 +276,15 @@ impl Block {
     }
 
     /// True for the block kinds whose disclosure [`Self::level`] the user
-    /// can dial: tool calls, markdown, and a card carrying a `diff` mark.
-    /// A diff-less card is chrome-level, and chrome is inert.
+    /// can dial — those with a real summary to collapse to: tool calls,
+    /// subagent results, and a card carrying a `diff` mark.  Model prose
+    /// ([`BlockKind::Markdown`]) has no summary, only product to read, so it
+    /// is inert; a diff-less card is chrome-level, and chrome is inert.
     pub(super) fn dialable(&self) -> bool {
         match &self.kind {
-            BlockKind::ToolCall { .. } | BlockKind::Markdown(_) | BlockKind::Subagent { .. } => {
-                true
-            }
+            BlockKind::ToolCall { .. } | BlockKind::Subagent { .. } => true,
             BlockKind::Card { card, .. } => card.has_diff(),
-            BlockKind::Chrome { .. } => false,
+            BlockKind::Markdown(_) | BlockKind::Chrome { .. } => false,
         }
     }
 
@@ -385,40 +387,37 @@ impl Block {
         self.cache = None;
     }
 
-    /// The lowest level this block dials to.  A tool call is always the
-    /// head of a coalesced ral block ([`super::group`]), whose floor is
-    /// **L1, the live tip** — there is no L0 for a call block.  Every other
-    /// dialable kind reduces to L0 (rail glyph alone).
-    fn level_floor(&self) -> u8 {
-        match self.kind {
-            BlockKind::ToolCall { .. } => 1,
-            _ => 0,
-        }
-    }
+    /// The lowest level any dialable block reduces to: **L1, the summary**.
+    /// There is no per-block L0 — a block reduces to its summary, never to
+    /// the rail glyph alone.  (A tool call is the head of a coalesced ral
+    /// block, [`super::group`], whose L1 is the live tip; a diff and a
+    /// subagent reduce to their one-line headers.)
+    const LEVEL_FLOOR: u8 = 1;
 
-    /// Dial the disclosure level by `delta`, clamped to `level_floor..=3`,
-    /// dropping the memo when it changed so the body re-renders at the new
-    /// level.  A no-op on a non-dialable block or when already at the clamp.
+    /// Dial the disclosure level by `delta`, clamped to [`Self::LEVEL_FLOOR`]
+    /// `..=3`, dropping the memo when it changed so the body re-renders at the
+    /// new level.  A no-op on a non-dialable block or when already at the
+    /// clamp.
     pub(super) fn dial(&mut self, delta: i8) {
         if !self.dialable() {
             return;
         }
-        let next = (self.level as i8 + delta).clamp(self.level_floor() as i8, 3) as u8;
+        let next = (self.level as i8 + delta).clamp(Self::LEVEL_FLOOR as i8, 3) as u8;
         if next != self.level {
             self.level = next;
             self.cache = None;
         }
     }
 
-    /// Cycle a dialable block between its floor (reduced) and L3 (revealed) —
-    /// the click-on-rail affordance, preserving today's click-to-expand.
-    /// A tool call's floor is L1, every other kind's is L0.
+    /// Cycle a dialable block between its floor ([`Self::LEVEL_FLOOR`],
+    /// reduced) and L3 (revealed) — the click-on-rail affordance, preserving
+    /// today's click-to-expand.
     pub(super) fn cycle(&mut self) {
         if !self.dialable() {
             return;
         }
         let next = if self.level >= 3 {
-            self.level_floor()
+            Self::LEVEL_FLOOR
         } else {
             3
         };
@@ -465,11 +464,6 @@ impl Block {
     fn render_with(&self, width: u16, force_full: bool) -> Vec<Line<'static>> {
         let level = self.render_level(force_full);
         let mut lines = self.body(width, level);
-        // L0 reduces the body to nothing; the rail glyph alone remains, so
-        // synthesise the single blank row it is prepended to.
-        if lines.is_empty() {
-            lines.push(Line::default());
-        }
         if let Some(kind) = self.rail_kind(level) {
             let rail = rail::span(kind, self.agent, self.magnitude());
             // Markdown insets every row by `MD_INDENT`; the rail occupies the
@@ -487,25 +481,17 @@ impl Block {
         lines
     }
 
-    /// The rail-less body at `width`, graded by `level`.  L0 reveals
-    /// nothing (only the rail survives, prepended by [`Self::render_with`]);
-    /// L1 the one-line summary; L2 the summary plus [`N`] lines of context;
-    /// L3 the full source.  Chrome ignores the level — it is always full.
+    /// The rail-less body at `width`, graded by `level` (`1..=3`): L1 the
+    /// one-line summary; L2 the summary plus [`N`] lines of context; L3 the
+    /// full source.  Prose and chrome ignore the level — they are always full.
     fn body(&self, width: u16, level: u8) -> Vec<Line<'static>> {
-        if level == 0 && self.dialable() {
-            return Vec::new();
-        }
         match &self.kind {
             BlockKind::ToolCall { tool, summary, cmd } => match level {
                 3 => line::tool_call_expanded(summary, tool, cmd, width),
                 2 => line::tool_call_context(summary, tool, cmd, N, width),
                 _ => line::tool_call_collapsed(summary, tool, self.result_size, width),
             },
-            BlockKind::Markdown(src) => match level {
-                3 => md::render_md(src, width, MD_INDENT, self.fidelity),
-                2 => first_rows(md::render_md(src, width, MD_INDENT, self.fidelity), N),
-                _ => first_rows(md::render_md(src, width, MD_INDENT, self.fidelity), 1),
-            },
+            BlockKind::Markdown(src) => md::render_md(src, width, MD_INDENT, self.fidelity),
             BlockKind::Subagent {
                 title,
                 text,
@@ -514,11 +500,10 @@ impl Block {
             } => {
                 let size = text.lines().count() as u32;
                 let mut ls = line::subagent_header(title, size, error.as_deref(), *elapsed);
-                // L1 (and L0, handled above) is the header alone; L2/L3 extend
-                // it with the rendered body. Build the header first so the
-                // markdown rows append after it intact — the header is row 0
-                // and the markdown's own first-rows/leading-blank logic never
-                // touches it.
+                // L1 is the header alone; L2/L3 extend it with the rendered
+                // body. Build the header first so the markdown rows append
+                // after it intact — the header is row 0 and the markdown's own
+                // first-rows/leading-blank logic never touches it.
                 match level {
                     3 => ls.extend(md::render_md(text, width, MD_INDENT, self.fidelity)),
                     2 => ls.extend(first_rows(
@@ -565,8 +550,8 @@ impl Block {
 
 /// The first `k` rendered rows of `lines`, preserving leading blanks but
 /// keeping at least one row so the rail always has somewhere to land.
-/// Used for the partial markdown views (L1/L2): `render_md` lays out the
-/// whole block, and truncating its rows keeps a code fence's opening
+/// Used for the subagent result's L2 context view: `render_md` lays out the
+/// whole result, and truncating its rows keeps a code fence's opening
 /// rows intact rather than re-parsing a prefix of the source.
 fn first_rows(mut lines: Vec<Line<'static>>, k: usize) -> Vec<Line<'static>> {
     // Skip the leading blank `render_md` does not emit (markdown opens
@@ -734,6 +719,7 @@ fn push_char(row: &mut Vec<Span<'static>>, ch: char, style: Style) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bus::Row;
 
     fn plain(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
@@ -741,6 +727,66 @@ mod tests {
 
     fn indent_of(s: &str) -> usize {
         s.len() - s.trim_start().len()
+    }
+
+    fn diff_block() -> Block {
+        let hunks = vec![Hunk {
+            start: 1,
+            rows: vec![Row::Add("a new line".into()), Row::Add("another".into())],
+        }];
+        Block::patch("src/lib.rs".into(), hunks, AgentSlot(0))
+    }
+
+    fn subagent_block() -> Block {
+        Block::subagent(
+            "delegate".into(),
+            "the result\nspanning\na few lines".into(),
+            None,
+            Duration::from_secs(2),
+            Fidelity::default(),
+            AgentSlot(0),
+        )
+    }
+
+    /// Model prose is not dialable: it has no summary to collapse to, so the
+    /// dial and click gestures are inert and it renders identically whatever
+    /// level is asked of it.
+    #[test]
+    fn markdown_is_inert_prose() {
+        let mut block = Block::markdown(
+            "# heading\n\nA paragraph of prose that the answer is to read.".into(),
+            AgentSlot(0),
+            Fidelity::default(),
+        );
+        assert!(!block.dialable());
+
+        let full = block.body(READ_W, 3);
+        assert_eq!(block.body(READ_W, 1), full, "L1 must render full prose");
+        assert_eq!(block.body(READ_W, 2), full, "L2 must render full prose");
+
+        let before = block.level();
+        block.dial(-1);
+        block.cycle();
+        assert_eq!(block.level(), before, "gestures are inert on prose");
+    }
+
+    /// Every dialable kind floors at L1 — there is no per-block L0, so a block
+    /// never reduces below its one-line summary.
+    #[test]
+    fn dialable_kinds_floor_at_l1() {
+        let tool = Block::tool_call("ral", "read lib".into(), "read src/lib.rs".into(), 0, AgentSlot(0));
+        for mut block in [tool, diff_block(), subagent_block()] {
+            assert!(block.dialable());
+            // Dial hard down: the level pins at the floor, never below it.
+            block.dial(-3);
+            assert_eq!(block.level(), Block::LEVEL_FLOOR);
+            assert_eq!(Block::LEVEL_FLOOR, 1);
+            // Cycling from full lands back on the floor, not L0.
+            block.dial(3);
+            assert_eq!(block.level(), 3);
+            block.cycle();
+            assert_eq!(block.level(), Block::LEVEL_FLOOR);
+        }
     }
 
     /// A wrapped, indented, rail-less line (a source or io-effect row) keeps

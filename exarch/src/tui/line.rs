@@ -524,8 +524,8 @@ pub(super) fn error(msg: &str) -> Vec<Line<'static>> {
 /// lightness), shape (`▎`).
 fn diff_body(path: &str, hunks: &[Hunk], level: u8) -> Vec<Line<'static>> {
     match level {
-        // L1: header only.  (L0 is the rail glyph alone, handled by the block.)
-        0 | 1 => vec![patch_header(path, hunks)],
+        // L1, the floor: header only.
+        1 => vec![patch_header(path, hunks)],
         // L2: header + the first hunk's located context and changes.
         2 => diff_capped(path, hunks, Some(1)),
         // L3: the full diff.

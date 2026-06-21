@@ -23,13 +23,13 @@ visual variables (shape, value, size, hue, grain, orientation).
 > `rule_line` ctx% value-ramp (Move 3 — the Gantt phase ribbon that shipped
 > alongside it was subsequently retired for an elapsed-wait bar; see the
 > amendment under Move 3), the collapsed-header
-> size bars (Move 4) and diff-density grain (Move 5), graded reduction (Move 6),
-> the agent×step matrix (Move 2), and coherent degradation (Move 7) are
+> size bars (Move 4) and diff-density grain (Move 5), graded reduction (Move 6,
+> including the 2026-06-20 coalescing of observation-only `ral` calls into a
+> dialable *block* with each `diff` an always-visible barrier, and the 2026-06-21
+> retirement of per-block L0 — prose renders full, every dialable kind floors at
+> L1), the agent×step matrix (Move 2), and coherent degradation (Move 7) are
 > implemented in `exarch/src/tui/`. Only Phase 8 (the projection switch — the
-> codebase map and a keybinding to cycle projections) remains `proposed`. A later
-> amendment under Move 6 (2026-06-20) proposes coalescing observation-only `ral`
-> calls into a dialable *block* (a live-tip L1, no L0), with each `diff` an
-> always-visible barrier between blocks, and is not yet built.
+> codebase map and a keybinding to cycle projections) remains `proposed`.
 ## The diagnosis
 
 The present TUI is a *narrative log*:
@@ -214,6 +214,33 @@ event on the bus, while move 7 can deepen with one.
    > a short bar can never be misread as a stressed call. And this is a TUI
    > projection only — headless prints each call and its effects in arrival order,
    > unchanged.
+
+   > **Amended 2026-06-21 — graded reduction applies only where there is a real
+   > summary to collapse to; prose is exempt and per-block L0 is retired.**
+   > Move 6 grades *every* dialable kind down a 0–3 ramp, but reduction is only
+   > meaningful where the lower levels are a genuine summary of the higher ones —
+   > where there is process to compress. Two corrections follow.
+   >
+   > **Prose is exempt — it always renders full.** A `Markdown` block's L1/L2 were
+   > arbitrary "first N rows" truncations, not a summary: model prose is the
+   > *answer*, product to read, not process to reduce, and a half-shown paragraph
+   > is just a paragraph with its end cut off. So `Markdown` is removed from the
+   > dialable set and renders full at every level; the dial and click gestures —
+   > already guarded on `dialable()` — pass over it. Its rail still carries
+   > identity and magnitude (the rail-magnitude work), so prose keeps its place in
+   > the 2-column thumbnail; only the per-block disclosure goes away. Subagent
+   > results stay dialable: they *do* have a real summary — the `↘ title · Ns ·
+   > size` header — that L1 collapses to.
+   >
+   > **Per-block L0 is retired — L1 is the floor for every kind.** The Move 6
+   > amendment above already gave the coalesced ral block no L0 (L1, the live tip,
+   > is its floor); this generalises that to every dialable kind. A diff and a
+   > subagent result, which previously reduced to L0 (the rail glyph alone), now
+   > floor at L1 (their one-line headers), exactly as a tool call always has. No
+   > block reduces below its summary, so the rail-glyph-alone level is gone as a
+   > *per-block* state. "Rail-only" is reserved for a possible future *view-level*
+   > skeleton mode — a projection that strips every block to its rail at once — and
+   > is never again a level a single block can hold.
 
 7. **Coherent degradation: the interface's fidelity tracks the model's
    capability.** Every agent TUI renders a degraded answer — one emitted under
@@ -628,6 +655,10 @@ header; Phase 5 then makes those headers the L1 view of a dialable stack. Either
 order composes — Phase 5 first decorates L1 with Phases 3–4 after; Phases 3–4
 first land on today's headers and Phase 5 generalises. The decision sequences
 4 → 5 → 6, which we follow.
+
+*Amended 2026-06-21: the per-kind L0 levels and the `Markdown` dial described
+here are retired — prose renders full and every dialable kind floors at L1; see
+the amendment under Move 6 above.*
 
 ### Phase 6 — Move 2, agent×step matrix
 
