@@ -145,8 +145,11 @@ struct Parser {
     tokens: Vec<(Token, Span)>,
     pos: usize,
     /// Current depth of recursive descent through nesting-introducing
-    /// productions ([`Parser::parse_primary`] and the Pratt
-    /// [`Parser::parse_expr_prec`]).  Bumped and decremented by
+    /// productions.  Each of the three mutually-recursive sub-grammars
+    /// passes through one guarded chokepoint per level —
+    /// [`Parser::parse_primary`] (values), [`Parser::parse_expr_atom`]
+    /// (arithmetic), and [`Parser::parse_pattern`] (patterns) — so this
+    /// one counter bounds them all.  Bumped and decremented by
     /// [`Parser::nested`] — closure-style so the decrement is always
     /// paired with its increment on every error-return path.
     depth: usize,
@@ -748,27 +751,32 @@ impl Parser {
         }))
     }
 
-    /// Parse a pattern (for binding LHS or lambda params)
+    /// Parse a pattern (binding LHS or lambda params).
+    ///
+    /// The *pattern* grammar's `nested()` chokepoint, and its sole entry:
+    /// list and map patterns recurse back through here for each element,
+    /// so one guard at the top bounds the whole pattern recursion — the
+    /// pattern-grammar analogue of [`Self::parse_primary`].
     fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
-        match self.peek() {
-            Token::LBracket => self.parse_pattern_inner(),
+        self.nested(|p| match p.peek() {
+            Token::LBracket => p.parse_pattern_inner(),
             tok if tok.as_plain_word() == Some("_") => {
-                self.advance();
+                p.advance();
                 Ok(Pattern::Wildcard)
             }
-            Token::Word(Word::Plain(name)) if is_reserved(name) => Err(self.error(format!(
+            Token::Word(Word::Plain(name)) if is_reserved(name) => Err(p.error(format!(
                 "'{name}' is a reserved keyword and cannot be used as a binding name"
             ))),
             Token::Word(Word::Plain(name)) if is_ident(name) => {
                 let name = name.clone();
-                self.advance();
+                p.advance();
                 Ok(Pattern::Name(name))
             }
-            _ => Err(self.error(
+            _ => Err(p.error(
                 "expected a pattern: a name like `x`, `_` to ignore, \
                  or a destructuring `[a, b]` / `[host: h, port: p]`",
             )),
-        }
+        })
     }
 
     fn parse_pattern_inner(&mut self) -> Result<Pattern, ParseError> {
@@ -925,11 +933,13 @@ impl Parser {
 
     /// primary = word | tag | block | collection
     ///
-    /// Gates recursive descent: every nested syntactic form
-    /// (`{ … }`, `[ … ]`, `!{ … }`, `$[ … ]` via `parse_word`'s
-    /// `Token::Bang`/`Token::Expr` arms) passes through here, so the
-    /// depth check at the top is sufficient to bound *parser*
-    /// recursion.  The matching cap on *lexer* nesting lives in
+    /// The *value* grammar's `nested()` chokepoint: every nested value
+    /// form (`{ … }`, `[ … ]`, `!{ … }`, `$[ … ]` via `parse_word`'s
+    /// `Token::Bang`/`Token::Expr` arms) passes through here, so one depth
+    /// check bounds the value recursion.  The sibling sub-grammars carry
+    /// their own chokepoints — [`Self::parse_expr_atom`] (arithmetic) and
+    /// [`Self::parse_pattern`] (patterns) — since neither routes through a
+    /// primary.  The matching cap on *lexer* nesting lives in
     /// [`lexer::Lexer::scan_token_group`].
     fn parse_primary(&mut self) -> Result<Ast, ParseError> {
         self.nested(|p| match p.peek() {
@@ -1424,28 +1434,42 @@ impl Parser {
 
     // ── Arithmetic (Pratt parser) ────────────────────────────────────
 
+    /// Precedence-climbing loop.  The depth-growing recursions —
+    /// parenthesised sub-expressions and unary prefixes — all bottom out
+    /// in [`Self::parse_expr_atom`], which carries the `nested()` guard,
+    /// so this loop needs none of its own: its only self-recursion is the
+    /// binary right-hand side, bounded by the fixed precedence ladder.
     fn parse_expr_prec(&mut self, min_prec: u8) -> Result<Expr, ParseError> {
-        self.nested(|p| {
-            let mut left = p.parse_expr_atom()?;
+        let mut left = self.parse_expr_atom()?;
 
-            while let Some((op, prec)) = p.peek_expr_op() {
-                if prec < min_prec {
-                    break;
-                }
-                p.advance(); // consume operator token
-                let right = p.parse_expr_prec(prec + 1)?;
-                left = match op {
-                    InfixOp::And => Expr::And(Box::new(left), Box::new(right)),
-                    InfixOp::Or => Expr::Or(Box::new(left), Box::new(right)),
-                    InfixOp::Op(o) => Expr::BinOp(Box::new(left), o, Box::new(right)),
-                };
+        while let Some((op, prec)) = self.peek_expr_op() {
+            if prec < min_prec {
+                break;
             }
+            self.advance(); // consume operator token
+            let right = self.parse_expr_prec(prec + 1)?;
+            left = match op {
+                InfixOp::And => Expr::And(Box::new(left), Box::new(right)),
+                InfixOp::Or => Expr::Or(Box::new(left), Box::new(right)),
+                InfixOp::Op(o) => Expr::BinOp(Box::new(left), o, Box::new(right)),
+            };
+        }
 
-            Ok(left)
-        })
+        Ok(left)
     }
 
+    /// One operand of the arithmetic grammar — and that grammar's single
+    /// `nested()` chokepoint.  Parenthesised sub-expressions recurse via
+    /// [`Self::parse_expr_prec`] and the unary prefixes `-` / `not` recurse
+    /// straight back here, so guarding this one entry bounds every
+    /// depth-growing path inside `$[…]`.  The body lives in
+    /// [`Self::parse_expr_operand`]; this wrapper exists only to apply the
+    /// guard, mirroring [`Self::parse_primary`] and [`Self::parse_pattern`].
     fn parse_expr_atom(&mut self) -> Result<Expr, ParseError> {
+        self.nested(Self::parse_expr_operand)
+    }
+
+    fn parse_expr_operand(&mut self) -> Result<Expr, ParseError> {
         match self.peek().clone() {
             Token::LParen => {
                 self.advance();
@@ -2771,6 +2795,56 @@ mod tests {
                 bare_head("echo"),
                 vec![plain("inner")]
             )]))]))]
+        );
+    }
+
+    // ── Recursion-depth chokepoints ─────────────────────────────────────
+    //
+    // The three mutually-recursive sub-grammars each descend through one
+    // `nested()` guard (`parse_primary` / `parse_expr_atom` /
+    // `parse_pattern`).  These exercise the two sub-grammars whose
+    // recursion does *not* route through `parse_primary`, so adversarial
+    // depth rejects cleanly rather than overflowing the call stack.  The
+    // depth used sits well above the cap (64) but far below any real stack
+    // ceiling, so a regression surfaces as a missing error, not a crash.
+
+    /// Nested destructuring patterns recurse through `parse_pattern`; deep
+    /// nesting must hit the cap, not overflow the stack.
+    #[test]
+    fn deeply_nested_pattern_hits_nesting_cap() {
+        let n = 200;
+        let src = format!("let {}a{} = x", "[".repeat(n), "]".repeat(n));
+        let err = parse(&src).unwrap_err();
+        assert!(
+            err.message.contains("too deep"),
+            "deep pattern nesting should hit the cap, got: {}",
+            err.message
+        );
+    }
+
+    /// A long run of unary `-` recurses through `parse_expr_atom`; deep
+    /// nesting must hit the cap, not overflow the stack.
+    #[test]
+    fn deeply_nested_unary_minus_hits_nesting_cap() {
+        let src = format!("$[{}1]", "- ".repeat(200));
+        let err = parse(&src).unwrap_err();
+        assert!(
+            err.message.contains("too deep"),
+            "deep unary-minus nesting should hit the cap, got: {}",
+            err.message
+        );
+    }
+
+    /// A long run of `not` recurses through `parse_expr_atom`; deep nesting
+    /// must hit the cap, not overflow the stack.
+    #[test]
+    fn deeply_nested_not_hits_nesting_cap() {
+        let src = format!("$[{}$x]", "not ".repeat(200));
+        let err = parse(&src).unwrap_err();
+        assert!(
+            err.message.contains("too deep"),
+            "deep `not` nesting should hit the cap, got: {}",
+            err.message
         );
     }
 
