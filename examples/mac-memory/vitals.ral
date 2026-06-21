@@ -1,0 +1,43 @@
+#!/usr/bin/env ral
+
+# A single structured reading of memory and load pressure on macOS.
+#
+#     ral vitals.ral
+#
+# The panic this replaces is a burst of unrelated probes —
+#
+#     uptime
+#     sysctl vm.swapusage
+#     memory_pressure | tail -1
+#     ps -Aco pid,pmem,rss,comm -m | head
+#     sysctl -n hw.memsize
+#
+# — five commands whose numbers you then eyeball-correlate by hand, none
+# of which survives the next prompt.  Here one `grab` combinator lifts a
+# capture group out of any line, the heaviest processes parse into typed
+# records, and the whole reading is one value: index it, diff it against
+# a later snapshot, or hand it to a `reap`.
+
+let grab = { |pat s| re-replace "(?s).*$pat.*" '$1' $s }
+
+let load  = map $float !{words !{grab 'averages: (.*)' !{uptime}}}
+let swap  = sysctl -n vm.swapusage
+let used  = float !{grab 'used = ([0-9.]+)'  $swap}
+let total = float !{grab 'total = ([0-9.]+)' $swap}
+let freep = int   !{grab 'free percentage: ([0-9]+)' !{memory_pressure 2>/dev/null}}
+let ram   = $[!{int !{sysctl -n hw.memsize}} / 1073741824]
+
+let hog = { |l|
+    let w = words $l
+    [name: !{intercalate ' ' !{drop 3 $w}}, mem-pct: !{float $w[1]}, rss-mb: $[!{int $w[2]} / 1024]]
+}
+let rows = lines !{ps -Aco pid,pmem,rss,comm -m}
+let hogs = map $hog !{take 6 !{drop 1 $rows}}
+
+[
+    ram-gb:   $ram,
+    load:     [m1: $load[0], m5: $load[1], m15: $load[2]],
+    swap-mb:  [used: $used, total: $total],
+    free-pct: $freep,
+    hogs:     $hogs,
+]
