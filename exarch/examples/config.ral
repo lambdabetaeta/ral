@@ -1,0 +1,63 @@
+# Example exarch provider config — unusual (custom) endpoints only.
+#
+# Copy to  $XDG_CONFIG_HOME/exarch/config.ral  (usually
+# ~/.config/exarch/config.ral).  It lives at the trusted config home,
+# NEVER in a working tree: a redirected `endpoint` points the agent's
+# own traffic at an arbitrary server, so the file is evaluated under a
+# no-authority grant (no exec/net/fs) and the sandboxed agent — which
+# writes only cwd and scratch — cannot reach it.
+#
+# You do NOT need this file for famous providers.  Those auto-populate
+# from the environment: export the conventional key var before launch
+# and exarch reads it into its in-memory store at startup, then scrubs
+# the var so no spawned child inherits the secret:
+#
+#     ANTHROPIC_API_KEY     -> anthropic
+#     OPENAI_API_KEY        -> openai
+#     OPENROUTER_API_KEY    -> openrouter
+#     DEEPSEEK_API_KEY      -> deepseek
+#     OPENCODE_API_KEY      -> opencode-zen and opencode-go (shared)
+#     XAI_API_KEY           -> xai
+#     DASHSCOPE_API_KEY     -> qwen
+#
+# This file is only for endpoints exarch cannot know: self-hosted or
+# non-famous.  The terminal expression must be a map
+#   [name: [endpoint: ..., key: ..., protocol: ...], ...]
+# with, per entry:
+#   endpoint  base URL of the API
+#   key       NAME OF THE ENV VAR holding the bearer key — never the key
+#             itself.  The key still comes from the environment, read and
+#             scrubbed exactly like a famous provider's.
+#   protocol  the wire protocol, one of:
+#               completions  OpenAI v1 (/v1/chat/completions)
+#               responses    OpenAI v2 (/v1/responses)
+#               anthropic    Anthropic native
+#
+# It is source code, not a static file, so you may compute values:
+
+let host = 'http://localhost:11434'
+
+return [
+  # A local OpenAI-compatible server (llama.cpp, Ollama, vLLM, ...).
+  # The bearer comes from $LOCAL_LLAMA_KEY at startup.
+  local-llama: [
+    endpoint: "$host/v1/",
+    key:      'LOCAL_LLAMA_KEY',
+    protocol: 'completions',
+  ],
+
+  # A gateway that speaks the OpenAI Responses (v2) protocol; its key is
+  # read from $GATEWAY_API_KEY.
+  work-gateway: [
+    endpoint: 'https://llm.internal.example/v1/',
+    key:      'GATEWAY_API_KEY',
+    protocol: 'responses',
+  ],
+
+  # An Anthropic-compatible proxy; bearer from $PROXY_ANTHROPIC_KEY.
+  anthropic-proxy: [
+    endpoint: 'https://proxy.example/anthropic/',
+    key:      'PROXY_ANTHROPIC_KEY',
+    protocol: 'anthropic',
+  ],
+]

@@ -44,12 +44,29 @@ is auto-discovered and available; no flag names a provider. The keys are
 read into memory and scrubbed from the environment at startup so no
 spawned child inherits them.
 
-| provider     | key env var          | default model               |
-|--------------|----------------------|-----------------------------|
-| `anthropic`  | `ANTHROPIC_API_KEY`  | `claude-opus-4`             |
-| `openai`     | `OPENAI_API_KEY`     | `gpt-5.5`                   |
-| `openrouter` | `OPENROUTER_API_KEY` | `anthropic/claude-opus-4`   |
-| `deepseek`   | `DEEPSEEK_API_KEY`   | `deepseek-chat`             |
+| provider       | key env var          | default model             |
+|----------------|----------------------|---------------------------|
+| `anthropic`    | `ANTHROPIC_API_KEY`  | `claude-opus-4`           |
+| `openai`       | `OPENAI_API_KEY`     | `gpt-5.5`                 |
+| `openrouter`   | `OPENROUTER_API_KEY` | `anthropic/claude-opus-4` |
+| `deepseek`     | `DEEPSEEK_API_KEY`   | `deepseek-chat`           |
+| `opencode-zen` | `OPENCODE_API_KEY`   | `glm-5.1`                 |
+| `opencode-go`  | `OPENCODE_API_KEY`   | `glm-5.2`                 |
+| `xai`          | `XAI_API_KEY`        | `grok-4.3`                |
+| `qwen`         | `DASHSCOPE_API_KEY`  | `qwen3.6-plus`            |
+
+`opencode-zen` and `opencode-go` share one `OPENCODE_API_KEY` — one account
+key, two endpoints — so setting it makes both available. A key value with a
+stray control character (e.g. a pasted newline) is rejected as malformed, but
+still scrubbed.
+
+A **custom or self-hosted endpoint** exarch has no built-in knowledge of is
+declared in `$XDG_CONFIG_HOME/exarch/config.ral` with its base URL, the *name*
+of the env var holding its key, and its wire protocol; the key itself still
+comes from the environment and is scrubbed like a famous provider's. See
+[`examples/config.ral`](examples/config.ral) for the format. A signed-in
+ChatGPT account is the one credential not read from the environment: it
+authorises over OAuth and appears as its own selectable provider.
 
 Type `/model` in the REPL for a searchable picker over every available
 provider's live model list (fetched from the provider and cached); the
