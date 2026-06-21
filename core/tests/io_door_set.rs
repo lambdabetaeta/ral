@@ -125,6 +125,7 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("exarch/src/state.rs", "io-door:silent:state-write"),
     ("exarch/src/tools/fff.rs", "io-door:silent:fff-db-dir"),
     ("exarch/src/tui.rs", "io-door:silent:stderr-log"),
+    ("exarch/src/tui/viewport.rs", "io-door:silent:export"),
     ("exarch/src/tui/viewport.rs", "io-door:silent:viewport-log"),
     // ── ral / ral-sh ──────────────────────────────────────────────────────
     ("ral-sh/src/main.rs", "io-door:silent:respawn-posix-sh"),
@@ -132,7 +133,7 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("ral/build.rs", "io-door:silent:git-probe"),
     ("ral/src/main.rs", "io-door:silent:script-read"),
     ("ral/src/platform.rs", "io-door:silent:exit-hints-read"),
-    ("ral/src/repl/complete.rs", "io-door:silent:complete-readdir"),
+    ("ral/src/repl/completion.rs", "io-door:silent:complete-readdir"),
     ("ral/src/repl/config.rs", "io-door:silent:history-mkdir"),
     ("ral/src/repl/config.rs", "io-door:silent:rc-write"),
     ("ral/src/repl/frontend.rs", "io-door:silent:history-append"),

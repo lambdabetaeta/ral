@@ -133,6 +133,18 @@ fn open_log(path: &Path) -> io::BufWriter<Box<dyn io::Write + Send>> {
     io::BufWriter::new(sink)
 }
 
+/// Copy an already-flushed `user.log` at `src` to the user-chosen `dest`
+/// for `/export`.  The caller resolves `dest`, refuses to overwrite it, and
+/// flushes the log first; this is the doored copy, kept beside [`open_log`]
+/// so all `user.log` I/O lives in one place.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:export] copies a flushed user.log to the user-chosen export path; output infra, not turn-time data I/O"
+)]
+pub(super) fn export_log(src: &Path, dest: &Path) -> io::Result<u64> {
+    fs::copy(src, dest)
+}
+
 impl Viewport {
     /// Build a viewport that tees its rendered text to `log_path`.
     /// `agent` is this session's palette slot, stamped onto every block.

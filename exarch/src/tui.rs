@@ -2704,11 +2704,9 @@ impl Repl<'_> {
     /// Write the focused tab's user view — its rendered `user.log` — to
     /// `arg`, a path that may be absolute, relative to the launch cwd, or
     /// `~`/`xdg:`-prefixed.  Refuses to overwrite an existing file so an
-    /// export never clobbers; an empty argument prints the usage line.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[io-door:silent:export] copies the rendered user.log to the user-chosen export path; output infra, not turn-time data I/O"
-    )]
+    /// export never clobbers; an empty argument prints the usage line.  The
+    /// copy itself goes through [`viewport::export_log`], where the
+    /// `user.log` I/O door lives.
     fn cmd_export(&mut self, arg: &str) -> Slash {
         let id = self.session.id;
         if arg.is_empty() {
@@ -2727,7 +2725,7 @@ impl Repl<'_> {
                 return Slash::Continue;
             }
         };
-        match std::fs::copy(&src, &dest) {
+        match viewport::export_log(&src, &dest) {
             Ok(_) => self.tui.handle(Event {
                 id,
                 kind: Kind::Dim(format!("[exported user view to {}]", dest.display())),
