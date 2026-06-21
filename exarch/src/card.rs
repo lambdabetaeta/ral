@@ -387,16 +387,16 @@ pub fn io_card(event: &IoEvent) -> Card {
 }
 
 /// The command of an exec, *without* its `$ ` prefix or `→ status` tail —
-/// the program as a [`Role::Path`] span and each arg as a [`Role::Code`]
-/// span (a missing command degrades to plain ink).  Shared by [`io_card`]
-/// (which frames it with the prompt and status) and [`io_group_card`] (which
-/// comma-joins several, dropping the per-event status — see its docs).
+/// the program as a [`Role::Path`] span and each arg as plain ink (a missing
+/// command degrades to plain ink).  Shared by [`io_card`] (which frames it
+/// with the prompt and status) and [`io_group_card`] (which comma-joins
+/// several, dropping the per-event status — see its docs).
 fn exec_cmd_spans(argv: &[String]) -> Vec<Span> {
     match argv.split_first() {
         Some((prog, args)) => {
             let mut spans = vec![span(Role::Path, prog)];
             for arg in args {
-                spans.push(span(Role::Code, &format!(" {arg}")));
+                spans.push(span_plain(&format!(" {arg}")));
             }
             spans
         }
