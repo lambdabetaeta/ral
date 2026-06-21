@@ -48,7 +48,8 @@ use crossterm::{
     event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
     execute,
     terminal::{
-        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, size,
+        BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
+        disable_raw_mode, enable_raw_mode, size,
     },
 };
 use picker::Picker;
@@ -952,12 +953,12 @@ impl App {
             status_row.height,
         );
         let focused = self.focused();
-        let (mut lines, offset, total) = match self.viewports.get_mut(&focused) {
+        let (mut lines, offset, total, scrollbar_pos) = match self.viewports.get_mut(&focused) {
             Some(vp) => {
                 let w = vp.render_window(text_rect.width, text_rect.height as usize);
-                (w.lines, w.offset, w.total)
+                (w.lines, w.offset, w.total, w.scrollbar_pos)
             }
-            None => (Vec::new(), 0, 0),
+            None => (Vec::new(), 0, 0, 0),
         };
         self.paint_selection(&mut lines, offset);
         self.frame = Some(FrameGeom {
@@ -992,24 +993,20 @@ impl App {
         let prompt_hint = self.prompt_hint(focused);
         let picker = self.picker.as_ref();
 
-        term.draw(|f| {
+        // Bracket the frame's terminal writes in a synchronized update so the
+        // emulator buffers the whole diff and swaps it atomically.  Without
+        // this, a tail-following redraw rewrites every visible cell each tick,
+        // and a terminal scanning the screen mid-write shows a half-painted
+        // frame — the tearing seen when a full page streams tool calls.
+        // `End` is emitted on the error path too, so a failed draw never
+        // strands the terminal in synchronized mode.
+        execute!(io::stdout(), BeginSynchronizedUpdate)?;
+        let drawn = term.draw(|f| {
             f.render_widget(Paragraph::new(lines), text_rect);
-            // ratatui's `ScrollbarState` treats `position` as a cursor over
-            // `[0, content_length-1]`: the thumb only bottoms out at
-            // `position == content_length-1` (its `last()`).  Our `offset` is
-            // the first visible row, topping out at `total - height` — short
-            // by `height-1`, so the thumb never reached the bottom (it stalled
-            // around 3/4 for a session a few times the viewport).  Map our
-            // scroll range onto ratatui's so a fully-scrolled viewport bottoms
-            // the thumb.
-            let max_off = total.saturating_sub(text_rect.height as usize);
-            let sb_pos = if max_off == 0 {
-                0
-            } else {
-                offset.saturating_mul(total.saturating_sub(1)) / max_off
-            };
+            // `scrollbar_pos` is mapped onto ratatui's cursor range and
+            // clamped at the source ([`Viewport::render_window`]).
             let mut sb = ScrollbarState::new(total)
-                .position(sb_pos)
+                .position(scrollbar_pos)
                 .viewport_content_length(text_rect.height as usize);
             f.render_stateful_widget(
                 Scrollbar::new(ScrollbarOrientation::VerticalRight),
@@ -1064,7 +1061,9 @@ impl App {
                 }
             }
             f.render_widget(Paragraph::new(footer_hint()), footer_row);
-        })?;
+        });
+        execute!(io::stdout(), EndSynchronizedUpdate)?;
+        drawn?;
         Ok(())
     }
 

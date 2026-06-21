@@ -45,10 +45,14 @@ pub(super) struct Viewport {
     /// Top visible visual row.  Owned per-viewport so each tab keeps its
     /// place; recomputed against the frame height in [`Self::render_window`].
     offset: usize,
-    /// Follow the tail: while set, [`Self::render_window`] pins `offset`
-    /// to the bottom.  Cleared when the user scrolls up, re-armed when
-    /// they scroll back down.
+    /// Follow the tail: while set, [`Self::render_window`] pins the trailing
+    /// segment's head row in place (see [`TailAnchor`]).  Cleared when the
+    /// user scrolls up, re-armed when they scroll back down.
     sticky: bool,
+    /// The live tail-follow anchor while `sticky`, re-seeded whenever the
+    /// trailing segment, width, or its disclosure level changes; `None` when
+    /// not following the tail.
+    tail_anchor: Option<TailAnchor>,
     /// Memoised flatten of [`Self::blocks`] into wrapped visual rows.
     flat: Flat,
     /// Append-only tee of every committed line to the session's
@@ -72,6 +76,10 @@ pub(super) struct RenderWindow {
     pub(super) lines: Vec<Line<'static>>,
     pub(super) offset: usize,
     pub(super) total: usize,
+    /// The scrollbar thumb's position, already mapped onto ratatui's
+    /// `[0, total-1]` cursor range and clamped — computed here beside the
+    /// `offset` it derives from, so the draw code never re-derives it.
+    pub(super) scrollbar_pos: usize,
 }
 
 /// Memoised whole-buffer flatten: every block's lines wrapped to `width`
@@ -83,6 +91,26 @@ struct Flat {
     rows: Vec<Line<'static>>,
     row_block: Vec<usize>,
     dirty: bool,
+}
+
+/// The tail-follow anchor: the trailing live segment's identity and the
+/// greatest height it has reached.  While following the tail, the segment's
+/// head row is pinned at the highest screen line it has occupied, so the
+/// segment grows downward (and clips at the bottom edge once taller than the
+/// window) while the committed transcript above it never recedes — a burst
+/// of streaming tool calls coalesces into one trailing group whose height
+/// oscillates as each result lands, and pinning its head keeps that churn
+/// from shoving the whole transcript up and down.
+///
+/// `peak` is the height in visual rows, so it is keyed on `width` and the
+/// segment's disclosure `level` alongside its anchor `block`: a reflow at a
+/// new width or a dial of the live group re-measures from scratch rather
+/// than holding a stale peak open as a gap.
+struct TailAnchor {
+    block: usize,
+    width: u16,
+    level: u8,
+    peak: usize,
 }
 
 /// Walk `open` for the latest paragraph break reached at fence depth
@@ -156,6 +184,7 @@ impl Viewport {
             open: String::new(),
             offset: 0,
             sticky: true,
+            tail_anchor: None,
             flat: Flat::default(),
             log: open_log(&log_path),
             log_path,
@@ -244,6 +273,7 @@ impl Viewport {
         self.open.clear();
         self.offset = 0;
         self.sticky = true;
+        self.tail_anchor = None;
         self.flat = Flat::default();
         self.log = open_log(&self.log_path);
         self.log_prev_blank = true;
@@ -511,25 +541,90 @@ impl Viewport {
     // ── rendering ────────────────────────────────────────────────────────
 
     /// The visible slice at `width` × `height`, after re-flattening if
-    /// stale and resolving the scroll position (pinned to the tail while
-    /// sticky, clamped otherwise — and re-armed to sticky once it reaches
-    /// the bottom).
+    /// stale and resolving the scroll position: head-anchored to the trailing
+    /// segment while sticky ([`Self::tail_anchored_offset`]), clamped
+    /// otherwise — and re-armed to sticky once it reaches the bottom.
     pub(super) fn render_window(&mut self, width: u16, height: usize) -> RenderWindow {
         self.reflow(width);
         let total = self.flat.rows.len();
         let max_off = total.saturating_sub(height);
         if self.sticky {
-            self.offset = max_off;
+            self.offset = self.tail_anchored_offset(width, height, total);
         } else {
             self.offset = self.offset.min(max_off);
             self.sticky = self.offset >= max_off;
+            self.tail_anchor = None;
         }
         let end = (self.offset + height).min(total);
+        // ratatui's `ScrollbarState` treats `position` as a cursor over
+        // `[0, total-1]`: the thumb only bottoms out at `position == total-1`
+        // (its `last()`).  Our `offset` is the first visible row, topping out
+        // at `total - height` — short by `height-1`, so without remapping the
+        // thumb never reaches the bottom (it stalls around 3/4 for a session a
+        // few times the viewport).  Map our scroll range onto ratatui's, and
+        // clamp: while head-anchored to a shrunken tail group `offset` runs
+        // past `max_off` (a gap opens below), which must not overshoot the
+        // cursor's top end.
+        let scrollbar_pos = self
+            .offset
+            .saturating_mul(total.saturating_sub(1))
+            .checked_div(max_off)
+            .unwrap_or(0)
+            .min(total.saturating_sub(1));
         RenderWindow {
             lines: self.flat.rows[self.offset..end].to_vec(),
             offset: self.offset,
             total,
+            scrollbar_pos,
         }
+    }
+
+    /// The tail-following offset that pins the trailing segment's head row at
+    /// the highest screen line it has reached.  The head row is fixed while a
+    /// group streams — committed content above it does not move, and fresh
+    /// observations join the same coalesced run rather than push it down — so
+    /// holding the peak height keeps a shrink (a call landing before its
+    /// result) from receding the transcript; the segment instead opens a
+    /// transient gap below, and once taller than the window pins its head at
+    /// the top and clips its tail at the bottom edge.
+    fn tail_anchored_offset(&mut self, width: u16, height: usize, total: usize) -> usize {
+        let Some(&block) = self.flat.row_block.last() else {
+            self.tail_anchor = None;
+            return 0;
+        };
+        let head_row = self.tail_segment_start(block);
+        let group_height = total - head_row;
+        let level = self.blocks.get(block).map_or(1, Block::level);
+        let peak = match &mut self.tail_anchor {
+            Some(a) if a.block == block && a.width == width && a.level == level => {
+                a.peak = a.peak.max(group_height);
+                a.peak
+            }
+            _ => {
+                self.tail_anchor = Some(TailAnchor {
+                    block,
+                    width,
+                    level,
+                    peak: group_height,
+                });
+                group_height
+            }
+        };
+        // Pin the head so the segment, at its peak height, just fills to the
+        // bottom; a shorter current height leaves that much space empty below.
+        let space_below = height.saturating_sub(peak);
+        head_row.saturating_sub(space_below)
+    }
+
+    /// The first visual-row index of the trailing segment — the run of rows
+    /// at the buffer's end sharing `block` as their anchor.  Row anchors are
+    /// non-decreasing, so the segment is the final equal-valued run.
+    fn tail_segment_start(&self, block: usize) -> usize {
+        self.flat
+            .row_block
+            .iter()
+            .rposition(|&b| b != block)
+            .map_or(0, |p| p + 1)
     }
 
     /// Rebuild [`Self::flat`] when stale or asked at a new width.
