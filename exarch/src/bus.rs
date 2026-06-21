@@ -87,6 +87,21 @@ impl AgentResult {
             AgentOutcome::Failed(e) => format!("[agent '{}' failed: {e}]", self.title),
         }
     }
+
+    /// The `(text, error)` a `↘` subagent breadcrumb shows for this result —
+    /// the same reduction a *synchronous* child's `Kind::SubagentDone` makes
+    /// from its `TurnOutcome`, so an async result renders as the identical
+    /// dialable block: body text on success, the reason in the header suffix
+    /// on a non-routine settle.
+    pub fn breadcrumb(&self) -> (String, Option<String>) {
+        match &self.outcome {
+            AgentOutcome::Complete => (self.text.clone(), None),
+            AgentOutcome::Empty => (String::new(), None),
+            AgentOutcome::Stopped(r) => (String::new(), Some(r.clone())),
+            AgentOutcome::Cancelled => (String::new(), Some("cancelled".into())),
+            AgentOutcome::Failed(e) => (String::new(), Some(e.clone())),
+        }
+    }
 }
 
 /// One typed message waiting in a session's [`Inbox`].
@@ -171,6 +186,40 @@ impl InboxMsg {
     }
 }
 
+/// The next deliverable a turn-boundary drain yields, carrying both the
+/// model-facing text *and* its source.
+///
+/// `drain_turn` once collapsed every source to a bare `String`, so the
+/// driver could not tell a human prompt from a wakeup from an agent reply
+/// and rendered all three as the human's own prompt-echo.  Threading the
+/// source through lets each turn render in its honest medium — a human
+/// prompt echoes as the user's turn, a wakeup as marked chrome, an agent
+/// reply as the same `↘` block a synchronous child gets — while the model
+/// still receives [`Self::text`] unchanged.
+#[derive(Clone, Debug)]
+pub enum Turn {
+    /// A coalesced run of human prompts (the old whole-queue join, so a lone
+    /// `/clear` still reaches the command path).  Verbatim model text.
+    Human(String),
+    /// A scheduled wakeup fired — a fresh, marked turn.  Its prompt may
+    /// itself be a slash command, so it still flows through the command
+    /// path; when it is not, it renders as marked chrome, not a prompt-echo.
+    Wakeup(String),
+    /// An async agent settled — rendered as a dialable `↘` subagent block.
+    Agent(AgentResult),
+}
+
+impl Turn {
+    /// The text the model sees when this turn is drained into context —
+    /// unchanged from what each source always rendered.
+    pub fn text(&self) -> String {
+        match self {
+            Turn::Human(s) | Turn::Wakeup(s) => s.clone(),
+            Turn::Agent(r) => r.render(),
+        }
+    }
+}
+
 /// A session's inbox: the typed, multi-producer queue the turn driver pulls
 /// its next prompt from.
 ///
@@ -239,11 +288,13 @@ impl Inbox {
         self.drain_run(|msg| msg.boundary() == Boundary::Tool)
     }
 
-    /// Turn-boundary drain: the next deliverable.  A leading run of *user*
-    /// steering coalesces into one prompt (preserving the old whole-queue
-    /// join, so a lone `/clear` still reaches the command path); a wakeup or
-    /// agent result is delivered on its own, rendered with its marker.
-    pub fn drain_turn(&self) -> Option<String> {
+    /// Turn-boundary drain: the next deliverable, tagged with its source.  A
+    /// leading run of *user* steering coalesces into one [`Turn::Human`]
+    /// prompt (preserving the old whole-queue join, so a lone `/clear` still
+    /// reaches the command path); a wakeup or agent result is delivered on
+    /// its own as [`Turn::Wakeup`] / [`Turn::Agent`], so the driver can render
+    /// each in its honest medium.
+    pub fn drain_turn(&self) -> Option<Turn> {
         let mut q = self.inner.lock().expect("inbox lock poisoned");
         match q.front()? {
             InboxMsg::UserSteering(_) => {
@@ -258,12 +309,21 @@ impl Inbox {
                     }
                     text.push_str(&s);
                 }
-                Some(text)
+                Some(Turn::Human(text))
             }
             _ => {
                 let msg = q.pop_front().expect("front checked present");
                 msg.on_drain();
-                Some(msg.render())
+                Some(match msg {
+                    InboxMsg::ScheduledWakeup { .. } => {
+                        let text = msg.render();
+                        Turn::Wakeup(text)
+                    }
+                    InboxMsg::AgentResult(r) => Turn::Agent(r),
+                    InboxMsg::UserSteering(_) => {
+                        unreachable!("user steering coalesced in the arm above")
+                    }
+                })
             }
         }
     }
@@ -597,7 +657,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Boundary, Emitter, Event, Inbox, InboxMsg, Kind, Pass, Sink, drain_pass, pump};
+    use super::{
+        Boundary, Emitter, Event, Inbox, InboxMsg, Kind, Pass, Sink, Turn, drain_pass, pump,
+    };
     use std::sync::Arc;
 
     /// A scheduled-wakeup message with a fresh pending flag, for the inbox
@@ -745,7 +807,10 @@ mod tests {
 
         assert_eq!(inbox.drain_tool().as_deref(), Some("steer first"));
         assert_eq!(inbox.drain_tool(), None);
-        assert_eq!(inbox.drain_turn().as_deref(), Some("/clear\n\nafter clear"));
+        assert!(
+            matches!(inbox.drain_turn(), Some(Turn::Human(s)) if s == "/clear\n\nafter clear"),
+            "the leading user run coalesces into one human turn",
+        );
         assert!(inbox.is_empty());
     }
 
@@ -761,10 +826,14 @@ mod tests {
         // Tool boundary takes the user prefix only, stopping at the wakeup.
         assert_eq!(inbox.drain_tool().as_deref(), Some("steer"));
         assert_eq!(inbox.drain_tool(), None);
-        // Turn boundary delivers the wakeup, rendered marked.
-        assert_eq!(
-            inbox.drain_turn().as_deref(),
-            Some("[scheduled 'nightly' · 0 3 * * *] run the tests"),
+        // Turn boundary delivers the wakeup, tagged as a wakeup and rendered
+        // marked so the driver can give it its own chrome.
+        assert!(
+            matches!(
+                inbox.drain_turn(),
+                Some(Turn::Wakeup(s)) if s == "[scheduled 'nightly' · 0 3 * * *] run the tests",
+            ),
+            "the wakeup drains as a marked Wakeup turn",
         );
         assert!(inbox.is_empty());
     }

@@ -211,15 +211,39 @@ pub(super) fn step(_n: usize) -> Vec<Line<'static>> {
     vec![Line::default()]
 }
 
-/// Scrollback echo of the user's submitted prompt. The typed text renders
-/// in reverse video so the user's turn boundary is unmistakable against
-/// the surrounding markdown/chrome; the `❖` glyph now arrives via the
-/// lifted rail ([`super::block::Block::render`], Generic shape), so the
-/// first line carries only the body and continuations indent two columns
-/// to align under it.
+/// Scrollback echo of the user's submitted prompt. Reverse video is reserved
+/// for an active selection alone ([`super::App::paint_selection`]), so the
+/// human's turn marks itself by *weight*: the cyan `❖` Generic rail (arriving
+/// via the lifted rail, [`super::block::Block::render`]) plus a bold body make
+/// the turn boundary unmistakable against the surrounding markdown/chrome
+/// without borrowing the selection look. The first line carries only the body
+/// and continuations indent two columns to align under it.
 pub(super) fn user_prompt(s: &str) -> Vec<Line<'static>> {
     let cont = Span::raw("  ");
-    let body = Style::default().add_modifier(Modifier::REVERSED);
+    let body = Style::default().add_modifier(Modifier::BOLD);
+    let mut ls: Vec<Line<'static>> = vec![Line::default()];
+    ls.extend(s.lines().enumerate().map(|(i, l)| {
+        let body_span = Span::styled(l.to_string(), body);
+        if i == 0 {
+            Line::from(vec![body_span])
+        } else {
+            Line::from(vec![cont.clone(), body_span])
+        }
+    }));
+    ls
+}
+
+/// Scrollback echo of a scheduled wakeup delivered as a fresh turn. A wakeup
+/// is the machine's own bookkeeping, not a human utterance, so it renders as
+/// dim, marked chrome — never the bold prompt-echo a human turn gets. The
+/// text is the marked render the model sees (`[scheduled '…' · …] …`), kept
+/// whole so the transcript and the model agree on what fired: the `[scheduled
+/// …]` prefix is the marker, and the dim slate styling reads it as
+/// bookkeeping rather than prose. The first line carries only the body and
+/// continuations indent two columns to align under it.
+pub(super) fn wakeup(s: &str) -> Vec<Line<'static>> {
+    let cont = Span::raw("  ");
+    let body = Style::default().fg(SLATE).add_modifier(Modifier::DIM);
     let mut ls: Vec<Line<'static>> = vec![Line::default()];
     ls.extend(s.lines().enumerate().map(|(i, l)| {
         let body_span = Span::styled(l.to_string(), body);
@@ -234,9 +258,10 @@ pub(super) fn user_prompt(s: &str) -> Vec<Line<'static>> {
 
 /// The pending-prompt strip shown above the input while a turn runs:
 /// each message the user submitted mid-turn, oldest first.  Pending
-/// prompts use the same cyan rail and reverse-video body as committed
-/// user prompts, so the strip reads as "this is your text waiting to be
-/// sent" rather than separate status chrome.  Wrapped to `width`
+/// prompts use the same cyan rail and bold body as the committed
+/// user-prompt echo, so the strip reads as "this is your text waiting to be
+/// sent" rather than separate status chrome — and, like that echo, leaves
+/// reverse video to an active selection alone.  Wrapped to `width`
 /// columns; continuations indent under the text.  Capped at `max_rows`
 /// total — a longer queue closes with a `⋯ (N more)` line so it can
 /// never crowd the transcript off-screen.
@@ -249,7 +274,7 @@ pub(super) fn queued_prompt(
         .saturating_sub(UnicodeWidthStr::width(RAIL))
         .max(8);
     let rail = Style::default().fg(CYAN);
-    let body = Style::default().add_modifier(Modifier::REVERSED);
+    let body = Style::default().add_modifier(Modifier::BOLD);
     let more = Style::default().fg(SLATE).add_modifier(Modifier::ITALIC);
     let mut out: Vec<Line<'static>> = Vec::new();
     for msg in messages {

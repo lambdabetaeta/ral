@@ -13,7 +13,7 @@
 //! round-tripping the committed messages through the same genai
 //! `ChatMessage` serialisation the live request uses.
 
-use exarch::bus::{Emitter, Event, Inbox, Kind, SessionId, Sink};
+use exarch::bus::{Emitter, Event, Inbox, Kind, SessionId, Sink, Turn};
 use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{Provider, ProviderError};
 use exarch::session::{Session, TurnOutcome};
@@ -364,16 +364,21 @@ fn async_agent_returns_a_receipt_and_delivers_through_the_inbox() {
     // delivery, then drain it as the driver would at the turn boundary.
     let mut delivered = None;
     for _ in 0..200 {
-        if let Some(text) = inbox.drain_turn() {
-            delivered = Some(text);
+        if let Some(turn) = inbox.drain_turn() {
+            delivered = Some(turn);
             break;
         }
         std::thread::sleep(Duration::from_millis(25));
     }
-    let text = delivered.expect("the async agent must post its result to the inbox");
+    let turn = delivered.expect("the async agent must post its result to the inbox");
     assert!(
-        text.starts_with("[agent 'background'"),
-        "delivered as a marked agent turn, got {text:?}"
+        matches!(&turn, Turn::Agent(r) if r.title == "background"),
+        "delivered tagged as an agent turn, got {turn:?}"
+    );
+    assert!(
+        turn.text().starts_with("[agent 'background'"),
+        "the model still sees the marked agent text, got {:?}",
+        turn.text(),
     );
     assert!(session.is_ready());
 }

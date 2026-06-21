@@ -29,7 +29,7 @@ use fidelity::Fidelity;
 use line::usage_text;
 
 use crate::bootstrap::Scratch;
-use crate::bus::{Event, Hunk, Inbox, Kind, Pass, SessionId, Sink, drain_pass, pump};
+use crate::bus::{Event, Hunk, Inbox, Kind, Pass, SessionId, Sink, Turn, drain_pass, pump};
 use std::sync::Arc;
 use crate::cancel;
 use crate::card::{Card, Field, FieldVal, IoEvent, Mark, Role, Span as CardSpan};
@@ -1124,10 +1124,11 @@ impl App {
     }
 
     /// Take the next deliverable from the inbox at the turn boundary — a
-    /// coalesced run of queued user prompts, or one wakeup / agent result
-    /// rendered with its marker — or `None` when the inbox is empty. User
-    /// prompts the worker drained between tool calls have already left it.
-    pub fn take_inbox(&mut self) -> Option<String> {
+    /// coalesced run of queued user prompts, a wakeup, or a finished agent —
+    /// each tagged with its source so the driver renders it in its honest
+    /// medium, or `None` when the inbox is empty. User prompts the worker
+    /// drained between tool calls have already left it.
+    pub fn take_inbox(&mut self) -> Option<Turn> {
         self.inbox.drain_turn()
     }
 
@@ -2290,21 +2291,22 @@ fn is_slash_command(text: &str) -> bool {
 
 impl Repl<'_> {
     fn drive(&mut self, seed: Option<String>) -> Result<(), String> {
-        let mut pending = seed;
+        // The seed and the interactive read are the human's own prompts.
+        let mut pending = seed.map(Turn::Human);
         loop {
-            // Order of sources: the seed prompt, then queued prompts the
-            // worker did not already drain at a tool boundary, then a fresh
-            // blocking read. Queued prompts flow through `handle_slash` like
-            // any other, so they echo as they are sent and a lone `/clear`
-            // still works when it reaches the ordinary turn boundary.
-            let prompt = match pending.take() {
-                Some(p) => Some(p),
+            // Order of sources: the seed prompt, then turn-boundary deliveries
+            // the worker did not already drain (queued user prompts, a wakeup,
+            // a finished agent), then a fresh blocking read. Every source is a
+            // typed `Turn`, so the commit below can render each in its honest
+            // medium while a lone `/clear` still reaches the command path.
+            let turn = match pending.take() {
+                Some(t) => Some(t),
                 None => match self.tui.app.take_inbox() {
-                    Some(q) => Some(q),
+                    Some(t) => Some(t),
                     None => match read_prompt(self.tui.guard.term(), &mut self.tui.app)
                         .map_err(|e| e.to_string())?
                     {
-                        Idle::Prompt(s) => Some(s),
+                        Idle::Prompt(s) => Some(Turn::Human(s)),
                         // A non-human message (a wakeup, a finished agent)
                         // landed in the inbox while idle: loop so the
                         // `take_inbox` arm above delivers it as a fresh turn.
@@ -2313,15 +2315,16 @@ impl Repl<'_> {
                     },
                 },
             };
-            if let Some(text) = &prompt {
-                match self.handle_slash(text) {
-                    Slash::Quit => return Ok(()),
-                    Slash::Continue => continue,
-                    Slash::Prompt => {}
-                }
+            let Some(turn) = turn else { continue };
+            match self.commit_turn(&turn) {
+                Slash::Quit => return Ok(()),
+                Slash::Continue => continue,
+                Slash::Prompt => {}
             }
+            // The model always sees the source's own rendered text — verbatim
+            // for a human, marked for a wakeup or an agent reply.
             self.session
-                .run_turn(&mut self.tui, &self.provider, prompt)?;
+                .run_turn(&mut self.tui, &self.provider, Some(turn.text()))?;
             self.tui
                 .app
                 .draw(self.tui.guard.term())
@@ -2329,7 +2332,42 @@ impl Repl<'_> {
         }
     }
 
-    fn handle_slash(&mut self, text: &str) -> Slash {
+    /// Echo a turn onto the transcript in the medium honest to its *source*,
+    /// then report whether the turn proceeds to the model.
+    ///
+    /// Reverse video means an active selection alone ([`App::paint_selection`]);
+    /// no resting block borrows it. A human prompt echoes as the user's turn
+    /// on its cyan Generic rail; a wakeup is dim, marked chrome; an agent
+    /// reply is the same dialable `↘` block a synchronous child gets. A human
+    /// or wakeup whose text is a slash command runs that command instead of
+    /// echoing — a wakeup's prompt may legitimately be `/clear` — while an
+    /// agent reply is never a command and always proceeds.
+    fn commit_turn(&mut self, turn: &Turn) -> Slash {
+        let id = self.session.id;
+        match turn {
+            Turn::Human(text) => self.echo_prompt(text, line::user_prompt(text)),
+            Turn::Wakeup(text) => self.echo_prompt(text, line::wakeup(text)),
+            Turn::Agent(r) => {
+                let (text, error) = r.breadcrumb();
+                self.tui.handle(Event {
+                    id,
+                    kind: Kind::SubagentDone {
+                        title: r.title.clone(),
+                        text,
+                        error,
+                        elapsed: r.elapsed,
+                    },
+                });
+                Slash::Prompt
+            }
+        }
+    }
+
+    /// Dispatch `text` as a slash command if it is one, else echo the
+    /// pre-rendered `lines` onto the transcript and proceed to the model.
+    /// `session.append_user` (inside `apply`) is what records the text
+    /// model-side; this is the transcript echo alone.
+    fn echo_prompt(&mut self, text: &str, lines: Vec<Line<'static>>) -> Slash {
         let trimmed = text.trim();
         if trimmed.is_empty() {
             return Slash::Continue;
@@ -2337,13 +2375,10 @@ impl Repl<'_> {
         if let Some(cmd) = lookup_command(trimmed) {
             return (cmd.run)(self);
         }
-        // Not a command: an ordinary prompt. Echo it onto the transcript;
-        // `session.append_user` (inside `apply`) is what records it model-side.
         let id = self.session.id;
-        self.tui.handle(Event {
-            id,
-            kind: Kind::UserPromptEcho(text.to_string()),
-        });
+        self.tui
+            .app
+            .push_chrome(id, RailShape::Generic, lines);
         Slash::Prompt
     }
 
