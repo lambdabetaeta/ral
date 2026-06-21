@@ -247,12 +247,28 @@ impl Block {
     }
 
     /// The block's magnitude, where defined: total changed lines
-    /// (deletions + additions) for a patch, `None` elsewhere.  The rail's
-    /// value-step and the header size-bar both read this.
+    /// (deletions + additions) for a patch, source-line count for prose (a
+    /// markdown block or a subagent result), `None` elsewhere.  The rail's
+    /// value-step and the header size-bar both read this, so prose volume
+    /// lightens the rail the way line counts do for a diff.
     pub(super) fn magnitude(&self) -> Option<u32> {
         match &self.kind {
             BlockKind::Card { card, .. } => card.magnitude(),
+            BlockKind::Markdown(src) => Some(src.lines().count() as u32),
             BlockKind::Subagent { text, .. } => Some(text.lines().count() as u32),
+            _ => None,
+        }
+    }
+
+    /// The block's contribution to the session's *code* footprint — the
+    /// changed lines of a diff card.  Distinct from [`Self::magnitude`],
+    /// which also counts prose volume (markdown, a subagent result) for the
+    /// rail's value channel: the matrix's "lines touched" readout is a
+    /// write footprint, so prose must not inflate it.  `None` on every kind
+    /// but a diff-bearing card.
+    pub(super) fn lines_changed(&self) -> Option<u32> {
+        match &self.kind {
+            BlockKind::Card { card, .. } => card.magnitude(),
             _ => None,
         }
     }

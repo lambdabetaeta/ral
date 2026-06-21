@@ -187,11 +187,11 @@ impl Viewport {
         steps
     }
 
-    /// Total lines this session touched: the summed [`Block::magnitude`]
-    /// over its patch blocks.  Drives the matrix's size readout; `0` for a
-    /// read-only agent.
+    /// Total lines this session touched: the summed [`Block::lines_changed`]
+    /// over its diff blocks.  Drives the matrix's size readout; `0` for a
+    /// read-only agent, and prose volume never inflates it.
     pub(super) fn lines_touched(&self) -> u32 {
-        self.blocks.iter().filter_map(Block::magnitude).sum()
+        self.blocks.iter().filter_map(Block::lines_changed).sum()
     }
 
     /// Whether the session's last block is an error — the matrix renders
