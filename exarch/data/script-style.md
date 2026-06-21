@@ -123,6 +123,126 @@ Overlap slow work: start the suite, read the implementation while it runs, and u
 
 Follow-ups index into the bindings — no re-grep, no re-run.
 
+## One program, not a nervous probe
+
+A failing machine draws the worst out of a shell.  The instinct is to
+fire one probe, read it, fire the next:
+
+    uptime
+    sysctl vm.swapusage
+    memory_pressure | tail -1
+    ps -Aco pid,pmem,rss,comm -m | head
+    pkill -i zulip ; pkill -i "Microsoft Edge"
+    sysctl vm.swapusage ; uptime          # ...did that help?
+
+Each line is gone the moment it scrolls past, and the numbers are
+correlated by eye.  But there are only **two questions** here — *how is
+memory?* and *what does killing the hogs buy back?* — so there should be
+two programs, each ending in one value.
+
+The first gathers every reading at once.  A single `grab` combinator
+lifts a capture group out of any line, and the heaviest processes parse
+into typed records — so `Code Helper (Renderer)` survives its spaces,
+the field-splitting that the bash `awk`-on-`split` idiom trips over:
+
+    let grab = { |pat s| re-replace "(?s).*$pat.*" '$1' $s }
+
+    let load  = map $float !{words !{grab 'averages: (.*)' !{uptime}}}
+    let swap  = sysctl -n vm.swapusage
+    let used  = float !{grab 'used = ([0-9.]+)'  $swap}
+    let total = float !{grab 'total = ([0-9.]+)' $swap}
+    let freep = int   !{grab 'free percentage: ([0-9]+)' !{memory_pressure 2>/dev/null}}
+    let ram   = $[!{int !{sysctl -n hw.memsize}} / 1073741824]
+
+    let hog = { |l|
+        let w = words $l
+        [name: !{intercalate ' ' !{drop 3 $w}}, mem-pct: !{float $w[1]}, rss-mb: $[!{int $w[2]} / 1024]]
+    }
+    let hogs = map $hog !{take 6 !{drop 1 !{lines !{ps -Aco pid,pmem,rss,comm -m}}}}
+
+    [ram-gb: $ram, load: [m1: $load[0], m5: $load[1], m15: $load[2]],
+     swap-mb: [used: $used, total: $total], free-pct: $freep, hogs: $hogs]
+
+The reading is a value now: index it, `take` from it, diff it against a
+later snapshot.  The second program acts, and reports what the action
+bought — the re-check is not a third step but a measurement taken either
+side of the kill (the file adds an argument guard):
+
+    let free   = { int !{grab 'free percentage: ([0-9]+)' !{memory_pressure 2>/dev/null}} }
+
+    let census = map { |l|
+        let w = words $l
+        [rss: !{int $w[0]}, comm: !{intercalate ' ' !{drop 1 $w}}]
+    } !{drop 1 !{lines !{ps -Aco rss,comm}}}
+
+    let weigh = { |pat|
+        let hits = filter { |p| re-match "(?i)$pat" $p[comm] } $census
+        let kb   = sum !{map { |p| $p[rss] } $hits}
+        [app: $pat, procs: !{length $hits}, rss-mb: $[$kb / 1024]]
+    }
+
+    let before = !$free
+    let reaped = map $weigh $args
+    for $args { |p| attempt { pkill -i $p } }
+    let after  = !$free
+
+    [reaped: $reaped, total-mb: !{sum !{map { |r| $r[rss-mb] } $reaped}}, free-pct: [before: $before, after: $after]]
+
+The census is taken once and every app weighed against it before
+anything dies.  The kills cannot simply be sequenced — `pkill` exits
+nonzero on an empty match, which would halt the rest — so `attempt`
+absorbs the miss.  And `grab`, bound in the first call, is still in
+scope for the second: a session accretes vocabulary.  The answer to
+*did that help?* lands in the returned record, not in your head.
+
+The full runnable scripts are in `examples/mac-memory/{vitals,reap}.ral`.
+
+## Mock with handlers
+
+`within [handlers: …]` rebinds a command by name for the extent of a
+block: inside, every call to that name runs your block instead of the
+real program.  Three uses follow from one mechanism.
+
+**Pin nondeterminism.**  Replace a clock, a random source, or a remote
+with a fixed answer, and a result becomes reproducible:
+
+    within [handlers: [date: { |args| echo '2026-01-01T00:00:00Z' }]] {
+        let stamp = date -u +%Y-%m-%dT%H:%M:%SZ        # always the pinned value
+        process-with $stamp
+    }
+
+**Exercise a destructive program without consequence.**  `reap` above
+kills processes; with its commands rebound it reads a census you supply
+and kills nothing, yet still returns its full record — so the logic is
+tested in isolation:
+
+    within [handlers: [
+        ps:              { |args| echo ##'  RSS COMM
+    1200000 Zulip
+     600000 Zulip'## },
+        memory_pressure: { |args| echo 'System-wide memory free percentage: 40%' },
+        pkill:           { |args| echo "would kill !{str $args}" 1>&2 },
+    ]] {
+        source 'examples/mac-memory/reap.ral'          # nothing dies; record still computed
+    }
+
+**Trace, by wrapping and forwarding.**  Handlers are *deep* — they hold
+for the whole body, nested calls included — and *self-masking*: inside a
+handler's own body a same-name call reaches the real command, so
+wrap-and-forward does not loop:
+
+    within [handlers: [git: { |args| echo "+ git !{str $args}" 1>&2 ; git ...$args }]] {
+        deploy            # every git inside is logged, then run for real
+    }
+
+For a blunt instrument, `handler:` (singular) is a catch-all binary
+block `{ |name args| … }` intercepting every external command in the
+body — a whole-script dry run:
+
+    within [handler: { |name args| echo "[would run: $name !{str $args}]" }] {
+        deploy            # prints the plan; runs none of it
+    }
+
 ## Reading large output
 
 An elision in value/stdout/stderr means a command succeeded, but you asked to see too much. Narrow the call:
