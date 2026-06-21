@@ -33,7 +33,7 @@ use ral_core::{CompileOutcome, Value};
 use ansi_to_tui::IntoText;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -45,7 +45,6 @@ use textarea_vim::{Mode, Vim, place_native_cursor};
 
 use std::collections::HashSet;
 use std::io;
-#[cfg(unix)]
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -53,8 +52,14 @@ use super::super::prompt::PromptText;
 use super::{EditBuffer, Frontend, History, Read};
 #[cfg(unix)]
 use crate::jobs::JobTable;
+use crate::repl::complete::style_ratatui;
 use crate::repl::completion::{self, Candidate, Sources};
-use crate::repl::plugin_editor::char_to_byte;
+use crate::repl::keybinding::{KeybindingOutcome, dispatch_keybinding};
+use crate::repl::plugin::{
+    HookEnvGuard, KeyChord, KeyName, Keymap, PendingKeybinding, PluginRuntime,
+    flush_pending_messages, lock, pop_buffer_stack, prepare_hook_env, run_buffer_change_hooks,
+};
+use crate::repl::plugin_editor::{HighlightSpan, char_to_byte};
 use crate::repl::worksheet::Worksheet;
 
 // ── Palette ───────────────────────────────────────────────────────────────
@@ -97,6 +102,17 @@ struct Menu {
     anchor_col: u16,
 }
 
+/// What [`StructuralFrontend::compose`]'s edit loop breaks with.  `Done` is a
+/// finished read; `Keybinding` is a plugin key that fired and must be
+/// dispatched once the viewport is gone (its handler may take the terminal via
+/// `_ed-tui`, exactly as rustyline dispatches only after `readline` returns).
+/// Kept internal to this frontend so the shared [`Read`] enum gains no
+/// structural-only variant.
+enum Composed {
+    Done(Read),
+    Keybinding(PendingKeybinding),
+}
+
 pub(in crate::repl) struct StructuralFrontend {
     history: History,
     /// The set of binding names present at the first `read` — the prelude
@@ -107,14 +123,24 @@ pub(in crate::repl) struct StructuralFrontend {
     /// Reduced from `rustyline::config::EditMode` at construction so the rest
     /// of this frontend never sees rustyline's type.
     vi: bool,
+    /// The plugin runtime, shared with the session and the other frontends.
+    /// The compose loop drives buffer-change hooks and dispatches plugin
+    /// keybindings through it, reusing the same neutral primitives the
+    /// rustyline frontend does — so the in-editor plugin surface (ghost text,
+    /// highlights, fzf/zoxide keys) works under `structural` too.
+    runtime: Arc<Mutex<PluginRuntime>>,
 }
 
 impl StructuralFrontend {
     /// Construct the frontend, verifying the terminal supports raw mode (so
     /// the boot selector can fall back when it does not).  Loads persisted
     /// history like the other frontends.  `edit_mode` selects emacs vs. vi
-    /// keybindings, reduced here to a plain flag.
-    pub(in crate::repl) fn new(edit_mode: rustyline::config::EditMode) -> io::Result<Self> {
+    /// keybindings, reduced here to a plain flag.  `runtime` is the shared
+    /// plugin runtime the in-editor surface drives.
+    pub(in crate::repl) fn new(
+        edit_mode: rustyline::config::EditMode,
+        runtime: Arc<Mutex<PluginRuntime>>,
+    ) -> io::Result<Self> {
         // Probe raw mode once: if the terminal cannot do it, the structural
         // surface cannot run and the caller degrades to a line editor.
         enable_raw_mode()?;
@@ -123,6 +149,7 @@ impl StructuralFrontend {
             history: History::load(),
             baseline: None,
             vi: matches!(edit_mode, rustyline::config::EditMode::Vi),
+            runtime,
         })
     }
 
@@ -159,8 +186,22 @@ impl StructuralFrontend {
         // prompt.  A multi-line prompt draws its lead rows above the editor.
         let prompt_lines = split_prompt(prompt);
 
+        // The in-editor plugin surface, set up exactly as the rustyline
+        // frontend sets it up before `readline` — reusing the same neutral
+        // primitives, not a parallel implementation.  The session-supplied
+        // `pending` wins; otherwise a buffer pushed by `_ed-push` (fzf-cd /
+        // zoxide save the current line, run, then accept a `cd`, and the
+        // saved line is restored here on the next read) is popped.  The hook
+        // shell + its guard, and the newest-first history snapshot that
+        // autosuggestion's `_ed-history` reads, are prepared up front.
+        let keymap = if self.vi { Keymap::Vi } else { Keymap::Emacs };
+        let initial = pending.or_else(|| pop_buffer_stack(&self.runtime));
+        prepare_hook_env(shell, &self.runtime, keymap);
+        let _guard = HookEnvGuard(self.runtime.clone());
+        lock(&self.runtime).hooks.history = self.history.entries().iter().rev().cloned().collect();
+
         let mut textarea = new_textarea();
-        if let Some(p) = &pending {
+        if let Some(p) = &initial {
             textarea.insert_str(&p.text);
             place_cursor(&mut textarea, p.cursor);
         }
@@ -177,6 +218,9 @@ impl StructuralFrontend {
         // commands/variables/cwd it captures cannot change underfoot.
         let mut sources: Option<Sources> = None;
         let mut menu: Option<Menu> = None;
+        // The plugin keybinding chords, built once on the first keypress (like
+        // `sources`): the runtime does not change while composing.
+        let mut chords: Option<Vec<(String, usize, KeyChord)>> = None;
 
         enable_raw_mode()?;
         let (_cols, rows) = size().unwrap_or((80, 24));
@@ -204,8 +248,28 @@ impl StructuralFrontend {
                 spine = build_spine(&s, shell);
                 last_buf = Some(s.clone());
             }
+            // Drive plugin buffer-change hooks (fish-style ghost text,
+            // highlight spans), then read back what they produced.  The driver
+            // dedups on (text, cursor) internally, so an idle redraw between
+            // keystrokes re-runs no plugin code.  The ghost is hidden while the
+            // completion menu owns the lower band.
+            run_buffer_change_hooks(&self.runtime, &s, joined_cursor_byte(&textarea));
+            let (ghost, highlights) = {
+                let rt = lock(&self.runtime);
+                (rt.hooks.ghost.clone(), rt.hooks.highlights.clone())
+            };
             terminal.draw(|frame| {
-                render(frame, &prompt_lines, &textarea, &spine, &ws_rows, &matrix, menu.as_ref());
+                render(
+                    frame,
+                    &prompt_lines,
+                    &textarea,
+                    &spine,
+                    &ws_rows,
+                    &matrix,
+                    menu.as_ref(),
+                    ghost.as_deref().filter(|_| menu.is_none()),
+                    &highlights,
+                );
             })?;
 
             if !event::poll(TICK)? {
@@ -256,14 +320,14 @@ impl StructuralFrontend {
             match k.code {
                 KeyCode::Char('c') if ctrl => {
                     if is_empty(&textarea) {
-                        break Read::Interrupt;
+                        break Composed::Done(Read::Interrupt);
                     }
                     textarea.select_all();
                     textarea.cut();
                 }
                 KeyCode::Char('d') if ctrl => {
                     if is_empty(&textarea) {
-                        break Read::Eof;
+                        break Composed::Done(Read::Eof);
                     }
                 }
                 // Up/Down walk history only from the prompt's edge rows: with
@@ -307,15 +371,39 @@ impl StructuralFrontend {
                         }
                     }
                 }
+                // Right-arrow at end-of-buffer accepts the autosuggestion
+                // ghost (parity with rustyline's hint-accept); elsewhere it
+                // moves the cursor.
+                KeyCode::Right if k.modifiers.is_empty() => match &ghost {
+                    Some(g) if !g.is_empty() && at_buffer_end(&textarea) => {
+                        textarea.insert_str(g);
+                    }
+                    _ => edit_key(&mut vim, &mut textarea, k),
+                },
                 KeyCode::Enter => {
                     let line = textarea.lines().join("\n");
                     if ral_core::syntax::parser::needs_continuation(&line) {
                         textarea.insert_newline();
                     } else {
-                        break Read::Line(line);
+                        break Composed::Done(Read::Line(line));
                     }
                 }
                 _ => {
+                    // A registered plugin chord breaks to dispatch outside the
+                    // viewport; anything else is ordinary editing.  Built-in
+                    // editing keys above take precedence, so a plugin cannot
+                    // shadow Ctrl-C/Ctrl-D/history/Tab/Enter.
+                    let chords = chords.get_or_insert_with(|| lock(&self.runtime).keybinding_chords());
+                    let hit = chords
+                        .iter()
+                        .find_map(|(name, bi, chord)| key_matches(&k, chord).then(|| (name.clone(), *bi)));
+                    if let Some((plugin, binding_idx)) = hit {
+                        break Composed::Keybinding(PendingKeybinding {
+                            plugin,
+                            binding_idx,
+                            cursor_byte: joined_cursor_byte(&textarea),
+                        });
+                    }
                     edit_key(&mut vim, &mut textarea, k);
                 }
             }
@@ -327,9 +415,10 @@ impl StructuralFrontend {
             // followed by the submitted text, in the live prompt's colours.
             // `insert_before` leaves the now-cleared viewport right below the
             // committed line.
-            Read::Line(text) => commit_line(&mut terminal, &prompt_lines, text)?,
-            // No line to commit (Interrupt / Eof): just clear the viewport so
-            // the next prompt — or the shell's exit — starts on a clean band.
+            Composed::Done(Read::Line(text)) => commit_line(&mut terminal, &prompt_lines, text)?,
+            // Nothing to commit (Interrupt / Eof / re-edit), or a plugin key
+            // about to dispatch: clear the viewport so the next prompt — or a
+            // keybinding handler taking the terminal — starts on a clean band.
             _ => terminal.clear()?,
         }
         // Park the cursor at the viewport's top-left origin before leaving raw
@@ -340,7 +429,29 @@ impl StructuralFrontend {
         let origin = terminal.get_frame().area();
         terminal.set_cursor_position(Position::new(origin.x, origin.y))?;
         disable_raw_mode()?;
-        Ok(result)
+        // Release the inline viewport before any handler runs: a plugin
+        // keybinding's `_ed-tui` (fzf, zoxide) takes over the terminal.
+        drop(terminal);
+
+        let read = match result {
+            Composed::Done(read) => read,
+            // The chord fired mid-compose; run its handler now that raw mode
+            // is off and the viewport is gone — the same dispatch the rustyline
+            // frontend runs once `readline` returns.  Accept yields a ready
+            // line; Edit re-feeds the buffer (fzf-files / fzf-history land
+            // here, the edited buffer reappearing on the next read).
+            Composed::Keybinding(pk) => {
+                let buf = textarea.lines().join("\n");
+                match dispatch_keybinding(pk, &buf, shell, &self.runtime, keymap) {
+                    KeybindingOutcome::Accept(line) => Read::Line(line),
+                    KeybindingOutcome::Edit(text, cursor) => Read::Edit(EditBuffer { text, cursor }),
+                }
+            }
+        };
+        // Flush plugin diagnostics deferred during composition or dispatch on
+        // every exit path, so they land on a durable line above the next prompt.
+        flush_pending_messages(&self.runtime);
+        Ok(read)
     }
 
     /// Recall the previous history entry (Up from the first row).  The live
@@ -455,6 +566,52 @@ fn edit_key(
 /// Whether the editor holds no text at all (every line empty).
 fn is_empty(ta: &TextArea<'static>) -> bool {
     ta.lines().iter().all(|l| l.is_empty())
+}
+
+/// Whether the cursor sits at the very end of the buffer (last row, last
+/// column) — the position fish-style autosuggestion is accepted from.
+fn at_buffer_end(ta: &TextArea<'static>) -> bool {
+    let DataCursor(row, col) = ta.cursor();
+    let lines = ta.lines();
+    row + 1 == lines.len() && col == lines[row].chars().count()
+}
+
+/// The cursor's absolute byte offset into the `\n`-joined buffer — the unit the
+/// buffer-change hooks and [`dispatch_keybinding`] expect (both convert to
+/// chars internally).  Sums each prior row's bytes plus its newline, then the
+/// cursor's byte column within its row.
+fn joined_cursor_byte(ta: &TextArea<'static>) -> usize {
+    let DataCursor(row, col) = ta.cursor();
+    let lines = ta.lines();
+    let prior: usize = lines.iter().take(row).map(|l| l.len() + 1).sum();
+    prior + char_to_byte(&lines[row], col)
+}
+
+/// Whether a crossterm key event matches a frontend-neutral plugin [`KeyChord`].
+/// Ctrl/Alt must match exactly; Shift is ignored, as no bindable chord carries
+/// it.
+fn key_matches(k: &KeyEvent, chord: &KeyChord) -> bool {
+    if k.modifiers.contains(KeyModifiers::CONTROL) != chord.ctrl
+        || k.modifiers.contains(KeyModifiers::ALT) != chord.alt
+    {
+        return false;
+    }
+    match (chord.name, k.code) {
+        (KeyName::Char(a), KeyCode::Char(b)) => a == b,
+        (KeyName::Tab, KeyCode::Tab) => true,
+        (KeyName::Enter, KeyCode::Enter) => true,
+        (KeyName::Escape, KeyCode::Esc) => true,
+        (KeyName::Up, KeyCode::Up) => true,
+        (KeyName::Down, KeyCode::Down) => true,
+        (KeyName::Left, KeyCode::Left) => true,
+        (KeyName::Right, KeyCode::Right) => true,
+        (KeyName::Home, KeyCode::Home) => true,
+        (KeyName::End, KeyCode::End) => true,
+        (KeyName::Delete, KeyCode::Delete) => true,
+        (KeyName::Backspace, KeyCode::Backspace) => true,
+        (KeyName::F(a), KeyCode::F(b)) => a == b,
+        _ => false,
+    }
 }
 
 /// Replace the editor's contents, leaving the cursor at the end — the unit of
@@ -940,6 +1097,7 @@ fn viewport_height(
     needed.clamp(1, MAX_VIEWPORT).min(rows.saturating_sub(1).max(1))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render(
     frame: &mut ratatui::Frame,
     prompt: &PromptLines,
@@ -948,6 +1106,8 @@ fn render(
     worksheet: &[WsRow],
     matrix: &[MxRow],
     menu: Option<&Menu>,
+    ghost: Option<&str>,
+    highlights: &[HighlightSpan],
 ) {
     let area = frame.area();
     let lead_rows = prompt.lead.len() as u16;
@@ -979,8 +1139,12 @@ fn render(
 
     render_spine(frame, spine_area, spine);
     render_prompt(frame, lead_area, editor_band, prompt, textarea);
-    // The underline overlay reads the cells the TextArea just painted, so it
-    // runs after `render_prompt`; the caret row sits in its own area below.
+    // The plugin overlays and the type-error underline all read the cells the
+    // TextArea just painted, so they run after `render_prompt`.  Order matters
+    // on conflict: highlights first, ghost (past the typed text) next, then the
+    // type-error flare last so it wins any cell a highlight also claimed.
+    overlay_highlights(frame, editor_band, prompt.last_w, textarea, highlights);
+    overlay_ghost(frame, editor_band, prompt.last_w, textarea, ghost);
     overlay_type_error(frame, editor_band, caret_area, prompt.last_w, textarea, spine);
     render_projections(frame, rest, worksheet, matrix);
     // The completion menu drops down over the top of the projection band,
@@ -1089,6 +1253,99 @@ fn underline_cells(frame: &mut ratatui::Frame, area: Rect, col: u16, span_w: u16
     for x in x0..(x0 + span_w).min(max_x) {
         buf[(x, y)].set_style(flare);
     }
+}
+
+/// Paint the autosuggestion ghost dim, starting at the cursor's screen cell
+/// and running right along its row, onto the cells the TextArea already
+/// painted.  Same coordinate model as [`overlay_type_error`]: every editor row
+/// begins `last_w` columns into the band, including continuation rows.  The
+/// cursor sits over the first ghost cell — fish-style — and Right-arrow accepts
+/// it (see [`StructuralFrontend::compose`]).
+fn overlay_ghost(
+    frame: &mut ratatui::Frame,
+    band: Rect,
+    last_w: u16,
+    textarea: &TextArea<'static>,
+    ghost: Option<&str>,
+) {
+    let Some(ghost) = ghost.filter(|g| !g.is_empty()) else {
+        return;
+    };
+    if band.height == 0 {
+        return;
+    }
+    let DataCursor(row, col) = textarea.cursor();
+    let y = band.y + row as u16;
+    let max_x = band.x + band.width;
+    if y >= band.y + band.height {
+        return;
+    }
+    let dim = Style::default().fg(SLATE).add_modifier(Modifier::DIM);
+    let buf = frame.buffer_mut();
+    let x0 = band.x + last_w + col as u16;
+    for (x, ch) in (x0..).zip(ghost.chars()) {
+        if x >= max_x {
+            break;
+        }
+        let cell = &mut buf[(x, y)];
+        cell.set_char(ch);
+        cell.set_style(dim);
+    }
+}
+
+/// Paint plugin highlight spans onto the prompt's editor cells.  Each span is
+/// a half-open CHAR range into the `\n`-joined buffer (the same units the
+/// `_ed-*` surface speaks); [`abs_char_to_row_col`] maps each offset to its
+/// editor row/column, and [`style_ratatui`] gives the cell style.  Same
+/// cell-overlay technique as [`underline_cells`]; an unknown style name or an
+/// offset on a newline / past the text is skipped.
+fn overlay_highlights(
+    frame: &mut ratatui::Frame,
+    band: Rect,
+    last_w: u16,
+    textarea: &TextArea<'static>,
+    highlights: &[HighlightSpan],
+) {
+    if highlights.is_empty() || band.height == 0 {
+        return;
+    }
+    let lines = textarea.lines();
+    let max_x = band.x + band.width;
+    let max_y = band.y + band.height;
+    let buf = frame.buffer_mut();
+    for hs in highlights {
+        let Some(style) = style_ratatui(&hs.style) else {
+            continue;
+        };
+        for abs in hs.span.range() {
+            let Some((row, col)) = abs_char_to_row_col(lines, abs) else {
+                continue;
+            };
+            let x = band.x + last_w + col as u16;
+            let y = band.y + row as u16;
+            if x < max_x && y < max_y {
+                buf[(x, y)].set_style(style);
+            }
+        }
+    }
+}
+
+/// Map an absolute character offset into the `\n`-joined buffer to its
+/// `(row, col)` within the editor's lines.  Returns `None` when the offset
+/// lands on a row's terminating newline or runs past the end — neither has a
+/// visible cell to style.
+fn abs_char_to_row_col(lines: &[String], abs: usize) -> Option<(usize, usize)> {
+    let mut remaining = abs;
+    for (row, line) in lines.iter().enumerate() {
+        let len = line.chars().count();
+        if remaining < len {
+            return Some((row, remaining));
+        }
+        // Consume this row's chars plus its newline; landing exactly on the
+        // newline (or past the last row) yields `None`.
+        remaining = remaining.checked_sub(len + 1)?;
+    }
+    None
 }
 
 /// Draw the caret-and-label row: pad to the span's start column, lay down
@@ -1487,5 +1744,74 @@ mod tests {
         assert_eq!(rows[0].name, "legacy");
         assert_eq!(rows[0].depth, 0);
         assert!(!rows[0].effectful);
+    }
+
+    /// The cursor's absolute byte offset into the `\n`-joined buffer accounts
+    /// for each prior row plus its newline — the unit the buffer-change hooks
+    /// and keybinding dispatch consume.
+    #[test]
+    fn joined_cursor_byte_spans_rows() {
+        let mut ta = new_textarea();
+        ta.insert_str("ab\ncd");
+        place_cursor(&mut ta, 0);
+        assert_eq!(joined_cursor_byte(&ta), 0);
+        place_cursor(&mut ta, 2); // end of the first row, before the newline
+        assert_eq!(joined_cursor_byte(&ta), 2);
+        place_cursor(&mut ta, 3); // start of the second row (newline consumed)
+        assert_eq!(joined_cursor_byte(&ta), 3);
+        place_cursor(&mut ta, 5); // end of the buffer
+        assert_eq!(joined_cursor_byte(&ta), 5);
+    }
+
+    /// `at_buffer_end` is true only at the last row's last column — the one
+    /// position the autosuggestion ghost is accepted from.
+    #[test]
+    fn at_buffer_end_only_at_the_tail() {
+        let mut ta = new_textarea();
+        ta.insert_str("ab\ncd");
+        place_cursor(&mut ta, 5);
+        assert!(at_buffer_end(&ta));
+        place_cursor(&mut ta, 2); // end of the first row, not the buffer
+        assert!(!at_buffer_end(&ta));
+        place_cursor(&mut ta, 4); // mid second row
+        assert!(!at_buffer_end(&ta));
+    }
+
+    /// Absolute char offsets map onto editor `(row, col)`; an offset that lands
+    /// on a row's newline or runs past the text has no visible cell → `None`.
+    #[test]
+    fn abs_char_to_row_col_skips_newlines_and_overflow() {
+        let lines: Vec<String> = vec!["ab".into(), "cd".into()];
+        assert_eq!(abs_char_to_row_col(&lines, 0), Some((0, 0)));
+        assert_eq!(abs_char_to_row_col(&lines, 1), Some((0, 1)));
+        assert_eq!(abs_char_to_row_col(&lines, 2), None); // the newline after "ab"
+        assert_eq!(abs_char_to_row_col(&lines, 3), Some((1, 0)));
+        assert_eq!(abs_char_to_row_col(&lines, 4), Some((1, 1)));
+        assert_eq!(abs_char_to_row_col(&lines, 5), None); // past the end
+    }
+
+    /// A crossterm key matches a plugin chord only when its name and ctrl/alt
+    /// modifiers agree; shift is ignored, a wrong char or modifier misses.
+    #[test]
+    fn key_matches_compares_name_and_modifiers() {
+        let ctrl_r = KeyChord {
+            name: KeyName::Char('r'),
+            ctrl: true,
+            alt: false,
+        };
+        let ev = |code, mods| KeyEvent::new(code, mods);
+        assert!(key_matches(&ev(KeyCode::Char('r'), KeyModifiers::CONTROL), &ctrl_r));
+        // Wrong char, a missing modifier, or an extra alt all miss.
+        assert!(!key_matches(&ev(KeyCode::Char('t'), KeyModifiers::CONTROL), &ctrl_r));
+        assert!(!key_matches(&ev(KeyCode::Char('r'), KeyModifiers::NONE), &ctrl_r));
+        assert!(!key_matches(
+            &ev(KeyCode::Char('r'), KeyModifiers::CONTROL | KeyModifiers::ALT),
+            &ctrl_r
+        ));
+        // Shift alongside ctrl is tolerated — no bindable chord carries shift.
+        assert!(key_matches(
+            &ev(KeyCode::Char('r'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+            &ctrl_r
+        ));
     }
 }

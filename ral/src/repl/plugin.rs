@@ -50,13 +50,63 @@ pub(super) fn lock(m: &Arc<Mutex<PluginRuntime>>) -> MutexGuard<'_, PluginRuntim
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Name of the keymap rustyline is in: `"viins"` for vi insert, `"emacs"` otherwise.
-/// Surfaced to plugin hooks via the `_ed-keymap` query.
-pub(super) fn keymap_name(mode: EditMode) -> &'static str {
-    match mode {
-        EditMode::Vi => "viins",
-        _ => "emacs",
+/// Which keymap the editor is in — the frontend-neutral reduction of
+/// rustyline's `EditMode`.  Both editor backends carry one of these to the
+/// shared hook/keybinding primitives so neither has to thread rustyline's
+/// type through code that only needs to name the keymap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Keymap {
+    Emacs,
+    Vi,
+}
+
+impl From<EditMode> for Keymap {
+    fn from(mode: EditMode) -> Self {
+        match mode {
+            EditMode::Vi => Keymap::Vi,
+            _ => Keymap::Emacs,
+        }
     }
+}
+
+/// Name the keymap for plugin hooks: `"viins"` for vi insert, `"emacs"`
+/// otherwise.  Surfaced to plugin hooks via the `_ed-keymap` query.
+pub(super) fn keymap_name(keymap: Keymap) -> &'static str {
+    match keymap {
+        Keymap::Vi => "viins",
+        Keymap::Emacs => "emacs",
+    }
+}
+
+/// A frontend-neutral key name: the subset of keys a plugin keybinding may
+/// bind, exactly the notations [`parse_key_notation`] accepts.  Each editor
+/// backend adapts these to its own event type at its boundary — rustyline's
+/// `KeyEvent` ([`chord_to_key_event`]), crossterm's in the structural surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum KeyName {
+    Char(char),
+    Tab,
+    Enter,
+    Escape,
+    Up,
+    Down,
+    Left,
+    Right,
+    Home,
+    End,
+    Delete,
+    Backspace,
+    F(u8),
+}
+
+/// A frontend-neutral key chord: a [`KeyName`] plus the ctrl/alt modifiers.
+/// [`parse_key_notation`] produces these; the backends compare/adapt them
+/// without ever seeing each other's event types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct KeyChord {
+    pub(super) name: KeyName,
+    pub(super) ctrl: bool,
+    pub(super) alt: bool,
 }
 
 // ── Substructs ──────────────────────────────────────────────────────────
@@ -151,6 +201,13 @@ pub(crate) fn flush_pending_messages(runtime: &Arc<Mutex<PluginRuntime>>) {
     for m in msgs {
         eprintln!("{m}");
     }
+}
+
+/// Drain one entry from the plugin buffer stack (`_ed-push`).  Both editor
+/// backends pop a pushed buffer when the session hands them no pending one,
+/// so the pop lives here rather than being duplicated per frontend.
+pub(super) fn pop_buffer_stack(runtime: &Arc<Mutex<PluginRuntime>>) -> Option<EditBuffer> {
+    lock(runtime).keybindings.buffers.pop()
 }
 
 /// A keybinding flagged by rustyline's event handler, identified by the
@@ -386,40 +443,72 @@ impl ConditionalEventHandler for CtrlDHandler {
 }
 
 /// Parse a key notation string ("ctrl-r", "alt-x", "f5", "tab", …) into a
-/// rustyline `KeyEvent`.  Returns `None` for unrecognised notations.
-pub(super) fn parse_key_notation(key: &str) -> Option<KeyEvent> {
-    const NAMED: &[(&str, KeyCode)] = &[
-        ("tab", KeyCode::Tab),
-        ("enter", KeyCode::Enter),
-        ("escape", KeyCode::Esc),
-        ("up", KeyCode::Up),
-        ("down", KeyCode::Down),
-        ("left", KeyCode::Left),
-        ("right", KeyCode::Right),
-        ("home", KeyCode::Home),
-        ("end", KeyCode::End),
-        ("delete", KeyCode::Delete),
-        ("backspace", KeyCode::Backspace),
+/// frontend-neutral [`KeyChord`].  Returns `None` for unrecognised notations.
+pub(super) fn parse_key_notation(key: &str) -> Option<KeyChord> {
+    const NAMED: &[(&str, KeyName)] = &[
+        ("tab", KeyName::Tab),
+        ("enter", KeyName::Enter),
+        ("escape", KeyName::Escape),
+        ("up", KeyName::Up),
+        ("down", KeyName::Down),
+        ("left", KeyName::Left),
+        ("right", KeyName::Right),
+        ("home", KeyName::Home),
+        ("end", KeyName::End),
+        ("delete", KeyName::Delete),
+        ("backspace", KeyName::Backspace),
     ];
+    let plain = |name| KeyChord {
+        name,
+        ctrl: false,
+        alt: false,
+    };
     let key = key.trim();
     if key.len() == 1 {
-        return Some(KeyEvent(
-            KeyCode::Char(key.chars().next()?),
-            Modifiers::NONE,
-        ));
+        return Some(plain(KeyName::Char(key.chars().next()?)));
     }
-    if let Some(&(_, code)) = NAMED.iter().find(|(n, _)| *n == key) {
-        return Some(KeyEvent(code, Modifiers::NONE));
+    if let Some(&(_, name)) = NAMED.iter().find(|(n, _)| *n == key) {
+        return Some(plain(name));
     }
-    for (prefix, mods) in [("ctrl-", Modifiers::CTRL), ("alt-", Modifiers::ALT)] {
+    for (prefix, ctrl, alt) in [("ctrl-", true, false), ("alt-", false, true)] {
         if let Some(rest) = key.strip_prefix(prefix) {
-            return Some(KeyEvent(KeyCode::Char(rest.chars().next()?), mods));
+            return Some(KeyChord {
+                name: KeyName::Char(rest.chars().next()?),
+                ctrl,
+                alt,
+            });
         }
     }
     let num = key.strip_prefix('f').and_then(|s| s.parse::<u8>().ok())?;
-    (1..=12)
-        .contains(&num)
-        .then_some(KeyEvent(KeyCode::F(num), Modifiers::NONE))
+    (1..=12).contains(&num).then_some(plain(KeyName::F(num)))
+}
+
+/// Adapt a [`KeyChord`] to the rustyline `KeyEvent` rustyline binds against.
+/// The rustyline boundary — [`sync_plugins`] is the only caller.
+fn chord_to_key_event(chord: KeyChord) -> KeyEvent {
+    let code = match chord.name {
+        KeyName::Char(c) => KeyCode::Char(c),
+        KeyName::Tab => KeyCode::Tab,
+        KeyName::Enter => KeyCode::Enter,
+        KeyName::Escape => KeyCode::Esc,
+        KeyName::Up => KeyCode::Up,
+        KeyName::Down => KeyCode::Down,
+        KeyName::Left => KeyCode::Left,
+        KeyName::Right => KeyCode::Right,
+        KeyName::Home => KeyCode::Home,
+        KeyName::End => KeyCode::End,
+        KeyName::Delete => KeyCode::Delete,
+        KeyName::Backspace => KeyCode::Backspace,
+        KeyName::F(n) => KeyCode::F(n),
+    };
+    let mut mods = Modifiers::NONE;
+    if chord.ctrl {
+        mods |= Modifiers::CTRL;
+    }
+    if chord.alt {
+        mods |= Modifiers::ALT;
+    }
+    KeyEvent(code, mods)
 }
 
 // ── Plugin lifecycle helpers ─────────────────────────────────────────────
@@ -461,7 +550,7 @@ pub(super) fn sync_plugins(
     let mut bound = Vec::new();
     for (name, keys) in &plugins {
         for (bi, key_str) in keys.iter().enumerate() {
-            if let Some(key_event) = parse_key_notation(key_str) {
+            if let Some(key_event) = parse_key_notation(key_str).map(chord_to_key_event) {
                 rl.bind_sequence(
                     key_event,
                     rustyline::EventHandler::Conditional(Box::new(PluginKeyHandler {
@@ -489,14 +578,14 @@ pub(super) fn sync_plugins(
 pub(super) fn prepare_hook_env(
     shell: &Shell,
     runtime: &Arc<Mutex<PluginRuntime>>,
-    edit_mode: EditMode,
+    keymap: Keymap,
 ) {
     let mut rt = lock(runtime);
 
     rt.hooks.state = EditorState {
         text: String::new(),
         cursor: 0,
-        keymap: keymap_name(edit_mode).into(),
+        keymap: keymap_name(keymap).into(),
     };
     rt.hooks.previous = EditBuffer::default();
     rt.hooks.ghost = None;
@@ -542,6 +631,27 @@ impl PluginRuntime {
         let idx = self.plugins.iter().position(|p| p.name == plugin)?;
         let (_, handler) = self.plugins[idx].keybindings.get(binding_idx)?;
         Some((idx, handler.clone()))
+    }
+
+    /// Every plugin keybinding as a frontend-neutral `(plugin_name,
+    /// binding_idx, chord)` triple, for a frontend that matches incoming
+    /// keys itself rather than registering handlers with rustyline (the
+    /// structural surface).  The `(plugin_name, binding_idx)` pair is the
+    /// same identity [`resolve_keybinding`] resolves, so a matched chord
+    /// dispatches through the shared [`super::keybinding::dispatch_keybinding`].
+    /// An unparseable notation is skipped silently — rustyline's
+    /// [`sync_plugins`] already warns on it, and this runs every keypress.
+    #[cfg(feature = "structural")]
+    pub(super) fn keybinding_chords(&self) -> Vec<(String, usize, KeyChord)> {
+        let mut out = Vec::new();
+        for p in &self.plugins {
+            for (bi, (key_str, _)) in p.keybindings.iter().enumerate() {
+                if let Some(chord) = parse_key_notation(key_str) {
+                    out.push((p.name.clone(), bi, chord));
+                }
+            }
+        }
+        out
     }
 }
 
@@ -609,4 +719,62 @@ pub(super) fn snapshot_history(
         })
         .collect();
     lock(runtime).hooks.history = entries;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `parse_key_notation` reduces every supported notation to a
+    /// frontend-neutral [`KeyChord`] — the modifiers and the named keys the
+    /// fzf/zoxide plugins bind, plus the bare-char and function-key forms.
+    #[test]
+    fn parse_key_notation_yields_neutral_chords() {
+        let chord = |name, ctrl, alt| Some(KeyChord { name, ctrl, alt });
+        assert_eq!(
+            parse_key_notation("ctrl-r"),
+            chord(KeyName::Char('r'), true, false)
+        );
+        assert_eq!(
+            parse_key_notation("alt-c"),
+            chord(KeyName::Char('c'), false, true)
+        );
+        assert_eq!(parse_key_notation("tab"), chord(KeyName::Tab, false, false));
+        assert_eq!(
+            parse_key_notation("t"),
+            chord(KeyName::Char('t'), false, false)
+        );
+        assert_eq!(parse_key_notation("f5"), chord(KeyName::F(5), false, false));
+        // Unrecognised notations and out-of-range function keys are rejected.
+        assert_eq!(parse_key_notation("hyper-x"), None);
+        assert_eq!(parse_key_notation("f13"), None);
+    }
+
+    /// The rustyline boundary: a parsed chord adapts to exactly the `KeyEvent`
+    /// rustyline binds against, so `sync_plugins` and the structural matcher
+    /// agree on what a notation means.
+    #[test]
+    fn chord_adapts_to_rustyline_key_event() {
+        let ev = |s| parse_key_notation(s).map(chord_to_key_event);
+        assert_eq!(
+            ev("ctrl-r"),
+            Some(KeyEvent(KeyCode::Char('r'), Modifiers::CTRL))
+        );
+        assert_eq!(
+            ev("alt-c"),
+            Some(KeyEvent(KeyCode::Char('c'), Modifiers::ALT))
+        );
+        assert_eq!(ev("tab"), Some(KeyEvent(KeyCode::Tab, Modifiers::NONE)));
+        assert_eq!(ev("f5"), Some(KeyEvent(KeyCode::F(5), Modifiers::NONE)));
+    }
+
+    /// `Keymap` is the neutral reduction of rustyline's `EditMode`, and names
+    /// the keymap for the `_ed-keymap` query the same way the old code did.
+    #[test]
+    fn keymap_reduces_edit_mode_and_names_it() {
+        assert_eq!(Keymap::from(EditMode::Vi), Keymap::Vi);
+        assert_eq!(Keymap::from(EditMode::Emacs), Keymap::Emacs);
+        assert_eq!(keymap_name(Keymap::Vi), "viins");
+        assert_eq!(keymap_name(Keymap::Emacs), "emacs");
+    }
 }

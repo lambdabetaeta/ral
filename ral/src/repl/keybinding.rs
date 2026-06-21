@@ -9,13 +9,12 @@
 
 use ral_core::Shell;
 use ral_core::types::Break;
-use rustyline::config::EditMode;
 use std::sync::{Arc, Mutex};
 
 use super::frontend::EditBuffer;
 use super::plugin::{
-    HookFor, PendingKeybinding, PluginRuntime, call_plugin_hook, defer_plugin_error, keymap_name,
-    lock,
+    HookFor, Keymap, PendingKeybinding, PluginRuntime, call_plugin_hook, defer_plugin_error,
+    keymap_name, lock,
 };
 use super::plugin_editor::{EditorState, PluginContext, PluginInputs, PluginOutputs, byte_to_char};
 
@@ -48,7 +47,7 @@ pub(super) fn dispatch_keybinding(
     current: &str,
     shell: &mut Shell,
     runtime: &Arc<Mutex<PluginRuntime>>,
-    edit_mode: EditMode,
+    keymap: Keymap,
 ) -> KeybindingOutcome {
     // Resolve the owning plugin by name, not by position: the index a
     // stale binding once carried would now address whatever plugin slid
@@ -76,7 +75,7 @@ pub(super) fn dispatch_keybinding(
         editor_state: EditorState {
             text: current.to_string(),
             cursor: cursor_chars,
-            keymap: keymap_name(edit_mode).into(),
+            keymap: keymap_name(keymap).into(),
         },
         inputs: PluginInputs {
             history_entries: lock(runtime).hooks.history.clone(),
