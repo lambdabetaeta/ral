@@ -25,6 +25,7 @@ mod rail;
 mod viewport;
 use block::{AgentSlot, RailShape};
 use fidelity::Fidelity;
+use rail::RailKind;
 
 use line::usage_text;
 
@@ -1628,6 +1629,146 @@ fn join_paths(paths: &[PathBuf]) -> String {
         .join(", ")
 }
 
+/// The `/legend` panel: the transcript's own visual vocabulary, rendered
+/// *as the graphic itself* — every sample is the literal output of the
+/// builder that draws it on a real block, so the legend can never drift
+/// from what the rail and bars actually paint.  It is ambient reference
+/// chrome, rail-less Plain like the splash and [`session_card`]: a panel
+/// to decode the transcript by, not a transcript event of its own.
+///
+/// The aligned `(label, sample)` rows go through [`line::legend_rows`] —
+/// the same selective-alignment primitive the startup matrix uses — so the
+/// samples land in one column; section titles between the row groups are
+/// plain slate-bold heads.  The samples derive from [`rail::RAIL_SHAPES`],
+/// [`AGENT_HUES`], and the bar / grain / spark / fidelity builders, so a
+/// palette or shape change updates the legend with no edit here.
+fn legend_panel() -> Vec<Line<'static>> {
+    let head = |s: &str| {
+        Line::from(Span::styled(
+            s.to_string(),
+            Style::default().fg(SLATE).add_modifier(Modifier::BOLD),
+        ))
+    };
+    let note = |s: &str| Span::styled(s.to_string(), Style::default().fg(SLATE));
+
+    let mut ls: Vec<Line<'static>> = vec![Line::default(), head("legend — the transcript as a graphic")];
+
+    // ── rail: one cell, three variables ───────────────────────────────
+    ls.push(Line::default());
+    ls.push(head("rail · shape = block kind"));
+    ls.extend(line::legend_rows(
+        rail::RAIL_SHAPES
+            .iter()
+            .map(|(kind, name)| (*name, vec![rail::span(*kind, AgentSlot(0), None)]))
+            .collect(),
+    ));
+    ls.push(Line::default());
+    ls.push(head("rail · hue = which agent"));
+    ls.extend(line::legend_rows(
+        (0..AGENT_HUES.len())
+            .map(|slot| {
+                let label = if slot == 0 { "root" } else { "subagent" };
+                (label, vec![rail::span(RailKind::Generic, AgentSlot(slot as u8), None)])
+            })
+            .collect(),
+    ));
+    ls.push(Line::default());
+    ls.push(head("rail · value = magnitude (brighter is bigger)"));
+    // One shape, the same hue, stepped up the value ramp by feeding the
+    // four magnitude buckets `rail::value_step` reads — so the row *is* the
+    // ramp the rail lightens by, not a restatement of it.
+    ls.extend(line::legend_rows(vec![(
+        "small → large",
+        [None, Some(4), Some(20), Some(80)]
+            .into_iter()
+            .map(|mag| rail::span(RailKind::Patch, AgentSlot(0), mag))
+            .collect(),
+    )]));
+
+    // ── the ordered bars ───────────────────────────────────────────────
+    ls.push(Line::default());
+    ls.push(head("bars · length and texture, beside a collapsed header"));
+    ls.extend(line::legend_rows(vec![
+        (
+            "size",
+            vec![line::size_bar(120), note("  log-scaled magnitude")],
+        ),
+        (
+            "grain",
+            vec![
+                line::grain_run(9, 1),
+                note("  diff density: ⣿ all adds → ⣀ all deletes"),
+            ],
+        ),
+        (
+            "sparkline",
+            vec![
+                Span::styled(
+                    [None, Some(2), Some(40), Some(8), Some(300)]
+                        .into_iter()
+                        .map(line::spark_glyph)
+                        .collect::<String>(),
+                    Style::default().fg(SLATE),
+                ),
+                note("  one bar per call in a coalesced ral block"),
+            ],
+        ),
+    ]));
+
+    // ── the status line's two bottom bars ──────────────────────────────
+    ls.push(Line::default());
+    ls.push(head("status line · the two bars under the transcript"));
+    ls.extend(line::legend_rows(vec![
+        (
+            "window",
+            {
+                let mut v = ctx_ramp(72, CTX_BAR_W);
+                v.push(note("fills and brightens toward a full context window"));
+                v
+            },
+        ),
+        (
+            "elapsed",
+            {
+                let mut v = wait_bar(Duration::from_secs(18));
+                v.push(note("grows with the current phase's wall-time"));
+                v
+            },
+        ),
+    ]));
+
+    // ── coherent degradation: how much to trust a passage ──────────────
+    ls.push(Line::default());
+    ls.push(head("fidelity · a shaky answer renders drained, not authoritative"));
+    // Real prose through the real `render_md`, so the drain and wash are
+    // exactly what a degraded block wears — never a re-derived colour.
+    let prose = "An answer the model committed to the transcript.";
+    let sample = |f: Fidelity| {
+        md::render_md(prose, READ_W, 0, f)
+            .into_iter()
+            .next()
+            .map(|line| line.spans)
+            .unwrap_or_default()
+    };
+    ls.extend(line::legend_rows(vec![
+        ("sound", sample(Fidelity::default())),
+        ("drained", sample(Fidelity { context: 2, echo: 0 })),
+        ("echoed", sample(Fidelity { context: 0, echo: 2 })),
+    ]));
+    ls.push(Line::from(note(
+        "  context pressure drains the ink; echoing its own script washes the field behind it",
+    )));
+
+    // ── disclosure: detail is something you dial ───────────────────────
+    ls.push(Line::default());
+    ls.push(head("disclosure · dial detail on the rail (wheel / click)"));
+    ls.push(Line::from(note(
+        "  levels L1–L3; tool calls, diffs, and subagents floor at L1 — model prose always renders full",
+    )));
+
+    ls
+}
+
 /// The rule line's right-side status readout: model name, the ctx%
 /// value-ramp inputs (`last_input` against `context_window`), and the
 /// running token `usage` figures.
@@ -2251,6 +2392,12 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         run: |r| r.cmd_help(),
     },
     SlashCommand {
+        name: "/legend",
+        aliases: &[],
+        help: "Decode the rail, bars, grain, and fidelity treatments.",
+        run: |r| r.cmd_legend(),
+    },
+    SlashCommand {
         name: "/clear",
         aliases: &[],
         help: "Forget the conversation and clear the screen.",
@@ -2416,6 +2563,17 @@ impl Repl<'_> {
         let _ = pump(&mut self.tui, id, |emit| {
             session.compact(provider, emit, true, &token)
         });
+        Slash::Continue
+    }
+
+    /// Push the visual-vocabulary legend onto the transcript as ambient,
+    /// rail-less chrome — the panel that decodes the rail, bars, grain, and
+    /// fidelity treatments, rendered as the graphic's own samples.
+    fn cmd_legend(&mut self) -> Slash {
+        let id = self.session.id;
+        self.tui
+            .app
+            .push_chrome(id, RailShape::Plain, legend_panel());
         Slash::Continue
     }
 
@@ -2785,7 +2943,7 @@ fn read_prompt(term: &mut Term, app: &mut App) -> io::Result<Idle> {
 
 #[cfg(test)]
 mod banner_tests {
-    use super::{SessionInfo, line, session_card};
+    use super::{SessionInfo, legend_panel, line, rail, session_card};
     use crate::card::{FieldVal, Mark, Role};
     use std::path::{Path, PathBuf};
 
@@ -2936,6 +3094,34 @@ mod banner_tests {
                 label_w,
                 "every field line opens with a label cell of width {label_w}"
             );
+        }
+    }
+
+    /// The legend enumerates the rail's *own* shape vocabulary: every
+    /// `RAIL_SHAPES` entry's name appears as a row label, so a new shape
+    /// cannot land on the rail without showing up in the legend.
+    #[test]
+    fn legend_names_every_rail_shape() {
+        let text: String = legend_panel().iter().map(line::plain).collect::<Vec<_>>().join("\n");
+        for (_, name) in rail::RAIL_SHAPES {
+            assert!(text.contains(name), "legend omits the {name:?} shape row");
+        }
+    }
+
+    /// The legend is ambient, rail-less chrome: no row borrows a marginal
+    /// rail glyph as its leading span.  The shape samples *contain* the
+    /// glyphs, but always in a value cell behind a label — never as the
+    /// row-leading rail the copy contract ([`line::plain`]) would strip.
+    #[test]
+    fn legend_wears_no_marginal_rail() {
+        for l in legend_panel() {
+            if let Some(first) = l.spans.first() {
+                assert!(
+                    !line::RAIL_GLYPHS.contains(&first.content.as_ref()),
+                    "a legend row leads with a rail glyph: {:?}",
+                    line::plain(&l)
+                );
+            }
         }
     }
 }

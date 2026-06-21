@@ -979,6 +979,25 @@ fn render_field_rows(rows: &[FieldRow], width: usize) -> Vec<Line<'static>> {
     ls
 }
 
+/// Align pre-styled `(label, sample)` rows into one shared label column —
+/// the `/legend` panel's primitive.  The legend's samples are not data the
+/// renderer styles (a [`FieldRow`] names a role and lets the kit stay
+/// colour-blind); they are the literal styled output of the rail / bar /
+/// grain builders, exhibited so the reader can decode the rail.  So this
+/// takes already-styled spans straight through the shared alignment
+/// ([`render_field_rows`]) rather than a [`Role`], the one place the TUI
+/// shows appearance because appearance *is* the subject.
+pub(super) fn legend_rows(rows: Vec<(&str, Vec<Span<'static>>)>) -> Vec<Line<'static>> {
+    let rows: Vec<FieldRow> = rows
+        .into_iter()
+        .map(|(label, spans)| FieldRow {
+            label: label.to_string(),
+            value: FieldValue::Inline(spans),
+        })
+        .collect();
+    render_field_rows(&rows, READ_W as usize)
+}
+
 // ── Provider-error rendering ────────────────────────────────────────────────
 
 /// Body keys subsumed by the rendered retry-after row, so a body

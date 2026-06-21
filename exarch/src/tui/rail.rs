@@ -54,6 +54,22 @@ impl RailKind {
     }
 }
 
+/// The shape vocabulary, each variant paired with the block kind it names —
+/// the row source the `/legend` panel draws its shape samples from (via
+/// [`span`]), so the legend enumerates the same set the rail dispatches on
+/// and can never list a glyph the rail does not draw. A shut / open tool
+/// call is one shape under disclosure, so both triangles appear.
+pub(super) const RAIL_SHAPES: &[(RailKind, &str)] = &[
+    (RailKind::Patch, "patch / diff"),
+    (RailKind::ToolCall(false), "tool call, shut"),
+    (RailKind::ToolCall(true), "tool call, open"),
+    (RailKind::Markdown, "model prose"),
+    (RailKind::Subagent, "subagent result"),
+    (RailKind::Step, "step boundary"),
+    (RailKind::Error, "error"),
+    (RailKind::Generic, "generic chrome"),
+];
+
 /// Bucket a magnitude into a `0..=3` lightness step: `None` and tiny
 /// changes read at the base hue (step 0); larger events step toward
 /// white so brighter rail = larger event, comparable across the whole
