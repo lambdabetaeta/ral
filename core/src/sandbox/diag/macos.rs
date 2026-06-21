@@ -52,17 +52,26 @@ pub(super) fn extract_pid(line: &str) -> Option<u32> {
 
 /// Split a denial line into its `(operation, path)` after the
 /// `Sandbox: ` tag, where the body reads `comm(pid) deny(n) <op>
-/// <path…>`.  The operation is the whitespace token following the
-/// `deny(...)` token; the path is the trimmed remainder of the line —
-/// macOS paths can contain spaces, so the remainder is taken whole and
-/// never split further.  The path is logged fully resolved, so it is
-/// exactly the path the user must grant.  Returns `None` on any
-/// deviation from that shape; a parsed line with no path tail yields
-/// `Some((op, None))`.
+/// <operand…>`.  The operation is the whitespace token following the
+/// `deny(...)` token; the operand is the trimmed remainder of the line
+/// — macOS paths can contain spaces, so the remainder is taken whole
+/// and never split further.
+///
+/// A `path` is returned only for filesystem operations (`file-*`),
+/// whose operand Seatbelt logs fully resolved — exactly the path the
+/// user must grant.  Non-filesystem denials carry a service or
+/// endpoint name in the same position, not a grantable path:
+/// `ipc-posix-shm-*` names a POSIX shared-memory region (e.g.
+/// `apple.shm.notification_center`, touched benignly at process
+/// startup), `mach-lookup` a Mach service, `network-*` an address.
+/// These yield `Some((op, None))`, so the hint can still reproduce
+/// their kernel line for transparency but never offers the operand as
+/// a path to add to an fs grant.  Returns `None` on any deviation from
+/// the `comm(pid) deny(n) <op> …` shape.
 pub(super) fn parse_denial(line: &str) -> Option<(&str, Option<&str>)> {
     let after_tag = line.rsplit_once("Sandbox: ")?.1;
     // Skip the `comm(pid)` token, then the `deny(n)` token, landing on
-    // the operation.  `splitn` keeps the path tail (with its spaces)
+    // the operation.  `splitn` keeps the operand tail (with its spaces)
     // intact as the final piece.
     let after_deny = after_tag.split_once("deny(")?.1.split_once(')')?.1;
     let mut rest = after_deny.trim_start().splitn(2, char::is_whitespace);
@@ -70,7 +79,12 @@ pub(super) fn parse_denial(line: &str) -> Option<(&str, Option<&str>)> {
     if op.is_empty() {
         return None;
     }
-    let path = rest.next().map(str::trim).filter(|p| !p.is_empty());
+    // Only filesystem operations carry a grantable path; the operand of
+    // an ipc/mach/network denial is a service name, not a path.
+    let path = rest
+        .next()
+        .map(str::trim)
+        .filter(|p| !p.is_empty() && op.starts_with("file-"));
     Some((op, path))
 }
 
@@ -121,6 +135,20 @@ mod tests {
     fn parse_denial_handles_op_without_a_path() {
         let line = "kernel[0] (Sandbox) Sandbox: foo(1) deny(1) network-outbound";
         assert_eq!(parse_denial(line), Some(("network-outbound", None)));
+    }
+
+    #[test]
+    fn parse_denial_drops_non_filesystem_operand() {
+        // The benign startup denial that misled the diagnostic: the
+        // operand is a POSIX shared-memory region, not a path to grant.
+        let shm = "kernel[0] (Sandbox) Sandbox: git(58522) deny(1) \
+                   ipc-posix-shm-read-data apple.shm.notification_center";
+        assert_eq!(parse_denial(shm), Some(("ipc-posix-shm-read-data", None)));
+
+        // mach-lookup names a Mach service in the same position.
+        let mach = "kernel[0] (Sandbox) Sandbox: git(58522) deny(1) \
+                    mach-lookup com.apple.system.notification_center";
+        assert_eq!(parse_denial(mach), Some(("mach-lookup", None)));
     }
 
     #[test]

@@ -225,6 +225,55 @@ mod tests {
         assert!(hint.contains("deny(1)"), "hint must show the kernel line");
     }
 
+    /// A benign non-filesystem denial logged before the real
+    /// `file-read*` denial must not hijack the "path to grant" slot.
+    /// This is the regression from the field: a `git status` under the
+    /// sandbox logged an `ipc-posix-shm-read-data` startup denial first,
+    /// and the hint offered `apple.shm.notification_center` as a path —
+    /// nonsense — instead of the resolved config path the read actually
+    /// hit through a dotfiles symlink.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hint_selects_filesystem_path_over_ipc_operand() {
+        let shm = "2026-06-19 12:00:00.000 kernel[0] (Sandbox) Sandbox: git(58522) deny(1) \
+                   ipc-posix-shm-read-data apple.shm.notification_center";
+        let read = "2026-06-19 12:00:00.100 kernel[0] (Sandbox) Sandbox: git(58522) deny(1) \
+                    file-read-data /Users/me/dotfiles/git/.config/git/config";
+        let hint = build_hint(&[shm, read]);
+        assert!(
+            hint.contains("the path `/Users/me/dotfiles/git/.config/git/config`"),
+            "hint must offer the resolved filesystem path to grant; got {hint:?}"
+        );
+        assert!(
+            !hint.contains("the path `apple.shm.notification_center`"),
+            "hint must not offer the IPC service operand as a path to grant; got {hint:?}"
+        );
+        // Both kernel lines stay reproduced verbatim for transparency.
+        assert!(
+            hint.contains("ipc-posix-shm-read-data") && hint.contains("file-read-data"),
+            "hint must reproduce every attributed denial line; got {hint:?}"
+        );
+    }
+
+    /// When the only denial in the window is a non-filesystem one, the
+    /// hint degrades to the no-grantable-path wording rather than
+    /// inventing a path from a service name.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hint_without_filesystem_denial_offers_no_path() {
+        let shm = "2026-06-19 12:00:00.000 kernel[0] (Sandbox) Sandbox: git(58522) deny(1) \
+                   ipc-posix-shm-read-data apple.shm.notification_center";
+        let hint = build_hint(&[shm]);
+        assert!(
+            hint.contains("carries no path here"),
+            "a lone non-fs denial must use the no-path arm; got {hint:?}"
+        );
+        assert!(
+            !hint.contains("apple.shm.notification_center`"),
+            "the service operand must never appear as a grantable path; got {hint:?}"
+        );
+    }
+
     /// More than [`MAX_DENIAL_LINES`] denials reproduce the cap plus an
     /// "(N more)" tail rather than the whole stream.
     #[cfg(target_os = "macos")]
