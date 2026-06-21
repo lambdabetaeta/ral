@@ -78,46 +78,6 @@ model (its provider is resolved as the available provider whose list
 contains it). With no `--model` and no saved selection, the first available
 provider's default model is used.
 
-## Layout
-
-- `build.rs` — bakes the ral prelude into `OUT_DIR` (port of `ral/build.rs`).
-- `src/shell_eval.rs` — prelude `OnceLock`s and the in-process
-  `run_shell` that evaluates each tool call as a top-level turn
-  (`evaluator::eval_top_level`) under the profile's capabilities
-  (`Shell::with_capabilities`), captures stdout/stderr into in-memory
-  buffers, and reuses one `Shell` across calls.
-- `src/api.rs` — `Provider` trait with two implementations: `Anthropic`
-  (Messages API) and `ChatCompletions` (one struct, two constructors:
-  `::openai` and `::openrouter`).
-- `src/main.rs` — argv, provider selection, persistent `Shell` boot, the
-  loop, and the system prompt that teaches the model ral idioms.
-- `src/ui.rs` — truecolor neon transcript: banner, turn separators,
-  tool-call frames, exit colouring.
-
-## Wire shape
-
-`Provider::step(Step) -> StepOut` is provider-agnostic.
-
-- **Anthropic** sends `tool_use` content blocks; results return as
-  `tool_result` blocks inside a `user` message. Done when
-  `stop_reason != "tool_use"`.
-- **Chat Completions** sends `tool_calls` on the assistant message with
-  `arguments` as a JSON-encoded string; results return as dedicated
-  `role: "tool"` messages keyed by `tool_call_id`. Done when
-  `finish_reason != "tool_calls"`.
-
-The conversation is stateless on the wire — the exarch replays the full
-history each turn — but the in-process `Shell` persists, so cwd, env,
-and `let`-bound names survive across tool calls.
-
-Each tool call is a *top-level turn* in the ral sense (SPEC §4.3.1):
-`let`, `cd`, `env-set`, module loads, and the recorded last status
-persist into the next call (the profile's `Capabilities` are pushed
-onto the capability stack by `with_capabilities`, not by an enclosing
-source-level `grant { … }` block).  A `grant { … }` block the model
-writes itself, by contrast, still discards its body's bindings at the
-closing brace, as for any other block.
-
 ## Sandbox
 
 The boundary is the active profile's `Capabilities`, pushed onto the
