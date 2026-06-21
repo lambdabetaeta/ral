@@ -501,6 +501,7 @@ impl ScheduleRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bus::Turn;
     use jiff::civil::date;
 
     fn sched(expr: &str) -> CronSchedule {
@@ -645,13 +646,18 @@ mod tests {
         .unwrap();
         let mut fired = None;
         for _ in 0..200 {
-            if let Some(text) = inbox.drain_turn() {
-                fired = Some(text);
+            if let Some(turn) = inbox.drain_turn() {
+                fired = Some(turn);
                 break;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        let text = fired.expect("a one-shot `after` schedule must fire");
+        let turn = fired.expect("a one-shot `after` schedule must fire");
+        assert!(
+            matches!(&turn, Turn::Wakeup(_)),
+            "delivered tagged as a wakeup turn, got {turn:?}"
+        );
+        let text = turn.text();
         assert!(text.contains("ping"), "delivered the prompt: {text}");
         assert!(text.starts_with("[scheduled"), "marked wakeup: {text}");
         assert!(
