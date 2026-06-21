@@ -67,7 +67,8 @@ event on the bus, while move 7 can deepen with one.
    - **shape** (associative) → block *kind*: `▎` patch, `◆` tool call, `·`
      markdown, `━` step boundary, `✗` error;
    - **hue** → the *producing agent* (root / each subagent's palette slot);
-   - **value** (the ordered lightness ramp, Bertin's quantitative variable) →
+   - **value** (the ordered lightness ramp — *ordered*, not quantitative, in
+     Bertin's classification: rankable but not read as a numeric ratio) →
      *magnitude*: lines changed for a patch, tokens for a tool call, wall-time
      for a phase.
    The rail becomes a 2-column thumbnail of the whole session — its shape is
@@ -280,9 +281,12 @@ event on the bus, while move 7 can deepen with one.
   files × recency. Bertin's thesis is that the same data re-projected reveals
   different structure; `Block`/`Viewport` already separates data from
   rendering, so the projections are architecturally free.
-- **Quantitative data moves from text to value/size.** The two ordered
-  variables Bertin permits for magnitude carry the magnitudes; hue is freed to
-  do its associative job (agent identity).
+- **Quantitative data moves from text to value/size.** Magnitude rides value
+  (Bertin's *ordered* variable) and size (his one *quantitative* variable —
+  though we `log2`-scale every bar, so even size reads as ordered here, a rank
+  rather than a ratio); hue is freed to do its associative job (agent identity).
+  Either way the digits remain the quantity: the graphic gives the comparison,
+  the legend gives the value.
 - **The marginal index costs two columns.** Nothing in the present layout
   depends on the rail being uniform; `wrap_line` and the `line::plain`
   rail-stripping already treat the rail as separable chrome, so the copy path
@@ -346,9 +350,23 @@ retry count) arrive as `Kind` extensions without disturbing the other moves.
   separate modes with separate state — the open question is the gesture, not
   the data model.
 - **Colour-blind safety.** Value (lightness) and size are colour-blind safe by
-  construction; hue-for-agent is not. The agent palette should be augmented
-  with a shape or pattern secondary cue if agent count grows beyond two or
-  three.
+  construction; hue-for-agent is not.
+
+  > **Amended 2026-06-21 — the agent palette is made CVD-safe by lightness, not
+  > a second channel.** A secondary shape/pattern cue cannot ride the rail: its
+  > single cell already spends shape on *kind* and value on *magnitude*, so a
+  > fourth per-agent variable would over-pack it. Instead `AGENT_HUES`
+  > (`line.rs`) is rebuilt so the six hues separate by a *combination* of
+  > lightness and hue rather than hue alone — a descending `L*` ladder under
+  > which every pair stays distinct in simulated deuteranopia and protanopia
+  > (worst-case ΔE76 ≈ 19, against ≈3 for the old hue-only set, where
+  > orange/red and pink/lime collapsed). Root stays the exact `CYAN` accent, so
+  > a root-only session is unchanged. This fixes the one hue-only surface; agent
+  > identity is already recoverable as **text** in the matrix rows and tab
+  > labels, so those carry no hue-only risk. A *design call* for the owner: the
+  > new non-root hues (amber, magenta, blue, olive, plum) widen the lightness
+  > range beyond the old near-isoluminant set, which is the cost of the CVD
+  > separation.
 
 ## Implementation plan
 

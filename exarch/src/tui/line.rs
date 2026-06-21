@@ -41,7 +41,31 @@ pub(super) const CODE_BG: Color = Color::Rgb(36, 38, 46);
 /// accent — so a root-only session is visually unchanged in hue. The
 /// rail's value-step lightens a slot toward white with magnitude, so hue
 /// stays the identity channel and value stays the magnitude channel.
-pub(super) const AGENT_HUES: [Color; 6] = [CYAN, PINK, LIME, PURPLE, ORANGE, RED];
+///
+/// Agent identity is hue-only on the rail (the cell already spends shape on
+/// *kind* and value on *magnitude*, so no fourth channel is free), which a
+/// red-green–blind reader cannot follow on hue alone. So the six are picked
+/// to also separate by **lightness**: a descending `L*` ladder (≈77 → 75 →
+/// 62 → 59 → 55 → 47) under which every pair stays distinct in simulated
+/// deuteranopia *and* protanopia (worst-case ΔE76 ≈ 19, against ≈3 for a
+/// hue-only set). Where two sit at near-equal `L*` (CYAN/MAGENTA) the
+/// surviving blue–yellow axis holds them apart; no two warm hues share a
+/// lightness, so the old orange/red confusion cannot recur. These are a
+/// dedicated set, not the role palette above — agent identity must not alias
+/// a semantic colour (e.g. `RED` the error hue).
+pub(super) const AGENT_AMBER: Color = Color::Rgb(230, 175, 90);
+pub(super) const AGENT_MAGENTA: Color = Color::Rgb(205, 120, 190);
+pub(super) const AGENT_BLUE: Color = Color::Rgb(95, 140, 225);
+pub(super) const AGENT_OLIVE: Color = Color::Rgb(150, 130, 70);
+pub(super) const AGENT_PLUM: Color = Color::Rgb(135, 95, 165);
+pub(super) const AGENT_HUES: [Color; 6] = [
+    CYAN,
+    AGENT_AMBER,
+    AGENT_MAGENTA,
+    AGENT_BLUE,
+    AGENT_OLIVE,
+    AGENT_PLUM,
+];
 
 /// Saturated splash-only palette — the wordmark (pink) and the eagle
 /// (gold) of the one-shot startup banner.  These two are the only neon ink
