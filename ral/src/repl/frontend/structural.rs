@@ -335,6 +335,9 @@ impl StructuralFrontend {
                     if is_empty(&textarea) {
                         break Composed::Done(Read::Eof);
                     }
+                    // A non-empty buffer: Ctrl-D deletes the char under the
+                    // cursor (readline's behaviour), not EOF.
+                    edit_key(&mut vim, &mut textarea, k);
                 }
                 // Up/Down walk history only from the prompt's edge rows: with
                 // the cursor mid-text in a multi-line draft they fall through
@@ -571,9 +574,13 @@ fn new_textarea() -> TextArea<'static> {
     ta
 }
 
-/// Apply one keystroke to the editor.  With vi keys on (`vim` is `Some`) it
-/// folds the key through the shared [`textarea_vim::Vim::advance`] driver; off,
-/// it is plain `textarea.input(k)`, leaving the emacs path untouched.  The
+/// Apply one keystroke to the editor.  The shell-line escape-hatch chords
+/// ([`shell_line_edit`] — currently Ctrl-U) are honoured first, since
+/// ratatui-textarea binds them to editor, not shell, semantics (Ctrl-U is
+/// `undo` there): in emacs always, and under vi keys while in Insert mode —
+/// where the [`textarea_vim::Vim::advance`] driver would otherwise pass them
+/// straight to `textarea.input`.  Everything else folds through that vim driver
+/// (vi) or `textarea.input` (emacs); vi Normal/Visual keep the vim keymap.  The
 /// single dispatch point both fallthrough arms and the final `_` arm route
 /// through.
 fn edit_key(
@@ -583,9 +590,38 @@ fn edit_key(
 ) {
     match vim.take() {
         None => {
-            textarea.input(k);
+            if !shell_line_edit(textarea, &k) {
+                textarea.input(k);
+            }
         }
-        Some(v) => *vim = Some(v.advance(k.into(), textarea)),
+        Some(v) => {
+            if v.mode() == Mode::Insert && shell_line_edit(textarea, &k) {
+                *vim = Some(v);
+            } else {
+                *vim = Some(v.advance(k.into(), textarea));
+            }
+        }
+    }
+}
+
+/// The shell-line editing chords ratatui-textarea's keymap gets wrong for a
+/// shell — currently Ctrl-U, which it binds to `undo`.  Remap it to
+/// unix-line-discard (kill from the cursor to the start of the line) so the
+/// structural surface matches rustyline, in both emacs and vi-Insert mode;
+/// returns whether the chord was consumed.  Anything not listed here is left to
+/// the textarea's / vim driver's own (correct) bindings — Ctrl-A/E, Ctrl-K/W,
+/// and the movement keys already agree with readline.
+fn shell_line_edit(textarea: &mut TextArea<'static>, k: &KeyEvent) -> bool {
+    if !k.modifiers.contains(KeyModifiers::CONTROL) || k.modifiers.contains(KeyModifiers::ALT) {
+        return false;
+    }
+    match k.code {
+        // unix-line-discard: kill from the cursor back to the start of the line.
+        KeyCode::Char('u') => {
+            textarea.delete_line_by_head();
+            true
+        }
+        _ => false,
     }
 }
 
@@ -1743,6 +1779,58 @@ mod tests {
         ta.insert_str("hi");
         apply_candidate(&mut ta, 0, 1, 99, "xyz");
         assert_eq!(ta.lines(), ["hi"]);
+    }
+
+    /// Ctrl-U is readline's unix-line-discard: kill from the cursor back to the
+    /// start of the line, not the textarea keymap's `undo`.  The chord is
+    /// consumed so no `u` is inserted.
+    #[test]
+    fn ctrl_u_kills_to_line_start() {
+        let mut ta = new_textarea();
+        ta.insert_str("abcdef");
+        place_cursor(&mut ta, 3); // between `c` and `d`
+        let consumed = shell_line_edit(
+            &mut ta,
+            &KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        );
+        assert!(consumed);
+        assert_eq!(ta.lines(), ["def"]);
+        assert_eq!(ta.cursor(), (0, 0));
+    }
+
+    /// Under vi keys the Ctrl-U escape hatch applies while in Insert mode —
+    /// otherwise the vim driver routes it to the textarea's `undo`.  The editor
+    /// stays in Insert mode (the chord is handled before `advance`).
+    #[test]
+    fn ctrl_u_kills_to_line_start_in_vi_insert() {
+        let mut ta = new_textarea();
+        ta.insert_str("abcdef");
+        place_cursor(&mut ta, 3);
+        let mut vim = Some(Vim::new(Mode::Insert));
+        edit_key(
+            &mut vim,
+            &mut ta,
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(ta.lines(), ["def"]);
+        assert_eq!(vim.map(|v| v.mode()), Some(Mode::Insert));
+    }
+
+    /// In vi Normal mode Ctrl-U is left to the vim keymap (a no-op there), not
+    /// remapped — the cursor and buffer are untouched and the mode is kept.
+    #[test]
+    fn ctrl_u_is_left_to_vim_in_normal_mode() {
+        let mut ta = new_textarea();
+        ta.insert_str("abcdef");
+        place_cursor(&mut ta, 3);
+        let mut vim = Some(Vim::new(Mode::Normal));
+        edit_key(
+            &mut vim,
+            &mut ta,
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(ta.lines(), ["abcdef"]);
+        assert_eq!(vim.map(|v| v.mode()), Some(Mode::Normal));
     }
 
     /// A long value preview is truncated with an ellipsis.
