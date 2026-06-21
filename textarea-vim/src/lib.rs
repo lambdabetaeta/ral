@@ -174,7 +174,7 @@ impl Vim {
                         ..
                     } => textarea.move_cursor(CursorMove::WordBack),
                     Input {
-                        key: Key::Char('^'),
+                        key: Key::Char('^') | Key::Char('0'),
                         ..
                     } => textarea.move_cursor(CursorMove::Head),
                     Input {
@@ -628,6 +628,14 @@ mod tests {
     fn x_deletes_char_under_cursor() {
         // `^` parks the cursor on the first char; `x` deletes it.
         let (mode, lines) = run(Mode::Normal, "abc", &[ch('^'), ch('x')]);
+        assert_eq!(mode, Mode::Normal);
+        assert_eq!(lines, vec!["bc".to_string()]);
+    }
+
+    #[test]
+    fn zero_moves_to_line_head() {
+        // `0` parks the cursor at column 0; `x` then deletes that first char.
+        let (mode, lines) = run(Mode::Normal, "abc", &[ch('0'), ch('x')]);
         assert_eq!(mode, Mode::Normal);
         assert_eq!(lines, vec!["bc".to_string()]);
     }
