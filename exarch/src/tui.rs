@@ -994,8 +994,22 @@ impl App {
 
         term.draw(|f| {
             f.render_widget(Paragraph::new(lines), text_rect);
+            // ratatui's `ScrollbarState` treats `position` as a cursor over
+            // `[0, content_length-1]`: the thumb only bottoms out at
+            // `position == content_length-1` (its `last()`).  Our `offset` is
+            // the first visible row, topping out at `total - height` — short
+            // by `height-1`, so the thumb never reached the bottom (it stalled
+            // around 3/4 for a session a few times the viewport).  Map our
+            // scroll range onto ratatui's so a fully-scrolled viewport bottoms
+            // the thumb.
+            let max_off = total.saturating_sub(text_rect.height as usize);
+            let sb_pos = if max_off == 0 {
+                0
+            } else {
+                offset.saturating_mul(total.saturating_sub(1)) / max_off
+            };
             let mut sb = ScrollbarState::new(total)
-                .position(offset)
+                .position(sb_pos)
                 .viewport_content_length(text_rect.height as usize);
             f.render_stateful_widget(
                 Scrollbar::new(ScrollbarOrientation::VerticalRight),
