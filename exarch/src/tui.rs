@@ -30,7 +30,9 @@ use rail::RailKind;
 use line::usage_text;
 
 use crate::bootstrap::Scratch;
-use crate::bus::{Event, Hunk, Inbox, Kind, Pass, SessionId, Sink, Turn, drain_pass, pump};
+use crate::bus::{
+    Event, Hunk, Inbox, Kind, Pass, SessionBus, SessionId, Sink, Turn, drain_pass, pump,
+};
 use crate::cancel;
 use crate::card::{Card, Field, FieldVal, IoEvent, Mark, Role, Span as CardSpan};
 use crate::credential::CredentialStore;
@@ -521,15 +523,25 @@ impl App {
         }
     }
 
-    /// Drop sub-session viewports, reset root scrollback, zero cost,
-    /// redraw the banner.
+    /// Age out sub-session tabs, reset root scrollback, zero cost, redraw the
+    /// banner.  A `/clear` cancels every live background worker and bumps the
+    /// registry generation; here the frontend twin retires their tabs through
+    /// the existing `dying`/`LINGER` path rather than dropping them abruptly,
+    /// so a worker cancelled across the context rebuild fades out instead of
+    /// vanishing — and the [`Self::handle`] dying-guard stops it painting into
+    /// the rebuilt session in the meantime.  `tick` then reaps the faded tabs
+    /// (their viewports persist for `flush_logs`, exactly as a naturally-dead
+    /// child's do).
     pub fn clear(&mut self, info: &SessionInfo<'_>, term: &mut Term) -> io::Result<()> {
         let root = self.root;
-        self.viewports.retain(|&k, _| k == root);
-        self.dispatch_order = vec![root];
-        self.tabs = vec![root];
-        self.titles.retain(|&k, _| k == root);
-        self.dying.clear();
+        // Retire every still-live non-root tab into the linger window. A tab
+        // already dying keeps its earlier death instant, so a child that died
+        // just before the clear is not given a fresh full window.
+        let now = Instant::now();
+        let retiring: Vec<SessionId> = self.tabs.iter().copied().filter(|&id| id != root).collect();
+        for id in retiring {
+            self.dying.entry(id).or_insert(now);
+        }
         self.focus = root;
         if let Some(vp) = self.viewports.get_mut(&root) {
             vp.reset();
@@ -550,6 +562,16 @@ impl App {
     /// flushes; Usage accumulates globally; everything else renders to
     /// one viewport via [`line`](mod@line).
     pub fn handle(&mut self, Event { id, kind }: Event) {
+        // A tab in the linger window is frozen: its worker has emitted `Died`
+        // (natural death) or been retired by `/clear` (a cancelled background
+        // worker still winding down).  Either way no further event belongs in
+        // it — dropping them here stops a cancelled worker painting into the
+        // rebuilt session, the visual twin of the inbox's stale-generation
+        // rejection, while the tab still renders its final frame and ages out.
+        // Root never enters `dying`, so its events always pass.
+        if self.dying.contains_key(&id) {
+            return;
+        }
         // A phase label names the silent gap before the next thing
         // happens, so any other event supersedes it.  Clear the live
         // phase on the event's viewport first, resetting the elapsed-wait
@@ -2319,7 +2341,7 @@ impl Sink for Tui {
         self.app.inbox.clone()
     }
 
-    fn drive(&mut self, rx: Receiver<Event>, done: &AtomicBool) -> io::Result<()> {
+    fn drive(&mut self, rx: &Receiver<Event>, done: &AtomicBool) -> io::Result<()> {
         let r = drive_events(self.guard.term(), &mut self.app, rx, done);
         self.app.busy_off();
         r
@@ -2338,6 +2360,12 @@ type FetchRx = std::sync::mpsc::Receiver<(provider::ProviderId, Result<Vec<Strin
 
 struct Repl<'a> {
     tui: Tui,
+    /// The session-lived event bus.  Minted once at REPL start over the
+    /// `App`'s inbox; every turn's worker and every detached async child
+    /// clone its sender, so a background `agent` streams a live tab and the
+    /// idle wait drains it as a third source.  Outlives any single turn,
+    /// unlike headless's per-turn bus.
+    bus: SessionBus,
     session: &'a mut Session,
     /// The active provider behind an `Arc`, so a `/model` switch can swap in
     /// a freshly built one while any already-running async agent keeps the
@@ -2380,8 +2408,12 @@ pub fn run(
     .map_err(|e| format!("ratatui init: {e}"))?;
     let status_provider = crate::oauth::provider_label(provider.subscription(), info.provider);
     tui.app.set_status_model(&status_provider, info.model);
+    // The session-lived bus, over the App's own inbox so steering, wakeups,
+    // and async-agent results share the queue the App reads.
+    let bus = SessionBus::session(tui.app.inbox.clone());
     let mut r = Repl {
         tui,
+        bus,
         session,
         provider,
         info,
@@ -2543,16 +2575,18 @@ impl Repl<'_> {
                 Some(t) => Some(t),
                 None => match self.tui.app.take_inbox() {
                     Some(t) => Some(t),
-                    None => match read_prompt(self.tui.guard.term(), &mut self.tui.app)
-                        .map_err(|e| e.to_string())?
-                    {
-                        Idle::Prompt(s) => Some(Turn::Human(s)),
-                        // A non-human message (a wakeup, a finished agent)
-                        // landed in the inbox while idle: loop so the
-                        // `take_inbox` arm above delivers it as a fresh turn.
-                        Idle::Inbox => continue,
-                        Idle::Quit => return Ok(()),
-                    },
+                    None => {
+                        match read_prompt(self.tui.guard.term(), &mut self.tui.app, self.bus.rx())
+                            .map_err(|e| e.to_string())?
+                        {
+                            Idle::Prompt(s) => Some(Turn::Human(s)),
+                            // A non-human message (a wakeup, a finished agent)
+                            // landed in the inbox while idle: loop so the
+                            // `take_inbox` arm above delivers it as a fresh turn.
+                            Idle::Inbox => continue,
+                            Idle::Quit => return Ok(()),
+                        }
+                    }
                 },
             };
             let Some(turn) = turn else { continue };
@@ -2564,7 +2598,7 @@ impl Repl<'_> {
             // The model always sees the source's own rendered text — verbatim
             // for a human, marked for a wakeup or an agent reply.
             self.session
-                .run_turn(&mut self.tui, &self.provider, Some(turn.text()))?;
+                .run_turn(&mut self.tui, &self.bus, &self.provider, Some(turn.text()))?;
             self.tui
                 .app
                 .draw(self.tui.guard.term())
@@ -2718,7 +2752,7 @@ impl Repl<'_> {
         let token = root.token().clone();
         let provider = &self.provider;
         let session = &mut *self.session;
-        let _ = pump(&mut self.tui, id, |emit| {
+        let _ = pump(&mut self.tui, &self.bus, id, |emit| {
             session.compact(provider, emit, true, &token)
         });
         Slash::Continue
@@ -2989,7 +3023,7 @@ fn key_action(mode: KeyMode, k: &KeyEvent, enter_submits: bool) -> KeyAction {
 fn drive_events(
     term: &mut Term,
     app: &mut App,
-    rx: Receiver<Event>,
+    rx: &Receiver<Event>,
     done: &AtomicBool,
 ) -> io::Result<()> {
     const BATCH: usize = 64;
@@ -2997,12 +3031,12 @@ fn drive_events(
     loop {
         // The explicit-done completion contract, shared with the headless
         // default `Sink::drive`: drain a batch, then stop only when the worker
-        // is *done* — never when the channel disconnects, so a detached worker
-        // holding a sender forever cannot keep this loop (hence the turn) from
-        // ending. The batch cap bounds how long a token flood can starve the
-        // input poll below; `More` means events are still queued, so the frame
-        // does not wait for one.
-        let more = match drain_pass(&rx, done, Some(BATCH), |ev| app.handle(ev)) {
+        // is *done* — never when the channel empties or disconnects, so a
+        // detached worker (a live background `agent`) flooding the bus cannot
+        // keep this loop (hence the turn) from ending. The batch cap bounds how
+        // long a token flood can starve the input poll below; `More` means
+        // events are still queued, so the frame does not wait for one.
+        let more = match drain_pass(rx, done, Some(BATCH), |ev| app.handle(ev)) {
             Pass::Stop => {
                 app.draw(term)?;
                 return Ok(());
@@ -3053,9 +3087,10 @@ fn drive_events(
 }
 
 /// The outcome of the idle wait between turns — a multi-source select over
-/// `{ user input, inbox }`.  The TUI realises the select by polling: it
-/// redraws each tick anyway, so checking the inbox costs a comparison, and
-/// a wakeup or finished agent surfaces within one poll interval.
+/// `{ user input, inbox, bus }`.  The TUI realises the select by polling: it
+/// redraws each tick anyway, so checking the inbox and draining the bus cost
+/// little, and a wakeup, finished agent, or live background event surfaces
+/// within one poll interval.
 enum Idle {
     /// The user submitted a prompt.
     Prompt(String),
@@ -3066,12 +3101,31 @@ enum Idle {
     Quit,
 }
 
-fn read_prompt(term: &mut Term, app: &mut App) -> io::Result<Idle> {
+/// At-rest, batch-drain the session bus so a live background `agent` advances:
+/// its tokens grow its tab and its `Died` starts the linger that ages the tab
+/// out, all while the user sits at the prompt.  Non-blocking — the caller's
+/// poll provides the cadence — and bounded so a flooding background producer
+/// cannot starve the input poll within one idle tick.
+fn drain_bus_idle(app: &mut App, rx: &Receiver<Event>) {
+    const IDLE_BATCH: usize = 256;
+    for _ in 0..IDLE_BATCH {
+        match rx.try_recv() {
+            Ok(ev) => app.handle(ev),
+            Err(_) => break,
+        }
+    }
+}
+
+fn read_prompt(term: &mut Term, app: &mut App, rx: &Receiver<Event>) -> io::Result<Idle> {
     loop {
-        // The second source of the select: a wakeup or a finished agent
-        // posted to the inbox while we sat idle.  Hand back at once so the
-        // driver delivers it as a fresh turn; a half-typed draft survives in
-        // the textarea and reappears on the next idle read.
+        // The third source of the select: live events from a background agent
+        // still running between turns.  Drain them so its tab streams and its
+        // `Died` ages out while we sit idle.
+        drain_bus_idle(app, rx);
+        // The second source: a wakeup, a finished agent, or queued user
+        // steering posted to the inbox while we sat idle.  Hand back at once so
+        // the driver delivers it as a fresh turn; a half-typed draft survives
+        // in the textarea and reappears on the next idle read.
         if !app.inbox.is_empty() {
             return Ok(Idle::Inbox);
         }

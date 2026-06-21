@@ -491,6 +491,12 @@ pub struct Emitter {
     tx: Sender<Event>,
     id: SessionId,
     inbox: Inbox,
+    /// Whether this emitter's channel outlives the spawning turn, so a
+    /// *detached* worker (an async `agent` child) may clone it for a live
+    /// tab.  The TUI's session-lived bus sets it; headless's per-turn bus
+    /// leaves it `false`, keeping async children muted to their own log —
+    /// bus lifetime is a TUI property, not a core obligation.
+    session_lived: bool,
 }
 
 impl Emitter {
@@ -499,7 +505,12 @@ impl Emitter {
     }
 
     pub fn with_inbox(tx: Sender<Event>, id: SessionId, inbox: Inbox) -> Self {
-        Self { tx, id, inbox }
+        Self {
+            tx,
+            id,
+            inbox,
+            session_lived: false,
+        }
     }
 
     pub fn child(&self, id: SessionId) -> Self {
@@ -507,6 +518,7 @@ impl Emitter {
             tx: self.tx.clone(),
             id,
             inbox: self.inbox.clone(),
+            session_lived: self.session_lived,
         }
     }
 
@@ -521,9 +533,78 @@ impl Emitter {
         self.inbox.clone()
     }
 
+    /// Whether a detached worker may clone this emitter for a live tab.
+    /// True only off a session-lived bus ([`SessionBus::session`]); an async
+    /// `agent` reads it to choose a streaming tab over its muted log.
+    pub fn is_session_lived(&self) -> bool {
+        self.session_lived
+    }
+
     /// Mid-turn tool-boundary drain of user steering.
     pub fn drain_tool_steering(&self) -> Option<String> {
         self.inbox.drain_tool()
+    }
+}
+
+/// The event channel and its inbox, owned for as long as the host wants a
+/// worker→frontend bus to live.  Two lifetimes, one type:
+///
+/// - [`Self::session`] — minted once at REPL start and held for the whole
+///   session.  Each turn's foreground worker and every detached async child
+///   clone its sender (session-lived, so a background child gets a live tab);
+///   the idle wait drains it as a third source.
+/// - [`Self::per_turn`] — minted fresh for one turn (headless, tests), so the
+///   channel closes when the turn's worker finishes.  Its emitters are *not*
+///   session-lived: an async child stays muted to its own log, the
+///   observable behaviour headless has always had.
+///
+/// Either way [`pump_on`] borrows the channel — completion is the per-turn
+/// `done` flag, never the channel's lifetime.
+pub struct SessionBus {
+    tx: Sender<Event>,
+    rx: Receiver<Event>,
+    inbox: Inbox,
+    session_lived: bool,
+}
+
+impl SessionBus {
+    /// A session-lived bus over `inbox` (the TUI's `App` inbox).  Emitters
+    /// minted from it are session-lived, so detached async children stream.
+    pub fn session(inbox: Inbox) -> Self {
+        Self::build(inbox, true)
+    }
+
+    /// A per-turn bus over `inbox` (headless / tests).  Emitters are not
+    /// session-lived, so async children stay muted.
+    pub fn per_turn(inbox: Inbox) -> Self {
+        Self::build(inbox, false)
+    }
+
+    fn build(inbox: Inbox, session_lived: bool) -> Self {
+        let (tx, rx) = channel();
+        Self {
+            tx,
+            rx,
+            inbox,
+            session_lived,
+        }
+    }
+
+    /// The receiver the turn's [`Sink`] drains.
+    pub(crate) fn rx(&self) -> &Receiver<Event> {
+        &self.rx
+    }
+
+    /// An [`Emitter`] stamped with `id`, sharing this bus's sender and inbox,
+    /// carrying the bus's session-lived flag.  The foreground turn worker and
+    /// each detached async child take one.
+    pub fn emitter(&self, id: SessionId) -> Emitter {
+        Emitter {
+            tx: self.tx.clone(),
+            id,
+            inbox: self.inbox.clone(),
+            session_lived: self.session_lived,
+        }
     }
 }
 
@@ -535,8 +616,8 @@ const DRAIN_POLL: Duration = Duration::from_millis(10);
 /// The verdict of one [`drain_pass`]: the explicit-done completion contract,
 /// shared by every driver.
 pub(crate) enum Pass {
-    /// The worker is done (or the channel disconnected) and every buffered
-    /// event has been handled — render a final frame and return.
+    /// The worker is done (or the channel disconnected) and the buffered
+    /// batch has been handled — render a final frame and return.
     Stop,
     /// The channel went empty and the worker is not done: the loop is idle
     /// until the next event arrives.
@@ -552,40 +633,51 @@ pub(crate) enum Pass {
 ///
 /// Drains up to `max` available events through `handle`, then reports the
 /// channel's state. **Completion is `done` being set — the worker finished —
-/// never the channel disconnecting:** a detached worker (a `spawn`ed server)
-/// may hold a sender clone forever, but it never decides the turn is over,
-/// because the loop stops on the explicit `done` flag, not on the last sender
-/// dropping. This is the daemon-task-hang fix, factored so the two drivers
-/// cannot drift on it.
+/// never the channel emptying or disconnecting:** a detached worker (a
+/// `spawn`ed server, a live background `agent`) may hold a sender clone forever
+/// and keep the channel non-empty, but it never decides the turn is over,
+/// because the loop stops on the explicit `done` flag, not on the channel.
+/// This is the daemon-task-hang fix, factored so the two drivers cannot drift
+/// on it.
 ///
-/// `None` `max` drains the channel empty (headless, which has nothing to
-/// render between events); `Some(n)` caps one pass so a flood of streamed
-/// tokens cannot starve the TUI's input poll between passes. The `done` check
-/// fires only once the channel is momentarily empty, so a full batch returns
-/// [`Pass::More`] and the caller drains again. Disconnect is a safety net —
-/// the common case now that detachment holds no sender — and also stops.
+/// `done` is checked *before each receive*, so the pass ends the moment the
+/// worker finishes even while concurrent background producers keep the channel
+/// full — it does not wait for a momentarily-empty channel, which under a
+/// background flood would never come. On `done` it drains the buffered batch up
+/// to `max` (so the caller can render a final frame including the worker's last
+/// events) and returns [`Pass::Stop`]; any further in-flight background events
+/// are left for the idle drainer. `None` `max` drains every buffered event
+/// (headless, which has nothing to render between them); `Some(n)` caps one
+/// pass so a flood cannot starve the TUI's input poll between passes, reporting
+/// [`Pass::More`] so the caller drains again. Disconnect also stops.
 pub(crate) fn drain_pass(
     rx: &Receiver<Event>,
     done: &AtomicBool,
     max: Option<usize>,
     mut handle: impl FnMut(Event),
 ) -> Pass {
+    // Latch `done` once at the top: the worker sets it after `work` returns,
+    // so reading it before draining means a finishing worker's already-queued
+    // events are still handled in this pass, and the pass cannot loop forever
+    // chasing a channel that a background producer keeps non-empty.
+    let finished = done.load(Ordering::Acquire);
     let mut n = 0usize;
     loop {
         if max.is_some_and(|m| n >= m) {
-            return Pass::More;
+            // The batch cap bounds even a `done` drain, so a huge backlog from
+            // the finished worker (or background producers) cannot block the
+            // final frame; the caller drains the rest from the idle path.
+            return if finished { Pass::Stop } else { Pass::More };
         }
         match rx.try_recv() {
             Ok(ev) => {
                 handle(ev);
                 n += 1;
             }
+            // The buffered batch is exhausted. Stop if the worker has
+            // finished; otherwise the loop is idle until the next event.
             Err(TryRecvError::Empty) => {
-                return if done.load(Ordering::Acquire) {
-                    Pass::Stop
-                } else {
-                    Pass::Idle
-                };
+                return if finished { Pass::Stop } else { Pass::Idle };
             }
             Err(TryRecvError::Disconnected) => return Pass::Stop,
         }
@@ -609,12 +701,12 @@ pub trait Sink {
         Inbox::new()
     }
 
-    fn drive(&mut self, rx: Receiver<Event>, done: &AtomicBool) -> io::Result<()> {
+    fn drive(&mut self, rx: &Receiver<Event>, done: &AtomicBool) -> io::Result<()> {
         loop {
             // The shared completion contract. `None` max drains every buffered
             // event — headless has nothing to render between them, so it never
             // needs the TUI's batch cap.
-            match drain_pass(&rx, done, None, |ev| self.handle(ev)) {
+            match drain_pass(rx, done, None, |ev| self.handle(ev)) {
                 Pass::Stop => return Ok(()),
                 // Idle (an uncapped pass never reports `More`): block on the
                 // channel for the next event, waking each `DRAIN_POLL` to
@@ -631,16 +723,20 @@ pub trait Sink {
     }
 }
 
-/// Run `work` on a scoped thread, hand the channel to `sink`, join.
+/// Run `work` on a scoped thread over `bus`'s channel, drive `sink`, join.
 /// A worker panic is reported through the still-open [`Emitter`] as a
 /// final [`Kind::Error`]; the function returns `None` in that case.
 ///
-/// Completion is explicit: the worker sets `done` after `work` returns (or
-/// unwinds), and [`Sink::drive`] stops on that flag rather than on channel
-/// disconnect.  A detached worker holding a sender clone forever cannot keep
-/// the loop — hence the turn — from ending.
+/// The channel belongs to `bus`, not to `pump`: a session-lived bus keeps it
+/// open across turns (the TUI, so a background `agent` streams a live tab),
+/// while a per-turn bus closes it when the worker finishes (headless / tests).
+/// Either way completion is explicit — the worker sets `done` after `work`
+/// returns (or unwinds), and the drain stops on that flag, never on the
+/// channel's state.  A detached worker holding a sender clone forever, on
+/// either bus, cannot keep the loop — hence the turn — from ending.
 pub fn pump<S, R>(
     sink: &mut S,
+    bus: &SessionBus,
     root_id: SessionId,
     work: impl Send + FnOnce(&Emitter) -> R,
 ) -> io::Result<Option<R>>
@@ -652,11 +748,9 @@ where
     // and `drive` outlives the spawned thread's `'env`.
     let done = AtomicBool::new(false);
     let done_ref = &done;
+    let emit = bus.emitter(root_id);
     std::thread::scope(|s| -> io::Result<Option<R>> {
-        let (tx, rx) = channel();
-        let inbox = sink.inbox();
         let h = s.spawn(move || {
-            let emit = Emitter::with_inbox(tx, root_id, inbox);
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&emit)));
             if let Err(p) = &r {
                 let msg = p
@@ -666,12 +760,12 @@ where
                     .unwrap_or_else(|| "non-string payload".into());
                 emit.emit(Kind::Error(format!("{WORKER_PANIC_PREFIX}{msg}")));
             }
-            // Signal completion before the worker's `emit` (and its sender)
-            // drops: the turn is over because the worker finished.
+            // Signal completion before the worker's `emit` (and its sender
+            // clone) drops: the turn is over because the worker finished.
             done_ref.store(true, Ordering::Release);
             r.ok()
         });
-        sink.drive(rx, done_ref)?;
+        sink.drive(bus.rx(), done_ref)?;
         Ok(h.join().ok().flatten())
     })
 }
@@ -679,7 +773,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        Boundary, Emitter, Event, Inbox, InboxMsg, Kind, Pass, Sink, Turn, drain_pass, pump,
+        Boundary, Emitter, Event, Inbox, InboxMsg, Kind, Pass, SessionBus, Sink, Turn, drain_pass,
+        pump,
     };
     use std::sync::Arc;
 
@@ -700,10 +795,10 @@ mod tests {
 
     /// The headless default [`Sink::drive`] and the TUI's `drive_events` share
     /// one completion contract: [`drain_pass`]. It stops when the worker is
-    /// *done*, never when the channel disconnects — so a detached worker
-    /// holding a sender clone cannot keep a turn alive. Pinning the shared
-    /// primitive directly is what keeps the two drivers from drifting on the
-    /// daemon-task-hang fix.
+    /// *done*, never when the channel empties or disconnects — so a detached
+    /// worker holding a sender clone cannot keep a turn alive. Pinning the
+    /// shared primitive directly is what keeps the two drivers from drifting on
+    /// the daemon-task-hang fix.
     #[test]
     fn drain_pass_stops_on_done_with_a_live_detached_sender() {
         let (tx, rx) = channel::<Event>();
@@ -774,6 +869,52 @@ mod tests {
         assert_eq!(seen, 3, "the rest drains on the next pass");
     }
 
+    /// The session-lifetime refinement: a finished foreground turn must stop
+    /// even while the channel is *non-empty*, because concurrent background
+    /// producers (a live async `agent`) keep it full and the old
+    /// "stop only on a momentarily-empty channel" rule would never fire. On
+    /// `done`, `drain_pass` drains the buffered batch (up to the cap) and
+    /// returns `Stop`; the remainder is left for the idle drainer. Without the
+    /// fix the foreground turn would hang exactly when a background agent is
+    /// flooding the bus.
+    #[test]
+    fn drain_pass_stops_on_done_even_while_a_background_producer_floods() {
+        let (tx, rx) = channel::<Event>();
+        let done = AtomicBool::new(false);
+        // A background producer keeps sending — the channel is never empty.
+        let background = tx.clone();
+        for _ in 0..200 {
+            background
+                .send(Event {
+                    id: 9,
+                    kind: Kind::Token("x".into()),
+                })
+                .unwrap();
+        }
+        // The foreground worker finishes while the channel is still full.
+        done.store(true, Ordering::Release);
+
+        // A capped pass (the TUI) drains its batch and stops, never `More`-ing
+        // forever against the flood; the cap bounds the final frame's work.
+        let mut seen = 0usize;
+        assert!(
+            matches!(drain_pass(&rx, &done, Some(64), |_| seen += 1), Pass::Stop),
+            "a finished worker stops the pass even though the channel is non-empty"
+        );
+        assert_eq!(seen, 64, "the buffered batch is drained up to the cap");
+        // The background producer is unaffected — completion never depended on
+        // the channel draining or disconnecting.
+        assert!(
+            background
+                .send(Event {
+                    id: 9,
+                    kind: Kind::Died
+                })
+                .is_ok(),
+            "the background producer outlives the foreground stop"
+        );
+    }
+
     /// Completion is the worker finishing, not the channel disconnecting.
     /// A "detached holder" keeps a clone of the worker's [`Emitter`] (hence a
     /// live `Sender`) alive past the worker's return — modelling a `spawn`ed
@@ -790,12 +931,15 @@ mod tests {
         }
 
         let mut sink = CountSink(0);
+        // A session-lived bus, as the TUI uses it: its sender outlives the
+        // turn, so a detached worker's clone never disconnects the channel.
+        let bus = SessionBus::session(Inbox::new());
         // Outlives `pump`: holds an `Emitter` clone whose `Sender` keeps the
         // channel from ever disconnecting, exactly as a detached worker would.
         let holder: Mutex<Option<Emitter>> = Mutex::new(None);
 
         let t0 = Instant::now();
-        let r = pump(&mut sink, 0, |emit| {
+        let r = pump(&mut sink, &bus, 0, |emit| {
             *holder.lock().unwrap() = Some(emit.clone());
             emit.emit(Kind::Step(1));
             "done"

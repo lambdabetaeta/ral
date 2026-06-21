@@ -13,7 +13,7 @@
 //! round-tripping the committed messages through the same genai
 //! `ChatMessage` serialisation the live request uses.
 
-use exarch::bus::{Emitter, Event, Inbox, Kind, SessionId, Sink, Turn};
+use exarch::bus::{Emitter, Event, Inbox, Kind, SessionBus, SessionId, Sink, Turn};
 use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{Provider, ProviderError};
 use exarch::session::{Session, TurnOutcome};
@@ -225,9 +225,13 @@ fn queued_prompt_steers_after_current_tool_batch() {
             .then(Reply::text("steered")),
     );
     let mut sink = SteeringSink::default();
+    // A per-turn bus over the sink's own inbox, so the steering prompt the
+    // sink posts mid-turn reaches the worker's emitter — the headless/test
+    // shape (the channel closes when the worker finishes).
+    let bus = SessionBus::per_turn(sink.inbox());
 
     session
-        .run_turn(&mut sink, &provider, Some("start".into()))
+        .run_turn(&mut sink, &bus, &provider, Some("start".into()))
         .unwrap();
 
     let ral_calls = sink

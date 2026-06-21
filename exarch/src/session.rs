@@ -6,7 +6,7 @@
 //! [`Kind::Born`] / [`Kind::Died`] on the bus.
 
 use crate::bootstrap::Scratch;
-use crate::bus::{Emitter, Kind, SessionId, Sink, pump};
+use crate::bus::{Emitter, Kind, SessionBus, SessionId, Sink, pump};
 use crate::cancel;
 use crate::digest::{AGENT_REPLY_CAP, COMPACT_THRESHOLD, OPAQUE_CAP, clip, render};
 use crate::event::{QuiesceReason, SessionLog, ToolResult as SessionToolResult};
@@ -422,9 +422,16 @@ impl Session {
     /// hands the outcome to [`nudge::Registry::react`], which decides
     /// whether to stop or to loop with a (possibly synthetic) next
     /// prompt.
+    ///
+    /// `bus` owns the worker→frontend channel.  A session-lived bus (the
+    /// TUI) keeps it open across turns so a background `agent` streams a live
+    /// tab; a per-turn bus (headless / tests) closes it when the worker
+    /// finishes.  Completion is the per-turn `done` flag inside [`pump`],
+    /// independent of the bus's lifetime.
     pub fn run_turn<S: Sink>(
         &mut self,
         sink: &mut S,
+        bus: &SessionBus,
         provider: &Arc<Provider>,
         prompt: Option<String>,
     ) -> Result<(), String> {
@@ -446,7 +453,9 @@ impl Session {
                 let s: &mut Session = &mut *self;
                 let p = pending.take();
                 let token = root.token().clone();
-                match pump(sink, id, move |emit| s.apply(provider, p, &token, emit)) {
+                match pump(sink, bus, id, move |emit| {
+                    s.apply(provider, p, &token, emit)
+                }) {
                     Ok(a) => a,
                     Err(e) => break Err(e.to_string()),
                 }
@@ -869,8 +878,14 @@ mod tests {
                 .then(Reply::tool_calls(vec![ral_call("c2", "a4-panic-now")])),
         );
 
+        let bus = SessionBus::per_turn(crate::bus::Inbox::new());
         session
-            .run_turn(&mut NullSink, &provider, Some("compute then crash".into()))
+            .run_turn(
+                &mut NullSink,
+                &bus,
+                &provider,
+                Some("compute then crash".into()),
+            )
             .expect("run_turn absorbs the worker panic and returns Ok");
 
         // The completed call's binding survives the panic.

@@ -186,9 +186,11 @@ independent work you do not need to wait on now; list live ones with \
                 return Staged::Done(SessionToolResult { id, content: msg });
             }
         };
-        // The dispatch shows on the rail in both modes; only sync gives the
-        // child a live tab (`Born`/tokens/`Died`).  An async child is muted
-        // to its own log, so it never streams to the parent bus.
+        // The dispatch shows on the rail in both modes.  A child gets a live
+        // tab (`Born`/tokens/`Died`) whenever the bus outlives the turn: a
+        // sync child always, an async child only off the TUI's session-lived
+        // bus.  Off a per-turn bus (headless) an async child stays muted to
+        // its own log, since the channel closes when the spawning turn ends.
         emit.emit(Kind::ToolCall {
             tool: "agent",
             cmd: prompt.clone(),
@@ -253,8 +255,10 @@ fn dispatch_sync<'scope, 'env: 'scope>(
 /// Orchestration-edge async child: a detached worker owned by the session's
 /// agent registry, surviving this turn.  Returns a start receipt now; the
 /// child's reply is posted to the inbox at settle and delivered as a marked
-/// turn.  The worker is muted — the per-turn bus closes when the spawning
-/// turn ends — so it writes only its own `SessionLog`.
+/// turn.  Off the TUI's session-lived bus it also streams a live tab
+/// (`Born`/tokens/`Died`) through the existing id-routed draw path; off a
+/// per-turn bus (headless) it is muted to its own `SessionLog`, since the
+/// channel closes when the spawning turn ends.
 fn dispatch_async<'scope>(
     id: String,
     prompt: String,
@@ -283,16 +287,31 @@ fn dispatch_async<'scope>(
     let inbox = emit.inbox();
     let started = Instant::now();
     let worker_title = title.clone();
+    // A live tab whenever the bus outlives the turn (the TUI): a real emitter
+    // cloned off the session sender, stamped with the child's id.  Off a
+    // per-turn bus (headless) the child is muted — an emitter whose receiver
+    // is already dropped — so it never streams; its persistent record is its
+    // own forked `SessionLog` and its reply returns through the inbox.
+    let child_emit = if emit.is_session_lived() {
+        emit.child(agent_id)
+    } else {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        Emitter::new(tx, agent_id)
+    };
+    let born_title = title.clone();
     thread::Builder::new()
         .name(format!("exarch-agent-{agent_id}"))
         .spawn(move || {
-            // Muted: a background child cannot stream to the per-turn bus, so
-            // it gets an emitter whose receiver is dropped.  Its persistent
-            // record is its own forked `SessionLog`; its reply returns through
-            // the inbox.
-            let (tx, _rx) = std::sync::mpsc::channel();
-            let muted = Emitter::new(tx, agent_id);
-            let (outcome, text) = run_child(&mut child, prompt, &provider, &cancel, &muted);
+            // `Born`/`Died` bracket the child's run so its tab is registered
+            // before the first token and ages out after the last; on a muted
+            // emitter both are no-ops.  The id routes every event to the
+            // child's own tab through the TUI's existing draw path.
+            child_emit.emit(Kind::Born {
+                log_dir: log_dir.clone(),
+                title: born_title,
+            });
+            let (outcome, text) = run_child(&mut child, prompt, &provider, &cancel, &child_emit);
+            child_emit.emit(Kind::Died);
             // Deliver only if still the live worker of the current generation;
             // a result from before a `/clear` is dropped, not posted into a
             // rebuilt context.

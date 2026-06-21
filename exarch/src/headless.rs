@@ -13,7 +13,7 @@
 //! human stdout/stderr projection shows, and sub-agent output
 //! de-multiplexes cleanly by id.
 
-use crate::bus::{Event, Kind, Row, SessionId, Sink};
+use crate::bus::{Event, Kind, Row, SessionBus, SessionId, Sink};
 use crate::card::{Card, FieldVal, Mark};
 use crate::provider::{Provider, Usage};
 use crate::session::Session;
@@ -378,7 +378,11 @@ pub fn run(
     let file = File::create(&transcript).map_err(|e| format!("{}: {e}", transcript.display()))?;
     let json = format == OutputFormat::Json;
     let mut headless = Headless::new(json, BufWriter::new(file), session.id);
-    let r = session.run_turn(&mut headless, provider, Some(prompt));
+    // A per-turn bus: headless has no idle loop and no tabs, so the channel
+    // closes when the turn's worker finishes and async children stay muted to
+    // their own log — the observable behaviour headless has always had.
+    let bus = SessionBus::per_turn(headless.inbox());
+    let r = session.run_turn(&mut headless, &bus, provider, Some(prompt));
     let _ = headless.events.flush();
     let elapsed = headless.started.elapsed();
     if json {
