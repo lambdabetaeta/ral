@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 7ba500b
-generated_at_date: 2026-06-17
+generated_at_commit: 99300c0
+generated_at_date: 2026-06-21
 covers_paths: [exarch/src/tools.rs, exarch/src/tools/]
 ---
 
@@ -24,12 +24,18 @@ Three tools ship:
   [[map/exarch/frontend|rail]]; the full `cmd` is revealed when the user opens the
   collapsible tool-call block), and an optional `audit`.
 - `agent` (`tools/agent.rs`) — `fork` a child [[map/exarch/session|session]] from
-  a value-snapshot of the parent shell and run a sub-prompt to completion,
-  returning its final text. Returns `Staged::Spawned`; the parent dispatch loop
-  stages every same-batch call before joining, so sibling agents can overlap
-  while still finishing before the parent turn continues. Emits
-  `Born` / `Died` / `SubagentDone` on the bus so the TUI can tab and breadcrumb
-  children.
+  a value-snapshot of the parent shell and run a sub-prompt. Bimodal
+  ([[decisions/260617_async-agent-tool|async-agent-tool]]): `sync` (the default)
+  is a *dependency edge* — `Staged::Spawned`, joined before the parent's next
+  provider request, its final text returned in the `tool_result`, so same-batch
+  siblings overlap but never outlive the turn; `async` is an *orchestration
+  edge* — a detached registry-owned worker (`agents` lists live ones,
+  `agent_cancel` stops one) that returns a start receipt now and delivers its
+  reply later as a marked `Turn` through the [[map/exarch/frontend|inbox]]. A
+  child's settle reduces once through `AgentOutcome` (one `run_child`), drawn as
+  the `↘` `SubagentDone` breadcrumb in both modes. Both stream
+  `Born` / tokens / `Died` to a live tab — sync always, async whenever the bus
+  is session-lived ([[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]]).
 - `fff` (`tools/fff.rs`) — frecency-ranked fuzzy filename search over the working
   tree via the `fff-search` crate. The first call per directory blocks on a
   background scan, then caches a `FilePicker` (scan thread + filesystem watcher)

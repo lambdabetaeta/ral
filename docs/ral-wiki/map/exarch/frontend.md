@@ -1,13 +1,13 @@
 ---
-generated_at_commit: 7950be9
-generated_at_date: 2026-06-18
+generated_at_commit: 99300c0
+generated_at_date: 2026-06-21
 covers_paths: [exarch/src/bus.rs, exarch/src/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/host.rs]
 ---
 
 # Map: exarch / frontend
 
-The agent core and the user interface meet at **one event stream plus one
-prompt queue**, defined by `bus.rs`:
+The agent core and the user interface meet at **one outbound event stream and
+one inbound inbox**, defined by `bus.rs`:
 
 - workers stamp a `Kind` with a `SessionId` through an `Emitter`; a `Sink`
   consumes them. A `Kind` is a token, boundary, usage, tool call/result,
@@ -16,15 +16,25 @@ prompt queue**, defined by `bus.rs`:
   `Card` — a render document a kit raises through the `surface` builtin, decoded
   onto the bus by [[map/exarch/shell-eval|shell-eval]]'s host sink and drawn by
   one generic interpreter ([[map/exarch/cards|cards]]).
-- `PromptQueue` is the narrow TUI→worker back-channel: `Sink::prompt_queue`
-  hands `pump` a shared queue, `App::enqueue` pushes prompts typed while busy,
-  and `Emitter::drain_prompt_queue` lets the root dispatch loop consume them at
-  safe tool boundaries ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]]).
-- `pump` runs the worker on a scoped thread, drains the event channel into the
-  sink, and reports a worker panic as a final `Kind::Error`.
+- `Inbox` is the typed inbound twin — a per-session queue of `InboxMsg`s, each
+  carrying its source and drain boundary. User steering drains mid-turn at a
+  tool boundary (`drain_tool`); a scheduled wakeup or a settled async agent
+  drains at the turn boundary as its own marked `Turn` (`drain_turn`)
+  ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]],
+  [[decisions/260617_scheduled-wakeups|scheduled-wakeups]],
+  [[decisions/260617_async-agent-tool|async-agent-tool]]).
+- a `SessionBus` owns the event channel and the inbox; `pump` borrows it, runs
+  the worker on a scoped thread, drains events into the sink, and reports a
+  worker panic as a final `Kind::Error`. Completion is the per-turn `done` flag,
+  latched by `drain_pass` so a turn ends even while a background producer keeps
+  the channel non-empty — never the channel's state
+  ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]).
 
-Headless and test sinks expose an empty prompt queue; only the TUI supplies a
-live producer.
+The TUI mints one **session-lived** bus, so a detached async agent clones its
+sender and streams a live tab through the same id-routed draw path a sync child
+uses ([[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]]);
+headless and test sinks build a **per-turn** bus that closes when the worker
+finishes, keeping async children muted to their own log.
 
 `event.rs` is the canonical per-session record. `SessionLog` owns three things:
 
@@ -61,17 +71,22 @@ Two `Sink` implementations:
  elapsed-wait bar (elapsed wall-time on the live phase, resetting per round-trip);
  the live phase lives on `Viewport`, not `App`.
  Sub-agent sessions get tabs that linger after `Died`, each keeping its own
- scroll position. It owns the REPL loop and the raw-mode / bracketed-paste /
- alt-screen / mouse-capture guard. A prompt the user submits while a turn
- runs is queued (`PromptQueue` behind `App::queue`); the root dispatch loop
- drains non-slash prompts at the next safe tool boundary, and `Repl::drive`
- drains any remainder as the next turn's prompt, coalesced oldest-first.
- Slash-prefixed prompts stay on the REPL command path. Until then the queue
- renders in a strip above the input
- ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]]).
+ scroll position; an async agent on the session-lived bus streams its tab the
+ same way, and `/clear` retires every live sub-tab through the same linger
+ window ([[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]]).
+ It owns the REPL loop and the raw-mode / bracketed-paste /
+ alt-screen / mouse-capture guard. A prompt the user submits while a turn runs
+ is posted to the `Inbox`; the root dispatch loop drains non-slash steering at
+ the next safe tool boundary, and `Repl::drive` delivers the rest at the turn
+ boundary — a coalesced human run, or a wakeup / settled agent as its own
+ marked turn. Slash-prefixed prompts stay on the REPL command path. Until then
+ the inbox renders in a strip above the input, and the idle wait selects over
+ input, inbox, and the session bus
+ ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]],
+ [[decisions/260617_scheduled-wakeups|scheduled-wakeups]]).
 - `headless.rs` — one-shot pipe: assistant tokens to stdout, every other event
   condensed to one line on stderr, exit after one seed turn. Takes the default
-  `Sink::drive` and an empty prompt queue.
+  `Sink::drive` and a per-turn bus, so its async children stay muted.
 
 `cancel.rs` is the per-root-turn cancellation layered on ral's interrupt
 handling. A `run_turn` mints a `Token` (an `Arc<AtomicBool>`) and threads it

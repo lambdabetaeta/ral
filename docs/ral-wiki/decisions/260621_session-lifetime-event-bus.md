@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: active
 ---
 
 # A live background agent needs a session-lifetime event bus
@@ -166,6 +166,20 @@ worker→frontend channel that also outlives the turn.
   `Card` through `surface` competes for the foreground; the interaction with
   [[decisions/260619_terminal-lease|terminal-lease]] / terminal-foreground
   ownership is unexplored, since muting currently forecloses it.
+
+## As built
+
+Implemented as specified. The seam is a `SessionBus` value (`bus.rs`) owning the
+channel and inbox, *borrowed* by `pump`/`run_turn`: `SessionBus::session` for the
+TUI (emitters session-lived, async children stream a live tab),
+`SessionBus::per_turn` for headless and tests (async children muted). An
+`Emitter::session_lived` flag, inherited by `child`, is what `dispatch_async`
+reads to choose a streaming vs muted child emitter, bracketing `run_child` with
+`Born`/`Died`. `drain_pass` latches `done` at the top of each pass and stops on
+it regardless of channel occupancy; the idle wait gained `drain_bus_idle` as a
+third source; `App::clear` retires live tabs into the `dying`/`LINGER` path and an
+`App::handle` dying-guard drops a cancelled worker's late events. Headless and the
+model-facing inbox contract are unchanged.
 
 ## See also
 

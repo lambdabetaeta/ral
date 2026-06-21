@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 7ba500b
-generated_at_date: 2026-06-17
+generated_at_commit: 99300c0
+generated_at_date: 2026-06-21
 covers_paths: [exarch/src/session.rs, exarch/src/nudge.rs, exarch/src/digest.rs]
 ---
 
@@ -14,7 +14,9 @@ shape its turns (`is_subagent`, the headless-only `expect_action`, the per-turn
 Three nested loops:
 
 - `run_turn` — one user turn. Each pass runs `apply` on a scoped worker thread
-  (via `bus::pump`) and hands the `TurnOutcome` to `nudge::Registry::react`,
+  (via `bus::pump`, over the session's [[map/exarch/frontend|`SessionBus`]] —
+  session-lived under the TUI, per-turn headless) and hands the `TurnOutcome`
+  to `nudge::Registry::react`,
   which decides whether to stop or loop with a (possibly synthetic) next prompt.
   Under the headless-only `expect_action` flag (root sessions only; forks never
   inherit it), a clean completion is gated by two one-shot, budget-free nudges
@@ -52,13 +54,15 @@ Three nested loops:
   matches no nudge rule, so the driver treats it as terminal; re-driving would
   only spend the ceiling again.
 - `dispatch` — runs the turn's tool-call batch under one `thread::scope`. Each
-  call is staged first; `agent` calls return `Staged::Spawned`, so same-batch
-  sub-agents can overlap before the join phase. Once every requested tool id has
-  a result, dispatch drains the root prompt queue. A non-slash queued prompt is
-  appended after the complete tool-result batch, and the next loop asks the
-  provider with the user's steering in context
+  call is staged first; a *sync* `agent` call returns `Staged::Spawned`, so
+  same-batch sub-agents can overlap before the join phase (an *async* `agent`
+  returns `Staged::Done` with a start receipt and runs detached). Once every
+  requested tool id has a result, dispatch drains the root
+  [[map/exarch/frontend|inbox]]'s tool-boundary steering. A non-slash steering
+  prompt is appended after the complete tool-result batch, and the next loop
+  asks the provider with the user's steering in context
   ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]]). Sub-agents
-  do not consume the root prompt queue.
+  do not consume the root inbox.
 
 `clear` resets the root session without carrying cancellation residue forward:
 it obtains a fresh root shell from `boot_root_shell` (the scratch-seeding wrapper
