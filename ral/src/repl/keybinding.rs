@@ -7,14 +7,14 @@
 //! editor state.  The handler may mutate the buffer, accept the line, or
 //! push a new buffer onto the stack.
 
-use ral_core::types::Break;
+use ral_core::types::Capabilities;
 use ral_core::{RequestedTerminalAccess, Shell};
 use std::sync::{Arc, Mutex};
 
 use super::frontend::EditBuffer;
 use super::plugin::{
-    HookFor, HookFraming, Keymap, PendingKeybinding, PluginRuntime, call_plugin_hook,
-    defer_plugin_error, keymap_name, lock,
+    FramedHook, HookFor, HookFraming, Keymap, PendingKeybinding, PluginRuntime, call_plugin_hook,
+    defer_plugin_message, keymap_name, lock,
 };
 use super::plugin_editor::{EditorState, PluginContext, PluginInputs, PluginOutputs, byte_to_char};
 
@@ -57,9 +57,16 @@ pub(super) fn dispatch_keybinding(
     let resolved = {
         let rt = lock(runtime);
         rt.resolve_keybinding(&pk.plugin, pk.binding_idx)
-            .map(|(idx, handler)| (idx, rt.plugins[idx].state_cell.clone(), handler))
+            .map(|(idx, handler)| {
+                (
+                    idx,
+                    rt.plugins[idx].state_cell.clone(),
+                    rt.plugins[idx].source.clone(),
+                    handler,
+                )
+            })
     };
-    let Some((idx, state_cell, handler)) = resolved else {
+    let Some((idx, state_cell, source, handler)) = resolved else {
         return KeybindingOutcome::Edit(current.to_string(), end_of(current));
     };
 
@@ -93,18 +100,26 @@ pub(super) fn dispatch_keybinding(
     // rather than backgrounding it where `fzf` would block reading `/dev/tty`.
     let hr = call_plugin_hook(
         shell,
-        HookFor { name: &pk.plugin },
+        HookFor {
+            name: &pk.plugin,
+            source: &source,
+        },
         &handler,
         &[],
         Some(ctx_in),
-        HookFraming::Framed(RequestedTerminalAccess::Leased),
+        HookFraming::Framed(FramedHook {
+            terminal: RequestedTerminalAccess::Leased,
+            kind: "keybinding",
+            caps: Capabilities::root(),
+            budget: None,
+        }),
     );
 
-    if let Err(Break::Error(e)) = hr.result {
+    if let Some(rendered) = &hr.rendered_error {
         // Defer printing: the REPL loop is about to emit `\x1b[A\r\x1b[K`
         // to erase rustyline's stray newline, which would clobber an
         // immediate `eprintln!` on that very line.  Flushed afterward.
-        defer_plugin_error(runtime, &pk.plugin, "keybinding handler failed", &e);
+        defer_plugin_message(runtime, rendered.clone());
     }
 
     let Some(ctx) = hr.ctx else {
@@ -149,6 +164,8 @@ mod tests {
             keybindings: vec![(key.to_string(), handler)],
             bindings: Vec::new(),
             state_cell: None,
+            source: std::sync::Arc::from(""),
+            buffer_change_health: Default::default(),
         }
     }
 

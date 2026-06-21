@@ -40,6 +40,18 @@ pub(super) fn plugin_error(plugin_name: &str, context: &str, err: &Error) {
     eprintln!("{}", format_plugin_error(plugin_name, context, err));
 }
 
+/// Format the circuit-breaker's disable notice: `plugin '<name>': hook
+/// '<kind>' disabled for this session (<reason>)`.  Returned as a string (no
+/// trailing newline) so the readline loop can defer it past line-erase
+/// escapes alongside the other plugin diagnostics.
+pub(super) fn format_plugin_disabled(plugin_name: &str, kind: &str, reason: &str) -> String {
+    let c = ansi::use_color();
+    let (yellow, reset) = (ansi::when(c, BOLD_YELLOW), ansi::when(c, RESET));
+    format!(
+        "{yellow}plugin{reset} '{plugin_name}': hook '{kind}' disabled for this session ({reason})"
+    )
+}
+
 /// Print a plugin warning to stderr with consistent formatting.
 pub(super) fn plugin_warning(plugin_name: &str, msg: &str) {
     let c = ansi::use_color();

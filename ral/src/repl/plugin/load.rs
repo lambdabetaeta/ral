@@ -61,7 +61,10 @@ pub(crate) fn load_plugin(
     let module = instantiate(value, options, name_or_path, shell)?;
     check_is_manifest(&module, name_or_path)?;
 
-    let (plugin, bindings) = LoadedPlugin::parse(&module)?;
+    let (mut plugin, bindings) = LoadedPlugin::parse(&module)?;
+    // The manifest value carries no source; retain the file text the handler
+    // thunks were compiled from, so a fault inside one renders against it.
+    plugin.source = std::sync::Arc::from(source.as_str());
     check_not_loaded(&plugin.name, runtime)?;
     check_no_binding_conflicts(&bindings, &plugin.name, shell)?;
     install_bindings(&bindings, shell)?;
@@ -186,7 +189,7 @@ fn instantiate(
             // frame with the session's live streams and `Denied` terminal
             // authority — instantiating a plugin must not foreground a child.
             let req = framed_turn_request("<plugin>", RequestedTerminalAccess::Denied);
-            match shell.run_value_turn(val, vec![arg], req) {
+            match shell.run_value_turn(val, vec![arg], "", req) {
                 TurnReport::Ran { result, .. } => result,
                 TurnReport::Static { .. } => {
                     unreachable!("a thunk plugin factory never compiles source")

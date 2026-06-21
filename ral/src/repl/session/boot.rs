@@ -12,9 +12,9 @@ use rustyline::config::{BellStyle, EditMode};
 use std::sync::{Arc, Mutex};
 
 use super::super::config::{RcCtx, create_default_rc, find_ralrc};
-use super::super::frontend::{Frontend, MinimalFrontend, RustylineFrontend, Surface};
 #[cfg(feature = "structural")]
 use super::super::frontend::StructuralFrontend;
+use super::super::frontend::{Frontend, MinimalFrontend, RustylineFrontend, Surface};
 use super::super::plugin::{PluginRuntime, framed_turn_request};
 #[cfg(unix)]
 use crate::jobs;
@@ -240,9 +240,7 @@ pub(super) fn create_frontend(
                 ),
             }
             #[cfg(not(feature = "structural"))]
-            diagnostic::shell_warning(
-                "ral: this build has no structural surface; using readline",
-            );
+            diagnostic::shell_warning("ral: this build has no structural surface; using readline");
         }
         Surface::Readline => {}
     }
@@ -333,7 +331,7 @@ fn source_config_inner(path: &str, ctx: &mut RcCtx<'_>) -> Result<(), String> {
         // exit, so `let`s inside it do not leak — the prior in-place `apply`
         // behaviour, now properly framed.
         let req = framed_turn_request("<startup>", RequestedTerminalAccess::Denied);
-        match ctx.shell.run_value_turn(block, vec![], req) {
+        match ctx.shell.run_value_turn(block, vec![], "", req) {
             TurnReport::Ran { result, .. } => match result {
                 Ok(_) | Err(Break::Escape(Escape::Exit(_))) => {}
                 Err(Break::Error(e)) => return Err(format!("{path}: startup: {}", e.message)),

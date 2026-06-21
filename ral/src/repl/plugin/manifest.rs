@@ -5,9 +5,11 @@
 //! and alias thunks, and yields a [`LoadedPlugin`] record plus the list
 //! of `(name, thunk)` pairs that the loader installs into env.
 
+use super::HookHealth;
 use ral_core::types::Error;
 use ral_core::{Map, Value};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Hook events recognised in manifests.  Typos are load errors so a
 /// plugin cannot silently register a handler that never fires.
@@ -32,6 +34,14 @@ pub(crate) struct LoadedPlugin {
     /// Names installed into env at load time; removed on unload.
     pub(crate) bindings: Vec<String>,
     pub(crate) state_cell: Option<Value>,
+    /// The plugin file's source text, installed as the root context of every
+    /// framed hook turn so a fault inside a handler renders against the right
+    /// line of the right file.  Set by the loader once the file is read;
+    /// [`parse`](Self::parse) leaves it empty (it sees only the manifest value).
+    pub(crate) source: Arc<str>,
+    /// Circuit-breaker state for this plugin's buffer-change hook — the only
+    /// hook that fires on every keystroke and so needs a per-session brake.
+    pub(crate) buffer_change_health: HookHealth,
 }
 
 impl LoadedPlugin {
@@ -70,6 +80,8 @@ impl LoadedPlugin {
             keybindings,
             bindings: aliases.iter().map(|(n, _)| n.clone()).collect(),
             state_cell: None,
+            source: Arc::from(""),
+            buffer_change_health: HookHealth::default(),
             name,
         };
         Ok((plugin, aliases))

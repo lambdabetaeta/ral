@@ -4,13 +4,13 @@
 //! installed on the live shell.  Plugins may transform the result via
 //! the `prompt` lifecycle hook.
 
-use ral_core::types::{Break, Env};
+use ral_core::types::{Break, Capabilities, Env};
 use ral_core::{RequestedTerminalAccess, Shell, TurnReport, Value, diagnostic};
 use std::sync::{Arc, Mutex};
 
-use super::errfmt::plugin_error;
-
-use super::plugin::{HookFraming, PluginRuntime, call_plugin_hook, fold_hook, framed_turn_request};
+use super::plugin::{
+    FramedHook, HookFraming, PluginRuntime, call_plugin_hook, fold_hook, framed_turn_request,
+};
 
 /// The default prompt.  Session boot templates it into the thunk it
 /// binds to `RAL_PROMPT` (`install_default_prompt`); the failure arms in
@@ -137,7 +137,7 @@ pub(super) fn eval_prompt(prompt: &Value, shell: &mut Shell, bindings: &PromptBi
     let saved_status = shell.mobile.control.last_status;
     let (result, out) = ral_core::evaluator::with_capture(shell, |shell| {
         let req = framed_turn_request("<prompt>", RequestedTerminalAccess::Denied);
-        match shell.run_value_turn(synthetic, vec![], req) {
+        match shell.run_value_turn(synthetic, vec![], "", req) {
             TurnReport::Ran { result, .. } => result,
             TurnReport::Static { .. } => unreachable!("a thunk prompt body never compiles source"),
         }
@@ -212,7 +212,6 @@ pub(super) fn render(shell: &mut Shell, runtime: &Arc<Mutex<PluginRuntime>>) -> 
         "prompt",
         base,
         |shell, plugin, handler, prompt| {
-            let plugin_name = plugin.name.to_string();
             // The prompt hook runs during `read`, outside any frame, and only
             // transforms the prompt string — it never foregrounds a child, so
             // it frames with `Denied`.
@@ -222,15 +221,24 @@ pub(super) fn render(shell: &mut Shell, runtime: &Arc<Mutex<PluginRuntime>>) -> 
                 handler,
                 &[Value::String(prompt.clone())],
                 None,
-                HookFraming::Framed(RequestedTerminalAccess::Denied),
+                HookFraming::Framed(FramedHook {
+                    terminal: RequestedTerminalAccess::Denied,
+                    kind: "prompt",
+                    caps: Capabilities::root(),
+                    budget: None,
+                }),
             );
             match hr.result {
                 Ok(Value::String(s)) => s,
-                Err(Break::Error(e)) => {
-                    plugin_error(&plugin_name, "hook 'prompt' failed", &e);
+                _ => {
+                    // No readline escape is pending at render time, so the
+                    // source-mapped fault (rendered while its registry was live)
+                    // prints immediately above the prompt.
+                    if let Some(rendered) = hr.rendered_error {
+                        eprintln!("{rendered}");
+                    }
                     prompt
                 }
-                _ => prompt,
             }
         },
     );

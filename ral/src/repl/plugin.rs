@@ -27,11 +27,12 @@ pub(super) mod manifest;
 
 use ral_core::types::{Break, Capabilities, Settled};
 use ral_core::{
-    RequestedTerminalAccess, Shell, TurnIo, TurnReport, TurnRequest, TurnStdin, Value,
+    RequestedTerminalAccess, Shell, TurnIo, TurnReport, TurnRequest, TurnStdin, Value, diagnostic,
 };
+use std::time::Duration;
 
 use self::manifest::LoadedPlugin;
-use super::errfmt::{format_plugin_error, plugin_error, plugin_warning};
+use super::errfmt::{format_plugin_disabled, plugin_error, plugin_warning};
 use super::frontend::EditBuffer;
 use super::plugin_editor::{
     EditorState, HighlightSpan, PluginContext, PluginInputs, PluginOutputs, byte_to_char,
@@ -175,22 +176,18 @@ pub(crate) struct PluginRuntime {
 
 // ── Deferred diagnostics ────────────────────────────────────────────────
 
-/// Buffer a plugin error for the REPL loop to flush after readline returns.
+/// Buffer an already-rendered plugin diagnostic for the REPL loop to flush
+/// after readline returns.
 ///
-/// Use this from inside the readline loop (keybinding dispatch,
-/// buffer-change hooks).  For one-shot lifecycle paths where no escape
-/// sequence is pending, [`errfmt::plugin_error`](super::errfmt::plugin_error)
-/// may be called directly.
-pub(super) fn defer_plugin_error(
-    runtime: &Arc<Mutex<PluginRuntime>>,
-    plugin_name: &str,
-    context: &str,
-    err: &ral_core::types::Error,
-) {
-    lock(runtime)
-        .diagnostics
-        .messages
-        .push(format_plugin_error(plugin_name, context, err));
+/// Use this from inside the readline loop (keybinding dispatch, buffer-change
+/// hooks), where the REPL is about to emit a line-erase escape that would
+/// clobber an immediate `eprintln!`.  The messages are the source-mapped hook
+/// fault produced by [`call_plugin_hook`] and the circuit-breaker's disable
+/// notice — both already finished strings.  One-shot lifecycle paths, where no
+/// escape is pending, call [`errfmt::plugin_error`](super::errfmt::plugin_error)
+/// directly instead.
+pub(super) fn defer_plugin_message(runtime: &Arc<Mutex<PluginRuntime>>, message: String) {
+    lock(runtime).diagnostics.messages.push(message);
 }
 
 /// Drain and write any buffered plugin diagnostics to stderr.
@@ -228,11 +225,13 @@ pub(super) struct PendingKeybinding {
 // ── Transactional hook helper ───────────────────────────────────────────
 
 /// Per-call view of a plugin's metadata threaded through the hook
-/// helper.  `name` is used for diagnostic context.  Plugins run with
-/// host authority; no capability attenuation is applied around the
-/// hook call.
+/// helper.  `name` labels the hook turn's root context and the source-mapped
+/// fault; `source` is the plugin file's text, installed as that root context
+/// so a fault inside the handler resolves to the right line of the plugin
+/// file and renders with a source arrow, exactly as a command fault does.
 pub(super) struct HookFor<'a> {
     pub(super) name: &'a str,
+    pub(super) source: &'a str,
 }
 
 /// Outcome of one [`call_plugin_hook`] invocation.
@@ -240,10 +239,77 @@ pub(super) struct HookFor<'a> {
 /// `ctx` is `Some` iff the caller passed `Some` for `ctx_in`; the caller
 /// inspects `outputs` (ghost text, highlights, pushed buffer, accept
 /// flag) and `state_cell` (to save back into the plugin record).
+///
+/// `rendered_error` is the source-mapped rendering of a [`Break::Error`] the
+/// handler raised, produced *inside the helper* while the hook turn's source
+/// registry is still the live one — the next framed turn resets it, so a
+/// deferred raw `Error` would later resolve its `FileId` against the wrong
+/// registry. It is `Some` only on the [`HookFraming::Framed`] path (where the
+/// helper owns the source context); the in-frame path leaves rendering to the
+/// caller against the command's own frame. `timed_out` reports whether the
+/// turn's wall fired — the circuit-breaker's signal that a hook overran its
+/// budget.
 pub(super) struct HookResult {
     pub(super) result: Settled<Value>,
     pub(super) ctx: Option<PluginContext>,
+    pub(super) rendered_error: Option<String>,
+    pub(super) timed_out: bool,
 }
+
+/// Per-session health of one plugin hook, the circuit-breaker's state.
+///
+/// A buffer-change hook fires on every keystroke, so a slow or always-faulting
+/// one must not run unbraked. Consecutive faults accumulate; a fault run that
+/// reaches [`BUFFER_CHANGE_FAULT_LIMIT`], or any turn that overruns
+/// [`BUFFER_CHANGE_BUDGET`], trips the breaker — the hook is skipped for the
+/// rest of the session. A success resets the fault count.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HookHealth {
+    consecutive_faults: u32,
+    disabled: bool,
+}
+
+impl HookHealth {
+    pub(super) fn is_disabled(&self) -> bool {
+        self.disabled
+    }
+
+    /// Fold one hook outcome into the health state, returning `true` exactly on
+    /// the call that trips the breaker (so the caller emits the single disable
+    /// diagnostic once). A timeout trips immediately; otherwise faults
+    /// accumulate to `fault_limit` and a success clears the count.
+    pub(super) fn record_outcome(&mut self, ok: bool, timed_out: bool, fault_limit: u32) -> bool {
+        if self.disabled {
+            return false;
+        }
+        if timed_out {
+            self.disabled = true;
+            return true;
+        }
+        if ok {
+            self.consecutive_faults = 0;
+            false
+        } else {
+            self.consecutive_faults += 1;
+            if self.consecutive_faults >= fault_limit {
+                self.disabled = true;
+                true
+            } else {
+                false
+            }
+        }
+    }
+}
+
+/// Foreground wall for a single buffer-change hook turn: a hook that runs this
+/// long on one keystroke has overrun its keystroke budget and trips the
+/// breaker. The wall is cooperative — the trampoline polls cancellation at
+/// every reduction step, so any handler doing ordinary work (iteration,
+/// command spawns, recursion) is preempted at the next step.
+const BUFFER_CHANGE_BUDGET: Duration = Duration::from_millis(100);
+
+/// Consecutive buffer-change faults that trip the breaker.
+const BUFFER_CHANGE_FAULT_LIMIT: u32 = 3;
 
 /// How a hook call is framed against the turn machinery.
 ///
@@ -261,12 +327,29 @@ pub(super) struct HookResult {
 ///     `chpwd`) fire from inside the command's own turn frame. A second frame
 ///     would nest, so the handler is applied in place.
 pub(super) enum HookFraming {
-    /// Establish a fresh turn frame with this terminal authority before
-    /// applying the handler. Inherits the session streams; no capability
-    /// attenuation (plugins run with host authority); no lifecycle hooks.
-    Framed(RequestedTerminalAccess),
+    /// Establish a fresh turn frame before applying the handler. Inherits the
+    /// session streams and runs no lifecycle hooks; the [`FramedHook`] carries
+    /// the rest of the per-hook policy.
+    Framed(FramedHook),
     /// Apply the handler in place — already inside the command's turn frame.
     InFrame,
+}
+
+/// The per-hook policy for a [`HookFraming::Framed`] call.
+///
+/// `terminal` is the terminal authority the hook turn may hand to a child
+/// (keybinding dispatch leases it; the others deny it). `kind` labels the hook
+/// for the turn's root context and fault attribution (`"keybinding"`,
+/// `"buffer-change"`, `"prompt"`). `caps` is the capability ceiling the handler
+/// runs under — `Capabilities::root()` is full host authority (the default, so
+/// nothing regresses); a narrower set attenuates the handler. `budget` arms the
+/// turn's foreground wall: `Some(d)` cancels a handler that overruns `d`
+/// (the buffer-change keystroke budget), `None` leaves it uncapped.
+pub(super) struct FramedHook {
+    pub(super) terminal: RequestedTerminalAccess,
+    pub(super) kind: &'static str,
+    pub(super) caps: Capabilities,
+    pub(super) budget: Option<Duration>,
 }
 
 /// The single primitive for running a plugin hook.  In order:
@@ -295,21 +378,48 @@ pub(super) fn call_plugin_hook(
     ctx_in: Option<PluginContext>,
     framing: HookFraming,
 ) -> HookResult {
-    let _ = plugin.name; // reserved for future error-context use
     let prev = shell.repl_mut().plugin_context.take();
     if let Some(ctx) = ctx_in {
         shell.repl_mut().plugin_context = Some(Box::new(ctx));
     }
-    let result = match framing {
-        HookFraming::InFrame => ral_core::builtins::apply(hook, args, shell),
-        HookFraming::Framed(terminal) => {
-            let req = framed_turn_request("<hook>", terminal);
-            match shell.run_value_turn(hook.clone(), args.to_vec(), req) {
-                TurnReport::Ran { result, .. } => result,
-                // A thunk hook never reaches the parse/typecheck phase, so the
-                // value turn door cannot return `Static`.
-                TurnReport::Static { .. } => unreachable!("a thunk hook never compiles source"),
-            }
+    let (result, rendered_error, timed_out) = match framing {
+        HookFraming::InFrame => (ral_core::builtins::apply(hook, args, shell), None, false),
+        HookFraming::Framed(FramedHook {
+            terminal,
+            kind,
+            caps,
+            budget,
+        }) => {
+            // Label the root context `kind:plugin` (e.g. `keybinding:fzf`), and
+            // install the plugin's own source as that context's text so a fault
+            // resolves to the right line of the plugin file.
+            let label = format!("{kind}:{}", plugin.name);
+            let mut req = framed_turn_request(&label, terminal);
+            req.caps = caps;
+            req.turn_limit = budget;
+            let (result, timed_out) =
+                match shell.run_value_turn(hook.clone(), args.to_vec(), plugin.source, req) {
+                    TurnReport::Ran {
+                        result, timed_out, ..
+                    } => (result, timed_out),
+                    // A thunk hook never reaches the parse/typecheck phase, so the
+                    // value turn door cannot return `Static`.
+                    TurnReport::Static { .. } => {
+                        unreachable!("a thunk hook never compiles source")
+                    }
+                };
+            // Render the fault here, while `shell.sources()` still holds this
+            // turn's registry — the next framed turn resets it, so deferring the
+            // raw `Error` would resolve its `FileId` against the wrong source.
+            let rendered_error = match &result {
+                Err(Break::Error(e)) => Some(
+                    diagnostic::format_runtime_error_auto(shell.sources(), e, false)
+                        .trim_end()
+                        .to_string(),
+                ),
+                _ => None,
+            };
+            (result, rendered_error, timed_out)
         }
     };
     let ctx = shell
@@ -318,7 +428,12 @@ pub(super) fn call_plugin_hook(
         .take()
         .and_then(|b| b.downcast::<PluginContext>().ok().map(|b| *b));
     shell.repl_mut().plugin_context = prev;
-    HookResult { result, ctx }
+    HookResult {
+        result,
+        ctx,
+        rendered_error,
+        timed_out,
+    }
 }
 
 /// The per-turn policy for a turn the REPL host runs from a `Value` it already
@@ -328,9 +443,9 @@ pub(super) fn call_plugin_hook(
 /// varies (keybinding dispatch leases it; every other site denies it, never
 /// handing the terminal to a child).
 pub(super) fn framed_turn_request(
-    script_name: &'static str,
+    script_name: &str,
     terminal: RequestedTerminalAccess,
-) -> TurnRequest<'static> {
+) -> TurnRequest<'_> {
     TurnRequest {
         script_name,
         caps: Capabilities::root(),
@@ -365,14 +480,15 @@ pub(super) fn run_buffer_change_hooks(runtime: &Arc<Mutex<PluginRuntime>>, line:
         let old_buf = std::mem::replace(&mut rt.hooks.previous.text, line.to_string());
         rt.hooks.previous.cursor = pos;
 
-        let handlers: Vec<(usize, String, Value)> = rt
+        let handlers: Vec<(usize, String, std::sync::Arc<str>, Value)> = rt
             .plugins
             .iter()
             .enumerate()
+            .filter(|(_, p)| !p.buffer_change_health.is_disabled())
             .filter_map(|(i, p)| {
                 p.hooks
                     .get("buffer-change")
-                    .map(|h| (i, p.name.clone(), h.clone()))
+                    .map(|h| (i, p.name.clone(), p.source.clone(), h.clone()))
             })
             .collect();
 
@@ -399,7 +515,7 @@ pub(super) fn run_buffer_change_hooks(runtime: &Arc<Mutex<PluginRuntime>>, line:
     let mut spans: Vec<HighlightSpan> = Vec::new();
 
     // ── Phase 2: run each handler with lock released around evaluator ────
-    for (idx, name, handler) in handlers {
+    for (idx, name, source, handler) in handlers {
         // Snapshot state cell from the runtime; the helper will load it into
         // the PluginContext and surface any mutations back through `ctx_out`.
         let state_cell = lock(runtime)
@@ -425,18 +541,53 @@ pub(super) fn run_buffer_change_hooks(runtime: &Arc<Mutex<PluginRuntime>>, line:
 
         let hr = call_plugin_hook(
             &mut hook_env,
-            HookFor { name: &name },
+            HookFor {
+                name: &name,
+                source: &source,
+            },
             &handler,
             &args,
             Some(ctx_in),
             // Buffer-change hooks fire per keystroke outside any frame and
             // never hand the terminal to a child (`_ed-tui` is forbidden here),
-            // so they frame with `Denied`.
-            HookFraming::Framed(RequestedTerminalAccess::Denied),
+            // so they frame with `Denied`. The keystroke budget arms the wall,
+            // and the breaker disables a persistently bad hook for the session.
+            HookFraming::Framed(FramedHook {
+                terminal: RequestedTerminalAccess::Denied,
+                kind: "buffer-change",
+                caps: Capabilities::root(),
+                budget: Some(BUFFER_CHANGE_BUDGET),
+            }),
         );
 
-        if let Err(Break::Error(e)) = &hr.result {
-            defer_plugin_error(runtime, &name, "hook 'buffer-change' failed", e);
+        // Surface the fault (source-mapped, rendered while its registry was
+        // live), then fold the outcome into the breaker. A trip emits one
+        // disable notice; thereafter this plugin's hook is skipped above.
+        if let Some(rendered) = &hr.rendered_error {
+            defer_plugin_message(runtime, rendered.clone());
+        }
+        {
+            let mut rt = lock(runtime);
+            if let Some(p) = rt.plugins.get_mut(idx) {
+                let tripped = p.buffer_change_health.record_outcome(
+                    hr.result.is_ok(),
+                    hr.timed_out,
+                    BUFFER_CHANGE_FAULT_LIMIT,
+                );
+                if tripped {
+                    let why = if hr.timed_out {
+                        format!(
+                            "overran its {}ms keystroke budget",
+                            BUFFER_CHANGE_BUDGET.as_millis()
+                        )
+                    } else {
+                        format!("failed {BUFFER_CHANGE_FAULT_LIMIT} times in a row")
+                    };
+                    let msg = format_plugin_disabled(&name, "buffer-change", &why);
+                    drop(rt);
+                    defer_plugin_message(runtime, msg);
+                }
+            }
         }
 
         if let Some(ctx_out) = hr.ctx {
@@ -646,11 +797,7 @@ pub(super) fn sync_plugins(
 /// takes it back afterwards.  This keeps the persistent fields
 /// (`hooks.state`, `hooks.history`) as the source of truth and lets us
 /// build a fresh context per handler from them.
-pub(super) fn prepare_hook_env(
-    shell: &Shell,
-    runtime: &Arc<Mutex<PluginRuntime>>,
-    keymap: Keymap,
-) {
+pub(super) fn prepare_hook_env(shell: &Shell, runtime: &Arc<Mutex<PluginRuntime>>, keymap: Keymap) {
     let mut rt = lock(runtime);
 
     rt.hooks.state = EditorState {
@@ -739,15 +886,27 @@ pub(crate) fn fold_hook<T>(
     init: T,
     mut step: impl FnMut(&mut Shell, HookFor<'_>, &Value, T) -> T,
 ) -> T {
-    let handlers: Vec<(String, Value)> = lock(runtime)
+    let handlers: Vec<(String, std::sync::Arc<str>, Value)> = lock(runtime)
         .plugins
         .iter()
-        .filter_map(|p| p.hooks.get(hook_name).map(|h| (p.name.clone(), h.clone())))
+        .filter_map(|p| {
+            p.hooks
+                .get(hook_name)
+                .map(|h| (p.name.clone(), p.source.clone(), h.clone()))
+        })
         .collect();
 
     let mut acc = init;
-    for (name, handler) in handlers {
-        acc = step(shell, HookFor { name: &name }, &handler, acc);
+    for (name, source, handler) in handlers {
+        acc = step(
+            shell,
+            HookFor {
+                name: &name,
+                source: &source,
+            },
+            &handler,
+            acc,
+        );
     }
     acc
 }

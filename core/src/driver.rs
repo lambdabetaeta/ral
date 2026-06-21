@@ -164,9 +164,10 @@ pub fn bake_prelude_to_out_dir() {
 //
 // Hosts start an evaluation through exactly one of two doors:
 // `Shell::run_source_turn(src, TurnRequest)` runs a turn from source text;
-// `Shell::run_value_turn(thunk, args, TurnRequest)` runs a turn from an
+// `Shell::run_value_turn(thunk, args, src, TurnRequest)` runs a turn from an
 // already-evaluated thunk applied to argument values (a REPL plugin hook, a
-// prompt body, an rc startup block). Both return one flat `TurnReport`. Hosts
+// prompt body, an rc startup block), `src` being the thunk's defining source
+// for diagnostics. Both return one flat `TurnReport`. Hosts
 // describe *policy* (`TurnRequest`, `TurnIo`, `SurfaceSink`, lifecycle hooks);
 // core owns *resources* (`Sink`, `Source`, `TurnState`, guards, buffers,
 // signal slots). Completion is the call returning — never a channel
@@ -332,13 +333,19 @@ impl Shell {
     /// frame is installed and rejects a non-thunk `Value` with the same
     /// descriptive error reduction raises — so the door never starts an
     /// evaluation that escapes the frame. A turn run from a thunk is not a
-    /// single command, so the report carries `single_command: false`; the
-    /// empty source label keeps the root context honest (there is no text to
-    /// render an error against).
+    /// single command, so the report carries `single_command: false`.
+    ///
+    /// `src` is the text the thunk's body was compiled from — the defining
+    /// source the body's spans index into. It is installed as the turn's root
+    /// context, so a fault inside the body resolves to the right line of the
+    /// right file and renders with a source arrow, exactly as a command does.
+    /// A host that holds no source for the thunk passes `""`, which renders
+    /// faults without an arrow (the body's spans would index into nothing).
     pub fn run_value_turn(
         &mut self,
         thunk: Value,
         args: Vec<Value>,
+        src: &str,
         req: TurnRequest<'_>,
     ) -> TurnReport {
         let foreground = self.durable_root().child();
@@ -346,7 +353,7 @@ impl Shell {
             .turn_limit
             .map(|d| crate::process::arm_lifetime(foreground.as_scope().clone(), d));
 
-        self.run_built(req, foreground, wall, false, "", |s| {
+        self.run_built(req, foreground, wall, false, src, |s| {
             crate::builtins::apply(&thunk, &args, s)
         })
     }
@@ -373,7 +380,10 @@ impl Shell {
             TurnIo::Capture => {
                 let (stdout_sink, stdout_buf) = crate::io::new_buffer();
                 let (stderr_sink, stderr_buf) = crate::io::new_buffer();
-                (Some((stdout_sink, stderr_sink)), Some((stdout_buf, stderr_buf)))
+                (
+                    Some((stdout_sink, stderr_sink)),
+                    Some((stdout_buf, stderr_buf)),
+                )
             }
         };
 
@@ -398,8 +408,15 @@ impl Shell {
             req.detached_limit,
             req.surface,
         );
-        let (result, status) =
-            crate::turn::run_framed(self, next, req.script_name, src, req.caps, req.lifecycle, body);
+        let (result, status) = crate::turn::run_framed(
+            self,
+            next,
+            req.script_name,
+            src,
+            req.caps,
+            req.lifecycle,
+            body,
+        );
 
         // Disarm the wall before reading the cause. While it stays armed the
         // reaper can still fire; classifying against a live ceiling lets a turn
