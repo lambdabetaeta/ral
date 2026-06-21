@@ -1552,6 +1552,34 @@ impl Parser {
                     ))),
                 }
             }
+            // `<` / `>` reach the expression grammar as `Redirect` tokens
+            // ([`Self::peek_expr_op`] reads them as comparison operators).
+            // Hitting one in *operand* position means the comparison was
+            // misplaced — most often a digit glued to the operator, since
+            // `$[2>3]` lexes `2` as a file descriptor (`2>`) rather than the
+            // operand of `>`.  Point at the spacing fix instead of naming the
+            // bare `redirect` token.
+            Token::Redirect { fd, kind, .. } => {
+                let op = match kind {
+                    RedirectMode::Read => Some("<"),
+                    RedirectMode::Write => Some(">"),
+                    _ => None,
+                };
+                Err(self.error(match (op, fd) {
+                    (Some(op), Some(n)) => format!(
+                        "unexpected `{n}{op}` in expression; a digit glued to `{op}` is read \
+                         as a file-descriptor redirect — write `{n} {op} …` with spaces for a \
+                         comparison"
+                    ),
+                    (Some(op), None) => format!(
+                        "unexpected `{op}` in expression; `{op}` is a comparison operator and \
+                         needs an operand on each side"
+                    ),
+                    (None, _) => {
+                        format!("unexpected redirect in expression: {}", self.peek())
+                    }
+                }))
+            }
             _ => Err(self.error(format!("unexpected token in expression: {}", self.peek()))),
         }
     }
@@ -2117,6 +2145,29 @@ mod tests {
         assert!(
             err.message.contains("trailing input"),
             "expected trailing-input error, got: {}",
+            err.message
+        );
+    }
+
+    /// A numeric literal glued to a comparison operator inside `$[…]`
+    /// (`2>3`) lexes the digit as a file descriptor, so the `>` lands in
+    /// operand position.  The error must name the `2>` shape and point at
+    /// the spacing fix rather than reporting a bare "redirect" token.
+    #[test]
+    fn glued_comparison_suggests_spacing() {
+        let err = parse("return $[2>3]").unwrap_err();
+        assert!(
+            err.message.contains("`2>`") && err.message.contains("with spaces"),
+            "expected a spacing hint naming `2>`, got: {}",
+            err.message
+        );
+
+        // A bare operator with no left operand reports the comparison, not a
+        // file descriptor (there is no glued digit to blame).
+        let err = parse("return $[< 3]").unwrap_err();
+        assert!(
+            err.message.contains("comparison operator"),
+            "expected a comparison-operator error, got: {}",
             err.message
         );
     }
