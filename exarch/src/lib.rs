@@ -94,7 +94,25 @@ pub fn run() -> Result<(), String> {
     if let Some(command) = c.command {
         return match command {
             cli::Command::Login { device_auth } => oauth::login(device_auth),
-            cli::Command::Logout => oauth::logout(),
+            cli::Command::Logout { account, all } => oauth::logout(account, all),
+            cli::Command::Accounts => {
+                let accounts = oauth::load_all();
+                if accounts.is_empty() {
+                    eprintln!("No ChatGPT accounts signed in. Run `exarch login` to add one.");
+                } else {
+                    // Show the account id alongside the label only when the
+                    // label is an email — otherwise the label *is* the id and
+                    // printing it twice is noise.
+                    for token in accounts {
+                        if token.email.is_some() {
+                            println!("{} ({})", token.label(), token.account_id);
+                        } else {
+                            println!("{}", token.account_id);
+                        }
+                    }
+                }
+                Ok(())
+            }
         };
     }
     // Belt-and-suspenders to the clap `requires` above: `--output-format`

@@ -18,8 +18,15 @@
 //! the same sweep: each is keyed by its [`ProviderId`] and its declared key
 //! env var is read and scrubbed exactly like a famous provider's, so a custom
 //! endpoint becomes available the moment its key is in the environment.
+//!
+//! Signed-in ChatGPT accounts ([`crate::oauth`]) are the one source that does
+//! *not* come from the environment: each persisted login becomes its own
+//! [`ProviderId::ChatGpt`] bound to an [`Credential::OAuth`], loaded from the
+//! token store. Several can be available at once, and an account is a distinct
+//! identity from the API-key OpenAI provider — so a login and an
+//! `OPENAI_API_KEY` coexist as separate selectable providers.
 
-use crate::provider::{CustomProvider, ProviderId, ProviderKind};
+use crate::provider::{ChatGptAccount, CustomProvider, ProviderId, ProviderKind};
 use clap::ValueEnum;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -36,7 +43,7 @@ use std::sync::{Arc, Mutex};
 pub enum Credential {
     /// An API key read from the environment at startup.
     ApiKey(String),
-    /// A ChatGPT plan login for the OpenAI provider, shared so a mid-session
+    /// A signed-in ChatGPT account's plan login, shared so a mid-session
     /// refresh is visible to the request path.
     OAuth(Arc<Mutex<crate::oauth::OAuthToken>>),
 }
@@ -58,9 +65,10 @@ impl Credential {
 pub struct CredentialStore {
     ready: BTreeMap<ProviderId, Credential>,
     /// The famous providers, in [`ProviderKind`] declaration order, then the
-    /// custom providers in config order — the order [`Self::available`]
-    /// preserves. Holds every swept provider, available or not, so iteration
-    /// order is stable regardless of which keys happen to be set.
+    /// signed-in ChatGPT accounts (by label), then the custom providers in
+    /// config order — the order [`Self::available`] preserves. Holds every
+    /// known provider, available or not, so iteration order is stable
+    /// regardless of which keys happen to be set.
     all: Vec<ProviderId>,
 }
 
@@ -77,10 +85,27 @@ impl CredentialStore {
     /// single-threaded (before any session worker thread is created), so
     /// the env scrub cannot race another thread.
     pub fn resolve_and_scrub(custom: Vec<CustomProvider>) -> Self {
+        // Each signed-in ChatGPT account is its own provider identity, loaded
+        // from the OAuth token store rather than swept from the environment.
+        // Sorted by label so the picker lists accounts deterministically.
+        let mut accounts: Vec<(ProviderId, crate::oauth::OAuthToken)> = crate::oauth::load_all()
+            .into_iter()
+            .map(|tok| {
+                (
+                    ProviderId::ChatGpt(Arc::new(ChatGptAccount::from_token(&tok))),
+                    tok,
+                )
+            })
+            .collect();
+        accounts.sort_by(|(a, _), (b, _)| a.label().cmp(b.label()));
+
+        // Famous providers, then the signed-in ChatGPT accounts, then the
+        // custom providers — the order `available()` preserves.
         let all: Vec<ProviderId> = ProviderKind::value_variants()
             .iter()
             .copied()
             .map(ProviderId::Famous)
+            .chain(accounts.iter().map(|(id, _)| id.clone()))
             .chain(custom.into_iter().map(|c| ProviderId::Custom(Arc::new(c))))
             .collect();
 
@@ -88,7 +113,11 @@ impl CredentialStore {
         let mut scrub: Vec<String> = Vec::new();
 
         for id in &all {
-            let var = id.key_env();
+            // A ChatGPT account has no key env var (`key_env()` is `None`); it
+            // is resolved from the token store below, not the environment.
+            let Some(var) = id.key_env() else {
+                continue;
+            };
             // Scrub any var that is *present*, valid or not — a malformed
             // key is still a live secret in the child env.
             #[allow(clippy::disallowed_methods)]
@@ -110,14 +139,12 @@ impl CredentialStore {
             }
         }
 
-        // A stored ChatGPT login drives the OpenAI provider off the plan
-        // subscription; it supersedes any `OPENAI_API_KEY` (already read and
-        // scrubbed above), so a present login always wins for that provider.
-        if let Some(token) = crate::oauth::load() {
-            ready.insert(
-                ProviderId::Famous(ProviderKind::Openai),
-                Credential::OAuth(Arc::new(Mutex::new(token))),
-            );
+        // Bind each ChatGPT account to its OAuth credential. An account is a
+        // distinct provider identity from the API-key OpenAI provider, so a
+        // stored login and an `OPENAI_API_KEY` coexist as separate selectable
+        // providers rather than one superseding the other.
+        for (id, token) in accounts {
+            ready.insert(id, Credential::OAuth(Arc::new(Mutex::new(token))));
         }
 
         Self { ready, all }
@@ -172,7 +199,10 @@ fn read_env_key(var: &str) -> EnvKey {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "[io-door:test] test fs/process scaffolding")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:test] test fs/process scaffolding"
+)]
 mod tests {
     use super::*;
 
@@ -199,8 +229,8 @@ mod tests {
         static SERIAL: Mutex<()> = Mutex::new(());
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        // A fresh empty state dir per call, so `oauth::load` finds no token
-        // unless the scenario sets one up under its own XDG_STATE_HOME.
+        // A fresh empty state dir per call, so `oauth::load_all` finds no
+        // tokens unless the scenario sets one up under its own XDG_STATE_HOME.
         let state_dir = std::env::temp_dir().join(format!(
             "exarch-cred-env-{}-{}",
             std::process::id(),
@@ -430,11 +460,20 @@ mod tests {
         );
     }
 
-    /// A stored ChatGPT login resolves the OpenAI provider to an OAuth
-    /// credential and wins over a present `OPENAI_API_KEY`, which is still
-    /// scrubbed.
+    /// A signed-in ChatGPT account, keyed by its login email.
+    fn account(account_id: &str, email: &str) -> ProviderId {
+        ProviderId::ChatGpt(std::sync::Arc::new(ChatGptAccount {
+            account_id: account_id.into(),
+            label: email.into(),
+        }))
+    }
+
+    /// A stored ChatGPT login resolves to its own OAuth-backed provider
+    /// identity, keyed by the account's email — distinct from the API-key
+    /// OpenAI provider, so a present `OPENAI_API_KEY` *also* resolves (as an
+    /// `ApiKey`) and the two coexist. The key var is still scrubbed.
     #[test]
-    fn oauth_login_supersedes_openai_key() {
+    fn oauth_login_is_a_distinct_account_coexisting_with_openai_key() {
         let dir = std::env::temp_dir().join(format!("exarch-cred-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         with_env(
@@ -446,27 +485,80 @@ mod tests {
                 ("DEEPSEEK_API_KEY", None),
             ],
             || {
-                crate::oauth::save(&crate::oauth::OAuthToken {
+                crate::oauth::save_one(&crate::oauth::OAuthToken {
                     access_token: "at".into(),
                     refresh_token: "rt".into(),
                     account_id: "acc".into(),
+                    email: Some("alex@work".into()),
                     expires_at: u64::MAX,
                 })
                 .expect("save token");
                 let store = CredentialStore::resolve_and_scrub(Vec::new());
                 assert!(
                     matches!(
-                        store.get(&fam(ProviderKind::Openai)),
+                        store.get(&account("acc", "alex@work")),
                         Some(Credential::OAuth(_))
                     ),
-                    "a stored login must win over OPENAI_API_KEY"
+                    "the login resolves to its own OAuth-backed account"
+                );
+                assert!(
+                    matches!(
+                        store.get(&fam(ProviderKind::Openai)),
+                        Some(Credential::ApiKey(k)) if k == "sk-env"
+                    ),
+                    "OPENAI_API_KEY still resolves the API-key OpenAI provider alongside the login"
                 );
                 #[allow(clippy::disallowed_methods)]
                 {
                     assert!(
                         std::env::var("OPENAI_API_KEY").is_err(),
-                        "the superseded key var must still be scrubbed"
+                        "the key var must still be scrubbed"
                     );
+                }
+            },
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Several signed-in ChatGPT accounts are each available as their own
+    /// provider, ordered by label and placed after the famous providers (here
+    /// anthropic) and before any custom one.
+    #[test]
+    fn multiple_chatgpt_accounts_each_available_sorted_by_label() {
+        let dir = std::env::temp_dir().join(format!("exarch-cred-multi-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        with_env(
+            &[
+                ("XDG_STATE_HOME", Some(dir.to_str().unwrap())),
+                ("ANTHROPIC_API_KEY", Some("a")),
+                ("OPENAI_API_KEY", None),
+                ("OPENROUTER_API_KEY", None),
+                ("DEEPSEEK_API_KEY", None),
+            ],
+            || {
+                // Saved out of label order; resolution sorts them.
+                for (acc, email) in [("acc_w", "alex@work"), ("acc_p", "alex@home")] {
+                    crate::oauth::save_one(&crate::oauth::OAuthToken {
+                        access_token: "at".into(),
+                        refresh_token: "rt".into(),
+                        account_id: acc.into(),
+                        email: Some(email.into()),
+                        expires_at: u64::MAX,
+                    })
+                    .expect("save token");
+                }
+                let store = CredentialStore::resolve_and_scrub(Vec::new());
+                assert_eq!(
+                    store.available(),
+                    vec![
+                        fam(ProviderKind::Anthropic),
+                        account("acc_p", "alex@home"),
+                        account("acc_w", "alex@work"),
+                    ],
+                    "accounts follow the famous providers, sorted by label"
+                );
+                for acc in [account("acc_p", "alex@home"), account("acc_w", "alex@work")] {
+                    assert!(matches!(store.get(&acc), Some(Credential::OAuth(_))));
                 }
             },
         );

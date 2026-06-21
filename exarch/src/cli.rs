@@ -107,16 +107,29 @@ pub struct Cli {
 /// An out-of-band action that runs and exits instead of starting a session.
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Sign in with ChatGPT, so the OpenAI provider runs off the plan
-    /// subscription rather than an `OPENAI_API_KEY`.  Opens a browser by
-    /// default; `--device-auth` prints a URL and code instead, for a machine
-    /// with no local browser.
+    /// Sign in with ChatGPT, adding the account as a provider that runs off
+    /// the plan subscription.  Several accounts can be signed in at once; the
+    /// `/model` picker switches between them.  Signing in again with the same
+    /// account refreshes its tokens.  Opens a browser by default;
+    /// `--device-auth` prints a URL and code instead, for a machine with no
+    /// local browser.
     Login {
         #[arg(long = "device-auth")]
         device_auth: bool,
     },
-    /// Remove the stored ChatGPT login.
-    Logout,
+    /// Remove a stored ChatGPT login.  Names the account to remove (by its
+    /// email or account id); with no account it removes the sole login when
+    /// exactly one is signed in, and otherwise asks which.  `--all` removes
+    /// every account.
+    Logout {
+        /// The account to log out of — its login email or account id.
+        account: Option<String>,
+        /// Log out of every signed-in account.
+        #[arg(long, conflicts_with = "account")]
+        all: bool,
+    },
+    /// List the signed-in ChatGPT accounts.
+    Accounts,
 }
 
 /// Resolve `-p/-f` into an optional initial prompt.  A blank seed (empty

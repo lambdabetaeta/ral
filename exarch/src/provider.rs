@@ -168,15 +168,48 @@ pub struct CustomProvider {
     pub adapter: AdapterKind,
 }
 
-/// A provider identity: a famous [`ProviderKind`] or a custom-declared one.
+/// A signed-in ChatGPT account, as a selectable provider identity.
+///
+/// A ChatGPT plan authorises over OAuth rather than an API key, and several
+/// accounts can be signed in at once. Each is its own [`ProviderId`] so the
+/// `/model` picker, the persisted selection, and the credential store carry it
+/// exactly like any other provider — switching accounts *is* switching the
+/// selected identity, with no second selection dimension threaded anywhere.
+///
+/// It holds only what selection needs: the [`label`](ProviderId::label) the
+/// account is keyed and displayed by, and the OpenAI-side account id it maps
+/// to. The live tokens live in the [`crate::credential::Credential::OAuth`]
+/// cell the store binds under this id, not here; the `chatgpt-account-id` a
+/// request carries is read from that bound token, not from this struct.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatGptAccount {
+    /// The OpenAI account id this selection maps to.
+    pub account_id: String,
+    /// The account's stable, human-readable handle — its login email, or the
+    /// account id when none was issued. Its unique key in the store/picker.
+    pub label: String,
+}
+
+impl ChatGptAccount {
+    /// The selectable identity for a stored login.
+    pub fn from_token(token: &oauth::OAuthToken) -> Self {
+        Self {
+            account_id: token.account_id.clone(),
+            label: token.label(),
+        }
+    }
+}
+
+/// A provider identity: a famous [`ProviderKind`], a custom-declared one, or a
+/// signed-in ChatGPT account ([`ChatGptAccount`]).
 ///
 /// This is the single abstraction credential resolution, model listing, and
-/// transport building consume, so a custom provider flows through exactly the
-/// same machinery as a famous one. Each downstream call site reads the four
-/// facts it needs through [`Self::label`] / [`Self::key_env`] /
-/// [`Self::endpoint`] / [`Self::adapter`] and never matches on the
-/// famous-vs-custom distinction. The `Custom` arm holds an [`Arc`] so the id
-/// stays cheap to clone and to use as a map key.
+/// transport building consume, so a custom provider — or a ChatGPT account —
+/// flows through exactly the same machinery as a famous one. Each downstream
+/// call site reads the facts it needs through [`Self::label`] /
+/// [`Self::key_env`] / [`Self::endpoint`] / [`Self::default_adapter`] and
+/// rarely matches on the variant. The `Custom` and `ChatGpt` arms hold an
+/// [`Arc`] so the id stays cheap to clone and to use as a map key.
 ///
 /// Identity (`Eq`/`Ord`/`Hash`) is keyed on the label alone — a provider's
 /// label is its unique key in the credential store, the model catalog, and
@@ -187,65 +220,78 @@ pub enum ProviderId {
     Famous(ProviderKind),
     /// An unusual provider declared in `config.ral`.
     Custom(Arc<CustomProvider>),
+    /// A signed-in ChatGPT account, authorising over OAuth.
+    ChatGpt(Arc<ChatGptAccount>),
 }
 
 impl ProviderId {
     /// The stable label — `ProviderKind::info().0` for a famous provider, the
-    /// config map key for a custom one.
+    /// config map key for a custom one, the account handle for a ChatGPT login.
     pub fn label(&self) -> &str {
         match self {
             Self::Famous(kind) => kind.info().0,
             Self::Custom(c) => &c.label,
+            Self::ChatGpt(a) => &a.label,
         }
     }
 
-    /// The environment variable this provider's API key is read from.
-    pub fn key_env(&self) -> &str {
+    /// The environment variable this provider's API key is read from, or
+    /// `None` for a provider that does not authenticate off an env key — a
+    /// ChatGPT account authorises over OAuth, so it is loaded from the token
+    /// store rather than swept from the environment.
+    pub fn key_env(&self) -> Option<&str> {
         match self {
-            Self::Famous(kind) => kind.info().2,
-            Self::Custom(c) => &c.key_env,
+            Self::Famous(kind) => Some(kind.info().2),
+            Self::Custom(c) => Some(&c.key_env),
+            Self::ChatGpt(_) => None,
         }
     }
 
     /// The base URL for a provider that needs a custom endpoint, or `None`
     /// when the native adapter's default target is used. A custom provider
-    /// always has one.
+    /// always has one; a ChatGPT account redirects to the Codex backend
+    /// through its OAuth client, not through this endpoint.
     pub fn endpoint(&self) -> Option<&str> {
         match self {
             Self::Famous(kind) => kind.endpoint(),
             Self::Custom(c) => Some(&c.endpoint),
+            Self::ChatGpt(_) => None,
         }
     }
 
     /// The genai adapter this provider speaks by default. For a famous
     /// provider this is the per-kind default; a custom provider names its
-    /// wire protocol in the config and carries the resolved adapter.
+    /// wire protocol in the config and carries the resolved adapter; a ChatGPT
+    /// account speaks the OpenAI Responses adapter to the Codex backend.
     pub fn default_adapter(&self) -> AdapterKind {
         match self {
             Self::Famous(kind) => kind.default_adapter(),
             Self::Custom(c) => c.adapter,
+            Self::ChatGpt(_) => AdapterKind::OpenAIResp,
         }
     }
 
     /// Whether this provider bills as a flat subscription rather than per
     /// token. A famous provider delegates to [`ProviderKind::flat_rate`]; a
     /// custom provider is never flat-rate yet — the `config.ral` schema does
-    /// not declare it, so this is a future slice's extension point.
+    /// not declare it, so this is a future slice's extension point. A ChatGPT
+    /// account is unmetered too, but rides its OAuth credential (the bound
+    /// `token_cell`) rather than this property — so it is not `flat_rate`.
     pub fn flat_rate(&self) -> bool {
         match self {
             Self::Famous(kind) => kind.flat_rate(),
-            Self::Custom(_) => false,
+            Self::Custom(_) | Self::ChatGpt(_) => false,
         }
     }
 
     /// The famous kind, when this is a built-in provider — the few sites that
     /// genuinely need the enum (the OpenAI per-model adapter refinement, the
     /// persisted-selection round-trip) ask for it; everything else reads the
-    /// four facts above.
+    /// facts above.
     pub fn famous(&self) -> Option<ProviderKind> {
         match self {
             Self::Famous(kind) => Some(*kind),
-            Self::Custom(_) => None,
+            Self::Custom(_) | Self::ChatGpt(_) => None,
         }
     }
 }
@@ -1119,7 +1165,9 @@ impl Live {
         };
         match self.runtime.block_on(oauth::refresh(&current)) {
             Ok(fresh) => {
-                let _ = oauth::save(&fresh);
+                // Upsert this account's token, leaving any other signed-in
+                // account untouched — a whole-file overwrite would drop them.
+                let _ = oauth::save_one(&fresh);
                 *cell.lock().unwrap_or_else(|e| e.into_inner()) = fresh;
             }
             Err(e) => eprintln!("exarch: ChatGPT token refresh failed: {e}"),
@@ -1152,95 +1200,97 @@ impl Live {
             options = options.with_max_tokens(n);
         }
 
-        let end =
-            self.runtime
-                .block_on(retry_with_backoff("before request", cancel, async |_attempt| {
-                    let mut req = req_template.clone();
-                    req.tools = Some(tool_defs(advertise_root_only));
-                    let mut seen_any_token = false;
-                    let attempt_result: Result<StreamEnd, ProviderError> = async {
-                        let mut resp = tokio::select! {
+        let end = self.runtime.block_on(retry_with_backoff(
+            "before request",
+            cancel,
+            async |_attempt| {
+                let mut req = req_template.clone();
+                req.tools = Some(tool_defs(advertise_root_only));
+                let mut seen_any_token = false;
+                let attempt_result: Result<StreamEnd, ProviderError> = async {
+                    let mut resp = tokio::select! {
+                        biased;
+                        _ = wait_for_cancel(cancel) => {
+                            return Err(ProviderError::Cancelled("before request"));
+                        }
+                        // A fresh `sleep` per select entry bounds connect +
+                        // time-to-first-event; surfaced as a transient
+                        // transport error so the retry budget re-issues it
+                        // (no token has streamed yet).
+                        _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
+                            return Err(ProviderError::Transient {
+                                cause: "stream idle: no response within timeout".into(),
+                                attempts: 1,
+                                body: None,
+                            });
+                        }
+                        r = self.client.exec_chat_stream(model, req, Some(&options)) => {
+                            r.map_err(|e| ProviderError::from_genai(&e, model))?
+                        }
+                    };
+                    loop {
+                        let event = tokio::select! {
                             biased;
                             _ = wait_for_cancel(cancel) => {
-                                return Err(ProviderError::Cancelled("before request"));
+                                return Err(ProviderError::Cancelled("mid-stream"));
                             }
-                            // A fresh `sleep` per select entry bounds connect +
-                            // time-to-first-event; surfaced as a transient
-                            // transport error so the retry budget re-issues it
-                            // (no token has streamed yet).
+                            // Re-armed each loop iteration, so it is a
+                            // per-chunk idle timeout: a stream that stops
+                            // emitting events surfaces as a transient error
+                            // rather than blocking `next()` forever.
                             _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
                                 return Err(ProviderError::Transient {
-                                    cause: "stream idle: no response within timeout".into(),
+                                    cause: "stream idle: no event within timeout".into(),
                                     attempts: 1,
                                     body: None,
                                 });
                             }
-                            r = self.client.exec_chat_stream(model, req, Some(&options)) => {
-                                r.map_err(|e| ProviderError::from_genai(&e, model))?
+                            ev = resp.stream.next() => match ev {
+                                Some(Ok(ev)) => ev,
+                                Some(Err(e)) => {
+                                    return Err(ProviderError::from_genai(&e, model));
+                                }
+                                None => break,
                             }
                         };
-                        loop {
-                            let event = tokio::select! {
-                                biased;
-                                _ = wait_for_cancel(cancel) => {
-                                    return Err(ProviderError::Cancelled("mid-stream"));
+                        match event {
+                            ChatStreamEvent::Start => {}
+                            ChatStreamEvent::Chunk(c) => {
+                                if !c.content.is_empty() {
+                                    seen_any_token = true;
                                 }
-                                // Re-armed each loop iteration, so it is a
-                                // per-chunk idle timeout: a stream that stops
-                                // emitting events surfaces as a transient error
-                                // rather than blocking `next()` forever.
-                                _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
-                                    return Err(ProviderError::Transient {
-                                        cause: "stream idle: no event within timeout".into(),
-                                        attempts: 1,
-                                        body: None,
-                                    });
-                                }
-                                ev = resp.stream.next() => match ev {
-                                    Some(Ok(ev)) => ev,
-                                    Some(Err(e)) => {
-                                        return Err(ProviderError::from_genai(&e, model));
-                                    }
-                                    None => break,
-                                }
-                            };
-                            match event {
-                                ChatStreamEvent::Start => {}
-                                ChatStreamEvent::Chunk(c) => {
-                                    if !c.content.is_empty() {
-                                        seen_any_token = true;
-                                    }
-                                    on_text(&c.content);
-                                }
-                                ChatStreamEvent::End(end) => return Ok(end),
-                                // The remaining variants are captured in the
-                                // `End` frame (`captured_reasoning_content`,
-                                // the thought signatures and tool calls on the
-                                // assistant message) and replayed from there by
-                                // `step_out_from_end`, so no live action is
-                                // needed here.  Matched explicitly rather than
-                                // with a wildcard so a new genai stream variant
-                                // fails the build instead of vanishing (X10).
-                                ChatStreamEvent::ReasoningChunk(_)
-                                | ChatStreamEvent::ThoughtSignatureChunk(_)
-                                | ChatStreamEvent::ToolCallChunk(_) => {}
+                                on_text(&c.content);
                             }
+                            ChatStreamEvent::End(end) => return Ok(end),
+                            // The remaining variants are captured in the
+                            // `End` frame (`captured_reasoning_content`,
+                            // the thought signatures and tool calls on the
+                            // assistant message) and replayed from there by
+                            // `step_out_from_end`, so no live action is
+                            // needed here.  Matched explicitly rather than
+                            // with a wildcard so a new genai stream variant
+                            // fails the build instead of vanishing (X10).
+                            ChatStreamEvent::ReasoningChunk(_)
+                            | ChatStreamEvent::ThoughtSignatureChunk(_)
+                            | ChatStreamEvent::ToolCallChunk(_) => {}
                         }
-                        Err(ProviderError::Other(
-                            "stream ended without End event".into(),
-                        ))
                     }
-                    .await;
+                    Err(ProviderError::Other(
+                        "stream ended without End event".into(),
+                    ))
+                }
+                .await;
 
-                    match attempt_result {
-                        Ok(end) => Attempt::Done(end),
-                        // A cancel is surfaced as-is regardless of streamed tokens.
-                        Err(e @ ProviderError::Cancelled(_)) => Attempt::Failed(e),
-                        // Tokens already streamed: a re-issue would double-render.
-                        Err(e) if seen_any_token => Attempt::Committed(e),
-                        Err(e) => Attempt::Failed(e),
-                    }
-                }))?;
+                match attempt_result {
+                    Ok(end) => Attempt::Done(end),
+                    // A cancel is surfaced as-is regardless of streamed tokens.
+                    Err(e @ ProviderError::Cancelled(_)) => Attempt::Failed(e),
+                    // Tokens already streamed: a re-issue would double-render.
+                    Err(e) if seen_any_token => Attempt::Committed(e),
+                    Err(e) => Attempt::Failed(e),
+                }
+            },
+        ))?;
 
         Ok(step_out_from_end(model, end, self.metered()))
     }
@@ -1264,37 +1314,39 @@ impl Live {
             .with_max_tokens(1024)
             .with_prompt_cache_key(&self.cache_key);
 
-        let resp =
-            self.runtime
-                .block_on(retry_with_backoff("during summary", cancel, async |_attempt| {
-                    let req = req_template.clone();
-                    let r = tokio::select! {
-                        biased;
-                        _ = wait_for_cancel(cancel) => {
-                            return Attempt::Failed(ProviderError::Cancelled("during summary"));
-                        }
-                        // `summarize` is non-streaming, so there are no
-                        // incremental events to idle between: the same budget
-                        // bounds the whole `exec_chat` request.  `tls::client`
-                        // sets no timeout, so without this a stalled connection
-                        // hangs here exactly as it did in `complete` — reaped
-                        // only by the 900s harness wall.  No partial output is
-                        // ever rendered, so it is `Failed` (retryable), never
-                        // `Committed`.
-                        _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
-                            return Attempt::Failed(ProviderError::Transient {
-                                cause: "summary request: no response within timeout".into(),
-                                attempts: 1,
-                                body: None,
-                            });
-                        }
-                        r = self.client.exec_chat(model, req, Some(&options)) => r,
-                    };
-                    match r {
-                        Ok(resp) => Attempt::Done(resp),
-                        Err(e) => Attempt::Failed(ProviderError::from_genai(&e, model)),
+        let resp = self.runtime.block_on(retry_with_backoff(
+            "during summary",
+            cancel,
+            async |_attempt| {
+                let req = req_template.clone();
+                let r = tokio::select! {
+                    biased;
+                    _ = wait_for_cancel(cancel) => {
+                        return Attempt::Failed(ProviderError::Cancelled("during summary"));
                     }
-                }))?;
+                    // `summarize` is non-streaming, so there are no
+                    // incremental events to idle between: the same budget
+                    // bounds the whole `exec_chat` request.  `tls::client`
+                    // sets no timeout, so without this a stalled connection
+                    // hangs here exactly as it did in `complete` — reaped
+                    // only by the 900s harness wall.  No partial output is
+                    // ever rendered, so it is `Failed` (retryable), never
+                    // `Committed`.
+                    _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
+                        return Attempt::Failed(ProviderError::Transient {
+                            cause: "summary request: no response within timeout".into(),
+                            attempts: 1,
+                            body: None,
+                        });
+                    }
+                    r = self.client.exec_chat(model, req, Some(&options)) => r,
+                };
+                match r {
+                    Ok(resp) => Attempt::Done(resp),
+                    Err(e) => Attempt::Failed(ProviderError::from_genai(&e, model)),
+                }
+            },
+        ))?;
 
         // A summary that itself hit the 1024-token cap is incomplete;
         // replacing the whole history with it would silently drop
@@ -1745,7 +1797,7 @@ mod tests {
             adapter: AdapterKind::OpenAI,
         }));
         assert_eq!(id.label(), "local-llama");
-        assert_eq!(id.key_env(), "LOCAL_LLAMA_KEY");
+        assert_eq!(id.key_env(), Some("LOCAL_LLAMA_KEY"));
         assert_eq!(id.endpoint(), Some("https://llama.example/v1/"));
         assert_eq!(id.default_adapter(), AdapterKind::OpenAI);
         assert_eq!(id.famous(), None);
@@ -2162,15 +2214,18 @@ mod tests {
     #[test]
     fn idle_timeout_before_token_is_retried_then_surfaced() {
         let calls = std::cell::Cell::new(0u32);
-        let out: Result<(), ProviderError> =
-            make_runtime().block_on(retry_with_backoff("test", &cancel::Token::new(), async |_attempt| {
+        let out: Result<(), ProviderError> = make_runtime().block_on(retry_with_backoff(
+            "test",
+            &cancel::Token::new(),
+            async |_attempt| {
                 calls.set(calls.get() + 1);
                 Attempt::Failed(ProviderError::Transient {
                     cause: "stream idle: no event within timeout".into(),
                     attempts: 1,
                     body: None,
                 })
-            }));
+            },
+        ));
         assert_eq!(calls.get(), MAX_ATTEMPTS, "exhausts the transient budget");
         match out {
             Err(ProviderError::Transient { attempts, .. }) => {
@@ -2186,15 +2241,18 @@ mod tests {
     #[test]
     fn idle_timeout_after_token_surfaces_without_retry() {
         let calls = std::cell::Cell::new(0u32);
-        let out: Result<(), ProviderError> =
-            make_runtime().block_on(retry_with_backoff("test", &cancel::Token::new(), async |_attempt| {
+        let out: Result<(), ProviderError> = make_runtime().block_on(retry_with_backoff(
+            "test",
+            &cancel::Token::new(),
+            async |_attempt| {
                 calls.set(calls.get() + 1);
                 Attempt::Committed(ProviderError::Transient {
                     cause: "stream idle: no event within timeout".into(),
                     attempts: 1,
                     body: None,
                 })
-            }));
+            },
+        ));
         assert_eq!(calls.get(), 1, "committed output is not re-issued");
         assert!(
             matches!(out, Err(ProviderError::Transient { .. })),

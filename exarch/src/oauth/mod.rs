@@ -1,4 +1,4 @@
-//! "Sign in with ChatGPT" for the OpenAI provider.
+//! "Sign in with ChatGPT": ChatGPT-plan accounts as OAuth-backed providers.
 //!
 //! A ChatGPT plan subscription is authorised through OpenAI's OAuth issuer
 //! rather than an API key. Two interactive flows obtain the initial token:
@@ -7,9 +7,15 @@
 //! authorization-code exchange against the token endpoint, yielding an
 //! id_token, an access_token, and a refresh_token. The access_token is a
 //! JWT whose `exp` claim sets the expiry; the id_token carries the ChatGPT
-//! account id. The resulting [`OAuthToken`] is persisted to the XDG state
-//! directory and reloaded on later runs; the provider refreshes it through
-//! [`refresh`] when it is near expiry.
+//! account id and the login email.
+//!
+//! Several accounts can be signed in at once. The store ([`load_all`] /
+//! [`save_one`] / [`remove`]) holds a list of [`OAuthToken`]s keyed by
+//! account id, persisted under the XDG state directory and reloaded on later
+//! runs; each becomes a selectable [`crate::provider::ProviderId::ChatGpt`]
+//! in the credential store. The provider refreshes a token through
+//! [`refresh`] when it is near expiry, upserting it back into the store so a
+//! refresh never disturbs the other accounts.
 
 mod browser;
 mod device;
@@ -64,12 +70,19 @@ const ISSUER: &str = "https://auth.openai.com";
 const SCOPE: &str = "openid profile email offline_access api.connectors.read api.connectors.invoke";
 
 /// A persisted ChatGPT OAuth token. The access token is a short-lived JWT;
-/// the refresh token mints fresh access tokens once it expires.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+/// the refresh token mints fresh access tokens once it expires. Several of
+/// these can be stored at once — one per signed-in ChatGPT account — keyed
+/// by [`Self::account_id`].
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OAuthToken {
     pub access_token: String,
     pub refresh_token: String,
     pub account_id: String,
+    /// The account's login email, from the id_token's `email` claim. The
+    /// human-readable handle the picker and `/model` switch select by;
+    /// `None` when the id_token carried none, in which case the opaque
+    /// [`Self::account_id`] stands in (see [`Self::label`]).
+    pub email: Option<String>,
     /// Unix seconds at which `access_token` expires (its JWT `exp`).
     pub expires_at: u64,
 }
@@ -78,6 +91,16 @@ impl OAuthToken {
     /// True when the access token has expired or is within 60s of expiring.
     pub fn is_stale(&self) -> bool {
         self.expires_at <= crate::bootstrap::now_secs() + 60
+    }
+
+    /// The account's stable, human-readable handle: its login email, or the
+    /// opaque account id when no email was issued. This is the label exarch's
+    /// selection layer keys the account by — the picker row, the persisted
+    /// selection, and the `logout`/`accounts` commands all read it.
+    pub fn label(&self) -> String {
+        self.email
+            .clone()
+            .unwrap_or_else(|| self.account_id.clone())
     }
 }
 
@@ -105,50 +128,160 @@ pub fn login(device: bool) -> Result<(), String> {
         }
     })?;
     let token = finalize(raw)?;
-    save(&token)?;
-    eprintln!("Signed in to ChatGPT (account {}).", token.account_id);
+    let replaced = save_one(&token)?;
+    let verb = if replaced {
+        "Updated the login for"
+    } else {
+        "Signed in to"
+    };
+    eprintln!("{verb} ChatGPT account {}.", token.label());
     Ok(())
 }
 
-/// Delete the persisted token. Succeeds when no token is stored.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:silent:token-remove] deletes the stored OAuth token; credential store infra, not turn-time data I/O"
-)]
-pub fn logout() -> Result<(), String> {
-    let path = token_path();
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("could not remove {}: {e}", path.display())),
+/// Remove one signed-in account (matched by its label or account id), or
+/// every account when `all`. With neither an account nor `--all`: removes the
+/// sole account when exactly one is signed in, and otherwise errors asking
+/// which — so a stray `logout` cannot silently drop the wrong account when
+/// several are present. Progress is printed to stderr.
+pub fn logout(account: Option<String>, all: bool) -> Result<(), String> {
+    if all {
+        clear_at(&token_path())?;
+        eprintln!("Logged out of every ChatGPT account.");
+        return Ok(());
+    }
+    let accounts = load_all();
+    let target = match (account, accounts.as_slice()) {
+        (Some(name), _) => name,
+        (None, []) => {
+            eprintln!("No ChatGPT account to log out of.");
+            return Ok(());
+        }
+        (None, [only]) => only.account_id.clone(),
+        (None, many) => {
+            return Err(format!(
+                "multiple ChatGPT accounts signed in ({}); name one to log out, \
+                 or pass --all",
+                labels(many),
+            ));
+        }
+    };
+    match remove(&target)? {
+        Some(label) => {
+            eprintln!("Logged out of ChatGPT account {label}.");
+            Ok(())
+        }
+        None => Err(format!(
+            "no ChatGPT account matches '{target}' (signed in: {})",
+            labels(&accounts),
+        )),
     }
 }
 
-/// Load the persisted token, or `None` if absent or unparseable.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:silent:token-read] reads the persisted OAuth token; credential store infra, not turn-time data I/O"
-)]
-pub fn load() -> Option<OAuthToken> {
-    let bytes = std::fs::read(token_path()).ok()?;
-    serde_json::from_slice(&bytes).ok()
+/// Every signed-in account's label, comma-joined — for the disambiguating
+/// messages `logout`/`accounts` print.
+pub fn labels(accounts: &[OAuthToken]) -> String {
+    accounts
+        .iter()
+        .map(OAuthToken::label)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
-/// Persist a token. On Unix the file is created with mode 0600.
+/// Every persisted ChatGPT login, in stored order. An absent or unparseable
+/// store yields an empty list.
+pub fn load_all() -> Vec<OAuthToken> {
+    load_all_at(&token_path())
+}
+
+/// Persist `token`, replacing any existing login for the same account id and
+/// appending it otherwise. Returns whether an existing account was replaced.
+pub(crate) fn save_one(token: &OAuthToken) -> Result<bool, String> {
+    save_one_at(&token_path(), token)
+}
+
+/// Remove the login matched by `account` (its label or account id). Returns
+/// the removed account's label, or `None` when nothing matched.
+pub(crate) fn remove(account: &str) -> Result<Option<String>, String> {
+    remove_at(&token_path(), account)
+}
+
+// The storage core is a pure function of a path, so it is exercised in tests
+// against a temp file without mutating the process environment.
+
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:token-read] reads the persisted OAuth tokens; credential store infra, not turn-time data I/O"
+)]
+fn load_all_at(path: &std::path::Path) -> Vec<OAuthToken> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn save_one_at(path: &std::path::Path, token: &OAuthToken) -> Result<bool, String> {
+    let mut all = load_all_at(path);
+    let replaced = match all.iter_mut().find(|t| t.account_id == token.account_id) {
+        Some(existing) => {
+            *existing = token.clone();
+            true
+        }
+        None => {
+            all.push(token.clone());
+            false
+        }
+    };
+    write_all_at(path, &all)?;
+    Ok(replaced)
+}
+
+fn remove_at(path: &std::path::Path, account: &str) -> Result<Option<String>, String> {
+    let mut all = load_all_at(path);
+    let Some(pos) = all
+        .iter()
+        .position(|t| t.account_id == account || t.label() == account)
+    else {
+        return Ok(None);
+    };
+    let removed = all.remove(pos);
+    // Delete the store outright when the last account goes, so a fully
+    // logged-out machine carries no empty file.
+    if all.is_empty() {
+        clear_at(path)?;
+    } else {
+        write_all_at(path, &all)?;
+    }
+    Ok(Some(removed.label()))
+}
+
+/// Write the whole account set to `path`, creating its dir as needed. On Unix
+/// the file is created with mode 0600.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:token-dir] creates the OAuth token store dir; credential store infra, not turn-time data I/O"
 )]
-pub(crate) fn save(token: &OAuthToken) -> Result<(), String> {
-    let path = token_path();
+fn write_all_at(path: &std::path::Path, all: &[OAuthToken]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
     }
-    let json = serde_json::to_string_pretty(token)
-        .map_err(|e| format!("could not serialize token: {e}"))?;
-    write_private(&path, json.as_bytes())
+    let json = serde_json::to_string_pretty(all)
+        .map_err(|e| format!("could not serialize tokens: {e}"))?;
+    write_private(path, json.as_bytes())
         .map_err(|e| format!("could not write {}: {e}", path.display()))
+}
+
+/// Delete the whole store at `path`. Succeeds when no store is present.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:token-remove] deletes the stored OAuth tokens; credential store infra, not turn-time data I/O"
+)]
+fn clear_at(path: &std::path::Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("could not remove {}: {e}", path.display())),
+    }
 }
 
 /// Exchange the refresh token for a fresh [`OAuthToken`].
@@ -188,16 +321,24 @@ pub(crate) async fn refresh(current: &OAuthToken) -> Result<OAuthToken, String> 
     let refresh_token = resp
         .refresh_token
         .unwrap_or_else(|| current.refresh_token.clone());
-    let expires_at = expiry_secs(&access_token, resp.id_token.as_deref());
-    let account_id = resp
-        .id_token
-        .and_then(|jwt| account_id_from_jwt(&jwt))
+    let id_token = resp.id_token;
+    let expires_at = expiry_secs(&access_token, id_token.as_deref());
+    // The refresh response may omit the id_token; keep the account's existing
+    // identity (id and email) when it does, so a refresh never loses the label.
+    let account_id = id_token
+        .as_deref()
+        .and_then(account_id_from_jwt)
         .unwrap_or_else(|| current.account_id.clone());
+    let email = id_token
+        .as_deref()
+        .and_then(email_from_jwt)
+        .or_else(|| current.email.clone());
 
     Ok(OAuthToken {
         access_token,
         refresh_token,
         account_id,
+        email,
         expires_at,
     })
 }
@@ -300,6 +441,9 @@ struct AuthClaims {
 struct IdClaims {
     #[serde(rename = "https://api.openai.com/auth")]
     auth: Option<AuthClaims>,
+    /// The standard OIDC `email` claim — the account's login email, used as
+    /// its human-readable label. Requested via the `email` scope.
+    email: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -310,6 +454,11 @@ struct ExpClaims {
 /// The ChatGPT account id carried by an id_token's auth claim.
 fn account_id_from_jwt(jwt: &str) -> Option<String> {
     jwt_payload::<IdClaims>(jwt).ok()?.auth?.chatgpt_account_id
+}
+
+/// The login email carried by an id_token's standard `email` claim.
+fn email_from_jwt(jwt: &str) -> Option<String> {
+    jwt_payload::<IdClaims>(jwt).ok()?.email
 }
 
 /// The `exp` claim of a JWT, as unix seconds.
@@ -332,11 +481,13 @@ fn expiry_secs(access_token: &str, id_token: Option<&str>) -> u64 {
 fn finalize(raw: RawTokens) -> Result<OAuthToken, String> {
     let account_id = account_id_from_jwt(&raw.id_token)
         .ok_or_else(|| "login did not return a ChatGPT account id".to_string())?;
+    let email = email_from_jwt(&raw.id_token);
     let expires_at = expiry_secs(&raw.access_token, Some(&raw.id_token));
     Ok(OAuthToken {
         access_token: raw.access_token,
         refresh_token: raw.refresh_token,
         account_id,
+        email,
         expires_at,
     })
 }
@@ -386,11 +537,90 @@ mod tests {
     #[test]
     fn jwt_claims_extraction() {
         let payload = URL_SAFE_NO_PAD.encode(
-            br#"{"exp":1893456000,"https://api.openai.com/auth":{"chatgpt_account_id":"acc_123"}}"#,
+            br#"{"exp":1893456000,"email":"alex@work","https://api.openai.com/auth":{"chatgpt_account_id":"acc_123"}}"#,
         );
         let jwt = format!("hdr.{payload}.sig");
         assert_eq!(account_id_from_jwt(&jwt).as_deref(), Some("acc_123"));
+        assert_eq!(email_from_jwt(&jwt).as_deref(), Some("alex@work"));
         assert_eq!(jwt_exp(&jwt), Some(1893456000));
+    }
+
+    /// An account labels by its email, falling back to the opaque account id
+    /// when the id_token carried none.
+    #[test]
+    fn label_prefers_email_then_account_id() {
+        let with_email = OAuthToken {
+            access_token: "at".into(),
+            refresh_token: "rt".into(),
+            account_id: "acc_123".into(),
+            email: Some("alex@work".into()),
+            expires_at: 0,
+        };
+        let no_email = OAuthToken {
+            email: None,
+            ..with_email.clone()
+        };
+        assert_eq!(with_email.label(), "alex@work");
+        assert_eq!(no_email.label(), "acc_123");
+    }
+
+    /// `save_one` upserts by account id: a second account appends, and
+    /// re-saving an existing account replaces its tokens in place rather than
+    /// duplicating it. `remove` drops one account by label and deletes the
+    /// store only once the last account is gone. Exercised against a temp file
+    /// so no process-environment mutation is involved.
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:test] temp-file scaffolding"
+    )]
+    fn save_one_upserts_and_remove_targets_one_account() {
+        let path = std::env::temp_dir().join(format!(
+            "exarch-oauth-store-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id(),
+        ));
+        let _ = std::fs::remove_file(&path);
+        let tok = |acc: &str, email: &str, at: &str| OAuthToken {
+            access_token: at.into(),
+            refresh_token: "rt".into(),
+            account_id: acc.into(),
+            email: Some(email.into()),
+            expires_at: 0,
+        };
+
+        assert!(load_all_at(&path).is_empty(), "absent store is empty");
+        assert!(
+            !save_one_at(&path, &tok("acc_a", "a@x", "at1")).unwrap(),
+            "first is new"
+        );
+        assert!(
+            !save_one_at(&path, &tok("acc_b", "b@x", "at1")).unwrap(),
+            "second is new"
+        );
+        assert_eq!(load_all_at(&path).len(), 2, "two accounts coexist");
+
+        // Re-saving acc_a replaces its token rather than duplicating it.
+        assert!(
+            save_one_at(&path, &tok("acc_a", "a@x", "at2")).unwrap(),
+            "existing replaced"
+        );
+        let all = load_all_at(&path);
+        assert_eq!(all.len(), 2, "upsert, not append");
+        let a = all.iter().find(|t| t.account_id == "acc_a").unwrap();
+        assert_eq!(a.access_token, "at2", "token updated in place");
+
+        // Remove by label leaves the other account and keeps the file.
+        assert_eq!(remove_at(&path, "a@x").unwrap().as_deref(), Some("a@x"));
+        assert_eq!(load_all_at(&path), vec![tok("acc_b", "b@x", "at1")]);
+        // Removing the last account deletes the store entirely.
+        assert_eq!(remove_at(&path, "acc_b").unwrap().as_deref(), Some("b@x"));
+        assert!(!path.exists(), "empty store is removed, not left as []");
+        assert!(
+            remove_at(&path, "acc_b").unwrap().is_none(),
+            "no match → None"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// The single source of truth for the subscription decoration: a metered
@@ -399,7 +629,10 @@ mod tests {
     /// `/model` switch, and the picker cannot drift across flavours.
     #[test]
     fn provider_label_decorates_per_flavour() {
-        assert_eq!(provider_label(Subscription::Metered, "deepseek"), "deepseek");
+        assert_eq!(
+            provider_label(Subscription::Metered, "deepseek"),
+            "deepseek"
+        );
         assert_eq!(
             provider_label(Subscription::ChatGpt, "openai"),
             "openai (ChatGPT subscription)"
