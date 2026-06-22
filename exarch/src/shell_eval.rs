@@ -295,19 +295,15 @@ pub fn run_shell(
     };
 
     let value_str = match value {
-        // A top-level string is the result of stringly tools like
-        // `view-text`; JSON-encoding it would escape every newline as `\n`,
-        // which the model then reads as literal backslash-n.  Pass the
-        // raw text through.  Structured values go through pretty JSON so
-        // the shape is legible, with byte fields decoded as lossy UTF-8
-        // rather than the integer arrays `to-json` round-trips: a job's
-        // or audit node's captured `stderr` is text the model must read,
-        // not data.  That walk is total, so a value carrying a thunk or a
-        // non-finite float still renders instead of collapsing to nothing.
-        Some(RalValue::String(s)) => Some(s),
+        // A unit value has no `VALUE` section.  Everything else decodes to
+        // JSON with byte fields read as lossy UTF-8 rather than the integer
+        // arrays `to-json` round-trips — a job's or audit node's captured
+        // `stderr` is text the model must read, not data — and then renders
+        // through the shared `json_to_text` rule.  That decode walk is total,
+        // so a value carrying a thunk or a non-finite float still renders
+        // instead of collapsing to nothing.
         Some(v) if !matches!(v, RalValue::Unit) => {
-            let json = ral_core::builtins::value_to_json_lossy_bytes(&v);
-            serde_json::to_string_pretty(&json).ok()
+            json_to_text(&ral_core::builtins::value_to_json_lossy_bytes(&v))
         }
         _ => None,
     };
@@ -318,6 +314,26 @@ pub fn run_shell(
         value: value_str,
         exit,
     })
+}
+
+/// Render a JSON value as the text a tool result carries.
+///
+/// A JSON **string** passes through raw, so a markdown report keeps real
+/// newlines rather than the escaped `\n` a serializer would emit; any other
+/// shape is **pretty-printed** so its structure stays legible; a JSON **null**
+/// renders to nothing (`None`).
+///
+/// Shared by two callers with the same rendering need: the `ral` value section
+/// — which decodes its [`RalValue`] to JSON with `value_to_json_lossy_bytes`
+/// first, so byte fields read as text — and the `reply` tool, whose argument
+/// arrives as JSON already.  Keeping one rule means a sub-agent's markdown
+/// reply and a `view-text` value clip and elide identically downstream.
+pub(crate) fn json_to_text(json: &serde_json::Value) -> Option<String> {
+    match json {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) => Some(s.clone()),
+        other => serde_json::to_string_pretty(other).ok(),
+    }
 }
 
 #[cfg(test)]
@@ -1788,5 +1804,34 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
             io_cards, 0,
             "edit's read and write happen in Rust, so no read/write io card is raised"
         );
+    }
+
+    /// A JSON string renders raw — no escaping — so a markdown report keeps
+    /// real newlines rather than literal `\n`.  This is the shape a `reply`
+    /// payload and a `view-text` value share.
+    #[test]
+    fn json_to_text_passes_a_string_through_raw() {
+        let v = serde_json::json!("# Report\nline one\nline two");
+        assert_eq!(
+            super::json_to_text(&v).as_deref(),
+            Some("# Report\nline one\nline two"),
+        );
+    }
+
+    /// A JSON object/array is pretty-printed, so its structure stays legible —
+    /// the structured-findings case for `reply`.
+    #[test]
+    fn json_to_text_pretty_prints_structured_values() {
+        let v = serde_json::json!({ "findings": ["a", "b"] });
+        let out = super::json_to_text(&v).expect("an object renders");
+        assert!(out.contains("\"findings\""));
+        assert!(out.contains('\n'), "pretty-printing keeps the shape on lines");
+    }
+
+    /// A JSON null renders to nothing — the empty-reply case that settles
+    /// `AgentOutcome::Empty`.
+    #[test]
+    fn json_to_text_renders_null_to_nothing() {
+        assert_eq!(super::json_to_text(&serde_json::Value::Null), None);
     }
 }

@@ -48,6 +48,10 @@ const RULES: &[Rule] = &[on_empty_turn, on_early_stop, on_truncated];
 pub(crate) struct NudgeCtx {
     pub expect_action: bool,
     pub acted: bool,
+    /// Whether this session returns through `reply` — true for a sub-agent,
+    /// false for the root.  A sub-agent that finishes a tool-call-free step
+    /// without having replied earns one reminder to call `reply`.
+    pub must_reply: bool,
 }
 
 /// Per-session nudge state.  Lives on the [`Session`](crate::session::Session)
@@ -61,6 +65,10 @@ pub(crate) struct Registry {
     /// One-shot latch for the verify-before-finish nudge: same contract —
     /// at most once per turn, never drawing on the [`BUDGET`] counter.
     verify_nudged: bool,
+    /// One-shot latch for the no-reply reminder a sub-agent earns when it
+    /// finishes a tool-call-free step without calling `reply`: same contract —
+    /// at most once per turn, budget-free.
+    reply_nudged: bool,
 }
 
 impl Registry {
@@ -69,6 +77,7 @@ impl Registry {
             used: 0,
             idle_nudged: false,
             verify_nudged: false,
+            reply_nudged: false,
         }
     }
 
@@ -81,6 +90,7 @@ impl Registry {
         self.used = 0;
         self.idle_nudged = false;
         self.verify_nudged = false;
+        self.reply_nudged = false;
     }
 
     /// The one decider.  Walks [`RULES`] against `attempt`, optionally
@@ -97,6 +107,19 @@ impl Registry {
         log: &mut SessionLog,
     ) -> Option<String> {
         let Some((cause, message)) = RULES.iter().find_map(|&r| r(attempt)) else {
+            // A sub-agent reaches a tool-call-free `Complete` without having
+            // called `reply`: its parent would otherwise receive nothing (a
+            // `Complete` is no longer scraped).  Remind it once to return
+            // through `reply`.  A `Replied` outcome never lands here, so a
+            // child that already replied is not re-nudged.
+            if ctx.must_reply
+                && !self.reply_nudged
+                && matches!(attempt, Ok(TurnOutcome::Complete(_)))
+            {
+                self.reply_nudged = true;
+                let _ = log.record_nudge(self.used, BUDGET, "no-reply finish (sub-agent)".into());
+                return Some(REPLY_MESSAGE.into());
+            }
             // Under `--expect-action`, a clean completion is gated by two
             // one-shot, budget-free nudges before it is accepted: a turn
             // that never used a tool earns the idle nudge to engage, and a
@@ -173,6 +196,15 @@ const VERIFY_MESSAGE: &str = "Before finishing: re-read the output you produced 
     the command ran, not that the result is right, so check the result against what was asked. If \
     you have already verified it against the task, restate your conclusion and it will be accepted.";
 
+/// The one-shot no-reply reminder (gated by [`NudgeCtx::must_reply`], so it
+/// fires only for a sub-agent).  A child finished with prose but never called
+/// `reply`, so as things stand its parent receives nothing; this asks it to
+/// return through `reply` before the run ends.
+const REPLY_MESSAGE: &str = "You ended your turn without calling `reply`, so your parent will \
+    receive nothing. Return your result now by calling `reply` — pass a markdown report as \
+    `result`, or a JSON object/array for structured findings. This is the only way to hand \
+    your work back; a final message on its own is not delivered.";
+
 fn on_empty_turn(r: &Result<TurnOutcome, ProviderError>) -> Option<(String, &'static str)> {
     match r {
         Ok(TurnOutcome::Empty) => Some((
@@ -247,7 +279,8 @@ mod tests {
                 &attempt,
                 NudgeCtx {
                     expect_action: false,
-                    acted: false
+                    acted: false,
+                    must_reply: false,
                 },
                 &emit(),
                 &mut log,
@@ -272,7 +305,8 @@ mod tests {
                 &attempt,
                 NudgeCtx {
                     expect_action: false,
-                    acted: false
+                    acted: false,
+                    must_reply: false,
                 },
                 &emit(),
                 &mut log,
@@ -292,6 +326,7 @@ mod tests {
             NudgeCtx {
                 expect_action: false,
                 acted: false,
+                must_reply: false,
             },
             &emit(),
             &mut log,
@@ -313,7 +348,8 @@ mod tests {
                     &Ok(TurnOutcome::Empty),
                     NudgeCtx {
                         expect_action: false,
-                        acted: false
+                        acted: false,
+                        must_reply: false,
                     },
                     &emit(),
                     &mut log,
@@ -326,7 +362,8 @@ mod tests {
                 &Ok(TurnOutcome::Empty),
                 NudgeCtx {
                     expect_action: false,
-                    acted: false
+                    acted: false,
+                    must_reply: false,
                 },
                 &emit(),
                 &mut log,
@@ -345,6 +382,7 @@ mod tests {
         let ctx = || NudgeCtx {
             expect_action: true,
             acted: false,
+            must_reply: false,
         };
         match reg.react(
             &Ok(TurnOutcome::Complete("essay".into())),
@@ -378,7 +416,8 @@ mod tests {
                 &Ok(TurnOutcome::Complete("done".into())),
                 NudgeCtx {
                     expect_action: false,
-                    acted: false
+                    acted: false,
+                    must_reply: false,
                 },
                 &emit(),
                 &mut log,
@@ -397,6 +436,7 @@ mod tests {
         let ctx = || NudgeCtx {
             expect_action: true,
             acted: true,
+            must_reply: false,
         };
         match reg.react(
             &Ok(TurnOutcome::Complete("done".into())),
@@ -419,6 +459,62 @@ mod tests {
         assert_eq!(reg.used, 0, "verify nudge must not draw on the budget");
     }
 
+    /// A sub-agent (`must_reply`) that finishes a tool-call-free `Complete`
+    /// without replying earns one reminder to call `reply`; a second identical
+    /// attempt is accepted (the one-shot latch is spent) so the run can end,
+    /// and the reminder never draws on the budget.
+    #[test]
+    fn no_reply_finish_nudges_once_then_accepts() {
+        let mut reg = Registry::new();
+        let mut log = fresh_log("no-reply");
+        let ctx = || NudgeCtx {
+            expect_action: false,
+            acted: true,
+            must_reply: true,
+        };
+        match reg.react(
+            &Ok(TurnOutcome::Complete("prose, no reply".into())),
+            ctx(),
+            &emit(),
+            &mut log,
+        ) {
+            Some(msg) => assert!(msg.contains("`reply`")),
+            None => panic!("a sub-agent that did not reply must be nudged"),
+        }
+        assert!(
+            reg.react(
+                &Ok(TurnOutcome::Complete("still no reply".into())),
+                ctx(),
+                &emit(),
+                &mut log,
+            )
+            .is_none(),
+            "the second un-replied finish is accepted so the run can end"
+        );
+        assert_eq!(reg.used, 0, "the reply reminder must not draw on the budget");
+    }
+
+    /// The root (`must_reply` false) never gets the reply reminder — a clean
+    /// `Complete` ends its turn at once.
+    #[test]
+    fn root_completion_is_never_reply_nudged() {
+        let mut reg = Registry::new();
+        let mut log = fresh_log("root-complete");
+        assert!(
+            reg.react(
+                &Ok(TurnOutcome::Complete("answer to the user".into())),
+                NudgeCtx {
+                    expect_action: false,
+                    acted: true,
+                    must_reply: false,
+                },
+                &emit(),
+                &mut log,
+            )
+            .is_none()
+        );
+    }
+
     /// [`Registry::reset`] clears the per-turn budget and both one-shot
     /// latches, so a fresh turn-boundary message starts with a full budget
     /// and re-armed completion gates.
@@ -429,6 +525,7 @@ mod tests {
         let ctx = || NudgeCtx {
             expect_action: true,
             acted: false,
+            must_reply: false,
         };
         // Spend the idle latch and a unit of budget.
         let _ = reg.react(&Ok(TurnOutcome::Empty), ctx(), &emit(), &mut log);

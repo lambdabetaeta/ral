@@ -24,18 +24,24 @@ use std::sync::{Arc, OnceLock};
 mod agent;
 mod fff;
 mod ral;
+mod reply;
 mod schedule;
 
 /// Which tools a session advertises to the provider and may dispatch — the
 /// single source of truth for both advertisement (`provider.complete`) and
 /// enforcement ([`Session`]'s dispatch path), replacing the old
 /// `advertise_root_only` bool and the `is_subagent` dispatch check.
+///
+/// The two sets gate on mirror-image axes: the root holds the spawn family
+/// but not `reply` (it talks to the user across turns and never returns a
+/// value); a peer holds `reply` but not the spawn family (so it can return,
+/// and the spawn tree stays one level deep).
 #[derive(Clone, Copy)]
 pub enum ToolSet {
-    /// Every registered tool — a root.
+    /// Every registered tool except `reply` — a root.
     All,
     /// Every tool except the spawn family (`agent` / `agents` /
-    /// `agent_cancel`) — a peer, so the spawn tree stays one level deep.
+    /// `agent_cancel`) — a peer; it keeps `reply`, its way of returning.
     NoSpawn,
 }
 
@@ -43,7 +49,7 @@ impl ToolSet {
     /// Whether `tool` is advertised and permitted under this set.
     pub(crate) fn allows(&self, tool: &dyn Tool) -> bool {
         match self {
-            ToolSet::All => true,
+            ToolSet::All => !tool.replies(),
             ToolSet::NoSpawn => !tool.spawns(),
         }
     }
@@ -68,6 +74,14 @@ pub(crate) trait Tool: Send + Sync {
     /// tree stays one level deep.  Everything else (including `schedule`, so a
     /// peer may wake itself) defaults to `false`.
     fn spawns(&self) -> bool {
+        false
+    }
+
+    /// True only for `reply` — the mirror of [`Self::spawns`].  It is
+    /// withheld from the *root*'s [`ToolSet`] (unadvertised and refused): the
+    /// root talks to the user across turns and never returns a value, so
+    /// returning-and-terminating is meaningless there.  A peer holds it.
+    fn replies(&self) -> bool {
         false
     }
 
@@ -100,6 +114,7 @@ pub(crate) fn registry() -> &'static [Box<dyn Tool>] {
             Box::new(schedule::SchedulesTool),
             Box::new(schedule::UnscheduleTool),
             Box::new(fff::FffTool),
+            Box::new(reply::ReplyTool),
         ]
     })
 }

@@ -35,9 +35,13 @@ pub const FFF_CAP: usize = 2000;
 /// same room as stderr.
 pub const OPAQUE_CAP: usize = 3000;
 
-/// Cap for the final assistant text returned by a child agent — a
-/// curated, non-bindable report, so it keeps the most room.
-pub const AGENT_REPLY_CAP: usize = 6000;
+/// Cap for the payload a child agent returns through `reply` — a curated,
+/// deliberately-constructed report, not a scraped tail, so it keeps by far
+/// the most room.  An observed good explorer brief already ran to 5787 bytes
+/// against the former 6000 cap; the cap is now wide enough that a thorough
+/// report fits whole, with middle-elision (the [`clip`] backstop) reserved
+/// for the genuinely oversized reply rather than the common case.
+pub const AGENT_REPLY_CAP: usize = 16_000;
 
 /// History size in bytes at which [`crate::session::Session::compact`]
 /// kicks in.  500 KB keeps roughly a dozen tool results in flight

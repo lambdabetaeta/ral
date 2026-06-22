@@ -74,6 +74,14 @@ pub struct Session {
     /// genuine turn-boundary message; read by the completion-gate nudges to
     /// choose between the idle and verify prompts.
     acted: bool,
+    /// A sub-agent's staged return value, set by the `reply` tool's dispatch
+    /// (via [`Self::set_reply`]) and lifted by [`Self::apply`] into a
+    /// [`TurnOutcome::Replied`] once the current tool-call batch finishes
+    /// draining — never mid-batch, so the session reaches a clean boundary
+    /// with every `call_id` answered.  Empty (or absent) renders to nothing
+    /// and settles as [`AgentOutcome`](crate::bus::AgentOutcome)`::Empty`.
+    /// Only a peer ever sets it; `reply` is withheld from the root.
+    reply: Option<String>,
     /// Durable [`MobileSnapshot`](ral_core::types::MobileSnapshot) of the
     /// shell as of the last clean tool-call boundary.  Refreshed inside
     /// `run_shell` right before each dispatch, so it always holds the dynamic
@@ -103,6 +111,12 @@ pub struct Session {
 #[derive(Debug)]
 pub enum TurnOutcome {
     Complete(String),
+    /// A sub-agent called `reply`: the carried payload is its deliberate
+    /// return value (empty when the argument rendered to nothing).  Distinct
+    /// from [`Self::Complete`] precisely so the nudge layer can tell "already
+    /// returned" from "stopped without returning" and not re-nudge a child
+    /// that replied.  Terminal: it ends the drive loop.
+    Replied(String),
     Empty,
     Stopped {
         reason: String,
@@ -231,6 +245,7 @@ impl Session {
             cancel: cancel::Token::new(),
             tools,
             acted: false,
+            reply: None,
             durable,
             agents: crate::agent_registry::AgentRegistry::new(),
             schedules: crate::schedule::ScheduleRegistry::new(),
@@ -493,9 +508,17 @@ impl Session {
             let ctx = nudge::NudgeCtx {
                 expect_action: self.expect_action,
                 acted: self.acted,
+                // A peer returns through `reply`; an un-replied finish earns
+                // one reminder.  The root never returns, so it is exempt.
+                must_reply: !self.is_root,
             };
             if let Some(msg) = self.nudges.react(&outcome, ctx, emit, &mut self.log) {
                 self.inbox.push(InboxMsg::Nudge(msg));
+            }
+            // `reply` hard-terminates: end the drive loop even if a self-armed
+            // schedule would otherwise keep the peer parked.
+            if matches!(outcome, Ok(TurnOutcome::Replied(_))) {
+                break;
             }
         }
         // The loop always hands the session back ready for the next prompt: a
@@ -680,6 +703,12 @@ impl Session {
             if token.is_cancelled() {
                 return self.cancelled(emit);
             }
+            // The batch has fully drained — every call dispatched, every
+            // `call_id` answered.  If one of them was `reply`, end the run now
+            // with its payload rather than looping for another round-trip.
+            if let Some(payload) = self.reply.take() {
+                return self.replied(payload);
+            }
         }
     }
 
@@ -771,10 +800,20 @@ impl Session {
     fn stage(&mut self, provider: &Arc<Provider>, call: ToolCall, emit: &Emitter) -> SessionToolResult {
         match crate::tools::find(&call.fn_name) {
             Some(t) if !self.tools.allows(t) => {
-                let msg = format!(
-                    "tool `{}` is not available to sub-agents — do this work yourself",
-                    call.fn_name
-                );
+                // The allow-check is the backstop for two unadvertised cases:
+                // a peer reaching for the spawn family, or the root reaching
+                // for `reply`.  Name the right one.
+                let msg = if t.spawns() {
+                    format!(
+                        "tool `{}` is not available to sub-agents — do this work yourself",
+                        call.fn_name
+                    )
+                } else {
+                    format!(
+                        "tool `{}` is for sub-agents only — you finish a turn by replying to the user directly",
+                        call.fn_name
+                    )
+                };
                 self.note_error(msg.clone(), emit);
                 SessionToolResult {
                     id: call.call_id,
@@ -840,6 +879,23 @@ impl Session {
         };
         emit.emit(Kind::ToolResult(content.clone()));
         SessionToolResult { id, content }
+    }
+
+    /// Stash a sub-agent's deliberate return value — called from the `reply`
+    /// tool's dispatch.  [`Self::apply`] lifts it into a
+    /// [`TurnOutcome::Replied`] once the tool-call batch drains.
+    pub(crate) fn set_reply(&mut self, payload: String) {
+        self.reply = Some(payload);
+    }
+
+    /// Reached when the batch carried a `reply`: wind the session back to
+    /// `ReadyForUser` with the dedicated breadcrumb (the last round-trip
+    /// dispatched the reply but never asked for a final assistant message, so
+    /// the protocol sits in `AwaitingAssistantAfterToolResults`), and return
+    /// the payload.  `drive` then breaks the loop — `reply` hard-terminates.
+    fn replied(&mut self, payload: String) -> Result<TurnOutcome, ProviderError> {
+        self.log.quiesce(QuiesceReason::Replied);
+        Ok(TurnOutcome::Replied(payload))
     }
 
     fn cancelled(&mut self, emit: &Emitter) -> Result<TurnOutcome, ProviderError> {
@@ -911,13 +967,23 @@ fn announce(turn: &Turn, emit: &Emitter) {
 }
 
 /// Reduce a finished turn's outcome to the `(tag, text)` digest a peer's
-/// result carries — the one place the reduction happens, formerly the
-/// `agent` tool's `to_outcome`.  A completed run carries its final text,
-/// clipped to the reply cap; every other shape carries only its tag.
+/// result carries — the one place the reduction happens.  Only a deliberate
+/// `reply` carries text up: its payload is clipped to the reply cap (an empty
+/// payload settles `Empty`).  A tool-call-free prose finish is **not**
+/// harvested — there is no scrape — so it, like a genuinely empty turn, settles
+/// `Empty`; the child returns through `reply` or returns nothing.  Every other
+/// shape carries only its tag.
 fn agent_digest(r: &Result<TurnOutcome, ProviderError>) -> (AgentOutcome, String) {
     match r {
-        Ok(TurnOutcome::Complete(s)) => (AgentOutcome::Complete, clip(s, AGENT_REPLY_CAP)),
-        Ok(TurnOutcome::Empty) => (AgentOutcome::Empty, String::new()),
+        Ok(TurnOutcome::Replied(payload)) if payload.is_empty() => {
+            (AgentOutcome::Empty, String::new())
+        }
+        Ok(TurnOutcome::Replied(payload)) => {
+            (AgentOutcome::Complete, clip(payload, AGENT_REPLY_CAP))
+        }
+        Ok(TurnOutcome::Complete(_)) | Ok(TurnOutcome::Empty) => {
+            (AgentOutcome::Empty, String::new())
+        }
         Ok(TurnOutcome::Stopped { reason }) => (AgentOutcome::Stopped(reason.clone()), String::new()),
         Ok(TurnOutcome::Cancelled) => (AgentOutcome::Cancelled, String::new()),
         Ok(TurnOutcome::Capped) => (
@@ -1142,6 +1208,120 @@ mod tests {
         assert!(
             !child.tools.allows(agent),
             "a peer must not be permitted the `agent` spawn tool"
+        );
+    }
+
+    /// A `reply` tool call carrying `result`.
+    fn reply_call(id: &str, result: serde_json::Value) -> ToolCall {
+        ToolCall {
+            call_id: id.into(),
+            fn_name: "reply".into(),
+            fn_arguments: serde_json::json!({ "result": result }),
+            thought_signatures: None,
+        }
+    }
+
+    /// Drive a forked peer to quiescence through `provider`, returning the
+    /// `(outcome, text)` digest its parent's spawn site would deliver.
+    fn drive_peer(child: &mut Session, provider: Arc<Provider>) -> (AgentOutcome, String) {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let emit = Emitter::new(tx, child.id);
+        child.drive(ProviderHandle::new(provider), &mut NoControl, &emit)
+    }
+
+    /// A sub-agent returns through `reply`: its markdown payload is the value
+    /// the parent receives (raw, newlines intact), it settles `Complete`, and
+    /// the run hard-terminates leaving the session `ReadyForUser`.
+    #[test]
+    fn sub_agent_returns_through_reply() {
+        let dir = tmp("reply-terminal");
+        let parent = Session::for_test(&dir, "system").unwrap();
+        let mut child = parent.fork().expect("fork child");
+        child.seed("write a report".into());
+        let provider = scripted(
+            "test-model",
+            Script::new().then(Reply::tool_calls(vec![reply_call(
+                "r1",
+                serde_json::json!("# Report\nline one\nline two"),
+            )])),
+        );
+        let (outcome, text) = drive_peer(&mut child, provider);
+        assert!(
+            matches!(outcome, AgentOutcome::Complete),
+            "a reply settles Complete, got {outcome:?}"
+        );
+        assert_eq!(
+            text, "# Report\nline one\nline two",
+            "the markdown payload passes through raw, newlines intact"
+        );
+        assert!(
+            child.is_ready(),
+            "a replied turn must leave the session ReadyForUser"
+        );
+    }
+
+    /// A structured `reply` argument (object/array) is pretty-printed, so the
+    /// shape stays legible in what the parent receives.
+    #[test]
+    fn sub_agent_reply_renders_a_structured_payload() {
+        let dir = tmp("reply-structured");
+        let parent = Session::for_test(&dir, "system").unwrap();
+        let mut child = parent.fork().expect("fork child");
+        child.seed("list the files".into());
+        let provider = scripted(
+            "test-model",
+            Script::new().then(Reply::tool_calls(vec![reply_call(
+                "r1",
+                serde_json::json!({ "files": ["a.rs", "b.rs"] }),
+            )])),
+        );
+        let (outcome, text) = drive_peer(&mut child, provider);
+        assert!(matches!(outcome, AgentOutcome::Complete));
+        assert!(
+            text.contains("\"files\""),
+            "a structured reply is pretty-printed: {text}"
+        );
+    }
+
+    /// A sub-agent that finishes without calling `reply` is reminded once, and
+    /// if it still does not reply its run settles `Empty` — the final prose is
+    /// **not** harvested (no scrape).
+    #[test]
+    fn sub_agent_without_reply_is_nudged_then_returns_empty() {
+        let dir = tmp("reply-missing");
+        let parent = Session::for_test(&dir, "system").unwrap();
+        let mut child = parent.fork().expect("fork child");
+        child.seed("do the thing".into());
+        let provider = scripted(
+            "test-model",
+            Script::new()
+                .then(Reply::text("here is prose, but no reply"))
+                .then(Reply::text("still prose, still no reply")),
+        );
+        let (outcome, text) = drive_peer(&mut child, provider);
+        assert!(
+            matches!(outcome, AgentOutcome::Empty),
+            "an un-replied finish settles Empty, got {outcome:?}"
+        );
+        assert!(text.is_empty(), "the final prose must not be scraped: {text:?}");
+        assert!(child.is_ready());
+    }
+
+    /// `reply` is the peer's way of returning and is withheld from the root,
+    /// the mirror of how the spawn family is withheld from a peer.
+    #[test]
+    fn reply_is_offered_to_a_peer_and_withheld_from_the_root() {
+        let dir = tmp("reply-gating");
+        let root = Session::for_test(&dir, "system").unwrap();
+        let reply = crate::tools::find("reply").expect("reply tool registered");
+        assert!(
+            !root.tools.allows(reply),
+            "the root never returns, so it must not be offered `reply`"
+        );
+        let child = root.fork().expect("fork child");
+        assert!(
+            child.tools.allows(reply),
+            "a peer returns through `reply`, so it must hold it"
         );
     }
 }

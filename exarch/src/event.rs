@@ -280,6 +280,11 @@ pub enum QuiesceReason {
     /// The turn ended on a surfaced error — a transport failure or an
     /// exhausted retry budget — before the assistant replied.
     Aborted,
+    /// A sub-agent called `reply`: the last round-trip dispatched the reply
+    /// and its result but never asked for a closing assistant message, so the
+    /// machine sits in `AwaitingAssistantAfterToolResults`.  This winds it
+    /// back cleanly — the turn ended on purpose, not on an error.
+    Replied,
 }
 
 /// Per-session canonical log.  Holds the in-memory event vector, the
@@ -507,6 +512,11 @@ impl SessionLog {
                 "no result: turn aborted before tool execution",
                 "(no reply: turn aborted)",
                 "aborted",
+            ),
+            QuiesceReason::Replied => (
+                "no result: turn ended on reply",
+                "(turn ended: replied to parent)",
+                "replied",
             ),
         };
         loop {

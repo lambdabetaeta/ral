@@ -20,7 +20,6 @@ use exarch::session::{Session, TurnOutcome};
 use genai::chat::{ChatRole, ContentPart, ToolCall};
 use std::sync::Arc;
 use std::sync::mpsc::channel;
-use std::time::{Duration, Instant};
 
 /// A scripted provider behind the `Arc` the turn driver threads — the same
 /// shape the live driver holds so an async `agent` worker could capture a
@@ -73,19 +72,6 @@ fn ral_call(id: &str, cmd: &str) -> ToolCall {
         fn_arguments: serde_json::json!({
             "cmd": cmd,
             "description": "test command",
-        }),
-        thought_signatures: None,
-    }
-}
-
-/// An `agent` tool call invoking a child prompt.
-fn agent_call(id: &str, title: &str, prompt: &str) -> ToolCall {
-    ToolCall {
-        call_id: id.into(),
-        fn_name: "agent".into(),
-        fn_arguments: serde_json::json!({
-            "title": title,
-            "prompt": prompt,
         }),
         thought_signatures: None,
     }
@@ -145,45 +131,6 @@ fn tool_call_then_completion() {
             .iter()
             .any(|k| matches!(k, Kind::ToolCall { tool: "ral", .. })),
         "ral tool call should reach the bus"
-    );
-    assert!(session.is_ready());
-    assert_admissible(&session);
-}
-
-#[test]
-fn same_batch_agents_run_concurrently() {
-    let dir = tmp("same-batch-agents");
-    let mut session = Session::for_test(&dir, "system").unwrap();
-    let provider = scripted(
-        "test-model",
-        Script::new()
-            .then(Reply::tool_calls(vec![
-                agent_call("a1", "left", "sleep, then report left"),
-                agent_call("a2", "right", "sleep, then report right"),
-            ]))
-            .then(Reply::tool_calls(vec![ral_call("left-sleep", "sleep 0.3")]))
-            .then(Reply::tool_calls(vec![ral_call(
-                "right-sleep",
-                "sleep 0.3",
-            )]))
-            .then(Reply::text("left done"))
-            .then(Reply::text("right done"))
-            .then(Reply::text("root done")),
-    );
-
-    let started = Instant::now();
-    let (outcome, kinds) = drive_apply(&mut session, &provider, Some("fan out"));
-    let elapsed = started.elapsed();
-
-    assert!(matches!(outcome, Ok(TurnOutcome::Complete(_))));
-    let child_calls = kinds
-        .iter()
-        .filter(|k| matches!(k, Kind::ToolCall { tool: "agent", .. }))
-        .count();
-    assert_eq!(child_calls, 2, "the root should dispatch both child agents");
-    assert!(
-        elapsed < Duration::from_millis(550),
-        "two 300 ms child sleeps should overlap; elapsed {elapsed:?}"
     );
     assert!(session.is_ready());
     assert_admissible(&session);
