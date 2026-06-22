@@ -3231,3 +3231,18 @@ tag-set helpers gone ([[decisions/260619_surface-carries-documents|surface-carri
 [[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]],
 [[decisions/260608_witness-hash-h-prefix|witness-hash-h-prefix]]). Updated
 [[index|index]].
+
+## [2026-06-22] ingest | the checker retains per-stage pipeline value types and types handler/alias arms as lambdas
+
+Re-stamped [[map/core/typecheck|typecheck]] to `@1baac6d` for two commits of
+drift. The annotation pass now writes a resolved value type per pipeline stage
+onto the `Pipeline` node alongside its ground wires — the data flowing between
+stages, kept for the structural REPL's typed spine, with no new inference
+([[decisions/260603_ir-pipespec-annotation|ir-pipespec-annotation]]). A handler
+or alias arm is a fixed-arity lambda whose calling convention is fixed by the
+surface form rather than sniffed from the value, so `alias_arm_scheme`'s `param`
+is non-optional; the static layer still types a non-`Lam` thunk by its bare body,
+leaving the runtime install as the sole gate on shape
+([[invariants/fixed-arity|fixed-arity]],
+[[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
+Updated [[index|index]].
