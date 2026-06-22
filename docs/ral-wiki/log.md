@@ -3280,3 +3280,13 @@ per stage, parallel to `stages`/`wires` — emitted as a `Unit` placeholder by t
 elaborator and overwritten by the annotation pass, retained for the structural
 REPL's typed spine ([[decisions/260603_ir-pipespec-annotation|ir-pipespec-annotation]]).
 Updated [[index|index]].
+
+## [2026-06-22] ingest | fg resume is gated on a held terminal lease
+
+Re-stamped [[map/repl/jobs|jobs]] to `@1baac6d` for one behaviour commit (the
+other was a `cargo fmt` sweep). On Unix, `fg` now hands the controlling terminal
+to a parked group only when the turn holds a `TerminalLease`
+([[decisions/260619_terminal-lease|terminal-lease]]) — `wait_foreground` asks the
+session for the borrow rather than re-deriving a `startup_foreground` predicate,
+and a non-interactive resume with no lease skips the tty handoff. Updated
+[[index|index]].
