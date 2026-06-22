@@ -3095,3 +3095,23 @@ clippy-enforced I/O doors whose shapes render through
 [[map/exarch/io-surface|io-surface]]. The XDG resolver
 ([[decisions/260601_xdg-resolver-consolidation|xdg-resolver-consolidation]]) and
 the decision-fold structure are unchanged. Updated [[index|index]].
+
+## [2026-06-22] ingest | shell-eval re-ingested at HEAD (10 commits stale)
+
+Re-stamped [[map/exarch/shell-eval|shell-eval]] to `@1baac6d` after the turn-door
+cutover ([[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]],
+[[decisions/260618_run-turn-host-loop|run-turn-host-loop]]): `run_shell` is now a
+request supplier that enters core through the single source-text framed door
+`Shell::run_source_turn`, the only way into evaluation. Added the two new
+`TurnRequest` fields the migration carries — `terminal:
+RequestedTerminalAccess::Denied` paired with `stdin: TurnStdin::Empty`, so a tool
+turn holds no terminal lease and its foreground handoff is unrepresentable
+([[decisions/260619_terminal-lease|terminal-lease]]) — and reframed the surface
+sink around the `` `card `` render document core now carries
+([[decisions/260619_surface-carries-documents|surface-carries-documents]]),
+linking the mark set out to [[map/exarch/cards|cards]] and the io-door shapes to
+[[map/exarch/io-surface|io-surface]]. Dropped the dead `exarch/src/sandbox_diag.rs`
+/ `sandbox_diag/` `covers_paths` and the page's exarch-owned `sandbox_diag`
+paragraph: that diagnostic moved into `core::sandbox::diag`, now owned by
+[[map/core/capabilities|capabilities]]; the page links out to it. Updated
+[[index|index]].

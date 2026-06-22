@@ -179,7 +179,7 @@ design pages via the `against` stamp.
 - [[map/exarch|exarch]] — the exarch agent's front door: startup (CLI dispatch, bootstrap, account selection, sandbox early_init) and system-prompt assembly; the agent is a provider loop over one `shell` tool, each turn a grant-framed ral turn. *@1baac6d*
   - [[map/exarch/session|session]] — the turn loop: round-trips, tool dispatch with prompt-queue steering, auto-compaction, nudge-retry, the `MAX_STEPS` ceiling, sub-agent fork. *@3b8a4062*
   - [[map/exarch/provider|provider]] — LLM transport over genai: streaming, retry driver, prompt caching, usage/pricing. *@e8227dc*
-  - [[map/exarch/shell-eval|shell-eval]] — one tool call as a ral top-level turn under a pushed grant frame, seeded from the live session; buffered output digested for the transcript, surface host sink. *@d7e97288*
+  - [[map/exarch/shell-eval|shell-eval]] — one tool call as a ral top-level turn through `run_source_turn`, under a pushed grant frame, seeded from the live session, with `Denied` terminal access; buffered output digested for the transcript, the surface host sink decoding card marks onto the bus. *@1baac6d*
   - [[map/exarch/io-surface|io-surface]] — redirect reads/writes and exec images surface at runtime I/O doors as structural events, rendered as grouped cards; bulk helper I/O sunk below the ral line, enforced by a clippy-checked door set. *@1baac6d*
   - [[map/exarch/policy|policy]] — capability composition (base ∨ extend ⊓ restrict) and the bake-in profiles; the boundary is ral's grant. *@2df6db85*
   - [[map/exarch/tools|tools]] — the tool registry: `shell`, `agent`, `fff`; spawned agents are joined at steering boundaries. *@e28f2054*
