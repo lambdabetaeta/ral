@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 99300c0
-generated_at_date: 2026-06-21
+generated_at_commit: 1baac6d
+generated_at_date: 2026-06-22
 covers_paths: [exarch/src/bus.rs, exarch/src/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/host.rs]
 ---
 
@@ -50,26 +50,76 @@ finishes, keeping async children muted to their own log.
 The TUI writes a sibling `user.log` from the same stream — the "user view" —
 flushed as each block lands so it survives an abnormal exit. Both files live
 under the durable per-run log directory (`bootstrap::log_run_dir`,
-`$XDG_STATE_HOME/exarch/<project>/<run>/sessions/<id>/`).
+`$XDG_STATE_HOME/exarch/<project>/<run>/sessions/<id>/`). Every touch of that
+file lives in one place: `tui/viewport.rs` keeps both the tee writer
+(`open_log`) and the `/export` copy (`export_log`) beside each other, the
+single `user.log` I/O door, so `Repl::cmd_export` resolves and guards the
+destination but never reaches the filesystem itself.
 
 Two `Sink` implementations:
 
- `tui.rs` (+ `tui/{block,line,md,rail,viewport}.rs`) — the full-screen TUI.
- It owns the alternate screen and its own scrollback: each session is a
+ `tui.rs` (+ `tui/{block,group,line,md,rail,viewport}.rs`) — the full-screen
+ TUI. It owns the alternate screen and its own scrollback: each session is a
  `Vec<Block>` (`tui/block.rs`), and the whole frame is redrawn each tick from
  a memoised flatten of those blocks into wrapped visual rows. A tool call is
  the one collapsible block — its summary shows shut, the full ral script when
  a click opens it; the wheel scrolls, click-drag selects and copies the
  rail-stripped text via OSC-52, and Shift-drag falls through to the terminal's
- own selection. `tui/md.rs` is the streaming markdown renderer;
- `tui/viewport.rs` the per-session block buffer, scroll position, and
- `user.log` tee; `tui/rail.rs` the data-encoding marginal rail — one cell
- carrying three of Bertin's variables (shape → kind, hue → agent, value →
- magnitude), the keystone of the *transcript as graphic* re-encoding
+ own selection. `tui/md.rs` is the streaming markdown renderer; `tui/group.rs`
+ the coalescing projection that folds an observation run into one dialable
+ object; `tui/viewport.rs` the per-session block buffer, scroll position, and
+ `user.log` writer; `tui/rail.rs` the data-encoding marginal rail. The
+ transcript is laid out as a graphic on two orthogonal planes
  ([[decisions/260618_tui-transcript-as-graphic|tui-transcript-as-graphic]],
- Phases 0–2 landed). The `rule_line` carries a value-ramp `ctx%` bar and an
- elapsed-wait bar (elapsed wall-time on the live phase, resetting per round-trip);
- the live phase lives on `Viewport`, not `App`.
+ Phases 0–7 landed):
+
+ - **two voices, encoded as foreground and background.** *The transcript
+   collapses to two parties — the human and the agent field — read off
+   orthogonal channels so neither competes with the other.* The agent owns the
+   chromatic foreground (the rail hues); the background plane carries one
+   distinction only — machine text. A run of script or observation output is
+   washed into a recessed `CODE_BG` panel (`line::wash`, padded edge-to-edge so
+   the machine region reads as a clean rectangle); model prose sits unwashed at
+   the base; the human's submitted prompt is the sole occupant of a *third*
+   register, a raised cool `PROMPT_BG`-banded block opened by a full-width
+   `PROMPT_INK` rule fence (`line::prompt_fence`), found at a glance by common
+   region rather than by reverse video, which stays reserved for an active
+   selection.
+ - **the marginal rail: one cell, three variables.** Shape → block *kind*, hue
+   → the *producing agent*, value → *magnitude*. Hue is a per-*view* tint, not
+   a per-block one: every block in a tab shares that tab's agent slot
+   (`Viewport::agent`, threaded into `Block::lines` at render time), so the
+   whole rail glows one hue, read on a tab-switch as "whose transcript is
+   this". The human's prompt fence is the lone exception — a `❖` in neutral
+   `PROMPT_INK` so it never reads as just another agent's mark.
+ - **the in-flight reply as a growing magnitude.** Streamed-but-uncommitted
+   assistant text never paints as prose: `Viewport::streaming_seat` projects
+   the open buffer as a single trailing row — the markdown rail glyph plus a
+   `size_bar` of its line count — that grows in place as one extra scroll row,
+   so the settled transcript above stays a finished image until a fence-safe
+   break commits the real `Block::markdown`.
+ - **a surfaced general card as a bounded object.** A diff-less
+   `CardOrigin::Surfaced` card — the model's deliberate "look at this" —
+   renders through `line::render_card_framed` as an indented framed box, its
+   heading lifted into the top rule, no marginal rail glyph (the frame is its
+   mark). Diff cards keep their patch-shape rail; folded observation/write
+   cards stay generic chrome.
+
+ The frame's terminal writes are bracketed in a synchronized update
+ (`BeginSynchronizedUpdate` / `EndSynchronizedUpdate`) so the emulator swaps
+ the whole diff atomically — without it a tail-following redraw tears while a
+ full page streams tool calls. The same steadiness is held in the scroll
+ arithmetic: `Viewport::render_window` head-anchors the trailing live segment
+ (`TailAnchor` pins its head row at the greatest height it has reached), so a
+ burst of streaming calls coalesces into one group whose churn opens a
+ transient gap below rather than shoving the committed transcript up and down.
+ The scrollbar reads true because `render_window` maps `offset` (first visible
+ row, topping at `total - height`) onto ratatui's `[0, total-1]` cursor range
+ and clamps it (`scrollbar_pos`), so the thumb actually reaches the bottom.
+
+ The `rule_line` carries a value-ramp `ctx%` bar and an elapsed-wait bar
+ (elapsed wall-time on the live phase, resetting per round-trip); the live
+ phase lives on `Viewport`, not `App`.
  Sub-agent sessions get tabs that linger after `Died`, each keeping its own
  scroll position; an async agent on the session-lived bus streams its tab the
  same way, and `/clear` retires every live sub-tab through the same linger
@@ -79,9 +129,11 @@ Two `Sink` implementations:
  is posted to the `Inbox`; the root dispatch loop drains non-slash steering at
  the next safe tool boundary, and `Repl::drive` delivers the rest at the turn
  boundary — a coalesced human run, or a wakeup / settled agent as its own
- marked turn. Slash-prefixed prompts stay on the REPL command path. Until then
- the inbox renders in a strip above the input, and the idle wait selects over
- input, inbox, and the session bus
+ marked turn. A committed human turn echoes on the `RailShape::Prompt` band;
+ a wakeup stays dim, marked chrome on the Generic rail. Slash-prefixed prompts
+ stay on the REPL command path. Until then the inbox renders as a `PROMPT_BG`
+ strip above the input, and the idle wait selects over input, inbox, and the
+ session bus
  ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]],
  [[decisions/260617_scheduled-wakeups|scheduled-wakeups]]).
 - `headless.rs` — one-shot pipe: assistant tokens to stdout, every other event

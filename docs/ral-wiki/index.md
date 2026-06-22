@@ -183,5 +183,5 @@ design pages via the `against` stamp.
   - [[map/exarch/policy|policy]] — capability composition (base ∨ extend ⊓ restrict) and the bake-in profiles; the boundary is ral's grant. *@2df6db85*
   - [[map/exarch/tools|tools]] — the tool registry: `shell`, `agent`, `fff`; spawned agents are joined at steering boundaries. *@e28f2054*
   - [[map/exarch/builtins|builtins]] — the resident host atoms and `agent.ral` helpers for search, line witnesses, and editing. *@2df6db85*
-  - [[map/exarch/frontend|frontend]] — the agent/UI event bus, durable session log, the inline TUI / headless frontends, and the shared prompt queue that drains at tool or turn boundaries. *@e28f2054*
+  - [[map/exarch/frontend|frontend]] — the agent/UI event bus, durable session log, the headless frontend, and the inline TUI: a two-voice transcript laid out as a graphic — human band vs agent field, the marginal rail, an in-flight reply as a growing magnitude. *@1baac6d*
 - [[map/ral-sh|ral-sh]] — the POSIX-bridge login-shell dispatcher; execs `ral` interactively, forwards everything else to `/bin/sh`. *@c164cff*
