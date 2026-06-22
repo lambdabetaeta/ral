@@ -3202,3 +3202,18 @@ readline's kill-to-line-start in emacs and vi-Insert mode. The shared fuzzy
 completion engine and the native-cursor-every-mode editing
 ([[decisions/260522_repl-architecture|repl-architecture]]) were already on the
 page; confirmed both against the code. Updated [[index|index]].
+
+## [2026-06-22] ingest | plugin hooks gain source-mapped faults and a buffer-change breaker
+
+Re-stamped [[map/repl/plugins|plugins]] to `@1baac6d` for six commits of drift.
+Recorded that framed hooks (keybinding, buffer-change, prompt) now evaluate
+through the value turn door ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]),
+that a hook fault is source-mapped against the plugin file's own text and
+rendered inside `call_plugin_hook` while its registry is still live, and that a
+buffer-change hook is braked by a per-plugin `HookHealth` circuit breaker —
+three faults in a row or one overrun of the keystroke budget disables it for the
+session. Reframed the page around the runtime that drives the in-editor plugin
+surface both frontends render, pointing the rendering at
+[[map/repl/frontend|frontend]] and the host boundary at
+[[decisions/260514_repl-builtins-stay-in-repl|repl-builtins-stay-in-repl]].
+Updated [[index|index]].
