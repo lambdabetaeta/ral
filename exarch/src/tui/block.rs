@@ -126,8 +126,6 @@ pub(super) struct Block {
     /// defaults preserve today's rendering), dialed by [`Self::dial`].  Inert
     /// on prose and chrome, which always render full.
     level: u8,
-    /// The producing agent's palette slot, stamped at push.
-    agent: AgentSlot,
     /// The epistemic signal this block carries — context pressure and echo
     /// similarity, set at markdown commit (Move 7).  Sound (`0/0`) on every
     /// other kind, so only assistant prose degrades its medium.
@@ -150,7 +148,7 @@ impl Block {
     /// nothing changes visually until the user dials: `ToolCall` and
     /// `Subagent` at L1 (their collapsed headers), every other kind at L3
     /// (today's full render).
-    fn new(kind: BlockKind, agent: AgentSlot, fidelity: Fidelity) -> Self {
+    fn new(kind: BlockKind, fidelity: Fidelity) -> Self {
         let level = match kind {
             BlockKind::ToolCall { .. } | BlockKind::Subagent { .. } => 1,
             _ => 3,
@@ -158,7 +156,6 @@ impl Block {
         Self {
             kind,
             level,
-            agent,
             fidelity,
             result_size: None,
             cache: None,
@@ -175,16 +172,14 @@ impl Block {
         summary: String,
         cmd: String,
         context: u8,
-        agent: AgentSlot,
     ) -> Self {
         Self::new(
             BlockKind::ToolCall { tool, summary, cmd },
-            agent,
             Fidelity { context, echo: 0 },
         )
     }
-    pub(super) fn markdown(src: String, agent: AgentSlot, fidelity: Fidelity) -> Self {
-        Self::new(BlockKind::Markdown(src), agent, fidelity)
+    pub(super) fn markdown(src: String, fidelity: Fidelity) -> Self {
+        Self::new(BlockKind::Markdown(src), fidelity)
     }
     /// An async subagent's final result. `fidelity` rides the existing
     /// [`Block::fidelity`] field so the revealed markdown degrades with
@@ -195,7 +190,6 @@ impl Block {
         error: Option<String>,
         elapsed: Duration,
         fidelity: Fidelity,
-        agent: AgentSlot,
     ) -> Self {
         Self::new(
             BlockKind::Subagent {
@@ -204,43 +198,38 @@ impl Block {
                 error,
                 elapsed,
             },
-            agent,
             fidelity,
         )
     }
     /// A surfaced render document — the model's own communication, a
     /// barrier the coalescing projection never folds.
-    pub(super) fn card(card: Card, agent: AgentSlot) -> Self {
-        Self::card_with(card, CardOrigin::Surfaced, agent)
+    pub(super) fn card(card: Card) -> Self {
+        Self::card_with(card, CardOrigin::Surfaced)
     }
     /// A structural I/O effect: a read / grep / exec (foldable
     /// [`CardOrigin::Observation`]) or a write ([`CardOrigin::Write`], a
     /// barrier).  Distinct from [`Self::card`] so the projection can fold an
     /// observation into its call yet keep a write standalone.
-    pub(super) fn io_card(card: Card, write: bool, agent: AgentSlot) -> Self {
+    pub(super) fn io_card(card: Card, write: bool) -> Self {
         let origin = if write {
             CardOrigin::Write
         } else {
             CardOrigin::Observation
         };
-        Self::card_with(card, origin, agent)
+        Self::card_with(card, origin)
     }
-    fn card_with(card: Card, origin: CardOrigin, agent: AgentSlot) -> Self {
-        Self::new(BlockKind::Card { card, origin }, agent, Fidelity::default())
+    fn card_with(card: Card, origin: CardOrigin) -> Self {
+        Self::new(BlockKind::Card { card, origin }, Fidelity::default())
     }
     /// A single-file diff, the common card the patch-aggregation path emits:
     /// one `card` carrying one `diff` mark, so the rail renders `▎` and the
     /// disclosure dial reveals the located hunks.  A diff is a barrier, so it
     /// carries [`CardOrigin::Surfaced`] — the projection never folds it.
-    pub(super) fn patch(path: String, hunks: Vec<Hunk>, agent: AgentSlot) -> Self {
-        Self::card(Card(vec![Mark::Diff { path, hunks }]), agent)
+    pub(super) fn patch(path: String, hunks: Vec<Hunk>) -> Self {
+        Self::card(Card(vec![Mark::Diff { path, hunks }]))
     }
-    pub(super) fn chrome(shape: RailShape, lines: Vec<Line<'static>>, agent: AgentSlot) -> Self {
-        Self::new(
-            BlockKind::Chrome { shape, lines },
-            agent,
-            Fidelity::default(),
-        )
+    pub(super) fn chrome(shape: RailShape, lines: Vec<Line<'static>>) -> Self {
+        Self::new(BlockKind::Chrome { shape, lines }, Fidelity::default())
     }
 
     /// The block's current disclosure level (`0..=3`).
@@ -489,7 +478,7 @@ impl Block {
         let level = self.render_level(force_full);
         let mut lines = self.body(width, level);
         if let Some(kind) = self.rail_kind(level) {
-            let rail = rail::span(kind, self.agent, self.magnitude());
+            let rail = rail::span(kind, self.magnitude());
             // The common rail-seating path for every kind, so a body can never
             // hang inverted beneath the glyph again. Carve the rail's `RAIL_W`
             // gutter from the opening row — invisible where the row already
@@ -572,8 +561,9 @@ impl Block {
                 RailShape::Step => Some(RailKind::Step),
                 RailShape::Error => Some(RailKind::Error),
                 RailShape::Plain => None,
-                // The prompt's band is its mark; it wears no marginal rail.
-                RailShape::Prompt => None,
+                // The band is the prompt's body mark; the `❖` fence is its
+                // margin mark — a rare landmark, reinforced on both axes.
+                RailShape::Prompt => Some(RailKind::Prompt),
                 RailShape::Generic => Some(RailKind::Generic),
             },
         }
@@ -821,7 +811,7 @@ mod tests {
             start: 1,
             rows: vec![Row::Add("a new line".into()), Row::Add("another".into())],
         }];
-        Block::patch("src/lib.rs".into(), hunks, AgentSlot(0))
+        Block::patch("src/lib.rs".into(), hunks)
     }
 
     fn subagent_block() -> Block {
@@ -831,7 +821,6 @@ mod tests {
             None,
             Duration::from_secs(2),
             Fidelity::default(),
-            AgentSlot(0),
         )
     }
 
@@ -842,7 +831,6 @@ mod tests {
     fn markdown_is_inert_prose() {
         let mut block = Block::markdown(
             "# heading\n\nA paragraph of prose that the answer is to read.".into(),
-            AgentSlot(0),
             Fidelity::default(),
         );
         assert!(!block.dialable());
@@ -866,7 +854,6 @@ mod tests {
             "read lib".into(),
             "read src/lib.rs".into(),
             0,
-            AgentSlot(0),
         );
         for mut block in [tool, diff_block(), subagent_block()] {
             assert!(block.dialable());

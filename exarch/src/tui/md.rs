@@ -25,8 +25,6 @@ use super::rail::{desaturate, mix};
 /// against the column-0 chrome.
 pub(super) const MD_INDENT: u16 = 4;
 
-const CODE_BG: Color = Color::Rgb(28, 32, 42);
-
 /// The foreground assumed for spans with no explicit colour (plain prose
 /// rendered at the terminal default), so the fidelity drain has a concrete
 /// colour to desaturate. A degraded answer's prose must visibly lose its
@@ -123,19 +121,7 @@ fn drain_span(span: &mut Span<'static>, context: u8, echo: u8) {
         span.style.fg = Some(desaturate(fg, drain));
     }
     if echo > 0 {
-        span.style.bg = Some(mix(wash_from(span.style.bg), ECHO_WASH, echo as f32 / 2.0));
-    }
-}
-
-/// The concrete background a span's echo wash interpolates from: a span
-/// with no explicit field (the common case — plain prose, `Reset`) starts
-/// at black, so the wash reads at its full depth; one that already carries
-/// a field (a code span's `CODE_BG`) washes from that field, so the echo
-/// shade composes over the code colour rather than erasing it.
-fn wash_from(bg: Option<Color>) -> Color {
-    match bg {
-        Some(c) if c != Color::Reset => c,
-        _ => Color::Rgb(0, 0, 0),
+        span.style.bg = Some(mix(Color::Rgb(0, 0, 0), ECHO_WASH, echo as f32 / 2.0));
     }
 }
 
@@ -242,7 +228,7 @@ impl Composer {
             Event::Text(t) => self.text(&t),
             Event::Code(t) => self.push_span(Span::styled(
                 t.into_string(),
-                Style::default().fg(LIME).bg(CODE_BG),
+                Style::default().fg(LIME),
             )),
             Event::Html(t) | Event::InlineHtml(t) => self.text(&t),
             Event::SoftBreak => self.push_space(),
@@ -681,7 +667,7 @@ fn render_table<'a, I: Iterator<Item = Event<'a>>>(
             Event::Text(t) => cur_cell.push(Span::styled(t.into_string(), style)),
             Event::Code(t) => cur_cell.push(Span::styled(
                 t.into_string(),
-                Style::default().fg(LIME).bg(CODE_BG),
+                Style::default().fg(LIME),
             )),
             Event::SoftBreak | Event::HardBreak => cur_cell.push(Span::raw(" ".to_string())),
             _ => {}

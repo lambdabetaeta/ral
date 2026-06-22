@@ -302,7 +302,7 @@ impl Viewport {
         cmd: String,
         context: u8,
     ) {
-        self.push_block(Block::tool_call(tool, summary, cmd, context, self.agent));
+        self.push_block(Block::tool_call(tool, summary, cmd, context));
     }
 
     /// Append an async subagent's landed result as its own collapsible
@@ -316,15 +316,13 @@ impl Viewport {
         elapsed: Duration,
         fidelity: Fidelity,
     ) {
-        self.push_block(Block::subagent(
-            title, text, error, elapsed, fidelity, self.agent,
-        ));
+        self.push_block(Block::subagent(title, text, error, elapsed, fidelity));
     }
 
     /// Append a single-file diff block; it re-renders from its hunks at
     /// every width and disclosure level.
     pub(super) fn push_patch(&mut self, path: String, hunks: Vec<Hunk>) {
-        self.push_block(Block::patch(path, hunks, self.agent));
+        self.push_block(Block::patch(path, hunks));
     }
 
     /// Append a surfaced render document as its own block — a `card` of
@@ -333,7 +331,7 @@ impl Viewport {
     /// A surfaced card is the model's own communication, a barrier the
     /// coalescing projection never folds.
     pub(super) fn push_card(&mut self, card: Card) {
-        self.push_block(Block::card(card, self.agent));
+        self.push_block(Block::card(card));
     }
 
     /// Append a structural I/O effect card.  `write` marks a write redirect
@@ -341,14 +339,14 @@ impl Viewport {
     /// greps, and execs (`write == false`) are observations the projection
     /// folds under their call.
     pub(super) fn push_io_card(&mut self, card: Card, write: bool) {
-        self.push_block(Block::io_card(card, write, self.agent));
+        self.push_block(Block::io_card(card, write));
     }
 
     /// Append pre-rendered chrome (step header, error, banner, subagent
     /// breadcrumb, summary-less tool call).  `shape` lets the rail dispatch
     /// on the chrome sub-kind.
     pub(super) fn push_chrome(&mut self, shape: RailShape, lines: Vec<Line<'static>>) {
-        self.push_block(Block::chrome(shape, lines, self.agent));
+        self.push_block(Block::chrome(shape, lines));
     }
 
     /// Attach a tool result's magnitude — `text.lines().count()` — to the
@@ -390,7 +388,7 @@ impl Viewport {
             return;
         }
         let fidelity = self.commit_fidelity(&chunk, context_floor);
-        self.push_block(Block::markdown(chunk, self.agent, fidelity));
+        self.push_block(Block::markdown(chunk, fidelity));
     }
 
     /// Commit whatever remains in `open` as a final markdown block.
@@ -401,7 +399,7 @@ impl Viewport {
             return;
         }
         let fidelity = self.commit_fidelity(&leftover, context_floor);
-        self.push_block(Block::markdown(leftover, self.agent, fidelity));
+        self.push_block(Block::markdown(leftover, fidelity));
     }
 
     /// The fidelity to stamp on a committing markdown block: the turn-level
@@ -558,7 +556,7 @@ impl Viewport {
         }
         let magnitude = self.open.lines().count() as u32;
         Some(Line::from(vec![
-            rail::span(RailKind::Markdown, self.agent, Some(magnitude)),
+            rail::span(RailKind::Markdown, Some(magnitude)),
             size_bar(magnitude),
         ]))
     }
@@ -781,7 +779,7 @@ impl Viewport {
         let mut lines = group::body(&calls, level, width as usize);
         let open = level >= 2;
         let magnitude = group::aggregate_magnitude(&calls);
-        let rail = rail::span(RailKind::ToolCall(open), self.agent, magnitude);
+        let rail = rail::span(RailKind::ToolCall(open), magnitude);
         let idx = lines.iter().position(|l| !is_blank(l)).unwrap_or(0);
         if let Some(line) = lines.get_mut(idx) {
             line.spans.insert(0, rail);

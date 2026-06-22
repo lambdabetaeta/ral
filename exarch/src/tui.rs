@@ -1725,20 +1725,7 @@ fn legend_panel() -> Vec<Line<'static>> {
     ls.extend(line::legend_rows(
         rail::RAIL_SHAPES
             .iter()
-            .map(|(kind, name)| (*name, vec![rail::span(*kind, AgentSlot(0), None)]))
-            .collect(),
-    ));
-    ls.push(Line::default());
-    ls.push(head("rail · hue = which agent"));
-    ls.extend(line::legend_rows(
-        (0..AGENT_HUES.len())
-            .map(|slot| {
-                let label = if slot == 0 { "root" } else { "subagent" };
-                (
-                    label,
-                    vec![rail::span(RailKind::Generic, AgentSlot(slot as u8), None)],
-                )
-            })
+            .map(|(kind, name)| (*name, vec![rail::span(*kind, None)]))
             .collect(),
     ));
     ls.push(Line::default());
@@ -1750,7 +1737,7 @@ fn legend_panel() -> Vec<Line<'static>> {
         "small → large",
         [None, Some(4), Some(20), Some(80)]
             .into_iter()
-            .map(|mag| rail::span(RailKind::Patch, AgentSlot(0), mag))
+            .map(|mag| rail::span(RailKind::Patch, mag))
             .collect(),
     )]));
 
@@ -1766,10 +1753,9 @@ fn legend_panel() -> Vec<Line<'static>> {
     };
     ls.extend(line::legend_rows(vec![
         ("you", swatch("your prompt — a raised band", Some(line::PROMPT_BG))),
-        ("model", swatch("prose and tool intents — the base", None)),
         (
-            "shell",
-            swatch("read / grep / exec output — recessed, like code", Some(line::CODE_BG)),
+            "agent",
+            swatch("prose, tool intents, and shell output — the base", None),
         ),
     ]));
 
@@ -2643,16 +2629,19 @@ impl Repl<'_> {
     ///
     /// Reverse video means an active selection alone ([`App::paint_selection`]);
     /// no resting block borrows it. A human prompt echoes as the user's turn
-    /// on its cyan Generic rail; a wakeup is dim, marked chrome; an agent
-    /// reply is the same dialable `↘` block a synchronous child gets. A human
+    /// in its raised band ([`line::PROMPT_BG`]); a wakeup is dim, marked chrome
+    /// on the Generic rail; an agent reply is the same dialable `↘` block a
+    /// synchronous child gets. A human
     /// or wakeup whose text is a slash command runs that command instead of
     /// echoing — a wakeup's prompt may legitimately be `/clear` — while an
     /// agent reply is never a command and always proceeds.
     fn commit_turn(&mut self, turn: &Turn) -> Slash {
         let id = self.session.id;
         match turn {
-            Turn::Human(text) => self.echo_prompt(text, line::user_prompt(text)),
-            Turn::Wakeup(text) => self.echo_prompt(text, line::wakeup(text)),
+            Turn::Human(text) => {
+                self.echo_prompt(text, line::user_prompt(text), RailShape::Prompt)
+            }
+            Turn::Wakeup(text) => self.echo_prompt(text, line::wakeup(text), RailShape::Generic),
             Turn::Agent(r) => {
                 self.tui.handle(Event {
                     id,
@@ -2672,7 +2661,7 @@ impl Repl<'_> {
     /// pre-rendered `lines` onto the transcript and proceed to the model.
     /// `session.append_user` (inside `apply`) is what records the text
     /// model-side; this is the transcript echo alone.
-    fn echo_prompt(&mut self, text: &str, lines: Vec<Line<'static>>) -> Slash {
+    fn echo_prompt(&mut self, text: &str, lines: Vec<Line<'static>>, shape: RailShape) -> Slash {
         let trimmed = text.trim();
         if trimmed.is_empty() {
             return Slash::Continue;
@@ -2681,7 +2670,7 @@ impl Repl<'_> {
             return (cmd.run)(self, arg);
         }
         let id = self.session.id;
-        self.tui.app.push_chrome(id, RailShape::Generic, lines);
+        self.tui.app.push_chrome(id, shape, lines);
         Slash::Prompt
     }
 

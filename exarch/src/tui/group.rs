@@ -21,7 +21,7 @@
 //!   bar.
 //! - **L3, everything** — L2 plus each call's full ral `cmd` source.
 
-use super::line::{self, CODE_BG, RAIL_W, SLATE, push_wrapped};
+use super::line::{self, RAIL_W, SLATE, push_wrapped};
 use super::md;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -192,7 +192,7 @@ fn pinned_intent(
 ) -> Vec<Line<'static>> {
     let bars_left = (bar_last + 1).saturating_sub(bars_w);
     let body_w = bars_left.saturating_sub(lead_w + GAP).max(8);
-    let ink = Style::default().fg(Color::White);
+    let ink = Style::default().fg(SLATE);
     let mut out: Vec<Line<'static>> = Vec::new();
     push_wrapped(&mut out, intent, body_w, |chunk, first| {
         let mut row = if first {
@@ -224,7 +224,7 @@ fn source_rows(call: &Call) -> Vec<Line<'static>> {
         .map(|l| {
             Line::from(vec![
                 Span::raw(BODY_INDENT),
-                Span::styled(l.to_string(), Style::default().fg(Color::White).bg(CODE_BG)),
+                Span::styled(l.to_string(), Style::default().fg(Color::White)),
             ])
         })
         .collect()
@@ -264,17 +264,16 @@ fn bar(magnitude: Option<u32>) -> Span<'static> {
 
 /// Re-indent a call's pre-rendered effect rows by `indent`, dropping the
 /// leading blank `render_card` opens with so the effects sit flush under
-/// the intent rather than after a gap.  Each row is washed into the recessed
-/// [`CODE_BG`] stratum: an observation's read/grep/exec output is verbatim
-/// machine text, so it shares the register code lives in — distinct from the
-/// model's own intent and prose at the base level.
+/// the intent rather than after a gap.  The rows carry no background —
+/// observation output (read/grep/exec) reads as machine text from its rail
+/// shape and white ink, not a recessed background stratum.
 fn indent_rows(rows: &[Line<'static>], indent: &str) -> Vec<Line<'static>> {
     rows.iter()
         .filter(|l| !line::is_blank(l))
         .map(|l| {
             let mut spans = vec![Span::raw(indent.to_string())];
             spans.extend(l.spans.iter().cloned());
-            line::wash(Line::from(spans), CODE_BG, None)
+            Line::from(spans)
         })
         .collect()
 }

@@ -35,13 +35,19 @@ pub(super) const PURPLE: Color = Color::Rgb(175, 145, 210);
 pub(super) const ORANGE: Color = Color::Rgb(215, 145, 115);
 pub(super) const RED: Color = Color::Rgb(215, 110, 125);
 pub(super) const SLATE: Color = Color::Rgb(140, 150, 170);
-pub(super) const CODE_BG: Color = Color::Rgb(36, 38, 46);
-/// The human turn's raised, achromatic background stratum.  Agents own the
-/// chromatic foreground (the rail hues); the one party that is not an agent
-/// owns the achromatic background — a band lighter than both the base and the
-/// recessed [`CODE_BG`] machine-text register, so a submitted prompt reads as
-/// a found-at-a-glance landmark by common region.
-pub(super) const PROMPT_BG: Color = Color::Rgb(54, 58, 70);
+/// The human turn's raised, faintly cool background stratum — the *sole*
+/// background register.  Agents own the chromatic foreground (the rail
+/// hues), and machine text reads from the rail shape plus its white/lime
+/// ink, so the background plane carries one distinction only: the one party
+/// that is not an agent.  A band clearly lifted above the base, so a
+/// submitted prompt reads as a found-at-a-glance landmark by common region.
+pub(super) const PROMPT_BG: Color = Color::Rgb(72, 78, 94);
+/// The human's rail-fence ink — the `❖` marking a prompt in the rail
+/// thumbnail.  A light cool neutral, distinct from the agent rail's [`SLATE`]
+/// and bright enough to read on the [`PROMPT_BG`] band: the human owns a
+/// neutral tone, agents own the matrix hues, so the fence never reads as just
+/// another agent's mark.
+pub(super) const PROMPT_INK: Color = Color::Rgb(170, 180, 200);
 /// Agent rail palette: one hue per producing agent, indexed by
 /// [`super::block::AgentSlot`]. Root keeps [`CYAN`] — the existing rail
 /// accent — so a root-only session is visually unchanged in hue. The
@@ -224,11 +230,11 @@ pub(super) fn step(_n: usize) -> Vec<Line<'static>> {
 /// landmark by common region — no marginal rail glyph, the band is the mark.
 /// Reverse video stays reserved for an active selection alone
 /// ([`super::App::paint_selection`]); the band is a fill, not an inversion.
-/// The body is bold and flush-left, every line banded alike.
+/// The body is flush-left at regular weight — the band carries the emphasis,
+/// so the text needs none — every line banded alike.
 pub(super) fn user_prompt(s: &str) -> Vec<Line<'static>> {
-    let body = Style::default().add_modifier(Modifier::BOLD);
     let mut ls: Vec<Line<'static>> = vec![Line::default()];
-    ls.extend(s.lines().map(|l| Line::from(Span::styled(l.to_string(), body))));
+    ls.extend(s.lines().map(|l| Line::from(Span::raw(l.to_string()))));
     ls
 }
 
@@ -260,8 +266,8 @@ pub(super) fn wakeup(s: &str) -> Vec<Line<'static>> {
 /// the same raised band as the committed prompt echo ([`wash`] with
 /// [`PROMPT_BG`]), so your text reads as one stratum whether it is still
 /// waiting to be sent or already landed — and, like that echo, leaves reverse
-/// video to an active selection alone.  Bold and flush-left, wrapped to
-/// `width` columns.  Capped at `max_rows` total — a longer queue closes with
+/// video to an active selection alone.  Flush-left at regular weight, wrapped
+/// to `width` columns.  Capped at `max_rows` total — a longer queue closes with
 /// a `⋯ (N more)` line so it can never crowd the transcript off-screen.
 pub(super) fn queued_prompt(
     messages: &[String],
@@ -269,13 +275,12 @@ pub(super) fn queued_prompt(
     max_rows: usize,
 ) -> Vec<Line<'static>> {
     let w = width as usize;
-    let body = Style::default().add_modifier(Modifier::BOLD);
     let more = Style::default().fg(SLATE).add_modifier(Modifier::ITALIC);
     let mut out: Vec<Line<'static>> = Vec::new();
     for msg in messages {
         for raw in msg.lines() {
             push_wrapped(&mut out, raw, w, |chunk, _first| {
-                wash(Line::from(Span::styled(chunk, body)), PROMPT_BG, Some(w))
+                wash(Line::from(Span::raw(chunk)), PROMPT_BG, Some(w))
             });
         }
     }
@@ -396,10 +401,10 @@ fn tool_call_body(
 }
 
 /// Wash `row` with the background `bg`, preserving every span's foreground
-/// and modifiers — the single place a background stratum is painted, shared
-/// by the human turn's band, an observation's machine-text panel, and a code
-/// block.  `fill_to` pads the row to that display width so the wash reads
-/// edge-to-edge (a band); `None` lets it hug the spans (an inset panel).
+/// and modifiers — the single place a background stratum is painted, now the
+/// human turn's band alone (and the `/legend` swatches that sample it).
+/// `fill_to` pads the row to that display width so the wash reads edge-to-edge
+/// (a band); `None` lets it hug the spans (a swatch).
 pub(super) fn wash(row: Line<'static>, bg: Color, fill_to: Option<usize>) -> Line<'static> {
     let used: usize = row
         .spans
@@ -422,8 +427,9 @@ pub(super) fn wash(row: Line<'static>, bg: Color, fill_to: Option<usize>) -> Lin
 /// Append one source row to an expanded tool call.  The visible code block
 /// has a fixed two-column inset; wrapped continuation rows then repeat the
 /// source line's own leading whitespace so a long expression folds beneath
-/// the place where its content began, not back at column zero.  Each row is
-/// washed into the recessed [`CODE_BG`] machine-text stratum.
+/// the place where its content began, not back at column zero.  The rows
+/// carry no background — the rail shape and the white code ink mark them as
+/// machine text.
 fn push_code_row(ls: &mut Vec<Line<'static>>, line: &str, width: u16) {
     const CODE_INDENT: &str = "  ";
     let body_start = line
@@ -436,14 +442,10 @@ fn push_code_row(ls: &mut Vec<Line<'static>>, line: &str, width: u16) {
     let prefix_w = UnicodeWidthStr::width(prefix.as_str());
     let body_w = (width as usize).saturating_sub(prefix_w).max(8);
     push_wrapped(ls, body, body_w, |chunk, _first| {
-        wash(
-            Line::from(vec![
-                Span::raw(prefix.clone()),
-                Span::styled(chunk, Style::default().fg(Color::White)),
-            ]),
-            CODE_BG,
-            None,
-        )
+        Line::from(vec![
+            Span::raw(prefix.clone()),
+            Span::styled(chunk, Style::default().fg(Color::White)),
+        ])
     });
 }
 
@@ -702,7 +704,7 @@ fn push_gutter_row(
 fn role_style(role: Role) -> Style {
     match role {
         Role::Path => Style::default().fg(CYAN),
-        Role::Code => Style::default().fg(Color::White).bg(CODE_BG),
+        Role::Code => Style::default().fg(Color::White),
         Role::Ok => Style::default().fg(LIME).add_modifier(Modifier::BOLD),
         Role::Warn => Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
         Role::Bad => Style::default().fg(RED).add_modifier(Modifier::BOLD),
