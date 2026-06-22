@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 462afa4
-generated_at_date: 2026-06-19
+generated_at_commit: 1baac6d
+generated_at_date: 2026-06-22
 covers_paths: [exarch/src/card.rs, exarch/src/tui/line.rs, exarch/src/tui/block.rs, exarch/src/tui/viewport.rs, exarch/data/agent.ral, kit/tasks.ral]
 ---
 
@@ -29,8 +29,7 @@ A `` `card `` is a `List` of marks rendered top-to-bottom on one scrollback
   a hue, never a magnitude. A heading is a `strong` span.
 - **`measure`** `[label, value, max?, unit?]` — the quantitative mark, two
   ordered variables (size + value/lightness). Bounded (`max` present) → a
-  proportional fill bar (the old progress meter); unbounded → a `log2` size bar
-  (the old header bar).
+  proportional fill bar; unbounded → a `log2` size bar.
 - **`fields`** — the matrix mark: an aligned `(label, value)` table in one shared
   label column (Bertin's selective alignment). A value nests a `text` or
   `measure` mark.
@@ -47,17 +46,17 @@ Composability is one rule at three scales: the plane stacks marks (`card`),
 ## Decode — `value_to_card`
 
 `value_to_card` (`card.rs`) is the card decoder, reading marks off the runtime
-`Value` the way the old `value_to_kind` read fields (a sibling `value_to_io`
-decodes core's I/O events — [[map/exarch/io-surface|io-surface]]). The wire shape is
+`Value`; the sibling `value_to_io` decodes core's I/O events first
+([[map/exarch/io-surface|io-surface]]). The wire shape is
 `Variant{label:"card", payload: List<mark>}`; each mark is `Variant{label,
 payload: Map}`. A bare known mark surfaced unwrapped (`` `diff [...] ``) is
-lifted into a one-mark card for convenience; any other top-level value is
-dropped, exactly as the old decoder dropped an unrecognised variant. Decoding
-never fails *within* a recognised card: an unknown mark label or role degrades
-to plain `text`, because a card is a deliberate user-facing act, not a sentinel
-that might be malformed. The `diff` mark accepts either a `hunks` list or the
-flat single-hunk fields (`start`/`before`/`del`/`add`/`after`), the form the
-`edit` builtin emits.
+lifted into a one-mark card for convenience; any other top-level value returns
+`None` and is dropped. Decoding never fails *within* a recognised card: an
+unknown mark label or role degrades to plain `text`, because a card is a
+deliberate user-facing act, not a sentinel that might be malformed. The `diff`
+mark reads a `path` and a `hunks` list — each hunk a `start` line and a `rows`
+list of `{tag, text}` records — the whole-file shape the `edit` builtin emits;
+a missing `hunks` lifts to empty so a bare diff still renders.
 
 `AgentSink::emit` ([[map/exarch/shell-eval|shell-eval]]) is a two-decoder sink: an
 `io`-keyed value goes through `value_to_io`/`io_card` to a `Kind::Io`
@@ -71,31 +70,39 @@ flat single-hunk fields (`start`/`before`/`del`/`add`/`after`), the form the
 is the **single place hue lives** for kit content, so the kit can name a role but
 never a colour, and magnitude can never land on hue — the encoding is correct by
 construction. The quantitative encoders are reused, not duplicated: `measure`
-calls the generalised `size_bar`/`progress_bar`, `diff` calls the patch body
-(`diff_body`), and `fields` plus `provider_error` both feed the shared
-`render_field_rows`/`push_field` matrix primitive — folding `provider_error` into
-the `fields` path and killing the duplicate label-column logic. The header label
-reads `diff`.
+calls the generalised `size_bar`/`progress_bar` through `measure_value_spans`,
+`diff` calls the patch body (`diff_body`), and `fields` plus `provider_error`
+both feed the shared `render_field_rows`/`push_field` matrix primitive — so
+`provider_error` is one internal caller of the `fields` path, not a duplicate
+label-column. The diff header label reads `diff`.
 
 `render_card` opens with the single leading blank every block wears; the
 data-encoding rail span is prepended by the [[map/exarch/frontend|block]] to the
-first content row.
+first content row. A diff-less card the model *surfaced* deliberately renders
+through `render_card_framed` instead — an indented box with its heading lifted
+into the top rule, no rail glyph (the frame is its mark, see
+[[map/exarch/frontend|frontend]]).
 
 ## Block — derived disclosure and aggregation
 
-`BlockKind::Card(Card)` (`tui/block.rs`) replaces the old `Patch` variant and the
-`task`/`meter`/`wrote` chrome. Disclosure is **derived**, not named: a card
-holding a `diff` is dialable (`dialable()` → `Card::has_diff()`) and renders
-L1 header / L3 full; a card of only `text`/`fields`/`measure`/`raw` is
-chrome-level (L3-only, inert). The rail shape is `▎` for a diff card, `❖` for a
-diff-less one. `magnitude()` is the summed diff magnitude, feeding the rail's
-value-step and the agent matrix's size readout.
+`BlockKind::Card{card, origin}` (`tui/block.rs`) carries the render document and
+a `CardOrigin` (`Observation`/`Write`/`Surfaced`) telling the coalescing
+projection whether the card is a foldable effect or a barrier. Disclosure is
+**derived**, not named: a card holding a `diff` is dialable (`dialable()` →
+`Card::has_diff()`) and renders L1 header / L2 first-hunk / L3 full; a card of
+only `text`/`fields`/`measure`/`raw` is chrome-level (L3-only, inert). The rail
+shape is `▎` for a diff card, the neutral `❖` for a folded observation/write
+card, and none for a framed surfaced card. `magnitude()` is the summed diff
+magnitude, feeding the rail's value-step and the agent matrix's size readout;
+`lines_changed()` exposes the same diff total as the matrix's write footprint,
+distinct from prose volume.
 
 A single-`diff` card joins the patch-grouping buffer in `tui.rs`
 (`Card::into_single_diff` → `absorb_patch`/`patch_buf`): consecutive same-`(id,
-path)` diff cards merge their hunks into one `▎ diff <path>` block, the way a
+path)` diff cards merge their hunks into one `diff <path>` block, the way a
 unified diff presents one file. Every richer card is its own block, pushed via
-`Viewport::push_card`.
+`Viewport::push_card` (`tui/viewport.rs`); an I/O effect lands via
+`push_io_card`.
 
 ## Machine log
 
@@ -105,14 +112,21 @@ honestly so. The stderr condenser (`card_stderr`) walks marks generically.
 
 ## Kit side
 
-The tasks library holds small constructors so the mark grammar lives in one ral
-place: `task-card`/`meter-card` in `kit/tasks.ral` (the kit owns the status→role
-mapping, since the host knows only the closed role set), surfaced per transition.
-The agent library's `edit` is now a Rust builtin
-([[map/exarch/io-surface|io-surface]]) that builds its own `diff` card Rust-side;
-the read/write redirect and exec cards are likewise composed from core's I/O
-events, not by ral constructors — so the dormant `patch-card`/`wrote-card` ral
-helpers are gone.
+The kit declares data and its level of measurement; the host binds it to visual
+variables, and with no host `surface` is the identity, so a kit stays runnable in
+a bare ral REPL. The tasks library holds the small constructors so the mark
+grammar lives in one ral place: `task-card`/`meter-card` in `kit/tasks.ral` (the
+kit owns the status→role mapping, since the host knows only the closed role set),
+surfaced per transition through `transition`/`add-task`/`surface-progress`.
+
+The agent library's surfacing constructors are gone: `edit`, `grep-files`, and
+`window-hash` are Rust host builtins ([[map/exarch/io-surface|io-surface]]),
+their file I/O sunk below the redirect frame so each is one logical surface.
+`edit` builds its whole-file `diff` card Rust-side (one canonical original-vs-
+final diff grouped into hunks by `similar`); the read/write redirect and exec
+cards are likewise composed from core's I/O events. `agent.ral` now carries only
+the `view`/`view-around` line readers over the `window-hash` builtin and the
+`_rows` faithful split.
 
 One ral constraint shapes the wire format: lists and records are statically
 **homogeneous**. Heterogeneous *variant* lists are fine (ral unifies them into a
@@ -129,4 +143,5 @@ marks, the roles, and this constraint.
 decision), [[decisions/260618_tui-transcript-as-graphic|tui-transcript-as-graphic]]
 (the chrome-side Bertin encoding this extends), [[map/exarch/frontend|frontend]]
 (the bus / block / line arm this re-grounds), [[map/exarch/shell-eval|shell-eval]]
-(the host sink that decodes the card), [[map/exarch|map: exarch]].
+(the host sink that decodes the card), [[map/exarch/io-surface|io-surface]] (the
+core I/O events the sibling decoder turns into cards), [[map/exarch|map: exarch]].

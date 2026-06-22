@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 7ba500b
-generated_at_date: 2026-06-17
+generated_at_commit: 1baac6d
+generated_at_date: 2026-06-22
 covers_paths: [ral/src/jobs.rs]
 ---
 
@@ -33,3 +33,13 @@ taken down in three steps:
 Windows has no SIGTSTP analogue, so that state cannot arise spontaneously; the
 table still compiles and operates cfg-free, with `fg` blocking on the leader's
 handle and `cleanup` routed through the Job Object's KILL_ON_JOB_CLOSE flag.
+
+On Unix, **`fg` resumes a parked group only through a held terminal lease**: the
+controlling-terminal handoff is an unforgeable [[map/core/shell-state|TerminalLease]]
+the turn is given, not a predicate `wait_foreground` re-derives. The accessor
+yields `Some(&TerminalLease)` only when the installed turn's access permits and
+the session owns the lease (see [[decisions/260619_terminal-lease|terminal-lease]]);
+the [[map/core/io-process|ForegroundGuard]] acquires `tcsetpgrp` + the termios
+snapshot only on that borrow. Without a lease — a non-interactive resume — there
+is no tty dance to do, so `fg` still SIGCONTs the whole `-pgid` and waits but
+skips the handoff.

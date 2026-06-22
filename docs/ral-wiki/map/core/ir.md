@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 7ba500b
-generated_at_date: 2026-06-17
+generated_at_commit: 1baac6d
+generated_at_date: 2026-06-22
 covers_paths: [core/src/ir.rs]
 ---
 
@@ -26,9 +26,12 @@ Because the inference pass is unconditional — every evaluated IR is annotated
 ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]) — the mode
 slots are not optional: "the checker has not run yet" is not a representable state.
 
-- `CompKind::Pipeline` is a struct variant `{ stages, wires: Vec<Wire> }` — one
-  `Wire` per stage. The elaborator fills it with `Wire::EMPTY` placeholders that the
-  annotation pass overwrites wherever inference visited.
+- `CompKind::Pipeline` is a struct variant `{ stages, wires: Vec<Wire>, stage_types: Vec<Ty> }`
+  — one `Wire` and one `Ty` per stage, both parallel to `stages`. `wires` carries the
+  ground byte channel; `stage_types` carries the inferred *value* type that flows out of
+  each stage. The elaborator fills `wires` with `Wire::EMPTY` and `stage_types` with `Unit`
+  placeholders that the annotation pass overwrites wherever inference visited
+  ([[map/core/typecheck|typecheck]]).
 - `CompKind::Bind` carries `rhs_output: ByteMode` — the bound computation's ground
   output mode, the one bit `eval_bind_rhs` reads to decide stdout capture.
 

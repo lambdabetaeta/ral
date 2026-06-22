@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 7ba500b
-generated_at_date: 2026-06-17
+generated_at_commit: 1baac6d
+generated_at_date: 2026-06-22
 covers_paths: [core/src/syntax/]
 ---
 
@@ -12,7 +12,9 @@ sees raw bytes and bare words.
 - `lexer.rs` — `lex(source) -> Result<Vec<(Token, Span)>, LexError>`; the
   `Token` enum.
 - `parser.rs` — `parse(source) -> Result<Vec<Stmt>, ParseError>`; `parse_with`
-  carries a `FileId`.
+  carries a `FileId`. A digit glued to a comparison operator inside `$[…]`
+  (`$[2>3]`, lexed as the file-descriptor redirect `2>`) earns a diagnostic
+  that names the shape and asks for spaces, not a bare "redirect" token.
 - `ast.rs` — the surface AST. `Ast` is the expression node and `Stmt` the
   statement node; the enum is deliberately wide and flat
   ([[decisions/260530_ast-stays-flat|ast-stays-flat]]).
@@ -21,6 +23,18 @@ sees raw bytes and bare words.
 - `quote.rs` — bare-word classification (`is_bare_word`, `quote_word`,
   `quote_word_if_needed`), shared with the [[map/repl|REPL]].
 - `tag.rs`, `free_refs.rs` — variant-label tagging and free-reference scans.
+
+**Recursion is bounded by a single shared depth cap, so adversarial nesting
+rejects cleanly instead of overflowing the stack.** One `NESTING_DEPTH_LIMIT`
+governs both stages.
+- The lexer enforces it at `scan_token_group`, the sole recursion through
+  bracketed token groups.
+- The parser's three mutually-recursive sub-grammars each descend through
+  exactly one guarded chokepoint, all counting against `Parser::nested`'s
+  shared `depth`: values through `parse_primary`, arithmetic through
+  `parse_expr_atom` (the unary prefixes `-` / `not` and parenthesised
+  sub-expressions bottom out here), patterns through `parse_pattern` (list and
+  map patterns recurse back through it per element).
 
 A command's pipe modes are the modal projection of its declared type, read
 once: a builtin's boundary `PipeSpec` is `sig_pipe_spec` (the streaming reducer

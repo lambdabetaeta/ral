@@ -1,17 +1,18 @@
 ---
-generated_at_commit: 295fe5b
-generated_at_date: 2026-06-20
+generated_at_commit: 1baac6d
+generated_at_date: 2026-06-22
 covers_paths: [core/src/runtime/command/io_event.rs, core/src/runtime/command/redirect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/uutils.rs, core/src/types/shell/mod.rs, exarch/src/card.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/headless.rs, exarch/src/agent_builtins.rs, clippy.toml, core/tests/io_door_set.rs]
 ---
 
 # Map: exarch / io surface
 
 Every redirect read (`<`), every redirect write (`>` family), and every external
-or bundled exec image the model launches surfaces on the rail — one card per
-logical operation. Coverage is a property of the **runtime**, not of kit
-discipline: the hooks sit at the evaluator doors where the operation actually
-happens, so a read/write/exec surfaces no matter which helper — or no helper —
-issued it. Core emits a structural **I/O event** (a plain `Value` naming the
+or bundled exec image the model launches surfaces on the rail — **one structural
+event per logical operation**, the rail then coalescing a burst into one card per
+kind. Coverage is a property of the **runtime**, not of kit discipline: the hooks
+sit at the evaluator doors where the operation actually happens, so a
+read/write/exec surfaces no matter which helper — or no helper — issued it. Core
+emits a structural **I/O event** (a plain `Value` naming the
 operation); exarch binds it to a card from the existing
 [[map/exarch/cards|mark grammar]], exactly as it already binds a kit `` `card ``
 ([[decisions/260619_surface-carries-documents|surface-carries-documents]]). The
@@ -80,13 +81,29 @@ raw structural event and the rendered mark tree. Anything else falls back to
 degradation as before.
 
 `io_card` adds **zero new marks** — each event is one `text` mark of roled spans
-([[map/exarch/cards|cards]]): read is a `muted` `<` glyph + a `path` span; write
-is `>` + `path` + the mode + an outcome span roled `ok`/`warn`/`bad` for
-committed/aborted/failed; exec is the program as `path`, the args as `code`, and
-the status roled `ok`/`bad`; grep is the pattern as `code` over the cwd scope. No
-file-size or byte-count `measure` is ever surfaced. The TUI renders `Kind::Io`
-through the identical `render_card` path as `Kind::Card`, so width-reflow and
-the rest are free.
+([[map/exarch/cards|cards]]). The operation is a *nominal category*, so it is
+carried by a word, not a mirror-orientation glyph: read is a `muted` `Read:` label
++ a `path` span; write is `muted` `Write:` + `path` + the mode in parentheses +
+an outcome span roled `ok`/`warn`/`bad` for committed/aborted/failed; exec keeps
+the conventional `$` prompt, the program as `path`, each arg as plain ink, and a
+`→ status` tail roled `ok`/`bad`; grep is a `grep` verb, the pattern as `code`,
+and the cwd scope as `path`. `Role::Path` carries a real hue (cyan), so the
+subject of every row stands as figure against the muted label and the body prose.
+No file-size or byte-count `measure` is ever surfaced.
+
+The TUI renders `Kind::Io` not one card per event but **grouped by kind**. Core
+surfaces each effect as its own `Kind::Io`, so a burst would read as `Read…`,
+`$…`, `Read…`, `$…` — noisy clutter at the rail. An `IoBuf` (`tui.rs`, beside the
+patch buffer but kept separate, its keys differing) buckets a consecutive run —
+even *interleaved*, order-independent — into four deduped buckets (reads by path,
+execs by argv, greps by `(scope, pattern)`, writes by path keeping the latest
+outcome), flushed at the four turn boundaries through `io_group_card` into **one
+card per non-empty kind** in a fixed Read → Exec → Grep → Write order. Each group
+reuses the exact `io_card` span vocabulary, so a lone surface renders identically;
+the one departure is that the exec group **drops the `→ status` tail** — a comma-
+joined run reads as the *set* of commands run, and per-command status survives in
+the structured event. The render path is shared with `Kind::Card` (`render_card`),
+so width-reflow and the rest are free.
 
 ## One surface per operation — bulk plumbing below the ral line
 
@@ -100,11 +117,12 @@ frame:
 
 - **`grep-files`** folds the witness stamp into the search's single pass: one
   `fs::read` per matched file (the `search_tree` walk reads the bytes the search
-  already needs), `window_hash` stamped on each hit from the same rows, and **one**
-  `{io:"grep", scope, pattern}` surface for the whole logical search — not one
-  read card per file. A matched file that is not valid UTF-8 (un-editable) is
-  *flagged* with an empty witness rather than failing the search; the old strict
-  re-read and its error path are gone.
+  already needs), `window-hash` stamped on each hit from the same rows, and **one**
+  `{io:"grep", scope:".", pattern}` surface for the whole logical search — not one
+  read card per file. A matched file that is not valid UTF-8 (un-editable, so
+  `edit` can never touch it) is *flagged* with an empty-string witness — a value
+  no `window-hash` ever produces, unmistakably "no witness" — rather than failing
+  the whole search.
 - **`window-hash`** is now a Rust fold over the resident `line-hash`, shared by
   `grep-files` and `edit` — one implementation across the boundary, not a WET
   copy.
@@ -150,12 +168,14 @@ child-wait.
   would break the build on vendored code.
 - **Each door is accounted for, surfacing or silent (reasoned allow).** Each
   allowlisted site carries an `#[allow(clippy::disallowed_methods, reason = …)]`
-  whose reason opens with a stable tag — `[io-door:surfacing:…]` (the redirect,
+  whose reason opens with a stable tag — `[io-door:surface:<slug>]` (the redirect,
   exec, grep, and edit doors that fuse a surface into the operation),
-  `[io-door:silent:…]` (fs work that is not the model's data I/O —
+  `[io-door:silent:<slug>]` (fs work that is not the model's data I/O —
   canonicalisation, `which` probes, module loading, stat predicates, capability
-  load, sandbox respawn/exec, prelude bake, exarch/ral infra), or
-  `[io-door:test:…]`. So silence is a written decision, not an omission.
+  load, sandbox respawn/exec, prelude bake, exarch/ral infra), or `[io-door:test]`
+  (test scaffolding, blanket-allowed and not a door). The slug is unique within
+  its file, so the tag is stable across line shifts. So silence is a written
+  decision, not an omission.
 
 A meta-test pins it: `core/tests/io_door_set.rs` walks the production `src/`,
 checks every door allow is well-formed, and asserts the surface/silent door set

@@ -2960,6 +2960,377 @@ Studied the sync/async `agent` asymmetry and unified the incidental duplication 
 
 Implemented [[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]] (status → active): a `SessionBus` owns the channel and inbox, borrowed by `pump`/`run_turn`; the TUI mints a session-lived bus so a detached async `agent` streams a live tab, headless keeps a per-turn bus (muted), `drain_pass` latches `done` so a turn ends under a background flood, the idle wait gains the bus as a third source, and `/clear` retires live tabs through the linger window. Re-stamped [[map/exarch/frontend|frontend]], [[map/exarch/session|session]], and [[map/exarch/tools|tools]] (the `PromptQueue`→`Inbox` and sync-only-`agent` descriptions were stale) and updated [[index|index]].
 
+## [2026-06-22] ingest | transcript-as-graphic rework re-ingested into frontend
+
+Re-stamped [[map/exarch/frontend|frontend]] to `@1baac6d` after the [[decisions/260618_tui-transcript-as-graphic|tui-transcript-as-graphic]] rework's remaining phases landed (now 0–7). The TUI section now states the two-voice model — human band vs agent field encoded on orthogonal foreground/background planes, machine text washed into a recessed panel and the human prompt fenced as a raised band — the per-tab agent hue (now read from `Viewport::agent`, not per-block), the in-flight reply rendered as a growing magnitude seat, surfaced general cards framed as bounded objects, the synchronized-update bracket and head-anchored tail that steady the frame under streaming tool calls, and the scroll offset mapped onto ratatui's scrollbar range; the `user.log` paragraph notes the `/export` copy now living beside the tee writer as one I/O door. Updated [[index|index]].
+
+## [2026-06-22] ingest | cards re-ingested at HEAD (32 commits stale)
+
+Re-stamped [[map/exarch/cards|cards]] to `@1baac6d` after the
+[[decisions/260619_surface-carries-documents|surface-carries-documents]] model
+drifted 32 commits. The kit-side prose was the stale part: `edit`, `grep-files`,
+and `window-hash` are now Rust host builtins ([[map/exarch/io-surface|io-surface]]),
+so `agent.ral` carries only `view`/`view-around`, and the `diff` mark decodes the
+`hunks`-list shape `edit` emits (the flat single-hunk form is gone). Also folded
+in derived disclosure / aggregation as built (`CardOrigin`, `render_card_framed`,
+`absorb_patch`) and de-archeologised the decode prose. `cards` is not listed in
+[[index|index]], so index.md was left untouched.
+
+## [2026-06-22] ingest | io-surface re-ingested at HEAD (23 commits stale)
+
+Re-stamped [[map/exarch/io-surface|io-surface]] to `@1baac6d` after the
+[[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]] area
+drifted 23 commits. The rendering prose was the stale part: a Bertin pass replaced
+the `<`/`>` read/write glyphs with dim `Read:`/`Write:` words and lifted
+`Role::Path` to cyan, exec args now render as plain ink (not `code` spans), and the
+TUI coalesces an interleaved I/O burst into one grouped card per kind via
+`io_group_card` (the exec group dropping its per-command status tail). Corrected
+the Enforcement reason-tag taxonomy to the actual tags — `[io-door:surface:<slug>]`
+/ `[io-door:silent:<slug>]` / `[io-door:test]`. Fixed the orphan defect in
+[[index|index]]: both [[map/exarch/io-surface|io-surface]] and
+[[map/exarch/cards|cards]], which existed but were missing from the `map/` → exarch
+catalog, now have entries stamped `@1baac6d`.
+
+## [2026-06-22] ingest | loop re-ingested at HEAD (21 commits stale)
+
+Re-stamped [[map/repl/loop|loop]] to `@1baac6d` after the run-turn cutover and
+the structural-frontend series drifted it 21 commits. The "One input" prose was
+the stale part: a REPL turn no longer calls `compile_and_typecheck` /
+`eval_top_level` itself — `execute_input` builds a `TurnRequest` and enters core
+through the framed `run_source_turn` door, matching one flat `TurnReport`, with
+prompt thunks, rc startup, and plugin hooks entering through `run_value_turn`
+under `Denied` ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]],
+[[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]],
+[[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]],
+[[decisions/260617_turn-local-state|turn-local-state]]). Added the selectable
+`Frontend` (minimal / readline / structural, `--surface` and rc `surface:`),
+linking the structural surface out to [[map/repl/frontend|frontend]], and folded
+the SIGQUIT root-abort, the `set_stdout` printer wiring, and the `surface:` rc
+key into the page. Updated [[index|index]].
+
+## [2026-06-22] ingest | shell-state re-ingested at HEAD (19 commits stale)
+
+Re-stamped [[map/core/shell-state|shell-state]] to `@1baac6d` after the run-turn
+cutover and the terminal-lease / same-thread-body series drifted it 19 commits.
+The `Shell` is now split by lifetime into four fields — `Mobile`, `TurnState`,
+`SessionState`, `LocalState` — so the page records where each datum lives: the
+`surface` sink and `TerminalAccess` are turn-local, the `terminal_lease` and
+durable cancel root are session-durable, and audit / REPL scratch are local
+([[decisions/260617_turn-local-state|turn-local-state]],
+[[decisions/260619_terminal-lease|terminal-lease]]). Added that a same-thread
+thunk body runs in the caller's session by swapping only `Mobile`
+([[decisions/260620_same-thread-body-shares-the-session|same-thread-body-shares-the-session]]),
+that handler and alias arms are lambdas with a fixed `HandlerArity`
+([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]),
+and the host-embedding accessors (`host.rs`, `TerminalLoan`). Updated
+[[index|index]].
+
+## [2026-06-22] ingest | exarch hub re-ingested at HEAD (15 commits stale)
+
+Re-stamped [[map/exarch|exarch]] to `@1baac6d`, refocusing the hub on the
+binary's front door: pre-`main` dispatch normalised to `Option<u8>` and shared
+by `main` and every test ctor, the `login`/`logout`/`accounts` subcommands now
+that several ChatGPT accounts are each a selectable provider, bootstrap's
+machine probing through the renamed `ral_core::driver::boot_shell` (with
+`ral_core::host` owning the probes), and the scratch / run-log dirs. Rewrote the
+system-prompt section around the assembly order (persona, `Grant`, `Host`,
+`Ral`, `Script style`, `Headless`), reframed around definitions rather than
+bindings, the surface render-document model
+([[decisions/260619_surface-carries-documents|surface-carries-documents]]),
+lambda-only handlers
+([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]),
+and the `--allow-schedule` scheduled-wakeups affordance
+([[decisions/260617_scheduled-wakeups|scheduled-wakeups]]). Updated
+[[index|index]].
+
+## [2026-06-22] ingest | runtime re-ingested at HEAD (14 commits stale)
+
+Re-stamped [[map/core/runtime|runtime]] to `@1baac6d`. Confinement moved off
+`transport::dispatch` — a grant body now always evaluates locally
+([[decisions/260610_value-edge-locality|value-edge-locality]]) and the OS
+sandbox is entered per-command at external dispatch in `command::build_command`
+([[decisions/260617_sandbox-external-children|sandbox-external-children]]).
+Bundled coreutils/ripgrep heads run as `--ral-bundled-tool` exec images
+whenever process semantics are required, keeping the inline `uumain` placement
+only for a clean terminal and serialising the uucore exit-code cell across
+threads ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]]);
+redirect reads/writes and exec completions now surface at runtime I/O doors
+(`command/io_event.rs`), with the event shapes and card rendering in
+[[map/exarch/io-surface|io-surface]]
+([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]]).
+Corrected the module map (`command.rs` owns the External arm beside the
+`command_call.rs` dispatcher; `reexec_child_shell` lives in `subprocess.rs` and
+is driven by `child_eval.rs`) and recorded lambda-only handlers/aliases
+([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
+Updated [[index|index]].
+
+## [2026-06-22] ingest | startup re-ingested at HEAD (11 commits stale)
+
+Re-stamped [[map/repl/startup|startup]] to `@1baac6d`. Batch execution no longer
+calls `eval_top_level`: `run_batch` now enters core through the framed
+`Shell::run_source_turn` door, scoring its two-armed `TurnReport`
+([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]],
+[[decisions/260618_run-turn-host-loop|run-turn-host-loop]],
+[[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]]), and the
+foreground handoff is gated on a held `TerminalLease` via the request's
+`RequestedTerminalAccess` ([[decisions/260619_terminal-lease|terminal-lease]]).
+The interactive frontend is chosen by `--surface` (not `RAL_SURFACE`), the argv
+terminator's value-flag set is derived from clap, the prelude/Shell-embedding API
+moved `host` → `driver` (machine probing split into `core::host`), and the
+pre-clap chain gained confined-child tails (`--ral-sandbox-exec`,
+`--ral-bundled-tool`) normalised to `u8`. Updated [[index|index]].
+
+## [2026-06-22] ingest | capabilities re-ingested at HEAD (10 commits stale)
+
+Re-stamped [[map/core/capabilities|capabilities]] to `@1baac6d`. The OS sandbox's
+platform reality is sharpened: macOS-only re-exec items (`--ral-sandbox-exec`,
+`verify_unswapped`) are now `cfg(target_os = "macos")`-gated, and Windows fails
+closed at `maybe_enter_process_sandbox` — a requested policy it cannot enforce
+errors rather than running unconfined
+([[decisions/260617_sandbox-external-children|sandbox-external-children]]). Added
+the `diag.rs` kernel-denial hint, where only `file-*` denials yield a path to
+grant (ipc/mach/network operands reproduce verbatim but never fill the
+path-to-grant slot), and noted that the layer's `fs`/process constructors are
+clippy-enforced I/O doors whose shapes render through
+[[map/exarch/io-surface|io-surface]]. The XDG resolver
+([[decisions/260601_xdg-resolver-consolidation|xdg-resolver-consolidation]]) and
+the decision-fold structure are unchanged. Updated [[index|index]].
+
+## [2026-06-22] ingest | shell-eval re-ingested at HEAD (10 commits stale)
+
+Re-stamped [[map/exarch/shell-eval|shell-eval]] to `@1baac6d` after the turn-door
+cutover ([[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]],
+[[decisions/260618_run-turn-host-loop|run-turn-host-loop]]): `run_shell` is now a
+request supplier that enters core through the single source-text framed door
+`Shell::run_source_turn`, the only way into evaluation. Added the two new
+`TurnRequest` fields the migration carries — `terminal:
+RequestedTerminalAccess::Denied` paired with `stdin: TurnStdin::Empty`, so a tool
+turn holds no terminal lease and its foreground handoff is unrepresentable
+([[decisions/260619_terminal-lease|terminal-lease]]) — and reframed the surface
+sink around the `` `card `` render document core now carries
+([[decisions/260619_surface-carries-documents|surface-carries-documents]]),
+linking the mark set out to [[map/exarch/cards|cards]] and the io-door shapes to
+[[map/exarch/io-surface|io-surface]]. Dropped the dead `exarch/src/sandbox_diag.rs`
+/ `sandbox_diag/` `covers_paths` and the page's exarch-owned `sandbox_diag`
+paragraph: that diagnostic moved into `core::sandbox::diag`, now owned by
+[[map/core/capabilities|capabilities]]; the page links out to it. Updated
+[[index|index]].
+
+## [2026-06-22] ingest | provider re-ingested at HEAD (8 commits stale)
+
+Re-stamped [[map/exarch/provider|provider]] to `@1baac6d`. Rewrote the provider
+model around the three-armed `ProviderId` — auto-discovered famous providers, an
+unusual-provider `config.ral` with a custom endpoint + wire protocol
+([[decisions/260613_provider-config-ral-script|provider-config-ral-script]]), and
+each signed-in ChatGPT account as its own selectable OAuth identity — and named
+the two unmetered axes (opencode Go's flat rate vs an OAuth login). Recorded the
+per-event idle timeout that now bounds both the streaming loop and the
+non-streaming summary, the request-local cancellation seam of
+[[decisions/260617_async-agent-tool|async-agent-tool]] (registry/inbox linked out
+to [[map/exarch/tools|tools]] / [[map/exarch/session|session]]), the unified
+`humanize_tokens` formatter, and that error classification is now structural off
+genai's typed variants, carrying the parsed JSON body to the boundary for the
+[[map/exarch/cards|cards]] renderer. Updated [[index|index]].
+
+## [2026-06-22] ingest | evaluator re-ingested at HEAD (8 commits stale)
+
+Re-stamped [[map/core/evaluator|evaluator]] to `@1baac6d`. The boundary is now
+two crate-private verbs, not three public ones: `eval_top_level` is `pub(crate)`
+and reached only through the framed `Shell::run_source_turn` door
+([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]), and `apply`
+dropped from a listed boundary verb to a `pub(crate)` reduction host. Recorded
+that a same-thread thunk body — block force or lambda apply — now evaluates in
+the caller's session via the shared `with_thunk_body`, swapping only a rescoped
+mobile ([[decisions/260620_same-thread-body-shares-the-session|same-thread-body-shares-the-session]],
+the `Value` split kept by [[decisions/260616_force-eliminates-blocks|force-eliminates-blocks]]),
+that list destructuring without a `...rest` tail now rejects a longer value, and
+that `within` handlers and aliases must be fixed-arity lambdas validated at the
+install boundary ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
+Updated [[index|index]].
+
+## [2026-06-22] ingest | IO/process/stream re-ingested at HEAD (8 commits stale)
+
+Re-stamped [[map/core/io-process|io-process]] to `@1baac6d`. The foreground
+handoff is now gated on a held `TerminalLease` value (new `core/src/process/lease.rs`,
+lent to `ForegroundGuard::try_acquire`) rather than the inferred `startup_foreground`
+predicate, and the former `JobControl` is the placement-only `LaunchRole`
+([[decisions/260619_terminal-lease|terminal-lease]]); recorded the new no-input
+`Source::Empty`. Folded in the single reaper daemon whose action generalised to
+`Cancel | Run`, so death-clock deadlines, scheduled wakeups, and detached-worker
+ceilings share one timer ([[decisions/260617_scheduled-wakeups|scheduled-wakeups]],
+[[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-primitives]]),
+and noted that redirect reads/writes emit byte-level I/O doors at this layer,
+rendered by [[map/exarch/io-surface|io-surface]]. Updated [[index|index]].
+
+## [2026-06-22] ingest | core hub re-ingested at HEAD (8 commits stale)
+
+Re-stamped [[map/core|core]] to `@1baac6d`. Reframed the crate root around its
+two narrow seams: the compile-to-typed-IR ladder (`compile` /
+`compile_and_typecheck`), and the framed turn doors `Shell::run_source_turn` /
+`run_value_turn` as the only entry into evaluation — the reduction primitive
+behind them is crate-private, and completion is the call returning, not a
+channel closing ([[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]],
+[[decisions/260618_run-turn-host-loop|run-turn-host-loop]]). Recorded the new
+`host` (machine probing) / `driver` (Shell embedding, `boot_shell`,
+`BakedPrelude`, the single prelude-bake site) split
+([[decisions/260610_host-embedding-api|host-embedding-api]],
+[[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]). Updated [[index|index]].
+
+## [2026-06-22] ingest | repl hub re-ingested at HEAD (8 commits stale)
+
+Re-stamped [[map/repl|repl]] to `@1baac6d`. Reframed the `ral` binary's hub
+around its thesis: argv dispatch into a turn through core's framed door,
+driving one of three selectable frontends — minimal, readline (default), and
+structural, a default-on ratatui projection of live program state selected by
+`--surface` ([[decisions/260522_repl-architecture|repl-architecture]]). Recorded
+that every evaluation, batch or interactive, now enters core through the same
+framed turn door as one synchronous policy-carrying call
+([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]); the structural
+surface's internals (typed spine, reactive worksheet, handles matrix, vi-mode,
+shared fuzzy completion + Tab menu) stay pointed at [[map/repl/frontend|frontend]].
+Updated [[index|index]].
+
+## [2026-06-22] ingest | structural surface gains the plugin surface and shell line-edit
+
+Re-stamped [[map/repl/frontend|frontend]] to `@1baac6d` for six commits of
+refinement to the structural surface ([[decisions/260620_repl-as-structural-surface|repl-as-structural-surface]]).
+Recorded that it now drives the same in-editor plugin surface as the rustyline
+backend off the shared `PluginRuntime` — fish-style ghost text, highlight cell
+overlays, and fzf/zoxide keybindings, with the runtime itself living in
+[[map/repl/plugins|plugins]] — and that `shell_line_edit` remaps Ctrl-U to
+readline's kill-to-line-start in emacs and vi-Insert mode. The shared fuzzy
+completion engine and the native-cursor-every-mode editing
+([[decisions/260522_repl-architecture|repl-architecture]]) were already on the
+page; confirmed both against the code. Updated [[index|index]].
+
+## [2026-06-22] ingest | plugin hooks gain source-mapped faults and a buffer-change breaker
+
+Re-stamped [[map/repl/plugins|plugins]] to `@1baac6d` for six commits of drift.
+Recorded that framed hooks (keybinding, buffer-change, prompt) now evaluate
+through the value turn door ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]),
+that a hook fault is source-mapped against the plugin file's own text and
+rendered inside `call_plugin_hook` while its registry is still live, and that a
+buffer-change hook is braked by a per-plugin `HookHealth` circuit breaker —
+three faults in a row or one overrun of the keystroke budget disables it for the
+session. Reframed the page around the runtime that drives the in-editor plugin
+surface both frontends render, pointing the rendering at
+[[map/repl/frontend|frontend]] and the host boundary at
+[[decisions/260514_repl-builtins-stay-in-repl|repl-builtins-stay-in-repl]].
+Updated [[index|index]].
+
+## [2026-06-22] ingest | edit becomes a Rust atom building a similar whole-file diff card
+
+Re-stamped [[map/exarch/builtins|builtins]] to `@1baac6d` for four commits of
+drift. `edit`, `grep-files`, and `window-hash` are now Rust host builtins reading
+below the redirect frame, so the bulk helper I/O surfaces once at the I/O doors
+([[map/exarch/io-surface|io-surface]]) rather than as per-file read/write cards;
+`agent.ral` keeps only `_rows`/`view`/`view-around`. `edit` now builds one
+whole-file line-level `diff` card grouped into hunks by the `similar` crate and
+hands it to the core `surface` builtin ([[map/exarch/cards|cards]]), the dormant
+tag-set helpers gone ([[decisions/260619_surface-carries-documents|surface-carries-documents]],
+[[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]],
+[[decisions/260608_witness-hash-h-prefix|witness-hash-h-prefix]]). Updated
+[[index|index]].
+
+## [2026-06-22] ingest | the checker retains per-stage pipeline value types and types handler/alias arms as lambdas
+
+Re-stamped [[map/core/typecheck|typecheck]] to `@1baac6d` for two commits of
+drift. The annotation pass now writes a resolved value type per pipeline stage
+onto the `Pipeline` node alongside its ground wires — the data flowing between
+stages, kept for the structural REPL's typed spine, with no new inference
+([[decisions/260603_ir-pipespec-annotation|ir-pipespec-annotation]]). A handler
+or alias arm is a fixed-arity lambda whose calling convention is fixed by the
+surface form rather than sniffed from the value, so `alias_arm_scheme`'s `param`
+is non-optional; the static layer still types a non-`Lam` thunk by its bare body,
+leaving the runtime install as the sole gate on shape
+([[invariants/fixed-arity|fixed-arity]],
+[[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
+Updated [[index|index]].
+
+## [2026-06-22] ingest | one shared depth cap now bounds every recursive production in the syntax stage
+
+Re-stamped [[map/core/syntax|syntax]] to `@1baac6d` for three commits of drift.
+Pattern and unary-operator recursion now pass through the shared
+`NESTING_DEPTH_LIMIT`: the parser's three mutually-recursive sub-grammars each
+descend through one guarded chokepoint (`parse_primary`, `parse_expr_atom`,
+`parse_pattern`), so adversarial nesting rejects cleanly rather than overflowing
+the stack. The parser also gives a friendlier error when a digit is glued to a
+comparison operator inside `$[…]` (`$[2>3]`, lexed as the redirect `2>`), and the
+lexer's `\<newline>` continuation no longer stretches an adjacent literal's span.
+Updated [[index|index]].
+
+## [2026-06-22] ingest | transport carries a per-name handler's convention by construction
+
+Re-stamped [[map/core/transport|transport]] to `@1baac6d` for three commits of
+drift. The one genuine change to what the page asserts: a wire-hydrated per-name
+handler entry now takes its calling convention as `HandlerArity::Unary` by
+construction rather than re-sniffing it from the thunk's runtime shape — the
+values already cleared install-time arity validation on the sender, so hydration
+trusts that and does not re-check
+([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
+The serde mirror's other churn was doc-comment renames and the codec gained only
+`#[allow]` markers on its post-mortem `dump_frame` door — below this page's
+altitude, no prose change. Updated [[index|index]].
+
+## [2026-06-22] ingest | the pipeline node carries a typed spine
+
+Re-stamped [[map/core/ir|ir]] to `@1baac6d` for one commit of drift. The
+`CompKind::Pipeline` node gained `stage_types: Vec<Ty>` — one inferred value type
+per stage, parallel to `stages`/`wires` — emitted as a `Unit` placeholder by the
+elaborator and overwritten by the annotation pass, retained for the structural
+REPL's typed spine ([[decisions/260603_ir-pipespec-annotation|ir-pipespec-annotation]]).
+Updated [[index|index]].
+
+## [2026-06-22] ingest | fg resume is gated on a held terminal lease
+
+Re-stamped [[map/repl/jobs|jobs]] to `@1baac6d` for one behaviour commit (the
+other was a `cargo fmt` sweep). On Unix, `fg` now hands the controlling terminal
+to a parked group only when the turn holds a `TerminalLease`
+([[decisions/260619_terminal-lease|terminal-lease]]) — `wait_foreground` asks the
+session for the borrow rather than re-deriving a `startup_foreground` predicate,
+and a non-interactive resume with no lease skips the tty handoff. Updated
+[[index|index]].
+
+## [2026-06-22] ingest | elaborator emits a Unit placeholder per pipeline stage value type
+
+Re-ingested [[map/core/elaboration|elaboration]] for `3cd6d84`: the elaborator now seeds the `Pipeline` node's `stage_types` with a `Ty::Unit` per stage, parallel to the existing `Wire::EMPTY` mode-wire placeholders, which the checker's annotation pass overwrites with each stage's resolved value type. Extends [[decisions/260603_ir-pipespec-annotation|ir-pipespec-annotation]] — the same elaborator-placeholder / checker-overwrite split now carries the per-stage value types the structural REPL's typed spine needs.
+
+## [2026-06-22] ingest | diagnostics exposes the type-error underline ingredients
+
+Re-ingested [[map/core/diagnostics|diagnostics]] after `1a4cdb9` promoted `byte_to_char` and `label_message_for_kind` to `pub`, so an external renderer (the structural [[map/repl/frontend|frontend]]) can draw an in-place type-error underline that agrees word-for-word and column-for-column with the post-Enter ariadne report. The companion `0637d08` was a test-only ANSI-stripping change, no behaviour.
+
+## [2026-06-22] ingest | ral-sh exec sites become silent io-doors
+
+The login-shell bridge's two re-exec call sites (`exec_ral`, `exec_posix_sh`) now carry `[io-door:silent:respawn-…]` reasoned allows under the workspace door discipline; behaviour is unchanged. Re-stamped [[map/ral-sh|ral-sh]] to `1baac6d` and corrected its dispatch description to the four-rule first-match-wins matrix.
+
+## [2026-06-22] ingest | re-verify evaluator-machine at HEAD
+
+Re-ingested [[internals/evaluator-machine|evaluator-machine]] against the run-turn cutover and the Shell lifetime split: its `eval_top_level` / `apply` verbs are now `pub(crate)`, reached only through framed turn doors ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]), and the old two-way Mobile/Local split is now the four-way `Mobile` / `TurnState` / `SessionState` / `LocalState` partition ([[decisions/260617_turn-local-state|turn-local-state]]). Added the same-thread β-step that runs a thunk body in the caller's session via `with_thunk_body` rather than a copy ([[decisions/260620_same-thread-body-shares-the-session|same-thread-body-shares-the-session]]); bumped the verified stamp to `1baac6d`.
+
+## [2026-06-22] ingest | a turn runs through the framed door, not the eval_top_level spine
+
+Re-verified [[internals/a-turn-end-to-end|a-turn-end-to-end]] against the run-turn cutover: the single `run_turn` entry is now two synchronous doors, `Shell::run_source_turn`/`run_value_turn` returning a `TurnReport`, sharing one `build_turn`/`run_framed` scaffold while `eval_top_level` and the old spine go crate-private ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]], [[decisions/260618_run-turn-host-loop|run-turn-host-loop]], [[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]]). Dropped the vanished `run_turn`/`run_compiled` anchors, added `run_source_turn`/`run_value_turn`/`run_framed`, and bumped the verified stamp to `1baac6d` / 2026-06-22.
+
+## [2026-06-22] ingest | exarch policy: verify + re-stamp, deny-paths fix
+
+Re-ingested [[map/exarch/policy|policy]] at `1baac6d`: `policy.rs`/`policy/` are substantively unchanged (a test-only clippy `#[allow]` + rustfmt), so this is a faithful verify. Corrected the `fs.deny_paths` claim to lexical-only (core expands canonical/firmlink), dropped the duplicated `prompt.rs`/`data/` prompt-assembly (now owned by [[map/exarch|exarch]]), and trimmed `covers_paths` accordingly.
+
+## [2026-06-22] ingest | builtins: bundled tools span three families, heads are exec images
+
+Re-ingested [[map/core/builtins|builtins]] to HEAD: bundled tools are now coreutils + diffutils + ripgrep unified under `uutils_invoke`/`is_uutils_tool`, and the bundled heads are resolved command images rather than in-process builtins, with the `ral --ral-bundled-tool` dispatch delegated to [[map/core/runtime|runtime]] per [[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]].
+
+## [2026-06-22] ingest | pipeline-execution: foreground handoff now gated on the held terminal lease
+
+Re-verified [[internals/pipeline-execution|pipeline-execution]] to HEAD: the `startup_foreground` predicate has vanished as the foreground gate — the launch-time and resume-time `ForegroundGuard` are now acquired only against a held `TerminalLease` (`try_acquire(target, &TerminalLease)`), so the terminal plan and the guard ask one authority ([[decisions/260619_terminal-lease|terminal-lease]]). Confirmed the value-edge judgment ([[decisions/260610_value-edge-locality|value-edge-locality]]) and the shared `run_child_eval` frame pair ([[decisions/260610_child-eval-unification|child-eval-unification]]) still hold; dropped `startup_foreground`, added `TerminalLease`/`terminal_lease` to anchors, and bumped the stamp to `1baac6d`.
+
+## [2026-06-22] ingest | capability-enforcement re-verified at HEAD
+
+Re-stamped [[internals/capability-enforcement|capability-enforcement]] to 1baac6d after confirming all eight anchors survive and the grant-body-evaluates-locally / per-command OS sandbox flow of [[decisions/260617_sandbox-external-children|sandbox-external-children]] holds, with Windows fail-closed. Added the missing [[design/two-enforcers|two-enforcers]] link; the authenticated-confinement marker was removed with the reexec machinery and is correctly absent rather than tombstoned.
+
+## [2026-06-22] ingest | compilation-ladder re-verified to HEAD
+
+Re-verified [[internals/compilation-ladder|compilation-ladder]] against the host/driver split, relocating the prelude bake's encode/decode pin (`bake_prelude_to_out_dir`/`BakedPrelude`) from `host.rs` to `core/src/driver.rs` per [[decisions/260610_host-embedding-api|host-embedding-api]] and recording `annotate`'s new per-stage `stage_types` verdict alongside the ground `Wire`s ([[decisions/260603_ir-pipespec-annotation|ir-pipespec-annotation]]). Added the run-turn cutover note that the evaluator is reached only through the framed turn doors ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]); all anchors confirmed and the verified-stamp bumped to 1baac6d.
+
 ## [2026-06-22] ingest | surface recognised as multi-purpose; spawn-notify decision filed
 
 Studied ral `spawn`'s pull-only delivery and the model's three failure modes (poll, forget to `await`, assume an absent notification). Traced the seam: the one `surface` `EventSink` (`AgentSink`, `exarch/src/shell_eval.rs`), the `Emitter`'s `session_lived` flag and silent `let _ = tx.send` (so the withheld channel guards presentation *placement*, not liveness), and the session-lived inbox the async `agent` already posts to. Filed [[decisions/260622_surface-carries-control|surface-carries-control]] (proposed): recognises `surface` as the language→host typed-`Value` channel of which presentation is one class, and adds a non-rendering `` `spawn-started `` *control* event — surfaced **in-turn** and carrying a live `Value::Handle` — so exarch registers the handle and arms an inbox-posting waiter, letting `spawn` **notify** (`SpawnResult` → `Turn::Spawn`, generation-gated like `AgentResult`) instead of being **polled**. The design keeps one channel and gives the detached worker none — its closure is unchanged — upholding the detachment-holds-only-root/handle-resources invariant by construction; an earlier draft that handed the worker the `Emitter` is recorded as the rejected unsafe variant. Extends [[decisions/260619_surface-carries-documents|surface-carries-documents]] and [[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]] (*render* vs *control*, one step beyond *operation* vs *appearance*), refines [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]'s poll idiom and the poll-instructing inline-timeout text, and partly answers [[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]]'s background-surfacing open question (control class only). Flagged the one shell-free handle settle and its two-observer cache handoff as the sole concurrency risk. Updated [[index|index]].

@@ -1,14 +1,16 @@
 ---
-generated_at_commit: df36715
-generated_at_date: 2026-06-17
+generated_at_commit: 1baac6d
+generated_at_date: 2026-06-22
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
 
 # Map: core / capabilities & sandbox
 
 The [[design/grant|grant]] mechanism in two halves: an in-process decision layer
-and an OS process sandbox that enforces it for external commands. Authority is
-attenuated by intersection — a `grant` block can only narrow.
+and an OS process sandbox that enforces it for external commands — each
+authoritative exactly where the other is blind ([[design/two-enforcers|two
+enforcers]]). Authority is attenuated by intersection — a `grant` block can only
+narrow.
 
 ## Decision layer — `core/src/capability/`
 
@@ -96,8 +98,14 @@ Linux has no path-exec filter so there the in-process gate stands alone.
 - `reexec.rs` — pins an immutable handle on this executable at boot so a
   confined re-exec runs the same binary even under an on-disk swap, with a
   per-platform identity check (`/proc/self/fd` on Linux, `(dev, ino)` snapshot on
-  macOS, `BY_HANDLE_FILE_INFORMATION` on Windows); `maybe_enter_process_sandbox`
-  enters the OS sandbox in a per-command `--sandbox-projection` child (Unix).
+  macOS, `BY_HANDLE_FILE_INFORMATION` on Windows). On Unix
+  `maybe_enter_process_sandbox` enters the OS sandbox in a per-command
+  `--sandbox-projection` child; on Windows it **fails closed** — a supplied
+  policy it cannot enforce returns `Err`, never `Ok(None)` ("continue
+  unconfined"). `verify_unswapped`, the parent-side swap guard, is
+  `cfg(target_os = "macos")`: only macOS re-execs the *pinned self* parent-side
+  (Linux re-execs through the fd, where a swap is already moot; Windows has no
+  parent-side self re-exec).
 - `projection_enforceable` (`sandbox.rs`) — rejects an offline (`net: false`)
   projection on a backend with no kernel network enforcement, so an unenforceable
   request fails closed rather than running ignored.
@@ -110,17 +118,33 @@ Linux has no path-exec filter so there the in-process gate stands alone.
   wraps each child in `bwrap` (`make_command_with_policy`); macOS re-execs the
   pinned self (`ral --sandbox-projection <json> --ral-sandbox-exec <host>`, or
   `--ral-bundled-tool <tool>`) so the child enters Seatbelt in `early_init`, then
-  `serve_sandbox_exec` `execve`s the host target inside it; Windows fails closed
-  (no per-command AppContainer / restricted-token backend yet). The grant body
-  itself evaluates locally — `transport::dispatch` no longer re-execs it
+  `serve_sandbox_exec` `execve`s the host target inside it; **Windows fails
+  closed** — no per-command AppContainer / restricted-token backend exists, so a
+  requested policy errors rather than running unsandboxed. The `--ral-sandbox-exec`
+  sentinel and `serve_sandbox_exec`'s execve arm are `cfg(target_os = "macos")`,
+  the only platform that emits the host re-exec tail. The grant body itself
+  evaluates locally — `transport::dispatch` no longer re-execs it
   ([[decisions/260617_sandbox-external-children|sandbox-external-children]]).
 - Backends: `macos.rs` (Seatbelt, `macos-base.sbpl`), `linux.rs` (bwrap),
-  `windows.rs` (Job Objects) + `windows_restricted_token.rs` (a restricted token
-  with every privilege dropped and integrity lowered to Low — the Chrome-renderer
-  model: a file unreadable to the restricting SID set is unreadable to the child).
+  `windows.rs` (Job Objects, capping the child tree at 512 processes) +
+  `windows_restricted_token.rs` (a restricted token with every privilege dropped
+  and integrity lowered to Low — the Chrome-renderer model: a file unreadable to
+  the restricting SID set is unreadable to the child). The Windows backends supply
+  resource caps and a profile dump; no path exists yet to confine a per-command
+  child through them, so the entrypoint and launcher fail closed.
 
 Path-scoped *exec* confinement is unenforced on Linux (no landlock backend) —
 [[decisions/260530_linux-exec-confinement|linux-exec-confinement]].
+
+`diag.rs` turns a kernel-reported sandbox denial into an actionable hint on the
+failing command's `Error`: it reads the kernel log over the call's wall window
+(Seatbelt on macOS, the seccomp record inside bwrap on Linux), keeps only lines
+attributable to the call's descendant PIDs, and appends them. **Only a `file-*`
+denial yields a concrete path to grant** — ipc/mach/network operands name a
+service or endpoint, not a filesystem path, so they reproduce verbatim for
+transparency but never fill the path-to-grant slot. macOS logs fully-resolved
+paths, so the hint names the exact path with the symlink caveat; the Linux audit
+record carries no path, so the hint degrades to "a sandboxed syscall was denied".
 
 This boundary is what [[map/exarch|exarch]] reuses as its sandbox. Bundled
 tools route through the *exec* chokepoint in-process; their **filesystem**
@@ -131,3 +155,12 @@ the OS profile of the per-command sandbox it runs in
 That single binary carrying both ral and its coreutils is part of why ral
 is a [[invariants/single-binary|single-binary]]. `docs/SPEC.md` gives the
 formal capability calculus.
+
+Every `fs`/process constructor in this layer is a closed *I/O door*: the
+workspace bans the raw constructors via clippy `disallowed_methods`, so each call
+site carries an `#[allow(… reason = "[io-door:…]")]` classifying it as a surfaced
+exec image (`make_command`), a silent infrastructure spawn (the self re-exec, the
+`ps` denial sampler, the boot-time binary pin), or test scaffolding. The door
+shapes and their rail rendering live in [[map/exarch/io-surface|io-surface]]; here
+the doors are only declared and accounted, with `core/tests/io_door_set.rs`
+failing CI on any unaccounted constructor.

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 7ba500b
-generated_at_date: 2026-06-17
+generated_at_commit: 1baac6d
+generated_at_date: 2026-06-22
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs, core/src/mode.rs]
 ---
 
@@ -18,7 +18,15 @@ Entry points (`typecheck.rs`):
   against the final unifier, closed by quantifying residuals — generalisation
   against the empty environment) and the ground mode `Wire` onto every `Pipeline`
   stage and `Bind` RHS at any depth
-  ([[decisions/260603_ir-pipespec-annotation|ir-pipespec-annotation]]). The seed
+  ([[decisions/260603_ir-pipespec-annotation|ir-pipespec-annotation]]). A
+  `Pipeline` also carries `stage_types`, one resolved value type per stage
+  (parallel to its stages and wires): `infer_pipeline` records each stage's
+  return value alongside its spec in `InferCtx::stage_types`, keyed by stage
+  address, and `annotate` resolves each against the final unifier and writes the
+  `Vec<Ty>` onto the node — the data flowing between stages, kept for the
+  structural REPL's typed spine. No extra inference, only retention of what the
+  pipeline check already computes; the evaluator never reads it, so an
+  un-annotated stage keeps the elaborator's `Unit` placeholder harmlessly. The seed
   is one `SessionSchemes { bindings, aliases }`
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]):
   the scope's name→`Option<Scheme>` map plus the alias arms' schemes; `seed_env`
@@ -30,7 +38,16 @@ Entry points (`typecheck.rs`):
 - `alias_arm_scheme(head, param, body, SessionSchemes) -> Result<Scheme, ModeMismatch>`
   — infers an alias arm under the runtime handler calling convention, pins its
   `PipeSpec` to `head`'s spec (`Inferencer::pin_arm_to_head`), and closes it, for
-  `install_alias` and `WithinScope::parse` to store on a frame. `head_pipe_spec`
+  `install_alias` and `WithinScope::parse` to store on a frame. A handler or
+  alias arm is a *fixed-arity lambda* — its calling convention is the surface
+  form, not the runtime value's shape, so `param` is non-optional and
+  `infer_alias_arm` types the arm `Fun(List(elem), body)`, forcing it on the
+  argv list ([[invariants/fixed-arity|fixed-arity]],
+  [[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
+  Statically `infer_handler_comp` still types a non-`Lam` thunk (e.g. a computed
+  `alias g $h`) by its bare body, binding it so `g x` is an arity mismatch
+  rather than a silently discarded argument; the runtime install boundary is the
+  sole complete gate on shape. `head_pipe_spec`
   yields a *known* head's resolved `PipeSpec` and a fresh `F[μ, ν]` for an unknown
   head, so reinterpreting a known head with incompatible modes is the lone rejected
   failure while a fresh alias defines its own modes

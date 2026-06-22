@@ -51,12 +51,12 @@ A guided path through the system, *why* before *how*:
 - [[internals/compilation-ladder|compilation-ladder]] — source → tokens → flat AST → CBPV IR → annotated typed IR; the two `compile` verbs, per-turn seeding, the annotated prelude bake.
 - [[internals/surface-syntax|surface-syntax]] — context-free lexing, recursive-descent + Pratt parsing, the flat AST, three-stage head classification.
 - [[internals/type-inference|type-inference]] — the HM algorithm: the Inferencer, the Unifier (types, rows by Rémy rewrite, byte modes), generalisation at `Bind`, the verdict written onto the IR to survive into the next turn.
-- [[internals/evaluator-machine|evaluator-machine]] — the trampolined CBPV machine, the Mobile/Local Shell split, tail calls bounded by `pub(crate)`, the two exit channels.
+- [[internals/evaluator-machine|evaluator-machine]] — the trampolined CBPV machine, its `pub(crate)` verbs reached only through framed turn doors, the four-way `Shell` lifetime split, same-thread bodies sharing the caller's session, tail calls bounded by `pub(crate)`, the two exit channels.
 - [[internals/builtins-registry|builtins-registry]] — the six-facet `builtin_registry!`, seeding vs dispatch, bundled coreutils, host-layer builtins.
 - [[internals/handler-dispatch|handler-dispatch]] — the handler stack: two-pass lookup, self-masking strip-and-restore, deep frames on the dynamic context.
 - [[internals/capability-enforcement|capability-enforcement]] — the meet-fold chokepoint as a module boundary (`capability::check_*(&Context, …)`); in-process gate for what ral dispatches, a per-command OS sandbox for what a spawned child does (net is OS-only, Windows fail-closed); the grant body evaluates locally.
 - [[internals/pipeline-execution|pipeline-execution]] — value folds vs one process group; the resolve-time `StageLaunch` freeze, one value-edge judgment, the shared child-eval frame pair, the `n ≥ 2` pgid anchor, Windows Job Objects.
-- [[internals/a-turn-end-to-end|a-turn-end-to-end]] — one top-level turn for a ral REPL line and an exarch tool call; the shared `eval_top_level` spine.
+- [[internals/a-turn-end-to-end|a-turn-end-to-end]] — one top-level turn for a ral REPL line and an exarch tool call, through the shared framed door (`run_source_turn`/`run_value_turn` → `TurnReport`).
 - [[internals/output-capture-and-detachment|output-capture-and-detachment]] — capture drains each child's pipe to EOF, so a process that never closes it stalls the foreground to the wall and is killed with its tree; `spawn` moves it to a root-parented worker with a 16 MiB-bounded buffer and a one-hour death-clock. A long-running server is the canonical case.
 - [[internals/cancellation|cancellation]] — stopping in-flight work: an escalating `SIGNAL_COUNT` floor (third signal `_exit`s, batch/async only) and a cooperative cause-bearing `CancelScope` tree (`Interrupt < Explicit < Deadline < RootAbort`); signal-safe slots bridge the async edge, `process::check` polls both at status 130; per-host gestures — REPL Ctrl-C relays + foreground-cancels, REPL Ctrl-`\` root-aborts, exarch TUI active-turn Ctrl-C/Esc drives a per-turn token.
 
@@ -158,32 +158,34 @@ design pages via the `against` stamp.
 
 ## map/ — where things live
 
-- [[map/core|core]] — ral-core overview hub: the pipeline and subsystems below. *@91b3d37*
-  - [[map/core/syntax|syntax]] — lexer, parser, flat AST; a command's pipe modes are the projection of its declared type. *@2b999feb*
-  - [[map/core/elaboration|elaboration]] — surface AST → CBPV IR; the one sugar-aware phase. *@6bfeced*
-  - [[map/core/ir|ir]] — the `Val` / `Comp` call-by-push-value IR; `Bind` carries the checker's scheme, `Pipeline`/`Bind` carry non-optional ground mode wires. *@602218d3*
-  - [[map/core/typecheck|typecheck]] — HM with row types; the sole mode engine returns an annotated comp (schemes + ground wires) and one `SessionSchemes` seed; the pipeline-mode lattice and equality-strict unify rule (`mode.rs`). *@8c2437c1*
-  - [[map/core/evaluator|evaluator]] — the CBPV machine: trampoline, scope frames, matching, audit. *@2df6db85*
-  - [[map/core/runtime|runtime]] — the command/pipeline/transport machinery the machine dispatches into, plus the shared re-exec'd-child eval runner (`child_eval.rs`). *@7ce10d61*
-  - [[map/core/capabilities|capabilities]] — the grant decision layer (free `capability::check_*(&Context, …)` folds) and the OS process sandbox. *@d7e97288*
-  - [[map/core/io-process|io-process]] — byte sinks/sources, signals, process groups, Stream labels. *@7ce10d61*
-  - [[map/core/builtins|builtins]] — Rust commands and bundled coreutils/ripgrep. *@8c2437c1*
-  - [[map/core/shell-state|shell-state]] — runtime `Value`, the `surface` sink, handler stack, and the `Shell` state; a scope entry is `Binding { value, scheme }`. *@2df6db85*
-  - [[map/core/transport|transport]] — serde mirror (`SerialValue`, `SerialBinding`) and wire envelope (`WireMobile`) carrying a shell — values and schemes — across a re-exec. *@2b999feb*
-  - [[map/core/diagnostics|diagnostics]] — `Span`/`FileId` byte-range positions rendered directly via ariadne; ANSI gating; exit-code hints. *@2b999feb*
+- [[map/core|core]] — ral-core overview hub: the compile-to-typed-IR pipeline, the framed turn doors that are the only evaluation seam, the `host`/`driver` split, and the subsystems below. *@1baac6d*
+  - [[map/core/syntax|syntax]] — lexer, parser, flat AST; a command's pipe modes are the projection of its declared type; one shared depth cap bounds lexer and parser recursion. *@1baac6d*
+  - [[map/core/elaboration|elaboration]] — surface AST → CBPV IR; the one sugar-aware phase. *@1baac6d*
+  - [[map/core/ir|ir]] — the `Val` / `Comp` call-by-push-value IR; `Bind` carries the checker's scheme, `Pipeline`/`Bind` carry non-optional ground mode wires, and `Pipeline` also carries per-stage value types. *@1baac6d*
+  - [[map/core/typecheck|typecheck]] — HM with row types; the sole mode engine returns an annotated comp (schemes, ground wires, per-stage value types) and one `SessionSchemes` seed; handler/alias arms are fixed-arity lambdas; the pipeline-mode lattice and equality-strict unify rule (`mode.rs`). *@1baac6d*
+  - [[map/core/evaluator|evaluator]] — the trampolined CBPV machine: crate-private verbs entered only through framed turn doors, trampoline, scope frames, matching, audit; a same-thread thunk body runs in the caller's session. *@1baac6d*
+  - [[map/core/runtime|runtime]] — the command/pipeline/transport machinery the machine dispatches into: bundled heads as `--ral-bundled-tool` exec images (inline only on a clean terminal), external children spawned under the effective sandbox, grant bodies run locally, redirect/exec surfaced at runtime doors, plus the shared re-exec'd-child eval runner (`child_eval.rs`). *@1baac6d*
+  - [[map/core/capabilities|capabilities]] — the grant decision layer (free `capability::check_*(&Context, …)` folds) and the OS process sandbox (macOS Seatbelt, Linux bwrap, Windows fail-closed); kernel-denial hints offer a path to grant only for `file-*` denials. *@1baac6d*
+  - [[map/core/io-process|io-process]] — byte sinks/sources, the lease-gated foreground handoff, the Cancel|Run reaper daemon, Stream labels. *@1baac6d*
+  - [[map/core/builtins|builtins]] — the `builtin_registry!` macro and `CORE_BUILTINS`, plus bundled coreutils/diffutils/ripgrep heads dispatched in-process via `uutils_invoke`; registry/seeding here, runtime exec-image dispatch on runtime. *@1baac6d*
+  - [[map/core/shell-state|shell-state]] — runtime `Value`, the `surface` sink, handler stack, and the `Shell` state split by lifetime into `Mobile` / `TurnState` / `SessionState` / `LocalState`; a scope entry is `Binding { value, scheme }`. *@1baac6d*
+  - [[map/core/transport|transport]] — serde mirror (`SerialValue`, `SerialBinding`) and wire envelope (`WireMobile`) carrying a shell — values and schemes — across a re-exec. *@1baac6d*
+  - [[map/core/diagnostics|diagnostics]] — `Span`/`FileId` byte-range positions rendered directly via ariadne; the layer also exposes `byte_to_char` and the type-error label so an external surface can draw the same underline; ANSI gating; exit-code hints. *@1baac6d*
   - [[map/core/prelude|prelude]] — the embedded `prelude.ral` standard library. *@8c2437c1*
-- [[map/repl|repl]] — the `ral` binary: argv dispatch, REPL loop, frontends, plugins, jobs. *@2df6db85*
-  - [[map/repl/startup|startup]] — `main.rs`: argv → `Mode`, batch execution under the three-armed verdict, the annotated-prelude bake, platform glue. *@2df6db85*
-  - [[map/repl/loop|loop]] — the `Session` state machine, one-turn cycle seeded from the live session, rc verdict behaviour, prompt/theme. *@602218d3*
-  - [[map/repl/frontend|frontend]] — the `Frontend` trait, minimal + rustyline editors, completion. *@e8227dc*
-  - [[map/repl/plugins|plugins]] — plugin runtime, `_ed-*` editor builtins, captured session commands. *@e8227dc*
-  - [[map/repl/jobs|jobs]] — process-group job control, fg/bg/disown, `Escape::Stopped`. *@ce51d4e*
-- [[map/exarch|exarch]] — the exarch agent: prompt assembly, provider loop, one `shell` tool, and each turn sandboxed by a ral grant profile. *@e28f2054*
+- [[map/repl|repl]] — the `ral` binary: argv dispatch into a turn through core's framed door, driving one of three selectable frontends (minimal / readline / structural live-state projection) over the REPL session, plugins, and jobs. *@1baac6d*
+  - [[map/repl/startup|startup]] — `main.rs`: pre-clap sandbox/helper dispatch, argv → `Mode` (`--surface` frontend, clap-derived argv terminator), batch execution through core's framed turn door, the annotated-prelude bake, platform glue. *@1baac6d*
+  - [[map/repl/loop|loop]] — the `Session` state machine; one turn is a synchronous core entry through the framed turn doors, seeded from the live session; the selectable frontend, prompt/theme/rc. *@1baac6d*
+  - [[map/repl/frontend|frontend]] — the `Frontend` trait and its minimal / rustyline / structural editors, the shared fuzzy completion engine, and the in-editor plugin surface (ghost text, highlights, keybindings) both TUIs drive. *@1baac6d*
+  - [[map/repl/plugins|plugins]] — the plugin runtime: the hook model with source-mapped faults and a buffer-change circuit breaker, hooks framed through the value turn door, the `_ed-*` editor builtins, keybindings, and captured session commands, driving the in-editor plugin surface both frontends render. *@1baac6d*
+  - [[map/repl/jobs|jobs]] — process-group job control, fg/bg/disown, `Escape::Stopped`; `fg` resume gated on a held terminal lease. *@1baac6d*
+- [[map/exarch|exarch]] — the exarch agent's front door: startup (CLI dispatch, bootstrap, account selection, sandbox early_init) and system-prompt assembly; the agent is a provider loop over one `shell` tool, each turn a grant-framed ral turn. *@1baac6d*
   - [[map/exarch/session|session]] — the turn loop: round-trips, tool dispatch with prompt-queue steering, auto-compaction, nudge-retry, the `MAX_STEPS` ceiling, sub-agent fork. *@3b8a4062*
-  - [[map/exarch/provider|provider]] — LLM transport over genai: streaming, retry driver, prompt caching, usage/pricing. *@e8227dc*
-  - [[map/exarch/shell-eval|shell-eval]] — one tool call as a ral top-level turn under a pushed grant frame, seeded from the live session; buffered output digested for the transcript, surface host sink. *@d7e97288*
-  - [[map/exarch/policy|policy]] — capability composition (base ∨ extend ⊓ restrict) and the bake-in profiles; the boundary is ral's grant. *@2df6db85*
+  - [[map/exarch/provider|provider]] — LLM transport over genai: famous/custom/ChatGPT-account provider identity, the flat-rate vs OAuth split, streaming with a per-event idle timeout, retry driver, prompt caching, usage/pricing with a unified token formatter, structural error classification. *@1baac6d*
+  - [[map/exarch/shell-eval|shell-eval]] — one tool call as a ral top-level turn through `run_source_turn`, under a pushed grant frame, seeded from the live session, with `Denied` terminal access; buffered output digested for the transcript, the surface host sink decoding card marks onto the bus. *@1baac6d*
+  - [[map/exarch/io-surface|io-surface]] — redirect reads/writes and exec images surface at runtime I/O doors as structural events, rendered as grouped cards; bulk helper I/O sunk below the ral line, enforced by a clippy-checked door set. *@1baac6d*
+  - [[map/exarch/policy|policy]] — capability composition (base ∨ extend ⊓ restrict), the five bake-in profiles, and restrict-file self-denial; the boundary is ral's grant. *@1baac6d*
   - [[map/exarch/tools|tools]] — the tool registry: `ral`, the spawn family, `reply`, the schedule family, `fff`; two mirror axes (`spawns`/`replies`) gate root vs peer. *@f5dccde*
-  - [[map/exarch/builtins|builtins]] — the resident host atoms and `agent.ral` helpers for search, line witnesses, and editing. *@2df6db85*
-  - [[map/exarch/frontend|frontend]] — the agent/UI event bus, durable session log, the inline TUI / headless frontends, and the shared prompt queue that drains at tool or turn boundaries. *@e28f2054*
-- [[map/ral-sh|ral-sh]] — the POSIX-bridge login-shell dispatcher; execs `ral` interactively, forwards everything else to `/bin/sh`. *@c164cff*
+  - [[map/exarch/builtins|builtins]] — the resident host atoms (`grep-files`, `edit`, `window-hash`/`line-hash`) reading below the redirect frame, and the `agent.ral` line readers over them, for search, line witnesses, and witnessed editing. *@1baac6d*
+  - [[map/exarch/frontend|frontend]] — the agent/UI event bus, durable session log, the headless frontend, and the inline TUI: a two-voice transcript laid out as a graphic — human band vs agent field, the marginal rail, an in-flight reply as a growing magnitude. *@1baac6d*
+  - [[map/exarch/cards|cards]] — the `surface` render document: a closed set of five Bertin marks a kit composes in ral, decoded once and drawn through one generic interpreter; the kit names data and level of measurement, the host owns the visual binding. *@1baac6d*
+- [[map/ral-sh|ral-sh]] — the POSIX-bridge login-shell dispatcher; execs `ral` interactively, forwards everything else to `/bin/sh`. *@1baac6d*

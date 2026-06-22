@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 7ba500b
-generated_at_date: 2026-06-17
+generated_at_commit: 1baac6d
+generated_at_date: 2026-06-22
 covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/ansi.rs, core/src/exit_hints.rs]
 ---
 
@@ -56,6 +56,15 @@ one-liner is used instead. The per-stage entry points are
 `SourceLoc` against a `SourceDb`) / `_compact`, with `cmd_error` and
 `shell_warning` for unstructured command-layer output. Color is gated through
 `ansi::use_color`.
+
+**The layer also exposes the raw ingredients of a span underline so an
+external renderer can draw one in its own coordinate system.** `byte_to_char`
+(byte offset → character offset, the unit ariadne and a `TextArea` cursor both
+count in) and `label_message_for_kind` (a `TypeErrorKind` → its under-caret
+label phrase) are `pub`. The structural [[map/repl/frontend|frontend]] reuses
+them to paint an in-place type-error underline whose label and caret agree
+word-for-word and column-for-column with the post-Enter ariadne report — the
+inline rendering belongs to that page, not here.
 
 ## Styling — `core/src/ansi.rs`
 

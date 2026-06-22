@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 7ba500b
-generated_at_date: 2026-06-17
+generated_at_commit: 1baac6d
+generated_at_date: 2026-06-22
 covers_paths: [core/src/builtins/, core/src/builtins.rs]
 ---
 
@@ -87,17 +87,34 @@ coreutil vs. prelude vs. control operator — is [[design/name-resolution|design
 what a builtin *is* and the shape of the set is [[design/builtins|design: builtins]];
 the `from-X`/`to-X` byte↔value typing in `codecs.rs` is [[design/codecs|design: codecs]].
 
-## Bundled coreutils and ripgrep
+## Bundled coreutils, diffutils, and ripgrep
 
-`uutils.rs` declares the bundled tools as two parallel lists via
-`declare_coreutils!`: `cross` (always on under the `coreutils` feature) and
-`unix` (additionally under `coreutils-unix-only`, `cfg(unix)`-gated). It emits
-one merged `COREUTILS_TOOLS` slice and a `coreutils_invoke` dispatcher.
-`RIPGREP_TOOLS` (`["rg"]`) routes through `ral-ripgrep-core`. These run in-process
-and go through the same capability chokepoint as everything else — part of why
-ral is a [[invariants/single-binary|single-binary]]. The `grep` cargo feature separately backs
-the `re-*` regex string builtins.
+`uutils.rs` declares the bundled tools as three feature-gated families and the
+predicate and dispatch that unify them.
 
-The [[map/core/runtime|runtime]]'s `command/uutils.rs` is the call-side that
-dispatches a resolved head into `coreutils_invoke`. `docs/SPEC.md` §21 covers the
+- **coreutils** — `declare_coreutils!` takes two parallel lists: `cross`
+  (always on under the `coreutils` feature) and `unix` (additionally under
+  `coreutils-unix-only`, `cfg(unix)`-gated). It emits one merged
+  `COREUTILS_TOOLS` slice and a `coreutils_invoke` arm.
+- **diffutils** — `DIFFUTILS_TOOLS` (`["cmp", "diff"]`, `diffutils` feature),
+  whose `cmp_main` / `diff_main` shims faithfully translate the upstream
+  `diffutilslib` entrypoints (re-audit on a version bump).
+- **ripgrep** — `RIPGREP_TOOLS` (`["rg"]`, `ripgrep` feature), routed through
+  `ral-ripgrep-core::run_cli` by `rg_main` (which drops the argv[0] slot).
+
+`uutils_invoke` is the bare dispatch over all three families (diffutils and
+ripgrep matched ahead of the coreutils fall-through, each arm feature-gated);
+`is_uutils_tool` is the membership predicate. These bundled heads share the
+capability chokepoint with every other command — part of why ral is a
+[[invariants/single-binary|single-binary]]. The `grep` cargo feature separately
+backs the `re-*` regex string builtins.
+
+A bundled head is a resolved command *image*, not a builtin in `CORE_BUILTINS`:
+it runs `uutils_invoke` in-process only on the clean-terminal fast path, and is
+otherwise an ordinary `ral --ral-bundled-tool <tool>` child carrying process
+semantics ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]]).
+That dispatch — the `ExecImage::BundledTool` placement, the hidden entrypoint,
+and the inline gate — is the [[map/core/runtime|runtime]]'s
+(`command/uutils.rs`); this page owns only the registry of names, shims, and
+the in-binary `uutils_invoke` they converge on. `docs/SPEC.md` §21 covers the
 single-binary tool surface.

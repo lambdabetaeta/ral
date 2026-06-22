@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 478c977
-verified_at_date: 2026-06-18
+verified_at_commit: 1baac6d
+verified_at_date: 2026-06-22
 anchors: [check_exec_args, check_fs_op, sandbox_projection, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox]
 ---
 
@@ -8,8 +8,9 @@ anchors: [check_exec_args, check_fs_op, sandbox_projection, GrantStack, sandboxe
 
 [[design/grant|The grant design]] states the lattice — authority attenuated by
 intersection. This is how a check actually runs: an in-process decision layer and
-an OS sandbox that backs it for external commands (`core/src/capability/`,
-`core/src/sandbox/`).
+an OS sandbox that backs it for external commands, each authoritative exactly
+where the other is blind ([[design/two-enforcers|two enforcers]];
+`core/src/capability/`, `core/src/sandbox/`).
 
 **Every yes/no is a `capability::check_*(&Context, …)` that folds the whole
 stack.** Each decision (`capability/enforce.rs`, `capability/sandbox.rs`) is a free
