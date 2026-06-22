@@ -1,0 +1,340 @@
+/* landing.css — exarch landing page.
+   Shared tokens, menubar, window, footer live in exarch.css. */
+
+main { width: 100%; }
+.column { max-width: 53rem; margin: 0 auto; padding: 0 1.2rem; }
+
+/* ── eyebrow: serif small-caps with a gold cross seal ── */
+.eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-family: var(--serif);
+  font-variant: small-caps;
+  letter-spacing: 0.14em;
+  font-size: 0.92rem;
+  color: var(--porphyry);
+  margin: 0 0 1.1rem;
+}
+.eyebrow::before {
+  content: '\271A';                 /* the orb-cross the eagle holds */
+  font-family: var(--mono);
+  font-variant: normal;
+  letter-spacing: 0;
+  font-size: 0.85rem;
+  color: var(--gold);
+}
+
+/* ── ASCII art helper (system mono for full glyph coverage) ── */
+.ascii { display: inline-block; text-align: left; }
+.ascii pre { margin: 0; font-family: var(--art); line-height: 1.0; white-space: pre; }
+.scroll-x { max-width: 100%; overflow-x: auto; }
+
+/* ── 1. crest hero ── */
+.crest-wrap { padding: 2.4rem 1.2rem 0; }
+.crest {
+  max-width: 53rem;
+  margin: 0 auto;
+  background: radial-gradient(120% 90% at 50% 0%, #30181f 0%, var(--crest-field) 70%);
+  border: 1px solid var(--gold);
+  box-shadow: 0 0 0 1px var(--crest-field), 0 0 0 2px var(--gold),
+              0 18px 50px rgba(20,8,12,0.45);
+  padding: 2.6rem 1.2rem 2.2rem;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+.crest .corner {
+  position: absolute;
+  top: 0.7rem;
+  right: 0.9rem;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(200,162,63,0.7);
+}
+.crest .eagle {
+  color: var(--gold-bright);
+  font-size: clamp(0.85rem, 3.2vw, 1.5rem);
+  text-shadow: 0 1px 0 rgba(0,0,0,0.5);
+  margin-bottom: 1.3rem;
+}
+.crest .banner {
+  color: #efe6cf;
+  font-size: clamp(0.36rem, 1.7vw, 0.82rem);
+  margin: 0 auto 1.5rem;
+}
+.crest .thesis {
+  font-family: var(--serif);
+  font-size: clamp(1.4rem, 3.6vw, 2.05rem);
+  line-height: 1.25;
+  color: var(--crest-text);
+  max-width: 30rem;
+  margin: 0 auto;
+}
+.crest .thesis em { font-style: italic; color: var(--gold-bright); }
+.crest .rule {
+  width: 4rem;
+  height: 2px;
+  margin: 1.3rem auto 1.2rem;
+  background: var(--gold);
+  opacity: 0.85;
+}
+.crest .sub {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  line-height: 1.65;
+  color: #c9bfa6;
+  max-width: 33rem;
+  margin: 0 auto;
+}
+
+/* ── section rhythm ── */
+.section { padding: 3.2rem 0 0; }
+.section.last { padding-bottom: 3.2rem; }
+
+/* ── 2. the decree (manifesto) ── */
+.decree p {
+  font-family: var(--serif);
+  font-size: 1.12rem;
+  line-height: 1.7;
+  color: var(--ink);
+  margin: 0 0 1.05rem;
+}
+.decree p:last-child { margin-bottom: 0; }
+.decree p:first-of-type::first-letter {
+  float: left;
+  font-family: var(--serif);
+  font-weight: 600;
+  font-size: 3.5rem;
+  line-height: 0.78;
+  padding: 0.1rem 0.6rem 0 0;
+  color: var(--porphyry);
+}
+.decree em { font-style: italic; color: var(--porphyry); }
+.decree strong { font-weight: 600; color: var(--ink); }
+.decree code,
+.boundary code,
+.instruments code {
+  font-family: var(--mono);
+  font-size: 0.86em;
+  color: var(--gold);
+  background: var(--parchment-2);
+  padding: 0.05em 0.32em;
+  border: 1px solid var(--line);
+}
+
+/* ── 3. the boundary (compare) ── */
+.compare { display: grid; grid-template-columns: 1fr 1fr; gap: 1.1rem; }
+.panel { display: flex; flex-direction: column; min-width: 0; }
+.panel-label {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 0 0 0.5rem;
+  color: var(--muted);
+}
+.panel .body {
+  flex: 1 1 auto;
+  background: var(--parchment-2);
+  border: 1px solid var(--line);
+}
+.panel.bound .panel-label { color: var(--porphyry); }
+.panel.bound .body {
+  border: 1px solid var(--porphyry);
+  box-shadow: inset 0 0 0 1px var(--face), 0 0 0 1px var(--gold);
+  position: relative;
+}
+.panel.bound .body::after {
+  content: '\271A';
+  position: absolute;
+  top: -0.62rem;
+  right: -0.62rem;
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 50%;
+  background: var(--gold);
+  color: var(--crest-field);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.compare pre {
+  margin: 0;
+  padding: 1rem 1.1rem;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  line-height: 1.65;
+  color: var(--ink);
+  overflow-x: auto;
+}
+.compare .c { color: var(--muted); }
+.compare .k { color: var(--porphyry); font-weight: 600; }
+.compare .s { color: var(--on); }
+.compare .a { color: var(--gold); font-weight: 600; }
+
+/* ── 4. writs of authority (profiles as lattice) ── */
+.lattice { display: flex; flex-direction: column; }
+.lattice .bound-mark {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+  letter-spacing: 0.1em;
+  padding: 0.2rem 0;
+}
+.lattice .bound-mark .g { color: var(--gold); }
+.writ {
+  display: grid;
+  grid-template-columns: 1.4rem 9rem 1fr auto;
+  align-items: baseline;
+  gap: 0.6rem 1rem;
+  padding: 0.85rem 0.4rem;
+  border-top: 1px solid var(--line);
+}
+.writ:last-of-type { border-bottom: 1px solid var(--line); }
+.writ .seal { font-family: var(--mono); color: var(--gold); font-size: 0.9rem; }
+.writ .name {
+  font-family: var(--mono);
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: var(--porphyry);
+}
+.writ.default .name::after {
+  content: 'default';
+  margin-left: 0.5rem;
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--gold);
+  border: 1px solid var(--gold);
+  padding: 0.05em 0.35em;
+  vertical-align: middle;
+}
+.writ .desc { font-family: var(--serif); font-size: 0.96rem; color: var(--ink-2); line-height: 1.45; }
+.writ .caps {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--ink-2);
+  display: flex;
+  gap: 0.2rem 0.9rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.writ .caps .key { color: var(--muted); }
+.writ .caps .on { color: var(--on); }
+.writ .caps .off { color: var(--off); }
+.writ:hover { background: var(--parchment-2); }
+
+/* ── 5. instruments (features) ── */
+.instruments { display: grid; grid-template-columns: 1fr 1fr; gap: 1.6rem 2rem; }
+.inst { display: grid; grid-template-columns: 1.9rem 1fr; gap: 0.85rem; }
+.inst .glyph {
+  font-family: var(--mono);
+  font-size: 1rem;
+  color: var(--gold);
+  width: 1.9rem;
+  height: 1.9rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  align-self: start;
+}
+.inst h3 { margin: 0.1rem 0 0.3rem; font-family: var(--mono); font-size: 0.92rem; font-weight: 600; color: var(--ink); }
+.inst p { margin: 0; font-family: var(--serif); font-size: 0.98rem; line-height: 1.55; color: var(--ink-2); }
+.inst code { font-size: 0.82em; }
+
+/* ── 6. providers ── */
+.providers { display: flex; flex-wrap: wrap; gap: 0.45rem; }
+.chip {
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  color: var(--ink);
+  background: var(--parchment-2);
+  border: 1px solid var(--line);
+  padding: 0.3rem 0.7rem;
+}
+.chip .model { color: var(--muted); margin-left: 0.35rem; }
+.chip.more { color: var(--muted); border-style: dashed; }
+
+/* ── 7. run ── */
+.run {
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+  background: var(--crest-field);
+  border: 1px solid var(--gold);
+  padding: 0.55rem;
+}
+.run .prompt {
+  display: flex;
+  align-items: center;
+  padding: 0 0.4rem 0 0.5rem;
+  color: var(--gold-bright);
+  font-family: var(--mono);
+  font-weight: 700;
+  user-select: none;
+}
+.run .cmd {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 0.86rem;
+  color: #efe6cf;
+  overflow-x: auto;
+  white-space: nowrap;
+  cursor: pointer;
+  padding: 0.4rem 0.2rem;
+}
+.run .cmd .env { color: var(--gold-bright); }
+.run .cmd .dim { color: #9b8f74; }
+.run .copy {
+  flex: 0 0 auto;
+  padding: 0 1rem;
+  background: transparent;
+  border: 1px solid var(--gold);
+  color: var(--gold-bright);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.run .copy.done { color: #efe6cf; border-color: #efe6cf; }
+
+/* ── divider + cta ── */
+.seal-divider {
+  text-align: center;
+  color: var(--gold);
+  font-family: var(--mono);
+  padding: 2.4rem 0 0;
+  font-size: 0.95rem;
+  opacity: 0.8;
+}
+.cta { text-align: center; }
+.cta .motto { font-family: var(--serif); font-style: italic; font-size: 1.15rem; color: var(--ink); margin: 0 0 1.2rem; }
+.cta .motto em { color: var(--porphyry); }
+.cta-links { display: flex; gap: 0.7rem; justify-content: center; flex-wrap: wrap; }
+.cta-links a {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  color: var(--porphyry);
+  border: 1px solid var(--line);
+  padding: 0.5rem 1.1rem;
+}
+.cta-links a:hover { border-color: var(--gold); text-decoration: none; }
+
+/* ── responsive ── */
+@media (max-width: 40rem) {
+  .compare { grid-template-columns: 1fr; }
+  .instruments { grid-template-columns: 1fr; }
+  .writ { grid-template-columns: 1.2rem 1fr; }
+  .writ .desc { grid-column: 2; }
+  .writ .caps { grid-column: 2; justify-content: flex-start; }
+}

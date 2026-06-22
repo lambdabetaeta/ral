@@ -139,6 +139,7 @@ a:hover { color: var(--accent-2); text-decoration: underline; }
     inset  1px  1px 0 var(--face-lo),
     inset -1px -1px 0 var(--face-hi);
 }
+.menu-item .ext { font-size: 0.7rem; opacity: 0.6; }
 
 /* ── theme toggle ── */
 .theme-toggle {

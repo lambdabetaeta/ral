@@ -1,0 +1,182 @@
+/* exarch.css — Byzantine-chancery heraldic identity.
+   Parchment stone substrate, porphyry + antique gold imperial accents.
+   A gold double-headed eagle on a porphyry shield is the one bold mark;
+   prose is set as a decree (serif), the machine speaks in mono.
+   Page-specific styles in landing.css and doc.css. */
+
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  /* parchment-day */
+  --parchment:  #e7e0ce;
+  --parchment-2:#ded6c2;
+  --face:       #d8d0bc;
+  --line:       #c4ba9f;
+  --ink:        #2a2016;
+  --ink-2:      #5c5240;
+  --muted:      #857a5a;
+  --porphyry:   #6b2a44;
+  --porphyry-2: #893a55;
+  --gold:       #927518;
+  --gold-bright:#c8a23f;
+  --crest-field:#231219;
+  --on:         #466b4c;
+  --off:        #8d7a6a;
+  --crest-text: #f1e8d2;
+
+  --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --art:  ui-monospace, 'SF Mono', Menlo, 'DejaVu Sans Mono', monospace;
+  --serif:'Iowan Old Style', 'Palatino Linotype', Palatino, 'Hoefler Text',
+          Georgia, 'Times New Roman', serif;
+}
+
+:root.dark {
+  /* porphyry-night */
+  --parchment:  #14110c;
+  --parchment-2:#1b1610;
+  --face:       #221a15;
+  --line:       #382a20;
+  --ink:        #e7e0ce;
+  --ink-2:      #b4a98c;
+  --muted:      #8a7d60;
+  --porphyry:   #c66e8a;
+  --porphyry-2: #d98aa4;
+  --gold:       #c8a23f;
+  --gold-bright:#dcbb5e;
+  --crest-field:#1a0e13;
+  --on:         #6fa178;
+  --off:        #7d7060;
+  --crest-text: #f1e8d2;
+}
+
+html {
+  background: var(--parchment);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: 16px;
+  min-height: 100%;
+  -webkit-text-size-adjust: 100%;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+a { color: var(--porphyry); text-decoration: none; text-underline-offset: 0.18em; }
+a:hover { color: var(--porphyry-2); text-decoration: underline; }
+
+/* ── chancery menubar ── */
+.menubar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 0.1rem;
+  padding: 0.35rem 0.8rem;
+  background: var(--parchment-2);
+  border-bottom: 1px solid var(--line);
+  font-family: var(--mono);
+  line-height: 1.2;
+}
+.menubar .spacer { flex: 1 1 auto; }
+.menubar .toc {
+  display: flex;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+  align-items: center;
+  font-size: 0.7rem;
+}
+.menubar .toc a { color: var(--muted); letter-spacing: 0.04em; }
+.menubar .toc a:hover { color: var(--porphyry); text-decoration: none; }
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  padding: 0.3rem 0.7rem;
+  color: var(--ink-2);
+  font-size: 0.82rem;
+  letter-spacing: 0.02em;
+  border-bottom: 2px solid transparent;
+}
+.menu-item:hover { color: var(--porphyry); text-decoration: none; }
+.menu-item.current { color: var(--ink); border-bottom-color: var(--gold); }
+.menu-item .ext { font-size: 0.66rem; opacity: 0.6; }
+
+/* ── theme toggle ── */
+.theme-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.28rem 0.7rem;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  cursor: pointer;
+  user-select: none;
+}
+.theme-toggle:hover { border-color: var(--gold); color: var(--ink); }
+.theme-toggle .glyph { font-size: 0.85rem; line-height: 1; }
+
+/* ── gold-framed document window (doc pages) ── */
+.window {
+  background: var(--parchment-2);
+  border: 1px solid var(--gold);
+  box-shadow: 0 0 0 1px var(--line), 0 14px 40px rgba(20,8,12,0.16);
+}
+.titlebar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.7rem;
+  background: var(--crest-field);
+  color: var(--crest-text);
+  border-bottom: 1px solid var(--gold);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  user-select: none;
+  cursor: default;
+}
+.titlebar .app-icon {
+  flex: 0 0 auto;
+  color: var(--gold-bright);
+  font-size: 0.8rem;
+  line-height: 1;
+}
+.title-text { flex: 0 1 auto; }
+.window-body { padding: 0; }
+
+/* ── footer ── */
+.footer {
+  position: relative;
+  z-index: 1;
+  max-width: 53rem;
+  margin: 0 auto;
+  width: 100%;
+  margin-top: auto;
+  padding: 1.6rem 1.2rem 2.4rem;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  color: var(--muted);
+  border-top: 1px solid var(--line);
+}
+.footer a { color: var(--ink-2); }
+.footer a:hover { color: var(--porphyry); }
+
+/* ── responsive ── */
+@media (max-width: 36rem) {
+  .menu-item { padding: 0.28rem 0.5rem; font-size: 0.78rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; scroll-behavior: auto !important; }
+}

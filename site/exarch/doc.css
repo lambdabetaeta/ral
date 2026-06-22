@@ -1,0 +1,144 @@
+/* doc.css — long-form reading page for exarch (the profiles reference).
+   Shared tokens, menubar, window, footer live in exarch.css. */
+
+html {
+  line-height: 1.74;
+  scroll-behavior: smooth;
+  scroll-padding-top: 3rem;
+}
+
+main {
+  position: relative;
+  z-index: 1;
+  max-width: 54rem;
+  margin: 0 auto;
+  width: 100%;
+  padding: 1.2rem 1.2rem 2rem;
+}
+
+article {
+  padding: 1.9rem 1.8rem 2.1rem;
+  font-family: var(--serif);
+  font-size: 1.04rem;
+  line-height: 1.72;
+  color: var(--ink);
+}
+
+/* ── headings (the machine's voice: mono) ── */
+article h1 {
+  font-family: var(--mono);
+  font-size: clamp(1.6rem, 5vw, 2.2rem);
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--porphyry);
+  margin-bottom: 1.4rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 2px solid var(--gold);
+}
+article h2 {
+  font-family: var(--mono);
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--ink);
+  margin: 2.4rem 0 0.7rem;
+  scroll-margin-top: 3rem;
+}
+article h3 {
+  font-family: var(--mono);
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--porphyry);
+  margin: 1.8rem 0 0.5rem;
+  scroll-margin-top: 3rem;
+}
+article h4 {
+  font-family: var(--mono);
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+  margin: 1.3rem 0 0.4rem;
+}
+article p { margin-bottom: 1.1rem; }
+article ul, article ol { margin: 0.6rem 0 1.1rem 1.6rem; }
+article li { margin-bottom: 0.4rem; }
+article li > ul, article li > ol { margin-bottom: 0.2rem; }
+article strong { color: var(--ink); font-weight: 600; }
+article em { font-style: italic; }
+article a { color: var(--porphyry); }
+article a:hover { color: var(--porphyry-2); }
+
+/* ── code ── */
+article code {
+  font-family: var(--mono);
+  font-size: 0.84em;
+  color: var(--gold);
+  background: var(--parchment-2);
+  padding: 0.05em 0.32em;
+  border: 1px solid var(--line);
+}
+article pre {
+  font-family: var(--mono);
+  font-size: 0.84rem;
+  line-height: 1.7;
+  background: var(--parchment-2);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--gold);
+  padding: 1rem 1.2rem;
+  margin: 1rem 0 1.4rem;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+article pre::-webkit-scrollbar { height: 4px; }
+article pre::-webkit-scrollbar-thumb { background: var(--line); }
+article pre code {
+  font-size: inherit;
+  color: var(--ink);
+  background: none;
+  padding: 0;
+  border: none;
+}
+
+/* ── blockquote, rule, table ── */
+article blockquote {
+  border-left: 3px solid var(--porphyry);
+  padding: 0.1rem 0 0.1rem 1.1rem;
+  margin: 1.1rem 0;
+  color: var(--muted);
+  font-style: italic;
+}
+article hr {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 2rem 0;
+}
+article table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1rem 0 1.4rem;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+}
+article th, article td {
+  text-align: left;
+  padding: 0.45rem 0.65rem;
+  border: 1px solid var(--line);
+  vertical-align: top;
+}
+article th {
+  background: var(--crest-field);
+  font-weight: 600;
+  color: var(--crest-text);
+  border-color: var(--gold);
+}
+article td code { font-size: 0.92em; }
+article td:first-child code { color: var(--porphyry); font-weight: 600; }
+
+/* ── responsive ── */
+@media (max-width: 36rem) {
+  main { padding: 0.8rem 0.7rem 2rem; }
+  article { padding: 1.4rem 1.1rem; }
+  article table { font-size: 0.74rem; }
+  .menubar .toc { font-size: 0.62rem; }
+}
