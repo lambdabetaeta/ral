@@ -164,7 +164,7 @@ design pages via the `against` stamp.
   - [[map/core/evaluator|evaluator]] — the trampolined CBPV machine: crate-private verbs entered only through framed turn doors, trampoline, scope frames, matching, audit; a same-thread thunk body runs in the caller's session. *@1baac6d*
   - [[map/core/runtime|runtime]] — the command/pipeline/transport machinery the machine dispatches into: bundled heads as `--ral-bundled-tool` exec images (inline only on a clean terminal), external children spawned under the effective sandbox, grant bodies run locally, redirect/exec surfaced at runtime doors, plus the shared re-exec'd-child eval runner (`child_eval.rs`). *@1baac6d*
   - [[map/core/capabilities|capabilities]] — the grant decision layer (free `capability::check_*(&Context, …)` folds) and the OS process sandbox (macOS Seatbelt, Linux bwrap, Windows fail-closed); kernel-denial hints offer a path to grant only for `file-*` denials. *@1baac6d*
-  - [[map/core/io-process|io-process]] — byte sinks/sources, signals, process groups, Stream labels. *@7ce10d61*
+  - [[map/core/io-process|io-process]] — byte sinks/sources, the lease-gated foreground handoff, the Cancel|Run reaper daemon, Stream labels. *@1baac6d*
   - [[map/core/builtins|builtins]] — Rust commands and bundled coreutils/ripgrep. *@8c2437c1*
   - [[map/core/shell-state|shell-state]] — runtime `Value`, the `surface` sink, handler stack, and the `Shell` state split by lifetime into `Mobile` / `TurnState` / `SessionState` / `LocalState`; a scope entry is `Binding { value, scheme }`. *@1baac6d*
   - [[map/core/transport|transport]] — serde mirror (`SerialValue`, `SerialBinding`) and wire envelope (`WireMobile`) carrying a shell — values and schemes — across a re-exec. *@2b999feb*

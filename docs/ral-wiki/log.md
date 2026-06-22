@@ -3147,3 +3147,17 @@ that list destructuring without a `...rest` tail now rejects a longer value, and
 that `within` handlers and aliases must be fixed-arity lambdas validated at the
 install boundary ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
 Updated [[index|index]].
+
+## [2026-06-22] ingest | IO/process/stream re-ingested at HEAD (8 commits stale)
+
+Re-stamped [[map/core/io-process|io-process]] to `@1baac6d`. The foreground
+handoff is now gated on a held `TerminalLease` value (new `core/src/process/lease.rs`,
+lent to `ForegroundGuard::try_acquire`) rather than the inferred `startup_foreground`
+predicate, and the former `JobControl` is the placement-only `LaunchRole`
+([[decisions/260619_terminal-lease|terminal-lease]]); recorded the new no-input
+`Source::Empty`. Folded in the single reaper daemon whose action generalised to
+`Cancel | Run`, so death-clock deadlines, scheduled wakeups, and detached-worker
+ceilings share one timer ([[decisions/260617_scheduled-wakeups|scheduled-wakeups]],
+[[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-primitives]]),
+and noted that redirect reads/writes emit byte-level I/O doors at this layer,
+rendered by [[map/exarch/io-surface|io-surface]]. Updated [[index|index]].
