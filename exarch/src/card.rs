@@ -1096,9 +1096,8 @@ mod tests {
         }
     }
 
-    /// An exec card carries the program as a `Path` span, each arg as a
-    /// `Code` span, and a status span roled `Ok` at status 0, `Bad`
-    /// otherwise.
+    /// An exec card carries the program as a `Path` span, each arg as plain
+    /// ink, and a status span roled `Ok` at status 0, `Bad` otherwise.
     #[test]
     fn io_card_exec_roles_status_by_code() {
         let ok = io_card(&IoEvent::Exec {
@@ -1116,8 +1115,8 @@ mod tests {
         assert!(
             spans
                 .iter()
-                .any(|sp| sp.role == Some(Role::Code) && sp.text.contains("-la")),
-            "each arg is a Code span"
+                .any(|sp| sp.role.is_none() && sp.text.contains("-la")),
+            "each arg is plain ink"
         );
         let status = spans.last().expect("exec ends on its status");
         assert_eq!(status.role, Some(Role::Ok), "status 0 is Ok");
