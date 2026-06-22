@@ -195,6 +195,9 @@ pub fn run() -> Result<(), String> {
         label,
         c.expect_action,
         c.allow_schedule,
+        // Interactive (TUI) roots park for the human; a headless root
+        // terminates once its seeded work is idle.
+        !c.headless,
     )
     .map_err(|e| format!("session init: {e}"))?;
 

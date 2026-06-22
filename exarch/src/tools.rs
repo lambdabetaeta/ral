@@ -1,10 +1,11 @@
 //! Tool registry — one entry per tool the model may call.
 //!
 //! A [`Tool`] knows how to advertise itself to the provider (name,
-//! description, JSON schema) and how to dispatch one parsed JSON
-//! input against a live [`Session`].  Synchronous tools return
-//! [`Staged::Done`]; tools that fork a child session return
-//! [`Staged::Spawned`] and are joined by the parent's dispatch loop.
+//! description, JSON schema) and how to dispatch one parsed JSON input
+//! against a live [`Session`], returning a [`SessionToolResult`].  Every tool
+//! returns synchronously: a tool that forks a child session (`agent`) launches
+//! a detached peer and returns a start receipt, so dispatch never blocks and
+//! there is no join phase.
 //!
 //! Each tool owns its own input parsing and invalid-input UX —
 //! [`Tool::dispatch`] is given a raw `serde_json::Value`, and the tool
@@ -16,15 +17,37 @@
 use crate::bus::{Emitter, Kind};
 use crate::event::ToolResult as SessionToolResult;
 use crate::provider::Provider;
-use crate::session::{Session, Staged};
+use crate::session::Session;
 use serde_json::Value;
 use std::sync::{Arc, OnceLock};
-use std::thread;
 
 mod agent;
 mod fff;
 mod ral;
 mod schedule;
+
+/// Which tools a session advertises to the provider and may dispatch — the
+/// single source of truth for both advertisement (`provider.complete`) and
+/// enforcement ([`Session`]'s dispatch path), replacing the old
+/// `advertise_root_only` bool and the `is_subagent` dispatch check.
+#[derive(Clone, Copy)]
+pub enum ToolSet {
+    /// Every registered tool — a root.
+    All,
+    /// Every tool except the spawn family (`agent` / `agents` /
+    /// `agent_cancel`) — a peer, so the spawn tree stays one level deep.
+    NoSpawn,
+}
+
+impl ToolSet {
+    /// Whether `tool` is advertised and permitted under this set.
+    pub fn allows(&self, tool: &dyn Tool) -> bool {
+        match self {
+            ToolSet::All => true,
+            ToolSet::NoSpawn => !tool.spawns(),
+        }
+    }
+}
 
 /// One registered tool.  The registry stores `Box<dyn Tool>` and
 /// dispatches by name; [`Session`] holds no tool-specific knowledge.
@@ -39,36 +62,29 @@ pub(crate) trait Tool: Send + Sync {
     /// inside the impl; cheap to call.
     fn schema(&self) -> &'static Value;
 
-    /// True for tools only the root session may call.  Root-only tools
-    /// are not advertised to forked sub-agents and are refused if one
-    /// attempts the call.  `agent` is root-only: a sub-agent that could
-    /// spawn its own children turns a one-line task into a recursion of
-    /// duplicated sessions, so the spawn tree stays one level deep.
-    fn root_only(&self) -> bool {
+    /// True for the spawn family (`agent` / `agents` / `agent_cancel`).
+    /// These are withheld from a peer's [`ToolSet`] — both unadvertised and
+    /// refused — so a sub-agent cannot spawn its own children and the spawn
+    /// tree stays one level deep.  Everything else (including `schedule`, so a
+    /// peer may wake itself) defaults to `false`.
+    fn spawns(&self) -> bool {
         false
     }
 
-    /// Read `input`, render the rail header, and run the call.
-    /// Synchronous tools return [`Staged::Done`] inline; concurrent
-    /// tools spawn on `scope` and return [`Staged::Spawned`].
-    /// Malformed input is reported by the tool itself via
-    /// [`invalid_input`] (or its own equivalent), so this method
-    /// always succeeds in producing a [`Staged`].
-    ///
-    /// `token` is the root turn's cancellation token
-    /// ([`crate::cancel::Token`]); a tool that forks a child session
-    /// (`agent`) hands the child a clone so an Esc cancels the whole tree.
-    #[allow(clippy::too_many_arguments)] // each is distinct dispatch context, not a bundle
-    fn dispatch<'scope, 'env: 'scope>(
+    /// Read `input`, render the rail header, run the call, and return its
+    /// result.  A tool that forks a child session (`agent`) launches a
+    /// detached worker and returns a start receipt here — it does not block.
+    /// Malformed input is reported by the tool itself via [`invalid_input`]
+    /// (or its own equivalent), so this method always produces a result.  A
+    /// tool reads the live cancellation token from `session` if it needs it.
+    fn dispatch(
         &self,
         id: String,
         input: Value,
         session: &mut Session,
-        provider: &'env Arc<Provider>,
-        token: &'env crate::cancel::Token,
+        provider: &Arc<Provider>,
         emit: &Emitter,
-        scope: &'scope thread::Scope<'scope, 'env>,
-    ) -> Staged<'scope>;
+    ) -> SessionToolResult;
 }
 
 /// All registered tools, in the order they were added.  Built once.
@@ -97,16 +113,16 @@ pub(crate) fn find(name: &str) -> Option<&'static dyn Tool> {
 }
 
 /// Render the rail header and an error block for a malformed tool
-/// call, returning the [`Staged`] that satisfies the dispatcher.
+/// call, returning the [`SessionToolResult`] the dispatcher commits.
 /// `display` is the partial label the rail should show — typically
 /// the field that did parse, or `"<invalid input>"` when nothing did.
-pub(super) fn invalid_input<'scope>(
+pub(super) fn invalid_input(
     id: String,
     tool: &'static str,
     display: &str,
     reason: &str,
     emit: &Emitter,
-) -> Staged<'scope> {
+) -> SessionToolResult {
     emit.emit(Kind::ToolCall {
         tool,
         cmd: display.to_string(),
@@ -114,7 +130,7 @@ pub(super) fn invalid_input<'scope>(
     });
     let msg = format!("tool input error: {reason}\nexpected an object matching the tool's schema");
     emit.emit(Kind::ToolResult(msg.clone()));
-    Staged::Done(SessionToolResult { id, content: msg })
+    SessionToolResult { id, content: msg }
 }
 
 /// Pull a required `u64` field out of a tool's JSON input object.

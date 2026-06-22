@@ -1,23 +1,32 @@
 //! One continuous agent session: canonical event log, persistent shell,
-//! capability set, turn driver.  [`Session::apply`] runs one round-trip
-//! against the provider; [`Session::run_turn`] wraps it with the
-//! nudge-retry policy.  Sub-sessions fork on the model's `agent` tool;
-//! the call tree lives on the Rust call stack and mirrors as
-//! [`Kind::Born`] / [`Kind::Died`] on the bus.
+//! capability set, and the shared turn driver every agent runs.
+//!
+//! [`Session::apply`] runs one round-trip against the provider;
+//! [`Session::drive`] is the one loop — root and sub-agent alike — that pulls
+//! turn-boundary messages from the session's own [`Inbox`], runs one `apply`
+//! per message, and turns a nudge-worthy outcome into a self-posted
+//! [`InboxMsg::Nudge`].  The only differences between agents are structural:
+//! `is_root` (may spawn, mints the Esc token per turn), `park_when_idle` (an
+//! interactive root parks for the human; a headless root and every peer
+//! terminate at quiescence), `expect_action`, and `tools`.  A peer's single
+//! result is delivered up its parent's mailbox by the spawn site, not here, so
+//! `drive` itself is identical for both.
 
 use crate::bootstrap::Scratch;
-use crate::bus::{Emitter, Kind, SessionBus, SessionId, Sink, pump};
+use crate::bus::{
+    AgentOutcome, Emitter, Inbox, InboxMsg, Kind, Mailbox, SessionId, Turn, WORKER_PANIC_PREFIX,
+};
 use crate::cancel;
 use crate::digest::{AGENT_REPLY_CAP, COMPACT_THRESHOLD, OPAQUE_CAP, clip, render};
 use crate::event::{QuiesceReason, SessionLog, ToolResult as SessionToolResult};
 use crate::nudge;
 use crate::provider::{Provider, ProviderError, StepOut, StopReason, ToolCall};
 use crate::shell_eval;
+use crate::tools::ToolSet;
 use ral_core::Shell;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread;
 
 pub struct Session {
     pub id: SessionId,
@@ -25,45 +34,66 @@ pub struct Session {
     log: SessionLog,
     shell: Shell,
     caps: ral_core::types::Capabilities,
-    /// A forked child. Sub-agents are neither advertised nor permitted
-    /// root-only tools — chiefly `agent`, so the spawn tree stays one
-    /// level deep (see [`crate::tools::Tool::root_only`]).
-    is_subagent: bool,
-    /// When set (headless, root only), turn completion is gated by two
-    /// one-shot nudges: a turn that never used a tool is nudged to engage,
-    /// and a turn that did is nudged to verify its output against the task.
-    /// Forks never inherit it.
+    /// This session's own inbox — the consumer side of its message queue.
+    /// [`Session::drive`] pulls turn-boundary deliverables from here;
+    /// [`Session::apply`] drains tool-boundary steering from it mid-round-trip.
+    /// Self-nudges and self-armed wakeups land here; a child's result lands in
+    /// its *parent's* inbox, never reaching across into a sibling's.
+    inbox: Inbox,
+    /// Whether this session may spawn children — it holds the `agent` family
+    /// and owns a populated [`Self::agents`].  The one structural bit `drive`
+    /// branches on: only a root mints the process Esc token per turn; a peer
+    /// holds one sticky token for life.
+    is_root: bool,
+    /// Whether `drive` parks on an empty inbox or terminates.  True only for
+    /// an interactive root, whose human is an ever-present writer; a headless
+    /// root and every peer terminate at quiescence (a peer still parks while a
+    /// self-schedule is armed).
+    park_when_idle: bool,
+    /// When set (root only), turn completion is gated by two one-shot,
+    /// budget-free nudges: a turn that used no tool is nudged to engage, one
+    /// that did is nudged to verify.  Peers never carry it.
     expect_action: bool,
-    /// Whether the current turn has dispatched any tool call. Reset at the
-    /// top of [`Session::run_turn`]; read by the completion-gate nudges to
+    /// Per-session nudge state — the retry budget and the one-shot completion
+    /// gates.  Its latches reset on a genuine turn-boundary message, never on
+    /// a self-[`InboxMsg::Nudge`], so a multi-step nudge sequence runs to
+    /// completion within one turn.
+    nudges: nudge::Registry,
+    /// This session's cancellation token.  A peer owns one sticky token for
+    /// life (registered, cancelled by `agent_cancel` / `/clear` / its
+    /// ceiling).  The root re-mints a fresh *published* token at each turn
+    /// boundary (the X5 reset), so this field holds the root's current turn
+    /// token; an Esc on one turn never bleeds into the next.
+    cancel: cancel::Token,
+    /// Which tools this session advertises and may dispatch — the single
+    /// source of truth for both, read by `provider.complete` (advertisement)
+    /// and [`Self::stage`] (enforcement).  Full at the root; full minus the
+    /// spawn family at a peer, so the spawn tree stays one level deep.
+    tools: ToolSet,
+    /// Whether the current turn has dispatched any tool call.  Reset on each
+    /// genuine turn-boundary message; read by the completion-gate nudges to
     /// choose between the idle and verify prompts.
     acted: bool,
     /// Durable [`MobileSnapshot`](ral_core::types::MobileSnapshot) of the
-    /// shell as of the last clean tool-call boundary.  Refreshed inside the
-    /// worker (`run_shell`) right before each `run_shell` dispatches, so it
-    /// always holds the dynamic context that completed calls left behind,
-    /// never the one a call is mid-way through.  Read by
-    /// [`Session::run_turn`] after a caught worker panic (`pump` → `Ok(None)`)
-    /// to roll the panicking call's dynamic-context effects back: the field
-    /// lives on `Session` precisely so it survives `pump`'s `catch_unwind`
-    /// boundary (written by the worker, read by the driver).  See
-    /// `ral_core`'s `run_turn` frame guard for the IO half of the same
-    /// panic-recovery contract.
+    /// shell as of the last clean tool-call boundary.  Refreshed inside
+    /// `run_shell` right before each dispatch, so it always holds the dynamic
+    /// context completed calls left behind.  Read by [`Self::drive`] after a
+    /// caught worker panic to roll the panicking call's dynamic-context
+    /// effects back; it lives on `Session` precisely so it survives the
+    /// `catch_unwind` boundary.
     durable: ral_core::types::MobileSnapshot,
-    /// Live async `agent` workers spawned this session.  Only the root
-    /// populates it (`agent` is root-only); a forked child carries an empty
-    /// one it never uses.  Survives `/clear`: `clear` bumps its generation
-    /// and cancels its workers rather than replacing it, so a worker that
-    /// settles after the clear (holding a clone of this same registry) finds
-    /// its generation stale and drops its result.
+    /// Live async `agent` workers spawned this session.  Only a root populates
+    /// it (`agent` is in the root tool set); a peer carries an empty one it
+    /// never uses.  Survives `/clear`: the generation is bumped and workers
+    /// cancelled, so a worker that settles after the clear drops its result.
     pub(crate) agents: crate::agent_registry::AgentRegistry,
-    /// Live scheduled wakeups (cron / after).  Like [`Self::agents`], only
-    /// the root uses it; `/clear` drops every schedule (disarming its reaper
-    /// deadline).
+    /// Live scheduled wakeups (cron / after).  A peer may self-schedule (it
+    /// posts wakeups into its own inbox), so this is no longer root-only; it
+    /// is still gated by [`Self::schedule_authority`].
     pub(crate) schedules: crate::schedule::ScheduleRegistry,
-    /// Whether self-scheduling is authorised this session.  Off by default:
-    /// an agent that can wake itself indefinitely holds real authority, so
-    /// the `schedule` tool refuses unless `--allow-schedule` granted it.
+    /// Whether self-scheduling is authorised this session.  Off by default;
+    /// inherited by forks, so a `--allow-schedule` root grants its peers the
+    /// same authority.
     pub(crate) schedule_authority: bool,
 }
 
@@ -98,15 +128,76 @@ pub(crate) fn fresh_id() -> SessionId {
     N.fetch_add(1, Ordering::Relaxed)
 }
 
+/// What [`Session::drive`] should do after handing a session-affecting slash
+/// command to [`Control`].
+pub enum ControlFlow {
+    Continue,
+    Quit,
+}
+
+/// The frontend hook the drive loop calls for a session-affecting slash
+/// command ([`Turn::Command`]) drained at the turn boundary — the drive thread
+/// owns the session the command mutates, so it cannot run on the UI thread.
+/// View-only commands (`/help`, `/copy`, …) are handled frontend-side and
+/// never reach here.  Off the TUI there are no such commands, so [`NoControl`]
+/// handles none.
+pub trait Control {
+    /// Run `raw` (a slash-command line) against the session and provider the
+    /// drive loop owns, returning whether the loop should quit.  May swap the
+    /// provider (`/model`) by reassigning `*provider`.
+    fn command(
+        &mut self,
+        raw: &str,
+        session: &mut Session,
+        provider: &mut Arc<Provider>,
+        emit: &Emitter,
+    ) -> ControlFlow;
+}
+
+/// The no-op control for drivers with no slash commands (headless, peers,
+/// tests): a [`Turn::Command`] should never reach them, so it is a no-op.
+pub struct NoControl;
+
+impl Control for NoControl {
+    fn command(
+        &mut self,
+        _raw: &str,
+        _session: &mut Session,
+        _provider: &mut Arc<Provider>,
+        _emit: &Emitter,
+    ) -> ControlFlow {
+        ControlFlow::Continue
+    }
+}
+
+/// The launch configuration threaded into [`Session::assemble`] — bundled so
+/// the one constructor reads at the call site rather than as a wall of bare
+/// booleans.
+struct Build {
+    system: String,
+    caps: ral_core::types::Capabilities,
+    shell: Shell,
+    log: SessionLog,
+    is_root: bool,
+    park_when_idle: bool,
+    expect_action: bool,
+    schedule_authority: bool,
+    tools: ToolSet,
+}
+
 impl Session {
-    fn assemble(
-        system: String,
-        caps: ral_core::types::Capabilities,
-        mut shell: Shell,
-        log: SessionLog,
-        is_subagent: bool,
-        expect_action: bool,
-    ) -> Self {
+    fn assemble(b: Build) -> Self {
+        let Build {
+            system,
+            caps,
+            mut shell,
+            log,
+            is_root,
+            park_when_idle,
+            expect_action,
+            schedule_authority,
+            tools,
+        } = b;
         seed_session_dir(&mut shell, &log);
         let durable = shell.mobile_snapshot();
         Self {
@@ -115,13 +206,18 @@ impl Session {
             log,
             shell,
             caps,
-            is_subagent,
+            inbox: Inbox::new(),
+            is_root,
+            park_when_idle,
             expect_action,
+            nudges: nudge::Registry::new(),
+            cancel: cancel::Token::new(),
+            tools,
             acted: false,
             durable,
             agents: crate::agent_registry::AgentRegistry::new(),
             schedules: crate::schedule::ScheduleRegistry::new(),
-            schedule_authority: false,
+            schedule_authority,
         }
     }
 
@@ -141,14 +237,25 @@ impl Session {
         provider_label: &str,
         expect_action: bool,
         allow_schedule: bool,
+        interactive: bool,
     ) -> io::Result<Self> {
         let shell = boot_root_shell(scratch);
         let sessions_root = run_dir.join("sessions");
         let id = fresh_id();
         let log = SessionLog::root(&sessions_root, id, model, provider_label, system.len())?;
-        let mut s = Self::assemble(system, caps, shell, log, false, expect_action);
-        s.schedule_authority = allow_schedule;
-        Ok(s)
+        Ok(Self::assemble(Build {
+            system,
+            caps,
+            shell,
+            log,
+            is_root: true,
+            // Only an interactive root has an ever-present human writer to park
+            // for; a headless root terminates once its seeded work is idle.
+            park_when_idle: interactive,
+            expect_action,
+            schedule_authority: allow_schedule,
+            tools: ToolSet::All,
+        }))
     }
 
     pub(crate) fn clear(&mut self, scratch: &Scratch) -> io::Result<()> {
@@ -158,6 +265,9 @@ impl Session {
         let shell = boot_root_shell(scratch);
         self.log.clear(self.system.len())?;
         self.replace_shell(shell);
+        // Drop every queued message: a rebuilt context carries neither stale
+        // user steering nor non-human deliveries across the clear.
+        self.inbox.clear();
         // Cancel every live async agent and advance the generation so any
         // worker that settles after this clear drops its result rather than
         // delivering it into the rebuilt context.
@@ -172,30 +282,65 @@ impl Session {
         // the parent's scope (prelude, agent library, accumulated bindings),
         // dynamic context (cwd, env, grants), and installed builtin table (the
         // host's `window-hash`/`grep-files`/`edit` and the rest), and starts
-        // fresh in control counters and session state — no terminal authority,
-        // no flow-back. Core owns the flow matrix, so the builtin table can't
-        // be silently dropped here the way a hand-copied field once was.
+        // fresh in control counters and session state — its own inbox, its own
+        // (fresh) cancellation token, no terminal authority, no flow-back.
+        // Core owns the flow matrix, so the builtin table can't be silently
+        // dropped here the way a hand-copied field once was.
         let shell = self.shell.fork_session();
         let child_id = fresh_id();
         let log = self.log.fork(child_id, self.system.len())?;
-        Ok(Self::assemble(
-            self.system.clone(),
-            self.caps.clone(),
+        Ok(Self::assemble(Build {
+            system: self.system.clone(),
+            caps: self.caps.clone(),
             shell,
             log,
-            true,
-            false,
-        ))
+            is_root: false,
+            // A peer has no human; it terminates at quiescence (parking only
+            // while a self-schedule it armed is still live).
+            park_when_idle: false,
+            expect_action: false,
+            // Self-scheduling authority is inherited: a `--allow-schedule` root
+            // grants its peers the same right to wake themselves.
+            schedule_authority: self.schedule_authority,
+            // A peer may not spawn — withholding the spawn family from its tool
+            // set bounds recursion to depth 1, advertised and enforced.
+            tools: ToolSet::NoSpawn,
+        }))
     }
 
     pub(crate) fn log_dir(&self) -> &std::path::Path {
         self.log.dir()
     }
 
+    /// This session's mailbox — for the `schedule` tool to arm wakeups into
+    /// its *own* inbox, and the spawn site to capture the parent's box as a
+    /// child's upward result edge.
+    pub(crate) fn mailbox(&self) -> Mailbox {
+        self.inbox.mailbox()
+    }
+
+    /// Whether this session may spawn children (read by the spawn site).
+    pub(crate) fn is_root(&self) -> bool {
+        self.is_root
+    }
+
+    /// This session's cancellation token (read by the spawn site to register
+    /// a peer's sticky token in the parent's [`Self::agents`]).
+    pub(crate) fn cancel_token(&self) -> &cancel::Token {
+        &self.cancel
+    }
+
+    /// Seed this session's inbox with its launch prompt — the spawn site calls
+    /// it once on a freshly forked child, then drops its handle, so the only
+    /// downward edge is this one write.
+    pub(crate) fn seed(&self, prompt: String) {
+        self.inbox.push_user(prompt);
+    }
+
     /// Build a root session against a throwaway sessions root under
     /// `dir`, with default (unrestricted) capabilities and a baked
     /// shell.  The harness in `tests/` uses this to drive [`Self::apply`]
-    /// and [`Self::run_turn`] through a [`Provider::scripted`] backend.
+    /// and [`Self::drive`] through a [`Provider::scripted`] backend.
     pub fn for_test(dir: &std::path::Path, system: &str) -> io::Result<Self> {
         let shell = crate::bootstrap::boot_shell();
         let id = fresh_id();
@@ -206,14 +351,19 @@ impl Session {
             "test",
             system.len(),
         )?;
-        Ok(Self::assemble(
-            system.to_string(),
-            ral_core::types::Capabilities::default(),
+        Ok(Self::assemble(Build {
+            system: system.to_string(),
+            caps: ral_core::types::Capabilities::default(),
             shell,
             log,
-            false,
-            false,
-        ))
+            is_root: true,
+            // Tests drive `apply`/`drive` directly and must never block; a test
+            // root terminates at quiescence like a peer.
+            park_when_idle: false,
+            expect_action: false,
+            schedule_authority: false,
+            tools: ToolSet::All,
+        }))
     }
 
     /// Whether the session is at a settled turn boundary — every turn
@@ -236,6 +386,106 @@ impl Session {
         self.log.history_bytes()
     }
 
+    /// The one shared turn loop — root and peer alike.  Pull a turn-boundary
+    /// deliverable from the inbox, run one [`Self::apply`], let the nudge
+    /// registry post any retry as a self-[`InboxMsg::Nudge`], and repeat.  An
+    /// empty inbox either parks (an interactive root, or any agent with a live
+    /// self-schedule) or terminates (a peer / headless root at quiescence).
+    ///
+    /// Per-`apply` panic recovery lives here — the `catch_unwind` rolls the
+    /// dynamic context back to the last clean tool-call boundary and continues
+    /// the loop, so one crashing turn never sinks the session.  Returns the
+    /// final turn's `(outcome, text)` digest; the root ignores it, a peer's
+    /// spawn site delivers it up the parent's mailbox.
+    ///
+    /// `provider` is owned so [`Control`] can swap it on `/model`; `control`
+    /// handles session-affecting slash commands ([`NoControl`] off the TUI).
+    pub fn drive(
+        &mut self,
+        provider: Arc<Provider>,
+        control: &mut dyn Control,
+        emit: &Emitter,
+    ) -> (AgentOutcome, String) {
+        let mut provider = provider;
+        // The root's published Esc token, re-minted per turn boundary; held
+        // here so the slot stays valid for the whole turn and is retired when
+        // the next mint (or this loop's end) drops it.  A peer mints nothing.
+        let mut guard: Option<cancel::RootGuard> = None;
+        let mut digest = (AgentOutcome::Empty, String::new());
+        loop {
+            let armed = self.schedules.armed();
+            let Some(turn) = self
+                .inbox
+                .next_or_idle(self.park_when_idle, armed, &self.cancel)
+            else {
+                break;
+            };
+            // A genuine turn boundary resets the nudge latches and, at the
+            // root, re-mints the cancellation token (minting is itself the
+            // reset, so a prior turn's Esc cannot carry into this one).  A
+            // self-nudge is the same turn continuing and resets neither.
+            if turn.resets_turn() {
+                self.nudges.reset();
+                self.acted = false;
+                if self.is_root {
+                    let g = cancel::mint_root();
+                    self.cancel = g.token().clone();
+                    guard = Some(g);
+                }
+            }
+            // Session-affecting slash commands run against the owned session
+            // and provider, never the model.
+            if let Turn::Command(raw) = &turn {
+                match control.command(raw, self, &mut provider, emit) {
+                    ControlFlow::Quit => break,
+                    ControlFlow::Continue => continue,
+                }
+            }
+            announce(&turn, emit);
+            let token = self.cancel.clone();
+            let prompt = Some(turn.text());
+            let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.apply(&provider, prompt, &token, emit)
+            }));
+            let outcome = match attempt {
+                Ok(o) => o,
+                Err(p) => {
+                    // A worker panic mid-eval: roll the dynamic state — grant
+                    // frames, env/cwd overrides, the handler stack, half-applied
+                    // bindings — back to the last clean tool-call boundary.
+                    // Completed calls' effects live in the snapshot and survive;
+                    // the panicking call's do not.  The IO frame self-heals in
+                    // ral_core's own run_turn guard; this is the dynamic half.
+                    self.shell.restore_mobile(self.durable.clone());
+                    let msg = panic_msg(&p);
+                    self.note_error(format!("{WORKER_PANIC_PREFIX}{msg}"), emit);
+                    digest = (
+                        AgentOutcome::Failed(format!("worker panicked: {msg}")),
+                        String::new(),
+                    );
+                    continue;
+                }
+            };
+            digest = agent_digest(&outcome);
+            let ctx = nudge::NudgeCtx {
+                expect_action: self.expect_action,
+                acted: self.acted,
+            };
+            if let Some(msg) = self.nudges.react(&outcome, ctx, emit, &mut self.log) {
+                self.inbox.push(InboxMsg::Nudge(msg));
+            }
+        }
+        // The loop always hands the session back ready for the next prompt: a
+        // surfaced error or caught panic can leave the committed prompt
+        // stranded mid-protocol; wind it back here through the single exit.
+        if !self.log.is_ready() {
+            self.log.quiesce(QuiesceReason::Aborted);
+        }
+        debug_assert!(self.log.is_ready(), "drive must leave the session ReadyForUser");
+        drop(guard);
+        digest
+    }
+
     pub fn apply(
         &mut self,
         provider: &Arc<Provider>,
@@ -243,20 +493,13 @@ impl Session {
         token: &cancel::Token,
         emit: &Emitter,
     ) -> Result<TurnOutcome, ProviderError> {
-        // No clear here: the root turn mints a fresh token (see
-        // `run_turn`), and a sub-agent shares the parent's.  Clearing here
-        // would erase a just-pressed Esc the moment a sub-agent's `apply`
-        // begins (X5).
-        let mut last_text = String::new();
-        // Auto-compaction runs here, at the one boundary where
-        // `can_compact()` actually holds — `apply` is entered `ReadyForUser`
-        // (the turn-ends-ready invariant), before the prompt is committed.
-        // The prior mid-turn call sat in `AwaitingAssistantAfterToolResults`,
-        // where `can_compact()` is always false, so it never fired (X1).
-        // Every provider round-trip — each user turn, each nudge iteration —
-        // passes through here, so long autonomous and headless runs stay
-        // bounded.
+        // Auto-compaction runs here, at the one boundary where `can_compact()`
+        // actually holds — `apply` is entered `ReadyForUser` (the
+        // turn-ends-ready invariant), before the prompt is committed.  Every
+        // provider round-trip — each user turn, each nudge iteration — passes
+        // through here, so long autonomous and headless runs stay bounded.
         self.compact(provider, emit, false, token);
+        let mut last_text = String::new();
         if let Some(p) = prompt {
             self.log
                 .append_user(p)
@@ -296,7 +539,7 @@ impl Session {
                 provider.complete(
                     &self.system,
                     messages,
-                    !self.is_subagent,
+                    &self.tools,
                     &mut |t: &str| {
                         #[cfg(debug_assertions)]
                         if first_token.is_none() {
@@ -401,8 +644,7 @@ impl Session {
                 );
             }
             self.acted = true;
-            let Dispatch { results, steering } =
-                self.dispatch(provider, tool_calls, token, emit)?;
+            let Dispatch { results, steering } = self.dispatch(provider, tool_calls, token, emit);
             self.log
                 .append_tool_results(results)
                 .map_err(|e| ProviderError::Other(e.to_string()))?;
@@ -416,83 +658,6 @@ impl Session {
                 return self.cancelled(emit);
             }
         }
-    }
-
-    /// One user turn.  Each iteration runs one [`Session::apply`] and
-    /// hands the outcome to [`nudge::Registry::react`], which decides
-    /// whether to stop or to loop with a (possibly synthetic) next
-    /// prompt.
-    ///
-    /// `bus` owns the worker→frontend channel.  A session-lived bus (the
-    /// TUI) keeps it open across turns so a background `agent` streams a live
-    /// tab; a per-turn bus (headless / tests) closes it when the worker
-    /// finishes.  Completion is the per-turn `done` flag inside [`pump`],
-    /// independent of the bus's lifetime.
-    pub fn run_turn<S: Sink>(
-        &mut self,
-        sink: &mut S,
-        bus: &SessionBus,
-        provider: &Arc<Provider>,
-        prompt: Option<String>,
-    ) -> Result<(), String> {
-        let id = self.id;
-        let mut pending = prompt;
-        let mut nudges = nudge::Registry::new();
-        self.acted = false;
-        // Mint this root turn's cancellation token.  Minting publishes a
-        // fresh, un-cancelled token for the signal handler and is itself
-        // the reset; the guard retires it when the turn ends.  Every
-        // `apply` this turn — including a sub-agent's, which shares this
-        // token rather than minting — reads it, so one Esc halts the tree.
-        let root = cancel::mint_root();
-        let outcome = loop {
-            // Reborrow per iteration so the worker's closure owns only
-            // a short-lived `&mut Session`; the outer loop keeps the
-            // original for the next pass + post-attempt chrome.
-            let attempt = {
-                let s: &mut Session = &mut *self;
-                let p = pending.take();
-                let token = root.token().clone();
-                match pump(sink, bus, id, move |emit| {
-                    s.apply(provider, p, &token, emit)
-                }) {
-                    Ok(a) => a,
-                    Err(e) => break Err(e.to_string()),
-                }
-            };
-            // `None` is a worker panic — the error line is already out.
-            // `run_turn`'s frame guard has self-healed the IO frame
-            // on unwind; here we resume from the last committed `Mobile`
-            // snapshot, rolling the whole dynamic state — grant frames,
-            // env/cwd overrides, the handler stack, and any bindings the
-            // panicking call half-applied — back to the last clean
-            // tool-call boundary.  Completed calls' bindings and cwd live
-            // in the snapshot and survive; the panicking call's do not.
-            let Some(attempt) = attempt else {
-                self.shell.restore_mobile(self.durable.clone());
-                break Ok(());
-            };
-            let ctx = nudge::NudgeCtx {
-                expect_action: self.expect_action && !self.is_subagent,
-                acted: self.acted,
-            };
-            match nudges.react(&attempt, ctx, sink, &mut self.log, id) {
-                nudge::Step::Stop => break Ok(()),
-                nudge::Step::Continue(s) => pending = Some(s),
-            }
-        };
-        // A turn always hands the session back ready for the next user
-        // prompt.  A surfaced error leaves the committed prompt stranded
-        // mid-protocol — wind it back here, through the single exit, so
-        // the driver's next `append_user` is always admissible.
-        if !self.log.is_ready() {
-            self.log.quiesce(QuiesceReason::Aborted);
-        }
-        debug_assert!(
-            self.log.is_ready(),
-            "run_turn must leave the session ReadyForUser"
-        );
-        outcome
     }
 
     pub(crate) fn compact(
@@ -545,76 +710,62 @@ impl Session {
 
     // --- private helpers ---
 
+    /// Dispatch a batch of tool calls in order, short-circuiting the rest to
+    /// cancelled results the instant the token trips.  Every tool returns its
+    /// result synchronously now — the `agent` tool launches a detached peer
+    /// and returns a start receipt — so there is no join phase and no
+    /// `thread::scope`.
     fn dispatch(
         &mut self,
         provider: &Arc<Provider>,
         tool_calls: Vec<ToolCall>,
         token: &cancel::Token,
         emit: &Emitter,
-    ) -> Result<Dispatch, ProviderError> {
-        thread::scope(|scope| -> Result<Dispatch, ProviderError> {
-            let mut staged: Vec<Staged<'_>> = Vec::with_capacity(tool_calls.len());
-            let mut it = tool_calls.into_iter();
-            while let Some(call) = it.next() {
-                if token.is_cancelled() {
-                    staged.push(Staged::Done(cancelled_result(call.call_id)));
-                    staged.extend(it.map(|r| Staged::Done(cancelled_result(r.call_id))));
-                    break;
-                }
-                staged.push(self.stage(provider, call, token, emit, scope));
+    ) -> Dispatch {
+        let mut results = Vec::with_capacity(tool_calls.len());
+        let mut it = tool_calls.into_iter();
+        for call in it.by_ref() {
+            if token.is_cancelled() {
+                results.push(cancelled_result(call.call_id));
+                results.extend(it.map(|r| cancelled_result(r.call_id)));
+                break;
             }
-            let results = staged.into_iter().map(Staged::finish).collect();
-            Ok(Dispatch {
-                results,
-                steering: self.take_steering(emit),
-            })
-        })
-    }
-
-    fn take_steering(&self, emit: &Emitter) -> Option<String> {
-        if self.is_subagent {
-            None
-        } else {
-            emit.drain_tool_steering()
+            results.push(self.stage(provider, call, emit));
+        }
+        Dispatch {
+            results,
+            steering: self.take_steering(),
         }
     }
 
-    fn stage<'scope, 'env: 'scope>(
-        &mut self,
-        provider: &'env Arc<Provider>,
-        call: ToolCall,
-        token: &'env cancel::Token,
-        emit: &Emitter,
-        scope: &'scope thread::Scope<'scope, 'env>,
-    ) -> Staged<'scope> {
+    /// The tool-boundary steering drain: a non-slash user prompt that barged
+    /// in mid-turn, taken from this session's own inbox.  A peer has no human
+    /// writer, so its inbox holds no user steering and this is always `None`.
+    fn take_steering(&self) -> Option<String> {
+        self.inbox.drain_tool()
+    }
+
+    fn stage(&mut self, provider: &Arc<Provider>, call: ToolCall, emit: &Emitter) -> SessionToolResult {
         match crate::tools::find(&call.fn_name) {
-            Some(t) if t.root_only() && self.is_subagent => {
+            Some(t) if !self.tools.allows(t) => {
                 let msg = format!(
                     "tool `{}` is not available to sub-agents — do this work yourself",
                     call.fn_name
                 );
                 self.note_error(msg.clone(), emit);
-                Staged::Done(SessionToolResult {
+                SessionToolResult {
                     id: call.call_id,
                     content: msg,
-                })
+                }
             }
-            Some(t) => t.dispatch(
-                call.call_id,
-                call.fn_arguments,
-                self,
-                provider,
-                token,
-                emit,
-                scope,
-            ),
+            Some(t) => t.dispatch(call.call_id, call.fn_arguments, self, provider, emit),
             None => {
                 let msg = format!("unknown tool `{}`", call.fn_name);
                 self.note_error(msg.clone(), emit);
-                Staged::Done(SessionToolResult {
+                SessionToolResult {
                     id: call.call_id,
                     content: msg,
-                })
+                }
             }
         }
     }
@@ -645,13 +796,13 @@ impl Session {
         // Refresh the durable snapshot at this clean boundary: the
         // dynamic context here reflects every prior tool call that
         // returned, and none that this one is about to mutate.  If the
-        // eval below panics, `run_turn` rebuilds the live context from
+        // eval below panics, `drive` rebuilds the live context from
         // this snapshot, rolling the panicking call's effects back.
         self.durable = self.shell.mobile_snapshot();
         // The deferred-surface destination: a detached `spawn` worker flushes
-        // its buffered batch here at completion, stamped with the root id (so
-        // its cards land in the root viewport) and guarded by the agent
-        // registry's generation (so a `/clear` drops a stale batch).
+        // its buffered batch here at completion, posted into this session's
+        // own inbox (via `emit`'s mailbox) and guarded by the agent registry's
+        // generation (so a `/clear` drops a stale batch).
         let boundary = shell_eval::boundary_sink(emit, self.id, &self.agents);
         let content = match shell_eval::run_shell(
             &mut self.shell,
@@ -669,10 +820,6 @@ impl Session {
     }
 
     fn cancelled(&mut self, emit: &Emitter) -> Result<TurnOutcome, ProviderError> {
-        // No clear: a cancelled turn is `Stop`ped by the nudge registry,
-        // so `run_turn` returns and the next root turn mints a fresh,
-        // un-cancelled token (the reset).  Clearing the live token here
-        // would race a cancel still in flight to a sibling sub-agent.
         self.log.quiesce(QuiesceReason::Cancelled);
         // The canonical log already carries `Cancelled` from quiesce;
         // this is the user-facing companion only.
@@ -682,7 +829,7 @@ impl Session {
 
     /// Reached at the top of the round-trip loop once the step count
     /// would exceed [`MAX_STEPS`].  The history is mid-protocol (the last
-    /// step appended its tool results); `run_turn`'s single exit winds it
+    /// step appended its tool results); `drive`'s single exit winds it
     /// back to `ReadyForUser`.  `note_error` is the user-facing line and
     /// the forensic breadcrumb; the `StopReason` surfaces in the headless
     /// JSON result so a benchmark harness can tell a capped run from a
@@ -708,31 +855,48 @@ struct Dispatch {
     steering: Option<String>,
 }
 
-pub(crate) enum Staged<'scope> {
-    Done(SessionToolResult),
-    /// `agent` collapses the child's outcome to its reply string at the spawn
-    /// site (an errored run already folds to `call error: …`); dispatch joins
-    /// every same-batch child before the next provider request, so same-batch
-    /// agents may run concurrently but never outlive the parent turn.
-    Spawned {
-        id: String,
-        handle: thread::ScopedJoinHandle<'scope, String>,
-    },
+/// The model-facing chrome a turn's source emits before its `apply`: a human
+/// prompt and a wakeup echo as their (possibly marked) text, an agent result
+/// renders as the dialable `↘` subagent block the sink already knows.  A
+/// self-nudge and a command are quiet — a nudge is an internal continuation, a
+/// command never reaches the model.
+fn announce(turn: &Turn, emit: &Emitter) {
+    match turn {
+        Turn::Human(s) | Turn::Wakeup(s) => emit.emit(Kind::UserPromptEcho(s.clone())),
+        Turn::Agent(r) => emit.emit(Kind::SubagentDone {
+            title: r.title.clone(),
+            outcome: r.outcome.clone(),
+            text: r.text.clone(),
+            elapsed: r.elapsed,
+        }),
+        Turn::Nudge(_) | Turn::Command(_) | Turn::Surface { .. } => {}
+    }
 }
 
-impl<'scope> Staged<'scope> {
-    fn finish(self) -> SessionToolResult {
-        match self {
-            Staged::Done(r) => r,
-            Staged::Spawned { id, handle } => {
-                let content = match handle.join() {
-                    Ok(reply) => clip(&reply, AGENT_REPLY_CAP),
-                    Err(_) => "call panicked".into(),
-                };
-                SessionToolResult { id, content }
-            }
-        }
+/// Reduce a finished turn's outcome to the `(tag, text)` digest a peer's
+/// result carries — the one place the reduction happens, formerly the
+/// `agent` tool's `to_outcome`.  A completed run carries its final text,
+/// clipped to the reply cap; every other shape carries only its tag.
+fn agent_digest(r: &Result<TurnOutcome, ProviderError>) -> (AgentOutcome, String) {
+    match r {
+        Ok(TurnOutcome::Complete(s)) => (AgentOutcome::Complete, clip(s, AGENT_REPLY_CAP)),
+        Ok(TurnOutcome::Empty) => (AgentOutcome::Empty, String::new()),
+        Ok(TurnOutcome::Stopped { reason }) => (AgentOutcome::Stopped(reason.clone()), String::new()),
+        Ok(TurnOutcome::Cancelled) => (AgentOutcome::Cancelled, String::new()),
+        Ok(TurnOutcome::Capped) => (
+            AgentOutcome::Stopped("step cap reached".into()),
+            String::new(),
+        ),
+        Err(e) => (AgentOutcome::Failed(e.to_string()), String::new()),
     }
+}
+
+/// The message of a recovered panic payload, for either string shape.
+fn panic_msg(p: &Box<dyn std::any::Any + Send>) -> String {
+    p.downcast_ref::<String>()
+        .cloned()
+        .or_else(|| p.downcast_ref::<&'static str>().map(|s| (*s).into()))
+        .unwrap_or_else(|| "non-string payload".into())
 }
 
 fn boot_root_shell(scratch: &Scratch) -> Shell {
@@ -807,14 +971,13 @@ fn admit_assistant(msg: &mut genai::chat::ChatMessage) {
 )]
 mod tests {
     //! Panic-recovery integrity (A4): a worker panic mid-tool-eval must
-    //! preserve the bindings completed tool calls left behind and leave
-    //! the dynamic context clean for the next turn.  Driven through the
-    //! scripted provider and `run_turn` — the real path: `pump` catches
-    //! the unwind, `run_turn`'s frame guard self-heals the IO frame, and
-    //! `run_turn` rebuilds the live context from the durable snapshot.
+    //! preserve the bindings completed tool calls left behind and leave the
+    //! dynamic context clean.  Driven through the scripted provider and the
+    //! shared `drive` loop — the real path: `drive` catches the unwind,
+    //! ral_core's own frame guard self-heals the IO frame, and `drive`
+    //! rebuilds the live context from the durable snapshot.
 
     use super::*;
-    use crate::bus::Event;
     use crate::provider::scripted::{Reply, Script};
     use ral_core::Value;
     use ral_core::typecheck::builtins::{BuiltinTypeRule, mk_scheme, pure, thunk};
@@ -843,12 +1006,6 @@ mod tests {
         doc: "test-only: panic the evaluator mid-eval.",
         body: BuiltinBody::Static(builtin_panic_now),
     }];
-
-    /// Discards every event; the assertions read session state directly.
-    struct NullSink;
-    impl Sink for NullSink {
-        fn handle(&mut self, _e: Event) {}
-    }
 
     fn tmp(tag: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!("exarch-a4-{}-{tag}", std::process::id()));
@@ -881,23 +1038,18 @@ mod tests {
         session.durable = session.shell.mobile_snapshot();
         let baseline_grant_depth = session.shell.grant_depth();
 
-        // 1st call binds `a4_x` (completes); 2nd call panics mid-eval.
+        // 1st call binds `a4_x` (completes); 2nd call panics mid-eval.  Both
+        // round-trips happen inside one `apply`; `drive` catches the unwind.
         let provider = scripted(
             "test-model",
             Script::new()
                 .then(Reply::tool_calls(vec![ral_call("c1", "let a4_x = 7")]))
                 .then(Reply::tool_calls(vec![ral_call("c2", "a4-panic-now")])),
         );
-
-        let bus = SessionBus::per_turn(crate::bus::Inbox::new());
-        session
-            .run_turn(
-                &mut NullSink,
-                &bus,
-                &provider,
-                Some("compute then crash".into()),
-            )
-            .expect("run_turn absorbs the worker panic and returns Ok");
+        session.seed("compute then crash".into());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let emit = Emitter::new(tx, session.id);
+        let _ = session.drive(provider, &mut NoControl, &emit);
 
         // The completed call's binding survives the panic.
         assert!(
@@ -911,10 +1063,10 @@ mod tests {
             baseline_grant_depth,
             "the panicking call's grant frame must not leak into the next turn"
         );
-        // The turn handed the session back ready for a fresh prompt.
+        // The drive loop handed the session back ready for a fresh prompt.
         assert!(
             session.is_ready(),
-            "run_turn must leave the session ReadyForUser even after a worker panic"
+            "drive must leave the session ReadyForUser even after a worker panic"
         );
 
         // The next turn is admissible and runs to completion on the
@@ -930,16 +1082,12 @@ mod tests {
     }
 
     /// A forked child inherits the parent's installed builtin surface, not
-    /// just the core set a bare `Shell::new` seeds.  The exarch host builtins
-    /// (`window-hash` and friends) live in the session's dispatch table,
-    /// outside `mobile`, so without `adopt_builtins_from` the child's ral
-    /// `view-text`/`edit` helpers would call into nothing and fall back to a
-    /// failed PATH lookup.
+    /// just the core set a bare `Shell::new` seeds, and is denied the spawn
+    /// family (so the tree stays one level deep).
     #[test]
-    fn fork_inherits_host_builtins() {
+    fn fork_inherits_host_builtins_and_cannot_spawn() {
         let dir = tmp("fork-builtins");
         let session = Session::for_test(&dir, "system").unwrap();
-        // Sanity: the parent's boot shell has the exarch surface installed.
         assert!(
             session.shell.lookup_builtin("window-hash").is_some(),
             "the parent boot shell must carry the exarch host builtins"
@@ -951,36 +1099,12 @@ mod tests {
                 "the forked child must inherit the host builtin `{name}`"
             );
         }
-    }
-
-    /// A11/X5: a sub-agent shares the root turn's cancellation token, so an
-    /// Esc that lands on the parent's token before the child enters its own
-    /// `apply` still cancels the child.  Modelled deterministically: the
-    /// parent mints the root token (the `agent` tool would hand a clone to
-    /// the child), it is cancelled, and the child's `apply` — driven on the
-    /// shared token — short-circuits to `Cancelled` rather than running the
-    /// scripted turn.  A pre-fix child cleared the flag at the top of its
-    /// own `apply` and ran on regardless.
-    #[test]
-    fn subagent_apply_honours_a_shared_cancelled_token() {
-        let dir = tmp("subagent-cancel");
-        let session = Session::for_test(&dir, "system").unwrap();
-        let mut child = session.fork().expect("fork child session");
-
-        // The parent's root token, shared with the child as the `agent`
-        // tool would.  An Esc lands before the child runs.
-        let root = cancel::mint_root();
-        let child_token = root.token().clone();
-        root.token().cancel();
-
-        // The child would complete with "leaked" on the scripted provider;
-        // honouring the shared token, it must cancel instead.
-        let provider = scripted("test-model", Script::new().then(Reply::text("leaked")));
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let emit = Emitter::new(tx, child.id);
-        match child.apply(&provider, Some("do work".into()), &child_token, &emit) {
-            Ok(TurnOutcome::Cancelled) => {}
-            other => panic!("a sub-agent on a cancelled shared token must cancel, got {other:?}"),
-        }
+        // The child's tool set withholds the spawn family.
+        let agent = crate::tools::find("agent").expect("agent tool registered");
+        assert!(
+            !child.tools.allows(agent),
+            "a peer must not be permitted the `agent` spawn tool"
+        );
+        assert!(!child.is_root(), "a fork is not a root");
     }
 }

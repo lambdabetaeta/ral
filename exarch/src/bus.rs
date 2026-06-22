@@ -1,6 +1,7 @@
 //! Agent / frontend boundary.  Workers stamp [`Kind`]s with their
 //! [`SessionId`] through an [`Emitter`]; consumers implement [`Sink`].
 
+use crate::cancel;
 use crate::card::{Card, IoEvent};
 use crate::event::ProviderErrorRecord;
 use crate::provider::Usage;
@@ -11,7 +12,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 pub type SessionId = u64;
@@ -155,6 +156,20 @@ pub enum InboxMsg {
     },
     /// An async agent settled.  A fresh, *marked* turn at the turn boundary.
     AgentResult(AgentResult),
+    /// A synthetic continuation the agent posted to *itself* after an attempt
+    /// the nudge registry decided to retry (an empty turn, an early stop, a
+    /// budget-free completion gate).  Carries the synthetic user message; it
+    /// is the same turn continuing, so it resets no turn latch and renders
+    /// with no human chrome.  Self-pushed through the agent's own
+    /// [`Mailbox`], never across agents.
+    Nudge(String),
+    /// A session-affecting slash command (`/clear`, `/model`, `/compact`,
+    /// `/quit`) the frontend posted at the turn boundary.  The drive loop —
+    /// which owns the session the command mutates — hands it to its
+    /// [`Control`](crate::session::Control); view-only commands (`/help`,
+    /// `/copy`, …) are handled frontend-side and never reach here.  Carries
+    /// the raw command line.
+    Command(String),
     /// A detached `spawn` worker flushed its deferred `surface` batch at
     /// completion — the un-awaited delivery path.  The batch is ordinary
     /// surface vocabulary (io maps, `` `card `` variants) terminated by a
@@ -197,6 +212,7 @@ impl InboxMsg {
                 ..
             } => format!("[scheduled '{label}' · {trigger}] {prompt}"),
             InboxMsg::AgentResult(r) => r.render(),
+            InboxMsg::Nudge(s) | InboxMsg::Command(s) => s.clone(),
             InboxMsg::Surface { .. } => unreachable!("a Surface drains as Turn::Surface, not text"),
         }
     }
@@ -218,6 +234,8 @@ impl InboxMsg {
             InboxMsg::UserSteering(s) => s.clone(),
             InboxMsg::ScheduledWakeup { label, .. } => format!("⏰ {label}"),
             InboxMsg::AgentResult(r) => format!("● agent {}", r.title),
+            InboxMsg::Nudge(_) => "· retry".into(),
+            InboxMsg::Command(s) => s.clone(),
             InboxMsg::Surface { values, .. } => format!("● spawn {}", surface_cmd(values)),
         }
     }
@@ -281,6 +299,15 @@ pub enum Turn {
     Wakeup(String),
     /// An async agent settled — rendered as a dialable `↘` subagent block.
     Agent(AgentResult),
+    /// A synthetic nudge continuation the agent posted to itself.  Renders
+    /// with no human chrome and, crucially, does **not** reset the turn
+    /// latches — it is the same turn continuing.
+    Nudge(String),
+    /// A session-affecting slash command for the drive loop's [`Control`]
+    /// (`/clear`, `/model`, `/compact`, `/quit`).  Carries the raw line.
+    ///
+    /// [`Control`]: crate::session::Control
+    Command(String),
     /// A detached `spawn` worker flushed its deferred `surface` batch at
     /// completion.  The `commit_turn` arm decodes `values` with the shared
     /// surface decoder and feeds the resulting cards/io into the *root*
@@ -297,53 +324,138 @@ impl Turn {
     /// that `await` yields its value.
     pub fn text(&self) -> String {
         match self {
-            Turn::Human(s) | Turn::Wakeup(s) => s.clone(),
+            Turn::Human(s) | Turn::Wakeup(s) | Turn::Nudge(s) | Turn::Command(s) => s.clone(),
             Turn::Agent(r) => r.render(),
             Turn::Surface { values, .. } => surface_notice(values),
         }
     }
-}
 
-/// A session's inbox: the typed, multi-producer queue the turn driver pulls
-/// its next prompt from.
-///
-/// The TUI owns one producer side (`Enter` while busy); a cron wakeup and a
-/// finishing async agent are other producers, each capturing a clone (the
-/// inner `Arc` makes a clone share the same queue).  The turn worker drains
-/// tool-boundary messages mid-turn; the driver drains the rest at the turn
-/// boundary.  A drained message disappears from the pending strip and
-/// cannot be delivered twice.
-#[derive(Clone, Default)]
-pub struct Inbox {
-    inner: Arc<Mutex<VecDeque<InboxMsg>>>,
-}
-
-impl Inbox {
-    pub fn new() -> Self {
-        Self::default()
+    /// Whether draining this turn resets the per-turn nudge latches and (on
+    /// the root path) re-mints the cancellation token.  A [`Turn::Nudge`] is
+    /// the same turn continuing, so it resets nothing; every other source is
+    /// a genuine turn boundary.
+    pub fn resets_turn(&self) -> bool {
+        !matches!(self, Turn::Nudge(_))
     }
+}
 
-    /// Post any message (cron wakeup, agent result, …).
+/// The queue an [`Inbox`] consumer and its [`Mailbox`] senders share: a
+/// [`VecDeque`] of [`InboxMsg`] under a `Mutex`, plus a [`Condvar`] a parked
+/// `next_or_idle` waits on so a push wakes it without polling.
+struct Shared {
+    queue: Mutex<VecDeque<InboxMsg>>,
+    signal: Condvar,
+}
+
+impl Shared {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            queue: Mutex::new(VecDeque::new()),
+            signal: Condvar::new(),
+        })
+    }
+}
+
+/// How long a parked [`Inbox::next_or_idle`] sleeps between condvar wakes
+/// before re-checking its cancellation token.  A push notifies the condvar
+/// immediately; this bound only governs how fast a cancel (which does not
+/// notify) is observed by a parked agent.
+const PARK_POLL: Duration = Duration::from_millis(100);
+
+/// The cloneable **sender** side of a session's inbox.  Producers hold a
+/// `Mailbox`, never the [`Inbox`]: a schedule re-arms through its own
+/// session's `Mailbox`, a finishing child posts its one result through its
+/// parent's `Mailbox` ([`Session::outbox`](crate::session::Session)), a
+/// `spawn` worker flushes its surface batch through the owning session's
+/// `Mailbox`.  The registry maps id → cancel token, never a `Mailbox`, so no
+/// API hands one agent a sibling's sender — the "no inter-agent talking"
+/// invariant is the absence of such a handle, not a runtime check.
+#[derive(Clone)]
+pub struct Mailbox {
+    shared: Arc<Shared>,
+}
+
+impl Mailbox {
+    /// Post any message (cron wakeup, agent result, self-nudge, …) and wake a
+    /// parked consumer.
     pub fn push(&self, msg: InboxMsg) {
-        self.inner
+        self.shared
+            .queue
             .lock()
             .expect("inbox lock poisoned")
             .push_back(msg);
+        self.shared.signal.notify_all();
     }
 
     /// Post a user-typed steering prompt — the TUI `Enter`-while-busy path.
     pub fn push_user(&self, prompt: String) {
         self.push(InboxMsg::UserSteering(prompt));
     }
+}
+
+/// A session's inbox: the owned **consumer** of the typed, multi-producer
+/// queue the agent's drive loop pulls its next turn from.  Senders are minted
+/// with [`Self::mailbox`].
+///
+/// The drive loop drains tool-boundary messages mid-turn ([`Self::drain_tool`],
+/// from `apply`) and turn-boundary deliverables at the boundary
+/// ([`Self::next_or_idle`]); a drained message disappears from the pending
+/// strip and cannot be delivered twice.
+#[derive(Clone)]
+pub struct Inbox {
+    shared: Arc<Shared>,
+}
+
+impl Default for Inbox {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Inbox {
+    pub fn new() -> Self {
+        Self {
+            shared: Shared::new(),
+        }
+    }
+
+    /// Mint a [`Mailbox`] sender onto this inbox's queue.
+    pub fn mailbox(&self) -> Mailbox {
+        Mailbox {
+            shared: self.shared.clone(),
+        }
+    }
+
+    /// Post directly through the consumer handle — the self-push path (a
+    /// nudge, a self-armed wakeup landing in the agent's own box).  Equivalent
+    /// to `self.mailbox().push(msg)`.
+    pub fn push(&self, msg: InboxMsg) {
+        self.shared
+            .queue
+            .lock()
+            .expect("inbox lock poisoned")
+            .push_back(msg);
+        self.shared.signal.notify_all();
+    }
+
+    /// Post a user-typed steering prompt through the consumer handle.
+    pub fn push_user(&self, prompt: String) {
+        self.push(InboxMsg::UserSteering(prompt));
+    }
 
     pub fn is_empty(&self) -> bool {
-        self.inner.lock().expect("inbox lock poisoned").is_empty()
+        self.shared
+            .queue
+            .lock()
+            .expect("inbox lock poisoned")
+            .is_empty()
     }
 
     /// One strip label per pending message, oldest first, for the TUI's
     /// pending-prompt strip.
     pub fn snapshot(&self) -> Vec<String> {
-        self.inner
+        self.shared
+            .queue
             .lock()
             .expect("inbox lock poisoned")
             .iter()
@@ -355,7 +467,7 @@ impl Inbox {
     /// only if the tail is user steering.  A pending wakeup or agent result
     /// is not the user's draft and is never pulled into the editor.
     pub fn pop_back_user(&self) -> Option<String> {
-        let mut q = self.inner.lock().expect("inbox lock poisoned");
+        let mut q = self.shared.queue.lock().expect("inbox lock poisoned");
         match q.back() {
             Some(InboxMsg::UserSteering(_)) => match q.pop_back() {
                 Some(InboxMsg::UserSteering(s)) => Some(s),
@@ -369,95 +481,140 @@ impl Inbox {
     /// tool-boundary messages (user steering that is not a slash command),
     /// rendered and joined.  Stops at the first turn-boundary message.
     pub fn drain_tool(&self) -> Option<String> {
-        self.drain_run(|msg| msg.boundary() == Boundary::Tool)
+        let mut q = self.shared.queue.lock().expect("inbox lock poisoned");
+        drain_run(&mut q, |msg| msg.boundary() == Boundary::Tool)
     }
 
-    /// Turn-boundary drain: the next deliverable, tagged with its source.  A
-    /// leading run of *user* steering coalesces into one [`Turn::Human`]
-    /// prompt (preserving the old whole-queue join, so a lone `/clear` still
-    /// reaches the command path); a wakeup or agent result is delivered on
-    /// its own as [`Turn::Wakeup`] / [`Turn::Agent`], so the driver can render
-    /// each in its honest medium.
-    ///
-    /// A `Surface` batch carries its worker's deliver-once latch: this performs
-    /// the shared test-and-set on it (the same `joined` flag `await`/`race`
-    /// flip when they replay the buffer in-turn).  If the latch is already set,
-    /// an eliminator rendered these cards live this turn, so the batch is
-    /// dropped and the drain *loops* to the next message rather than yielding
-    /// nothing — a suppressed `Surface` never short-circuits a later
-    /// deliverable.  Whichever of replay or this drain wins the test-and-set is
-    /// the sole renderer; they never run concurrently (the turn completes
-    /// before the host drains), so a plain `Mutex<bool>` suffices.
+    /// Turn-boundary drain: the next deliverable, tagged with its source, or
+    /// `None` if the queue is empty.  Never blocks — see [`Self::next_or_idle`]
+    /// for the parking variant the drive loop uses.
     pub fn drain_turn(&self) -> Option<Turn> {
-        let mut q = self.inner.lock().expect("inbox lock poisoned");
+        let mut q = self.shared.queue.lock().expect("inbox lock poisoned");
+        pop_turn(&mut q)
+    }
+
+    /// The drive loop's turn-boundary pull.  Returns the next deliverable; on
+    /// an empty queue it either **parks** (the consumer has, or may yet get, a
+    /// producer) or **terminates** (`None`):
+    ///
+    /// - `park` — an ever-present upstream writer (the human, at an
+    ///   interactive root).  Parks until a push or `cancel`.
+    /// - `schedules_armed` — a live self-schedule may fire a wakeup.  Parks
+    ///   until it does (or `cancel`).
+    /// - neither — nothing will ever feed this agent again: returns `None`, so
+    ///   a peer (and a headless root) terminates at quiescence.
+    ///
+    /// A push wakes the park at once through the condvar; a cancellation does
+    /// not notify, so the park re-checks `cancel` every [`PARK_POLL`].  A
+    /// cancelled token short-circuits to `None`.
+    pub fn next_or_idle(
+        &self,
+        park: bool,
+        schedules_armed: bool,
+        cancel: &cancel::Token,
+    ) -> Option<Turn> {
+        let mut q = self.shared.queue.lock().expect("inbox lock poisoned");
         loop {
-            match q.front()? {
-                InboxMsg::UserSteering(_) => {
-                    let mut text = String::new();
-                    while matches!(q.front(), Some(InboxMsg::UserSteering(_))) {
-                        let s = match q.pop_front() {
-                            Some(InboxMsg::UserSteering(s)) => s,
-                            _ => unreachable!("front just checked to be user steering"),
-                        };
-                        if !text.is_empty() {
-                            text.push_str("\n\n");
-                        }
-                        text.push_str(&s);
-                    }
-                    return Some(Turn::Human(text));
-                }
-                _ => {
-                    let msg = q.pop_front().expect("front checked present");
-                    msg.on_drain();
-                    return Some(match msg {
-                        InboxMsg::ScheduledWakeup { .. } => {
-                            let text = msg.render();
-                            Turn::Wakeup(text)
-                        }
-                        InboxMsg::AgentResult(r) => Turn::Agent(r),
-                        InboxMsg::Surface { id, values, joined } => {
-                            let mut won = joined.lock().expect("surface joined latch poisoned");
-                            if *won {
-                                // An eliminator already replayed these cards in
-                                // the awaiting turn; drop the batch and try the
-                                // next message rather than return an empty turn.
-                                continue;
-                            }
-                            *won = true;
-                            Turn::Surface { id, values }
-                        }
-                        InboxMsg::UserSteering(_) => {
-                            unreachable!("user steering coalesced in the arm above")
-                        }
-                    });
-                }
+            // A cancelled token terminates a *peer* at once (drop any queued
+            // messages — `agent_cancel` means stop now).  The root never
+            // terminates here: its token is per-turn and may carry a prior
+            // turn's Esc, which must not end the session, so `park` overrides.
+            if !park && cancel.is_cancelled() {
+                return None;
             }
+            if let Some(turn) = pop_turn(&mut q) {
+                return Some(turn);
+            }
+            if !(park || schedules_armed) {
+                return None;
+            }
+            let (guard, _timeout) = self
+                .shared
+                .signal
+                .wait_timeout(q, PARK_POLL)
+                .expect("inbox lock poisoned");
+            q = guard;
         }
     }
 
     /// Drop every pending message — `/clear` rebuilds the root, so neither
     /// queued user prompts nor stale non-human deliveries carry across.
     pub fn clear(&self) {
-        self.inner.lock().expect("inbox lock poisoned").clear();
+        self.shared
+            .queue
+            .lock()
+            .expect("inbox lock poisoned")
+            .clear();
     }
+}
 
-    /// Take the leading run of messages matching `keep`, rendered and joined
-    /// by a blank line.  `None` when the front does not match.
-    fn drain_run(&self, keep: impl Fn(&InboxMsg) -> bool) -> Option<String> {
-        let mut q = self.inner.lock().expect("inbox lock poisoned");
-        if q.front().is_none_or(|m| !keep(m)) {
-            return None;
-        }
-        let mut text = String::new();
-        while q.front().is_some_and(&keep) {
-            let msg = q.pop_front().expect("front checked before pop");
-            if !text.is_empty() {
-                text.push_str("\n\n");
+/// Pop the next turn-boundary deliverable from a locked queue, tagged with its
+/// source.  A leading run of *user* steering coalesces into one [`Turn::Human`]
+/// (preserving the whole-queue join, so a lone `/clear` still reaches the
+/// command path); every other source is delivered on its own so the drive loop
+/// can render each in its honest medium.  A `Surface` whose deliver-once latch
+/// is already set is dropped and the scan continues (a suppressed batch never
+/// short-circuits a later deliverable).
+fn pop_turn(q: &mut VecDeque<InboxMsg>) -> Option<Turn> {
+    loop {
+        match q.front()? {
+            InboxMsg::UserSteering(_) => {
+                let mut text = String::new();
+                while matches!(q.front(), Some(InboxMsg::UserSteering(_))) {
+                    let s = match q.pop_front() {
+                        Some(InboxMsg::UserSteering(s)) => s,
+                        _ => unreachable!("front just checked to be user steering"),
+                    };
+                    if !text.is_empty() {
+                        text.push_str("\n\n");
+                    }
+                    text.push_str(&s);
+                }
+                return Some(Turn::Human(text));
             }
-            text.push_str(&msg.render());
+            _ => {
+                let msg = q.pop_front().expect("front checked present");
+                msg.on_drain();
+                return Some(match msg {
+                    InboxMsg::ScheduledWakeup { .. } => Turn::Wakeup(msg.render()),
+                    InboxMsg::AgentResult(r) => Turn::Agent(r),
+                    InboxMsg::Nudge(s) => Turn::Nudge(s),
+                    InboxMsg::Command(s) => Turn::Command(s),
+                    InboxMsg::Surface { id, values, joined } => {
+                        let mut won = joined.lock().expect("surface joined latch poisoned");
+                        if *won {
+                            // An eliminator already replayed these cards in the
+                            // awaiting turn; drop the batch and try the next
+                            // message rather than return an empty turn.
+                            continue;
+                        }
+                        *won = true;
+                        Turn::Surface { id, values }
+                    }
+                    InboxMsg::UserSteering(_) => {
+                        unreachable!("user steering coalesced in the arm above")
+                    }
+                });
+            }
         }
-        Some(text)
     }
+}
+
+/// Take the leading run of messages matching `keep` from a locked queue,
+/// rendered and joined by a blank line.  `None` when the front does not match.
+fn drain_run(q: &mut VecDeque<InboxMsg>, keep: impl Fn(&InboxMsg) -> bool) -> Option<String> {
+    if q.front().is_none_or(|m| !keep(m)) {
+        return None;
+    }
+    let mut text = String::new();
+    while q.front().is_some_and(&keep) {
+        let msg = q.pop_front().expect("front checked before pop");
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(&msg.render());
+    }
+    Some(text)
 }
 
 pub struct Event {
@@ -581,7 +738,11 @@ pub enum Row {
 pub struct Emitter {
     tx: Sender<Event>,
     id: SessionId,
-    inbox: Inbox,
+    /// The **owning** session's mailbox — root's for the root emitter, the
+    /// child's own for a child emitter.  Used by the `spawn` boundary sink to
+    /// post a deferred surface batch into the agent that ran the spawn.  An
+    /// emitter never carries another agent's mailbox.
+    mailbox: Mailbox,
     /// Whether this emitter's channel outlives the spawning turn, so a
     /// *detached* worker (an async `agent` child) may clone it for a live
     /// tab.  The TUI's session-lived bus sets it; headless's per-turn bus
@@ -591,24 +752,30 @@ pub struct Emitter {
 }
 
 impl Emitter {
+    /// An emitter with a standalone, orphan mailbox — for tests and the muted
+    /// headless child, whose surface push has nowhere meaningful to land.
     pub fn new(tx: Sender<Event>, id: SessionId) -> Self {
-        Self::with_inbox(tx, id, Inbox::new())
+        Self::with_mailbox(tx, id, Inbox::new().mailbox())
     }
 
-    pub fn with_inbox(tx: Sender<Event>, id: SessionId, inbox: Inbox) -> Self {
+    pub fn with_mailbox(tx: Sender<Event>, id: SessionId, mailbox: Mailbox) -> Self {
         Self {
             tx,
             id,
-            inbox,
+            mailbox,
             session_lived: false,
         }
     }
 
-    pub fn child(&self, id: SessionId) -> Self {
+    /// A sibling emitter for a child session: the same event channel and
+    /// session-lived flag, stamped with the child's id, carrying the
+    /// **child's own** mailbox — so the child's surface batches land in the
+    /// child's box, never the parent's.
+    pub fn child(&self, id: SessionId, mailbox: Mailbox) -> Self {
         Self {
             tx: self.tx.clone(),
             id,
-            inbox: self.inbox.clone(),
+            mailbox,
             session_lived: self.session_lived,
         }
     }
@@ -617,11 +784,10 @@ impl Emitter {
         let _ = self.tx.send(Event { id: self.id, kind });
     }
 
-    /// The session inbox, for a producer the turn starts (a cron schedule,
-    /// an async agent) that must post to it after the turn ends — it
-    /// captures this clone, which shares the same queue.
-    pub fn inbox(&self) -> Inbox {
-        self.inbox.clone()
+    /// The owning session's mailbox, for the `spawn` boundary sink that posts
+    /// a deferred surface batch back into this agent's own inbox.
+    pub fn mailbox(&self) -> Mailbox {
+        self.mailbox.clone()
     }
 
     /// Whether a detached worker may clone this emitter for a live tab.
@@ -629,11 +795,6 @@ impl Emitter {
     /// `agent` reads it to choose a streaming tab over its muted log.
     pub fn is_session_lived(&self) -> bool {
         self.session_lived
-    }
-
-    /// Mid-turn tool-boundary drain of user steering.
-    pub fn drain_tool_steering(&self) -> Option<String> {
-        self.inbox.drain_tool()
     }
 }
 
@@ -654,29 +815,29 @@ impl Emitter {
 pub struct SessionBus {
     tx: Sender<Event>,
     rx: Receiver<Event>,
-    inbox: Inbox,
+    mailbox: Mailbox,
     session_lived: bool,
 }
 
 impl SessionBus {
-    /// A session-lived bus over `inbox` (the TUI's `App` inbox).  Emitters
+    /// A session-lived bus over `inbox` (the TUI root's inbox).  Emitters
     /// minted from it are session-lived, so detached async children stream.
     pub fn session(inbox: Inbox) -> Self {
-        Self::build(inbox, true)
+        Self::build(inbox.mailbox(), true)
     }
 
     /// A per-turn bus over `inbox` (headless / tests).  Emitters are not
     /// session-lived, so async children stay muted.
     pub fn per_turn(inbox: Inbox) -> Self {
-        Self::build(inbox, false)
+        Self::build(inbox.mailbox(), false)
     }
 
-    fn build(inbox: Inbox, session_lived: bool) -> Self {
+    fn build(mailbox: Mailbox, session_lived: bool) -> Self {
         let (tx, rx) = channel();
         Self {
             tx,
             rx,
-            inbox,
+            mailbox,
             session_lived,
         }
     }
@@ -686,14 +847,15 @@ impl SessionBus {
         &self.rx
     }
 
-    /// An [`Emitter`] stamped with `id`, sharing this bus's sender and inbox,
-    /// carrying the bus's session-lived flag.  The foreground turn worker and
-    /// each detached async child take one.
+    /// An [`Emitter`] stamped with `id`, sharing this bus's sender and the
+    /// root mailbox, carrying the bus's session-lived flag.  The root drive
+    /// worker takes one; a child emitter is derived with [`Emitter::child`]
+    /// carrying the child's own mailbox.
     pub fn emitter(&self, id: SessionId) -> Emitter {
         Emitter {
             tx: self.tx.clone(),
             id,
-            inbox: self.inbox.clone(),
+            mailbox: self.mailbox.clone(),
             session_lived: self.session_lived,
         }
     }

@@ -16,7 +16,7 @@
 //! recomputing on each fire so DST shifts, clock steps, and suspends are
 //! absorbed.
 
-use crate::bus::{Inbox, InboxMsg};
+use crate::bus::{InboxMsg, Mailbox};
 use jiff::civil::DateTime;
 use jiff::{ToSpan, Zoned};
 use ral_core::process::{Deadline, arm_callback};
@@ -384,14 +384,14 @@ impl ScheduleRegistry {
 
     /// Add a schedule and arm its first occurrence on the reaper.  Returns
     /// the new id, or an error when a cron expression never fires.  `label`
-    /// defaults to `sched-{id}`.  `inbox` is the session inbox the fired
-    /// wakeup is posted to.
+    /// defaults to `sched-{id}`.  `mailbox` is the *owning session's* mailbox
+    /// the fired wakeup is posted to — a session schedules only itself.
     pub fn schedule(
         &self,
         trigger: Trigger,
         prompt: String,
         label: Option<String>,
-        inbox: Inbox,
+        mailbox: Mailbox,
     ) -> Result<ScheduleId, String> {
         let delay = trigger
             .next_delay()
@@ -400,7 +400,7 @@ impl ScheduleRegistry {
         let id = g.next_id;
         g.next_id += 1;
         let label = label.unwrap_or_else(|| format!("sched-{id}"));
-        let deadline = self.arm_deadline(id, &inbox, delay);
+        let deadline = self.arm_deadline(id, &mailbox, delay);
         g.entries.insert(
             id,
             Entry {
@@ -419,6 +419,13 @@ impl ScheduleRegistry {
     /// disarms its reaper deadline.
     pub fn unschedule(&self, id: ScheduleId) -> bool {
         self.lock().entries.remove(&id).is_some()
+    }
+
+    /// Whether any schedule is live — the drive loop's park-or-terminate
+    /// input at quiescence: a peer with a live self-schedule parks for its
+    /// next wakeup rather than terminating.
+    pub fn armed(&self) -> bool {
+        !self.lock().entries.is_empty()
     }
 
     /// Snapshot the live schedules, ordered by id.
@@ -449,10 +456,10 @@ impl ScheduleRegistry {
     /// Arm one occurrence on the reaper: a `Run` deadline whose closure
     /// fires this schedule.  Does not touch the registry lock, so it is safe
     /// to call while holding it.
-    fn arm_deadline(&self, id: ScheduleId, inbox: &Inbox, delay: Duration) -> Deadline {
+    fn arm_deadline(&self, id: ScheduleId, mailbox: &Mailbox, delay: Duration) -> Deadline {
         let reg = self.clone();
-        let inbox = inbox.clone();
-        arm_callback(delay, move || reg.fire(id, inbox))
+        let mailbox = mailbox.clone();
+        arm_callback(delay, move || reg.fire(id, mailbox))
     }
 
     /// The reaper fired this schedule's deadline.  Posts a wakeup (unless a
@@ -460,7 +467,7 @@ impl ScheduleRegistry {
     /// next occurrence (cron) or removes the schedule (one-shot `after`).
     /// Runs on the reaper thread, outside its heap lock, so re-arming here
     /// is safe.
-    fn fire(&self, id: ScheduleId, inbox: Inbox) {
+    fn fire(&self, id: ScheduleId, mailbox: Mailbox) {
         let mut g = self.lock();
         let Some(entry) = g.entries.get_mut(&id) else {
             return; // unscheduled or cleared between arming and firing
@@ -480,7 +487,7 @@ impl ScheduleRegistry {
         };
         if recurring {
             match entry.trigger.next_delay() {
-                Some(delay) => entry.deadline = self.arm_deadline(id, &inbox, delay),
+                Some(delay) => entry.deadline = self.arm_deadline(id, &mailbox, delay),
                 None => {
                     let _ = entry;
                     g.entries.remove(&id);
@@ -492,7 +499,7 @@ impl ScheduleRegistry {
         }
         drop(g);
         if let Some(msg) = msg {
-            inbox.push(msg);
+            mailbox.push(msg);
         }
     }
 
@@ -504,7 +511,7 @@ impl ScheduleRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bus::Turn;
+    use crate::bus::{Inbox, Turn};
     use jiff::civil::date;
 
     fn sched(expr: &str) -> CronSchedule {
@@ -624,7 +631,7 @@ mod tests {
                 },
                 "run tests".into(),
                 Some("nightly".into()),
-                inbox,
+                inbox.mailbox(),
             )
             .unwrap();
         let live = reg.list();
@@ -644,7 +651,7 @@ mod tests {
             Trigger::After(Duration::from_millis(40)),
             "ping".into(),
             None,
-            inbox.clone(),
+            inbox.mailbox(),
         )
         .unwrap();
         let mut fired = None;
@@ -680,7 +687,7 @@ mod tests {
             },
             "x".into(),
             None,
-            inbox,
+            inbox.mailbox(),
         )
         .unwrap();
         assert_eq!(reg.list().len(), 1);
