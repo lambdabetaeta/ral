@@ -49,6 +49,11 @@ pub(super) const PROMPT_BG: Color = Color::Rgb(72, 78, 94);
 /// neutral tone, agents own the matrix hues, so the fence never reads as just
 /// another agent's mark.
 pub(super) const PROMPT_INK: Color = Color::Rgb(170, 180, 200);
+/// The recessed machine-text panel — a grey fill behind a code block or a run
+/// of observation output, marking it as a contiguous machine *region* (an
+/// areal mark, matched to the data's nature).  Distinct from the model's base
+/// prose and from the human's rule fence: background here means "machine".
+pub(super) const CODE_BG: Color = Color::Rgb(36, 38, 46);
 /// Agent rail palette: one hue per producing agent, indexed by
 /// [`super::block::AgentSlot`]. Root keeps [`CYAN`] — the existing rail
 /// accent — so a root-only session is visually unchanged in hue. The
@@ -239,6 +244,17 @@ pub(super) fn user_prompt(s: &str) -> Vec<Line<'static>> {
     ls
 }
 
+/// The human turn's fence: a full-width rule in [`PROMPT_INK`], painted by the
+/// flatten just above a prompt's text.  A *boundary* drawn as a line (its
+/// native implantation), not a region — so background stays free to mean
+/// "machine".  Scales to any prompt length, since the rule is its own row.
+pub(super) fn prompt_fence(width: u16) -> Line<'static> {
+    Line::from(Span::styled(
+        "─".repeat(width as usize),
+        Style::default().fg(PROMPT_INK),
+    ))
+}
+
 /// Scrollback echo of a scheduled wakeup delivered as a fresh turn. A wakeup
 /// is the machine's own bookkeeping, not a human utterance, so it renders as
 /// dim, marked chrome — never the bold prompt-echo a human turn gets. The
@@ -263,10 +279,10 @@ pub(super) fn wakeup(s: &str) -> Vec<Line<'static>> {
 }
 
 /// The pending-prompt strip shown above the input while a turn runs: each
-/// message the user submitted mid-turn, oldest first.  Pending prompts wear
-/// the same raised band as the committed prompt echo ([`wash`] with
-/// [`PROMPT_BG`]), so your text reads as one stratum whether it is still
-/// waiting to be sent or already landed — and, like that echo, leaves reverse
+/// message the user submitted mid-turn, oldest first.  Pending prompts wear a
+/// raised [`PROMPT_BG`] band ([`wash`]) — a "your text, still queued"
+/// affordance in the input area, distinct from the rule fence the committed
+/// prompt gets in the transcript — and, like that echo, leaves reverse
 /// video to an active selection alone.  Flush-left at regular weight, wrapped
 /// to `width` columns.  Capped at `max_rows` total — a longer queue closes with
 /// a `⋯ (N more)` line so it can never crowd the transcript off-screen.
@@ -402,10 +418,10 @@ fn tool_call_body(
 }
 
 /// Wash `row` with the background `bg`, preserving every span's foreground
-/// and modifiers — the single place a background stratum is painted, now the
-/// human turn's band alone (and the `/legend` swatches that sample it).
+/// and modifiers — the single place a background stratum is painted: the
+/// recessed code panel, the pending-prompt band, and the `/legend` swatches.
 /// `fill_to` pads the row to that display width so the wash reads edge-to-edge
-/// (a band); `None` lets it hug the spans (a swatch).
+/// (a panel); `None` lets it hug the spans (a swatch).
 pub(super) fn wash(row: Line<'static>, bg: Color, fill_to: Option<usize>) -> Line<'static> {
     let used: usize = row
         .spans
@@ -428,9 +444,9 @@ pub(super) fn wash(row: Line<'static>, bg: Color, fill_to: Option<usize>) -> Lin
 /// Append one source row to an expanded tool call.  The visible code block
 /// has a fixed two-column inset; wrapped continuation rows then repeat the
 /// source line's own leading whitespace so a long expression folds beneath
-/// the place where its content began, not back at column zero.  The rows
-/// carry no background — the rail shape and the white code ink mark them as
-/// machine text.
+/// the place where its content began, not back at column zero.  Each row is
+/// washed into the recessed [`CODE_BG`] panel, padded uniform to `width` so
+/// the machine region reads as a clean rectangle rather than a ragged smear.
 fn push_code_row(ls: &mut Vec<Line<'static>>, line: &str, width: u16) {
     const CODE_INDENT: &str = "  ";
     let body_start = line
@@ -443,10 +459,14 @@ fn push_code_row(ls: &mut Vec<Line<'static>>, line: &str, width: u16) {
     let prefix_w = UnicodeWidthStr::width(prefix.as_str());
     let body_w = (width as usize).saturating_sub(prefix_w).max(8);
     push_wrapped(ls, body, body_w, |chunk, _first| {
-        Line::from(vec![
-            Span::raw(prefix.clone()),
-            Span::styled(chunk, Style::default().fg(Color::White)),
-        ])
+        wash(
+            Line::from(vec![
+                Span::raw(prefix.clone()),
+                Span::styled(chunk, Style::default().fg(Color::White)),
+            ]),
+            CODE_BG,
+            Some(width as usize),
+        )
     });
 }
 

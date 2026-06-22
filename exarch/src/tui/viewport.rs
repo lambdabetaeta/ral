@@ -17,7 +17,7 @@
 use super::block::{AgentSlot, Block, RailShape, wrap_line};
 use super::fidelity::{self, Fidelity};
 use super::group;
-use super::line::{PROMPT_BG, READ_W, is_blank, plain, size_bar, wash};
+use super::line::{READ_W, is_blank, plain, prompt_fence, size_bar};
 use super::rail::{self, RailKind};
 use crate::bus::Hunk;
 use crate::card::Card;
@@ -693,15 +693,15 @@ impl Viewport {
             // `band` is `Some` only for the human turn — the flatten paints
             // its raised light stratum here, where the content width is known,
             // so the band reads edge-to-edge as a scrollback landmark.
-            let (anchor, lines, band) = if self.blocks[i].observation() {
+            let (anchor, lines, prompt) = if self.blocks[i].observation() {
                 let end = self.observation_run_end(i);
                 let anchor = self.group_anchor(i, end);
-                let segment = (anchor, self.render_group(i, end, anchor, content_w), None);
+                let segment = (anchor, self.render_group(i, end, anchor, content_w), false);
                 i = end;
                 segment
             } else {
-                let band = self.blocks[i].is_prompt().then_some(PROMPT_BG);
-                let segment = (i, self.blocks[i].lines(content_w, agent).to_vec(), band);
+                let prompt = self.blocks[i].is_prompt();
+                let segment = (i, self.blocks[i].lines(content_w, agent).to_vec(), prompt);
                 i += 1;
                 segment
             };
@@ -711,12 +711,16 @@ impl Viewport {
                     first += 1;
                 }
             }
+            // A prompt opens with its fence: a full-width rule just above its
+            // first text row (the `❖` rides the rail on that row).
+            let mut fenced = false;
             for line in &lines[first..] {
                 for vrow in wrap_line(line, content_w as usize) {
-                    let vrow = match band {
-                        Some(bg) if !is_blank(&vrow) => wash(vrow, bg, Some(content_w as usize)),
-                        _ => vrow,
-                    };
+                    if prompt && !fenced && !is_blank(&vrow) {
+                        rows.push(prompt_fence(content_w));
+                        row_block.push(anchor);
+                        fenced = true;
+                    }
                     rows.push(vrow);
                     row_block.push(anchor);
                 }
@@ -868,6 +872,28 @@ mod tests {
             !plain(w.lines.last().expect("committed rows")).contains('░'),
             "no provisional seat remains after commit: {all:?}"
         );
+    }
+
+    /// A committed prompt opens with a full-width rule fence (its boundary
+    /// mark) and carries no background band — background belongs to code now.
+    #[test]
+    fn prompt_opens_with_a_rule_fence_no_band() {
+        let mut vp = viewport();
+        vp.push_chrome(
+            RailShape::Prompt,
+            vec![Line::default(), Line::from("hello cutie")],
+        );
+        let w = vp.render_window(READ_W, 24);
+        let fence = w.lines.iter().any(|l| {
+            let t: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+            !t.is_empty() && t.chars().all(|c| c == '─')
+        });
+        assert!(fence, "prompt opens with a full-width rule");
+        for l in &w.lines {
+            for s in &l.spans {
+                assert!(s.style.bg.is_none(), "no background band on a prompt");
+            }
+        }
     }
 
     /// Between turns the buffer is empty, so there is no seat: the window is

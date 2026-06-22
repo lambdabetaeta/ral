@@ -1756,20 +1756,21 @@ fn legend_panel() -> Vec<Line<'static>> {
 
     // ── strata: who is speaking, read off the background ───────────────
     ls.push(Line::default());
-    ls.push(head("strata · background value = source"));
+    ls.push(head("strata · background = machine region"));
     // Each swatch is the literal `line::wash` output, so the legend wears the
-    // exact tones the transcript paints. Agents own the chromatic foreground
-    // (the rail hues above); the human owns the achromatic raised band.
+    // exact tones the transcript paints. Background is reserved for one thing —
+    // machine text, a recessed panel; prose sits at the base, and your prompt
+    // is fenced by a rule (the rail's `❖`), not a fill.
     let swatch = |text: &str, bg: Option<Color>| match bg {
         Some(bg) => line::wash(Line::from(Span::raw(text.to_string())), bg, None).spans,
         None => vec![note(text)],
     };
     ls.extend(line::legend_rows(vec![
-        ("you", swatch("your prompt — a raised band", Some(line::PROMPT_BG))),
         (
-            "agent",
-            swatch("prose, tool intents, and shell output — the base", None),
+            "code",
+            swatch("scripts and shell output — a recessed panel", Some(line::CODE_BG)),
         ),
+        ("prose", swatch("model narration and replies — the base", None)),
     ]));
 
     // ── the ordered bars ───────────────────────────────────────────────

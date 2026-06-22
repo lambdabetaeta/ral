@@ -21,7 +21,8 @@
 //!   bar.
 //! - **L3, everything** — L2 plus each call's full ral `cmd` source.
 
-use super::line::{self, RAIL_W, SLATE, push_wrapped};
+use super::block::wrap_line;
+use super::line::{self, CODE_BG, RAIL_W, SLATE, push_wrapped, wash};
 use super::md;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -131,7 +132,7 @@ fn live_tip(calls: &[Call], width: usize) -> Vec<Line<'static>> {
         calls.len(),
         bar_col(width).saturating_sub(RAIL_W),
     ));
-    ls.extend(indent_rows(&latest.effects, INTENT_INDENT));
+    ls.extend(indent_rows(&latest.effects, INTENT_INDENT, width));
     ls
 }
 
@@ -145,9 +146,9 @@ fn full_list(calls: &[Call], source: bool, width: usize) -> Vec<Line<'static>> {
         }
         ls.extend(intent_row(call, width));
         if source {
-            ls.extend(source_rows(call));
+            ls.extend(source_rows(call, width));
         }
-        ls.extend(indent_rows(&call.effects, BODY_INDENT));
+        ls.extend(indent_rows(&call.effects, BODY_INDENT, width));
     }
     ls
 }
@@ -192,7 +193,7 @@ fn pinned_intent(
 ) -> Vec<Line<'static>> {
     let bars_left = (bar_last + 1).saturating_sub(bars_w);
     let body_w = bars_left.saturating_sub(lead_w + GAP).max(8);
-    let ink = Style::default().fg(SLATE);
+    let ink = Style::default().fg(Color::White);
     let mut out: Vec<Line<'static>> = Vec::new();
     push_wrapped(&mut out, intent, body_w, |chunk, first| {
         let mut row = if first {
@@ -218,16 +219,31 @@ fn pinned_intent(
 
 /// The call's full ral `cmd` source rows (L3), each inset under the call's
 /// body column and styled as code, so the script reads beneath its intent.
-fn source_rows(call: &Call) -> Vec<Line<'static>> {
-    call.cmd
-        .lines()
-        .map(|l| {
-            Line::from(vec![
-                Span::raw(BODY_INDENT),
-                Span::styled(l.to_string(), Style::default().fg(Color::White)),
-            ])
-        })
-        .collect()
+fn source_rows(call: &Call, width: usize) -> Vec<Line<'static>> {
+    let mut ls = Vec::new();
+    for raw in call.cmd.lines() {
+        // Preserve the source line's own leading indentation under BODY_INDENT,
+        // wrap the body to clear the panel's right edge, and wash each row into
+        // the recessed CODE_BG panel padded uniform to `width`.
+        let body_start = raw
+            .char_indices()
+            .find_map(|(i, c)| (!c.is_whitespace()).then_some(i))
+            .unwrap_or(raw.len());
+        let prefix = format!("{BODY_INDENT}{}", &raw[..body_start]);
+        let prefix_w = UnicodeWidthStr::width(prefix.as_str());
+        let body_w = width.saturating_sub(prefix_w).max(8);
+        push_wrapped(&mut ls, &raw[body_start..], body_w, |chunk, _first| {
+            wash(
+                Line::from(vec![
+                    Span::raw(prefix.clone()),
+                    Span::styled(chunk, Style::default().fg(Color::White)),
+                ]),
+                CODE_BG,
+                Some(width),
+            )
+        });
+    }
+    ls
 }
 
 /// The block's head: the tool name the run's calls share, slate like every
@@ -263,19 +279,19 @@ fn bar(magnitude: Option<u32>) -> Span<'static> {
 }
 
 /// Re-indent a call's pre-rendered effect rows by `indent`, dropping the
-/// leading blank `render_card` opens with so the effects sit flush under
-/// the intent rather than after a gap.  The rows carry no background —
-/// observation output (read/grep/exec) reads as machine text from its rail
-/// shape and white ink, not a recessed background stratum.
-fn indent_rows(rows: &[Line<'static>], indent: &str) -> Vec<Line<'static>> {
-    rows.iter()
-        .filter(|l| !line::is_blank(l))
-        .map(|l| {
-            let mut spans = vec![Span::raw(indent.to_string())];
-            spans.extend(l.spans.iter().cloned());
-            Line::from(spans)
-        })
-        .collect()
+/// leading blank `render_card` opens with so the effects sit flush under the
+/// intent, then wash each into the recessed [`CODE_BG`] panel padded uniform
+/// to `width` — observation output shares the machine region with the script.
+fn indent_rows(rows: &[Line<'static>], indent: &str, width: usize) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    for l in rows.iter().filter(|l| !line::is_blank(l)) {
+        let mut spans = vec![Span::raw(indent.to_string())];
+        spans.extend(l.spans.iter().cloned());
+        for vrow in wrap_line(&Line::from(spans), width) {
+            out.push(wash(vrow, CODE_BG, Some(width)));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -297,6 +313,33 @@ mod tests {
             },
             Vec::new(),
         )
+    }
+
+    /// The coalesced script renders as a uniform `CODE_BG` panel: every row
+    /// washed and padded to the full content width, so the machine region
+    /// reads as a clean rectangle — no ragged right edge, no gutter spill.
+    #[test]
+    fn source_rows_paint_a_uniform_panel() {
+        let c = Call::new(
+            CallParts {
+                intent: "x",
+                tool: "ral",
+                cmd: "let x = 1\nlet y = 2",
+                magnitude: None,
+                context: 0,
+            },
+            Vec::new(),
+        );
+        let rows = source_rows(&c, 60);
+        assert_eq!(rows.len(), 2);
+        for r in &rows {
+            let w: usize = r.spans.iter().map(|s| s.width()).sum();
+            assert_eq!(w, 60, "panel row padded to full width");
+            assert!(
+                r.spans.iter().all(|s| s.style.bg == Some(CODE_BG)),
+                "every cell washed into the panel"
+            );
+        }
     }
 
     /// The rail-less plain text of a line, span contents joined.
