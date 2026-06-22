@@ -9,7 +9,7 @@
 #     find . -type f -printf '%s\t%p\n' | sort -rn | head
 #
 # is one tab character in a filename away from disaster.  Here every
-# file-info record is a value of its own; sorting and slicing are
+# `file-info` record is a value of its own; sorting and slicing are
 # operations over typed records, not field-cut strings.
 
 let [root] = $args

@@ -11,7 +11,7 @@
 # which silently loses per-URL failures and depends on filenames being
 # unique within `basename`.  `par` returns a structured result per
 # input — failures land in the manifest alongside successes, so the
-# "what didn't fetch?" answer is one filter call.
+# "what didn't fetch?" answer is one `filter` call.
 
 let [list_file, out_dir] = $args
 

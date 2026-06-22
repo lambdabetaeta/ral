@@ -445,7 +445,7 @@ def regex_highlight(body: str) -> str:
 
 INTRO = (
     "      A guided tour of typical shell tasks written in ral.  Each is a\n"
-    "      complete, runnable script — `ral &lt;file&gt;.ral` to execute.  The\n"
+    "      complete, runnable script — <code>ral &lt;file&gt;.ral</code> to execute.  The\n"
     "      comment block at the top explains the bash equivalent and what ral\n"
     "      does differently."
 )
@@ -476,12 +476,18 @@ def render_examples(use_ts: bool) -> None:
 
         highlighted = highlight_source(body, use_ts)
 
+        # The summary is the comment block, authored in markdown: a lead
+        # paragraph, indented usage/bash blocks, inline `code` spans.  Render
+        # it like the doc pages.  Its code blocks are shell, not ral, so they
+        # stay plain monospace — no ral highlighting.
+        summary_html = markdown.markdown(summary, extensions=["extra", "sane_lists"])
+
         s = slug(name)
         toc_links.append(f'<a href="#{s}">{html.escape(name)}</a>')
         sections.append(
             f'    <section class="example" id="{s}">\n'
             f'      <h2><span class="name">{html.escape(name)}</span></h2>\n'
-            f'      <div class="summary">{html.escape(summary)}</div>\n'
+            f'      <div class="summary">{summary_html}</div>\n'
             f'      <pre class="source"><code>{highlighted}</code></pre>\n'
             f'    </section>'
         )

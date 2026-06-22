@@ -1,6 +1,6 @@
 #!/usr/bin/env ral
 
-# Rename every *.FROM in a directory to *.TO.  Lower-casing a stack of
+# Rename every `*.FROM` in a directory to `*.TO`.  Lower-casing a stack of
 # JPEGs:
 #
 #     ral rename-extension.ral ~/photos JPEG jpg

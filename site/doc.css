@@ -144,8 +144,9 @@ section.example .summary {
   color: var(--muted);
   font-size: 0.95rem;
   margin: 0.6rem 0 0.9rem;
-  white-space: pre-wrap;
 }
+section.example .summary > :first-child { margin-top: 0; }
+section.example .summary > :last-child { margin-bottom: 0; }
 section.example pre.source { margin: 0; }
 .raw-link {
   display: inline-block;
