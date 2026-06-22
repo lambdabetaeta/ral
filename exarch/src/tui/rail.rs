@@ -1,18 +1,19 @@
 //! The data-encoding marginal rail.
 //!
 //! The left two columns of every block are re-projected as a scannable
-//! thumbnail of the session: one cell carries two of Bertin's visual
+//! thumbnail of the session: one cell carries three of Bertin's visual
 //! variables at once —
 //!
 //! - **shape** (associative) → block *kind*, via [`RailKind`];
+//! - **hue** (associative) → the *producing agent*, via [`AGENT_HUES`];
 //! - **value** (the ordered lightness ramp) → *magnitude*, via
 //!   [`value_step`] + [`lighten`].
 //!
-//! Producing-agent identity is deliberately *not* on the rail: within a
-//! transcript every block is the same agent (subagents are tabs that compute
-//! and return, they never interleave into the stream), so a per-block hue
-//! would be constant here and encode nothing. Agent hue lives where agents
-//! are actually set side by side — the matrix ([`super::line::AGENT_HUES`]).
+//! Hue is a per-*view* tint, not a per-block variable: within one transcript
+//! every block shares the tab's agent, so the whole rail glows that agent's
+//! hue — constant here by design, and read on a tab-switch as "whose
+//! transcript is this". The human's prompt fence is the exception, wearing a
+//! neutral [`super::line::PROMPT_INK`] so it never reads as an agent.
 //!
 //! The rail is the keystone of the "transcript as graphic" re-encoding
 //! ([[decisions/260618_tui-transcript-as-graphic]]): the variables live
@@ -20,7 +21,8 @@
 //! reads at a glance and every later projection (matrix, codebase map)
 //! composes on the same substrate.
 
-use super::line::{PROMPT_INK, SLATE};
+use super::block::AgentSlot;
+use super::line::{AGENT_HUES, PROMPT_INK};
 use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 
@@ -135,15 +137,17 @@ pub(super) fn desaturate(c: Color, t: f32) -> Color {
     mix(c, Color::Rgb(luma, luma, luma), t)
 }
 
-/// Build the 2-column rail span — one shape glyph in the neutral rail ink
-/// lightened by its magnitude's value-step, then a space. The human's prompt
-/// fence wears its own [`PROMPT_INK`] so it stands apart from the agent's
-/// field; every other kind is the agent's neutral [`SLATE`]. One cell, two
-/// variables: shape and value.
-pub(super) fn span(kind: RailKind, magnitude: Option<u32>) -> Span<'static> {
+/// Build the 2-column rail span — one shape glyph in the producing agent's
+/// hue, lightened by its magnitude's value-step, then a space. The human's
+/// prompt fence wears its own [`PROMPT_INK`] so it never reads as an agent.
+/// One cell, three variables: shape, hue, and value.
+pub(super) fn span(kind: RailKind, agent: AgentSlot, magnitude: Option<u32>) -> Span<'static> {
     let base = match kind {
         RailKind::Prompt => PROMPT_INK,
-        _ => SLATE,
+        _ => AGENT_HUES
+            .get(agent.0 as usize)
+            .copied()
+            .unwrap_or(AGENT_HUES[0]),
     };
     let fg = lighten(base, value_step(magnitude));
     Span::styled(format!("{} ", kind.glyph()), Style::default().fg(fg))
@@ -152,7 +156,6 @@ pub(super) fn span(kind: RailKind, magnitude: Option<u32>) -> Span<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::line::AGENT_HUES;
 
     fn luma(c: Color) -> f32 {
         let Color::Rgb(r, g, b) = c else {

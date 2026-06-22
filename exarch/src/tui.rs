@@ -1725,7 +1725,20 @@ fn legend_panel() -> Vec<Line<'static>> {
     ls.extend(line::legend_rows(
         rail::RAIL_SHAPES
             .iter()
-            .map(|(kind, name)| (*name, vec![rail::span(*kind, None)]))
+            .map(|(kind, name)| (*name, vec![rail::span(*kind, AgentSlot(0), None)]))
+            .collect(),
+    ));
+    ls.push(Line::default());
+    ls.push(head("rail · hue = which agent (constant down a tab)"));
+    ls.extend(line::legend_rows(
+        (0..AGENT_HUES.len())
+            .map(|slot| {
+                let label = if slot == 0 { "root" } else { "subagent" };
+                (
+                    label,
+                    vec![rail::span(RailKind::Generic, AgentSlot(slot as u8), None)],
+                )
+            })
             .collect(),
     ));
     ls.push(Line::default());
@@ -1737,7 +1750,7 @@ fn legend_panel() -> Vec<Line<'static>> {
         "small → large",
         [None, Some(4), Some(20), Some(80)]
             .into_iter()
-            .map(|mag| rail::span(RailKind::Patch, mag))
+            .map(|mag| rail::span(RailKind::Patch, AgentSlot(0), mag))
             .collect(),
     )]));
 

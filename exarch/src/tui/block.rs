@@ -442,9 +442,9 @@ impl Block {
 
     /// The block's lines at `width`, rebuilding the memo when it is cold
     /// or was filled at another width.
-    pub(super) fn lines(&mut self, width: u16) -> &[Line<'static>] {
+    pub(super) fn lines(&mut self, width: u16, agent: AgentSlot) -> &[Line<'static>] {
         if self.cache.is_none() || self.cache_w != width {
-            self.cache = Some(self.render(width));
+            self.cache = Some(self.render(width, agent));
             self.cache_w = width;
         }
         self.cache.as_deref().expect("just filled")
@@ -455,12 +455,12 @@ impl Block {
     /// of its live level, so the script / diff / prose is on the record
     /// even while reduced on screen.  Routes through the same rendering
     /// path as [`Self::render`] (rail included) with the level forced full.
-    pub(super) fn log_lines(&self) -> Vec<Line<'static>> {
-        self.render_with(READ_W, true)
+    pub(super) fn log_lines(&self, agent: AgentSlot) -> Vec<Line<'static>> {
+        self.render_with(READ_W, true, agent)
     }
 
-    fn render(&self, width: u16) -> Vec<Line<'static>> {
-        self.render_with(width, false)
+    fn render(&self, width: u16, agent: AgentSlot) -> Vec<Line<'static>> {
+        self.render_with(width, false, agent)
     }
 
     /// The level at which to render: the live [`Self::level`], or L3 when
@@ -474,11 +474,11 @@ impl Block {
     /// renders every dialable block at L3 regardless of its live level —
     /// used only by [`Self::log_lines`] so the on-disk transcript is
     /// complete.
-    fn render_with(&self, width: u16, force_full: bool) -> Vec<Line<'static>> {
+    fn render_with(&self, width: u16, force_full: bool, agent: AgentSlot) -> Vec<Line<'static>> {
         let level = self.render_level(force_full);
         let mut lines = self.body(width, level);
         if let Some(kind) = self.rail_kind(level) {
-            let rail = rail::span(kind, self.magnitude());
+            let rail = rail::span(kind, agent, self.magnitude());
             // The common rail-seating path for every kind, so a body can never
             // hang inverted beneath the glyph again. Carve the rail's `RAIL_W`
             // gutter from the opening row — invisible where the row already

@@ -433,7 +433,7 @@ impl Viewport {
     /// blank separators against the previous line exactly as the screen
     /// flatten does.
     fn log_block(&mut self, block: &Block) {
-        for line in block.log_lines() {
+        for line in block.log_lines(self.agent) {
             if is_blank(&line) {
                 if self.log_prev_blank {
                     continue;
@@ -556,7 +556,7 @@ impl Viewport {
         }
         let magnitude = self.open.lines().count() as u32;
         Some(Line::from(vec![
-            rail::span(RailKind::Markdown, Some(magnitude)),
+            rail::span(RailKind::Markdown, self.agent, Some(magnitude)),
             size_bar(magnitude),
         ]))
     }
@@ -685,6 +685,7 @@ impl Viewport {
             return;
         }
         let content_w = width.min(READ_W);
+        let agent = self.agent;
         let mut rows: Vec<Line<'static>> = Vec::new();
         let mut row_block: Vec<usize> = Vec::new();
         let mut i = 0;
@@ -700,7 +701,7 @@ impl Viewport {
                 segment
             } else {
                 let band = self.blocks[i].is_prompt().then_some(PROMPT_BG);
-                let segment = (i, self.blocks[i].lines(content_w).to_vec(), band);
+                let segment = (i, self.blocks[i].lines(content_w, agent).to_vec(), band);
                 i += 1;
                 segment
             };
@@ -779,7 +780,7 @@ impl Viewport {
         let mut lines = group::body(&calls, level, width as usize);
         let open = level >= 2;
         let magnitude = group::aggregate_magnitude(&calls);
-        let rail = rail::span(RailKind::ToolCall(open), magnitude);
+        let rail = rail::span(RailKind::ToolCall(open), self.agent, magnitude);
         let idx = lines.iter().position(|l| !is_blank(l)).unwrap_or(0);
         if let Some(line) = lines.get_mut(idx) {
             line.spans.insert(0, rail);
