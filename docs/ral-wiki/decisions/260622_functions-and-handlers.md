@@ -208,6 +208,49 @@ no exception.
   Fix to do: pin it to `Fun(String, Fun(List α, B))`, exactly as `infer_try` pins
   its failure handler to `Fun(error-record, result)`.
 
+## What this unlocks — and what it doesn't
+
+The change pays for itself and clears a little ground past its own edits, but it
+is not a keystone that topples a row of dominoes. Recorded honestly so the next
+reader does not over-credit it.
+
+**Follow-on deletions it enables:**
+
+- **`ArgSig::Variadic` and its arg-checking arm** (the `Variadic` branch of the
+  arg-policy match in [`core/src/typecheck/infer.rs`](../../../core/src/typecheck/infer.rs))
+  lose their only users once `echo` is sugar and `help` is split: `BYTES_VARIADIC`
+  and `HELP` are the sole `ArgSig::Variadic` entries, and nothing in host crates or
+  plugins uses the variant. The whole policy arm becomes dead and can go.
+- **`echo`'s `format_args`**
+  ([`core/src/builtins/misc.rs`](../../../core/src/builtins/misc.rs)) is private and
+  called only by `builtin_echo`, so it dies with `echo`.
+
+**The real gain is an invariant, not a deletion.** With no variadic builtin,
+[[invariants/fixed-arity|fixed-arity]] is exception-free: variable surface arity is
+*always* a user handler (a list value), never a builtin. One concrete consequence
+to chase: command-position spreads (`...$xs`) then matter only for handler
+dispatch, so the argv-collection path may be narrowable to handler calls — to
+confirm, not assume.
+
+**What it does *not* unlock — so no one banks on it:**
+
+- **Not one renderer everywhere.** Dropping `format_args` unifies `echo`'s *output*
+  on `str` / `to-line`, but `pretty_print` persists as the *display* renderer (it is
+  `pub use`-exported and recursive — the REPL's) and is exactly what `echo` diverged
+  toward. Reconciling display with `str` / `to-line` is a separate question with a
+  real tension (multi-line pretty maps for humans vs flat for pipes); this decision
+  only opens it.
+- **Not uniform reification.** Removing two variadic entries barely dents the
+  command-only set (~20 `value: None` sigs — codecs, `to-*`, terminal-control,
+  `chdir`), which is command-only for reasons unrelated to variadicity. The
+  first-class/second-class split stays.
+- **Not a `Scheme`/`Sig` merge.** The split is orthogonal to function-vs-handler
+  (`range` is a `Sig` function) and is untouched.
+- **Not a smaller handler stack.** `run_handler`, `within` / `handle`, and
+  `HandlerArity` are *user*-handler machinery; there was never a
+  native-handler-in-stack path to remove. "No builtin is a handler" is conceptual
+  clarity here, not code reduction.
+
 Cite: [[design/builtins|builtins]], [[design/name-resolution|name-resolution]],
 [[invariants/fixed-arity|fixed-arity]],
 [[internals/handler-dispatch|handler-dispatch]],
