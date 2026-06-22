@@ -14,6 +14,55 @@ use crate::ir::IrPattern;
 use crate::typecheck::Scheme;
 use crate::types::*;
 
+/// Refuse each name a `let` pattern binds that would shadow a PATH command.
+/// Driven from `eval_bind` only: lambda parameters bind through
+/// [`assign_pattern`] in the trampoline and are deliberately never checked —
+/// a parameter is a local lexical name, not an entry in the command
+/// namespace the user types into.
+pub(crate) fn check_pattern_shadow(pattern: &IrPattern, shell: &Shell) -> Raw<()> {
+    match pattern {
+        IrPattern::Wildcard => Ok(()),
+        IrPattern::Name(name) => check_path_shadow(name, shell),
+        IrPattern::List { elems, rest } => {
+            for elem in elems {
+                check_pattern_shadow(elem, shell)?;
+            }
+            if let Some(name) = rest {
+                check_path_shadow(name, shell)?;
+            }
+            Ok(())
+        }
+        IrPattern::Map(entries) => {
+            for entry in entries {
+                check_pattern_shadow(&entry.pattern, shell)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Refuse a session-scope binding that would shadow a command reachable on
+/// `PATH`: ral keeps the value and command namespaces disjoint.  Bindings
+/// below the session scope (block/lambda bodies, the prelude) never enter
+/// the command namespace and are exempt ([`Env::at_session_scope`]).
+pub(crate) fn check_path_shadow(name: &str, shell: &Shell) -> Raw<()> {
+    if shell.mobile.scope.at_session_scope()
+        && let Some(path) = shell.locate_command(name)
+    {
+        return Err(shell
+            .err_hint(
+                format!(
+                    "cannot bind `{name}`: a command named `{name}` is reachable on PATH ({})",
+                    path.display()
+                ),
+                "ral keeps value and command names disjoint; rename the binding",
+                1,
+            )
+            .into());
+    }
+    Ok(())
+}
+
 pub(crate) fn assign_pattern(
     pattern: &IrPattern,
     value: &Value,

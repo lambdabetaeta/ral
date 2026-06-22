@@ -86,6 +86,15 @@ impl Env {
         None
     }
 
+    /// True when the innermost scope is the persisted user scope itself —
+    /// `scopes[0]` prelude, `scopes[1]` the user scope `builtins::register`
+    /// pushes — with no block/lambda/`if`/`letrec` frame above it.  A binding
+    /// installed here survives the turn; anything deeper is popped before it
+    /// ends.  Same convention as [`Self::get_local`].
+    pub fn at_session_scope(&self) -> bool {
+        self.scopes.len() == 2
+    }
+
     /// Look up in the prelude scope only (`scopes[0]`).
     pub fn get_prelude(&self, name: &str) -> Option<&Value> {
         self.scopes

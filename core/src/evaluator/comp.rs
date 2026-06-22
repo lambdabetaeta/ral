@@ -170,6 +170,14 @@ fn eval_letrec(
     bindings: &Arc<Vec<(String, Val)>>,
     shell: &mut Shell,
 ) -> Raw<Value> {
+    // A `slot = None` letrec installs the group into the caller's scope;
+    // guard against shadowing a PATH command before the fixpoint frame is
+    // pushed.  The per-slot re-entry (`Some`) reinstalls nothing.
+    if slot.is_none() {
+        for (name, _) in bindings.iter() {
+            super::pattern::check_path_shadow(name, shell)?;
+        }
+    }
     let snap = shell.snapshot();
     shell.mobile.scope.push_scope();
     // Fixpoint encoding: install each binding as a self-referential
@@ -317,6 +325,7 @@ fn eval_bind(
     shell: &mut Shell,
 ) -> Raw<Value> {
     crate::process::check(shell)?;
+    super::pattern::check_pattern_shadow(pattern, shell)?;
     let val = eval_bind_rhs(m, rhs_output, shell)?;
     if let Value::Bool(b) = val {
         shell.set_status_from_bool(b);
