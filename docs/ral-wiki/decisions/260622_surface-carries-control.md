@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: superseded
 ---
 
 # `surface` is the host's event channel, not only its presentation channel

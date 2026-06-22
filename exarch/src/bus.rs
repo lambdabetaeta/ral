@@ -4,6 +4,7 @@
 use crate::card::{Card, IoEvent};
 use crate::event::ProviderErrorRecord;
 use crate::provider::Usage;
+use ral_core::Value;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::io;
@@ -154,6 +155,21 @@ pub enum InboxMsg {
     },
     /// An async agent settled.  A fresh, *marked* turn at the turn boundary.
     AgentResult(AgentResult),
+    /// A detached `spawn` worker flushed its deferred `surface` batch at
+    /// completion — the un-awaited delivery path.  The batch is ordinary
+    /// surface vocabulary (io maps, `` `card `` variants) terminated by a
+    /// `` `done `` event; the boundary sink posts it here, stamped with the
+    /// *root* session id so its cards render in the root viewport (a spawn
+    /// worker registers no tab of its own).  A fresh, marked turn at the turn
+    /// boundary, like a wakeup or an agent result.  `joined` is the worker's
+    /// deliver-once latch, shared with the eliminators (`await`/`race`): the
+    /// drain renders this batch only if it wins the test-and-set on the flag,
+    /// so a replay that already rendered the cards in-turn suppresses it.
+    Surface {
+        id: SessionId,
+        values: Vec<Value>,
+        joined: Arc<Mutex<bool>>,
+    },
 }
 
 impl InboxMsg {
@@ -167,7 +183,10 @@ impl InboxMsg {
 
     /// The text the model sees when this message is drained into context.
     /// User steering is verbatim; the rest render with their source marker
-    /// so the model can tell a wakeup or an agent reply from a human.
+    /// so the model can tell a wakeup or an agent reply from a human.  A
+    /// `Surface` batch never reaches here — `drain_turn` hands it straight to
+    /// [`Turn::Surface`], which composes its own notice from the `` `done ``
+    /// event ([`surface_notice`]) — so this never collapses it to a string.
     fn render(&self) -> String {
         match self {
             InboxMsg::UserSteering(s) => s.clone(),
@@ -178,6 +197,7 @@ impl InboxMsg {
                 ..
             } => format!("[scheduled '{label}' · {trigger}] {prompt}"),
             InboxMsg::AgentResult(r) => r.render(),
+            InboxMsg::Surface { .. } => unreachable!("a Surface drains as Turn::Surface, not text"),
         }
     }
 
@@ -198,8 +218,46 @@ impl InboxMsg {
             InboxMsg::UserSteering(s) => s.clone(),
             InboxMsg::ScheduledWakeup { label, .. } => format!("⏰ {label}"),
             InboxMsg::AgentResult(r) => format!("● agent {}", r.title),
+            InboxMsg::Surface { values, .. } => format!("● spawn {}", surface_cmd(values)),
         }
     }
+}
+
+/// The settled `spawn`'s `cmd`, pulled from a surface batch's trailing
+/// `` `done `` event — the handle's `<handle:…>` form core stamped on it.  The
+/// pending strip and the model-facing notice both name the spawn by it; an
+/// absent or malformed `done` (a batch the kit somehow flushed without one)
+/// degrades to `<spawn>`.
+fn surface_cmd(values: &[Value]) -> String {
+    values
+        .iter()
+        .rev()
+        .find_map(crate::card::value_to_done)
+        .map(|(cmd, _)| cmd)
+        .unwrap_or_else(|| "<spawn>".into())
+}
+
+/// The model-facing notice [`Turn::Surface`] delivers when a detached `spawn`
+/// worker settles un-awaited: which spawn finished, how it settled, and where
+/// its output now lives.  This is the "host notifies, don't poll" wake — terse
+/// and in the register the model already sees from a subagent breadcrumb.  The
+/// worker's surfaced cards have already reached the rail through the
+/// `commit_turn` decode; the value record (a return value, captured bytes) is
+/// pulled on demand with `await $h`.
+fn surface_notice(values: &[Value]) -> String {
+    use crate::card::DoneOutcome;
+    let cmd = surface_cmd(values);
+    let settled = match values.iter().rev().find_map(crate::card::value_to_done) {
+        Some((_, DoneOutcome::Ok)) => "returned".to_string(),
+        Some((_, DoneOutcome::Err { message, status })) => {
+            format!("failed (status {status}): {message}")
+        }
+        Some((_, DoneOutcome::Panic { message })) => format!("panicked: {message}"),
+        None => "settled".to_string(),
+    };
+    format!(
+        "[spawn {cmd} {settled}] its output is on the rail; await its handle for the value record."
+    )
 }
 
 /// The next deliverable a turn-boundary drain yields, carrying both the
@@ -223,15 +281,25 @@ pub enum Turn {
     Wakeup(String),
     /// An async agent settled — rendered as a dialable `↘` subagent block.
     Agent(AgentResult),
+    /// A detached `spawn` worker flushed its deferred `surface` batch at
+    /// completion.  The `commit_turn` arm decodes `values` with the shared
+    /// surface decoder and feeds the resulting cards/io into the *root*
+    /// viewport (the carried `id`) exactly as a live tool turn would; the
+    /// model is woken with [`Self::text`]'s notice.
+    Surface { id: SessionId, values: Vec<Value> },
 }
 
 impl Turn {
     /// The text the model sees when this turn is drained into context —
-    /// unchanged from what each source always rendered.
+    /// unchanged from what each source always rendered.  A `Surface` is the
+    /// host's "your spawn settled" notice — it does not re-narrate the cards
+    /// (those rendered on the rail), only names the spawn, its outcome, and
+    /// that `await` yields its value.
     pub fn text(&self) -> String {
         match self {
             Turn::Human(s) | Turn::Wakeup(s) => s.clone(),
             Turn::Agent(r) => r.render(),
+            Turn::Surface { values, .. } => surface_notice(values),
         }
     }
 }
@@ -310,36 +378,59 @@ impl Inbox {
     /// reaches the command path); a wakeup or agent result is delivered on
     /// its own as [`Turn::Wakeup`] / [`Turn::Agent`], so the driver can render
     /// each in its honest medium.
+    ///
+    /// A `Surface` batch carries its worker's deliver-once latch: this performs
+    /// the shared test-and-set on it (the same `joined` flag `await`/`race`
+    /// flip when they replay the buffer in-turn).  If the latch is already set,
+    /// an eliminator rendered these cards live this turn, so the batch is
+    /// dropped and the drain *loops* to the next message rather than yielding
+    /// nothing — a suppressed `Surface` never short-circuits a later
+    /// deliverable.  Whichever of replay or this drain wins the test-and-set is
+    /// the sole renderer; they never run concurrently (the turn completes
+    /// before the host drains), so a plain `Mutex<bool>` suffices.
     pub fn drain_turn(&self) -> Option<Turn> {
         let mut q = self.inner.lock().expect("inbox lock poisoned");
-        match q.front()? {
-            InboxMsg::UserSteering(_) => {
-                let mut text = String::new();
-                while matches!(q.front(), Some(InboxMsg::UserSteering(_))) {
-                    let s = match q.pop_front() {
-                        Some(InboxMsg::UserSteering(s)) => s,
-                        _ => unreachable!("front just checked to be user steering"),
-                    };
-                    if !text.is_empty() {
-                        text.push_str("\n\n");
+        loop {
+            match q.front()? {
+                InboxMsg::UserSteering(_) => {
+                    let mut text = String::new();
+                    while matches!(q.front(), Some(InboxMsg::UserSteering(_))) {
+                        let s = match q.pop_front() {
+                            Some(InboxMsg::UserSteering(s)) => s,
+                            _ => unreachable!("front just checked to be user steering"),
+                        };
+                        if !text.is_empty() {
+                            text.push_str("\n\n");
+                        }
+                        text.push_str(&s);
                     }
-                    text.push_str(&s);
+                    return Some(Turn::Human(text));
                 }
-                Some(Turn::Human(text))
-            }
-            _ => {
-                let msg = q.pop_front().expect("front checked present");
-                msg.on_drain();
-                Some(match msg {
-                    InboxMsg::ScheduledWakeup { .. } => {
-                        let text = msg.render();
-                        Turn::Wakeup(text)
-                    }
-                    InboxMsg::AgentResult(r) => Turn::Agent(r),
-                    InboxMsg::UserSteering(_) => {
-                        unreachable!("user steering coalesced in the arm above")
-                    }
-                })
+                _ => {
+                    let msg = q.pop_front().expect("front checked present");
+                    msg.on_drain();
+                    return Some(match msg {
+                        InboxMsg::ScheduledWakeup { .. } => {
+                            let text = msg.render();
+                            Turn::Wakeup(text)
+                        }
+                        InboxMsg::AgentResult(r) => Turn::Agent(r),
+                        InboxMsg::Surface { id, values, joined } => {
+                            let mut won = joined.lock().expect("surface joined latch poisoned");
+                            if *won {
+                                // An eliminator already replayed these cards in
+                                // the awaiting turn; drop the batch and try the
+                                // next message rather than return an empty turn.
+                                continue;
+                            }
+                            *won = true;
+                            Turn::Surface { id, values }
+                        }
+                        InboxMsg::UserSteering(_) => {
+                            unreachable!("user steering coalesced in the arm above")
+                        }
+                    });
+                }
             }
         }
     }
@@ -1012,6 +1103,80 @@ mod tests {
         inbox.push(wakeup("x", "@", "p"));
         assert_eq!(inbox.pop_back_user(), None, "tail is a wakeup, not a draft");
         assert_eq!(wakeup("x", "@", "p").boundary(), Boundary::Turn);
+    }
+
+    /// A detached `spawn` worker's flushed surface batch, terminated by the
+    /// `` `done `` event core appends, with a fresh deliver-once latch.
+    fn surface(joined: &Arc<Mutex<bool>>) -> InboxMsg {
+        use ral_core::Value;
+        let done = Value::Variant {
+            label: "done".into(),
+            payload: Some(Box::new(Value::map(vec![
+                ("cmd".into(), Value::String("<block>".into())),
+                (
+                    "outcome".into(),
+                    Value::Variant {
+                        label: "ok".into(),
+                        payload: Some(Box::new(Value::Unit)),
+                    },
+                ),
+            ]))),
+        };
+        InboxMsg::Surface {
+            id: 0,
+            values: vec![done],
+            joined: joined.clone(),
+        }
+    }
+
+    /// Deliver-once at the drain: a `Surface` whose latch is already set (an
+    /// `await`/`race` rendered its cards in-turn) is dropped, and the drain
+    /// loops to the next deliverable rather than stalling on the suppressed
+    /// batch.  An un-joined `Surface` yields a [`Turn::Surface`] and sets the
+    /// latch, so a later replay would in turn be suppressed.
+    #[test]
+    fn inbox_surface_deliver_once_drops_joined_and_surfaces_unjoined() {
+        // A `Surface` already joined by an eliminator is dropped; the wakeup
+        // queued behind it still surfaces on the same drain.
+        let joined = Arc::new(Mutex::new(true));
+        let inbox = Inbox::new();
+        inbox.push(surface(&joined));
+        inbox.push(wakeup("nightly", "@", "go"));
+        assert!(
+            matches!(inbox.drain_turn(), Some(Turn::Wakeup(_))),
+            "a suppressed Surface does not short-circuit the next deliverable"
+        );
+        assert!(inbox.is_empty());
+
+        // An un-joined `Surface` surfaces and sets its latch.
+        let joined = Arc::new(Mutex::new(false));
+        let inbox = Inbox::new();
+        inbox.push(surface(&joined));
+        assert!(
+            matches!(inbox.drain_turn(), Some(Turn::Surface { id, .. }) if id == 0),
+            "an un-joined Surface yields a Turn::Surface in the root viewport"
+        );
+        assert!(
+            *joined.lock().unwrap(),
+            "draining the Surface sets its deliver-once latch"
+        );
+    }
+
+    /// A `Surface` is a turn-boundary message — it never drains at a tool
+    /// boundary — and `clear` drops a queued batch for free (the deque is
+    /// emptied), so a `/clear` between flush and drain delivers nothing.
+    #[test]
+    fn inbox_surface_is_turn_boundary_and_cleared() {
+        let joined = Arc::new(Mutex::new(false));
+        let inbox = Inbox::new();
+        inbox.push(surface(&joined));
+        assert_eq!(surface(&joined).boundary(), Boundary::Turn);
+        assert_eq!(inbox.drain_tool(), None, "a Surface never drains mid-turn");
+        inbox.clear();
+        assert!(
+            inbox.drain_turn().is_none(),
+            "a /clear drops the queued batch"
+        );
     }
 
     /// A wakeup's pending flag clears when it drains, re-opening its

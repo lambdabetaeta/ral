@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: superseded
 ---
 
 # Two language→host channels, split by lifetime: `surface` (sync) and `notify` (async)

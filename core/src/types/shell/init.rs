@@ -42,6 +42,7 @@ impl Shell {
                     ..Default::default()
                 },
                 surface: None,
+                boundary: None,
                 cancel: root.child(),
                 loc: LocationCursor::default(),
                 detached_ceiling: None,

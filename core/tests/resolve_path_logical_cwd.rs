@@ -35,6 +35,7 @@ fn top_level(shell: &mut Shell, source: &str) -> Value {
             terminal: RequestedTerminalAccess::Leased,
             stdin: TurnStdin::Inherit,
             surface: None,
+            boundary: None,
             lifecycle: Box::new(()),
         },
     ) {

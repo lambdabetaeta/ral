@@ -29,7 +29,8 @@ use crate::process::{ForegroundCancelSlot, ForegroundScope, RootCancelSlot};
 use crate::syntax::parser::ParseError;
 use crate::typecheck::TypeError;
 use crate::types::{
-    Break, Capabilities, Escape, LocationCursor, Settled, Shell, SurfaceSink, TurnState, Value,
+    Boundary, Break, Capabilities, Escape, LocationCursor, Settled, Shell, SurfaceSink, TurnState,
+    Value,
 };
 use crate::{CompileOutcome, compile_and_typecheck};
 use std::sync::Arc;
@@ -130,7 +131,10 @@ impl Drop for TurnGuard<'_> {
 /// [`RequestedTerminalAccess`](crate::driver::RequestedTerminalAccess)): stdin is
 /// always installed, so `Capture` no longer implies `Source::Terminal`. The
 /// `surface` is always the request's turn-local sink — it is no longer carried
-/// on the persistent session, so it has no liveness role.
+/// on the persistent session, so it has no liveness role.  `boundary` is the
+/// session-lived destination a detached worker flushes its deferred surface to
+/// at completion.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_turn(
     shell: &Shell,
     capture: Option<(Sink, Sink)>,
@@ -139,6 +143,7 @@ pub(crate) fn build_turn(
     foreground: ForegroundScope,
     detached_ceiling: Option<std::time::Duration>,
     surface: Option<SurfaceSink>,
+    boundary: Option<Boundary>,
 ) -> TurnState {
     let mut turn_io = shell.turn.io.try_clone().unwrap_or_else(|_| Io {
         terminal: shell.turn.io.terminal,
@@ -154,6 +159,7 @@ pub(crate) fn build_turn(
     TurnState {
         io: turn_io,
         surface,
+        boundary,
         cancel: foreground,
         loc: LocationCursor::default(),
         detached_ceiling,
@@ -261,6 +267,7 @@ mod tests {
             terminal: RequestedTerminalAccess::Denied,
             stdin: TurnStdin::Empty,
             surface: None,
+            boundary: None,
             lifecycle: Box::new(()),
         }
     }

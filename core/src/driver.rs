@@ -27,7 +27,7 @@ use crate::ir::Comp;
 use crate::process::CancelCause;
 use crate::turn::{StaticDiagnostics, TurnLifecycle};
 use crate::typecheck::Scheme;
-use crate::types::{Capabilities, Settled, Shell, SurfaceSink, Value};
+use crate::types::{Boundary, Capabilities, Settled, Shell, SurfaceSink, Value};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -257,6 +257,11 @@ pub struct TurnRequest<'a> {
     /// `None` is the identity (a bare REPL). Same-thread children inherit it;
     /// detached workers buffer into bounded deferred storage instead.
     pub surface: Option<SurfaceSink>,
+    /// The session-lived destination a detached worker flushes its deferred
+    /// surface batch to at completion, rendered by the host at the next turn
+    /// boundary. `None` outside an agent host (a bare REPL): then a detached
+    /// worker's surface reaches a sink only via `await`/`race`.
+    pub boundary: Option<Boundary>,
     /// Per-turn lifecycle hooks; `Box::new(())` for a host with none.
     pub lifecycle: Box<dyn TurnLifecycle + 'a>,
 }
@@ -407,6 +412,7 @@ impl Shell {
             foreground.clone(),
             req.detached_limit,
             req.surface,
+            req.boundary,
         );
         let (result, status) = crate::turn::run_framed(
             self,

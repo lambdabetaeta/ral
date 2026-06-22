@@ -669,7 +669,7 @@ mod tests {
             stdout_buf: Arc::new(Mutex::new(Vec::new())),
             stderr_buf: Arc::new(Mutex::new(Vec::new())),
             surface_buf: Arc::new(Mutex::new(Vec::new())),
-            surface_replayed: Arc::new(Mutex::new(false)),
+            joined: Arc::new(Mutex::new(false)),
             cmd: "dummy".into(),
             cancel: crate::process::CancelScope::default(),
         });

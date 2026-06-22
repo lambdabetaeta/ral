@@ -11,14 +11,15 @@
 //! the session log in full.  Nothing streams live to the user; the rail
 //! surfaces tool summaries, patches, writes, and tasks instead.
 
-use crate::bus::{Emitter, Kind};
-use crate::card::{io_card, value_to_card, value_to_io};
-use ral_core::types::{Break, Escape};
+use crate::agent_registry::AgentRegistry;
+use crate::bus::{Emitter, Inbox, InboxMsg, Kind, SessionId};
+use crate::card::{done_card, io_card, value_to_card, value_to_done, value_to_io};
+use ral_core::types::{Boundary, BoundarySink, Break, Escape};
 use ral_core::{
     EventSink, RequestedTerminalAccess, Shell, StaticDiagnostics, TurnIo, TurnReport, TurnRequest,
     TurnStdin, Value as RalValue, diagnostic,
 };
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Lifetime ceiling armed on every detached `spawn` worker: an
@@ -47,36 +48,119 @@ pub enum Outcome {
 }
 
 /// The agent's structured-event surface: the turn-local [`EventSink`] exarch
-/// installs for a tool call.  It decodes each `Value` the `surface` builtin
-/// hands it and emits it on the presentation bus through a clone of the call's
-/// [`Emitter`].  Two shapes arrive at this one sink:
-///
-///   * a structural I/O event core emits (a read, write, exec, or grep) — a
-///     `Map` tagged by its `io` field, decoded into a typed [`IoEvent`] and
-///     paired with the [`Card`] composed from it ([`Kind::Io`]); and
-///   * a render document a ral kit composed (a `` `card `` variant of Bertin
-///     marks), decoded into a [`Card`] ([`Kind::Card`]).
-///
-/// They cannot collide — an io value is a `Map`, a card a `Variant` — but the
-/// io path is tried first, so the raw effect record always reaches the bus
-/// beside its rendering.  A value that is neither is dropped, the same
-/// graceful degradation as [`value_to_card`].  Detached workers never receive
-/// this sink: core buffers their `surface` calls and replays them on `await`,
-/// so a clone of the bus `Emitter` can never outlive the tool turn.
+/// installs for a *foreground* tool call.  It decodes each `Value` the
+/// `surface` builtin hands it ([`decode_surface`]) and emits the resulting
+/// [`Kind`] on the presentation bus through a clone of the call's [`Emitter`],
+/// live, now.  A value that decodes to nothing is dropped, the same graceful
+/// degradation as [`value_to_card`].  Detached workers never receive this
+/// sink: core buffers their `surface` calls and either replays them on
+/// `await`/`race` or flushes them to the [`InboxBoundary`] at completion, so a
+/// clone of the bus `Emitter` can never outlive the tool turn.
 ///
 /// [`Card`]: crate::card::Card
-/// [`IoEvent`]: crate::card::IoEvent
 struct AgentSink(Emitter);
 
 impl EventSink for AgentSink {
     fn emit(&self, ev: &RalValue) {
-        if let Some(event) = value_to_io(ev) {
-            let card = io_card(&event);
-            self.0.emit(Kind::Io { event, card });
-        } else if let Some(card) = value_to_card(ev) {
-            self.0.emit(Kind::Card(card));
+        if let Some(kind) = decode_surface(ev) {
+            self.0.emit(kind);
         }
     }
+}
+
+/// Decode one surfaced `Value` into the [`Kind`] it renders as — the single
+/// decoder both delivery regimes share.  The live foreground sink
+/// ([`AgentSink`]) calls it to emit now; the deferred boundary's `commit_turn`
+/// arm calls the *same* function to mint the identical events at the turn
+/// boundary.  Three shapes arrive on the one `surface` channel:
+///
+///   * a structural I/O event core emits (a read, write, exec, or grep) — a
+///     `Map` tagged by its `io` field, decoded into a typed [`IoEvent`] and
+///     paired with the [`Card`] composed from it ([`Kind::Io`]);
+///   * a render document a ral kit composed (a `` `card `` variant of Bertin
+///     marks), decoded into a [`Card`] ([`Kind::Card`]); and
+///   * the `` `done `` completion event a detached worker flushes at the end of
+///     its deferred batch, composed into its one-line outcome [`Card`].
+///
+/// They cannot collide — io is a `Map`, a card and a `done` are distinct
+/// `Variant` labels — and the order (io, then card, then done) is the
+/// tried-first sequence, so the raw effect record always reaches the bus
+/// beside its rendering.  A value that is none of the three returns `None` and
+/// is dropped.
+///
+/// [`Card`]: crate::card::Card
+/// [`IoEvent`]: crate::card::IoEvent
+pub fn decode_surface(ev: &RalValue) -> Option<Kind> {
+    if let Some(event) = value_to_io(ev) {
+        let card = io_card(&event);
+        Some(Kind::Io { event, card })
+    } else if let Some(card) = value_to_card(ev) {
+        Some(Kind::Card(card))
+    } else if let Some((cmd, outcome)) = value_to_done(ev) {
+        Some(Kind::Card(done_card(&cmd, &outcome)))
+    } else {
+        None
+    }
+}
+
+/// The deferred half of `surface`: the session-lived [`BoundarySink`] a
+/// detached `spawn` worker flushes its buffered batch to at completion.  It is
+/// surface's *deferred destination* — not a new channel — so it carries the
+/// same ordinary surface vocabulary the live sink does, posted to the session
+/// [`Inbox`] as an [`InboxMsg::Surface`] for the host to render at the next
+/// turn boundary (the [`Card`]/`Io` events the live path mints now, minted
+/// later).  The id it stamps is the **root** session's, so a spawn worker's
+/// cards land in the root viewport — a spawn worker registers no tab of its
+/// own.
+///
+/// The generation guard mirrors the async `agent`'s exactly: it captures the
+/// [`AgentRegistry`]'s generation at construction and, in [`Self::deliver`],
+/// re-reads the live counter.  A `/clear` between spawn and flush bumps that
+/// counter (`AgentRegistry::clear`), so a stale batch is dropped before it can
+/// reach a rebuilt context — the session epoch the ADR calls for, reusing the
+/// one counter rather than minting a parallel one.  `Inbox::clear` empties the
+/// deque, so a batch already queued when `/clear` runs is dropped for free.
+///
+/// [`Card`]: crate::card::Card
+struct InboxBoundary {
+    inbox: Inbox,
+    /// The root session id, stamped on every batch so a spawn worker's cards
+    /// render in the root viewport.
+    root: SessionId,
+    registry: AgentRegistry,
+    /// The registry generation captured at construction; a batch flushed after
+    /// a `/clear` advanced it is dropped.
+    generation: u64,
+}
+
+impl BoundarySink for InboxBoundary {
+    fn deliver(&self, batch: Vec<RalValue>, joined: Arc<Mutex<bool>>) {
+        // A `/clear` since this worker was spawned bumped the registry
+        // generation; its batch belongs to a context that no longer exists, so
+        // drop it rather than post it into the rebuilt session — the deferred
+        // twin of the async agent's stale-result rejection.
+        if self.registry.generation() != self.generation {
+            return;
+        }
+        self.inbox.push(InboxMsg::Surface {
+            id: self.root,
+            values: batch,
+            joined,
+        });
+    }
+}
+
+/// Build the deferred [`Boundary`] a tool turn installs: an [`InboxBoundary`]
+/// over `emit`'s session inbox, stamping batches with `root` and guarding them
+/// with `registry`'s current generation.  Cloned into the worker's turn state
+/// by core, so a nested `spawn` inherits it and flushes at its own completion.
+pub fn boundary_sink(emit: &Emitter, root: SessionId, registry: &AgentRegistry) -> Boundary {
+    Arc::new(InboxBoundary {
+        inbox: emit.inbox(),
+        root,
+        registry: registry.clone(),
+        generation: registry.generation(),
+    })
 }
 
 /// Evaluate `cmd` against `shell`, wrapped in `caps`, capturing
@@ -90,6 +174,7 @@ pub fn run_shell(
     cmd: &str,
     timeout_secs: u64,
     emit: &Emitter,
+    boundary: Option<Boundary>,
 ) -> Outcome {
     let name = "<tool>";
 
@@ -117,6 +202,7 @@ pub fn run_shell(
             terminal: RequestedTerminalAccess::Denied,
             stdin: TurnStdin::Empty,
             surface: Some(Arc::new(AgentSink(emit.clone()))),
+            boundary,
             lifecycle: Box::new(()),
         },
     );
@@ -166,8 +252,9 @@ pub fn run_shell(
                 ral_core::types::Error::new(
                     format!(
                         "ral tool: timed out after {timeout_secs}s — work this long must not run inline. \
-                         Spawn it (`let h = spawn {{ … }}`), let the turn return, then `poll $h` on later \
-                         turns and `await $h` once it has settled."
+                         Spawn it (`let h = spawn {{ … }}`) and let the turn return: the host notifies you \
+                         at the next turn boundary when it settles and renders its output on the rail. \
+                         `await $h` when you want its value record — you need not poll."
                     ),
                     124,
                 )
@@ -301,7 +388,7 @@ mod tests {
     /// `core/tests/top_level_vs_block.rs`'s sandbox-parity tests).
     fn run_once(shell: &mut Shell, cmd: &str) -> ToolResult {
         let (emit, _rx) = dummy_emitter();
-        match run_shell(shell, &Capabilities::root(), cmd, 30, &emit) {
+        match run_shell(shell, &Capabilities::root(), cmd, 30, &emit, None) {
             Outcome::Ran(r) => r,
             Outcome::Static(s) => panic!("static (parse/type) failure: {s}"),
         }
@@ -677,7 +764,7 @@ keep-bottom
 let hits = grep-files 'unique target'
 edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
         );
-        let r = match run_shell(&mut shell, &Capabilities::root(), &src, 30, &emit) {
+        let r = match run_shell(&mut shell, &Capabilities::root(), &src, 30, &emit, None) {
             Outcome::Ran(r) => r,
             Outcome::Static(s) => panic!("static failure: {s}"),
         };
@@ -864,6 +951,84 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
         );
     }
 
+    /// The shared decoder both regimes use round-trips each of the three
+    /// surface classes to its `Kind` — an io `Map` to `Kind::Io`, a `` `card ``
+    /// variant to `Kind::Card`, and the `` `done `` completion event to a
+    /// `Kind::Card` (its one-line outcome card) — and drops a junk value to
+    /// `None`.  The live `AgentSink` emits these now; the boundary's
+    /// `commit_turn` arm mints the identical ones at the turn boundary.
+    #[test]
+    fn decode_surface_round_trips_each_class() {
+        // An io map → Kind::Io.
+        assert!(matches!(
+            decode_surface(&RalValue::map(vec![
+                ("io".into(), RalValue::String("read".into())),
+                ("path".into(), RalValue::String("a.rs".into())),
+            ])),
+            Some(Kind::Io { .. })
+        ));
+        // A `card` variant → Kind::Card.
+        assert!(matches!(
+            decode_surface(&RalValue::Variant {
+                label: "card".into(),
+                payload: Some(Box::new(RalValue::list(vec![]))),
+            }),
+            Some(Kind::Card(_))
+        ));
+        // A `done` event → Kind::Card (the done card).
+        assert!(matches!(
+            decode_surface(&RalValue::Variant {
+                label: "done".into(),
+                payload: Some(Box::new(RalValue::map(vec![
+                    ("cmd".into(), RalValue::String("<block>".into())),
+                    (
+                        "outcome".into(),
+                        RalValue::Variant {
+                            label: "ok".into(),
+                            payload: Some(Box::new(RalValue::Unit)),
+                        },
+                    ),
+                ]))),
+            }),
+            Some(Kind::Card(_))
+        ));
+        // A value that is none of the three → None.
+        assert!(decode_surface(&RalValue::String("nope".into())).is_none());
+    }
+
+    /// The `InboxBoundary` posts a detached worker's batch as an
+    /// `InboxMsg::Surface` stamped with the root id — *unless* a `/clear` has
+    /// advanced the registry generation since the boundary was built, in which
+    /// case the batch belongs to a context that no longer exists and is dropped
+    /// (the deferred twin of the async agent's stale-result rejection).
+    #[test]
+    fn inbox_boundary_pushes_then_drops_after_clear() {
+        let registry = AgentRegistry::new();
+        let inbox = Inbox::new();
+        let (tx, _rx) = mpsc::channel();
+        let emit = Emitter::with_inbox(tx, 7, inbox.clone());
+        let boundary = boundary_sink(&emit, 7, &registry);
+        let joined = Arc::new(Mutex::new(false));
+
+        // A fresh batch reaches the inbox, stamped with the root id (7).
+        boundary.deliver(vec![RalValue::Unit], joined.clone());
+        match inbox.drain_turn() {
+            Some(crate::bus::Turn::Surface { id, .. }) => {
+                assert_eq!(id, 7, "the batch is stamped with the root session id")
+            }
+            other => panic!("a delivered batch surfaces as Turn::Surface, got {other:?}"),
+        }
+
+        // A `/clear` bumps the registry generation; the boundary captured the
+        // old one, so a later flush is dropped rather than posted.
+        registry.clear();
+        boundary.deliver(vec![RalValue::Unit], Arc::new(Mutex::new(false)));
+        assert!(
+            inbox.is_empty(),
+            "a batch flushed after /clear advanced the generation is dropped"
+        );
+    }
+
     /// Colour suppression reaches spawned commands through the
     /// environment: a child shell must see `NO_COLOR=1` and
     /// `CLICOLOR_FORCE=0` (see `bootstrap::seed_no_color`).
@@ -906,7 +1071,7 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
         // exits unless the timeout tears the group down.
         let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
         let t0 = std::time::Instant::now();
-        let r = match run_shell(&mut shell, &Capabilities::root(), cmd, 2, &emit) {
+        let r = match run_shell(&mut shell, &Capabilities::root(), cmd, 2, &emit, None) {
             Outcome::Ran(r) => r,
             Outcome::Static(s) => panic!("static failure: {s}"),
         };
@@ -958,7 +1123,7 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
         let (emit, _rx) = dummy_emitter();
         let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
         let t0 = std::time::Instant::now();
-        let r = match run_shell(&mut shell, &projecting_caps(), cmd, 2, &emit) {
+        let r = match run_shell(&mut shell, &projecting_caps(), cmd, 2, &emit, None) {
             Outcome::Ran(r) => r,
             Outcome::Static(s) => panic!("static failure: {s}"),
         };
@@ -1145,7 +1310,7 @@ let hits = grep-files 'TARGET'
 each {{ |h| edit $h[file] [[$h[hash], 'REPLACED']] }} $hits
 return !{{length $hits}}"#
         );
-        let r = match run_shell(&mut shell, &Capabilities::root(), &src, 30, &emit) {
+        let r = match run_shell(&mut shell, &Capabilities::root(), &src, 30, &emit, None) {
             Outcome::Ran(r) => r,
             Outcome::Static(s) => panic!("static failure: {s}"),
         };
@@ -1194,7 +1359,7 @@ return !{{length $hits}}"#
     fn run_capturing(shell: &mut Shell, cmd: &str) -> (ToolResult, Vec<crate::bus::Kind>) {
         let (tx, rx) = mpsc::channel();
         let emit = Emitter::new(tx, 0);
-        let result = match run_shell(shell, &Capabilities::root(), cmd, 30, &emit) {
+        let result = match run_shell(shell, &Capabilities::root(), cmd, 30, &emit, None) {
             Outcome::Ran(r) => r,
             Outcome::Static(s) => panic!("static (parse/type) failure: {s}"),
         };
@@ -1591,7 +1756,7 @@ return !{{length $hits}}"#
 let hits = grep-files 'unique target'
 edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
         );
-        let r = match run_shell(&mut shell, &Capabilities::root(), &src, 30, &emit) {
+        let r = match run_shell(&mut shell, &Capabilities::root(), &src, 30, &emit, None) {
             Outcome::Ran(r) => r,
             Outcome::Static(s) => panic!("static failure: {s}"),
         };

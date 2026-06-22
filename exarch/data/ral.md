@@ -176,7 +176,7 @@ Prelude functions cover common cases:
 
 ## Concurrency
 
-`spawn { … }` runs a block on a worker and returns a handle at once; `await $h` blocks until the worker settles and returns a [value, stdout, stderr] record. Awaiting is cheap and returns the moment the block settles; should the block outlast 30s the `await` unwinds, but the worker keeps running, so await again on a later turn. Use like this:
+`spawn { … }` runs a block on a worker and returns a handle at once; `await $h` blocks until the worker settles and returns a [value, stdout, stderr] record. Awaiting is cheap and returns the moment the block settles. A `spawn` you do not await is not stranded: let the turn return and the host notifies you at the next turn boundary when the worker settles, rendering its surfaced output on the rail; `await $h` then, on that later turn, only when you want the value record. Use like this:
 
     let b = { cargo build }
     let h = spawn $b
@@ -201,10 +201,10 @@ There is also a bounded parallel `map` and a `race`; use `help` to find out more
 `poll $h` checks a handle without blocking or raising: 
 
     let job = spawn { cargo build 2>&1 }
-    # … a later turn …
+    # … other work in this turn …
     let p = poll $job
 
-`poll` returns `` `settled `` once the block finishes, `` `pending `` while it runs. `` `settled `` carries `[stdout, stderr, outcome]`; `outcome` is `` `ok `` with the block's value or `` `err `` with the caught-error record (the same shape `try` hands you, including `status`). `await` is the way to wait; reach for poll only when you have other work to interleave; avoid busy-waiting on `poll`.
+`poll` returns `` `settled `` once the block finishes, `` `pending `` while it runs. `` `settled `` carries `[stdout, stderr, outcome]`; `outcome` is `` `ok `` with the block's value or `` `err `` with the caught-error record (the same shape `try` hands you, including `status`). `await`/`poll`/`race` are the in-turn join and the on-demand value pull; reach for `poll` only when you have other work to interleave within the turn. They are not how you observe a worker across turns — the host surfaces a settled `spawn` on its own — so do not busy-wait on `poll` or re-`poll` on later turns.
 
 ## Within
 

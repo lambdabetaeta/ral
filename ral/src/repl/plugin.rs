@@ -455,6 +455,7 @@ pub(super) fn framed_turn_request(
         terminal,
         stdin: TurnStdin::Inherit,
         surface: None,
+        boundary: None,
         lifecycle: Box::new(()),
     }
 }

@@ -318,10 +318,13 @@ pub struct HandleInner {
     /// (possibly-ended) spawning turn's live sink.  Drained once on
     /// completion into [`CompletedHandle::surface`].
     pub surface_buf: SurfaceBuffer,
-    /// Set once when `await`/`race` replays the deferred surface to the
-    /// caller's current sink, so repeated observation does not duplicate
-    /// cards and a never-awaited worker emits none.
-    pub surface_replayed: Arc<Mutex<bool>>,
+    /// The deliver-once test-and-set latch for the worker's deferred surface,
+    /// shared between the two renderers and set by whichever renders the batch
+    /// first — an eliminator's replay (`await`/`race`) or the host's boundary
+    /// delivery.  Whoever wins renders; the other sees it set and skips, so a
+    /// batch never renders twice and a never-awaited worker still delivers
+    /// exactly once at the boundary.
+    pub joined: Arc<Mutex<bool>>,
     pub cmd: std::string::String,
     /// The worker's cancel scope, a child of the spawning shell's scope.
     /// `cancel` and `race`-of-losers fire it so the worker stops at its

@@ -173,6 +173,26 @@ impl EventSink for () {
 /// role, so a clone can never decide that a turn is over.
 pub type SurfaceSink = Arc<dyn EventSink>;
 
+/// Host-installed destination for a *detached* worker's deferred surface
+/// batch, delivered at the worker's completion and rendered by the host at
+/// the next turn boundary. `None` outside an agent host: a bare REPL installs
+/// none, so a detached worker's surface still reaches a sink only via
+/// `await`/`race`.
+pub trait BoundarySink: Send + Sync {
+    /// Deliver a completed detached worker's surfaced values as one batch.
+    /// `joined` is the worker's deliver-once latch, shared with the
+    /// eliminators (`await`/`race`): the host renders the batch only if it
+    /// wins the test-and-set on this flag, so a replay that already rendered
+    /// suppresses the batch and a rendered batch suppresses a later replay.
+    fn deliver(&self, batch: Vec<Value>, joined: std::sync::Arc<std::sync::Mutex<bool>>);
+}
+
+/// Shared handle to the session-lived boundary sink.  Carried on the turn
+/// beside [`SurfaceSink`] and cloned into spawned workers (so a nested `spawn`
+/// flushes at its own completion); unlike `surface` it is session-lived, the
+/// destination the deferred regime delivers a completed worker's batch to.
+pub type Boundary = Arc<dyn BoundarySink>;
+
 /// This turn's authority to hand the controlling terminal to a child.
 ///
 /// The internal (per-turn) form of the host-facing
@@ -213,6 +233,11 @@ pub struct TurnState {
     /// `surface` is the identity.  Cloned into thunk bodies and spawned
     /// stages — the `Arc` is shared, never folded back.
     pub(crate) surface: Option<SurfaceSink>,
+    /// Host-installed destination for a detached worker's deferred surface
+    /// batch.  `None` outside an agent host (e.g. a bare REPL).  Cloned into
+    /// thunk bodies and spawned workers so a nested `spawn` flushes at its own
+    /// completion; like `surface` it never folds back.
+    pub(crate) boundary: Option<Boundary>,
     /// The turn's foreground work scope.  `signal::check` consults it between
     /// effectful steps; a foreground cancel (turn timeout, Ctrl-C) unwinds
     /// the same-thread work that shares it.  Always a descendant of
@@ -246,6 +271,7 @@ impl TurnState {
     pub fn inherit_from(&mut self, parent: &mut TurnState) {
         self.io.inherit_from(&mut parent.io);
         self.surface = parent.surface.clone();
+        self.boundary = parent.boundary.clone();
         self.cancel = parent.cancel.clone();
         self.loc = parent.loc.clone();
         self.detached_ceiling = parent.detached_ceiling;

@@ -66,6 +66,7 @@ fn top_level_under_request(shell: &mut Shell, caps: Capabilities, source: &str) 
             terminal: RequestedTerminalAccess::Leased,
             stdin: TurnStdin::Inherit,
             surface: None,
+            boundary: None,
             lifecycle: Box::new(()),
         },
     ) {

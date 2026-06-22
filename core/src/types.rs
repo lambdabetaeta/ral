@@ -75,7 +75,7 @@ pub use audit::{
 // Shell state, Context.  See types/shell.rs.
 mod shell;
 pub use shell::{
-    Context, DEFAULT_RECURSION_LIMIT, EventSink, LocalState, Mobile, SessionState, Shell,
-    SurfaceSink, TerminalLoan, TurnState,
+    Boundary, BoundarySink, Context, DEFAULT_RECURSION_LIMIT, EventSink, LocalState, Mobile,
+    SessionState, Shell, SurfaceSink, TerminalLoan, TurnState,
 };
 pub(crate) use shell::{TerminalAccess, ThunkBody};

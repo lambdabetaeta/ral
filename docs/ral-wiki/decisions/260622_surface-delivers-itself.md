@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # `surface` delivers itself: finish the deferred half, drop the extra channel
@@ -101,8 +101,8 @@ DeferredSurface { buf, boundary }   // boundary renders a batch as one fresh tur
 
 Be honest about what this is: a real new sink — the same kind of session-lived
 channel [[decisions/260622_sync-surface-async-notify|sync-surface-async-notify]]'s
-`notify` was, carried on `TurnRequest` beside `surface` (today's `TurnRequest` holds
-only `surface`, `core/src/builtins/driver.rs`). The saving here is not "no new sink";
+`notify` was, carried on `TurnRequest` beside its turn-local `surface` sink
+(`core/src/driver.rs:227`). The saving here is not "no new sink";
 it is no new *channel concept* (it is surface's deferred destination, carrying
 surface vocabulary), no waiter thread, and no two-observer handoff. Because the
 boundary sink lives on the worker's turn state, a nested `spawn` inherits it:
@@ -151,25 +151,34 @@ turn; the boundary flush renders a fresh turn later. So `await` is not an
 optimization — it is the live-frame delivery, and the flush is the fallback for the
 un-awaited case.
 
-Deliver-once is a single `joined` flag on the handle (folding today's
-`surface_replayed`), set by the eliminators that *render* — `await` and `race`, when
-they replay — and **read at the boundary**: if `joined` is set, the queued boundary
-batch is dropped. `poll` returns the outcome as data but renders no cards, so it
-neither sets `joined` nor suppresses the boundary; its cards still surface there.
-This needs no atomic handoff: the check runs after the turn that could have set the
-flag, and because the worker flushed its own clone, the boundary's copy is
-independent of whatever the eliminators drained. There is no second observer of the
-handle and no shared settle critical section — which is exactly the two-observer
+Deliver-once is a single `joined` *test-and-set* flag on the handle (folding today's
+`surface_replayed`), shared by both renderers: whichever renders the batch first —
+an eliminator (`await`/`race`, when it replays) or the boundary drain — sets the flag
+and renders; the other sees it set and skips. So `await` before the boundary suppresses
+the queued batch; the boundary before a later `await` suppresses the replay (the
+`await` still returns its cached result record, just renders no cards). `poll` returns
+the outcome as data but renders nothing, so it neither sets nor reads the flag; its
+cards still surface at the boundary. This needs no atomic handoff: an in-turn
+eliminator and a between-turn boundary drain never run concurrently — a turn runs to
+completion before the host drains the inbox — so the flag is a plain serialized
+test-and-set, and because the worker flushed its own clone the boundary's copy is
+independent of whatever the eliminators drained. There is no second observer racing
+the handle and no shared settle critical section — which is exactly the two-observer
 cache handoff [[decisions/260622_surface-carries-control|surface-carries-control]]
 had to pay for, gone.
 
 ### the model-facing contract
 
-As in both prior ADRs: don't poll; the host notifies. The poll-instructing timeout
-text (`exarch/src/shell_eval.rs:165`) and the system prompt (`exarch/data/ral.md`)
-are rewritten. `await`/`poll`/`race` remain — the in-script join and the on-demand
-pull — but are no longer the cross-turn observation mechanism. This supersedes the
-poll idiom of [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]].
+As in both prior ADRs: don't poll; the host notifies. Concretely, the boundary turn
+is model-facing in exactly the two-channel shape `Turn::Agent` already has: the `done`
+event is the turn's *text* — it wakes the model with the labelled ok/err/panic notice,
+so the model learns its `spawn` settled without polling — while the surfaced cards
+render on the rail. (The model may then `await $h` for the value record; the replay is
+suppressed by `joined`, so no card renders twice.) The poll-instructing timeout text
+(`exarch/src/shell_eval.rs:165`) and the system prompt (`exarch/data/ral.md`) are
+rewritten. `await`/`poll`/`race` remain — the in-script join and the on-demand pull —
+but are no longer the cross-turn observation mechanism. This supersedes the poll idiom
+of [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]].
 
 ## Safety
 
@@ -247,16 +256,26 @@ channel dispatched by class; the detached worker must not hold the live emitter;
   `surface_replayed`, and an unwind-safe flush guard. No waiter, no shell-free
   settle, no two-observer handoff.
 - exarch adds: a boundary sink over the inbox; a `Turn` payload carrying the
-  surfaced `Value`s; and a `commit_turn` arm that decodes them with the shared
-  decoder and feeds the *existing* `Kind::Card`/`Kind::Io` render path. The decoder
-  is shared; the render dispatch is the bus's `Kind` path, reached at the boundary.
+  surfaced `Value`s; a `commit_turn` arm that decodes them with the shared decoder and
+  feeds the *existing* `Kind::Card`/`Kind::Io` render path; and one render for the
+  `done` class — core names the event, exarch names its appearance
+  ([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]]). The
+  decoder is shared; the render dispatch is the bus's `Kind` path, reached at the
+  boundary.
 - `/clear` must reject a stale boundary batch — and a `spawn` worker registers
   nowhere, so it has **no** `AgentRegistry` generation to borrow
   (`exarch/src/agent_registry.rs`; the async `agent` guards its inbox push with
-  `registry.settle`, `tools/agent.rs`). Instead the boundary sink stamps each batch
-  with a session generation that `/clear` bumps, and the drain drops a stale-stamped
-  batch. One session epoch — smaller than `surface-carries-control`'s spawn registry,
-  but real host bookkeeping, not free.
+  `registry.settle`, `tools/agent.rs`). Instead the boundary sink **captures the
+  session generation when it is installed on the turn** — not when it flushes —
+  exactly mirroring the async agent's register-at-birth / settle-at-completion: at
+  completion it compares its captured generation against the live counter and *drops
+  the batch rather than pushing it* if a `/clear` has since bumped the counter, while a
+  batch already queued when `/clear` runs is dropped by the inbox clear `/clear`
+  already performs. The two together — completion-time generation check for in-flight
+  workers, inbox clear for queued batches — give the same coverage `agent` gets, and
+  the session generation reuses `AgentRegistry`'s counter rather than minting a fresh
+  epoch. Real host bookkeeping, but no new counter and smaller than
+  `surface-carries-control`'s spawn registry.
 - `events.json` records the boundary batch only once it is minted as `Kind::Io`/
   `Kind::Card` (the rewiring above); given that, surfaced values are data, not live
   handles, so they serialise — unlike `surface-carries-control`'s handle-carrying
@@ -270,10 +289,11 @@ channel dispatched by class; the detached worker must not hold the live emitter;
   not require one (the worker can use the handle's `cmd`, which renders `<handle:…>`,
   `core/src/types/value.rs`). Whether to require `spawn "build" { … }` (mirroring
   `watch`, `concurrency.rs:225`) is a contract choice.
-- **the session generation for `/clear`.** Whether the boundary epoch reuses an
-  existing session counter or is a fresh sibling of `AgentRegistry`'s generation is
-  an implementation choice; that *some* per-flush stamp is needed (a spawn worker has
-  none today) is settled, in Consequences.
+- **the session generation for `/clear`.** Resolved (see Consequences): the boundary
+  sink reuses `AgentRegistry`'s generation counter — captured when installed on the
+  turn, checked at completion before pushing — rather than minting a fresh epoch. That
+  *some* generation guard is needed (a `spawn` worker has none today) was the settled
+  part; reusing the existing counter is the chosen way to supply it.
 - **live render from a running child.** Still foreclosed; unchanged
   ([[decisions/260619_terminal-lease|terminal-lease]],
   [[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]]).

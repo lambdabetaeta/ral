@@ -38,6 +38,7 @@ fn turn(shell: &mut Shell, src: &str) -> Settled<Value> {
             terminal: RequestedTerminalAccess::Leased,
             stdin: TurnStdin::Inherit,
             surface: None,
+            boundary: None,
             lifecycle: Box::new(()),
         },
     ) {

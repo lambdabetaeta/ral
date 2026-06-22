@@ -56,6 +56,7 @@ fn run(shell: &mut Shell, source: &str) -> (Settled<Value>, Vec<Value>) {
             terminal: RequestedTerminalAccess::Leased,
             stdin: TurnStdin::Inherit,
             surface: Some(sink),
+            boundary: None,
             lifecycle: Box::new(()),
         },
     ) {

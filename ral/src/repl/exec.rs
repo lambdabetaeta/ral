@@ -111,6 +111,7 @@ pub(super) fn execute_input(
         terminal: RequestedTerminalAccess::Leased,
         stdin: TurnStdin::Inherit,
         surface: None,
+        boundary: None,
         lifecycle: Box::new(ReplLifecycle { runtime }),
     };
     match shell.run_source_turn(trimmed, req) {

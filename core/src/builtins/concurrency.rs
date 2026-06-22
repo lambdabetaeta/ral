@@ -47,10 +47,13 @@ const DEFERRED_SURFACE_CAP: usize = 4096;
 /// The surface a *detached* worker installs.  Unlike a same-thread thunk body,
 /// a detached worker may outlive the turn that spawned it, so it must not hold
 /// the turn's live sink: it buffers structured events into a bounded
-/// [`SurfaceBuffer`], which `await`/`race` replays through the awaiting turn's
-/// surface exactly once (see [`replay_deferred_surface`]).
+/// [`SurfaceBuffer`].  The buffer has two ways out — `await`/`race` replay it
+/// through the awaiting turn's surface (the live-frame pull), and at completion
+/// the worker flushes a clone to its [`Boundary`] sink (the un-awaited
+/// fallback) — gated to deliver exactly once by the handle's `joined` latch.
 struct DeferredSurface {
     buf: SurfaceBuffer,
+    boundary: Option<Boundary>,
 }
 
 impl EventSink for DeferredSurface {
@@ -65,6 +68,77 @@ impl EventSink for DeferredSurface {
             });
         }
         // Past the cap (marker already recorded): drop.
+    }
+}
+
+/// The final surface event a detached worker appends to its buffer at
+/// completion: a `` `done `` record carrying the handle's `cmd` and the
+/// worker's `outcome` — `` `ok ``, `` `err `` (the [`break_record`]), or
+/// `` `panic `` (the message).  Core names the event; exarch names its
+/// appearance.  It carries no return value — the model `await`s for that.
+fn done_event(cmd: &str, outcome: Value) -> Value {
+    Value::Variant {
+        label: "done".into(),
+        payload: Some(Box::new(Value::map(vec![
+            ("cmd".into(), Value::String(cmd.into())),
+            ("outcome".into(), outcome),
+        ]))),
+    }
+}
+
+impl DeferredSurface {
+    /// Flush this worker's deferred surface — the buffer plus a final
+    /// [`done_event`] — to its [`Boundary`] sink as one batch, gated to deliver
+    /// once by the shared `joined` latch.  A no-op when no boundary is installed
+    /// (a bare REPL): then the deferred surface reaches a sink only via
+    /// `await`/`race`.  The batch is a fresh clone so it is independent of
+    /// whatever an eliminator later drains from the same buffer
+    /// (`complete_handle`'s `mem::take`).
+    fn flush(&self, joined: &Arc<Mutex<bool>>, cmd: &str, outcome: Value) {
+        let Some(boundary) = self.boundary.as_ref() else {
+            return;
+        };
+        let mut batch = self.buf.lock().unwrap().clone();
+        batch.push(done_event(cmd, outcome));
+        boundary.deliver(batch, joined.clone());
+    }
+}
+
+/// Drop-guard that flushes the worker's deferred surface to its boundary on
+/// *every* exit path.  The clean path arms it with the body's `` `ok ``/`` `err ``
+/// outcome and disarms it explicitly (the clone is taken before the result is
+/// sent on the handle channel, so the boundary's copy is independent of the
+/// eliminators' later drain); an unwinding panic leaves it armed, so `drop`
+/// fires with a `` `panic `` outcome and the unwind then continues — the worker
+/// still drops its `Sender` without sending, so the receiver reports
+/// `Disconnected` and `try_settle` settles the handle as a panic exactly as
+/// before.
+struct FlushGuard {
+    surface: Arc<DeferredSurface>,
+    joined: Arc<Mutex<bool>>,
+    cmd: String,
+    armed: bool,
+}
+
+impl FlushGuard {
+    /// Disarm and flush with `outcome` on a non-panicking exit.  Taking the
+    /// clone here, before the clean path sends the result, keeps the boundary's
+    /// copy independent of the eliminators' later `mem::take`.
+    fn settle(mut self, outcome: Value) {
+        self.armed = false;
+        self.surface.flush(&self.joined, &self.cmd, outcome);
+    }
+}
+
+impl Drop for FlushGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let panic = Value::Variant {
+                label: "panic".into(),
+                payload: Some(Box::new(Value::String("spawned thread panicked".into()))),
+            };
+            self.surface.flush(&self.joined, &self.cmd, panic);
+        }
     }
 }
 
@@ -96,9 +170,21 @@ where
     let (stdout_sink, stdout_buf) = new_buffer();
     let (stderr_sink, stderr_buf) = new_buffer();
     // The detached worker buffers `surface` calls here rather than holding the
-    // spawning turn's live sink; `await`/`race` replay it once.
+    // spawning turn's live sink; `await`/`race` replay it once and the worker
+    // flushes a clone to the boundary at completion.
     let surface_buf: SurfaceBuffer = Arc::new(Mutex::new(Vec::new()));
-    let worker_surface_buf = surface_buf.clone();
+    // The session-lived boundary the worker flushes to at completion, captured
+    // from the spawning turn so it survives that turn's teardown and a nested
+    // `spawn` inside the worker inherits it.  The worker's `DeferredSurface`
+    // holds both the buffer and this destination; the `joined` latch is shared
+    // with the eliminators so whichever renders first wins the deliver-once test.
+    let boundary = shell.turn.boundary.clone();
+    let worker_surface = Arc::new(DeferredSurface {
+        buf: surface_buf.clone(),
+        boundary: boundary.clone(),
+    });
+    let joined = Arc::new(Mutex::new(false));
+    let worker_joined = joined.clone();
     let (stdout, stderr, flush_pending) = match io_mode {
         ChildIoMode::Buffered => (stdout_sink, stderr_sink, false),
         ChildIoMode::Watch { label } => {
@@ -124,14 +210,28 @@ where
     };
 
     let cmd = cmd.to_string();
+    let worker_cmd = cmd.clone();
 
     let (_join, cancel) = shell.spawn_thread(snap, move |child_env| {
         child_env.turn.io.capture_outer = None;
         child_env.turn.io.stdout = stdout;
         child_env.turn.io.stderr = stderr;
-        child_env.turn.surface = Some(Arc::new(DeferredSurface {
-            buf: worker_surface_buf,
-        }));
+        // The boundary flows onto the worker's turn so a nested `spawn` inside
+        // the body installs its own `DeferredSurface` with the same boundary
+        // and flushes at *its* own completion.
+        child_env.turn.boundary = boundary;
+        child_env.turn.surface = Some(worker_surface.clone());
+
+        // Arm the flush guard before the body runs: a panicking body unwinds
+        // through it (a `` `panic `` batch, then the unwind continues to drop
+        // `tx` unsent), while the clean path disarms it with the body's
+        // outcome.  When no boundary is installed it is inert on every path.
+        let guard = FlushGuard {
+            surface: worker_surface,
+            joined: worker_joined,
+            cmd: worker_cmd,
+            armed: true,
+        };
 
         // Worker absorption point: a tail call cannot cross the thread
         // boundary, so the worker root settles it into the channel
@@ -142,6 +242,19 @@ where
             let _ = child_env.turn.io.stdout.flush_pending();
             let _ = child_env.turn.io.stderr.flush_pending();
         }
+        // Flush the boundary's clone before sending the result, so its copy is
+        // independent of `complete_handle`'s later `mem::take` of the buffer.
+        let outcome = match &result {
+            Ok(_) => Value::Variant {
+                label: "ok".into(),
+                payload: Some(Box::new(Value::Unit)),
+            },
+            Err(e) => Value::Variant {
+                label: "err".into(),
+                payload: Some(Box::new(break_record(e))),
+            },
+        };
+        guard.settle(outcome);
         let _ = tx.send(result);
     });
 
@@ -164,7 +277,7 @@ where
         stdout_buf,
         stderr_buf,
         surface_buf,
-        surface_replayed: Arc::new(Mutex::new(false)),
+        joined,
         cmd,
         cancel,
     })
@@ -332,11 +445,11 @@ fn try_settle(handle: &HandleInner, shell: &mut Shell) -> Option<CompletedHandle
 /// — on whichever turn observes the handle.
 fn replay_deferred_surface(handle: &HandleInner, completed: &CompletedHandle, shell: &mut Shell) {
     {
-        let mut replayed = handle.surface_replayed.lock().unwrap();
-        if *replayed {
+        let mut joined = handle.joined.lock().unwrap();
+        if *joined {
             return;
         }
-        *replayed = true;
+        *joined = true;
     }
     if let Some(sink) = shell.turn.surface.as_ref() {
         for ev in &completed.surface {
@@ -581,7 +694,7 @@ mod tests {
             stdout_buf,
             stderr_buf,
             surface_buf: Arc::new(Mutex::new(Vec::new())),
-            surface_replayed: Arc::new(Mutex::new(false)),
+            joined: Arc::new(Mutex::new(false)),
             cmd: "<test>".into(),
             cancel: crate::process::CancelScope::default(),
         }
@@ -773,7 +886,7 @@ mod tests {
             stdout_buf,
             stderr_buf,
             surface_buf: Arc::new(Mutex::new(Vec::new())),
-            surface_replayed: Arc::new(Mutex::new(false)),
+            joined: Arc::new(Mutex::new(false)),
             cmd: "<test>".into(),
             cancel: worker_scope.clone(),
         };
@@ -885,7 +998,7 @@ mod tests {
             stdout_buf,
             stderr_buf,
             surface_buf,
-            surface_replayed: Arc::new(Mutex::new(false)),
+            joined: Arc::new(Mutex::new(false)),
             cmd: "<test>".into(),
             cancel: crate::process::CancelScope::default(),
         };
@@ -909,6 +1022,228 @@ mod tests {
             log.lock().unwrap().len(),
             1,
             "repeat await must not duplicate"
+        );
+    }
+
+    /// A boundary test double standing in for the agent host: it records each
+    /// delivered batch, but only the one that wins the shared `joined`
+    /// test-and-set — exactly as the host renders only the batch that beats the
+    /// eliminators' replay.
+    struct RecBoundary(Arc<Mutex<Vec<Vec<Value>>>>);
+
+    impl BoundarySink for RecBoundary {
+        fn deliver(&self, batch: Vec<Value>, joined: Arc<Mutex<bool>>) {
+            let mut won = joined.lock().unwrap();
+            if *won {
+                return;
+            }
+            *won = true;
+            self.0.lock().unwrap().push(batch);
+        }
+    }
+
+    /// Spin until the boundary has recorded a batch (the worker flushed) or the
+    /// budget elapses, returning the recorded batches.  A `spawn_child` worker
+    /// runs on its own thread, so its completion flush is observed by waiting on
+    /// the destination rather than on the result channel.
+    fn wait_for_batch(batches: &Arc<Mutex<Vec<Vec<Value>>>>) -> Vec<Vec<Value>> {
+        for _ in 0..500 {
+            {
+                let got = batches.lock().unwrap();
+                if !got.is_empty() {
+                    return got.clone();
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        panic!("worker never flushed its batch to the boundary");
+    }
+
+    /// The `outcome` label inside a batch's trailing `` `done `` event.  Pins
+    /// the structural shape the exarch decoder matches: `` `done `` carries a
+    /// `{cmd, outcome}` map, and `outcome` is a closed `` `ok ``/`` `err ``/
+    /// `` `panic `` variant.
+    fn done_outcome_label(done: &Value) -> String {
+        let fields = expect_map(expect_variant(done, "done"));
+        match fields.get("outcome").expect("outcome field") {
+            Value::Variant { label, .. } => label.to_string(),
+            other => panic!("outcome must be a variant, got {other:?}"),
+        }
+    }
+
+    /// Install a boundary and `spawn_child` a worker; on completion the worker
+    /// flushes its buffer plus a trailing `` `done `` event to the boundary as
+    /// one batch.  This is the un-awaited delivery the ADR adds: a fire-and-forget
+    /// worker reaches a sink with no eliminator at all.  Each outcome — clean
+    /// return, raised `Err`, panic — stamps the matching `done` label.
+    #[test]
+    fn detached_worker_flushes_done_to_boundary() {
+        fn run(work: impl FnOnce(&mut Shell) -> Raw<Value> + Send + 'static) -> Vec<Value> {
+            let mut shell = Shell::new(Default::default());
+            let batches = Arc::new(Mutex::new(Vec::new()));
+            shell.turn.boundary = Some(Arc::new(RecBoundary(batches.clone())));
+            let snap = Arc::new(shell.mobile().scope);
+            // Hold the handle (and its receiver) so the channel stays connected
+            // until the worker has flushed; never observed, so no eliminator
+            // competes for the `joined` latch.
+            let _handle =
+                spawn_child(snap, &mut shell, ChildIoMode::Buffered, "<block>", work).unwrap();
+            let mut got = wait_for_batch(&batches);
+            assert_eq!(got.len(), 1, "one batch per completed worker");
+            got.pop().unwrap()
+        }
+
+        // Clean return: a `` `done `` whose outcome is `` `ok ``, carrying the
+        // handle's cmd.
+        let ok = run(|_child| Ok(Value::Unit));
+        assert_eq!(ok.len(), 1, "an empty body's batch is just the `done event");
+        let done = &ok[0];
+        assert_eq!(done_outcome_label(done), "ok");
+        let fields = expect_map(expect_variant(done, "done"));
+        assert_eq!(fields.get("cmd"), Some(&Value::String("<block>".into())));
+
+        // Raised `Err`: a `` `done `` whose outcome is `` `err ``.
+        let err = run(|_child| Err(sig("boom").into()));
+        assert_eq!(done_outcome_label(&err[0]), "err");
+
+        // Panic: the guard fires on the unwind with a `` `panic `` outcome.
+        let panicked = run(|_child| panic!("worker exploded"));
+        assert_eq!(done_outcome_label(&panicked[0]), "panic");
+    }
+
+    /// The body's own `surface`/`io` values appear in the batch *before* the
+    /// trailing `` `done ``: the boundary carries the full deferred surface, not
+    /// only the completion notice.  Also pins that a panicking worker still
+    /// settles its handle as a panic through the existing `Disconnected` path —
+    /// the flush guard preserves that semantics.
+    #[test]
+    fn boundary_batch_carries_body_surface_before_done() {
+        let mut shell = Shell::new(Default::default());
+        let batches = Arc::new(Mutex::new(Vec::new()));
+        shell.turn.boundary = Some(Arc::new(RecBoundary(batches.clone())));
+        let snap = Arc::new(shell.mobile().scope);
+
+        // A worker that surfaces one card, then panics: the buffered card must
+        // precede the `` `panic `` `done`, and the handle must still settle as a
+        // panic when observed.
+        let handle = spawn_child(snap, &mut shell, ChildIoMode::Buffered, "<block>", |child| {
+            if let Some(sink) = child.turn.surface.as_ref() {
+                sink.emit(&Value::Variant {
+                    label: "card".into(),
+                    payload: None,
+                });
+            }
+            panic!("after surfacing");
+        })
+        .unwrap();
+
+        let batch = wait_for_batch(&batches).pop().unwrap();
+        assert_eq!(batch.len(), 2, "the body's card, then the `done event");
+        assert_eq!(
+            batch[0],
+            Value::Variant {
+                label: "card".into(),
+                payload: None,
+            },
+            "the body's surface precedes the `done"
+        );
+        assert_eq!(done_outcome_label(&batch[1]), "panic");
+
+        // The panicked worker dropped its `Sender` without sending, so the
+        // handle settles as a failed (panic) outcome through `try_settle`'s
+        // `Disconnected` arm — unchanged by the flush guard.
+        match try_settle(&handle, &mut shell) {
+            Some(CompletedHandle {
+                outcome: Err(Break::Error(_)),
+                ..
+            }) => {}
+            other => panic!("expected a settled panic outcome, got {other:?}"),
+        }
+    }
+
+    /// With no boundary installed (the bare REPL), a completed worker flushes
+    /// nothing: REPL behaviour is byte-for-byte unchanged, and the deferred
+    /// surface reaches a sink only via `await`/`race`.
+    #[test]
+    fn no_boundary_means_no_delivery() {
+        let mut shell = Shell::new(Default::default());
+        assert!(shell.turn.boundary.is_none(), "a bare REPL installs none");
+        let snap = Arc::new(shell.mobile().scope);
+        let handle = spawn_child(snap, &mut shell, ChildIoMode::Buffered, "<block>", |child| {
+            if let Some(sink) = child.turn.surface.as_ref() {
+                sink.emit(&Value::Variant {
+                    label: "card".into(),
+                    payload: None,
+                });
+            }
+            Ok(Value::Unit)
+        })
+        .unwrap();
+
+        // Join through `await`: the worker has run and (with no boundary) flushed
+        // nothing.  The `joined` latch was never set by a boundary, so the replay
+        // still surfaces the body's card through the awaiting turn — the existing
+        // pull-forward path.
+        let log = Arc::new(Mutex::new(Vec::new()));
+        struct Rec(Arc<Mutex<Vec<Value>>>);
+        impl EventSink for Rec {
+            fn emit(&self, ev: &Value) {
+                self.0.lock().unwrap().push(ev.clone());
+            }
+        }
+        shell.turn.surface = Some(Arc::new(Rec(log.clone())));
+        await_handle(&handle, &mut shell).expect("await ok");
+        let replayed = log.lock().unwrap();
+        assert_eq!(
+            replayed.as_slice(),
+            &[Value::Variant {
+                label: "card".into(),
+                payload: None,
+            }],
+            "no boundary appends no `done; await replays only the body's card"
+        );
+    }
+
+    /// Deliver-once across the two regimes: once the boundary has delivered a
+    /// batch (winning the `joined` test-and-set), a later `await` replays
+    /// nothing — the shared latch suppresses the duplicate render — yet `await`
+    /// still returns its cached result record.
+    #[test]
+    fn boundary_delivery_suppresses_a_later_await_replay() {
+        let mut shell = Shell::new(Default::default());
+        let batches = Arc::new(Mutex::new(Vec::new()));
+        shell.turn.boundary = Some(Arc::new(RecBoundary(batches.clone())));
+        let snap = Arc::new(shell.mobile().scope);
+        let handle = spawn_child(snap, &mut shell, ChildIoMode::Buffered, "<block>", |child| {
+            if let Some(sink) = child.turn.surface.as_ref() {
+                sink.emit(&Value::Variant {
+                    label: "card".into(),
+                    payload: None,
+                });
+            }
+            Ok(Value::Unit)
+        })
+        .unwrap();
+
+        // The boundary wins the latch first, recording one batch.
+        wait_for_batch(&batches);
+        assert!(*handle.joined.lock().unwrap(), "the boundary set `joined");
+
+        // A later `await` reads the result but finds the latch set, so it
+        // replays no card into the live turn.
+        let log = Arc::new(Mutex::new(Vec::new()));
+        struct Rec(Arc<Mutex<Vec<Value>>>);
+        impl EventSink for Rec {
+            fn emit(&self, ev: &Value) {
+                self.0.lock().unwrap().push(ev.clone());
+            }
+        }
+        shell.turn.surface = Some(Arc::new(Rec(log.clone())));
+        await_handle(&handle, &mut shell).expect("await still returns the result record");
+        assert_eq!(
+            log.lock().unwrap().len(),
+            0,
+            "the boundary already delivered, so the replay is suppressed"
         );
     }
 }

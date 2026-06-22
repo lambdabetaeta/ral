@@ -648,11 +648,22 @@ impl Session {
         // eval below panics, `run_turn` rebuilds the live context from
         // this snapshot, rolling the panicking call's effects back.
         self.durable = self.shell.mobile.clone();
-        let content =
-            match shell_eval::run_shell(&mut self.shell, &self.caps, cmd, timeout_secs, emit) {
-                shell_eval::Outcome::Ran(r) => render(&r),
-                shell_eval::Outcome::Static(s) => clip(&s, OPAQUE_CAP),
-            };
+        // The deferred-surface destination: a detached `spawn` worker flushes
+        // its buffered batch here at completion, stamped with the root id (so
+        // its cards land in the root viewport) and guarded by the agent
+        // registry's generation (so a `/clear` drops a stale batch).
+        let boundary = shell_eval::boundary_sink(emit, self.id, &self.agents);
+        let content = match shell_eval::run_shell(
+            &mut self.shell,
+            &self.caps,
+            cmd,
+            timeout_secs,
+            emit,
+            Some(boundary),
+        ) {
+            shell_eval::Outcome::Ran(r) => render(&r),
+            shell_eval::Outcome::Static(s) => clip(&s, OPAQUE_CAP),
+        };
         emit.emit(Kind::ToolResult(content.clone()));
         SessionToolResult { id, content }
     }

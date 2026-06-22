@@ -52,6 +52,7 @@ fn run(shell: &mut Shell, source: &str, surface: Option<SurfaceSink>) -> Settled
             terminal: RequestedTerminalAccess::Leased,
             stdin: TurnStdin::Inherit,
             surface,
+            boundary: None,
             lifecycle: Box::new(()),
         },
     ) {

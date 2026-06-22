@@ -523,6 +523,90 @@ fn span_plain(text: &str) -> Span {
     }
 }
 
+// ── `done`: the completion event a detached worker flushes at the boundary ───
+
+/// How a detached `spawn` worker settled, as the final `` `done `` event core
+/// appends to the worker's deferred buffer at completion.  Like an [`IoEvent`]
+/// it is the raw record — [`value_to_done`] decodes it once and [`done_card`]
+/// composes the matching one-line card.  Core names the event (`` `ok ``,
+/// `` `err ``, `` `panic ``); exarch names its appearance: a fixed-position
+/// outcome mark roled by result, never an animation.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum DoneOutcome {
+    /// The worker returned cleanly.
+    Ok,
+    /// The worker raised — the caught error's `message` and `status`, the same
+    /// fields `try`/`poll` surface.
+    Err { message: String, status: i64 },
+    /// The worker panicked — the panic message.
+    Panic { message: String },
+}
+
+/// Decode the `` `done `` value a detached worker flushes at completion into
+/// its `(cmd, outcome)`.  The shape is `` `done [cmd: "…", outcome: …] `` where
+/// `outcome` is the closed `` `ok ``/`` `err ``/`` `panic `` variant core mints;
+/// `err` carries the `{cmd, status, message, line, col}` error record.  Anything
+/// else returns `None`, the same graceful degradation as [`value_to_io`] and
+/// [`value_to_card`]; the decoder seam then drops it.
+pub fn value_to_done(v: &RalValue) -> Option<(String, DoneOutcome)> {
+    let RalValue::Variant { label, payload } = v else {
+        return None;
+    };
+    if label != "done" {
+        return None;
+    }
+    let m = map_of(payload.as_deref()?)?;
+    let cmd = str_field(m, "cmd")?;
+    let RalValue::Variant { label, payload } = m.get("outcome")? else {
+        return None;
+    };
+    let outcome = match label.as_str() {
+        "ok" => DoneOutcome::Ok,
+        "err" => {
+            let rec = map_of(payload.as_deref()?)?;
+            DoneOutcome::Err {
+                message: str_field(rec, "message").unwrap_or_default(),
+                status: int_field(rec, "status").unwrap_or(0),
+            }
+        }
+        "panic" => DoneOutcome::Panic {
+            message: match payload.as_deref() {
+                Some(RalValue::String(s)) => s.clone(),
+                _ => String::new(),
+            },
+        },
+        _ => return None,
+    };
+    Some((cmd, outcome))
+}
+
+/// Compose a `` `done `` event into a one-line [`Card`] using only the existing
+/// [`Mark::Text`] vocabulary — the `cmd` (the settled `spawn`, which renders as
+/// its `<handle:…>` form) lifted by [`Role::Strong`], then an outcome span roled
+/// by how it settled: a clean return is `Ok`, a raise is `Bad` carrying the
+/// message and status, a panic is `Bad` carrying the message.  The outcome is a
+/// fixed-position value mark, not an animation — the worker has already settled
+/// when this renders.
+pub fn done_card(cmd: &str, outcome: &DoneOutcome) -> Card {
+    let mut spans = vec![span(Role::Strong, cmd), span_plain(" ")];
+    match outcome {
+        DoneOutcome::Ok => spans.push(span(Role::Ok, "done")),
+        DoneOutcome::Err { message, status } => {
+            spans.push(span(Role::Bad, &format!("failed ({status})")));
+            if !message.is_empty() {
+                spans.push(span_plain(&format!(": {message}")));
+            }
+        }
+        DoneOutcome::Panic { message } => {
+            spans.push(span(Role::Bad, "panicked"));
+            if !message.is_empty() {
+                spans.push(span_plain(&format!(": {message}")));
+            }
+        }
+    }
+    Card(vec![Mark::Text { spans }])
+}
+
 // ── Decode: runtime `Value` → `Card` ────────────────────────────────────────
 
 /// Decode the value a ral kit handed to `surface` into a [`Card`].
@@ -1181,6 +1265,121 @@ mod tests {
         assert_eq!(v["argv"], serde_json::json!(["git", "log"]));
         assert_eq!(v["outcome"], "ok");
         assert_eq!(v["status"], 0);
+    }
+
+    /// Build the `` `done `` value a detached worker flushes — `cmd` plus a
+    /// closed `` `ok ``/`` `err ``/`` `panic `` outcome — the way core mints it.
+    fn done_value(cmd: &str, outcome: RalValue) -> RalValue {
+        RalValue::Variant {
+            label: "done".into(),
+            payload: Some(Box::new(RalValue::map(vec![
+                ("cmd".into(), s(cmd)),
+                ("outcome".into(), outcome),
+            ]))),
+        }
+    }
+    fn variant(label: &str, payload: RalValue) -> RalValue {
+        RalValue::Variant {
+            label: label.into(),
+            payload: Some(Box::new(payload)),
+        }
+    }
+
+    /// The three outcome classes decode into their typed [`DoneOutcome`]: a
+    /// clean `` `ok ``, an `` `err `` carrying the error record's message and
+    /// status, and a `` `panic `` carrying its message.
+    #[test]
+    fn value_to_done_decodes_each_outcome() {
+        assert_eq!(
+            value_to_done(&done_value("<block>", variant("ok", RalValue::Unit))),
+            Some(("<block>".into(), DoneOutcome::Ok))
+        );
+        let err = variant(
+            "err",
+            RalValue::map(vec![
+                ("cmd".into(), s("<runtime>")),
+                ("status".into(), RalValue::Int(2)),
+                ("message".into(), s("boom")),
+                ("line".into(), RalValue::Int(3)),
+                ("col".into(), RalValue::Int(1)),
+            ]),
+        );
+        assert_eq!(
+            value_to_done(&done_value("<block>", err)),
+            Some((
+                "<block>".into(),
+                DoneOutcome::Err {
+                    message: "boom".into(),
+                    status: 2,
+                }
+            ))
+        );
+        assert_eq!(
+            value_to_done(&done_value("<block>", variant("panic", s("kaput")))),
+            Some((
+                "<block>".into(),
+                DoneOutcome::Panic {
+                    message: "kaput".into(),
+                }
+            ))
+        );
+    }
+
+    /// A non-`done` value is not a done event: a `` `card `` variant, an io
+    /// `Map`, and a plain string all return `None` so the decoder seam drops
+    /// them onto the next branch.
+    #[test]
+    fn value_to_done_rejects_non_done_values() {
+        assert!(value_to_done(&card_value(vec![])).is_none());
+        assert!(value_to_done(&io_value(vec![("io", s("read"))])).is_none());
+        assert!(value_to_done(&s("plain")).is_none());
+    }
+
+    /// The done card is one text mark: the `cmd` as a `Strong` span, then an
+    /// outcome span roled by result — `Ok` for a clean return, `Bad` for a
+    /// raise (carrying the status) or a panic.
+    #[test]
+    fn done_card_roles_outcome_by_result() {
+        let ok = done_card("<block>", &DoneOutcome::Ok);
+        let spans = only_text(&ok);
+        assert_eq!(spans[0].role, Some(Role::Strong));
+        assert_eq!(spans[0].text, "<block>");
+        let outcome = spans.last().expect("a done card ends on its outcome");
+        assert_eq!(outcome.role, Some(Role::Ok));
+        assert!(outcome.text.contains("done"));
+
+        let raised = done_card(
+            "<block>",
+            &DoneOutcome::Err {
+                message: "boom".into(),
+                status: 2,
+            },
+        );
+        let spans = only_text(&raised);
+        assert!(
+            spans
+                .iter()
+                .any(|sp| sp.role == Some(Role::Bad) && sp.text.contains("failed (2)")),
+            "a raise roles its outcome Bad and carries the status"
+        );
+        assert!(
+            spans.iter().any(|sp| sp.text.contains("boom")),
+            "the error message rides the card"
+        );
+
+        let panicked = done_card(
+            "<block>",
+            &DoneOutcome::Panic {
+                message: "kaput".into(),
+            },
+        );
+        let spans = only_text(&panicked);
+        assert!(
+            spans
+                .iter()
+                .any(|sp| sp.role == Some(Role::Bad) && sp.text.contains("panicked")),
+            "a panic roles its outcome Bad"
+        );
     }
 
     /// `single_diff` keys aggregation: exactly one diff mark yields its

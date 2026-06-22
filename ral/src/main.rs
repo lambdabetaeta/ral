@@ -503,6 +503,7 @@ fn run_batch(name: &str, source: String, script_args: Vec<String>, opts: BatchOp
             terminal: terminal_access,
             stdin: TurnStdin::Inherit,
             surface: None,
+            boundary: None,
             lifecycle: Box::new(()),
         },
     ) {

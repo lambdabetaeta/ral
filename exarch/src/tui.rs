@@ -2668,6 +2668,21 @@ impl Repl<'_> {
                 });
                 Slash::Prompt
             }
+            // A detached `spawn` worker flushed its deferred surface batch.
+            // Decode each value with the same decoder the live foreground sink
+            // uses and feed the resulting `Kind` into the render path, so the
+            // worker's cards/io land in the (root) viewport the batch is
+            // stamped with — exactly as a live tool turn's would, only minted
+            // now at the boundary. The model is then woken with `turn.text()`'s
+            // notice, so proceed as a prompt.
+            Turn::Surface { id: vp_id, values } => {
+                for ev in values {
+                    if let Some(kind) = crate::shell_eval::decode_surface(ev) {
+                        self.tui.handle(Event { id: *vp_id, kind });
+                    }
+                }
+                Slash::Prompt
+            }
         }
     }
 
