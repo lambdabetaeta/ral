@@ -533,7 +533,16 @@ impl Block {
                 }
                 ls
             }
-            BlockKind::Card { card, .. } => line::render_card(card, level),
+            // A surfaced general card (no diff) is the model's deliberate
+            // artifact — framed as a bounded object. Diff cards keep their
+            // own rich rendering; folded observation/write cards stay plain.
+            BlockKind::Card { card, origin } => {
+                if !card.has_diff() && *origin == CardOrigin::Surfaced {
+                    line::render_card_framed(card, width)
+                } else {
+                    line::render_card(card, level)
+                }
+            }
             BlockKind::Chrome { lines, .. } => lines.clone(),
         }
     }
@@ -550,13 +559,19 @@ impl Block {
             // The `↘` keeps the delegated-result identity even on error; the
             // failure reads in the header suffix, not a swapped glyph.
             BlockKind::Subagent { .. } => Some(RailKind::Subagent),
-            // A diff card wears the patch shape (`▎`); a diff-less card is
-            // generic chrome (`❖`), the shape `wrote`/`task`/`meter` wore.
-            BlockKind::Card { card, .. } => Some(if card.has_diff() {
-                RailKind::Patch
-            } else {
-                RailKind::Generic
-            }),
+            // A diff card wears the patch shape (`▎`). A surfaced general card
+            // is framed, and the frame is its mark, so it wears no rail glyph
+            // (like the prompt's band). A folded observation/write card stays
+            // generic chrome (`❖`).
+            BlockKind::Card { card, origin } => {
+                if card.has_diff() {
+                    Some(RailKind::Patch)
+                } else if *origin == CardOrigin::Surfaced {
+                    None
+                } else {
+                    Some(RailKind::Generic)
+                }
+            }
             BlockKind::Chrome { shape, .. } => match shape {
                 RailShape::Step => Some(RailKind::Step),
                 RailShape::Error => Some(RailKind::Error),

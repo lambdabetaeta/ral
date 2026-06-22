@@ -11,6 +11,7 @@ use crate::bus::{Hunk, Row};
 use crate::card::{Card, Field as CardField, FieldVal, Mark, Measure, Role, Span as CardSpan};
 use crate::event::ProviderErrorRecord;
 use crate::provider;
+use super::block::wrap_line;
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -743,6 +744,112 @@ pub(super) fn render_card(card: &Card, level: u8) -> Vec<Line<'static>> {
     ls
 }
 
+/// Left indent of a framed surfaced card, in columns — pushed right of the
+/// transcript so the card reads as a composed object, set apart from the flow.
+const CARD_INDENT: usize = 4;
+
+/// Render a surfaced general card (no `diff` mark) as a framed, indented
+/// object: a neutral box, its heading set into the top rule, the remaining
+/// marks padded inside.  A surfaced card is the model's deliberate "look at
+/// this" — rare enough to earn the chrome, and so distinct from the calm human
+/// band and the rail-glyph trace of incremental work.  `width` bounds the box;
+/// the frame wears the neutral rail ink, since identity lives in the matrix.
+pub(super) fn render_card_framed(card: &Card, width: u16) -> Vec<Line<'static>> {
+    let border = Style::default().fg(SLATE);
+    let indent = " ".repeat(CARD_INDENT);
+    // Inner content budget: the content column less the indent and the four
+    // frame columns (`│ ` … ` │`).
+    let max_inner = (width.min(READ_W) as usize)
+        .saturating_sub(CARD_INDENT + 4)
+        .max(8);
+
+    // Lift a single-line leading heading into the top rule; everything else
+    // renders inside.  A multi-line or non-text first mark leaves no title.
+    let marks = card.marks();
+    let (title, body_marks): (Option<Vec<Span<'static>>>, &[Mark]) = match marks.first() {
+        Some(Mark::Text { spans }) => {
+            let head = render_text(spans);
+            if head.len() == 1 {
+                (Some(head[0].spans.clone()), &marks[1..])
+            } else {
+                (None, marks)
+            }
+        }
+        _ => (None, marks),
+    };
+
+    // Body marks → logical lines → wrapped to the inner budget.
+    let mut body: Vec<Line<'static>> = Vec::new();
+    for mark in body_marks {
+        match mark {
+            Mark::Text { spans } => body.extend(render_text(spans)),
+            Mark::Measure(m) => body.push(render_measure(m)),
+            Mark::Fields { rows } => body.extend(render_fields(rows)),
+            Mark::Raw { bytes } => body.extend(render_raw(bytes)),
+            // A diff never reaches here — diff-bearing cards take the diff path.
+            Mark::Diff { .. } => {}
+        }
+    }
+    let wrapped: Vec<Line<'static>> =
+        body.iter().flat_map(|l| wrap_line(l, max_inner)).collect();
+
+    // Inner width: the widest row, and at least one column past the title so
+    // the top rule's `╭─ title ─╮` always closes.  Capped at the budget.
+    let title_w = title.as_deref().map_or(0, span_run_width);
+    let title_min = if title.is_some() { title_w + 1 } else { 0 };
+    let inner_w = wrapped
+        .iter()
+        .map(|l| span_run_width(&l.spans))
+        .max()
+        .unwrap_or(0)
+        .max(title_min)
+        .clamp(1, max_inner);
+    let interior = inner_w + 2; // one padding column each side
+
+    let mut out: Vec<Line<'static>> = vec![Line::default()];
+
+    // Top rule, with the heading set into it.
+    let mut top = vec![Span::raw(indent.clone())];
+    match &title {
+        Some(spans) => {
+            top.push(Span::styled("╭─ ", border));
+            top.extend(spans.iter().cloned());
+            let fill = interior.saturating_sub(3 + title_w); // "─ " + title + " "
+            top.push(Span::styled(format!(" {}", "─".repeat(fill)), border));
+            top.push(Span::styled("╮", border));
+        }
+        None => {
+            top.push(Span::styled("╭", border));
+            top.push(Span::styled("─".repeat(interior), border));
+            top.push(Span::styled("╮", border));
+        }
+    }
+    out.push(Line::from(top));
+
+    // Content rows, each padded out to the inner width inside the borders.
+    for row in &wrapped {
+        let pad = inner_w.saturating_sub(span_run_width(&row.spans));
+        let mut spans = vec![Span::raw(indent.clone()), Span::styled("│ ", border)];
+        spans.extend(row.spans.iter().cloned());
+        spans.push(Span::raw(" ".repeat(pad + 1)));
+        spans.push(Span::styled("│", border));
+        out.push(Line::from(spans));
+    }
+
+    out.push(Line::from(vec![
+        Span::raw(indent),
+        Span::styled("╰", border),
+        Span::styled("─".repeat(interior), border),
+        Span::styled("╯", border),
+    ]));
+    out
+}
+
+/// Total display width of a span run, unicode-aware.
+fn span_run_width(spans: &[Span<'static>]) -> usize {
+    spans.iter().map(|s| s.width()).sum()
+}
+
 /// Render a `text` mark — a run of optionally-roled spans into one or more
 /// `Line`s, breaking on embedded newlines so a multi-line span stays
 /// faithful.  Width-folding happens later in `block::wrap_line`, which
@@ -1295,4 +1402,77 @@ fn prettify_embedded_json(s: &str) -> Cow<'_, str> {
     };
     let end = start + stream.byte_offset();
     Cow::Owned(format!("{}{}{}", &s[..start], pretty, &s[end..]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vibes_card() -> Card {
+        Card(vec![
+            Mark::Text {
+                spans: vec![CardSpan {
+                    role: Some(Role::Strong),
+                    text: "hello cutie".into(),
+                }],
+            },
+            Mark::Measure(Measure {
+                label: "vibes".into(),
+                value: 5,
+                max: Some(42),
+                unit: None,
+            }),
+            Mark::Fields {
+                rows: vec![CardField {
+                    label: "mood".into(),
+                    value: FieldVal::Inline(vec![CardSpan {
+                        role: Some(Role::Ok),
+                        text: "rainy".into(),
+                    }]),
+                }],
+            },
+        ])
+    }
+
+    fn text(l: &Line<'static>) -> String {
+        l.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// A surfaced general card frames as a closed box: a `╭…╮` top rule with
+    /// the heading lifted into it, `│`-flanked content, a `╰…╯` bottom, and
+    /// every framed line the same display width so the right edge is flush.
+    #[test]
+    fn framed_card_is_a_closed_box() {
+        let lines = render_card_framed(&vibes_card(), 80);
+        let rows: Vec<&Line<'static>> = lines.iter().filter(|l| !is_blank(l)).collect();
+        assert!(rows.len() >= 3, "top, content, bottom: got {}", rows.len());
+
+        let top = text(rows[0]);
+        let bottom = text(rows[rows.len() - 1]);
+        assert!(top.contains('╭') && top.contains('╮'), "top rule: {top:?}");
+        assert!(top.contains("hello cutie"), "heading set into the rule: {top:?}");
+        assert!(!top.contains("rainy"), "body stays inside, not in the rule");
+        assert!(bottom.contains('╰') && bottom.contains('╯'), "bottom rule: {bottom:?}");
+
+        let w = span_run_width(&rows[0].spans);
+        for r in &rows {
+            assert_eq!(span_run_width(&r.spans), w, "ragged box edge: {:?}", text(r));
+        }
+        for r in &rows[1..rows.len() - 1] {
+            assert!(text(r).contains('│'), "content row not flanked: {:?}", text(r));
+        }
+    }
+
+    /// The box is bounded by `width`: a narrow terminal still closes flush.
+    #[test]
+    fn framed_card_fits_width() {
+        let lines = render_card_framed(&vibes_card(), 30);
+        for l in lines.iter().filter(|l| !is_blank(l)) {
+            assert!(
+                span_run_width(&l.spans) <= 30,
+                "overflows width 30: {}",
+                span_run_width(&l.spans)
+            );
+        }
+    }
 }
