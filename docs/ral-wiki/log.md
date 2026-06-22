@@ -3042,3 +3042,24 @@ lambda-only handlers
 and the `--allow-schedule` scheduled-wakeups affordance
 ([[decisions/260617_scheduled-wakeups|scheduled-wakeups]]). Updated
 [[index|index]].
+
+## [2026-06-22] ingest | runtime re-ingested at HEAD (14 commits stale)
+
+Re-stamped [[map/core/runtime|runtime]] to `@1baac6d`. Confinement moved off
+`transport::dispatch` — a grant body now always evaluates locally
+([[decisions/260610_value-edge-locality|value-edge-locality]]) and the OS
+sandbox is entered per-command at external dispatch in `command::build_command`
+([[decisions/260617_sandbox-external-children|sandbox-external-children]]).
+Bundled coreutils/ripgrep heads run as `--ral-bundled-tool` exec images
+whenever process semantics are required, keeping the inline `uumain` placement
+only for a clean terminal and serialising the uucore exit-code cell across
+threads ([[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]]);
+redirect reads/writes and exec completions now surface at runtime I/O doors
+(`command/io_event.rs`), with the event shapes and card rendering in
+[[map/exarch/io-surface|io-surface]]
+([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]]).
+Corrected the module map (`command.rs` owns the External arm beside the
+`command_call.rs` dispatcher; `reexec_child_shell` lives in `subprocess.rs` and
+is driven by `child_eval.rs`) and recorded lambda-only handlers/aliases
+([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
+Updated [[index|index]].

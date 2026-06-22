@@ -162,7 +162,7 @@ design pages via the `against` stamp.
   - [[map/core/ir|ir]] — the `Val` / `Comp` call-by-push-value IR; `Bind` carries the checker's scheme, `Pipeline`/`Bind` carry non-optional ground mode wires. *@602218d3*
   - [[map/core/typecheck|typecheck]] — HM with row types; the sole mode engine returns an annotated comp (schemes + ground wires) and one `SessionSchemes` seed; the pipeline-mode lattice and equality-strict unify rule (`mode.rs`). *@8c2437c1*
   - [[map/core/evaluator|evaluator]] — the CBPV machine: trampoline, scope frames, matching, audit. *@2df6db85*
-  - [[map/core/runtime|runtime]] — the command/pipeline/transport machinery the machine dispatches into, plus the shared re-exec'd-child eval runner (`child_eval.rs`). *@7ce10d61*
+  - [[map/core/runtime|runtime]] — the command/pipeline/transport machinery the machine dispatches into: bundled heads as `--ral-bundled-tool` exec images (inline only on a clean terminal), external children spawned under the effective sandbox, grant bodies run locally, redirect/exec surfaced at runtime doors, plus the shared re-exec'd-child eval runner (`child_eval.rs`). *@1baac6d*
   - [[map/core/capabilities|capabilities]] — the grant decision layer (free `capability::check_*(&Context, …)` folds) and the OS process sandbox. *@d7e97288*
   - [[map/core/io-process|io-process]] — byte sinks/sources, signals, process groups, Stream labels. *@7ce10d61*
   - [[map/core/builtins|builtins]] — Rust commands and bundled coreutils/ripgrep. *@8c2437c1*
