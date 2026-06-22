@@ -1679,19 +1679,13 @@ fn parse_force_body(tokens: Vec<(Token, Span)>) -> Result<Vec<Stmt>, ParseError>
     Parser::run_complete(tokens, Parser::parse_program)
 }
 
-/// Keywords and value literals that may not be used as binding names.
-/// Control-operator names come from [`ScopeAst::KEYWORDS`]; the inline
-/// `matches!` covers control flow, value literals, and `case`.  The
-/// `^name` head form bypasses this predicate — `^try` parses as
+/// Keywords and value literals that may not be used as binding names: a
+/// keyword ([`crate::syntax::is_keyword`] — control flow plus the
+/// control-operator names) or a value literal (`true`, `false`, `unit`).
+/// The `^name` head form bypasses this predicate — `^try` parses as
 /// `Head::ExternalName("try")` and dispatches to PATH lookup.
 fn is_reserved(s: &str) -> bool {
-    if ScopeAst::lookup_keyword(s).is_some() {
-        return true;
-    }
-    matches!(
-        s,
-        "if" | "elsif" | "else" | "let" | "return" | "true" | "false" | "unit" | "case"
-    )
+    crate::syntax::is_keyword(s) || matches!(s, "true" | "false" | "unit")
 }
 
 /// Parsed map-literal key — either a static label (bare or tag, via

@@ -18,6 +18,7 @@
 mod block;
 mod fidelity;
 mod group;
+mod highlight;
 mod line;
 mod md;
 mod picker;

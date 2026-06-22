@@ -22,6 +22,7 @@
 //! - **L3, everything** — L2 plus each call's full ral `cmd` source.
 
 use super::block::wrap_line;
+use super::highlight::highlight_ral;
 use super::line::{self, CODE_BG, RAIL_W, SLATE, push_wrapped, wash};
 use super::md;
 use ratatui::style::{Color, Style};
@@ -218,30 +219,18 @@ fn pinned_intent(
 }
 
 /// The call's full ral `cmd` source rows (L3), each inset under the call's
-/// body column and styled as code, so the script reads beneath its intent.
+/// body column and syntax-highlighted, so the script reads as code beneath
+/// its intent.  The highlighted spans hang under BODY_INDENT (plus the source
+/// line's own leading whitespace), wrap to clear the panel's right edge, and
+/// wash into the recessed CODE_BG panel padded uniform to `width`.
 fn source_rows(call: &Call, width: usize) -> Vec<Line<'static>> {
     let mut ls = Vec::new();
-    for raw in call.cmd.lines() {
-        // Preserve the source line's own leading indentation under BODY_INDENT,
-        // wrap the body to clear the panel's right edge, and wash each row into
-        // the recessed CODE_BG panel padded uniform to `width`.
-        let body_start = raw
-            .char_indices()
-            .find_map(|(i, c)| (!c.is_whitespace()).then_some(i))
-            .unwrap_or(raw.len());
-        let prefix = format!("{BODY_INDENT}{}", &raw[..body_start]);
-        let prefix_w = UnicodeWidthStr::width(prefix.as_str());
-        let body_w = width.saturating_sub(prefix_w).max(8);
-        push_wrapped(&mut ls, &raw[body_start..], body_w, |chunk, _first| {
-            wash(
-                Line::from(vec![
-                    Span::raw(prefix.clone()),
-                    Span::styled(chunk, Style::default().fg(Color::White)),
-                ]),
-                CODE_BG,
-                Some(width),
-            )
-        });
+    for line in highlight_ral(&call.cmd) {
+        let mut spans = vec![Span::raw(BODY_INDENT)];
+        spans.extend(line.spans);
+        for vrow in wrap_line(&Line::from(spans), width) {
+            ls.push(wash(vrow, CODE_BG, Some(width)));
+        }
     }
     ls
 }

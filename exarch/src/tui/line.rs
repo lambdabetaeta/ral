@@ -12,6 +12,7 @@ use crate::card::{Card, Field as CardField, FieldVal, Mark, Measure, Role, Span 
 use crate::event::ProviderErrorRecord;
 use crate::provider;
 use super::block::wrap_line;
+use super::highlight::highlight_ral;
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -54,6 +55,19 @@ pub(super) const PROMPT_INK: Color = Color::Rgb(170, 180, 200);
 /// areal mark, matched to the data's nature).  Distinct from the model's base
 /// prose and from the human's rule fence: background here means "machine".
 pub(super) const CODE_BG: Color = Color::Rgb(36, 38, 46);
+
+/// Syntax-highlight inks for ral code washed into the [`CODE_BG`] panel — one
+/// low-saturation hue per token class ([`super::highlight`]).  Kept muted so
+/// code reads calmly against the recessed panel rather than as alarm, and
+/// held distinct from each other, from the chrome [`Role`] palette, from the
+/// human's [`PROMPT_INK`], and from the agent-rail identity set
+/// ([`AGENT_HUES`]) so a token's colour never aliases a semantic one.
+/// Punctuation reuses [`SLATE`]; every other token keeps the default code
+/// ink (white).
+pub(super) const CODE_KEYWORD: Color = Color::Rgb(168, 154, 208);
+pub(super) const CODE_STRING: Color = Color::Rgb(150, 186, 146);
+pub(super) const CODE_VARIABLE: Color = Color::Rgb(206, 166, 130);
+pub(super) const CODE_TAG: Color = Color::Rgb(202, 150, 178);
 /// Agent rail palette: one hue per producing agent, indexed by
 /// [`super::block::AgentSlot`]. Root keeps [`CYAN`] — the existing rail
 /// accent — so a root-only session is visually unchanged in hue. The
@@ -411,8 +425,8 @@ fn tool_call_body(
     ls.extend(tool_call_header(label, tool, None, width));
     ls.push(Line::default());
     let take = cap.unwrap_or(usize::MAX);
-    for l in cmd.lines().take(take) {
-        push_code_row(&mut ls, l, width);
+    for line in highlight_ral(cmd).into_iter().take(take) {
+        push_code_row(&mut ls, line, width);
     }
     ls
 }
@@ -441,33 +455,20 @@ pub(super) fn wash(row: Line<'static>, bg: Color, fill_to: Option<usize>) -> Lin
     Line::from(spans)
 }
 
-/// Append one source row to an expanded tool call.  The visible code block
-/// has a fixed two-column inset; wrapped continuation rows then repeat the
-/// source line's own leading whitespace so a long expression folds beneath
-/// the place where its content began, not back at column zero.  Each row is
-/// washed into the recessed [`CODE_BG`] panel, padded uniform to `width` so
-/// the machine region reads as a clean rectangle rather than a ragged smear.
-fn push_code_row(ls: &mut Vec<Line<'static>>, line: &str, width: u16) {
+/// Append one highlighted source row to an expanded tool call.  The visible
+/// code block has a fixed two-column inset; the row composes that inset ahead
+/// of the line's already-highlighted spans, folds to `width` — continuation
+/// rows hang beneath the inset plus the source line's own leading whitespace,
+/// so a long expression folds where its content began, not at column zero —
+/// and washes each resulting row into the recessed [`CODE_BG`] panel, padded
+/// uniform to `width` so the machine region reads as a clean rectangle.
+fn push_code_row(ls: &mut Vec<Line<'static>>, line: Line<'static>, width: u16) {
     const CODE_INDENT: &str = "  ";
-    let body_start = line
-        .char_indices()
-        .find_map(|(i, c)| (!c.is_whitespace()).then_some(i))
-        .unwrap_or(line.len());
-    let source_indent = &line[..body_start];
-    let body = &line[body_start..];
-    let prefix = format!("{CODE_INDENT}{source_indent}");
-    let prefix_w = UnicodeWidthStr::width(prefix.as_str());
-    let body_w = (width as usize).saturating_sub(prefix_w).max(8);
-    push_wrapped(ls, body, body_w, |chunk, _first| {
-        wash(
-            Line::from(vec![
-                Span::raw(prefix.clone()),
-                Span::styled(chunk, Style::default().fg(Color::White)),
-            ]),
-            CODE_BG,
-            Some(width as usize),
-        )
-    });
+    let mut spans = vec![Span::raw(CODE_INDENT)];
+    spans.extend(line.spans);
+    for row in wrap_line(&Line::from(spans), width as usize) {
+        ls.push(wash(row, CODE_BG, Some(width as usize)));
+    }
 }
 
 /// A tool call with no separate summary — the `fff` query, an
