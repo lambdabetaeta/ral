@@ -7,6 +7,7 @@
 use crate::cancel;
 use crate::credential::Credential;
 use crate::oauth;
+use crate::tools::ToolSet;
 use clap::ValueEnum;
 use futures_util::StreamExt;
 use genai::Headers;
@@ -1101,7 +1102,7 @@ impl Provider {
         &self,
         system: &str,
         messages: Vec<ChatMessage>,
-        advertise_root_only: bool,
+        tools: &ToolSet,
         on_text: &mut F,
         cancel: &cancel::Token,
     ) -> Result<StepOut, ProviderError> {
@@ -1111,7 +1112,7 @@ impl Provider {
                 self.max_tokens_override,
                 system,
                 messages,
-                advertise_root_only,
+                tools,
                 on_text,
                 cancel,
             ),
@@ -1181,11 +1182,14 @@ impl Live {
         max_tokens_override: Option<u32>,
         system: &str,
         messages: Vec<ChatMessage>,
-        advertise_root_only: bool,
+        tools: &ToolSet,
         on_text: &mut F,
         cancel: &cancel::Token,
     ) -> Result<StepOut, ProviderError> {
         self.refresh_if_stale();
+        // `ToolSet` is `Copy`, so the retry closure captures it by value
+        // and `tool_defs` consumes it fresh on every attempt.
+        let tools = *tools;
         let req_template = build_cached_request(self.adapter, system, messages);
         let mut options = ChatOptions::default()
             .with_capture_usage(true)
@@ -1205,7 +1209,7 @@ impl Live {
             cancel,
             async |_attempt| {
                 let mut req = req_template.clone();
-                req.tools = Some(tool_defs(advertise_root_only));
+                req.tools = Some(tool_defs(tools));
                 let mut seen_any_token = false;
                 let attempt_result: Result<StreamEnd, ProviderError> = async {
                     let mut resp = tokio::select! {
@@ -1448,10 +1452,10 @@ fn build_cached_request(
     ChatRequest::new(all)
 }
 
-fn tool_defs(advertise_root_only: bool) -> Vec<Tool> {
+fn tool_defs(tools: ToolSet) -> Vec<Tool> {
     crate::tools::registry()
         .iter()
-        .filter(|t| advertise_root_only || !t.root_only())
+        .filter(|t| tools.allows(t.as_ref()))
         .map(|t| {
             Tool::new(t.name())
                 .with_description(t.desc())

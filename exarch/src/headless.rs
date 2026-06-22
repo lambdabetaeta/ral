@@ -13,7 +13,7 @@
 //! human stdout/stderr projection shows, and sub-agent output
 //! de-multiplexes cleanly by id.
 
-use crate::bus::{Event, Kind, Row, SessionBus, SessionId, Sink};
+use crate::bus::{Event, Kind, Row, SessionBus, SessionId, Sink, pump};
 use crate::card::{Card, FieldVal, Mark};
 use crate::provider::{Provider, Usage};
 use crate::session::Session;
@@ -60,9 +60,11 @@ pub struct Headless {
     /// The root's last completed assistant message — the `result` field
     /// of the JSON output.
     final_msg: String,
-    /// Set when a worker thread unwound this run.  `run_turn` recovers from
-    /// the panic and returns `Ok`, so without latching it here the JSON
-    /// result would report a crashed turn as a clean, empty success.
+    /// Set when a worker thread unwound this run.  `pump` recovers from the
+    /// panic, emits it as a [`WORKER_PANIC_PREFIX`](crate::bus::WORKER_PANIC_PREFIX)
+    /// error, and returns the worker value as normal, so without latching it
+    /// here the JSON result would report a crashed turn as a clean, empty
+    /// success.
     panicked: bool,
     /// Whether the last stdout byte written in text mode was a newline, so
     /// the closing newline is emitted only when the streamed reply did not
@@ -378,11 +380,37 @@ pub fn run(
     let file = File::create(&transcript).map_err(|e| format!("{}: {e}", transcript.display()))?;
     let json = format == OutputFormat::Json;
     let mut headless = Headless::new(json, BufWriter::new(file), session.id);
-    // A per-turn bus: headless has no idle loop and no tabs, so the channel
-    // closes when the turn's worker finishes and async children stay muted to
-    // their own log — the observable behaviour headless has always had.
-    let bus = SessionBus::per_turn(headless.inbox());
-    let r = session.run_turn(&mut headless, &bus, provider, Some(prompt));
+    // A per-turn bus over the session's *own* inbox, so the drive worker's
+    // emitter and any in-turn producer share one queue.  Headless has no idle
+    // loop and no tabs, so the channel closes when the worker finishes and
+    // async children stay muted to their own log — the behaviour headless has
+    // always had.
+    let bus = SessionBus::per_turn(session.inbox());
+    // Seed the launch prompt into that same inbox; the headless root is
+    // `park_when_idle=false`, so `drive` runs the seeded work and returns once
+    // it is idle.
+    session.seed(prompt);
+    // A fixed provider handle — headless never swaps the model mid-run.
+    let provider = crate::session::ProviderHandle::new(std::sync::Arc::clone(provider));
+    // Headless has no slash commands, so the drive loop's `Control` is a no-op;
+    // declared here so its `&mut` borrow outlives the worker closure `pump`
+    // runs on its scoped thread.
+    let mut control = crate::session::NoControl;
+    // Drive on a scoped worker thread while the main thread drives the sink.
+    // `pump` returns the worker's `(outcome, text)`, or `None` if it panicked.
+    let root_id = session.id;
+    let outcome = pump(&mut headless, &bus, root_id, |emit| {
+        session.drive(provider.clone(), &mut control, emit)
+    });
+    // The sink already latched `panicked` from the WORKER_PANIC_PREFIX error a
+    // worker unwind emits, so this `Result` only drives the top-level
+    // `is_error`/`error` fields; `result_json` reads the message and stop
+    // reason from the sink, not from here.
+    let r: Result<(), String> = match outcome {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err("worker panicked".to_string()),
+        Err(e) => Err(e.to_string()),
+    };
     let _ = headless.events.flush();
     let elapsed = headless.started.elapsed();
     if json {
@@ -414,9 +442,9 @@ mod tests {
     use super::*;
 
     /// A recovered worker panic must surface in the JSON result as an error,
-    /// not a clean completion: `run_turn` absorbs the unwind and returns Ok,
-    /// so the result is built from `Ok(())` — the panic is recognised only
-    /// by the `Kind::Error` the bus emits.
+    /// not a clean completion: `pump` absorbs the unwind and returns the worker
+    /// value, so `run` builds the result from `Ok(())` — the panic is
+    /// recognised only by the `Kind::Error` the bus emits.
     #[test]
     fn recovered_worker_panic_reports_error_not_success() {
         let root: SessionId = 1;

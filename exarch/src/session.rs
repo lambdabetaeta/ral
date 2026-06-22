@@ -25,7 +25,7 @@ use crate::shell_eval;
 use crate::tools::ToolSet;
 use ral_core::Shell;
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct Session {
@@ -128,6 +128,35 @@ pub(crate) fn fresh_id() -> SessionId {
     N.fetch_add(1, Ordering::Relaxed)
 }
 
+/// A shared, swappable handle to the active provider.  The drive loop reads
+/// the current provider once per turn through [`Self::current`]; a `/model`
+/// switch on the frontend's UI thread swaps it through [`Self::swap`].  Live
+/// provider replacement across the UI / drive thread boundary needs a shared
+/// cell rather than an owned `Arc` the worker would hold privately; a `Mutex`
+/// suffices (the cell is touched at most once per turn and on the rare
+/// switch).  A peer wraps a *snapshot* of the provider at spawn, so a later
+/// root `/model` never disturbs an already-running child.
+#[derive(Clone)]
+pub struct ProviderHandle(Arc<Mutex<Arc<Provider>>>);
+
+impl ProviderHandle {
+    pub fn new(provider: Arc<Provider>) -> Self {
+        Self(Arc::new(Mutex::new(provider)))
+    }
+
+    /// The provider in force for the next turn.
+    pub fn current(&self) -> Arc<Provider> {
+        self.0.lock().expect("provider handle poisoned").clone()
+    }
+
+    /// Replace the active provider (a `/model` switch).  Takes effect on the
+    /// drive loop's next turn; an in-flight turn finishes on the provider it
+    /// started with, and any running peer keeps its own snapshot.
+    pub fn swap(&self, provider: Arc<Provider>) {
+        *self.0.lock().expect("provider handle poisoned") = provider;
+    }
+}
+
 /// What [`Session::drive`] should do after handing a session-affecting slash
 /// command to [`Control`].
 pub enum ControlFlow {
@@ -138,20 +167,14 @@ pub enum ControlFlow {
 /// The frontend hook the drive loop calls for a session-affecting slash
 /// command ([`Turn::Command`]) drained at the turn boundary — the drive thread
 /// owns the session the command mutates, so it cannot run on the UI thread.
-/// View-only commands (`/help`, `/copy`, …) are handled frontend-side and
-/// never reach here.  Off the TUI there are no such commands, so [`NoControl`]
-/// handles none.
+/// Only the non-interactive session commands route here (`/clear`, `/compact`,
+/// `/quit`); `/model` swaps the [`ProviderHandle`] directly on the UI thread,
+/// and view-only commands (`/help`, `/copy`, …) are handled frontend-side.
+/// Off the TUI there are no such commands, so [`NoControl`] handles none.
 pub trait Control {
-    /// Run `raw` (a slash-command line) against the session and provider the
-    /// drive loop owns, returning whether the loop should quit.  May swap the
-    /// provider (`/model`) by reassigning `*provider`.
-    fn command(
-        &mut self,
-        raw: &str,
-        session: &mut Session,
-        provider: &mut Arc<Provider>,
-        emit: &Emitter,
-    ) -> ControlFlow;
+    /// Run `raw` (a slash-command line) against the session the drive loop
+    /// owns, returning whether the loop should quit.
+    fn command(&mut self, raw: &str, session: &mut Session, emit: &Emitter) -> ControlFlow;
 }
 
 /// The no-op control for drivers with no slash commands (headless, peers,
@@ -159,13 +182,7 @@ pub trait Control {
 pub struct NoControl;
 
 impl Control for NoControl {
-    fn command(
-        &mut self,
-        _raw: &str,
-        _session: &mut Session,
-        _provider: &mut Arc<Provider>,
-        _emit: &Emitter,
-    ) -> ControlFlow {
+    fn command(&mut self, _raw: &str, _session: &mut Session, _emit: &Emitter) -> ControlFlow {
         ControlFlow::Continue
     }
 }
@@ -319,6 +336,13 @@ impl Session {
         self.inbox.mailbox()
     }
 
+    /// A handle to this session's inbox — for a frontend to build the bus
+    /// (whose emitters mint mailboxes onto this same queue) over the session's
+    /// own queue, so producers and the drive loop share one inbox.
+    pub(crate) fn inbox(&self) -> Inbox {
+        self.inbox.clone()
+    }
+
     /// Whether this session may spawn children (read by the spawn site).
     pub(crate) fn is_root(&self) -> bool {
         self.is_root
@@ -398,15 +422,16 @@ impl Session {
     /// final turn's `(outcome, text)` digest; the root ignores it, a peer's
     /// spawn site delivers it up the parent's mailbox.
     ///
-    /// `provider` is owned so [`Control`] can swap it on `/model`; `control`
-    /// handles session-affecting slash commands ([`NoControl`] off the TUI).
+    /// `provider` is the shared [`ProviderHandle`] the loop reads once per
+    /// turn, so a `/model` swap on the UI thread takes effect next turn;
+    /// `control` handles session-affecting slash commands ([`NoControl`] off
+    /// the TUI).
     pub fn drive(
         &mut self,
-        provider: Arc<Provider>,
+        provider: ProviderHandle,
         control: &mut dyn Control,
         emit: &Emitter,
     ) -> (AgentOutcome, String) {
-        let mut provider = provider;
         // The root's published Esc token, re-minted per turn boundary; held
         // here so the slot stays valid for the whole turn and is retired when
         // the next mint (or this loop's end) drops it.  A peer mints nothing.
@@ -433,19 +458,22 @@ impl Session {
                     guard = Some(g);
                 }
             }
-            // Session-affecting slash commands run against the owned session
-            // and provider, never the model.
+            // Session-affecting slash commands run against the owned session,
+            // never the model.
             if let Turn::Command(raw) = &turn {
-                match control.command(raw, self, &mut provider, emit) {
+                match control.command(raw, self, emit) {
                     ControlFlow::Quit => break,
                     ControlFlow::Continue => continue,
                 }
             }
             announce(&turn, emit);
+            // Read the provider in force for this turn; a `/model` swap lands
+            // here next turn, never mid-turn.
+            let active = provider.current();
             let token = self.cancel.clone();
             let prompt = Some(turn.text());
             let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.apply(&provider, prompt, &token, emit)
+                self.apply(&active, prompt, &token, emit)
             }));
             let outcome = match attempt {
                 Ok(o) => o,
@@ -1049,7 +1077,7 @@ mod tests {
         session.seed("compute then crash".into());
         let (tx, _rx) = std::sync::mpsc::channel();
         let emit = Emitter::new(tx, session.id);
-        let _ = session.drive(provider, &mut NoControl, &emit);
+        let _ = session.drive(ProviderHandle::new(provider), &mut NoControl, &emit);
 
         // The completed call's binding survives the panic.
         assert!(

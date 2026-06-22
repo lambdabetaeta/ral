@@ -14,10 +14,9 @@ use crate::bus::{Emitter, Kind};
 use crate::event::ToolResult as SessionToolResult;
 use crate::provider::Provider;
 use crate::schedule::{CronSchedule, Trigger, parse_duration};
-use crate::session::{Session, Staged};
+use crate::session::Session;
 use serde_json::{Value, json};
 use std::sync::{Arc, OnceLock};
-use std::thread;
 
 /// `schedule` — arm a recurring cron or one-shot `after` wakeup.
 pub(super) struct ScheduleTool;
@@ -36,10 +35,6 @@ calendar occurrence, or `after` (e.g. `30m`, `2h`) for a one-shot relative \
 delay.  The payload is a natural-language instruction you will act on when \
 woken, not code.  List live ones with `schedules`; remove one with \
 `unschedule`.  Requires scheduling authority (off by default)."
-    }
-
-    fn root_only(&self) -> bool {
-        true
     }
 
     fn schema(&self) -> &'static Value {
@@ -74,16 +69,14 @@ woken, not code.  List live ones with `schedules`; remove one with \
         })
     }
 
-    fn dispatch<'scope, 'env: 'scope>(
+    fn dispatch(
         &self,
         id: String,
         input: Value,
         session: &mut Session,
-        _provider: &'env Arc<Provider>,
-        _token: &'env crate::cancel::Token,
+        _provider: &Arc<Provider>,
         emit: &Emitter,
-        _scope: &'scope thread::Scope<'scope, 'env>,
-    ) -> Staged<'scope> {
+    ) -> SessionToolResult {
         if !session.schedule_authority {
             let msg = "scheduling is not authorised in this session — start exarch with \
                        --allow-schedule to enable self-wakeups"
@@ -94,7 +87,7 @@ woken, not code.  List live ones with `schedules`; remove one with \
                 summary: None,
             });
             emit.emit(Kind::ToolResult(msg.clone()));
-            return Staged::Done(SessionToolResult { id, content: msg });
+            return SessionToolResult { id, content: msg };
         }
         let Some(obj) = input.as_object() else {
             return invalid_input(
@@ -156,15 +149,16 @@ woken, not code.  List live ones with `schedules`; remove one with \
             cmd: format!("{}: {}", trigger.describe(), prompt),
             summary: label.clone(),
         });
+        let mailbox = session.mailbox();
         let content = match session
             .schedules
-            .schedule(trigger, prompt, label, emit.inbox())
+            .schedule(trigger, prompt, label, mailbox)
         {
             Ok(sid) => format!("scheduled (id {sid})"),
             Err(e) => format!("could not schedule: {e}"),
         };
         emit.emit(Kind::ToolResult(content.clone()));
-        Staged::Done(SessionToolResult { id, content })
+        SessionToolResult { id, content }
     }
 }
 
@@ -182,10 +176,6 @@ to the next fire, and how many times each has fired.  Use it to recover \
 schedule ids after a context compaction, then `unschedule` to remove one."
     }
 
-    fn root_only(&self) -> bool {
-        true
-    }
-
     fn schema(&self) -> &'static Value {
         static S: OnceLock<Value> = OnceLock::new();
         S.get_or_init(|| {
@@ -197,16 +187,14 @@ schedule ids after a context compaction, then `unschedule` to remove one."
         })
     }
 
-    fn dispatch<'scope, 'env: 'scope>(
+    fn dispatch(
         &self,
         id: String,
         _input: Value,
         session: &mut Session,
-        _provider: &'env Arc<Provider>,
-        _token: &'env crate::cancel::Token,
+        _provider: &Arc<Provider>,
         emit: &Emitter,
-        _scope: &'scope thread::Scope<'scope, 'env>,
-    ) -> Staged<'scope> {
+    ) -> SessionToolResult {
         emit.emit(Kind::ToolCall {
             tool: "schedules",
             cmd: "schedules".into(),
@@ -231,7 +219,7 @@ schedule ids after a context compaction, then `unschedule` to remove one."
                 .join("\n")
         };
         emit.emit(Kind::ToolResult(content.clone()));
-        Staged::Done(SessionToolResult { id, content })
+        SessionToolResult { id, content }
     }
 }
 
@@ -246,10 +234,6 @@ impl Tool for UnscheduleTool {
     fn desc(&self) -> &'static str {
         "Remove a scheduled wakeup by its id (from `schedules`).  A no-op if \
 no schedule has that id."
-    }
-
-    fn root_only(&self) -> bool {
-        true
     }
 
     fn schema(&self) -> &'static Value {
@@ -268,16 +252,14 @@ no schedule has that id."
         })
     }
 
-    fn dispatch<'scope, 'env: 'scope>(
+    fn dispatch(
         &self,
         id: String,
         input: Value,
         session: &mut Session,
-        _provider: &'env Arc<Provider>,
-        _token: &'env crate::cancel::Token,
+        _provider: &Arc<Provider>,
         emit: &Emitter,
-        _scope: &'scope thread::Scope<'scope, 'env>,
-    ) -> Staged<'scope> {
+    ) -> SessionToolResult {
         let sid = match u64_field(&input, "id") {
             Some(n) => n,
             None => {
@@ -301,6 +283,6 @@ no schedule has that id."
             format!("no schedule with id {sid}")
         };
         emit.emit(Kind::ToolResult(content.clone()));
-        Staged::Done(SessionToolResult { id, content })
+        SessionToolResult { id, content }
     }
 }

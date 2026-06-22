@@ -12,7 +12,7 @@
 //! surfaces tool summaries, patches, writes, and tasks instead.
 
 use crate::agent_registry::AgentRegistry;
-use crate::bus::{Emitter, Inbox, InboxMsg, Kind, SessionId};
+use crate::bus::{Emitter, InboxMsg, Kind, Mailbox, SessionId};
 use crate::card::{done_card, io_card, value_to_card, value_to_done, value_to_io};
 use ral_core::types::{Boundary, BoundarySink, Break, Escape};
 use ral_core::{
@@ -106,24 +106,27 @@ pub fn decode_surface(ev: &RalValue) -> Option<Kind> {
 /// The deferred half of `surface`: the session-lived [`BoundarySink`] a
 /// detached `spawn` worker flushes its buffered batch to at completion.  It is
 /// surface's *deferred destination* — not a new channel — so it carries the
-/// same ordinary surface vocabulary the live sink does, posted to the session
-/// [`Inbox`] as an [`InboxMsg::Surface`] for the host to render at the next
-/// turn boundary (the [`Card`]/`Io` events the live path mints now, minted
-/// later).  The id it stamps is the **root** session's, so a spawn worker's
-/// cards land in the root viewport — a spawn worker registers no tab of its
-/// own.
+/// same ordinary surface vocabulary the live sink does, posted through the
+/// session's own [`Mailbox`] as an [`InboxMsg::Surface`] for the host to render
+/// at the next turn boundary (the [`Card`]/`Io` events the live path mints now,
+/// minted later) — the spawn worker flushes its deferred surface batch into the
+/// agent that ran the spawn.  The id it stamps is the **root** session's, so a
+/// spawn worker's cards land in the root viewport — a spawn worker registers no
+/// tab of its own.
 ///
 /// The generation guard mirrors the async `agent`'s exactly: it captures the
 /// [`AgentRegistry`]'s generation at construction and, in [`Self::deliver`],
 /// re-reads the live counter.  A `/clear` between spawn and flush bumps that
 /// counter (`AgentRegistry::clear`), so a stale batch is dropped before it can
 /// reach a rebuilt context — the session epoch the ADR calls for, reusing the
-/// one counter rather than minting a parallel one.  `Inbox::clear` empties the
-/// deque, so a batch already queued when `/clear` runs is dropped for free.
+/// one counter rather than minting a parallel one.  The inbox's `clear` empties
+/// the deque, so a batch already queued when `/clear` runs is dropped for free.
 ///
 /// [`Card`]: crate::card::Card
 struct InboxBoundary {
-    inbox: Inbox,
+    /// The session's own inbox sender; a spawn worker flushes its deferred
+    /// surface batch into the agent that ran the spawn.
+    mailbox: Mailbox,
     /// The root session id, stamped on every batch so a spawn worker's cards
     /// render in the root viewport.
     root: SessionId,
@@ -142,7 +145,7 @@ impl BoundarySink for InboxBoundary {
         if self.registry.generation() != self.generation {
             return;
         }
-        self.inbox.push(InboxMsg::Surface {
+        self.mailbox.push(InboxMsg::Surface {
             id: self.root,
             values: batch,
             joined,
@@ -156,7 +159,7 @@ impl BoundarySink for InboxBoundary {
 /// by core, so a nested `spawn` inherits it and flushes at its own completion.
 pub fn boundary_sink(emit: &Emitter, root: SessionId, registry: &AgentRegistry) -> Boundary {
     Arc::new(InboxBoundary {
-        inbox: emit.inbox(),
+        mailbox: emit.mailbox(),
         root,
         registry: registry.clone(),
         generation: registry.generation(),
@@ -343,7 +346,7 @@ mod tests {
 
     use super::*;
     use crate::agent_builtins;
-    use crate::bus::{Emitter, Row};
+    use crate::bus::{Emitter, Inbox, Row};
     use ral_core::types::Capabilities;
     use std::sync::mpsc;
 
@@ -1006,7 +1009,7 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
         let registry = AgentRegistry::new();
         let inbox = Inbox::new();
         let (tx, _rx) = mpsc::channel();
-        let emit = Emitter::with_inbox(tx, 7, inbox.clone());
+        let emit = Emitter::with_mailbox(tx, 7, inbox.mailbox());
         let boundary = boundary_sink(&emit, 7, &registry);
         let joined = Arc::new(Mutex::new(false));
 

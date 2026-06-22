@@ -4,13 +4,14 @@
 //! ral's `signal::install_handlers` sets `SIGNAL_COUNT` so the
 //! evaluator unwinds between statements; that interrupts an in-flight
 //! tool call but leaves exarch's turn loop free to keep going.  Here we
-//! add a cancellation [`Token`] minted once per *root* turn
-//! ([`crate::session::Session::run_turn`]) and threaded down through
-//! `apply` → dispatch → tools → child sessions.  A sub-agent shares the
-//! parent's token rather than minting its own, so a single Ctrl-C / Esc
-//! cancels the whole call tree.  The token is cancelled by the chained
-//! signal handler and raced by the HTTP request future, so one signal
-//! stops the turn and returns to the prompt.
+//! add a cancellation [`Token`] the *root* drive loop re-mints at each
+//! turn boundary ([`crate::session::Session::drive`]) and threads down
+//! through `apply` → dispatch → tools.  Esc cancels only the root's
+//! current turn — a peer holds its own sticky token (registered, cancelled
+//! by `agent_cancel` / `/clear` / its ceiling), so an Esc on the foreground
+//! never reaches into a detached child.  The token is cancelled by the
+//! chained signal handler and raced by the HTTP request future, so one
+//! signal stops the turn and returns to the prompt.
 //!
 //! Ctrl-C and Esc route through [`raise_interrupt`], which cancels
 //! the per-turn token and asks ral to cancel the current turn's
@@ -28,7 +29,7 @@
 //! observed through the threaded [`Token`] every cancel check already
 //! holds (`is_set` reads the slot directly, but only in tests).  The slot is
 //! published by [`mint_root`]'s RAII guard and cleared on its drop, so a
-//! sub-agent turn (which runs `apply` directly, not `run_turn`) never
+//! peer (which drives on its own sticky token and never mints) never
 //! touches it: minting is the *only* reset, replacing X5's clear-at-every-
 //! `apply` which erased a just-pressed Esc before a sub-agent saw it.
 //!

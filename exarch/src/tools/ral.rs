@@ -6,11 +6,11 @@
 
 use super::{Tool, invalid_input};
 use crate::bus::{Emitter, Kind};
+use crate::event::ToolResult as SessionToolResult;
 use crate::provider::Provider;
-use crate::session::{Session, Staged};
+use crate::session::Session;
 use serde_json::{Value, json};
 use std::sync::{Arc, OnceLock};
-use std::thread;
 
 pub(super) struct RalTool;
 
@@ -101,16 +101,14 @@ impl Tool for RalTool {
         })
     }
 
-    fn dispatch<'scope, 'env: 'scope>(
+    fn dispatch(
         &self,
         id: String,
         input: Value,
         session: &mut Session,
-        _provider: &'env Arc<Provider>,
-        _token: &'env crate::cancel::Token,
+        _provider: &Arc<Provider>,
         emit: &Emitter,
-        _scope: &'scope thread::Scope<'scope, 'env>,
-    ) -> Staged<'scope> {
+    ) -> SessionToolResult {
         let args = match parse_args(&input) {
             Ok(a) => a,
             Err(reason) => return invalid_input(id, "ral", "<invalid input>", &reason, emit),
@@ -120,7 +118,7 @@ impl Tool for RalTool {
             cmd: args.cmd.clone(),
             summary: Some(args.description.clone()),
         });
-        Staged::Done(session.run_shell(id, &args.cmd, CALL_TIMEOUT_SECS, emit))
+        session.run_shell(id, &args.cmd, CALL_TIMEOUT_SECS, emit)
     }
 }
 

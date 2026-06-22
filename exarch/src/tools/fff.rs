@@ -18,7 +18,7 @@ use crate::bus::{Emitter, Kind};
 use crate::digest::{FFF_CAP, clip};
 use crate::event::ToolResult as SessionToolResult;
 use crate::provider::Provider;
-use crate::session::{Session, Staged};
+use crate::session::Session;
 use fff_search::file_picker::FilePicker;
 use fff_search::{
     FFFMode, FilePickerOptions, FrecencyTracker, FuzzySearchOptions, PaginationArgs, QueryParser,
@@ -31,7 +31,6 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
-use std::thread;
 use std::time::Duration;
 
 pub(super) struct FffTool;
@@ -235,16 +234,14 @@ grepping their contents."
         })
     }
 
-    fn dispatch<'scope, 'env: 'scope>(
+    fn dispatch(
         &self,
         id: String,
         input: Value,
         session: &mut Session,
-        _provider: &'env Arc<Provider>,
-        _token: &'env crate::cancel::Token,
+        _provider: &Arc<Provider>,
         emit: &Emitter,
-        _scope: &'scope thread::Scope<'scope, 'env>,
-    ) -> Staged<'scope> {
+    ) -> SessionToolResult {
         let args = match parse_args(&input) {
             Ok(a) => a,
             Err(reason) => return invalid_input(id, "fff", "<invalid input>", &reason, emit),
@@ -261,7 +258,7 @@ grepping their contents."
         };
         let content = clip(&raw, FFF_CAP);
         emit.emit(Kind::ToolResult(content.clone()));
-        Staged::Done(SessionToolResult { id, content })
+        SessionToolResult { id, content }
     }
 }
 

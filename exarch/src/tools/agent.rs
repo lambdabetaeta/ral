@@ -1,17 +1,18 @@
-//! `agent` tool — fork a child session and run a sub-agent prompt.
+//! `agent` tool — fork a child session and launch a sub-agent.
 //!
-//! [`Staged::Spawned`]; the parent joins same-batch children before the next
-//! provider request, so sibling agents can overlap but cannot outlive the
-//! parent turn.
+//! Launch-only and always asynchronous: every call forks a child, runs it on a
+//! detached thread through the same [`Session::drive`] loop, and returns a
+//! start receipt immediately.  The child's single result is delivered later to
+//! the parent's inbox at quiescence.
+//!
 //! The full prompt — every line — is rendered to the rail before spawn, so the
 //! user can see what the child was asked to do.
 
 use super::{Tool, invalid_input, u64_field};
 use crate::bus::{AgentOutcome, AgentResult, Emitter, InboxMsg, Kind};
-use crate::cancel::Token;
 use crate::event::ToolResult as SessionToolResult;
-use crate::provider::{Provider, ProviderError};
-use crate::session::{Session, Staged, TurnOutcome};
+use crate::provider::Provider;
+use crate::session::Session;
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -26,27 +27,12 @@ pub(super) struct AgentTool;
 /// siblings on screen.
 static DISPATCH_SEQ: AtomicU64 = AtomicU64::new(1);
 
-/// How the parent relates to the child: a dependency edge or an
-/// orchestration edge.
-#[cfg_attr(test, derive(Debug, PartialEq))]
-enum Mode {
-    /// Run the child because the parent needs its answer now — fork-join on
-    /// the dispatch scope, the answer returns in this `tool_result`.
-    Sync,
-    /// Start the child because the parent is orchestrating independent work
-    /// — a detached worker that outlives the turn; this call returns a start
-    /// receipt and the child's reply arrives later through the inbox.
-    Async,
-}
-
-/// Parsed Agent tool input: the child's prompt, a validated tab label, and
-/// the dependency/orchestration mode.  Splitting the parse from dispatch
-/// keeps validation testable in isolation.
+/// Parsed Agent tool input: the child's prompt and a validated tab label.
+/// Splitting the parse from dispatch keeps validation testable in isolation.
 #[cfg_attr(test, derive(Debug))]
 struct Args {
     prompt: String,
     title: String,
-    mode: Mode,
 }
 
 /// True for titles that fit the tab-bar contract — non-empty, ≤24
@@ -75,22 +61,7 @@ fn parse_args(input: &Value) -> Result<Args, String> {
         Some(t) if valid_title(t) => t.to_string(),
         _ => format!("sub-{}", DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed)),
     };
-    // `mode` is optional; sync is the compatibility default, since today's
-    // `agent` result is the child's final answer, not a start receipt.
-    let mode = match obj.get("mode").and_then(Value::as_str) {
-        None | Some("sync") => Mode::Sync,
-        Some("async") => Mode::Async,
-        Some(other) => {
-            return Err(format!(
-                "`mode` must be \"sync\" or \"async\", got {other:?}"
-            ));
-        }
-    };
-    Ok(Args {
-        prompt,
-        title,
-        mode,
-    })
+    Ok(Args { prompt, title })
 }
 
 impl Tool for AgentTool {
@@ -99,32 +70,29 @@ impl Tool for AgentTool {
     }
 
     fn desc(&self) -> &'static str {
-        "Spawn a sub-agent to carry out `prompt`, returning only its final \
-assistant text.  This is expensive: the child is a fresh session that \
-re-pays the entire system prompt and does not share your conversation — it \
-sees a value-snapshot of your shell (your `let` bindings, cwd, env) but \
-none of your reasoning or message history.  Its own shell mutations (cd, \
-env, new bindings) do NOT propagate back; you receive a string, not its \
-bindings or intermediate findings.  File edits it makes to the working tree \
-are real and persist.  Because each call costs a whole session boot plus a \
-round-trip to relay the result back as text, delegate only a substantial, \
-self-contained unit of work: a focused exploration whose intermediate \
-detail you do not want to carry, or a task whose execution would otherwise \
-flood your own context.  NEVER delegate a single grep/view/read/edit you \
-can run inline — running it yourself is cheaper and keeps the result \
-addressable (e.g. the line-hash `edit` needs).  A sub-agent cannot itself \
-spawn sub-agents.\n\n\
-`mode` chooses the dependency edge.  `\"sync\"` (the default) blocks: the \
-child's final text returns in this call, the right shape when you need the \
-answer before you can continue.  `\"async\"` starts the child as background \
-work and returns immediately with a start receipt `{id, title, status, \
-log_dir}`; the child runs off your critical path and its reply is delivered \
-to you on its own as a marked turn when it finishes.  Use async to fan out \
-independent work you do not need to wait on now; list live ones with \
-`agents` and stop one with `agent_cancel`."
+        "Spawn a sub-agent to carry out `prompt`.  This is launch-only and \
+always asynchronous: the call forks a child session and returns immediately \
+with a start receipt `{id, title, status, log_dir}`.  The child runs the same \
+agent loop off your critical path; its single reply is delivered to you LATER \
+as its own marked turn when it finishes.  To fan out independent work, spawn \
+several and combine their results when they land; poll live ones with `agents` \
+and stop one with `agent_cancel`.  A sub-agent cannot itself spawn \
+sub-agents.\n\n\
+This is expensive: the child is a fresh session that re-pays the entire system \
+prompt and does not share your conversation — it sees a value-snapshot of your \
+shell (your `let` bindings, cwd, env) but none of your reasoning or message \
+history.  Its own shell mutations (cd, env, new bindings) do NOT propagate \
+back; you receive a string, not its bindings or intermediate findings.  File \
+edits it makes to the working tree are real and persist.  Because each call \
+costs a whole session boot plus a round-trip to relay the result back as text, \
+delegate only a substantial, self-contained unit of work: a focused \
+exploration whose intermediate detail you do not want to carry, or a task \
+whose execution would otherwise flood your own context.  NEVER delegate a \
+single grep/view/read/edit you can run inline — running it yourself is cheaper \
+and keeps the result addressable (e.g. the line-hash `edit` needs)."
     }
 
-    fn root_only(&self) -> bool {
+    fn spawns(&self) -> bool {
         true
     }
 
@@ -146,245 +114,121 @@ independent work you do not need to wait on now; list live ones with \
             Choose a phrase the user will recognise at a glance.  Omitted or invalid \
             titles fall back to `sub-{N}`.",
                     },
-                    "mode": {
-                        "type": "string",
-                        "enum": ["sync", "async"],
-                        "description": "`sync` (default) blocks and returns the child's final \
-            text in this call — a dependency edge.  `async` starts the child as background \
-            work, returns a start receipt now, and delivers the reply later as a marked \
-            turn — an orchestration edge.",
-                    },
                 },
                 "required": ["prompt", "title"],
             })
         })
     }
 
-    fn dispatch<'scope, 'env: 'scope>(
+    fn dispatch(
         &self,
         id: String,
         input: Value,
         session: &mut Session,
-        provider: &'env Arc<Provider>,
-        token: &'env crate::cancel::Token,
+        provider: &Arc<Provider>,
         emit: &Emitter,
-        scope: &'scope thread::Scope<'scope, 'env>,
-    ) -> Staged<'scope> {
-        let Args {
-            prompt,
-            title,
-            mode,
-        } = match parse_args(&input) {
+    ) -> SessionToolResult {
+        let Args { prompt, title } = match parse_args(&input) {
             Ok(a) => a,
             Err(reason) => return invalid_input(id, "agent", "<invalid input>", &reason, emit),
         };
-        let child = match session.fork() {
+        let mut child = match session.fork() {
             Ok(c) => c,
             Err(e) => {
                 let msg = format!("could not fork child session: {e}");
                 session.note_error(msg.clone(), emit);
-                return Staged::Done(SessionToolResult { id, content: msg });
+                return SessionToolResult { id, content: msg };
             }
         };
-        // The dispatch shows on the rail in both modes.  A child gets a live
-        // tab (`Born`/tokens/`Died`) whenever the bus outlives the turn: a
-        // sync child always, an async child only off the TUI's session-lived
-        // bus.  Off a per-turn bus (headless) an async child stays muted to
-        // its own log, since the channel closes when the spawning turn ends.
+        // Capture everything off the child before it moves into the worker
+        // thread: its identity, log directory, and own cancellation token, the
+        // registry entry's generation, the parent's mailbox (the child's
+        // upward result edge), an owned registry handle and provider clone.
+        let agent_id = child.id;
+        let log_dir = child.log_dir().to_path_buf();
+        let log_dir_str = log_dir.display().to_string();
+        let cancel = child.cancel_token().clone();
+        let generation = session
+            .agents
+            .register(agent_id, title.clone(), log_dir.clone(), cancel);
+        let parent_mailbox = session.mailbox();
+        let registry = session.agents.clone();
+        let provider = Arc::clone(provider);
+        // A live tab whenever the bus outlives the turn (the TUI): a real
+        // emitter cloned off the session sender, stamped with the child's id
+        // and carrying the child's own mailbox.  Off a per-turn bus (headless)
+        // the child is muted — an emitter whose receiver is already dropped —
+        // so it never streams; its persistent record is its own forked
+        // `SessionLog` and its reply returns through the inbox.
+        let child_emit = if emit.is_session_lived() {
+            emit.child(agent_id, child.mailbox())
+        } else {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            Emitter::new(tx, agent_id)
+        };
+        let started = Instant::now();
+        let born_title = title.clone();
+        let worker_title = title.clone();
+        // Seed the launch turn into the child's own inbox: the only downward
+        // edge is this one write.
+        child.seed(prompt.clone());
+        // The dispatch shows on the rail before the spawn, so the user can see
+        // exactly what the child was asked to do.
         emit.emit(Kind::ToolCall {
             tool: "agent",
-            cmd: prompt.clone(),
+            cmd: prompt,
             summary: Some(title.clone()),
         });
-        match mode {
-            Mode::Sync => dispatch_sync(id, prompt, title, child, provider, token, emit, scope),
-            Mode::Async => dispatch_async(id, prompt, title, child, provider, session, emit),
+        thread::Builder::new()
+            .name(format!("exarch-agent-{agent_id}"))
+            .spawn(move || {
+                // `Born`/`Died` bracket the child's run so its tab is
+                // registered before the first token and ages out after the
+                // last; on a muted emitter both are no-ops.  The id routes
+                // every event to the child's own tab through the TUI's existing
+                // draw path.
+                child_emit.emit(Kind::Born {
+                    log_dir: log_dir.clone(),
+                    title: born_title,
+                });
+                let (outcome, text) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    // The peer wraps a snapshot of the provider at spawn, so a
+                    // later root `/model` never disturbs an already-running child.
+                    child.drive(
+                        crate::session::ProviderHandle::new(provider),
+                        &mut crate::session::NoControl,
+                        &child_emit,
+                    )
+                }))
+                .unwrap_or_else(|_| (AgentOutcome::Failed("sub-agent panicked".into()), String::new()));
+                child_emit.emit(Kind::Died);
+                // Deliver only if still the live worker of the current
+                // generation; a result from before a `/clear` is dropped, not
+                // posted into a rebuilt context.
+                if registry.settle(agent_id, generation) {
+                    parent_mailbox.push(InboxMsg::AgentResult(AgentResult {
+                        id: agent_id,
+                        title: worker_title,
+                        outcome,
+                        text,
+                        log_dir,
+                        elapsed: started.elapsed(),
+                        generation,
+                    }));
+                }
+            })
+            .expect("spawn async agent worker");
+        let receipt = json!({
+            "id": agent_id,
+            "title": title,
+            "status": "started",
+            "log_dir": log_dir_str,
+        });
+        SessionToolResult {
+            id,
+            content: receipt.to_string(),
         }
     }
-}
-
-/// Fork-join sync child: runs on the dispatch `thread::scope`, the parent
-/// joins it before the next provider request, and its final text returns in
-/// this `tool_result`.  The child shares the parent's cancellation token, so
-/// one Esc halts the whole spawn tree.
-#[allow(clippy::too_many_arguments)]
-fn dispatch_sync<'scope, 'env: 'scope>(
-    id: String,
-    prompt: String,
-    title: String,
-    mut child: Session,
-    provider: &'env Arc<Provider>,
-    token: &'env Token,
-    emit: &Emitter,
-    scope: &'scope thread::Scope<'scope, 'env>,
-) -> Staged<'scope> {
-    let child_emit = emit.child(child.id);
-    child_emit.emit(Kind::Born {
-        log_dir: child.log_dir().to_path_buf(),
-        title: title.clone(),
-    });
-    // Children do not nudge — the top-level driver owns that.  Settle the
-    // child to its `(outcome, text)` digest here so the parent's join phase
-    // sees a single shape, and emit a final `SubagentDone` on the parent's
-    // channel so the TUI can land a completion breadcrumb in root's scrollback
-    // (where subagent tabs leave no trace once their linger window expires).
-    let parent_emit = emit.clone();
-    let started = Instant::now();
-    let child_token = token.clone();
-    let handle = scope.spawn(move || {
-        // A child's `apply` runs on this scoped thread, outside the root
-        // turn's `catch_unwind` (`bus::pump`), so a mid-eval panic here would
-        // otherwise skip the two emits below — leaking the child's TUI tab (no
-        // `Died` to age it out) and dropping the breadcrumb.  `run_child`
-        // recovers the panic into a `Failed` outcome so `Died`/`SubagentDone`
-        // always fire.
-        let (outcome, text) = run_child(&mut child, prompt, provider, &child_token, &child_emit);
-        child_emit.emit(Kind::Died);
-        let reply = outcome.reply(&text);
-        parent_emit.emit(Kind::SubagentDone {
-            title,
-            outcome,
-            text,
-            elapsed: started.elapsed(),
-        });
-        reply
-    });
-    Staged::Spawned { id, handle }
-}
-
-/// Orchestration-edge async child: a detached worker owned by the session's
-/// agent registry, surviving this turn.  Returns a start receipt now; the
-/// child's reply is posted to the inbox at settle and delivered as a marked
-/// turn.  Off the TUI's session-lived bus it also streams a live tab
-/// (`Born`/tokens/`Died`) through the existing id-routed draw path; off a
-/// per-turn bus (headless) it is muted to its own `SessionLog`, since the
-/// channel closes when the spawning turn ends.
-fn dispatch_async<'scope>(
-    id: String,
-    prompt: String,
-    title: String,
-    mut child: Session,
-    provider: &Arc<Provider>,
-    session: &mut Session,
-    emit: &Emitter,
-) -> Staged<'scope> {
-    let agent_id = child.id;
-    let log_dir = child.log_dir().to_path_buf();
-    let log_dir_str = log_dir.display().to_string();
-    // A background worker holds its own, unpublished cancellation token: an
-    // Esc targets the foreground turn, never these children.  They are
-    // cancelled by `agent_cancel`, `/clear`, or their reaper ceiling.
-    let cancel = Token::new();
-    let generation =
-        session
-            .agents
-            .register(agent_id, title.clone(), log_dir.clone(), cancel.clone());
-    // An owned provider clone: the worker outlives the dispatch frame and so
-    // cannot hold the borrowed `&Provider`.  A later `/model` switch replaces
-    // the driver's Arc but leaves this already-running child on its clone.
-    let provider = Arc::clone(provider);
-    let registry = session.agents.clone();
-    let inbox = emit.inbox();
-    let started = Instant::now();
-    let worker_title = title.clone();
-    // A live tab whenever the bus outlives the turn (the TUI): a real emitter
-    // cloned off the session sender, stamped with the child's id.  Off a
-    // per-turn bus (headless) the child is muted — an emitter whose receiver
-    // is already dropped — so it never streams; its persistent record is its
-    // own forked `SessionLog` and its reply returns through the inbox.
-    let child_emit = if emit.is_session_lived() {
-        emit.child(agent_id)
-    } else {
-        let (tx, _rx) = std::sync::mpsc::channel();
-        Emitter::new(tx, agent_id)
-    };
-    let born_title = title.clone();
-    thread::Builder::new()
-        .name(format!("exarch-agent-{agent_id}"))
-        .spawn(move || {
-            // `Born`/`Died` bracket the child's run so its tab is registered
-            // before the first token and ages out after the last; on a muted
-            // emitter both are no-ops.  The id routes every event to the
-            // child's own tab through the TUI's existing draw path.
-            child_emit.emit(Kind::Born {
-                log_dir: log_dir.clone(),
-                title: born_title,
-            });
-            let (outcome, text) = run_child(&mut child, prompt, &provider, &cancel, &child_emit);
-            child_emit.emit(Kind::Died);
-            // Deliver only if still the live worker of the current generation;
-            // a result from before a `/clear` is dropped, not posted into a
-            // rebuilt context.
-            if registry.settle(agent_id, generation) {
-                inbox.push(InboxMsg::AgentResult(AgentResult {
-                    id: agent_id,
-                    title: worker_title,
-                    outcome,
-                    text,
-                    log_dir,
-                    elapsed: started.elapsed(),
-                    generation,
-                }));
-            }
-        })
-        .expect("spawn async agent worker");
-    let receipt = json!({
-        "id": agent_id,
-        "title": title,
-        "status": "started",
-        "log_dir": log_dir_str,
-    });
-    Staged::Done(SessionToolResult {
-        id,
-        content: receipt.to_string(),
-    })
-}
-
-/// Run a forked child's single turn to a settled digest: apply the prompt,
-/// recover a panic into [`AgentOutcome::Failed`], and reduce the
-/// [`TurnOutcome`] through [`to_outcome`].  Both dispatchers funnel through
-/// here, so the panic-recovery and the outcome reduction live in one place.
-fn run_child(
-    child: &mut Session,
-    prompt: String,
-    provider: &Arc<Provider>,
-    token: &Token,
-    emit: &Emitter,
-) -> (AgentOutcome, String) {
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        child.apply(provider, Some(prompt), token, emit)
-    }))
-    .unwrap_or_else(|p| {
-        Err(ProviderError::Other(format!(
-            "sub-agent panicked: {}",
-            panic_msg(&p)
-        )))
-    });
-    to_outcome(r)
-}
-
-/// The single place a child's turn outcome collapses to the inbox digest: the
-/// outcome tag and, for a completed run, its final text.
-fn to_outcome(r: Result<TurnOutcome, ProviderError>) -> (AgentOutcome, String) {
-    match r {
-        Ok(TurnOutcome::Complete(s)) => (AgentOutcome::Complete, s),
-        Ok(TurnOutcome::Empty) => (AgentOutcome::Empty, String::new()),
-        Ok(TurnOutcome::Stopped { reason }) => (AgentOutcome::Stopped(reason), String::new()),
-        Ok(TurnOutcome::Cancelled) => (AgentOutcome::Cancelled, String::new()),
-        Ok(TurnOutcome::Capped) => (
-            AgentOutcome::Stopped("step cap reached".into()),
-            String::new(),
-        ),
-        Err(e) => (AgentOutcome::Failed(e.to_string()), String::new()),
-    }
-}
-
-/// The message of a recovered panic payload, for either string shape.
-fn panic_msg(p: &Box<dyn std::any::Any + Send>) -> String {
-    p.downcast_ref::<String>()
-        .cloned()
-        .or_else(|| p.downcast_ref::<&'static str>().map(|s| (*s).into()))
-        .unwrap_or_else(|| "non-string payload".into())
 }
 
 /// `agents` — list the live async agents this session started.
@@ -403,7 +247,7 @@ straggler.  Settled agents are not listed: their replies arrive on their own \
 as marked turns."
     }
 
-    fn root_only(&self) -> bool {
+    fn spawns(&self) -> bool {
         true
     }
 
@@ -418,16 +262,14 @@ as marked turns."
         })
     }
 
-    fn dispatch<'scope, 'env: 'scope>(
+    fn dispatch(
         &self,
         id: String,
         _input: Value,
         session: &mut Session,
-        _provider: &'env Arc<Provider>,
-        _token: &'env Token,
+        _provider: &Arc<Provider>,
         emit: &Emitter,
-        _scope: &'scope thread::Scope<'scope, 'env>,
-    ) -> Staged<'scope> {
+    ) -> SessionToolResult {
         emit.emit(Kind::ToolCall {
             tool: "agents",
             cmd: "agents".into(),
@@ -451,7 +293,7 @@ as marked turns."
                 .join("\n")
         };
         emit.emit(Kind::ToolResult(content.clone()));
-        Staged::Done(SessionToolResult { id, content })
+        SessionToolResult { id, content }
     }
 }
 
@@ -469,7 +311,7 @@ asked to stop at its next checkpoint; it then delivers a cancelled result.  \
 A no-op if no live agent has that id."
     }
 
-    fn root_only(&self) -> bool {
+    fn spawns(&self) -> bool {
         true
     }
 
@@ -489,16 +331,14 @@ A no-op if no live agent has that id."
         })
     }
 
-    fn dispatch<'scope, 'env: 'scope>(
+    fn dispatch(
         &self,
         id: String,
         input: Value,
         session: &mut Session,
-        _provider: &'env Arc<Provider>,
-        _token: &'env Token,
+        _provider: &Arc<Provider>,
         emit: &Emitter,
-        _scope: &'scope thread::Scope<'scope, 'env>,
-    ) -> Staged<'scope> {
+    ) -> SessionToolResult {
         let agent_id = match u64_field(&input, "id") {
             Some(n) => n,
             None => {
@@ -522,7 +362,7 @@ A no-op if no live agent has that id."
             format!("no live agent with id {agent_id}")
         };
         emit.emit(Kind::ToolResult(content.clone()));
-        Staged::Done(SessionToolResult { id, content })
+        SessionToolResult { id, content }
     }
 }
 
@@ -539,17 +379,6 @@ mod tests {
         .unwrap();
         assert_eq!(a.prompt, "summarise SPEC.md");
         assert_eq!(a.title, "summarise-spec");
-        assert_eq!(a.mode, Mode::Sync, "sync is the default mode");
-    }
-
-    #[test]
-    fn parse_reads_async_mode_and_rejects_unknown() {
-        let a = parse_args(&json!({ "prompt": "x", "title": "t", "mode": "async" })).unwrap();
-        assert_eq!(a.mode, Mode::Async);
-        let s = parse_args(&json!({ "prompt": "x", "title": "t", "mode": "sync" })).unwrap();
-        assert_eq!(s.mode, Mode::Sync);
-        let e = parse_args(&json!({ "prompt": "x", "title": "t", "mode": "later" })).unwrap_err();
-        assert!(e.contains("mode"), "unknown mode is rejected: {e}");
     }
 
     #[test]
