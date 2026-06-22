@@ -1,23 +1,9 @@
 # ral — design rationale
 
-This document is about why ral is the way it is.  The specification
-says what ral is.  Here we record, for each design choice, the
-alternatives it beat and the reasoning behind it — motivation, not
-contract.  §20 of the spec fixes the underlying calculus.
-
-The document is organised into seven parts.  **Foundations** states the
-calculus and the one identification — external commands are algebraic
-effects — from which the dynamic design follows.  **Surface decisions**
-covers the visible grammar and binding rules.  **Control and effects**
-explains what earns a grammar arm, and how scoped contexts, handlers,
-and capabilities compose.  **The filesystem surface** explains the
-asymmetry between structured queries and effects.  **Types** records the
-row-types choice.  **Runtime** covers the two pipeline models and
-concurrency.  **The interactive layer** covers aliases, modules, and
-plugins.  Implementation mechanics are out of scope here; the spec is
-normative where the two disagree.
-
-# Foundations
+This document is about why ral is the way it is.  The specification says
+what ral is.  Here we record, for each design choice, the reasoning behind
+it and the cost it carries — motivation, not contract.  The spec is normative
+where the two disagree.
 
 ## Influences
 
@@ -41,682 +27,158 @@ POSIX compatibility.  Nushell enforces structured data on every pipeline
 stage.  Ours differs by doing neither: we retain no POSIX compatibility,
 and we do not require structure at every stage.
 
-## Values and commands
+## Roadmap
 
-The organising distinction is between *values* — inert data, named,
-passed, inspected — and *commands* — effectful processes that may read,
-emit bytes, return a value, or fail.  Most shells collapse the two.
-Every datum is a string, and every string is simultaneously data, a
-command name, and source text for further evaluation.  The consequence
-is that captured output is re-lexed, split on whitespace, and
-glob-expanded.  We refuse this collapse, and thereby avoid the class of
-bugs that arises from it, without sacrificing first-class commands and
-pipes.
-
-The formal account is call-by-push-value (Levy).  Values are inert;
-computations are effectful; a thunk packages a computation as a value;
-and forcing runs it.  One need not know the theory to use the shell.
-The slogan is that a value *is* and a computation *does*, and at the
-surface `{M}` thunks while `!` forces.
+ral rests on one overarching identification, from which the dynamic design
+follows, together with seven further commitments that shape the surface and
+the runtime.  The identification is that **system calls are algebraic
+effects** — running an external command is the performance of an operation
+whose interpretation is supplied separately, by default the operating
+system.  From there the tour proceeds.  We separate *values* from *commands*,
+the inert from the effectful, so that captured output is never re-lexed.  We
+make every binding immutable, so that a name's meaning is fixed once it is
+bound and a `spawn` is safe without synchronisation.  We let a program supply
+its own interpretation of an operation through *scoped effect handlers*, the
+reinterpretation layer the identification leaves open.  We confine authority
+through *explicit sandboxing*, a capability wrapper whose braces are
+lexically apparent and whose restriction reaches dynamically into every
+callee.  We give the pipe *two execution models*, one for values and one for
+bytes, settled by the type of the connecting edge.  We make *handlers and
+aliases variadic while functions are not*, because the asymmetry is the
+exec/lambda boundary made visible.  And we keep *a spare surface*, two sigils
+and no hidden lexer modes, refusing to overload one form with two meanings.
+Eight commitments in all, threaded in that order through the sections below.
 
 ## System calls are algebraic effects
 
-The value/command distinction leaves one question open: what *is* a
-command? **Our answer is that running an external command is the
-performance of an *algebraic effect operation*.** A name such as
-`git`, which the binding namespace declines, is an *operation*.  It is
-performed, it returns once with a result or a failure, and its meaning
-is supplied separately by its *interpretation* — by default, the
-operating system carrying out the syscall.  This separation of the
-operation from its interpretation is the defining move, and the rest
-of ral's dynamic design rests on it.
-
-Not every kernel call is an effect in this sense.  A structured-query
-builtin such as `list-dir` or `file-info` reaches the kernel yet is
-kept inside the pure value language, answering with records rather
-than bytes, precisely so that the capture-then-reparse round-trip
-never arises.  What makes a name an operation is being an open external
-name whose meaning comes from its interpretation, not merely the fact
-of touching the OS.  We therefore draw the effect boundary at the
-external-process surface — the `exec`/`wait` family that defines a
-shell.
-
-Two further choices are *orthogonal* to this principle.  First, whether
-a program may *reinterpret* an operation rather than defer to the OS.
-Second, should it reinterpret, whether the reinterpreting handler may
-capture the continuation.  Both belong to *Effect handlers* below, and
-on each we take the minimal setting.  The principle stands without
-either: an external command is an effect whether or not any handler
-intercepts it, and performing one needs no captured continuation — the
-syscall is a single forward step, and the continuation is the ordinary
-rest of the computation, never a reified value.  From the
-identification alone follow scoped authority (a capability is
-permission over the effect set), the capability check at the point an
-effect is performed, audit as a record of the operations performed,
-and failure as an operation's exceptional outcome.
-
-## Blocks as the single abstraction mechanism
-
-`{M}` stores a command; `{ |x| M }` is a function; `!` runs either.
-This single mechanism replaces the several of conventional shells —
-functions, aliases, `eval`, subshells, trap handlers.
-
-Forcing is always explicit, with a single exception: a bound name
-resolved in head position is forced (or applied) implicitly.  This
-keeps ordinary calls natural (`greet alice`) while keeping the storage
-of commands visible (`let plan = { make build }`).
-
-## Two sigils
-
-`$` retrieves data; `!` runs stored commands.  `!$b` composes:
-dereference, then force.  A single sigil covering both would make
-'retrieve' and 'run' indistinguishable at a glance, and the ambiguity
-would then propagate into every expression that passes blocks as data.
-
-# Surface decisions
-
-## Shadowing, not mutation
-
-All `let` bindings are immutable; re-`let` shadows within the enclosing
-scope.  Closures capture at definition time, so equational reasoning
-holds in the pure fragment.  The cost is the absence of mutable
-accumulators; `fold`, `reduce`, and the streaming `fold-lines` replace
-them.  The benefit is twofold.  First, local reasoning is easier.
-Second, `spawn` is safe without synchronisation — the isolated copy
-shares nothing that can be mutated concurrently.
-
-## External commands return strings
-
-When an external command's stdout is captured in a `let`, the runtime
-decodes it as UTF-8, strips one trailing newline, and binds the result
-as `String`.  Invalid UTF-8 fails with a message naming the command
-and suggesting `| from-bytes`; `Bytes` remains available via that
-terminator.
-
-This trades a sliver of generality for a large reduction in ceremony.
-Most command output is text.  Demanding an explicit decode on every
-binding generates noise without adding protection beyond what a strict
-error already gives.  The returned `String` is data — never re-lexed,
-split, or globbed — so the classic capture-then-reparse chain does not
-arise.
-
-## Piping and failure
-
-`|` and `?` are deliberately separate: `|` moves data between stages,
-whereas `?` reacts to command failure.  Exit status and data flow thus
-remain distinct concerns.  `if` branches on `Bool`, not on command
-success; a predicate returning `false` still *succeeds*, so confusing
-'false' with 'failed' is impossible.  When success must be inspected as
-data, `try` is the mechanism.  When a command dies from a signal or is
-stopped by terminal job control, we keep that distinction in the error
-we report, rather than collapsing everything to a numeric status too
-early.
-
-## No command-level `||`
-
-`try { a } { |_| b }` replaces `a || b` in command context.  A binary
-`||` on pipelines would force precedence rules relative to `?` and
-`|`, adding grammar for a case `try` already handles.  The `||`
-operator that *does* exist is the Boolean connective inside expression
-blocks, `$[a || b]` (§2, SPEC).  It operates on `Bool` values, not on
-command success.
-
-## Expression blocks
-
-`$[...]` is one expression language, spanning arithmetic
-(`+ - * / %`), comparison (`== != < > <= >=`), and logic
-(`&& || not`).  Unlike bash, which partitions these into `(( ))`
-and `[[ ]]` because its history forced separate lexers, we have no
-such history.  Comparisons already cross the numeric/Boolean boundary
-by returning `Bool`, so the simplest and most honest grammar is
-one.  `&&` and `||` short-circuit; operands are strict `Bool` —
-`$[1 && true]` is a type error, not truthy.  The `not` keyword
-carries unary negation, because `!` is already force (`!{...}`)
-and `~` is tilde expansion; context-dependent symbol overloading
-would be the worse trade.
-
-## Data-last argument order
-
-`map f items`, `fold f init items`, `filter p items`.  Piping and
-partial application then align: `items | map $f | filter $p` reads
-left-to-right, and `map $f` is itself a function waiting for its list.
-
-## No context-dependent lexer rules
-
-The token classes are fixed once, single-pass, with no mode the parser
-can flip.  `IDENT` (the variable/key/deref class, §1.1 SPEC) terminates
-on `:` and on `=`, so names end naturally at these characters; a `NAME`
-(the bare-word class) does not, so that command arguments such as
-`-DFOO=bar` and `http://host:port` stay single tokens.  `:` becomes a
-token of its own only before whitespace, `]`, or end of input, which
-is why `host: val` splits but `localhost:5432` does not.
-
-## Path construction uses interpolation
-
-Outside quotes, `$name` is a separate atom — `$dir/file` is two
-arguments.  Paths are built by interpolation: `"$dir/file.txt"`.  This
-inverts the bash convention, where quoting suppresses word-splitting.
-Here the unquoted form is already safe — there is no splitting — and it
-is quoting that performs concatenation.
-
-## Paths are strings
-
-There is no `Path` type.  Textual values are UTF-8, and the absence of
-word splitting removes the historical reason shells needed
-path-specific quoting.
-
-## `let` unifies binding, capture, and storage
-
-The `let` RHS is a command context, and a single mechanism covers
-three operations:
-
-- `let x = foo`        runs `foo` and binds its result;
-- `let x = 'foo'`      binds the string;
-- `let f = { |x| … }`  stores the block.
-
-Bare words run commands; quoted words are data; and value forms
-(literals, blocks, lists, maps, derefs, arithmetic) receive an
-implicit `return` in command context.  We thus preserve the shell
-convention — unquoted words run commands — without collapsing the
-language into strings.
-
-## Not POSIX
-
-POSIX shell compatibility requires word-splitting, glob expansion on
-unquoted variables, `$IFS`, and context-dependent quoting.  We
-eliminate exactly these.  Compatibility is therefore a non-goal.
-
-## Termination: `return`, `fail`, `exit`
-
-Scripts end at the last statement.  Three primitives end them earlier,
-each with its own scope:
-
-- `return` exits the current block or file with success.  Inside a
-  sourced file, it stops *that* file, not the caller — so that a
-  `return` in a library never kills the script that loaded it.
-- `fail` aborts the current evaluation with nonzero status and an
-  error record:
-
-      fail [status: 1]
-      fail [status: 7, message: 'config missing']
-      fail $e                          # re-raise inside a try handler
-
-  Errors are values, not numbers.  The record produced by `try { ...
-  } { |e| ... }` is exactly the input shape `fail` accepts, so
-  wrap-and-rethrow composes without dropping fields.
-- `exit N` (alias `quit`) terminates the whole shell process with
-  status `N`.  It is reserved for top-level use; scripts that want to
-  halt cleanly should prefer `return`.
-
-# Control and effects
-
-## Control flow is library; five control operators are syntax
-
-The grammar knows about exactly five control operators — `within`,
-`grant`, `try`, `guard`, `audit` — plus the two purely-syntactic
-forms `if` and `case` and the chain operator `?`.  Everything else
-that looks like control flow (`for`, `map`, `each`, the prelude's
-`attempt` and `retry`) is an ordinary parameterised block in the
-prelude.  The split is principled, not pragmatic.
-
-A construct earns a grammar arm just if *both* of the following hold:
-its typing rule is not derivable from ordinary Hindley–Milner over the
-builtin signature, and its runtime semantics cannot be expressed as a
-function taking thunks without lying about that signature.  The five
-operators meet both conditions:
-
-- `try B H` has a custom typing rule that unifies `B`'s output with
-  `H`'s output and threads the error record into `H`'s parameter; no
-  monomorphic builtin signature captures this.
-- `guard B C` mediates which failure escapes (the body's; never the
-  cleanup's) and which is logged-and-discarded.
-- `within OPTS B` and `grant CAPS B` manipulate dynamic frames
-  (working directory, environment, effect handlers, attenuable
-  capabilities) that live in `Shell` state, not in any value the
-  body can observe through its parameters.
-- `audit B` *owns* the audit subtree its body produces; the
-  tree-shape question — which scope's children does this node belong
-  to — is structural and cannot be answered after the fact by a
-  function that received `B` as a thunk.
-
-Surfacing these as keywords also shrinks the surface elsewhere.  The
-five names are reserved in `let`-binding position and in bare-head
-command position; `^try` keeps PATH-lookup semantics; `$try` and the
-other four in value position are compile-time errors with a targeted
-diagnostic.  The IR carries a `Within`/`Grant`/`Try`/`Guard`/`Audit`
-node per operator with named structural fields, and a `Redirect`
-wrapper for the trailing-redirect case — none of the five appear as
-string-keyed builtins anywhere in the typechecker or evaluator.
-
-`if`, `case`, and `?` remain in the grammar for a different reason:
-they take an arbitrary number of arms and need parser support to keep
-the surface readable, even though their typing is ordinary.  Everything
-else stays in the prelude.  The parser does not grow when a user
-defines `retry`; it grows only when a new wrapper needs handler-frame
-manipulation, audit-tree ownership, or a typing rule outside HM.
-
-## Scoped execution contexts
-
-`within` and `grant` are properties of the execution context, not of
-source text.  A function defined in one module and called inside a
-restricted block runs under that restriction.  `within [env: [KEY:
-VAL]] { body }` overrides environment variables; `within [dir: PATH] {
-body }` overrides the working directory.  Both are facets of a single
-scoping primitive.  The idea is simple: lexical capture is the right
-model for data, whereas dynamic inheritance is the right model for
-ambient authority.
-
-`grant` is a *capability wrapper around a block*: it narrows the active
-authority for the duration of `body` and otherwise composes like any
-other block-bodied builtin.  The block itself always evaluates locally,
-in the caller's process; what an `fs`/`net`-restricting grant adds on a
-platform with OS sandboxing is per-command child confinement — each
-external or bundled command spawned inside the block is launched under
-the effective platform sandbox, while ral's own dispatched effects are
-gated in-process by the capability checks.  The caller observes only the
-outcome and the captured audit/byte observations.
-
-## Effect handlers: deep with self-masking
-
-Handlers are the orthogonal reinterpretation layer of *System calls
-are algebraic effects* above.  They let a program supply its own
-interpretation of an operation in place of the OS default.  They are
-additive — the effect identity holds whether or not any handler
-intercepts a command — and ours are a deliberately small fragment:
-tail-resumptive with no first-class `resume`, and so less than
-algebraic-effect handlers usually offer.
-
-`within [handlers: …, handler: …]` installs effect handlers on a
-dynamic stack.  Each per-name handler (and every alias) is a unary
-lambda `{ |args| … }` invoked with the command's argument list, and
-the catch-all `handler:` is a binary lambda `{ |name args| … }`
-invoked with the command's name and arguments; the calling convention
-is fixed by the surface form, so a bare block or a wrong-arity lambda
-is rejected at install time rather than coerced.  Two independent
-design questions then arise, often conflated under one 'deep vs
-shallow' heading; we commit to a definite answer to each.
-
-Handlers interpret open operation names after the language binding
-namespace has declined the name.  Lexical bindings, prelude names, and
-builtins are not shell aliases: a handler cannot replace `length`, and
-a local `let foo = ...` beats an active handler for `foo`.  This keeps
-ordinary language names stable while preserving command mocking for
-open external names such as `cat` or `git`.
-
-**Deep vs shallow** is the question of whether a handler `H` persists
-across the continuation of the operation it handles.  After
-`within [handlers: [git: H]] { git a; git b }`, both `git a` and `git b`
-trigger `H`; the installation is not consumed by the first call.  By
-the standard criterion (Plotkin–Pretnar deep handlers re-wrap `H`
-around the continuation; Hillerström–Lindley shallow handlers do not),
-ral's handlers are **deep**.
-
-**Self-masking vs self-transparent** is a separate question: during
-the evaluation of `H`'s body, is `H` itself still in scope? In ral,
-the matched frame is lifted off the dynamic stack for the dynamic
-extent of the handler body — so a call to the same name from inside
-`H` reaches the next outer frame, or the OS, never `H` itself.  ral's
-handlers are **self-masking**.
-
-Without `resume`, deep handlers can re-trigger themselves only through
-a raw recursive call from inside the handler body.  The Plotkin–Pretnar
-calculus avoids this issue because all re-entry happens through
-`resume k`, and `k` evaluates under `H` by construction; the
-continuation discipline does the work.  ral has no `resume` —
-handlers receive the command name and arguments and return a value or
-fail.  Self-masking is therefore the operational rule that keeps the
-dominant idiom (`within [handlers: [git: { |args| my-git ...$args }]]`) free of
-infinite recursion without requiring `^git` inside every handler
-body.
-
-The shell intuition is the same as a POSIX function named `git` whose
-body wants to call the real `git`: the function shadows the name only
-*outside* itself.  ral generalises this to the whole handler stack,
-typed and lexically scoped, with `^name` available as an explicit
-bypass of the lexical/prelude/builtin binding chain (handlers still
-apply, because `^name` is a syntactic flag on the lookup, not a
-frame-unwind).
-
-This combination is the practical content of ral's effect-handler
-design: deep, so `within` covers its dynamic extent the way the user
-expects; self-masking, so the wrap-and-forward idiom is the natural
-reading and not a recursion trap.
-
-## `guard`, not `on EXIT`
-
-`guard` wraps a body, runs cleanup regardless of outcome, and
-propagates the original failure unchanged.  It is scoped and lexically
-apparent.  Registration-based cleanup (`on EXIT`), by contrast, is
-mutable global state whose ordering follows execution flow rather than
-source structure, and composes poorly with nested error handling.
-
-## `try` and `audit` are separate operators
-
-`try` traps failure and dispatches to a handler that receives a small
-structural record (`status`, `cmd`, `message`, `line`, `col`); it is
-otherwise transparent, in that it does not redirect fd 1 or fd 2, so
-side-effects inside the body remain observable as they happen.
-`audit` builds the full execution tree, recording per-command bytes
-regardless of outcome.  Separating them keeps the common case
-(catch-and-handle) from paying for the uncommon one (full tracing),
-and lets the two compose: `audit { try { … } { … } }` traps errors
-*and* records bytes.  Both are control-operator keywords (§ "Control
-flow is library; five control operators are syntax"), so the typing
-rules are dedicated rather than shoehorned through a builtin scheme.
-
-## Audit is one mechanism
-
-Every audit-producing site goes through the same lexical scope: the
-scope-introducing operator (`grant`, `within`, `guard`, `try`,
-`audit`) owns the nodes its body produces.  Process boundaries —
-each external or bundled command confined under an `fs`/`net`-restricting
-grant, each pipeline stage helper — only transport audit fragments;
-they never decide tree shape.  The wrapping scope merges incoming
-fragments into its own child trail, so reports stay readable: a
-sandboxed `grant { … }` shows its body's nodes as direct children
-of the `grant` node, not loose at the root.
-
-# The filesystem surface
-
-## Three layers, one asymmetry
-
-The filesystem surface is split into three layers:
-
-1. **Structured queries** — primitives that return values: `list-dir`,
-   `file-info`, `file-empty`, `line-count`, `temp-dir`, `temp-file`,
-   `resolve-path`, `glob`, and the `is-*` predicates.  These drive a
-   structured pipeline; they have no shell-tool analogue worth
-   bothering with.
-2. **Bytes I/O** — codecs (`from-string`, `to-json`, …) plus
-   redirects: `to-json $v > $path` writes, `from-string < $path`
-   reads.  Atomic-rename-on-write is built into `>` for regular files.
-3. **Filesystem effects** — bundled coreutils (`cp`, `mv`, `rm`,
-   `mkdir`, `ln -s`, `chmod`, …).  Effects don't return structured
-   values, so a ral-native primitive would buy nothing the shell form
-   doesn't already give; there are none.
-
-The asymmetry is the design: structured returns earn a primitive;
-effects do not.
-
-Core keeps the universal part of that surface.  Exarch adds its
-agent-facing search atoms (`grep-files`, `line-hash`, `explore-dir`)
-and source-level edit helper as host extensions, because they are a
-model workflow rather than a shell language requirement.
-
-## The dangerous verb wears its name
-
-Destruction is never abstracted.  Removing a directory tree is written
-`rm -rf`: the flag that recurses is visible at the call site, written
-on purpose by a caller who can see what they typed.  A polite wrapper
-that decides for itself whether to recurse hides exactly the decision
-a shell must keep visible.  Effects therefore go through the bundled
-coreutils, where the destructive flag is part of the name.
-
-## Bundled coreutils are mandatory in exarch, optional in ral
-
-A sealed exarch profile that depends on host coreutils is not sealed —
-it is reproducible only modulo whatever `cp` or `mv` the host happens
-to ship (BSD vs GNU drift, version skew, locale defaults).  Exarch
-therefore bundles a curated coreutils set and pins behaviour.  The
-binary-size cost is paid once per profile build and is the price of
-"I know exactly what's in this".
-
-The bare `ral` binary keeps coreutils behind a feature flag.  An
-interactive shell on a developer machine has system coreutils
-already; there is no reason to ship 30+MB of duplicate tools.
-
-## Capability-checked dispatch for bundled tools
-
-Every uutils invocation goes through a wrapper that consults the
-tool's own clap parser to find the path-argv positions, then calls
-the same `check_fs_read` / `check_fs_write` that the structured
-primitives use.  Bypassing the sandbox by reaching for `cp` instead
-of a primitive is therefore not possible — both paths land at the
-same chokepoint.  `within [dir: ...]` scope propagates by chdir under
-a per-call lock, so relative paths resolve against ral's scoped CWD,
-not the host process CWD.
-
-## Syscall bridge, not text parsing
-
-The structured query builtins — `list-dir`, `file-info`, the `is-*`
-predicates (`is-file`, `is-dir`, `exists`, …), `resolve-path`, and
-`glob` — replace shelling out to `stat`, `ls`, or `realpath` and
-parsing their text.  Platform differences and the perpetual
-bytes–text–structured round-trip disappear.  Effects are not in the
-bridge — they are bundled commands invoked through the
-capability-checked dispatch.
-
-# Types
-
-## Record types and scoped labels
-
-The checker infers per-field types for map literals with static keys.
-The representation is a *row*: a list of `(label, type)` pairs with an
-optional tail variable standing for unknown fields.  Field access
-unifies the target with `[label:α | ρ]` and returns `α`.  The unifier is
-that of [Rémy 1989]: mismatched head labels permute past each other
-into a shared fresh tail.
-
-The spread `[...$base, port: 9090]` raises the question of duplicate
-labels: if `$base` already has `port`, the result has two.  Rémy's
-original system assumes uniqueness, and would require absence markers
-(`Pre(T)` / `Abs`) and a restriction operator `ρ ∖ port`.  Introducing
-them means new row constructors and changes to unifier, generaliser,
-and display.
-
-ral instead adopts the scoped-label row types of [Leijen 2005].
-Duplicates are permitted in rows; selection always takes the first;
-extension prepends, shadowing the prior entry rather than removing it.
-The key observation is that the Rémy rewrite rule already treats
-duplicates correctly — it swaps only *different* labels past each
-other, so same-label entries keep their relative order.  No changes to
-unifier, generaliser, or occurs check are required.
-
-Effect: `[...$base, port: 9090]` with `$base : [host: String | ρ]` infers
-as `[port: Int, host: String | ρ]`.  The explicit field prepends over the
-spread's row variable, which becomes the result's open tail.  Shadowed
-duplicates are invisible to selection and suppressed in display.  With
-multiple spreads the result is open but imprecise — chaining two
-arbitrary rows needs row concatenation, which is not part of Leijen's
-system and is not included.
-
-# Runtime
-
-## Byte pipelines are processes; value pipelines are folds
-
-Pipelines have two distinct execution models.  The type of the adjacent
-edges decides which one runs.
-
-A pipeline whose every stage operates on values is just typed
-data-last composition: `x | f` reduces to `f !{x}`, evaluated
-sequentially in the parent.  No process is spawned, and no pipe exists.
-This is the path `range 1 21 | filter $even | sum` takes — three
-function calls threaded by the value channel.
-
-A pipeline that touches bytes — at least one external command, or any
-byte edge — runs as a Unix-style process pipeline.  Every stage,
-including ral-implemented ones, executes in a subprocess; all
-subprocesses share one process group; the parent ral process is *not*
-a member of that group.  This shape is what makes `cat README.md |
-glow -p` work: the kernel sees one foreground process group containing
-every stage that can touch the terminal, regardless of whether `cat`
-is `/bin/cat`, an alias, a handler, or a ral block that wraps `bat`.
-
-Keeping the parent out of the process group is what lets job control
-remain coherent: a shell process that participates in its own
-foreground pipeline cannot consistently both own the terminal and not
-own it.  The price is that a ral stage running out-of-process is a
-*subshell with respect to mutation* — a helper stage's `cd`, `env-set`,
-alias / module / registry updates, or REPL changes do not flow back to
-the parent; only the pipe contents and the final value cross the
-boundary.  This matches the way every traditional shell treats process
-pipeline stages.
-
-The platform mechanics that realise this shape — the Unix process
-group and `tcsetpgrp` handoff, the exec trampoline that wins a
-foreground-claim race, the helper-frame protocol, and the Windows Job
-Object equivalents — are transport details, not part of the model.
-
-## Concurrency: isolation, not shared state
-
-`spawn` creates an isolated copy of the evaluator.  There is no shared
-mutable state and no synchronisation.  `await` is the only channel.
-A second `await` on the same handle returns the cached result,
-avoiding the need for affine types or runtime traps on aliased
-handles.
-
-A spawned handle buffers its output and replays it on `await`; a
-watched handle (`watch "label" P`) streams each line live to the
-caller's stdout, prefixed `[label] ` (stdout) or `[label:err] `
-(stderr).  `watch` is an ordinary builtin (arity 2), not a keyword.
-The framing lives in a single `Sink` variant — `LineFramed` — that
-buffers bytes until `\n` and emits `prefix + line + '\n'` as one write
-to the caller's stdout; sibling watchers serialise through the OS
-stdout lock (or, under the interactive REPL, rustyline's external
-printer) so each line is atomic even when several watchers run
-concurrently.  Live watching hides the usual `cmd > /tmp/log &; tail -f`
-scaffolding behind a library function.  We deliberately do not ship a
-read-API on handles (`read-line $h`, `select-line [h₁,h₂]`): value
-builtins like `each` are value-complete, so a handle-as-pipe-source
-would require a streaming-internals refactor, whereas line-framed
-watching satisfies the observed motivating use case at a much smaller
-surface.
-
-## Job control is narrower than bash, on purpose
-
-Ctrl-Z parks the foreground command's process group as a numbered
-job; `fg [N]` resumes it; `bg [N]` resumes it in the background;
-`jobs` lists what is parked.  Beyond that, ral does not reproduce
-the bash machinery that exists to compensate for the shell having no
-persistent UI for parked work.
-
-There is no exit-time refusal ("There are stopped jobs"), no
-asynchronous `[N] Done <cmd>` print stream interleaved with the next
-prompt, and no `%1` / `%+` / `%-` short-form addressing.  Job state
-is observed by typing `jobs`, not by being interrupted at the
-prompt.  The bash exit-time guardrail and the async notification
-stream both exist because the shell has no other UI for jobs.  The
-trade — printf-into-readline that occasionally collides with what
-the user is typing — is the cost of that compensation.  Modern
-multiplexers (tmux, zellij) cover the "I want a second running
-thing" use case better than juggling jobs in one shell, so ral's
-narrower surface is sufficient for the case Ctrl-Z genuinely needs
-to handle: vim's drop-to-shell idiom and the same pattern in
-`less`, `man`, and `top`.
-
-The kernel mechanism — SIGTSTP delivery to the foreground process
-group, `tcsetpgrp` for terminal handoff, `waitpid(..., WUNTRACED)`,
-SIGCONT to resume — is unchanged from the canonical Unix
-implementation.  The narrowing is in the prompt-side bookkeeping,
-not the OS-side machinery.
-
-Pure-value pipelines are sequential folds in the parent evaluator.  No
-process exists for SIGTSTP to suspend, so they are outside this
-discussion entirely.
-
-# The interactive layer
-
-## Aliases are semantic, not syntactic
-
-Aliases live in the interactive command namespace, resolved at
-evaluation time after value-head lookup, active only in interactive
-mode.  Scripts never see them, so script behaviour cannot depend on
-the user's interactive configuration.
-
-## `source` is kept for configuration
-
-`~/.ralrc` and interactive configuration need scope merging, which
-`use` (returning a module map) does not do.  `source` exists for this.
-`use` remains the default for library code.
-
-## Plugins are modules, and run with host authority
-
-A plugin is an ordinary ral module (§8) whose return value is either
-a manifest map or a block that takes an options map and returns a
-manifest map.  There is no plugin DSL, no separate loader language,
-and no magic `$config` binding: a plugin's knobs are fields on the
-options map it receives.  `_plugin 'load' 'fzf-files' [key: 'ctrl-t']`
-evaluates the file, applies the options map to the returned block,
-and reads `name`, `hooks`, `keybindings`, and `aliases` off the
-resulting record.  Record destructuring, row polymorphism, and
-`grant` already exist for other reasons; the plugin system is a
-thin composition of them.
-
-```
-return { |options|
-    let key = get $options key 'ctrl-t'
-    return [
-        name: 'fzf-files',
-        capabilities: [
-            exec: [fzf: []],
-            fs: [read: ['.']],
-            editor: [read: true, write: true, tui: true],
-        ],
-        keybindings: [[key: $key, handler: $_handler]],
-    ]
-}
-```
-
-Hooks (`buffer-change`, `pre-exec`, `post-exec`, `chpwd`, `prompt`)
-fire on the live evaluator, not a clone.  They need to observe and
-sometimes alter shell state — the `prompt` hook returns the prompt
-segment, `chpwd` may update state cells.  The shell does **not** push a
-capability frame around handler, keybinding, or plugin-alias dispatch:
-plugins run with whatever capabilities the caller's stack already
-grants.  A manifest may carry a `capabilities:` key, but it is advisory
-documentation only — parsed and ignored at load.
-
-This is a deliberate trade.  Plugin manifests are self-declared, so
-in-process attenuation gives zero defence against an adversarial
-plugin author and catches only honest-but-buggy plugins.  Paying the
-conceptual cost — `with_capabilities` carrying two distinct meanings
-(user-syntactic `grant` vs in-process plugin attenuation), bleeding
-into the eval-boundary's transport dispatch — was disproportionate.
-Users who want to confine a plugin call should wrap the call site in
-`grant { … }`.  That is what `grant` is for, and it composes with
-plugin code the same way it composes with any other code.
-
-Handlers for an event run in load order; a failing handler's error
-is logged but does not cancel siblings.  `buffer-change` runs under
-a soft deadline (default 16ms) so a slow plugin cannot make typing
-feel laggy; stale handlers are re-run at the next input idle.
-
-## `_ed-tui` captures stdout
-
-Interactive plugins invoke fuzzy finders (`fzf`, `sk`, …) that draw
-on the terminal via `/dev/tty` and print the user's selection on
-stdout.  A plugin needs that selection as a value.  If the body's
-stdout went to the terminal, the selection would appear above the
-prompt and the handler would get nothing back.
-
-`_ed-tui` therefore opts into byte capture for the duration of
-its body, analogous to what `let x = !{ … }` does at a binding site.
-A non-`Unit` value from the body wins outright; otherwise the captured
-bytes (trimmed of one trailing newline) are returned in the `output`
-field of the result record `[output: Str, status: Int]`.  This is the
-same "last command's bytes are the value" rule as `let`, applied
-inside a higher-order builtin; body failures are caught internally and
-reported via `status` so plugins switch on it without a `try`.
-
-```
-let dir = _ed-tui { fzf --walker dir +m }
-```
-
-## Keybinding dispatch is handler composition
-
-Multiple plugins can bind the same key.  Dispatch walks handlers in
-reverse load order: a handler returning `true` consumes the
-keystroke, a handler returning `false` falls through to the next,
-and if every plugin handler declines the shell runs its built-in
-binding for the key.
-
-This is the same shape as the `?` fallback chain for commands — a
-stack of alternatives where each one decides whether to handle or
-pass.  Load order controls precedence, the same way `use` order does
-for bindings, so the user's last-loaded plugin wins by default and
-earlier plugins remain reachable.
-
-```
-# if autosuggest's CTRL-F doesn't apply, the built-in binding still runs
-load-plugin 'autosuggest' [:]
-```
+The value/command distinction leaves one question open: what *is* a command?  Our answer is the identification on which the whole of ral's dynamic design turns, and it is worth stating plainly before any of its consequences.  **Running an external command is the performance of an *algebraic effect operation*.**  A name such as `git` or `cat`, which the binding namespace declines — neither a lexical `let`, nor a builtin, nor a prelude name — is an *operation*: it is performed, it returns once with a result or a failure, and its meaning is supplied separately by its *interpretation*, by default the operating system carrying out the syscall.  Separating the operation from its interpretation is the defining move; everything dynamic in ral rests on it.
+
+The identification is generous: from it alone, with no further machinery, the rest of the dynamic design follows.  First, authority is permission over the effect set — a capability narrows *which* operations may be performed and on what arguments, which is exactly what `grant` does.  Second, the capability check sits at the effect-performance site: ral vets the call against the active grant lattice at the very point it would dispatch the operation, before it resolves an executable image at all.  Third, audit is a trace of operations performed and the scopes that framed them.  Fourth, failure is an operation's exceptional outcome — a command returns, emits bytes, or *fails*, and failure is the effect's outcome, not a `Bool`.
+
+The reader's natural objection is that *every* builtin which touches the kernel ought then to be an effect.  We meet it head-on: not every kernel call is an effect.  A structured-query builtin such as `list-dir` or `file-info` reaches the kernel — it calls `read_dir`, it `lstat`s a path — yet it is deliberately pulled to the value side, answering with a record rather than bytes, precisely so that the capture-then-reparse round-trip never arises.  What makes a name an operation is being an *open external name* whose meaning comes from its interpretation, not the mere fact of touching the OS.  Hence we draw the effect boundary at the external-*process* surface — the `exec`/`wait` family that defines a shell.
+
+Two further choices are *orthogonal* to the principle, and we defer both to *Scoped effect handlers* below, taking on each the minimal setting.  The first is whether a program may *reinterpret* an operation rather than defer to the OS; the second, should it reinterpret, whether the reinterpreting handler may capture the continuation.  The principle stands without either — an external command is an effect whether or not any handler intercepts it.  And performing one needs no reified continuation: a syscall is a single forward step into the world, so the continuation is the ordinary rest of the computation, never a value the program captures.
+
+## Values and commands
+
+This section is about the one distinction from which the rest of ral's surface follows: the separation of *values* from *commands*. A value is inert data — a string, an integer, a list, a record, a stored block — that may be named, passed, and inspected but never, of itself, executes. A command is an effectful process that may read input, emit bytes, return a value, or fail. Most shells collapse the two. Every datum is a string, and every string is at once data, a command name, and source text for further evaluation; the consequence is that captured output is re-lexed, split on whitespace, and glob-expanded before the next stage ever sees it. We refuse this collapse, and thereby avoid the entire class of quoting and word-splitting bugs that grows from it — yet without surrendering first-class commands and pipes, the two things a shell exists to provide.
+
+The formal account is call-by-push-value (Levy). Values are inert; computations are effectful; a *thunk* packages a computation as a value; and forcing runs it. One need not know the theory to use the shell. The slogan is that **a value *is* and a computation *does***, and at the surface a block `{M}` thunks while `!` forces.
+
+The crossing between the two worlds is deliberate, and it is the single abstraction mechanism. A block `{M}` is a command packaged as a value — a thunk — and `!` forces it back into running; `{ |x| M }` is a function, the same thunk awaiting arguments. This one mechanism does the work that conventional shells splinter across five: functions, aliases, `eval`, subshells, and trap handlers all become a block that is bound, passed, returned, or installed. A block can be stored in a `let`, handed to `map`, or installed as an effect handler, and it is the same object throughout.
+
+Forcing is always explicit, with a single exception — a bound name resolved in head position is forced, or applied, implicitly. This is what keeps ordinary calls reading naturally, `greet alice`, while the storage of a command stays visible, `let plan = { make build }`: the braces mark, at a glance, that no work has yet happened. The natural objection is that two rules are harder than one; the answer is that the implicit case is exactly the one where a human reads an application and means an application, so the convenience never hides an effect. And because the value a captured command returns is data, it is never re-lexed, split, or globbed — the capture-then-reparse round-trip, the original sin of the string-only shell, simply has no place to occur. Concretely, capturing a command's stdout in a `let` decodes it as UTF-8, strips one trailing newline, and binds a `String`; the decode is *strict*, so invalid bytes fail with a hint to keep them via `| from-bytes` rather than quietly substituting replacement characters.
+
+## Immutable bindings: shadowing, not mutation
+
+This section is about why ral has no mutable variables.  Every `let`
+binding is immutable, and a re-`let` does not overwrite the old name — it
+introduces a fresh binding that *shadows* the prior one within the
+enclosing lexical scope.  The slogan, to borrow the shape of "a value
+is, a computation does", is that **a name's meaning is fixed once it is
+bound**.  Closures inherit the same discipline: a `{...}` block captures
+its environment at the point of definition, not at the point of forcing,
+so it observes the bindings in force where it was written rather than
+wherever it later runs.
+
+The reader's natural objection is that this forbids the mutable
+accumulator — the running total a loop body bumps on each pass — and that
+objection is correct.  We meet it head-on: there is no such accumulator,
+and we do not regret its absence.  Iteration that needs to carry state
+threads it explicitly through `fold`, through `reduce` (which is `fold`
+without an initial value), and, for byte streams, through the streaming
+`fold-lines`.  The state becomes an argument and a result rather than a
+cell written behind the loop's back — the same move by which functional
+programming has long replaced assignment, and no less expressive for it.
+
+The benefit is twofold.  First, local reasoning is easier.  When a name
+cannot be reassigned, reading code never requires tracing every prior
+statement to learn what `$x` now holds; its meaning is its defining
+right-hand side, and equational reasoning holds in the pure fragment.
+Second, and less obviously, `spawn` is safe without a line of
+synchronisation.  A spawned block runs on its own thread over a *copy* of
+the captured environment, and because nothing in that environment can be
+mutated, the parent and the worker share no cell that two threads could
+race on — the only channel between them is `await`.
+
+This is the same property the process side of *Two pipeline models*
+relies on: a stage of a byte pipeline runs out-of-process and is
+therefore a *subshell with respect to mutation*, its `cd` or `env-set`
+never flowing back.  Under immutability the in-process value pipeline and
+the out-of-process byte pipeline agree — neither lets a stage scribble on
+its neighbours — so the two models differ only in where they run, not in
+what they may touch.  Finally, the surface pays nothing for any of this.
+*A spare surface* wants no machinery for re-assignment: there
+is no `set`, no `=` as a statement, no distinction between declaration
+and update.  A name is bound by `let` and shadowed by `let`, and that is
+the whole story.
+
+## Scoped effect handlers
+
+This section is about the orthogonal reinterpretation layer promised by *System calls are algebraic effects*: the means by which a program supplies its own interpretation of an operation in place of the OS default. The identification leaves the door open; **a handler is what walks through it.** `within [handlers: [git: H], handler: K] { body }` installs interpretations on a dynamic stack for the dynamic extent of `body`, and the matched entry runs instead of the syscall. Handlers are *additive*: the effect identity holds whether or not any handler intercepts, so a program reads the same way under a mock as it does against the real OS.
+
+The first design decision is where handlers sit in name resolution, and the answer is *last*. A handler fires only after the binding namespace has declined the name — resolution runs environment, then builtins, then handlers, then the external surface. Hence a handler can mock `git` or `cat`, but it cannot replace `length`, which is a builtin; and a local `let foo` beats an active `foo` handler. Ordinary language names thus stay stable, and command mocking is confined to the open external names where it belongs.
+
+Two further questions, each conflated under one heading in the literature, get a definite answer. *Deep versus shallow* asks whether a handler persists across the continuation of the operation it handles. After `within [handlers: [git: H]] { git a; git b }`, both calls trigger `H` — the frame is not consumed at first use — so by the Plotkin–Pretnar criterion ours are deep. *Self-masking versus self-transparent* asks whether `H` is still in scope during its own body. In ral the matched frame is lifted off the stack for the dynamic extent of the body, so a call to the same name from inside `H` reaches the next outer frame, or the OS, never `H` itself; ours are self-masking.
+
+The reader may object that self-masking is a peculiar default. It is not, and the reason is that we have no first-class `resume` — a handler receives the name and arguments and returns a value or fails. In the Plotkin–Pretnar calculus self-re-entry is harmless because all re-entry flows through `resume k`, and `k` runs under `H` by construction; the continuation discipline does the work. Lacking that machinery, self-masking is the operational rule that keeps the dominant wrap-and-forward idiom — `within [handlers: [git: { |args| my-git ...$args }]]` — free of infinite recursion, without writing `^git` in every body. The shell intuition is exactly a POSIX function named `git` that calls the real `git`: the name shadows only *outside* itself. The `^name` form is an explicit bypass of the lexical/prelude/builtin chain — handlers still apply, because `^name` is a flag on the lookup, not a frame-unwind.
+
+A corollary closes the layer. Control flow is library; exactly five operators — `within`, `grant`, `try`, `guard`, `audit` — earn a grammar arm, by a two-part criterion: a typing rule not derivable from ordinary Hindley–Milner over the builtin signature, *and* runtime semantics not expressible as a function taking thunks. Handler installation is one such case, which is why `within` is a keyword and not a prelude name.
+
+## Explicit sandboxing
+
+This section is about confinement.  A shell that can run anything is a shell that can destroy anything, and the only honest defence is to make the bound on a program's authority visible at the call site, real at the kernel, and impossible to slip past.  ral's answer is `grant`.  Unlike a setuid wrapper or a daemon that vets requests at arm's length, `grant` is *a capability wrapper around a block*: `grant [exec: …, fs: …, net: …] { body }` narrows the active authority for the duration of `body` and otherwise composes like any other block-bodied builtin.  Capabilities are attenuable, never amplified — the lineage is Shill — so a dimension a grant omits inherits the ambient authority, a dimension it names can only narrow it, nested grants compose by meet, and a deny is anti-monotonic: a later layer adds denials but never reopens a denied region.
+
+The intuition is that **the braces are lexically apparent, but the restriction is dynamically reaching** — you can see the `grant` braces, yet the narrowed authority flows into every callee, including a function defined in another module.  The body itself evaluates locally, in the caller's process; the evaluator merely intersects authority onto a dynamic stack.  What an `fs`- or `net`-restricting grant adds, on a platform with OS sandboxing, is *per-command child confinement*: each external or bundled command spawned inside the block is launched under the effective platform sandbox — Seatbelt on macOS, `bwrap` on Linux — while ral's own dispatched effects are gated in-process before the syscall.  These are two enforcers, not one mechanism described twice, because each is authoritative exactly where the other is blind.  An OS sandbox confines only a child and never sees an operation ral performs itself; the in-process gate sees ral's own dispatch but cannot follow a child once it runs.
+
+Three points make the discipline concrete.
+
+First, *the dangerous verb wears its name*.  Destruction is never abstracted: removing a tree is written `rm -rf`, the recursing flag visible at the call site, written on purpose by a caller who can see what they typed.  A polite wrapper that decides for itself whether to recurse would hide exactly the decision a shell must keep visible.  Effects therefore go through the bundled coreutils, where the destructive flag is part of the name — there is no `remove-file` primitive to launder it through.
+
+Second, *no back door*.  One might fear that reaching for `cp` rather than a structured primitive escapes the cage; it does not.  The chokepoint is the exec lattice, not a re-parsing of paths: before any external or bundled command spawns, the full `(head, args)` call clears the active grant through `check_exec_args`, a three-valued decision (allow, allow-these-subcommands, deny) that the orthodox object-capability model cannot express — a base profile can veto a name a restrict file never mentions.  A bundled coreutil's own filesystem reads and writes, by contrast, happen inside upstream uutils code that does not call ral's `check_fs_op`.  Reaching for `cp` is therefore not gated by re-deriving its source and destination — it is gated by refusing the inline placement under any active projection and spawning the tool as a confined child, so its self-issued I/O is held by the same kernel sandbox an external would receive.  The structured primitives and redirects, which ral *does* perform itself, are the operations gated in-process by `check_fs_read` / `check_fs_write`.  Either way both roads end at one fence; what differs is which enforcer mans it.
+
+Third, *scope reaches into relative paths*.  A `within [dir: …]` inside a grant cannot escape the enclosing policy, because a path is canonicalised after resolution against the scoped working directory — `.` and `..` collapsed, symlinks resolved — and only the resolved path is matched.  The scoped cwd is not installed by mutating the process: a logical cwd is threaded into each spawn instead, precisely so that a `cd` in one thread cannot race a sibling.  The cost is paid honestly.  `net` has no in-process gate at all, since ral dispatches no network operation for a gate to see, so on a platform without a sandbox backend a `net`-restricting grant fails closed rather than running unconfined — and on Linux `bwrap` cannot path-filter a child's own re-execs, a known seam we name rather than paper over.  This is the boundary exarch reuses unchanged: an agent turn is a host-pushed grant frame over the very same stack.
+
+## Two pipeline models
+
+A pipeline `|` has two distinct execution models, and the type of the adjacent edges decides which one runs. The intuition is that the pipe is whatever its data demand it to be: a pipeline that only ever threads values needs no operating system at all, whereas a pipeline that touches bytes is the genuine Unix article. **The connecting edge's type, settled by the checker, is what selects the model — not any keyword and not any runtime guess.**
+
+The first model is the *value pipeline*. When every stage operates on the value channel, `x | f` is nothing more than typed data-last composition: it reduces to `f !{x}`, evaluated sequentially in the parent evaluator. No process is spawned, no pipe exists, and no process group is formed. Thus `range 1 21 | filter $even | sum` is three function calls threaded by the value channel — the same β-rule `x | f = f !{x}` realised once, parent-side.
+
+The second model is the *byte pipeline*. As soon as one edge touches bytes — at least one external command, or any byte edge — the whole pipeline runs as a Unix-style process pipeline. Three facts hold together. First, every stage, *including* ral-implemented ones, executes in a subprocess. Second, all subprocesses share one process group. Third, the parent ral process is *not* a member of that group: the children call `setpgid` in their own `pre_exec`, and ral never joins. Keeping the parent out is precisely what lets job control stay coherent — a shell that participates in its own foreground pipeline cannot consistently both own the terminal and not own it, since terminal ownership is a property of a single process group that the shell must hand away and reclaim.
+
+The reader will object that this isolation has a price, and it does — we state it plainly. A ral stage running out-of-process is a *subshell with respect to mutation*: its `cd`, `env-set`, alias, module, registry, or REPL changes do not flow back to the parent; only the pipe contents and the final value cross the boundary. This is acceptable because it is exactly how every traditional shell treats process-pipeline stages, and because the alternative — smuggling mutations back across a process boundary — would forfeit the very isolation that makes the byte model honest. The platform mechanics that realise the shape — the process group and `tcsetpgrp` handoff, the exec trampoline that wins the foreground-claim race, the helper-frame protocol, and the Windows Job Object equivalents — are transport details, not part of the model.
+
+## Handlers and aliases are variadic, functions are not
+
+This section is about why a handler accepts an argument list of any length while a function does not, and why that asymmetry is forced rather than chosen. The short answer is that a handler is the in-process interpretation of `execve`, whose interface is `argv[]` — a vector of arbitrary length — so **a handler is variadic by necessity, not by taste**. You cannot mock `git` with a fixed-arity function, because `git status`, `git commit -m …`, and `git log --oneline -n 5` all reach the one handler installed for the name; the handler must take whatever the caller typed. A function is the other thing entirely: lambda application over a declared parameter list, as in `{ |x y| … }`, its arity fixed at definition and part of its type. The asymmetry is therefore the exec/lambda boundary — the identifications of *System calls are algebraic effects* and *Values and commands* — made visible at the point where you actually invoke things; the arity tells you which world you are in.
+
+Concretely, a per-name handler is a unary lambda `{ |args| … }` invoked with the command's argument list, and the catch-all `handler:` is a binary lambda `{ |name args| … }` invoked with the name and the arguments. The calling convention is fixed by the surface position — per-name versus catch-all — not inferred from the value's runtime shape, and arity is validated once at install time, so a bare block or a wrong-arity lambda is rejected rather than coerced. The reason it must be rejected, not inferred, is currying: a binary lambda applied to one argument does not fault but returns the inner closure, so a mis-shaped handler would silently hand the body a partial-application closure as the command's result — a category error surviving as a plausible value, exactly the bug class ral exists to make unconstructable.
+
+An alias is just a top-level handler — the same shape, the same variadic convention, and the same dispatch after the binding namespace has declined the name. It differs only in where and how long it is installed: in the interactive command namespace rather than scoped by `within`, and persisting across turns rather than popped at block exit. Hence scripts never see aliases at all, so script behaviour cannot turn on the user's interactive configuration — a property worth the narrowing on its own.
+
+## A spare surface: not POSIX, two sigils
+
+This section is about the visible grammar, and about the single discipline that shapes it: **the surface refuses to overload one form with two meanings.** This is where the value/command distinction of *Values and commands* becomes syntax you can point at, and it is where the break from POSIX lives.
+
+Start with what we give up. POSIX shell compatibility is not a matter of matching a few operators; it requires word-splitting, glob expansion on unquoted variables, `$IFS`, and context-dependent quoting — the very machinery whose interaction produces the classic escaping bugs. We eliminate exactly these. Compatibility is therefore not a goal we narrowly miss but one we decline on purpose, because keeping it would mean keeping the collapse that *Values and commands* exists to refuse.
+
+In its place stand two sigils, one for each operation that matters. `$` retrieves data — it consults only the value namespace and never triggers command lookup — whereas `!` runs a stored command. The two compose: `!$b` is *dereference, then force*. The reader may ask why two are needed when one would read more tersely. The answer is that a single sigil covering both would make *retrieve* and *run* indistinguishable at a glance, and — since blocks are ordinary values passed as data — that ambiguity would propagate into every expression that traffics in commands. Two sigils keep the call site honest about which thing is happening.
+
+Five further decisions are the same refusal seen from other angles.
+
+First, *no context-dependent lexer rules*. The token classes are fixed once, single-pass, with no mode the parser can flip — none of the separate arithmetic, test, or glob lexers a POSIX shell carries, because we have no history forcing them. An `IDENT` (the variable, key, and deref class) terminates on `:` and on `=`, so a name ends naturally there; a `NAME` (the bare-word class) does not, so command arguments such as `-DFOO=bar` and `http://host:port` stay single tokens. And `:` becomes a token of its own only before whitespace, `]`, or end of input — which is why `host: val` splits but `localhost:5432` does not.
+
+Second, *paths are built by interpolation, not quoting*. Outside quotes `$name` is a separate atom, so `$dir/file` is two arguments and a path is written `"$dir/file.txt"`. This inverts the bash convention. There the unquoted form is dangerous and quoting tames it; here the unquoted form is already safe — there is no splitting to suppress — and it is the quotes that perform the concatenation.
+
+Third, *paths are strings*. There is no `Path` type. Once word-splitting is gone the historical reason a shell needed path-specific quoting goes with it, and a textual UTF-8 value suffices.
+
+Fourth, *one expression language*. `$[...]` spans arithmetic, comparison, and logic under a single Pratt grammar, rather than bash's `(( ))`/`[[ ]]` split — a partition its history forced by way of separate lexers, and one we have no reason to inherit. The `&&` and `||` inside `$[...]` are the Boolean connectives on strict `Bool`, not tests of command success.
+
+Fifth, *no command-level `||`*. `try { a } { |_| b }` already replaces `a || b` in command context, so a binary `||` on pipelines would only buy precedence rules against `?` and `|` for a case `try` handles — grammar paid for nothing.
+
+The cost of all this is plain: a lifetime of POSIX habit transfers imperfectly, and scripts must be rewritten rather than ported. We accept it because the habit being broken is precisely the one that breeds the bugs — and because a surface with two sigils and no hidden modes is one a reader can hold in the head whole.
+
+## Derivations, not pillars
+
+A handful of decisions look like pillars but are really corollaries, and it is worth saying which follow from what, lest the design seem larger than it is.  The small-core rule — that control flow is library, and exactly five operators (`within`, `grant`, `try`, `guard`, `audit`) earn a grammar arm by the two-part criterion of a non-HM typing rule and runtime semantics no thunk-taking function can express — is not a co-equal commitment but a corollary of *Scoped effect handlers*: handler installation is the very thing that fails the criterion, and the other four join it for the same structural reason.  The three-layer filesystem surface — structured queries that return values, bytes I/O through codecs and redirects, and effects through bundled coreutils — is derived from the algebraic-effects identification together with the value/command split: a structured return earns a value-side primitive, whereas an effect is an open external name and earns none.  The row-types choice — scoped labels after Leijen, so that a spread shadows rather than removes — derives from the same value side, since records are values and their fields must unify without absence markers.  And the syscall bridge — `list-dir`, `file-info`, the `is-*` predicates, `resolve-path`, `glob`, in place of parsing the text of `stat`, `ls`, or `realpath` — is the value/command split applied to the kernel: a query is a value, so it crosses the bridge, while an effect stays a command.  None of these is an independent axiom; each follows.

@@ -31,8 +31,9 @@ spawned block shares nothing mutable.
 **Invariants.**
 - `$` consults only the value namespace and never triggers command lookup or
   handler dispatch.
-- Captured external output is decoded UTF-8 *lossily* — invalid bytes become
-  U+FFFD — so the decode is total and the bytes are never re-lexed.
+- Captured external output is decoded UTF-8 *strictly* — invalid bytes fail
+  with a hint to keep them via `| from-bytes` — and the decoded text is never
+  re-lexed.
 - Closures observe the bindings in force where they were defined, not where they
   run.
 
