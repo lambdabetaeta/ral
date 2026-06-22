@@ -2975,3 +2975,18 @@ so `agent.ral` carries only `view`/`view-around`, and the `diff` mark decodes th
 in derived disclosure / aggregation as built (`CardOrigin`, `render_card_framed`,
 `absorb_patch`) and de-archeologised the decode prose. `cards` is not listed in
 [[index|index]], so index.md was left untouched.
+
+## [2026-06-22] ingest | io-surface re-ingested at HEAD (23 commits stale)
+
+Re-stamped [[map/exarch/io-surface|io-surface]] to `@1baac6d` after the
+[[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]] area
+drifted 23 commits. The rendering prose was the stale part: a Bertin pass replaced
+the `<`/`>` read/write glyphs with dim `Read:`/`Write:` words and lifted
+`Role::Path` to cyan, exec args now render as plain ink (not `code` spans), and the
+TUI coalesces an interleaved I/O burst into one grouped card per kind via
+`io_group_card` (the exec group dropping its per-command status tail). Corrected
+the Enforcement reason-tag taxonomy to the actual tags — `[io-door:surface:<slug>]`
+/ `[io-door:silent:<slug>]` / `[io-door:test]`. Fixed the orphan defect in
+[[index|index]]: both [[map/exarch/io-surface|io-surface]] and
+[[map/exarch/cards|cards]], which existed but were missing from the `map/` → exarch
+catalog, now have entries stamped `@1baac6d`.
