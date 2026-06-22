@@ -3217,3 +3217,17 @@ surface both frontends render, pointing the rendering at
 [[map/repl/frontend|frontend]] and the host boundary at
 [[decisions/260514_repl-builtins-stay-in-repl|repl-builtins-stay-in-repl]].
 Updated [[index|index]].
+
+## [2026-06-22] ingest | edit becomes a Rust atom building a similar whole-file diff card
+
+Re-stamped [[map/exarch/builtins|builtins]] to `@1baac6d` for four commits of
+drift. `edit`, `grep-files`, and `window-hash` are now Rust host builtins reading
+below the redirect frame, so the bulk helper I/O surfaces once at the I/O doors
+([[map/exarch/io-surface|io-surface]]) rather than as per-file read/write cards;
+`agent.ral` keeps only `_rows`/`view`/`view-around`. `edit` now builds one
+whole-file line-level `diff` card grouped into hunks by the `similar` crate and
+hands it to the core `surface` builtin ([[map/exarch/cards|cards]]), the dormant
+tag-set helpers gone ([[decisions/260619_surface-carries-documents|surface-carries-documents]],
+[[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]],
+[[decisions/260608_witness-hash-h-prefix|witness-hash-h-prefix]]). Updated
+[[index|index]].

@@ -183,7 +183,7 @@ design pages via the `against` stamp.
   - [[map/exarch/io-surface|io-surface]] — redirect reads/writes and exec images surface at runtime I/O doors as structural events, rendered as grouped cards; bulk helper I/O sunk below the ral line, enforced by a clippy-checked door set. *@1baac6d*
   - [[map/exarch/policy|policy]] — capability composition (base ∨ extend ⊓ restrict) and the bake-in profiles; the boundary is ral's grant. *@2df6db85*
   - [[map/exarch/tools|tools]] — the tool registry: `shell`, `agent`, `fff`; spawned agents are joined at steering boundaries. *@e28f2054*
-  - [[map/exarch/builtins|builtins]] — the resident host atoms and `agent.ral` helpers for search, line witnesses, and editing. *@2df6db85*
+  - [[map/exarch/builtins|builtins]] — the resident host atoms (`grep-files`, `edit`, `window-hash`/`line-hash`) reading below the redirect frame, and the `agent.ral` line readers over them, for search, line witnesses, and witnessed editing. *@1baac6d*
   - [[map/exarch/frontend|frontend]] — the agent/UI event bus, durable session log, the headless frontend, and the inline TUI: a two-voice transcript laid out as a graphic — human band vs agent field, the marginal rail, an in-flight reply as a growing magnitude. *@1baac6d*
   - [[map/exarch/cards|cards]] — the `surface` render document: a closed set of five Bertin marks a kit composes in ral, decoded once and drawn through one generic interpreter; the kit names data and level of measurement, the host owns the visual binding. *@1baac6d*
 - [[map/ral-sh|ral-sh]] — the POSIX-bridge login-shell dispatcher; execs `ral` interactively, forwards everything else to `/bin/sh`. *@c164cff*
