@@ -1,5 +1,5 @@
 ---
-status: active
+status: complete
 ---
 
 # Split `Shell` by lifetime; make turn state a field
@@ -286,16 +286,24 @@ API.
   it. Privacy should be tightened around the new invariant-bearing state first,
   then the older host conveniences can be narrowed separately.
 
-## Open questions
+## Resolution
 
-- **Does the turn guard own signal-slot publication?** The publication lifetime
-  matches the turn swap lifetime, so owning both in one guard is attractive. The
-  implementation must still drop the publications before restoring the previous
-  `TurnState`.
-- **How much of `Mobile` should remain directly visible long term?** This
-  decision keeps `Mobile` as the host snapshot seam, but the existing broad
-  field visibility is larger than that seam. A later embedding-API cleanup can
-  narrow it without changing the turn/session split.
+Implemented. The lifetime split, the turn guard, and the visibility discipline
+are all in the tree; both open questions are settled.
+
+- **The turn guard owns signal-slot publication.** `TurnGuard::install` swaps
+  `shell.turn`, then publishes the foreground scope and durable root for the
+  swap's extent; `Drop` drops the publications before restoring the previous
+  `TurnState`, so a signal slot never points at a removed frame
+  ([`core/src/turn.rs`](../../../core/src/turn.rs)).
+- **`Mobile`'s broad field visibility is gone.** `Shell::mobile` is now
+  `pub(crate)` alongside `turn` / `session` / `local`; no host crate reads a
+  `Shell` field directly. Every reach goes through an intent verb — the
+  durability seam is the opaque-`MobileSnapshot` pair `mobile_snapshot` /
+  `restore_mobile` (a host can rebind only a checkpoint it took, never a forged
+  or wire-borne bundle), and the scope/context/control reads and writes have
+  named accessors. The deferred embedding-API cleanup the "make every field
+  private immediately" alternative set aside has thereby landed as its own step.
 
 See also [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]] (the
 turn lifted into `ral_core`), [[internals/a-turn-end-to-end|a-turn-end-to-end]]

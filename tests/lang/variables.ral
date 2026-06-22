@@ -1,10 +1,10 @@
 # Test: basic variable binding and shadowing
 
-let x = 'hello'
-echo $x
+let greeting = 'hello'
+echo $greeting
 
-let x = 'world'
-echo $x
+let greeting = 'world'
+echo $greeting
 
 # Shadowing — not mutation
 let y = 5

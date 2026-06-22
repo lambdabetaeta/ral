@@ -48,7 +48,7 @@ pub const COMPACT_THRESHOLD: usize = 500 * 1024;
 /// model's recourse is to narrow what it asked for — scope the query at
 /// its source, or read the result in slices.  Re-running the command,
 /// or `$x`-dumping the whole binding, only reproduces the same cut.
-const ELISION_NUDGE: &str = "; complete but clamped — narrow it (within/filter to scope, take/view/tail to slice); re-running repeats the cut";
+const ELISION_NUDGE: &str = "; complete but clamped — narrow it (within/filter to scope, take/view-text/tail to slice); re-running repeats the cut";
 
 /// Cap `text` at `cap` bytes for the model's history and the transcript.
 ///

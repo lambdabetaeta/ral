@@ -87,7 +87,7 @@ are batched rather than live under the sandbox.
 `agent_builtins.rs` registers exarch's resident host atoms — the line/window
 witnesses and the `grep-files` search and hash-addressed `edit` that moved below
 the ral line ([[map/exarch/io-surface|io-surface]]) — and sources the now-smaller
-embedded `data/agent.ral` helper library (`view`) into the shell at boot
+embedded `data/agent.ral` helper library (`view-text`) into the shell at boot
 ([[map/exarch/builtins|builtins]]). The Rust atoms — but not the sourced
 library — also dress the [[map/core/capabilities|sandbox-IPC child]]'s fresh
 shell, installed through `set_child_shell_extension`.

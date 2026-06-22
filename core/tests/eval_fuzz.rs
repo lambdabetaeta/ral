@@ -68,7 +68,7 @@ fn literal_negative_int() {
 fn literal_string_in_assignment() {
     // Assign a string literal and read it back.
     assert_eq!(
-        must_succeed("let x = 'hello'\nreturn $x"),
+        must_succeed("let xv = 'hello'\nreturn $xv"),
         Value::String("hello".into())
     );
 }
@@ -136,7 +136,7 @@ fn if_with_bare_block_condition_is_type_error() {
 #[test]
 fn if_one_armed_true_runs_body() {
     assert_eq!(
-        must_succeed("let x = 0\nif true { let x = 1 }\nreturn $x"),
+        must_succeed("let xv = 0\nif true { let xv = 1 }\nreturn $xv"),
         // one-armed if runs for side effects; outer x is shadowed inside
         // the block but not outside — still 0
         Value::Int(0),
@@ -255,7 +255,7 @@ fn undefined_variable_is_error() {
 #[test]
 fn shadowing_preserves_old_binding() {
     assert_eq!(
-        must_succeed("let x = 5\nlet f = { return $x }\nlet x = 10\n!$f"),
+        must_succeed("let xv = 5\nlet f = { return $xv }\nlet xv = 10\n!$f"),
         Value::Int(5)
     );
 }
@@ -270,7 +270,7 @@ fn block_scoping() {
 fn assignment_returns_status_not_value() {
     // Assignment doesn't leak the value.
     // A block like { x = 42 } doesn't auto-execute 42.
-    must_succeed("let x = {echo hello}\necho 'after'");
+    must_succeed("let xv = {echo hello}\necho 'after'");
 }
 
 #[test]
@@ -284,7 +284,7 @@ fn wildcard_assignment_discards_value() {
 #[test]
 fn wildcard_destructure_discards_element() {
     assert_eq!(
-        must_succeed("let [_, x] = [1, 2]\nreturn $x"),
+        must_succeed("let [_, xv] = [1, 2]\nreturn $xv"),
         Value::Int(2)
     );
 }
@@ -330,10 +330,10 @@ fn mutual_recursion_three_functions_compute_value() {
     //       → a 3 222 → b 2 223 → c 1 233 → a 0 333 → 333.
     assert_eq!(
         must_succeed(concat!(
-            "let a = { |n acc| if $[$n <= 0] { return $acc } else { b $[$n - 1] $[$acc +   1] } }\n",
-            "let b = { |n acc| if $[$n <= 0] { return $acc } else { c $[$n - 1] $[$acc +  10] } }\n",
-            "let c = { |n acc| if $[$n <= 0] { return $acc } else { a $[$n - 1] $[$acc + 100] } }\n",
-            "!{a 9 0}"
+            "let a1 = { |n acc| if $[$n <= 0] { return $acc } else { b1 $[$n - 1] $[$acc +   1] } }\n",
+            "let b1 = { |n acc| if $[$n <= 0] { return $acc } else { c1 $[$n - 1] $[$acc +  10] } }\n",
+            "let c1 = { |n acc| if $[$n <= 0] { return $acc } else { a1 $[$n - 1] $[$acc + 100] } }\n",
+            "!{a1 9 0}"
         )),
         Value::Int(333)
     );
@@ -345,9 +345,9 @@ fn mutual_recursion_non_tail() {
     // f 4 = 4 + g 3 = 4 + (3 + f 2) = 4 + 3 + (2 + g 1) = 4 + 3 + 2 + (1 + f 0) = 11.
     assert_eq!(
         must_succeed(concat!(
-            "let f = { |n| if $[$n <= 0] { return 1 } else { let r = g $[$n - 1]; return $[$n + $r] } }\n",
-            "let g = { |n| if $[$n <= 0] { return 1 } else { let r = f $[$n - 1]; return $[$n + $r] } }\n",
-            "!{f 4}"
+            "let ff = { |n| if $[$n <= 0] { return 1 } else { let r = gg $[$n - 1]; return $[$n + $r] } }\n",
+            "let gg = { |n| if $[$n <= 0] { return 1 } else { let r = ff $[$n - 1]; return $[$n + $r] } }\n",
+            "!{ff 4}"
         )),
         Value::Int(11)
     );
@@ -450,7 +450,7 @@ fn map_spread_non_overlapping_fields_accessible() {
 fn map_multiple_spreads_explicit_wins() {
     // With two spreads, the explicit field must still take priority.
     let v = must_succeed(
-        "let a = [x: 1, z: 10]\nlet b = [y: 2, z: 20]\nlet r = [...$a, ...$b, z: 99]\nreturn $r[z]",
+        "let a = [x: 1, z: 10]\nlet bb = [y: 2, z: 20]\nlet r = [...$a, ...$bb, z: 99]\nreturn $r[z]",
     );
     assert_eq!(v, Value::Int(99));
 }
@@ -1231,7 +1231,7 @@ fn empty_lambda_call() {
 #[test]
 fn assign_block_does_not_execute() {
     // Assigning a block should NOT execute it
-    must_succeed("let x = { fail [status: 1] }\necho 'survived'");
+    must_succeed("let xv = { fail [status: 1] }\necho 'survived'");
 }
 
 #[test]
@@ -1307,7 +1307,7 @@ fn map_of_lambdas() {
 
 #[test]
 fn interpolation_with_all_forms() {
-    must_succeed("let x = 5\necho \"val=$x arith=$[$x + 1] sub=!{echo hi}\"");
+    must_succeed("let xv = 5\necho \"val=$xv arith=$[$xv + 1] sub=!{echo hi}\"");
 }
 
 #[test]
@@ -1626,7 +1626,7 @@ fn lexical_non_head_name_uses_deref_to_get_value() {
 #[test]
 fn binding_position_bare_name_dispatches_in_let_rhs() {
     assert_eq!(
-        must_succeed("let upper = { |x| return $x }\nlet x = upper hello\nreturn $x"),
+        must_succeed("let upper = { |x| return $x }\nlet xv = upper hello\nreturn $xv"),
         Value::String("hello".into())
     );
 }
@@ -1715,7 +1715,7 @@ fn curry_three_params() {
 #[test]
 fn curry_three_partial() {
     assert_eq!(
-        must_succeed("let f = { |x y z| return $[$x + $y + $z] }\nlet g = f 1 2\n!{g 3}"),
+        must_succeed("let f = { |x y z| return $[$x + $y + $z] }\nlet gg = f 1 2\n!{gg 3}"),
         Value::Int(6)
     );
 }
@@ -1764,7 +1764,7 @@ fn await_cached() {
     // Second await returns the same record from cache.
     assert_eq!(
         must_succeed(
-            "let h = !{spawn { return 99 }}\nlet a = await $h\nlet b = await $h\nreturn $[$a[value] + $b[value]]"
+            "let h = !{spawn { return 99 }}\nlet a = await $h\nlet bb = await $h\nreturn $[$a[value] + $bb[value]]"
         ),
         Value::Int(198)
     );
@@ -1841,8 +1841,8 @@ fn spawn_nested_structured() {
              let inc = $m[ops][0]\n\
              let dbl = $m[ops][1]\n\
              let a = $inc 10\n\
-             let b = $dbl 10\n\
-             return $[$a + $b]"
+             let bb = $dbl 10\n\
+             return $[$a + $bb]"
         ),
         Value::Int(31) // (10+1) + (10*2) = 11 + 20 = 31
     );
@@ -2153,13 +2153,13 @@ fn spawn_pipeline_chain() {
         must_succeed(
             r#"
             let a = !{spawn { return [1, 2, 3] }}
-            let b = !{spawn {
+            let bb = !{spawn {
                 let r = await $a
                 let items = $r[value]
                 let doubled = !{map { |x| return $[$x * 2] } $items}; return $doubled
             }}
             let c = !{spawn {
-                let r = await $b
+                let r = await $bb
                 let items = $r[value]
                 let sum = !{fold { |acc x| return $[$acc + $x] } 0 $items}; return $sum
             }}
@@ -2323,7 +2323,7 @@ fn arith_unary_negation() {
 
 #[test]
 fn arith_negate_variable() {
-    assert_eq!(must_succeed("let x = 10\nreturn $[-$x]"), Value::Int(-10));
+    assert_eq!(must_succeed("let xv = 10\nreturn $[-$xv]"), Value::Int(-10));
 }
 
 // ── quoted map keys ─────────────────────────────────────────────────────
@@ -2354,7 +2354,7 @@ fn interpolation_coerces_int() {
 #[test]
 fn interpolation_coerces_unit_to_empty() {
     assert_eq!(
-        must_succeed("let u = unit\nreturn \"val: $u end\""),
+        must_succeed("let uu = unit\nreturn \"val: $uu end\""),
         Value::String("val:  end".into())
     );
 }
@@ -2493,10 +2493,10 @@ fn hoist_inside_untaken_chain_arm_does_not_run() {
 #[test]
 fn earlier_use_of_a_later_non_thunk_let_is_not_shadowed() {
     // Forward declaration covers only the binding shapes group.rs knots
-    // (thunk RHS, which can be mutually recursive).  A later `let echo = 5`
-    // must not shadow line 1's builtin `echo` into an undefined-variable
+    // (thunk RHS, which can be mutually recursive).  A later `let upper = 5`
+    // must not shadow line 1's builtin `upper` into an undefined-variable
     // error.  Review F8: `stmts` used to forward-declare every named let.
-    must_succeed("echo hi\nlet echo = 5");
+    must_succeed("upper hi\nlet upper = 5");
 }
 
 #[test]
@@ -2913,9 +2913,9 @@ fn forward_reference_in_let_group() {
     // `concat` defined later — a regression would show up as "unbound
     // variable" during elaboration.
     let r = must_succeed(
-        "let f = { |x| g $x }\n\
-         let g = { |x| return $[$x + 1] }\n\
-         f 41",
+        "let ff = { |x| gg $x }\n\
+         let gg = { |x| return $[$x + 1] }\n\
+         ff 41",
     );
     assert_eq!(r, Value::Int(42));
 }
@@ -2925,13 +2925,13 @@ fn forward_reference_in_let_group_block_rhs() {
     // Same SCC-analysed group as `forward_reference_in_let_group`, but the
     // RHS is a parameterless `Ast::Block` rather than `Ast::Lambda`.  Both
     // are thunks (deferred computations), so both must participate in the
-    // group's LetRec.  A regression here would re-emit the `b` binding as
-    // a plain `Bind` whose RHS runs eagerly and triggers "unbound a" before
-    // `a` is in scope.
+    // group's LetRec.  A regression here would re-emit the `b1` binding as
+    // a plain `Bind` whose RHS runs eagerly and triggers "unbound a1" before
+    // `a1` is in scope.
     let r = must_succeed(
-        "let a = { return $[!{b} + 1] }\n\
-         let b = { return 41 }\n\
-         !{a}",
+        "let a1 = { return $[!{b1} + 1] }\n\
+         let b1 = { return 41 }\n\
+         !{a1}",
     );
     assert_eq!(r, Value::Int(42));
 }
@@ -2957,8 +2957,8 @@ fn hoist_applies_block_and_substitutes() {
     // §2.4: !{$f $x} evaluates $f $x and substitutes its result.
     let r = must_succeed(
         "let double = { |n| return $[$n * 2] }\n\
-         let x = !{double 21}\n\
-         return $x",
+         let xv = !{double 21}\n\
+         return $xv",
     );
     assert_eq!(r, Value::Int(42));
 }

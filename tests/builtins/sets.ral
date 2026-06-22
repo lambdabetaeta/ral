@@ -1,25 +1,25 @@
 # Test: set operations (maps as sets with Unit values)
 
-let a = [alice: unit, bob: unit, carol: unit]
-let b = [bob: unit, dave: unit, eve: unit]
+let left = [alice: unit, bob: unit, carol: unit]
+let right = [bob: unit, dave: unit, eve: unit]
 
 # has — membership
-echo !{has $a alice}
-echo !{has $a dave}
+echo !{has $left alice}
+echo !{has $left dave}
 
 # union
-let u = union $a $b
-echo !{has $u alice}
-echo !{has $u dave}
+let un = union $left $right
+echo !{has $un alice}
+echo !{has $un dave}
 
 # intersection
-let i = intersection $a $b
-echo !{has $i bob}
-echo !{has $i alice}
+let inter = intersection $left $right
+echo !{has $inter bob}
+echo !{has $inter alice}
 
 # difference
-let d = difference $a $b
-echo !{has $d alice}
-echo !{has $d bob}
+let subtracted = difference $left $right
+echo !{has $subtracted alice}
+echo !{has $subtracted bob}
 
 echo 'set tests done'

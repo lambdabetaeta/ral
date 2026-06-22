@@ -84,7 +84,7 @@ fn unawaited_spawns_do_not_leak() {
     let out = run_io(
         r#"
         let a = spawn { echo alpha }
-        let b = spawn { echo bravo }
+        let bb = spawn { echo bravo }
         sleep 0.1
         echo only-this
         "#,

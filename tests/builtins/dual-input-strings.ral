@@ -30,14 +30,14 @@ let m = re-match '.ral$' 'hello.ral'
 assert_eq 're-match explicit true' true $m
 let l = lines "x\ny"
 assert_eq 'lines explicit length' 2 !{length $l}
-let w = words "one  two\nthree"
-assert_eq 'words explicit length' 3 !{length $w}
+let ws = words "one  two\nthree"
+assert_eq 'words explicit length' 3 !{length $ws}
 let w_crlf = lines "one\r\ntwo"
 assert_eq 'read-lines crlf length' 2 !{length $w_crlf}
 
 # JSON parsing and line-splitting via codecs / prelude
-let p = !{to-string '{"k": 7}' | from-json}
-assert_eq 'parse-json wrapper explicit' 7 $p[k]
+let parsed = !{to-string '{"k": 7}' | from-json}
+assert_eq 'parse-json wrapper explicit' 7 $parsed[k]
 let rl = lines "u\nv"
 assert_eq 'read-lines wrapper explicit' 2 !{length $rl}
 # to-X encoders write to the byte channel: value piped to from-X roundtrip
@@ -45,8 +45,8 @@ let round2 = [x: 1] | to-json | from-json
 assert_eq 'to-json piped roundtrip' 1 $round2[x]
 
 # bytes codec roundtrip — to-bytes piped to from-bytes gives Value::Bytes
-let b = [72, 105]
-let b2 = to-bytes $b | from-bytes
+let bs = [72, 105]
+let b2 = to-bytes $bs | from-bytes
 assert_eq 'bytes codec length' 2 !{length $b2}
 let b2_txt = !{to-bytes $b2 | from-string}
 assert_eq 'bytes codec string' 'Hi' $b2_txt

@@ -135,8 +135,8 @@ fn byte_producer_into_byte_consumer_typechecks() {
 #[test]
 fn cross_turn_value_type_error_is_static() {
     let mut sh = shell();
-    turn(&mut sh, "let x = 'hello'").unwrap();
-    let errs = check_errors(&sh, "return $[$x + 1]");
+    turn(&mut sh, "let xv = 'hello'").unwrap();
+    let errs = check_errors(&sh, "return $[$xv + 1]");
     assert!(
         errs.iter()
             .any(|e| e.kind.render_message().contains("couldn't match")),
@@ -159,21 +159,21 @@ fn cross_turn_value_type_error_is_static() {
 #[test]
 fn rebind_retypes_the_name() {
     let mut sh = shell();
-    turn(&mut sh, "let x = 3").unwrap();
-    turn(&mut sh, "let x = 'hello'").unwrap();
-    let errs = check_errors(&sh, "return $[$x + 1]");
+    turn(&mut sh, "let xv = 3").unwrap();
+    turn(&mut sh, "let xv = 'hello'").unwrap();
+    let errs = check_errors(&sh, "return $[$xv + 1]");
     assert!(
         errs.iter()
             .any(|e| e.kind.render_message().contains("couldn't match")),
-        "expected $x (now String) + 1 to mismatch, got: {:?}",
+        "expected $xv (now String) + 1 to mismatch, got: {:?}",
         errs.iter()
             .map(|e| e.kind.render_message())
             .collect::<Vec<_>>()
     );
     assert!(
-        check_errors(&sh, "!{upper $x}").is_empty(),
-        "expected String use of $x to be clean, got: {:?}",
-        check_errors(&sh, "!{upper $x}")
+        check_errors(&sh, "!{upper $xv}").is_empty(),
+        "expected String use of $xv to be clean, got: {:?}",
+        check_errors(&sh, "!{upper $xv}")
             .iter()
             .map(|e| e.kind.render_message())
             .collect::<Vec<_>>()
@@ -190,15 +190,15 @@ fn rebind_retypes_the_name() {
 #[test]
 fn failed_statement_installs_no_scheme() {
     let mut sh = shell();
-    turn(&mut sh, "let x = 1").unwrap();
+    turn(&mut sh, "let xv = 1").unwrap();
     // The bad command aborts the turn before the rebind runs.
-    let outcome = turn(&mut sh, "nonexistent-command-zz\nlet x = hello");
+    let outcome = turn(&mut sh, "nonexistent-command-zz\nlet xv = hello");
     assert!(outcome.is_err(), "the bad command must abort the turn");
-    // `x` is still Int, so Int arithmetic is clean.
+    // `xv` is still Int, so Int arithmetic is clean.
     assert!(
-        check_errors(&sh, "return $[$x + 1]").is_empty(),
-        "expected $x to keep its Int scheme after the failed rebind, got: {:?}",
-        check_errors(&sh, "return $[$x + 1]")
+        check_errors(&sh, "return $[$xv + 1]").is_empty(),
+        "expected $xv to keep its Int scheme after the failed rebind, got: {:?}",
+        check_errors(&sh, "return $[$xv + 1]")
             .iter()
             .map(|e| e.kind.render_message())
             .collect::<Vec<_>>()
@@ -214,7 +214,7 @@ fn failed_statement_installs_no_scheme() {
 #[test]
 fn pattern_binds_carry_no_scheme() {
     let mut sh = shell();
-    turn(&mut sh, "let [a, b] = [1, 2]").unwrap();
+    turn(&mut sh, "let [a, bb] = [1, 2]").unwrap();
     assert!(
         check_errors(&sh, "return $[$a + 1]").is_empty(),
         "expected pattern-bound $a to check cleanly, got: {:?}",

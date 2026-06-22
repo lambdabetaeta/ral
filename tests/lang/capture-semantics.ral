@@ -8,8 +8,8 @@ let assert_eq = { |name expected actual|
 }
 
 # Block return value: only the last command's bytes are the bound value.
-let x = !{ echo one; echo two; echo three }
-assert_eq 'block last only' three $x
+let xs = !{ echo one; echo two; echo three }
+assert_eq 'block last only' three $xs
 
 # Value-returning last command: no capture; value bound directly.
 let n = !{ echo hello; length [1, 2, 3] }
@@ -22,8 +22,8 @@ assert_eq 'higher-order capture' hello $h
 
 # to-json is a dual-channel encoder: returns Bytes, not String.
 # Roundtrip via from-json confirms the value is Bytes.
-let b = to-json [a: 42]
-let obj = !{to-bytes $b | from-json}
+let encoded = to-json [a: 42]
+let obj = !{to-bytes $encoded | from-json}
 assert_eq 'to-json returns bytes (roundtrip)' 42 $obj[a]
 
 # to-bytes: non-UTF-8 roundtrip via from-bytes.

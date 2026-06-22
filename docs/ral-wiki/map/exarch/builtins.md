@@ -44,12 +44,12 @@ Sourced into the shell at boot:
 - `window-hash rows i` — the witness: `line-hash` of the ±3 neighbours' own
   `line-hash`es, prefixed by the target's offset within the (edge-clamped) window.
   Context distinguishes repeated lines; the offset distinguishes lines in a file
-  too short for the window to shift. Shared by `view`, `grep-files`, and `edit`,
+  too short for the window to shift. Shared by `view-text`, `grep-files`, and `edit`,
   so a read and an edit always compute the same hash.
-- `view start end` — the read primitive: materialise stdin's lines, tag each in
+- `view-text start end` — the read primitive: materialise stdin's lines, tag each in
   `[start, end)` as `<line-no>\t<window-hash>\t<text>`. Bounds `< 1` fail; an empty
   range yields nothing.
-- `view-around line peek` — `view` of the `2*peek + 1` lines centred on `line`,
+- `view-text-around line peek` — `view-text` of the `2*peek + 1` lines centred on `line`,
   clamped at the top of the file.
 - `grep-files <pattern>` → `[{ file, line, text, hash }]`. Calls `_search-files`,
   groups hits by file, reads each matched file once, and stamps every hit with its

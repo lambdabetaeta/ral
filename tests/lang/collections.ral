@@ -16,15 +16,15 @@ echo $config[db][host]
 echo $config[app][workers]
 
 # Spread in maps (override then rest)
-let defaults = [host: localhost, port: 8080, workers: 4]
-let custom = [port: 9090, ...$defaults]
+let base_opts = [host: localhost, port: 8080, workers: 4]
+let custom = [port: 9090, ...$base_opts]
 echo $custom[port]
 echo $custom[host]
 
 # Spread in lists
-let a = [1, 2]
-let b = [3, 4]
-let all = [...$a, ...$b, 5]
+let xs = [1, 2]
+let ys = [3, 4]
+let all = [...$xs, ...$ys, 5]
 echo !{length $all}
 
 # Empty collections

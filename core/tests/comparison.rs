@@ -73,7 +73,7 @@ fn expect_error(source: &str, needle: &str) {
 fn equal_bytes_is_reflexive() {
     // Pre-fix: `values_equal` had no Bytes arm, so `_ => false` made a Bytes
     // value unequal to itself.
-    expect_bool("let b = !{to-bytes [65, 66]}; return !{equal $b $b}", true);
+    expect_bool("let bb = !{to-bytes [65, 66]}; return !{equal $bb $bb}", true);
     expect_bool(
         "return !{equal !{to-bytes [1, 2]} !{to-bytes [1, 3]}}",
         false,
@@ -86,18 +86,18 @@ fn equal_variants_compare_structurally() {
     // compare by label and payload, not fall to `_ => false`.  Bare-word
     // variants greedily absorb a following atom as payload, so each operand
     // is bound first to keep the two arguments separate.
-    expect_bool("let a = `ok; let b = `ok; return !{equal $a $b}", true);
-    expect_bool("let a = `ok; let b = `err; return !{equal $a $b}", false);
+    expect_bool("let a = `ok; let bb = `ok; return !{equal $a $bb}", true);
+    expect_bool("let a = `ok; let bb = `err; return !{equal $a $bb}", false);
     expect_bool(
-        "let a = `some 1; let b = `some 1; return !{equal $a $b}",
+        "let a = `some 1; let bb = `some 1; return !{equal $a $bb}",
         true,
     );
     expect_bool(
-        "let a = `some 1; let b = `some 2; return !{equal $a $b}",
+        "let a = `some 1; let bb = `some 2; return !{equal $a $bb}",
         false,
     );
     expect_bool(
-        "let a = `some 1; let b = `none; return !{equal $a $b}",
+        "let a = `some 1; let bb = `none; return !{equal $a $bb}",
         false,
     );
 }

@@ -46,8 +46,8 @@ pub fn install_agent_library(shell: &mut Shell) -> Settled<Value> {
 /// agent library is as discoverable as the prelude.
 pub(crate) fn agent_library_docs() -> Vec<(String, String)> {
     [
-        ("view", "view START END < PATH  — show the half-open line range [START, END), each line tagged `<line-no>\\t<hash>\\t<text>`; the hash is the ±3-context witness `edit` checks."),
-        ("view-around", "view-around LINE PEEK < PATH  — show the 2*PEEK+1 lines centred on LINE, tagged like `view`, clamped at the top of the file."),
+        ("view-text", "view-text START END < PATH  — show the half-open line range [START, END), each line tagged `<line-no>\\t<hash>\\t<text>`; the hash is the ±3-context witness `edit` checks."),
+        ("view-text-around", "view-text-around LINE PEEK < PATH  — show the 2*PEEK+1 lines centred on LINE, tagged like `view-text`, clamped at the top of the file."),
     ]
     .into_iter()
     .map(|(n, d)| (n.to_string(), d.to_string()))
@@ -67,7 +67,7 @@ fn line_hash(line: &str) -> String {
 
 /// Expose `line_hash` to ral.  This is the only irreducibly-Rust part
 /// of the read/edit surface: numbering, slicing, and tagging compose in
-/// the prelude (`view`), but the Blake3 digest cannot.
+/// the prelude (`view-text`), but the Blake3 digest cannot.
 fn builtin_line_hash(args: &[Value], _shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "line-hash")?;
     Ok(Value::String(line_hash(&args[0].to_string())))
@@ -103,7 +103,7 @@ fn rows_of(body: &str) -> Vec<String> {
     body.split('\n').map(str::to_string).collect()
 }
 
-/// Expose [`window_hash`] to ral: `window-hash ROWS I`.  `view` (still ral)
+/// Expose [`window_hash`] to ral: `window-hash ROWS I`.  `view-text` (still ral)
 /// stamps each line it shows through this, so a read hands back the witness
 /// `edit` checks.
 fn builtin_window_hash(args: &[Value], _shell: &mut Shell) -> Settled<Value> {
@@ -334,7 +334,7 @@ fn builtin_edit(args: &[Value], shell: &mut Shell) -> Settled<Value> {
         match idxs.len() {
             0 => {
                 return Err(sig(format!(
-                    "edit: no line in {path} hashes to {want} — did the file change? Re-read with view/grep-files before editing."
+                    "edit: no line in {path} hashes to {want} — did the file change? Re-read with view-text/grep-files before editing."
                 )));
             }
             1 => resolved.push(ResolvedEdit { at: idxs[0], new }),
@@ -637,13 +637,13 @@ pub static EXARCH_BUILTINS: &[BuiltinEntry] = &[
     BuiltinEntry {
         name: Cow::Borrowed("line-hash"),
         type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_line_hash),
-        doc: "line-hash <s>  — content hash of a line (an `h` tag plus six hex, trailing whitespace ignored); the witness `view` shows and `edit` checks.",
+        doc: "line-hash <s>  — content hash of a line (an `h` tag plus six hex, trailing whitespace ignored); the witness `view-text` shows and `edit` checks.",
         body: BuiltinBody::Static(builtin_line_hash),
     },
     BuiltinEntry {
         name: Cow::Borrowed("window-hash"),
         type_rule: BuiltinTypeRule::Scheme(Some(2), scheme_window_hash),
-        doc: "window-hash <rows> <i>  — the witness for line i (0-indexed) of the line list ROWS: the line-hash of the ±3 surrounding lines' line-hashes, prefixed with the target's offset. What `view` shows and `edit` checks; folding in context distinguishes repeated lines without a position.",
+        doc: "window-hash <rows> <i>  — the witness for line i (0-indexed) of the line list ROWS: the line-hash of the ±3 surrounding lines' line-hashes, prefixed with the target's offset. What `view-text` shows and `edit` checks; folding in context distinguishes repeated lines without a position.",
         body: BuiltinBody::Static(builtin_window_hash),
     },
     BuiltinEntry {

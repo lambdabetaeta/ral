@@ -933,7 +933,7 @@ mod tests {
     /// just the core set a bare `Shell::new` seeds.  The exarch host builtins
     /// (`window-hash` and friends) live in the session's dispatch table,
     /// outside `mobile`, so without `adopt_builtins_from` the child's ral
-    /// `view`/`edit` helpers would call into nothing and fall back to a
+    /// `view-text`/`edit` helpers would call into nothing and fall back to a
     /// failed PATH lookup.
     #[test]
     fn fork_inherits_host_builtins() {

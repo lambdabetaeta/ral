@@ -106,7 +106,7 @@ fn try_does_not_swallow_exit() {
 ///
 /// The repro is the exact program from the fix commit's body: `f` runs
 /// `cd /tmp` only when `$n <= 0`, so depth >= 1 is needed to make the
-/// check fall on a non-initial iteration of the trampoline.  `g 2` runs
+/// check fall on a non-initial iteration of the trampoline.  `gg 2` runs
 /// `f 2 -> f 1 -> f 0`, and the final `cd /tmp` must be denied by the
 /// outer `grant`.
 ///
@@ -118,8 +118,8 @@ fn grant_attenuates_across_tail_recursion() {
     let mut shell = fresh_shell();
     let src = "\
 let f = { |n| if $[$n <= 0] { cd /tmp } else { f $[$n - 1] } }\n\
-let g = { |n| grant [shell: [chdir: false]] { f $n } }\n\
-g 2";
+let gg = { |n| grant [shell: [chdir: false]] { f $n } }\n\
+gg 2";
     let result = top_level(&mut shell, src);
     match result {
         Err(Break::Error(e)) => {
@@ -252,7 +252,7 @@ fn pipeline_non_final_stage_is_not_tail_emitting() {
     let mut shell = fresh_shell();
     let _ = top_level(&mut shell, "let f = { |x| $[$x + 1] }");
     let top = int_result(&mut shell, "f 1 | f");
-    let in_fn = int_result(&mut shell, "let g = { |y| f $y | f }\n!{g 1}");
+    let in_fn = int_result(&mut shell, "let gg = { |y| f $y | f }\n!{gg 1}");
     assert_eq!(top, 3, "top-level `f 1 | f` must apply f twice");
     assert_eq!(
         in_fn, top,
@@ -276,7 +276,7 @@ fn chain_non_final_arm_failure_is_catchable() {
     let _ = top_level(&mut shell, "let f = { |x| fail \"boom\" }");
     // The non-final arm `f $y` fails; the fallback `return 7` must run,
     // so the chain's value is 7 rather than the propagated error.
-    let in_fn = top_level(&mut shell, "let g = { |y| f $y ? return 7 }\n!{g 1}");
+    let in_fn = top_level(&mut shell, "let gg = { |y| f $y ? return 7 }\n!{gg 1}");
     match in_fn {
         Ok(Value::Int(7)) => {}
         Ok(other) => panic!(

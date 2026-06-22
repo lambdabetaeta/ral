@@ -47,8 +47,8 @@ echo "[$result]"
 # Expected: [hello] (no trailing newline)
 
 # from-line strips trailing newline
-let b = printf "hello\n"
-let s = from-line $b
+let raw = printf "hello\n"
+let s = from-line $raw
 if $[not !{equal $s "hello"}] { fail [status: 1] }
 echo "from-line: $s"
 # Expected: from-line: hello

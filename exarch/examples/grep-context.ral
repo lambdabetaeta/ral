@@ -9,7 +9,7 @@
 # records from a recursive walk of cwd.  The bash post-grep dance is
 # to re-parse `file:line:text` back into pieces; here the pieces
 # never left, and `line` plus `hash` are ready to feed an edit.
-# `view-around` reads stdin centred on a given 1-based line —
+# `view-text-around` reads stdin centred on a given 1-based line —
 # composing them is one loop, no parsing.
 
 if !{is-empty $args} {
@@ -30,7 +30,7 @@ within [dir: $where] {
 
     for $hits { |h|
         echo "!{styled $ansi-cyan "==> $h[file]:$h[line]"}"
-        view-around $h[line] 2 < $h[file]
+        view-text-around $h[line] 2 < $h[file]
         echo ''
     }
 }

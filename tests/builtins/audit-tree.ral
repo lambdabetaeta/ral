@@ -26,15 +26,15 @@ let outer = audit {
 echo $outer[status]
 
 # grant nests its body's audit events as children (§10.3)
-let g = audit { grant [exec: [echo: []], audit: true] { echo 'inside' } }
-let grant_node = $g[children][0]
+let grant_report = audit { grant [exec: [echo: []], audit: true] { echo 'inside' } }
+let grant_node = $grant_report[children][0]
 echo $grant_node[cmd]
 echo !{length $grant_node[children]}
 echo $grant_node[children][0][cmd]
 
 # within nests its body's audit events as children
-let w = audit { within [dir: '/tmp'] { echo 'inside' } }
-let within_node = $w[children][0]
+let within_report = audit { within [dir: '/tmp'] { echo 'inside' } }
+let within_node = $within_report[children][0]
 echo $within_node[cmd]
 echo !{length $within_node[children]}
 

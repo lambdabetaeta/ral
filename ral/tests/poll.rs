@@ -26,8 +26,8 @@ fn poll_settled_carries_value_and_stdout() {
         r#"
         let h = spawn { echo done-here; 42 }
         sleep 0.2
-        let p = poll $h
-        case $p [
+        let polled = poll $h
+        case $polled [
             `settled: { |s|
                 case $s[outcome] [
                     `ok: { |v| echo "value=$v" },
@@ -50,8 +50,8 @@ fn poll_pending_while_running() {
     let out = run_poll(
         r#"
         let h = spawn { sleep 2; return 1 }
-        let p = poll $h
-        case $p [
+        let polled = poll $h
+        case $polled [
             `settled: { |_| echo unexpected-settled },
             `pending: { |_| echo pending }
         ]
@@ -72,8 +72,8 @@ fn poll_settled_err_carries_status_and_stderr() {
         r#"
         let h = spawn { /bin/sh -c "echo before-fail >&2; exit 7" }
         sleep 0.2
-        let p = poll $h
-        case $p [
+        let polled = poll $h
+        case $polled [
             `settled: { |s|
                 case $s[outcome] [
                     `ok: { |_| echo unexpected-ok },

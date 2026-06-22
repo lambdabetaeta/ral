@@ -28,8 +28,8 @@ rm $path
 # fold-lines also takes `<file` through the same channel.
 let lines_path = '/tmp/ral-stdin-redirect-lines.txt'
 to-lines [a, b, c] >~ $lines_path
-let last = fold-lines { |_ line| $line } '' < $lines_path
-assert_eq 'fold-lines last' c $last
+let last_line = fold-lines { |_ line| $line } '' < $lines_path
+assert_eq 'fold-lines last' c $last_line
 
 rm $lines_path
 

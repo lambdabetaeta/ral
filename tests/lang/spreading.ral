@@ -25,8 +25,8 @@ echo $zs
 echo $xs
 
 # Spread in map literal (explicit entries take priority)
-let defaults = [host: localhost, port: 8080]
-let config = [port: 9090, ...$defaults]
+let base_opts = [host: localhost, port: 8080]
+let config = [port: 9090, ...$base_opts]
 echo $config[port]
 echo $config[host]
 

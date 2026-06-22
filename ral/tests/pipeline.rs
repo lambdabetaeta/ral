@@ -913,7 +913,7 @@ fn to_bytes_rejects_non_int_values() {
 #[test]
 fn ext_command_result_is_string_not_bytes() {
     // External command captures decode to String, one trailing \n stripped.
-    let o = run("let x = printf 'hello\\n'\necho $x");
+    let o = run("let xv = printf 'hello\\n'\necho $xv");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "hello");
 }
@@ -921,7 +921,7 @@ fn ext_command_result_is_string_not_bytes() {
 #[test]
 fn ext_command_single_newline_stripped() {
     // One trailing \n stripped; a second \n is preserved.
-    let o = run("let x = printf 'a\\n\\n'\necho $x");
+    let o = run("let xv = printf 'a\\n\\n'\necho $xv");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout, "a\n\n");
 }
@@ -929,7 +929,7 @@ fn ext_command_single_newline_stripped() {
 #[test]
 fn ext_command_non_utf8_gives_named_error() {
     // Invalid UTF-8 output from an external command is a runtime error.
-    let o = run("let x = /usr/bin/printf '\\377'");
+    let o = run("let xv = /usr/bin/printf '\\377'");
     assert_ne!(o.status, 0, "expected failure on non-UTF-8 output");
     assert!(
         o.stderr.contains("returned bytes that are not valid UTF-8"),
@@ -946,7 +946,7 @@ fn ext_command_non_utf8_gives_named_error() {
 #[test]
 fn read_lines_from_stdin() {
     let o = run_with_stdin(
-        "let ls = !{from-lines}\nlet ls = !{stream-to-list $ls}\necho !{length $ls}",
+        "let listing = !{from-lines}\nlet listing = !{stream-to-list $listing}\necho !{length $listing}",
         b"one\ntwo\nthree\n",
     );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
@@ -1280,7 +1280,7 @@ fn grant_fs_capture_returns_output() {
         return;
     }
     let o = run(
-        "let x = grant [exec: ['/bin/echo': []], fs: [read: ['/tmp']]] { let s = !{/bin/echo captured | from-lines}; stream-to-list $s }; echo $x[0]",
+        "let xv = grant [exec: ['/bin/echo': []], fs: [read: ['/tmp']]] { let s = !{/bin/echo captured | from-lines}; stream-to-list $s }; echo $xv[0]",
     );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "captured");
@@ -1323,7 +1323,7 @@ fn grant_fs_pipeline_stdin_forwarded() {
         return;
     }
     let o = run(
-        "let x = /bin/echo piped | grant [fs: [read: ['/tmp']]] { let s = !{from-lines}; stream-to-list $s }; echo $x[0]",
+        "let xv = /bin/echo piped | grant [fs: [read: ['/tmp']]] { let s = !{from-lines}; stream-to-list $s }; echo $xv[0]",
     );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "piped");
@@ -1387,14 +1387,14 @@ fn pipeline_external_stage_expands_empty_spread_to_zero_args() {
     // so `...$xs` with an empty list became a single "" argv entry — and
     // trailing `""` confused commands like fzf ("unknown option:").
     // analyze_stage must expand spreads the same way eval_call_args does.
-    let o = run("let e = []; echo hi | /usr/bin/printf '[%s]\\n' --flag '' ...$e");
+    let o = run("let ee = []; echo hi | /usr/bin/printf '[%s]\\n' --flag '' ...$ee");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout, "[--flag]\n[]\n");
 }
 
 #[test]
 fn pipeline_external_stage_expands_nonempty_spread() {
-    let o = run("let e = ['-n', 'hello']; echo hi | /usr/bin/printf '[%s]\\n' --flag ...$e");
+    let o = run("let ee = ['-n', 'hello']; echo hi | /usr/bin/printf '[%s]\\n' --flag ...$ee");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout, "[--flag]\n[-n]\n[hello]\n");
 }
@@ -1467,7 +1467,7 @@ fn block_return_captures_only_last_command() {
     // The block's return value is the last command's bytes decoded — not a
     // concatenation of all commands' output.  Non-final bytes flush to stdout
     // (the outer stream), so the final `echo` of `$x` shows `[three]` last.
-    let o = run("let x = !{ echo one; echo two; echo three }\necho \"[$x]\"");
+    let o = run("let xv = !{ echo one; echo two; echo three }\necho \"[$xv]\"");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     let last = o.stdout.trim().lines().last().unwrap_or("");
     assert_eq!(last, "[three]", "full stdout: {:?}", o.stdout);
@@ -1477,7 +1477,7 @@ fn block_return_captures_only_last_command() {
 fn block_non_final_bytes_reach_terminal() {
     // Non-final commands in a captured block flush their bytes to the outer
     // stdout (the terminal) so side-effects are visible.
-    let o = run("let x = !{ echo log; echo result }\necho \"x=$x\"");
+    let o = run("let xv = !{ echo log; echo result }\necho \"x=$xv\"");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert!(
         o.stdout.contains("log"),
@@ -1495,7 +1495,7 @@ fn block_non_final_bytes_reach_terminal() {
 fn higher_order_capture() {
     // Call-site mode instantiation: the higher-order function's Var output mode
     // is resolved to Bytes from the argument thunk's syntactic mode.
-    let o = run("let f = { |cmd| !$cmd }\nlet x = f { printf hello }\necho \"[$x]\"");
+    let o = run("let f = { |cmd| !$cmd }\nlet xv = f { printf hello }\necho \"[$xv]\"");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "[hello]");
 }
@@ -1506,7 +1506,7 @@ fn to_json_returns_bytes() {
     // AND returns those bytes as a Bytes value.  In let position, the Bytes
     // value is bound directly (not decoded to String).  Verify by roundtripping
     // through from-json — route the Bytes value via to-bytes (emit-stage).
-    let o = run("let b = to-json [a: 1]\nlet obj = !{to-bytes $b | from-json}\necho $obj[a]");
+    let o = run("let bb = to-json [a: 1]\nlet obj = !{to-bytes $bb | from-json}\necho $obj[a]");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "1");
 }
@@ -1515,7 +1515,7 @@ fn to_json_returns_bytes() {
 fn to_bytes_non_utf8_succeeds() {
     // to-bytes returns Bytes, not String — so non-UTF-8 byte sequences
     // are not passed through String::from_utf8 and do not produce an error.
-    let o = run("let b = to-bytes [255, 0, 254]\necho !{length $b}");
+    let o = run("let bb = to-bytes [255, 0, 254]\necho !{length $bb}");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "3");
 }
@@ -1525,7 +1525,7 @@ fn to_json_via_user_wrapper() {
     // to-json is a primitive; users who want a first-class handle wrap it
     // in a block.  Roundtrip: encode → bytes → decode.
     let o = run(
-        "let f = { |v| to-json $v }\nlet b = !{f [a: 42]}\nlet obj = !{to-bytes $b | from-json}\necho $obj[a]",
+        "let f = { |v| to-json $v }\nlet bb = !{f [a: 42]}\nlet obj = !{to-bytes $bb | from-json}\necho $obj[a]",
     );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "42");
@@ -1537,7 +1537,7 @@ fn block_mixed_modes_returns_value() {
     // is installed; the value is bound directly.  Preceding byte-output
     // commands' output goes to the terminal as a side-effect (visible in stdout
     // since the test harness captures ral's stdout).
-    let o = run("let x = !{ echo hello; length [1, 2, 3] }\necho $x");
+    let o = run("let xv = !{ echo hello; length [1, 2, 3] }\necho $xv");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     // "hello" appears from the non-captured echo; "3" appears from echo $x.
     let last = o.stdout.trim().lines().last().unwrap_or("");

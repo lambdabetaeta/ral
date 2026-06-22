@@ -401,8 +401,8 @@ fn bindings_persist_across_tool_calls() {
     let provider = scripted(
         "test-model",
         Script::new()
-            .then(Reply::tool_calls(vec![ral_call("c1", "let x = 41")]))
-            .then(Reply::tool_calls(vec![ral_call("c2", "echo $[$x + 1]")]))
+            .then(Reply::tool_calls(vec![ral_call("c1", "let xv = 41")]))
+            .then(Reply::tool_calls(vec![ral_call("c2", "echo $[$xv + 1]")]))
             .then(Reply::text("done")),
     );
 

@@ -16,7 +16,7 @@ The witness has two parts ([[map/exarch/builtins|builtins]] is the *where*):
 `line_hash` of the concatenated `line_hash`es of the lines in `[i-3, i+3]`,
 prefixed by the target's offset within that window. `line_hash` itself is the
 letter `h` followed by six hex characters (24 bits) of a Blake3 digest of one
-line with trailing whitespace stripped. `view`, `view-around`, and `grep-files`
+line with trailing whitespace stripped. `view-text`, `view-text-around`, and `grep-files`
 emit the window-hash beside the 1-indexed line number, so a read result already
 carries the argument shape `edit` expects.
 
@@ -83,7 +83,7 @@ filesystem checks.
 irreducible pieces — `line-hash` (one Blake3 digest), `_search-files` (the
 ignore-aware ripgrep walk, returning `[file, line, text]` with no witness;
 `_`-prefixed so `help` hides it), and `explore-dir`. `window-hash` composes
-`line-hash` over a slice; `view` and `edit` compute it directly; `grep-files`
+`line-hash` over a slice; `view-text` and `edit` compute it directly; `grep-files`
 reads each matched file once and stamps `_search-files`'s hits with it. The same `window-hash` is shared by all three, so
 a read and an edit always agree. This keeps exarch's
 [[design/exarch-architecture|thin architecture]]: editing is source ral over a

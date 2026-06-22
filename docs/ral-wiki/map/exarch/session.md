@@ -99,9 +99,9 @@ stack and mirrors as `Kind::Born` / `Kind::Died` on the bus.
 Routing the fork through core matters because the builtin table is the easiest
 thing to drop. The exarch host builtins — `window-hash`, `grep-files`, `edit`,
 `explore-dir`, `line-hash` ([[map/exarch/shell-eval|agent_builtins]]) — live in
-the session's dispatch table, *outside* `Mobile`, and the `view` / `view-around`
+the session's dispatch table, *outside* `Mobile`, and the `view-text` / `view-text-around`
 helpers in `agent.ral` call `window-hash`. A fork that copied only `mobile.scope`
-and `mobile.context` would leave the child's `view` resolving to nothing and
+and `mobile.context` would leave the child's `view-text` resolving to nothing and
 falling through to a failed PATH lookup. `fork_session` copies `session.builtins`
 as part of the flow matrix, so the decision lives in one place and the table
 cannot be silently severed at this call site.

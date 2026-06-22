@@ -19,9 +19,9 @@ echo !{to-bytes $r[stdout] | from-string}
 
 # Multiple spawns
 let a = spawn { echo alpha }
-let b = spawn { echo beta }
+let beta_h = spawn { echo beta }
 let ra = await $a
-let rb = await $b
+let rb = await $beta_h
 echo !{to-bytes $ra[stdout] | from-string} !{to-bytes $rb[stdout] | from-string}
 # Expected: alpha beta
 

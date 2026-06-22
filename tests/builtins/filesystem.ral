@@ -7,8 +7,8 @@ echo $content
 # Expected: hello
 
 # file size via file-info
-let size = !{file-info /tmp/ral-fs-test.txt}[size]
-echo $size
+let filesz = !{file-info /tmp/ral-fs-test.txt}[size]
+echo $filesz
 # Expected: 6 (hello + newline)
 
 # line-count
@@ -29,19 +29,19 @@ rm /tmp/ral-fs-test.txt /tmp/ral-fs-lines.txt
 
 # write file via to-string > path
 to-string 'hello from write' > /tmp/ral-write-test.txt
-let wc = !{from-string < /tmp/ral-write-test.txt}
-echo $wc
+let written = !{from-string < /tmp/ral-write-test.txt}
+echo $written
 
 # cp (bundled coreutils, sandboxed via the capability-checked dispatch)
 cp /tmp/ral-write-test.txt /tmp/ral-copy-test.txt
-let cc = !{from-string < /tmp/ral-copy-test.txt}
-echo $cc
+let copied = !{from-string < /tmp/ral-copy-test.txt}
+echo $copied
 
 # mv
 mv /tmp/ral-copy-test.txt /tmp/ral-move-test.txt
 if $[not !{exists /tmp/ral-copy-test.txt}] { echo 'mv ok' }
-let mc = !{from-string < /tmp/ral-move-test.txt}
-echo $mc
+let moved = !{from-string < /tmp/ral-move-test.txt}
+echo $moved
 
 # mkdir -p
 mkdir -p /tmp/ral-mkdir-test/sub
@@ -50,9 +50,9 @@ if !{is-dir /tmp/ral-mkdir-test/sub} { echo 'mkdir ok' }
 # list-dir (structured query — primitive, returns a value)
 let entries = list-dir /tmp/ral-mkdir-test
 if $[!{length $entries} == 1] { echo 'list-dir ok' }
-let e = $entries[0]
-echo $e[name]
-echo $e[type]
+let entry = $entries[0]
+echo $entry[name]
+echo $entry[type]
 
 # rm (regular file)
 rm /tmp/ral-write-test.txt /tmp/ral-move-test.txt

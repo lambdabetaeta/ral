@@ -416,8 +416,8 @@ fn poll_settled_after_completion_carries_the_value() {
         &mut shell,
         "let h = !{spawn { return 42 }}\n\
          let _ = await $h\n\
-         let p = poll $h\n\
-         case $p [`settled: { |s| case $s[outcome] [`ok: { |v| return $v }, `err: { |_| return -2 }] }, `pending: { |_| return -1 }]",
+         let polled = poll $h\n\
+         case $polled [`settled: { |s| case $s[outcome] [`ok: { |v| return $v }, `err: { |_| return -2 }] }, `pending: { |_| return -1 }]",
     )
     .expect("poll a settled handle");
     assert_eq!(result, Value::Int(42));
@@ -433,8 +433,8 @@ fn poll_pending_on_a_running_block() {
     let result = top_level(
         &mut shell,
         "let h = !{spawn { sleep 30 }}\n\
-         let p = poll $h\n\
-         let pending = case $p [`settled: { |_| return false }, `pending: { |_| return true }]\n\
+         let polled = poll $h\n\
+         let pending = case $polled [`settled: { |_| return false }, `pending: { |_| return true }]\n\
          cancel $h\n\
          return $pending",
     )
@@ -454,9 +454,9 @@ fn poll_then_await_returns_the_cached_record() {
         "let h = !{spawn { return 7 }}\n\
          let _ = await $h\n\
          let sampled = poll $h\n\
-         let p = case $sampled [`settled: { |s| case $s[outcome] [`ok: { |v| return $v }, `err: { |_| return -2 }] }, `pending: { |_| return -1 }]\n\
+         let polled = case $sampled [`settled: { |s| case $s[outcome] [`ok: { |v| return $v }, `err: { |_| return -2 }] }, `pending: { |_| return -1 }]\n\
          let r = await $h\n\
-         return $[$p + $r[value]]",
+         return $[$polled + $r[value]]",
     )
     .expect("poll then await");
     assert_eq!(result, Value::Int(14));
@@ -575,9 +575,9 @@ fn forced_block_keeps_caller_status_when_body_sets_none() {
 #[test]
 fn lambda_folds_back_body_status() {
     let mut shell = fresh_shell();
-    top_level(&mut shell, "let g = { |_| return $[1 == 2] }").expect("define g");
+    top_level(&mut shell, "let gg = { |_| return $[1 == 2] }").expect("define gg");
     shell.set_last_status(5);
-    top_level(&mut shell, "g unit").expect("call g");
+    top_level(&mut shell, "gg unit").expect("call gg");
     assert_eq!(
         shell.last_status(), 1,
         "the lambda body's status (1, from a false comparison) folds back, \

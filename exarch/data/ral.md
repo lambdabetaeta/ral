@@ -133,7 +133,7 @@ Arithmetic and Boolean expressions must be in `$[…]` blocks: `$[$x == 0]`, `$[
     let at_end = [d, e, ...$xs]        # appending by spreading
     ls ...$flags ...$dirs              # …and to splice arguments
 
-Indexing `$h[key]` works in any context (pipelines, blocks, double quoted): e.g. `view-around $h[line] 3 < $h[file]`.
+Indexing `$h[key]` works in any context (pipelines, blocks, double quoted): e.g. `view-text-around $h[line] 3 < $h[file]`.
 
 A *map* is the homogeneous cousin (all values one type); only maps support `keys`, `values`, `has`, `get` (with default), `union`, `entries`. `[:]` is the empty map. 
 
@@ -270,14 +270,14 @@ Prefer these to external `rg`/`find`/`ls`: each returns a ral list or record ins
 
 ## Reading and editing files
 
-- `view START END < PATH` shows the half-open line range `[START, END)`, each line tagged `<line-no>\t<hash>\t<text>`. Pipe from anything: `git show HEAD:f.rs | view 100 150`.
-- `view-around LINE PEEK < PATH` shows the `2*PEEK + 1` lines centred on `LINE`, tagged the same way.
+- `view-text START END < PATH` shows the half-open line range `[START, END)`, each line tagged `<line-no>\t<hash>\t<text>`. Pipe from anything: `git show HEAD:f.rs | view-text 100 150`.
+- `view-text-around LINE PEEK < PATH` shows the `2*PEEK + 1` lines centred on `LINE`, tagged the same way.
 
-The hash is a freshness witness: it identifies the line by its content and neighbourhood. Every `view`, `view-around`, and `grep-files` line carries it, as it is required to edit.
+The hash is a freshness witness: it identifies the line by its content and neighbourhood. Every `view-text`, `view-text-around`, and `grep-files` line carries it, as it is required to edit.
 
 `edit PATH EDITS` applies a batch of `[HASH, NEW-TEXT]` pairs in one read/write pass. Each pair rewrites or deletes one witnessed line; `NEW-TEXT` is verbatim, so a real newline splits a line and `\n` does not. Raw `#'…'#` is only for replacements containing `'`; never double quotes, which interpolate. All hashes resolve against the file as read before any write, so adjacent edits are safe and the batch is atomic.
 
-    view 80 120 < src/lib.rs
+    view-text 80 120 < src/lib.rs
     edit 'src/lib.rs' [
       [h1b2c3, '    let n = 42
         let scaled = n * 2'],
@@ -289,7 +289,7 @@ The hash is a freshness witness: it identifies the line by its content and neigh
     let mine = filter { |h| equal $h[file] 'src/lib.rs' } $hits
     edit 'src/lib.rs' !{map { |h| [$h[hash], '    // resolved'] } $mine}
 
-If `edit` reports zero or multiple matches, nothing was written: re-read with `view`/`grep-files` and use the fresh witnesses, never the stale ones.
+If `edit` reports zero or multiple matches, nothing was written: re-read with `view-text`/`grep-files` and use the fresh witnesses, never the stale ones.
 
 ## Surfacing
 
@@ -317,7 +317,7 @@ A `` `card `` may stack marks of different kinds, but within one homogeneous lis
 When you are unsure of the signature of something you always call `help <name>`. This can be done as part of a turn:
 
     let h = spawn { audit { make } }
-    let x = help 'view-around'
-    [view-around-help: $x]
+    let x = help 'view-text-around'
+    [view-text-around-help: $x]
 
 Many builtins are not covered above; call `help` on any of: `ask`, `watch`, `alias`/`unalias`, `source`, `use`, `shell-quote`/`shell-split`, `upper`/`lower`/`slice`, `str`, `re-split`/`re-find-match`/`re-find-matches`/`re-replace`, `resolve-path`/`cwd`/`cd`/`temp-dir`/`temp-file`, `is-link`/`is-readable`/`is-writable`/`is-empty`, `fold-lines`, `clear`/`reset`, `reduce`, `last`, `take-while`/`drop-while`, `words`, `intersection`/`difference`, `stream-cons`/`stream-nil`/`stream-take`/`stream-drop`, `map-lines`/`filter-lines`/`each-line`, `file-empty`, `par`, `ansi-…`/`styled`.

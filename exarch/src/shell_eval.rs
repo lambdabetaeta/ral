@@ -293,7 +293,7 @@ pub fn run_shell(
 
     let value_str = match value {
         // A top-level string is the result of stringly tools like
-        // `view`; JSON-encoding it would escape every newline as `\n`,
+        // `view-text`; JSON-encoding it would escape every newline as `\n`,
         // which the model then reads as literal backslash-n.  Pass the
         // raw text through.  Structured values go through pretty JSON so
         // the shape is legible, with byte fields decoded as lossy UTF-8
@@ -410,8 +410,8 @@ mod tests {
         }
     }
 
-    /// `view` is the one read primitive: a sourced prelude pipeline over
-    /// the `line-hash` builtin plus coreutils.  `echo "alpha" | view 1 2`
+    /// `view-text` is the one read primitive: a sourced prelude pipeline over
+    /// the `line-hash` builtin plus coreutils.  `echo "alpha" | view-text 1 2`
     /// must number the line and tag it with its content hash, which means
     /// `line-hash` dispatches as a builtin rather than falling through to
     /// an external-command exec lookup ("command 'line-hash' not found on
@@ -420,11 +420,11 @@ mod tests {
     #[test]
     fn view_tags_lines_with_hash() {
         let mut shell = fresh_shell();
-        let r = run_once(&mut shell, "echo \"alpha\" | view 1 2");
+        let r = run_once(&mut shell, "echo \"alpha\" | view-text 1 2");
         assert_eq!(
             r.exit,
             0,
-            "view must run; stderr was: {}",
+            "view-text must run; stderr was: {}",
             String::from_utf8_lossy(&r.stderr)
         );
         let out = String::from_utf8_lossy(&r.stdout);
@@ -537,7 +537,7 @@ mod tests {
     }
 
     /// Exarch sources agent helpers at boot and registers the Rust
-    /// atoms they depend on as host builtins.  `view` / `view-around` are
+    /// atoms they depend on as host builtins.  `view-text` / `view-text-around` are
     /// source-loaded ral names (in `mobile.scope`); `window-hash` /
     /// `grep-files` / `edit` are now host builtins (reachable by name via the
     /// builtin registry, not bound in lexical scope).  This test also locks in
@@ -545,8 +545,8 @@ mod tests {
     #[test]
     fn agent_helpers_are_loaded_into_tool_shell() {
         let mut shell = fresh_shell();
-        assert!(shell.scope_lookup("view").is_some());
-        assert!(shell.scope_lookup("view-around").is_some());
+        assert!(shell.scope_lookup("view-text").is_some());
+        assert!(shell.scope_lookup("view-text-around").is_some());
         for builtin in ["window-hash", "grep-files", "edit"] {
             assert!(
                 shell.lookup_value_name(builtin).is_some(),
@@ -614,8 +614,8 @@ target
             &mut shell,
             &format!(
                 "let rows = _rows !{{from-string < '{repeated_str}'}}\n\
-                 let w = window-hash $rows 1\n\
-                 edit '{repeated_str}' [[$w, 'FIRST']]"
+                 let wh = window-hash $rows 1\n\
+                 edit '{repeated_str}' [[$wh, 'FIRST']]"
             ),
         );
         assert_eq!(
@@ -648,8 +648,8 @@ target
             &mut shell,
             &format!(
                 "let rows = _rows !{{from-string < '{run_str}'}}\n\
-                 let w = window-hash $rows 5\n\
-                 edit '{run_str}' [[$w, 'Z']]"
+                 let wh = window-hash $rows 5\n\
+                 edit '{run_str}' [[$wh, 'Z']]"
             ),
         );
         let _ = std::fs::remove_dir_all(&tmp);
@@ -692,8 +692,8 @@ keep-bottom
             &mut shell,
             &format!(
                 "let rows = _rows !{{from-string < '{path_str}'}}\n\
-                 let a = window-hash $rows 1\n\
-                 edit '{path_str}' [[$a, 'X'], ['hzzzzzz', 'Y']]"
+                 let h1 = window-hash $rows 1\n\
+                 edit '{path_str}' [[$h1, 'X'], ['hzzzzzz', 'Y']]"
             ),
         );
         assert_ne!(poisoned.exit, 0, "a batch with a stale hash must fail");
@@ -709,10 +709,10 @@ keep-bottom
             &mut shell,
             &format!(
                 "let rows = _rows !{{from-string < '{path_str}'}}\n\
-                 let a = window-hash $rows 1\n\
-                 let b = window-hash $rows 2\n\
-                 let c = window-hash $rows 3\n\
-                 edit '{path_str}' [[$a, 'REPLACED'], [$b, ''], [$c, 'X\nY']]"
+                 let h1 = window-hash $rows 1\n\
+                 let h2 = window-hash $rows 2\n\
+                 let h3 = window-hash $rows 3\n\
+                 edit '{path_str}' [[$h1, 'REPLACED'], [$h2, ''], [$h3, 'X\nY']]"
             ),
         );
         let after = std::fs::read_to_string(&path).expect("read after clean batch");
@@ -811,8 +811,8 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
     }
 
     /// Regression: a witness hash that happens to read as a number must
-    /// still round-trip from `view` into `edit`. The agent copies the hash
-    /// out of a `view` result and types it as a *bare* `edit` argument, so
+    /// still round-trip from `view-text` into `edit`. The agent copies the hash
+    /// out of a `view-text` result and types it as a *bare* `edit` argument, so
     /// an all-digit hash like `152347` lexes as an `Int` while the hash
     /// `edit` recomputes is a `String`; the witness check then rejects a
     /// correct hash and the agent loops forever re-issuing the same edit.
@@ -822,7 +822,7 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
     #[cfg(unix)]
     #[test]
     fn edit_accepts_numeric_witness_hash() {
-        // The witness `view` shows is the `window-hash`, not the bare line
+        // The witness `view-text` shows is the `window-hash`, not the bare line
         // digest, so mirror that computation here to search for an all-digit
         // one. For a file written as "{content}\n" the line list is
         // [content, ""]; line 1 (index 0) saturates the window to the whole
@@ -860,12 +860,12 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
             std::fs::write(&path, format!("{content}\n")).expect("write witness fixture");
             let path_str = display_no_trailing_sep(&path);
 
-            // Read the witness exactly as the agent would: from `view`.
-            let vr = run_once(&mut shell, &format!("view 1 2 < '{path_str}'"));
+            // Read the witness exactly as the agent would: from `view-text`.
+            let vr = run_once(&mut shell, &format!("view-text 1 2 < '{path_str}'"));
             assert_eq!(
                 vr.exit,
                 0,
-                "view must read the fixture; stderr was: {}",
+                "view-text must read the fixture; stderr was: {}",
                 String::from_utf8_lossy(&vr.stderr)
             );
             let stdout = String::from_utf8_lossy(&vr.stdout);
@@ -873,7 +873,7 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
             let witness = row
                 .split('\t')
                 .nth(1)
-                .expect("view row tags a hash")
+                .expect("view-text row tags a hash")
                 .trim()
                 .to_string();
 
@@ -1568,8 +1568,8 @@ return !{{length $hits}}"#
         assert_eq!(status.text, "0");
     }
 
-    /// `view` is a ral closure that reads stdin, NOT an external image: a
-    /// `view 1 2 < a` reads its input through the `<` redirect, so the door
+    /// `view-text` is a ral closure that reads stdin, NOT an external image: a
+    /// `view-text 1 2 < a` reads its input through the `<` redirect, so the door
     /// raises one READ card and no exec card — the closure dispatches in
     /// process, never spawning a command.
     #[cfg(unix)]
@@ -1579,12 +1579,12 @@ return !{{length $hits}}"#
         let mut shell = fresh_shell();
         let (dir, path) = scratch_file("cov-view", "a", "alpha\nbeta\ngamma\n");
 
-        let (r, kinds) = run_capturing(&mut shell, &format!("view 1 2 < '{path}'"));
+        let (r, kinds) = run_capturing(&mut shell, &format!("view-text 1 2 < '{path}'"));
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
             r.exit,
             0,
-            "view must read the fixture; stderr was {:?}",
+            "view-text must read the fixture; stderr was {:?}",
             String::from_utf8_lossy(&r.stderr)
         );
 
@@ -1597,10 +1597,10 @@ return !{{length $hits}}"#
             .iter()
             .filter(|e| matches!(e, IoEvent::Exec { .. }))
             .count();
-        assert_eq!(reads, 1, "view's `< a` raises one read card");
+        assert_eq!(reads, 1, "view-text's `< a` raises one read card");
         assert_eq!(
             execs, 0,
-            "view is a ral closure, not an external image — no exec card, got {ios:?}"
+            "view-text is a ral closure, not an external image — no exec card, got {ios:?}"
         );
     }
 

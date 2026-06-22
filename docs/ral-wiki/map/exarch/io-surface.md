@@ -90,7 +90,7 @@ the rest are free.
 
 ## One surface per operation — bulk plumbing below the ral line
 
-The redirect frame cannot tell the model's `view 50 100 < foo.rs` from a
+The redirect frame cannot tell the model's `view-text 50 100 < foo.rs` from a
 library helper's internal read — both install a read frame. The resolution is
 **not** a suppression flag but the invariant *if a ral redirect always means the
 model's I/O, library plumbing must not be a ral redirect*. So the bulk-I/O
@@ -115,7 +115,7 @@ frame:
   `edit` below the line, **no** ral helper does internal I/O and no suppression
   mechanism exists anywhere.
 
-`view` stays in ral: its `<` is the model's own read at the call site, and
+`view-text` stays in ral: its `<` is the model's own read at the call site, and
 surfaces once, correctly.
 
 The residual on the record: `source` / `use` read ral *code* via `read_to_string`

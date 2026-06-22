@@ -5,13 +5,13 @@ let [first, second, third] = [a, b, c]
 echo $first $second $third
 
 # Rest params
-let [head, ...tail] = [1, 2, 3, 4, 5]
-echo $head
-echo !{length $tail}
+let [hd, ...tl] = [1, 2, 3, 4, 5]
+echo $hd
+echo !{length $tl}
 
 # Map destructuring
-let [host: h, port: p] = [host: prod1, port: 8080]
-echo $h $p
+let [host: hst, port: prt] = [host: prod1, port: 8080]
+echo $hst $prt
 
 # Nested destructuring
 let [name: n, addr: [city: c]] = [name: alice, addr: [city: london, zip: 'SW1']]

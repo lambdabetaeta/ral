@@ -11,19 +11,19 @@ let _rows = { |s| re-split '\n' $s }
 
 ## `window-hash`, `grep-files`, and `edit` are now exarch host builtins
 ## (`exarch/src/agent_builtins.rs`): their file I/O happens in Rust, below
-## the redirect frame, so each is a single logical surface.  `view` and
-## `view-around` stay ral over the `window-hash` builtin.
+## the redirect frame, so each is a single logical surface.  `view-text` and
+## `view-text-around` stay ral over the `window-hash` builtin.
 
 ## Show the half-open range `[start, end)` of stdin (1-indexed, end
-## exclusive — EWD-831): `view 100 150` yields fifty lines, 100 through
+## exclusive — EWD-831): `view-text 100 150` yields fifty lines, 100 through
 ## 149.  Each line is tagged `<line-no>\t<window-hash>\t<text>`; the hash
 ## is the witness `grep-files` reports and `edit` checks, so a read hands
 ## you the edit witness directly.  Reads stdin — feed it via a pipe or
-## `<`: `view 100 150 < foo.rs`, `git show HEAD:f.rs | view 100 150`.
+## `<`: `view-text 100 150 < foo.rs`, `git show HEAD:f.rs | view-text 100 150`.
 ## Both bounds must be `>= 1`; an empty range yields no output.
-let view = { |start end|
+let view-text = { |start end|
     if $[$start < 1 || $end < 1] {
-        fail [status: 2, message: "view: bounds must be >= 1, got start=$start end=$end (range is half-open: end > start)"]
+        fail [status: 2, message: "view-text: bounds must be >= 1, got start=$start end=$end (range is half-open: end > start)"]
     } else {
         let rows = _rows !{from-string}
         let n = length $rows
@@ -39,7 +39,7 @@ let view = { |start end|
 
 ## Around a stdin file, show `peek` hashed lines on each side of `line`
 ## (`2*peek + 1` total), clamped at the top of the file.
-let view-around = { |line peek|
+let view-text-around = { |line peek|
     let lo = if $[$line > $peek] { return $[$line - $peek] } else { return 1 }
-    view $lo $[$line + $peek + 1]
+    view-text $lo $[$line + $peek + 1]
 }

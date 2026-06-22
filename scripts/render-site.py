@@ -353,7 +353,7 @@ BUILTINS = {
     "enumerate", "keys", "values", "has", "get", "union",
     "intersection", "difference", "sum", "range", "ext", "stem",
     "dir", "base", "path-join", "resolve-path", "file-info",
-    "list-dir", "glob", "grep-files", "view", "view-around",
+    "list-dir", "glob", "grep-files", "view-text", "view-text-around",
     "line-hash", "edit",
     "temp-dir", "temp-file", "line-count", "intercalate",
     "replace", "re-replace", "re-replace-all", "re-split",

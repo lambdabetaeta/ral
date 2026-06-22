@@ -8,7 +8,7 @@ mod common;
 
 #[test]
 fn variant_displays_with_payload() {
-    let out = common::run("variant_with_payload", "let x = `ok 42\necho $x\n");
+    let out = common::run("variant_with_payload", "let xv = `ok 42\necho $xv\n");
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     assert_eq!(out.stdout.trim(), "`ok 42");
 }
@@ -67,7 +67,7 @@ fn variant_payload_can_be_record() {
 fn case_dispatches_to_ok_arm() {
     let out = common::run(
         "case_ok",
-        "let r = `ok 5\nlet x = case $r [`ok: { |x| return $x }, `err: { |_| return -1 }]\necho $x\n",
+        "let r = `ok 5\nlet xv = case $r [`ok: { |x| return $x }, `err: { |_| return -1 }]\necho $xv\n",
     );
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     assert_eq!(out.stdout.trim(), "5");
@@ -77,7 +77,7 @@ fn case_dispatches_to_ok_arm() {
 fn case_dispatches_to_err_arm() {
     let out = common::run(
         "case_err",
-        "let r = `err nope\nlet x = case $r [`ok: { |s| return $s }, `err: { |m| return $m }]\necho $x\n",
+        "let r = `err nope\nlet xv = case $r [`ok: { |s| return $s }, `err: { |m| return $m }]\necho $xv\n",
     );
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     assert_eq!(out.stdout.trim(), "nope");
@@ -87,7 +87,7 @@ fn case_dispatches_to_err_arm() {
 fn case_handles_nullary_tag() {
     let out = common::run(
         "case_nullary",
-        "let r = `none\nlet x = case $r [`none: { |_| return absent }, `some: { |_| return present }]\necho $x\n",
+        "let r = `none\nlet xv = case $r [`none: { |_| return absent }, `some: { |_| return present }]\necho $xv\n",
     );
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     assert_eq!(out.stdout.trim(), "absent");
