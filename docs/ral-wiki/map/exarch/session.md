@@ -83,10 +83,28 @@ appending tool results, in `AwaitingAssistantAfterToolResults`, where
 turn-boundary Esc bails before the summarize request
 ([[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]).
 
-`fork` value-snapshots the parent's shell context (cwd, env, definitions) into a
-child `Session` for the `agent` tool; mutations do not propagate back. The call
-tree lives on the Rust call stack and mirrors as `Kind::Born` / `Kind::Died` on
-the bus.
+`fork` builds the child `Session` for the `agent` tool through
+`Shell::fork_session` ([[map/core/shell-state|the flow matrix]]) rather than
+hand-copying fields after a bare `Shell::new`. The child snapshots the parent's
+whole lexical scope (prelude, agent library, every accumulated binding), its
+dynamic context (cwd, env, grants, handlers), and the installed builtin table,
+and starts fresh in everything else — fresh control counters (a new session is
+not a continuation of the caller's call stack) and a freshly-defaulted
+`SessionState`, so it holds **no terminal authority** (`TerminalAccess::Denied`,
+no lease — a sub-agent is not the foreground session and can never seize the
+controlling terminal the host's TUI owns). There is no flow-back: the child's
+`cd`, env, and new bindings die with it. The call tree lives on the Rust call
+stack and mirrors as `Kind::Born` / `Kind::Died` on the bus.
+
+Routing the fork through core matters because the builtin table is the easiest
+thing to drop. The exarch host builtins — `window-hash`, `grep-files`, `edit`,
+`explore-dir`, `line-hash` ([[map/exarch/shell-eval|agent_builtins]]) — live in
+the session's dispatch table, *outside* `Mobile`, and the `view` / `view-around`
+helpers in `agent.ral` call `window-hash`. A fork that copied only `mobile.scope`
+and `mobile.context` would leave the child's `view` resolving to nothing and
+falling through to a failed PATH lookup. `fork_session` copies `session.builtins`
+as part of the flow matrix, so the decision lives in one place and the table
+cannot be silently severed at this call site.
 
 `digest.rs` holds `cap_and_spill` and the fixed byte caps for what the *model*
 sees in history: the four tool-result sections (stdout/stderr/value/audit) share

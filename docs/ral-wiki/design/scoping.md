@@ -32,6 +32,29 @@ Each dynamic frame nests by its own algebra:
 A tail-recursive call inside a `within` or `grant` block stays under that scope
 across every tail landing.
 
+## Two layers: lexical scope vs fork inheritance
+
+The lexical scoping above is one mechanism; *crossing a shell boundary* is a
+different one, and they should not be conflated.
+
+- **Lexical scope within a shell** is the `Env` type (`core/src/types/env.rs`):
+  a stack of name→`Binding` scopes, innermost last, with the prelude at index 0
+  and locals `push_scope`d / `pop_scope`d above it. Lookup walks innermost-first,
+  so the inner binding wins. The stack is an `imbl::Vector<Arc<HashMap<…>>>`
+  rather than a `Vec`, so a closure captures its defining environment by *cloning*
+  the `Env` — an O(1) refcount bump on the structurally-shared chain, not an
+  allocation per scope. This is the hot path for recursion.
+- **Fork inheritance** is [[map/core/shell-state|the flow matrix]] in
+  `inherit.rs`: when a genuine runtime fork (a `spawn` worker, a pipeline stage,
+  a REPL aside, a sub-agent session) needs the parent's lexical environment, it
+  clones the *whole* `Env` into the new shell, alongside the rest of the
+  parent→child manifest (builtin table, dynamic context, cancel root).
+
+A same-thread β-step bridges the two: `with_thunk_body` sets the body's
+`mobile.scope` to the closure's captured `Env` and `push_scope`s a fresh frame —
+lexical-scope machinery — while sharing the surrounding shell store *by identity*
+rather than forking it ([[decisions/260620_same-thread-body-shares-the-session|same-thread-body-shares-the-session]]).
+
 See also [[design/syscalls-are-effects|syscalls-are-effects]] (dynamic scope is for the authority over effects), [[design/cbpv|cbpv]], [[design/control-operators|control-operators]].
 
 **Realised in** [[internals/evaluator-machine|evaluator-machine]] (the dynamic frame stack).
