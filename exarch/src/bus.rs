@@ -943,10 +943,12 @@ pub(crate) fn drain_pass(
 /// the worker finished — *not* the channel disconnecting: a detached worker
 /// (a `spawn`ed server) may outlive the turn, but it holds bounded deferred
 /// surface storage in core, never a clone of this channel's sender, so it
-/// cannot keep the loop alive.  Both drivers route their completion decision
-/// through the shared [`drain_pass`]; the only difference is the *frame timer*
-/// — the default `drive` blocks on the channel between passes, while the TUI
-/// renders and polls keys (see `tui::drive_events`).
+/// cannot keep the loop alive.  The default [`Self::drive`] is what the
+/// headless frontend (and the tests) run; it blocks on the channel between
+/// passes.  The TUI is *not* a `Sink` — its `ui_loop` drains the bus through
+/// the same [`drain_pass`] primitive but on its own ~60 FPS render cadence,
+/// polling keys between passes — so the completion contract stays identical
+/// across both even though only one of them implements this trait.
 pub trait Sink {
     fn handle(&mut self, e: Event);
 
