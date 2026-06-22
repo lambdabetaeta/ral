@@ -3310,3 +3310,23 @@ Re-ingested [[internals/evaluator-machine|evaluator-machine]] against the run-tu
 ## [2026-06-22] ingest | a turn runs through the framed door, not the eval_top_level spine
 
 Re-verified [[internals/a-turn-end-to-end|a-turn-end-to-end]] against the run-turn cutover: the single `run_turn` entry is now two synchronous doors, `Shell::run_source_turn`/`run_value_turn` returning a `TurnReport`, sharing one `build_turn`/`run_framed` scaffold while `eval_top_level` and the old spine go crate-private ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]], [[decisions/260618_run-turn-host-loop|run-turn-host-loop]], [[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]]). Dropped the vanished `run_turn`/`run_compiled` anchors, added `run_source_turn`/`run_value_turn`/`run_framed`, and bumped the verified stamp to `1baac6d` / 2026-06-22.
+
+## [2026-06-22] ingest | exarch policy: verify + re-stamp, deny-paths fix
+
+Re-ingested [[map/exarch/policy|policy]] at `1baac6d`: `policy.rs`/`policy/` are substantively unchanged (a test-only clippy `#[allow]` + rustfmt), so this is a faithful verify. Corrected the `fs.deny_paths` claim to lexical-only (core expands canonical/firmlink), dropped the duplicated `prompt.rs`/`data/` prompt-assembly (now owned by [[map/exarch|exarch]]), and trimmed `covers_paths` accordingly.
+
+## [2026-06-22] ingest | builtins: bundled tools span three families, heads are exec images
+
+Re-ingested [[map/core/builtins|builtins]] to HEAD: bundled tools are now coreutils + diffutils + ripgrep unified under `uutils_invoke`/`is_uutils_tool`, and the bundled heads are resolved command images rather than in-process builtins, with the `ral --ral-bundled-tool` dispatch delegated to [[map/core/runtime|runtime]] per [[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]].
+
+## [2026-06-22] ingest | pipeline-execution: foreground handoff now gated on the held terminal lease
+
+Re-verified [[internals/pipeline-execution|pipeline-execution]] to HEAD: the `startup_foreground` predicate has vanished as the foreground gate — the launch-time and resume-time `ForegroundGuard` are now acquired only against a held `TerminalLease` (`try_acquire(target, &TerminalLease)`), so the terminal plan and the guard ask one authority ([[decisions/260619_terminal-lease|terminal-lease]]). Confirmed the value-edge judgment ([[decisions/260610_value-edge-locality|value-edge-locality]]) and the shared `run_child_eval` frame pair ([[decisions/260610_child-eval-unification|child-eval-unification]]) still hold; dropped `startup_foreground`, added `TerminalLease`/`terminal_lease` to anchors, and bumped the stamp to `1baac6d`.
+
+## [2026-06-22] ingest | capability-enforcement re-verified at HEAD
+
+Re-stamped [[internals/capability-enforcement|capability-enforcement]] to 1baac6d after confirming all eight anchors survive and the grant-body-evaluates-locally / per-command OS sandbox flow of [[decisions/260617_sandbox-external-children|sandbox-external-children]] holds, with Windows fail-closed. Added the missing [[design/two-enforcers|two-enforcers]] link; the authenticated-confinement marker was removed with the reexec machinery and is correctly absent rather than tombstoned.
+
+## [2026-06-22] ingest | compilation-ladder re-verified to HEAD
+
+Re-verified [[internals/compilation-ladder|compilation-ladder]] against the host/driver split, relocating the prelude bake's encode/decode pin (`bake_prelude_to_out_dir`/`BakedPrelude`) from `host.rs` to `core/src/driver.rs` per [[decisions/260610_host-embedding-api|host-embedding-api]] and recording `annotate`'s new per-stage `stage_types` verdict alongside the ground `Wire`s ([[decisions/260603_ir-pipespec-annotation|ir-pipespec-annotation]]). Added the run-turn cutover note that the evaluator is reached only through the framed turn doors ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]); all anchors confirmed and the verified-stamp bumped to 1baac6d.

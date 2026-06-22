@@ -1,7 +1,7 @@
 ---
-verified_at_commit: df36715
-verified_at_date: 2026-06-17
-anchors: [run_pipeline, resolve_pipeline, StageLaunch, value_edge_in, force_pipe_value, run_child_eval, PipelineGroup, spawn_with_pgid, wait_handling_stop, Escape::Stopped, wait_foreground, ForegroundGuard, startup_foreground, park_on_stop]
+verified_at_commit: 1baac6d
+verified_at_date: 2026-06-22
+anchors: [run_pipeline, resolve_pipeline, StageLaunch, value_edge_in, force_pipe_value, run_child_eval, PipelineGroup, spawn_with_pgid, wait_handling_stop, Escape::Stopped, wait_foreground, ForegroundGuard, TerminalLease, terminal_lease, park_on_stop]
 ---
 
 # Pipeline execution: value folds, process groups, and the resolve-time launch
@@ -140,7 +140,12 @@ does not `SIGKILL` the parked group. As `run_pipeline` returns, `PipelineGroup`'
 drop has the `ForegroundGuard` restore the terminal to the shell and
 `AnchorProcess::finish` `SIGCONT` *just the anchor's own pid* (not `-pgid`), so
 the anchor wakes, sees EOF on its release fd, and exits without disturbing the
-parked stages — POSIX keeps the pgid addressable while any member lives.
+parked stages — POSIX keeps the pgid addressable while any member lives. That
+guard was acquired at launch by `claim_foreground` only when the turn held a
+terminal lease: `try_acquire(leader, lease)` takes a `&TerminalLease` whose
+borrow *is* the proof ral owns the controlling terminal's foreground, so the
+terminal plan and the guard ask the same authority
+([[decisions/260619_terminal-lease|terminal-lease]]).
 `Escape::Stopped` rides out to the REPL, which records a `Stopped` job;
 [[map/repl/jobs|`JobTable`]] keys it by pgid. `try` and `audit` deliberately let
 `Escape::Stopped` propagate unclassified — a parked job is not a recoverable
@@ -149,7 +154,9 @@ suspend.
 
 Resuming is where ordering becomes load-bearing. `wait_foreground`
 (`ral/src/jobs.rs`) acquires a `ForegroundGuard` *first* — `tcsetpgrp(-pgid)`
-plus a termios snapshot — and only *then* sends `SIGCONT` to `-pgid`, draining
+plus a termios snapshot, again gated on `shell.terminal_lease()` so a
+non-interactive resume that holds no lease skips the tty dance but still
+`SIGCONT`s and waits — and only *then* sends `SIGCONT` to `-pgid`, draining
 with `waitpid(-pgid, WUNTRACED)` (EINTR-retried) until the group exits or stops
 again. The `tcsetpgrp`-before-`SIGCONT` order is the invariant: a resumed member
 that reads the tty before the handoff lands would hit `SIGTTIN` — children carry
