@@ -3246,3 +3246,15 @@ leaving the runtime install as the sole gate on shape
 ([[invariants/fixed-arity|fixed-arity]],
 [[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
 Updated [[index|index]].
+
+## [2026-06-22] ingest | one shared depth cap now bounds every recursive production in the syntax stage
+
+Re-stamped [[map/core/syntax|syntax]] to `@1baac6d` for three commits of drift.
+Pattern and unary-operator recursion now pass through the shared
+`NESTING_DEPTH_LIMIT`: the parser's three mutually-recursive sub-grammars each
+descend through one guarded chokepoint (`parse_primary`, `parse_expr_atom`,
+`parse_pattern`), so adversarial nesting rejects cleanly rather than overflowing
+the stack. The parser also gives a friendlier error when a digit is glued to a
+comparison operator inside `$[…]` (`$[2>3]`, lexed as the redirect `2>`), and the
+lexer's `\<newline>` continuation no longer stretches an adjacent literal's span.
+Updated [[index|index]].

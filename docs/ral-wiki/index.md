@@ -157,7 +157,7 @@ design pages via the `against` stamp.
 ## map/ — where things live
 
 - [[map/core|core]] — ral-core overview hub: the compile-to-typed-IR pipeline, the framed turn doors that are the only evaluation seam, the `host`/`driver` split, and the subsystems below. *@1baac6d*
-  - [[map/core/syntax|syntax]] — lexer, parser, flat AST; a command's pipe modes are the projection of its declared type. *@2b999feb*
+  - [[map/core/syntax|syntax]] — lexer, parser, flat AST; a command's pipe modes are the projection of its declared type; one shared depth cap bounds lexer and parser recursion. *@1baac6d*
   - [[map/core/elaboration|elaboration]] — surface AST → CBPV IR; the one sugar-aware phase. *@6bfeced*
   - [[map/core/ir|ir]] — the `Val` / `Comp` call-by-push-value IR; `Bind` carries the checker's scheme, `Pipeline`/`Bind` carry non-optional ground mode wires. *@602218d3*
   - [[map/core/typecheck|typecheck]] — HM with row types; the sole mode engine returns an annotated comp (schemes, ground wires, per-stage value types) and one `SessionSchemes` seed; handler/alias arms are fixed-arity lambdas; the pipeline-mode lattice and equality-strict unify rule (`mode.rs`). *@1baac6d*
