@@ -367,9 +367,11 @@ const PARK_POLL: Duration = Duration::from_millis(100);
 /// session's `Mailbox`, a finishing child posts its one result through its
 /// parent's `Mailbox` ([`Session::outbox`](crate::session::Session)), a
 /// `spawn` worker flushes its surface batch through the owning session's
-/// `Mailbox`.  The registry maps id → cancel token, never a `Mailbox`, so no
-/// API hands one agent a sibling's sender — the "no inter-agent talking"
-/// invariant is the absence of such a handle, not a runtime check.
+/// `Mailbox`.  The registry holds each peer's `Mailbox` so the frontend can
+/// steer a focused tab, but only the frontend (and root) ever obtains the
+/// registry — no API hands one agent a sibling's sender, so the "no
+/// inter-agent talking" invariant rests on who holds the registry, not on a
+/// runtime check.
 #[derive(Clone)]
 pub struct Mailbox {
     shared: Arc<Shared>,

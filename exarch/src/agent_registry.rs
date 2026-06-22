@@ -19,7 +19,7 @@
 //! ephemeral, live only while their worker runs, and their result is pushed
 //! to the session inbox rather than collected by id.
 
-use crate::bus::AgentId;
+use crate::bus::{AgentId, Mailbox};
 use crate::cancel::Token;
 use ral_core::process::{self, Deadline};
 use std::collections::HashMap;
@@ -63,6 +63,13 @@ struct Entry {
     log_dir: PathBuf,
     started: Instant,
     cancel: Token,
+    /// The peer's inbox sender, so the frontend can route a focused tab's
+    /// typed line into that peer's queue as `UserSteering`.  The registry now
+    /// hands out *senders*, but only the frontend (and root) ever obtains the
+    /// registry, so peers still can't reach each other: the "no inter-agent
+    /// talking" policy is preserved by who holds the registry, not by
+    /// withholding the field.
+    mailbox: Mailbox,
     /// Holds the worker's reaper ceiling armed; dropping the entry on settle
     /// disarms it, so a worker that finished before its ceiling is never
     /// reaped by a late pop.
@@ -94,7 +101,14 @@ impl AgentRegistry {
     /// Register a freshly spawned worker.  Arms its ceiling on the reaper (a
     /// `Run` deadline that cancels `cancel` when it elapses) and returns the
     /// birth generation the worker carries into its result.
-    pub fn register(&self, id: AgentId, title: String, log_dir: PathBuf, cancel: Token) -> u64 {
+    pub fn register(
+        &self,
+        id: AgentId,
+        title: String,
+        log_dir: PathBuf,
+        cancel: Token,
+        mailbox: Mailbox,
+    ) -> u64 {
         let ceiling = process::arm_callback(AGENT_CEILING, {
             let t = cancel.clone();
             move || t.cancel()
@@ -107,10 +121,20 @@ impl AgentRegistry {
                 log_dir,
                 started: Instant::now(),
                 cancel,
+                mailbox,
                 _ceiling: ceiling,
             },
         );
         g.generation
+    }
+
+    /// The live peer's inbox sender, or `None` once it has settled/cleared.
+    /// The frontend looks one up by focused id to route a steering line into
+    /// that peer's queue; a missing entry means the tab is dead or lingering,
+    /// and the line is dropped rather than reviving anything.
+    pub fn mailbox(&self, id: AgentId) -> Option<Mailbox> {
+        let g = self.lock();
+        g.entries.get(&id).map(|e| e.mailbox.clone())
     }
 
     /// Settle a worker born under `generation`.  If it is still the live
@@ -177,7 +201,13 @@ mod tests {
     use super::*;
 
     fn entry(reg: &AgentRegistry, id: AgentId) -> u64 {
-        reg.register(id, format!("a{id}"), PathBuf::from("/tmp"), Token::new())
+        reg.register(
+            id,
+            format!("a{id}"),
+            PathBuf::from("/tmp"),
+            Token::new(),
+            crate::bus::Inbox::new().mailbox(),
+        )
     }
 
     #[test]
@@ -204,11 +234,27 @@ mod tests {
     fn cancel_sets_the_token_and_list_reports_live_agents() {
         let reg = AgentRegistry::new();
         let token = Token::new();
-        reg.register(7, "lint".into(), PathBuf::from("/log/7"), token.clone());
+        reg.register(
+            7,
+            "lint".into(),
+            PathBuf::from("/log/7"),
+            token.clone(),
+            crate::bus::Inbox::new().mailbox(),
+        );
         assert_eq!(reg.list().len(), 1);
         assert_eq!(reg.list()[0].title, "lint");
         assert!(reg.cancel(7), "an existing agent is cancellable");
         assert!(token.is_cancelled(), "cancel sets the worker's token");
         assert!(!reg.cancel(99), "an unknown id is not cancellable");
+    }
+
+    #[test]
+    fn mailbox_resolves_only_while_an_agent_is_live() {
+        let reg = AgentRegistry::new();
+        let g = entry(&reg, 1);
+        assert!(reg.mailbox(1).is_some(), "a live entry hands out its sender");
+        assert!(reg.mailbox(99).is_none(), "an unknown id has no sender");
+        assert!(reg.settle(1, g));
+        assert!(reg.mailbox(1).is_none(), "a settled entry hands out none");
     }
 }

@@ -1237,7 +1237,7 @@ impl App {
         }
     }
 
-    pub fn key(&mut self, k: KeyEvent) {
+    pub fn key(&mut self, k: KeyEvent, can_edit: bool) {
         if k.kind != KeyEventKind::Press {
             return;
         }
@@ -1265,9 +1265,10 @@ impl App {
             }
             return;
         }
-        // Tab cycles regardless of focus; every other key is delivered
-        // to the textarea *only* when main is focused.  Subagent tabs
-        // are watch-only — they keep the global textarea pristine for
+        // Tab cycles regardless of focus; every other key is delivered to
+        // the textarea only on an editable tab (`can_edit`) — root, or a live
+        // peer the caller resolved a steering mailbox for.  A dead/lingering
+        // subagent tab is watch-only, keeping the global textarea pristine for
         // when the user tabs home.
         match k.code {
             // Paging scrolls the focused pane on any tab; bare Up/Down
@@ -1317,7 +1318,7 @@ impl App {
                     self.edit_input(k);
                 }
             }
-            _ if self.focused() == self.root => {
+            _ if can_edit => {
                 self.edit_input(k);
             }
             _ => {}
@@ -2539,13 +2540,17 @@ pub fn run(
     // parked worker with a `/quit` before joining — without it the worker
     // (an interactive root) parks forever and `join` would deadlock.
     let quit_mailbox = session.inbox().mailbox();
+    // A clone of the registry the worker mutates — same `Arc<Mutex<…>>`, so a
+    // peer the worker registers is visible to the UI immediately.  The UI looks
+    // a focused peer's `Mailbox` up here to route a steering line into it.
+    let agents = session.agents.clone();
     std::thread::scope(|scope| -> Result<(), String> {
         let worker = scope.spawn(move || {
             let out = session.drive(worker_provider, &mut control, &worker_emit);
             done_ref.store(true, Ordering::Release);
             out
         });
-        let r = ui_loop(&mut tui, &bus, done_ref, &provider, store, catalog, info);
+        let r = ui_loop(&mut tui, &bus, done_ref, &provider, store, catalog, info, &agents);
         if r.is_err() {
             quit_mailbox.push(InboxMsg::Command("/quit".into()));
         }
@@ -2585,6 +2590,7 @@ type FetchRx = std::sync::mpsc::Receiver<(provider::ProviderId, Result<Vec<Strin
 /// drains), and Esc / Ctrl-C raise the published cancel token the worker's
 /// current turn reads.  Returns when the worker finishes (a `/quit`), draining
 /// its final events for one last frame.
+#[allow(clippy::too_many_arguments)] // distinct render/route/steer handles, not a bundle
 fn ui_loop(
     tui: &mut Tui,
     bus: &SessionBus,
@@ -2593,6 +2599,7 @@ fn ui_loop(
     store: &CredentialStore,
     catalog: &mut ModelCatalog<LiveSource>,
     info: &SessionInfo<'_>,
+    agents: &crate::agent_registry::AgentRegistry,
 ) -> io::Result<()> {
     const BATCH: usize = 64;
     const MIN_FRAME_MS: u64 = 16; // ~60 FPS max
@@ -2632,16 +2639,31 @@ fn ui_loop(
         if ct_poll(timeout)? {
             match ct_read()? {
                 CtEvent::Key(k) if k.kind == KeyEventKind::Press => {
-                    match key_action(KeyMode::Running, &k, tui.app.focused() == tui.app.root) {
+                    // A tab is steerable when it is root (slash commands and
+                    // prompts) or a live peer with a registered inbox; on a
+                    // steerable tab Enter submits and text entry is allowed.
+                    let focused = tui.app.focused();
+                    let steerable = focused == tui.app.root || agents.mailbox(focused).is_some();
+                    match key_action(KeyMode::Running, &k, steerable) {
                         // Esc / Ctrl-C raise the published root token the
                         // worker's current turn reads.
                         KeyAction::Cancel => cancel::raise_interrupt(),
                         KeyAction::Submit => {
                             if let Some(text) = tui.app.submit() {
-                                route_submit(text, tui, &mailbox, provider, store, catalog, info)?;
+                                if focused == tui.app.root {
+                                    route_submit(
+                                        text, tui, &mailbox, provider, store, catalog, info,
+                                    )?;
+                                } else if let Some(mb) = agents.mailbox(focused) {
+                                    // Steer the live peer: the whole line is
+                                    // steering text — no slash, no revival.
+                                    mb.push_user(text);
+                                }
+                                // The peer died between focus and submit: its
+                                // mailbox is gone, so the line is dropped.
                             }
                         }
-                        KeyAction::Edit => tui.app.key(k),
+                        KeyAction::Edit => tui.app.key(k, steerable),
                     }
                 }
                 CtEvent::Paste(s) => tui.app.paste(&s),

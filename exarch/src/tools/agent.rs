@@ -148,9 +148,14 @@ and keeps the result addressable (e.g. the line-hash `edit` needs)."
         let log_dir = child.log_dir().to_path_buf();
         let log_dir_str = log_dir.display().to_string();
         let cancel = child.cancel_token().clone();
-        let generation = session
-            .agents
-            .register(agent_id, title.clone(), log_dir.clone(), cancel);
+        // The child's inbox sender, registered so the frontend can steer this
+        // peer's tab.  Cheap-clone, taken off `child` before it moves into the
+        // worker thread (alongside the one the streaming `child_emit` carries).
+        let child_mailbox = child.mailbox();
+        let generation =
+            session
+                .agents
+                .register(agent_id, title.clone(), log_dir.clone(), cancel, child_mailbox);
         let parent_mailbox = session.mailbox();
         let registry = session.agents.clone();
         let provider = Arc::clone(provider);
