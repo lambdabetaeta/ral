@@ -32,14 +32,14 @@ use line::usage_text;
 
 use crate::bootstrap::Scratch;
 use crate::bus::{
-    Event, Hunk, Inbox, Kind, Pass, SessionBus, SessionId, Sink, Turn, drain_pass, pump,
+    Emitter, Event, Hunk, Inbox, InboxMsg, Kind, Mailbox, Pass, SessionBus, SessionId, drain_pass,
 };
 use crate::cancel;
 use crate::card::{Card, Field, FieldVal, IoEvent, Mark, Role, Span as CardSpan};
 use crate::credential::CredentialStore;
 use crate::models::{LiveSource, ModelCatalog, ModelSource};
 use crate::provider::{self, Provider, Usage};
-use crate::session::Session;
+use crate::session::{Control, ControlFlow, ProviderHandle, Session};
 use crate::state;
 use ral_core::path::sigil::expand_path_prefix;
 use std::sync::Arc;
@@ -74,7 +74,6 @@ use std::{
     sync::{
         Once,
         atomic::{AtomicBool, Ordering},
-        mpsc::Receiver,
     },
     time::{Duration, Instant},
 };
@@ -324,13 +323,15 @@ pub struct App {
     /// The in-progress line stashed when history browsing begins,
     /// restored when Down walks back past the newest entry.
     draft: String,
-    /// Prompts the user submitted while a turn was in flight, oldest first. The
-    /// queue is shared with the worker for this frontend: `Session::dispatch`
-    /// may drain a non-slash prefix after a tool result to steer the next
-    /// assistant step; the REPL still drains any remainder at the next turn
-    /// boundary ([`Self::take_queue`]). Until then, pending messages render in
-    /// the strip above the input ([`line::queued_prompt`]) and bare Up on an
-    /// empty prompt pulls the newest one back for editing.
+    /// The session's own inbox, bound here by [`Self::bind_inbox`] at REPL
+    /// start so the input editor, the pending strip, and the worker's drive
+    /// loop all share one queue. A submitted prompt is pushed onto it (through a
+    /// `Mailbox`); the worker drains a non-slash prefix after a tool result to
+    /// steer the next assistant step ([`Session::dispatch`]) and the remainder
+    /// at the next turn boundary ([`Inbox::next_or_idle`]). Until drained,
+    /// pending messages render in the strip above the input
+    /// ([`line::queued_prompt`]) and bare Up on an empty prompt pulls the newest
+    /// one back for editing.
     inbox: Inbox,
     total_usage: Usage,
     /// Last turn's prompt size (genai's `prompt_tokens`, which already
@@ -509,6 +510,14 @@ impl App {
     /// once at startup and again on every `/model` switch.
     pub fn set_status_model(&mut self, provider: &str, model: &str) {
         self.status_model = format!("{provider} {model}");
+    }
+
+    /// Bind the App's inbox to the session's own queue, so the input editor,
+    /// the pending strip, and the worker's drive loop all read and write one
+    /// inbox.  Called once at REPL start; before it, the App holds the throwaway
+    /// inbox [`App::new`] seeded so `draw` has something to snapshot.
+    pub fn bind_inbox(&mut self, inbox: Inbox) {
+        self.inbox = inbox;
     }
 
     /// Mutable access to the active picker, for the REPL's picker loop.
@@ -1149,28 +1158,6 @@ impl App {
         }
     }
 
-    /// Submit the current draft onto the pending-prompt queue rather
-    /// than running it now — the path taken by Enter while a turn is in
-    /// flight. Returns `true` when a non-empty prompt was queued.
-    pub fn enqueue(&mut self) -> bool {
-        match self.submit() {
-            Some(p) => {
-                self.inbox.push_user(p);
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Take the next deliverable from the inbox at the turn boundary — a
-    /// coalesced run of queued user prompts, a wakeup, or a finished agent —
-    /// each tagged with its source so the driver renders it in its honest
-    /// medium, or `None` when the inbox is empty. User prompts the worker
-    /// drained between tool calls have already left it.
-    pub fn take_inbox(&mut self) -> Option<Turn> {
-        self.inbox.drain_turn()
-    }
-
     /// Pull the newest pending prompt back into the editor for revision.
     /// A non-empty live draft wins over queue editing: Up keeps its ordinary
     /// history behaviour rather than discarding text the user has started.
@@ -1195,9 +1182,9 @@ impl App {
     }
 
     /// Recolor the prompt text in place: a line that names a known slash
-    /// command (so [`Repl::echo_prompt`] will dispatch it) glows cyan
-    /// and bold; anything else stays plain white. Driven once per frame from
-    /// [`App::draw`], so it tracks every edit — typing, paste, history recall.
+    /// command (so the UI loop will dispatch it) glows cyan and bold; anything
+    /// else stays plain white. Driven once per frame from [`App::draw`], so it
+    /// tracks every edit — typing, paste, history recall.
     fn style_prompt(&mut self) {
         let style = if is_slash_command(&self.prompt_text()) {
             Style::default().fg(CYAN).add_modifier(Modifier::BOLD)
@@ -1256,7 +1243,7 @@ impl App {
         }
         // The `/model` picker is modal: while it is open no key reaches the
         // textarea or the scrollback. Its own key handling runs in the
-        // REPL's picker loop ([`Repl::pick_model`]), which drives the
+        // UI loop's picker loop ([`drive_picker`]), which drives the
         // picker directly; this guard only keeps a stray key (e.g. one
         // arriving on a non-prompt path) from leaking through.
         if self.picker.is_some() {
@@ -2283,7 +2270,7 @@ fn footer_hint() -> Line<'static> {
     let st = Style::default()
         .fg(SLATE)
         .add_modifier(Modifier::DIM | Modifier::ITALIC);
-    let hint = " Tab pane • ⇧Tab reorder • click ▸ expand • wheel ▸ dial • drag copy (⇧ native) • wheel/PgUp scroll • Ctrl-Y yank • Ctrl-C cancel • Ctrl-D quit ";
+    let hint = " Tab pane • ⇧Tab reorder • click ▸ expand • wheel ▸ dial • drag copy (⇧ native) • wheel/PgUp scroll • Ctrl-Y yank • Ctrl-C cancel • /quit to leave ";
     Line::from(Span::styled(hint, st))
 }
 
@@ -2342,10 +2329,10 @@ fn prompt_height(textarea: &TextArea<'_>, width: u16, max_h: u16) -> u16 {
 
 // ── Sink + REPL ─────────────────────────────────────────────────────────
 
-/// Pairs the terminal lifetime with the app so one `&mut Tui` serves as
-/// the [`Sink`] argument to [`pump`].  Fields are accessed via direct
-/// field syntax (`self.guard.term()` alongside `&mut self.app`) for
-/// disjoint-borrow splitting.
+/// Pairs the terminal lifetime with the app so the worker thread and the UI
+/// loop can split the two: the worker borrows the session through
+/// [`App::handle`]'s bus, the UI loop borrows `guard.term()` alongside
+/// `&mut self.app` via direct field syntax for disjoint-borrow splitting.
 pub struct Tui {
     guard: TerminalGuard,
     app: App,
@@ -2365,126 +2352,11 @@ impl Tui {
     }
 }
 
-impl Sink for Tui {
-    fn handle(&mut self, e: Event) {
-        self.app.handle(e);
-    }
-
-    fn inbox(&self) -> Inbox {
-        self.app.inbox.clone()
-    }
-
-    fn drive(&mut self, rx: &Receiver<Event>, done: &AtomicBool) -> io::Result<()> {
-        let r = drive_events(self.guard.term(), &mut self.app, rx, done);
-        self.app.busy_off();
-        r
-    }
-}
-
-enum Slash {
-    Quit,
-    Continue,
-    Prompt,
-}
-
-/// Channel carrying `(provider, fetched models or failure)` from the
-/// per-provider background fetch threads back to the picker loop.
-type FetchRx = std::sync::mpsc::Receiver<(provider::ProviderId, Result<Vec<String>, String>)>;
-
-struct Repl<'a> {
-    tui: Tui,
-    /// The session-lived event bus.  Minted once at REPL start over the
-    /// `App`'s inbox; every turn's worker and every detached async child
-    /// clone its sender, so a background `agent` streams a live tab and the
-    /// idle wait drains it as a third source.  Outlives any single turn,
-    /// unlike headless's per-turn bus.
-    bus: SessionBus,
-    session: &'a mut Session,
-    /// The active provider behind an `Arc`, so a `/model` switch can swap in
-    /// a freshly built one while any already-running async agent keeps the
-    /// clone it captured at spawn (the switch replaces this field, not the
-    /// child's transport).
-    provider: Arc<Provider>,
-    info: &'a SessionInfo<'a>,
-    /// The auto-discovered credentials a `/model` switch draws the chosen
-    /// provider's key from, and the live model catalog the picker fetches
-    /// through. The picker shows every available provider's models; a
-    /// switch rebuilds the transport over the same transcript.
-    store: &'a CredentialStore,
-    catalog: &'a mut ModelCatalog<LiveSource>,
-    scratch: &'a Scratch,
-}
-
-/// Build the [`Tui`], banner, run the REPL, flush logs, print log
-/// paths + usage on the restored shell.
-#[allow(clippy::too_many_arguments)]
-pub fn run(
-    session: &mut Session,
-    provider: Arc<Provider>,
-    info: &SessionInfo<'_>,
-    store: &CredentialStore,
-    catalog: &mut ModelCatalog<LiveSource>,
-    scratch: &Scratch,
-    run_dir: &std::path::Path,
-    seed: Option<String>,
-    vi: bool,
-) -> Result<(), String> {
-    let caps = provider::caps_for(provider.model());
-    let stderr_log = run_dir.join("stderr.log");
-    let mut tui = Tui::new(
-        session.id,
-        session.log_dir(),
-        caps.context_window,
-        &stderr_log,
-        vi,
-    )
-    .map_err(|e| format!("ratatui init: {e}"))?;
-    let status_provider = crate::oauth::provider_label(provider.subscription(), info.provider);
-    tui.app.set_status_model(&status_provider, info.model);
-    // The session-lived bus, over the App's own inbox so steering, wakeups,
-    // and async-agent results share the queue the App reads.
-    let bus = SessionBus::session(tui.app.inbox.clone());
-    let mut r = Repl {
-        tui,
-        bus,
-        session,
-        provider,
-        info,
-        store,
-        catalog,
-        scratch,
-    };
-    r.tui
-        .app
-        .banner(r.tui.guard.term(), info)
-        .map_err(|e| e.to_string())?;
-    let drive = r.drive(seed);
-    let logs = r
-        .tui
-        .app
-        .flush_logs()
-        .map_err(|e| format!("session logs: {e}"));
-    let usage = r.tui.app.total_usage();
-    // Restore the terminal before printing so log paths land on the
-    // user's normal shell rather than the alt screen.
-    drop(r);
-    if let Ok(paths) = &logs {
-        for p in paths {
-            match p.parent() {
-                Some(dir) => println!("Session logs: {} (user.log + events.json)", dir.display()),
-                None => println!("Session log: {}", p.display()),
-            }
-        }
-    } else if let Err(e) = logs {
-        eprintln!("exarch: {e}");
-    }
-    println!("{usage}");
-    drive
-}
-
 /// One row of the slash-command registry: the canonical token, any aliases,
-/// the argument it consumes (if any), a one-line description for `/help`,
-/// and the handler that runs it.
+/// the argument it consumes (if any), and a one-line description for `/help`.
+/// The table is metadata only — names, help, and the argument shape; dispatch
+/// is a direct match by name in [`route_submit`], split by where the work must
+/// run (the UI thread or the session's drive loop).
 struct SlashCommand {
     name: &'static str,
     aliases: &'static [&'static str],
@@ -2494,75 +2366,59 @@ struct SlashCommand {
     /// means the user meant a prompt, not the command.  Shown in `/help`.
     arg: Option<&'static str>,
     help: &'static str,
-    run: fn(&mut Repl<'_>, &str) -> Slash,
 }
 
-/// The slash-command registry — the single source of truth. Dispatch
-/// ([`Repl::echo_prompt`]), the prompt-box highlight ([`is_slash_command`]),
-/// and the `/help` listing all read from here, so they cannot drift.
-///
-/// Each `run` wraps its method in a non-capturing closure rather than naming
-/// the method path directly: a method item never generalizes the `Repl`
-/// lifetime into the fn-pointer's binder, so `Repl::cmd_quit as fn(_)` is
-/// `for<'a> fn(&'a mut Repl<'fixed>)`, which cannot coerce to the higher-ranked
-/// `for<'a, 'b> fn(&'b mut Repl<'a>)` the field demands. The closure coerces at
-/// a flexible inference site, where the higher-ranked target is satisfied.
+/// The slash-command registry — the single source of truth for the prompt-box
+/// highlight ([`is_slash_command`]), the routing match ([`route_submit`]), and
+/// the `/help` listing, so the three cannot drift.
 const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "/help",
         aliases: &[],
         arg: None,
         help: "List the available commands.",
-        run: |r, _| r.cmd_help(),
     },
     SlashCommand {
         name: "/legend",
         aliases: &[],
         arg: None,
         help: "Decode the rail, bars, grain, and fidelity treatments.",
-        run: |r, _| r.cmd_legend(),
     },
     SlashCommand {
         name: "/clear",
         aliases: &[],
         arg: None,
         help: "Forget the conversation and clear the screen.",
-        run: |r, _| r.cmd_clear(),
     },
     SlashCommand {
         name: "/copy",
         aliases: &[],
         arg: None,
         help: "Copy the latest reply to the clipboard.",
-        run: |r, _| r.cmd_copy(),
     },
     SlashCommand {
         name: "/export",
         aliases: &[],
         arg: Some("<path>"),
         help: "Write the user view to a file.",
-        run: |r, arg| r.cmd_export(arg),
     },
     SlashCommand {
         name: "/model",
         aliases: &[],
         arg: None,
         help: "Switch the model or provider.",
-        run: |r, _| r.cmd_model(),
     },
     SlashCommand {
         name: "/compact",
         aliases: &[],
         arg: None,
         help: "Summarize the conversation to reclaim context.",
-        run: |r, _| r.cmd_compact(),
     },
     SlashCommand {
         name: "/quit",
         aliases: &["/exit"],
         arg: None,
         help: "Leave exarch.",
-        run: |r, _| r.cmd_quit(),
     },
 ];
 
@@ -2594,512 +2450,179 @@ fn is_slash_command(text: &str) -> bool {
     lookup_command(text.trim()).is_some()
 }
 
-impl Repl<'_> {
-    fn drive(&mut self, seed: Option<String>) -> Result<(), String> {
-        // The seed and the interactive read are the human's own prompts.
-        let mut pending = seed.map(Turn::Human);
-        loop {
-            // Order of sources: the seed prompt, then turn-boundary deliveries
-            // the worker did not already drain (queued user prompts, a wakeup,
-            // a finished agent), then a fresh blocking read. Every source is a
-            // typed `Turn`, so the commit below can render each in its honest
-            // medium while a lone `/clear` still reaches the command path.
-            let turn = match pending.take() {
-                Some(t) => Some(t),
-                None => match self.tui.app.take_inbox() {
-                    Some(t) => Some(t),
-                    None => {
-                        match read_prompt(self.tui.guard.term(), &mut self.tui.app, self.bus.rx())
-                            .map_err(|e| e.to_string())?
-                        {
-                            Idle::Prompt(s) => Some(Turn::Human(s)),
-                            // A non-human message (a wakeup, a finished agent)
-                            // landed in the inbox while idle: loop so the
-                            // `take_inbox` arm above delivers it as a fresh turn.
-                            Idle::Inbox => continue,
-                            Idle::Quit => return Ok(()),
-                        }
-                    }
-                },
-            };
-            let Some(turn) = turn else { continue };
-            match self.commit_turn(&turn) {
-                Slash::Quit => return Ok(()),
-                Slash::Continue => continue,
-                Slash::Prompt => {}
+/// The session-affecting slash command hook the worker's [`Session::drive`]
+/// calls at the turn boundary, where the drive thread owns the session the
+/// command mutates.  `/clear` rebuilds the session (its viewport was already
+/// cleared UI-side), `/compact` summarizes the history, `/quit` ends the
+/// drive loop — which sets `done`, so the UI loop's next drain returns `Stop`
+/// and exits.  Every other command is handled UI-side and never reaches here.
+struct ReplControl<'a> {
+    provider: ProviderHandle,
+    scratch: &'a Scratch,
+}
+
+impl Control for ReplControl<'_> {
+    fn command(&mut self, raw: &str, session: &mut Session, emit: &Emitter) -> ControlFlow {
+        match raw.trim() {
+            "/clear" => {
+                let _ = session.clear(self.scratch);
+                ControlFlow::Continue
             }
-            // The model always sees the source's own rendered text — verbatim
-            // for a human, marked for a wakeup or an agent reply.
-            self.session
-                .run_turn(&mut self.tui, &self.bus, &self.provider, Some(turn.text()))?;
-            self.tui
-                .app
-                .draw(self.tui.guard.term())
-                .map_err(|e| e.to_string())?;
-        }
-    }
-
-    /// Echo a turn onto the transcript in the medium honest to its *source*,
-    /// then report whether the turn proceeds to the model.
-    ///
-    /// Reverse video means an active selection alone ([`App::paint_selection`]);
-    /// no resting block borrows it. A human prompt echoes as the user's turn
-    /// in its raised band ([`line::PROMPT_BG`]); a wakeup is dim, marked chrome
-    /// on the Generic rail; an agent reply is the same dialable `↘` block a
-    /// synchronous child gets. A human
-    /// or wakeup whose text is a slash command runs that command instead of
-    /// echoing — a wakeup's prompt may legitimately be `/clear` — while an
-    /// agent reply is never a command and always proceeds.
-    fn commit_turn(&mut self, turn: &Turn) -> Slash {
-        let id = self.session.id;
-        match turn {
-            Turn::Human(text) => {
-                self.echo_prompt(text, line::user_prompt(text), RailShape::Prompt)
+            "/compact" => {
+                let p = self.provider.current();
+                let token = session.cancel_token().clone();
+                session.compact(&p, emit, true, &token);
+                ControlFlow::Continue
             }
-            Turn::Wakeup(text) => self.echo_prompt(text, line::wakeup(text), RailShape::Generic),
-            Turn::Agent(r) => {
-                self.tui.handle(Event {
-                    id,
-                    kind: Kind::SubagentDone {
-                        title: r.title.clone(),
-                        outcome: r.outcome.clone(),
-                        text: r.text.clone(),
-                        elapsed: r.elapsed,
-                    },
-                });
-                Slash::Prompt
-            }
-            // A detached `spawn` worker flushed its deferred surface batch.
-            // Decode each value with the same decoder the live foreground sink
-            // uses and feed the resulting `Kind` into the render path, so the
-            // worker's cards/io land in the (root) viewport the batch is
-            // stamped with — exactly as a live tool turn's would, only minted
-            // now at the boundary. The model is then woken with `turn.text()`'s
-            // notice, so proceed as a prompt.
-            Turn::Surface { id: vp_id, values } => {
-                for ev in values {
-                    if let Some(kind) = crate::shell_eval::decode_surface(ev) {
-                        self.tui.handle(Event { id: *vp_id, kind });
-                    }
-                }
-                Slash::Prompt
-            }
+            "/quit" | "/exit" => ControlFlow::Quit,
+            _ => ControlFlow::Continue,
         }
     }
+}
 
-    /// Dispatch `text` as a slash command if it is one, else echo the
-    /// pre-rendered `lines` onto the transcript and proceed to the model.
-    /// `session.append_user` (inside `apply`) is what records the text
-    /// model-side; this is the transcript echo alone.
-    fn echo_prompt(&mut self, text: &str, lines: Vec<Line<'static>>, shape: RailShape) -> Slash {
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            return Slash::Continue;
-        }
-        if let Some((cmd, arg)) = lookup_command(trimmed) {
-            return (cmd.run)(self, arg);
-        }
-        let id = self.session.id;
-        self.tui.app.push_chrome(id, shape, lines);
-        Slash::Prompt
+/// Build the [`Tui`], banner, run the worker + UI loop, flush logs, print log
+/// paths + usage on the restored shell.
+#[allow(clippy::too_many_arguments)]
+pub fn run(
+    session: &mut Session,
+    provider: Arc<Provider>,
+    info: &SessionInfo<'_>,
+    store: &CredentialStore,
+    catalog: &mut ModelCatalog<LiveSource>,
+    scratch: &Scratch,
+    run_dir: &std::path::Path,
+    seed: Option<String>,
+    vi: bool,
+) -> Result<(), String> {
+    let caps = provider::caps_for(provider.model());
+    let stderr_log = run_dir.join("stderr.log");
+    let mut tui = Tui::new(
+        session.id,
+        session.log_dir(),
+        caps.context_window,
+        &stderr_log,
+        vi,
+    )
+    .map_err(|e| format!("ratatui init: {e}"))?;
+    let status_provider = crate::oauth::provider_label(provider.subscription(), info.provider);
+    tui.app.set_status_model(&status_provider, info.model);
+    // Bind the App's inbox to the session's own queue, then mint the
+    // session-lived bus over it: input, the pending strip, async-agent results,
+    // and the worker's drive loop all read and write this one inbox.
+    tui.app.bind_inbox(session.inbox());
+    let bus = SessionBus::session(session.inbox());
+    if let Some(s) = seed {
+        session.seed(s);
     }
+    let provider = ProviderHandle::new(provider);
+    tui.app
+        .banner(tui.guard.term(), info)
+        .map_err(|e| e.to_string())?;
 
-    fn cmd_quit(&mut self) -> Slash {
-        Slash::Quit
-    }
-
-    fn cmd_clear(&mut self) -> Slash {
-        let id = self.session.id;
-        if let Err(e) = self.session.clear(self.scratch) {
-            self.note_error(id, format!("could not clear session: {e}"));
-            return Slash::Continue;
-        }
-        if let Err(e) = self.tui.app.clear(self.info, self.tui.guard.term()) {
-            self.note_error(id, format!("could not redraw after /clear: {e}"));
-        }
-        Slash::Continue
-    }
-
-    /// Copy the latest assistant reply — the focused tab's trailing prose,
-    /// as raw markdown — to the system clipboard via OSC 52.  An oversized
-    /// reply exceeds the terminal's per-sequence limit, so copy its tail
-    /// (the same bound `Ctrl+Y` uses) and say so, rather than let the
-    /// terminal drop the whole sequence and copy nothing silently.
-    fn cmd_copy(&mut self) -> Slash {
-        let id = self.session.id;
-        let reply = self.tui.app.latest_reply();
-        if reply.is_empty() {
-            self.note_error(id, "no reply to copy yet".into());
-            return Slash::Continue;
-        }
-        let payload = tail_bytes(&reply, YANK_CAP);
-        if let Err(e) = osc52_copy(payload) {
-            self.note_error(id, format!("clipboard write failed: {e}"));
-            return Slash::Continue;
-        }
-        let note = if payload.len() < reply.len() {
-            format!("[reply exceeds the clipboard limit — copied its last {YANK_CAP} bytes]")
-        } else {
-            format!(
-                "[copied the latest reply — {} lines]",
-                reply.lines().count()
-            )
-        };
-        self.tui.handle(Event {
-            id,
-            kind: Kind::Dim(note),
+    // The worker thread runs the whole session via `Session::drive`, parking on
+    // an empty inbox (an interactive root) until a `/quit` command tells its
+    // `Control` to quit; it then sets `done`, and the UI loop's next drain
+    // returns `Stop`. The UI loop renders the bus and routes input in one
+    // continuous loop alongside it.
+    let done = AtomicBool::new(false);
+    let done_ref = &done;
+    let mut control = ReplControl {
+        provider: provider.clone(),
+        scratch,
+    };
+    // The worker captures the session emitter, not `&bus`: `SessionBus` is not
+    // `Sync` (its `Receiver` is single-consumer), so the receiver stays on the
+    // UI thread. The emitter is `Send` and is all the worker needs.
+    let worker_emit = bus.emitter(session.id);
+    let worker_provider = provider.clone();
+    // A `Mailbox` onto the session inbox, so a UI-loop failure can wake the
+    // parked worker with a `/quit` before joining — without it the worker
+    // (an interactive root) parks forever and `join` would deadlock.
+    let quit_mailbox = session.inbox().mailbox();
+    std::thread::scope(|scope| -> Result<(), String> {
+        let worker = scope.spawn(move || {
+            let out = session.drive(worker_provider, &mut control, &worker_emit);
+            done_ref.store(true, Ordering::Release);
+            out
         });
-        Slash::Continue
-    }
-
-    /// Write the focused tab's user view — its rendered `user.log` — to
-    /// `arg`, a path that may be absolute, relative to the launch cwd, or
-    /// `~`/`xdg:`-prefixed.  Refuses to overwrite an existing file so an
-    /// export never clobbers; an empty argument prints the usage line.  The
-    /// copy itself goes through [`viewport::export_log`], where the
-    /// `user.log` I/O door lives.
-    fn cmd_export(&mut self, arg: &str) -> Slash {
-        let id = self.session.id;
-        if arg.is_empty() {
-            self.note_error(id, "usage: /export <path>".into());
-            return Slash::Continue;
+        let r = ui_loop(&mut tui, &bus, done_ref, &provider, store, catalog, info);
+        if r.is_err() {
+            quit_mailbox.push(InboxMsg::Command("/quit".into()));
         }
-        let dest = resolve_export_path(arg, self.info.cwd);
-        if dest.exists() {
-            self.note_error(id, format!("refusing to overwrite {}", dest.display()));
-            return Slash::Continue;
-        }
-        let src = match self.tui.app.flush_focused_log() {
-            Ok(p) => p,
-            Err(e) => {
-                self.note_error(id, format!("could not flush transcript: {e}"));
-                return Slash::Continue;
-            }
-        };
-        match viewport::export_log(&src, &dest) {
-            Ok(_) => self.tui.handle(Event {
-                id,
-                kind: Kind::Dim(format!("[exported user view to {}]", dest.display())),
-            }),
-            Err(e) => self.note_error(id, format!("could not write {}: {e}", dest.display())),
-        }
-        Slash::Continue
-    }
+        let _ = worker.join();
+        r.map_err(|e| e.to_string())
+    })?;
 
-    fn cmd_model(&mut self) -> Slash {
-        self.pick_model();
-        Slash::Continue
-    }
-
-    fn cmd_compact(&mut self) -> Slash {
-        let id = self.session.id;
-        // Publish a root token for the duration of the summarize, as
-        // `run_turn` does, and hand its clone to `compact` so the
-        // provider's request-local cancel sees an Esc — the signal handler
-        // sets this published slot's flag, which is the token we pass.
-        let root = cancel::mint_root();
-        let token = root.token().clone();
-        let provider = &self.provider;
-        let session = &mut *self.session;
-        let _ = pump(&mut self.tui, &self.bus, id, |emit| {
-            session.compact(provider, emit, true, &token)
-        });
-        Slash::Continue
-    }
-
-    /// Push the visual-vocabulary legend onto the transcript as ambient,
-    /// rail-less chrome — the panel that decodes the rail, bars, grain, and
-    /// fidelity treatments, rendered as the graphic's own samples.
-    fn cmd_legend(&mut self) -> Slash {
-        let id = self.session.id;
-        self.tui
-            .app
-            .push_chrome(id, RailShape::Plain, legend_panel());
-        Slash::Continue
-    }
-
-    /// Emit one dim transcript line per registry entry: the command token
-    /// (with aliases) left-padded to a common width, then its description.
-    fn cmd_help(&mut self) -> Slash {
-        let id = self.session.id;
-        let names: Vec<String> = SLASH_COMMANDS
-            .iter()
-            .map(|c| {
-                let mut s = c.name.to_string();
-                if let Some(arg) = c.arg {
-                    s.push(' ');
-                    s.push_str(arg);
-                }
-                if !c.aliases.is_empty() {
-                    s.push_str(&format!(" ({})", c.aliases.join(", ")));
-                }
-                s
-            })
-            .collect();
-        let width = names.iter().map(String::len).max().unwrap_or(0);
-        for (n, c) in names.iter().zip(SLASH_COMMANDS) {
-            self.tui.handle(Event {
-                id,
-                kind: Kind::Dim(format!("{n:<width$}   {}", c.help)),
-            });
-        }
-        Slash::Continue
-    }
-
-    /// Open the `/model` picker over the available providers, fetch their
-    /// model lists (cache-first, then background), and drive the modal loop
-    /// until the user selects a model or dismisses it. On a selection the
-    /// provider is rebuilt over the same transcript, the saved selection is updated,
-    /// and the status bar follows.
-    fn pick_model(&mut self) {
-        let available = self.store.available();
-        // Each plan-backed provider's flavour, for the picker's labels: a
-        // ChatGPT login (the OAuth credential) reads as the ChatGPT plan, an
-        // otherwise-metered provider whose `ProviderId` declares a flat rate
-        // (opencode Go) as the generic subscription. A provider absent from
-        // the map is metered.
-        let subscription = available
-            .iter()
-            .filter_map(|id| {
-                let kind = if self.store.get(id).is_some_and(|c| c.is_subscription()) {
-                    crate::oauth::Subscription::ChatGpt
-                } else if id.flat_rate() {
-                    crate::oauth::Subscription::FlatRate
-                } else {
-                    return None;
-                };
-                Some((id.clone(), kind))
-            })
-            .collect();
-        let mut picker = Picker::new(available, subscription);
-        // Seed each provider from the catalog's cache instantly; spawn a
-        // background fetch for the rest so the UI shows "loading…" rather
-        // than freezing on the network. A ChatGPT plan login has no catalog
-        // endpoint, so its curated plan models are seeded directly and it is
-        // excluded from the fetch; a flat-rate gateway (opencode Go) lists
-        // live through genai like any other API-key provider.
-        let mut rx = None;
-        let to_fetch: Vec<_> = picker
-            .loading_providers()
-            .into_iter()
-            .filter(|id| {
-                if self.store.get(id).is_some_and(|c| c.is_subscription()) {
-                    let models = crate::oauth::PLAN_MODELS
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect();
-                    picker.set_models(id, picker::ModelsState::Loaded(models));
-                    return false;
-                }
-                match self.catalog.cached(id) {
-                    Some(models) => {
-                        picker.set_models(id, picker::ModelsState::Loaded(models));
-                        false
-                    }
-                    None => true,
-                }
-            })
-            .collect();
-        if !to_fetch.is_empty() {
-            let (tx, recv) = std::sync::mpsc::channel();
-            for id in to_fetch {
-                let source = self.catalog.source().clone();
-                let tx = tx.clone();
-                std::thread::spawn(move || {
-                    let result = source.list(&id);
-                    let _ = tx.send((id, result));
-                });
-            }
-            rx = Some(recv);
-        }
-        self.tui.app.picker = Some(picker);
-        let outcome = self.drive_picker(rx);
-        self.tui.app.picker = None;
-        if let Some((id, model)) = outcome {
-            self.apply_model_switch(id, model);
-        }
-    }
-
-    /// Poll keys and background-fetch results until the picker resolves.
-    /// Returns the chosen `(provider, model)`, or `None` on cancel.
-    fn drive_picker(&mut self, rx: Option<FetchRx>) -> Option<(provider::ProviderId, String)> {
-        loop {
-            // Fold any landed fetch results into the picker (and the
-            // catalog's caches), on this thread, so the disk write stays
-            // single-threaded.
-            if let Some(rx) = &rx {
-                while let Ok((id, result)) = rx.try_recv() {
-                    let state = match result {
-                        Ok(models) => {
-                            self.catalog.record(&id, models.clone());
-                            picker::ModelsState::Loaded(models)
-                        }
-                        Err(reason) => picker::ModelsState::Failed(reason),
-                    };
-                    if let Some(p) = self.tui.app.picker_mut() {
-                        p.set_models(&id, state);
-                    }
-                }
-            }
-            if self.tui.app.draw(self.tui.guard.term()).is_err() {
-                return None;
-            }
-            if !ct_poll(Duration::from_millis(100)).unwrap_or(false) {
-                continue;
-            }
-            let Ok(CtEvent::Key(k)) = ct_read() else {
-                continue;
-            };
-            if k.kind != KeyEventKind::Press {
-                continue;
-            }
-            if key_action(KeyMode::Overlay, &k, false) == KeyAction::Cancel {
-                return None;
-            }
-            let action = self.tui.app.picker_mut()?.key(k.code);
-            match action {
-                picker::PickAction::None => {}
-                picker::PickAction::Cancelled => return None,
-                picker::PickAction::Selected(id, model) => return Some((id, model)),
-                picker::PickAction::Manual(query) => {
-                    let available = self.store.available();
-                    match crate::models::resolve_model_provider(&query, &available, self.catalog) {
-                        Ok(id) => return Some((id, query)),
-                        Err(e) => self.note_error(self.session.id, e),
-                    }
-                }
+    let logs = tui.app.flush_logs().map_err(|e| format!("session logs: {e}"));
+    let usage = tui.app.total_usage();
+    // Restore the terminal before printing so log paths land on the
+    // user's normal shell rather than the alt screen.
+    drop(tui);
+    if let Ok(paths) = &logs {
+        for p in paths {
+            match p.parent() {
+                Some(dir) => println!("Session logs: {} (user.log + events.json)", dir.display()),
+                None => println!("Session log: {}", p.display()),
             }
         }
+    } else if let Err(e) = logs {
+        eprintln!("exarch: {e}");
     }
-
-    /// Rebuild the provider for the chosen `kind` + `model` over the same
-    /// transcript, persist the selection to the project state dir, and
-    /// update the live status bar. A persistence failure is noted but does
-    /// not undo the in-memory switch.
-    fn apply_model_switch(&mut self, provider_id: provider::ProviderId, model: String) {
-        let id = self.session.id;
-        let Some(cred) = self.store.get(&provider_id).cloned() else {
-            self.note_error(
-                id,
-                format!("{} has no resolved credential", provider_id.label()),
-            );
-            return;
-        };
-        self.provider = Arc::new(Provider::build(
-            &provider_id,
-            model.clone(),
-            &cred,
-            self.info.max_tokens_override,
-        ));
-        let label = provider_id.label();
-        let status_provider = crate::oauth::provider_label(self.provider.subscription(), label);
-        self.tui.app.set_status_model(&status_provider, &model);
-        let state_dir = crate::bootstrap::project_dir(self.info.cwd);
-        if let Err(e) = state::save(&state_dir, &state::State::new(&provider_id, &model)) {
-            self.note_error(id, format!("could not persist selection: {e}"));
-        }
-        self.tui.handle(Event {
-            id,
-            kind: Kind::Dim(format!("[switched to {label} {model}]")),
-        });
-    }
-
-    fn note_error(&mut self, id: SessionId, message: String) {
-        self.tui.handle(Event {
-            id,
-            kind: Kind::Error(message),
-        });
-    }
+    println!("{usage}");
+    Ok(())
 }
 
-fn ctrl_key(k: &KeyEvent, c: char) -> bool {
-    k.code == KeyCode::Char(c) && k.modifiers.contains(KeyModifiers::CONTROL)
-}
+/// Channel carrying `(provider, fetched models or failure)` from the
+/// per-provider background fetch threads back to the picker loop.
+type FetchRx = std::sync::mpsc::Receiver<(provider::ProviderId, Result<Vec<String>, String>)>;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum KeyMode {
-    Idle,
-    Running,
-    Overlay,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum KeyAction {
-    Edit,
-    Submit,
-    Quit,
-    Cancel,
-}
-
-fn key_action(mode: KeyMode, k: &KeyEvent, enter_submits: bool) -> KeyAction {
-    if ctrl_key(k, 'c') {
-        return match mode {
-            KeyMode::Idle => KeyAction::Quit,
-            KeyMode::Running | KeyMode::Overlay => KeyAction::Cancel,
-        };
-    }
-    if ctrl_key(k, 'd') {
-        return match mode {
-            KeyMode::Idle => KeyAction::Quit,
-            KeyMode::Overlay => KeyAction::Cancel,
-            KeyMode::Running => KeyAction::Edit,
-        };
-    }
-    if k.code == KeyCode::Esc {
-        return match mode {
-            KeyMode::Idle => KeyAction::Edit,
-            KeyMode::Running | KeyMode::Overlay => KeyAction::Cancel,
-        };
-    }
-    if enter_submits
-        && k.code == KeyCode::Enter
-        && !k.modifiers.contains(KeyModifiers::SHIFT)
-        && !k.modifiers.contains(KeyModifiers::ALT)
-    {
-        KeyAction::Submit
-    } else {
-        KeyAction::Edit
-    }
-}
-
-/// Drain `rx` and poll terminal keys at ~60 FPS until `rx`
-/// disconnects.  Keystrokes go into the input editor (the user composes a
-/// steering prompt during the turn); on the main tab Enter queues the draft
-/// (`App::enqueue`) for the worker to drain at the next tool boundary, or for
-/// the REPL to send at the turn boundary if no such boundary arrives.  Ctrl-C /
-/// Esc raise the cancel flag.  The drain is batched so terminal polling never
-/// starves during heavy token streaming.
-fn drive_events(
-    term: &mut Term,
-    app: &mut App,
-    rx: &Receiver<Event>,
+/// The merged render + input loop, running on the UI thread alongside the
+/// worker's [`Session::drive`].  It drains the session-lived bus into the App
+/// (the same `App::handle` the old per-turn drive used), ticks and redraws at
+/// ~60 FPS, and routes the user's keystrokes: scrollback / picker keys edit the
+/// App, a submitted line is routed by [`route_submit`] (view commands run here;
+/// session commands and plain prompts go onto the session inbox the worker
+/// drains), and Esc / Ctrl-C raise the published cancel token the worker's
+/// current turn reads.  Returns when the worker finishes (a `/quit`), draining
+/// its final events for one last frame.
+fn ui_loop(
+    tui: &mut Tui,
+    bus: &SessionBus,
     done: &AtomicBool,
+    provider: &ProviderHandle,
+    store: &CredentialStore,
+    catalog: &mut ModelCatalog<LiveSource>,
+    info: &SessionInfo<'_>,
 ) -> io::Result<()> {
     const BATCH: usize = 64;
     const MIN_FRAME_MS: u64 = 16; // ~60 FPS max
+    // The session inbox, so a routed line (a plain prompt, a session command)
+    // reaches the worker's drive loop through the queue the App is bound to.
+    let mailbox = tui.app.inbox.mailbox();
+    let rx = bus.rx();
     loop {
-        // The explicit-done completion contract, shared with the headless
-        // default `Sink::drive`: drain a batch, then stop only when the worker
-        // is *done* — never when the channel empties or disconnects, so a
-        // detached worker (a live background `agent`) flooding the bus cannot
-        // keep this loop (hence the turn) from ending. The batch cap bounds how
-        // long a token flood can starve the input poll below; `More` means
-        // events are still queued, so the frame does not wait for one.
-        let more = match drain_pass(rx, done, Some(BATCH), |ev| app.handle(ev)) {
+        // The explicit-done completion contract (shared with the headless
+        // `Sink::drive`): drain a batch, then stop only when the worker is
+        // *done* — never when the channel empties or disconnects, so a detached
+        // worker (a live background `agent`) flooding the bus cannot end the
+        // loop early. The batch cap bounds how long a token flood can starve the
+        // input poll below; `More` means events are still queued, so the frame
+        // does not wait for one.
+        let more = match drain_pass(rx, done, Some(BATCH), |ev| tui.app.handle(ev)) {
             Pass::Stop => {
-                app.draw(term)?;
+                tui.app.busy_off();
+                tui.app.draw(tui.guard.term())?;
                 return Ok(());
             }
             Pass::More => true,
             Pass::Idle => false,
         };
-        app.tick();
-        app.draw(term)?;
-        // Poll for input every iteration, even with events still
-        // queued: a backlog of streamed tokens must never starve
-        // Esc/Ctrl-C. While the drain is incomplete the poll is
-        // non-blocking so draining stays prompt; once the channel is
-        // empty it waits up to a frame for the next key.
+        tui.app.tick();
+        tui.app.draw(tui.guard.term())?;
+        // Poll for input every iteration, even with events still queued: a
+        // backlog of streamed tokens must never starve Esc/Ctrl-C. While the
+        // drain is incomplete the poll is non-blocking so draining stays prompt;
+        // once the channel is empty it waits up to a frame for the next key.
         let before = std::time::Instant::now();
         let timeout = if more {
             Duration::ZERO
@@ -3109,22 +2632,25 @@ fn drive_events(
         if ct_poll(timeout)? {
             match ct_read()? {
                 CtEvent::Key(k) if k.kind == KeyEventKind::Press => {
-                    match key_action(KeyMode::Running, &k, app.focused() == app.root) {
+                    match key_action(KeyMode::Running, &k, tui.app.focused() == tui.app.root) {
+                        // Esc / Ctrl-C raise the published root token the
+                        // worker's current turn reads.
                         KeyAction::Cancel => cancel::raise_interrupt(),
                         KeyAction::Submit => {
-                            app.enqueue();
+                            if let Some(text) = tui.app.submit() {
+                                route_submit(text, tui, &mailbox, provider, store, catalog, info)?;
+                            }
                         }
-                        KeyAction::Edit => app.key(k),
-                        KeyAction::Quit => {}
+                        KeyAction::Edit => tui.app.key(k),
                     }
                 }
-                CtEvent::Paste(s) => app.paste(&s),
-                CtEvent::Mouse(m) => app.mouse(m),
+                CtEvent::Paste(s) => tui.app.paste(&s),
+                CtEvent::Mouse(m) => tui.app.mouse(m),
                 _ => {}
             }
         }
-        // Cap the frame rate only when idle; while a backlog drains the
-        // sleep is skipped so throughput isn't throttled to
+        // Cap the frame rate only when idle; while a backlog drains the sleep is
+        // skipped so throughput isn't throttled to
         // BATCH * (1000 / MIN_FRAME_MS) events per second.
         if !more {
             let elapsed = before.elapsed().as_millis() as u64;
@@ -3135,74 +2661,373 @@ fn drive_events(
     }
 }
 
-/// The outcome of the idle wait between turns — a multi-source select over
-/// `{ user input, inbox, bus }`.  The TUI realises the select by polling: it
-/// redraws each tick anyway, so checking the inbox and draining the bus cost
-/// little, and a wakeup, finished agent, or live background event surfaces
-/// within one poll interval.
-enum Idle {
-    /// The user submitted a prompt.
-    Prompt(String),
-    /// A turn-boundary message is waiting in the inbox; the driver should
-    /// drain and deliver it.
-    Inbox,
-    /// The user asked to quit.
-    Quit,
+/// Route a submitted prompt line.  A view command (`/help`, `/legend`, `/copy`,
+/// `/export`, `/model`) touches only the App, clipboard, file, or picker, so it
+/// runs here on the UI thread.  A session command (`/clear`, `/compact`,
+/// `/quit`) and a plain prompt go onto the session inbox, where the worker's
+/// drive loop drains them — `/clear` *also* clears the viewport UI-side so the
+/// screen blanks immediately, before the worker rebuilds the session.
+fn route_submit(
+    text: String,
+    tui: &mut Tui,
+    mailbox: &Mailbox,
+    provider: &ProviderHandle,
+    store: &CredentialStore,
+    catalog: &mut ModelCatalog<LiveSource>,
+    info: &SessionInfo<'_>,
+) -> io::Result<()> {
+    let trimmed = text.trim();
+    match lookup_command(trimmed) {
+        Some((cmd, arg)) => match cmd.name {
+            "/help" => cmd_help(&mut tui.app),
+            "/legend" => cmd_legend(&mut tui.app),
+            "/copy" => cmd_copy(&mut tui.app),
+            "/export" => cmd_export(&mut tui.app, arg, info),
+            "/model" => {
+                pick_model(tui, provider, store, catalog, info)?;
+            }
+            // The viewport blanks immediately; the worker rebuilds the session.
+            "/clear" => {
+                tui.app.clear(info, tui.guard.term())?;
+                mailbox.push(InboxMsg::Command("/clear".into()));
+            }
+            // The worker's `ReplControl` compacts the history / returns Quit.
+            _ => mailbox.push(InboxMsg::Command(text.clone())),
+        },
+        // A plain prompt: onto the session inbox for the worker to drain.
+        None => mailbox.push_user(text),
+    }
+    Ok(())
 }
 
-/// At-rest, batch-drain the session bus so a live background `agent` advances:
-/// its tokens grow its tab and its `Died` starts the linger that ages the tab
-/// out, all while the user sits at the prompt.  Non-blocking — the caller's
-/// poll provides the cadence — and bounded so a flooding background producer
-/// cannot starve the input poll within one idle tick.
-fn drain_bus_idle(app: &mut App, rx: &Receiver<Event>) {
-    const IDLE_BATCH: usize = 256;
-    for _ in 0..IDLE_BATCH {
-        match rx.try_recv() {
-            Ok(ev) => app.handle(ev),
-            Err(_) => break,
+/// Emit one dim transcript line per registry entry: the command token
+/// (with aliases) left-padded to a common width, then its description.
+fn cmd_help(app: &mut App) {
+    let id = app.root;
+    let names: Vec<String> = SLASH_COMMANDS
+        .iter()
+        .map(|c| {
+            let mut s = c.name.to_string();
+            if let Some(arg) = c.arg {
+                s.push(' ');
+                s.push_str(arg);
+            }
+            if !c.aliases.is_empty() {
+                s.push_str(&format!(" ({})", c.aliases.join(", ")));
+            }
+            s
+        })
+        .collect();
+    let width = names.iter().map(String::len).max().unwrap_or(0);
+    for (n, c) in names.iter().zip(SLASH_COMMANDS) {
+        app.handle(Event {
+            id,
+            kind: Kind::Dim(format!("{n:<width$}   {}", c.help)),
+        });
+    }
+}
+
+/// Push the visual-vocabulary legend onto the transcript as ambient, rail-less
+/// chrome — the panel that decodes the rail, bars, grain, and fidelity
+/// treatments, rendered as the graphic's own samples.
+fn cmd_legend(app: &mut App) {
+    app.push_chrome(app.root, RailShape::Plain, legend_panel());
+}
+
+/// Copy the latest assistant reply — the focused tab's trailing prose, as raw
+/// markdown — to the system clipboard via OSC 52.  An oversized reply exceeds
+/// the terminal's per-sequence limit, so copy its tail (the same bound `Ctrl+Y`
+/// uses) and say so, rather than let the terminal drop the whole sequence and
+/// copy nothing silently.
+fn cmd_copy(app: &mut App) {
+    let id = app.root;
+    let reply = app.latest_reply();
+    if reply.is_empty() {
+        note_error(app, id, "no reply to copy yet".into());
+        return;
+    }
+    let payload = tail_bytes(&reply, YANK_CAP);
+    if let Err(e) = osc52_copy(payload) {
+        note_error(app, id, format!("clipboard write failed: {e}"));
+        return;
+    }
+    let note = if payload.len() < reply.len() {
+        format!("[reply exceeds the clipboard limit — copied its last {YANK_CAP} bytes]")
+    } else {
+        format!("[copied the latest reply — {} lines]", reply.lines().count())
+    };
+    app.handle(Event {
+        id,
+        kind: Kind::Dim(note),
+    });
+}
+
+/// Write the focused tab's user view — its rendered `user.log` — to `arg`, a
+/// path that may be absolute, relative to the launch cwd, or `~`/`xdg:`-
+/// prefixed.  Refuses to overwrite an existing file so an export never clobbers;
+/// an empty argument prints the usage line.  The copy itself goes through
+/// [`viewport::export_log`], where the `user.log` I/O door lives.
+fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
+    let id = app.root;
+    if arg.is_empty() {
+        note_error(app, id, "usage: /export <path>".into());
+        return;
+    }
+    let dest = resolve_export_path(arg, info.cwd);
+    if dest.exists() {
+        note_error(app, id, format!("refusing to overwrite {}", dest.display()));
+        return;
+    }
+    let src = match app.flush_focused_log() {
+        Ok(p) => p,
+        Err(e) => {
+            note_error(app, id, format!("could not flush transcript: {e}"));
+            return;
+        }
+    };
+    match viewport::export_log(&src, &dest) {
+        Ok(_) => app.handle(Event {
+            id,
+            kind: Kind::Dim(format!("[exported user view to {}]", dest.display())),
+        }),
+        Err(e) => note_error(app, id, format!("could not write {}: {e}", dest.display())),
+    }
+}
+
+/// Open the `/model` picker over the available providers, fetch their model
+/// lists (cache-first, then background), and drive the modal loop until the
+/// user selects a model or dismisses it. On a selection the provider is rebuilt
+/// over the same transcript, the [`ProviderHandle`] is swapped (taking effect on
+/// the worker's next turn), the saved selection is updated, and the status bar
+/// follows.
+fn pick_model(
+    tui: &mut Tui,
+    provider: &ProviderHandle,
+    store: &CredentialStore,
+    catalog: &mut ModelCatalog<LiveSource>,
+    info: &SessionInfo<'_>,
+) -> io::Result<()> {
+    let available = store.available();
+    // Each plan-backed provider's flavour, for the picker's labels: a ChatGPT
+    // login (the OAuth credential) reads as the ChatGPT plan, an otherwise-
+    // metered provider whose `ProviderId` declares a flat rate (opencode Go) as
+    // the generic subscription. A provider absent from the map is metered.
+    let subscription = available
+        .iter()
+        .filter_map(|id| {
+            let kind = if store.get(id).is_some_and(|c| c.is_subscription()) {
+                crate::oauth::Subscription::ChatGpt
+            } else if id.flat_rate() {
+                crate::oauth::Subscription::FlatRate
+            } else {
+                return None;
+            };
+            Some((id.clone(), kind))
+        })
+        .collect();
+    let mut picker = Picker::new(available, subscription);
+    // Seed each provider from the catalog's cache instantly; spawn a background
+    // fetch for the rest so the UI shows "loading…" rather than freezing on the
+    // network. A ChatGPT plan login has no catalog endpoint, so its curated plan
+    // models are seeded directly and it is excluded from the fetch; a flat-rate
+    // gateway (opencode Go) lists live through genai like any other API-key
+    // provider.
+    let mut rx = None;
+    let to_fetch: Vec<_> = picker
+        .loading_providers()
+        .into_iter()
+        .filter(|id| {
+            if store.get(id).is_some_and(|c| c.is_subscription()) {
+                let models = crate::oauth::PLAN_MODELS
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                picker.set_models(id, picker::ModelsState::Loaded(models));
+                return false;
+            }
+            match catalog.cached(id) {
+                Some(models) => {
+                    picker.set_models(id, picker::ModelsState::Loaded(models));
+                    false
+                }
+                None => true,
+            }
+        })
+        .collect();
+    if !to_fetch.is_empty() {
+        let (tx, recv) = std::sync::mpsc::channel();
+        for id in to_fetch {
+            let source = catalog.source().clone();
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let result = source.list(&id);
+                let _ = tx.send((id, result));
+            });
+        }
+        rx = Some(recv);
+    }
+    tui.app.picker = Some(picker);
+    let outcome = drive_picker(tui, store, catalog, rx);
+    tui.app.picker = None;
+    if let Some((id, model)) = outcome {
+        apply_model_switch(tui, provider, store, info, id, model);
+    }
+    Ok(())
+}
+
+/// Poll keys and background-fetch results until the picker resolves.  Returns
+/// the chosen `(provider, model)`, or `None` on cancel.
+fn drive_picker(
+    tui: &mut Tui,
+    store: &CredentialStore,
+    catalog: &mut ModelCatalog<LiveSource>,
+    rx: Option<FetchRx>,
+) -> Option<(provider::ProviderId, String)> {
+    loop {
+        // Fold any landed fetch results into the picker (and the catalog's
+        // caches), on this thread, so the disk write stays single-threaded.
+        if let Some(rx) = &rx {
+            while let Ok((id, result)) = rx.try_recv() {
+                let state = match result {
+                    Ok(models) => {
+                        catalog.record(&id, models.clone());
+                        picker::ModelsState::Loaded(models)
+                    }
+                    Err(reason) => picker::ModelsState::Failed(reason),
+                };
+                if let Some(p) = tui.app.picker_mut() {
+                    p.set_models(&id, state);
+                }
+            }
+        }
+        if tui.app.draw(tui.guard.term()).is_err() {
+            return None;
+        }
+        if !ct_poll(Duration::from_millis(100)).unwrap_or(false) {
+            continue;
+        }
+        let Ok(CtEvent::Key(k)) = ct_read() else {
+            continue;
+        };
+        if k.kind != KeyEventKind::Press {
+            continue;
+        }
+        if key_action(KeyMode::Overlay, &k, false) == KeyAction::Cancel {
+            return None;
+        }
+        let action = tui.app.picker_mut()?.key(k.code);
+        match action {
+            picker::PickAction::None => {}
+            picker::PickAction::Cancelled => return None,
+            picker::PickAction::Selected(id, model) => return Some((id, model)),
+            picker::PickAction::Manual(query) => {
+                let available = store.available();
+                match crate::models::resolve_model_provider(&query, &available, catalog) {
+                    Ok(id) => return Some((id, query)),
+                    Err(e) => {
+                        let root = tui.app.root;
+                        note_error(&mut tui.app, root, e);
+                    }
+                }
+            }
         }
     }
 }
 
-fn read_prompt(term: &mut Term, app: &mut App, rx: &Receiver<Event>) -> io::Result<Idle> {
-    loop {
-        // The third source of the select: live events from a background agent
-        // still running between turns.  Drain them so its tab streams and its
-        // `Died` ages out while we sit idle.
-        drain_bus_idle(app, rx);
-        // The second source: a wakeup, a finished agent, or queued user
-        // steering posted to the inbox while we sat idle.  Hand back at once so
-        // the driver delivers it as a fresh turn; a half-typed draft survives
-        // in the textarea and reappears on the next idle read.
-        if !app.inbox.is_empty() {
-            return Ok(Idle::Inbox);
-        }
-        app.tick();
-        app.draw(term)?;
-        if !ct_poll(Duration::from_millis(100))? {
-            continue;
-        }
-        match ct_read()? {
-            CtEvent::Key(k) => {
-                if k.kind != KeyEventKind::Press {
-                    continue;
-                }
-                match key_action(KeyMode::Idle, &k, app.focused() == app.root) {
-                    KeyAction::Quit => return Ok(Idle::Quit),
-                    KeyAction::Submit => {
-                        if let Some(s) = app.submit() {
-                            return Ok(Idle::Prompt(s));
-                        }
-                    }
-                    KeyAction::Edit => app.key(k),
-                    KeyAction::Cancel => {}
-                }
-            }
-            CtEvent::Paste(s) => app.paste(&s),
-            CtEvent::Mouse(m) => app.mouse(m),
-            _ => {}
-        }
+/// Rebuild the provider for the chosen `kind` + `model` over the same
+/// transcript, swap it into the shared [`ProviderHandle`] (the worker's next
+/// turn reads it), persist the selection to the project state dir, and update
+/// the live status bar. A persistence failure is noted but does not undo the
+/// in-memory switch.
+fn apply_model_switch(
+    tui: &mut Tui,
+    provider: &ProviderHandle,
+    store: &CredentialStore,
+    info: &SessionInfo<'_>,
+    provider_id: provider::ProviderId,
+    model: String,
+) {
+    let id = tui.app.root;
+    let Some(cred) = store.get(&provider_id).cloned() else {
+        note_error(
+            &mut tui.app,
+            id,
+            format!("{} has no resolved credential", provider_id.label()),
+        );
+        return;
+    };
+    let new_provider = Arc::new(Provider::build(
+        &provider_id,
+        model.clone(),
+        &cred,
+        info.max_tokens_override,
+    ));
+    let label = provider_id.label();
+    let status_provider = crate::oauth::provider_label(new_provider.subscription(), label);
+    provider.swap(new_provider);
+    tui.app.set_status_model(&status_provider, &model);
+    let state_dir = crate::bootstrap::project_dir(info.cwd);
+    if let Err(e) = state::save(&state_dir, &state::State::new(&provider_id, &model)) {
+        note_error(&mut tui.app, id, format!("could not persist selection: {e}"));
+    }
+    tui.app.handle(Event {
+        id,
+        kind: Kind::Dim(format!("[switched to {label} {model}]")),
+    });
+}
+
+/// Push an error line into the App's transcript — the UI-thread twin of
+/// `session.note_error`, for the view commands that surface their own failures.
+fn note_error(app: &mut App, id: SessionId, message: String) {
+    app.handle(Event {
+        id,
+        kind: Kind::Error(message),
+    });
+}
+
+fn ctrl_key(k: &KeyEvent, c: char) -> bool {
+    k.code == KeyCode::Char(c) && k.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+/// The two live input contexts: the running UI loop (the worker drives the
+/// whole session, so the prompt is never an idle read) and the modal `/model`
+/// picker overlay.  There is no idle mode — an interactive root's worker parks
+/// in [`Session::drive`] rather than returning, so the session ends through
+/// `/quit`, never a keystroke.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KeyMode {
+    Running,
+    Overlay,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum KeyAction {
+    Edit,
+    Submit,
+    Cancel,
+}
+
+fn key_action(mode: KeyMode, k: &KeyEvent, enter_submits: bool) -> KeyAction {
+    if ctrl_key(k, 'c') {
+        return KeyAction::Cancel;
+    }
+    if ctrl_key(k, 'd') {
+        return match mode {
+            KeyMode::Overlay => KeyAction::Cancel,
+            KeyMode::Running => KeyAction::Edit,
+        };
+    }
+    if k.code == KeyCode::Esc {
+        return KeyAction::Cancel;
+    }
+    if enter_submits
+        && k.code == KeyCode::Enter
+        && !k.modifiers.contains(KeyModifiers::SHIFT)
+        && !k.modifiers.contains(KeyModifiers::ALT)
+    {
+        KeyAction::Submit
+    } else {
+        KeyAction::Edit
     }
 }
 

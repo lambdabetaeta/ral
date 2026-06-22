@@ -41,7 +41,7 @@ pub enum ToolSet {
 
 impl ToolSet {
     /// Whether `tool` is advertised and permitted under this set.
-    pub fn allows(&self, tool: &dyn Tool) -> bool {
+    pub(crate) fn allows(&self, tool: &dyn Tool) -> bool {
         match self {
             ToolSet::All => true,
             ToolSet::NoSpawn => !tool.spawns(),

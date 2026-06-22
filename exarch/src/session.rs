@@ -343,11 +343,6 @@ impl Session {
         self.inbox.clone()
     }
 
-    /// Whether this session may spawn children (read by the spawn site).
-    pub(crate) fn is_root(&self) -> bool {
-        self.is_root
-    }
-
     /// This session's cancellation token (read by the spawn site to register
     /// a peer's sticky token in the parent's [`Self::agents`]).
     pub(crate) fn cancel_token(&self) -> &cancel::Token {
@@ -897,7 +892,21 @@ fn announce(turn: &Turn, emit: &Emitter) {
             text: r.text.clone(),
             elapsed: r.elapsed,
         }),
-        Turn::Nudge(_) | Turn::Command(_) | Turn::Surface { .. } => {}
+        // A detached `spawn` worker's deferred surface batch: decode each value
+        // and emit it as the live foreground decode would, so its cards/io land
+        // on the rail.  The emitter's id is this session's, which is exactly the
+        // id the batch was stamped with (a session's boundary sink stamps with
+        // its own id and posts to its own inbox), so the cards reach the right
+        // viewport.  The model is then woken with `turn.text()`'s notice.
+        Turn::Surface { values, .. } => {
+            for v in values {
+                if let Some(kind) = shell_eval::decode_surface(v) {
+                    emit.emit(kind);
+                }
+            }
+        }
+        // A self-nudge is a quiet continuation; a command never reaches the model.
+        Turn::Nudge(_) | Turn::Command(_) => {}
     }
 }
 
@@ -1127,12 +1136,12 @@ mod tests {
                 "the forked child must inherit the host builtin `{name}`"
             );
         }
-        // The child's tool set withholds the spawn family.
+        // The child's tool set withholds the spawn family, so a peer cannot
+        // spawn its own children and the tree stays one level deep.
         let agent = crate::tools::find("agent").expect("agent tool registered");
         assert!(
             !child.tools.allows(agent),
             "a peer must not be permitted the `agent` spawn tool"
         );
-        assert!(!child.is_root(), "a fork is not a root");
     }
 }

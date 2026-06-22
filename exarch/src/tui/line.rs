@@ -269,29 +269,6 @@ pub(super) fn prompt_fence(width: u16) -> Line<'static> {
     ))
 }
 
-/// Scrollback echo of a scheduled wakeup delivered as a fresh turn. A wakeup
-/// is the machine's own bookkeeping, not a human utterance, so it renders as
-/// dim, marked chrome — never the bold prompt-echo a human turn gets. The
-/// text is the marked render the model sees (`[scheduled '…' · …] …`), kept
-/// whole so the transcript and the model agree on what fired: the `[scheduled
-/// …]` prefix is the marker, and the dim slate styling reads it as
-/// bookkeeping rather than prose. The first line carries only the body and
-/// continuations indent two columns to align under it.
-pub(super) fn wakeup(s: &str) -> Vec<Line<'static>> {
-    let cont = Span::raw("  ");
-    let body = Style::default().fg(SLATE).add_modifier(Modifier::DIM);
-    let mut ls: Vec<Line<'static>> = vec![Line::default()];
-    ls.extend(s.lines().enumerate().map(|(i, l)| {
-        let body_span = Span::styled(l.to_string(), body);
-        if i == 0 {
-            Line::from(vec![body_span])
-        } else {
-            Line::from(vec![cont.clone(), body_span])
-        }
-    }));
-    ls
-}
-
 /// The pending-prompt strip shown above the input while a turn runs: each
 /// message the user submitted mid-turn, oldest first.  Pending prompts wear a
 /// raised [`PROMPT_BG`] band ([`wash`]) — a "your text, still queued"
