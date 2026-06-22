@@ -205,10 +205,10 @@ pub enum SessionEvent {
     /// pending have been synthesised back to a `ReadyForUser` state by
     /// [`SessionLog::quiesce`].
     Cancelled,
-    /// History was compacted.  The summary text becomes the body of the
-    /// next `UserPrompt` (recorded separately) — this event is just the
-    /// archival breadcrumb so post-mortem tooling can spot where the
-    /// truncation happened.
+    /// History was compacted.  The live model view (the summary plus the
+    /// kept suffix) is held in [`SessionLog::compaction`]; this event is
+    /// just the archival breadcrumb so post-mortem tooling can spot where
+    /// the truncation happened and read the summary it produced.
     Compacted {
         before_bytes: usize,
         after_bytes: usize,
@@ -304,11 +304,12 @@ pub struct SessionLog {
     /// truncated by `/compact` and by `/clear`.
     events: Vec<SessionEvent>,
     state: State,
-    /// Index *inside `events`* of the most recent `Compacted` event, if
-    /// any.  Events at or before this index are excluded from the
-    /// model-facing render — the summary takes their place via the
-    /// `UserPrompt` that the compaction wrote right after.
-    compact_cut: Option<usize>,
+    /// Active compaction, if any: the summary standing in for the dropped
+    /// prefix and the index in `events` where the kept verbatim suffix
+    /// begins.  In-memory only (logs are per-run); the on-disk `Compacted`
+    /// event is the archival breadcrumb.  The model view is the summary
+    /// followed by `events[suffix_start..]`.
+    compaction: Option<Compaction>,
     /// Model identifier this log records.  Stored so `clear` can
     /// re-emit `SessionStarted` with the same value, and `fork`
     /// inherits it for the child's first event.
@@ -320,6 +321,36 @@ pub struct SessionLog {
     /// under.  Stored so `fork` doesn't need to thread it through from
     /// the binary.
     sessions_root: PathBuf,
+}
+
+/// The live state of an applied compaction: the summary standing in for
+/// the dropped prefix, and where in `events` the kept verbatim suffix
+/// begins.  The model view is the summary followed by `events[suffix_start..]`.
+struct Compaction {
+    summary: String,
+    suffix_start: usize,
+}
+
+/// A planned compaction: the cut to apply (`suffix_start`) and the older
+/// messages to summarise (`prefix_messages`, including any prior summary).
+pub struct CompactionPlan {
+    pub suffix_start: usize,
+    pub prefix_messages: Vec<ChatMessage>,
+}
+
+/// The user-message wrapper a compaction summary takes in the model view.
+fn summary_prompt(summary: &str) -> String {
+    format!("Summary of prior work in this session:\n\n{summary}")
+}
+
+/// Serialised model-message bytes an event contributes — the per-event
+/// unit [`SessionLog::history_bytes`] sums and the suffix budget measures.
+fn event_message_bytes(e: &SessionEvent) -> usize {
+    e.clone()
+        .into_chat_messages()
+        .iter()
+        .map(|m| serde_json::to_string(m).map(|s| s.len()).unwrap_or(0))
+        .sum()
 }
 
 impl SessionLog {
@@ -380,8 +411,10 @@ impl SessionLog {
     }
 
     /// Approximate context size as serialised model-view message bytes.
-    /// Drives the `compact_threshold` decision in
-    /// [`crate::session::Session::compact`].
+    /// The fallback compaction trigger in
+    /// [`crate::session::Session::compact`], used when the model's context
+    /// window is unknown; otherwise compaction tracks token pressure
+    /// against the window.
     pub fn history_bytes(&self) -> usize {
         self.model_messages()
             .iter()
@@ -548,37 +581,90 @@ impl SessionLog {
         }
     }
 
-    /// Replace prior history with a compact summary.  Records the
-    /// `Compacted` breadcrumb on disk, then a `UserPrompt` carrying the
-    /// summary, and shifts the model-view cutoff so future renders skip
-    /// everything before.
-    pub fn replace_with_summary(&mut self, summary: String) -> Result<(), String> {
+    /// Indices in `events[from..]` of top-level user prompts — the turn
+    /// boundaries a compaction may cut at.  Replays the ready/in-turn
+    /// state so a mid-turn steering prompt (not a clean boundary) is
+    /// skipped, and a cut never splits an assistant message from its tool
+    /// results.
+    fn turn_start_indices(&self, from: usize) -> Vec<usize> {
+        let mut ready = true;
+        let mut starts = Vec::new();
+        for (i, e) in self.events.iter().enumerate().skip(from) {
+            match e {
+                SessionEvent::UserPrompt { .. } if ready => {
+                    starts.push(i);
+                    ready = false;
+                }
+                SessionEvent::AssistantMessage { pending_tool_ids, .. } => {
+                    ready = pending_tool_ids.is_empty();
+                }
+                SessionEvent::ToolResults { .. } => ready = false,
+                SessionEvent::Compacted { .. } => ready = true,
+                _ => {}
+            }
+        }
+        starts
+    }
+
+    /// Plan a compaction: choose the cut so the most recent turns fitting
+    /// in `keep_budget_bytes` stay verbatim, and gather the older prefix
+    /// (plus any prior summary) as the messages to summarise.  `None` when
+    /// everything currently visible fits the budget — nothing older than
+    /// the kept suffix to summarise.
+    pub fn plan_compaction(&self, keep_budget_bytes: usize) -> Option<CompactionPlan> {
+        let visible_start = self.compaction.as_ref().map_or(0, |c| c.suffix_start);
+        let candidates = self.turn_start_indices(visible_start);
+
+        // Walk turn starts newest-first, growing the kept suffix until it
+        // would exceed the budget; the cut is the oldest start still
+        // inside it.  Default: keep nothing (cut past the end) — a single
+        // turn larger than the whole budget falls back to summarising all.
+        let mut cut = self.events.len();
+        let mut acc = 0usize;
+        let mut upper = self.events.len();
+        for &cand in candidates.iter().rev() {
+            acc += self.events[cand..upper].iter().map(event_message_bytes).sum::<usize>();
+            if acc <= keep_budget_bytes {
+                cut = cand;
+                upper = cand;
+            } else {
+                break;
+            }
+        }
+        if cut <= visible_start {
+            return None;
+        }
+
+        let mut prefix_messages = Vec::new();
+        if let Some(c) = &self.compaction {
+            prefix_messages.push(ChatMessage::user(summary_prompt(&c.summary)));
+        }
+        for e in &self.events[visible_start..cut] {
+            prefix_messages.extend(e.clone().into_chat_messages());
+        }
+        Some(CompactionPlan { suffix_start: cut, prefix_messages })
+    }
+
+    /// Commit a planned compaction: record the archival `Compacted`
+    /// breadcrumb and switch the model view to the summary plus the kept
+    /// suffix (`events[suffix_start..]`).
+    pub fn apply_compaction(&mut self, summary: String, suffix_start: usize) -> Result<(), String> {
         if !self.can_compact() {
             return Err("cannot compact while tool results are pending".into());
         }
         let before_bytes = self.history_bytes();
         self.record_or_string_err(SessionEvent::Compacted {
             before_bytes,
-            // `after_bytes` is computed by `history_bytes` *after* the
-            // summary prompt is in, so the on-disk record is faithful;
-            // we patch it in just below.
+            // Patched below, once the new model view is in place; the
+            // on-disk `0` is accepted rather than rewriting a
+            // pretty-printed object in place.
             after_bytes: 0,
             summary: summary.clone(),
         })?;
-        // Future model-render only sees events strictly after this one.
-        self.compact_cut = Some(self.events.len() - 1);
-        self.record_or_string_err(SessionEvent::UserPrompt {
-            text: format!("Summary of prior work in this session:\n\n{summary}"),
-        })?;
+        self.compaction = Some(Compaction { summary, suffix_start });
         self.state = State::ReadyForUser;
-        // Now patch the recorded `Compacted.after_bytes`.  Disk already
-        // shows `0` — we accept that minor staleness because rewriting
-        // a pretty-printed JSON object in place is not worth the
-        // complexity; the in-memory accumulator stays accurate.
         let after = self.history_bytes();
-        if let Some(SessionEvent::Compacted { after_bytes, .. }) =
-            self.events.get_mut(self.compact_cut.unwrap())
-        {
+        if let Some(SessionEvent::Compacted { after_bytes, .. }) = self.events.last_mut() {
             *after_bytes = after;
         }
         Ok(())
@@ -591,7 +677,7 @@ impl SessionLog {
     pub fn clear(&mut self, system_prompt_bytes: usize) -> io::Result<()> {
         self.events.clear();
         self.state = State::ReadyForUser;
-        self.compact_cut = None;
+        self.compaction = None;
         // Truncate the events file in place.
         self.events_file = open_events_file(&self.dir)?;
         self.record_started(None, system_prompt_bytes)
@@ -651,7 +737,7 @@ impl SessionLog {
             events_file,
             events: Vec::new(),
             state: State::ReadyForUser,
-            compact_cut: None,
+            compaction: None,
             model,
             provider,
             sessions_root,
@@ -690,23 +776,23 @@ impl SessionLog {
         self.record(ev).map_err(|e| e.to_string())
     }
 
-    /// Slice of events visible to the model — drops everything at or
-    /// before the most recent `Compacted` cut, then keeps the rest in
-    /// arrival order.
-    fn model_events(&self) -> &[SessionEvent] {
-        match self.compact_cut {
-            Some(i) => &self.events[i + 1..],
-            None => &self.events,
-        }
-    }
-
-    /// Project model events into the `Vec<ChatMessage>` shape genai
-    /// wants.  Lifecycle / step / usage events drop out here.
+    /// The `Vec<ChatMessage>` shape genai wants.  When a compaction is
+    /// active, the view is the summary (as a user message) followed by the
+    /// kept suffix `events[suffix_start..]`; otherwise it is every event.
+    /// Lifecycle / step / usage events drop out in projection.
     fn model_messages(&self) -> Vec<ChatMessage> {
-        self.model_events()
-            .iter()
-            .flat_map(|e| e.clone().into_chat_messages())
-            .collect()
+        let mut msgs = Vec::new();
+        let start = match &self.compaction {
+            Some(c) => {
+                msgs.push(ChatMessage::user(summary_prompt(&c.summary)));
+                c.suffix_start
+            }
+            None => 0,
+        };
+        for e in &self.events[start..] {
+            msgs.extend(e.clone().into_chat_messages());
+        }
+        msgs
     }
 }
 
@@ -825,7 +911,7 @@ mod tests {
         s.append_user("p".into()).unwrap();
         s.append_assistant(assistant_with_tool("a"), vec!["a".into()], None)
             .unwrap();
-        let err = s.replace_with_summary("summary".into()).unwrap_err();
+        let err = s.apply_compaction("summary".into(), 0).unwrap_err();
         assert!(err.contains("cannot compact"));
     }
 
@@ -835,7 +921,10 @@ mod tests {
         s.append_user("first".into()).unwrap();
         s.append_assistant(ChatMessage::assistant("done"), vec![], None)
             .unwrap();
-        s.replace_with_summary("did stuff".into()).unwrap();
+        // Keep no suffix (cut past the end) — the model view collapses to
+        // the summary alone, as it does when no recent turn fits the budget.
+        let cut = s.events.len();
+        s.apply_compaction("did stuff".into(), cut).unwrap();
         // Compaction lands in `ReadyForUser`; mimic the REPL by
         // priming a fresh user prompt before asking what the model
         // sees on the next turn.
@@ -850,6 +939,34 @@ mod tests {
         let contents = fs::read_to_string(s.dir().join("events.json")).unwrap();
         assert!(contents.contains("first"));
         assert!(contents.contains("compacted"));
+    }
+
+    #[test]
+    fn compaction_keeps_the_recent_suffix_and_summarises_the_prefix() {
+        let mut s = fresh_root("compact-suffix");
+        for (u, a) in [("USER1", "ASST1"), ("USER2", "ASST2"), ("USER3", "ASST3")] {
+            s.append_user(u.into()).unwrap();
+            s.append_assistant(ChatMessage::assistant(a), vec![], None)
+                .unwrap();
+        }
+
+        // A budget that holds exactly the last turn keeps it verbatim and
+        // summarises everything older.
+        let last_turn = &s.events[s.events.len() - 2..];
+        let keep = last_turn.iter().map(event_message_bytes).sum::<usize>();
+        let plan = s.plan_compaction(keep).expect("a prefix to summarise");
+        s.apply_compaction("PRIOR-WORK".into(), plan.suffix_start)
+            .unwrap();
+
+        let view = serde_json::to_string(&s.history_messages()).unwrap();
+        // Summary stands in for the dropped turns; the last turn survives.
+        assert!(view.contains("PRIOR-WORK"));
+        assert!(view.contains("USER3") && view.contains("ASST3"));
+        // The summarised prefix is gone from the model view…
+        assert!(!view.contains("USER1") && !view.contains("USER2"));
+        // …but still on disk.
+        let disk = fs::read_to_string(s.dir().join("events.json")).unwrap();
+        assert!(disk.contains("USER1") && disk.contains("ASST2"));
     }
 
     #[test]

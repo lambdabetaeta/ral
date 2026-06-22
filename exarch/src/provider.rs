@@ -1070,6 +1070,16 @@ impl Provider {
         &self.model
     }
 
+    /// This model's total context window in tokens, when the catalog
+    /// lists it — the denominator the compaction trigger measures real
+    /// context pressure against.  A live catalog lookup (a cheap `HashMap`
+    /// get), so it self-heals once [`crate::pricing::ensure_loaded`]
+    /// completes; `None` for a native provider or before the catalog
+    /// loads, where compaction falls back to the byte heuristic.
+    pub fn context_window(&self) -> Option<u64> {
+        crate::pricing::context_window(&self.model)
+    }
+
     /// How this provider's plan reads — a flat subscription (and which
     /// flavour) or a metered API key. A subscription's turns carry no
     /// per-token price; the flavour drives the status/picker label
@@ -1129,10 +1139,11 @@ impl Provider {
         &self,
         system: &str,
         messages: Vec<ChatMessage>,
+        max_tokens: u32,
         cancel: &cancel::Token,
     ) -> Result<SummaryOut, ProviderError> {
         match &self.backend {
-            Backend::Live(live) => live.summarize(&self.model, system, messages, cancel),
+            Backend::Live(live) => live.summarize(&self.model, system, messages, max_tokens, cancel),
             Backend::Scripted(s) => s.summarize(&self.model),
         }
     }
@@ -1304,18 +1315,20 @@ impl Live {
         model: &str,
         system: &str,
         mut messages: Vec<ChatMessage>,
+        max_tokens: u32,
         cancel: &cancel::Token,
     ) -> Result<SummaryOut, ProviderError> {
         self.refresh_if_stale();
         messages.push(ChatMessage::user(
-            "Summarise the conversation so far in one paragraph: \
+            "Summarise the conversation so far concisely: \
             the user's task, what has been tried, what worked, what state the \
             shell is in (cwd, env, defined names), and any open subtasks. \
+            A prior summary may appear first — fold it in. \
             Return only the summary, no preamble.",
         ));
         let req_template = build_cached_request(self.adapter, system, messages);
         let options = ChatOptions::default()
-            .with_max_tokens(1024)
+            .with_max_tokens(max_tokens)
             .with_prompt_cache_key(&self.cache_key);
 
         let resp = self.runtime.block_on(retry_with_backoff(
@@ -1352,11 +1365,10 @@ impl Live {
             },
         ))?;
 
-        // A summary that itself hit the 1024-token cap is incomplete;
-        // replacing the whole history with it would silently drop
-        // everything past the cut-off.  Surface it as `Truncated` so
-        // `Session::compact` keeps the un-summarised history rather than
-        // committing a half summary (X10).
+        // A summary that itself hit the `max_tokens` cap is incomplete;
+        // committing it would silently drop everything past the cut-off.
+        // Surface it as `Truncated` so `Session::compact` keeps the
+        // un-summarised history rather than compacting to a half summary.
         if matches!(resp.stop_reason, Some(StopReason::MaxTokens(_))) {
             return Err(ProviderError::Truncated {
                 reason: "summary exceeded the compaction token budget".into(),
@@ -1632,62 +1644,26 @@ pub mod scripted {
                 outcome: Err(err),
             }
         }
-
-        /// Attach a usage delta to a reply (for compaction-threshold
-        /// tests, which need history bytes to cross the cap).
-        pub fn with_usage(mut self, usage: Usage) -> Self {
-            if let Ok(step) = &mut self.outcome {
-                step.usage = usage;
-            }
-            self
-        }
     }
 
     /// A scripted run: `completes` are popped one per [`Provider::complete`]
-    /// call, `summaries` one per [`Provider::summarize`] call.  Build with
-    /// [`Script::new`] and chain [`Script::then`] / [`Script::then_summary`].
+    /// call.  Build with [`Script::new`] and chain [`Script::then`].
     ///
     /// [`Provider::complete`]: super::Provider::complete
-    /// [`Provider::summarize`]: super::Provider::summarize
     pub struct Script {
         completes: Mutex<VecDeque<Reply>>,
-        summaries: Mutex<VecDeque<Result<SummaryOut, ProviderError>>>,
     }
 
     impl Script {
         pub fn new() -> Self {
             Self {
                 completes: Mutex::new(VecDeque::new()),
-                summaries: Mutex::new(VecDeque::new()),
             }
         }
 
         /// Append a `complete` reply.
         pub fn then(self, reply: Reply) -> Self {
             self.completes.lock().unwrap().push_back(reply);
-            self
-        }
-
-        /// Append a `summarize` reply.
-        pub fn then_summary(self, summary: &str) -> Self {
-            self.summaries.lock().unwrap().push_back(Ok(SummaryOut {
-                summary: summary.to_string(),
-                usage: Usage::default(),
-            }));
-            self
-        }
-
-        /// Append a `summarize` reply that was itself truncated by the
-        /// compaction token budget — the X10 shape the Live backend
-        /// surfaces as `Truncated` so `Session::compact` keeps the
-        /// un-summarised history rather than committing a half summary.
-        pub fn then_summary_truncated(self) -> Self {
-            self.summaries
-                .lock()
-                .unwrap()
-                .push_back(Err(ProviderError::Truncated {
-                    reason: "summary exceeded the compaction token budget".into(),
-                }));
             self
         }
 
@@ -1708,12 +1684,14 @@ pub mod scripted {
             reply.outcome
         }
 
+        /// The scripted backend does not model the summariser; it returns
+        /// a fixed summary so a byte-fallback compaction driven through it
+        /// stays total rather than panicking.
         pub(super) fn summarize(&self, _model: &str) -> Result<SummaryOut, ProviderError> {
-            self.summaries
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("scripted provider ran out of `summarize` replies")
+            Ok(SummaryOut {
+                summary: "scripted summary".to_string(),
+                usage: Usage::default(),
+            })
         }
     }
 

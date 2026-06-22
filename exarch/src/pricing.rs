@@ -146,6 +146,16 @@ pub fn caps(model: &str) -> Option<ModelCaps> {
     CATALOG.get()?.caps.get(model).cloned()
 }
 
+/// The total context window in tokens for `model`, when the OpenRouter
+/// catalog has been fetched and lists it.  A targeted accessor that skips
+/// the `ModelCaps` clone [`caps`] makes — the compaction trigger reads
+/// only this one field, at every turn boundary.  `None` for a native
+/// provider or before the catalog loads, so the caller falls back to the
+/// byte heuristic; it self-heals once [`ensure_loaded`] completes.
+pub fn context_window(model: &str) -> Option<u64> {
+    CATALOG.get()?.caps.get(model)?.context_window
+}
+
 #[derive(Default)]
 struct Snapshot {
     prices: HashMap<String, ModelPricing>,

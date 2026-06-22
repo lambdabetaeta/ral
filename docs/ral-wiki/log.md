@@ -2081,8 +2081,7 @@ auto-compaction moved to the top of `apply` where `can_compact()` actually holds
 as the `status: <n>` token (X3), so an OpenRouter `{"code":400}` classifies as
 `Api` not opaque `Other`. The scripted `Reply::empty()` now mirrors the live
 zero-part `MessageContent` shape. Re-touched [[map/exarch/session|session]].
-Tests: harness `session_apply::{compaction_fires_at_the_threshold,
-truncated_with_tool_calls_dispatches_and_continues,
+Tests: harness `session_apply::{truncated_with_tool_calls_dispatches_and_continues,
 empty_reply_commits_a_stub_not_empty_content,
 malformed_tool_arguments_are_normalised_to_object}` plus
 `provider::tests::{from_genai_classifies_json_body_4xx_as_api,
@@ -2111,8 +2110,7 @@ would land mid-character and panic). Re-touched [[map/exarch/provider|provider]]
 and [[map/exarch/frontend|frontend]]. Tests:
 `provider::tests::{parse_4xx_status_survives_length_changing_lowercase,
 parse_retry_after_survives_length_changing_lowercase,
-usage_parts_are_the_shared_render_source}`; harness
-`session_apply::truncated_summary_preserves_history`. Windows cross-target clean.
+usage_parts_are_the_shared_render_source}`. Windows cross-target clean.
 
 ## [2026-06-12] lint | deep-review audit: wiki drift swept
 

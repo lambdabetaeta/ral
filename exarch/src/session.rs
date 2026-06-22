@@ -17,7 +17,10 @@ use crate::bus::{
     AgentOutcome, Emitter, Inbox, InboxMsg, Kind, Mailbox, SessionId, Turn, WORKER_PANIC_PREFIX,
 };
 use crate::cancel;
-use crate::digest::{AGENT_REPLY_CAP, COMPACT_THRESHOLD, OPAQUE_CAP, clip, render};
+use crate::digest::{
+    AGENT_REPLY_CAP, COMPACT_THRESHOLD, OPAQUE_CAP, SUMMARY_CAP_FALLBACK_TOKENS, clip,
+    compaction_due, render, suffix_keep_budget, summary_cap_tokens,
+};
 use crate::event::{QuiesceReason, SessionLog, ToolResult as SessionToolResult};
 use crate::nudge;
 use crate::provider::{Provider, ProviderError, StepOut, StopReason, ToolCall};
@@ -103,6 +106,11 @@ pub struct Session {
     /// inherited by forks, so a `--allow-schedule` root grants its peers the
     /// same authority.
     pub(crate) schedule_authority: bool,
+    /// Input tokens the model saw on the most recent completion — the live
+    /// numerator for the context-pressure compaction trigger
+    /// ([`Self::compact`]), the same signal the TUI's fidelity gauge reads.
+    /// Set from each step's usage; reset to `0` on `/clear`.
+    last_input: u64,
 }
 
 /// Outcome of one [`Session::apply`].  Degenerate cases (`Empty`,
@@ -250,6 +258,7 @@ impl Session {
             agents: crate::agent_registry::AgentRegistry::new(),
             schedules: crate::schedule::ScheduleRegistry::new(),
             schedule_authority,
+            last_input: 0,
         }
     }
 
@@ -297,6 +306,9 @@ impl Session {
         let shell = boot_root_shell(scratch);
         self.log.clear(self.system.len())?;
         self.replace_shell(shell);
+        // A rebuilt context starts empty: drop the stale pressure reading so
+        // the next turn's usage sets it afresh.
+        self.last_input = 0;
         // Drop every queued message: a rebuilt context carries neither stale
         // user steering nor non-human deliveries across the clear.
         self.inbox.clear();
@@ -618,6 +630,9 @@ impl Session {
                 }
                 Err(e) => return Err(e),
             };
+            // The tokens the model just saw — the live numerator for the
+            // context-pressure compaction trigger at this turn's boundary.
+            self.last_input = usage.input;
             self.log
                 .record_usage(usage.into())
                 .map_err(|e| ProviderError::Other(e.to_string()))?;
@@ -725,8 +740,33 @@ impl Session {
             }
             return;
         }
-        let bytes = self.log.history_bytes();
-        if bytes < COMPACT_THRESHOLD {
+        // Auto-compaction tracks real context pressure: `last_input` (the
+        // tokens the model last saw) against the model's context window,
+        // firing once it grows into the reserve (oh-my-pi's trigger).  An
+        // unknown window (native provider, or the catalog not yet fetched)
+        // falls back to the absolute byte heuristic.  A manual `/compact`
+        // (`requested`) overrides the gate: the user is compacting on
+        // purpose.  `summary_cap` scales the summary with the window —
+        // exarch keeps a recent suffix verbatim and summarises only the
+        // older prefix, so the summary stays concise either way.
+        let used = self.last_input;
+        let window = provider.context_window();
+        let (due, detail, summary_cap) = match window {
+            Some(w) if w > 0 => (
+                compaction_due(used, w),
+                format!("{used} of {w} tokens"),
+                summary_cap_tokens(w),
+            ),
+            _ => {
+                let bytes = self.log.history_bytes();
+                (
+                    bytes >= COMPACT_THRESHOLD,
+                    format!("{} KB", bytes / 1024),
+                    SUMMARY_CAP_FALLBACK_TOKENS,
+                )
+            }
+        };
+        if !requested && !due {
             return;
         }
         // A turn-boundary Esc must not kick off a summarize request we'd
@@ -735,19 +775,24 @@ impl Session {
         if token.is_cancelled() {
             return;
         }
-        self.note_dim(
-            format!("[compacting history: {} KB → summary]", bytes / 1024),
-            emit,
-        );
+        // Keep the recent half verbatim; summarise the older prefix.
+        let keep = suffix_keep_budget(self.log.history_bytes());
+        let Some(plan) = self.log.plan_compaction(keep) else {
+            if requested {
+                self.note_dim("[nothing to compact]".into(), emit);
+            }
+            return;
+        };
+        self.note_dim(format!("[compacting history: {detail} → summary]"), emit);
         emit.emit(Kind::Phase("compacting history".into()));
-        match provider.summarize(&self.system, self.log.history_messages(), token) {
+        match provider.summarize(&self.system, plan.prefix_messages, summary_cap, token) {
             Ok(summary) => {
                 if let Err(e) = self.log.record_usage(summary.usage.into()) {
                     self.note_error(format!("compact failed: {e}"), emit);
                     return;
                 }
                 emit.emit(Kind::Usage(summary.usage));
-                if let Err(e) = self.log.replace_with_summary(summary.summary) {
+                if let Err(e) = self.log.apply_compaction(summary.summary, plan.suffix_start) {
                     self.note_error(format!("compact failed: {e}"), emit);
                     return;
                 }

@@ -43,10 +43,56 @@ pub const OPAQUE_CAP: usize = 3000;
 /// for the genuinely oversized reply rather than the common case.
 pub const AGENT_REPLY_CAP: usize = 16_000;
 
-/// History size in bytes at which [`crate::session::Session::compact`]
-/// kicks in.  500 KB keeps roughly a dozen tool results in flight
-/// before compaction.
+/// Fallback compaction trigger, in serialised model-view bytes, for
+/// [`crate::session::Session::compact`] — used only when the model's
+/// context window is unknown (a native provider with no fetched catalog).
+/// When the window *is* known, compaction tracks real token pressure
+/// against the window via [`compaction_due`].  500 KB keeps roughly a
+/// dozen tool results in flight before compaction.
 pub const COMPACT_THRESHOLD: usize = 500 * 1024;
+
+/// Summary output cap, in tokens, when the window is unknown — the
+/// companion to [`COMPACT_THRESHOLD`]'s byte trigger.  A generous fixed
+/// ceiling: a faithful summary is far smaller, but it must be wide enough
+/// that a verbose summariser finishes, since a truncated summary aborts
+/// the whole compaction.
+pub const SUMMARY_CAP_FALLBACK_TOKENS: u32 = 8_192;
+
+/// Tokens held back from the window for the next prompt and the summary
+/// response — the headroom compaction keeps free.  Mirrors oh-my-pi's
+/// `effectiveReserveTokens`: at least 15% of the window, with a fixed
+/// floor so a small window still reserves a usable margin.
+fn reserve_tokens(window: u64) -> u64 {
+    const RESERVE_FLOOR_TOKENS: u64 = 16_384;
+    (window * 15 / 100).max(RESERVE_FLOOR_TOKENS)
+}
+
+/// Whether the live context (`used` input tokens) has grown into the
+/// reserve — i.e. crossed `window − reserve`.  The window-aware
+/// compaction trigger; an unknown window falls back to
+/// [`COMPACT_THRESHOLD`] on the serialised history bytes at the call site.
+pub fn compaction_due(used: u64, window: u64) -> bool {
+    used + reserve_tokens(window) > window
+}
+
+/// Summary output cap for a known `window`: four-fifths of the reserve
+/// (oh-my-pi's `0.8 * reserve`), clamped so a small window still allows a
+/// usable summary and a huge one does not invite a rambling one.  exarch
+/// keeps a recent suffix verbatim, so the summary covers only the dropped
+/// prefix and stays concise.
+pub fn summary_cap_tokens(window: u64) -> u32 {
+    const MIN: u64 = 4_096;
+    const MAX: u64 = 32_768;
+    (reserve_tokens(window) * 4 / 5).clamp(MIN, MAX) as u32
+}
+
+/// Byte budget for the verbatim suffix kept across a compaction: half the
+/// current model-view bytes, so compaction summarises the older half and
+/// keeps the recent half intact.  Window-agnostic by design — it splits
+/// whatever is in context, which the token trigger already bounds.
+pub fn suffix_keep_budget(history_bytes: usize) -> usize {
+    history_bytes / 2
+}
 
 /// Appended to an elision banner.  The elided bytes are gone, so the
 /// model's recourse is to narrow what it asked for — scope the query at
