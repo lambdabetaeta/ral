@@ -1236,7 +1236,6 @@ dependencies = [
 name = "exarch"
 version = "0.1.0"
 dependencies = [
- "ansi-to-tui",
  "base64",
  "blake3",
  "clap",
@@ -3878,7 +3877,6 @@ dependencies = [
  "ratatui",
  "ratatui-textarea",
  "rustyline",
- "serde",
  "serde_json",
  "tempfile",
  "textarea-vim",

@@ -38,7 +38,6 @@ textarea-vim = { path = "../textarea-vim", optional = true }
 # Fuzzy matcher (the Helix team's) behind the shared completion engine; every
 # frontend ranks completions fuzzily through it.
 nucleo-matcher = "0.3"
-serde      = { workspace = true }
 serde_json = { workspace = true }
 clap       = { workspace = true }
 base64     = { workspace = true }
