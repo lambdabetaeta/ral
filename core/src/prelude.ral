@@ -61,13 +61,13 @@ let get = { |m key default|
 let take-while = { |pred items|
     let _go = { |xs acc|
         if !{is-empty $xs} {
-            let rev = !{reverse $acc}
-            return $rev
+            let reversed = !{reverse $acc}
+            return $reversed
         } else {
             let [head, ...rest] = $xs
             if !{$pred $head} { _go $rest [$head, ...$acc] } else {
-                let rev = !{reverse $acc}
-                return $rev
+                let reversed = !{reverse $acc}
+                return $reversed
             }
         }
     }
@@ -86,8 +86,8 @@ let drop-while = { |pred items|
 let take = { |n items|
     let _go = { |k xs acc|
         if $[$k <= 0 || !{is-empty $xs}] {
-            let rev = !{reverse $acc}
-            return $rev
+            let reversed = !{reverse $acc}
+            return $reversed
         } else {
             let [head, ...rest] = $xs
             _go $[$k - 1] $rest [$head, ...$acc]
@@ -184,8 +184,8 @@ let par = { |f items jobs|
 ## `false`.  Non-blocking: `poll` samples without waiting.  Like `await`,
 ## it fails on a cancelled handle.
 let is-done = { |h|
-    let p = poll $h
-    case $p [
+    let polled = poll $h
+    case $polled [
         `settled: { |_| return true },
         `pending: { |_| return false }
     ]
@@ -234,8 +234,8 @@ let sum = { |items| fold { |acc x| return $[$acc + $x] } 0 $items }
 let zip = { |a b|
     let _go = { |xs ys acc|
         if $[!{is-empty $xs} || !{is-empty $ys}] {
-            let rev = !{reverse $acc}
-            return $rev
+            let reversed = !{reverse $acc}
+            return $reversed
         } else {
             let [xh, ...xt] = $xs
             let [yh, ...yt] = $ys
@@ -308,8 +308,8 @@ let stream-nil = { return `done }
 ## tail calls are TCO'd, so the recursion stays flat regardless of
 ## producer depth.
 let stream-to-list = { |s|
-    let rev = !{stream-fold { |acc x| return [$x, ...$acc] } [] $s}
-    reverse $rev
+    let reversed = !{stream-fold { |acc x| return [$x, ...$acc] } [] $s}
+    reverse $reversed
 }
 
 ## Drop the first `n` elements of a stream, returning the rest as a
