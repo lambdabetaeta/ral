@@ -3131,3 +3131,19 @@ to [[map/exarch/tools|tools]] / [[map/exarch/session|session]]), the unified
 `humanize_tokens` formatter, and that error classification is now structural off
 genai's typed variants, carrying the parsed JSON body to the boundary for the
 [[map/exarch/cards|cards]] renderer. Updated [[index|index]].
+
+## [2026-06-22] ingest | evaluator re-ingested at HEAD (8 commits stale)
+
+Re-stamped [[map/core/evaluator|evaluator]] to `@1baac6d`. The boundary is now
+two crate-private verbs, not three public ones: `eval_top_level` is `pub(crate)`
+and reached only through the framed `Shell::run_source_turn` door
+([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]), and `apply`
+dropped from a listed boundary verb to a `pub(crate)` reduction host. Recorded
+that a same-thread thunk body — block force or lambda apply — now evaluates in
+the caller's session via the shared `with_thunk_body`, swapping only a rescoped
+mobile ([[decisions/260620_same-thread-body-shares-the-session|same-thread-body-shares-the-session]],
+the `Value` split kept by [[decisions/260616_force-eliminates-blocks|force-eliminates-blocks]]),
+that list destructuring without a `...rest` tail now rejects a longer value, and
+that `within` handlers and aliases must be fixed-arity lambdas validated at the
+install boundary ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
+Updated [[index|index]].
