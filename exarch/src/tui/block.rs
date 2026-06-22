@@ -767,6 +767,42 @@ fn push_char(row: &mut Vec<Span<'static>>, ch: char, style: Style) {
     }
 }
 
+/// Tokenise a span stream into maximal whitespace / non-whitespace runs,
+/// paired with each run's display width.  A run carries its style-fragments
+/// so a word that crosses a span seam (a style change mid-word) keeps each
+/// fragment's [`Style`].  Mirrors `md`'s word/space split, but span-aware.
+fn words(spans: &[Span<'static>]) -> Vec<(Vec<(String, Style)>, usize)> {
+    let mut out: Vec<(Vec<(String, Style)>, usize)> = Vec::new();
+    let mut run: Vec<(String, Style)> = Vec::new();
+    let mut run_w = 0;
+    // Whether the run accumulated so far is whitespace — `None` until the
+    // first char fixes its kind.
+    let mut ws: Option<bool> = None;
+    let mut flush = |run: &mut Vec<(String, Style)>, run_w: &mut usize, ws: &mut Option<bool>| {
+        if !run.is_empty() {
+            out.push((std::mem::take(run), std::mem::replace(run_w, 0)));
+        }
+        *ws = None;
+    };
+    for span in spans {
+        for ch in span.content.chars() {
+            let is_ws = ch.is_whitespace();
+            if ws.is_some_and(|prev| prev != is_ws) {
+                flush(&mut run, &mut run_w, &mut ws);
+            }
+            ws = Some(is_ws);
+            let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+            match run.last_mut() {
+                Some((s, st)) if *st == span.style => s.push(ch),
+                _ => run.push((ch.to_string(), span.style)),
+            }
+            run_w += cw;
+        }
+    }
+    flush(&mut run, &mut run_w, &mut ws);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -899,40 +935,4 @@ mod tests {
             assert_eq!(indent_of(&plain(row)), 0);
         }
     }
-}
-
-/// Tokenise a span stream into maximal whitespace / non-whitespace runs,
-/// paired with each run's display width.  A run carries its style-fragments
-/// so a word that crosses a span seam (a style change mid-word) keeps each
-/// fragment's [`Style`].  Mirrors `md`'s word/space split, but span-aware.
-fn words(spans: &[Span<'static>]) -> Vec<(Vec<(String, Style)>, usize)> {
-    let mut out: Vec<(Vec<(String, Style)>, usize)> = Vec::new();
-    let mut run: Vec<(String, Style)> = Vec::new();
-    let mut run_w = 0;
-    // Whether the run accumulated so far is whitespace — `None` until the
-    // first char fixes its kind.
-    let mut ws: Option<bool> = None;
-    let mut flush = |run: &mut Vec<(String, Style)>, run_w: &mut usize, ws: &mut Option<bool>| {
-        if !run.is_empty() {
-            out.push((std::mem::take(run), std::mem::replace(run_w, 0)));
-        }
-        *ws = None;
-    };
-    for span in spans {
-        for ch in span.content.chars() {
-            let is_ws = ch.is_whitespace();
-            if ws.is_some_and(|prev| prev != is_ws) {
-                flush(&mut run, &mut run_w, &mut ws);
-            }
-            ws = Some(is_ws);
-            let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
-            match run.last_mut() {
-                Some((s, st)) if *st == span.style => s.push(ch),
-                _ => run.push((ch.to_string(), span.style)),
-            }
-            run_w += cw;
-        }
-    }
-    flush(&mut run, &mut run_w, &mut ws);
-    out
 }
