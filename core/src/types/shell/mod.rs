@@ -42,6 +42,7 @@ pub(crate) mod repl;
 mod scope;
 
 pub use host::TerminalLoan;
+pub use inherit::MobileSnapshot;
 pub(crate) use inherit::ThunkBody;
 
 use self::control::ControlState;
@@ -341,11 +342,14 @@ pub struct LocalState {
 /// ([`TurnState`]), survives a turn ([`SessionState`]), crosses evaluation
 /// boundaries ([`Mobile`]), or stays as host scratch ([`LocalState`]).
 ///
-/// `mobile` is the public embedding seam; `turn` / `session` / `local` are
-/// `pub(crate)` — the fields that encode turn safety are not a public API.
-/// Hosts drive a session through the accessors in [`mod@host`].
+/// Every field is `pub(crate)`: the partition that encodes turn safety,
+/// capability attenuation, and mobile-snapshot framing is core's invariant,
+/// not a public API a host can reach past.  Hosts drive a session through the
+/// intent verbs — the [`mod@host`] accessors, the scope/context verbs, and the
+/// [`Shell::mobile_snapshot`] / [`Shell::restore_mobile`] durability pair — each
+/// of which is a complete operation rather than a raw field poke.
 pub struct Shell {
-    pub mobile: Mobile,
+    pub(crate) mobile: Mobile,
     pub(crate) turn: TurnState,
     pub(crate) session: SessionState,
     pub(crate) local: LocalState,

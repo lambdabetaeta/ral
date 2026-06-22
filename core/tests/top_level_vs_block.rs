@@ -140,11 +140,11 @@ fn top_level_partial_effects_persist_on_error() {
         "let pre_fail_x = 1\ncat /nonexistent\nlet post_fail_y = 2",
     );
     assert!(
-        shell.mobile.scope.get("pre_fail_x").is_some(),
+        shell.scope_lookup("pre_fail_x").is_some(),
         "pre-failure `let` must survive into the next turn"
     );
     assert!(
-        shell.mobile.scope.get("post_fail_y").is_none(),
+        shell.scope_lookup("post_fail_y").is_none(),
         "post-failure `let` never ran, must not be present"
     );
 }
@@ -196,7 +196,7 @@ fn block_grant_does_not_leak_let_binding() {
     let _ = top_level(&mut shell, "grant [exec: [:]] { let leak_grant = 1 }")
         .expect("grant body should succeed");
     assert!(
-        shell.mobile.scope.get("leak_grant").is_none(),
+        shell.scope_lookup("leak_grant").is_none(),
         "`let` inside grant must not leak into the parent env"
     );
 }
@@ -215,7 +215,7 @@ fn block_within_does_not_leak_let_binding() {
     )
     .expect("within body should succeed");
     assert!(
-        shell.mobile.scope.get("leak_within").is_none(),
+        shell.scope_lookup("leak_within").is_none(),
         "`let` inside within must not leak into the parent env"
     );
 }
@@ -235,7 +235,7 @@ fn block_try_does_not_leak_let_binding() {
     )
     .expect("try body should succeed");
     assert!(
-        shell.mobile.scope.get("leak_try").is_none(),
+        shell.scope_lookup("leak_try").is_none(),
         "`let` inside try must not leak into the parent env"
     );
 }
@@ -252,7 +252,7 @@ fn block_guard_does_not_leak_let_binding() {
     let _ = top_level(&mut shell, "guard { let leak_guard = 1 } { echo done }")
         .expect("guard body should succeed");
     assert!(
-        shell.mobile.scope.get("leak_guard").is_none(),
+        shell.scope_lookup("leak_guard").is_none(),
         "`let` inside guard must not leak into the parent env"
     );
 }
@@ -266,7 +266,7 @@ fn block_audit_does_not_leak_let_binding() {
     let _ =
         top_level(&mut shell, "audit { let leak_audit = 1 }").expect("audit body should succeed");
     assert!(
-        shell.mobile.scope.get("leak_audit").is_none(),
+        shell.scope_lookup("leak_audit").is_none(),
         "`let` inside audit must not leak into the parent env"
     );
 }
@@ -329,11 +329,11 @@ fn sandbox_parity_top_level_partial_effects() {
         "let pre_parity_x = 1\ncat /nonexistent\nlet post_parity_y = 2",
     );
     assert!(
-        shell.mobile.scope.get("pre_parity_x").is_some(),
+        shell.scope_lookup("pre_parity_x").is_some(),
         "pre-failure `let` must persist under sandbox projection"
     );
     assert!(
-        shell.mobile.scope.get("post_parity_y").is_none(),
+        shell.scope_lookup("post_parity_y").is_none(),
         "post-failure `let` must not appear under sandbox projection"
     );
 }
@@ -546,10 +546,10 @@ fn sandbox_parity_top_level_cd() {
 fn lambda_enters_with_fresh_status() {
     let mut shell = fresh_shell();
     top_level(&mut shell, "let f = { |_| return unit }").expect("define f");
-    shell.mobile.control.last_status = 7;
+    shell.set_last_status(7);
     top_level(&mut shell, "f unit").expect("call f");
     assert_eq!(
-        shell.mobile.control.last_status, 0,
+        shell.last_status(), 0,
         "a lambda body enters with a fresh $? (0), not the caller's 7; its \
          body set none, so 0 folds back"
     );
@@ -561,10 +561,10 @@ fn lambda_enters_with_fresh_status() {
 #[test]
 fn forced_block_keeps_caller_status_when_body_sets_none() {
     let mut shell = fresh_shell();
-    shell.mobile.control.last_status = 7;
+    shell.set_last_status(7);
     top_level(&mut shell, "!{ return unit }").expect("forced block");
     assert_eq!(
-        shell.mobile.control.last_status, 7,
+        shell.last_status(), 7,
         "a forced block keeps the caller's $? when its body sets none"
     );
 }
@@ -576,10 +576,10 @@ fn forced_block_keeps_caller_status_when_body_sets_none() {
 fn lambda_folds_back_body_status() {
     let mut shell = fresh_shell();
     top_level(&mut shell, "let g = { |_| return $[1 == 2] }").expect("define g");
-    shell.mobile.control.last_status = 5;
+    shell.set_last_status(5);
     top_level(&mut shell, "g unit").expect("call g");
     assert_eq!(
-        shell.mobile.control.last_status, 1,
+        shell.last_status(), 1,
         "the lambda body's status (1, from a false comparison) folds back, \
          replacing the caller's 5"
     );
@@ -589,10 +589,10 @@ fn lambda_folds_back_body_status() {
 #[test]
 fn forced_block_folds_back_body_status() {
     let mut shell = fresh_shell();
-    shell.mobile.control.last_status = 5;
+    shell.set_last_status(5);
     top_level(&mut shell, "!{ $[1 == 2] }").expect("forced block");
     assert_eq!(
-        shell.mobile.control.last_status, 1,
+        shell.last_status(), 1,
         "the block body's status (1, from a false comparison) folds back, \
          replacing the caller's 5"
     );

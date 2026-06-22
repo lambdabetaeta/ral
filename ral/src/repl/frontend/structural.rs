@@ -911,9 +911,7 @@ struct MxRow {
 /// Every binding name currently in scope — the baseline snapshot.
 fn binding_names(shell: &Shell) -> HashSet<String> {
     shell
-        .mobile
-        .scope
-        .all_bindings()
+        .bindings()
         .into_iter()
         .map(|(n, _)| n)
         .collect()
@@ -923,9 +921,7 @@ fn binding_names(shell: &Shell) -> HashSet<String> {
 /// snapshot the worksheet and matrix projections share.
 fn user_bindings(shell: &Shell, baseline: &HashSet<String>) -> Vec<(String, Value)> {
     shell
-        .mobile
-        .scope
-        .all_bindings()
+        .bindings()
         .into_iter()
         .filter(|(n, _)| !baseline.contains(n))
         .collect()
@@ -948,7 +944,7 @@ fn user_bindings(shell: &Shell, baseline: &HashSet<String>) -> Vec<(String, Valu
 /// data-flow chain.  A node with no live-binding dependency is a root.
 fn worksheet_rows(user: &[(String, Value)], shell: &Shell, model: &Worksheet) -> Vec<WsRow> {
     let schemes: std::collections::HashMap<String, Option<Scheme>> =
-        shell.mobile.scope.binding_schemes().into_iter().collect();
+        shell.binding_schemes().into_iter().collect();
     let live: HashSet<&str> = user.iter().map(|(n, _)| n.as_str()).collect();
 
     // Record order indexes the model entries; a node's "latest dependency"

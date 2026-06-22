@@ -53,9 +53,7 @@ impl Sources {
     /// shell will actually run.
     pub(super) fn from_shell(shell: &Shell) -> Self {
         let mut variables: Vec<String> = shell
-            .mobile
-            .scope
-            .all_bindings()
+            .bindings()
             .into_iter()
             .filter_map(|(name, _)| (!name.starts_with('_')).then_some(name))
             .collect();
@@ -64,7 +62,7 @@ impl Sources {
 
         let mut commands = variables.clone();
         let cwd = shell.cwd();
-        if let Some(path) = shell.mobile.context.env_overrides().get_or_host("PATH") {
+        if let Some(path) = shell.env_var("PATH") {
             commands.extend(ral_core::path::commands_on_path(&path, Some(&cwd)));
         }
 
@@ -77,12 +75,9 @@ impl Sources {
 
         commands.extend(
             shell
-                .mobile
-                .context
-                .handlers
-                .entries()
-                .filter(|e| !e.name.starts_with('_'))
-                .map(|e| e.name.as_ref().to_string()),
+                .handler_names()
+                .filter(|name| !name.starts_with('_'))
+                .map(str::to_string),
         );
 
         commands.sort();

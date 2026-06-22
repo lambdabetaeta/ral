@@ -177,7 +177,7 @@ fn use_returns_a_map_and_does_not_leak() {
         other => panic!("expected Map, got {other:?}"),
     }
     assert!(
-        shell.mobile.scope.get("x").is_none(),
+        shell.scope_lookup("x").is_none(),
         "`use` must not leak `x`"
     );
 
@@ -193,7 +193,7 @@ fn source_leaks_bindings_into_caller_scope() {
 
     top_level(&mut shell, &format!("source '{p}'")).expect("source");
     assert_eq!(
-        shell.mobile.scope.get("leaked"),
+        shell.scope_lookup("leaked"),
         Some(&Value::Int(5)),
         "`source` must leak `leaked` into the caller's scope"
     );

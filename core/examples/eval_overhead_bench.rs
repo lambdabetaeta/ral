@@ -22,7 +22,7 @@ const ITERS: u32 = 200_000;
 
 fn populate_env(shell: &mut Shell, n: usize) {
     let pairs = (0..n).map(|i| (format!("RAL_BENCH_VAR_{i:05}"), format!("val_{i}")));
-    shell.mobile.context.extend_env(pairs);
+    shell.extend_env(pairs);
 }
 
 fn time_thunk_bracket(shell: &mut Shell, captured: &Env, iters: u32) -> std::time::Duration {

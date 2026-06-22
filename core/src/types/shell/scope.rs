@@ -171,6 +171,80 @@ impl Shell {
             .set_binding(name, Binding { value, scheme });
     }
 
+    /// Bind `name` → `value` as a plain scope variable, inferring no
+    /// scheme.  The scheme-less sibling of [`Self::bind_value`]: where
+    /// `bind_value` types a definition so it is callable by function
+    /// application at the prompt, this installs data (an env mirror like
+    /// `USER` / `CWD`, the `RAL_PROMPT` thunk read by the renderer, a host
+    /// seed var) that is *resolved* but never reinterpreted as a typed
+    /// prompt-callable.  Keeping the two verbs distinct preserves the
+    /// boundary an rc draws between its `bindings:` (typed) and its
+    /// `env:` / `prompt:` (untyped) keys.
+    pub fn set_var(&mut self, name: String, value: Value) {
+        self.mobile.scope.set(name, value);
+    }
+
+    /// Look `name` up in the lexical scope chain alone — *not* the
+    /// pseudo-variable or builtin namespaces that [`Self::lookup_value_name`]
+    /// also consults.  The read dual of [`Self::set_var`] /
+    /// [`Self::bind_value`]: a host asking "is this name a lexical binding,
+    /// and what does it hold" (prompt lookup, alias-conflict checks,
+    /// worksheet projections) wants exactly this, so that a name shadowed by
+    /// a builtin still reads as unbound in scope.
+    pub fn scope_lookup(&self, name: &str) -> Option<&Value> {
+        self.mobile.scope.get(name)
+    }
+
+    /// Every lexical binding's `(name, value)` across the whole scope
+    /// chain, innermost shadowing outermost.  The enumeration a host
+    /// drives tab-completion and the worksheet from; the read-many dual of
+    /// [`Self::set_var`].
+    pub fn bindings(&self) -> Vec<(String, Value)> {
+        self.mobile.scope.all_bindings()
+    }
+
+    /// Every bound name with its installed scheme, innermost binding
+    /// wins — the scope half of [`Self::session_schemes`], surfaced on its
+    /// own for the worksheet's type column.
+    pub fn binding_schemes(&self) -> Vec<(String, Option<crate::typecheck::Scheme>)> {
+        self.mobile.scope.binding_schemes()
+    }
+
+    /// The type scheme bound to `name`, if it is a lexical binding that
+    /// carries one.  Flattens "unbound" and "bound but scheme-less" to
+    /// `None`: a name appears with a scheme only when [`Self::bind_value`]
+    /// (or the prelude harvest) inferred one — pattern components and
+    /// [`Self::set_var`] data bindings carry none.  The single-name
+    /// companion of [`Self::binding_schemes`].
+    pub fn binding_scheme(&self, name: &str) -> Option<&crate::typecheck::Scheme> {
+        self.mobile.scope.get_binding(name)?.scheme.as_ref()
+    }
+
+    /// The names of every installed handler entry — `within` arms and
+    /// aliases alike — for tab completion.  The handler-stack counterpart
+    /// of [`Self::builtin_names`](Self::builtin_names).
+    pub fn handler_names(&self) -> impl Iterator<Item = &str> {
+        self.mobile
+            .context
+            .handlers
+            .entries()
+            .map(|e| e.name.as_ref())
+    }
+
+    /// Run `f` under a fresh innermost lexical scope, popped on return.
+    /// The isolation primitive `use` and the REPL plugin loader share:
+    /// a loaded file's top-level helper bindings live in this frame and
+    /// are discarded when it pops, so they never leak into the caller's
+    /// scope.  Pairs with [`crate::builtins::modules::evaluate_source`],
+    /// which owns the cycle/depth guards and script-context swap; this
+    /// owns only the scope frame.
+    pub fn in_fresh_scope<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.mobile.scope.push_scope();
+        let r = f(self);
+        self.mobile.scope.pop_scope();
+        r
+    }
+
     /// The next turn's check seed, read off the live session: every
     /// scope binding with its installed scheme, plus the alias arms'
     /// schemes off the persistent handler frames.

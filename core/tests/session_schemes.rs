@@ -224,13 +224,13 @@ fn pattern_binds_carry_no_scheme() {
             .collect::<Vec<_>>()
     );
     assert!(
-        sh.mobile.scope.get_binding("a").unwrap().scheme.is_none(),
+        sh.binding_scheme("a").is_none(),
         "a pattern-bound name must carry no scheme"
     );
     // A plain `let` binding does carry a scheme.
     turn(&mut sh, "let n = 3").unwrap();
     assert!(
-        sh.mobile.scope.get_binding("n").unwrap().scheme.is_some(),
+        sh.binding_scheme("n").is_some(),
         "a plain let binding must carry a scheme"
     );
 }
@@ -310,14 +310,9 @@ fn live_binding_scheme_matches_baked_entry() {
         .map(|(n, s)| (n.as_str(), fmt_scheme(s)))
         .collect();
     for name in ["lines", "reverse"] {
-        let live = sh
-            .mobile
-            .scope
-            .get_binding(name)
-            .unwrap_or_else(|| panic!("prelude name {name:?} must be bound on the live scope"))
-            .scheme
-            .as_ref()
-            .unwrap_or_else(|| panic!("prelude binding {name:?} must carry a scheme"));
+        let live = sh.binding_scheme(name).unwrap_or_else(|| {
+            panic!("prelude binding {name:?} must be bound on the live scope and carry a scheme")
+        });
         assert_eq!(
             fmt_scheme(live),
             baked[name],

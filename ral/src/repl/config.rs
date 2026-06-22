@@ -127,14 +127,11 @@ pub(crate) fn apply_rc_config(
                     if matches!(k.as_str(), "PWD" | "OLDPWD") {
                         continue;
                     }
-                    ctx.shell
-                        .mobile
-                        .context
-                        .set_env_var(k.clone(), v.to_string());
-                    ctx.shell.mobile.scope.set(k, v);
+                    ctx.shell.set_env_var(k.clone(), v.to_string());
+                    ctx.shell.set_var(k, v);
                 }
             }
-            "prompt" => ctx.shell.mobile.scope.set("RAL_PROMPT".into(), val),
+            "prompt" => ctx.shell.set_var("RAL_PROMPT".into(), val),
             "aliases" => {
                 // A callable installs as an argv-handler alias; any other
                 // value falls through to a plain scope binding so the key
@@ -152,7 +149,7 @@ pub(crate) fn apply_rc_config(
                             }
                         }
                     } else {
-                        ctx.shell.mobile.scope.set(name, value);
+                        ctx.shell.set_var(name, value);
                     }
                 }
             }
@@ -194,7 +191,7 @@ pub(crate) fn apply_rc_config(
             }
             "recursion_limit" => {
                 if let Some(n) = val.as_int().filter(|n| *n > 0) {
-                    ctx.shell.mobile.control.recursion_limit = n as usize;
+                    ctx.shell.set_recursion_limit(n as usize);
                 }
             }
             "plugins" => {
@@ -495,15 +492,15 @@ mod tests {
         assert!(shell.has_alias("greet"));
         assert!(shell.has_alias("ll"));
         // Aliases live in the handler stack, not in scope.
-        assert!(shell.mobile.scope.get("greet").is_none());
-        assert!(shell.mobile.scope.get("ll").is_none());
+        assert!(shell.scope_lookup("greet").is_none());
+        assert!(shell.scope_lookup("ll").is_none());
     }
 
     /// rc `recursion_limit:` overrides the default on the shell.
     #[test]
     fn rc_recursion_limit_applied() {
         let shell = apply_rc("return [recursion_limit: 256]\n");
-        assert_eq!(shell.mobile.control.recursion_limit, 256);
+        assert_eq!(shell.recursion_limit(), 256);
     }
 
     /// A non-positive `recursion_limit` is silently ignored (the default
@@ -512,7 +509,7 @@ mod tests {
     fn rc_recursion_limit_zero_ignored() {
         let shell = apply_rc("return [recursion_limit: 0]\n");
         assert_eq!(
-            shell.mobile.control.recursion_limit,
+            shell.recursion_limit(),
             ral_core::types::DEFAULT_RECURSION_LIMIT
         );
     }
@@ -586,10 +583,10 @@ mod tests {
             ]),
         )]));
         assert_eq!(
-            shell.mobile.scope.get("greeting"),
+            shell.scope_lookup("greeting"),
             Some(&Value::String("hello".into()))
         );
-        assert_eq!(shell.mobile.scope.get("n"), Some(&Value::Int(42)));
+        assert_eq!(shell.scope_lookup("n"), Some(&Value::Int(42)));
     }
 
     /// Under `aliases:` a callable installs as an alias handler frame; a
@@ -601,7 +598,7 @@ mod tests {
             "aliases".into(),
             Value::map(vec![("ll".into(), plain.clone())]),
         )]));
-        assert_eq!(shell.mobile.scope.get("ll"), Some(&plain));
+        assert_eq!(shell.scope_lookup("ll"), Some(&plain));
         assert!(!shell.has_alias("ll"));
     }
 
@@ -626,7 +623,7 @@ mod tests {
         let src = "return [\n    bindings: [\n        ws: { |name body| echo $name; !$body },\n    ],\n]\n";
         let (shell, _, _) = apply_rc_inner(src, true);
         // Lexical binding, not an alias handler frame.
-        assert!(shell.mobile.scope.get("ws").is_some());
+        assert!(shell.scope_lookup("ws").is_some());
         assert!(!shell.has_alias("ws"));
         let errs = typecheck_against_session(&shell, "ws 'x' { echo lol }\n");
         assert!(
@@ -647,7 +644,7 @@ mod tests {
         let (shell, _, _) = apply_rc_inner(src, true);
         // Alias handler frame, not a scope binding.
         assert!(shell.has_alias("ws"));
-        assert!(shell.mobile.scope.get("ws").is_none());
+        assert!(shell.scope_lookup("ws").is_none());
         let errs = typecheck_against_session(&shell, "ws 'x' { echo lol }\n");
         assert!(
             errs.iter().any(|e| e.kind.code() == "T0010"),

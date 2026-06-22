@@ -76,6 +76,6 @@ pub use audit::{
 mod shell;
 pub use shell::{
     Boundary, BoundarySink, Context, DEFAULT_RECURSION_LIMIT, EventSink, LocalState, Mobile,
-    SessionState, Shell, SurfaceSink, TerminalLoan, TurnState,
+    MobileSnapshot, SessionState, Shell, SurfaceSink, TerminalLoan, TurnState,
 };
 pub(crate) use shell::{TerminalAccess, ThunkBody};

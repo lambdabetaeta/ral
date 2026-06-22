@@ -77,6 +77,20 @@ pub(crate) enum ThunkBody {
     Lambda,
 }
 
+/// An in-process checkpoint of a [`Shell`]'s [`Mobile`], minted by
+/// [`Shell::mobile_snapshot`] and rolled back by [`Shell::restore_mobile`].
+///
+/// Opaque on purpose, mirroring [`TerminalLoan`](super::TerminalLoan): a host
+/// can hold and clone one but cannot read its parts or forge a `Mobile` into
+/// it. That is what separates this durability seam from the wire path — a
+/// snapshot is always one *this* shell produced, so reinstalling it is a
+/// rollback, never a foreign install. A mobile arriving from another process
+/// carries foreign handler frames and must instead go through
+/// [`crate::subprocess::install_shell_mobile`], which splices rather than
+/// replaces.
+#[derive(Clone)]
+pub struct MobileSnapshot(Mobile);
+
 impl Shell {
     /// Snapshot the persistable half of this shell's state.
     ///
@@ -108,6 +122,26 @@ impl Shell {
     /// handler frames on top.
     pub(crate) fn install_mobile(&mut self, mobile: Mobile) {
         self.mobile = mobile;
+    }
+
+    /// Checkpoint the persistable half of this shell for later rollback.
+    ///
+    /// The public durability door — an agent host stashes one at each clean
+    /// tool-call boundary and rolls back to it ([`Self::restore_mobile`]) if a
+    /// later call panics mid-evaluation, winding the dynamic context (grant
+    /// frames, env/cwd overrides, the handler stack, half-applied bindings)
+    /// back to the last committed state. Unlike [`Self::mobile`] it yields an
+    /// opaque [`MobileSnapshot`], so a host can rebind only a checkpoint it
+    /// took, never a forged or wire-borne bundle.
+    pub fn mobile_snapshot(&self) -> MobileSnapshot {
+        MobileSnapshot(self.mobile.clone())
+    }
+
+    /// Roll this shell back to a [`MobileSnapshot`] taken earlier from it.
+    /// The restore half of [`Self::mobile_snapshot`]; see [`MobileSnapshot`]
+    /// for why this in-process rollback is distinct from the wire path.
+    pub fn restore_mobile(&mut self, snapshot: MobileSnapshot) {
+        self.mobile = snapshot.0;
     }
 
     /// Swap `mobile` in, run `f`, swap back out.

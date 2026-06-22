@@ -6,7 +6,6 @@
 //! bindings into `env`, and records the plugin in [`PluginRuntime`].
 //! Unloading reverses the env installation and drops the record.
 
-use ral_core::builtins::modules::ScriptContextGuard;
 use ral_core::types::{Break, Error, Settled};
 use ral_core::{RequestedTerminalAccess, Shell, TurnReport, Value};
 use std::sync::{Arc, Mutex};
@@ -119,7 +118,7 @@ fn check_no_binding_conflicts(
                 "alias '{name}' from plugin '{plugin_name}' conflicts with an existing alias"
             )));
         }
-        if shell.mobile.scope.get(name).is_some() || ral_core::builtins::is_builtin(name) {
+        if shell.scope_lookup(name).is_some() || ral_core::builtins::is_builtin(name) {
             return Err(load_err(format!(
                 "alias '{name}' from plugin '{plugin_name}' conflicts with a lexical or builtin binding"
             )));
@@ -141,35 +140,34 @@ fn install_bindings(bindings: &[(String, Value)], shell: &mut Shell) -> Result<(
 }
 
 /// Evaluate a plugin file (already read and canonicalized) in an isolated scope.
+///
+/// Routes through core's shared module loader
+/// ([`evaluate_source`](ral_core::builtins::modules::evaluate_source)), which
+/// owns the cycle-detection stack, the recursion-depth guard, the type-check
+/// pass that writes the evaluator's mode wires, and the script-context swap
+/// that keeps diagnostics pointing at the plugin file.  The plugin policy
+/// adds only lexical-scope isolation: a plugin file's top-level helper
+/// bindings live in a fresh frame and are discarded, since the manifest is
+/// the file's *return value*, not its bindings.
 fn eval_plugin_file(path: &str, source: &str, shell: &mut Shell) -> Settled<Value> {
-    let path_owned = path.to_owned();
-    if shell.mobile.context.modules.stack.contains(&path_owned) {
-        return Err(Break::Error(load_err(format!(
-            "circular dependency: {path}"
-        ))));
+    shell
+        .in_fresh_scope(|shell| ral_core::builtins::modules::evaluate_source(shell, source, path))
+        .map_err(tag_load_error)
+}
+
+/// Prefix a loader failure with `load-plugin:` while preserving its status,
+/// location, and hint — the surface every plugin-load error carries.  Skips
+/// the prefix when the message already begins with it.
+fn tag_load_error(e: Break) -> Break {
+    match e {
+        Break::Error(mut err) => {
+            if !err.message.starts_with("load-plugin:") {
+                err.message = format!("load-plugin: {}", err.message);
+            }
+            Break::Error(err)
+        }
+        other => other,
     }
-    // The inference pass writes the evaluator's mode wires, so a plugin
-    // file passes through the checker before it runs.  A type error is
-    // fatal and the file is reported and skipped.  The schemes seed the
-    // check from the session scope the plugin loads into.
-    let comp = std::sync::Arc::new(
-        ral_core::compile_and_typecheck(source, shell.session_schemes())
-            .into_comp_or_message()
-            .map_err(|m| Break::Error(load_err(format!("{path}: {m}"))))?,
-    );
-    let mut ctx = ScriptContextGuard::enter(shell, &path_owned, source);
-    ctx.shell_mut()
-        .mobile
-        .context
-        .modules
-        .stack
-        .push(path_owned);
-    ctx.shell_mut().mobile.scope.push_scope();
-    // `evaluate` returns `Settled<Value>` directly.
-    let result = ral_core::evaluator::evaluate(&comp, ctx.shell_mut());
-    ctx.shell_mut().mobile.scope.pop_scope();
-    ctx.shell_mut().mobile.context.modules.stack.pop();
-    result
 }
 
 /// Apply the options map to a parameterised plugin block to yield its

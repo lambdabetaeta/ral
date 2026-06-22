@@ -53,8 +53,8 @@ pub fn boot_shell() -> Shell {
 /// that ignore the convention.  Env-only, no ral scope binding: the
 /// agent has no reason to read these back.
 pub(crate) fn seed_no_color(shell: &mut Shell) {
-    shell.mobile.context.set_env_var("NO_COLOR", "1");
-    shell.mobile.context.set_env_var("CLICOLOR_FORCE", "0");
+    shell.set_env_var("NO_COLOR", "1");
+    shell.set_env_var("CLICOLOR_FORCE", "0");
 }
 
 /// Per-session scratch directory exposed to the agent as `$EXARCH_SCRATCH`.
@@ -213,11 +213,8 @@ fn project_slug(cwd: &str) -> String {
 /// resolves in ral source).  Shared by [`Scratch::install_into`] and the
 /// per-session `EXARCH_SESSION_DIR` seeding in [`crate::session`].
 pub(crate) fn seed_var(shell: &mut Shell, name: &str, value: &str) {
-    shell.mobile.context.set_env_var(name, value);
-    shell
-        .mobile
-        .scope
-        .set(name.into(), ral_core::types::Value::String(value.into()));
+    shell.set_env_var(name, value);
+    shell.set_var(name.into(), ral_core::types::Value::String(value.into()));
 }
 
 #[cfg(test)]

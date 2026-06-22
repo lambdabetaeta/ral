@@ -445,10 +445,10 @@ fn run_batch(name: &str, source: String, script_args: Vec<String>, opts: BatchOp
     shell.set_exit_hints(load_exit_hints());
     tick!("builtins");
     if let Some(n) = recursion_limit {
-        shell.mobile.control.recursion_limit = n;
+        shell.set_recursion_limit(n);
     }
     shell.install_root_context(name.to_string(), source.as_str());
-    shell.mobile.context.args = script_args;
+    shell.set_args(script_args);
 
     // `--capabilities a.ral,b.ral` — load + freeze + push as session
     // ceiling.  Done after register because profiles may use builtins
@@ -521,7 +521,7 @@ fn run_batch(name: &str, source: String, script_args: Vec<String>, opts: BatchOp
     };
 
     let exit_code = match &result {
-        Ok(_) => shell.mobile.control.last_status.clamp(0, 255),
+        Ok(_) => shell.last_status().clamp(0, 255),
         Err(Break::Escape(Escape::Exit(code))) => (*code).clamp(0, 255),
         Err(Break::Error(e)) => {
             if !audit {
@@ -549,7 +549,7 @@ fn run_batch(name: &str, source: String, script_args: Vec<String>, opts: BatchOp
             tree_children,
             audit_start,
             pretty,
-            shell.mobile.context.principal(),
+            shell.principal(),
         );
     }
 

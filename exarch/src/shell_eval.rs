@@ -499,11 +499,11 @@ mod tests {
         // second call's bindings via the live shell and inspect
         // `mobile.scope` directly.  Same observation, lower noise.
         assert!(
-            shell.mobile.scope.get("pre_x").is_some(),
+            shell.scope_lookup("pre_x").is_some(),
             "pre-failure `let` must persist into the next tool call"
         );
         assert!(
-            shell.mobile.scope.get("post_y").is_none(),
+            shell.scope_lookup("post_y").is_none(),
             "post-failure `let` never ran, must not be present"
         );
     }
@@ -545,15 +545,15 @@ mod tests {
     #[test]
     fn agent_helpers_are_loaded_into_tool_shell() {
         let mut shell = fresh_shell();
-        assert!(shell.mobile.scope.get("view").is_some());
-        assert!(shell.mobile.scope.get("view-around").is_some());
+        assert!(shell.scope_lookup("view").is_some());
+        assert!(shell.scope_lookup("view-around").is_some());
         for builtin in ["window-hash", "grep-files", "edit"] {
             assert!(
                 shell.lookup_value_name(builtin).is_some(),
                 "{builtin} must resolve as a host builtin"
             );
             assert!(
-                shell.mobile.scope.get(builtin).is_none(),
+                shell.scope_lookup(builtin).is_none(),
                 "{builtin} is a builtin, not a lexical binding"
             );
         }

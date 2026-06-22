@@ -228,7 +228,8 @@ fn denied_external_installs_failing_status_into_mobile() {
         "expected the confined external to fail closed, got Ok"
     );
     assert_ne!(
-        shell.mobile.control.last_status, 0,
+        shell.last_status(),
+        0,
         "a denied confined external must install a non-zero last_status into the mobile"
     );
     assert!(!denied.exists());

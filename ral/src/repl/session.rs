@@ -107,7 +107,7 @@ impl Session {
         );
         // CLI flag wins over rc — apply after load_profiles.
         if let Some(n) = opts.run.recursion_limit {
-            shell.mobile.control.recursion_limit = n;
+            shell.set_recursion_limit(n);
         }
         if let Some(s) = opts.surface {
             surface = s;

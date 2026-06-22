@@ -38,17 +38,18 @@ pub struct Session {
     /// top of [`Session::run_turn`]; read by the completion-gate nudges to
     /// choose between the idle and verify prompts.
     acted: bool,
-    /// Durable snapshot of `shell.mobile` as of the last clean tool-call
-    /// boundary.  Refreshed inside the worker (`run_shell`) right before
-    /// each `run_shell` dispatches, so it always holds the dynamic context
-    /// that completed calls left behind, never the one a call is mid-way
-    /// through.  Read by [`Session::run_turn`] after a caught worker panic
-    /// (`pump` → `Ok(None)`) to roll the panicking call's dynamic-context
-    /// effects back: the field lives on `Session` precisely so it survives
-    /// `pump`'s `catch_unwind` boundary (written by the worker, read by the
-    /// driver).  See `ral_core`'s `run_turn` frame guard for the IO half
-    /// of the same panic-recovery contract.
-    durable: ral_core::types::Mobile,
+    /// Durable [`MobileSnapshot`](ral_core::types::MobileSnapshot) of the
+    /// shell as of the last clean tool-call boundary.  Refreshed inside the
+    /// worker (`run_shell`) right before each `run_shell` dispatches, so it
+    /// always holds the dynamic context that completed calls left behind,
+    /// never the one a call is mid-way through.  Read by
+    /// [`Session::run_turn`] after a caught worker panic (`pump` → `Ok(None)`)
+    /// to roll the panicking call's dynamic-context effects back: the field
+    /// lives on `Session` precisely so it survives `pump`'s `catch_unwind`
+    /// boundary (written by the worker, read by the driver).  See
+    /// `ral_core`'s `run_turn` frame guard for the IO half of the same
+    /// panic-recovery contract.
+    durable: ral_core::types::MobileSnapshot,
     /// Live async `agent` workers spawned this session.  Only the root
     /// populates it (`agent` is root-only); a forked child carries an empty
     /// one it never uses.  Survives `/clear`: `clear` bumps its generation
@@ -107,7 +108,7 @@ impl Session {
         expect_action: bool,
     ) -> Self {
         seed_session_dir(&mut shell, &log);
-        let durable = shell.mobile.clone();
+        let durable = shell.mobile_snapshot();
         Self {
             id: log.id(),
             system,
@@ -126,7 +127,7 @@ impl Session {
 
     fn replace_shell(&mut self, mut shell: Shell) {
         seed_session_dir(&mut shell, &self.log);
-        self.durable = shell.mobile.clone();
+        self.durable = shell.mobile_snapshot();
         self.shell = shell;
     }
 
@@ -468,7 +469,7 @@ impl Session {
             // tool-call boundary.  Completed calls' bindings and cwd live
             // in the snapshot and survive; the panicking call's do not.
             let Some(attempt) = attempt else {
-                self.shell.mobile = self.durable.clone();
+                self.shell.restore_mobile(self.durable.clone());
                 break Ok(());
             };
             let ctx = nudge::NudgeCtx {
@@ -646,7 +647,7 @@ impl Session {
         // returned, and none that this one is about to mutate.  If the
         // eval below panics, `run_turn` rebuilds the live context from
         // this snapshot, rolling the panicking call's effects back.
-        self.durable = self.shell.mobile.clone();
+        self.durable = self.shell.mobile_snapshot();
         // The deferred-surface destination: a detached `spawn` worker flushes
         // its buffered batch here at completion, stamped with the root id (so
         // its cards land in the root viewport) and guarded by the agent
@@ -877,8 +878,8 @@ mod tests {
         // Refresh `durable` so the snapshot reflects the just-installed
         // builtin frame, matching the production boundary where the
         // baseline is the booted shell.
-        session.durable = session.shell.mobile.clone();
-        let baseline_grant_depth = session.shell.mobile.context.grants.iter().count();
+        session.durable = session.shell.mobile_snapshot();
+        let baseline_grant_depth = session.shell.grant_depth();
 
         // 1st call binds `a4_x` (completes); 2nd call panics mid-eval.
         let provider = scripted(
@@ -900,13 +901,13 @@ mod tests {
 
         // The completed call's binding survives the panic.
         assert!(
-            session.shell.mobile.scope.get("a4_x").is_some(),
+            session.shell.scope_lookup("a4_x").is_some(),
             "a binding from a completed tool call must survive a later call's panic"
         );
         // The dynamic context is rolled back to the clean boundary: no
         // leaked grant frame from the panicking call's `with_capabilities`.
         assert_eq!(
-            session.shell.mobile.context.grants.iter().count(),
+            session.shell.grant_depth(),
             baseline_grant_depth,
             "the panicking call's grant frame must not leak into the next turn"
         );

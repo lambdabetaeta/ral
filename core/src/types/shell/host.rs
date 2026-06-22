@@ -166,6 +166,89 @@ impl Shell {
     pub fn in_terminal_loan(&self) -> bool {
         matches!(self.turn.terminal_access, TerminalAccess::ExplicitLoan)
     }
+
+    /// Exit status of the last command (`$?`).  A host reads it to set its
+    /// own process exit code or to seed a prompt's status segment.
+    pub fn last_status(&self) -> i32 {
+        self.mobile.control.last_status
+    }
+
+    /// Set the last-command exit status (`$?`) to an explicit code.  The
+    /// integer-valued sibling of
+    /// [`set_status_from_bool`](Shell::set_status_from_bool).
+    pub fn set_last_status(&mut self, status: i32) {
+        self.mobile.control.last_status = status;
+    }
+
+    /// Run `f` with `last_status` saved across it and restored afterwards.
+    /// The prompt cycle uses it: rendering `RAL_PROMPT` runs a value turn
+    /// whose own status must not clobber the previous command's exit code,
+    /// which the next prompt segment still wants to read.
+    pub fn with_preserved_status<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let saved = self.mobile.control.last_status;
+        let r = f(self);
+        self.mobile.control.last_status = saved;
+        r
+    }
+
+    /// The active non-tail call-depth ceiling.
+    pub fn recursion_limit(&self) -> usize {
+        self.mobile.control.recursion_limit
+    }
+
+    /// Set the non-tail call-depth ceiling (rc `recursion_limit:` /
+    /// `--recursion-limit`).
+    pub fn set_recursion_limit(&mut self, n: usize) {
+        self.mobile.control.recursion_limit = n;
+    }
+
+    /// Install the invocation positional args (`$args`, `$1`, …) — the
+    /// script arguments a CLI host passes after the program path.
+    pub fn set_args(&mut self, args: Vec<String>) {
+        self.mobile.context.args = args;
+    }
+
+    /// The acting principal (`$USER` from the dynamic env, empty if unset).
+    /// Forwards to [`Context::principal`](super::Context::principal).
+    pub fn principal(&self) -> String {
+        self.mobile.context.principal()
+    }
+
+    /// Set a dynamic env-var override (`within [shell: …]`'s per-key door,
+    /// also the seam a host uses to seed `NO_COLOR`, `EXARCH_SESSION_DIR`,
+    /// and the like).  Forwards to
+    /// [`Context::set_env_var`](super::Context::set_env_var).
+    pub fn set_env_var(&mut self, k: impl Into<String>, v: impl Into<String>) {
+        self.mobile.context.set_env_var(k, v);
+    }
+
+    /// Bulk-insert dynamic env-var overrides.  Forwards to
+    /// [`Context::extend_env`](super::Context::extend_env) — the seam a host
+    /// uses to seed a batch of vars at boot.
+    pub fn extend_env<I, K, V>(&mut self, items: I)
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.mobile.context.extend_env(items);
+    }
+
+    /// Read an env var through the dynamic overlay, falling back to the host
+    /// process environment — the `within [shell: K=…]` overlay-on-process
+    /// rule. A host driving command completion reads `PATH` here.
+    pub fn env_var(&self, name: &str) -> Option<String> {
+        self.mobile.context.env_overrides().get_or_host(name)
+    }
+
+    /// Number of capability frames on the grant stack (the ambient root plus
+    /// every live `grant` / `within` attenuation).  Hosts assert grant-stack
+    /// balance across a turn boundary with it — e.g. that a panicking tool
+    /// call left no leaked frame behind.  The qualitative companion is
+    /// [`Shell::has_active_capabilities`](Shell::has_active_capabilities).
+    pub fn grant_depth(&self) -> usize {
+        self.mobile.context.grants.iter().count()
+    }
 }
 
 #[cfg(test)]

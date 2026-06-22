@@ -1246,7 +1246,7 @@ fn deeply_nested_calls() {
 #[test]
 fn script_args_are_not_polluted_by_runner_argv() {
     let mut shell = Shell::new(Default::default());
-    shell.mobile.context.args = vec!["alpha".into(), "beta".into()];
+    shell.set_args(vec!["alpha".into(), "beta".into()]);
     builtins::register(&mut shell, common::prelude_comp());
     let result = evaluate(
         &std::sync::Arc::new(elaborate(
@@ -1268,7 +1268,7 @@ fn script_args_are_not_polluted_by_runner_argv() {
 #[test]
 fn env_overrides_shadow_process_env_in_dollar_env() {
     let mut shell = Shell::new(Default::default());
-    shell.mobile.context.set_env_var("RAL_TEST_ENV", "override");
+    shell.set_env_var("RAL_TEST_ENV", "override");
     builtins::register(&mut shell, common::prelude_comp());
     let result = evaluate(
         &std::sync::Arc::new(elaborate(

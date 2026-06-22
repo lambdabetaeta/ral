@@ -81,7 +81,7 @@ impl PromptBindings {
         Self {
             user,
             cwd,
-            status: i64::from(shell.mobile.control.last_status),
+            status: i64::from(shell.last_status()),
         }
     }
 
@@ -89,8 +89,8 @@ impl PromptBindings {
     /// the ambient (process-shell) namespace gets stringified copies.
     fn apply(&self, shell: &mut Shell) {
         for (k, v, s) in self.entries() {
-            shell.mobile.scope.set(k.into(), v);
-            shell.mobile.context.set_env_var(k, s);
+            shell.set_var(k.into(), v);
+            shell.set_env_var(k, s);
         }
     }
 
@@ -131,18 +131,20 @@ pub(super) fn eval_prompt(prompt: &Value, shell: &mut Shell, bindings: &PromptBi
     // stages flush to the visible stdout via `capture_outer`); `build_turn`
     // clones that capture context into the value turn's frame, so the body
     // runs under it. The prompt runs `Denied`: it must never foreground a
-    // child. Save and restore `last_status` so the prompt body's own status
-    // does not clobber the user's previous-command exit code visible at the
-    // next prompt cycle (`PromptBindings::collect` reads it).
-    let saved_status = shell.mobile.control.last_status;
-    let (result, out) = ral_core::evaluator::with_capture(shell, |shell| {
-        let req = framed_turn_request("<prompt>", RequestedTerminalAccess::Denied);
-        match shell.run_value_turn(synthetic, vec![], "", req) {
-            TurnReport::Ran { result, .. } => result,
-            TurnReport::Static { .. } => unreachable!("a thunk prompt body never compiles source"),
-        }
+    // child. `with_preserved_status` keeps the prompt body's own status from
+    // clobbering the user's previous-command exit code visible at the next
+    // prompt cycle (`PromptBindings::collect` reads it).
+    let (result, out) = shell.with_preserved_status(|shell| {
+        ral_core::evaluator::with_capture(shell, |shell| {
+            let req = framed_turn_request("<prompt>", RequestedTerminalAccess::Denied);
+            match shell.run_value_turn(synthetic, vec![], "", req) {
+                TurnReport::Ran { result, .. } => result,
+                TurnReport::Static { .. } => {
+                    unreachable!("a thunk prompt body never compiles source")
+                }
+            }
+        })
     });
-    shell.mobile.control.last_status = saved_status;
 
     match result {
         Ok(Value::Unit) => {
@@ -199,9 +201,7 @@ pub(super) fn render(shell: &mut Shell, runtime: &Arc<Mutex<PluginRuntime>>) -> 
     bindings.apply(shell);
 
     let prompt = shell
-        .mobile
-        .scope
-        .get("RAL_PROMPT")
+        .scope_lookup("RAL_PROMPT")
         .cloned()
         .expect("RAL_PROMPT is bound at session boot");
     let base = eval_prompt(&prompt, shell, &bindings);

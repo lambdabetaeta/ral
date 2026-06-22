@@ -158,7 +158,7 @@ pub(super) fn install_default_prompt(shell: &mut Shell) {
     let src = format!("{{ return \"{}\" }}", super::super::prompt::DEFAULT_PROMPT);
     let comp = Arc::new(ral_core::compile(&src).expect("default prompt thunk compiles"));
     let block = evaluate(&comp, shell).expect("default prompt thunk evaluates");
-    shell.mobile.scope.set("RAL_PROMPT".into(), block);
+    shell.set_var("RAL_PROMPT".into(), block);
 }
 
 /// Mark the shell interactive and publish the probed terminal as the
@@ -166,10 +166,8 @@ pub(super) fn install_default_prompt(shell: &mut Shell) {
 /// shell was constructed and is exposed via `shell.terminal()`.
 pub(super) fn setup_terminal(shell: &mut Shell) {
     shell.set_interactive(true);
-    shell
-        .mobile
-        .scope
-        .set("TERMINAL".into(), shell.terminal().to_value());
+    let terminal = shell.terminal().to_value();
+    shell.set_var("TERMINAL".into(), terminal);
 }
 
 /// Source login profiles (if login shell) and the user RC file.
