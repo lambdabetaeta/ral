@@ -264,14 +264,17 @@ fn bar(magnitude: Option<u32>) -> Span<'static> {
 
 /// Re-indent a call's pre-rendered effect rows by `indent`, dropping the
 /// leading blank `render_card` opens with so the effects sit flush under
-/// the intent rather than after a gap.
+/// the intent rather than after a gap.  Each row is washed into the recessed
+/// [`CODE_BG`] stratum: an observation's read/grep/exec output is verbatim
+/// machine text, so it shares the register code lives in — distinct from the
+/// model's own intent and prose at the base level.
 fn indent_rows(rows: &[Line<'static>], indent: &str) -> Vec<Line<'static>> {
     rows.iter()
         .filter(|l| !line::is_blank(l))
         .map(|l| {
             let mut spans = vec![Span::raw(indent.to_string())];
             spans.extend(l.spans.iter().cloned());
-            Line::from(spans)
+            line::wash(Line::from(spans), CODE_BG, None)
         })
         .collect()
 }

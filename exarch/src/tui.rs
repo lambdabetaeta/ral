@@ -656,7 +656,7 @@ impl App {
             // size-bar.
             Kind::ToolResult(text) => self.with_viewport(id, |vp| vp.set_result_size(&text)),
             Kind::UserPromptEcho(text) => {
-                self.push_chrome(id, RailShape::Generic, line::user_prompt(&text))
+                self.push_chrome(id, RailShape::Prompt, line::user_prompt(&text))
             }
             Kind::StopReason(raw) => {
                 self.push_chrome(id, RailShape::Generic, line::stop_reason(&raw))
@@ -1753,6 +1753,25 @@ fn legend_panel() -> Vec<Line<'static>> {
             .map(|mag| rail::span(RailKind::Patch, AgentSlot(0), mag))
             .collect(),
     )]));
+
+    // ── strata: who is speaking, read off the background ───────────────
+    ls.push(Line::default());
+    ls.push(head("strata · background value = source"));
+    // Each swatch is the literal `line::wash` output, so the legend wears the
+    // exact tones the transcript paints. Agents own the chromatic foreground
+    // (the rail hues above); the human owns the achromatic raised band.
+    let swatch = |text: &str, bg: Option<Color>| match bg {
+        Some(bg) => line::wash(Line::from(Span::raw(text.to_string())), bg, None).spans,
+        None => vec![note(text)],
+    };
+    ls.extend(line::legend_rows(vec![
+        ("you", swatch("your prompt — a raised band", Some(line::PROMPT_BG))),
+        ("model", swatch("prose and tool intents — the base", None)),
+        (
+            "shell",
+            swatch("read / grep / exec output — recessed, like code", Some(line::CODE_BG)),
+        ),
+    ]));
 
     // ── the ordered bars ───────────────────────────────────────────────
     ls.push(Line::default());

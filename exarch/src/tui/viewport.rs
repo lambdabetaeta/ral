@@ -17,7 +17,7 @@
 use super::block::{AgentSlot, Block, RailShape, wrap_line};
 use super::fidelity::{self, Fidelity};
 use super::group;
-use super::line::{READ_W, is_blank, plain};
+use super::line::{PROMPT_BG, READ_W, is_blank, plain, wash};
 use super::rail::{self, RailKind};
 use crate::bus::Hunk;
 use crate::card::Card;
@@ -653,14 +653,18 @@ impl Viewport {
         let mut row_block: Vec<usize> = Vec::new();
         let mut i = 0;
         while i < self.blocks.len() {
-            let (anchor, lines) = if self.blocks[i].observation() {
+            // `band` is `Some` only for the human turn — the flatten paints
+            // its raised light stratum here, where the content width is known,
+            // so the band reads edge-to-edge as a scrollback landmark.
+            let (anchor, lines, band) = if self.blocks[i].observation() {
                 let end = self.observation_run_end(i);
                 let anchor = self.group_anchor(i, end);
-                let segment = (anchor, self.render_group(i, end, anchor, content_w));
+                let segment = (anchor, self.render_group(i, end, anchor, content_w), None);
                 i = end;
                 segment
             } else {
-                let segment = (i, self.blocks[i].lines(content_w).to_vec());
+                let band = self.blocks[i].is_prompt().then_some(PROMPT_BG);
+                let segment = (i, self.blocks[i].lines(content_w).to_vec(), band);
                 i += 1;
                 segment
             };
@@ -672,6 +676,10 @@ impl Viewport {
             }
             for line in &lines[first..] {
                 for vrow in wrap_line(line, content_w as usize) {
+                    let vrow = match band {
+                        Some(bg) if !is_blank(&vrow) => wash(vrow, bg, Some(content_w as usize)),
+                        _ => vrow,
+                    };
                     rows.push(vrow);
                     row_block.push(anchor);
                 }

@@ -36,6 +36,12 @@ pub(super) const ORANGE: Color = Color::Rgb(215, 145, 115);
 pub(super) const RED: Color = Color::Rgb(215, 110, 125);
 pub(super) const SLATE: Color = Color::Rgb(140, 150, 170);
 pub(super) const CODE_BG: Color = Color::Rgb(36, 38, 46);
+/// The human turn's raised, achromatic background stratum.  Agents own the
+/// chromatic foreground (the rail hues); the one party that is not an agent
+/// owns the achromatic background — a band lighter than both the base and the
+/// recessed [`CODE_BG`] machine-text register, so a submitted prompt reads as
+/// a found-at-a-glance landmark by common region.
+pub(super) const PROMPT_BG: Color = Color::Rgb(54, 58, 70);
 /// Agent rail palette: one hue per producing agent, indexed by
 /// [`super::block::AgentSlot`]. Root keeps [`CYAN`] — the existing rail
 /// accent — so a root-only session is visually unchanged in hue. The
@@ -80,10 +86,10 @@ pub(super) const BANNER_GOLD: Color = Color::Rgb(255, 191, 0);
 /// Maximum readable width in columns; markdown is wrapped to this.
 pub(super) const READ_W: u16 = 100;
 
-/// Rail accent glyph for chrome that owns its own marker (the pending-
-/// prompt strip, which is not a [`super::block::Block`] and so does not
-/// receive the lifted rail). Block content instead gets its rail from
-/// [`super::rail::span`], prepended by [`super::block::Block::render`].
+/// The generic chrome glyph (`RailKind::Generic`'s `❖`) plus its trailing
+/// space — named because [`RAIL_GLYPHS`] reuses it as the eighth entry of the
+/// shape vocabulary. Block content gets its rail from [`super::rail::span`],
+/// prepended by [`super::block::Block::render`].
 pub(super) const RAIL: &str = "❖ ";
 
 /// Rail width in columns: one shape glyph plus one trailing space. Every
@@ -211,25 +217,18 @@ pub(super) fn step(_n: usize) -> Vec<Line<'static>> {
     vec![Line::default()]
 }
 
-/// Scrollback echo of the user's submitted prompt. Reverse video is reserved
-/// for an active selection alone ([`super::App::paint_selection`]), so the
-/// human's turn marks itself by *weight*: the cyan `❖` Generic rail (arriving
-/// via the lifted rail, [`super::block::Block::render`]) plus a bold body make
-/// the turn boundary unmistakable against the surrounding markdown/chrome
-/// without borrowing the selection look. The first line carries only the body
-/// and continuations indent two columns to align under it.
+/// Scrollback echo of the user's submitted prompt. The human's turn is the
+/// one block in the light stratum: the flatten paints a full-width raised
+/// background band behind it ([`wash`] with [`PROMPT_BG`], keyed on
+/// [`super::block::Block::is_prompt`]), so it reads as a found-at-a-glance
+/// landmark by common region — no marginal rail glyph, the band is the mark.
+/// Reverse video stays reserved for an active selection alone
+/// ([`super::App::paint_selection`]); the band is a fill, not an inversion.
+/// The body is bold and flush-left, every line banded alike.
 pub(super) fn user_prompt(s: &str) -> Vec<Line<'static>> {
-    let cont = Span::raw("  ");
     let body = Style::default().add_modifier(Modifier::BOLD);
     let mut ls: Vec<Line<'static>> = vec![Line::default()];
-    ls.extend(s.lines().enumerate().map(|(i, l)| {
-        let body_span = Span::styled(l.to_string(), body);
-        if i == 0 {
-            Line::from(vec![body_span])
-        } else {
-            Line::from(vec![cont.clone(), body_span])
-        }
-    }));
+    ls.extend(s.lines().map(|l| Line::from(Span::styled(l.to_string(), body))));
     ls
 }
 
@@ -256,49 +255,38 @@ pub(super) fn wakeup(s: &str) -> Vec<Line<'static>> {
     ls
 }
 
-/// The pending-prompt strip shown above the input while a turn runs:
-/// each message the user submitted mid-turn, oldest first.  Pending
-/// prompts use the same cyan rail and bold body as the committed
-/// user-prompt echo, so the strip reads as "this is your text waiting to be
-/// sent" rather than separate status chrome — and, like that echo, leaves
-/// reverse video to an active selection alone.  Wrapped to `width`
-/// columns; continuations indent under the text.  Capped at `max_rows`
-/// total — a longer queue closes with a `⋯ (N more)` line so it can
-/// never crowd the transcript off-screen.
+/// The pending-prompt strip shown above the input while a turn runs: each
+/// message the user submitted mid-turn, oldest first.  Pending prompts wear
+/// the same raised band as the committed prompt echo ([`wash`] with
+/// [`PROMPT_BG`]), so your text reads as one stratum whether it is still
+/// waiting to be sent or already landed — and, like that echo, leaves reverse
+/// video to an active selection alone.  Bold and flush-left, wrapped to
+/// `width` columns.  Capped at `max_rows` total — a longer queue closes with
+/// a `⋯ (N more)` line so it can never crowd the transcript off-screen.
 pub(super) fn queued_prompt(
     messages: &[String],
     width: u16,
     max_rows: usize,
 ) -> Vec<Line<'static>> {
-    let body_w = (width as usize)
-        .saturating_sub(UnicodeWidthStr::width(RAIL))
-        .max(8);
-    let rail = Style::default().fg(CYAN);
+    let w = width as usize;
     let body = Style::default().add_modifier(Modifier::BOLD);
     let more = Style::default().fg(SLATE).add_modifier(Modifier::ITALIC);
     let mut out: Vec<Line<'static>> = Vec::new();
     for msg in messages {
-        // The rail keys off the message-level first chunk, not each
-        // wrapped line's, so a multi-line message marks only its very
-        // first row and indents every continuation under it.
-        let first = std::cell::Cell::new(true);
-        let lead = || {
-            if first.replace(false) {
-                Span::styled(RAIL, rail)
-            } else {
-                Span::raw("  ")
-            }
-        };
         for raw in msg.lines() {
-            push_wrapped(&mut out, raw, body_w, |chunk, _first| {
-                Line::from(vec![lead(), Span::styled(chunk, body)])
+            push_wrapped(&mut out, raw, w, |chunk, _first| {
+                wash(Line::from(Span::styled(chunk, body)), PROMPT_BG, Some(w))
             });
         }
     }
     if out.len() > max_rows {
         let hidden = out.len() - (max_rows - 1);
         out.truncate(max_rows - 1);
-        out.push(Line::from(Span::styled(format!("⋯ ({hidden} more)"), more)));
+        out.push(wash(
+            Line::from(Span::styled(format!("⋯ ({hidden} more)"), more)),
+            PROMPT_BG,
+            Some(w),
+        ));
     }
     out
 }
@@ -407,10 +395,35 @@ fn tool_call_body(
     ls
 }
 
+/// Wash `row` with the background `bg`, preserving every span's foreground
+/// and modifiers — the single place a background stratum is painted, shared
+/// by the human turn's band, an observation's machine-text panel, and a code
+/// block.  `fill_to` pads the row to that display width so the wash reads
+/// edge-to-edge (a band); `None` lets it hug the spans (an inset panel).
+pub(super) fn wash(row: Line<'static>, bg: Color, fill_to: Option<usize>) -> Line<'static> {
+    let used: usize = row
+        .spans
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
+    let mut spans: Vec<Span<'static>> = row
+        .spans
+        .into_iter()
+        .map(|s| Span::styled(s.content, s.style.bg(bg)))
+        .collect();
+    if let Some(w) = fill_to
+        && w > used
+    {
+        spans.push(Span::styled(" ".repeat(w - used), Style::default().bg(bg)));
+    }
+    Line::from(spans)
+}
+
 /// Append one source row to an expanded tool call.  The visible code block
 /// has a fixed two-column inset; wrapped continuation rows then repeat the
 /// source line's own leading whitespace so a long expression folds beneath
-/// the place where its content began, not back at column zero.
+/// the place where its content began, not back at column zero.  Each row is
+/// washed into the recessed [`CODE_BG`] machine-text stratum.
 fn push_code_row(ls: &mut Vec<Line<'static>>, line: &str, width: u16) {
     const CODE_INDENT: &str = "  ";
     let body_start = line
@@ -422,13 +435,15 @@ fn push_code_row(ls: &mut Vec<Line<'static>>, line: &str, width: u16) {
     let prefix = format!("{CODE_INDENT}{source_indent}");
     let prefix_w = UnicodeWidthStr::width(prefix.as_str());
     let body_w = (width as usize).saturating_sub(prefix_w).max(8);
-    let code_style = Style::default().fg(Color::White).bg(CODE_BG);
-    let indent_style = Style::default().bg(CODE_BG);
     push_wrapped(ls, body, body_w, |chunk, _first| {
-        Line::from(vec![
-            Span::styled(prefix.clone(), indent_style),
-            Span::styled(chunk, code_style),
-        ])
+        wash(
+            Line::from(vec![
+                Span::raw(prefix.clone()),
+                Span::styled(chunk, Style::default().fg(Color::White)),
+            ]),
+            CODE_BG,
+            None,
+        )
     });
 }
 

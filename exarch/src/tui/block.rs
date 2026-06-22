@@ -43,6 +43,10 @@ pub(super) enum RailShape {
     Error,
     /// Ambient chrome outside the transcript proper — no marginal rail.
     Plain,
+    /// The human's submitted prompt — no marginal rail; its raised
+    /// background band ([`super::line::PROMPT_BG`], painted by the flatten)
+    /// is its mark.
+    Prompt,
     /// Everything else — renders the static `❖`.
     #[default]
     Generic,
@@ -385,6 +389,19 @@ impl Block {
         )
     }
 
+    /// True for the human turn's prompt echo — the one block in the light
+    /// stratum, banded full-width by the flatten ([`super::viewport`]) as a
+    /// scrollback landmark.
+    pub(super) fn is_prompt(&self) -> bool {
+        matches!(
+            self.kind,
+            BlockKind::Chrome {
+                shape: RailShape::Prompt,
+                ..
+            }
+        )
+    }
+
     /// Attach a tool call's result magnitude (`text.lines().count()`),
     /// dropping the memo so the collapsed header re-renders with its
     /// size-bar.  A no-op set on a non-tool-call block would never light
@@ -473,15 +490,21 @@ impl Block {
         let mut lines = self.body(width, level);
         if let Some(kind) = self.rail_kind(level) {
             let rail = rail::span(kind, self.agent, self.magnitude());
-            // Markdown insets every row by `MD_INDENT`; the rail occupies the
-            // first `RAIL_W` columns of that inset on the opening row, so shrink
-            // the inset there to keep prose flush with the body.
-            let shrink = matches!(self.kind, BlockKind::Markdown(_))
-                .then_some(RAIL_W)
-                .unwrap_or(0);
+            // The common rail-seating path for every kind, so a body can never
+            // hang inverted beneath the glyph again. Carve the rail's `RAIL_W`
+            // gutter from the opening row — invisible where the row already
+            // insets its content (markdown's `MD_INDENT`, a diff's two-column
+            // gutter), a rightward push where it is flush — then hang every
+            // continuation under that content by padding any row shy of the
+            // gutter up to it. A diff's rows are already inset, so the hang is a
+            // no-op for them; a flush surfaced card is the case it rescues.
             let idx = lines.iter().position(|l| !is_blank(l)).unwrap_or(0);
-            if shrink > 0 {
-                shrink_leading_ws(&mut lines[idx], shrink);
+            shrink_leading_ws(&mut lines[idx], RAIL_W);
+            for (i, line) in lines.iter_mut().enumerate() {
+                let short = RAIL_W.saturating_sub(leading_ws(line));
+                if i != idx && short > 0 && !is_blank(line) {
+                    line.spans.insert(0, Span::raw(" ".repeat(short)));
+                }
             }
             lines[idx].spans.insert(0, rail);
         }
@@ -549,6 +572,8 @@ impl Block {
                 RailShape::Step => Some(RailKind::Step),
                 RailShape::Error => Some(RailKind::Error),
                 RailShape::Plain => None,
+                // The prompt's band is its mark; it wears no marginal rail.
+                RailShape::Prompt => None,
                 RailShape::Generic => Some(RailKind::Generic),
             },
         }
@@ -572,6 +597,25 @@ fn first_rows(mut lines: Vec<Line<'static>>, k: usize) -> Vec<Line<'static>> {
 /// first whitespace-only span(s) in place.  Used to reclaim the columns
 /// the rail occupies on a markdown block's opening row so its prose stays
 /// flush with the body inset.
+/// The width of a line's leading run of all-space spans — the indent the
+/// rail's gutter is carved from or hung under. Counted span-wise to match
+/// [`shrink_leading_ws`], which only trims leading spans the builders emit
+/// as their own span (markdown's inset, a wrapped continuation's hang).
+fn leading_ws(line: &Line<'static>) -> usize {
+    let mut w = 0;
+    for span in &line.spans {
+        let s = span.content.as_ref();
+        if s.is_empty() {
+            continue;
+        }
+        if !s.chars().all(|c| c == ' ') {
+            break;
+        }
+        w += s.chars().count();
+    }
+    w
+}
+
 fn shrink_leading_ws(line: &mut Line<'static>, n: usize) {
     let mut remaining = n;
     for span in &mut line.spans {
