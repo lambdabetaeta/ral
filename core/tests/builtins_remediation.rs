@@ -205,7 +205,7 @@ fn to_json_refuses_block() {
 
 #[test]
 fn from_json_refuses_u64_beyond_i64() {
-    expect_error("from-json '18446744073709551615'", "from-json");
+    expect_error("to-string '18446744073709551615' | from-json", "from-json");
 }
 
 // ── B11 — prelude `lines`/`words` strip leading/trailing empties ──────────

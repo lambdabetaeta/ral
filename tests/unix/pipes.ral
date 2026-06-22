@@ -47,20 +47,17 @@ echo "[$result]"
 # Expected: [hello] (no trailing newline)
 
 # from-line strips trailing newline
-let raw = printf "hello\n"
-let s = from-line $raw
+let s = printf "hello\n" | from-line
 if $[not !{equal $s "hello"}] { fail [status: 1] }
 echo "from-line: $s"
 # Expected: from-line: hello
 
 # from-line preserves internal newlines, strips only the final one
-let b2 = printf "foo\nbar\n"
-let s2 = from-line $b2
+let s2 = printf "foo\nbar\n" | from-line
 if $[not !{equal $s2 "foo\nbar"}] { fail [status: 1] }
 
 # from-line on bytes with no trailing newline is a no-op
-let b3 = printf "no-newline"
-let s3 = from-line $b3
+let s3 = printf "no-newline" | from-line
 if $[not !{equal $s3 "no-newline"}] { fail [status: 1] }
 
 # Cleanup

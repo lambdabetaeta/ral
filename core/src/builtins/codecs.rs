@@ -5,11 +5,13 @@
 //! typechecker sees the actual return type, and a misspelled name fails at
 //! command lookup rather than as a runtime "unknown codec" string.
 //!
-//! `from-X` accepts 0 or 1 argument: zero means read stdin (used with `<file`
-//! or pipeline input); one means decode the supplied Bytes/String.  `to-X`
-//! always takes a single value, writes its encoded form to stdout, and
-//! returns Bytes.  The cached-tty gate fires only when stdin is genuinely
-//! unset — see `read_stdin_bytes`.
+//! Decoders and encoders are duals with definite arities.  A `from-X`
+//! decoder takes no argument: its bytes always come from the channel
+//! (stdin, a `< file` redirect, or a pipeline).  A `to-X` encoder takes
+//! exactly one value, writes its encoded form to stdout, and returns
+//! Bytes.  To decode a value already in hand, put it on the channel with
+//! the matching encoder — `to-string $s | from-json`.  The cached-tty
+//! gate fires only when stdin is genuinely unset — see `read_stdin_bytes`.
 
 use crate::ir::{CompKind, Val};
 use crate::source::Spanned;
@@ -32,32 +34,18 @@ fn read_stdin_bytes(name: &str, shell: &mut Shell) -> Settled<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Source bytes for a `from-X` builtin.  Zero args → stdin; one arg of Bytes
-/// passes through; one arg of any other type is rendered to its String form.
-/// `from-bytes` is stricter: a non-Bytes argument is an error rather than a
-/// silent stringify, since the whole point of the codec is to assert "these
-/// are raw bytes already".
-fn input_bytes(
-    args: &[Value],
-    name: &str,
-    require_bytes_arg: bool,
-    shell: &mut Shell,
-) -> Settled<Vec<u8>> {
-    match args {
-        [] => read_stdin_bytes(name, shell),
-        [Value::Bytes(b)] => Ok(b.clone()),
-        [v] => {
-            if require_bytes_arg {
-                Err(sig_hint(
-                    format!("{name}: expected Bytes, got {}", v.type_name()),
-                    "use from-string for UTF-8 validation, or from-bytes to read raw bytes",
-                ))
-            } else {
-                Ok(v.to_string().into_bytes())
-            }
-        }
-        _ => Err(sig(format!("{name}: too many arguments (expected 0 or 1)"))),
+/// Channel bytes for a `from-X` decoder.  Decoders are 0-arity: the bytes
+/// come from the channel (stdin / a `< file` redirect / a pipeline), never
+/// from an argument.  Passing one is a mistake — the encoder→decoder pipe is
+/// how a value already in hand reaches the channel.
+fn input_bytes(args: &[Value], name: &str, shell: &mut Shell) -> Settled<Vec<u8>> {
+    if !args.is_empty() {
+        return Err(sig_hint(
+            format!("{name}: takes no arguments — it reads the byte channel"),
+            "to decode a value in hand, pipe it through the matching encoder: `to-string $x | from-json`",
+        ));
     }
+    read_stdin_bytes(name, shell)
 }
 
 pub(super) fn builtin_fold_lines(args: &[Value], shell: &mut Shell) -> Settled<Value> {
@@ -72,11 +60,11 @@ pub(super) fn builtin_fold_lines(args: &[Value], shell: &mut Shell) -> Settled<V
 }
 
 pub(super) fn builtin_from_bytes(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    Ok(Value::Bytes(input_bytes(args, "from-bytes", true, shell)?))
+    Ok(Value::Bytes(input_bytes(args, "from-bytes", shell)?))
 }
 
 pub(super) fn builtin_from_string(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let bytes = input_bytes(args, "from-string", false, shell)?;
+    let bytes = input_bytes(args, "from-string", shell)?;
     Ok(Value::String(decode_utf8_strict(
         bytes,
         "from-string: input is not valid UTF-8",
@@ -85,7 +73,7 @@ pub(super) fn builtin_from_string(args: &[Value], shell: &mut Shell) -> Settled<
 }
 
 pub(super) fn builtin_from_line(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let bytes = input_bytes(args, "from-line", false, shell)?;
+    let bytes = input_bytes(args, "from-line", shell)?;
     let text = decode_utf8_strict(
         bytes,
         "from-line: input is not valid UTF-8",
@@ -118,7 +106,7 @@ fn stream_cons(head: String, tail: Value) -> Value {
 }
 
 pub(super) fn builtin_from_lines(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let bytes = input_bytes(args, "from-lines", false, shell)?;
+    let bytes = input_bytes(args, "from-lines", shell)?;
     let text = String::from_utf8_lossy(&bytes).into_owned();
     let mut s = Value::Variant {
         label: DONE_LABEL.into(),
@@ -131,7 +119,7 @@ pub(super) fn builtin_from_lines(args: &[Value], shell: &mut Shell) -> Settled<V
 }
 
 pub(super) fn builtin_from_json(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let bytes = input_bytes(args, "from-json", false, shell)?;
+    let bytes = input_bytes(args, "from-json", shell)?;
     let text = decode_utf8_strict(
         bytes,
         "from-json: input is not valid UTF-8",

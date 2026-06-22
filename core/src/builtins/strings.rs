@@ -326,7 +326,7 @@ pub(super) fn builtin_to_string(args: &[Value]) -> Settled<Value> {
     match val {
         Value::Bytes(_) => Err(sig_hint(
             "str does not accept Bytes",
-            "decode bytes first: from-string $bytes",
+            "decode bytes first: to-bytes $bytes | from-string",
         )),
         _ => Ok(Value::String(val.to_string())),
     }
