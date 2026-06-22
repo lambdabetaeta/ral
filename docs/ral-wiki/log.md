@@ -3079,3 +3079,19 @@ terminator's value-flag set is derived from clap, the prelude/Shell-embedding AP
 moved `host` → `driver` (machine probing split into `core::host`), and the
 pre-clap chain gained confined-child tails (`--ral-sandbox-exec`,
 `--ral-bundled-tool`) normalised to `u8`. Updated [[index|index]].
+
+## [2026-06-22] ingest | capabilities re-ingested at HEAD (10 commits stale)
+
+Re-stamped [[map/core/capabilities|capabilities]] to `@1baac6d`. The OS sandbox's
+platform reality is sharpened: macOS-only re-exec items (`--ral-sandbox-exec`,
+`verify_unswapped`) are now `cfg(target_os = "macos")`-gated, and Windows fails
+closed at `maybe_enter_process_sandbox` — a requested policy it cannot enforce
+errors rather than running unconfined
+([[decisions/260617_sandbox-external-children|sandbox-external-children]]). Added
+the `diag.rs` kernel-denial hint, where only `file-*` denials yield a path to
+grant (ipc/mach/network operands reproduce verbatim but never fill the
+path-to-grant slot), and noted that the layer's `fs`/process constructors are
+clippy-enforced I/O doors whose shapes render through
+[[map/exarch/io-surface|io-surface]]. The XDG resolver
+([[decisions/260601_xdg-resolver-consolidation|xdg-resolver-consolidation]]) and
+the decision-fold structure are unchanged. Updated [[index|index]].
