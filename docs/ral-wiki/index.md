@@ -173,7 +173,7 @@ design pages via the `against` stamp.
 - [[map/repl|repl]] — the `ral` binary: argv dispatch into a turn through core's framed door, driving one of three selectable frontends (minimal / readline / structural live-state projection) over the REPL session, plugins, and jobs. *@1baac6d*
   - [[map/repl/startup|startup]] — `main.rs`: pre-clap sandbox/helper dispatch, argv → `Mode` (`--surface` frontend, clap-derived argv terminator), batch execution through core's framed turn door, the annotated-prelude bake, platform glue. *@1baac6d*
   - [[map/repl/loop|loop]] — the `Session` state machine; one turn is a synchronous core entry through the framed turn doors, seeded from the live session; the selectable frontend, prompt/theme/rc. *@1baac6d*
-  - [[map/repl/frontend|frontend]] — the `Frontend` trait, minimal + rustyline editors, completion. *@e8227dc*
+  - [[map/repl/frontend|frontend]] — the `Frontend` trait and its minimal / rustyline / structural editors, the shared fuzzy completion engine, and the in-editor plugin surface (ghost text, highlights, keybindings) both TUIs drive. *@1baac6d*
   - [[map/repl/plugins|plugins]] — plugin runtime, `_ed-*` editor builtins, captured session commands. *@e8227dc*
   - [[map/repl/jobs|jobs]] — process-group job control, fg/bg/disown, `Escape::Stopped`. *@ce51d4e*
 - [[map/exarch|exarch]] — the exarch agent's front door: startup (CLI dispatch, bootstrap, account selection, sandbox early_init) and system-prompt assembly; the agent is a provider loop over one `shell` tool, each turn a grant-framed ral turn. *@1baac6d*

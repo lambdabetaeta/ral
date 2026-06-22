@@ -3189,3 +3189,16 @@ framed turn door as one synchronous policy-carrying call
 surface's internals (typed spine, reactive worksheet, handles matrix, vi-mode,
 shared fuzzy completion + Tab menu) stay pointed at [[map/repl/frontend|frontend]].
 Updated [[index|index]].
+
+## [2026-06-22] ingest | structural surface gains the plugin surface and shell line-edit
+
+Re-stamped [[map/repl/frontend|frontend]] to `@1baac6d` for six commits of
+refinement to the structural surface ([[decisions/260620_repl-as-structural-surface|repl-as-structural-surface]]).
+Recorded that it now drives the same in-editor plugin surface as the rustyline
+backend off the shared `PluginRuntime` — fish-style ghost text, highlight cell
+overlays, and fzf/zoxide keybindings, with the runtime itself living in
+[[map/repl/plugins|plugins]] — and that `shell_line_edit` remaps Ctrl-U to
+readline's kill-to-line-start in emacs and vi-Insert mode. The shared fuzzy
+completion engine and the native-cursor-every-mode editing
+([[decisions/260522_repl-architecture|repl-architecture]]) were already on the
+page; confirmed both against the code. Updated [[index|index]].

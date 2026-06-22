@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 738fa73
-generated_at_date: 2026-06-20
+generated_at_commit: 1baac6d
+generated_at_date: 2026-06-22
 covers_paths: [ral/src/repl/frontend.rs, ral/src/repl/frontend/, ral/src/repl/completion.rs, ral/src/repl/complete.rs]
 ---
 
@@ -39,6 +39,17 @@ dumb terminals whatever was asked):
   surface (`structural` feature, `--surface structural`): the typed spine,
   worksheet, and handles matrix around the prompt, plus Tab completion (below).
   See [[decisions/260620_repl-as-structural-surface|repl-as-structural-surface]].
+  It drives the same in-editor plugin surface the rustyline backend does, off the
+  shared [[map/repl/plugins|`PluginRuntime`]] rather than a parallel copy: each
+  iteration runs `run_buffer_change_hooks` and reads back the fish-style ghost
+  suggestion and highlight spans (overlaid as ratatui cells via `style_ratatui`,
+  arm-for-arm with `style_ansi`), accepts the ghost on right-arrow at buffer end,
+  and matches `keybinding_chords` against the keypress. A matched chord breaks
+  the loop to a `Composed::Keybinding` outcome — no new `Read` variant — tears
+  down the viewport and raw mode, then runs `dispatch_keybinding`, so an
+  `_ed-tui` handler (fzf, zoxide) gets the terminal exactly as the rustyline path
+  dispatches only after leaving `readline`; an `_ed-push` buffer is popped when
+  nothing is pending.
 
 The structural surface and exarch's TUI share their editor-cursor handling
 through the `textarea-vim` crate: the vi dispatch fold (`Vim::advance`) and
@@ -47,6 +58,13 @@ cursor at the edit point via the widget's wrap-aware `screen_cursor`. Both show
 that native cursor in **every** mode, the same shape throughout (no painted
 vi modal-mode block); the widget's own painted cursor cell is suppressed with a
 plain `set_cursor_style` at construction. One implementation, not a copy each.
+
+The structural surface intercepts the chords ratatui-textarea binds to editor
+rather than shell semantics: `shell_line_edit` remaps **Ctrl-U to
+kill-to-line-start** (`delete_line_by_head`, readline's unix-line-discard, not
+the textarea's `undo`), in emacs and in vi-Insert mode — vi Normal/Visual keep
+the vim keymap. Ctrl-D on a non-empty buffer deletes the char under the cursor;
+only an empty buffer reads as `Eof`.
 
 ## Completion
 
