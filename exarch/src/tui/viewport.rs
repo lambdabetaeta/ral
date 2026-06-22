@@ -146,6 +146,19 @@ fn safe_paragraph_break(open: &str) -> Option<usize> {
     last_safe
 }
 
+/// Whether `block` opens its own rail-run rather than continuing a prior
+/// prose paragraph's.  A run of consecutive [`Block::markdown_src`] blocks
+/// is one response — committed piecewise only because streaming commits
+/// each fence-safe paragraph as its own block
+/// ([`Viewport::flush_complete_paragraphs`]) — so the rail marks it once,
+/// on its head row; a continuation paragraph passes `lead = false`, keeping
+/// the gutter but dropping its redundant `·`.  Read off arrival order, like
+/// every other projection in the flatten: `prev` is the block immediately
+/// preceding `block`, `None` at the buffer's head.
+fn opens_rail_run(prev: Option<&Block>, block: &Block) -> bool {
+    !(block.markdown_src().is_some() && prev.is_some_and(|p| p.markdown_src().is_some()))
+}
+
 /// Open `path` as the session's rendered-text log, truncating any prior
 /// content.  Falls back to a discarding sink when the file can't be
 /// opened, so a log-path failure never disables the viewport.
@@ -433,7 +446,8 @@ impl Viewport {
     /// blank separators against the previous line exactly as the screen
     /// flatten does.
     fn log_block(&mut self, block: &Block) {
-        for line in block.log_lines(self.agent) {
+        let lead = opens_rail_run(self.blocks.last(), block);
+        for line in block.log_lines(self.agent, lead) {
             if is_blank(&line) {
                 if self.log_prev_blank {
                     continue;
@@ -701,7 +715,8 @@ impl Viewport {
                 segment
             } else {
                 let prompt = self.blocks[i].is_prompt();
-                let segment = (i, self.blocks[i].lines(content_w, agent).to_vec(), prompt);
+                let lead = opens_rail_run(i.checked_sub(1).map(|j| &self.blocks[j]), &self.blocks[i]);
+                let segment = (i, self.blocks[i].lines(content_w, agent, lead).to_vec(), prompt);
                 i += 1;
                 segment
             };
