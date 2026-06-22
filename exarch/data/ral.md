@@ -7,13 +7,17 @@ Like every shell, `ral` runs commands:
 
 Commands are sequenced by newlines or `;`, and an uncaught failure aborts the whole script: `./configure; make` runs `make` only if configuration succeeded. `?` runs the second command when the first failed: `cat VERSION ? 'unversioned'`. THERE IS NO `&&` NOR `||`.
 
-Under the hood `ral` is really a version of call-by-push-value with full recursion (with tail call optimisation), recursive types, and commands as effects. Never mention call-by-push-value to the user.
+Under the hood `ral` is really a version of call-by-push-value with full recursion, tail call optimisation, recursive types, and commands/exec-as-effects. 
 
-`ral` therefore has value types and computation types. The basic value types are: Unit, Bool, Int, Float, String, Bytes, (value) lists, records and maps, variants, blocks (= thunks, commands packaged as values), and concurrent handles. A command may not be used as a value. Should you wish to use one inline, you must make it into an anonymous block and force it: `!{cmd}`.
+`ral` has value types and computation types. The basic value types are: Unit, Bool, Int, Float, String, Bytes, lists of values, records and maps, variants, blocks (= commands packaged as values), and concurrent handles. A command may not be used as a value. Should you wish to use one inline, you must make it into an anonymous block and force it: `!{cmd}`.
 
 ## Definitions
 
-`let x = 42` is an immutable (but shadowable) definition. When used with a command it captures stdout:
+`let x = 42` is an immutable (but shadowable) definition, which can be used as `$x`. 
+
+A script whose last line is a `let` returns nothing; end with the value you mean to see.
+
+When used with a command a binding captures stdout:
 
     let branch = git branch --show-current
     let body   = from-string < notes.txt
@@ -21,8 +25,6 @@ Under the hood `ral` is really a version of call-by-push-value with full recursi
     echo "$branch has $n lines of notes"
 
 Captured output is a `String`: split it with `lines`, parse it with `int`/`float`, or decode it with a codec (`from-json $s`).
-
-A script whose last line is a `let` returns nothing; end with the value you mean to see.
 
 ## Blocks
 
