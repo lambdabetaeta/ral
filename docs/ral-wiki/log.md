@@ -3271,3 +3271,12 @@ trusts that and does not re-check
 The serde mirror's other churn was doc-comment renames and the codec gained only
 `#[allow]` markers on its post-mortem `dump_frame` door — below this page's
 altitude, no prose change. Updated [[index|index]].
+
+## [2026-06-22] ingest | the pipeline node carries a typed spine
+
+Re-stamped [[map/core/ir|ir]] to `@1baac6d` for one commit of drift. The
+`CompKind::Pipeline` node gained `stage_types: Vec<Ty>` — one inferred value type
+per stage, parallel to `stages`/`wires` — emitted as a `Unit` placeholder by the
+elaborator and overwritten by the annotation pass, retained for the structural
+REPL's typed spine ([[decisions/260603_ir-pipespec-annotation|ir-pipespec-annotation]]).
+Updated [[index|index]].
