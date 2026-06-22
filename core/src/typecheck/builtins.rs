@@ -280,6 +280,7 @@ pub mod sig {
     const ONE_INT: &[ArgTemplate] = &[INT];
     const TO_BYTES_ARGS: &[ArgTemplate] = &[ArgTemplate::OneOf(BYTES_OR_INT_LIST)];
     const TO_LINES_ARGS: &[ArgTemplate] = &[ArgTemplate::Ty(TyTemplate::ListAny)];
+    const NO_ARGS: &[ArgTemplate] = &[];
     const ALIAS_ARGS: &[ArgTemplate] = &[STR, BLOCK];
 
     const fn pure(value: TyTemplate) -> CompTemplate {
@@ -310,6 +311,12 @@ pub mod sig {
     pub const BYTES_VARIADIC: BuiltinSig = command(
         ArgSig::Variadic(ANY),
         ret(ModeTemplate::Fresh, ModeTemplate::Bytes, TyTemplate::String),
+        None,
+    );
+
+    pub const TERMINAL_CONTROL: BuiltinSig = command(
+        ArgSig::Exact(NO_ARGS),
+        ret(ModeTemplate::Fresh, ModeTemplate::Bytes, TyTemplate::Unit),
         None,
     );
 
