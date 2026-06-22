@@ -368,6 +368,19 @@ let from-lines-list = { |p|
     stream-to-list $s
 }
 
+# JSON Lines — one JSON value per line, over the serde-backed `from-json`
+# / `to-json` codecs.  `from-jsonl` keeps `from-lines` at the head of its
+# body pipeline so the block advertises the `Bytes` input channel, and so
+# composes both as `from-jsonl < $p` and `… | from-jsonl`; the result is a
+# lazy `Stream` of decoded values.  Each line is routed back onto the
+# channel with `to-string` before `from-json` reads it, since decoders are
+# 0-arity.  `to-json` emits compact (single-line) JSON, so one record per
+# line falls out for free.
+## Decode JSON Lines from stdin into a lazy stream of values.
+let from-jsonl = { from-lines | stream-map { |line| to-string $line | from-json } }
+## Encode a list of values as JSON Lines, one compact record per line.
+let to-jsonl = { |items| each { |x| to-json $x; echo "" } $items }
+
 # Streaming (stdin, line by line).  `fold-lines` is a builtin; `map-lines`
 # and `filter-lines` are ergonomic wrappers around it.
 ## Map a function over stdin lines, echoing results.

@@ -20,7 +20,7 @@ pub(crate) fn interpolate_piece(v: &Value, shell: &Shell) -> Result<String, Erro
         Value::String(_) | Value::Int(_) | Value::Float(_) | Value::Bool(_) => Ok(v.to_string()),
         Value::Bytes(_) => Err(shell.err_hint(
             "cannot interpolate Bytes in string",
-            "decode first: from-string $bytes",
+            "decode first: to-bytes $bytes | from-string",
             1,
         )),
         _ => Err(shell.err_hint(
