@@ -1,19 +1,19 @@
 #![allow(clippy::disallowed_methods)]
 
-//! End-to-end tests for [`exarch::session::Session::apply`] and
-//! [`Session::run_turn`] driven through a scripted provider backend
-//! (`exarch::provider::Provider::scripted`).  This is the composition
-//! the protocol machine (`event.rs`) is exercised under in production:
-//! `apply` renders the transcript, calls the provider, commits the
-//! reply, dispatches tools, and loops — the loop `event.rs`'s unit
-//! tests never see.
+//! End-to-end tests for [`exarch::session::Session::apply`] driven through
+//! a scripted provider backend (`exarch::provider::Provider::scripted`).
+//! This is the composition the protocol machine (`event.rs`) is exercised
+//! under in production: `apply` renders the transcript, calls the provider,
+//! commits the reply, dispatches tools, drains tool-boundary steering, and
+//! continues until the turn completes — the path `event.rs`'s unit tests
+//! never see.
 //!
 //! The transcript-admission invariant (every committed message
 //! serialises to a request every provider accepts) is asserted by
 //! round-tripping the committed messages through the same genai
 //! `ChatMessage` serialisation the live request uses.
 
-use exarch::bus::{Emitter, Event, Inbox, Kind, SessionBus, SessionId, Sink, Turn};
+use exarch::bus::{Emitter, Kind, SessionId};
 use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{Provider, ProviderError};
 use exarch::session::{Session, TurnOutcome};
@@ -46,53 +46,6 @@ fn tmp(tag: &str) -> std::path::PathBuf {
     let _ = std::fs::remove_dir_all(&p);
     std::fs::create_dir_all(&p).unwrap();
     p
-}
-
-/// A sink that records every event it handles, for `run_turn` tests
-/// that need to inspect what reached the frontend.
-#[derive(Default)]
-#[allow(dead_code)]
-struct Recorder {
-    kinds: Vec<Kind>,
-}
-
-impl Sink for Recorder {
-    fn handle(&mut self, e: Event) {
-        self.kinds.push(e.kind);
-    }
-}
-
-struct SteeringSink {
-    inbox: Inbox,
-    kinds: Vec<Kind>,
-    queued: bool,
-}
-
-impl Default for SteeringSink {
-    fn default() -> Self {
-        Self {
-            inbox: Inbox::new(),
-            kinds: Vec::new(),
-            queued: false,
-        }
-    }
-}
-
-impl Sink for SteeringSink {
-    fn handle(&mut self, e: Event) {
-        let should_queue = !self.queued
-            && matches!(&e.kind, Kind::ToolCall { cmd, .. } if cmd.contains("sleep 0.1"));
-        if should_queue {
-            self.inbox
-                .push_user("steer: revise after the current batch".into());
-            self.queued = true;
-        }
-        self.kinds.push(e.kind);
-    }
-
-    fn inbox(&self) -> Inbox {
-        self.inbox.clone()
-    }
 }
 
 /// Run one `apply` against a fresh `Emitter`/collector pair, returning
@@ -133,20 +86,6 @@ fn agent_call(id: &str, title: &str, prompt: &str) -> ToolCall {
         fn_arguments: serde_json::json!({
             "title": title,
             "prompt": prompt,
-        }),
-        thought_signatures: None,
-    }
-}
-
-/// An async `agent` tool call — the orchestration-edge mode.
-fn agent_async_call(id: &str, title: &str, prompt: &str) -> ToolCall {
-    ToolCall {
-        call_id: id.into(),
-        fn_name: "agent".into(),
-        fn_arguments: serde_json::json!({
-            "title": title,
-            "prompt": prompt,
-            "mode": "async",
         }),
         thought_signatures: None,
     }
@@ -212,84 +151,6 @@ fn tool_call_then_completion() {
 }
 
 #[test]
-fn queued_prompt_steers_after_current_tool_batch() {
-    let dir = tmp("tool-steering");
-    let mut session = Session::for_test(&dir, "system").unwrap();
-    let provider = scripted(
-        "test-model",
-        Script::new()
-            .then(Reply::tool_calls(vec![
-                ral_call("c1", "sleep 0.1; return first"),
-                ral_call("c2", "return second"),
-            ]))
-            .then(Reply::text("steered")),
-    );
-    let mut sink = SteeringSink::default();
-    // A per-turn bus over the sink's own inbox, so the steering prompt the
-    // sink posts mid-turn reaches the worker's emitter — the headless/test
-    // shape (the channel closes when the worker finishes).
-    let bus = SessionBus::per_turn(sink.inbox());
-
-    session
-        .run_turn(&mut sink, &bus, &provider, Some("start".into()))
-        .unwrap();
-
-    let ral_calls = sink
-        .kinds
-        .iter()
-        .filter(|k| matches!(k, Kind::ToolCall { tool: "ral", .. }))
-        .count();
-    assert_eq!(
-        ral_calls, 2,
-        "batch-boundary steering lets every already-issued tool call run"
-    );
-    assert!(
-        sink.kinds
-            .iter()
-            .any(|k| matches!(k, Kind::UserPromptEcho(s) if s.contains("after the current batch"))),
-        "drained steering prompt should echo when it becomes model-visible"
-    );
-
-    let messages = session.rendered_messages();
-    let users: Vec<&str> = messages
-        .iter()
-        .filter(|m| m.role == ChatRole::User)
-        .flat_map(|m| {
-            m.content.iter().filter_map(|p| match p {
-                ContentPart::Text(t) => Some(t.as_str()),
-                _ => None,
-            })
-        })
-        .collect();
-    assert!(
-        users.contains(&"steer: revise after the current batch"),
-        "steering prompt must be committed before the next assistant step: {users:?}"
-    );
-
-    let tool_text = messages
-        .iter()
-        .filter(|m| m.role == ChatRole::Tool)
-        .flat_map(|m| {
-            m.content.iter().filter_map(|p| match p {
-                ContentPart::ToolResponse(r) => Some(r.content.as_str()),
-                _ => None,
-            })
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        tool_text.contains("first"),
-        "first call should run before steering is drained: {tool_text}"
-    );
-    assert!(
-        tool_text.contains("second"),
-        "second call should run before batch-boundary steering is drained: {tool_text}"
-    );
-    assert!(session.is_ready());
-    assert_admissible(&session);
-}
-
-#[test]
 fn same_batch_agents_run_concurrently() {
     let dir = tmp("same-batch-agents");
     let mut session = Session::for_test(&dir, "system").unwrap();
@@ -326,70 +187,6 @@ fn same_batch_agents_run_concurrently() {
     );
     assert!(session.is_ready());
     assert_admissible(&session);
-}
-
-/// An async `agent` dispatch returns a start receipt now (not the child's
-/// answer) and the child's reply arrives later through the session inbox as
-/// a marked turn — the orchestration edge.  The root turn does not wait for
-/// the child.
-#[test]
-fn async_agent_returns_a_receipt_and_delivers_through_the_inbox() {
-    let dir = tmp("async-agent");
-    let mut session = Session::for_test(&dir, "system").unwrap();
-    // Three replies, consumed across the root and the detached child: the
-    // root's async dispatch, then a text reply each for whichever of the two
-    // turns reaches the provider next.  The assertions do not depend on that
-    // order — only that the root completes and the child posts a result.
-    let provider = scripted(
-        "test-model",
-        Script::new()
-            .then(Reply::tool_calls(vec![agent_async_call(
-                "bg",
-                "background",
-                "do background work",
-            )]))
-            .then(Reply::text("first"))
-            .then(Reply::text("second")),
-    );
-
-    // Hold the inbox so we can observe the worker's delivery; `drive_apply`
-    // builds its own, so drive `apply` directly here.
-    let inbox = Inbox::new();
-    let (tx, _rx) = channel();
-    let emit = Emitter::with_inbox(tx, session.id, inbox.clone());
-    let root = exarch::cancel::mint_root();
-    let outcome = session.apply(
-        &provider,
-        Some("dispatch async".into()),
-        root.token(),
-        &emit,
-    );
-    assert!(
-        matches!(outcome, Ok(TurnOutcome::Complete(_))),
-        "the root turn completes without waiting for the child"
-    );
-
-    // The detached worker settles on its own thread; poll the inbox for its
-    // delivery, then drain it as the driver would at the turn boundary.
-    let mut delivered = None;
-    for _ in 0..200 {
-        if let Some(turn) = inbox.drain_turn() {
-            delivered = Some(turn);
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    let turn = delivered.expect("the async agent must post its result to the inbox");
-    assert!(
-        matches!(&turn, Turn::Agent(r) if r.title == "background"),
-        "delivered tagged as an agent turn, got {turn:?}"
-    );
-    assert!(
-        turn.text().starts_with("[agent 'background'"),
-        "the model still sees the marked agent text, got {:?}",
-        turn.text(),
-    );
-    assert!(session.is_ready());
 }
 
 /// A `let` binding committed by an earlier tool call survives into the
