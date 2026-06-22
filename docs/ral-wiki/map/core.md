@@ -1,24 +1,56 @@
 ---
-generated_at_commit: 7ba500b
-generated_at_date: 2026-06-17
+generated_at_commit: 1baac6d
+generated_at_date: 2026-06-22
 covers_paths: [core/src/lib.rs]
 ---
 
 # Map: core (ral-core)
 
-`core/` is the `ral-core` crate — the language engine, and the bulk of the
-codebase (~100k lines of Rust). Both binaries, `ral` and [[map/exarch|exarch]],
-embed it.
+**`core/` is the `ral-core` crate — the language engine — and a host reaches it
+through two narrow crate-root seams: a compile-then-typecheck pipeline that turns
+source into typed IR, and the framed turn doors that are the only entry into
+evaluation.** It is the bulk of the codebase (~100k lines of Rust); both
+binaries, `ral` and [[map/exarch|exarch]], embed it.
 
-`core/src/lib.rs` is the front door. It re-exports the whole public surface and
-states the pipeline as two functions: `compile` (parse → elaborate) and
-`compile_and_typecheck` (parse → elaborate → typecheck → `CompileOutcome`).
-Hosting a `Shell` is `host::boot_shell` over a `BakedPrelude`, and the prelude
-bake — a schema-less `postcard` blob with its `cargo:rerun-if-changed`
-shape-file list (`ir.rs`, `syntax/ast.rs`, `mode.rs`, `typecheck/ty.rs`,
-`typecheck/scheme.rs`) — is owned in one place, `host.rs`, so the
-schema-evolution hazard is a single list rather than three that must agree
-([[decisions/260610_host-embedding-api|host-embedding-api]]).
+`core/src/lib.rs` is the front door. The compilation ladder is *source → tokens →
+flat AST → CBPV IR → typed IR*, bundled as two functions: `compile` (parse →
+elaborate) and `compile_and_typecheck` (parse → elaborate → typecheck →
+`CompileOutcome`). Evaluation is not on the crate root — `evaluate`, `parse`,
+`elaborate`, and `Comp` are crate-private, reached by the owning module path when
+a host deliberately steps past the seam
+([[decisions/260618_after-turn-api-simplifications|after-turn-api-simplifications]]).
+
+## The evaluation seam
+
+Evaluation enters only through the *framed turn doors* on `Shell`, never the
+reduction primitive behind them. A host states policy; core owns resources.
+
+- `Shell::run_source_turn(src, TurnRequest)` runs a turn from source text;
+  `Shell::run_value_turn(thunk, args, src, TurnRequest)` runs one from an
+  already-evaluated thunk applied to argument values. Both are synchronous and
+  runtime-agnostic, and both return one flat `TurnReport`
+  ([[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]]).
+- Completion is the call returning, never a channel disconnecting, so a detached
+  worker holding a surface clone cannot keep a turn from ending
+  ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]).
+- The reduction host behind the doors is crate-private, so a host cannot start an
+  unframed evaluation that would foreground or capture against a stale frame.
+
+## host and driver
+
+The crate splits driving a `Shell` from probing the machine it runs on.
+
+- `driver` embeds and drives a `Shell` in a host process: `boot_shell` constructs,
+  seeds, and loads it from a `BakedPrelude`. The prelude is baked ahead of time
+  into a schema-less `postcard` blob whose single encode site
+  (`driver::bake_prelude_to_out_dir`) and single decode site
+  (`driver::BakedPrelude`) sit beside one `cargo:rerun-if-changed` shape-file
+  list, so the schema-evolution hazard is one list rather than three that must
+  agree ([[decisions/260610_host-embedding-api|host-embedding-api]],
+  [[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
+- `host` probes the underlying machine: `git()`, `os_name`/`arch`/`family`,
+  wall-clock `now()`, and re-exports of cwd/user/home. exarch's host snapshot is
+  a formatter over it.
 
 ## The pipeline, by judgment
 

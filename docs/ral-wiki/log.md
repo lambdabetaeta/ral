@@ -3161,3 +3161,17 @@ ceilings share one timer ([[decisions/260617_scheduled-wakeups|scheduled-wakeups
 [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-primitives]]),
 and noted that redirect reads/writes emit byte-level I/O doors at this layer,
 rendered by [[map/exarch/io-surface|io-surface]]. Updated [[index|index]].
+
+## [2026-06-22] ingest | core hub re-ingested at HEAD (8 commits stale)
+
+Re-stamped [[map/core|core]] to `@1baac6d`. Reframed the crate root around its
+two narrow seams: the compile-to-typed-IR ladder (`compile` /
+`compile_and_typecheck`), and the framed turn doors `Shell::run_source_turn` /
+`run_value_turn` as the only entry into evaluation — the reduction primitive
+behind them is crate-private, and completion is the call returning, not a
+channel closing ([[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]],
+[[decisions/260618_run-turn-host-loop|run-turn-host-loop]]). Recorded the new
+`host` (machine probing) / `driver` (Shell embedding, `boot_shell`,
+`BakedPrelude`, the single prelude-bake site) split
+([[decisions/260610_host-embedding-api|host-embedding-api]],
+[[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]). Updated [[index|index]].
