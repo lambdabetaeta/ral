@@ -3290,3 +3290,23 @@ to a parked group only when the turn holds a `TerminalLease`
 session for the borrow rather than re-deriving a `startup_foreground` predicate,
 and a non-interactive resume with no lease skips the tty handoff. Updated
 [[index|index]].
+
+## [2026-06-22] ingest | elaborator emits a Unit placeholder per pipeline stage value type
+
+Re-ingested [[map/core/elaboration|elaboration]] for `3cd6d84`: the elaborator now seeds the `Pipeline` node's `stage_types` with a `Ty::Unit` per stage, parallel to the existing `Wire::EMPTY` mode-wire placeholders, which the checker's annotation pass overwrites with each stage's resolved value type. Extends [[decisions/260603_ir-pipespec-annotation|ir-pipespec-annotation]] — the same elaborator-placeholder / checker-overwrite split now carries the per-stage value types the structural REPL's typed spine needs.
+
+## [2026-06-22] ingest | diagnostics exposes the type-error underline ingredients
+
+Re-ingested [[map/core/diagnostics|diagnostics]] after `1a4cdb9` promoted `byte_to_char` and `label_message_for_kind` to `pub`, so an external renderer (the structural [[map/repl/frontend|frontend]]) can draw an in-place type-error underline that agrees word-for-word and column-for-column with the post-Enter ariadne report. The companion `0637d08` was a test-only ANSI-stripping change, no behaviour.
+
+## [2026-06-22] ingest | ral-sh exec sites become silent io-doors
+
+The login-shell bridge's two re-exec call sites (`exec_ral`, `exec_posix_sh`) now carry `[io-door:silent:respawn-…]` reasoned allows under the workspace door discipline; behaviour is unchanged. Re-stamped [[map/ral-sh|ral-sh]] to `1baac6d` and corrected its dispatch description to the four-rule first-match-wins matrix.
+
+## [2026-06-22] ingest | re-verify evaluator-machine at HEAD
+
+Re-ingested [[internals/evaluator-machine|evaluator-machine]] against the run-turn cutover and the Shell lifetime split: its `eval_top_level` / `apply` verbs are now `pub(crate)`, reached only through framed turn doors ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]), and the old two-way Mobile/Local split is now the four-way `Mobile` / `TurnState` / `SessionState` / `LocalState` partition ([[decisions/260617_turn-local-state|turn-local-state]]). Added the same-thread β-step that runs a thunk body in the caller's session via `with_thunk_body` rather than a copy ([[decisions/260620_same-thread-body-shares-the-session|same-thread-body-shares-the-session]]); bumped the verified stamp to `1baac6d`.
+
+## [2026-06-22] ingest | a turn runs through the framed door, not the eval_top_level spine
+
+Re-verified [[internals/a-turn-end-to-end|a-turn-end-to-end]] against the run-turn cutover: the single `run_turn` entry is now two synchronous doors, `Shell::run_source_turn`/`run_value_turn` returning a `TurnReport`, sharing one `build_turn`/`run_framed` scaffold while `eval_top_level` and the old spine go crate-private ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]], [[decisions/260618_run-turn-host-loop|run-turn-host-loop]], [[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]]). Dropped the vanished `run_turn`/`run_compiled` anchors, added `run_source_turn`/`run_value_turn`/`run_framed`, and bumped the verified stamp to `1baac6d` / 2026-06-22.
