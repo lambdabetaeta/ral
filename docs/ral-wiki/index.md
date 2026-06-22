@@ -167,7 +167,7 @@ design pages via the `against` stamp.
   - [[map/core/io-process|io-process]] — byte sinks/sources, the lease-gated foreground handoff, the Cancel|Run reaper daemon, Stream labels. *@1baac6d*
   - [[map/core/builtins|builtins]] — Rust commands and bundled coreutils/ripgrep. *@8c2437c1*
   - [[map/core/shell-state|shell-state]] — runtime `Value`, the `surface` sink, handler stack, and the `Shell` state split by lifetime into `Mobile` / `TurnState` / `SessionState` / `LocalState`; a scope entry is `Binding { value, scheme }`. *@1baac6d*
-  - [[map/core/transport|transport]] — serde mirror (`SerialValue`, `SerialBinding`) and wire envelope (`WireMobile`) carrying a shell — values and schemes — across a re-exec. *@2b999feb*
+  - [[map/core/transport|transport]] — serde mirror (`SerialValue`, `SerialBinding`) and wire envelope (`WireMobile`) carrying a shell — values and schemes — across a re-exec. *@1baac6d*
   - [[map/core/diagnostics|diagnostics]] — `Span`/`FileId` byte-range positions rendered directly via ariadne; ANSI gating; exit-code hints. *@2b999feb*
   - [[map/core/prelude|prelude]] — the embedded `prelude.ral` standard library. *@8c2437c1*
 - [[map/repl|repl]] — the `ral` binary: argv dispatch into a turn through core's framed door, driving one of three selectable frontends (minimal / readline / structural live-state projection) over the REPL session, plugins, and jobs. *@1baac6d*

@@ -3258,3 +3258,16 @@ the stack. The parser also gives a friendlier error when a digit is glued to a
 comparison operator inside `$[…]` (`$[2>3]`, lexed as the redirect `2>`), and the
 lexer's `\<newline>` continuation no longer stretches an adjacent literal's span.
 Updated [[index|index]].
+
+## [2026-06-22] ingest | transport carries a per-name handler's convention by construction
+
+Re-stamped [[map/core/transport|transport]] to `@1baac6d` for three commits of
+drift. The one genuine change to what the page asserts: a wire-hydrated per-name
+handler entry now takes its calling convention as `HandlerArity::Unary` by
+construction rather than re-sniffing it from the thunk's runtime shape — the
+values already cleared install-time arity validation on the sender, so hydration
+trusts that and does not re-check
+([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
+The serde mirror's other churn was doc-comment renames and the codec gained only
+`#[allow]` markers on its post-mortem `dump_frame` door — below this page's
+altitude, no prose change. Updated [[index|index]].

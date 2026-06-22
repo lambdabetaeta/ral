@@ -1,6 +1,6 @@
 ---
-generated_at_commit: df36715
-generated_at_date: 2026-06-17
+generated_at_commit: 1baac6d
+generated_at_date: 2026-06-22
 covers_paths: [core/src/serial.rs, core/src/subprocess.rs, core/src/subprocess_codec.rs]
 ---
 
@@ -28,6 +28,10 @@ realisations:
 - *hydration* installs a complete `HandlerFrame` through
   `HandlerStack::push_frame` rather than re-deriving fields like
   `removable_by_unalias`, so a wire-hydrated alias stays removable by `unalias`;
+  a per-name entry's calling convention rides as `HandlerArity::Unary` by
+  construction, never re-sniffed from the thunk's shape — the values cleared
+  install-time arity validation on the sender, so hydration does not re-check
+  ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]);
 - *kinds* ride as serde enums — `WireExecNode.kind` is `ExecNodeKind`, not a
   string — and *floats* ride by IEEE-754 bits (`f64::to_bits`/`from_bits` in the
   serde mirror), total and exact where JSON's number coerces NaN/±∞ to `null`.
