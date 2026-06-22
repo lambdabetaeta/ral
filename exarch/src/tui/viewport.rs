@@ -17,7 +17,7 @@
 use super::block::{AgentSlot, Block, RailShape, wrap_line};
 use super::fidelity::{self, Fidelity};
 use super::group;
-use super::line::{PROMPT_BG, READ_W, is_blank, plain, wash};
+use super::line::{PROMPT_BG, READ_W, is_blank, plain, size_bar, wash};
 use super::rail::{self, RailKind};
 use crate::bus::Hunk;
 use crate::card::Card;
@@ -40,7 +40,10 @@ pub(super) struct Viewport {
     /// value readout; the global `App::total_usage` stays for `rule_line`.
     usage: Usage,
     /// In-progress assistant text since the last fence-safe paragraph
-    /// boundary; renders nothing until it commits as a [`Block::markdown`].
+    /// boundary.  It never streams as prose — [`Self::render_window`]
+    /// projects only its growing magnitude as a provisional rail seat
+    /// ([`Self::streaming_seat`]) until a fence-safe break or the turn's end
+    /// commits it as a [`Block::markdown`].
     open: String,
     /// Top visible visual row.  Owned per-viewport so each tab keeps its
     /// place; recomputed against the frame height in [`Self::render_window`].
@@ -540,13 +543,39 @@ impl Viewport {
 
     // ── rendering ────────────────────────────────────────────────────────
 
+    /// The provisional rail seat for the in-flight response: a single row
+    /// projecting only the *magnitude* of the streamed-but-uncommitted
+    /// [`Self::open`] buffer — the markdown rail shape (`·`), lightened by its
+    /// line count, then a [`size_bar`] of the same — and never its text.
+    /// `None` between turns, when `open` is empty.  Drawn as the trailing row
+    /// by [`Self::render_window`] and superseded the instant
+    /// [`Self::flush_open`] commits the real [`Block::markdown`] at the
+    /// boundary: the growing edge reads as accruing volume while the settled
+    /// transcript above it stays a finished image.
+    fn streaming_seat(&self) -> Option<Line<'static>> {
+        if self.open.trim().is_empty() {
+            return None;
+        }
+        let magnitude = self.open.lines().count() as u32;
+        Some(Line::from(vec![
+            rail::span(RailKind::Markdown, self.agent, Some(magnitude)),
+            size_bar(magnitude),
+        ]))
+    }
+
     /// The visible slice at `width` × `height`, after re-flattening if
     /// stale and resolving the scroll position: head-anchored to the trailing
     /// segment while sticky ([`Self::tail_anchored_offset`]), clamped
     /// otherwise — and re-armed to sticky once it reaches the bottom.
     pub(super) fn render_window(&mut self, width: u16, height: usize) -> RenderWindow {
         self.reflow(width);
-        let total = self.flat.rows.len();
+        // The provisional streaming seat (when a response is in flight) is the
+        // trailing row, one past the committed flatten: a fixed-height mark
+        // that grows in place, so it joins the scroll arithmetic as one extra
+        // row rather than a block churning the memoised flatten each token.
+        let seat = self.streaming_seat();
+        let committed = self.flat.rows.len();
+        let total = committed + seat.is_some() as usize;
         let max_off = total.saturating_sub(height);
         if self.sticky {
             self.offset = self.tail_anchored_offset(width, height, total);
@@ -571,8 +600,17 @@ impl Viewport {
             .checked_div(max_off)
             .unwrap_or(0)
             .min(total.saturating_sub(1));
+        // Committed rows fill the window up to the seat's row (`committed`);
+        // the seat itself lands only once the window reaches past them — i.e.
+        // the tail is in view.
+        let mut lines = self.flat.rows[self.offset.min(committed)..end.min(committed)].to_vec();
+        if let Some(seat) = seat
+            && end > committed
+        {
+            lines.push(seat);
+        }
         RenderWindow {
-            lines: self.flat.rows[self.offset..end].to_vec(),
+            lines,
             offset: self.offset,
             total,
             scrollbar_pos,
@@ -781,5 +819,69 @@ impl Viewport {
             calls.push(group::Call::new(prev, effects));
         }
         calls
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn viewport() -> Viewport {
+        let path = std::env::temp_dir().join("exarch-streaming-seat-test.log");
+        Viewport::new(path, AgentSlot(0))
+    }
+
+    /// While a response streams, the uncommitted `open` buffer renders as a
+    /// single trailing seat row — the markdown rail glyph and a size-bar of
+    /// its line count — and never its text.  The prose appears only when the
+    /// boundary commits it as a block, at which point the seat gives way.
+    #[test]
+    fn streaming_renders_a_magnitude_seat_not_text() {
+        let mut vp = viewport();
+        // A fenced script with no fence-safe paragraph break: nothing commits,
+        // so the whole chunk stays in `open`.
+        vp.push_token("```ral\nlet x = 1\nlet y = 2\n", 0);
+        assert!(vp.open.contains("let x = 1"));
+
+        let w = vp.render_window(READ_W, 24);
+        let seat_line = w.lines.last().expect("a seat row while streaming");
+        // The leading span is the markdown rail glyph (`plain` would strip it).
+        assert_eq!(
+            seat_line.spans.first().map(|s| s.content.as_ref()),
+            Some("· "),
+            "seat wears the markdown rail glyph",
+        );
+        let seat = plain(seat_line);
+        assert!(seat.contains('█'), "seat shows a filled size-bar: {seat:?}");
+        assert!(
+            !seat.contains("let x = 1"),
+            "seat withholds the streamed text: {seat:?}"
+        );
+
+        // The boundary commits the buffer: the seat gives way to the rendered
+        // prose block, and `open` is drained.
+        vp.close_boundary(0);
+        assert!(vp.open.is_empty());
+        let w = vp.render_window(READ_W, 24);
+        let all = w.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
+        assert!(all.contains("let x = 1"), "committed prose now renders: {all:?}");
+        assert!(
+            !plain(w.lines.last().expect("committed rows")).contains('░'),
+            "no provisional seat remains after commit: {all:?}"
+        );
+    }
+
+    /// Between turns the buffer is empty, so there is no seat: the window is
+    /// exactly the committed flatten.
+    #[test]
+    fn no_seat_between_turns() {
+        let mut vp = viewport();
+        vp.push_token("```ral\nlet x = 1\n", 0);
+        vp.close_boundary(0);
+        let w = vp.render_window(READ_W, 24);
+        assert!(
+            !plain(w.lines.last().expect("committed rows")).contains('░'),
+            "an idle viewport shows no streaming seat"
+        );
     }
 }
