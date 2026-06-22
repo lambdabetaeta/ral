@@ -26,6 +26,10 @@
 //! - **REPL aside** (prompt, hook): [`Shell::child_from`] clones the
 //!   parent's [`Context`](super::Context) without touching its local
 //!   machinery; the child is an independent sibling with no flow-back.
+//! - **Host session fork** (sub-agent): [`Shell::fork_session`] is the
+//!   session-scoped specialisation of `child_from` — it snapshots the whole
+//!   scope, context, and builtin table into a child session that runs its
+//!   own turns, with fresh control counters and no flow-back.
 //!
 //! Each fork starts from a freshly-defaulted
 //! [`SessionState`](super::SessionState) and so holds no terminal authority
@@ -226,6 +230,28 @@ impl Shell {
         child
     }
 
+    /// Fork this shell into an independent child *session* — the primitive a
+    /// host uses to spawn a sub-agent that runs its own turns.
+    ///
+    /// The session-scoped specialisation of [`Self::child_from`]: the child
+    /// snapshots this shell's whole lexical `scope` (prelude, libraries, and
+    /// every accumulated binding), its dynamic `context` (cwd, env, grants,
+    /// handlers), and the installed builtin table, and starts fresh in
+    /// everything else — fresh control counters (a new session is not a
+    /// continuation of the caller's call stack) and a freshly-defaulted
+    /// [`SessionState`](super::SessionState), so it holds no terminal
+    /// authority (`TerminalAccess::Denied`, no lease — it is not the
+    /// foreground session). There is no flow-back: the child's `cd`, env, and
+    /// new bindings die with it.
+    ///
+    /// Routing a host fork through here keeps the "what flows into a child"
+    /// decision in the flow matrix rather than at the call site, so a host
+    /// cannot silently sever an inheritable datum — the builtin table among
+    /// them — by hand-copying only the fields it happened to remember.
+    pub fn fork_session(&self) -> Self {
+        Self::child_from(&self.mobile.scope, self)
+    }
+
     /// Spawn `f` on a fresh OS thread with a cloned child shell.  The
     /// caller supplies `scopes` — the thunk's captured closure scope
     /// for `spawn` / `par`, or the caller's own scope for pipeline
@@ -336,6 +362,31 @@ mod tests {
         assert!(
             shell.terminal_lease().is_some(),
             "the session still holds the lease after the body — it never moved",
+        );
+    }
+
+    /// A forked session is not the foreground session, so it holds no terminal
+    /// authority — even when forked from a parent that does, and even if the
+    /// child's own turn later claims `Leased` access.  `fork_session` builds
+    /// the child over a freshly-defaulted `SessionState`, which mints no lease
+    /// witness, so a sub-agent can never foreground an external command and
+    /// seize the controlling terminal the host's TUI owns.
+    #[test]
+    #[cfg(unix)]
+    fn fork_session_holds_no_terminal_authority() {
+        let mut parent = Shell::default();
+        parent.session.terminal_lease = TerminalLease::mint_at_startup(true);
+        parent.turn.terminal_access = TerminalAccess::Leased;
+        assert!(
+            parent.terminal_lease().is_some(),
+            "precondition: the parent holds a Leased lease",
+        );
+
+        let mut child = parent.fork_session();
+        child.turn.terminal_access = TerminalAccess::Leased;
+        assert!(
+            child.terminal_lease().is_none(),
+            "a forked session minted no lease witness, so it cannot foreground",
         );
     }
 }

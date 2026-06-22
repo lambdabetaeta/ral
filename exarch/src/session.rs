@@ -167,15 +167,14 @@ impl Session {
     }
 
     pub(crate) fn fork(&self) -> io::Result<Session> {
-        // Snapshot the parent's whole shell into the child: `scope` (the
-        // baked ral prelude, the agent helper library, and any bindings
-        // the parent has accumulated — none of which survive a bare
-        // `Shell::new`) and `context` (cwd, env, dynamic context). Only
-        // the evaluator's control counters start fresh: the child is a new
-        // session, not a continuation of the parent's call stack.
-        let mut shell = Shell::new(crate::bootstrap::probe_terminal());
-        shell.mobile.scope = self.shell.mobile.scope.clone();
-        shell.mobile.context = self.shell.mobile.context.clone();
+        // The child is an independent fork of the parent session: it snapshots
+        // the parent's scope (prelude, agent library, accumulated bindings),
+        // dynamic context (cwd, env, grants), and installed builtin table (the
+        // host's `window-hash`/`grep-files`/`edit` and the rest), and starts
+        // fresh in control counters and session state — no terminal authority,
+        // no flow-back. Core owns the flow matrix, so the builtin table can't
+        // be silently dropped here the way a hand-copied field once was.
+        let shell = self.shell.fork_session();
         let child_id = fresh_id();
         let log = self.log.fork(child_id, self.system.len())?;
         Ok(Self::assemble(
@@ -926,6 +925,30 @@ mod tests {
         match session.apply(&provider2, Some("continue".into()), root.token(), &emit) {
             Ok(TurnOutcome::Complete(s)) => assert_eq!(s, "ok"),
             other => panic!("next turn on the healed shell must complete, got {other:?}"),
+        }
+    }
+
+    /// A forked child inherits the parent's installed builtin surface, not
+    /// just the core set a bare `Shell::new` seeds.  The exarch host builtins
+    /// (`window-hash` and friends) live in the session's dispatch table,
+    /// outside `mobile`, so without `adopt_builtins_from` the child's ral
+    /// `view`/`edit` helpers would call into nothing and fall back to a
+    /// failed PATH lookup.
+    #[test]
+    fn fork_inherits_host_builtins() {
+        let dir = tmp("fork-builtins");
+        let session = Session::for_test(&dir, "system").unwrap();
+        // Sanity: the parent's boot shell has the exarch surface installed.
+        assert!(
+            session.shell.lookup_builtin("window-hash").is_some(),
+            "the parent boot shell must carry the exarch host builtins"
+        );
+        let child = session.fork().expect("fork child session");
+        for name in ["window-hash", "grep-files", "edit", "explore-dir", "line-hash"] {
+            assert!(
+                child.shell.lookup_builtin(name).is_some(),
+                "the forked child must inherit the host builtin `{name}`"
+            );
         }
     }
 
