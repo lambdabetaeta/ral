@@ -22,7 +22,12 @@ convention, the word "alias" is redundant and is retired everywhere.
   single homogeneous list, so a parameterised arm is typed `Fun(List α, B)`
   and every supplied argument inhabits the element type `α`
   ([`apply_handler_arm` / `infer_handler_arm`, `core/src/typecheck/infer.rs`](../../../core/src/typecheck/infer.rs)).
-  A catch-all also receives the name: `Fun(String, Fun(List α, B))`.
+  A catch-all `{ |name args| … }` also receives the dispatched name, typed
+  `Fun(String, Fun(List α, B))` — the shape that lets it monitor every call
+  (`{ |name args| echo "$name called with ...$args" }`). That is the runtime
+  calling convention (`run_handler`,
+  [`core/src/runtime/command_call.rs`](../../../core/src/runtime/command_call.rs));
+  the typechecker does not yet pin it (see *Known weaknesses*).
 
 Variable arity is therefore a *surface* phenomenon — a handler invoked `g a b c`
 sees one three-element list — while at the value level a handler is fixed-arity-one. The
@@ -195,6 +200,13 @@ no exception.
   per-name lookup is now `explain NAME`, and bare `help` is the overview. Scripts
   and muscle memory calling `help foo` move to `explain foo`; `help`'s overview
   text names `explain`, so the path is discoverable.
+- **The catch-all's type is unenforced.** Its `Fun(String, Fun(List α, B))` shape
+  is the runtime calling convention, but `infer_within`
+  ([`core/src/typecheck/scope.rs`](../../../core/src/typecheck/scope.rs)) infers
+  the catch-all body only for its internal errors and leaves both parameters
+  free — so misusing `name` (anything but `String`) goes uncaught until runtime.
+  Fix to do: pin it to `Fun(String, Fun(List α, B))`, exactly as `infer_try` pins
+  its failure handler to `Fun(error-record, result)`.
 
 Cite: [[design/builtins|builtins]], [[design/name-resolution|name-resolution]],
 [[invariants/fixed-arity|fixed-arity]],
