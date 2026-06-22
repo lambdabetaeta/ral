@@ -166,7 +166,7 @@ design pages via the `against` stamp.
   - [[map/core/capabilities|capabilities]] — the grant decision layer (free `capability::check_*(&Context, …)` folds) and the OS process sandbox. *@d7e97288*
   - [[map/core/io-process|io-process]] — byte sinks/sources, signals, process groups, Stream labels. *@7ce10d61*
   - [[map/core/builtins|builtins]] — Rust commands and bundled coreutils/ripgrep. *@8c2437c1*
-  - [[map/core/shell-state|shell-state]] — runtime `Value`, the `surface` sink, handler stack, and the `Shell` state; a scope entry is `Binding { value, scheme }`. *@2df6db85*
+  - [[map/core/shell-state|shell-state]] — runtime `Value`, the `surface` sink, handler stack, and the `Shell` state split by lifetime into `Mobile` / `TurnState` / `SessionState` / `LocalState`; a scope entry is `Binding { value, scheme }`. *@1baac6d*
   - [[map/core/transport|transport]] — serde mirror (`SerialValue`, `SerialBinding`) and wire envelope (`WireMobile`) carrying a shell — values and schemes — across a re-exec. *@2b999feb*
   - [[map/core/diagnostics|diagnostics]] — `Span`/`FileId` byte-range positions rendered directly via ariadne; ANSI gating; exit-code hints. *@2b999feb*
   - [[map/core/prelude|prelude]] — the embedded `prelude.ral` standard library. *@8c2437c1*

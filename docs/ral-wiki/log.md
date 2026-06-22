@@ -3007,3 +3007,20 @@ under `Denied` ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]],
 linking the structural surface out to [[map/repl/frontend|frontend]], and folded
 the SIGQUIT root-abort, the `set_stdout` printer wiring, and the `surface:` rc
 key into the page. Updated [[index|index]].
+
+## [2026-06-22] ingest | shell-state re-ingested at HEAD (19 commits stale)
+
+Re-stamped [[map/core/shell-state|shell-state]] to `@1baac6d` after the run-turn
+cutover and the terminal-lease / same-thread-body series drifted it 19 commits.
+The `Shell` is now split by lifetime into four fields — `Mobile`, `TurnState`,
+`SessionState`, `LocalState` — so the page records where each datum lives: the
+`surface` sink and `TerminalAccess` are turn-local, the `terminal_lease` and
+durable cancel root are session-durable, and audit / REPL scratch are local
+([[decisions/260617_turn-local-state|turn-local-state]],
+[[decisions/260619_terminal-lease|terminal-lease]]). Added that a same-thread
+thunk body runs in the caller's session by swapping only `Mobile`
+([[decisions/260620_same-thread-body-shares-the-session|same-thread-body-shares-the-session]]),
+that handler and alias arms are lambdas with a fixed `HandlerArity`
+([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]),
+and the host-embedding accessors (`host.rs`, `TerminalLoan`). Updated
+[[index|index]].
