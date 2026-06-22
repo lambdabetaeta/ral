@@ -2990,3 +2990,20 @@ the Enforcement reason-tag taxonomy to the actual tags — `[io-door:surface:<sl
 [[index|index]]: both [[map/exarch/io-surface|io-surface]] and
 [[map/exarch/cards|cards]], which existed but were missing from the `map/` → exarch
 catalog, now have entries stamped `@1baac6d`.
+
+## [2026-06-22] ingest | loop re-ingested at HEAD (21 commits stale)
+
+Re-stamped [[map/repl/loop|loop]] to `@1baac6d` after the run-turn cutover and
+the structural-frontend series drifted it 21 commits. The "One input" prose was
+the stale part: a REPL turn no longer calls `compile_and_typecheck` /
+`eval_top_level` itself — `execute_input` builds a `TurnRequest` and enters core
+through the framed `run_source_turn` door, matching one flat `TurnReport`, with
+prompt thunks, rc startup, and plugin hooks entering through `run_value_turn`
+under `Denied` ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]],
+[[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]],
+[[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]],
+[[decisions/260617_turn-local-state|turn-local-state]]). Added the selectable
+`Frontend` (minimal / readline / structural, `--surface` and rc `surface:`),
+linking the structural surface out to [[map/repl/frontend|frontend]], and folded
+the SIGQUIT root-abort, the `set_stdout` printer wiring, and the `surface:` rc
+key into the page. Updated [[index|index]].
