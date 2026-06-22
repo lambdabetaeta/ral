@@ -3063,3 +3063,19 @@ Corrected the module map (`command.rs` owns the External arm beside the
 is driven by `child_eval.rs`) and recorded lambda-only handlers/aliases
 ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]).
 Updated [[index|index]].
+
+## [2026-06-22] ingest | startup re-ingested at HEAD (11 commits stale)
+
+Re-stamped [[map/repl/startup|startup]] to `@1baac6d`. Batch execution no longer
+calls `eval_top_level`: `run_batch` now enters core through the framed
+`Shell::run_source_turn` door, scoring its two-armed `TurnReport`
+([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]],
+[[decisions/260618_run-turn-host-loop|run-turn-host-loop]],
+[[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]]), and the
+foreground handoff is gated on a held `TerminalLease` via the request's
+`RequestedTerminalAccess` ([[decisions/260619_terminal-lease|terminal-lease]]).
+The interactive frontend is chosen by `--surface` (not `RAL_SURFACE`), the argv
+terminator's value-flag set is derived from clap, the prelude/Shell-embedding API
+moved `host` → `driver` (machine probing split into `core::host`), and the
+pre-clap chain gained confined-child tails (`--ral-sandbox-exec`,
+`--ral-bundled-tool`) normalised to `u8`. Updated [[index|index]].

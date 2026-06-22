@@ -171,7 +171,7 @@ design pages via the `against` stamp.
   - [[map/core/diagnostics|diagnostics]] — `Span`/`FileId` byte-range positions rendered directly via ariadne; ANSI gating; exit-code hints. *@2b999feb*
   - [[map/core/prelude|prelude]] — the embedded `prelude.ral` standard library. *@8c2437c1*
 - [[map/repl|repl]] — the `ral` binary: argv dispatch, REPL loop, frontends, plugins, jobs. *@2df6db85*
-  - [[map/repl/startup|startup]] — `main.rs`: argv → `Mode`, batch execution under the three-armed verdict, the annotated-prelude bake, platform glue. *@2df6db85*
+  - [[map/repl/startup|startup]] — `main.rs`: pre-clap sandbox/helper dispatch, argv → `Mode` (`--surface` frontend, clap-derived argv terminator), batch execution through core's framed turn door, the annotated-prelude bake, platform glue. *@1baac6d*
   - [[map/repl/loop|loop]] — the `Session` state machine; one turn is a synchronous core entry through the framed turn doors, seeded from the live session; the selectable frontend, prompt/theme/rc. *@1baac6d*
   - [[map/repl/frontend|frontend]] — the `Frontend` trait, minimal + rustyline editors, completion. *@e8227dc*
   - [[map/repl/plugins|plugins]] — plugin runtime, `_ed-*` editor builtins, captured session commands. *@e8227dc*
