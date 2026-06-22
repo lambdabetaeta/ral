@@ -26,12 +26,18 @@ jobs:
       - uses: actions/checkout@v5
 
       # tree-sitter CLI (prebuilt binary) for the examples-page highlighting.
-      # `highlight` needs only the binary and the committed parser.c — no node.
+      # `highlight` needs only the binary and the generated parser.c.
+      # `generate --js-runtime native` uses the built-in QuickJS runtime, so
+      # no node/bun is required on the runner.
       - name: Install tree-sitter CLI
         run: |
           curl -fsSL https://github.com/tree-sitter/tree-sitter/releases/download/v0.26.9/tree-sitter-linux-x64.gz \
             | gunzip > /usr/local/bin/tree-sitter
           chmod +x /usr/local/bin/tree-sitter
+
+      - name: Generate tree-sitter parser
+        run: tree-sitter generate --js-runtime native
+        working-directory: editors/tree-sitter-ral
 
       - uses: astral-sh/setup-uv@v5
 

@@ -1,0 +1,237 @@
+/* index.css — landing-page-specific styles.
+   Shared tokens, menubar, window, footer live in site.css. */
+
+html { font-weight: 500; }
+
+body { padding-bottom: 2rem; }
+
+main {
+  position: relative;
+  z-index: 1;
+  max-width: 54rem;
+  margin: 0 auto;
+  padding: 2.5rem 1.2rem 2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.2rem;
+}
+
+/* ── hero window ── */
+.hero-body {
+  padding: 2.8rem 1.5rem 2.5rem;
+  text-align: center;
+}
+.sigil {
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: clamp(2rem, 5vw, 2.6rem);
+  line-height: 1;
+  color: var(--accent);
+  letter-spacing: 0.02em;
+  margin-bottom: 0.8rem;
+  user-select: none;
+}
+.wordmark {
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: clamp(4.5rem, 17vw, 7rem);
+  line-height: 0.9;
+  letter-spacing: -0.04em;
+  color: var(--ink);
+  margin-bottom: 1.2rem;
+}
+.thesis {
+  font-size: 1.3rem;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--ink);
+}
+.thesis em { font-style: normal; color: var(--accent); }
+.subthesis {
+  margin-top: 0.6rem;
+  font-size: 0.95rem;
+  color: var(--muted);
+}
+
+/* ── manifesto window ── */
+.manifesto {
+  padding: 2rem 1.8rem;
+  font-size: 1.0rem;
+  line-height: 1.72;
+  color: var(--ink);
+}
+.manifesto p + p { margin-top: 0.9rem; }
+.manifesto strong { color: var(--accent); font-weight: 600; }
+.manifesto code {
+  font-family: var(--mono);
+  font-size: 0.88em;
+  background: var(--desktop);
+  padding: 0.05em 0.3em;
+  border: 1px solid var(--face-mid);
+  box-shadow: inset 1px 1px 0 var(--face-lo), inset -1px -1px 0 var(--face-hi);
+}
+
+/* ── install window ── */
+.install-body {
+  display: flex;
+  align-items: stretch;
+  padding: 0.6rem;
+  gap: 0.5rem;
+}
+.install-prompt {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  padding: 0 0.5rem 0 0.3rem;
+  font-family: var(--mono);
+  color: var(--accent);
+  font-weight: 600;
+  user-select: none;
+}
+.install-cmd {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  padding: 0.5rem 0.6rem;
+  font-family: var(--mono);
+  font-size: 0.88rem;
+  color: var(--ink);
+  background: var(--desktop);
+  border: 1px solid var(--face-mid);
+  box-shadow: inset 1px 1px 0 var(--face-lo), inset -1px -1px 0 var(--face-hi);
+  white-space: nowrap;
+  overflow-x: auto;
+  cursor: pointer;
+  scrollbar-width: thin;
+  scrollbar-color: var(--face-lo) transparent;
+}
+.install-cmd::-webkit-scrollbar { height: 4px; }
+.install-cmd::-webkit-scrollbar-thumb { background: var(--face-lo); }
+
+.btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 1rem;
+  background: var(--face);
+  border: 1px solid var(--face-mid);
+  box-shadow:
+    inset  1px  1px 0 var(--face-hi),
+    inset -1px -1px 0 var(--face-lo);
+  font-family: var(--sans);
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--ink);
+  cursor: pointer;
+  user-select: none;
+  transition: box-shadow 0.08s;
+}
+.btn:active, .btn.pressed {
+  box-shadow:
+    inset  1px  1px 0 var(--face-lo),
+    inset -1px -1px 0 var(--face-hi);
+}
+.btn.done { color: var(--accent); }
+
+/* ── taste window: bash vs ral ── */
+.taste-body {
+  background: var(--desktop);
+  box-shadow: inset 1px 1px 0 var(--face-lo);
+}
+.compare {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  background: var(--face-mid);
+}
+.compare .panel {
+  background: var(--desktop);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.compare .panel-label {
+  padding: 0.4rem 1rem 0.3rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 1px solid var(--face-mid);
+  background: var(--face);
+}
+.compare pre {
+  margin: 0;
+  padding: 1.1rem 1.2rem;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  line-height: 1.7;
+  color: var(--ink);
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--face-lo) transparent;
+  flex: 1 1 auto;
+}
+.compare pre::-webkit-scrollbar { height: 4px; }
+.compare pre::-webkit-scrollbar-thumb { background: var(--face-lo); }
+.compare .c { color: var(--muted); }
+.compare .k { color: var(--kw); font-weight: 600; }
+.compare .s { color: var(--str); }
+
+/* ── downloads window ── */
+.dl-body { padding: 1rem 1.1rem; }
+.dl-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: 0.6rem;
+}
+.dl-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.6rem 0.8rem;
+  background: var(--face);
+  border: 1px solid var(--face-mid);
+  box-shadow:
+    inset  1px  1px 0 var(--face-hi),
+    inset -1px -1px 0 var(--face-lo);
+}
+.dl-os {
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 0.1rem;
+}
+.dl-btn {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--accent);
+  text-decoration: none;
+  line-height: 1.5;
+}
+.dl-btn:hover { color: var(--accent-2); text-decoration: underline; }
+.dl-btn.primary { color: var(--ink); font-weight: 500; }
+.dl-btn.primary:hover { color: var(--accent); }
+.dl-btn.allutils::before { content: '+ '; color: var(--muted); }
+
+.dl-src {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+  align-items: baseline;
+  margin-top: 0.9rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--face-mid);
+  font-size: 0.85rem;
+}
+.dl-src .label { color: var(--muted); font-weight: 500; }
+
+/* ── responsive ── */
+@media (max-width: 36rem) {
+  main { padding: 1.5rem 0.7rem 2rem; gap: 0.9rem; }
+  .install-body { flex-wrap: wrap; }
+  .install-cmd { flex: 1 1 100%; }
+  .compare { grid-template-columns: 1fr; }
+}

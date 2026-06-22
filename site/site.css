@@ -1,0 +1,244 @@
+/* site.css — shared workstation aesthetic for all ral pages.
+   Tokens, base elements, menubar, window chrome, footer, theme toggle.
+   Page-specific styles live in index.css (landing) and doc.css (docs). */
+
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --desktop:   #bfb6a0;
+  --face:      #d4cec0;
+  --face-hi:   #ebe5d6;
+  --face-lo:   #948a78;
+  --face-mid:  #b0a894;
+  --title:     #5a1e14;
+  --title-hi:  #7a2e20;
+  --title-lo:  #380f06;
+  --title-text:#ebe5d6;
+  --ink:       #241f16;
+  --ink-2:     #5a5040;
+  --muted:     #6a6050;
+  --accent:    #5a1e14;
+  --accent-2:  #7a2e20;
+  --str:       #2c5f56;
+  --kw:        #7a3b1a;
+  --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', 'JetBrains Mono',
+          Menlo, Consolas, 'DejaVu Sans Mono', monospace;
+  --sans: 'IBM Plex Sans', 'Helvetica Neue', Arial, sans-serif;
+}
+
+:root.dark {
+  --desktop:   #2a2520;
+  --face:      #3a342c;
+  --face-hi:   #4a4238;
+  --face-lo:   #1f1a14;
+  --face-mid:  #2e2820;
+  --title:     #3a1410;
+  --title-hi:  #2a1008;
+  --title-lo:  #5a1e14;
+  --title-text:#d4cec0;
+  --ink:       #d4cec0;
+  --ink-2:     #9a8e7c;
+  --muted:     #8a7e6c;
+  --accent:    #c47050;
+  --accent-2:  #d48260;
+  --str:       #6a9a8e;
+  --kw:        #c4888a;
+}
+
+html {
+  background: var(--desktop);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 17px;
+  -webkit-text-size-adjust: 100%;
+  text-rendering: optimizeLegibility;
+}
+
+body { min-height: 100vh; overflow-x: hidden; }
+
+::selection { background: var(--accent); color: var(--face-hi); }
+
+/* ── Venetian blinds — sunlight through the window shades ── */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    rgba(255, 250, 240, 0.07) 0px,
+    rgba(255, 250, 240, 0.07) 1px,
+    transparent 1px,
+    transparent 3px,
+    rgba(0, 0, 0, 0.05) 3px,
+    rgba(0, 0, 0, 0.05) 5px,
+    transparent 5px,
+    transparent 30px
+  );
+  pointer-events: none;
+  z-index: 0;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+  text-underline-offset: 0.18em;
+}
+a:hover { color: var(--accent-2); text-decoration: underline; }
+
+/* ── menubar ── */
+.menubar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: stretch;
+  padding: 0.15rem 0.3rem;
+  background: color-mix(in srgb, var(--face) 92%, transparent);
+  backdrop-filter: blur(6px);
+  border-bottom: 1px solid var(--face-mid);
+  gap: 0.05rem;
+  line-height: 1.2;
+}
+.menubar .spacer { flex: 1 1 auto; }
+.menubar .toc {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+}
+.menubar .toc a {
+  color: var(--muted);
+  text-decoration: none;
+  letter-spacing: 0.06em;
+}
+.menubar .toc a:hover { color: var(--accent); }
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  padding: 0.35rem 0.9rem;
+  color: var(--ink);
+  text-decoration: none;
+  font-size: 0.9rem;
+  font-weight: 500;
+  border: 1px solid transparent;
+  transition: border-color 0.08s, box-shadow 0.08s;
+}
+.menu-item:hover {
+  color: var(--ink);
+  text-decoration: none;
+  border-color: var(--face-mid);
+  box-shadow:
+    inset  1px  1px 0 var(--face-hi),
+    inset -1px -1px 0 var(--face-lo);
+}
+.menu-item:active {
+  box-shadow:
+    inset  1px  1px 0 var(--face-lo),
+    inset -1px -1px 0 var(--face-hi);
+}
+
+/* ── theme toggle ── */
+.theme-toggle {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.35rem 0.7rem;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+  transition: border-color 0.08s, box-shadow 0.08s;
+}
+.theme-toggle:hover {
+  border-color: var(--face-mid);
+  box-shadow:
+    inset  1px  1px 0 var(--face-hi),
+    inset -1px -1px 0 var(--face-lo);
+}
+.theme-toggle:active {
+  box-shadow:
+    inset  1px  1px 0 var(--face-lo),
+    inset -1px -1px 0 var(--face-hi);
+}
+.theme-toggle .glyph {
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+/* ── window ── */
+.window {
+  background: var(--face);
+  border: 1px solid var(--face-mid);
+  box-shadow:
+    inset  1px  1px 0 var(--face-hi),
+    inset -1px -1px 0 var(--face-lo);
+}
+.titlebar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.5rem;
+  background: var(--title);
+  color: var(--title-text);
+  box-shadow:
+    inset  1px  1px 0 var(--title-hi),
+    inset -1px -1px 0 var(--title-lo);
+  font-size: 0.82rem;
+  font-weight: 500;
+  user-select: none;
+  cursor: default;
+}
+.menu-box {
+  flex: 0 0 auto;
+  width: 1.3rem;
+  height: 1.3rem;
+  background: var(--face);
+  border: 1px solid var(--face-mid);
+  box-shadow:
+    inset  1px  1px 0 var(--face-hi),
+    inset -1px -1px 0 var(--face-lo);
+}
+.menu-box.app-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono);
+  font-size: 0.5rem;
+  font-weight: 600;
+  color: var(--accent);
+  line-height: 1;
+}
+.title-text { flex: 0 1 auto; letter-spacing: 0.02em; }
+.titlebar .spacer { flex: 1 1 auto; }
+
+/* ── footer ── */
+.footer {
+  position: relative;
+  z-index: 1;
+  max-width: 54rem;
+  margin: 0 auto;
+  padding: 1.2rem 0.2rem 2rem;
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.footer a { color: var(--ink-2); font-weight: 500; }
+.footer a:hover { color: var(--accent); }
+
+/* ── responsive ── */
+@media (max-width: 36rem) {
+  .menu-item { padding: 0.35rem 0.6rem; font-size: 0.85rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}

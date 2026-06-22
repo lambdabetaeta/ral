@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ral — a typed, capability-secure shell</title>
+  <meta name="description" content="ral is a Unix shell built on one idea: running an external command is an algebraic effect. Typed commands, scoped authority, and a sandbox, all from a single principle.">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="site.css">
+  <link rel="stylesheet" href="index.css">
+  <script>
+    (function () {
+      var s = localStorage.getItem('ral-theme');
+      if (!s) s = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      if (s === 'dark') document.documentElement.classList.add('dark');
+    })();
+  </script>
+</head>
+<body>
+  <nav class="menubar" aria-label="Documentation">
+    <a class="menu-item" href="index.html">ral</a>
+    <a class="menu-item" href="tutorial.html">Tutorial</a>
+    <a class="menu-item" href="spec.html">Spec</a>
+    <a class="menu-item" href="rationale.html">Rationale</a>
+    <a class="menu-item" href="examples.html">Examples</a>
+    <span class="spacer"></span>
+    <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch theme">
+      <span class="glyph" id="theme-glyph">☀</span><span id="theme-label">light</span>
+    </button>
+  </nav>
+
+  <main>
+
+    <div class="window" id="hero">
+      <div class="titlebar">
+        <span class="menu-box app-icon" aria-hidden="true">!{}</span>
+        <span class="title-text">ral</span>
+      </div>
+      <div class="window-body">
+        <div class="hero-body">
+          <p class="sigil" aria-hidden="true">!{}</p>
+          <h1 class="wordmark">ral</h1>
+          <p class="thesis">Running a command is an <em>algebraic effect</em>.</p>
+          <p class="subthesis">A Unix shell where the operation and its interpretation are separate things.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="window" id="manifesto">
+      <div class="window-body">
+        <div class="manifesto">
+          <p>The command is an <strong>operation</strong>. The operating system is its
+          default <strong>interpretation</strong>. Separate them, and typed commands,
+          scoped authority, and a sandbox all fall out of a single principle —
+          without giving up first-class commands and pipes.</p>
+          <p>ral refuses the shell collapse between data and source text. Values
+          are inert; commands are effectful. Two sigils, no ambiguity:
+          <code>$</code> retrieves data, <code>!</code> runs stored commands.</p>
+          <p>Not POSIX. No word splitting, no glob expansion on unquoted
+          variables, no <code>$IFS</code>, no context-dependent quoting.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="window" id="install-win">
+      <div class="titlebar">
+        <span class="menu-box" aria-hidden="true"></span>
+        <span class="title-text">shell</span>
+      </div>
+      <div class="window-body">
+        <div class="install-body">
+          <span class="install-prompt" aria-hidden="true">$</span>
+          <code class="install-cmd" id="install-cmd" role="button" tabindex="0"
+                aria-label="Copy install command to clipboard">curl -fsSL https://lambdabetaeta.github.io/ral/scripts/install.sh | sh</code>
+          <button class="btn" id="install-copy" type="button" aria-live="polite">copy</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="window" id="taste">
+      <div class="window-body">
+        <div class="taste-body">
+          <div class="compare">
+            <div class="panel">
+              <div class="panel-label">bash</div>
+<pre><span class="c"># no authority boundary —</span>
+<span class="c"># ssh can run anything, anywhere</span>
+cfg=$(curl -s "$api")
+hosts=$(echo "$cfg" | jq -r <span class="s">'.hosts[]'</span>)
+<span class="k">for</span> h <span class="k">in</span> $hosts; <span class="k">do</span>      <span class="c"># word-split on IFS</span>
+    ssh "$h" <span class="s">'systemctl restart app'</span>
+<span class="k">done</span></pre>
+            </div>
+            <div class="panel">
+              <div class="panel-label">ral</div>
+<pre><span class="k">let</span> cfg = curl -s $api | from-json
+<span class="k">for</span> $cfg[hosts] { |h|  <span class="c"># typed; no split</span>
+    <span class="k">grant</span> [exec: [ssh: []]] { <span class="c"># only ssh</span>
+        ssh $h <span class="s">'systemctl restart app'</span>
+    }
+}</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="window" id="downloads">
+      <div class="titlebar">
+        <span class="menu-box" aria-hidden="true"></span>
+        <span class="title-text">downloads</span>
+      </div>
+      <div class="window-body">
+        <div class="dl-body">
+          <div class="dl-grid">
+{{DOWNLOAD_GROUPS}}
+          </div>
+          <div class="dl-src">
+            <span class="label">source:</span>
+            <a class="dl-btn" href="https://github.com/lambdabetaeta/ral/archive/refs/heads/main.tar.gz" download>.tar.gz</a>
+            <a class="dl-btn" href="https://github.com/lambdabetaeta/ral/archive/refs/heads/main.zip" download>.zip</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <footer class="footer">
+    © <a href="https://www.lambdabetaeta.eu">G. A. Kavvos</a>
+  </footer>
+
+  <script>
+    (function () {
+      /* ── install copy ── */
+      var cmd  = document.getElementById('install-cmd');
+      var copy = document.getElementById('install-copy');
+      var text = cmd.textContent.trim();
+      function flash() {
+        copy.textContent = 'copied';
+        copy.classList.add('done', 'pressed');
+        setTimeout(function () {
+          copy.textContent = 'copy';
+          copy.classList.remove('done', 'pressed');
+        }, 1800);
+      }
+      function doCopy() {
+        copy.classList.add('pressed');
+        if (navigator.clipboard) {
+          navigator.clipboard.writeText(text).then(flash, function () {
+            copy.classList.remove('pressed');
+          });
+        } else { flash(); }
+      }
+      copy.addEventListener('click', doCopy);
+      cmd.addEventListener('click', doCopy);
+      cmd.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); doCopy(); }
+      });
+
+      /* ── theme toggle ── */
+      var root  = document.documentElement;
+      var btn   = document.getElementById('theme-toggle');
+      var glyph = document.getElementById('theme-glyph');
+      var label = document.getElementById('theme-label');
+      function syncToggle() {
+        var dark = root.classList.contains('dark');
+        glyph.textContent = dark ? '☾' : '☀';
+        label.textContent = dark ? 'dark' : 'light';
+      }
+      syncToggle();
+      btn.addEventListener('click', function () {
+        root.classList.toggle('dark');
+        localStorage.setItem('ral-theme', root.classList.contains('dark') ? 'dark' : 'light');
+        syncToggle();
+      });
+    })();
+  </script>
+</body>
+</html>

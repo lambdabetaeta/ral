@@ -1,175 +1,102 @@
-/* doc.css — clean reading theme for the long-form pages (spec, rationale,
-   examples).  The landing page keeps its own CRT styling; these pages trade
-   the scanlines and glow for a calm, high-contrast typeset look so the prose
-   is actually readable.  Code blocks stay monospace and keep the warm palette. */
-
-*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
-
-:root {
-  --bg:       #16120e;   /* warm near-black, no purple cast */
-  --panel:    #1e1813;   /* code blocks and surfaces */
-  --border:   #382c20;   /* hairlines */
-  --text:     #e8ded0;   /* body prose */
-  --muted:    #b3a48d;   /* intro, summaries, blockquote */
-  --heading:  #f6ead7;   /* headings */
-  --accent:   #ff8a2a;   /* links, rules */
-  --accent-2: #ffb060;   /* inline code, hover */
-
-  --serif: 'Charter', 'Iowan Old Style', 'Palatino Linotype', Palatino,
-           Georgia, 'Times New Roman', serif;
-  --mono:  ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas,
-           'DejaVu Sans Mono', monospace;
-}
+/* doc.css — long-form reading page styles.
+   Shared tokens, menubar, window, footer live in site.css. */
 
 html {
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--serif);
-  font-size: 20px;
-  line-height: 1.7;
+  font-weight: 400;
+  line-height: 1.72;
   scroll-behavior: smooth;
-  scroll-padding-top: 4rem;   /* anchors clear the sticky nav */
-  -webkit-text-size-adjust: 100%;
+  scroll-padding-top: 3rem;
 }
 
-body { min-height: 100vh; overflow-y: scroll; }
-
-::selection { background: var(--accent); color: var(--bg); }
-
-/* ── nav ── */
-
-nav {
-  position: sticky;
-  top: 0;
-  z-index: 20;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 1.2rem;
-  background: rgba(22, 18, 14, 0.92);
-  backdrop-filter: blur(6px);
-  border-bottom: 1px solid var(--border);
-  padding: 0.7rem 2rem;
-}
-
-nav a {
-  color: var(--muted);
-  text-decoration: none;
-  font-family: var(--mono);
-  font-size: 0.75rem;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  transition: color 0.15s;
-}
-
-nav a:hover { color: var(--accent-2); }
-
-nav .toc {
-  display: flex;
-  gap: 1rem;
-  flex-wrap: wrap;
-  font-size: 0.66rem;
-  letter-spacing: 0.1em;
+main {
+  position: relative;
+  z-index: 1;
+  max-width: 54rem;
+  margin: 0 auto;
+  padding: 1.2rem 1.2rem 2rem;
 }
 
 /* ── article ── */
-
 article {
-  max-width: 74ch;
-  margin: 0 auto;
-  padding: 3.5rem 2rem 7rem;
+  padding: 2rem 1.8rem;
+  font-size: 1.0rem;
+  line-height: 1.72;
+  color: var(--ink);
 }
-
 article h1 {
-  font-family: var(--serif);
-  font-size: clamp(2rem, 5vw, 2.7rem);
+  font-family: var(--sans);
+  font-size: clamp(1.8rem, 5vw, 2.4rem);
   font-weight: 600;
   line-height: 1.2;
-  color: var(--heading);
-  margin-bottom: 1.75rem;
-  padding-bottom: 0.75rem;
+  color: var(--ink);
+  margin-bottom: 1.5rem;
+  padding-bottom: 0.6rem;
   border-bottom: 2px solid var(--accent);
 }
-
 article h2 {
-  font-family: var(--serif);
-  font-size: 1.45rem;
+  font-family: var(--sans);
+  font-size: 1.35rem;
   font-weight: 600;
-  color: var(--heading);
-  margin: 3rem 0 0.85rem;
+  color: var(--ink);
+  margin: 2.5rem 0 0.75rem;
 }
-
 article h3 {
-  font-family: var(--serif);
-  font-size: 1.18rem;
+  font-family: var(--sans);
+  font-size: 1.12rem;
   font-weight: 600;
-  color: var(--accent-2);
-  margin: 2.1rem 0 0.6rem;
+  color: var(--accent);
+  margin: 1.8rem 0 0.5rem;
 }
-
 article h4 {
-  font-family: var(--serif);
-  font-size: 1.02rem;
+  font-family: var(--sans);
+  font-size: 0.98rem;
   font-weight: 600;
   color: var(--muted);
   letter-spacing: 0.02em;
-  margin: 1.6rem 0 0.45rem;
+  margin: 1.4rem 0 0.4rem;
 }
-
 article p { margin-bottom: 1.1rem; }
-
 article ul, article ol { margin: 0.6rem 0 1.1rem 1.6rem; }
 article li { margin-bottom: 0.4rem; }
 article li > ul, article li > ol { margin-bottom: 0.2rem; }
-
-article a {
-  color: var(--accent);
-  text-decoration: underline;
-  text-decoration-color: rgba(255, 138, 42, 0.45);
-  text-underline-offset: 3px;
-  transition: text-decoration-color 0.15s;
-}
-
-article a:hover { text-decoration-color: var(--accent); }
-
-article strong { color: var(--heading); font-weight: 700; }
+article strong { color: var(--ink); font-weight: 600; }
 article em { font-style: italic; }
 
 /* ── code ── */
-
 article code {
   font-family: var(--mono);
   font-size: 0.86em;
-  color: var(--accent-2);
-  background: var(--panel);
-  border: 1px solid var(--border);
-  padding: 0.1em 0.36em;
-  border-radius: 4px;
+  color: var(--accent);
+  background: var(--desktop);
+  padding: 0.05em 0.3em;
+  border: 1px solid var(--face-mid);
+  box-shadow: inset 1px 1px 0 var(--face-lo), inset -1px -1px 0 var(--face-hi);
 }
-
 article pre {
   font-family: var(--mono);
-  font-size: 0.84rem;
-  line-height: 1.6;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 1.05rem 1.25rem;
+  font-size: 0.85rem;
+  line-height: 1.7;
+  background: var(--desktop);
+  border: 1px solid var(--face-mid);
+  box-shadow: inset 1px 1px 0 var(--face-lo);
+  padding: 1rem 1.2rem;
   margin: 1rem 0 1.4rem;
   overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--face-lo) transparent;
 }
-
+article pre::-webkit-scrollbar { height: 4px; }
+article pre::-webkit-scrollbar-thumb { background: var(--face-lo); }
 article pre code {
   font-size: inherit;
-  color: var(--text);
+  color: var(--ink);
   background: none;
   border: none;
   padding: 0;
-  border-radius: 0;
+  box-shadow: none;
 }
 
 /* ── blockquote, rule, table ── */
-
 article blockquote {
   border-left: 3px solid var(--accent);
   padding: 0.1rem 0 0.1rem 1.1rem;
@@ -177,60 +104,49 @@ article blockquote {
   color: var(--muted);
   font-style: italic;
 }
-
 article hr {
   border: none;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--face-mid);
   margin: 2.5rem 0;
 }
-
 article table {
   border-collapse: collapse;
   width: 100%;
   margin: 1.2rem 0;
   font-size: 0.92rem;
 }
-
 article th, article td {
-  border: 1px solid var(--border);
+  border: 1px solid var(--face-mid);
   padding: 0.5rem 0.85rem;
   text-align: left;
 }
-
-article th { color: var(--heading); font-family: var(--serif); font-weight: 600; }
+article th { color: var(--ink); font-weight: 600; }
 
 /* ── examples page ── */
-
 article > p.intro {
   color: var(--muted);
   font-size: 1.02rem;
   margin-bottom: 3rem;
 }
-
-section.example { margin-bottom: 3.5rem; }
-
+section.example { margin-bottom: 3rem; }
 section.example h2 {
-  font-size: 1.3rem;
+  font-size: 1.2rem;
   margin: 0 0 0.5rem;
   padding-bottom: 0.4rem;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--face-mid);
 }
-
 section.example h2 .name {
   font-family: var(--mono);
-  font-size: 0.95rem;
-  color: var(--accent-2);
+  font-size: 0.9rem;
+  color: var(--accent);
 }
-
 section.example .summary {
   color: var(--muted);
-  font-size: 0.96rem;
-  margin: 0.7rem 0 1rem;
+  font-size: 0.95rem;
+  margin: 0.6rem 0 0.9rem;
   white-space: pre-wrap;
 }
-
 section.example pre.source { margin: 0; }
-
 .raw-link {
   display: inline-block;
   font-family: var(--mono);
@@ -242,16 +158,45 @@ section.example pre.source { margin: 0; }
   margin-left: 0.8rem;
   vertical-align: middle;
 }
+.raw-link:hover { color: var(--accent); }
 
-.raw-link:hover { color: var(--accent-2); }
+/* ── tree-sitter syntax highlighting (CSS classes, theme-aware) ── */
+pre.source .comment              { color: var(--muted); font-style: italic; }
+pre.source .keyword              { color: var(--kw); font-weight: 600; }
+pre.source .keyword.return       { color: var(--kw); }
+pre.source .keyword.control      { color: var(--kw); }
+pre.source .keyword.control.conditional { color: var(--kw); }
+pre.source .keyword.import       { color: var(--kw); }
+pre.source .keyword.operator     { color: var(--ink-2); }
+pre.source .string               { color: var(--str); }
+pre.source .string.escape        { color: var(--kw); }
+pre.source .number               { color: #9a5a1a; }
+pre.source .number.float         { color: #9a5a1a; }
+pre.source .boolean              { color: #9a5a1a; }
+pre.source .constant.builtin     { color: #9a5a1a; }
+pre.source .variable             { color: var(--ink); }
+pre.source .variable.builtin     { color: var(--accent); }
+pre.source .variable.parameter   { color: var(--ink); }
+pre.source .variable.declaration { color: var(--ink-2); }
+pre.source .function             { color: var(--accent); }
+pre.source .function.builtin     { color: var(--accent); }
+pre.source .function.call        { color: var(--accent); }
+pre.source .constructor          { color: var(--accent-2); }
+pre.source .operator             { color: var(--ink-2); }
+pre.source .property             { color: var(--str); }
+pre.source .embedded             { color: var(--accent-2); }
+pre.source .punctuation.bracket  { color: var(--muted); }
+pre.source .punctuation.delimiter { color: var(--muted); }
+pre.source .function-builtin     { color: var(--accent); }
 
-/* Fallback regex highlighter classes (used only when tree-sitter is missing,
-   e.g. local dev).  CI highlights with the real grammar, which emits inline
-   colours from editors/tree-sitter-ral/.tsconfig/config.json. */
-pre.source .comment          { color: var(--muted); font-style: italic; }
-pre.source .string           { color: #e0bb70; }
-pre.source .keyword          { color: #ffb060; }
-pre.source .function-builtin { color: #ff7a15; }
-pre.source .variable         { color: #ffd17a; }
-pre.source .number           { color: #ffa050; }
-pre.source .operator         { color: #ff9a3c; }
+:root.dark pre.source .number           { color: #d48260; }
+:root.dark pre.source .number.float     { color: #d48260; }
+:root.dark pre.source .boolean          { color: #d48260; }
+:root.dark pre.source .constant.builtin { color: #d4a070; }
+
+/* ── responsive ── */
+@media (max-width: 36rem) {
+  main { padding: 0.8rem 0.7rem 2rem; }
+  article { padding: 1.5rem 1.2rem; }
+  .menubar .toc { font-size: 0.62rem; }
+}

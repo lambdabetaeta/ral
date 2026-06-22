@@ -62,9 +62,15 @@ CURATED_ORDER = [
 
 # ── shared page shell ──────────────────────────────────────────────────────
 
-def doc_page(title: str, body: str, toc_html: str | None = None) -> str:
-    """The reading-page shell: nav + article, styled by doc.css."""
-    toc = f'\n    <span class="toc">{toc_html}</span>' if toc_html else ""
+def doc_page(title: str, body: str, titlebar: str | None = None,
+             toc_html: str | None = None) -> str:
+    """The reading-page shell: menubar + window + article, styled by doc.css.
+
+    ``titlebar`` is the filename shown in the window's title bar (e.g.
+    "spec.md"); ``title`` is the <title> tag and menu link label.
+    """
+    tb = titlebar or title
+    toc = f'\n      <span class="toc">{toc_html}</span>' if toc_html else ""
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -72,13 +78,64 @@ def doc_page(title: str, body: str, toc_html: str | None = None) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ral — {title}</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="site.css">
   <link rel="stylesheet" href="doc.css">
+  <script>
+    (function () {{
+      var s = localStorage.getItem('ral-theme');
+      if (!s) s = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      if (s === 'dark') document.documentElement.classList.add('dark');
+    }})();
+  </script>
 </head>
 <body>
-  <nav><a href="./">&#8592; ral</a>{toc}</nav>
-  <article>
+  <nav class="menubar" aria-label="Documentation">
+    <a class="menu-item" href="index.html">ral</a>
+    <a class="menu-item" href="tutorial.html">Tutorial</a>
+    <a class="menu-item" href="spec.html">Spec</a>
+    <a class="menu-item" href="rationale.html">Rationale</a>
+    <a class="menu-item" href="examples.html">Examples</a>{toc}
+    <span class="spacer"></span>
+    <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch theme">
+      <span class="glyph" id="theme-glyph">&#9788;</span><span id="theme-label">light</span>
+    </button>
+  </nav>
+  <main>
+    <div class="window">
+      <div class="titlebar">
+        <span class="menu-box" aria-hidden="true"></span>
+        <span class="title-text">{tb}</span>
+      </div>
+      <article>
 {body}
-  </article>
+      </article>
+    </div>
+  </main>
+  <footer class="footer">
+    &copy; <a href="https://www.lambdabetaeta.eu">G. A. Kavvos</a>
+  </footer>
+  <script>
+    (function () {{
+      var root  = document.documentElement;
+      var btn   = document.getElementById('theme-toggle');
+      var glyph = document.getElementById('theme-glyph');
+      var label = document.getElementById('theme-label');
+      function syncToggle() {{
+        var dark = root.classList.contains('dark');
+        glyph.textContent = dark ? '\u263E' : '\u2600';
+        label.textContent = dark ? 'dark' : 'light';
+      }}
+      syncToggle();
+      btn.addEventListener('click', function () {{
+        root.classList.toggle('dark');
+        localStorage.setItem('ral-theme', root.classList.contains('dark') ? 'dark' : 'light');
+        syncToggle();
+      }});
+    }})();
+  </script>
 </body>
 </html>
 """
@@ -109,7 +166,7 @@ def render_download_groups(downloads: dict) -> str:
 
 
 def render_index() -> None:
-    template = (SITE / "index.template.html").read_text(encoding="utf-8")
+    template = (ROOT / "scripts" / "index.template.html").read_text(encoding="utf-8")
     downloads = json.loads((SITE / "downloads.json").read_text(encoding="utf-8"))
     placeholder = "{{DOWNLOAD_GROUPS}}"
     if placeholder not in template:
@@ -151,7 +208,8 @@ def render_docs(use_ts: bool) -> None:
         text = text.replace("RATIONALE.md", "rationale.html")
         body = markdown.markdown(text, extensions=["extra", "sane_lists"])
         body = highlight_doc_blocks(body, use_ts)
-        (SITE / dst).write_text(doc_page(title, body), encoding="utf-8")
+        (SITE / dst).write_text(doc_page(title, body, titlebar=src.name),
+                                encoding="utf-8")
 
 
 # ── examples: splitting ────────────────────────────────────────────────────
@@ -198,7 +256,25 @@ def tree_sitter_available() -> bool:
     install fails fast and we fall back to the regex tokeniser cleanly.
     """
     if not (GRAMMAR_DIR / "src" / "parser.c").is_file():
-        return False
+        # The parser is a build artefact (gitignored).  Generate it with the
+        # built-in QuickJS runtime so no node/bun is required on the host.
+        try:
+            subprocess.run(
+                ["tree-sitter", "generate", "--js-runtime", "native"],
+                cwd=GRAMMAR_DIR,
+                capture_output=True,
+                check=True,
+                timeout=30,
+            )
+        except (FileNotFoundError, subprocess.CalledProcessError,
+                subprocess.TimeoutExpired, OSError) as exc:
+            print(f"render-site: tree-sitter generate failed ({exc}); "
+                  f"falling back to the regex highlighter.  "
+                  f"Install tree-sitter-cli to use the real grammar.",
+                  file=sys.stderr)
+            return False
+        if not (GRAMMAR_DIR / "src" / "parser.c").is_file():
+            return False
     try:
         subprocess.run(
             ["tree-sitter", "--version"],
@@ -216,7 +292,7 @@ _LINE_CELL_RE = re.compile(r"<td class=line>(.*?)</td>", re.DOTALL)
 
 
 def tree_sitter_highlight(body: str) -> str | None:
-    """Highlight `body` through the ral grammar and return the inline-styled
+    """Highlight `body` through the ral grammar and return class-tagged
     HTML, or None on any failure so the caller can fall back to the regex
     tokeniser.
 
@@ -233,7 +309,7 @@ def tree_sitter_highlight(body: str) -> str | None:
         tmp_path = tmp.name
     try:
         result = subprocess.run(
-            ["tree-sitter", "highlight", "--html", tmp_path],
+            ["tree-sitter", "highlight", "--html", "--css-classes", tmp_path],
             cwd=GRAMMAR_DIR,
             env=env,
             capture_output=True,
@@ -415,7 +491,7 @@ def render_examples(use_ts: bool) -> None:
         f'    <p class="intro">\n{INTRO}\n    </p>\n'
         + "\n".join(sections)
     )
-    page = doc_page("examples", body, toc_html="".join(toc_links))
+    page = doc_page("examples", body, titlebar="examples.ral")
     (SITE / "examples.html").write_text(page, encoding="utf-8")
 
 
