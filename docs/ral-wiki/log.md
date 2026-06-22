@@ -3024,3 +3024,21 @@ that handler and alias arms are lambdas with a fixed `HandlerArity`
 ([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]),
 and the host-embedding accessors (`host.rs`, `TerminalLoan`). Updated
 [[index|index]].
+
+## [2026-06-22] ingest | exarch hub re-ingested at HEAD (15 commits stale)
+
+Re-stamped [[map/exarch|exarch]] to `@1baac6d`, refocusing the hub on the
+binary's front door: pre-`main` dispatch normalised to `Option<u8>` and shared
+by `main` and every test ctor, the `login`/`logout`/`accounts` subcommands now
+that several ChatGPT accounts are each a selectable provider, bootstrap's
+machine probing through the renamed `ral_core::driver::boot_shell` (with
+`ral_core::host` owning the probes), and the scratch / run-log dirs. Rewrote the
+system-prompt section around the assembly order (persona, `Grant`, `Host`,
+`Ral`, `Script style`, `Headless`), reframed around definitions rather than
+bindings, the surface render-document model
+([[decisions/260619_surface-carries-documents|surface-carries-documents]]),
+lambda-only handlers
+([[decisions/260619_handlers-and-aliases-are-lambdas|handlers-and-aliases-are-lambdas]]),
+and the `--allow-schedule` scheduled-wakeups affordance
+([[decisions/260617_scheduled-wakeups|scheduled-wakeups]]). Updated
+[[index|index]].

@@ -176,7 +176,7 @@ design pages via the `against` stamp.
   - [[map/repl/frontend|frontend]] — the `Frontend` trait, minimal + rustyline editors, completion. *@e8227dc*
   - [[map/repl/plugins|plugins]] — plugin runtime, `_ed-*` editor builtins, captured session commands. *@e8227dc*
   - [[map/repl/jobs|jobs]] — process-group job control, fg/bg/disown, `Escape::Stopped`. *@ce51d4e*
-- [[map/exarch|exarch]] — the exarch agent: prompt assembly, provider loop, one `shell` tool, and each turn sandboxed by a ral grant profile. *@e28f2054*
+- [[map/exarch|exarch]] — the exarch agent's front door: startup (CLI dispatch, bootstrap, account selection, sandbox early_init) and system-prompt assembly; the agent is a provider loop over one `shell` tool, each turn a grant-framed ral turn. *@1baac6d*
   - [[map/exarch/session|session]] — the turn loop: round-trips, tool dispatch with prompt-queue steering, auto-compaction, nudge-retry, the `MAX_STEPS` ceiling, sub-agent fork. *@3b8a4062*
   - [[map/exarch/provider|provider]] — LLM transport over genai: streaming, retry driver, prompt caching, usage/pricing. *@e8227dc*
   - [[map/exarch/shell-eval|shell-eval]] — one tool call as a ral top-level turn under a pushed grant frame, seeded from the live session; buffered output digested for the transcript, surface host sink. *@d7e97288*
