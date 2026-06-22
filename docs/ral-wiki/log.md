@@ -2963,3 +2963,15 @@ Implemented [[decisions/260621_session-lifetime-event-bus|session-lifetime-event
 ## [2026-06-22] ingest | transcript-as-graphic rework re-ingested into frontend
 
 Re-stamped [[map/exarch/frontend|frontend]] to `@1baac6d` after the [[decisions/260618_tui-transcript-as-graphic|tui-transcript-as-graphic]] rework's remaining phases landed (now 0–7). The TUI section now states the two-voice model — human band vs agent field encoded on orthogonal foreground/background planes, machine text washed into a recessed panel and the human prompt fenced as a raised band — the per-tab agent hue (now read from `Viewport::agent`, not per-block), the in-flight reply rendered as a growing magnitude seat, surfaced general cards framed as bounded objects, the synchronized-update bracket and head-anchored tail that steady the frame under streaming tool calls, and the scroll offset mapped onto ratatui's scrollbar range; the `user.log` paragraph notes the `/export` copy now living beside the tee writer as one I/O door. Updated [[index|index]].
+
+## [2026-06-22] ingest | cards re-ingested at HEAD (32 commits stale)
+
+Re-stamped [[map/exarch/cards|cards]] to `@1baac6d` after the
+[[decisions/260619_surface-carries-documents|surface-carries-documents]] model
+drifted 32 commits. The kit-side prose was the stale part: `edit`, `grep-files`,
+and `window-hash` are now Rust host builtins ([[map/exarch/io-surface|io-surface]]),
+so `agent.ral` carries only `view`/`view-around`, and the `diff` mark decodes the
+`hunks`-list shape `edit` emits (the flat single-hunk form is gone). Also folded
+in derived disclosure / aggregation as built (`CardOrigin`, `render_card_framed`,
+`absorb_patch`) and de-archeologised the decode prose. `cards` is not listed in
+[[index|index]], so index.md was left untouched.
