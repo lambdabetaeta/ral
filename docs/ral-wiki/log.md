@@ -3115,3 +3115,19 @@ linking the mark set out to [[map/exarch/cards|cards]] and the io-door shapes to
 paragraph: that diagnostic moved into `core::sandbox::diag`, now owned by
 [[map/core/capabilities|capabilities]]; the page links out to it. Updated
 [[index|index]].
+
+## [2026-06-22] ingest | provider re-ingested at HEAD (8 commits stale)
+
+Re-stamped [[map/exarch/provider|provider]] to `@1baac6d`. Rewrote the provider
+model around the three-armed `ProviderId` — auto-discovered famous providers, an
+unusual-provider `config.ral` with a custom endpoint + wire protocol
+([[decisions/260613_provider-config-ral-script|provider-config-ral-script]]), and
+each signed-in ChatGPT account as its own selectable OAuth identity — and named
+the two unmetered axes (opencode Go's flat rate vs an OAuth login). Recorded the
+per-event idle timeout that now bounds both the streaming loop and the
+non-streaming summary, the request-local cancellation seam of
+[[decisions/260617_async-agent-tool|async-agent-tool]] (registry/inbox linked out
+to [[map/exarch/tools|tools]] / [[map/exarch/session|session]]), the unified
+`humanize_tokens` formatter, and that error classification is now structural off
+genai's typed variants, carrying the parsed JSON body to the boundary for the
+[[map/exarch/cards|cards]] renderer. Updated [[index|index]].
