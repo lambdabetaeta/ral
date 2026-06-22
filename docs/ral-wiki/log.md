@@ -3175,3 +3175,17 @@ channel closing ([[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]],
 `BakedPrelude`, the single prelude-bake site) split
 ([[decisions/260610_host-embedding-api|host-embedding-api]],
 [[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]). Updated [[index|index]].
+
+## [2026-06-22] ingest | repl hub re-ingested at HEAD (8 commits stale)
+
+Re-stamped [[map/repl|repl]] to `@1baac6d`. Reframed the `ral` binary's hub
+around its thesis: argv dispatch into a turn through core's framed door,
+driving one of three selectable frontends — minimal, readline (default), and
+structural, a default-on ratatui projection of live program state selected by
+`--surface` ([[decisions/260522_repl-architecture|repl-architecture]]). Recorded
+that every evaluation, batch or interactive, now enters core through the same
+framed turn door as one synchronous policy-carrying call
+([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]); the structural
+surface's internals (typed spine, reactive worksheet, handles matrix, vi-mode,
+shared fuzzy completion + Tab menu) stay pointed at [[map/repl/frontend|frontend]].
+Updated [[index|index]].

@@ -170,7 +170,7 @@ design pages via the `against` stamp.
   - [[map/core/transport|transport]] — serde mirror (`SerialValue`, `SerialBinding`) and wire envelope (`WireMobile`) carrying a shell — values and schemes — across a re-exec. *@2b999feb*
   - [[map/core/diagnostics|diagnostics]] — `Span`/`FileId` byte-range positions rendered directly via ariadne; ANSI gating; exit-code hints. *@2b999feb*
   - [[map/core/prelude|prelude]] — the embedded `prelude.ral` standard library. *@8c2437c1*
-- [[map/repl|repl]] — the `ral` binary: argv dispatch, REPL loop, frontends, plugins, jobs. *@2df6db85*
+- [[map/repl|repl]] — the `ral` binary: argv dispatch into a turn through core's framed door, driving one of three selectable frontends (minimal / readline / structural live-state projection) over the REPL session, plugins, and jobs. *@1baac6d*
   - [[map/repl/startup|startup]] — `main.rs`: pre-clap sandbox/helper dispatch, argv → `Mode` (`--surface` frontend, clap-derived argv terminator), batch execution through core's framed turn door, the annotated-prelude bake, platform glue. *@1baac6d*
   - [[map/repl/loop|loop]] — the `Session` state machine; one turn is a synchronous core entry through the framed turn doors, seeded from the live session; the selectable frontend, prompt/theme/rc. *@1baac6d*
   - [[map/repl/frontend|frontend]] — the `Frontend` trait, minimal + rustyline editors, completion. *@e8227dc*
