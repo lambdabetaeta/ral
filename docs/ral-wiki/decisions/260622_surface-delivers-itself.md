@@ -158,14 +158,22 @@ and renders; the other sees it set and skips. So `await` before the boundary sup
 the queued batch; the boundary before a later `await` suppresses the replay (the
 `await` still returns its cached result record, just renders no cards). `poll` returns
 the outcome as data but renders nothing, so it neither sets nor reads the flag; its
-cards still surface at the boundary. This needs no atomic handoff: an in-turn
-eliminator and a between-turn boundary drain never run concurrently — a turn runs to
-completion before the host drains the inbox — so the flag is a plain serialized
-test-and-set, and because the worker flushed its own clone the boundary's copy is
+cards still surface at the boundary. The flag is a `Mutex<bool>`, not a bare `bool`,
+because its two test-and-set sites can fall on different threads: a handle `await`ed
+from inside *another* detached worker replays on that worker's thread, while the host
+drains the same handle's flushed batch on its own — and a boundary that test-and-sets
+inside `deliver` (rather than deferring it to a host-side drain, as exarch's inbox
+does) sets the flag on the worker thread outright. The lock is the serialization:
+whichever site acquires it first renders, the other finds it set and skips. For a
+top-level handle whose eliminator runs inside a host turn this collapses to a
+single-threaded check — the turn completes before the host drains the inbox — but the
+lock, not that ordering, is what keeps the nested case correct. The batches never
+collide either way: the worker flushed its own clone, so the boundary's copy is
 independent of whatever the eliminators drained. There is no second observer racing
-the handle and no shared settle critical section — which is exactly the two-observer
-cache handoff [[decisions/260622_surface-carries-control|surface-carries-control]]
-had to pay for, gone.
+for the handle's cached *result* and no shared settle critical section — which is
+exactly the two-observer cache handoff
+[[decisions/260622_surface-carries-control|surface-carries-control]] had to pay for,
+gone.
 
 ### the model-facing contract
 
