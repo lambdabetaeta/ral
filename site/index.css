@@ -286,6 +286,13 @@ code.cmd { color: var(--accent); }
   font-size: 0.8rem;
 }
 .dl-src .label { color: var(--muted); }
+.dl-repo .gh-mark {
+  vertical-align: -0.15em;
+  margin-right: 0.4rem;
+  opacity: 0.85;
+}
+.dl-repo:hover .gh-mark { opacity: 1; }
+.dl-sep { color: var(--faint); }
 
 /* ── foundations coda ── */
 .foundations {
