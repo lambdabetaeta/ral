@@ -73,12 +73,14 @@ main { width: 100%; }
 }
 .crest .sub {
   font-family: var(--mono);
-  font-size: 0.82rem;
-  line-height: 1.65;
+  font-size: 0.92rem;
+  line-height: 1.6;
   color: #c9bfa6;
   max-width: 33rem;
   margin: 0 auto;
 }
+.crest .sub a { color: var(--gold-bright); }
+.crest .sub a:hover { color: var(--gold-bright); text-decoration: underline; }
 
 /* ── section rhythm ── */
 .section { padding: 3.2rem 0 0; }
@@ -105,8 +107,7 @@ main { width: 100%; }
 .decree em { font-style: italic; color: var(--porphyry); }
 .decree strong { font-weight: 600; color: var(--ink); }
 .decree code,
-.boundary code,
-.instruments code {
+.boundary code {
   font-family: var(--mono);
   font-size: 0.86em;
   color: var(--gold);
@@ -221,26 +222,7 @@ main { width: 100%; }
 .writ .caps .off { color: var(--off); }
 .writ:hover { background: var(--parchment-2); }
 
-/* ── 5. instruments (features) ── */
-.instruments { display: grid; grid-template-columns: 1fr 1fr; gap: 1.6rem 2rem; }
-.inst { display: grid; grid-template-columns: 1.9rem 1fr; gap: 0.85rem; }
-.inst .glyph {
-  font-family: var(--mono);
-  font-size: 1rem;
-  color: var(--gold);
-  width: 1.9rem;
-  height: 1.9rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--line);
-  align-self: start;
-}
-.inst h3 { margin: 0.1rem 0 0.3rem; font-family: var(--mono); font-size: 0.92rem; font-weight: 600; color: var(--ink); }
-.inst p { margin: 0; font-family: var(--serif); font-size: 0.98rem; line-height: 1.55; color: var(--ink-2); }
-.inst code { font-size: 0.82em; }
-
-/* ── 6. providers ── */
+/* ── 5. providers ── */
 .provider-note {
   font-family: var(--serif);
   font-size: 0.98rem;
@@ -261,7 +243,7 @@ main { width: 100%; }
 .chip .model { color: var(--muted); margin-left: 0.35rem; }
 .chip.more { color: var(--muted); border-style: dashed; }
 
-/* ── 7. run ── */
+/* ── 6. run ── */
 .run {
   display: flex;
   align-items: stretch;
@@ -331,7 +313,6 @@ main { width: 100%; }
 /* ── responsive ── */
 @media (max-width: 40rem) {
   .compare { grid-template-columns: 1fr; }
-  .instruments { grid-template-columns: 1fr; }
   .writ { grid-template-columns: 1.2rem 1fr; }
   .writ .desc { grid-column: 2; }
   .writ .caps { grid-column: 2; justify-content: flex-start; }

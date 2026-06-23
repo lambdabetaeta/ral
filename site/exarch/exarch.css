@@ -53,7 +53,7 @@ html {
   background: var(--parchment);
   color: var(--ink);
   font-family: var(--serif);
-  font-size: 16px;
+  font-size: 17px;
   min-height: 100%;
   -webkit-text-size-adjust: 100%;
   text-rendering: optimizeLegibility;
