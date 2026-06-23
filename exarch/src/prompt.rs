@@ -10,7 +10,7 @@ use ral_core::types::{Capabilities, ExecDir};
 use std::path::{Path, PathBuf};
 
 /// Build the full system prompt.  Order: persona, Grant, Host, Ral,
-/// Script style, [Headless].  Grant sits directly under the persona so
+/// Script style, [Workspace], [Headless].  Grant sits directly under the persona so
 /// its constraints are encountered before the tool reference (`Ral`)
 /// tempts the model to use capabilities it does not hold.  The set of
 /// builtins is not listed here; the agent discovers it at runtime with
@@ -20,7 +20,13 @@ use std::path::{Path, PathBuf};
 /// (`data/script-style.md`) appear as distinct sections; `--system
 /// FILE...` collapses them into one user-supplied section and the
 /// `Ral` / `Script style` slots are omitted (the user takes
-/// responsibility for the tool reference).  When `headless`, a closing
+/// responsibility for the tool reference).  A `Workspace` section follows,
+/// present whenever any `AGENTS.md` is discovered (see [`discover_agents`]):
+/// the operator's own `<config>/AGENTS.md` then every repo `AGENTS.md` from
+/// the git root down to the cwd, the deepest last so its recency wins.  It
+/// carries project instructions, not authority — it cannot widen the `Grant`
+/// — and appears regardless of `--system`, the same orthogonality the
+/// headless note relies on.  When `headless`, a closing
 /// section (`data/headless.md`) tells the root it returns its result by
 /// calling `reply` exactly once (a finish without `reply` returns nothing
 /// and fails) — appended last, where its recency carries, and regardless of
@@ -29,6 +35,8 @@ pub fn assemble(
     files: &[PathBuf],
     caps: &Capabilities,
     scratch: &Path,
+    cwd: &Path,
+    config_dir: &Path,
     headless: bool,
 ) -> Result<String, String> {
     let mut sections: Vec<(Option<&str>, String)> = Vec::new();
@@ -49,10 +57,60 @@ pub fn assemble(
             include_str!("../data/script-style.md").into(),
         ));
     }
+    let agents = discover_agents(cwd, config_dir);
+    if !agents.is_empty() {
+        sections.push((Some("Workspace"), read_files(&agents)?));
+    }
     if headless {
         sections.push((Some("Headless"), include_str!("../data/headless.md").into()));
     }
     Ok(render(&sections))
+}
+
+/// Discover the `AGENTS.md` instruction files to inject, outermost first so
+/// the most specific file's recency dominates.  The operator's own
+/// `<config>/AGENTS.md` (the trusted XDG config home — the same root
+/// [`crate::config`] loads `config.ral` from, never the working tree) leads;
+/// then, when `cwd` sits inside a git repository, every `AGENTS.md` from the
+/// repo root down to `cwd`; outside a repo, only `cwd/AGENTS.md` (the bare
+/// ancestor chain is not followed up into unrelated parents).
+///
+/// The walk stops at the first ancestor holding a `.git` entry — file or
+/// directory, so worktrees and submodules count — which bounds discovery to
+/// the project the agent was launched in.  Existence is the only gate,
+/// checked through [`ral_core::path::exists`]; the reads happen in
+/// [`read_files`], under its door.
+///
+/// These files steer behaviour, not authority: a cwd `AGENTS.md` lives in the
+/// agent's own writable tree, so unlike `config.ral` it is untrusted — but it
+/// only adds prompt text, never capabilities, so it cannot widen the `Grant`.
+fn discover_agents(cwd: &Path, config_dir: &Path) -> Vec<PathBuf> {
+    let mut chain: Vec<PathBuf> = Vec::new();
+    let mut found_root = false;
+    for dir in cwd.ancestors() {
+        chain.push(dir.to_path_buf());
+        if ral_core::path::exists(&dir.join(".git").to_string_lossy()) {
+            found_root = true;
+            break;
+        }
+    }
+    if !found_root {
+        chain.truncate(1);
+    }
+    chain.reverse();
+
+    let mut files = Vec::new();
+    let global = config_dir.join("AGENTS.md");
+    if ral_core::path::exists(&global.to_string_lossy()) {
+        files.push(global);
+    }
+    for dir in chain {
+        let file = dir.join("AGENTS.md");
+        if ral_core::path::exists(&file.to_string_lossy()) {
+            files.push(file);
+        }
+    }
+    files
 }
 
 /// Concatenate `--system` files with blank-line separators, in the

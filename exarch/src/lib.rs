@@ -180,7 +180,16 @@ pub fn run() -> Result<(), String> {
     }
     let scratch = bootstrap::Scratch::new().map_err(|e| format!("scratch dir: {e}"))?;
     let run_dir = bootstrap::log_run_dir(&cwd).map_err(|e| format!("log dir: {e}"))?;
-    let system = prompt::assemble(&c.system_files, &caps, scratch.path(), c.headless)?;
+    let config_dir = bootstrap::xdg_app_dir(ral_core::path::basedir::XdgKind::Config);
+    let cwd_path = std::path::PathBuf::from(&cwd);
+    let system = prompt::assemble(
+        &c.system_files,
+        &caps,
+        scratch.path(),
+        &cwd_path,
+        &config_dir,
+        c.headless,
+    )?;
     let system_size = system.len();
 
     // Behind an `Arc` from the start: an async `agent` worker captures a

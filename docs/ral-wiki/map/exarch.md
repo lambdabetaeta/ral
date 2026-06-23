@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1baac6d
-generated_at_date: 2026-06-22
+generated_at_commit: b443215
+generated_at_date: 2026-06-24
 covers_paths: [exarch/src/main.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/prompt.rs, exarch/data/system.md, exarch/data/ral.md, exarch/data/script-style.md]
 ---
 
@@ -77,12 +77,15 @@ into its own OAuth-backed provider, ordered after the API-key providers.
   directory at `$XDG_STATE_HOME/exarch/<project>/<run>/`, keyed by a slug of the
   project cwd (`project_slug`), so logs survive an abnormal exit. The persisted
   model selection (`state.json`) lives under the same per-project `project_dir`.
+- **`xdg_app_dir`** — the one spelling of the `$XDG_<kind>_HOME/exarch/` convention
+  that `project_dir` (state), the model cache (cache), and the trusted config home
+  all build on ([[design/exarch-config-dir|exarch-config-dir]]).
 
 ## System prompt
 
 `prompt::assemble` builds the prompt from `(heading, body)` sections walked by one
 uniform renderer, in order **persona, `Grant`, `Host`, `Ral`, `Script style`,
-[`Headless`]**.
+[`Workspace`], [`Headless`]**.
 
 - **Persona** (`data/system.md`, unheaded — it sets the tone, not a topic) frames
   the session as a *progressively expanding script of reusable definitions*: the
@@ -103,12 +106,18 @@ uniform renderer, in order **persona, `Grant`, `Host`, `Ral`, `Script style`,
 - **`Script style`** (`data/script-style.md`) is the reuse guide: one program, not
   a nervous probe — define then query, parameterised blocks, records for knobs,
   blocks as policy, long-running work behind `spawn`/`await`.
+- **`Workspace`** (`discover_agents`) collects the `AGENTS.md` instruction files,
+  outermost first so the deepest file's recency wins: the operator's
+  `<config>/AGENTS.md`, then every repo `AGENTS.md` from the git root down to cwd
+  (the walk stops at the first `.git` entry; outside a repo, only `cwd/AGENTS.md`).
+  Present whenever any is found; project guidance that cannot widen the `Grant`
+  ([[design/agents-md-injection|agents-md-injection]]).
 - **`Headless`** (`data/headless.md`) is appended last under `--headless`, where
   recency carries, warning that assistant prose now *is* the output.
 
 `--system FILE...` collapses the persona, `Ral`, and `Script style` slots into one
 user-supplied section (the user takes responsibility for the tool reference);
-`Grant`, `Host`, and a headless `Headless` still surround it.
+`Grant`, `Host`, `Workspace`, and a headless `Headless` still surround it.
 
 ## Subsystems
 
@@ -120,7 +129,7 @@ user-supplied section (the user takes responsibility for the tool reference);
   pushed capabilities frame; the streaming digest and the surface host sink.
 - [[map/exarch/policy|policy]] — capability composition (base ∨ extend ⊓ restrict) and
   the bake-in profiles; the boundary *is* ral's [[design/grant|grant]].
-- [[map/exarch/tools|tools]] — the tool registry: `shell`, `agent`, `fff`; `agent` forks are joined at steering boundaries.
+- [[map/exarch/tools|tools]] — the tool registry: `ral`, the spawn family, `reply`, the schedule family, `fff`; two mirror axes (`spawns`/`replies`) gate root vs peer.
 - [[map/exarch/builtins|builtins]] — the resident host atoms: the hash-addressed edit
   primitives and the `agent.ral` helpers ([[design/hash-addressed-editing|why]]).
 - [[map/exarch/frontend|frontend]] — the agent/UI boundary (event bus, session log) and
