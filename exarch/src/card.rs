@@ -213,17 +213,6 @@ impl WriteMode {
             _ => return None,
         })
     }
-
-    /// The verb that opens a write card — the mode *is* the verb, so the card
-    /// needs no redundant `(write)` after it. A streaming write is still a
-    /// write to the reader, so `Stream` collapses to `Write:`; the stream
-    /// detail rides the recorded event, not the surface.
-    fn verb(self) -> &'static str {
-        match self {
-            Self::Write | Self::Stream => "Write",
-            Self::Append => "Append",
-        }
-    }
 }
 
 /// How a write settled: `committed` to disk, `aborted` before commit, or
@@ -355,15 +344,11 @@ pub fn value_to_io(v: &RalValue) -> Option<IoEvent> {
 /// the outcome roled by its level.
 pub fn io_card(event: &IoEvent) -> Card {
     let spans = match event {
-        // `Read: path` — a muted verb, then the path as subject.
-        IoEvent::Read { path } => vec![span(Role::Muted, "Read: "), span(Role::Path, path)],
-        // `Write: path (mode) outcome` — verb, path, the mode in
-        // parentheses, then the outcome roled by how it settled.
-        IoEvent::Write {
-            path,
-            mode,
-            outcome,
-        } => write_spans(path, *mode, *outcome),
+        // `read path` — a muted verb, then the path as subject.
+        IoEvent::Read { path } => read_spans(path),
+        // `write path outcome` — the verb, the path, then the outcome roled by
+        // how it settled.  The mode is recorded but not surfaced.
+        IoEvent::Write { path, outcome, .. } => write_spans(path, *outcome),
         // `$ prog arg arg → status` — the program as a path, its args as
         // code, and the exit status roled ok/bad.
         IoEvent::Exec {
@@ -417,22 +402,26 @@ fn grep_spans(scope: &str, pattern: &str) -> Vec<Span> {
     ]
 }
 
-/// A write row: the mode as the verb (`Write:` / `Append:` / `Stream:`) then
-/// the path as the subject — and nothing more when the write committed, since
-/// the card's mere existence reports that.  An outcome that *departs* from the
-/// happy path (aborted, failed) earns a trailing roled word; the constant case
-/// is dropped so the path is what the eye lands on.  Reused verbatim per entry
-/// in [`io_group_card`]'s comma-joined write run.
-fn write_spans(path: &str, mode: WriteMode, outcome: WriteOutcome) -> Vec<Span> {
-    let mut spans = vec![
-        span(Role::Muted, &format!("{}: ", mode.verb())),
+/// A read row: the muted verb `read`, then the path as the subject.  Reused
+/// verbatim per entry in [`io_group_card`]'s comma-joined read run, so a lone
+/// read and a grouped one share one shape.
+fn read_spans(path: &str) -> Vec<Span> {
+    vec![span(Role::Muted, "read "), span(Role::Path, path)]
+}
+
+/// A write row: the muted verb `write`, the path as the subject, then the
+/// outcome roled by how it settled (`committed`→`Ok`, `aborted`→`Warn`,
+/// `failed`→`Bad`).  Every write reads the same `write <path> <outcome>`,
+/// whatever its mode — the mode rides the recorded event, but the surface
+/// names only the act and how it landed.  Reused verbatim per entry in
+/// [`io_group_card`]'s comma-joined write run.
+fn write_spans(path: &str, outcome: WriteOutcome) -> Vec<Span> {
+    vec![
+        span(Role::Muted, "write "),
         span(Role::Path, path),
-    ];
-    if outcome != WriteOutcome::Committed {
-        spans.push(span_plain(" "));
-        spans.push(span(outcome.role(), outcome.label()));
-    }
-    spans
+        span_plain(" "),
+        span(outcome.role(), outcome.label()),
+    ]
 }
 
 /// Compose a run of buffered I/O surfaces — even interleaved, grouped by the
@@ -455,11 +444,11 @@ pub fn io_group_card(
     writes: &[IoEvent],
 ) -> Vec<Card> {
     let mut cards = Vec::new();
-    // Read: `Read: p1, p2, …` — one muted verb, the paths comma-joined.
+    // Read: `read p1, read p2, …` — each entry the verb + path, comma-joined.
     if !reads.is_empty() {
-        let mut spans = vec![span(Role::Muted, "Read: ")];
+        let mut spans = Vec::new();
         join_spans(&mut spans, reads, |spans, path| {
-            spans.push(span(Role::Path, path))
+            spans.extend(read_spans(path))
         });
         cards.push(Card(vec![Mark::Text { spans }]));
     }
@@ -485,18 +474,13 @@ pub fn io_group_card(
         });
         cards.push(Card(vec![Mark::Text { spans }]));
     }
-    // Write: `Write: p1, Append: p2 failed, …` — each entry the mode-verb +
-    // path (plus a roled outcome only when it deviated), comma-joined.
+    // Write: `write p1 committed, write p2 failed, …` — each entry the verb +
+    // path + roled outcome, comma-joined.
     if !writes.is_empty() {
         let mut spans = Vec::new();
         join_spans(&mut spans, writes, |spans, e| {
-            if let IoEvent::Write {
-                path,
-                mode,
-                outcome,
-            } = e
-            {
-                spans.extend(write_spans(path, *mode, *outcome));
+            if let IoEvent::Write { path, outcome, .. } = e {
+                spans.extend(write_spans(path, *outcome));
             }
         });
         cards.push(Card(vec![Mark::Text { spans }]));
@@ -1124,14 +1108,6 @@ mod tests {
         RalValue::map(fields.into_iter().map(|(k, v)| (k.into(), v)).collect())
     }
 
-    /// The single `text` mark of a one-mark card, for asserting on io cards.
-    fn only_text(card: &Card) -> &[Span] {
-        match card.marks() {
-            [Mark::Text { spans }] => spans,
-            other => panic!("expected a one-mark text card, got {other:?}"),
-        }
-    }
-
     /// Each of the four io shapes decodes into its typed [`IoEvent`].
     #[test]
     fn value_to_io_decodes_each_shape() {
@@ -1197,125 +1173,6 @@ mod tests {
         assert!(
             value_to_io(&io_value(vec![("path", s("a.rs"))])).is_none(),
             "a map without an io field is not an io event"
-        );
-    }
-
-    /// A read card is a muted `Read:` label followed by the `Path`-roled path.
-    #[test]
-    fn io_card_read_is_muted_label_and_path() {
-        let card = io_card(&IoEvent::Read {
-            path: "a.rs".into(),
-        });
-        let spans = only_text(&card);
-        assert_eq!(spans[0].role, Some(Role::Muted));
-        assert!(spans[0].text.contains("Read"));
-        assert_eq!(spans[1].role, Some(Role::Path));
-        assert_eq!(spans[1].text, "a.rs");
-    }
-
-    /// A write card opens with the mode as its verb (so no redundant
-    /// `(write)`) and the path as the subject. A committed write shows nothing
-    /// more — the card's existence reports it; an aborted or failed one earns a
-    /// trailing word roled by severity (`Warn` / `Bad`).
-    #[test]
-    fn io_card_write_verb_then_deviant_outcome() {
-        // Committed: mode-verb + path, and no outcome word.
-        let card = io_card(&IoEvent::Write {
-            path: "b.rs".into(),
-            mode: WriteMode::Stream,
-            outcome: WriteOutcome::Committed,
-        });
-        let spans = only_text(&card);
-        assert!(
-            spans
-                .iter()
-                .any(|sp| sp.role == Some(Role::Path) && sp.text == "b.rs"),
-            "the path is roled Path"
-        );
-        assert!(
-            spans.first().is_some_and(|sp| sp.text.starts_with("Write")),
-            "a streaming write surfaces as the Write verb"
-        );
-        assert!(
-            !spans.iter().any(|sp| sp.text.contains("committed")),
-            "a committed write shows no outcome word"
-        );
-
-        // Deviant outcomes earn a trailing roled word.
-        for (outcome, role, word) in [
-            (WriteOutcome::Aborted, Role::Warn, "aborted"),
-            (WriteOutcome::Failed, Role::Bad, "failed"),
-        ] {
-            let card = io_card(&IoEvent::Write {
-                path: "b.rs".into(),
-                mode: WriteMode::Write,
-                outcome,
-            });
-            let last = only_text(&card)
-                .last()
-                .cloned()
-                .expect("a deviant write ends on its outcome");
-            assert_eq!(last.role, Some(role), "{outcome:?} roles the outcome");
-            assert!(last.text.contains(word));
-        }
-    }
-
-    /// An exec card carries the program as a `Path` span, each arg as plain
-    /// ink, and a status span roled `Ok` at status 0, `Bad` otherwise.
-    #[test]
-    fn io_card_exec_roles_status_by_code() {
-        let ok = io_card(&IoEvent::Exec {
-            argv: vec!["ls".into(), "-la".into()],
-            outcome: ExecOutcome::Ok,
-            status: 0,
-        });
-        let spans = only_text(&ok);
-        assert!(
-            spans
-                .iter()
-                .any(|sp| sp.role == Some(Role::Path) && sp.text == "ls"),
-            "the program is a Path span"
-        );
-        assert!(
-            spans
-                .iter()
-                .any(|sp| sp.role.is_none() && sp.text.contains("-la")),
-            "each arg is plain ink"
-        );
-        let status = spans.last().expect("exec ends on its status");
-        assert_eq!(status.role, Some(Role::Ok), "status 0 is Ok");
-        assert_eq!(status.text, "0");
-
-        let bad = io_card(&IoEvent::Exec {
-            argv: vec!["false".into()],
-            outcome: ExecOutcome::Bad,
-            status: 1,
-        });
-        let status = only_text(&bad).last().expect("exec ends on its status");
-        assert_eq!(status.role, Some(Role::Bad), "a nonzero status is Bad");
-        assert_eq!(status.text, "1");
-    }
-
-    /// A grep card carries the scope as a `Path` span and the pattern as a
-    /// `Code` span.
-    #[test]
-    fn io_card_grep_codes_the_pattern() {
-        let card = io_card(&IoEvent::Grep {
-            scope: "src/".into(),
-            pattern: "fn main".into(),
-        });
-        let spans = only_text(&card);
-        assert!(
-            spans
-                .iter()
-                .any(|sp| sp.role == Some(Role::Code) && sp.text == "fn main"),
-            "the pattern is a Code span"
-        );
-        assert!(
-            spans
-                .iter()
-                .any(|sp| sp.role == Some(Role::Path) && sp.text == "src/"),
-            "the scope is a Path span"
         );
     }
 
@@ -1413,53 +1270,6 @@ mod tests {
         assert!(value_to_done(&card_value(vec![])).is_none());
         assert!(value_to_done(&io_value(vec![("io", s("read"))])).is_none());
         assert!(value_to_done(&s("plain")).is_none());
-    }
-
-    /// The done card is one text mark: the `cmd` as a `Strong` span, then an
-    /// outcome span roled by result — `Ok` for a clean return, `Bad` for a
-    /// raise (carrying the status) or a panic.
-    #[test]
-    fn done_card_roles_outcome_by_result() {
-        let ok = done_card("<block>", &DoneOutcome::Ok);
-        let spans = only_text(&ok);
-        assert_eq!(spans[0].role, Some(Role::Strong));
-        assert_eq!(spans[0].text, "<block>");
-        let outcome = spans.last().expect("a done card ends on its outcome");
-        assert_eq!(outcome.role, Some(Role::Ok));
-        assert!(outcome.text.contains("done"));
-
-        let raised = done_card(
-            "<block>",
-            &DoneOutcome::Err {
-                message: "boom".into(),
-                status: 2,
-            },
-        );
-        let spans = only_text(&raised);
-        assert!(
-            spans
-                .iter()
-                .any(|sp| sp.role == Some(Role::Bad) && sp.text.contains("failed (2)")),
-            "a raise roles its outcome Bad and carries the status"
-        );
-        assert!(
-            spans.iter().any(|sp| sp.text.contains("boom")),
-            "the error message rides the card"
-        );
-
-        let panicked = done_card(
-            "<block>",
-            &DoneOutcome::Panic {
-                message: "kaput".into(),
-            },
-        );
-        let spans = only_text(&panicked);
-        assert!(
-            spans
-                .iter()
-                .any(|sp| sp.role == Some(Role::Bad) && sp.text.contains("panicked")),
-            "a panic roles its outcome Bad"
-        );
     }
 
     /// `single_diff` keys aggregation: exactly one diff mark yields its

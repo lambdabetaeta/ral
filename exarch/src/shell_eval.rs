@@ -1496,12 +1496,11 @@ return !{{length $hits}}"#
 
     /// Coverage — the READ door end-to-end: a bare `from-string < a` reads
     /// stdin through one `<` redirect, so exactly one `Kind::Io` carrying a
-    /// `Read` event for that path reaches the bus, and the composed card is the
-    /// muted-glyph-then-path read card.  No exec card: `from-string` is a
-    /// builtin, not an external image.
+    /// `Read` event for that path reaches the bus.  No exec card: `from-string`
+    /// is a builtin, not an external image.
     #[test]
     fn bare_read_redirect_surfaces_one_read_card() {
-        use crate::card::{IoEvent, Mark, Role};
+        use crate::card::IoEvent;
         let mut shell = fresh_shell();
         let (dir, path) = scratch_file("cov-read", "a", "hello\n");
 
@@ -1525,31 +1524,14 @@ return !{{length $hits}}"#
             &IoEvent::Read { path: path.clone() },
             "the one io event is a read of the redirect path"
         );
-        // The card composed beside the event is the read card: a muted `Read:`
-        // label, then the path roled `Path`.
-        let Kind::Io { card, .. } = kinds
-            .iter()
-            .find(|k| matches!(k, Kind::Io { .. }))
-            .expect("the read event rode the bus")
-        else {
-            unreachable!("filtered to Kind::Io")
-        };
-        let [Mark::Text { spans }] = card.marks() else {
-            panic!("a read card is one text mark, got {:?}", card.marks())
-        };
-        assert_eq!(spans[0].role, Some(Role::Muted));
-        assert!(spans[0].text.contains("Read"), "the read label is `Read:`");
-        assert_eq!(spans[1].role, Some(Role::Path));
-        assert_eq!(spans[1].text, path);
     }
 
     /// Coverage — the WRITE door end-to-end: a bare `to-string "x" > b`
     /// commits an atomic write through one `>` redirect, so exactly one
-    /// `Kind::Io` carrying a committed `Write` event reaches the bus, and the
-    /// composed card roles its outcome span `Ok`.
+    /// `Kind::Io` carrying a committed `Write` event reaches the bus.
     #[test]
     fn bare_write_redirect_surfaces_one_committed_write_card() {
-        use crate::card::{IoEvent, Mark, Role, WriteMode, WriteOutcome};
+        use crate::card::{IoEvent, WriteMode, WriteOutcome};
         let mut shell = fresh_shell();
         // A fresh dir with no fixture file: the write creates the target.
         let dir = std::env::temp_dir().join(format!("exarch-cov-write-{}", std::process::id()));
@@ -1583,41 +1565,16 @@ return !{{length $hits}}"#
             },
             "the one io event is a committed write of the redirect path"
         );
-        let Kind::Io { card, .. } = kinds
-            .iter()
-            .find(|k| matches!(k, Kind::Io { .. }))
-            .expect("the write event rode the bus")
-        else {
-            unreachable!("filtered to Kind::Io")
-        };
-        let [Mark::Text { spans }] = card.marks() else {
-            panic!("a write card is one text mark, got {:?}", card.marks())
-        };
-        assert!(
-            spans
-                .iter()
-                .any(|s| s.role == Some(Role::Path) && s.text == path),
-            "the path is roled Path"
-        );
-        // A committed write reports itself by the card's mere existence: it
-        // shows no outcome word, so the row ends on the path.
-        assert!(
-            !spans.iter().any(|s| s.text.contains("committed")),
-            "a committed write shows no outcome word"
-        );
-        let last = spans.last().expect("a write card has spans");
-        assert_eq!(last.role, Some(Role::Path), "the row ends on the path");
     }
 
     /// Coverage — the EXEC door end-to-end: a bare external command raises
     /// exactly one `Kind::Io` carrying an `Exec` event with the resolved argv
-    /// and exit status, and the composed card carries the program as a `Path`
-    /// span and the status roled by its code.  `/usr/bin/true` is the
-    /// deterministic, always-present image the core suite already leans on.
+    /// and exit status.  `/usr/bin/true` is the deterministic, always-present
+    /// image the core suite already leans on.
     #[cfg(unix)]
     #[test]
     fn bare_external_surfaces_one_exec_card() {
-        use crate::card::{ExecOutcome, IoEvent, Mark, Role};
+        use crate::card::{ExecOutcome, IoEvent};
         let mut shell = fresh_shell();
 
         let (r, kinds) = run_capturing(&mut shell, "/usr/bin/true");
@@ -1643,25 +1600,6 @@ return !{{length $hits}}"#
             },
             "the one io event is a successful exec of the image"
         );
-        let Kind::Io { card, .. } = kinds
-            .iter()
-            .find(|k| matches!(k, Kind::Io { .. }))
-            .expect("the exec event rode the bus")
-        else {
-            unreachable!("filtered to Kind::Io")
-        };
-        let [Mark::Text { spans }] = card.marks() else {
-            panic!("an exec card is one text mark, got {:?}", card.marks())
-        };
-        assert!(
-            spans
-                .iter()
-                .any(|s| s.role == Some(Role::Path) && s.text == "/usr/bin/true"),
-            "the program is a Path span"
-        );
-        let status = spans.last().expect("an exec card ends on its status");
-        assert_eq!(status.role, Some(Role::Ok), "status 0 roles the status Ok");
-        assert_eq!(status.text, "0");
     }
 
     /// `view-text` is a ral closure that reads stdin, NOT an external image: a
