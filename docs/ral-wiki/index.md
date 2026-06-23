@@ -1,3 +1,7 @@
+---
+title: Wiki index
+---
+
 # Wiki index
 
 Catalog of every page. Read this first, then drill into the pages. How pages are

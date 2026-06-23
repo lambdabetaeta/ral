@@ -9,7 +9,10 @@
 configuration:
   pageTitle: ral & exarch — wiki
   pageTitleSuffix: ""
-  enableSPA: true
+  # SPA off: under a GitHub Pages subpath the client router drops the /wiki/
+  # prefix on navigation, which breaks relative links and the search-index fetch.
+  # Full-page loads resolve every relative path against the slash-redirected URL.
+  enableSPA: false
   enablePopovers: true
   analytics:
     provider: null
@@ -88,7 +91,7 @@ plugins:
     enabled: true
     order: 70
   - source: github:quartz-community/latex
-    enabled: true
+    enabled: false # no math in the wiki; avoids a broken katex copy-tex CDN fetch
     options:
       renderEngine: katex
     order: 80
@@ -153,7 +156,7 @@ plugins:
       position: right
       priority: 30
   - source: github:quartz-community/article-title
-    enabled: true
+    enabled: false # every page leads with its own H1; this plugin would duplicate it
     layout:
       position: beforeBody
       priority: 10
