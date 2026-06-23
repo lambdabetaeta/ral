@@ -231,7 +231,7 @@ impl Sink for Headless {
                 }
                 eprintln!("error: {msg}");
             }
-            Kind::Dim(text) => eprintln!("{text}"),
+            Kind::SystemNote(text) => eprintln!("{text}"),
             Kind::Nudge {
                 used, max, cause, ..
             } if id == self.root_id => eprintln!("[nudge {used}/{max}: {cause}]"),

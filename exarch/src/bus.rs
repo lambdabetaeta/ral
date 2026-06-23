@@ -672,7 +672,13 @@ pub enum Kind {
     UserPromptEcho(String),
     StopReason(String),
     Error(String),
-    Dim(String),
+    /// An operational note the agent's driver issued — a truncation recovery,
+    /// a compaction step.  Names *what happened*, like every other operational
+    /// `Kind`; the display renders it dim, but *dimness is the renderer's
+    /// choice*, not a fact in the vocabulary.  The trace records it as
+    /// `system_note`; it has no `events.json` twin, since it is not a message
+    /// the model saw.
+    SystemNote(String),
     /// A recovery nudge the driver issued between attempts.  The trace records
     /// it; the display surfaces it as it sees fit (a stderr line in headless,
     /// quiet on the TUI rail).  Its `events.json` twin is the model-view

@@ -115,7 +115,7 @@ pub(crate) fn event_record(t_ms: u128, id: SessionId, kind: &Kind) -> Option<ser
         Kind::ToolResult(text) => ("tool_result", json!({ "text": text })),
         Kind::StopReason(raw) => ("stop_reason", json!({ "raw": raw })),
         Kind::Error(msg) => ("error", json!({ "msg": msg })),
-        Kind::Dim(text) => ("dim", json!({ "text": text })),
+        Kind::SystemNote(text) => ("system_note", json!({ "text": text })),
         Kind::Nudge { used, max, cause } => (
             "nudge",
             json!({ "used": used, "max": max, "cause": cause }),

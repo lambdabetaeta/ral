@@ -218,9 +218,6 @@ pub enum SessionEvent {
     /// in the rendered log.  Not visible to the model: errors are about
     /// the orchestration, not the conversation.
     Error { text: String },
-    /// Dim informational chrome — compaction progress, parenthetical
-    /// notes, etc.  User-only, like [`Self::Error`].
-    Dim { text: String },
     /// Recovery breadcrumb the top-level driver writes between
     /// iterations when nudging the model.  Recorded so events.json
     /// shows where the driver intervened.
@@ -701,10 +698,6 @@ impl SessionLog {
         self.record(SessionEvent::Error { text })
     }
 
-    pub fn record_dim(&mut self, text: String) -> io::Result<()> {
-        self.record(SessionEvent::Dim { text })
-    }
-
     pub fn record_nudge(&mut self, used: u32, max: u32, cause: String) -> io::Result<()> {
         self.record(SessionEvent::Nudge { used, max, cause })
     }
@@ -1055,29 +1048,26 @@ mod tests {
         assert!(matches!(parsed[1], SessionEvent::UserPrompt { .. }));
     }
 
-    /// Diagnostic chrome must round-trip through `events.json` as
-    /// typed events — the property the typed-chrome refactor was
-    /// added to satisfy.  Replaying `events.json` (the canonical
-    /// "model view" file) now also captures everything the user saw
-    /// chrome-side, so `user.log` is in principle reconstructable
-    /// from `events.json` alone.
+    /// The model-view forensic breadcrumbs — an error diagnostic, a recovery
+    /// nudge — round-trip through `events.json` as typed events.  Operational
+    /// system notes are deliberately *not* here: they live only in
+    /// `transcript.jsonl`, the operational view, so `events.json` carries only
+    /// what the model saw plus these breadcrumbs.
     #[test]
     fn diagnostic_events_round_trip_through_disk() {
         let mut s = fresh_root("diagnostic-roundtrip");
         s.record_error("boom".into()).unwrap();
-        s.record_dim("[compacting]".into()).unwrap();
         s.record_nudge(2, 3, "stop=length".into()).unwrap();
         let body = fs::read_to_string(s.dir().join("events.json")).unwrap();
         let parsed: Vec<SessionEvent> = serde_json::Deserializer::from_str(&body)
             .into_iter::<SessionEvent>()
             .collect::<Result<_, _>>()
             .expect("round-trip");
-        // session_started + 3 diagnostics = 4 events.
-        assert_eq!(parsed.len(), 4);
+        // session_started + 2 diagnostics = 3 events.
+        assert_eq!(parsed.len(), 3);
         assert!(matches!(&parsed[1], SessionEvent::Error { text } if text == "boom"));
-        assert!(matches!(&parsed[2], SessionEvent::Dim { text } if text == "[compacting]"));
         assert!(matches!(
-            &parsed[3],
+            &parsed[2],
             SessionEvent::Nudge { used: 2, max: 3, cause } if cause == "stop=length"
         ));
     }

@@ -681,7 +681,7 @@ impl App {
                 self.push_chrome(id, RailShape::Plain, line::stop_reason(&raw))
             }
             Kind::Error(msg) => self.push_chrome(id, RailShape::Error, line::error(&msg)),
-            Kind::Dim(text) => self.push_chrome(id, RailShape::Plain, line::dim(&text)),
+            Kind::SystemNote(text) => self.push_chrome(id, RailShape::Plain, line::dim(&text)),
             // Quiet on the rail; recorded in the trace at the emit seam.
             Kind::Nudge { .. } => {}
             Kind::ProviderError(error) => {
@@ -776,6 +776,21 @@ impl App {
 
     fn push_chrome(&mut self, id: SessionId, shape: RailShape, lines: Vec<Line<'static>>) {
         self.with_viewport(id, |vp| vp.push_chrome(shape, lines));
+    }
+
+    /// Draw a dim UI note straight to the viewport — view-local chrome (a slash
+    /// legend row, a clipboard or export ack) that names nothing about the run,
+    /// so it is *drawn, not recorded*: it never becomes an event, the way the
+    /// rendered `Kind::SystemNote` does at the emit seam.
+    fn push_note(&mut self, id: SessionId, text: String) {
+        self.push_chrome(id, RailShape::Plain, line::dim(&text));
+    }
+
+    /// Draw an error line straight to the viewport — the UI-thread twin of
+    /// [`Session::note_error`], for the view commands that surface their own
+    /// failures.  Drawn, not recorded.
+    fn push_error(&mut self, id: SessionId, message: String) {
+        self.push_chrome(id, RailShape::Error, line::error(&message));
     }
 
     /// Absorb a single-`diff` card's hunks into [`Self::patch_buf`], or
@@ -2624,6 +2639,12 @@ pub fn run(
     // the root's `Transcript`, so the TUI records `transcript.jsonl` too — the
     // operational view beside `user.log`'s rendered one.
     let worker_emit = bus.emitter(session.id, session.transcript());
+    // A recording emitter for the UI thread, minted from the bus *before* the
+    // worker takes the session: it carries the root's `transcript()`, so a
+    // UI-caused operational event — a `/model` switch — records in the trace
+    // and draws through the normal bus path, exactly as a worker-raised note
+    // does.  The worker takes `worker_emit`; this clone stays on the UI thread.
+    let ui_emit = bus.emitter(session.id, session.transcript());
     let worker_provider = provider.clone();
     // A `Mailbox` onto the session inbox, so a UI-loop failure can wake the
     // parked worker with a `/quit` before joining — without it the worker
@@ -2633,13 +2654,22 @@ pub fn run(
     // peer the worker registers is visible to the UI immediately.  The UI looks
     // a focused peer's `Mailbox` up here to route a steering line into it.
     let agents = session.agents.clone();
+    // The UI thread's command context: the handles `route_submit` and the
+    // `/model` path service a submitted line against, threaded as one.
+    let mut cmd_ctx = CommandCtx {
+        provider: &provider,
+        store,
+        catalog,
+        info,
+        emit: &ui_emit,
+    };
     std::thread::scope(|scope| -> Result<(), String> {
         let worker = scope.spawn(move || {
             let out = session.drive(worker_provider, &mut control, &worker_emit);
             done_ref.store(true, Ordering::Release);
             out
         });
-        let r = ui_loop(&mut tui, &bus, done_ref, &provider, store, catalog, info, &agents);
+        let r = ui_loop(&mut tui, &bus, done_ref, &agents, &mut cmd_ctx);
         if r.is_err() {
             quit_mailbox.push(InboxMsg::Command("/quit".into()));
         }
@@ -2670,6 +2700,20 @@ pub fn run(
 /// per-provider background fetch threads back to the picker loop.
 type FetchRx = std::sync::mpsc::Receiver<(provider::ProviderId, Result<Vec<String>, String>)>;
 
+/// The long-lived handles the UI thread services a submitted line against: the
+/// provider it can hot-swap, the credential store and model catalog the
+/// `/model` picker reads, the static session info, and the recording emitter a
+/// UI-caused operational event (a model switch) rides.  Bundled so the command
+/// path — `ui_loop` → `route_submit` → `pick_model` → `apply_model_switch` —
+/// threads one context rather than a fistful of handles.
+struct CommandCtx<'a> {
+    provider: &'a ProviderHandle,
+    store: &'a CredentialStore,
+    catalog: &'a mut ModelCatalog<LiveSource>,
+    info: &'a SessionInfo<'a>,
+    emit: &'a Emitter,
+}
+
 /// The merged render + input loop, running on the UI thread alongside the
 /// worker's [`Session::drive`].  It drains the session-lived bus into the App
 /// (the same `App::handle` the old per-turn drive used), ticks and redraws at
@@ -2679,16 +2723,12 @@ type FetchRx = std::sync::mpsc::Receiver<(provider::ProviderId, Result<Vec<Strin
 /// drains), and Esc / Ctrl-C raise the published cancel token the worker's
 /// current turn reads.  Returns when the worker finishes (a `/quit`), draining
 /// its final events for one last frame.
-#[allow(clippy::too_many_arguments)] // distinct render/route/steer handles, not a bundle
 fn ui_loop(
     tui: &mut Tui,
     bus: &SessionBus,
     done: &AtomicBool,
-    provider: &ProviderHandle,
-    store: &CredentialStore,
-    catalog: &mut ModelCatalog<LiveSource>,
-    info: &SessionInfo<'_>,
     agents: &crate::agent_registry::AgentRegistry,
+    ctx: &mut CommandCtx<'_>,
 ) -> io::Result<()> {
     const BATCH: usize = 64;
     let frame = Duration::from_millis(16); // ~60 FPS max
@@ -2753,9 +2793,7 @@ fn ui_loop(
                         KeyAction::Submit => {
                             if let Some(text) = tui.app.submit() {
                                 if focused == tui.app.root {
-                                    route_submit(
-                                        text, tui, &mailbox, provider, store, catalog, info,
-                                    )?;
+                                    route_submit(text, tui, &mailbox, ctx)?;
                                 } else if let Some(mb) = agents.mailbox(focused) {
                                     // Steer the live peer: the whole line is
                                     // steering text — no slash, no revival.
@@ -2786,11 +2824,9 @@ fn route_submit(
     text: String,
     tui: &mut Tui,
     mailbox: &Mailbox,
-    provider: &ProviderHandle,
-    store: &CredentialStore,
-    catalog: &mut ModelCatalog<LiveSource>,
-    info: &SessionInfo<'_>,
+    ctx: &mut CommandCtx<'_>,
 ) -> io::Result<()> {
+    let info = ctx.info;
     let trimmed = text.trim();
     match lookup_command(trimmed) {
         Some((cmd, arg)) => match cmd.name {
@@ -2799,7 +2835,7 @@ fn route_submit(
             "/copy" => cmd_copy(&mut tui.app),
             "/export" => cmd_export(&mut tui.app, arg, info),
             "/model" => {
-                pick_model(tui, provider, store, catalog, info)?;
+                pick_model(tui, ctx)?;
             }
             // The viewport blanks immediately; the worker rebuilds the session.
             "/clear" => {
@@ -2835,10 +2871,7 @@ fn cmd_help(app: &mut App) {
         .collect();
     let width = names.iter().map(String::len).max().unwrap_or(0);
     for (n, c) in names.iter().zip(SLASH_COMMANDS) {
-        app.handle(Event {
-            id,
-            kind: Kind::Dim(format!("{n:<width$}   {}", c.help)),
-        });
+        app.push_note(id, format!("{n:<width$}   {}", c.help));
     }
 }
 
@@ -2858,12 +2891,12 @@ fn cmd_copy(app: &mut App) {
     let id = app.root;
     let reply = app.latest_reply();
     if reply.is_empty() {
-        note_error(app, id, "no reply to copy yet".into());
+        app.push_error(id, "no reply to copy yet".into());
         return;
     }
     let payload = tail_bytes(&reply, YANK_CAP);
     if let Err(e) = osc52_copy(payload) {
-        note_error(app, id, format!("clipboard write failed: {e}"));
+        app.push_error(id, format!("clipboard write failed: {e}"));
         return;
     }
     let note = if payload.len() < reply.len() {
@@ -2871,10 +2904,7 @@ fn cmd_copy(app: &mut App) {
     } else {
         format!("[copied the latest reply — {} lines]", reply.lines().count())
     };
-    app.handle(Event {
-        id,
-        kind: Kind::Dim(note),
-    });
+    app.push_note(id, note);
 }
 
 /// Write the focused tab's user view — its rendered `user.log` — to `arg`, a
@@ -2885,27 +2915,24 @@ fn cmd_copy(app: &mut App) {
 fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
     let id = app.root;
     if arg.is_empty() {
-        note_error(app, id, "usage: /export <path>".into());
+        app.push_error(id, "usage: /export <path>".into());
         return;
     }
     let dest = resolve_export_path(arg, info.cwd);
     if dest.exists() {
-        note_error(app, id, format!("refusing to overwrite {}", dest.display()));
+        app.push_error(id, format!("refusing to overwrite {}", dest.display()));
         return;
     }
     let src = match app.flush_focused_log() {
         Ok(p) => p,
         Err(e) => {
-            note_error(app, id, format!("could not flush transcript: {e}"));
+            app.push_error(id, format!("could not flush transcript: {e}"));
             return;
         }
     };
     match viewport::export_log(&src, &dest) {
-        Ok(_) => app.handle(Event {
-            id,
-            kind: Kind::Dim(format!("[exported user view to {}]", dest.display())),
-        }),
-        Err(e) => note_error(app, id, format!("could not write {}: {e}", dest.display())),
+        Ok(_) => app.push_note(id, format!("[exported user view to {}]", dest.display())),
+        Err(e) => app.push_error(id, format!("could not write {}: {e}", dest.display())),
     }
 }
 
@@ -2915,13 +2942,8 @@ fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
 /// over the same transcript, the [`ProviderHandle`] is swapped (taking effect on
 /// the worker's next turn), the saved selection is updated, and the status bar
 /// follows.
-fn pick_model(
-    tui: &mut Tui,
-    provider: &ProviderHandle,
-    store: &CredentialStore,
-    catalog: &mut ModelCatalog<LiveSource>,
-    info: &SessionInfo<'_>,
-) -> io::Result<()> {
+fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) -> io::Result<()> {
+    let store = ctx.store;
     let available = store.available();
     // Each plan-backed provider's flavour, for the picker's labels: a ChatGPT
     // login (the OAuth credential) reads as the ChatGPT plan, an otherwise-
@@ -2960,7 +2982,7 @@ fn pick_model(
                 picker.set_models(id, picker::ModelsState::Loaded(models));
                 return false;
             }
-            match catalog.cached(id) {
+            match ctx.catalog.cached(id) {
                 Some(models) => {
                     picker.set_models(id, picker::ModelsState::Loaded(models));
                     false
@@ -2972,7 +2994,7 @@ fn pick_model(
     if !to_fetch.is_empty() {
         let (tx, recv) = std::sync::mpsc::channel();
         for id in to_fetch {
-            let source = catalog.source().clone();
+            let source = ctx.catalog.source().clone();
             let tx = tx.clone();
             std::thread::spawn(move || {
                 let result = source.list(&id);
@@ -2982,10 +3004,10 @@ fn pick_model(
         rx = Some(recv);
     }
     tui.app.picker = Some(picker);
-    let outcome = drive_picker(tui, store, catalog, rx);
+    let outcome = drive_picker(tui, store, ctx.catalog, rx);
     tui.app.picker = None;
     if let Some((id, model)) = outcome {
-        apply_model_switch(tui, provider, store, info, id, model);
+        apply_model_switch(tui, ctx, id, model);
     }
     Ok(())
 }
@@ -3041,7 +3063,7 @@ fn drive_picker(
                     Ok(id) => return Some((id, query)),
                     Err(e) => {
                         let root = tui.app.root;
-                        note_error(&mut tui.app, root, e);
+                        tui.app.push_error(root, e);
                     }
                 }
             }
@@ -3054,18 +3076,25 @@ fn drive_picker(
 /// turn reads it), persist the selection to the project state dir, and update
 /// the live status bar. A persistence failure is noted but does not undo the
 /// in-memory switch.
+///
+/// A model switch is a *real* operational event, so it goes through `emit` —
+/// the UI-thread recording emitter carrying the root's transcript — as a
+/// [`Kind::SystemNote`].  It records in the trace and draws through the normal
+/// bus path, like a worker-raised note; the UI never fabricates an `Event` for
+/// it.  Its own failures, by contrast, are view chrome ([`App::push_error`]).
 fn apply_model_switch(
     tui: &mut Tui,
-    provider: &ProviderHandle,
-    store: &CredentialStore,
-    info: &SessionInfo<'_>,
+    ctx: &CommandCtx<'_>,
     provider_id: provider::ProviderId,
     model: String,
 ) {
+    let provider = ctx.provider;
+    let store = ctx.store;
+    let info = ctx.info;
+    let emit = ctx.emit;
     let id = tui.app.root;
     let Some(cred) = store.get(&provider_id).cloned() else {
-        note_error(
-            &mut tui.app,
+        tui.app.push_error(
             id,
             format!("{} has no resolved credential", provider_id.label()),
         );
@@ -3083,21 +3112,10 @@ fn apply_model_switch(
     tui.app.set_status_model(&status_provider, &model);
     let state_dir = crate::bootstrap::project_dir(info.cwd);
     if let Err(e) = state::save(&state_dir, &state::State::new(&provider_id, &model)) {
-        note_error(&mut tui.app, id, format!("could not persist selection: {e}"));
+        tui.app
+            .push_error(id, format!("could not persist selection: {e}"));
     }
-    tui.app.handle(Event {
-        id,
-        kind: Kind::Dim(format!("[switched to {label} {model}]")),
-    });
-}
-
-/// Push an error line into the App's transcript — the UI-thread twin of
-/// `session.note_error`, for the view commands that surface their own failures.
-fn note_error(app: &mut App, id: SessionId, message: String) {
-    app.handle(Event {
-        id,
-        kind: Kind::Error(message),
-    });
+    emit.emit(Kind::SystemNote(format!("[switched to {label} {model}]")));
 }
 
 fn ctrl_key(k: &KeyEvent, c: char) -> bool {

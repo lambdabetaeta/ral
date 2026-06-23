@@ -20,9 +20,7 @@ applied to kit content, now applied to the **event vocabulary and where it is
 recorded**: name the *role* of a thing, not its appearance, and record it once at
 the point it is announced.
 
-The session-owned trace and the `Kind::Nudge` recording (below) have **landed**.
-The vocabulary rename, the removal of operational notes from the model view, and
-the screen-never-invents-events cleanup are the **remaining** parcels.
+All of this is **implemented**.
 
 ## The diagnosis
 
@@ -66,7 +64,7 @@ same fact, and three shortcuts were harmless that are not harmless now.
 
 ## The decision
 
-### A per-session operational trace, fed at the emit seam — *landed*
+### A per-session operational trace, fed at the emit seam
 
 `transcript.jsonl` is owned by the [`Session`](../../../exarch/src/session.rs),
 created in `Session::assemble` beside its `events.json`, so the root and every
@@ -81,7 +79,7 @@ operational events only — the rendering-only `Card`, the card half of a
 `Kind::Io`, and `Kind::Phase` project to nothing (`exarch/src/transcript.rs`
 `event_record`); their place is the rendered `user.log`.
 
-### Nudges are operational — *landed*
+### Nudges are operational
 
 A driver nudge is the harness re-prompting the model; it is something that
 happened, not a thing drawn. `Kind::Nudge { used, max, cause }`
@@ -177,9 +175,9 @@ events that arrive, and draw its own local decoration — and each former
 - The screen is a pure consumer again: it draws events and its own chrome, and can
   no longer fabricate durable state.
 
-## Implementation plan (remaining)
+## Implementation plan
 
-Landable in order; each compiles and the suite passes between steps.
+Landed in order; each compiled and the suite passed between steps.
 
 ```
 1  Rename       Kind::Dim -> Kind::SystemNote; render dim in tui + headless; trace projects "system_note"
@@ -189,8 +187,11 @@ Landable in order; each compiles and the suite passes between steps.
 5  Drop          remove the "nothing to compact" note entirely
 ```
 
-No new tests; the `event.rs` `Dim` tests (`exarch/src/event.rs`) are updated or
-removed as the rename and removal break them.
+No new tests; the `event.rs` `Dim` round-trip test was rewritten to assert only
+the model-view breadcrumbs (`Error`, `Nudge`) that remain. Threading the
+UI-thread emitter through the command path bundled the picker handles into a
+`CommandCtx` (`exarch/src/tui.rs`), so `ui_loop` → `route_submit` → `pick_model`
+→ `apply_model_switch` carry one context rather than a fistful of handles.
 
 ## See also
 

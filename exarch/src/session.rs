@@ -728,7 +728,7 @@ impl Session {
                 });
             }
             if truncated {
-                self.note_dim(
+                self.note(
                     "[turn truncated by the output cap mid-tool-call; dispatching the \
                      captured calls and continuing]"
                         .into(),
@@ -809,12 +809,12 @@ impl Session {
         // Keep the recent half verbatim; summarise the older prefix.
         let keep = suffix_keep_budget(self.log.history_bytes());
         let Some(plan) = self.log.plan_compaction(keep) else {
-            if requested {
-                self.note_dim("[nothing to compact]".into(), emit);
-            }
+            // No turn old enough to summarise.  This is a no-op, not an event:
+            // the absence of a `compacted` note already says nothing happened,
+            // and the worker has no honest way to draw view-only chrome.
             return;
         };
-        self.note_dim(format!("[compacting history: {detail} → summary]"), emit);
+        self.note(format!("[compacting history: {detail} → summary]"), emit);
         emit.emit(Kind::Phase("compacting history".into()));
         match provider.summarize(&self.system, plan.prefix_messages, summary_cap, token) {
             Ok(summary) => {
@@ -827,7 +827,7 @@ impl Session {
                     self.note_error(format!("compact failed: {e}"), emit);
                     return;
                 }
-                self.note_dim(
+                self.note(
                     format!("[compacted: now {} KB]", self.log.history_bytes() / 1024),
                     emit,
                 );
@@ -919,9 +919,12 @@ impl Session {
         emit.emit(Kind::Error(msg));
     }
 
-    pub(crate) fn note_dim(&mut self, text: String, emit: &Emitter) {
-        let _ = self.log.record_dim(text.clone());
-        emit.emit(Kind::Dim(text));
+    /// Emit an operational system note — a truncation recovery, a compaction
+    /// step.  Recorded in `transcript.jsonl` at the emit seam and surfaced on
+    /// the display dim; never written to the model-view `events.json`, since it
+    /// is not a message the model saw.
+    pub(crate) fn note(&self, text: String, emit: &Emitter) {
+        emit.emit(Kind::SystemNote(text));
     }
 
     pub(crate) fn run_shell(
