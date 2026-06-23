@@ -4,141 +4,136 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ral — a typed, capability-secure shell</title>
-  <meta name="description" content="ral is a Unix shell built on one idea: running an external command is an algebraic effect. Typed commands, scoped authority, and a sandbox, all from a single principle.">
+  <meta name="description" content="ral is a Unix shell built on one idea: running a command is an algebraic effect. It separates values from commands — typed output, scoped authority, and a sandbox all fall out of a single principle.">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,400;0,500;0,600;1,400;1,500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="site.css">
   <link rel="stylesheet" href="index.css">
-  <script>
-    (function () {
-      var s = localStorage.getItem('ral-theme');
-      if (!s) s = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-      if (s === 'dark') document.documentElement.classList.add('dark');
-    })();
-  </script>
 </head>
 <body>
   <nav class="menubar" aria-label="Documentation">
-    <a class="menu-item" href="index.html">ral</a>
+    <a class="menu-item current" href="index.html">ral</a>
     <a class="menu-item" href="tutorial.html">Tutorial</a>
     <a class="menu-item" href="spec.html">Spec</a>
     <a class="menu-item" href="rationale.html">Rationale</a>
     <a class="menu-item" href="examples.html">Examples</a>
     <span class="spacer"></span>
     <a class="menu-item" href="exarch/index.html">exarch<span class="ext"> ↗</span></a>
-    <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch theme">
-      <span class="glyph" id="theme-glyph">☀</span><span id="theme-label">light</span>
-    </button>
   </nav>
 
-  <main>
+  <aside class="burst">
+    <span class="burst-text">Now powering the <a href="exarch/index.html"><code>exarch</code></a> coding agent</span>
+  </aside>
 
-    <div class="window" id="hero">
-      <div class="titlebar">
-        <span class="menu-box app-icon" aria-hidden="true">!{}</span>
-        <span class="title-text">ral</span>
-      </div>
-      <div class="window-body">
-        <div class="hero-body">
-          <p class="sigil" aria-hidden="true">!{}</p>
-          <h1 class="wordmark">ral</h1>
-          <p class="thesis">Running a command is an <em>algebraic effect</em>.</p>
-          <p class="subthesis">A typed shell that separates values and commands.</p>
-        </div>
-      </div>
-    </div>
+  <main id="top">
 
-    <div class="window" id="taste">
-      <div class="window-body">
-        <div class="taste-body">
-          <p class="taste-lead">In ral, output comes back as typed data, not text. Capture a command and you get a record or a list to work with — and when you fan work across cores, failures return as values instead of vanishing down a pipe.</p>
-          <div class="compare">
-            <div class="panel">
-              <div class="panel-label">bash</div>
+    <section class="hero">
+      <p class="sigil" aria-hidden="true"><span class="bang">!</span><span class="brace">{}</span></p>
+      <h1 class="wordmark">ral</h1>
+      <p class="thesis">Running a command is an <em>algebraic effect</em>.</p>
+      <p class="subthesis">A typed shell that separates values and commands.</p>
+    </section>
+
+    <section class="duality" aria-label="value versus command">
+      <div class="duo val">
+        <span class="duo-sigil" aria-hidden="true">$</span>
+        <span class="duo-label">value</span>
+        <p class="duo-line">A value <em>is</em>.</p>
+        <p class="duo-note">Inert data — a list, a record, JSON. You read it; you never run it.</p>
+      </div>
+      <div class="seam" aria-hidden="true"></div>
+      <div class="duo cmd">
+        <span class="duo-sigil" aria-hidden="true">!</span>
+        <span class="duo-label">command</span>
+        <p class="duo-line">A command <em>does</em>.</p>
+        <p class="duo-note">An effect — output to catch, failure to handle, authority to confine.</p>
+      </div>
+    </section>
+
+    <section class="prose">
+      <p class="eyebrow">the two sigils</p>
+      <p>A value is a noun, a command a verb, and ral writes the difference into
+      the notation itself: <code class="val">$</code> retrieves a value,
+      <code class="cmd">!</code> runs a stored command. One asks for data, the
+      other does something — and the shell's oldest ambiguity, between inert text
+      and a live instruction, has nowhere left to live.</p>
+    </section>
+
+    <section class="taste" aria-label="bash versus ral">
+      <p class="eyebrow">the same job, twice</p>
+      <p class="taste-lead">In ral, output comes back as typed data, not text.
+      Capture a command and you get a record or a list to work with — and when you
+      fan work across cores, failures return as values instead of vanishing down a
+      pipe.</p>
+      <div class="compare">
+        <div class="panel bash">
+          <div class="panel-label">bash</div>
 <pre><span class="c"># which URLs failed? you don't find out.</span>
 cat urls.txt | xargs -P8 -I{} \
   curl -fsSL -o "out/$(basename {})" {}</pre>
-            </div>
-            <div class="panel">
-              <div class="panel-label">ral</div>
+        </div>
+        <div class="seam" aria-hidden="true"></div>
+        <div class="panel ral">
+          <div class="panel-label">ral</div>
 <pre><span class="k">let</span> urls = from-lines-list <span class="s">'urls.txt'</span>
 <span class="k">let</span> report = <span class="k">par</span> { |u|
     <span class="k">try</span> {
-        <span class="k">let</span> body = curl -fsSL $u
-        <span class="k">return</span> [url: $u, ok: true, bytes: !{length $body}]
-    } { |e| <span class="k">return</span> [url: $u, ok: false, bytes: 0] }
-} $urls 8
-to-json $report &gt; <span class="s">'manifest.json'</span></pre>
-            </div>
-          </div>
+        <span class="k">let</span> body = curl -fsSL <span class="v">$u</span>
+        <span class="k">return</span> [url: <span class="v">$u</span>, ok: true, bytes: <span class="bang">!</span>{length <span class="v">$body</span>}]
+    } { |e| <span class="k">return</span> [url: <span class="v">$u</span>, ok: false, bytes: 0] }
+} <span class="v">$urls</span> 8
+to-json <span class="v">$report</span> &gt; <span class="s">'manifest.json'</span></pre>
         </div>
       </div>
-    </div>
+    </section>
 
-    <div class="window" id="manifesto">
-      <div class="window-body">
-        <div class="manifesto">
-          <p>Separate data from commands, and the data half becomes something a
-          shell has never been: a small, purely functional language. Variables
-          don't mutate, so a name means one thing throughout. There are no
-          subshells, no <code>$(...)</code> — you build data up and take it apart
-          with <code>map</code>, <code>filter</code>, and <code>fold</code>, the
-          way you would in any functional language.</p>
-          <p>Purity isn't decoration here; it pays. Because nothing mutates,
-          running work in parallel loses its usual hazards: fan a job across a
-          pool of workers and there are no locks and no races, and the results
-          come back in the order you sent them. And because a captured value is
-          data, not text, it has a type — a list, a record, JSON — instead of a
-          string you have to re-split and re-quote by hand.</p>
-          <p>A command is a system call, and ral owns the moment it runs: catch
-          its output into a typed variable, catch its failure, substitute your
-          own interpretation, or confine it in an OS sandbox — which files
-          it may touch, which programs it may run, whether the network is
-          reachable — set up before it starts. And because every command
-          passes through ral, you can audit the whole tree a script produced:
-          every command run, its arguments, its output, and the permission
-          decisions that framed it.</p>
-        </div>
-      </div>
-    </div>
+    <section class="prose">
+      <p class="eyebrow">what falls out</p>
+      <p>Once they are apart, the data half becomes something a shell has never
+      been: a small, purely functional language. Variables don't mutate, so a name
+      means one thing throughout. There are no subshells, no <code>$(...)</code> —
+      you build data up and take it apart with <code>map</code>,
+      <code>filter</code>, and <code>fold</code>, the way you would in any
+      functional language.</p>
+      <p>Purity isn't decoration here; it pays. Because nothing mutates, running
+      work in parallel loses its usual hazards: fan a job across a pool of workers
+      and there are no locks and no races, and the results come back in the order
+      you sent them. And because a captured value is data, not text, it has a type
+      — a list, a record, JSON — instead of a string you have to re-split and
+      re-quote by hand.</p>
+      <p>A command is a system call, and ral owns the moment it runs: catch its
+      output into a typed variable, catch its failure, substitute your own
+      interpretation, or confine it in an OS sandbox — which files it may touch,
+      which programs it may run, whether the network is reachable — set up before
+      it starts. And because every command passes through ral, you can audit the
+      whole tree a script produced: every command run, its arguments, its output,
+      and the permission decisions that framed it.</p>
+    </section>
 
-    <div class="window" id="install-win">
-      <div class="titlebar">
-        <span class="menu-box" aria-hidden="true"></span>
-        <span class="title-text">shell</span>
+    <section class="get">
+      <p class="eyebrow">get ral</p>
+      <div class="install">
+        <span class="install-prompt" aria-hidden="true">$</span>
+        <code class="install-cmd" id="install-cmd" role="button" tabindex="0"
+              aria-label="Copy install command to clipboard">curl -fsSL https://lambdabetaeta.github.io/ral/scripts/install.sh | sh</code>
+        <button class="btn" id="install-copy" type="button" aria-live="polite">copy</button>
       </div>
-      <div class="window-body">
-        <div class="install-body">
-          <span class="install-prompt" aria-hidden="true">$</span>
-          <code class="install-cmd" id="install-cmd" role="button" tabindex="0"
-                aria-label="Copy install command to clipboard">curl -fsSL https://lambdabetaeta.github.io/ral/scripts/install.sh | sh</code>
-          <button class="btn" id="install-copy" type="button" aria-live="polite">copy</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="window" id="downloads">
-      <div class="titlebar">
-        <span class="menu-box" aria-hidden="true"></span>
-        <span class="title-text">downloads</span>
-      </div>
-      <div class="window-body">
-        <div class="dl-body">
-          <div class="dl-grid">
+      <div class="downloads">
+        <div class="dl-grid">
 {{DOWNLOAD_GROUPS}}
-          </div>
-          <div class="dl-src">
-            <span class="label">source:</span>
-            <a class="dl-btn" href="https://github.com/lambdabetaeta/ral/archive/refs/heads/main.tar.gz" download>.tar.gz</a>
-            <a class="dl-btn" href="https://github.com/lambdabetaeta/ral/archive/refs/heads/main.zip" download>.zip</a>
-          </div>
+        </div>
+        <div class="dl-src">
+          <span class="label">source:</span>
+          <a class="dl-btn" href="https://github.com/lambdabetaeta/ral/archive/refs/heads/main.tar.gz" download>.tar.gz</a>
+          <a class="dl-btn" href="https://github.com/lambdabetaeta/ral/archive/refs/heads/main.zip" download>.zip</a>
         </div>
       </div>
-    </div>
+    </section>
 
     <section class="foundations">
+      <p class="eyebrow center">foundations</p>
       <p>None of this is improvised. Separating values from commands is
       <em>call-by-push-value</em> (Levy); treating a command as an operation
       whose interpretation is supplied separately is <em>algebraic effects</em>
@@ -156,14 +151,15 @@ to-json $report &gt; <span class="s">'manifest.json'</span></pre>
 
   <script>
     (function () {
-      /* ── install copy ── */
       var cmd  = document.getElementById('install-cmd');
       var copy = document.getElementById('install-copy');
       var text = cmd.textContent.trim();
+      var timer;
       function flash() {
         copy.textContent = 'copied';
         copy.classList.add('done', 'pressed');
-        setTimeout(function () {
+        clearTimeout(timer);
+        timer = setTimeout(function () {
           copy.textContent = 'copy';
           copy.classList.remove('done', 'pressed');
         }, 1800);
@@ -180,23 +176,6 @@ to-json $report &gt; <span class="s">'manifest.json'</span></pre>
       cmd.addEventListener('click', doCopy);
       cmd.addEventListener('keydown', function (e) {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); doCopy(); }
-      });
-
-      /* ── theme toggle ── */
-      var root  = document.documentElement;
-      var btn   = document.getElementById('theme-toggle');
-      var glyph = document.getElementById('theme-glyph');
-      var label = document.getElementById('theme-label');
-      function syncToggle() {
-        var dark = root.classList.contains('dark');
-        glyph.textContent = dark ? '☾' : '☀';
-        label.textContent = dark ? 'dark' : 'light';
-      }
-      syncToggle();
-      btn.addEventListener('click', function () {
-        root.classList.toggle('dark');
-        localStorage.setItem('ral-theme', root.classList.contains('dark') ? 'dark' : 'light');
-        syncToggle();
       });
     })();
   </script>

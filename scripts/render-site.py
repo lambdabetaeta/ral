@@ -88,16 +88,9 @@ def doc_page(title: str, body: str, titlebar: str | None = None,
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,400;0,500;0,600;1,400;1,500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="site.css">
   <link rel="stylesheet" href="doc.css">
-  <script>
-    (function () {{
-      var s = localStorage.getItem('ral-theme');
-      if (!s) s = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-      if (s === 'dark') document.documentElement.classList.add('dark');
-    }})();
-  </script>
 </head>
 <body>
   <nav class="menubar" aria-label="Documentation">
@@ -108,9 +101,6 @@ def doc_page(title: str, body: str, titlebar: str | None = None,
     <a class="menu-item" href="examples.html">Examples</a>{toc}
     <span class="spacer"></span>
     <a class="menu-item" href="exarch/index.html">exarch<span class="ext"> &#8599;</span></a>
-    <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch theme">
-      <span class="glyph" id="theme-glyph">&#9788;</span><span id="theme-label">light</span>
-    </button>
   </nav>
   <main>
     <div class="window">
@@ -126,25 +116,6 @@ def doc_page(title: str, body: str, titlebar: str | None = None,
   <footer class="footer">
     &copy; <a href="https://www.lambdabetaeta.eu">G. A. Kavvos</a>
   </footer>
-  <script>
-    (function () {{
-      var root  = document.documentElement;
-      var btn   = document.getElementById('theme-toggle');
-      var glyph = document.getElementById('theme-glyph');
-      var label = document.getElementById('theme-label');
-      function syncToggle() {{
-        var dark = root.classList.contains('dark');
-        glyph.textContent = dark ? '\u263E' : '\u2600';
-        label.textContent = dark ? 'dark' : 'light';
-      }}
-      syncToggle();
-      btn.addEventListener('click', function () {{
-        root.classList.toggle('dark');
-        localStorage.setItem('ral-theme', root.classList.contains('dark') ? 'dark' : 'light');
-        syncToggle();
-      }});
-    }})();
-  </script>
 </body>
 </html>
 """

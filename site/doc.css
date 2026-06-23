@@ -1,5 +1,7 @@
-/* doc.css — long-form reading page styles.
-   Shared tokens, menubar, window, footer live in site.css. */
+/* doc.css — long-form reading pages (tutorial, spec, rationale, examples).
+   A typeset monograph on the instrument plate: serif body, mono machine voice
+   for headings' kickers and code.  Shared tokens, menubar, window, footer live
+   in site.css. */
 
 html {
   font-weight: 400;
@@ -19,81 +21,86 @@ main {
 /* ── article ── */
 article {
   padding: 2rem 1.8rem;
-  font-size: 1.0rem;
-  line-height: 1.72;
-  color: var(--ink);
+  font-family: var(--serif);
+  font-size: 1.06rem;
+  line-height: 1.74;
+  color: var(--text);
 }
 article h1 {
-  font-family: var(--sans);
-  font-size: clamp(1.8rem, 5vw, 2.4rem);
+  font-family: var(--serif);
+  font-size: clamp(1.9rem, 5vw, 2.5rem);
   font-weight: 600;
   line-height: 1.2;
-  color: var(--ink);
+  color: var(--text);
   margin-bottom: 1.5rem;
   padding-bottom: 0.6rem;
   border-bottom: 2px solid var(--accent);
 }
 article h2 {
-  font-family: var(--sans);
-  font-size: 1.35rem;
+  font-family: var(--serif);
+  font-size: 1.4rem;
   font-weight: 600;
-  color: var(--ink);
+  color: var(--text);
   margin: 2.5rem 0 0.75rem;
 }
 article h3 {
-  font-family: var(--sans);
-  font-size: 1.12rem;
+  font-family: var(--serif);
+  font-size: 1.15rem;
   font-weight: 600;
   color: var(--accent);
   margin: 1.8rem 0 0.5rem;
 }
 article h4 {
-  font-family: var(--sans);
-  font-size: 0.98rem;
+  font-family: var(--mono);
+  font-size: 0.78rem;
   font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
   color: var(--muted);
-  letter-spacing: 0.02em;
   margin: 1.4rem 0 0.4rem;
 }
 article p { margin-bottom: 1.1rem; }
 article ul, article ol { margin: 0.6rem 0 1.1rem 1.6rem; }
 article li { margin-bottom: 0.4rem; }
 article li > ul, article li > ol { margin-bottom: 0.2rem; }
-article strong { color: var(--ink); font-weight: 600; }
+article strong { color: var(--text); font-weight: 600; }
 article em { font-style: italic; }
+article a { color: var(--accent); }
+article a:hover { color: var(--accent-2); }
 
 /* ── code ── */
 article code {
   font-family: var(--mono);
-  font-size: 0.86em;
-  color: var(--accent);
-  background: var(--desktop);
-  padding: 0.05em 0.3em;
-  border: 1px solid var(--face-mid);
-  box-shadow: inset 1px 1px 0 var(--face-lo), inset -1px -1px 0 var(--face-hi);
+  font-size: 0.85em;
+  color: var(--val);
+  background: var(--panel);
+  padding: 0.05em 0.32em;
+  border: 1px solid var(--line);
+  border-radius: 2px;
 }
 article pre {
   font-family: var(--mono);
   font-size: 0.85rem;
   line-height: 1.7;
-  background: var(--desktop);
-  border: 1px solid var(--face-mid);
-  box-shadow: inset 1px 1px 0 var(--face-lo);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  box-shadow:
+    inset  1px  1px 0 var(--bevel-hi),
+    inset -1px -1px 0 var(--bevel-lo);
   padding: 1rem 1.2rem;
   margin: 1rem 0 1.4rem;
   overflow-x: auto;
   scrollbar-width: thin;
-  scrollbar-color: var(--face-lo) transparent;
+  scrollbar-color: var(--line) transparent;
 }
 article pre::-webkit-scrollbar { height: 4px; }
-article pre::-webkit-scrollbar-thumb { background: var(--face-lo); }
+article pre::-webkit-scrollbar-thumb { background: var(--line); }
 article pre code {
   font-size: inherit;
-  color: var(--ink);
+  color: var(--text);
   background: none;
   border: none;
   padding: 0;
-  box-shadow: none;
 }
 
 /* ── blockquote, rule, table ── */
@@ -106,7 +113,7 @@ article blockquote {
 }
 article hr {
   border: none;
-  border-top: 1px solid var(--face-mid);
+  border-top: 1px solid var(--line);
   margin: 2.5rem 0;
 }
 article table {
@@ -116,11 +123,11 @@ article table {
   font-size: 0.92rem;
 }
 article th, article td {
-  border: 1px solid var(--face-mid);
+  border: 1px solid var(--line);
   padding: 0.5rem 0.85rem;
   text-align: left;
 }
-article th { color: var(--ink); font-weight: 600; }
+article th { color: var(--text); font-weight: 600; background: var(--panel); }
 
 /* ── examples page ── */
 article > p.intro {
@@ -133,7 +140,7 @@ section.example h2 {
   font-size: 1.2rem;
   margin: 0 0 0.5rem;
   padding-bottom: 0.4rem;
-  border-bottom: 1px solid var(--face-mid);
+  border-bottom: 1px solid var(--line);
 }
 section.example h2 .name {
   font-family: var(--mono);
@@ -161,39 +168,37 @@ section.example pre.source { margin: 0; }
 }
 .raw-link:hover { color: var(--accent); }
 
-/* ── tree-sitter syntax highlighting (CSS classes, theme-aware) ── */
-pre.source .comment              { color: var(--muted); font-style: italic; }
-pre.source .keyword              { color: var(--kw); font-weight: 600; }
-pre.source .keyword.return       { color: var(--kw); }
-pre.source .keyword.control      { color: var(--kw); }
-pre.source .keyword.control.conditional { color: var(--kw); }
-pre.source .keyword.import       { color: var(--kw); }
-pre.source .keyword.operator     { color: var(--ink-2); }
-pre.source .string               { color: var(--str); }
-pre.source .string.escape        { color: var(--kw); }
-pre.source .number               { color: #9a5a1a; }
-pre.source .number.float         { color: #9a5a1a; }
-pre.source .boolean              { color: #9a5a1a; }
-pre.source .constant.builtin     { color: #9a5a1a; }
-pre.source .variable             { color: var(--ink); }
-pre.source .variable.builtin     { color: var(--accent); }
-pre.source .variable.parameter   { color: var(--ink); }
-pre.source .variable.declaration { color: var(--ink-2); }
-pre.source .function             { color: var(--accent); }
-pre.source .function.builtin     { color: var(--accent); }
-pre.source .function.call        { color: var(--accent); }
-pre.source .constructor          { color: var(--accent-2); }
-pre.source .operator             { color: var(--ink-2); }
-pre.source .property             { color: var(--str); }
-pre.source .embedded             { color: var(--accent-2); }
-pre.source .punctuation.bracket  { color: var(--muted); }
-pre.source .punctuation.delimiter { color: var(--muted); }
-pre.source .function-builtin     { color: var(--accent); }
-
-:root.dark pre.source .number           { color: #d48260; }
-:root.dark pre.source .number.float     { color: #d48260; }
-:root.dark pre.source .boolean          { color: #d48260; }
-:root.dark pre.source .constant.builtin { color: #d4a070; }
+/* ── tree-sitter syntax highlighting (CSS classes) ──
+   Values run cool, commands run warm — the same two temperatures as the
+   landing.  Strings and constructors are data (cool); keywords, functions, and
+   embedded commands are effects (warm); numbers and constants are gold. */
+pre.source .comment                      { color: var(--faint); font-style: italic; }
+pre.source .keyword                      { color: var(--kw); font-weight: 600; }
+pre.source .keyword.return               { color: var(--kw); }
+pre.source .keyword.control              { color: var(--kw); }
+pre.source .keyword.control.conditional  { color: var(--kw); }
+pre.source .keyword.import               { color: var(--kw); }
+pre.source .keyword.operator             { color: var(--ink-2); }
+pre.source .string                       { color: var(--str); }
+pre.source .string.escape                { color: var(--kw); }
+pre.source .number                       { color: var(--num); }
+pre.source .number.float                 { color: var(--num); }
+pre.source .boolean                      { color: var(--num); }
+pre.source .constant.builtin             { color: var(--num); }
+pre.source .variable                     { color: var(--text); }
+pre.source .variable.builtin             { color: var(--val); }
+pre.source .variable.parameter           { color: var(--text); }
+pre.source .variable.declaration         { color: var(--ink-2); }
+pre.source .function                     { color: var(--accent); }
+pre.source .function.builtin             { color: var(--accent); }
+pre.source .function.call                { color: var(--accent); }
+pre.source .constructor                  { color: var(--val); }
+pre.source .operator                     { color: var(--ink-2); }
+pre.source .property                     { color: var(--str); }
+pre.source .embedded                     { color: var(--accent); }
+pre.source .punctuation.bracket          { color: var(--muted); }
+pre.source .punctuation.delimiter        { color: var(--muted); }
+pre.source .function-builtin             { color: var(--accent); }
 
 /* ── responsive ── */
 @media (max-width: 36rem) {
