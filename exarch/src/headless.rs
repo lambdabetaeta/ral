@@ -49,8 +49,10 @@ pub struct Headless {
     /// When true, stdout carries a single JSON result object emitted at
     /// the end instead of the live token stream.
     json_mode: bool,
-    /// Highest root-session step number seen — the turn count surfaced
-    /// at the end and in the JSON result.
+    /// Cumulative count of root-session steps (LLM round-trips) — the
+    /// turn count surfaced at the end and in the JSON result. The
+    /// per-segment `Kind::Step(n)` index resets when the root resumes
+    /// after an async-spawned block, so this counts rather than tracks it.
     turns: u32,
     /// Last non-routine stop reason surfaced by the root, if any.
     last_stop: Option<String>,
@@ -287,7 +289,7 @@ impl Sink for Headless {
             Kind::Usage(u) => self.usage += u,
             Kind::Step(n) => {
                 if id == self.root_id {
-                    self.turns = n;
+                    self.turns += 1;
                     eprintln!("[step {n}]");
                 }
             }
@@ -469,5 +471,34 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&out).expect("result is JSON");
         assert_eq!(v["is_error"], serde_json::json!(true), "{out}");
         assert_eq!(v["stop_reason"], serde_json::json!("panicked"), "{out}");
+    }
+
+    /// `num_turns` is the cumulative count of root steps, not the last
+    /// per-segment index: the `Kind::Step(n)` index restarts each time the
+    /// root resumes after an async-spawned block, so storing `n` would
+    /// report only the final segment. Sub-agent steps must not count.
+    #[test]
+    fn num_turns_counts_root_steps_across_segments() {
+        let root: SessionId = 1;
+        let sub: SessionId = 2;
+        let path =
+            std::env::temp_dir().join(format!("exarch-turns-result-{}.jsonl", std::process::id()));
+        let file = File::create(&path).expect("events file");
+        let mut h = Headless::new(true, BufWriter::new(file), root);
+        // Two root segments whose per-segment indices reset (1..3, then
+        // 1..2), with a sub-agent step interleaved that must be ignored.
+        for n in [1, 2, 3, 1, 2] {
+            h.handle(Event {
+                id: root,
+                kind: Kind::Step(n),
+            });
+        }
+        h.handle(Event {
+            id: sub,
+            kind: Kind::Step(1),
+        });
+        let out = result_json(&h, &Ok(()), std::time::Duration::ZERO);
+        let v: serde_json::Value = serde_json::from_str(&out).expect("result is JSON");
+        assert_eq!(v["num_turns"], serde_json::json!(5), "{out}");
     }
 }
