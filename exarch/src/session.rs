@@ -1115,10 +1115,11 @@ fn announce(turn: &Turn, emit: &Emitter) {
 fn agent_digest(r: &Result<TurnOutcome, ProviderError>) -> (AgentOutcome, Option<serde_json::Value>) {
     match r {
         Ok(TurnOutcome::Replied(v)) => match shell_eval::json_to_text(v) {
-            // A null or empty-string reply is a deliberate empty return.
-            None => (AgentOutcome::Empty, None),
-            Some(s) if s.is_empty() => (AgentOutcome::Empty, None),
-            Some(_) => (AgentOutcome::Complete, Some(v.clone())),
+            // Any value that renders to text carries content; a null or
+            // empty-string reply (renders to nothing) is a deliberate empty
+            // return.
+            Some(s) if !s.is_empty() => (AgentOutcome::Complete, Some(v.clone())),
+            _ => (AgentOutcome::Empty, None),
         },
         // A finish without `reply`.  There is no scrape: a returning agent that
         // never replied did not complete its contract, so it fails honestly

@@ -78,15 +78,13 @@ impl ToolSet {
         }
     }
 
-    /// Whether `tool` is advertised and permitted under this set.
+    /// Whether `tool` is advertised and permitted under this set: it must
+    /// satisfy every axis it touches — a spawner needs `spawns`, a replier
+    /// needs `returns` — so a tool on neither axis is always allowed, and the
+    /// two axes are checked independently rather than assuming a tool sits on
+    /// at most one.
     pub(crate) fn allows(&self, tool: &dyn Tool) -> bool {
-        if tool.spawns() {
-            self.spawns
-        } else if tool.replies() {
-            self.returns
-        } else {
-            true
-        }
+        (!tool.spawns() || self.spawns) && (!tool.replies() || self.returns)
     }
 }
 
