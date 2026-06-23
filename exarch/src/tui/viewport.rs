@@ -72,17 +72,26 @@ pub(super) struct Viewport {
     /// a superseding `set_phase`).  `None` when the viewport is between
     /// phases, leaving the bar hidden.
     phase: Option<(String, Instant)>,
+    /// Kit-authored *state*: an ordered `key → Card` register, the
+    /// model-authored dual of the matrix.  Re-pinning a key overwrites its
+    /// card in place ([`Self::set_pin`]); `` `unpin `` drops it
+    /// ([`Self::drop_pin`]).  Rendered as the reserved right-hand register
+    /// column, never logged, and wiped by [`Self::reset`] so a pin is
+    /// generation-bounded exactly as [`Self::blocks`] is.  A `Vec` of pairs,
+    /// not a map, so render order is first-seen insertion order.
+    pins: Vec<(String, Card)>,
 }
 
-/// The visible slice of a viewport plus the figures the scrollbar needs.
+/// The visible slice of a viewport plus the scroll readout the rule line needs.
 pub(super) struct RenderWindow {
     pub(super) lines: Vec<Line<'static>>,
     pub(super) offset: usize,
-    pub(super) total: usize,
-    /// The scrollbar thumb's position, already mapped onto ratatui's
-    /// `[0, total-1]` cursor range and clamped — computed here beside the
-    /// `offset` it derives from, so the draw code never re-derives it.
-    pub(super) scrollbar_pos: usize,
+    /// How far the window has scrolled through the buffer, as a percent in
+    /// `0..=100`, or `None` when the whole buffer fits and there is nothing to
+    /// scroll.  Computed here beside the `offset` it derives from; the rule
+    /// line renders it as a fixed-position magnitude (`⇣ 72%`, `⇣ bot`) in
+    /// place of the deleted right-margin scrollbar.
+    pub(super) scroll_pct: Option<u16>,
 }
 
 /// Memoised whole-buffer flatten: every block's lines wrapped to `width`
@@ -206,6 +215,7 @@ impl Viewport {
             log_path,
             log_prev_blank: true,
             phase: None,
+            pins: Vec::new(),
         }
     }
 
@@ -294,6 +304,7 @@ impl Viewport {
         self.log = open_log(&self.log_path);
         self.log_prev_blank = true;
         self.phase = None;
+        self.pins.clear();
     }
 
     /// Final flush of the `user.log` at session end; lines are already
@@ -345,6 +356,30 @@ impl Viewport {
     /// coalescing projection never folds.
     pub(super) fn push_card(&mut self, card: Card) {
         self.push_block(Block::card(card));
+    }
+
+    // ── pinned state (the register) ────────────────────────────────────────
+    // The in-place analogue of `push_card`: a pin writes a keyed register slot
+    // instead of appending a block, and touches neither the flatten nor the
+    // log — pinned state is ambient, not scrollback.
+
+    /// Overwrite (or insert, keeping first-seen order) the register slot `key`.
+    pub(super) fn set_pin(&mut self, key: String, card: Card) {
+        match self.pins.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, slot)) => *slot = card,
+            None => self.pins.push((key, card)),
+        }
+    }
+
+    /// Drop the register slot `key`, if present.
+    pub(super) fn drop_pin(&mut self, key: &str) {
+        self.pins.retain(|(k, _)| k != key);
+    }
+
+    /// The pinned register slots in stable insertion order — the register
+    /// column's content for the focused session.
+    pub(super) fn pins(&self) -> &[(String, Card)] {
+        &self.pins
     }
 
     /// Append a structural I/O effect card.  `write` marks a write redirect
@@ -597,21 +632,13 @@ impl Viewport {
             self.tail_anchor = None;
         }
         let end = (self.offset + height).min(total);
-        // ratatui's `ScrollbarState` treats `position` as a cursor over
-        // `[0, total-1]`: the thumb only bottoms out at `position == total-1`
-        // (its `last()`).  Our `offset` is the first visible row, topping out
-        // at `total - height` — short by `height-1`, so without remapping the
-        // thumb never reaches the bottom (it stalls around 3/4 for a session a
-        // few times the viewport).  Map our scroll range onto ratatui's, and
-        // clamp: while head-anchored to a shrunken tail group `offset` runs
-        // past `max_off` (a gap opens below), which must not overshoot the
-        // cursor's top end.
-        let scrollbar_pos = self
-            .offset
-            .saturating_mul(total.saturating_sub(1))
-            .checked_div(max_off)
-            .unwrap_or(0)
-            .min(total.saturating_sub(1));
+        // Scroll position as a percentage of the scrollable range: `0%` at the
+        // top, `100%` once `offset` reaches `max_off` (the tail).  `None` when
+        // the whole buffer fits, so the rule line shows no readout.  `offset`
+        // is clamped to `max_off` because a head-anchored shrunken tail group
+        // can run it past the bottom (a gap opens below).
+        let scroll_pct = (max_off > 0)
+            .then(|| (self.offset.min(max_off) * 100 / max_off).min(100) as u16);
         // Committed rows fill the window up to the seat's row (`committed`);
         // the seat itself lands only once the window reaches past them — i.e.
         // the tail is in view.
@@ -624,8 +651,7 @@ impl Viewport {
         RenderWindow {
             lines,
             offset: self.offset,
-            total,
-            scrollbar_pos,
+            scroll_pct,
         }
     }
 
@@ -847,6 +873,38 @@ mod tests {
     fn viewport() -> Viewport {
         let path = std::env::temp_dir().join("exarch-streaming-seat-test.log");
         Viewport::new(path, AgentSlot(0))
+    }
+
+    /// The register is keyed state: a repeated key overwrites its slot in
+    /// place (no new slot, order preserved), `drop_pin` removes just that
+    /// slot, and `reset` wipes the whole register — the generation discipline
+    /// that bounds it to a session exactly as it bounds the scrollback.
+    #[test]
+    fn pins_overwrite_in_place_and_keep_insertion_order() {
+        use crate::card::Mark;
+        let raw = |b: &[u8]| Card(vec![Mark::Raw { bytes: b.to_vec() }]);
+        let keys = |vp: &Viewport| {
+            vp.pins()
+                .iter()
+                .map(|(k, _)| k.clone())
+                .collect::<Vec<_>>()
+        };
+        let mut vp = viewport();
+        vp.set_pin("tasks".into(), raw(b"v1"));
+        vp.set_pin("build".into(), raw(b"ok"));
+        assert_eq!(keys(&vp), ["tasks", "build"]);
+
+        // Re-pinning a key overwrites in place: no new slot, order unchanged,
+        // the card replaced.
+        vp.set_pin("tasks".into(), raw(b"v2"));
+        assert_eq!(keys(&vp), ["tasks", "build"]);
+        assert!(matches!(&vp.pins()[0].1.0[..], [Mark::Raw { bytes }] if bytes == b"v2"));
+
+        // Drop removes just the named slot; reset wipes the register.
+        vp.drop_pin("tasks");
+        assert_eq!(keys(&vp), ["build"]);
+        vp.reset();
+        assert!(vp.pins().is_empty(), "reset wipes the register");
     }
 
     /// While a response streams, the uncommitted `open` buffer renders as a

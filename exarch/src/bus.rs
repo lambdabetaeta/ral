@@ -710,6 +710,22 @@ pub enum Kind {
         event: IoEvent,
         card: Card,
     },
+    /// Kit-authored *state* pinned to a keyed register slot — the
+    /// model-authored dual of the matrix.  `surface `` `pin [key, body] ``
+    /// decodes here, writing `card` to slot `key` and **overwriting in place**
+    /// on re-pin.  Unlike [`Kind::Card`], a pin is neither logged nor landed in
+    /// scrollback: it is what is *currently true*, not a thing that happened, so
+    /// it is rendered ambiently in the reserved register column and updated
+    /// where it sits.
+    Pin {
+        key: String,
+        card: Card,
+    },
+    /// Drop a pinned register slot: `surface `` `unpin [key] ``, or a `` `pin ``
+    /// whose body is absent.  A finished plan clears its gauge.
+    Unpin {
+        key: String,
+    },
 }
 
 /// One grouped hunk of a whole-file diff, carried by a

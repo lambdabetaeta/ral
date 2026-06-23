@@ -24,6 +24,10 @@ use crate::session::TurnOutcome;
 /// on top of, the provider's inner retry budget.
 const BUDGET: u32 = 3;
 
+/// How many genuine turns elapse between pinned-state reminders.  A gentle
+/// cadence: often enough that a stale gauge is caught, rare enough not to nag.
+const REMIND_EVERY: u32 = 12;
+
 /// A firing rule: inspect the turn outcome and, when it matches, return
 /// the cause (for the forensic log) and the synthetic user message to
 /// continue with.  Walked in order; the first `Some` wins.
@@ -52,6 +56,10 @@ pub(crate) struct NudgeCtx {
     /// false for the root.  A sub-agent that finishes a tool-call-free step
     /// without having replied earns one reminder to call `reply`.
     pub must_reply: bool,
+    /// The model's current pinned state as a one-line description, or `None`
+    /// when nothing is pinned.  Drives the periodic pinned-state reminder so a
+    /// long-lived rail gauge does not drift out of the model's attention.
+    pub pinned: Option<String>,
 }
 
 /// Per-session nudge state.  Lives on the [`Session`](crate::session::Session)
@@ -69,6 +77,14 @@ pub(crate) struct Registry {
     /// finishes a tool-call-free step without calling `reply`: same contract —
     /// at most once per turn, budget-free.
     reply_nudged: bool,
+    /// Genuine turns since the last pinned-state reminder, bumped once per
+    /// turn-boundary message by [`Self::reset`].  Unlike the latches it
+    /// accumulates *across* turns; the reminder fires once it reaches
+    /// [`REMIND_EVERY`], then it returns to zero.
+    turns_since_pin_reminder: u32,
+    /// One-shot latch for the pinned-state reminder: at most once per turn,
+    /// budget-free, like the completion gates.
+    pin_reminded: bool,
 }
 
 impl Registry {
@@ -78,12 +94,16 @@ impl Registry {
             idle_nudged: false,
             verify_nudged: false,
             reply_nudged: false,
+            turns_since_pin_reminder: 0,
+            pin_reminded: false,
         }
     }
 
-    /// Reset the per-turn state — the retry budget and both one-shot latches.
-    /// Called by [`Session::drive`] on a genuine turn-boundary message, never
-    /// on a self-nudge (which is the same turn continuing).
+    /// Reset the per-turn state — the retry budget and the one-shot latches —
+    /// and count this turn toward the periodic pinned-state reminder.  Called
+    /// by [`Session::drive`] on a genuine turn-boundary message, never on a
+    /// self-nudge (which is the same turn continuing), so the turn counter
+    /// advances once per real turn.
     ///
     /// [`Session::drive`]: crate::session::Session::drive
     pub fn reset(&mut self) {
@@ -91,6 +111,8 @@ impl Registry {
         self.idle_nudged = false;
         self.verify_nudged = false;
         self.reply_nudged = false;
+        self.turns_since_pin_reminder += 1;
+        self.pin_reminded = false;
     }
 
     /// The one decider.  Walks [`RULES`] against `attempt`, optionally
@@ -144,6 +166,21 @@ impl Registry {
                     );
                     return Some(VERIFY_MESSAGE.into());
                 }
+            }
+            // A periodic, budget-free reminder of the model's pinned state —
+            // at most once per turn, only on a clean completion, only when
+            // something is pinned, and only every `REMIND_EVERY` turns — so a
+            // long-lived rail gauge stays in the model's attention without the
+            // kit having to nag for it.
+            if let Some(desc) = &ctx.pinned
+                && matches!(attempt, Ok(TurnOutcome::Complete(_)))
+                && !self.pin_reminded
+                && self.turns_since_pin_reminder >= REMIND_EVERY
+            {
+                self.pin_reminded = true;
+                self.turns_since_pin_reminder = 0;
+                let _ = log.record_nudge(self.used, BUDGET, "pinned-state reminder".into());
+                return Some(format!("{PIN_REMINDER_PREFIX}{desc}{PIN_REMINDER_SUFFIX}"));
             }
             surface_provider_error(attempt, emit, log);
             return None;
@@ -204,6 +241,14 @@ const REPLY_MESSAGE: &str = "You ended your turn without calling `reply`, so you
     receive nothing. Return your result now by calling `reply` — pass a markdown report as \
     `result`, or a JSON object/array for structured findings. This is the only way to hand \
     your work back; a final message on its own is not delivered.";
+
+/// The periodic pinned-state reminder, wrapped around the current pinned
+/// description.  Quiet and budget-free; kit-agnostic (it names no kit), so any
+/// kit that pins state earns it.
+const PIN_REMINDER_PREFIX: &str =
+    "Reminder — you have state pinned to the rail that the user is watching: ";
+const PIN_REMINDER_SUFFIX: &str =
+    ". Keep it current as your work moves on; if it is already accurate, just continue.";
 
 fn on_empty_turn(r: &Result<TurnOutcome, ProviderError>) -> Option<(String, &'static str)> {
     match r {
@@ -281,6 +326,7 @@ mod tests {
                     expect_action: false,
                     acted: false,
                     must_reply: false,
+                    pinned: None,
                 },
                 &emit(),
                 &mut log,
@@ -307,6 +353,7 @@ mod tests {
                     expect_action: false,
                     acted: false,
                     must_reply: false,
+                    pinned: None,
                 },
                 &emit(),
                 &mut log,
@@ -327,6 +374,7 @@ mod tests {
                 expect_action: false,
                 acted: false,
                 must_reply: false,
+                pinned: None,
             },
             &emit(),
             &mut log,
@@ -350,6 +398,7 @@ mod tests {
                         expect_action: false,
                         acted: false,
                         must_reply: false,
+                        pinned: None,
                     },
                     &emit(),
                     &mut log,
@@ -364,6 +413,7 @@ mod tests {
                     expect_action: false,
                     acted: false,
                     must_reply: false,
+                    pinned: None,
                 },
                 &emit(),
                 &mut log,
@@ -383,6 +433,7 @@ mod tests {
             expect_action: true,
             acted: false,
             must_reply: false,
+            pinned: None,
         };
         match reg.react(
             &Ok(TurnOutcome::Complete("essay".into())),
@@ -418,6 +469,7 @@ mod tests {
                     expect_action: false,
                     acted: false,
                     must_reply: false,
+                    pinned: None,
                 },
                 &emit(),
                 &mut log,
@@ -437,6 +489,7 @@ mod tests {
             expect_action: true,
             acted: true,
             must_reply: false,
+            pinned: None,
         };
         match reg.react(
             &Ok(TurnOutcome::Complete("done".into())),
@@ -471,6 +524,7 @@ mod tests {
             expect_action: false,
             acted: true,
             must_reply: true,
+            pinned: None,
         };
         match reg.react(
             &Ok(TurnOutcome::Complete("prose, no reply".into())),
@@ -507,6 +561,7 @@ mod tests {
                     expect_action: false,
                     acted: true,
                     must_reply: false,
+                    pinned: None,
                 },
                 &emit(),
                 &mut log,
@@ -526,6 +581,7 @@ mod tests {
             expect_action: true,
             acted: false,
             must_reply: false,
+            pinned: None,
         };
         // Spend the idle latch and a unit of budget.
         let _ = reg.react(&Ok(TurnOutcome::Empty), ctx(), &emit(), &mut log);
@@ -534,5 +590,60 @@ mod tests {
         reg.reset();
         assert_eq!(reg.used, 0, "reset clears the budget");
         assert!(!reg.idle_nudged && !reg.verify_nudged, "reset re-arms the gates");
+    }
+
+    /// With state pinned, the periodic reminder fires once on the twelfth
+    /// turn's clean completion — not before — and names the pinned state,
+    /// free of the retry budget.
+    #[test]
+    fn pinned_state_reminder_fires_every_twelfth_turn() {
+        let mut reg = Registry::new();
+        let mut log = fresh_log("pin-reminder");
+        let ctx = || NudgeCtx {
+            expect_action: false,
+            acted: false,
+            must_reply: false,
+            pinned: Some("tasks 3/8".into()),
+        };
+        // The first eleven turns count toward the reminder but do not fire it.
+        for _ in 1..REMIND_EVERY {
+            reg.reset();
+            assert!(
+                reg.react(&Ok(TurnOutcome::Complete("x".into())), ctx(), &emit(), &mut log)
+                    .is_none(),
+                "no reminder before the twelfth turn"
+            );
+        }
+        // The twelfth turn fires it, naming the pinned state.
+        reg.reset();
+        match reg.react(&Ok(TurnOutcome::Complete("x".into())), ctx(), &emit(), &mut log) {
+            Some(msg) => assert!(msg.contains("tasks 3/8"), "the reminder names the pinned state"),
+            None => panic!("the twelfth turn must remind"),
+        }
+        assert_eq!(reg.used, 0, "the pin reminder must not draw on the budget");
+    }
+
+    /// With nothing pinned, the reminder never fires however many turns pass.
+    #[test]
+    fn no_reminder_without_pinned_state() {
+        let mut reg = Registry::new();
+        let mut log = fresh_log("no-pin-reminder");
+        for _ in 0..(REMIND_EVERY + 3) {
+            reg.reset();
+            assert!(
+                reg.react(
+                    &Ok(TurnOutcome::Complete("x".into())),
+                    NudgeCtx {
+                        expect_action: false,
+                        acted: false,
+                        must_reply: false,
+                        pinned: None,
+                    },
+                    &emit(),
+                    &mut log,
+                )
+                .is_none()
+            );
+        }
     }
 }

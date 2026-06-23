@@ -148,7 +148,13 @@ pub(crate) fn event_record(t_ms: u128, id: SessionId, kind: &Kind) -> Option<ser
         // erases) for a post-mortem, alongside the card the rail drew.
         Kind::Io { event, card } => ("io", json!({ "event": event, "card": card })),
         Kind::Phase(label) => ("phase", json!({ "label": label })),
-        Kind::Token(_) | Kind::Boundary | Kind::UserPromptEcho(_) => return None,
+        // Pinned state is what is *currently true*, not a thing that happened —
+        // it is never an `events.json` row, exactly as the matrix is not.
+        Kind::Token(_)
+        | Kind::Boundary
+        | Kind::UserPromptEcho(_)
+        | Kind::Pin { .. }
+        | Kind::Unpin { .. } => return None,
     };
     let map = obj
         .as_object_mut()
@@ -355,6 +361,9 @@ impl Sink for Headless {
             | Kind::Died
             | Kind::UserPromptEcho(_)
             | Kind::Phase(_) => {}
+            // Pinned state is a TUI register; headless has no register to
+            // overwrite, so a pin neither prints nor logs.
+            Kind::Pin { .. } | Kind::Unpin { .. } => {}
         }
     }
 }

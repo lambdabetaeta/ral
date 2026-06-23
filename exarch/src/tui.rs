@@ -64,7 +64,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::Paragraph,
 };
 use ratatui_textarea::TextArea;
 use std::{
@@ -91,6 +91,15 @@ pub(super) const PROMPT_PAD_H: u16 = 1;
 /// Gives the marginal rail breathing room from the terminal edge so it
 /// reads as a Bertin data column rather than frame chrome.
 const LEFT_MARGIN: u16 = 2;
+/// Width of the pinned-state register column, in columns — a framed gauge
+/// (`│ tasks ▓▓░ 3/8 │`) plus its borders and a padding column each side.
+const REGISTER_W: u16 = 28;
+/// Minimum reading gap between the `READ_W`-capped transcript and the register
+/// column.  The register is reserved only when the content area is at least
+/// `LEFT_MARGIN + READ_W + REGISTER_GAP + REGISTER_W` wide — wide enough that
+/// reclaiming the dead right margin costs the transcript nothing; below that it
+/// collapses to the pin band.
+const REGISTER_GAP: u16 = 4;
 const ART: &str = include_str!("../data/banner.txt");
 const EAGLE: &str = include_str!("../data/eagle.txt");
 /// How long a subagent tab stays in the rotation after the session
@@ -728,6 +737,20 @@ impl App {
             // record already reached the transcript via `headless::event_record`
             // upstream of `handle`, so nothing is lost.
             Kind::Io { event, .. } => self.absorb_io(id, event),
+            // Pinned state: write or drop a register slot in place.  Routed
+            // directly, *not* through `with_viewport` — a pin is ambient state
+            // like `Kind::Usage`, never a scrollback barrier, so it must not
+            // flush the io/patch grouping windows the way a landing block does.
+            Kind::Pin { key, card } => {
+                if let Some(vp) = self.viewports.get_mut(&id) {
+                    vp.set_pin(key, card);
+                }
+            }
+            Kind::Unpin { key } => {
+                if let Some(vp) = self.viewports.get_mut(&id) {
+                    vp.drop_pin(&key);
+                }
+            }
         }
     }
 
@@ -890,11 +913,11 @@ impl App {
         self.flush_patch_buf();
     }
 
-    /// Redraw the whole frame: the focused session's visible rows and a
-    /// scrollbar fill the content area, with a blank breathing row, then
-    /// the tab bar, status row, prompt, and footer pinned beneath.  The
-    /// content geometry is stashed in [`Self::frame`] so the next mouse
-    /// event maps to a buffer row.
+    /// Redraw the whole frame: the focused session's visible rows fill the
+    /// content area's left, the pinned-state register column its right edge,
+    /// with a blank breathing row, then the tab bar, status row, prompt, and
+    /// footer pinned beneath.  The content geometry is stashed in
+    /// [`Self::frame`] so the next mouse event maps to a buffer row.
     pub fn draw(&mut self, term: &mut Term) -> io::Result<()> {
         let (cols, rows) = size().unwrap_or((READ_W, 24));
         let area = Rect::new(0, 0, cols, rows);
@@ -911,44 +934,66 @@ impl App {
         };
         // The pending-prompt strip above the input: messages the user queued
         // mid-turn, waiting for the next tool-result or turn boundary. Its
-        // width matches the content column (the scrollbar's column reserved),
-        // and its height is capped at a third of the screen so a long queue can
-        // never crowd the transcript off-screen.
+        // width matches the content column (capped at READ_W like the
+        // transcript), and its height is capped at a third of the screen so a
+        // long queue can never crowd the transcript off-screen.
         let queued = self.inbox.snapshot();
         let queued_lines = if queued.is_empty() {
             Vec::new()
         } else {
-            let w = area
-                .width
-                .saturating_sub(1)
-                .saturating_sub(LEFT_MARGIN)
-                .min(READ_W);
+            let w = area.width.saturating_sub(LEFT_MARGIN).min(READ_W);
             line::queued_prompt(&queued, w, (area.height / 3).max(1) as usize)
         };
         let queued_h = queued_lines.len() as u16;
+        // The register's vertical budget is decided here, before the layout:
+        // shown as the right-hand column when the focused session has pins and
+        // the terminal is wide enough to spare the margin, else collapsed to a
+        // one-row pin band beside the matrix.  `content.width == area.width`
+        // (the vertical split keeps full width), so the threshold reads off
+        // `area.width` directly.
+        let focused = self.focused();
+        let has_pins = self
+            .viewports
+            .get(&focused)
+            .is_some_and(|vp| !vp.pins().is_empty());
+        let show_register =
+            has_pins && area.width >= LEFT_MARGIN + READ_W + REGISTER_GAP + REGISTER_W;
+        let pin_band_h = (has_pins && !show_register) as u16;
         let layout = Layout::vertical([
             Constraint::Min(1),
             Constraint::Length(1), // breathing row between output and chrome
             Constraint::Length(tab_h),
+            Constraint::Length(pin_band_h), // collapsed register, beside the matrix
             Constraint::Length(queued_h),
             Constraint::Length(prompt_h),
             Constraint::Length(1), // rule_line: sits below prompt, above footer
             Constraint::Length(1),
         ])
         .split(area);
-        let (content, tab_row, queued_row, prompt_row, status_row, footer_row) = (
-            layout[0], layout[2], layout[3], layout[4], layout[5], layout[6],
+        let (content, tab_row, pin_band_row, queued_row, prompt_row, status_row, footer_row) = (
+            layout[0], layout[2], layout[3], layout[4], layout[5], layout[6], layout[7],
         );
-        // Reserve a left gutter and the rightmost scrollbar column of the
-        // content area; the gutter offsets the rail from the terminal edge.
-        let body = Layout::horizontal([
-            Constraint::Length(LEFT_MARGIN),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .split(content);
-        let (text_rect, sb_rect) = (body[1], body[2]);
-        // Inset the queued-prompt strip and rule line to share the
+        // Split the content row by hand into the rail's left gutter, the
+        // transcript, and — on a wide enough terminal — the register glued to
+        // the right edge.  No scrollbar: the right edge is the register's, and
+        // scroll position reads as a magnitude in the rule line.  Capping the
+        // transcript at READ_W (rather than letting it expand) is what keeps
+        // the register from ever narrowing prose: it claims only dead margin.
+        let text_w = if show_register {
+            READ_W
+        } else {
+            content.width.saturating_sub(LEFT_MARGIN)
+        };
+        let text_rect = Rect::new(content.x + LEFT_MARGIN, content.y, text_w, content.height);
+        let register_rect = show_register.then(|| {
+            Rect::new(
+                content.x + content.width - REGISTER_W,
+                content.y,
+                REGISTER_W,
+                content.height,
+            )
+        });
+        // Inset the queued-prompt strip, pin band, and rule line to share the
         // transcript's left gutter.
         let queued_rect = Rect::new(
             queued_row.x + LEFT_MARGIN,
@@ -956,19 +1001,39 @@ impl App {
             queued_row.width.saturating_sub(LEFT_MARGIN),
             queued_row.height,
         );
+        let pin_band_rect = Rect::new(
+            pin_band_row.x + LEFT_MARGIN,
+            pin_band_row.y,
+            pin_band_row.width.saturating_sub(LEFT_MARGIN),
+            pin_band_row.height,
+        );
         let status_rect = Rect::new(
             status_row.x + LEFT_MARGIN,
             status_row.y,
             status_row.width.saturating_sub(LEFT_MARGIN),
             status_row.height,
         );
-        let focused = self.focused();
-        let (mut lines, offset, total, scrollbar_pos) = match self.viewports.get_mut(&focused) {
+        // Pre-render the register's content (the focused session's pins, in its
+        // agent hue) before the borrow needed by `render_window`: as the full
+        // right column when shown, else as the collapsed one-row band.
+        let (register_lines, pin_band_lines): (Vec<Line<'static>>, Vec<Line<'static>>) =
+            match self.viewports.get(&focused) {
+                Some(vp) if show_register => {
+                    let hue = AGENT_HUES
+                        .get(vp.agent().0 as usize)
+                        .copied()
+                        .unwrap_or(AGENT_HUES[0]);
+                    (line::render_register(vp.pins(), REGISTER_W, hue), Vec::new())
+                }
+                Some(vp) if pin_band_h > 0 => (Vec::new(), line::pin_band(vp.pins())),
+                _ => (Vec::new(), Vec::new()),
+            };
+        let (mut lines, offset, scroll_pct) = match self.viewports.get_mut(&focused) {
             Some(vp) => {
                 let w = vp.render_window(text_rect.width, text_rect.height as usize);
-                (w.lines, w.offset, w.total, w.scrollbar_pos)
+                (w.lines, w.offset, w.scroll_pct)
             }
-            None => (Vec::new(), 0, 0, 0),
+            None => (Vec::new(), 0, None),
         };
         self.paint_selection(&mut lines, offset);
         self.frame = Some(FrameGeom {
@@ -1013,16 +1078,13 @@ impl App {
         execute!(io::stdout(), BeginSynchronizedUpdate)?;
         let drawn = term.draw(|f| {
             f.render_widget(Paragraph::new(lines), text_rect);
-            // `scrollbar_pos` is mapped onto ratatui's cursor range and
-            // clamped at the source ([`Viewport::render_window`]).
-            let mut sb = ScrollbarState::new(total)
-                .position(scrollbar_pos)
-                .viewport_content_length(text_rect.height as usize);
-            f.render_stateful_widget(
-                Scrollbar::new(ScrollbarOrientation::VerticalRight),
-                sb_rect,
-                &mut sb,
-            );
+            // The register column (or its collapsed band) — the focused
+            // session's pinned state, painted in place on the right edge.
+            if let Some(reg) = register_rect {
+                f.render_widget(Paragraph::new(register_lines), reg);
+            } else if !pin_band_lines.is_empty() {
+                f.render_widget(Paragraph::new(pin_band_lines), pin_band_rect);
+            }
             if let Some(matrix) = matrix_lines {
                 f.render_widget(Paragraph::new(matrix), tab_row);
             }
@@ -1034,6 +1096,7 @@ impl App {
                     text_rect.width.min(READ_W) as usize,
                     phase.as_deref(),
                     wait_elapsed,
+                    scroll_pct,
                     StatusReadout {
                         usage: &usage,
                         last_input,
@@ -1868,6 +1931,7 @@ fn rule_line(
     width: usize,
     phase: Option<&str>,
     wait_elapsed: Option<Duration>,
+    scroll_pct: Option<u16>,
     status: StatusReadout<'_>,
 ) -> Line<'static> {
     let StatusReadout {
@@ -1925,6 +1989,22 @@ fn rule_line(
         let readout = Span::styled(format!(" {pct}% "), Style::default().fg(SLATE));
         left_w += readout.width();
         spans.push(readout);
+    }
+
+    // ── scroll position ───────────────────────────────────────────────
+    // Where the window sits in the scrollback, as a fixed-position value —
+    // the deleted right-margin scrollbar's datum, re-encoded as a magnitude
+    // the doctrine permits.  `⇣ bot` at the tail, `⇣ N%` above it; absent
+    // when the whole buffer fits.
+    if let Some(pct) = scroll_pct {
+        let text = if pct >= 100 {
+            "⇣ bot ".to_string()
+        } else {
+            format!("⇣ {pct}% ")
+        };
+        let seg = Span::styled(text, Style::default().fg(SLATE));
+        left_w += seg.width();
+        spans.push(seg);
     }
 
     // ── usage (right-aligned) ─────────────────────────────────────────

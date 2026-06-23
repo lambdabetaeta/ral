@@ -753,13 +753,27 @@ const CARD_INDENT: usize = 4;
 /// band and the rail-glyph trace of incremental work.  `width` bounds the box;
 /// the frame wears the neutral rail ink, since identity lives in the matrix.
 pub(super) fn render_card_framed(card: &Card, width: u16) -> Vec<Line<'static>> {
-    let border = Style::default().fg(SLATE);
-    let indent = " ".repeat(CARD_INDENT);
+    render_framed(card, CARD_INDENT, Style::default().fg(SLATE), width.min(READ_W))
+}
+
+/// Render a pinned register card: framed in its producing agent's `hue`, flush
+/// to the register column (no transcript indent), bounded by the column
+/// `width`.  The hue is the register's only departure from a surfaced card —
+/// identity that the transcript reads from the matrix, a side column must carry
+/// itself.
+pub(super) fn render_pin(card: &Card, width: u16, hue: Color) -> Vec<Line<'static>> {
+    render_framed(card, 0, Style::default().fg(hue), width)
+}
+
+/// Core framed-card renderer shared by the transcript's surfaced cards and the
+/// register's pins: a bordered box `indent_w` columns in, drawn in `border`
+/// ink, content wrapped to a budget derived from `width` (the caller caps it —
+/// the transcript at [`READ_W`], the register at its column width).
+fn render_framed(card: &Card, indent_w: usize, border: Style, width: u16) -> Vec<Line<'static>> {
+    let indent = " ".repeat(indent_w);
     // Inner content budget: the content column less the indent and the four
     // frame columns (`│ ` … ` │`).
-    let max_inner = (width.min(READ_W) as usize)
-        .saturating_sub(CARD_INDENT + 4)
-        .max(8);
+    let max_inner = (width as usize).saturating_sub(indent_w + 4).max(8);
 
     // Lift a single-line leading heading into the top rule; everything else
     // renders inside.  A multi-line or non-text first mark leaves no title.
@@ -841,6 +855,43 @@ pub(super) fn render_card_framed(card: &Card, width: u16) -> Vec<Line<'static>> 
         Span::styled("╯", border),
     ]));
     out
+}
+
+/// Assemble the register column: each pin's card framed in `hue`, stacked
+/// top-down.  Each framed card leads with a blank row, so the stack carries its
+/// own inter-card gutter; the slot keys are identity, not shown — a pinned card
+/// carries its own label.
+pub(super) fn render_register(pins: &[(String, Card)], width: u16, hue: Color) -> Vec<Line<'static>> {
+    pins.iter()
+        .flat_map(|(_key, card)| render_pin(card, width, hue))
+        .collect()
+}
+
+/// One pin reduced to its first non-blank rendered row — the digest the
+/// collapsed pin band shows when the terminal is too narrow for the column.
+fn pin_digest(card: &Card) -> Vec<Span<'static>> {
+    render_card(card, 3)
+        .into_iter()
+        .find(|l| !is_blank(l))
+        .map(|l| l.spans)
+        .unwrap_or_default()
+}
+
+/// The collapsed register: every pin's digest on one row, separated by a gap —
+/// the narrow-terminal fallback for the register column.  Empty (no row) when
+/// there are no pins; overflow past the strip is clipped by the paragraph.
+pub(super) fn pin_band(pins: &[(String, Card)]) -> Vec<Line<'static>> {
+    if pins.is_empty() {
+        return Vec::new();
+    }
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (_key, card) in pins {
+        if !spans.is_empty() {
+            spans.push(Span::styled("   ", Style::default().fg(SLATE)));
+        }
+        spans.extend(pin_digest(card));
+    }
+    vec![Line::from(spans)]
 }
 
 /// Total display width of a span run, unicode-aware.

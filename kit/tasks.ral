@@ -18,44 +18,20 @@
 #   save-/load-tasks, …) is side-effect-free and runs in a bare ral
 #   REPL with no host.
 # * The host-surfacing layer (add-task, transition, surface-progress)
-#   hands the host a render document with the `surface` builtin — a
-#   `` `card `` of Bertin marks (`task-card` builds a roled `text`,
-#   `meter-card` a bounded `measure`) — which an exarch host renders on
-#   the rail.  With no host installed `surface` is the identity, so the
-#   kit stays runnable in a bare ral REPL.
+#   hands the host a render document with the `surface` builtin.  Task
+#   state is *pinned*, not streamed: `surface-progress` pins one `tasks`
+#   rollup gauge (a bounded `measure` wrapped in a `` `pin `` disposition
+#   keyed to a register slot) which the host overwrites in place rather
+#   than appending a card per change.  With no host installed `surface`
+#   is the identity, so the kit stays runnable in a bare ral REPL.
 #
 # Id allocation: `add-task` calls `next-id`, which returns
 # `max(ids) + 1`.  Ids freed by `remove-task` are recycled.
+#
+# Keeping the task list current is no longer the kit's job to nag about: the
+# host reminds the model of its pinned state on a fixed cadence (see exarch's
+# `nudge` registry), so the kit just declares and pins data.
 
-
-# --- tool-use watchdog ------------------------------------------------------
-# Under exarch a per-session counter file tracks how many watched "work"
-# commands have run since the task list was last touched.  Past `wd-limit`
-# the kit nudges on stderr -- which lands in the model's tool result as a
-# `STDERR:` section, in-band -- and resets.  Using the kit (add-task /
-# transition) resets it too.  Outside exarch the counter path is unset, so
-# every probe is a `try`-guarded no-op and the watched aliases just forward.
-# The counter dir comes from `$EXARCH_SESSION_DIR`, seeded by the host.
-
-let wd-limit = 8
-
-let __wd-probe = {
-    try {
-        let cf = "$EXARCH_SESSION_DIR/.wd-count"
-        let n = if !{exists $cf} { from-json < $cf } else { 0 }
-        if $[ $n >= $wd-limit ] {
-            echo "[tasks] $n commands since the task list was last updated -- record progress with add-task / transition" 1>&2
-            to-json 0 > $cf
-        } else {
-            to-json $[ $n + 1 ] > $cf
-        }
-        return unit
-    } { |_| return unit }
-}
-
-let __wd-reset = {
-    try { to-json 0 > "$EXARCH_SESSION_DIR/.wd-count" ; return unit } { |_| return unit }
-}
 
 # --- constructor ------------------------------------------------------------
 
@@ -92,15 +68,13 @@ let next-id = { |ts|
 # --- list combinators ------------------------------------------------------
 
 ## Construct a fresh task with `desc`, allocate its id via `next-id`,
-## and append it to `ts`.  Surfaces the creation as a `task open <desc>`
-## event followed by the refreshed rollup meter, so growing the list
-## lands on the rail alongside the data update.  Returns the updated
-## list.  Canonical entry point for growing the task list.
+## and append it to `ts`.  Updates the pinned `tasks` rollup gauge in
+## place — growing the list is a state change, not an event, so it
+## appends nothing to the transcript.  Returns the updated list.
+## Canonical entry point for growing the task list.
 let add-task = { |ts desc|
   let new-ts = [...$ts, !{mk-task !{next-id $ts} $desc}]
-  surface !{task-card "open" $desc}
   surface-progress $new-ts
-  __wd-reset
   $new-ts
 }
 
@@ -148,71 +122,39 @@ let load-tasks = { |path|    from-json     < $path }
 # its level of measurement; the host binds it to visual variables.  See
 # `value_to_card` in `exarch/src/card.rs` for the host's decoder.
 
-## Map a task status to the nominal role its word wears on the rail.  The
-## host knows only the closed role set (ok/warn/bad/muted/strong), never
-## task vocabulary, so this domain mapping lives in the kit.
-let task-role = { |status|
-    if !{equal $status "done"} { return "ok" }
-    else {
-        if !{equal $status "blocked"} { return "warn" }
-        else {
-            if !{equal $status "doing"} { return "strong" }
-            else { return "muted" }
-        }
-    }
-}
-
-## A task transition as a one-mark card: a `text` mark whose first span is
-## the status word in its nominal role, then the plain description.
-let task-card = { |status desc|
-    `card [`text [spans: [[role: !{task-role $status}, text: $status], [role: "", text: "  $desc"]]]]
-}
-
 ## A rollup as a one-mark card: a bounded `measure` (`value`/`max`), which
 ## the host renders as a proportional progress bar with a lightness ramp.
 let meter-card = { |done total label|
     `card [`measure [label: $label, value: $done, max: $total]]
 }
 
-## Push a `tasks <done>/<total>` meter onto the host rail.  The label
-## is the noun being counted; the kit fixes it to "tasks" so the
-## reader can scan the rollup at a glance.
+## Wrap the `tasks` meter in a `` `pin `` disposition keyed to a register
+## slot, so the host writes it to a fixed slot and overwrites in place on
+## re-surface instead of appending a fresh card per change.
+let pin-tasks = { |done total|
+    `pin [key: "tasks", body: !{meter-card $done $total "tasks"}]
+}
+
+## Pin the `tasks <done>/<total>` rollup to the host's register.  The
+## label is the noun being counted; the kit fixes it to "tasks" so the
+## reader can scan the rollup at a glance, and the keyed slot means the
+## gauge fills in place rather than streaming down the scrollback.
 let surface-progress = { |ts|
     let done = !{length !{by-status $ts "done"}}
     let total = !{length $ts}
-    surface !{meter-card $done $total "tasks"}
+    surface !{pin-tasks $done $total}
 }
 
-## Transition a task's status and surface both the change (as a `task`
-## event carrying status + desc) and the refreshed rollup meter.
-## Returns the updated task list.  Falls back to "task #N" for desc
-## when the id does not resolve, so a stale id never silences the
-## surface call.
+## Transition a task's status and update the pinned `tasks` rollup gauge
+## in place.  A status change is a state transition of a state variable,
+## so it overwrites the gauge and appends nothing.  An unresolved id
+## leaves the list unchanged.  Returns the updated task list.
 let transition = { |ts id new-status|
-    let matches = filter { |t| $[$t[id] == $id] } $ts
-    let desc =
-        if !{is-empty $matches} { return "task #$id" }
-        else { return $matches[0][desc] }
     let new-ts = update-task $ts $id { |t| set-status $t $new-status }
-    surface !{task-card $new-status $desc}
     surface-progress $new-ts
-    __wd-reset
     $new-ts
 }
 
-
-# --- watched "work" commands ------------------------------------------------
-# Each forwards transparently (self-masking) after a probe.  Genuine
-# externals only -- `alias` rejects builtins and lexical names.  Editing the
-# list is how a kit author tunes what counts as "work".
-
-alias git     { |a| __wd-probe; git     ...$a }
-alias rg      { |a| __wd-probe; rg      ...$a }
-alias fd      { |a| __wd-probe; fd      ...$a }
-alias find    { |a| __wd-probe; find    ...$a }
-alias sed     { |a| __wd-probe; sed     ...$a }
-alias awk     { |a| __wd-probe; awk     ...$a }
-alias python3 { |a| __wd-probe; python3 ...$a }
 
 # --- load-time briefing ----------------------------------------------------
 # Runs once when the file is sourced.  The echoes land in the
@@ -221,17 +163,14 @@ alias python3 { |a| __wd-probe; python3 ...$a }
 
 echo 'tasks kit loaded.'
 echo '  empty-tasks                          — correctly-typed empty list'
-echo '  add-task $tasks <desc>               — fresh id, append, surface creation'
+echo '  add-task $tasks <desc>               — fresh id, append, update pinned gauge'
 echo '  remove-task $tasks <id>              — drop by id'
 echo '  update-task $tasks <id> { |t| … }    — patch one task pure-functionally'
-echo '  transition $tasks <id> <status>      — change status + surface to rail'
+echo '  transition $tasks <id> <status>      — change status + update the pinned gauge'
 echo '  status-counts $tasks                 — record of per-status counts'
 echo '  render-tasks $tasks                  — echo each task to stdout'
 echo '  save-tasks $tasks <path> / load-tasks <path>'
 echo ''
 echo 'add tasks with `add-task`; change status with `transition` —'
-echo 'transition pushes a task event and progress meter to the rail'
-echo 'so the user can see what you are working on.'
-echo ''
-echo 'a watchdog reminds you to update the task list if you run a stretch'
-echo 'of work commands (git, rg, find, sed, …) without touching it.'
+echo 'both pin a `tasks` rollup gauge to the rail register, updated in'
+echo 'place, so the user can see progress at a fixed spot.'

@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # A rendered value is an *event* or *state*: `surface` pins state to a register, in place
@@ -139,23 +139,37 @@ stable insertion order. `App::handle` routes `Kind::Pin { key, card }` to
 register, so a pin is generation-bounded by the same discipline as everything else.
 
 The register renders as a **reserved right-hand column** for the *focused*
-session — a flat `Layout::horizontal` rect (joining the body split at
-`exarch/src/tui.rs:934`), **not** a floating overlay. The distinction is the one
-the `/model` picker already draws — *"flat in rendering — a strip, not a floating
-overlay"* (`tui.rs:349`): the column is a region the layout reserves and the
-transcript reflows around, never a layer that occludes — and so defeats — the
-selectable, yank-able scrollback. It is the picker's principle rotated onto the
-*X*-axis.
+session — a flat rect glued to the right edge of the content area, **not** a
+floating overlay. The distinction is the one the `/model` picker already draws —
+*"flat in rendering — a strip, not a floating overlay"*: the column is a region
+the layout reserves and the transcript sits left of, never a layer that occludes
+— and so defeats — the selectable, yank-able scrollback. It is the picker's
+principle rotated onto the *X*-axis.
+
+**The right edge is freed by deleting the scrollbar.** The 1-column
+`ScrollbarOrientation::VerticalRight` widget owned the right edge and would have
+competed with the register for it; we retire it. Its datum — *where the window
+sits in the scrollback* — is not lost but **re-encoded as a fixed-position
+magnitude in the rule line** (`⇣ 72%`, `⇣ bot` at the tail), which is the
+encode-don't-stream doctrine applied to the scroll position itself: a value mark
+at a fixed spot, not a sliding glyph. So the deletion is *more* on-doctrine than
+the bar it removes, and it makes the frame's left/right symmetry exact — the
+**rail owns the left edge** (the data column, what happened), the **register owns
+the right edge** (the state column, what is).
 
 The placement is nearly free. `reflow` already wraps the transcript at
-`width.min(READ_W)` with `READ_W = 100` (`viewport.rs:687`, `line.rs:94`), so on
-any terminal wider than ~`READ_W + column`, the body fills only its leftmost 100
-columns and the right margin is **dead space today**. The register column claims
-that margin — on a wide terminal the transcript does not narrow at all:
+`width.min(READ_W)` with `READ_W = 100`, so the body only ever paints its leftmost
+100 columns and any width past that is **dead space today**. The body row is split
+by hand (not a constraint solver) into three regions: the rail's `LEFT_MARGIN`, a
+transcript **capped at `READ_W`** so it never widens past the reading measure, and
+the register glued to the right edge — the surplus between them is a flexible
+reading gap. Pinning the transcript at the cap is what makes "the transcript does
+not narrow at all" literally true: inserting the column steals only from the dead
+margin, never from prose.
 
 ```
-[LEFT_MARGIN][ transcript, wrapped at READ_W ][ gutter ][ register ][scrollbar]
-    rail            the event stream                      the post-its
+[LEFT_MARGIN][ transcript, capped at READ_W ][ flexible gap ][ register ]
+    rail            the event stream            grows w/ width   the post-its
 ```
 
 Each pin renders as a bordered `Card` — the "bounded object" framing surfaced
@@ -167,10 +181,13 @@ the full datum (the entire task list) is reached by **disclosure**, never by
 permanently occupying the column. Two degradations, each following an established
 pattern:
 
-- **Narrow terminals** — below ~`READ_W + min-column + scrollbar` there is no free
-  margin to claim. The column **collapses** to a one-line gauge in the rule-line
-  neighbourhood rather than narrowing the transcript — the same conditional-chrome
-  pattern as the matrix appearing only with more than one session.
+- **Narrow terminals** — below ~`LEFT_MARGIN + READ_W + gap + column` there is no
+  free margin to claim without narrowing prose. The register **collapses** to a
+  one-row **pin band** — each pin reduced to a one-line digest, laid out
+  horizontally in a reserved strip beside the matrix — rather than narrowing the
+  transcript. The same conditional-chrome pattern as the matrix appearing only
+  with more than one session; the column is, by design, a wide-terminal luxury,
+  and every narrower terminal still gets ambient feedback in the band.
 - **Vertical overflow** — a column has the full frame height (far more headroom
   than a band would), but a kit that pins past what fits still needs a cap +
   oldest-key-drop or an internal scroll. The policy is named in open questions.
@@ -313,11 +330,15 @@ ambient state within the current one. Keeping pins off the inbox is what keeps
 - **Disclosure mechanism.** Reuse the rail-dial idiom on a pinned mark, or a
   dedicated key? An implementation detail, but the *principle* (detail is
   disclosed, never resident) is load-bearing and decided here.
-- **Horizontal budget and the matrix.** The register column claims right margin;
-  the matrix claims rows above the prompt — different axes, so they no longer
-  compete directly. What is unspecified is the column's exact width, its
-  min-width-before-collapse threshold, and its adjacency to the scrollbar, which
-  also owns the right edge.
+- **Horizontal budget and the matrix.** *Resolved.* The register column claims the
+  right margin; the matrix claims rows; they sit on different axes. The
+  scrollbar-adjacency conflict is gone — the scrollbar is deleted and the register
+  owns the right edge outright. The width is `REGISTER_W` (a framed gauge plus
+  borders) and the collapse threshold is `LEFT_MARGIN + READ_W + gap + REGISTER_W`;
+  both are tunable constants in `tui.rs`. Below the threshold the register shows as
+  the pin band. *Still open:* vertical overflow when a kit pins past a screenful —
+  v1 clips at the column's height; a cap + oldest-key-drop or internal scroll is
+  deferred.
 
 ## See also
 

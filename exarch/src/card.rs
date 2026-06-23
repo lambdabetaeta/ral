@@ -607,6 +607,48 @@ pub fn done_card(cmd: &str, outcome: &DoneOutcome) -> Card {
     Card(vec![Mark::Text { spans }])
 }
 
+/// A [`Card`] as a compact one-line summary — the session-layer digest the
+/// nudge facility shows when reminding the model of its pinned state, where the
+/// TUI's framed rendering is out of reach.  Text marks concatenate their span
+/// runs (whitespace collapsed); a measure reads `label value/maxunit`; a fields
+/// matrix reads `label value` pairs; a diff names its path; raw ink is its
+/// bytes, lossily.  Marks join with a space.
+pub fn summary_line(card: &Card) -> String {
+    fn field_val(v: &FieldVal) -> String {
+        match v {
+            FieldVal::Inline(spans) => spans.iter().map(|s| s.text.as_str()).collect(),
+            FieldVal::Measure(m) => {
+                let bound = m.max.map(|mx| format!("/{mx}")).unwrap_or_default();
+                format!("{}{bound}{}", m.value, m.unit.as_deref().unwrap_or(""))
+            }
+        }
+    }
+    let collapse = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut parts: Vec<String> = Vec::new();
+    for mark in card.marks() {
+        let part = match mark {
+            Mark::Text { spans } => {
+                collapse(&spans.iter().map(|s| s.text.as_str()).collect::<String>())
+            }
+            Mark::Measure(m) => {
+                let bound = m.max.map(|mx| format!("/{mx}")).unwrap_or_default();
+                format!("{} {}{bound}{}", m.label, m.value, m.unit.as_deref().unwrap_or(""))
+            }
+            Mark::Fields { rows } => rows
+                .iter()
+                .map(|f| format!("{} {}", f.label, field_val(&f.value)))
+                .collect::<Vec<_>>()
+                .join(", "),
+            Mark::Diff { path, .. } => format!("diff {path}"),
+            Mark::Raw { bytes } => collapse(&String::from_utf8_lossy(bytes)),
+        };
+        if !part.is_empty() {
+            parts.push(part);
+        }
+    }
+    parts.join(" ")
+}
+
 // ── Decode: runtime `Value` → `Card` ────────────────────────────────────────
 
 /// Decode the value a ral kit handed to `surface` into a [`Card`].
@@ -639,6 +681,29 @@ pub fn value_to_card(v: &RalValue) -> Option<Card> {
         Some(Card(vec![decode_mark(v)]))
     } else {
         None
+    }
+}
+
+/// Decode a `` `pin ``/`` `unpin `` *disposition wrapper* into its register key
+/// and optional body card.  The shape is `` `pin [key: "…", body: `card […]] ``
+/// — a render document keyed to a register slot — or `` `unpin [key: "…"] `` to
+/// drop the slot.  The `body` is decoded by the **unchanged** [`value_to_card`],
+/// so the wrapper carries only *placement*; an absent body is the same as
+/// `` `unpin ``.  Anything else returns `None`, the same graceful degradation as
+/// [`value_to_card`]; the decoder seam then drops it.
+pub fn value_to_pin(v: &RalValue) -> Option<(String, Option<Card>)> {
+    let RalValue::Variant { label, payload } = v else {
+        return None;
+    };
+    match label.as_str() {
+        "pin" => {
+            let m = map_of(payload.as_deref()?)?;
+            let key = str_field(m, "key")?;
+            let body = m.get("body").and_then(value_to_card);
+            Some((key, body))
+        }
+        "unpin" => Some((str_field(map_of(payload.as_deref()?)?, "key")?, None)),
+        _ => None,
     }
 }
 

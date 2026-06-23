@@ -111,6 +111,12 @@ pub struct Session {
     /// ([`Self::compact`]), the same signal the TUI's fidelity gauge reads.
     /// Set from each step's usage; reset to `0` on `/clear`.
     last_input: u64,
+    /// Current pinned-state digests (`key → one-line summary`), mirrored from
+    /// the surface sink as the model `` `pin ``s/`` `unpin ``s state.  Pins
+    /// otherwise flow past the session to the frontend; this small copy lets
+    /// the periodic [`nudge`] reminder describe what the model has pinned.
+    /// Cleared on `/clear` like the rest of the session's generation state.
+    pins: shell_eval::PinDigests,
 }
 
 /// Outcome of one [`Session::apply`].  Degenerate cases (`Empty`,
@@ -259,6 +265,7 @@ impl Session {
             schedules: crate::schedule::ScheduleRegistry::new(),
             schedule_authority,
             last_input: 0,
+            pins: Default::default(),
         }
     }
 
@@ -318,6 +325,11 @@ impl Session {
         self.agents.clear();
         // Drop every schedule too: a fresh root carries no pending wakeups.
         self.schedules.clear();
+        // A rebuilt context wears no pinned state: the frontend wipes its
+        // register on `/clear`, so the session's mirror must follow.
+        if let Ok(mut m) = self.pins.lock() {
+            m.clear();
+        }
         Ok(())
     }
 
@@ -523,6 +535,7 @@ impl Session {
                 // A peer returns through `reply`; an un-replied finish earns
                 // one reminder.  The root never returns, so it is exempt.
                 must_reply: !self.is_root,
+                pinned: self.pinned_digest(),
             };
             if let Some(msg) = self.nudges.react(&outcome, ctx, emit, &mut self.log) {
                 self.inbox.push(InboxMsg::Nudge(msg));
@@ -918,12 +931,25 @@ impl Session {
             timeout_secs,
             emit,
             Some(boundary),
+            Some(self.pins.clone()),
         ) {
             shell_eval::Outcome::Ran(r) => render(&r),
             shell_eval::Outcome::Static(s) => clip(&s, OPAQUE_CAP),
         };
         emit.emit(Kind::ToolResult(content.clone()));
         SessionToolResult { id, content }
+    }
+
+    /// The current pinned state as a one-line description for the periodic
+    /// nudge reminder, or `None` when nothing is pinned.  Joins each slot's
+    /// digest (`tasks 3/8`) — the model's labels already name them — so the
+    /// reminder reads as the user sees the rail.
+    fn pinned_digest(&self) -> Option<String> {
+        let m = self.pins.lock().ok()?;
+        if m.is_empty() {
+            return None;
+        }
+        Some(m.values().cloned().collect::<Vec<_>>().join("; "))
     }
 
     /// Stash a sub-agent's deliberate return value — called from the `reply`

@@ -13,7 +13,7 @@
 
 use crate::agent_registry::AgentRegistry;
 use crate::bus::{Emitter, InboxMsg, Kind, Mailbox, SessionId};
-use crate::card::{done_card, io_card, value_to_card, value_to_done, value_to_io};
+use crate::card::{done_card, io_card, value_to_card, value_to_done, value_to_io, value_to_pin};
 use ral_core::types::{Boundary, BoundarySink, Break, Escape};
 use ral_core::{
     EventSink, RequestedTerminalAccess, Shell, StaticDiagnostics, TurnIo, TurnReport, TurnRequest,
@@ -58,12 +58,39 @@ pub enum Outcome {
 /// clone of the bus `Emitter` can never outlive the tool turn.
 ///
 /// [`Card`]: crate::card::Card
-struct AgentSink(Emitter);
+/// A shared, session-owned register of current pinned-state digests
+/// (`key → one-line summary`), written by the live surface sink as
+/// `` `pin ``/`` `unpin `` flow by and read by the nudge facility to describe
+/// what the model has pinned.  The session clones a handle into each turn's
+/// [`AgentSink`]; `None` (tests, any path with no nudge layer) disables the
+/// mirror.  The session is otherwise pin-blind — pins flow past it to the
+/// frontend — so this small mirror is how the boundary nudge can name them.
+pub type PinDigests = Arc<Mutex<std::collections::BTreeMap<String, String>>>;
+
+struct AgentSink {
+    emit: Emitter,
+    pins: Option<PinDigests>,
+}
 
 impl EventSink for AgentSink {
     fn emit(&self, ev: &RalValue) {
         if let Some(kind) = decode_surface(ev) {
-            self.0.emit(kind);
+            // Mirror pinned state into the session register so the nudge layer
+            // can describe it; the bus event remains the rendering path.
+            if let Some(pins) = &self.pins
+                && let Ok(mut m) = pins.lock()
+            {
+                match &kind {
+                    Kind::Pin { key, card } => {
+                        m.insert(key.clone(), crate::card::summary_line(card));
+                    }
+                    Kind::Unpin { key } => {
+                        m.remove(key);
+                    }
+                    _ => {}
+                }
+            }
+            self.emit.emit(kind);
         }
     }
 }
@@ -82,16 +109,27 @@ impl EventSink for AgentSink {
 ///   * the `` `done `` completion event a detached worker flushes at the end of
 ///     its deferred batch, composed into its one-line outcome [`Card`].
 ///
-/// They cannot collide — io is a `Map`, a card and a `done` are distinct
-/// `Variant` labels — and the order (io, then card, then done) is the
-/// tried-first sequence, so the raw effect record always reaches the bus
-/// beside its rendering.  A value that is none of the three returns `None` and
-/// is dropped.
+/// A fourth shape rides the same channel as a render *disposition*, tried
+/// first: a `` `pin ``/`` `unpin `` wrapper carrying *state* rather than an
+/// event ([`value_to_pin`]) — a render document keyed to a register slot,
+/// overwritten in place on re-pin ([`Kind::Pin`]/[`Kind::Unpin`]) rather than
+/// appended to scrollback.
+///
+/// They cannot collide — io is a `Map`; a card, a `done`, and a pin are
+/// distinct `Variant` labels — and the order (pin, then io, then card, then
+/// done) is the tried-first sequence, so the raw effect record always reaches
+/// the bus beside its rendering.  A value that is none of these returns `None`
+/// and is dropped.
 ///
 /// [`Card`]: crate::card::Card
 /// [`IoEvent`]: crate::card::IoEvent
 pub fn decode_surface(ev: &RalValue) -> Option<Kind> {
-    if let Some(event) = value_to_io(ev) {
+    if let Some((key, body)) = value_to_pin(ev) {
+        Some(match body {
+            Some(card) => Kind::Pin { key, card },
+            None => Kind::Unpin { key },
+        })
+    } else if let Some(event) = value_to_io(ev) {
         let card = io_card(&event);
         Some(Kind::Io { event, card })
     } else if let Some(card) = value_to_card(ev) {
@@ -178,6 +216,7 @@ pub fn run_shell(
     timeout_secs: u64,
     emit: &Emitter,
     boundary: Option<Boundary>,
+    pins: Option<PinDigests>,
 ) -> Outcome {
     let name = "<tool>";
 
@@ -204,7 +243,10 @@ pub fn run_shell(
             io: TurnIo::Capture,
             terminal: RequestedTerminalAccess::Denied,
             stdin: TurnStdin::Empty,
-            surface: Some(Arc::new(AgentSink(emit.clone()))),
+            surface: Some(Arc::new(AgentSink {
+                emit: emit.clone(),
+                pins,
+            })),
             boundary,
             lifecycle: Box::new(()),
         },
@@ -407,7 +449,7 @@ mod tests {
     /// `core/tests/top_level_vs_block.rs`'s sandbox-parity tests).
     fn run_once(shell: &mut Shell, cmd: &str) -> ToolResult {
         let (emit, _rx) = dummy_emitter();
-        match run_shell(shell, &Capabilities::root(), cmd, 30, &emit, None) {
+        match run_shell(shell, &Capabilities::root(), cmd, 30, &emit, None, None) {
             Outcome::Ran(r) => r,
             Outcome::Static(s) => panic!("static (parse/type) failure: {s}"),
         }
@@ -783,7 +825,7 @@ keep-bottom
 let hits = grep-files 'unique target'
 edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
         );
-        let r = match run_shell(&mut shell, &Capabilities::root(), &src, 30, &emit, None) {
+        let r = match run_shell(&mut shell, &Capabilities::root(), &src, 30, &emit, None, None) {
             Outcome::Ran(r) => r,
             Outcome::Static(s) => panic!("static failure: {s}"),
         };
@@ -928,7 +970,10 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
     fn agent_sink_routes_io_and_card_distinctly() {
         use crate::card::IoEvent;
         let (emit, rx) = dummy_emitter();
-        let sink = AgentSink(emit);
+        let sink = AgentSink {
+            emit,
+            pins: None,
+        };
 
         // An io value routes to Kind::Io, carrying the decoded event and a
         // card rendered from it.
@@ -970,12 +1015,13 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
         );
     }
 
-    /// The shared decoder both regimes use round-trips each of the three
-    /// surface classes to its `Kind` — an io `Map` to `Kind::Io`, a `` `card ``
-    /// variant to `Kind::Card`, and the `` `done `` completion event to a
-    /// `Kind::Card` (its one-line outcome card) — and drops a junk value to
-    /// `None`.  The live `AgentSink` emits these now; the boundary's
-    /// `commit_turn` arm mints the identical ones at the turn boundary.
+    /// The shared decoder both regimes use round-trips each surface class to
+    /// its `Kind` — an io `Map` to `Kind::Io`, a `` `card `` variant to
+    /// `Kind::Card`, the `` `done `` completion event to a `Kind::Card`, and a
+    /// `` `pin ``/`` `unpin `` disposition to `Kind::Pin`/`Kind::Unpin` — and
+    /// drops a junk value to `None`.  The live `AgentSink` emits these now; the
+    /// boundary's `commit_turn` arm mints the identical ones at the turn
+    /// boundary.
     #[test]
     fn decode_surface_round_trips_each_class() {
         // An io map → Kind::Io.
@@ -1011,7 +1057,37 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
             }),
             Some(Kind::Card(_))
         ));
-        // A value that is none of the three → None.
+        // A `pin` wrapper → Kind::Pin, its body decoded by value_to_card.
+        assert!(matches!(
+            decode_surface(&RalValue::Variant {
+                label: "pin".into(),
+                payload: Some(Box::new(RalValue::map(vec![
+                    ("key".into(), RalValue::String("tasks".into())),
+                    (
+                        "body".into(),
+                        RalValue::Variant {
+                            label: "card".into(),
+                            payload: Some(Box::new(RalValue::list(vec![]))),
+                        },
+                    ),
+                ]))),
+            }),
+            Some(Kind::Pin { .. })
+        ));
+        // `unpin`, and a `pin` whose body is absent, both → Kind::Unpin.
+        for label in ["unpin", "pin"] {
+            assert!(matches!(
+                decode_surface(&RalValue::Variant {
+                    label: label.into(),
+                    payload: Some(Box::new(RalValue::map(vec![(
+                        "key".into(),
+                        RalValue::String("tasks".into()),
+                    )]))),
+                }),
+                Some(Kind::Unpin { .. })
+            ));
+        }
+        // A value that is none of these → None.
         assert!(decode_surface(&RalValue::String("nope".into())).is_none());
     }
 
@@ -1090,7 +1166,7 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
         // exits unless the timeout tears the group down.
         let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
         let t0 = std::time::Instant::now();
-        let r = match run_shell(&mut shell, &Capabilities::root(), cmd, 2, &emit, None) {
+        let r = match run_shell(&mut shell, &Capabilities::root(), cmd, 2, &emit, None, None) {
             Outcome::Ran(r) => r,
             Outcome::Static(s) => panic!("static failure: {s}"),
         };
@@ -1142,7 +1218,7 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
         let (emit, _rx) = dummy_emitter();
         let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
         let t0 = std::time::Instant::now();
-        let r = match run_shell(&mut shell, &projecting_caps(), cmd, 2, &emit, None) {
+        let r = match run_shell(&mut shell, &projecting_caps(), cmd, 2, &emit, None, None) {
             Outcome::Ran(r) => r,
             Outcome::Static(s) => panic!("static failure: {s}"),
         };
@@ -1329,7 +1405,7 @@ let hits = grep-files 'TARGET'
 each {{ |h| edit $h[file] [[$h[hash], 'REPLACED']] }} $hits
 return !{{length $hits}}"#
         );
-        let r = match run_shell(&mut shell, &Capabilities::root(), &src, 30, &emit, None) {
+        let r = match run_shell(&mut shell, &Capabilities::root(), &src, 30, &emit, None, None) {
             Outcome::Ran(r) => r,
             Outcome::Static(s) => panic!("static failure: {s}"),
         };
@@ -1378,7 +1454,7 @@ return !{{length $hits}}"#
     fn run_capturing(shell: &mut Shell, cmd: &str) -> (ToolResult, Vec<crate::bus::Kind>) {
         let (tx, rx) = mpsc::channel();
         let emit = Emitter::new(tx, 0);
-        let result = match run_shell(shell, &Capabilities::root(), cmd, 30, &emit, None) {
+        let result = match run_shell(shell, &Capabilities::root(), cmd, 30, &emit, None, None) {
             Outcome::Ran(r) => r,
             Outcome::Static(s) => panic!("static (parse/type) failure: {s}"),
         };
@@ -1775,7 +1851,7 @@ return !{{length $hits}}"#
 let hits = grep-files 'unique target'
 edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
         );
-        let r = match run_shell(&mut shell, &Capabilities::root(), &src, 30, &emit, None) {
+        let r = match run_shell(&mut shell, &Capabilities::root(), &src, 30, &emit, None, None) {
             Outcome::Ran(r) => r,
             Outcome::Static(s) => panic!("static failure: {s}"),
         };
