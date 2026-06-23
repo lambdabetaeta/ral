@@ -45,38 +45,7 @@
           <p class="sigil" aria-hidden="true">!{}</p>
           <h1 class="wordmark">ral</h1>
           <p class="thesis">Running a command is an <em>algebraic effect</em>.</p>
-          <p class="subthesis">A Unix shell where the operation and its interpretation are separate things.</p>
-        </div>
-      </div>
-    </div>
-
-    <div class="window" id="manifesto">
-      <div class="window-body">
-        <div class="manifesto">
-          <p>The command is an <strong>operation</strong>. The operating system is its
-          default <strong>interpretation</strong>. Separate them, and typed commands,
-          scoped authority, and a sandbox all fall out of a single principle —
-          without giving up first-class commands and pipes.</p>
-          <p>ral refuses the shell collapse between data and source text. Values
-          are inert; commands are effectful. Two sigils, no ambiguity:
-          <code>$</code> retrieves data, <code>!</code> runs stored commands.</p>
-          <p>Not POSIX. No word splitting, no glob expansion on unquoted
-          variables, no <code>$IFS</code>, no context-dependent quoting.</p>
-        </div>
-      </div>
-    </div>
-
-    <div class="window" id="install-win">
-      <div class="titlebar">
-        <span class="menu-box" aria-hidden="true"></span>
-        <span class="title-text">shell</span>
-      </div>
-      <div class="window-body">
-        <div class="install-body">
-          <span class="install-prompt" aria-hidden="true">$</span>
-          <code class="install-cmd" id="install-cmd" role="button" tabindex="0"
-                aria-label="Copy install command to clipboard">curl -fsSL https://lambdabetaeta.github.io/ral/scripts/install.sh | sh</code>
-          <button class="btn" id="install-copy" type="button" aria-live="polite">copy</button>
+          <p class="subthesis">A typed shell that separates values and commands.</p>
         </div>
       </div>
     </div>
@@ -84,6 +53,7 @@
     <div class="window" id="taste">
       <div class="window-body">
         <div class="taste-body">
+          <p class="taste-lead">A command is a system call whose inputs stay in view. Nothing slips in as text for the shell to split, glob, and re-read as a second command.</p>
           <div class="compare">
             <div class="panel">
               <div class="panel-label">bash</div>
@@ -109,6 +79,48 @@ hosts=$(echo "$cfg" | jq -r <span class="s">'.hosts[]'</span>)
       </div>
     </div>
 
+    <div class="window" id="manifesto">
+      <div class="window-body">
+        <div class="manifesto">
+          <p>Separate data from commands, and the data half becomes something a
+          shell has never been: a small, purely functional language. Variables
+          don't mutate, so a name means one thing throughout. There are no
+          subshells, no <code>$(...)</code> — you build data up and take it apart
+          with <code>map</code>, <code>filter</code>, and <code>fold</code>, the
+          way you would in any functional language.</p>
+          <p>Purity isn't decoration here; it pays. Because nothing mutates,
+          running work in parallel loses its usual hazards: fan a job across a
+          pool of workers and there are no locks and no races, and the results
+          come back in the order you sent them. And because a captured value is
+          data, not text, it has a type — a list, a record, JSON — instead of a
+          string you have to re-split and re-quote by hand.</p>
+          <p>A command is a system call, and ral owns the moment it runs: catch
+          its output into a typed variable, catch its failure, substitute your
+          own interpretation, or confine it to a set of permissions — which files
+          it may touch, which programs it may run, whether the network exists at
+          all — all enforced before the process starts. And because every command
+          passes through ral, you can audit the whole tree a script produced:
+          every command run, its arguments, its output, and the permission
+          decisions that framed it.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="window" id="install-win">
+      <div class="titlebar">
+        <span class="menu-box" aria-hidden="true"></span>
+        <span class="title-text">shell</span>
+      </div>
+      <div class="window-body">
+        <div class="install-body">
+          <span class="install-prompt" aria-hidden="true">$</span>
+          <code class="install-cmd" id="install-cmd" role="button" tabindex="0"
+                aria-label="Copy install command to clipboard">curl -fsSL https://lambdabetaeta.github.io/ral/scripts/install.sh | sh</code>
+          <button class="btn" id="install-copy" type="button" aria-live="polite">copy</button>
+        </div>
+      </div>
+    </div>
+
     <div class="window" id="downloads">
       <div class="titlebar">
         <span class="menu-box" aria-hidden="true"></span>
@@ -127,6 +139,16 @@ hosts=$(echo "$cfg" | jq -r <span class="s">'.hosts[]'</span>)
         </div>
       </div>
     </div>
+
+    <section class="foundations">
+      <p>None of this is improvised. Separating values from commands is
+      <em>call-by-push-value</em> (Levy); treating a command as an operation
+      whose interpretation is supplied separately is <em>algebraic effects</em>
+      (Plotkin and Power). The whole language is written down — a
+      <a href="spec.html">specification</a> and a
+      <a href="rationale.html">rationale</a>, not a pile of features. And it is
+      not POSIX, by design: your bash scripts won't run.</p>
+    </section>
 
   </main>
 
