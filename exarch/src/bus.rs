@@ -229,23 +229,25 @@ impl InboxMsg {
 
     /// The single-line label for the pending strip the TUI draws above the
     /// prompt: user prompts show their text, the rest show a glyph + source.
-    fn strip_label(&self) -> String {
-        match self {
+    /// `None` for a message with no strip presence — a settled `spawn`'s
+    /// `Surface` batch renders its cards on the rail and delivers its notice at
+    /// the turn boundary, so it earns no pending-strip row of its own.
+    fn strip_label(&self) -> Option<String> {
+        Some(match self {
             InboxMsg::UserSteering(s) => s.clone(),
             InboxMsg::ScheduledWakeup { label, .. } => format!("⏰ {label}"),
             InboxMsg::AgentResult(r) => format!("● agent {}", r.title),
             InboxMsg::Nudge(_) => "· retry".into(),
             InboxMsg::Command(s) => s.clone(),
-            InboxMsg::Surface { values, .. } => format!("● spawn {}", surface_cmd(values)),
-        }
+            InboxMsg::Surface { .. } => return None,
+        })
     }
 }
 
 /// The settled `spawn`'s `cmd`, pulled from a surface batch's trailing
 /// `` `done `` event — the handle's `<handle:…>` form core stamped on it.  The
-/// pending strip and the model-facing notice both name the spawn by it; an
-/// absent or malformed `done` (a batch the kit somehow flushed without one)
-/// degrades to `<spawn>`.
+/// model-facing notice names the spawn by it; an absent or malformed `done` (a
+/// batch the kit somehow flushed without one) degrades to `<spawn>`.
 fn surface_cmd(values: &[Value]) -> String {
     values
         .iter()
@@ -453,15 +455,16 @@ impl Inbox {
             .is_empty()
     }
 
-    /// One strip label per pending message, oldest first, for the TUI's
-    /// pending-prompt strip.
+    /// One strip label per pending message that has one, oldest first, for the
+    /// TUI's pending-prompt strip.  Messages with no strip presence (a settled
+    /// `spawn`'s `Surface` batch) are skipped.
     pub fn snapshot(&self) -> Vec<String> {
         self.shared
             .queue
             .lock()
             .expect("inbox lock poisoned")
             .iter()
-            .map(InboxMsg::strip_label)
+            .filter_map(InboxMsg::strip_label)
             .collect()
     }
 
