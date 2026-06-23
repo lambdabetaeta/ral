@@ -63,10 +63,10 @@
 
     <section class="taste" aria-label="bash versus ral">
       <p class="eyebrow">the same job, twice</p>
-      <p class="taste-lead">In ral, output comes back as typed data, not text.
-      Capture a command and you get a record or a list to work with — and when you
-      fan work across cores, failures return as values instead of vanishing down a
-      pipe.</p>
+      <p class="taste-lead">In ral, a command's output is a value you hold, and a
+      command's failure is a value too. Fan the work across cores, catch each
+      result into a record, and the URLs that failed come back in hand instead of
+      vanishing down a pipe.</p>
       <div class="compare">
         <div class="panel bash">
           <div class="panel-label">bash</div>
@@ -80,9 +80,9 @@ cat urls.txt | xargs -P8 -I{} \
 <pre><span class="k">let</span> urls = from-lines-list <span class="s">'urls.txt'</span>
 <span class="k">let</span> report = <span class="k">par</span> { |u|
     <span class="k">try</span> {
-        <span class="k">let</span> body = curl -fsSL <span class="v">$u</span>
-        <span class="k">return</span> [url: <span class="v">$u</span>, ok: true, bytes: <span class="bang">!</span>{length <span class="v">$body</span>}]
-    } { |e| <span class="k">return</span> [url: <span class="v">$u</span>, ok: false, bytes: 0] }
+        <span class="k">let</span> data = curl -fsSL <span class="v">$u</span> | from-json
+        <span class="k">return</span> [url: <span class="v">$u</span>, result: `ok <span class="v">$data</span>]
+    } { |e| <span class="k">return</span> [url: <span class="v">$u</span>, result: `err <span class="v">$e</span>[message]] }
 } <span class="v">$urls</span> 8
 to-json <span class="v">$report</span> &gt; <span class="s">'manifest.json'</span></pre>
         </div>
@@ -97,19 +97,17 @@ to-json <span class="v">$report</span> &gt; <span class="s">'manifest.json'</spa
       you build data up and take it apart with <code>map</code>,
       <code>filter</code>, and <code>fold</code>, the way you would in any
       functional language.</p>
-      <p>Purity isn't decoration here; it pays. Because nothing mutates, running
+      <p>Because nothing mutates, running
       work in parallel loses its usual hazards: fan a job across a pool of workers
-      and there are no locks and no races, and the results come back in the order
-      you sent them. And because a captured value is data, not text, it has a type
-      — a list, a record, JSON — instead of a string you have to re-split and
-      re-quote by hand.</p>
-      <p>A command is a system call, and ral owns the moment it runs: catch its
-      output into a typed variable, catch its failure, substitute your own
-      interpretation, or confine it in an OS sandbox — which files it may touch,
-      which programs it may run, whether the network is reachable — set up before
-      it starts. And because every command passes through ral, you can audit the
-      whole tree a script produced: every command run, its arguments, its output,
-      and the permission decisions that framed it.</p>
+      and there are no locks and no races. The results come back in the order
+      you sent them. A command's output is captured as a <code>String</code> —
+      a value, not a text stream you re-split and re-quote by hand. When you want a
+      list, a record, or JSON, you cross to it on purpose with a codec like
+      <code>from-json</code>, and the type is fixed at that one boundary.</p>
+      <p>A command is a system call: catch its output into a typed variable,
+      catch its failure, substitute your own interpretation, or confine it in an
+      OS sandbox. Audit the whole tree of commands a script produced: its
+      arguments, its output, and the permission decisions that framed it.</p>
     </section>
 
     <section class="get">
