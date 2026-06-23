@@ -54,38 +54,65 @@ jobs:
           cp scripts/install.sh        site/scripts/install.sh
           cp scripts/exarch-install.sh site/scripts/exarch-install.sh
 
+      # The wiki (docs/ral-wiki) is published under site/wiki/ by Quartz v5, but
+      # the Quartz build is minutes long, so we don't pay it on every push.  The
+      # built output is cached keyed on the wiki sources + config + pinned tag:
+      # on a hit we restore site/wiki/ and skip the build; on a miss (the wiki
+      # changed, or the cache aged out) we rebuild.  Pages deploys the whole
+      # site/ each run, so the restore is what keeps the wiki in the artifact —
+      # skipping the build alone would deploy a site with no wiki.
+      - name: Restore built wiki
+        id: wiki-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: site/wiki
+          key: wiki-v5.0.0-${{ hashFiles('docs/ral-wiki/**', 'scripts/wiki/quartz.config.yaml') }}
+
       - uses: actions/setup-node@v4
+        if: steps.wiki-restore.outputs.cache-hit != 'true'
         with:
           node-version: 24
 
-      # The wiki (docs/ral-wiki) is published under site/wiki/ by Quartz v5.
-      # Quartz is its own Node project, so we clone it pinned, drop in our config
-      # (scripts/wiki/quartz.config.yaml), and point its build at the wiki.  The
-      # dep tree and plugin set are fixed by the pinned tag + our config, so the
-      # caches key on those (the package-lock.json lives only inside the clone).
+      # Quartz is its own Node project, so we clone it pinned, drop in our config,
+      # and point its build at the wiki.  The dep tree and plugin set are fixed by
+      # the pinned tag + our config, so these caches key on those (the
+      # package-lock.json lives only inside the clone).
       - name: Clone Quartz (v5)
+        if: steps.wiki-restore.outputs.cache-hit != 'true'
         run: |
           git clone --depth 1 --branch v5.0.0 https://github.com/jackyzha0/quartz.git "$RUNNER_TEMP/quartz"
           cp scripts/wiki/quartz.config.yaml "$RUNNER_TEMP/quartz/quartz.config.yaml"
 
       - name: Cache npm packages
+        if: steps.wiki-restore.outputs.cache-hit != 'true'
         uses: actions/cache@v4
         with:
           path: ~/.npm
           key: ${{ runner.os }}-quartz-npm-v5.0.0
 
       - name: Cache Quartz plugins
+        if: steps.wiki-restore.outputs.cache-hit != 'true'
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/quartz/.quartz/plugins
           key: ${{ runner.os }}-quartz-plugins-v5.0.0-${{ hashFiles('scripts/wiki/quartz.config.yaml') }}
 
       - name: Build wiki (Quartz v5)
+        if: steps.wiki-restore.outputs.cache-hit != 'true'
         working-directory: ${{ runner.temp }}/quartz
         run: |
           npm ci
           npx quartz plugin install
           npx quartz build -d "$GITHUB_WORKSPACE/docs/ral-wiki" -o "$GITHUB_WORKSPACE/site/wiki"
+
+      # Save only after a successful rebuild (a failed build halts the job before
+      # here, so we never cache a broken wiki).
+      - name: Save built wiki
+        if: steps.wiki-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: site/wiki
+          key: ${{ steps.wiki-restore.outputs.cache-primary-key }}
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v4
