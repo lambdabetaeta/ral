@@ -5,6 +5,7 @@ use crate::cancel;
 use crate::card::{Card, IoEvent};
 use crate::event::ProviderErrorRecord;
 use crate::provider::Usage;
+use crate::transcript::Transcript;
 use ral_core::Value;
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -672,6 +673,11 @@ pub enum Kind {
     StopReason(String),
     Error(String),
     Dim(String),
+    /// A recovery nudge the driver issued between attempts.  The trace records
+    /// it; the display surfaces it as it sees fit (a stderr line in headless,
+    /// quiet on the TUI rail).  Its `events.json` twin is the model-view
+    /// forensic breadcrumb.
+    Nudge { used: u32, max: u32, cause: String },
     ProviderError(ProviderErrorRecord),
     /// Emitted by the `agent` tool when a subagent finishes — *after*
     /// the child's own `Kind::Died` and *before* the spawn rejoins the
@@ -705,8 +711,8 @@ pub enum Kind {
     /// decoded once by [`shell_eval`] into a typed [`IoEvent`] and paired with
     /// the [`Card`] composed from it.  The bus carries *both*: the rendered
     /// card is what the rail draws, while the raw `event` keeps the structure
-    /// the mark tree erases, so `transcript.jsonl` records the effect itself
-    /// beside its presentation.
+    /// the mark tree erases, so `transcript.jsonl` records the effect itself;
+    /// the card is a presentation (the rail, the `user.log`) and is not.
     ///
     /// [`shell_eval`]: crate::shell_eval
     Io {
@@ -767,14 +773,20 @@ pub struct Emitter {
     /// Whether this emitter's channel outlives the spawning turn, so a
     /// *detached* worker (an async `agent` child) may clone it for a live
     /// tab.  The TUI's session-lived bus sets it; headless's per-turn bus
-    /// leaves it `false`, keeping async children muted to their own log —
-    /// bus lifetime is a TUI property, not a core obligation.
+    /// leaves it `false`, keeping async children muted *on the display* —
+    /// bus lifetime is a TUI property, not a core obligation.  It does not
+    /// gate [`Self::transcript`]: a muted child still records its own trace.
     session_lived: bool,
+    /// This emitter's owning session's [`Transcript`].  Every [`Self::emit`]
+    /// tees here, so the session's operational trace is written at the emit
+    /// seam — independent of who drains the live bus for display, and so a
+    /// child muted off a per-turn bus still records its full trace.
+    transcript: Transcript,
 }
 
 impl Emitter {
-    /// An emitter with a standalone, orphan mailbox — for tests and the muted
-    /// headless child, whose surface push has nowhere meaningful to land.
+    /// An emitter with a standalone, orphan mailbox and no transcript — for
+    /// tests, whose events land nowhere durable.
     pub fn new(tx: Sender<Event>, id: SessionId) -> Self {
         Self::with_mailbox(tx, id, Inbox::new().mailbox())
     }
@@ -785,23 +797,42 @@ impl Emitter {
             id,
             mailbox,
             session_lived: false,
+            transcript: Transcript::none(),
+        }
+    }
+
+    /// A muted emitter: a dead display channel but a live [`Transcript`].  The
+    /// headless child takes this — it streams nowhere (its receiver is already
+    /// dropped) yet still records its own operational trace, because recording
+    /// is a session property, not a display one.
+    pub fn muted(id: SessionId, transcript: Transcript) -> Self {
+        let (tx, _rx) = channel();
+        Self {
+            tx,
+            id,
+            mailbox: Inbox::new().mailbox(),
+            session_lived: false,
+            transcript,
         }
     }
 
     /// A sibling emitter for a child session: the same event channel and
     /// session-lived flag, stamped with the child's id, carrying the
-    /// **child's own** mailbox — so the child's surface batches land in the
-    /// child's box, never the parent's.
-    pub fn child(&self, id: SessionId, mailbox: Mailbox) -> Self {
+    /// **child's own** mailbox and **own** [`Transcript`] — so the child's
+    /// surface batches land in the child's box and its events in the child's
+    /// trace, never the parent's.
+    pub fn child(&self, id: SessionId, mailbox: Mailbox, transcript: Transcript) -> Self {
         Self {
             tx: self.tx.clone(),
             id,
             mailbox,
             session_lived: self.session_lived,
+            transcript,
         }
     }
 
     pub fn emit(&self, kind: Kind) {
+        self.transcript.record(self.id, &kind);
         let _ = self.tx.send(Event { id: self.id, kind });
     }
 
@@ -828,8 +859,10 @@ impl Emitter {
 ///   the idle wait drains it as a third source.
 /// - [`Self::per_turn`] — minted fresh for one turn (headless, tests), so the
 ///   channel closes when the turn's worker finishes.  Its emitters are *not*
-///   session-lived: an async child stays muted to its own log, the
-///   observable behaviour headless has always had.
+///   session-lived: an async child stays muted *on the display* (it never
+///   streams to a live tab) — the observable display behaviour headless has
+///   always had.  It still records its own `transcript.jsonl`, since recording
+///   rides the emitter, not the channel's lifetime.
 ///
 /// Either way [`pump_on`] borrows the channel — completion is the per-turn
 /// `done` flag, never the channel's lifetime.
@@ -848,7 +881,8 @@ impl SessionBus {
     }
 
     /// A per-turn bus over `inbox` (headless / tests).  Emitters are not
-    /// session-lived, so async children stay muted.
+    /// session-lived, so async children stay muted on the display (they still
+    /// record their own trace).
     pub fn per_turn(inbox: Inbox) -> Self {
         Self::build(inbox.mailbox(), false)
     }
@@ -872,12 +906,13 @@ impl SessionBus {
     /// root mailbox, carrying the bus's session-lived flag.  The root drive
     /// worker takes one; a child emitter is derived with [`Emitter::child`]
     /// carrying the child's own mailbox.
-    pub fn emitter(&self, id: SessionId) -> Emitter {
+    pub fn emitter(&self, id: SessionId, transcript: Transcript) -> Emitter {
         Emitter {
             tx: self.tx.clone(),
             id,
             mailbox: self.mailbox.clone(),
             session_lived: self.session_lived,
+            transcript,
         }
     }
 }
@@ -1014,6 +1049,7 @@ pub fn pump<S, R>(
     sink: &mut S,
     bus: &SessionBus,
     root_id: SessionId,
+    transcript: Transcript,
     work: impl Send + FnOnce(&Emitter) -> R,
 ) -> io::Result<Option<R>>
 where
@@ -1024,7 +1060,7 @@ where
     // and `drive` outlives the spawned thread's `'env`.
     let done = AtomicBool::new(false);
     let done_ref = &done;
-    let emit = bus.emitter(root_id);
+    let emit = bus.emitter(root_id, transcript);
     std::thread::scope(|s| -> io::Result<Option<R>> {
         let h = s.spawn(move || {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&emit)));
@@ -1049,8 +1085,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        Boundary, Emitter, Event, Inbox, InboxMsg, Kind, Pass, SessionBus, Sink, Turn, drain_pass,
-        pump,
+        Boundary, Emitter, Event, Inbox, InboxMsg, Kind, Pass, SessionBus, Sink, Transcript, Turn,
+        drain_pass, pump,
     };
     use std::sync::Arc;
 
@@ -1215,7 +1251,7 @@ mod tests {
         let holder: Mutex<Option<Emitter>> = Mutex::new(None);
 
         let t0 = Instant::now();
-        let r = pump(&mut sink, &bus, 0, |emit| {
+        let r = pump(&mut sink, &bus, 0, Transcript::none(), |emit| {
             *holder.lock().unwrap() = Some(emit.clone());
             emit.emit(Kind::Step(1));
             "done"

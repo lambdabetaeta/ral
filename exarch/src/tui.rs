@@ -682,6 +682,8 @@ impl App {
             }
             Kind::Error(msg) => self.push_chrome(id, RailShape::Error, line::error(&msg)),
             Kind::Dim(text) => self.push_chrome(id, RailShape::Plain, line::dim(&text)),
+            // Quiet on the rail; recorded in the trace at the emit seam.
+            Kind::Nudge { .. } => {}
             Kind::ProviderError(error) => {
                 self.push_chrome(id, RailShape::Error, line::provider_error(&error))
             }
@@ -734,8 +736,8 @@ impl App {
             // (even interleaved) into one block per kind, flushed at the next
             // boundary.  The per-event `card` is dropped on the render path; it
             // is reconstructed grouped at flush, and the structured per-event
-            // record already reached the transcript via `headless::event_record`
-            // upstream of `handle`, so nothing is lost.
+            // record already reached the transcript at the emit seam
+            // (`Emitter::emit`), upstream of this UI handler, so nothing is lost.
             Kind::Io { event, .. } => self.absorb_io(id, event),
             // Pinned state: write or drop a register slot in place.  Routed
             // directly, *not* through `with_viewport` — a pin is ambient state
@@ -2618,8 +2620,10 @@ pub fn run(
     };
     // The worker captures the session emitter, not `&bus`: `SessionBus` is not
     // `Sync` (its `Receiver` is single-consumer), so the receiver stays on the
-    // UI thread. The emitter is `Send` and is all the worker needs.
-    let worker_emit = bus.emitter(session.id);
+    // UI thread. The emitter is `Send` and is all the worker needs.  It carries
+    // the root's `Transcript`, so the TUI records `transcript.jsonl` too — the
+    // operational view beside `user.log`'s rendered one.
+    let worker_emit = bus.emitter(session.id, session.transcript());
     let worker_provider = provider.clone();
     // A `Mailbox` onto the session inbox, so a UI-loop failure can wake the
     // parked worker with a `/quit` before joining — without it the worker

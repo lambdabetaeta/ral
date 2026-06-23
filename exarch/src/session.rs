@@ -26,6 +26,7 @@ use crate::nudge;
 use crate::provider::{Provider, ProviderError, StepOut, StopReason, ToolCall};
 use crate::shell_eval;
 use crate::tools::ToolSet;
+use crate::transcript::Transcript;
 use ral_core::Shell;
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -35,6 +36,12 @@ pub struct Session {
     pub id: SessionId,
     pub(crate) system: String,
     log: SessionLog,
+    /// This session's operational trace (`transcript.jsonl`), written at the
+    /// emit seam through the [`Emitter`](crate::bus::Emitter) the frontend
+    /// builds from [`Self::transcript`].  The sibling of [`Self::log`]: the
+    /// model view (`events.json`) is what the model saw; the transcript is
+    /// what the agent did.
+    transcript: Transcript,
     shell: Shell,
     caps: ral_core::types::Capabilities,
     /// This session's own inbox — the consumer side of its message queue.
@@ -231,7 +238,7 @@ struct Build {
 }
 
 impl Session {
-    fn assemble(b: Build) -> Self {
+    fn assemble(b: Build) -> io::Result<Self> {
         let Build {
             system,
             caps,
@@ -245,10 +252,14 @@ impl Session {
         } = b;
         seed_session_dir(&mut shell, &log);
         let durable = shell.mobile_snapshot();
-        Self {
+        // Every session — root and each fork, both modes — owns its trace,
+        // born in the same dir as its `events.json`.
+        let transcript = Transcript::create(&log.dir().join("transcript.jsonl"))?;
+        Ok(Self {
             id: log.id(),
             system,
             log,
+            transcript,
             shell,
             caps,
             inbox: Inbox::new(),
@@ -266,7 +277,7 @@ impl Session {
             schedule_authority,
             last_input: 0,
             pins: Default::default(),
-        }
+        })
     }
 
     fn replace_shell(&mut self, mut shell: Shell) {
@@ -291,7 +302,7 @@ impl Session {
         let sessions_root = run_dir.join("sessions");
         let id = fresh_id();
         let log = SessionLog::root(&sessions_root, id, model, provider_label, system.len())?;
-        Ok(Self::assemble(Build {
+        Self::assemble(Build {
             system,
             caps,
             shell,
@@ -303,7 +314,7 @@ impl Session {
             expect_action,
             schedule_authority: allow_schedule,
             tools: ToolSet::All,
-        }))
+        })
     }
 
     pub(crate) fn clear(&mut self, scratch: &Scratch) -> io::Result<()> {
@@ -345,7 +356,7 @@ impl Session {
         let shell = self.shell.fork_session();
         let child_id = fresh_id();
         let log = self.log.fork(child_id, self.system.len())?;
-        Ok(Self::assemble(Build {
+        Self::assemble(Build {
             system: self.system.clone(),
             caps: self.caps.clone(),
             shell,
@@ -361,11 +372,18 @@ impl Session {
             // A peer may not spawn — withholding the spawn family from its tool
             // set bounds recursion to depth 1, advertised and enforced.
             tools: ToolSet::NoSpawn,
-        }))
+        })
     }
 
     pub(crate) fn log_dir(&self) -> &std::path::Path {
         self.log.dir()
+    }
+
+    /// A handle to this session's [`Transcript`] — for the frontend to attach
+    /// to the emitter it drives this session through (the root) and for the
+    /// spawn site to hand a forked child its own trace.
+    pub(crate) fn transcript(&self) -> Transcript {
+        self.transcript.clone()
     }
 
     /// This session's mailbox — for the `schedule` tool to arm wakeups into
@@ -409,7 +427,7 @@ impl Session {
             "test",
             system.len(),
         )?;
-        Ok(Self::assemble(Build {
+        Self::assemble(Build {
             system: system.to_string(),
             caps: ral_core::types::Capabilities::default(),
             shell,
@@ -421,7 +439,7 @@ impl Session {
             expect_action: false,
             schedule_authority: false,
             tools: ToolSet::All,
-        }))
+        })
     }
 
     /// Whether the session is at a settled turn boundary — every turn

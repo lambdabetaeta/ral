@@ -33,6 +33,7 @@ pub mod shell_eval;
 pub mod state;
 pub mod tls;
 pub mod tools;
+pub mod transcript;
 pub mod tui;
 
 use clap::Parser;

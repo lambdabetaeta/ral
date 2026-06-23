@@ -6,7 +6,7 @@
 //! (`tui::line::render_card`).  The *set of cards* is open — compose marks
 //! in ral, zero Rust per card — while the *set of marks* stays closed and
 //! small, so the renderer is total and reflow / disclosure / aggregation /
-//! the structured `transcript.jsonl` log all keep working.
+//! the rendered `user.log` all keep working.
 //!
 //! The discipline is Bertin's: the kit declares **data and its level of
 //! measurement, never its appearance**.  A [`Span`] carries a nominal
@@ -436,7 +436,7 @@ fn write_spans(path: &str, outcome: WriteOutcome) -> Vec<Span> {
 /// run* (`$ wc -l, grep -rn, git status`), and a per-command status would be
 /// per-event noise on that line.  The status is not lost — it rides the bus
 /// in each `Kind::Io`'s structured event and reaches the transcript via
-/// `headless::event_record`; only this grouped *presentation* omits it.
+/// `transcript::event_record`; only this grouped *presentation* omits it.
 pub fn io_group_card(
     reads: &[String],
     execs: &[IoEvent],
@@ -1070,9 +1070,9 @@ mod tests {
         assert!(matches!(&marks[1], Mark::Text { .. }), "unknown → text");
     }
 
-    /// A card serialises to a structured mark tree — the `transcript.jsonl`
-    /// record — with each mark internally tagged and a `raw` mark carrying
-    /// its bytes.  Only `raw` is opaque, and honestly so.
+    /// A card serialises to a structured mark tree — with each mark internally
+    /// tagged and a `raw` mark carrying its bytes.  Only `raw` is opaque, and
+    /// honestly so.
     #[test]
     fn serialises_to_a_structured_mark_tree() {
         let card = Card(vec![
@@ -1178,7 +1178,7 @@ mod tests {
 
     /// An `IoEvent` serialises structurally — tagged by its `io` field, with
     /// the mode/outcome enums as snake_case strings — so the raw effect is
-    /// recorded beside the card in `transcript.jsonl`.
+    /// recorded in `transcript.jsonl` (the card it renders is not).
     #[test]
     fn io_event_serialises_structurally() {
         let v = serde_json::to_value(IoEvent::Write {

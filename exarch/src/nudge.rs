@@ -4,8 +4,8 @@
 //! walk the rules and either accept the turn (surfacing any attached provider
 //! error on the way out) or hand back a synthetic next prompt for the drive
 //! loop to post to itself as an [`InboxMsg::Nudge`](crate::bus::InboxMsg).
-//! Records to events.json; emits to the bus only for the budget-exhausted and
-//! provider-error breadcrumbs.  Nudges themselves are quiet.
+//! Records each nudge to both the `events.json` breadcrumb and the operational
+//! trace (`Kind::Nudge`); the display decides whether to surface it.
 //!
 //! The registry is **per-session** ([`Session::nudges`]): the drive loop runs
 //! one [`Session::apply`] per inbox message, not one whole turn, so the
@@ -139,7 +139,7 @@ impl Registry {
                 && matches!(attempt, Ok(TurnOutcome::Complete(_)))
             {
                 self.reply_nudged = true;
-                let _ = log.record_nudge(self.used, BUDGET, "no-reply finish (sub-agent)".into());
+                record_nudge(emit, log, self.used, "no-reply finish (sub-agent)".into());
                 return Some(REPLY_MESSAGE.into());
             }
             // Under `--expect-action`, a clean completion is gated by two
@@ -150,18 +150,15 @@ impl Registry {
             if ctx.expect_action && matches!(attempt, Ok(TurnOutcome::Complete(_))) {
                 if !ctx.acted && !self.idle_nudged {
                     self.idle_nudged = true;
-                    let _ = log.record_nudge(
-                        self.used,
-                        BUDGET,
-                        "idle-completion (expect-action)".into(),
-                    );
+                    record_nudge(emit, log, self.used, "idle-completion (expect-action)".into());
                     return Some(IDLE_MESSAGE.into());
                 }
                 if ctx.acted && !self.verify_nudged {
                     self.verify_nudged = true;
-                    let _ = log.record_nudge(
+                    record_nudge(
+                        emit,
+                        log,
                         self.used,
-                        BUDGET,
                         "verify-before-finish (expect-action)".into(),
                     );
                     return Some(VERIFY_MESSAGE.into());
@@ -179,7 +176,7 @@ impl Registry {
             {
                 self.pin_reminded = true;
                 self.turns_since_pin_reminder = 0;
-                let _ = log.record_nudge(self.used, BUDGET, "pinned-state reminder".into());
+                record_nudge(emit, log, self.used, "pinned-state reminder".into());
                 return Some(format!("{PIN_REMINDER_PREFIX}{desc}{PIN_REMINDER_SUFFIX}"));
             }
             surface_provider_error(attempt, emit, log);
@@ -193,11 +190,20 @@ impl Registry {
             return None;
         }
         self.used += 1;
-        // Recorded in events.json for forensics; not surfaced on the
-        // bus — nudges are an internal driver concern.
-        let _ = log.record_nudge(self.used, BUDGET, cause);
+        record_nudge(emit, log, self.used, cause);
         Some(message.into())
     }
+}
+
+/// Record a nudge to both views: the `events.json` forensic breadcrumb and the
+/// operational trace (`Kind::Nudge`, which the display surfaces as it sees fit).
+fn record_nudge(emit: &Emitter, log: &mut SessionLog, used: u32, cause: String) {
+    let _ = log.record_nudge(used, BUDGET, cause.clone());
+    emit.emit(Kind::Nudge {
+        used,
+        max: BUDGET,
+        cause,
+    });
 }
 
 fn surface_provider_error(

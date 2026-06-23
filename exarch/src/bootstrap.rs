@@ -132,7 +132,7 @@ impl Scratch {
 /// slugified absolute `cwd` (see [`project_slug`]) and `<run>` is
 /// `<unix-seconds>-<pid>`, unique per launch so successive runs in the
 /// same project never overwrite one another.  Holds `stderr.log` and
-/// `sessions/<id>/{events.json,user.log}`.  Unlike the disposable
+/// `sessions/<id>/{events.json,transcript.jsonl,user.log}`.  Unlike the disposable
 /// [`Scratch`] this is durable state under the user's XDG state home, so
 /// it survives an abnormal exit and stays findable without a symlink.
 #[allow(

@@ -162,14 +162,15 @@ and keeps the result addressable (e.g. the line-hash `edit` needs)."
         // A live tab whenever the bus outlives the turn (the TUI): a real
         // emitter cloned off the session sender, stamped with the child's id
         // and carrying the child's own mailbox.  Off a per-turn bus (headless)
-        // the child is muted — an emitter whose receiver is already dropped —
-        // so it never streams; its persistent record is its own forked
-        // `SessionLog` and its reply returns through the inbox.
+        // the child is muted *on the display* — an emitter whose receiver is
+        // already dropped — so it never streams; but either way it carries the
+        // child's own `Transcript`, so its operational trace is recorded
+        // regardless of whether anyone is watching.  Its model view returns
+        // through its forked `SessionLog`, its reply through the inbox.
         let child_emit = if emit.is_session_lived() {
-            emit.child(agent_id, child.mailbox())
+            emit.child(agent_id, child.mailbox(), child.transcript())
         } else {
-            let (tx, _rx) = std::sync::mpsc::channel();
-            Emitter::new(tx, agent_id)
+            Emitter::muted(agent_id, child.transcript())
         };
         let started = Instant::now();
         let born_title = title.clone();

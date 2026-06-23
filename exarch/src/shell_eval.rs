@@ -1723,13 +1723,13 @@ return !{{length $hits}}"#
         );
     }
 
-    /// The transcript seam (`headless::event_record`) records the raw
-    /// structural `event` STRUCTURALLY beside the rendered `card` mark tree:
-    /// a `Kind::Io` projects to `("io", { event, card })`, so a post-mortem
-    /// reader keeps the effect's shape the rendered card erases.  Driven
+    /// The transcript seam (`transcript::event_record`) is the *operational*
+    /// view: a `Kind::Io` projects to `("io", { event })`, keeping the raw
+    /// structural effect the rendered card erases — but NOT the card itself,
+    /// which is a rendering and belongs to the TUI's `user.log`.  Driven
     /// against `event_record` directly — not a TUI render.
     #[test]
-    fn io_event_record_carries_event_and_card_structurally() {
+    fn io_event_record_carries_structural_event_not_card() {
         use crate::card::{IoEvent, io_card};
         let event = IoEvent::Write {
             path: "b.rs".into(),
@@ -1741,7 +1741,7 @@ return !{{length $hits}}"#
             event: event.clone(),
             card,
         };
-        let rec = crate::headless::event_record(7, 3, &kind).expect("an io event records");
+        let rec = crate::transcript::event_record(7, 3, &kind).expect("an io event records");
 
         assert_eq!(rec["kind"], "io", "the record is tagged io");
         // The raw structural event survives, tagged by its `io` field with the
@@ -1750,14 +1750,11 @@ return !{{length $hits}}"#
         assert_eq!(rec["event"]["path"], "b.rs");
         assert_eq!(rec["event"]["mode"], "append");
         assert_eq!(rec["event"]["outcome"], "committed");
-        // The rendered card rides beside it as a structured mark tree.
-        let marks = rec["card"]
-            .as_array()
-            .expect("the card serialises to a JSON array of marks");
-        assert_eq!(marks[0]["mark"], "text", "the io card is one text mark");
+        // The rendered card does NOT ride along — it is a presentation, not an
+        // operational effect.
         assert!(
-            !marks[0]["spans"].as_array().expect("spans").is_empty(),
-            "the composed card carries its spans beside the raw event"
+            rec.get("card").is_none(),
+            "the operational trace drops the rendered card, got {rec:?}"
         );
     }
 

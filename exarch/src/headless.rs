@@ -5,21 +5,18 @@
 //! goes to stderr; the process exits after one seed turn.  Takes the
 //! default [`Sink::drive`]; only [`Sink::handle`] is custom.
 //!
-//! Independently of what reaches stdout/stderr, the full structured
-//! event stream is mirrored to `transcript.jsonl` in the session log
-//! dir — one JSON object per event, tagged with its session id — so a
-//! post-mortem reader gets the lossless trace (every tool `cmd` and
-//! result, step, usage delta, patch, subagent boundary) whatever the
-//! human stdout/stderr projection shows, and sub-agent output
-//! de-multiplexes cleanly by id.
+//! This frontend is a *display* — it projects the bus to stdout/stderr.
+//! The durable record is not its concern: each session writes its own
+//! `transcript.jsonl` (operational view) and `events.json` (model view)
+//! through the [`crate::transcript`] and [`crate::event`] seams, in headless
+//! exactly as in the TUI, for the root and every forked child alike.
 
 use crate::bus::{Event, Kind, Row, SessionBus, SessionId, Sink, pump};
 use crate::card::{Card, FieldVal, Mark};
 use crate::provider::{Provider, Usage};
 use crate::session::Session;
 use crate::tui::SessionInfo;
-use std::fs::File;
-use std::io::{self, BufWriter, Write};
+use std::io::{self, Write};
 use std::time::Instant;
 
 /// What the root agent's output looks like on stdout in headless mode.
@@ -38,13 +35,8 @@ pub struct Headless {
     /// stdout; sub-agent token streams stay off the main surface
     /// (they'd interleave) and surface as `SubagentDone` breadcrumbs.
     root_id: SessionId,
-    /// Structured mirror of the bus: every event except the token
-    /// stream and the interactive-only live lines is written here as
-    /// one JSON object per line. Independent of `verbose` — this is
-    /// the lossless trace; stdout/stderr are its human projection.
-    events: BufWriter<File>,
-    /// Start instant for the monotonic `t_ms` offset stamped on each
-    /// JSONL record.
+    /// Start instant for the run's wall-clock, surfaced at the end and in
+    /// the JSON result.
     started: Instant,
     /// When true, stdout carries a single JSON result object emitted at
     /// the end instead of the live token stream.
@@ -75,11 +67,10 @@ pub struct Headless {
 }
 
 impl Headless {
-    fn new(json_mode: bool, events: BufWriter<File>, root_id: SessionId) -> Self {
+    fn new(json_mode: bool, root_id: SessionId) -> Self {
         Self {
             usage: Usage::default(),
             root_id,
-            events,
             started: Instant::now(),
             json_mode,
             turns: 0,
@@ -92,86 +83,12 @@ impl Headless {
     }
 }
 
-/// Project one event into its `transcript.jsonl` record, or `None` for
-/// the variants we deliberately omit: the `Token` stream (assistant
-/// prose is already on stdout) and the interactive-only `Boundary` and
-/// `UserPromptEcho`. The exhaustive match means a new [`Kind`] variant
-/// won't silently fall out of the trace.
-pub(crate) fn event_record(t_ms: u128, id: SessionId, kind: &Kind) -> Option<serde_json::Value> {
-    use serde_json::json;
-    let (name, mut obj) = match kind {
-        Kind::Born { log_dir, title } => (
-            "born",
-            json!({ "log_dir": log_dir.to_string_lossy(), "title": title }),
-        ),
-        Kind::Died => ("died", json!({})),
-        Kind::Usage(u) => (
-            "usage",
-            json!({
-                "input": u.input,
-                "output": u.output,
-                "cache_creation": u.cache_creation,
-                "cache_read": u.cache_read,
-                "dollars": u.dollars,
-            }),
-        ),
-        Kind::Step(n) => ("step", json!({ "n": n })),
-        Kind::ToolCall { tool, cmd, summary } => (
-            "tool_call",
-            json!({ "tool": tool, "cmd": cmd, "summary": summary }),
-        ),
-        Kind::ToolResult(text) => ("tool_result", json!({ "text": text })),
-        Kind::StopReason(raw) => ("stop_reason", json!({ "raw": raw })),
-        Kind::Error(msg) => ("error", json!({ "msg": msg })),
-        Kind::Dim(text) => ("dim", json!({ "text": text })),
-        Kind::ProviderError(error) => ("provider_error", json!({ "error": error })),
-        Kind::SubagentDone {
-            title,
-            outcome,
-            text,
-            elapsed,
-        } => {
-            let (text, error) = outcome.breadcrumb(text);
-            (
-                "subagent_done",
-                json!({
-                    "title": title,
-                    "text": text,
-                    "error": error,
-                    "elapsed_ms": elapsed.as_millis() as u64,
-                }),
-            )
-        }
-        // The whole mark tree, so the machine log stays structured; only a
-        // `raw` mark is opaque, and honestly so.
-        Kind::Card(card) => ("card", json!({ "card": card })),
-        // The raw structural effect beside the mark tree composed from it:
-        // the log keeps the io event's structure (which the rendered card
-        // erases) for a post-mortem, alongside the card the rail drew.
-        Kind::Io { event, card } => ("io", json!({ "event": event, "card": card })),
-        Kind::Phase(label) => ("phase", json!({ "label": label })),
-        // Pinned state is what is *currently true*, not a thing that happened —
-        // it is never an `events.json` row, exactly as the matrix is not.
-        Kind::Token(_)
-        | Kind::Boundary
-        | Kind::UserPromptEcho(_)
-        | Kind::Pin { .. }
-        | Kind::Unpin { .. } => return None,
-    };
-    let map = obj
-        .as_object_mut()
-        .expect("event_record arms are JSON objects");
-    map.insert("t_ms".into(), json!(t_ms as u64));
-    map.insert("id".into(), json!(id));
-    map.insert("kind".into(), json!(name));
-    Some(obj)
-}
-
 /// Condense a surfaced [`Card`] to stderr lines — the human projection of
 /// the mark tree, walked generically: a `diff` reproduces the old patch
 /// lines, a `measure` its bracketed readout, `fields` its aligned pairs,
-/// `text` its plain prose, `raw` its bytes lossily.  The structured form
-/// stays in `transcript.jsonl`.
+/// `text` its plain prose, `raw` its bytes lossily.  The card is a rendering;
+/// the operational trace keeps only an io card's structural `event`, never
+/// the mark tree itself.
 fn card_stderr(card: &Card) -> Vec<String> {
     let mut out = Vec::new();
     for mark in card.marks() {
@@ -259,13 +176,7 @@ fn result_json(h: &Headless, r: &Result<(), String>, elapsed: std::time::Duratio
 
 impl Sink for Headless {
     fn handle(&mut self, e: Event) {
-        let t_ms = self.started.elapsed().as_millis();
         let id = e.id;
-        if let Some(rec) = event_record(t_ms, id, &e.kind)
-            && let Ok(line) = serde_json::to_string(&rec)
-        {
-            let _ = writeln!(self.events, "{line}");
-        }
         match e.kind {
             // Only the root agent's tokens reach the user — in text mode
             // they stream to stdout; in json mode they accumulate so the
@@ -321,12 +232,16 @@ impl Sink for Headless {
                 eprintln!("error: {msg}");
             }
             Kind::Dim(text) => eprintln!("{text}"),
+            Kind::Nudge {
+                used, max, cause, ..
+            } if id == self.root_id => eprintln!("[nudge {used}/{max}: {cause}]"),
+            Kind::Nudge { .. } => {}
             Kind::ProviderError(error) => eprintln!("provider error: {error:?}"),
             // A surfaced render document, or a structural I/O event paired
             // with the card composed from it.  In headless we condense the
-            // card's marks to stderr lines generically; the canonical
-            // structured form (the mark tree, and for io the raw event
-            // beside it) is in `transcript.jsonl`.
+            // card's marks to stderr lines generically; for an io event its
+            // raw structural form is kept in `transcript.jsonl` (the card is a
+            // rendering and is not).
             Kind::Card(card) | Kind::Io { card, .. } => {
                 for line in card_stderr(&card) {
                     eprintln!("{line}");
@@ -356,8 +271,9 @@ impl Sink for Headless {
                 self.final_msg = std::mem::take(&mut self.cur_msg);
             }
             // Boundary / Born / Died / UserPromptEcho are interactive-only;
-            // Phase is already captured in `events.json` by `event_record`
-            // and would only clutter the live stderr stream.
+            // Phase is a progress label — a rendering — so headless neither
+            // prints it (it would clutter the stderr stream) nor records it
+            // (the operational trace omits presentation events).
             Kind::Boundary
             | Kind::Born { .. }
             | Kind::Died
@@ -370,10 +286,6 @@ impl Sink for Headless {
     }
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:silent:transcript-file] creates the headless run's transcript.jsonl; output infra, not turn-time data I/O"
-)]
 pub fn run(
     session: &mut Session,
     provider: &std::sync::Arc<Provider>,
@@ -386,16 +298,16 @@ pub fn run(
         "exarch: provider={} model={} base={}",
         info.provider, info.model, info.base
     );
-    let log_dir = session.log_dir();
-    let transcript = log_dir.join("transcript.jsonl");
-    let file = File::create(&transcript).map_err(|e| format!("{}: {e}", transcript.display()))?;
     let json = format == OutputFormat::Json;
-    let mut headless = Headless::new(json, BufWriter::new(file), session.id);
+    let mut headless = Headless::new(json, session.id);
+    // The root's trace handle, attached to the emitter `pump` drives it
+    // through; bound before `session` is borrowed into the worker closure.
+    let root_transcript = session.transcript();
     // A per-turn bus over the session's *own* inbox, so the drive worker's
     // emitter and any in-turn producer share one queue.  Headless has no idle
     // loop and no tabs, so the channel closes when the worker finishes and
-    // async children stay muted to their own log — the behaviour headless has
-    // always had.
+    // async children stay muted *on the display* — but each still records its
+    // own trace, the behaviour we want everywhere.
     let bus = SessionBus::per_turn(session.inbox());
     // Seed the launch prompt into that same inbox; the headless root is
     // `park_when_idle=false`, so `drive` runs the seeded work and returns once
@@ -410,7 +322,7 @@ pub fn run(
     // Drive on a scoped worker thread while the main thread drives the sink.
     // `pump` returns the worker's `(outcome, text)`, or `None` if it panicked.
     let root_id = session.id;
-    let outcome = pump(&mut headless, &bus, root_id, |emit| {
+    let outcome = pump(&mut headless, &bus, root_id, root_transcript, |emit| {
         session.drive(provider.clone(), &mut control, emit)
     });
     // The sink already latched `panicked` from the WORKER_PANIC_PREFIX error a
@@ -422,7 +334,6 @@ pub fn run(
         Ok(None) => Err("worker panicked".to_string()),
         Err(e) => Err(e.to_string()),
     };
-    let _ = headless.events.flush();
     let elapsed = headless.started.elapsed();
     if json {
         // The streamed text was held back, so this single result object
@@ -445,10 +356,6 @@ pub fn run(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:test] test fs/process scaffolding"
-)]
 mod tests {
     use super::*;
 
@@ -459,10 +366,7 @@ mod tests {
     #[test]
     fn recovered_worker_panic_reports_error_not_success() {
         let root: SessionId = 1;
-        let path =
-            std::env::temp_dir().join(format!("exarch-panic-result-{}.jsonl", std::process::id()));
-        let file = File::create(&path).expect("events file");
-        let mut h = Headless::new(true, BufWriter::new(file), root);
+        let mut h = Headless::new(true, root);
         h.handle(Event {
             id: root,
             kind: Kind::Error(format!("{}boom", crate::bus::WORKER_PANIC_PREFIX)),
@@ -481,10 +385,7 @@ mod tests {
     fn num_turns_counts_root_steps_across_segments() {
         let root: SessionId = 1;
         let sub: SessionId = 2;
-        let path =
-            std::env::temp_dir().join(format!("exarch-turns-result-{}.jsonl", std::process::id()));
-        let file = File::create(&path).expect("events file");
-        let mut h = Headless::new(true, BufWriter::new(file), root);
+        let mut h = Headless::new(true, root);
         // Two root segments whose per-segment indices reset (1..3, then
         // 1..2), with a sub-agent step interleaved that must be ignored.
         for n in [1, 2, 3, 1, 2] {
