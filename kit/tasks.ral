@@ -1,9 +1,8 @@
 # tasks.ral — a small task-management kit.
 #
-# Load with `source "kit/tasks.ral"` (or `use kit/tasks` once a project
-# module path resolves there).  The bindings drop into the current
-# scope; loading also echoes a short API recap to stdout so the
-# model sees the kit's surface in the tool result.
+# Load with `source "kit/tasks.ral"`.  The bindings drop into the current
+# scope; loading also echoes a short API recap to stdout so the model
+# sees the kit's surface in the tool result.
 #
 # Schema (records are statically typed; every field is always present):
 #     id     : Int
@@ -19,18 +18,22 @@
 #   REPL with no host.
 # * The host-surfacing layer (add-task, transition, surface-progress)
 #   hands the host a render document with the `surface` builtin.  Task
-#   state is *pinned*, not streamed: `surface-progress` pins one `tasks`
-#   rollup gauge (a bounded `measure` wrapped in a `` `pin `` disposition
-#   keyed to a register slot) which the host overwrites in place rather
-#   than appending a card per change.  With no host installed `surface`
-#   is the identity, so the kit stays runnable in a bare ral REPL.
+#   state is *pinned*, not streamed: `surface-progress` pins one card
+#   — a `measure` gauge on top, then two `text` marks per task (a
+#   coloured header line and an indented body line) — wrapped in a
+#   `` `pin `` disposition keyed to a register slot, which the host
+#   overwrites in place rather than appending a card per change.  With
+#   no host installed `surface` is the identity, so the kit stays
+#   runnable in a bare ral REPL.
 #
 # Id allocation: `add-task` calls `next-id`, which returns
 # `max(ids) + 1`.  Ids freed by `remove-task` are recycled.
 #
-# Keeping the task list current is no longer the kit's job to nag about: the
-# host reminds the model of its pinned state on a fixed cadence (see exarch's
-# `nudge` registry), so the kit just declares and pins data.
+# Convenience wrappers (tag-task, note-task, retag-task) compose on top
+# of update-task so callers never rebuild a full record by hand.
+#
+# Status validation: `transition` rejects anything outside
+# `valid-statuses` and leaves the list unchanged, printing a warning.
 
 
 # --- constructor ------------------------------------------------------------
@@ -42,6 +45,9 @@ let mk-task = { |id desc|
 # A correctly-typed empty task list. A bare `[]` would be polymorphic and
 # get monomorphised to the wrong element type at the first use site.
 let empty-tasks = drop 1 [ !{mk-task 0 ""} ]
+
+# Valid status values.  `transition` rejects anything outside this set.
+let valid-statuses = ['open', 'doing', 'blocked', 'done']
 
 # --- per-field setters ------------------------------------------------------
 # One respread per setter, so adding a field touches O(setters), not O(callers).
@@ -88,18 +94,31 @@ let update-task = { |ts id f|
   map { |t| if $[$t[id] == $id] { f $t } else { $t } } $ts
 }
 
+# --- list-level convenience (setters composed, no record rebuilding) ---
+
+let tag-task   = { |ts id tag|  update-task $ts $id { |t| add-tag  $t $tag } }
+let untag-task = { |ts id tag|  update-task $ts $id { |t| remove-tag $t $tag } }
+let note-task  = { |ts id note| update-task $ts $id { |t| set-notes  $t $note } }
+let retag-task = { |ts id tags| update-task $ts $id { |t| set-tags   $t $tags } }
+
+
 # --- queries ---------------------------------------------------------------
 
 let by-status   = { |ts s| filter { |t| equal $t[status] $s } $ts }
 let by-tag      = { |ts g| filter { |t| elem   $g $t[tags]  } $ts }
 let open-tasks  = { |ts| by-status $ts "open" }
 
+# Single-fold status counts — one pass over the list, not four.
 let status-counts = { |ts|
-  [ open:    !{length !{by-status $ts "open"   }},
-    doing:   !{length !{by-status $ts "doing"  }},
-    blocked: !{length !{by-status $ts "blocked"}},
-    done:    !{length !{by-status $ts "done"   }} ]
+  fold { |acc t|
+    if    !{equal $t[status] "open"}    { [open: $[$acc[open] + 1],     doing: $acc[doing],   blocked: $acc[blocked], done: $acc[done]] }
+    elsif !{equal $t[status] "doing"}   { [open: $acc[open],   doing: $[$acc[doing] + 1],   blocked: $acc[blocked], done: $acc[done]] }
+    elsif !{equal $t[status] "blocked"} { [open: $acc[open],   doing: $acc[doing],   blocked: $[$acc[blocked] + 1], done: $acc[done]] }
+    elsif !{equal $t[status] "done"}    { [open: $acc[open],   doing: $acc[doing],   blocked: $acc[blocked], done: $[$acc[done] + 1]] }
+    else                                { $acc }
+  } [open: 0, doing: 0, blocked: 0, done: 0] $ts
 }
+
 
 # --- rendering -------------------------------------------------------------
 
@@ -111,10 +130,12 @@ let render-task = { |t|
 
 let render-tasks = { |ts| for $ts { |t| echo !{render-task $t} } }
 
+
 # --- persistence -----------------------------------------------------------
 
 let save-tasks = { |ts path| to-json   $ts > $path }
 let load-tasks = { |path|    from-json     < $path }
+
 
 # --- host-rail surfacing ---------------------------------------------------
 # `surface` hands the host a render document — a `` `card `` of Bertin
@@ -122,43 +143,57 @@ let load-tasks = { |path|    from-json     < $path }
 # its level of measurement; the host binds it to visual variables.  See
 # `value_to_card` in `exarch/src/card.rs` for the host's decoder.
 
-## A rollup as a one-mark card: a bounded `measure` (`value`/`max`), which
-## the host renders as a proportional progress bar with a lightness ramp.
-let meter-card = { |done total label|
-    `card [`measure [label: $label, value: $done, max: $total]]
+## Build a list of two `` `text `` marks for one task: a header line
+## (id + coloured status) and a body line (description, tags, notes).
+## Empty tags or notes produce no span, so nothing renders as `[]`.
+let task-to-marks = { |t|
+  let id-str = "#$t[id]  "
+  let status-str = $t[status]
+  let tag-str = if !{is-empty $t[tags]} { "" } else { "  [!{intercalate "," $t[tags]}]" }
+  let note-str = if !{equal $t[notes] ""} { "" } else { "  -- $t[notes]" }
+  let header =
+    if    !{equal $t[status] "done"}    { [[role: "muted", text: $id-str], [role: "ok",    text: $status-str]] }
+    elsif !{equal $t[status] "doing"}   { [[role: "muted", text: $id-str], [role: "warn",   text: $status-str]] }
+    elsif !{equal $t[status] "blocked"} { [[role: "muted", text: $id-str], [role: "bad",    text: $status-str]] }
+    else                                { [[role: "muted", text: $id-str], [role: "muted",  text: $status-str]] }
+  let desc-span = [[role: "", text: "  $t[desc]"]]
+  let tag-span  = if !{is-empty $t[tags]}    { [] }  else { [[role: "code",  text: $tag-str]] }
+  let note-span = if !{equal $t[notes] ""}   { [] } else { [[role: "muted", text: $note-str]] }
+  let body = [...$desc-span, ...$tag-span, ...$note-span]
+  [`text [spans: $header], `text [spans: $body]]
 }
 
-## Wrap the `tasks` meter in a `` `pin `` disposition keyed to a register
-## slot, so the host writes it to a fixed slot and overwrites in place on
-## re-surface instead of appending a fresh card per change.
-let pin-tasks = { |done total|
-    `pin [key: "tasks", body: !{meter-card $done $total "tasks"}]
-}
-
-## Pin the `tasks <done>/<total>` rollup to the host's register.  The
-## label is the noun being counted; the kit fixes it to "tasks" so the
-## reader can scan the rollup at a glance, and the keyed slot means the
-## gauge fills in place rather than streaming down the scrollback.
+## Pin the `tasks <done>/<total>` rollup to the host register, with the
+## full task list rendered as two-line blocks beneath the gauge.  The
+## keyed slot means the whole card fills in place rather than streaming
+## down the scrollback.
 let surface-progress = { |ts|
-    let done = !{length !{by-status $ts "done"}}
+    let done  = !{length !{by-status $ts "done"}}
     let total = !{length $ts}
-    surface !{pin-tasks $done $total}
+    let gauge = `measure [label: "tasks", value: $done, max: $total]
+    let marks = [$gauge, ...!{flat-map $task-to-marks $ts}]
+    surface `pin [key: "tasks", body: `card $marks]
 }
 
-## Transition a task's status and update the pinned `tasks` rollup gauge
-## in place.  A status change is a state transition of a state variable,
-## so it overwrites the gauge and appends nothing.  An unresolved id
-## leaves the list unchanged.  Returns the updated task list.
+## Transition a task status and update the pinned `tasks` rollup gauge
+## in place.  Rejects invalid statuses (anything outside
+## open|doing|blocked|done) with a warning on stderr and leaves the
+## list unchanged.  Returns the updated task list.
 let transition = { |ts id new-status|
-    let new-ts = update-task $ts $id { |t| set-status $t $new-status }
-    surface-progress $new-ts
-    $new-ts
+    if !{elem $new-status $valid-statuses} {
+        let new-ts = update-task $ts $id { |t| set-status $t $new-status }
+        surface-progress $new-ts
+        $new-ts
+    } else {
+        echo "transition: invalid status -- $new-status (expected open|doing|blocked|done)" 1>&2
+        $ts
+    }
 }
 
 
 # --- load-time briefing ----------------------------------------------------
 # Runs once when the file is sourced.  The echoes land in the
-# sourcing tool call's stdout so the model receives the API recap
+# sourcing tool call stdout so the model receives the API recap
 # alongside the bindings.
 
 echo 'tasks kit loaded.'
@@ -166,11 +201,15 @@ echo '  empty-tasks                          — correctly-typed empty list'
 echo '  add-task $tasks <desc>               — fresh id, append, update pinned gauge'
 echo '  remove-task $tasks <id>              — drop by id'
 echo '  update-task $tasks <id> { |t| … }    — patch one task pure-functionally'
-echo '  transition $tasks <id> <status>      — change status + update the pinned gauge'
-echo '  status-counts $tasks                 — record of per-status counts'
+echo '  tag-task $tasks <id> <tag>           — add a tag to a task'
+echo '  note-task $tasks <id> <note>         — set notes on a task'
+echo '  retag-task $tasks <id> <tags>        — replace all tags on a task'
+echo '  transition $tasks <id> <status>      — change status (validated) + update pinned gauge'
+echo '  status-counts $tasks                 — record of per-status counts (single fold)'
 echo '  render-tasks $tasks                  — echo each task to stdout'
 echo '  save-tasks $tasks <path> / load-tasks <path>'
 echo ''
 echo 'add tasks with `add-task`; change status with `transition` —'
 echo 'both pin a `tasks` rollup gauge to the rail register, updated in'
 echo 'place, so the user can see progress at a fixed spot.'
+echo 'tag-task / note-task / retag-task set fields without rebuilding records.'
