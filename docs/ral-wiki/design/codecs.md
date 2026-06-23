@@ -31,11 +31,15 @@ codec" string ([[design/builtins|why each codec is its own builtin]]).
 
 ## The two directions
 
-`from-X` reads stdin with zero arguments (the `< file` or pipeline case) or
-decodes the one value it is given:
+`from-X` takes **no value argument** — it reads the byte channel, whether that
+channel is a `< file` redirect or the left stage of a pipeline. Passing a value
+is an error (`from-json: takes no arguments — it reads the byte channel`) whose
+hint names the fix: to decode a value already in hand, pipe it through the
+matching `to-X` encoder, so the bytes re-enter the channel a decoder reads —
+`to-string $s | from-json` for JSON in a `String`, `to-bytes $b | from-string`
+for a `Bytes` value (e.g. `$r[stdout]` from `await`). The decoders:
 
-- `from-bytes` → `Bytes`, the raw escape hatch (a non-`Bytes` argument is an
-  error, not a silent stringify);
+- `from-bytes` → `Bytes`, the raw escape hatch;
 - `from-string` → `String`, **strict** UTF-8;
 - `from-line` → `String`, strict, one trailing `\n` / `\r\n` stripped;
 - `from-json` → a decoded value, strict UTF-8 then JSON;
@@ -44,6 +48,11 @@ decodes the one value it is given:
 `to-X` takes one value, writes its encoded form to the byte channel, and returns
 the `Bytes` it wrote: `to-bytes`, `to-string`, `to-line` (trailing newline),
 `to-lines` (newline-join a list), `to-json`. All five share the `encode` mode.
+`to-json` maps a ral value to JSON structurally: a record or `[String:A]` map
+becomes an object, a list an array, `Unit` becomes `null`, and a variant
+`` `tag payload `` becomes `{"tag": "tag", "payload": …}` — the `payload` key
+omitted for a niladic tag. `Bytes` serialises as an array of byte integers; a
+`Lambda`, `Block`, or `Handle` has no JSON image and is an error.
 
 ## Whole-buffer vs. streaming
 
