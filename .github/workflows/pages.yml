@@ -24,6 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # full history so Quartz can date wiki pages from git
 
       # tree-sitter CLI (prebuilt binary) for the examples-page highlighting.
       # `highlight` needs only the binary and the generated parser.c.
@@ -51,6 +53,23 @@ jobs:
           mkdir -p site/scripts
           cp scripts/install.sh        site/scripts/install.sh
           cp scripts/exarch-install.sh site/scripts/exarch-install.sh
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # The wiki (docs/ral-wiki) is published under site/wiki/ by Quartz v5.
+      # Quartz is its own Node project, so we clone it pinned, drop in our config
+      # (scripts/wiki/quartz.config.yaml), and point its build at the wiki.
+      - name: Build wiki (Quartz v5)
+        run: |
+          QUARTZ_DIR="$RUNNER_TEMP/quartz"
+          git clone --depth 1 --branch v5.0.0 https://github.com/jackyzha0/quartz.git "$QUARTZ_DIR"
+          cp scripts/wiki/quartz.config.yaml "$QUARTZ_DIR/quartz.config.yaml"
+          cd "$QUARTZ_DIR"
+          npm ci
+          npx quartz plugin install
+          npx quartz build -d "$GITHUB_WORKSPACE/docs/ral-wiki" -o "$GITHUB_WORKSPACE/site/wiki"
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v4

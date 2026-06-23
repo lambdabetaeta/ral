@@ -98,7 +98,8 @@ def doc_page(title: str, body: str, titlebar: str | None = None,
     <a class="menu-item" href="tutorial.html">Tutorial</a>
     <a class="menu-item" href="spec.html">Spec</a>
     <a class="menu-item" href="rationale.html">Rationale</a>
-    <a class="menu-item" href="examples.html">Examples</a>{toc}
+    <a class="menu-item" href="examples.html">Examples</a>
+    <a class="menu-item" href="wiki/index.html">Wiki</a>{toc}
     <span class="spacer"></span>
     <a class="menu-item" href="exarch/index.html">exarch<span class="ext"> &#8599;</span></a>
   </nav>

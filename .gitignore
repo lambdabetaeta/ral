@@ -29,6 +29,8 @@ site/spec.html
 site/rationale.html
 site/exarch/index.html
 site/exarch/profiles.html
+# generated wiki sub-site (scripts/wiki/build.sh — Quartz v5)
+site/wiki/
 
 CLAUDE.md
 
