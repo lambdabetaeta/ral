@@ -78,8 +78,11 @@ Two `Sink` implementations:
    orthogonal channels so neither competes with the other.* The agent owns the
    chromatic foreground (the rail hues); the background plane carries one
    distinction only — machine text. A run of script or observation output is
-   washed into a recessed `CODE_BG` panel (`line::wash`, padded edge-to-edge so
-   the machine region reads as a clean rectangle); model prose sits unwashed at
+   washed into a recessed `CODE_BG` panel (`group::wash_inset`): a *left-inset*
+   rectangle whose left edge aligns with the content — so it nests under its
+   intent, and script and output share one margin to read as a single region —
+   and whose right edge still runs to the margin, so the wash reads as a stratum
+   rather than a content-hugging swatch; model prose sits unwashed at
    the base; the human's submitted prompt is the sole occupant of a *third*
    register, a raised cool `PROMPT_BG`-banded block opened by a full-width
    `PROMPT_INK` rule fence (`line::prompt_fence`), found at a glance by common

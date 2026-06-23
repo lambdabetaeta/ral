@@ -133,7 +133,12 @@ fn live_tip(calls: &[Call], width: usize) -> Vec<Line<'static>> {
         calls.len(),
         bar_col(width).saturating_sub(RAIL_W),
     ));
-    ls.extend(indent_rows(&latest.effects, INTENT_INDENT, width));
+    // The effects nest under the *intent*, not the `ral` head: they hang at
+    // `RAIL_W + lead_w` — the column the intent text opens at on the head row
+    // once the viewport prepends the rail — so each observation reads as
+    // belonging to the call above it, and its machine wash starts there.
+    let effect_indent = " ".repeat(RAIL_W + lead_w);
+    ls.extend(indent_rows(&latest.effects, &effect_indent, width));
     ls
 }
 
@@ -218,19 +223,16 @@ fn pinned_intent(
     out
 }
 
-/// The call's full ral `cmd` source rows (L3), each inset under the call's
-/// body column and syntax-highlighted, so the script reads as code beneath
-/// its intent.  The highlighted spans hang under BODY_INDENT (plus the source
-/// line's own leading whitespace), wrap to clear the panel's right edge, and
-/// wash into the recessed CODE_BG panel padded uniform to `width`.
+/// The call's full ral `cmd` source rows (L3), each syntax-highlighted and
+/// washed into the recessed [`CODE_BG`] machine panel inset under
+/// [`BODY_INDENT`] — the panel's left edge — so the script reads as code
+/// beneath its intent.  The highlighted spans hang under that margin (plus the
+/// source line's own leading whitespace) and the wash runs to the right edge
+/// ([`wash_inset`]).
 fn source_rows(call: &Call, width: usize) -> Vec<Line<'static>> {
     let mut ls = Vec::new();
     for line in highlight_ral(&call.cmd) {
-        let mut spans = vec![Span::raw(BODY_INDENT)];
-        spans.extend(line.spans);
-        for vrow in wrap_line(&Line::from(spans), width) {
-            ls.push(wash(vrow, CODE_BG, Some(width)));
-        }
+        wash_inset(&mut ls, &line, BODY_INDENT, width);
     }
     ls
 }
@@ -267,20 +269,36 @@ fn bar(magnitude: Option<u32>) -> Span<'static> {
     )
 }
 
-/// Re-indent a call's pre-rendered effect rows by `indent`, dropping the
-/// leading blank `render_card` opens with so the effects sit flush under the
-/// intent, then wash each into the recessed [`CODE_BG`] panel padded uniform
-/// to `width` — observation output shares the machine region with the script.
+/// Re-indent a call's pre-rendered effect rows, dropping the leading blank
+/// `render_card` opens with so the effects sit flush under the intent, then
+/// wash each into the recessed [`CODE_BG`] machine panel inset under `indent`
+/// ([`wash_inset`]) — observation output shares the machine region with the
+/// script, and in the L2/L3 list passing the script's [`BODY_INDENT`] keeps the
+/// two one rectangle.
 fn indent_rows(rows: &[Line<'static>], indent: &str, width: usize) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     for l in rows.iter().filter(|l| !line::is_blank(l)) {
-        let mut spans = vec![Span::raw(indent.to_string())];
-        spans.extend(l.spans.iter().cloned());
-        for vrow in wrap_line(&Line::from(spans), width) {
-            out.push(wash(vrow, CODE_BG, Some(width)));
-        }
+        wash_inset(&mut out, l, indent, width);
     }
     out
+}
+
+/// Inset `body` under a left margin of `indent` and wash its content into the
+/// recessed [`CODE_BG`] panel from that margin to `width` — the machine region
+/// as a *left-inset rectangle*.  The `indent` columns stay unwashed, so the
+/// panel's left edge aligns with the content (and thus nests under the intent);
+/// the wash still runs to the right margin, so the region reads as a stratum,
+/// not a content-hugging swatch.  Script and effects pass the *same* margin, so
+/// a coalesced run reads as one rectangle, not a stepped pair.  Wrapped
+/// continuations hang under the margin.  Appends the rendered rows to `out`.
+fn wash_inset(out: &mut Vec<Line<'static>>, body: &Line<'static>, indent: &str, width: usize) {
+    let indent_w = UnicodeWidthStr::width(indent);
+    let body_w = width.saturating_sub(indent_w).max(1);
+    for vrow in wrap_line(body, body_w) {
+        let mut spans = vec![Span::raw(indent.to_string())];
+        spans.extend(wash(vrow, CODE_BG, Some(body_w)).spans);
+        out.push(Line::from(spans));
+    }
 }
 
 #[cfg(test)]
@@ -304,11 +322,13 @@ mod tests {
         )
     }
 
-    /// The coalesced script renders as a uniform `CODE_BG` panel: every row
-    /// washed and padded to the full content width, so the machine region
-    /// reads as a clean rectangle — no ragged right edge, no gutter spill.
+    /// The coalesced script renders as a left-inset `CODE_BG` panel: the
+    /// [`BODY_INDENT`] margin stays unwashed, every row's content from that
+    /// margin to the right edge is washed and padded to the full width, so the
+    /// machine region reads as one clean rectangle whose left edge aligns with
+    /// the content — no ragged right edge, no wash spilling under the rail.
     #[test]
-    fn source_rows_paint_a_uniform_panel() {
+    fn source_rows_paint_an_inset_panel() {
         let c = Call::new(
             CallParts {
                 intent: "x",
@@ -321,12 +341,21 @@ mod tests {
         );
         let rows = source_rows(&c, 60);
         assert_eq!(rows.len(), 2);
+        let inset = UnicodeWidthStr::width(BODY_INDENT);
         for r in &rows {
             let w: usize = r.spans.iter().map(|s| s.width()).sum();
             assert_eq!(w, 60, "panel row padded to full width");
+            assert_eq!(washed_start(r), inset, "wash starts at the BODY_INDENT margin");
             assert!(
-                r.spans.iter().all(|s| s.style.bg == Some(CODE_BG)),
-                "every cell washed into the panel"
+                r.spans.iter().any(|s| s.style.bg == Some(CODE_BG)),
+                "the row is washed"
+            );
+            assert!(
+                r.spans
+                    .iter()
+                    .filter(|s| s.style.bg.is_some())
+                    .all(|s| s.style.bg == Some(CODE_BG)),
+                "washed cells wear CODE_BG"
             );
         }
     }
@@ -346,6 +375,16 @@ mod tests {
 
     fn indent_of(s: &str) -> usize {
         s.len() - s.trim_start().len()
+    }
+
+    /// The display column at which the row's wash begins — the summed width of
+    /// the leading unwashed (bg-less) spans.
+    fn washed_start(line: &Line<'_>) -> usize {
+        line.spans
+            .iter()
+            .take_while(|s| s.style.bg.is_none())
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum()
     }
 
     /// L1 head row: `ral␠␠<intent>…<sparkline>`.  The row's display width is
@@ -368,6 +407,47 @@ mod tests {
 
         let lead_w = UnicodeWidthStr::width("ral") + GAP;
         assert_eq!(indent_of(&rows[1]), RAIL_W + lead_w);
+    }
+
+    /// L1 live tip: the latest call's effects nest under the *intent* (at
+    /// `RAIL_W + "ral  "`), not under the `ral` head, and their machine wash
+    /// starts at that inset — the margin stays unwashed — and runs to the right
+    /// edge, so the effect reads as a left-inset rectangle belonging to the
+    /// call above it.
+    #[test]
+    fn live_tip_effects_nest_and_inset_the_wash() {
+        let width = 80;
+        let effect = Line::from(vec![Span::raw("Read: "), Span::raw("a.md")]);
+        let c = Call::new(
+            CallParts {
+                intent: "look",
+                tool: "ral",
+                cmd: "",
+                magnitude: Some(2),
+                context: 0,
+            },
+            // `render_card` opens with a leading blank; `indent_rows` drops it.
+            vec![Line::default(), effect],
+        );
+        let rows = body(&[c], 1, width);
+        let effect_row = rows
+            .iter()
+            .find(|l| plain(l).contains("Read:"))
+            .expect("the effect row");
+
+        let inset = RAIL_W + UnicodeWidthStr::width("ral") + GAP;
+        assert_eq!(indent_of(&plain(effect_row)), inset, "nests under the intent");
+        assert_eq!(washed_start(effect_row), inset, "wash starts at the inset");
+        let w: usize = effect_row.spans.iter().map(|s| s.width()).sum();
+        assert_eq!(w, width, "wash runs to the right margin");
+        assert!(
+            effect_row
+                .spans
+                .iter()
+                .filter(|s| s.style.bg.is_some())
+                .all(|s| s.style.bg == Some(CODE_BG)),
+            "washed cells wear CODE_BG"
+        );
     }
 
     /// L2 list row: the bare `ral` head, then per-call intent rows whose
