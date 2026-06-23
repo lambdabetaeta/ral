@@ -2682,18 +2682,18 @@ fn ui_loop(
     agents: &crate::agent_registry::AgentRegistry,
 ) -> io::Result<()> {
     const BATCH: usize = 64;
-    const MIN_FRAME_MS: u64 = 16; // ~60 FPS max
-    let frame = Duration::from_millis(MIN_FRAME_MS);
+    let frame = Duration::from_millis(16); // ~60 FPS max
     // The session inbox, so a routed line (a plain prompt, a session command)
     // reaches the worker's drive loop through the queue the App is bound to.
     let mailbox = tui.app.inbox.mailbox();
     let rx = bus.rx();
-    // The frame clock: the instant the last frame was painted, `None` before
-    // the first.  Draws are gated on it so the redraw rate is bounded by the
-    // frame interval independently of how fast events drain — a token/tool
-    // flood coalesces into one coherent frame per interval instead of a
-    // full-screen rewrite per 64-event batch (the jitter that churn caused).
-    let mut last_draw: Option<Instant> = None;
+    // The frame clock: the instant the last frame was painted, seeded a frame
+    // in the past so the first iteration paints at once.  Draws are gated on it
+    // so the redraw rate is bounded by the frame interval independently of how
+    // fast events drain — a token/tool flood coalesces into one coherent frame
+    // per interval instead of a full-screen rewrite per 64-event batch (the
+    // jitter that churn caused).
+    let mut last_draw = Instant::now() - frame;
     loop {
         // The explicit-done completion contract (shared with the headless
         // `Sink::drive`): drain a batch, then stop only when the worker is
@@ -2714,10 +2714,10 @@ fn ui_loop(
         // Paint only when a frame is due, so a multi-batch backlog still drains
         // at full throughput but redraws at most once per interval.  Idle frames
         // are still due each interval, so the animated wait bar keeps ticking.
-        if last_draw.is_none_or(|t| t.elapsed() >= frame) {
+        if last_draw.elapsed() >= frame {
             tui.app.tick();
             tui.app.draw(tui.guard.term())?;
-            last_draw = Some(Instant::now());
+            last_draw = Instant::now();
         }
         // Poll for input every iteration, even with events still queued: a
         // backlog of streamed tokens must never starve Esc/Ctrl-C. While the
@@ -2727,7 +2727,7 @@ fn ui_loop(
         let timeout = if more {
             Duration::ZERO
         } else {
-            last_draw.map_or(Duration::ZERO, |t| frame.saturating_sub(t.elapsed()))
+            frame.saturating_sub(last_draw.elapsed())
         };
         if ct_poll(timeout)? {
             match ct_read()? {
