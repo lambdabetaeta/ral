@@ -2683,10 +2683,17 @@ fn ui_loop(
 ) -> io::Result<()> {
     const BATCH: usize = 64;
     const MIN_FRAME_MS: u64 = 16; // ~60 FPS max
+    let frame = Duration::from_millis(MIN_FRAME_MS);
     // The session inbox, so a routed line (a plain prompt, a session command)
     // reaches the worker's drive loop through the queue the App is bound to.
     let mailbox = tui.app.inbox.mailbox();
     let rx = bus.rx();
+    // The frame clock: the instant the last frame was painted, `None` before
+    // the first.  Draws are gated on it so the redraw rate is bounded by the
+    // frame interval independently of how fast events drain — a token/tool
+    // flood coalesces into one coherent frame per interval instead of a
+    // full-screen rewrite per 64-event batch (the jitter that churn caused).
+    let mut last_draw: Option<Instant> = None;
     loop {
         // The explicit-done completion contract (shared with the headless
         // `Sink::drive`): drain a batch, then stop only when the worker is
@@ -2704,17 +2711,23 @@ fn ui_loop(
             Pass::More => true,
             Pass::Idle => false,
         };
-        tui.app.tick();
-        tui.app.draw(tui.guard.term())?;
+        // Paint only when a frame is due, so a multi-batch backlog still drains
+        // at full throughput but redraws at most once per interval.  Idle frames
+        // are still due each interval, so the animated wait bar keeps ticking.
+        if last_draw.is_none_or(|t| t.elapsed() >= frame) {
+            tui.app.tick();
+            tui.app.draw(tui.guard.term())?;
+            last_draw = Some(Instant::now());
+        }
         // Poll for input every iteration, even with events still queued: a
         // backlog of streamed tokens must never starve Esc/Ctrl-C. While the
         // drain is incomplete the poll is non-blocking so draining stays prompt;
-        // once the channel is empty it waits up to a frame for the next key.
-        let before = std::time::Instant::now();
+        // once the channel is empty it waits only until the next frame is due,
+        // which both paces the idle loop and keeps Esc/Ctrl-C responsive.
         let timeout = if more {
             Duration::ZERO
         } else {
-            Duration::from_millis(MIN_FRAME_MS)
+            last_draw.map_or(Duration::ZERO, |t| frame.saturating_sub(t.elapsed()))
         };
         if ct_poll(timeout)? {
             match ct_read()? {
@@ -2749,15 +2762,6 @@ fn ui_loop(
                 CtEvent::Paste(s) => tui.app.paste(&s),
                 CtEvent::Mouse(m) => tui.app.mouse(m),
                 _ => {}
-            }
-        }
-        // Cap the frame rate only when idle; while a backlog drains the sleep is
-        // skipped so throughput isn't throttled to
-        // BATCH * (1000 / MIN_FRAME_MS) events per second.
-        if !more {
-            let elapsed = before.elapsed().as_millis() as u64;
-            if elapsed < MIN_FRAME_MS {
-                std::thread::sleep(Duration::from_millis(MIN_FRAME_MS - elapsed));
             }
         }
     }
