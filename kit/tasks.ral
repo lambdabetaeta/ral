@@ -16,15 +16,17 @@
 # * The pure data layer (set-status, update-task, by-status, render-*,
 #   save-/load-tasks, …) is side-effect-free and runs in a bare ral
 #   REPL with no host.
-# * The host-surfacing layer (add-task, transition, surface-progress)
-#   hands the host a render document with the `surface` builtin.  Task
-#   state is *pinned*, not streamed: `surface-progress` pins one card
-#   — a `measure` gauge on top, then two `text` marks per task (a
-#   coloured header line and an indented body line) — wrapped in a
-#   `` `pin `` disposition keyed to a register slot, which the host
-#   overwrites in place rather than appending a card per change.  With
-#   no host installed `surface` is the identity, so the kit stays
-#   runnable in a bare ral REPL.
+# * The host-surfacing layer (add-task, remove-task, transition,
+#   surface-progress) hands the host a render document with the `surface`
+#   builtin.  Task state is *pinned*, not streamed: `surface-progress`
+#   pins one card — a `measure` gauge on top, then two `text` marks per
+#   task (a coloured header line and an indented body line) — wrapped in
+#   a `` `pin `` disposition keyed to a register slot, which the host
+#   overwrites in place rather than appending a card per change.  When a
+#   change leaves no work — the list emptied, or every task done — the
+#   card goes empty and the host drops the slot, so the gauge clears from
+#   the rail.  With no host installed `surface` is the identity, so the
+#   kit stays runnable in a bare ral REPL.
 #
 # Id allocation: `add-task` calls `next-id`, which returns
 # `max(ids) + 1`.  Ids freed by `remove-task` are recycled.
@@ -88,7 +90,15 @@ let add-task = { |ts desc|
 ## bulk import.
 let append-task = { |ts t| [...$ts, $t] }
 
-let remove-task = { |ts id|   filter { |t| $[$t[id] != $id] } $ts }
+## Drop the task with `id` and update the pinned `tasks` gauge in place.
+## Removing the last task empties the card, so the host drops the slot
+## and the gauge disappears.  Returns the updated list.  The mirror of
+## `add-task`, the canonical entry point for shrinking the list.
+let remove-task = { |ts id|
+  let new-ts = filter { |t| $[$t[id] != $id] } $ts
+  surface-progress $new-ts
+  $new-ts
+}
 let find-task   = { |ts id|   first  { |t| $[$t[id] == $id] } $ts }
 let update-task = { |ts id f|
   map { |t| if $[$t[id] == $id] { f $t } else { $t } } $ts
@@ -166,12 +176,17 @@ let task-to-marks = { |t|
 ## Pin the `tasks <done>/<total>` rollup to the host register, with the
 ## full task list rendered as two-line blocks beneath the gauge.  The
 ## keyed slot means the whole card fills in place rather than streaming
-## down the scrollback.
+## down the scrollback.  When no work is left — done == total, the empty
+## list included — the card is emptied; the host drops a pin with an
+## empty body, so a finished plan clears its gauge instead of resting at
+## done/done.
 let surface-progress = { |ts|
     let done  = !{length !{by-status $ts "done"}}
     let total = !{length $ts}
     let gauge = `measure [label: "tasks", value: $done, max: $total]
-    let marks = [$gauge, ...!{flat-map $task-to-marks $ts}]
+    let marks =
+      if $[$done == $total] { drop 1 [$gauge] }
+      else                  { [$gauge, ...!{flat-map $task-to-marks $ts}] }
     surface `pin [key: "tasks", body: `card $marks]
 }
 
@@ -199,7 +214,7 @@ let transition = { |ts id new-status|
 echo 'tasks kit loaded.'
 echo '  empty-tasks                          — correctly-typed empty list'
 echo '  add-task $tasks <desc>               — fresh id, append, update pinned gauge'
-echo '  remove-task $tasks <id>              — drop by id'
+echo '  remove-task $tasks <id>              — drop by id, update pinned gauge'
 echo '  update-task $tasks <id> { |t| … }    — patch one task pure-functionally'
 echo '  tag-task $tasks <id> <tag>           — add a tag to a task'
 echo '  note-task $tasks <id> <note>         — set notes on a task'
@@ -209,7 +224,7 @@ echo '  status-counts $tasks                 — record of per-status counts (si
 echo '  render-tasks $tasks                  — echo each task to stdout'
 echo '  save-tasks $tasks <path> / load-tasks <path>'
 echo ''
-echo 'add tasks with `add-task`; change status with `transition` —'
-echo 'both pin a `tasks` rollup gauge to the rail register, updated in'
-echo 'place, so the user can see progress at a fixed spot.'
+echo 'add-task, remove-task and transition all pin a `tasks` rollup gauge'
+echo 'to the rail register, updated in place; it clears once no work is'
+echo 'left, so the user can see progress at a fixed spot.'
 echo 'tag-task / note-task / retag-task set fields without rebuilding records.'

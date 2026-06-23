@@ -1057,7 +1057,7 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
             }),
             Some(Kind::Card(_))
         ));
-        // A `pin` wrapper → Kind::Pin, its body decoded by value_to_card.
+        // A `pin` wrapper with a non-empty body → Kind::Pin, decoded by value_to_card.
         assert!(matches!(
             decode_surface(&RalValue::Variant {
                 label: "pin".into(),
@@ -1067,7 +1067,9 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
                         "body".into(),
                         RalValue::Variant {
                             label: "card".into(),
-                            payload: Some(Box::new(RalValue::list(vec![]))),
+                            payload: Some(Box::new(RalValue::list(vec![RalValue::String(
+                                "x".into(),
+                            )]))),
                         },
                     ),
                 ]))),
@@ -1087,6 +1089,24 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
                 Some(Kind::Unpin { .. })
             ));
         }
+        // A `pin` whose body is an *empty* card also drops the slot — a pin
+        // with nothing to show is the same as `unpin`.
+        assert!(matches!(
+            decode_surface(&RalValue::Variant {
+                label: "pin".into(),
+                payload: Some(Box::new(RalValue::map(vec![
+                    ("key".into(), RalValue::String("tasks".into())),
+                    (
+                        "body".into(),
+                        RalValue::Variant {
+                            label: "card".into(),
+                            payload: Some(Box::new(RalValue::list(vec![]))),
+                        },
+                    ),
+                ]))),
+            }),
+            Some(Kind::Unpin { .. })
+        ));
         // A value that is none of these → None.
         assert!(decode_surface(&RalValue::String("nope".into())).is_none());
     }

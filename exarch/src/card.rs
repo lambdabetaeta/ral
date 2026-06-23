@@ -680,8 +680,9 @@ pub fn value_to_card(v: &RalValue) -> Option<Card> {
 /// and optional body card.  The shape is `` `pin [key: "…", body: `card […]] ``
 /// — a render document keyed to a register slot — or `` `unpin [key: "…"] `` to
 /// drop the slot.  The `body` is decoded by the **unchanged** [`value_to_card`],
-/// so the wrapper carries only *placement*; an absent body is the same as
-/// `` `unpin ``.  Anything else returns `None`, the same graceful degradation as
+/// so the wrapper carries only *placement*; an absent — or empty — body is the
+/// same as `` `unpin ``, so a pin with nothing left to show drops the slot.
+/// Anything else returns `None`, the same graceful degradation as
 /// [`value_to_card`]; the decoder seam then drops it.
 pub fn value_to_pin(v: &RalValue) -> Option<(String, Option<Card>)> {
     let RalValue::Variant { label, payload } = v else {
@@ -691,7 +692,10 @@ pub fn value_to_pin(v: &RalValue) -> Option<(String, Option<Card>)> {
         "pin" => {
             let m = map_of(payload.as_deref()?)?;
             let key = str_field(m, "key")?;
-            let body = m.get("body").and_then(value_to_card);
+            let body = m
+                .get("body")
+                .and_then(value_to_card)
+                .filter(|c| !c.marks().is_empty());
             Some((key, body))
         }
         "unpin" => Some((str_field(map_of(payload.as_deref()?)?, "key")?, None)),
