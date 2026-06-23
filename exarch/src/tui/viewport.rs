@@ -507,6 +507,13 @@ impl Viewport {
         self.flat.row_block.get(row).copied()
     }
 
+    /// Whether the block at `idx` is dialable — a stable property of its
+    /// kind, independent of its current level, so a wheel resting on its
+    /// glyph can claim the gesture even when the level is already clamped.
+    pub(super) fn block_dialable(&self, idx: usize) -> bool {
+        self.blocks.get(idx).is_some_and(Block::dialable)
+    }
+
     /// Dial the block at `idx` by `delta` if it is dialable, returning
     /// whether it changed — so the caller can tell a real dial from a
     /// gesture on inert chrome or a clamped level.

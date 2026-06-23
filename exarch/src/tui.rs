@@ -1448,9 +1448,10 @@ impl App {
     }
 
     /// Dial the block under a rail-glyph wheel event by `delta`,
-    /// returning whether the event was consumed — `true` only when it sat
-    /// on the glyph of a dialable block at an unclamped level, leaving the
-    /// wheel to scroll otherwise.
+    /// returning whether the event was consumed — `true` whenever it sat
+    /// on the glyph of a dialable block, so a wheel that overshoots the
+    /// clamp rests as an inert no-op rather than spilling into a page
+    /// scroll.  Only a glyph over inert chrome leaves the wheel to scroll.
     fn rail_dial(&mut self, me: MouseEvent, delta: i8) -> bool {
         let Some(idx) = self.rail_block(me) else {
             return false;
@@ -1459,7 +1460,11 @@ impl App {
         let Some(vp) = self.viewports.get_mut(&id) else {
             return false;
         };
-        vp.dial_block(idx, delta)
+        if !vp.block_dialable(idx) {
+            return false;
+        }
+        vp.dial_block(idx, delta);
+        true
     }
 
     /// Scroll the focused pane by `delta` rows (negative = up).
