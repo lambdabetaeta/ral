@@ -139,19 +139,25 @@ A *map* is the homogeneous cousin (all values one type); only maps support `keys
 
 `range 1 11` returns the list `[1, …, 10]` (`seq` is the external coreutil, and prints bytes).
 
-## Case
+## Variants and case
 
-`case` eliminates a variant: a tag-keyed table of handler blocks, each binding that tag's payload; the matching label runs.
+A variant is a backtick-tagged value. `` `absent `` is a bare (nullary) tag; `` `file [bytes: 4890] `` is a tag carrying a payload — usually a record. A tag records which of several outcomes occurred and its payload carries that outcome's data, so a function that probes the system records its finding as a variant:
 
-    case !{poll $h} [
-      `pending: { |_| 'running' },
-      `settled: { |s| case $s[outcome] [
-          `ok:  { |v| "done: $v"            },
-          `err: { |e| "failed: $e[message]" }
-      ]}
+    let probe = { |p|
+      if    $[not !{exists $p}] { `absent }
+      elsif !{is-dir $p}        { `dir  [entries: !{length !{list-dir $p}}] }
+      else                      { `file [bytes: !{file-info $p}[size]] }
+    }
+
+`case` eliminates a variant: a tag-keyed table of handler blocks, each binding the matched tag's payload; only that label's block runs.
+
+    case !{probe $path} [
+      `absent: { |_| "$path: not found" },
+      `dir:    { |d| "$path: directory, $d[entries] entries" },
+      `file:   { |f| "$path: file, $f[bytes] bytes" }
     ]
 
-The table must cover every tag. A nullary tag still hands its block a value — ignore it with `_`.
+The table must cover every tag. A nullary tag still hands its block a value — ignore it with `_`. Handlers nest: when a payload is itself a variant, match it with a `case` inside its block.
 
 ## Failure
 
@@ -197,14 +203,6 @@ Use `cancel $h` to stop a worker that is no longer needed.
 A spawned failure raises at `await` before returning its buffered bytes; put `audit` or `try` inside the worker when logs matter. 
 
 There is also a bounded parallel `map` and a `race`; use `help` to find out more about them. 
-
-`poll $h` checks a handle without blocking or raising: 
-
-    let job = spawn { cargo build 2>&1 }
-    # … other work in this turn …
-    let p = poll $job
-
-`poll` returns `` `settled `` once the block finishes, `` `pending `` while it runs. `` `settled `` carries `[stdout, stderr, outcome]`; `outcome` is `` `ok `` with the block's value or `` `err `` with the caught-error record (the same shape `try` hands you, including `status`). `await`/`poll`/`race` are the in-turn join and the on-demand value pull; reach for `poll` only when you have other work to interleave within the turn. They are not how you observe a worker across turns — the host surfaces a settled `spawn` on its own — so do not busy-wait on `poll` or re-`poll` on later turns.
 
 ## Within
 
@@ -275,9 +273,9 @@ Prefer these to external `rg`/`find`/`ls`: each returns a ral list or record ins
 
 The hash is a freshness witness: it identifies the line by its content and neighbourhood. Every `view-text`, `view-text-around`, and `grep-files` line carries it, as it is required to edit.
 
-`edit PATH EDITS` applies a batch of `[HASH, NEW-TEXT]` pairs in one read/write pass. Each pair rewrites or deletes one witnessed line; `NEW-TEXT` is verbatim, so a real newline splits a line and `\n` does not. Raw `#'…'#` is only for replacements containing `'`; never double quotes, which interpolate. All hashes resolve against the file as read before any write, so adjacent edits are safe and the batch is atomic.
+`edit PATH EDITS` applies a batch of `[HASH, NEW-TEXT]` pairs in one pass. Each pair replaces **only the unique line identified by the hash**; to replace an multiline block provide all hashes and replacement strings (one pair per line). `NEW-TEXT` is inserted verbatim, so newlines become actual newlines; pass the empty string `''` to delete a line. . Raw `#'…'#` is useful for replacements; never use interpolating double quotes for editing. All hashes resolve against the file as read before any write, so adjacent edits are safe and the edit is atomic. Example:
 
-    view-text 80 120 < src/lib.rs
+    view-text 80 120 < src/lib.rs       # this allows you to view hashes
     edit 'src/lib.rs' [
       [h1b2c3, '    let n = 42
         let scaled = n * 2'],
@@ -285,17 +283,17 @@ The hash is a freshness witness: it identifies the line by its content and neigh
       [h7a8b9, '']
     ]
 
+`edit` can also be used programmaticaly:
+
     let hits = grep-files …
     let mine = filter { |h| equal $h[file] 'src/lib.rs' } $hits
     edit 'src/lib.rs' !{map { |h| [$h[hash], '    // resolved'] } $mine}
 
-If `edit` reports zero or multiple matches, nothing was written: re-read with `view-text`/`grep-files` and use the fresh witnesses, never the stale ones.
-
 ## Surfacing
 
-`surface CARD` shows the user a render document on the rail; with no host it is a no-op, so kit code stays runnable in a bare REPL. `edit` already surfaces each change, and the tasks kit surfaces its transitions — surface your own card only when a result is worth the user seeing it (a build summary, a test matrix, a captured output). You declare the *data* and its *level of measurement*; the host owns the appearance, so you name a role or a magnitude, never a colour.
+`surface CARD` shows the user a render document on the rail. Surface your own card only when a result is worth the user seeing it (a build summary, a test matrix, a captured output). You declare both the *data* and its *level of measurement*; the host owns the appearance, so you name a role or a magnitude, never a colour.
 
-A card is `` `card [MARK, …] `` — an ordered stack of marks drawn top-to-bottom. There are five marks:
+A card `` `card LIST-OF-MARKS` `` is an ordered stack of marks drawn top-to-bottom. There are five marks:
 
 - `` `text [spans: [[role: "…", text: "…"], …]] `` — a run of spans. Every span carries `role` — one of `path`, `code`, `ok`, `warn`, `bad`, `muted`, `strong` (identity, mapped to a hue), or `""` for plain ink. A heading is a `strong` span.
 - `` `measure [label: "…", value: N, max: M, unit: "…"] `` — a magnitude. With `max`, it reads as a proportional bar (`value/max`); without, as a `log2` size bar. `max`/`unit` may be omitted.
