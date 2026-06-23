@@ -71,6 +71,34 @@ impl CommandIdentity {
         }
         names
     }
+
+    /// Candidate names by which this head triggers a `Deny` veto — the
+    /// broad identity set: [`policy_names`](Self::policy_names) widened
+    /// with the basename of the resolved and the as-invoked forms.
+    ///
+    /// Admission stays keyed on the narrow `policy_names`, but a veto
+    /// must see through both of a command's identities.  A `Path` head
+    /// `/bin/bash` carries no bare name in `policy_names` (anti-spoof:
+    /// see there), so a bare `bash: deny` would otherwise be missed and
+    /// a covering `/bin/` allow dir would admit it.  Surfacing the
+    /// basename here closes that hole on the veto side WITHOUT widening
+    /// admission — a planted `/tmp/evil/rg` still cannot inherit a bare
+    /// `rg: allow`, because the basename is in this set, never in
+    /// `policy_names`.  Basenames are added only when they differ from a
+    /// name already present (a bare invocation already carries its bare
+    /// name).
+    pub(crate) fn deny_names(&self, ctx: &Context) -> Vec<String> {
+        let mut names = self.policy_names(ctx);
+        for base in [
+            crate::path::basename(&self.resolved),
+            crate::path::basename(&self.shown),
+        ] {
+            if !names.iter().any(|n| n == base) {
+                names.push(base.to_string());
+            }
+        }
+        names
+    }
 }
 
 /// Surface rendering of `name`: bare and path heads are returned
@@ -130,6 +158,7 @@ fn absolutize(s: &str, ctx: &Context) -> Option<String> {
 mod tests {
     use super::*;
     use crate::types::Shell;
+    use std::collections::BTreeMap;
 
     #[test]
     fn render_expands_tilde_against_env_home() {
@@ -207,6 +236,100 @@ mod tests {
         )
         .policy_names(&shell.mobile.context);
         assert_eq!(names, vec!["/usr/local/bin/configure".to_string()]);
+    }
+
+    /// Closes the bare/absolute identity duality: a `reasonable`-shaped
+    /// policy denies `bash` by bare name and allows `/bin/`.  Invoked by
+    /// absolute path, `bash` carries no bare name in the narrow
+    /// `policy_names`, so the narrow-only gate (pre-fix) admits it via
+    /// the `/bin/` allow dir — the security hole.  The broad `deny_names`
+    /// surfaces the basename `bash`, so the fixed gate vetoes it.
+    #[cfg(unix)]
+    #[test]
+    fn deny_names_close_path_bash_bypass_of_bare_deny() {
+        use crate::capability::admits_for_test;
+        use crate::types::{Capabilities, Context, ExecDir, ExecMap, ExecPolicy, GrantStack};
+
+        let mut grants = GrantStack::root();
+        grants.push(Capabilities {
+            exec: Some(ExecMap {
+                literals: BTreeMap::from([("bash".into(), ExecPolicy::Deny)]),
+                dirs: BTreeMap::from([("/bin".into(), ExecDir::Allow)]),
+            }),
+            ..Capabilities::root()
+        });
+        let ctx = Context {
+            grants,
+            ..Context::default()
+        };
+        let id = CommandIdentity::resolve(CommandName::Path("/bin/bash".into()), &ctx);
+        let allow = id.policy_names(&ctx);
+        let allow_refs: Vec<&str> = allow.iter().map(String::as_str).collect();
+        let deny = id.deny_names(&ctx);
+        let deny_refs: Vec<&str> = deny.iter().map(String::as_str).collect();
+
+        // Pre-fix shape: narrow set fed as both — the hole is open.
+        assert!(
+            admits_for_test(&ctx, &allow_refs, &allow_refs),
+            "narrow-only gate admits /bin/bash (the pre-fix bypass)",
+        );
+        assert!(
+            !allow.iter().any(|n| n == "bash"),
+            "policy_names must NOT carry the bare basename for a Path head",
+        );
+        assert!(
+            deny.iter().any(|n| n == "bash"),
+            "deny_names must surface the bare basename for a Path head",
+        );
+        // Post-fix: broad deny set closes the hole.
+        assert!(
+            !admits_for_test(&ctx, &deny_refs, &allow_refs),
+            "broad deny_names veto closes the /bin/bash bypass",
+        );
+    }
+
+    /// Anti-spoof preserved: a planted binary invoked by absolute path
+    /// must not inherit a bare-name `allow`.  The only `rg` grant is the
+    /// bare literal `rg: allow` (no covering allow dir); a `Path` head
+    /// `/tmp/evil/rg` carries the basename `rg` ONLY in the broad
+    /// `deny_names`, never in the narrow `policy_names`, so it is not
+    /// admitted.
+    #[cfg(unix)]
+    #[test]
+    fn deny_names_basename_does_not_admit_planted_path_head() {
+        use crate::capability::admits_for_test;
+        use crate::types::{Capabilities, Context, ExecMap, ExecPolicy, GrantStack};
+
+        let mut grants = GrantStack::root();
+        grants.push(Capabilities {
+            exec: Some(ExecMap {
+                literals: BTreeMap::from([("rg".into(), ExecPolicy::Allow)]),
+                dirs: BTreeMap::new(),
+            }),
+            ..Capabilities::root()
+        });
+        let ctx = Context {
+            grants,
+            ..Context::default()
+        };
+        let id = CommandIdentity::resolve(CommandName::Path("/tmp/evil/rg".into()), &ctx);
+        let allow = id.policy_names(&ctx);
+        let allow_refs: Vec<&str> = allow.iter().map(String::as_str).collect();
+        let deny = id.deny_names(&ctx);
+        let deny_refs: Vec<&str> = deny.iter().map(String::as_str).collect();
+
+        assert!(
+            !allow.iter().any(|n| n == "rg"),
+            "policy_names must not carry the basename for a planted Path head",
+        );
+        assert!(
+            deny.iter().any(|n| n == "rg"),
+            "deny_names carries the basename (harmless: it is an allow, not a deny)",
+        );
+        assert!(
+            !admits_for_test(&ctx, &deny_refs, &allow_refs),
+            "bare rg: allow must not admit a Path-invoked /tmp/evil/rg",
+        );
     }
 
     /// When a scoped `PATH` redirects resolution away from the host

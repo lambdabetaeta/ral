@@ -75,9 +75,6 @@ return [
     '/tmp/':     'allow',
     'tempdir:/': 'allow',
 
-    git:                  'deny',
-    '/usr/bin/git':       'deny',
-    '/usr/local/bin/git': 'deny',
     bash: 'deny',
     zsh:  'deny',
   ],

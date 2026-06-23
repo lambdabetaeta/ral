@@ -155,6 +155,7 @@ design pages via the `against` stamp.
 - [[related/handlers-of-algebraic-effects|handlers-of-algebraic-effects]] — Plotkin–Pretnar 2009: the founding handler calculus, on CBPV, with shell redirection as its own example; ral is its tail-resumptive fragment.
 - [[related/rows-and-handlers|rows-and-handlers]] — Hillerström–Lindley 2016: the effect typing ral declined — the same row machinery extended to every arrow; nearly ral's runtime, the inverse of ral's wild/handleable split.
 - [[related/call-by-push-value|call-by-push-value]] — Levy 1999/2003: the substrate taken as surface design; ral grades `F` with byte modes, adds the pipe as a combinator, drops computation products.
+- [[related/access-control-algebra|access-control-algebra]] — XACML, Saltzer–Schroeder, Bruns–Huth, Bonatti, Tschantz–Krishnamurthi, Al-Shaer–Hamed: grant's restrict/extend-base as standard policy composition — deny-overrides (a deny is a floor, both ways) as fail-safe default; the four-valued bilattice is the deeper structure.
 
 ## map/ — where things live
 

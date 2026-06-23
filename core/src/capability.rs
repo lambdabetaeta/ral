@@ -35,3 +35,6 @@ pub(crate) use enforce::{
 };
 pub use load::{apply_session_profiles, load_capabilities_from_path, load_capabilities_from_str};
 pub(crate) use sandbox::sandbox_projection;
+
+#[cfg(test)]
+pub(crate) use exec::admits_for_test;

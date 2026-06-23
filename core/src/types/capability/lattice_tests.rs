@@ -259,11 +259,12 @@ fn meet_exec_preserves_one_sided_deny() {
     assert_eq!(exec.literals.get("bash"), Some(&ExecPolicy::Deny));
 }
 
-/// `Deny` only survives join when both sides agree.  An
-/// extend-base that re-grants `bash` must be able to lift the
-/// ceiling's veto.
+/// Deny-overrides under join: a veto is a floor that even an explicit
+/// same-key re-grant cannot lift.  An extend-base that names
+/// `bash: 'allow'` against a base `bash: 'deny'` leaves bash denied —
+/// to permit bash you choose a base that allows it, not an overlay.
 #[test]
-fn join_exec_drops_one_sided_deny() {
+fn join_exec_regrant_does_not_lift_deny() {
     let base = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::from([("bash".into(), ExecPolicy::Deny)]),
@@ -279,10 +280,33 @@ fn join_exec_drops_one_sided_deny() {
         ..Default::default()
     };
     let j = base.join(extend);
-    assert_eq!(
-        j.exec.unwrap().literals.get("bash"),
-        Some(&ExecPolicy::Allow)
-    );
+    assert_eq!(j.exec.unwrap().literals.get("bash"), Some(&ExecPolicy::Deny));
+}
+
+/// The dual of `meet_exec_preserves_one_sided_deny`: a base veto on
+/// `bash` survives `--extend-base` against an extension that opens an
+/// unrelated command and is silent on `bash`.  Without this, any
+/// extension carrying a single exec key would silently re-admit every
+/// shell the base pinned out — the extend-base footgun this fix closes.
+#[test]
+fn join_exec_keeps_one_sided_deny() {
+    let base = Capabilities {
+        exec: Some(ExecMap {
+            literals: BTreeMap::from([("bash".into(), ExecPolicy::Deny)]),
+            dirs: BTreeMap::new(),
+        }),
+        ..Default::default()
+    };
+    let extend = Capabilities {
+        exec: Some(ExecMap {
+            literals: BTreeMap::from([("rg".into(), ExecPolicy::Allow)]),
+            dirs: BTreeMap::new(),
+        }),
+        ..Default::default()
+    };
+    let exec = base.join(extend).exec.unwrap();
+    assert_eq!(exec.literals.get("bash"), Some(&ExecPolicy::Deny));
+    assert_eq!(exec.literals.get("rg"), Some(&ExecPolicy::Allow));
 }
 
 /// Dir `Deny` is sticky downward, exactly as literal `Deny`: a base
@@ -335,10 +359,11 @@ fn meet_exec_dirs_deny_beats_allow() {
     assert_eq!(dirs.get("/usr/bin"), Some(&ExecDir::Deny));
 }
 
-/// Dir `Deny` only survives join when both sides agree: an extend-base
-/// that re-grants the tree lifts the ceiling's directory veto.
+/// Deny-overrides on dirs too: an extend-base that re-grants the exact
+/// denied tree does not lift the veto — the deny wins the exact-key
+/// clash, mirroring `meet`.
 #[test]
-fn join_exec_dirs_drop_one_sided_deny() {
+fn join_exec_dirs_regrant_does_not_lift_deny() {
     let base = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::new(),
@@ -354,7 +379,30 @@ fn join_exec_dirs_drop_one_sided_deny() {
         ..Default::default()
     };
     let dirs = base.join(extend).exec.unwrap().dirs;
-    assert_eq!(dirs.get("/x"), Some(&ExecDir::Allow));
+    assert_eq!(dirs.get("/x"), Some(&ExecDir::Deny));
+}
+
+/// Dir veto is sticky under join too: a base that denies a directory
+/// tree keeps that veto when an extension opens only an unrelated tree.
+#[test]
+fn join_exec_dirs_keep_one_sided_deny() {
+    let base = Capabilities {
+        exec: Some(ExecMap {
+            literals: BTreeMap::new(),
+            dirs: BTreeMap::from([("/opt/danger".into(), ExecDir::Deny)]),
+        }),
+        ..Default::default()
+    };
+    let extend = Capabilities {
+        exec: Some(ExecMap {
+            literals: BTreeMap::new(),
+            dirs: BTreeMap::from([("/usr/bin".into(), ExecDir::Allow)]),
+        }),
+        ..Default::default()
+    };
+    let dirs = base.join(extend).exec.unwrap().dirs;
+    assert_eq!(dirs.get("/opt/danger"), Some(&ExecDir::Deny));
+    assert_eq!(dirs.get("/usr/bin"), Some(&ExecDir::Allow));
 }
 
 /// Meet keeps an allow-region intersection AND a covering deny carved
@@ -473,13 +521,18 @@ fn join_exec_widens_policies_and_unions_names() {
     }
 }
 
+/// Widening unions read/write prefixes and preserves every deny: a
+/// `deny_path` is a sticky veto, so an extension silent on a base
+/// carve-out cannot erode it.  Mirrors `meet`, which also unions denies
+/// — a deny survives any composition.
 #[test]
-fn join_fs_unions_prefixes_and_intersects_denies() {
+fn join_fs_unions_prefixes_and_denies() {
     let m = witness_a().join(witness_b());
     let fs = m.fs.unwrap();
     assert!(fs.read_prefixes.iter().any(|p| p == "/tmp"));
     assert!(fs.read_prefixes.iter().any(|p| p == "/tmp/work"));
-    assert!(fs.deny_paths.is_empty());
+    assert!(fs.deny_paths.iter().any(|p| p == "/tmp/secret"));
+    assert!(fs.deny_paths.iter().any(|p| p == "/tmp/work/.exarch.toml"));
 }
 
 /// Decode accepts known `xdg:` tokens (with and without a sub-path),

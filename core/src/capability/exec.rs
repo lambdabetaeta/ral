@@ -53,6 +53,27 @@ pub(super) enum LayerExec {
     Allowed(Admit),
 }
 
+/// The two identity sets a command carries into the exec gate.
+///
+/// A command has two identities — the bare name and the resolved
+/// absolute path — and the basename of either form.  These widen the
+/// VETO surface but must not widen the ADMISSION surface: a planted
+/// `/tmp/evil/rg` invoked by absolute path must not inherit the bare
+/// `rg` admission of an outer grant.  So the gate carries both sets and
+/// consults them asymmetrically — deny-broad, allow-narrow.
+///
+/// * `deny` — broad: `policy_names` ∪ basenames of the resolved and
+///   as-invoked forms.  Any hit on a literal `Deny`, or any absolute
+///   `deny` name landing in a `Deny` dir, vetoes.
+/// * `allow` — narrow: exactly `policy_names`.  Only a hit here on a
+///   literal `Allow`/`Subcommands`, or an absolute `allow` name landing
+///   in an `Allow` dir, admits.
+#[derive(Clone, Copy)]
+pub(super) struct ExecNames<'a> {
+    pub(super) deny: &'a [&'a str],
+    pub(super) allow: &'a [&'a str],
+}
+
 /// Folded verdict across the whole capability stack.
 pub(super) enum ExecVerdict {
     /// No layer has any exec opinion.
@@ -70,7 +91,7 @@ pub(super) enum ExecVerdict {
 /// intersect.  If the stack declared exec policy but no layer admitted
 /// the command, deny; only a stack with no exec policy at all is
 /// unrestricted.
-pub(super) fn evaluate_exec(ctx: &Context, names: &[&str]) -> ExecVerdict {
+pub(super) fn evaluate_exec(ctx: &Context, names: ExecNames) -> ExecVerdict {
     let mut admit: Option<Admit> = None;
     let mut saw = false;
     for exec in ctx.grants.exec() {
@@ -93,31 +114,64 @@ pub(super) fn evaluate_exec(ctx: &Context, names: &[&str]) -> ExecVerdict {
 ///
 /// The exec map admits or denies commands two ways: a literal key
 /// match (bare name or absolute path) and a directory-prefix match.
-/// Match order:
+/// The two identity sets are consulted asymmetrically — deny-broad,
+/// allow-narrow (see [`ExecNames`]) — so a basename can close a veto
+/// hole without widening admission.  Match order:
 ///
-///   1. Literal hit wins.  An explicit `Deny` here vetoes even when a
-///      covering directory would otherwise admit the path.  Multiple
-///      candidate-name hits are meet-folded.
-///   2. Otherwise the deepest matching directory prefix wins.  A dir
-///      `Deny` propagates as `LayerExec::Denied`; a dir `Allow`
-///      yields `LayerExec::Allowed(Allow)`.  Deeper prefix beats
-///      shallower, so `/usr/bin/sudo: Deny` excludes a hole inside
-///      `/usr/bin: Allow`.
-///   3. Neither form fires: strict deny — the deny-by-default that
+///   1. A literal `Deny` on any BROAD name is the strongest veto: it
+///      fires even when a covering directory would admit the path.
+///   2. A literal `Allow`/`Subcommands` on the NARROW names wins next.
+///      Multiple narrow literal hits are meet-folded, so a bare
+///      `git: Allow` paired with `/usr/bin/git: Deny` still yields
+///      `Deny` (the deny side already caught it in step 1; the fold
+///      confirms it).
+///   3. Otherwise the deepest matching directory prefix wins.  A dir
+///      `Deny` propagates as `LayerExec::Denied`; a dir `Allow` yields
+///      `LayerExec::Allowed(Allow)`.  Deeper prefix beats shallower, so
+///      `/usr/bin/sudo: Deny` excludes a hole inside `/usr/bin: Allow`.
+///   4. Neither form fires: strict deny — the deny-by-default that
 ///      every opining layer carries.
-pub(super) fn layer_exec_verdict(exec: &ExecMap, names: &[&str]) -> LayerExec {
-    if let Some(policy) = match_literal_keys(&exec.literals, names) {
+///
+/// Dirs match only absolute names; the basenames the broad set adds are
+/// bare (no slash) and never absolute, so dir matching sees the same
+/// candidates from `allow` and `deny` and needs only the narrow set.
+pub(super) fn layer_exec_verdict(exec: &ExecMap, names: ExecNames) -> LayerExec {
+    if literal_vetoes(&exec.literals, names.deny) {
+        return LayerExec::Denied;
+    }
+    if let Some(policy) = match_literal_keys(&exec.literals, names.allow) {
         return match policy {
             ExecPolicy::Deny => LayerExec::Denied,
             ExecPolicy::Allow => LayerExec::Allowed(Admit::Any),
             ExecPolicy::Subcommands(s) => LayerExec::Allowed(Admit::Subcommands(s)),
         };
     }
-    match longest_dir_match(exec, names) {
+    match longest_dir_match(exec, names.allow) {
         Some(ExecDir::Deny) => LayerExec::Denied,
         Some(ExecDir::Allow) => LayerExec::Allowed(Admit::Any),
         None => LayerExec::Denied,
     }
+}
+
+/// True iff any broad identity hits a literal `Deny`.  A literal `Deny`
+/// is the strongest veto and beats a covering allow dir, so this is
+/// consulted before any admission path.
+fn literal_vetoes(literals: &BTreeMap<String, ExecPolicy>, deny_names: &[&str]) -> bool {
+    deny_names
+        .iter()
+        .any(|n| matches!(literals.get(*n), Some(ExecPolicy::Deny)))
+}
+
+/// Run the stack-level exec verdict over an explicit deny/allow name
+/// pair, returning whether the command is admitted (not denied).  Lets
+/// a test feed the narrow set as both sets — reproducing the pre-fix
+/// gate, which had no broad veto identity — against the fixed gate.
+#[cfg(test)]
+pub(crate) fn admits_for_test(ctx: &Context, deny: &[&str], allow: &[&str]) -> bool {
+    !matches!(
+        evaluate_exec(ctx, ExecNames { deny, allow }),
+        ExecVerdict::Denied
+    )
 }
 
 /// Look up every candidate name as a literal key (bare names and

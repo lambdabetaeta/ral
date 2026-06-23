@@ -50,7 +50,9 @@ pub(crate) fn vet(id: &CommandIdentity, args: &[Value], shell: &mut Shell) -> Se
     let arg_strs = validate_argv(id, args, shell)?;
     let policy_names = id.policy_names(&shell.mobile.context);
     let policy_refs: Vec<&str> = policy_names.iter().map(String::as_str).collect();
-    shell.check_exec_args(&id.shown, &policy_refs, &arg_strs)?;
+    let deny_names = id.deny_names(&shell.mobile.context);
+    let deny_refs: Vec<&str> = deny_names.iter().map(String::as_str).collect();
+    shell.check_exec_call(&id.shown, &deny_refs, &policy_refs, &arg_strs)?;
     let image = match &id.name {
         CommandName::Bare(b) if crate::builtins::uutils::is_uutils_tool(b) => {
             ExecImage::BundledTool { tool: b.clone() }

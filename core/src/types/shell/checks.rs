@@ -57,14 +57,44 @@ impl Shell {
 
     /// Validate an `exec` capability check against the active stack
     /// and emit an audit node if auditing is on.
+    ///
+    /// Convenience entry for a command with a single identity set: the
+    /// `policy_names` act as both the veto and the admission identities.
+    /// The runtime dispatch path, where a head's resolved/as-invoked
+    /// basenames widen the veto surface, goes through
+    /// [`Self::check_exec_call`].
     pub fn check_exec_args(
         &mut self,
         display_name: &str,
         policy_names: &[&str],
         args: &[String],
     ) -> Settled<()> {
+        self.check_exec_call(display_name, policy_names, policy_names, args)
+    }
+
+    /// Validate an `exec` capability check with distinct veto and
+    /// admission identity sets — deny-broad, allow-narrow.
+    ///
+    /// `deny_names` is the broad identity set consulted for vetoes;
+    /// `policy_names` is the narrow set that may admit.  See
+    /// [`CommandIdentity::deny_names`](crate::runtime::command::CommandIdentity::deny_names).
+    pub fn check_exec_call(
+        &mut self,
+        display_name: &str,
+        deny_names: &[&str],
+        policy_names: &[&str],
+        args: &[String],
+    ) -> Settled<()> {
         self.audit_call(|ctx, audit, site| {
-            crate::capability::check_exec_args(ctx, display_name, policy_names, args, audit, site)
+            crate::capability::check_exec_args(
+                ctx,
+                display_name,
+                deny_names,
+                policy_names,
+                args,
+                audit,
+                site,
+            )
         })
     }
 

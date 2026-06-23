@@ -51,9 +51,13 @@ pub trait Meet {
     fn meet(self, other: Self) -> Self;
 }
 
-/// Least upper bound under the type's partial order — dual of [`Meet`].
-/// Used at load time to widen a base ceiling with an extension before
-/// any attenuation runs (`base.join(extension)` adds authority).
+/// Widen a base ceiling with an extension at load time, before any
+/// attenuation runs (`base.join(extension)`).  Adds the extension's
+/// positive authority but preserves every veto — `Deny`s and
+/// `deny_paths` are sticky on both sides — so this is a widening
+/// join-semilattice, not the strict order-dual of [`Meet`]: a deny
+/// survives any composition, and only an explicit same-key re-grant
+/// lifts one.
 pub trait Join {
     fn join(self, other: Self) -> Self;
 }
@@ -99,10 +103,13 @@ impl Join for bool {
 ///
 /// Forms a three-point lattice with `Allow` at top, `Subcommands(_)`
 /// in the middle (more elements = more authority), and `Deny` at
-/// bottom.  An explicit `Deny` is a sticky veto: it survives meet
-/// against absence in another layer's map (so a base ceiling can
-/// pin a command name out without restrict files having to repeat
-/// it) and beats subpath admission elsewhere in the same map.
+/// bottom.  An explicit `Deny` is a sticky veto: it survives both meet
+/// and join against absence in another layer's map (so a base ceiling
+/// can pin a command name out without restrict *or* extend-base files
+/// having to repeat it) and beats subpath admission elsewhere in the
+/// same map.  No composition lifts it — deny-overrides holds under both
+/// meet and join — so to permit a denied name you choose a base that
+/// does not deny it, rather than re-granting it from an overlay.
 ///
 /// Borne by [`ExecMap::literals`], whose keys are bare command names
 /// (`git`) or absolute literal paths (`/usr/bin/git`).  Directory
@@ -520,15 +527,18 @@ impl Capabilities {
         }
     }
 
-    /// Lattice join — the least-authority capability above both
-    /// `self` and `other`.  Used to widen a base ceiling with an
-    /// extension profile before any attenuation runs.  Commutative,
-    /// associative, idempotent.
+    /// Widen `self` with `other` — the composition `--extend-base`
+    /// runs to lift a base ceiling before any attenuation.
+    /// Commutative, associative, idempotent.
     ///
-    /// `None` on a field acts as the join identity.  Inner
-    /// fields union (exec maps, fs prefixes), OR (net, editor,
-    /// shell), and intersect (`fs.deny_paths` — fewer denies =
-    /// more authority).
+    /// `None` on a field acts as the join identity.  Positive authority
+    /// widens — exec allows and fs prefixes union, net/editor/shell OR
+    /// — while every veto is preserved: `fs.deny_paths` and exec `Deny`s
+    /// survive (deny-overrides, the same conflict rule as `meet`), so an
+    /// extension can add authority where the base was silent but can
+    /// never re-admit a denied region.  This is not the order-dual of
+    /// [`meet`](Self::meet): a deny is a floor under both, never lifted
+    /// by composition — only by choosing a different base.
     pub fn join(self, other: Self) -> Self {
         // Per-field joins via the lattice trait — symmetric to `meet`.
         Self {
@@ -588,8 +598,12 @@ impl Meet for ExecPolicy {
 impl Join for ExecPolicy {
     fn join(self, other: Self) -> Self {
         match (self, other) {
+            // Deny-overrides: a veto wins under widening exactly as it
+            // does under `meet`, so `--extend-base` can never re-admit a
+            // command the base denies.  Allows still widen (subcommand
+            // sets union) where neither side vetoes.
+            (Self::Deny, _) | (_, Self::Deny) => Self::Deny,
             (Self::Allow, _) | (_, Self::Allow) => Self::Allow,
-            (Self::Deny, p) | (p, Self::Deny) => p,
             (Self::Subcommands(s1), Self::Subcommands(s2)) => Self::Subcommands(&s1 | &s2),
         }
     }
@@ -616,11 +630,11 @@ impl Join for FsPolicy {
         Self {
             read_prefixes: union_prefixes(self.read_prefixes, other.read_prefixes),
             write_prefixes: union_prefixes(self.write_prefixes, other.write_prefixes),
-            deny_paths: self
-                .deny_paths
-                .into_iter()
-                .filter(|p| other.deny_paths.contains(p))
-                .collect(),
+            // Denies union, exactly as in `meet`: a `deny_path` is a
+            // sticky veto, not erodable authority.  An `--extend-base`
+            // overlay that is silent on a base carve-out must not lift
+            // it — so widening preserves every deny from either side.
+            deny_paths: union_prefixes(self.deny_paths, other.deny_paths),
         }
     }
 }
@@ -686,22 +700,24 @@ impl Meet for ExecMap {
     }
 }
 
-/// Join two exec maps — dual of [`ExecMap`]'s `Meet`.  In `dirs`:
-/// allow-regions union (either side widens), deny-regions intersect (a
-/// prefix stays denied only where BOTH sides deny it, the deeper one
-/// winning), and on an exact-key clash the allow lands last so join's
-/// top — `Allow` — wins.  The `literals` half mirrors this through
+/// Join two exec maps — the widening composition `--extend-base` runs.
+/// In `dirs`: allow-regions union (either side widens) and deny-regions
+/// union too (a dir `Deny` is a sticky veto, kept from either side), so
+/// an extension silent on a base's denied tree cannot re-admit it.  On
+/// an exact-key clash the deny lands last, so deny-overrides: a base
+/// veto on a directory survives even an overlay that re-grants it,
+/// exactly as under `meet`.  The `literals` half mirrors this through
 /// [`join_literal_exec`].
 impl Join for ExecMap {
     fn join(self, other: Self) -> Self {
         let (a_allow, a_deny) = partition_exec_dirs(&self.dirs);
         let (b_allow, b_deny) = partition_exec_dirs(&other.dirs);
         let mut dirs = BTreeMap::new();
-        for path in intersect_prefix_strings(&a_deny, &b_deny) {
-            dirs.insert(path, ExecDir::Deny);
-        }
         for path in union_prefix_strings(a_allow, b_allow) {
             dirs.insert(path, ExecDir::Allow);
+        }
+        for path in union_prefix_strings(a_deny, b_deny) {
+            dirs.insert(path, ExecDir::Deny);
         }
         Self {
             literals: join_literal_exec(self.literals, other.literals),
@@ -759,6 +775,11 @@ pub(crate) fn meet_literal_exec(
     out
 }
 
+/// Per-name join over the `literals` half of an exec map — dual of
+/// [`meet_literal_exec`].  Shared keys combine via [`ExecPolicy::join`]
+/// (deny-overrides — a `Deny` on either side wins).  One-sided keys
+/// survive verbatim: an absent key is the join identity (`p ⊔ ⊥ = p`),
+/// so silence on one side lifts neither a base's grant nor its veto.
 fn join_literal_exec(
     a: BTreeMap<String, ExecPolicy>,
     b: BTreeMap<String, ExecPolicy>,
@@ -769,17 +790,13 @@ fn join_literal_exec(
             Some(pb) => {
                 out.insert(name.clone(), pa.clone().join(pb.clone()));
             }
-            None if !matches!(pa, ExecPolicy::Deny) => {
+            None => {
                 out.insert(name.clone(), pa.clone());
             }
-            None => {}
         }
     }
     for (name, pb) in &b {
-        if a.contains_key(name) {
-            continue;
-        }
-        if !matches!(pb, ExecPolicy::Deny) {
+        if !a.contains_key(name) {
             out.insert(name.clone(), pb.clone());
         }
     }

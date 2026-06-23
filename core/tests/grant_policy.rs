@@ -260,3 +260,129 @@ fn sandbox_projection_does_not_leak_outer_raw_prefix() {
             .contains(&inner_dir.to_string_lossy().into_owned())
     );
 }
+
+/// The bare/absolute identity duality is closed on the veto side: a
+/// `reasonable`-shaped grant denies `bash` by bare name but allows
+/// `/bin/`.  An absolute invocation `/bin/bash` carries no bare name in
+/// its narrow admission set, but its broad deny set surfaces the
+/// basename `bash`, so the `bash: Deny` literal vetoes even though the
+/// `/bin/` allow dir would otherwise admit the resolved path.
+#[test]
+fn broad_deny_set_vetoes_path_invoked_denied_basename() {
+    let mut shell = Shell::default();
+    let grant = Capabilities {
+        exec: Some(ExecMap {
+            literals: BTreeMap::from([("bash".into(), ExecPolicy::Deny)]),
+            dirs: BTreeMap::from([("/bin".into(), ExecDir::Allow)]),
+        }),
+        ..Capabilities::root()
+    };
+    // deny set (broad): resolved path plus its basename; allow set
+    // (narrow): the resolved path only — exactly what a Path head's
+    // deny_names / policy_names produce for `/bin/bash`.
+    let result = shell.with_capabilities(grant, |sh| {
+        sh.check_exec_call("/bin/bash", &["/bin/bash", "bash"], &["/bin/bash"], &[])
+    });
+    assert!(
+        result.is_err(),
+        "bare bash: Deny must veto a direct /bin/bash invocation"
+    );
+}
+
+/// Anti-spoof preserved: a planted binary invoked by absolute path must
+/// not inherit a bare-name `allow`.  The only `rg` grant is the bare
+/// literal `rg: Allow` (no covering allow dir); the basename `rg` is in
+/// the broad deny set but NOT the narrow admission set, so a Path head
+/// `/tmp/evil/rg` is denied.
+#[test]
+fn broad_deny_set_does_not_admit_planted_path_invoked_basename() {
+    let mut shell = Shell::default();
+    let grant = Capabilities {
+        exec: Some(ExecMap {
+            literals: BTreeMap::from([("rg".into(), ExecPolicy::Allow)]),
+            dirs: BTreeMap::new(),
+        }),
+        ..Capabilities::root()
+    };
+    let result = shell.with_capabilities(grant, |sh| {
+        sh.check_exec_call("/tmp/evil/rg", &["/tmp/evil/rg", "rg"], &["/tmp/evil/rg"], &[])
+    });
+    assert!(
+        result.is_err(),
+        "bare rg: Allow must not admit a Path-invoked /tmp/evil/rg via its basename"
+    );
+}
+
+/// No regression on the resolved-absolute deny: a literal `Deny` on the
+/// resolved absolute path still vetoes a bare invocation whose broad
+/// set carries that path.
+#[test]
+fn literal_deny_on_resolved_absolute_still_vetoes() {
+    let mut shell = Shell::default();
+    let grant = Capabilities {
+        exec: Some(ExecMap {
+            literals: BTreeMap::from([("/usr/bin/git".into(), ExecPolicy::Deny)]),
+            dirs: BTreeMap::from([("/usr/bin".into(), ExecDir::Allow)]),
+        }),
+        ..Capabilities::root()
+    };
+    let result = shell.with_capabilities(grant, |sh| {
+        sh.check_exec_call("git", &["git", "/usr/bin/git"], &["git", "/usr/bin/git"], &[])
+    });
+    assert!(
+        result.is_err(),
+        "literal Deny on the resolved absolute path must veto"
+    );
+}
+
+/// No regression: bare `git` admitted under a `reasonable`-shaped grant
+/// (bare `git: Allow`), and its `status` subcommand gating stays intact
+/// when the literal carries a `Subcommands` restriction.
+#[test]
+fn bare_admit_and_subcommand_gating_unregressed() {
+    // Bare git: Allow admits a bare invocation with any args.
+    let mut shell = Shell::default();
+    let allow = Capabilities {
+        exec: Some(ExecMap {
+            literals: BTreeMap::from([("git".into(), ExecPolicy::Allow)]),
+            dirs: BTreeMap::new(),
+        }),
+        ..Capabilities::root()
+    };
+    shell
+        .with_capabilities(allow, |sh| {
+            sh.check_exec_call("git", &["git", "/usr/bin/git"], &["git", "/usr/bin/git"], &[
+                "status".into(),
+            ])
+        })
+        .expect("bare git: Allow must admit");
+
+    // Subcommands restriction: `status` admitted, `push` denied.
+    let mut shell = Shell::default();
+    let gated = Capabilities {
+        exec: Some(ExecMap {
+            literals: BTreeMap::from([(
+                "git".into(),
+                ExecPolicy::Subcommands(BTreeSet::from(["status".into()])),
+            )]),
+            dirs: BTreeMap::new(),
+        }),
+        ..Capabilities::root()
+    };
+    shell
+        .with_capabilities(gated.clone(), |sh| {
+            sh.check_exec_call("git", &["git", "/usr/bin/git"], &["git", "/usr/bin/git"], &[
+                "status".into(),
+            ])
+        })
+        .expect("git status must be admitted under Subcommands([status])");
+    let denied = shell.with_capabilities(gated, |sh| {
+        sh.check_exec_call("git", &["git", "/usr/bin/git"], &["git", "/usr/bin/git"], &[
+            "push".into(),
+        ])
+    });
+    assert!(
+        denied.is_err(),
+        "git push must be denied under Subcommands([status])"
+    );
+}

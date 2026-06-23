@@ -69,7 +69,9 @@ turn evaluates under a profile's capabilities pushed onto this same stack.
 See also [[design/syscalls-are-effects|syscalls-are-effects]] (a capability is permission over the effect set),
 [[design/scoping|scoping]], [[design/control-operators|control-operators]],
 [[design/two-enforcers|two-enforcers]], [[related/system-c|system-c]] (the
-type-based pole of this calculus).
+type-based pole of this calculus),
+[[related/access-control-algebra|access-control-algebra]] (the security-literature
+model this lattice instantiates — composition over a Belnap bilattice).
 
 **Realised in** [[internals/capability-enforcement|capability-enforcement]].
 

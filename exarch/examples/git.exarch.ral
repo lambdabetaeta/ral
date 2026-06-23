@@ -1,26 +1,28 @@
-# Opt-in Git extension for `--extend-base`.
+# Opt-in Git config-read extension for `--extend-base`.
 #
-# `reasonable` and `read-only` already admit git as part of their
-# default toolset.  This file exists for the tighter bases:
+# `reasonable` and `read-only` already read `~/.gitconfig` as part of
+# their default fs grant.  This file is for the tighter bases
+# (`minimal`, `confined`): they grant no home reads, and they admit
+# only the *system* git under `/usr/bin/` — a Homebrew git under
+# `/opt/homebrew/bin` is not on their exec subpaths at all:
 #
 #     exarch --base minimal   --extend-base exarch/examples/git.exarch.ral
 #     exarch --base confined  --extend-base exarch/examples/git.exarch.ral
 #
-# It admits `~/.gitconfig` + `xdg:config/git` for read and `git` for
-# exec, and re-denies the credential-config dirs (gh/op/gcloud) so a
-# user who joins this against a permissive base doesn't accidentally
-# widen them.
+# It adds `~/.gitconfig` + `xdg:config/git` for read, so git finds
+# user.name / user.email / aliases; and `git: 'allow'` for exec, so git
+# is admitted wherever it resolves — including a Homebrew install the
+# base's binary-dir subpaths don't cover.
+#
+# No credential-deny block is needed: `--extend-base` preserves the
+# base's `deny_paths` — gh/op/gcloud and the rest stay denied — so an
+# overlay never has to re-state a veto to keep it.
 
 return [
   fs: [
     read: [
       '~/.gitconfig',
       'xdg:config/git',
-    ],
-    deny: [
-      'xdg:config/gh',
-      'xdg:config/op',
-      'xdg:config/gcloud',
     ],
   ],
   exec: [

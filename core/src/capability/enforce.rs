@@ -12,7 +12,7 @@
 //! these gates share an authority model with is built in the sibling
 //! [`super::sandbox`].
 
-use super::exec::{Admit, ExecVerdict, evaluate_exec};
+use super::exec::{Admit, ExecNames, ExecVerdict, evaluate_exec};
 use crate::path::NormalizedPrefix;
 use crate::types::{
     Audit, Break, CallSite, Capabilities, Context, ExecNode, FsPolicy, Map, Settled, Value, sig,
@@ -24,12 +24,17 @@ use crate::types::{
 pub(crate) fn check_exec_args(
     ctx: &Context,
     display_name: &str,
+    deny_names: &[&str],
     policy_names: &[&str],
     args: &[String],
     audit: &mut Audit,
     site: CallSite,
 ) -> Settled<()> {
-    let result: Settled<()> = match evaluate_exec(ctx, policy_names) {
+    let names = ExecNames {
+        deny: deny_names,
+        allow: policy_names,
+    };
+    let result: Settled<()> = match evaluate_exec(ctx, names) {
         ExecVerdict::Unrestricted | ExecVerdict::Allowed(Admit::Any) => Ok(()),
         ExecVerdict::Denied => Err(sig_hint(
             format!("command '{display_name}' denied by active grant"),
@@ -191,9 +196,15 @@ pub(crate) fn check_fs_op(
 /// policy keys?  Pre-args judgment that classification and the `which`
 /// inspector consult to short-circuit a denied head with a focused error.
 pub(crate) fn admits_head(ctx: &Context, id: &crate::runtime::command::CommandIdentity) -> bool {
-    let names = id.policy_names(ctx);
-    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    !matches!(evaluate_exec(ctx, &refs), ExecVerdict::Denied)
+    let allow = id.policy_names(ctx);
+    let deny = id.deny_names(ctx);
+    let allow_refs: Vec<&str> = allow.iter().map(String::as_str).collect();
+    let deny_refs: Vec<&str> = deny.iter().map(String::as_str).collect();
+    let names = ExecNames {
+        deny: &deny_refs,
+        allow: &allow_refs,
+    };
+    !matches!(evaluate_exec(ctx, names), ExecVerdict::Denied)
 }
 
 /// Check `editor.read` capability is available.

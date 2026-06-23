@@ -487,47 +487,63 @@ mod tests {
         }
     }
 
-    /// `minimal` keeps git denied: the base is for additive
-    /// `--extend-base` composition, so admitting git silently would
-    /// erode the "deliberate opt-ins" property the profile sells.
+    /// `minimal` admits the *system* git under `/usr/bin/` (its own
+    /// header lists git among what the subpath rule allows) but not a
+    /// Homebrew git under `/opt/homebrew/bin` — minimal admits no
+    /// homebrew tree, so user-installed brew tools stay opt-in.  A
+    /// non-root cwd keeps the `cwd:/` allow from masking the test: under
+    /// `cwd: /` everything resolves inside the working tree.  The git
+    /// extension's `git: 'allow'` is what carries a Homebrew install.
     #[cfg(unix)]
     #[test]
-    fn minimal_denies_git() {
+    fn minimal_admits_system_git_not_homebrew() {
         let home = ral_core::path::home_from_env();
         let ctx = FreezeCtx {
             home: &home,
-            cwd: Path::new("/"),
+            cwd: Path::new("/work"),
         };
-        let caps = load("minimal", MINIMAL_RAL, &ctx);
-        let mut shell = Shell::default();
-        let r = shell.with_capabilities(caps, |sh| {
-            sh.check_exec_args("git", &["git", "/usr/bin/git"], &[])
-        });
-        assert!(r.is_err(), "minimal should deny git");
+        let admits = |caps: ral_core::types::Capabilities, names: &[&str]| {
+            let mut shell = Shell::default();
+            shell
+                .with_capabilities(caps, |sh| sh.check_exec_args(names[0], names, &[]))
+                .is_ok()
+        };
+        assert!(
+            admits(load("minimal", MINIMAL_RAL, &ctx), &["git", "/usr/bin/git"]),
+            "minimal admits the system git via the /usr/bin/ subpath"
+        );
+        assert!(
+            !admits(
+                load("minimal", MINIMAL_RAL, &ctx),
+                &["git", "/opt/homebrew/bin/git"]
+            ),
+            "minimal does not admit a Homebrew git — brew trees are opt-in"
+        );
+        let widened =
+            load("minimal", MINIMAL_RAL, &ctx).join(load("git-ext", GIT_EXTENSION_RAL, &ctx));
+        assert!(
+            admits(widened, &["git", "/opt/homebrew/bin/git"]),
+            "the git extension's git: 'allow' carries a Homebrew install"
+        );
     }
 
-    /// The git extension's load-bearing job is now to widen
-    /// `minimal` (and `confined`) into something that can run git;
-    /// `reasonable` and `read-only` already admit it.
+    /// The git extension adds gitconfig *reads* (and a portable `git`
+    /// exec grant) to a tight base: `minimal` and `confined` grant no
+    /// home reads and admit only the system git under `/usr/bin/`, while
+    /// `reasonable` and `read-only` already read `~/.gitconfig`.
     ///
     /// Two facts about the join are pinned here:
     ///
-    /// 1. Joining against `minimal` produces git admitted +
-    ///    gitconfig readable — the extension lifts the base into a
-    ///    git-capable shape.
-    /// 2. The extension's gh/op/gcloud denies survive only when
-    ///    joined against a base that also has them: `FsPolicy::join`
-    ///    intersects deny sets (correct lattice semantics — a one-
-    ///    sided deny means the other side admits the path, so the
-    ///    widened result must admit too).  Joining with `reasonable`
-    ///    preserves them; joining with `minimal` does not.  This is
-    ///    fine — minimal's narrow read set means xdg:config/* isn't
-    ///    reachable in the first place, so the dropped deny is
-    ///    moot.
+    /// 1. Joining against `minimal` keeps git admitted (the extension's
+    ///    one-sided `git: 'allow'` survives) and makes gitconfig
+    ///    readable.
+    /// 2. The base's gh/op/gcloud credential denies survive the join:
+    ///    `FsPolicy::join` unions deny sets, so a veto is preserved even
+    ///    though the extension no longer re-states it.  This is the
+    ///    sticky-veto property that lets an overlay stay purely additive.
     ///
     /// Both sides freeze against the same home, so the resolved
-    /// `xdg:config/*` paths coincide and the deny intersection keeps
-    /// them.
+    /// `xdg:config/*` paths coincide.
     #[cfg(unix)]
     #[test]
     fn git_extension_widens_into_git_capable_profile() {
