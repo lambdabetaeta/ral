@@ -60,13 +60,29 @@ jobs:
 
       # The wiki (docs/ral-wiki) is published under site/wiki/ by Quartz v5.
       # Quartz is its own Node project, so we clone it pinned, drop in our config
-      # (scripts/wiki/quartz.config.yaml), and point its build at the wiki.
-      - name: Build wiki (Quartz v5)
+      # (scripts/wiki/quartz.config.yaml), and point its build at the wiki.  The
+      # dep tree and plugin set are fixed by the pinned tag + our config, so the
+      # caches key on those (the package-lock.json lives only inside the clone).
+      - name: Clone Quartz (v5)
         run: |
-          QUARTZ_DIR="$RUNNER_TEMP/quartz"
-          git clone --depth 1 --branch v5.0.0 https://github.com/jackyzha0/quartz.git "$QUARTZ_DIR"
-          cp scripts/wiki/quartz.config.yaml "$QUARTZ_DIR/quartz.config.yaml"
-          cd "$QUARTZ_DIR"
+          git clone --depth 1 --branch v5.0.0 https://github.com/jackyzha0/quartz.git "$RUNNER_TEMP/quartz"
+          cp scripts/wiki/quartz.config.yaml "$RUNNER_TEMP/quartz/quartz.config.yaml"
+
+      - name: Cache npm packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-quartz-npm-v5.0.0
+
+      - name: Cache Quartz plugins
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/quartz/.quartz/plugins
+          key: ${{ runner.os }}-quartz-plugins-v5.0.0-${{ hashFiles('scripts/wiki/quartz.config.yaml') }}
+
+      - name: Build wiki (Quartz v5)
+        working-directory: ${{ runner.temp }}/quartz
+        run: |
           npm ci
           npx quartz plugin install
           npx quartz build -d "$GITHUB_WORKSPACE/docs/ral-wiki" -o "$GITHUB_WORKSPACE/site/wiki"

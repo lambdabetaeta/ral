@@ -118,7 +118,7 @@ plugins:
   - source: github:quartz-community/favicon
     enabled: true
   - source: github:quartz-community/og-image
-    enabled: true
+    enabled: false # social-preview cards: not worth rendering a PNG per page
   - source: github:quartz-community/cname
     enabled: false
   - source: github:quartz-community/canvas-page
