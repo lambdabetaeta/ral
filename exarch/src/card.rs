@@ -214,12 +214,14 @@ impl WriteMode {
         })
     }
 
-    /// The word shown in a write card's text.
-    fn label(self) -> &'static str {
+    /// The verb that opens a write card — the mode *is* the verb, so the card
+    /// needs no redundant `(write)` after it. A streaming write is still a
+    /// write to the reader, so `Stream` collapses to `Write:`; the stream
+    /// detail rides the recorded event, not the surface.
+    fn verb(self) -> &'static str {
         match self {
-            Self::Write => "write",
-            Self::Append => "append",
-            Self::Stream => "stream",
+            Self::Write | Self::Stream => "Write",
+            Self::Append => "Append",
         }
     }
 }
@@ -415,16 +417,22 @@ fn grep_spans(scope: &str, pattern: &str) -> Vec<Span> {
     ]
 }
 
-/// A write's full `Write: path (mode) outcome` — the verb, the path, the mode
-/// in parentheses, then the outcome roled by how it settled.  Reused verbatim
-/// per entry in [`io_group_card`]'s comma-joined write run.
+/// A write row: the mode as the verb (`Write:` / `Append:` / `Stream:`) then
+/// the path as the subject — and nothing more when the write committed, since
+/// the card's mere existence reports that.  An outcome that *departs* from the
+/// happy path (aborted, failed) earns a trailing roled word; the constant case
+/// is dropped so the path is what the eye lands on.  Reused verbatim per entry
+/// in [`io_group_card`]'s comma-joined write run.
 fn write_spans(path: &str, mode: WriteMode, outcome: WriteOutcome) -> Vec<Span> {
-    vec![
-        span(Role::Muted, "Write: "),
+    let mut spans = vec![
+        span(Role::Muted, &format!("{}: ", mode.verb())),
         span(Role::Path, path),
-        span_plain(&format!(" ({}) ", mode.label())),
-        span(outcome.role(), outcome.label()),
-    ]
+    ];
+    if outcome != WriteOutcome::Committed {
+        spans.push(span_plain(" "));
+        spans.push(span(outcome.role(), outcome.label()));
+    }
+    spans
 }
 
 /// Compose a run of buffered I/O surfaces — even interleaved, grouped by the
@@ -477,8 +485,8 @@ pub fn io_group_card(
         });
         cards.push(Card(vec![Mark::Text { spans }]));
     }
-    // Write: `Write: p1 (mode) outcome, Write: p2 …` — each entry the full
-    // write row, comma-joined.
+    // Write: `Write: p1, Append: p2 failed, …` — each entry the mode-verb +
+    // path (plus a roled outcome only when it deviated), comma-joined.
     if !writes.is_empty() {
         let mut spans = Vec::new();
         join_spans(&mut spans, writes, |spans, e| {
@@ -1205,43 +1213,50 @@ mod tests {
         assert_eq!(spans[1].text, "a.rs");
     }
 
-    /// A write card roles its outcome span by how the write settled:
-    /// committed→`Ok`, aborted→`Warn`, failed→`Bad`.  The path is `Path`,
-    /// and the mode word is carried in the card.
+    /// A write card opens with the mode as its verb (so no redundant
+    /// `(write)`) and the path as the subject. A committed write shows nothing
+    /// more — the card's existence reports it; an aborted or failed one earns a
+    /// trailing word roled by severity (`Warn` / `Bad`).
     #[test]
-    fn io_card_write_roles_outcome_by_settling() {
-        for (outcome, role) in [
-            (WriteOutcome::Committed, Role::Ok),
-            (WriteOutcome::Aborted, Role::Warn),
-            (WriteOutcome::Failed, Role::Bad),
+    fn io_card_write_verb_then_deviant_outcome() {
+        // Committed: mode-verb + path, and no outcome word.
+        let card = io_card(&IoEvent::Write {
+            path: "b.rs".into(),
+            mode: WriteMode::Stream,
+            outcome: WriteOutcome::Committed,
+        });
+        let spans = only_text(&card);
+        assert!(
+            spans
+                .iter()
+                .any(|sp| sp.role == Some(Role::Path) && sp.text == "b.rs"),
+            "the path is roled Path"
+        );
+        assert!(
+            spans.first().is_some_and(|sp| sp.text.starts_with("Write")),
+            "a streaming write surfaces as the Write verb"
+        );
+        assert!(
+            !spans.iter().any(|sp| sp.text.contains("committed")),
+            "a committed write shows no outcome word"
+        );
+
+        // Deviant outcomes earn a trailing roled word.
+        for (outcome, role, word) in [
+            (WriteOutcome::Aborted, Role::Warn, "aborted"),
+            (WriteOutcome::Failed, Role::Bad, "failed"),
         ] {
             let card = io_card(&IoEvent::Write {
                 path: "b.rs".into(),
-                mode: WriteMode::Stream,
+                mode: WriteMode::Write,
                 outcome,
             });
-            let spans = only_text(&card);
-            assert!(
-                spans
-                    .iter()
-                    .any(|sp| sp.role == Some(Role::Path) && sp.text == "b.rs"),
-                "the path is roled Path"
-            );
-            assert!(
-                spans.iter().any(|sp| sp.text.contains("stream")),
-                "the mode word is shown"
-            );
-            let outcome_span = spans.last().expect("a write card ends on its outcome");
-            assert_eq!(
-                outcome_span.role,
-                Some(role),
-                "{outcome:?} roles the outcome span"
-            );
-            assert!(outcome_span.text.contains(match outcome {
-                WriteOutcome::Committed => "committed",
-                WriteOutcome::Aborted => "aborted",
-                WriteOutcome::Failed => "failed",
-            }));
+            let last = only_text(&card)
+                .last()
+                .cloned()
+                .expect("a deviant write ends on its outcome");
+            assert_eq!(last.role, Some(role), "{outcome:?} roles the outcome");
+            assert!(last.text.contains(word));
         }
     }
 

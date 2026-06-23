@@ -88,6 +88,16 @@ Two `Sink` implementations:
    `PROMPT_INK` rule fence (`line::prompt_fence`), found at a glance by common
    region rather than by reverse video, which stays reserved for an active
    selection.
+ - **figure and ground, on the luminance axis.** Within the agent's
+   foreground, *communication* and *work* split by value: the model's prose
+   answer, a subagent's returned result, and the human's prompt stay at full
+   luminance (the figure); a tool call's *intent* — work-narration, not the
+   answer — drops to the `SLATE` ground tier (`group.rs` intent ink,
+   `line::tool_call_header`), joining the already-recessed machine output and
+   widening the app's `DIM` idiom from "minor chrome" to "the ground stratum".
+   The rail glyph and the size/sparkline bars keep their luminance — there it
+   is *magnitude* — so figure/ground rides value on content marks only and
+   never collides with the quantitative read.
  - **the marginal rail: one cell, three variables.** Shape → block *kind*, hue
    → the *producing agent*, value → *magnitude*. Hue is a per-*view* tint, not
    a per-block one: every block in a tab shares that tab's agent slot
@@ -133,7 +143,8 @@ Two `Sink` implementations:
  the next safe tool boundary, and `Repl::drive` delivers the rest at the turn
  boundary — a coalesced human run, or a wakeup / settled agent as its own
  marked turn. A committed human turn echoes on the `RailShape::Prompt` band;
- a wakeup stays dim, marked chrome on the Generic rail. Slash-prefixed prompts
+ a wakeup stays dim, ambient chrome with no rail glyph (`RailShape::Plain`).
+ Slash-prefixed prompts
  stay on the REPL command path. Until then the inbox renders as a `PROMPT_BG`
  strip above the input, and the idle wait selects over input, inbox, and the
  session bus

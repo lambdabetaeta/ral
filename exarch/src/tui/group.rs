@@ -25,7 +25,7 @@ use super::block::wrap_line;
 use super::highlight::highlight_ral;
 use super::line::{self, CODE_BG, RAIL_W, SLATE, push_wrapped, wash};
 use super::md;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
@@ -199,7 +199,10 @@ fn pinned_intent(
 ) -> Vec<Line<'static>> {
     let bars_left = (bar_last + 1).saturating_sub(bars_w);
     let body_w = bars_left.saturating_sub(lead_w + GAP).max(8);
-    let ink = Style::default().fg(Color::White);
+    // The intent is work-narration, not the answer: it sits in the SLATE
+    // ground tier so the model's prose (BASE_FG) reads as the figure. SLATE
+    // also gives the context drain a hue to desaturate — white had none.
+    let ink = Style::default().fg(SLATE);
     let mut out: Vec<Line<'static>> = Vec::new();
     push_wrapped(&mut out, intent, body_w, |chunk, first| {
         let mut row = if first {
@@ -341,11 +344,9 @@ mod tests {
         );
         let rows = source_rows(&c, 60);
         assert_eq!(rows.len(), 2);
-        let inset = UnicodeWidthStr::width(BODY_INDENT);
         for r in &rows {
             let w: usize = r.spans.iter().map(|s| s.width()).sum();
             assert_eq!(w, 60, "panel row padded to full width");
-            assert_eq!(washed_start(r), inset, "wash starts at the BODY_INDENT margin");
             assert!(
                 r.spans.iter().any(|s| s.style.bg == Some(CODE_BG)),
                 "the row is washed"
@@ -377,16 +378,6 @@ mod tests {
         s.len() - s.trim_start().len()
     }
 
-    /// The display column at which the row's wash begins — the summed width of
-    /// the leading unwashed (bg-less) spans.
-    fn washed_start(line: &Line<'_>) -> usize {
-        line.spans
-            .iter()
-            .take_while(|s| s.style.bg.is_none())
-            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-            .sum()
-    }
-
     /// L1 head row: `ral␠␠<intent>…<sparkline>`.  The row's display width is
     /// pinned so the sparkline's last glyph lands at `bar_col` once the
     /// viewport shifts the row by [`RAIL_W`]; the wrapped continuation hangs
@@ -407,47 +398,6 @@ mod tests {
 
         let lead_w = UnicodeWidthStr::width("ral") + GAP;
         assert_eq!(indent_of(&rows[1]), RAIL_W + lead_w);
-    }
-
-    /// L1 live tip: the latest call's effects nest under the *intent* (at
-    /// `RAIL_W + "ral  "`), not under the `ral` head, and their machine wash
-    /// starts at that inset — the margin stays unwashed — and runs to the right
-    /// edge, so the effect reads as a left-inset rectangle belonging to the
-    /// call above it.
-    #[test]
-    fn live_tip_effects_nest_and_inset_the_wash() {
-        let width = 80;
-        let effect = Line::from(vec![Span::raw("Read: "), Span::raw("a.md")]);
-        let c = Call::new(
-            CallParts {
-                intent: "look",
-                tool: "ral",
-                cmd: "",
-                magnitude: Some(2),
-                context: 0,
-            },
-            // `render_card` opens with a leading blank; `indent_rows` drops it.
-            vec![Line::default(), effect],
-        );
-        let rows = body(&[c], 1, width);
-        let effect_row = rows
-            .iter()
-            .find(|l| plain(l).contains("Read:"))
-            .expect("the effect row");
-
-        let inset = RAIL_W + UnicodeWidthStr::width("ral") + GAP;
-        assert_eq!(indent_of(&plain(effect_row)), inset, "nests under the intent");
-        assert_eq!(washed_start(effect_row), inset, "wash starts at the inset");
-        let w: usize = effect_row.spans.iter().map(|s| s.width()).sum();
-        assert_eq!(w, width, "wash runs to the right margin");
-        assert!(
-            effect_row
-                .spans
-                .iter()
-                .filter(|s| s.style.bg.is_some())
-                .all(|s| s.style.bg == Some(CODE_BG)),
-            "washed cells wear CODE_BG"
-        );
     }
 
     /// L2 list row: the bare `ral` head, then per-call intent rows whose

@@ -27,8 +27,10 @@ use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 
 /// The rail glyph a block wears, derived from its [`super::block::BlockKind`].
-/// Each variant maps to one shape cell; chrome's coarse [`RailShape`]
-/// (`Step` / `Error` / `Generic`) is lifted into this set by the block.
+/// Each variant maps to one shape cell, and every kind has its own — the
+/// shape names the kind, with no two kinds sharing a glyph. Chrome's coarse
+/// [`RailShape`] (`Step` / `Error` / `ToolCall`) is lifted into this set by
+/// the block.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum RailKind {
     /// A file mutation — the change-bar `▎`. Both an `edit`'s located diff
@@ -36,16 +38,18 @@ pub(super) enum RailKind {
     /// summary) wear it; the body, not the shape, says which.
     Patch,
     /// A tool call, open or shut — the disclosure triangle *is* the
-    /// tool-call shape, so no separate `◆`.
+    /// tool-call shape, so no separate `◆`. A summary-less call (`fff`, an
+    /// invalid-input header) is the shut triangle, inert: there is nothing
+    /// to dial, but a tool call is a tool call.
     ToolCall(bool),
     Markdown,
     /// An async subagent's landed result — the `↘` delegated-result shape.
     Subagent,
     Step,
     Error,
-    Generic,
     /// The human turn's fence — a `❖` in the human's [`PROMPT_INK`], beside
-    /// the raised band, so the rail thumbnail still shows where each turn opens.
+    /// the raised band, so the rail thumbnail still shows where each turn
+    /// opens. The sole wearer of `❖`, so the glyph reads as "the human".
     Prompt,
 }
 
@@ -61,7 +65,6 @@ impl RailKind {
             RailKind::Subagent => "↘",
             RailKind::Step => "━",
             RailKind::Error => "╳",
-            RailKind::Generic => "❖",
             RailKind::Prompt => "❖",
         }
     }
@@ -80,7 +83,6 @@ pub(super) const RAIL_SHAPES: &[(RailKind, &str)] = &[
     (RailKind::Subagent, "subagent result"),
     (RailKind::Step, "step boundary"),
     (RailKind::Error, "error"),
-    (RailKind::Generic, "generic chrome"),
     (RailKind::Prompt, "your prompt — the fence"),
 ];
 

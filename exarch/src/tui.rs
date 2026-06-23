@@ -664,7 +664,7 @@ impl App {
                     // shows shut, the script on a click.  Summary-less
                     // calls (`fff`, invalid input) have nothing to open.
                     Some(s) => vp.push_tool_call(tool, s, cmd, floor),
-                    None => vp.push_chrome(RailShape::Generic, line::tool_call_static(&cmd, tool)),
+                    None => vp.push_chrome(RailShape::ToolCall, line::tool_call_static(&cmd, tool)),
                 });
             }
             // A tool result's body is not rendered — the script the user
@@ -678,10 +678,10 @@ impl App {
                 self.push_chrome(id, RailShape::Prompt, line::user_prompt(&text))
             }
             Kind::StopReason(raw) => {
-                self.push_chrome(id, RailShape::Generic, line::stop_reason(&raw))
+                self.push_chrome(id, RailShape::Plain, line::stop_reason(&raw))
             }
             Kind::Error(msg) => self.push_chrome(id, RailShape::Error, line::error(&msg)),
-            Kind::Dim(text) => self.push_chrome(id, RailShape::Generic, line::dim(&text)),
+            Kind::Dim(text) => self.push_chrome(id, RailShape::Plain, line::dim(&text)),
             Kind::ProviderError(error) => {
                 self.push_chrome(id, RailShape::Error, line::provider_error(&error))
             }
@@ -1788,7 +1788,7 @@ fn legend_panel() -> Vec<Line<'static>> {
                 let label = if slot == 0 { "root" } else { "subagent" };
                 (
                     label,
-                    vec![rail::span(RailKind::Generic, AgentSlot(slot as u8), None)],
+                    vec![rail::span(RailKind::ToolCall(false), AgentSlot(slot as u8), None)],
                 )
             })
             .collect(),

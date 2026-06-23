@@ -112,8 +112,8 @@ pub(super) const BANNER_GOLD: Color = Color::Rgb(255, 191, 0);
 /// Maximum readable width in columns; markdown is wrapped to this.
 pub(super) const READ_W: u16 = 100;
 
-/// The generic chrome glyph (`RailKind::Generic`'s `❖`) plus its trailing
-/// space — named because [`RAIL_GLYPHS`] reuses it as the eighth entry of the
+/// The prompt-fence glyph (`RailKind::Prompt`'s `❖`) plus its trailing
+/// space — named because [`RAIL_GLYPHS`] reuses it as the last entry of the
 /// shape vocabulary. Block content gets its rail from [`super::rail::span`],
 /// prepended by [`super::block::Block::render`].
 pub(super) const RAIL: &str = "❖ ";
@@ -332,7 +332,7 @@ fn tool_call_header(label: &str, tool: &str, size: Option<u32>, width: u16) -> V
             let mut spans = vec![
                 Span::styled(tool.to_string(), Style::default().fg(SLATE)),
                 Span::raw("  "),
-                Span::styled(chunk, Style::default().fg(Color::White)),
+                Span::styled(chunk, Style::default().fg(SLATE)),
             ];
             if let Some(magnitude) = size {
                 spans.push(Span::raw("  "));
@@ -342,7 +342,7 @@ fn tool_call_header(label: &str, tool: &str, size: Option<u32>, width: u16) -> V
         } else {
             Line::from(vec![
                 Span::raw(" ".repeat(prefix_w)),
-                Span::styled(chunk, Style::default().fg(Color::White)),
+                Span::styled(chunk, Style::default().fg(SLATE)),
             ])
         }
     });
@@ -449,9 +449,10 @@ fn push_code_row(ls: &mut Vec<Line<'static>>, line: Line<'static>, width: u16) {
 }
 
 /// A tool call with no separate summary — the `fff` query, an
-/// invalid-input header.  There is nothing to reveal, so it carries the
-/// static `❖` rail rather than a disclosure triangle: `cmd`'s first line
-/// is the label, any remainder follows 2-space indented.
+/// invalid-input header.  There is nothing to dial open, so it is pushed as
+/// inert chrome (`RailShape::ToolCall`) wearing the shut triangle `▸` — a
+/// tool call still, not the prompt's `❖`: `cmd`'s first line is the label,
+/// any remainder follows 2-space indented.
 pub(super) fn tool_call_static(cmd: &str, tool: &str) -> Vec<Line<'static>> {
     let mut ls = vec![Line::default()];
     ls.extend(tool_call_header(
@@ -463,7 +464,7 @@ pub(super) fn tool_call_static(cmd: &str, tool: &str) -> Vec<Line<'static>> {
     for l in cmd.lines().skip(1) {
         ls.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled(l.to_string(), Style::default().fg(Color::White)),
+            Span::styled(l.to_string(), Style::default().fg(SLATE)),
         ]));
     }
     ls

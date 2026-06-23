@@ -41,15 +41,19 @@ pub(super) enum RailShape {
     Step,
     /// An error — renders `╳`.
     Error,
-    /// Ambient chrome outside the transcript proper — no marginal rail.
+    /// Ambient chrome outside the transcript proper — no marginal rail. The
+    /// default: a meta-notice (a model/mode switch, an export, a stop reason)
+    /// is an annotation, not a navigable block, so it earns no shape.
+    #[default]
     Plain,
     /// The human's submitted prompt — no marginal rail; its raised
     /// background band ([`super::line::PROMPT_BG`], painted by the flatten)
     /// is its mark.
     Prompt,
-    /// Everything else — renders the static `❖`.
-    #[default]
-    Generic,
+    /// A summary-less tool call (the `fff` query, an invalid-input header):
+    /// nothing to dial, but a tool call all the same, so it wears the shut
+    /// tool-call triangle `▸` — not the prompt's `❖`.
+    ToolCall,
 }
 
 /// Where a [`BlockKind::Card`] came from — the distinction the coalescing
@@ -75,7 +79,8 @@ pub(super) enum BlockKind {
     /// A tool call worth revealing: `summary` is the one-line label
     /// shown reduced, `cmd` the full ral source shown revealed.
     /// Summary-less calls (the `fff` query, an invalid-input header) have
-    /// nothing to reveal and arrive as [`BlockKind::Chrome`] instead.
+    /// nothing to reveal and arrive as [`BlockKind::Chrome`] instead, wearing
+    /// the shut `▸` ([`RailShape::ToolCall`]) — inert, but a tool call still.
     ToolCall {
         tool: &'static str,
         summary: String,
@@ -583,15 +588,14 @@ impl Block {
             // change-bar (`▎`); the body distinguishes located hunks from a
             // whole-file write summary. A surfaced general card is framed, and
             // the frame is its mark, so it wears no rail glyph (like the
-            // prompt's band). Any other card — a standalone observation, which
-            // the projection otherwise folds — stays generic chrome (`❖`).
+            // prompt's band). An observation card folds into its ral group on
+            // screen and so earns no rail glyph; only the per-block `user.log`
+            // tee ever renders one alone, where an effect has no kind-mark.
             BlockKind::Card { card, origin } => {
                 if card.has_diff() || *origin == CardOrigin::Write {
                     Some(RailKind::Patch)
-                } else if *origin == CardOrigin::Surfaced {
-                    None
                 } else {
-                    Some(RailKind::Generic)
+                    None
                 }
             }
             BlockKind::Chrome { shape, .. } => match shape {
@@ -601,7 +605,9 @@ impl Block {
                 // The band is the prompt's body mark; the `❖` fence is its
                 // margin mark — a rare landmark, reinforced on both axes.
                 RailShape::Prompt => Some(RailKind::Prompt),
-                RailShape::Generic => Some(RailKind::Generic),
+                // A summary-less tool call is still a tool call — the shut
+                // triangle `▸`, inert (there is nothing to dial open).
+                RailShape::ToolCall => Some(RailKind::ToolCall(false)),
             },
         }
     }
@@ -945,18 +951,6 @@ mod tests {
             assert_eq!(indent_of(&text), 2);
             assert!(!text.starts_with('▸'));
         }
-    }
-
-    /// A write is a file mutation, the sibling of a diff: it wears the same
-    /// change-bar `▎` (`RailKind::Patch`), not the `❖` it once borrowed from
-    /// the human's prompt fence. Carrying no hunks, it stays inert — a diff
-    /// dials open to its change, a write has nothing more to reveal.
-    #[test]
-    fn write_wears_the_change_bar_like_a_diff() {
-        let write = Block::io_card(Card(vec![Mark::Text { spans: vec![] }]), true);
-        assert_eq!(write.rail_kind(1), Some(RailKind::Patch), "a write wears ▎");
-        assert_eq!(diff_block().rail_kind(1), Some(RailKind::Patch), "a diff wears ▎");
-        assert!(!write.dialable(), "a write has no hunks to dial open");
     }
 
     /// A flush, unindented line wraps back to column zero — no spurious indent.

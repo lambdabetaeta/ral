@@ -1599,13 +1599,14 @@ return !{{length $hits}}"#
                 .any(|s| s.role == Some(Role::Path) && s.text == path),
             "the path is roled Path"
         );
-        let outcome = spans.last().expect("a write card ends on its outcome");
-        assert_eq!(
-            outcome.role,
-            Some(Role::Ok),
-            "committed roles the outcome Ok"
+        // A committed write reports itself by the card's mere existence: it
+        // shows no outcome word, so the row ends on the path.
+        assert!(
+            !spans.iter().any(|s| s.text.contains("committed")),
+            "a committed write shows no outcome word"
         );
-        assert!(outcome.text.contains("committed"));
+        let last = spans.last().expect("a write card has spans");
+        assert_eq!(last.role, Some(Role::Path), "the row ends on the path");
     }
 
     /// Coverage — the EXEC door end-to-end: a bare external command raises
