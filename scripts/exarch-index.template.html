@@ -142,14 +142,35 @@ shell(<span class="s">"curl get.sh | sh"</span>)</pre></div>
       </div>
     </section>
 
-    <!-- 6. run -->
-    <section class="section run-sec">
+    <!-- 6. get exarch -->
+    <section class="section get-sec">
       <div class="column">
-        <p class="eyebrow">Run</p>
+        <p class="eyebrow">Get exarch</p>
+        <p class="get-note">macOS and Linux. The <a href="../index.html"><code>ral</code></a> shell it runs on is built in — one binary, nothing else to install.</p>
+        <div class="run">
+          <span class="prompt" aria-hidden="true">$</span>
+          <code class="cmd" id="install-cmd" role="button" tabindex="0"
+                aria-label="Copy install command to clipboard">curl -fsSL https://lambdabetaeta.github.io/ral/scripts/exarch-install.sh | sh</code>
+          <button class="copy" id="install-copy" type="button" aria-live="polite">copy</button>
+        </div>
+        <div class="downloads">
+          <div class="dl-grid">
+{{EXARCH_DOWNLOADS}}
+          </div>
+          <div class="dl-src">
+            <span class="seal" aria-hidden="true">&#10010;</span>
+            <span class="label">source</span>
+            <a class="dl-btn dl-repo" href="https://github.com/lambdabetaeta/ral/tree/main/exarch">
+              <svg class="gh-mark" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.65 7.65 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+              lambdabetaeta/ral
+            </a>
+          </div>
+        </div>
+        <p class="get-note">Then set a provider key and run from a project directory:</p>
         <div class="run">
           <span class="prompt" aria-hidden="true">$</span>
           <code class="cmd" id="run-cmd" role="button" tabindex="0"
-                aria-label="Copy run command to clipboard"><span class="env">ANTHROPIC_API_KEY</span>=<span class="dim">&#8230;</span> cargo run -p exarch</code>
+                aria-label="Copy run command to clipboard"><span class="env">ANTHROPIC_API_KEY</span>=<span class="dim">&#8230;</span> exarch</code>
           <button class="copy" id="run-copy" type="button" aria-live="polite">copy</button>
         </div>
       </div>
@@ -176,28 +197,34 @@ shell(<span class="s">"curl get.sh | sh"</span>)</pre></div>
 
   <script>
     (function () {
-      /* ── copy run command ── */
-      var cmd  = document.getElementById('run-cmd');
-      var copy = document.getElementById('run-copy');
-      var text = 'ANTHROPIC_API_KEY=… cargo run -p exarch';
-      function flash() {
-        copy.textContent = 'copied';
-        copy.classList.add('done');
-        setTimeout(function () {
-          copy.textContent = 'copy';
-          copy.classList.remove('done');
-        }, 1600);
+      /* ── copy-to-clipboard widgets (install + run) ── */
+      function wireCopy(cmdId, copyId, text) {
+        var cmd  = document.getElementById(cmdId);
+        var copy = document.getElementById(copyId);
+        var timer;
+        function flash() {
+          copy.textContent = 'copied';
+          copy.classList.add('done');
+          clearTimeout(timer);
+          timer = setTimeout(function () {
+            copy.textContent = 'copy';
+            copy.classList.remove('done');
+          }, 1600);
+        }
+        function doCopy() {
+          if (navigator.clipboard) {
+            navigator.clipboard.writeText(text).then(flash, flash);
+          } else { flash(); }
+        }
+        copy.addEventListener('click', doCopy);
+        cmd.addEventListener('click', doCopy);
+        cmd.addEventListener('keydown', function (e) {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); doCopy(); }
+        });
       }
-      function doCopy() {
-        if (navigator.clipboard) {
-          navigator.clipboard.writeText(text).then(flash, flash);
-        } else { flash(); }
-      }
-      copy.addEventListener('click', doCopy);
-      cmd.addEventListener('click', doCopy);
-      cmd.addEventListener('keydown', function (e) {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); doCopy(); }
-      });
+      wireCopy('install-cmd', 'install-copy',
+               'curl -fsSL https://lambdabetaeta.github.io/ral/scripts/exarch-install.sh | sh');
+      wireCopy('run-cmd', 'run-copy', 'ANTHROPIC_API_KEY=… exarch');
 
       /* ── theme toggle ── */
       var root  = document.documentElement;

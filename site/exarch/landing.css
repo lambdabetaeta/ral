@@ -288,6 +288,73 @@ main { width: 100%; }
 }
 .run .copy.done { color: #efe6cf; border-color: #efe6cf; }
 
+/* ── 6b. get exarch: prose note + download plate ── */
+.get-note {
+  font-family: var(--serif);
+  font-size: 0.98rem;
+  line-height: 1.55;
+  color: var(--ink-2);
+  margin: 0 0 1.1rem;
+  max-width: 42rem;
+}
+.get-note code { font-family: var(--mono); font-size: 0.86em; color: var(--gold); }
+.get-sec .run { margin: 0 0 1.1rem; }
+.downloads {
+  background: var(--parchment-2);
+  border: 1px solid var(--line);
+  padding: 1.1rem 1.2rem;
+  margin: 0 0 1.4rem;
+}
+.dl-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: 0.7rem;
+}
+.dl-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.7rem 0.85rem;
+  background: var(--face);
+  border: 1px solid var(--line);
+}
+.dl-os {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.dl-btn {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--porphyry);
+  line-height: 1.5;
+}
+.dl-btn:hover { color: var(--porphyry-2); text-decoration: underline; }
+.dl-src {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem;
+  margin-top: 1rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--line);
+  font-family: var(--mono);
+}
+.dl-src .seal { color: var(--gold); font-size: 0.85rem; }
+.dl-src .label {
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.dl-repo { display: inline-flex; align-items: center; }
+.dl-repo .gh-mark { margin-right: 0.4rem; opacity: 0.8; vertical-align: -0.15em; }
+.dl-repo:hover .gh-mark { opacity: 1; }
+
 /* ── divider + cta ── */
 .seal-divider {
   text-align: center;

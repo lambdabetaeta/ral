@@ -46,10 +46,11 @@ jobs:
       - name: Render site
         run: uv run scripts/render-site.py
 
-      - name: Stage install script
+      - name: Stage install scripts
         run: |
           mkdir -p site/scripts
-          cp scripts/install.sh site/scripts/install.sh
+          cp scripts/install.sh        site/scripts/install.sh
+          cp scripts/exarch-install.sh site/scripts/exarch-install.sh
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v4

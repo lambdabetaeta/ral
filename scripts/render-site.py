@@ -194,6 +194,31 @@ def render_docs(use_ts: bool) -> None:
 
 # ── exarch sub-site ─────────────────────────────────────────────────────────
 
+def render_exarch_downloads(downloads: dict) -> str:
+    """Per-OS binary buttons for the exarch landing's get section.
+
+    Mirrors render_download_groups() but for exarch's matrix: macOS + Linux
+    only, one binary per target (no `allutils` split — those utils belong to
+    ral)."""
+    release_repo = downloads["release_repo"]
+    base = f"https://github.com/{release_repo}/releases/download/latest"
+    lines: list[str] = []
+    for target in downloads["targets"]:
+        os_name = html.escape(target["os"])
+        artifact = html.escape(target["artifact"])
+        lines.extend(
+            [
+                "",
+                '          <div class="dl-group">',
+                f'            <span class="dl-os">{os_name}</span>',
+                f'            <a class="dl-btn" href="{base}/{artifact}" download>{artifact}</a>',
+                "          </div>",
+            ]
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def exarch_menubar(current: str) -> str:
     """Shared nav for the exarch sub-site; ``current`` is the active page key
     (``index`` or ``profiles``).  Generated once so both the landing template
@@ -291,12 +316,16 @@ def render_exarch() -> None:
     """
     template = (ROOT / "scripts" / "exarch-index.template.html").read_text(
         encoding="utf-8")
-    placeholder = "{{MENUBAR}}"
-    if placeholder not in template:
-        raise SystemExit(
-            f"missing placeholder {placeholder} in exarch-index.template.html")
-    (EXARCH_SITE / "index.html").write_text(
-        template.replace(placeholder, exarch_menubar("index")), encoding="utf-8")
+    for placeholder in ("{{MENUBAR}}", "{{EXARCH_DOWNLOADS}}"):
+        if placeholder not in template:
+            raise SystemExit(
+                f"missing placeholder {placeholder} in exarch-index.template.html")
+    downloads = json.loads(
+        (EXARCH_SITE / "downloads.json").read_text(encoding="utf-8"))
+    rendered = template.replace("{{MENUBAR}}", exarch_menubar("index"))
+    rendered = rendered.replace(
+        "{{EXARCH_DOWNLOADS}}", render_exarch_downloads(downloads))
+    (EXARCH_SITE / "index.html").write_text(rendered, encoding="utf-8")
 
     profiles_md = (EXARCH_DIR / "PROFILES.md").read_text(encoding="utf-8")
     body = markdown.markdown(profiles_md, extensions=["extra", "sane_lists", "toc"])

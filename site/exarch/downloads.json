@@ -1,0 +1,17 @@
+{
+  "release_repo": "lambdabetaeta/ral",
+  "targets": [
+    {
+      "os": "macOS arm64",
+      "artifact": "exarch-macos-arm64"
+    },
+    {
+      "os": "Linux x86_64",
+      "artifact": "exarch-linux-x86_64"
+    },
+    {
+      "os": "Linux arm64",
+      "artifact": "exarch-linux-arm64"
+    }
+  ]
+}
