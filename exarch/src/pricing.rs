@@ -241,6 +241,20 @@ fn build_snapshot(data: Vec<ModelEntry>) -> Snapshot {
 /// under its bare suffix as well, but *only* when that suffix is unique
 /// across the catalog: an ambiguous bare alias would silently bind to
 /// whichever vendor sorted first, which is worse than a miss.
+///
+/// OpenRouter additionally separates a model's version with a dot
+/// (`anthropic/claude-opus-4.8`), whereas the native Anthropic provider
+/// names the very same model with a dash (`claude-opus-4-8`) — exarch
+/// passes the native id through, so the dotted catalog key never matches.
+/// Bridge the two by *also* indexing each qualifying entry under the
+/// dash-normalized form of its bare suffix (every `.` replaced by `-`),
+/// so `anthropic/claude-opus-4.8` is reachable as both `claude-opus-4.8`
+/// and `claude-opus-4-8`.  The dash form inherits the same source-suffix
+/// uniqueness guard, is generated only when the bare suffix actually
+/// carries a `.`, never overwrites a literal catalog key, and is dropped
+/// when two distinct dotted suffixes would collapse onto one dash key —
+/// each guard for the same reason the bare alias has it: an alias that
+/// could bind to the wrong rate is worse than a miss.
 fn add_bare_aliases<V: Clone>(map: &mut HashMap<String, V>) {
     let mut suffix_count: HashMap<&str, usize> = HashMap::new();
     for key in map.keys() {
@@ -248,12 +262,35 @@ fn add_bare_aliases<V: Clone>(map: &mut HashMap<String, V>) {
             *suffix_count.entry(suffix).or_default() += 1;
         }
     }
+    let unique_suffix = |suffix: &str| suffix_count.get(suffix).copied() == Some(1);
+
+    let mut dash_count: HashMap<String, usize> = HashMap::new();
+    for key in map.keys() {
+        if let Some((_, suffix)) = key.split_once('/') {
+            if unique_suffix(suffix) && suffix.contains('.') {
+                *dash_count.entry(suffix.replace('.', "-")).or_default() += 1;
+            }
+        }
+    }
+
     let aliases: Vec<(String, V)> = map
         .iter()
-        .filter_map(|(key, value)| {
-            let (_, suffix) = key.split_once('/')?;
-            (suffix_count.get(suffix).copied() == Some(1) && !map.contains_key(suffix))
-                .then(|| (suffix.to_string(), value.clone()))
+        .flat_map(|(key, value)| {
+            let suffix = match key.split_once('/') {
+                Some((_, suffix)) if unique_suffix(suffix) => suffix,
+                _ => return Vec::new(),
+            };
+            let mut out = Vec::new();
+            if !map.contains_key(suffix) {
+                out.push((suffix.to_string(), value.clone()));
+            }
+            if suffix.contains('.') {
+                let dash = suffix.replace('.', "-");
+                if dash_count.get(&dash).copied() == Some(1) && !map.contains_key(&dash) {
+                    out.push((dash, value.clone()));
+                }
+            }
+            out
         })
         .collect();
     map.extend(aliases);
@@ -478,5 +515,64 @@ mod tests {
         m.insert("vendor/foo".into(), 20);
         add_bare_aliases(&mut m);
         assert_eq!(m.get("foo"), Some(&10));
+    }
+
+    /// OpenRouter separates a version with a dot
+    /// (`anthropic/claude-opus-4.8`); the native Anthropic provider uses
+    /// a dash (`claude-opus-4-8`) for the same model.  A unique dotted
+    /// suffix must resolve under its dotted bare form, its dash form, AND
+    /// the original prefixed key — otherwise every modern native-Anthropic
+    /// launch bills at $0.
+    #[test]
+    fn dash_alias_resolves_unique_dotted_suffix() {
+        let mut m: HashMap<String, u32> = HashMap::new();
+        m.insert("anthropic/claude-opus-4.8".into(), 7);
+        add_bare_aliases(&mut m);
+        assert_eq!(m.get("claude-opus-4.8"), Some(&7));
+        assert_eq!(m.get("claude-opus-4-8"), Some(&7));
+        assert_eq!(m.get("anthropic/claude-opus-4.8"), Some(&7));
+    }
+
+    /// An ambiguous dotted suffix is as unsafe as an ambiguous bare one:
+    /// neither the dotted bare alias nor the dash alias may be inserted.
+    #[test]
+    fn dash_alias_skips_ambiguous_suffix() {
+        let mut m: HashMap<String, u32> = HashMap::new();
+        m.insert("vendor-a/model-4.5".into(), 1);
+        m.insert("vendor-b/model-4.5".into(), 2);
+        add_bare_aliases(&mut m);
+        assert!(!m.contains_key("model-4.5"));
+        assert!(!m.contains_key("model-4-5"));
+        assert_eq!(m.get("vendor-a/model-4.5"), Some(&1));
+        assert_eq!(m.get("vendor-b/model-4.5"), Some(&2));
+    }
+
+    /// The dash alias must never clobber a literal catalog key already
+    /// living at the dash form — the literal entry wins, exactly as the
+    /// bare alias yields to a pre-existing bare entry.
+    #[test]
+    fn dash_alias_does_not_overwrite_existing_literal_key() {
+        let mut m: HashMap<String, u32> = HashMap::new();
+        m.insert("claude-opus-4-8".into(), 10);
+        m.insert("anthropic/claude-opus-4.8".into(), 20);
+        add_bare_aliases(&mut m);
+        assert_eq!(m.get("claude-opus-4-8"), Some(&10));
+        // The dotted bare alias is still safe to add.
+        assert_eq!(m.get("claude-opus-4.8"), Some(&20));
+    }
+
+    /// Two distinct dotted suffixes can normalize to the same dash key
+    /// (`a-1.0` and `a.1-0` both → `a-1-0`).  That collision is ambiguous,
+    /// so neither contributes a dash alias — though each keeps its own
+    /// unique dotted bare alias.
+    #[test]
+    fn dash_alias_skips_colliding_normalized_key() {
+        let mut m: HashMap<String, u32> = HashMap::new();
+        m.insert("vendor/model-1.0".into(), 1);
+        m.insert("vendor/model.1-0".into(), 2);
+        add_bare_aliases(&mut m);
+        assert!(!m.contains_key("model-1-0"));
+        assert_eq!(m.get("model-1.0"), Some(&1));
+        assert_eq!(m.get("model.1-0"), Some(&2));
     }
 }

@@ -32,25 +32,60 @@ mod schedule;
 /// enforcement ([`Session`]'s dispatch path), replacing the old
 /// `advertise_root_only` bool and the `is_subagent` dispatch check.
 ///
-/// The two sets gate on mirror-image axes: the root holds the spawn family
-/// but not `reply` (it talks to the user across turns and never returns a
-/// value); a peer holds `reply` but not the spawn family (so it can return,
-/// and the spawn tree stays one level deep).
+/// Two genuinely orthogonal axes decide membership: whether the agent may
+/// **spawn** children (the `agent` family) and whether it **returns** a value
+/// (`reply`). They are independent booleans, not mirror-image variants, because
+/// the three live agents occupy three of the four combinations
+/// ([[decisions/260623_reply-terminates-returning-agents]]):
+///
+/// - the **interactive root** spawns but does not return — it converses with
+///   the user across turns and never hands a value back;
+/// - the **headless (returning) root** both spawns and returns — it is seeded
+///   once, produces one result through `reply`, and the process exits;
+/// - a **peer** returns but does not spawn — so it can hand its result back and
+///   the spawn tree stays one level deep.
 #[derive(Clone, Copy)]
-pub enum ToolSet {
-    /// Every registered tool except `reply` — a root.
-    All,
-    /// Every tool except the spawn family (`agent` / `agents` /
-    /// `agent_cancel`) — a peer; it keeps `reply`, its way of returning.
-    NoSpawn,
+pub struct ToolSet {
+    spawns: bool,
+    returns: bool,
 }
 
 impl ToolSet {
+    /// An interactive root: spawns children, never returns (it converses with
+    /// the user across turns), so `reply` is withheld.
+    pub(crate) fn interactive_root() -> Self {
+        Self {
+            spawns: true,
+            returns: false,
+        }
+    }
+
+    /// A headless root: a returning agent that also spawns — it holds both the
+    /// spawn family and `reply`.
+    pub(crate) fn returning_root() -> Self {
+        Self {
+            spawns: true,
+            returns: true,
+        }
+    }
+
+    /// A peer: returns through `reply` but may not spawn, so the spawn tree
+    /// stays one level deep.
+    pub(crate) fn peer() -> Self {
+        Self {
+            spawns: false,
+            returns: true,
+        }
+    }
+
     /// Whether `tool` is advertised and permitted under this set.
     pub(crate) fn allows(&self, tool: &dyn Tool) -> bool {
-        match self {
-            ToolSet::All => !tool.replies(),
-            ToolSet::NoSpawn => !tool.spawns(),
+        if tool.spawns() {
+            self.spawns
+        } else if tool.replies() {
+            self.returns
+        } else {
+            true
         }
     }
 }
@@ -77,10 +112,11 @@ pub(crate) trait Tool: Send + Sync {
         false
     }
 
-    /// True only for `reply` — the mirror of [`Self::spawns`].  It is
-    /// withheld from the *root*'s [`ToolSet`] (unadvertised and refused): the
-    /// root talks to the user across turns and never returns a value, so
-    /// returning-and-terminating is meaningless there.  A peer holds it.
+    /// True only for `reply` — the *returns* axis of the [`ToolSet`].  It is
+    /// held by every returning agent (a peer and the headless root) and
+    /// withheld only from the interactive root (unadvertised and refused),
+    /// which talks to the user across turns and never returns a value, so
+    /// returning-and-terminating is meaningless there.
     fn replies(&self) -> bool {
         false
     }

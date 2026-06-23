@@ -1,17 +1,20 @@
-//! `reply` tool — a sub-agent's deliberate return value.
+//! `reply` tool — a returning agent's deliberate return value.
 //!
-//! A child hands its parent a value by *constructing* it: it calls `reply`
-//! with its result and the run hard-terminates.  There is no scrape of the
-//! final prose step — `reply` is the only way a sub-agent returns, and so it
-//! is withheld from the root (which talks to the user across turns and never
-//! "returns").  Finishing-and-returning is an agent-protocol act, a peer of
-//! spawning (`agent`), which is why it is a tool and not a ral builtin.
+//! A returning agent — every sub-agent, and the headless root — hands its
+//! result back by *constructing* it: it calls `reply` with the value and the
+//! run hard-terminates.  There is no scrape of the final prose step; `reply` is
+//! the sole return path, and so it is withheld only from the *interactive* root
+//! (which talks to the user across turns and never "returns").
+//! Finishing-and-returning is an agent-protocol act, a peer of spawning
+//! (`agent`), which is why it is a tool and not a ral builtin.
 //!
-//! The argument is rendered by the shared value→text rule
-//! ([`shell_eval::json_to_text`]): a JSON string passes through raw (a markdown
-//! report keeps real newlines), an object/array is pretty-printed.  The
-//! dispatch stashes the rendered payload on the session and the drive loop
-//! turns it into a `Replied` terminal once the whole tool-call batch drains.
+//! The dispatch stashes the *faithful* value the model passed and the drive
+//! loop turns it into a `Replied` terminal once the whole tool-call batch
+//! drains.  Each consumer renders it at its own edge by the shared value→text
+//! rule ([`shell_eval::json_to_text`]: a JSON string passes through raw, so a
+//! markdown report keeps real newlines; an object/array is pretty-printed) —
+//! except the headless harness, which writes the structure faithfully.  The
+//! rail shows that render as the call's display line.
 
 use super::Tool;
 use crate::bus::{Emitter, Kind};
@@ -71,29 +74,28 @@ without calling `reply`, your parent receives nothing."
         _provider: &Arc<Provider>,
         emit: &Emitter,
     ) -> SessionToolResult {
-        // The payload is the `result` field, rendered by the shared value→text
-        // rule.  A missing field, a JSON null, or an empty string all render
-        // to nothing and settle as `AgentOutcome::Empty` downstream.
-        let payload = input
-            .get("result")
-            .and_then(shell_eval::json_to_text)
-            .unwrap_or_default();
+        // The payload is the `result` field, stashed as the faithful value the
+        // model passed so each consumer renders it at its own edge (a missing
+        // field is a JSON null).  The rail display is the value→text render of
+        // it; a null or empty render settles as `AgentOutcome::Empty`.
+        let value = input.get("result").cloned().unwrap_or(Value::Null);
+        let display = shell_eval::json_to_text(&value).unwrap_or_default();
         // Show the reply on the child's own rail before it terminates; the
         // full payload opens in the collapsible block.
         emit.emit(Kind::ToolCall {
             tool: "reply",
-            cmd: if payload.is_empty() {
+            cmd: if display.is_empty() {
                 "(empty reply)".into()
             } else {
-                payload.clone()
+                display
             },
             summary: None,
         });
-        // Stash it for `apply` to lift into a `Replied` terminal once the
-        // batch drains.  The tool result itself is never seen by the model
-        // (the run ends here); it exists only so the transcript stays
-        // role-alternating (every dispatched call gets a result).
-        session.set_reply(payload);
+        // Stash the faithful value for `apply` to lift into a `Replied`
+        // terminal once the batch drains.  The tool result itself is never seen
+        // by the model (the run ends here); it exists only so the transcript
+        // stays role-alternating (every dispatched call gets a result).
+        session.set_reply(value);
         let content = "reply recorded; ending turn".to_string();
         emit.emit(Kind::ToolResult(content.clone()));
         SessionToolResult { id, content }

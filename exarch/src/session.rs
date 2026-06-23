@@ -84,14 +84,17 @@ pub struct Session {
     /// genuine turn-boundary message; read by the completion-gate nudges to
     /// choose between the idle and verify prompts.
     acted: bool,
-    /// A sub-agent's staged return value, set by the `reply` tool's dispatch
-    /// (via [`Self::set_reply`]) and lifted by [`Self::apply`] into a
+    /// A returning agent's staged return value, set by the `reply` tool's
+    /// dispatch (via [`Self::set_reply`]) and lifted by [`Self::apply`] into a
     /// [`TurnOutcome::Replied`] once the current tool-call batch finishes
     /// draining — never mid-batch, so the session reaches a clean boundary
-    /// with every `call_id` answered.  Empty (or absent) renders to nothing
-    /// and settles as [`AgentOutcome`](crate::bus::AgentOutcome)`::Empty`.
-    /// Only a peer ever sets it; `reply` is withheld from the root.
-    reply: Option<String>,
+    /// with every `call_id` answered.  Held as the faithful
+    /// [`serde_json::Value`] the model passed, so the consuming edge renders it
+    /// (a null or empty value settles as
+    /// [`AgentOutcome`](crate::bus::AgentOutcome)`::Empty`).  Every returning
+    /// agent sets it — a peer and the headless root; `reply` is withheld only
+    /// from the interactive root.
+    reply: Option<serde_json::Value>,
     /// Durable [`MobileSnapshot`](ral_core::types::MobileSnapshot) of the
     /// shell as of the last clean tool-call boundary.  Refreshed inside
     /// `run_shell` right before each dispatch, so it always holds the dynamic
@@ -132,12 +135,15 @@ pub struct Session {
 #[derive(Debug)]
 pub enum TurnOutcome {
     Complete(String),
-    /// A sub-agent called `reply`: the carried payload is its deliberate
-    /// return value (empty when the argument rendered to nothing).  Distinct
-    /// from [`Self::Complete`] precisely so the nudge layer can tell "already
-    /// returned" from "stopped without returning" and not re-nudge a child
+    /// A returning agent called `reply`: the carried payload is its deliberate
+    /// return value, a faithful [`serde_json::Value`] (a JSON null when the
+    /// argument was absent or null).  Carried as a value, not pre-rendered
+    /// text, so each consumer renders it at its own edge — prose for a model
+    /// parent, the structure itself for the headless harness.  Distinct from
+    /// [`Self::Complete`] precisely so the nudge layer can tell "already
+    /// returned" from "stopped without returning" and not re-nudge an agent
     /// that replied.  Terminal: it ends the drive loop.
-    Replied(String),
+    Replied(serde_json::Value),
     Empty,
     Stopped {
         reason: String,
@@ -313,7 +319,13 @@ impl Session {
             park_when_idle: interactive,
             expect_action,
             schedule_authority: allow_schedule,
-            tools: ToolSet::All,
+            // The interactive root converses and never returns, so it withholds
+            // `reply`; a headless root is a returning agent that also spawns.
+            tools: if interactive {
+                ToolSet::interactive_root()
+            } else {
+                ToolSet::returning_root()
+            },
         })
     }
 
@@ -370,8 +382,9 @@ impl Session {
             // grants its peers the same right to wake themselves.
             schedule_authority: self.schedule_authority,
             // A peer may not spawn — withholding the spawn family from its tool
-            // set bounds recursion to depth 1, advertised and enforced.
-            tools: ToolSet::NoSpawn,
+            // set bounds recursion to depth 1, advertised and enforced.  It
+            // keeps `reply`, its way of returning.
+            tools: ToolSet::peer(),
         })
     }
 
@@ -434,11 +447,12 @@ impl Session {
             log,
             is_root: true,
             // Tests drive `apply`/`drive` directly and must never block; a test
-            // root terminates at quiescence like a peer.
+            // root terminates at quiescence like a peer, so it is a returning
+            // root — it both spawns and returns through `reply`.
             park_when_idle: false,
             expect_action: false,
             schedule_authority: false,
-            tools: ToolSet::All,
+            tools: ToolSet::returning_root(),
         })
     }
 
@@ -471,8 +485,10 @@ impl Session {
     /// Per-`apply` panic recovery lives here — the `catch_unwind` rolls the
     /// dynamic context back to the last clean tool-call boundary and continues
     /// the loop, so one crashing turn never sinks the session.  Returns the
-    /// final turn's `(outcome, text)` digest; the root ignores it, a peer's
-    /// spawn site delivers it up the parent's mailbox.
+    /// final turn's `(outcome, payload)` digest, where `payload` is the
+    /// faithful [`serde_json::Value`] a `reply` carried (else `None`); the
+    /// interactive root ignores it, a peer's spawn site renders it to text, and
+    /// the headless sink writes it faithfully.
     ///
     /// `provider` is the shared [`ProviderHandle`] the loop reads once per
     /// turn, so a `/model` swap on the UI thread takes effect next turn;
@@ -483,12 +499,12 @@ impl Session {
         provider: ProviderHandle,
         control: &mut dyn Control,
         emit: &Emitter,
-    ) -> (AgentOutcome, String) {
+    ) -> (AgentOutcome, Option<serde_json::Value>) {
         // The root's published Esc token, re-minted per turn boundary; held
         // here so the slot stays valid for the whole turn and is retired when
         // the next mint (or this loop's end) drops it.  A peer mints nothing.
         let mut guard: Option<cancel::RootGuard> = None;
-        let mut digest = (AgentOutcome::Empty, String::new());
+        let mut digest = (AgentOutcome::Empty, None);
         loop {
             let armed = self.schedules.armed();
             let Some(turn) = self
@@ -539,10 +555,7 @@ impl Session {
                     self.shell.restore_mobile(self.durable.clone());
                     let msg = panic_msg(&p);
                     self.note_error(format!("{WORKER_PANIC_PREFIX}{msg}"), emit);
-                    digest = (
-                        AgentOutcome::Failed(format!("worker panicked: {msg}")),
-                        String::new(),
-                    );
+                    digest = (AgentOutcome::Failed(format!("worker panicked: {msg}")), None);
                     continue;
                 }
             };
@@ -550,9 +563,11 @@ impl Session {
             let ctx = nudge::NudgeCtx {
                 expect_action: self.expect_action,
                 acted: self.acted,
-                // A peer returns through `reply`; an un-replied finish earns
-                // one reminder.  The root never returns, so it is exempt.
-                must_reply: !self.is_root,
+                // Every returning agent (a peer or a headless root) hands its
+                // value back through `reply`; an un-replied finish is re-nudged
+                // within budget, then fails.  Only the interactive root, which
+                // converses and never returns, is exempt.
+                must_reply: self.returns(),
                 pinned: self.pinned_digest(),
             };
             if let Some(msg) = self.nudges.react(&outcome, ctx, emit, &mut self.log) {
@@ -893,12 +908,21 @@ impl Session {
         self.inbox.drain_tool()
     }
 
+    /// A returning agent — a peer or a headless root — hands a value back
+    /// through `reply` and terminates; only the interactive root converses
+    /// across turns and parks for its human.  "Returns a value" and "does not
+    /// park" are the same fact, read here in one place.
+    fn returns(&self) -> bool {
+        !self.park_when_idle
+    }
+
     fn stage(&mut self, provider: &Arc<Provider>, call: ToolCall, emit: &Emitter) -> SessionToolResult {
         match crate::tools::find(&call.fn_name) {
             Some(t) if !self.tools.allows(t) => {
                 // The allow-check is the backstop for two unadvertised cases:
-                // a peer reaching for the spawn family, or the root reaching
-                // for `reply`.  Name the right one.
+                // a peer reaching for the spawn family, or the interactive root
+                // (the only non-returning agent) reaching for `reply`.  Name
+                // the right one.
                 let msg = if t.spawns() {
                     format!(
                         "tool `{}` is not available to sub-agents — do this work yourself",
@@ -906,7 +930,7 @@ impl Session {
                     )
                 } else {
                     format!(
-                        "tool `{}` is for sub-agents only — you finish a turn by replying to the user directly",
+                        "tool `{}` is not available here — you converse with the user across turns and never return a value; finish by replying to them directly",
                         call.fn_name
                     )
                 };
@@ -993,10 +1017,11 @@ impl Session {
         Some(m.values().cloned().collect::<Vec<_>>().join("; "))
     }
 
-    /// Stash a sub-agent's deliberate return value — called from the `reply`
-    /// tool's dispatch.  [`Self::apply`] lifts it into a
-    /// [`TurnOutcome::Replied`] once the tool-call batch drains.
-    pub(crate) fn set_reply(&mut self, payload: String) {
+    /// Stash a returning agent's deliberate return value — called from the
+    /// `reply` tool's dispatch with the faithful [`serde_json::Value`] the
+    /// model passed.  [`Self::apply`] lifts it into a [`TurnOutcome::Replied`]
+    /// once the tool-call batch drains.
+    pub(crate) fn set_reply(&mut self, payload: serde_json::Value) {
         self.reply = Some(payload);
     }
 
@@ -1005,7 +1030,7 @@ impl Session {
     /// dispatched the reply but never asked for a final assistant message, so
     /// the protocol sits in `AwaitingAssistantAfterToolResults`), and return
     /// the payload.  `drive` then breaks the loop — `reply` hard-terminates.
-    fn replied(&mut self, payload: String) -> Result<TurnOutcome, ProviderError> {
+    fn replied(&mut self, payload: serde_json::Value) -> Result<TurnOutcome, ProviderError> {
         self.log.quiesce(QuiesceReason::Replied);
         Ok(TurnOutcome::Replied(payload))
     }
@@ -1078,32 +1103,43 @@ fn announce(turn: &Turn, emit: &Emitter) {
     }
 }
 
-/// Reduce a finished turn's outcome to the `(tag, text)` digest a peer's
-/// result carries — the one place the reduction happens.  Only a deliberate
-/// `reply` carries text up: its payload is clipped to the reply cap (an empty
-/// payload settles `Empty`).  A tool-call-free prose finish is **not**
-/// harvested — there is no scrape — so it, like a genuinely empty turn, settles
-/// `Empty`; the child returns through `reply` or returns nothing.  Every other
+/// Reduce a finished turn's outcome to the `(tag, payload)` digest a returning
+/// agent's result carries — the one place the reduction happens.  Only a
+/// deliberate `reply` carries a value up, and it travels as the faithful
+/// [`serde_json::Value`] the model passed; the consuming edge renders it (a
+/// null or empty-string value settles `Empty`).  A tool-call-free prose finish
+/// is **not** harvested — there is no scrape — and because `reply` is the sole
+/// return path, a returning agent that never replied did not complete its
+/// contract: it (like a genuinely empty turn) settles `Failed`.  Every other
 /// shape carries only its tag.
-fn agent_digest(r: &Result<TurnOutcome, ProviderError>) -> (AgentOutcome, String) {
+fn agent_digest(r: &Result<TurnOutcome, ProviderError>) -> (AgentOutcome, Option<serde_json::Value>) {
     match r {
-        Ok(TurnOutcome::Replied(payload)) if payload.is_empty() => {
-            (AgentOutcome::Empty, String::new())
-        }
-        Ok(TurnOutcome::Replied(payload)) => {
-            (AgentOutcome::Complete, clip(payload, AGENT_REPLY_CAP))
-        }
+        Ok(TurnOutcome::Replied(v)) => match shell_eval::json_to_text(v) {
+            // A null or empty-string reply is a deliberate empty return.
+            None => (AgentOutcome::Empty, None),
+            Some(s) if s.is_empty() => (AgentOutcome::Empty, None),
+            Some(_) => (AgentOutcome::Complete, Some(v.clone())),
+        },
+        // A finish without `reply`.  There is no scrape: a returning agent that
+        // never replied did not complete its contract, so it fails honestly
+        // rather than handing up a trailing fragment that masquerades as the
+        // answer.  Re-nudged within budget first (see [`nudge`]).
         Ok(TurnOutcome::Complete(_)) | Ok(TurnOutcome::Empty) => {
-            (AgentOutcome::Empty, String::new())
+            (AgentOutcome::Failed("ended without calling `reply`".into()), None)
         }
-        Ok(TurnOutcome::Stopped { reason }) => (AgentOutcome::Stopped(reason.clone()), String::new()),
-        Ok(TurnOutcome::Cancelled) => (AgentOutcome::Cancelled, String::new()),
-        Ok(TurnOutcome::Capped) => (
-            AgentOutcome::Stopped("step cap reached".into()),
-            String::new(),
-        ),
-        Err(e) => (AgentOutcome::Failed(e.to_string()), String::new()),
+        Ok(TurnOutcome::Stopped { reason }) => (AgentOutcome::Stopped(reason.clone()), None),
+        Ok(TurnOutcome::Cancelled) => (AgentOutcome::Cancelled, None),
+        Ok(TurnOutcome::Capped) => (AgentOutcome::Stopped("step cap reached".into()), None),
+        Err(e) => (AgentOutcome::Failed(e.to_string()), None),
     }
+}
+
+/// Render a reply payload to the text a model parent reads: the shared
+/// value→text rule ([`shell_eval::json_to_text`]), clipped to the reply cap.
+/// The peer edge (the `agent` tool's settle site) and the `drive_peer` test
+/// helper share it; the headless edge instead writes the value faithfully.
+pub(crate) fn render_reply(v: &serde_json::Value) -> String {
+    clip(&shell_eval::json_to_text(v).unwrap_or_default(), AGENT_REPLY_CAP)
 }
 
 /// The message of a recovered panic payload, for either string shape.
@@ -1334,11 +1370,14 @@ mod tests {
     }
 
     /// Drive a forked peer to quiescence through `provider`, returning the
-    /// `(outcome, text)` digest its parent's spawn site would deliver.
+    /// `(outcome, text)` its parent's spawn site would deliver — it renders the
+    /// faithful reply payload to text exactly as the peer edge does.
     fn drive_peer(child: &mut Session, provider: Arc<Provider>) -> (AgentOutcome, String) {
         let (tx, _rx) = std::sync::mpsc::channel();
         let emit = Emitter::new(tx, child.id);
-        child.drive(ProviderHandle::new(provider), &mut NoControl, &emit)
+        let (outcome, payload) = child.drive(ProviderHandle::new(provider), &mut NoControl, &emit);
+        let text = payload.as_ref().map(render_reply).unwrap_or_default();
+        (outcome, text)
     }
 
     /// A sub-agent returns through `reply`: its markdown payload is the value
@@ -1395,45 +1434,58 @@ mod tests {
         );
     }
 
-    /// A sub-agent that finishes without calling `reply` is reminded once, and
-    /// if it still does not reply its run settles `Empty` — the final prose is
-    /// **not** harvested (no scrape).
+    /// A returning agent that finishes without calling `reply` is re-nudged
+    /// within budget, and if it still does not reply its run settles `Failed`
+    /// — `reply` is the sole return path, so a finish without it did not
+    /// complete the contract, and the final prose is **not** harvested (no
+    /// scrape).
     #[test]
-    fn sub_agent_without_reply_is_nudged_then_returns_empty() {
+    fn sub_agent_without_reply_is_re_nudged_then_fails() {
         let dir = tmp("reply-missing");
         let parent = Session::for_test(&dir, "system").unwrap();
         let mut child = parent.fork().expect("fork child");
         child.seed("do the thing".into());
-        let provider = scripted(
-            "test-model",
-            Script::new()
-                .then(Reply::text("here is prose, but no reply"))
-                .then(Reply::text("still prose, still no reply")),
-        );
-        let (outcome, text) = drive_peer(&mut child, provider);
+        // More prose-only replies than the nudge budget will consume: once it
+        // is spent the un-replied finish is accepted and the surplus is never
+        // popped (so the test does not couple to the exact budget).
+        let mut script = Script::new();
+        for _ in 0..8 {
+            script = script.then(Reply::text("here is prose, but no reply"));
+        }
+        let (outcome, text) = drive_peer(&mut child, scripted("test-model", script));
         assert!(
-            matches!(outcome, AgentOutcome::Empty),
-            "an un-replied finish settles Empty, got {outcome:?}"
+            matches!(outcome, AgentOutcome::Failed(_)),
+            "an un-replied finish settles Failed, got {outcome:?}"
         );
         assert!(text.is_empty(), "the final prose must not be scraped: {text:?}");
         assert!(child.is_ready());
     }
 
-    /// `reply` is the peer's way of returning and is withheld from the root,
-    /// the mirror of how the spawn family is withheld from a peer.
+    /// `reply` is held by every returning agent — a peer and a (returning,
+    /// i.e. non-interactive) root — and withheld only from the interactive
+    /// root, which converses across turns and never returns a value.
     #[test]
-    fn reply_is_offered_to_a_peer_and_withheld_from_the_root() {
+    fn reply_is_held_by_returning_agents_and_withheld_from_the_interactive_root() {
         let dir = tmp("reply-gating");
-        let root = Session::for_test(&dir, "system").unwrap();
         let reply = crate::tools::find("reply").expect("reply tool registered");
+        // A `for_test` root is non-interactive, so it is a returning root and
+        // holds `reply`.
+        let root = Session::for_test(&dir, "system").unwrap();
         assert!(
-            !root.tools.allows(reply),
-            "the root never returns, so it must not be offered `reply`"
+            root.tools.allows(reply),
+            "a returning root hands its result back, so it must hold `reply`"
         );
+        // A peer (fork) returns through `reply` too.
         let child = root.fork().expect("fork child");
         assert!(
             child.tools.allows(reply),
             "a peer returns through `reply`, so it must hold it"
+        );
+        // The interactive root is the one non-returning agent: it withholds
+        // `reply` while keeping the spawn family.
+        assert!(
+            !ToolSet::interactive_root().allows(reply),
+            "the interactive root converses and never returns, so it withholds `reply`"
         );
     }
 }

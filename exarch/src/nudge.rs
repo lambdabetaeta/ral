@@ -52,9 +52,10 @@ const RULES: &[Rule] = &[on_empty_turn, on_early_stop, on_truncated];
 pub(crate) struct NudgeCtx {
     pub expect_action: bool,
     pub acted: bool,
-    /// Whether this session returns through `reply` — true for a sub-agent,
-    /// false for the root.  A sub-agent that finishes a tool-call-free step
-    /// without having replied earns one reminder to call `reply`.
+    /// Whether this session returns through `reply` — true for a returning
+    /// agent (a peer or a headless root), false for the interactive root.  A
+    /// returning agent that finishes a tool-call-free step without having
+    /// replied is re-nudged to call `reply` within the [`BUDGET`], then fails.
     pub must_reply: bool,
     /// The model's current pinned state as a one-line description, or `None`
     /// when nothing is pinned.  Drives the periodic pinned-state reminder so a
@@ -73,10 +74,6 @@ pub(crate) struct Registry {
     /// One-shot latch for the verify-before-finish nudge: same contract —
     /// at most once per turn, never drawing on the [`BUDGET`] counter.
     verify_nudged: bool,
-    /// One-shot latch for the no-reply reminder a sub-agent earns when it
-    /// finishes a tool-call-free step without calling `reply`: same contract —
-    /// at most once per turn, budget-free.
-    reply_nudged: bool,
     /// Genuine turns since the last pinned-state reminder, bumped once per
     /// turn-boundary message by [`Self::reset`].  Unlike the latches it
     /// accumulates *across* turns; the reminder fires once it reaches
@@ -93,7 +90,6 @@ impl Registry {
             used: 0,
             idle_nudged: false,
             verify_nudged: false,
-            reply_nudged: false,
             turns_since_pin_reminder: 0,
             pin_reminded: false,
         }
@@ -110,7 +106,6 @@ impl Registry {
         self.used = 0;
         self.idle_nudged = false;
         self.verify_nudged = false;
-        self.reply_nudged = false;
         self.turns_since_pin_reminder += 1;
         self.pin_reminded = false;
     }
@@ -129,24 +124,15 @@ impl Registry {
         log: &mut SessionLog,
     ) -> Option<String> {
         let Some((cause, message)) = RULES.iter().find_map(|&r| r(attempt)) else {
-            // A sub-agent reaches a tool-call-free `Complete` without having
-            // called `reply`: its parent would otherwise receive nothing (a
-            // `Complete` is no longer scraped).  Remind it once to return
-            // through `reply`.  A `Replied` outcome never lands here, so a
-            // child that already replied is not re-nudged.
-            if ctx.must_reply
-                && !self.reply_nudged
-                && matches!(attempt, Ok(TurnOutcome::Complete(_)))
-            {
-                self.reply_nudged = true;
-                record_nudge(emit, log, self.used, "no-reply finish (sub-agent)".into());
-                return Some(REPLY_MESSAGE.into());
-            }
+            // (No RULE matched.)
+            //
             // Under `--expect-action`, a clean completion is gated by two
             // one-shot, budget-free nudges before it is accepted: a turn
             // that never used a tool earns the idle nudge to engage, and a
             // turn that did earns the verify nudge to check its output
-            // against the task before claiming done.
+            // against the task before claiming done.  These fire *ahead* of
+            // the no-reply nudge, so a returning agent under `--expect-action`
+            // still earns its quality nudges on the path to replying.
             if ctx.expect_action && matches!(attempt, Ok(TurnOutcome::Complete(_))) {
                 if !ctx.acted && !self.idle_nudged {
                     self.idle_nudged = true;
@@ -163,6 +149,26 @@ impl Registry {
                     );
                     return Some(VERIFY_MESSAGE.into());
                 }
+            }
+            // A returning agent reached a tool-call-free `Complete` without
+            // calling `reply` — its sole return path, no scrape — so insist on
+            // it.  Re-nudge within the per-turn budget, then give up honestly:
+            // once the budget is spent the un-replied `Complete` is accepted
+            // here and `agent_digest` maps it to `Failed`.  A `Replied`
+            // outcome never lands here, so an agent that already replied is not
+            // re-nudged.
+            if ctx.must_reply && matches!(attempt, Ok(TurnOutcome::Complete(_))) {
+                if self.used < BUDGET {
+                    self.used += 1;
+                    record_nudge(emit, log, self.used, "no-reply finish (returning agent)".into());
+                    return Some(REPLY_MESSAGE.into());
+                }
+                let msg = "agent finished without calling `reply` after the nudge budget; \
+                           returning a failure"
+                    .to_string();
+                let _ = log.record_error(msg.clone());
+                emit.emit(Kind::Error(msg));
+                return None;
             }
             // A periodic, budget-free reminder of the model's pinned state —
             // at most once per turn, only on a clean completion, only when
@@ -239,10 +245,12 @@ const VERIFY_MESSAGE: &str = "Before finishing: re-read the output you produced 
     the command ran, not that the result is right, so check the result against what was asked. If \
     you have already verified it against the task, restate your conclusion and it will be accepted.";
 
-/// The one-shot no-reply reminder (gated by [`NudgeCtx::must_reply`], so it
-/// fires only for a sub-agent).  A child finished with prose but never called
-/// `reply`, so as things stand its parent receives nothing; this asks it to
-/// return through `reply` before the run ends.
+/// The no-reply reminder (gated by [`NudgeCtx::must_reply`], so it fires for a
+/// returning agent — a peer or a headless root).  The agent finished with prose
+/// but never called `reply`, its sole return path, so as things stand it
+/// returns nothing; this asks it to return through `reply` before the run ends.
+/// Unlike the idle/verify gates it is *budgeted*: re-issued each un-replied
+/// finish until the [`BUDGET`] is spent, then the run fails.
 const REPLY_MESSAGE: &str = "You ended your turn without calling `reply`, so your parent will \
     receive nothing. Return your result now by calling `reply` — pass a markdown report as \
     `result`, or a JSON object/array for structured findings. This is the only way to hand \
@@ -518,12 +526,13 @@ mod tests {
         assert_eq!(reg.used, 0, "verify nudge must not draw on the budget");
     }
 
-    /// A sub-agent (`must_reply`) that finishes a tool-call-free `Complete`
-    /// without replying earns one reminder to call `reply`; a second identical
-    /// attempt is accepted (the one-shot latch is spent) so the run can end,
-    /// and the reminder never draws on the budget.
+    /// A returning agent (`must_reply`) that finishes a tool-call-free
+    /// `Complete` without replying is re-nudged to call `reply` while budget
+    /// remains — drawing on the shared per-turn budget — then, once it is
+    /// spent, the un-replied finish is accepted (`None`) so the drive loop ends
+    /// and `agent_digest` maps the `Complete` to `Failed`.
     #[test]
-    fn no_reply_finish_nudges_once_then_accepts() {
+    fn no_reply_finish_re_nudges_up_to_budget_then_fails() {
         let mut reg = Registry::new();
         let mut log = fresh_log("no-reply");
         let ctx = || NudgeCtx {
@@ -532,15 +541,22 @@ mod tests {
             must_reply: true,
             pinned: None,
         };
-        match reg.react(
-            &Ok(TurnOutcome::Complete("prose, no reply".into())),
-            ctx(),
-            &emit(),
-            &mut log,
-        ) {
-            Some(msg) => assert!(msg.contains("`reply`")),
-            None => panic!("a sub-agent that did not reply must be nudged"),
+        // Each un-replied finish re-nudges and spends one unit of budget.
+        for _ in 0..BUDGET {
+            match reg.react(
+                &Ok(TurnOutcome::Complete("prose, no reply".into())),
+                ctx(),
+                &emit(),
+                &mut log,
+            ) {
+                Some(msg) => assert!(msg.contains("`reply`")),
+                None => {
+                    panic!("a returning agent that did not reply must re-nudge while budget remains")
+                }
+            }
         }
+        assert_eq!(reg.used, BUDGET, "the no-reply nudge now draws on the budget");
+        // Past the budget the un-replied finish is accepted so the run ends.
         assert!(
             reg.react(
                 &Ok(TurnOutcome::Complete("still no reply".into())),
@@ -549,13 +565,12 @@ mod tests {
                 &mut log,
             )
             .is_none(),
-            "the second un-replied finish is accepted so the run can end"
+            "past the budget the un-replied finish is accepted (mapped to Failed downstream)"
         );
-        assert_eq!(reg.used, 0, "the reply reminder must not draw on the budget");
     }
 
-    /// The root (`must_reply` false) never gets the reply reminder — a clean
-    /// `Complete` ends its turn at once.
+    /// The interactive root (`must_reply` false) never gets the reply reminder
+    /// — a clean `Complete` ends its turn at once.
     #[test]
     fn root_completion_is_never_reply_nudged() {
         let mut reg = Registry::new();

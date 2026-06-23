@@ -1,9 +1,11 @@
 //! One-shot frontend over the bus event stream.  In text mode the root
-//! agent's assistant tokens stream to stdout; under `--output-format
-//! json` they are held back for a single result object emitted at the
-//! end.  Every other event — and sub-agent activity, as breadcrumbs —
-//! goes to stderr; the process exits after one seed turn.  Takes the
-//! default [`Sink::drive`]; only [`Sink::handle`] is custom.
+//! agent's assistant tokens stream to stdout as live narration; under
+//! `--output-format json` they are dropped and a single result object —
+//! built from the root's deliberate `reply` value — is emitted at the end
+//! ([[decisions/260623_reply-terminates-returning-agents]]).  Every other
+//! event — and sub-agent activity, as breadcrumbs — goes to stderr; the
+//! process exits after one seed turn.  Takes the default [`Sink::drive`];
+//! only [`Sink::handle`] is custom.
 //!
 //! This frontend is a *display* — it projects the bus to stdout/stderr.
 //! The durable record is not its concern: each session writes its own
@@ -11,7 +13,7 @@
 //! through the [`crate::transcript`] and [`crate::event`] seams, in headless
 //! exactly as in the TUI, for the root and every forked child alike.
 
-use crate::bus::{Event, Kind, Row, SessionBus, SessionId, Sink, pump};
+use crate::bus::{AgentOutcome, Event, Kind, Row, SessionBus, SessionId, Sink, pump};
 use crate::card::{Card, FieldVal, Mark};
 use crate::provider::{Provider, Usage};
 use crate::session::Session;
@@ -24,12 +26,17 @@ use std::time::Instant;
 pub enum OutputFormat {
     /// Stream the root agent's assistant text to stdout as it arrives.
     Text,
-    /// Hold the text back and emit one JSON result object to stdout
-    /// when the run ends.
+    /// Drop the streamed text and emit one JSON result object to stdout
+    /// when the run ends — its `result` is the root's `reply` value.
     Json,
 }
 
 pub struct Headless {
+    /// The run total, read once from the bus's [`UsageMeter`](crate::bus::UsageMeter)
+    /// at the end of the run — the root plus every sub-agent, muted or live,
+    /// since each tees its usage to the shared meter at the emit seam.  It is
+    /// **not** a per-event sink accumulation: a `Kind::Usage` arriving here is
+    /// already counted in the meter, so the sink must not add it again.
     usage: Usage,
     /// The root session's id.  Only this session's tokens reach
     /// stdout; sub-agent token streams stay off the main surface
@@ -48,12 +55,14 @@ pub struct Headless {
     turns: u32,
     /// Last non-routine stop reason surfaced by the root, if any.
     last_stop: Option<String>,
-    /// Root assistant tokens for the message currently streaming (json
-    /// mode only); rolled into `final_msg` at each message boundary.
-    cur_msg: String,
-    /// The root's last completed assistant message — the `result` field
-    /// of the JSON output.
-    final_msg: String,
+    /// The root's deliberate return value — the faithful payload it passed to
+    /// `reply`, captured from the drive digest after the run
+    /// ([[decisions/260623_reply-terminates-returning-agents]]).  It is the
+    /// `result` field of the JSON output: a string stays a string, an
+    /// object/array stays structured (no double-encoding into a JSON string).
+    /// `None` when the root finished without replying, which renders as a JSON
+    /// null and pairs with `is_error`.
+    result: Option<serde_json::Value>,
     /// Set when a worker thread unwound this run.  `pump` recovers from the
     /// panic, emits it as a [`WORKER_PANIC_PREFIX`](crate::bus::WORKER_PANIC_PREFIX)
     /// error, and returns the worker value as normal, so without latching it
@@ -75,8 +84,7 @@ impl Headless {
             json_mode,
             turns: 0,
             last_stop: None,
-            cur_msg: String::new(),
-            final_msg: String::new(),
+            result: None,
             panicked: false,
             ended_with_newline: false,
         }
@@ -139,21 +147,33 @@ fn field_value_text(v: &FieldVal) -> String {
     }
 }
 
-/// The `--output-format json` result object on stdout: the root's final
-/// message plus the run's stop reason, turn count, wall-clock, and token
-/// usage + cost.  Field names mirror Claude Code's headless result so a
-/// harness can parse either agent identically.
+/// The `--output-format json` result object on stdout: the root's deliberate
+/// `reply` value plus the run's stop reason, turn count, wall-clock, and token
+/// usage + cost.  Field names mirror Claude Code's headless result so a harness
+/// can parse either agent identically; `result` deliberately diverges in *type*
+/// — it is the faithful value (`string | object | array | null`), not always a
+/// string, so a structured reply is not double-encoded into a JSON string.
 fn result_json(h: &Headless, r: &Result<(), String>, elapsed: std::time::Duration) -> String {
     use serde_json::json;
     let u = &h.usage;
     let mut obj = json!({
         "type": "result",
         "is_error": r.is_err() || h.panicked,
-        "result": h.final_msg,
+        "result": h.result,
         "stop_reason": h.last_stop.clone().unwrap_or_else(|| {
             // A recovered worker panic leaves no StopReason; report it as
             // such rather than letting it default to "completed".
-            if h.panicked { "panicked".into() } else { "completed".into() }
+            if h.panicked {
+                "panicked".into()
+            } else if r.is_err() {
+                // The run errored with no provider stop reason: it ended
+                // without producing a `reply` value (a no-reply finish, or a
+                // failure before one).  Report that rather than the misleading
+                // "completed"; the `error` field below carries the detail.
+                "no_reply".into()
+            } else {
+                "completed".into()
+            }
         }),
         "num_turns": h.turns,
         "duration_ms": elapsed.as_millis() as u64,
@@ -178,26 +198,23 @@ impl Sink for Headless {
     fn handle(&mut self, e: Event) {
         let id = e.id;
         match e.kind {
-            // Only the root agent's tokens reach the user — in text mode
-            // they stream to stdout; in json mode they accumulate so the
-            // last completed message becomes the `result` field.  Sub-
-            // agent token streams would interleave unreadably and are an
-            // internal detail of the root's turn; their full transcript
-            // lives in that session's own log dir.
-            Kind::Token(text) if id == self.root_id => {
-                if self.json_mode {
-                    self.cur_msg.push_str(&text);
-                } else {
-                    let mut out = io::stdout();
-                    let _ = out.write_all(text.as_bytes());
-                    let _ = out.flush();
-                    if let Some(last) = text.as_bytes().last() {
-                        self.ended_with_newline = *last == b'\n';
-                    }
+            // Only the root agent's tokens reach the user, and only in text
+            // mode — there they stream to stdout as live narration.  In json
+            // mode they are dropped: the `result` is the root's deliberate
+            // `reply` value, captured from the drive digest, not whatever prose
+            // happened to stream.  Sub-agent token streams would interleave
+            // unreadably and are an internal detail of the root's turn; their
+            // full transcript lives in that session's own log dir.
+            Kind::Token(text) if id == self.root_id && !self.json_mode => {
+                let mut out = io::stdout();
+                let _ = out.write_all(text.as_bytes());
+                let _ = out.flush();
+                if let Some(last) = text.as_bytes().last() {
+                    self.ended_with_newline = *last == b'\n';
                 }
             }
             Kind::Token(_) => {}
-            Kind::Usage(u) => self.usage += u,
+            Kind::Usage(_) => {}
             Kind::Step(n) => {
                 if id == self.root_id {
                     self.turns += 1;
@@ -265,15 +282,12 @@ impl Sink for Headless {
                     None => eprintln!("[agent: {title} done in {secs:.1}s]"),
                 }
             }
-            // A message boundary: in json mode the root's just-completed
-            // message becomes the candidate `result` (last one wins).
-            Kind::Boundary if self.json_mode && id == self.root_id => {
-                self.final_msg = std::mem::take(&mut self.cur_msg);
-            }
             // Boundary / Born / Died / UserPromptEcho are interactive-only;
             // Phase is a progress label — a rendering — so headless neither
             // prints it (it would clutter the stderr stream) nor records it
-            // (the operational trace omits presentation events).
+            // (the operational trace omits presentation events).  A message
+            // boundary is no longer scraped for the json `result`: that value
+            // is the root's deliberate `reply`, captured from the drive digest.
             Kind::Boundary
             | Kind::Born { .. }
             | Kind::Died
@@ -325,15 +339,31 @@ pub fn run(
     let outcome = pump(&mut headless, &bus, root_id, root_transcript, |emit| {
         session.drive(provider.clone(), &mut control, emit)
     });
-    // The sink already latched `panicked` from the WORKER_PANIC_PREFIX error a
-    // worker unwind emits, so this `Result` only drives the top-level
-    // `is_error`/`error` fields; `result_json` reads the message and stop
-    // reason from the sink, not from here.
+    // `pump` returns the drive digest — the outcome and the root's faithful
+    // `reply` payload.  The payload is the json `result` (a string stays a
+    // string, an object/array stays structured); the outcome drives the
+    // top-level `is_error`/`error` fields.  The sink already latched `panicked`
+    // from the WORKER_PANIC_PREFIX error a worker unwind emits.
     let r: Result<(), String> = match outcome {
-        Ok(Some(_)) => Ok(()),
+        Ok(Some((agent_outcome, payload))) => {
+            headless.result = payload;
+            match agent_outcome {
+                // A reply (or a deliberate empty reply) completed the contract.
+                AgentOutcome::Complete | AgentOutcome::Empty => Ok(()),
+                // A finish without `reply`, a stop, or a failure: no result.
+                AgentOutcome::Stopped(s) => Err(s),
+                AgentOutcome::Cancelled => Err("cancelled".to_string()),
+                AgentOutcome::Failed(e) => Err(e),
+            }
+        }
         Ok(None) => Err("worker panicked".to_string()),
         Err(e) => Err(e.to_string()),
     };
+    // The run total, summed at the emit seam across the root and every
+    // sub-agent — including async children muted on this per-turn bus, whose
+    // usage never reached the sink.  This is the single source of truth the
+    // JSON result and the `[done]` line both read.
+    headless.usage = bus.usage_total();
     let elapsed = headless.started.elapsed();
     if json {
         // The streamed text was held back, so this single result object
@@ -401,5 +431,44 @@ mod tests {
         let out = result_json(&h, &Ok(()), std::time::Duration::ZERO);
         let v: serde_json::Value = serde_json::from_str(&out).expect("result is JSON");
         assert_eq!(v["num_turns"], serde_json::json!(5), "{out}");
+    }
+
+    /// A structured `reply` value reaches the json `result` faithfully — an
+    /// object stays an object, not a pretty-printed string.  Stringifying it
+    /// would double-encode the structure so the harness re-parses JSON out of a
+    /// JSON string; the union-typed `result` is the deliberate divergence from
+    /// Claude Code's always-string shape.
+    #[test]
+    fn structured_result_is_faithful_not_stringified() {
+        let root: SessionId = 1;
+        let mut h = Headless::new(true, root);
+        h.result = Some(serde_json::json!({ "files": ["a.rs", "b.rs"] }));
+        let out = result_json(&h, &Ok(()), std::time::Duration::ZERO);
+        let v: serde_json::Value = serde_json::from_str(&out).expect("result is JSON");
+        assert!(
+            v["result"].is_object(),
+            "a structured reply stays structured, not stringified: {out}"
+        );
+        assert_eq!(v["result"]["files"][0], serde_json::json!("a.rs"), "{out}");
+        assert_eq!(v["is_error"], serde_json::json!(false), "{out}");
+    }
+
+    /// A root that finished without calling `reply` yields an honest failure:
+    /// no `result` value (a JSON null), `is_error` true, and a `no_reply` stop
+    /// reason rather than the misleading "completed".
+    #[test]
+    fn no_reply_root_is_error_with_null_result() {
+        let root: SessionId = 1;
+        // `result` stays `None` — the run errored before producing a reply.
+        let h = Headless::new(true, root);
+        let out = result_json(
+            &h,
+            &Err("ended without calling `reply`".to_string()),
+            std::time::Duration::ZERO,
+        );
+        let v: serde_json::Value = serde_json::from_str(&out).expect("result is JSON");
+        assert_eq!(v["is_error"], serde_json::json!(true), "{out}");
+        assert_eq!(v["result"], serde_json::Value::Null, "{out}");
+        assert_eq!(v["stop_reason"], serde_json::json!("no_reply"), "{out}");
     }
 }

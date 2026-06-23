@@ -21,10 +21,10 @@ use std::path::{Path, PathBuf};
 /// FILE...` collapses them into one user-supplied section and the
 /// `Ral` / `Script style` slots are omitted (the user takes
 /// responsibility for the tool reference).  When `headless`, a closing
-/// section (`data/headless.md`) warns that assistant prose now *is* the
-/// program's output, not narration beside it — appended last, where its
-/// recency carries, and regardless of `--system` since it governs the
-/// output channel, not the persona.
+/// section (`data/headless.md`) tells the root it returns its result by
+/// calling `reply` exactly once (a finish without `reply` returns nothing
+/// and fails) — appended last, where its recency carries, and regardless of
+/// `--system` since it governs the return channel, not the persona.
 pub fn assemble(
     files: &[PathBuf],
     caps: &Capabilities,

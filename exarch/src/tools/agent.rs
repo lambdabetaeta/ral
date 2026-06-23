@@ -170,7 +170,7 @@ and keeps the result addressable (e.g. the line-hash `edit` needs)."
         let child_emit = if emit.is_session_lived() {
             emit.child(agent_id, child.mailbox(), child.transcript())
         } else {
-            Emitter::muted(agent_id, child.transcript())
+            emit.muted_child(agent_id, child.transcript())
         };
         let started = Instant::now();
         let born_title = title.clone();
@@ -197,7 +197,7 @@ and keeps the result addressable (e.g. the line-hash `edit` needs)."
                     log_dir: log_dir.clone(),
                     title: born_title,
                 });
-                let (outcome, text) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let (outcome, payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     // The peer wraps a snapshot of the provider at spawn, so a
                     // later root `/model` never disturbs an already-running child.
                     child.drive(
@@ -206,8 +206,14 @@ and keeps the result addressable (e.g. the line-hash `edit` needs)."
                         &child_emit,
                     )
                 }))
-                .unwrap_or_else(|_| (AgentOutcome::Failed("sub-agent panicked".into()), String::new()));
+                .unwrap_or_else(|_| (AgentOutcome::Failed("sub-agent panicked".into()), None));
                 child_emit.emit(Kind::Died);
+                // A model parent reads the reply as prose in its context, so the
+                // peer edge renders the faithful payload to text here.
+                let text = payload
+                    .as_ref()
+                    .map(crate::session::render_reply)
+                    .unwrap_or_default();
                 // Deliver only if still the live worker of the current
                 // generation; a result from before a `/clear` is dropped, not
                 // posted into a rebuilt context.

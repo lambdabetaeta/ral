@@ -14,16 +14,22 @@ join phase. Each tool owns its own input parsing and invalid-input UX; nothing
 in `provider.rs` or `session.rs` knows a tool's shape. Adding a tool is a
 sibling module under `tools/` listed in `registry()`.
 
-**Two mirror-image axes decide which tools a session holds**, gating both
+**Two orthogonal axes decide which tools a session holds** — whether it may
+**spawn** children and whether it **returns** a value — gating both
 advertisement (`provider.complete`) and dispatch (`Session::stage`) through one
 `ToolSet::allows` check:
 
-- `spawns()` is true for the spawn family; a peer's `ToolSet::NoSpawn` withholds
-  it, so the spawn tree stays one level deep.
-- `replies()` is true for `reply`; the root's `ToolSet::All` withholds it — the
-  root talks to the user across turns and never returns a value.
-- So the *root* holds everything but `reply`, and a *peer* holds everything but
-  the spawn family — keeping `reply`, its way of returning.
+- `spawns()` is true for the spawn family; a peer withholds it, so the spawn
+  tree stays one level deep.
+- `replies()` is true for `reply`; it is held by every *returning* agent and
+  withheld only from the interactive root, which converses across turns and
+  never returns a value
+  ([[decisions/260623_reply-terminates-returning-agents]]).
+- The two booleans are independent, so the three live agents occupy three
+  combinations: the **interactive root** spawns but does not return
+  (`ToolSet::interactive_root`); the **headless (returning) root** does both
+  (`ToolSet::returning_root`); a **peer** returns but does not spawn
+  (`ToolSet::peer`).
 
 The tools that ship:
 
@@ -42,14 +48,20 @@ The tools that ship:
   `Turn` through the [[map/exarch/frontend|inbox]]. `agents` lists live workers
   (id, title, elapsed, log dir); `agent_cancel` stops one by id. A peer is denied
   the family, so the tree stays one level deep.
-- `reply` (`tools/reply.rs`), gated by `replies()` — a sub-agent's deliberate
-  return value ([[decisions/260622_agent-reply-tool|agent-reply-tool]]). Its
-  `result` argument is rendered by the shared value→text rule
-  ([[map/exarch/shell-eval|shell-eval]]'s `json_to_text`: a string passes through
-  raw, an object/array is pretty-printed), stashed on the session, and lifted
+- `reply` (`tools/reply.rs`), gated by `replies()` — a returning agent's
+  deliberate return value ([[decisions/260622_agent-reply-tool|agent-reply-tool]],
+  extended to the headless root by
+  [[decisions/260623_reply-terminates-returning-agents]]). Its `result` argument
+  is stashed on the session as the *faithful* value the model passed and lifted
   into a `Replied` terminal once the tool-call batch drains — it hard-terminates
-  the child. There is no prose scrape, so a child that never calls `reply`
-  returns nothing. Withheld from the root.
+  the agent. Each consumer renders it at its own edge by the shared value→text
+  rule ([[map/exarch/shell-eval|shell-eval]]'s `json_to_text`: a string passes
+  through raw, an object/array is pretty-printed), except the headless harness,
+  which writes the structure faithfully to its json `result`. `reply` is the
+  *sole* return path — there is no prose scrape — so a returning agent that
+  never calls it returns nothing and fails (re-nudged within the
+  [[map/exarch/session|nudge]] budget first). Withheld only from the interactive
+  root.
 - the **schedule family** — `schedule` / `schedules` / `unschedule`
   (`tools/schedule.rs`) — self-armed wakeups (a cron expression or `after <dur>`)
   posted into the session's *own* inbox. Gated not by `ToolSet` but by
