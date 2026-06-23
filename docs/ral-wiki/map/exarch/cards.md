@@ -91,8 +91,9 @@ projection whether the card is a foldable effect or a barrier. Disclosure is
 **derived**, not named: a card holding a `diff` is dialable (`dialable()` →
 `Card::has_diff()`) and renders L1 header / L2 first-hunk / L3 full; a card of
 only `text`/`fields`/`measure`/`raw` is chrome-level (L3-only, inert). The rail
-shape is `▎` for a diff card, the neutral `❖` for a folded observation/write
-card, and none for a framed surfaced card. `magnitude()` is the summed diff
+shape is `▎` for a file mutation — a diff card or a write card alike — and
+none for a framed surfaced card; an observation card folds into its ral group
+rather than carrying its own rail. `magnitude()` is the summed diff
 magnitude, feeding the rail's value-step and the agent matrix's size readout;
 `lines_changed()` exposes the same diff total as the matrix's write footprint,
 distinct from prose volume.

@@ -105,8 +105,8 @@ Two `Sink` implementations:
    `CardOrigin::Surfaced` card — the model's deliberate "look at this" —
    renders through `line::render_card_framed` as an indented framed box, its
    heading lifted into the top rule, no marginal rail glyph (the frame is its
-   mark). Diff cards keep their patch-shape rail; folded observation/write
-   cards stay generic chrome.
+   mark). A file mutation — a diff card or a write card — wears the
+   patch-shape change-bar `▎`; an observation card folds into its ral group.
 
  The frame's terminal writes are bracketed in a synchronized update
  (`BeginSynchronizedUpdate` / `EndSynchronizedUpdate`) so the emulator swaps

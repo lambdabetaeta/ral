@@ -31,6 +31,9 @@ use ratatui::text::Span;
 /// (`Step` / `Error` / `Generic`) is lifted into this set by the block.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum RailKind {
+    /// A file mutation — the change-bar `▎`. Both an `edit`'s located diff
+    /// (dialable to its hunks) and a whole-file write (atomic, a one-line
+    /// summary) wear it; the body, not the shape, says which.
     Patch,
     /// A tool call, open or shut — the disclosure triangle *is* the
     /// tool-call shape, so no separate `◆`.
@@ -70,7 +73,7 @@ impl RailKind {
 /// and can never list a glyph the rail does not draw. A shut / open tool
 /// call is one shape under disclosure, so both triangles appear.
 pub(super) const RAIL_SHAPES: &[(RailKind, &str)] = &[
-    (RailKind::Patch, "patch / diff"),
+    (RailKind::Patch, "file change — diff or write"),
     (RailKind::ToolCall(false), "tool call, shut"),
     (RailKind::ToolCall(true), "tool call, open"),
     (RailKind::Markdown, "model prose"),

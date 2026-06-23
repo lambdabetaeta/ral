@@ -579,12 +579,14 @@ impl Block {
             // The `↘` keeps the delegated-result identity even on error; the
             // failure reads in the header suffix, not a swapped glyph.
             BlockKind::Subagent { .. } => Some(RailKind::Subagent),
-            // A diff card wears the patch shape (`▎`). A surfaced general card
-            // is framed, and the frame is its mark, so it wears no rail glyph
-            // (like the prompt's band). A folded observation/write card stays
-            // generic chrome (`❖`).
+            // A diff and a write are both file mutations, so both wear the
+            // change-bar (`▎`); the body distinguishes located hunks from a
+            // whole-file write summary. A surfaced general card is framed, and
+            // the frame is its mark, so it wears no rail glyph (like the
+            // prompt's band). Any other card — a standalone observation, which
+            // the projection otherwise folds — stays generic chrome (`❖`).
             BlockKind::Card { card, origin } => {
-                if card.has_diff() {
+                if card.has_diff() || *origin == CardOrigin::Write {
                     Some(RailKind::Patch)
                 } else if *origin == CardOrigin::Surfaced {
                     None
@@ -943,6 +945,18 @@ mod tests {
             assert_eq!(indent_of(&text), 2);
             assert!(!text.starts_with('▸'));
         }
+    }
+
+    /// A write is a file mutation, the sibling of a diff: it wears the same
+    /// change-bar `▎` (`RailKind::Patch`), not the `❖` it once borrowed from
+    /// the human's prompt fence. Carrying no hunks, it stays inert — a diff
+    /// dials open to its change, a write has nothing more to reveal.
+    #[test]
+    fn write_wears_the_change_bar_like_a_diff() {
+        let write = Block::io_card(Card(vec![Mark::Text { spans: vec![] }]), true);
+        assert_eq!(write.rail_kind(1), Some(RailKind::Patch), "a write wears ▎");
+        assert_eq!(diff_block().rail_kind(1), Some(RailKind::Patch), "a diff wears ▎");
+        assert!(!write.dialable(), "a write has no hunks to dial open");
     }
 
     /// A flush, unindented line wraps back to column zero — no spurious indent.
