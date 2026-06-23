@@ -209,6 +209,55 @@ fn truncated_with_tool_calls_dispatches_and_continues() {
     assert_admissible(&session);
 }
 
+/// A stream that stalls after some text has streamed must not discard the
+/// work and end the run: `apply` commits the streamed prefix as the
+/// assistant message and returns `Truncated` (carrying the stall cause) so
+/// the nudge re-drives the turn with `continue`.  The recovery is an
+/// operational `SystemNote`, not an `Error`.
+#[test]
+fn stalled_stream_commits_partial_and_truncates() {
+    let dir = tmp("stalled-stream");
+    let mut session = Session::for_test(&dir, "system").unwrap();
+    let provider = scripted(
+        "test-model",
+        Script::new().then(Reply::stalled("partial answer before the stall")),
+    );
+
+    let (outcome, kinds) = drive_apply(&mut session, &provider, Some("answer at length"));
+    match outcome {
+        Err(ProviderError::Truncated { reason }) => {
+            assert_eq!(reason, "stream idle: no event within timeout")
+        }
+        other => panic!("a committed stall must surface as Truncated, got {other:?}"),
+    }
+    // The streamed prefix is committed verbatim, so the re-driven turn
+    // continues from exactly what the user already saw.
+    let committed: Vec<_> = session
+        .rendered_messages()
+        .into_iter()
+        .filter(|m| m.role == ChatRole::Assistant)
+        .filter_map(|m| m.content.first_text().map(str::to_string))
+        .collect();
+    assert!(
+        committed
+            .iter()
+            .any(|t| t == "partial answer before the stall"),
+        "the streamed prefix must be committed, got {committed:?}",
+    );
+    // A recovered stall is operational, not a misconfiguration: it surfaces
+    // as a dim note, never the red error chrome.
+    assert!(
+        kinds.iter().any(|k| matches!(k, Kind::SystemNote(t) if t.contains("stream stalled"))),
+        "the stall recovery must surface as a SystemNote",
+    );
+    assert!(
+        !kinds.iter().any(|k| matches!(k, Kind::Error(_))),
+        "a recovered stall must not surface an Error",
+    );
+    assert!(session.is_ready());
+    assert_admissible(&session);
+}
+
 /// X7: an empty assistant reply (zero content parts) must never be
 /// committed empty — a stub is substituted so the transcript stays
 /// admissible — while the turn still surfaces as `Empty` for the nudge.

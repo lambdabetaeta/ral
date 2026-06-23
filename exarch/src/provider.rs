@@ -440,13 +440,30 @@ pub struct StepOut {
     pub tool_calls: Vec<ToolCall>,
     pub usage: Usage,
     /// Provider-normalised stop reason for this turn.  `None` means the
-    /// adapter did not surface one (most non-Anthropic adapters do).
-    /// Critical signal: `Some(StopReason::MaxTokens(_))` means the
-    /// assistant text — and any tool call the model was about to emit —
-    /// was truncated by [`Provider`]'s output cap.  The session loop
-    /// must surface this rather than treating "no tool call" as
-    /// "the model is done".
+    /// adapter did not surface one (most non-Anthropic adapters do), or
+    /// the stream broke before one arrived (see [`CutShort::Stalled`]).
     pub stop_reason: Option<StopReason>,
+    /// Set when the assistant turn ended short of the model's own stop,
+    /// with the partial text already committed: the session re-drives the
+    /// turn with a `continue` nudge instead of treating the short reply as
+    /// final.  `None` on a turn that reached its own stop reason.
+    pub cut_short: Option<CutShort>,
+}
+
+/// Why an assistant turn ended before the model chose to stop.  Both
+/// causes leave a partial assistant message that the session commits and
+/// continues from; they differ only in the operator-facing note.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CutShort {
+    /// The output-token cap (`max_tokens`) truncated the turn — the model
+    /// was mid-text or about to emit a tool call.  The operator can raise
+    /// the ceiling with `--max-tokens`.
+    OutputCap,
+    /// The stream broke mid-response *after* partial text had rendered: an
+    /// idle stall, a transport error frame, or a close with no `End` frame.
+    /// Re-issuing would double-render the streamed prefix, so it is kept
+    /// and the turn continues.  Carries the underlying cause for the note.
+    Stalled(String),
 }
 
 /// One compaction summary response.
@@ -511,15 +528,15 @@ pub enum ProviderError {
         /// renderer uses it for a structured display.
         body: Option<serde_json::Value>,
     },
-    /// The turn finished with a non-success `StopReason` — most
-    /// commonly `max_tokens`, where the provider truncated the response
-    /// before the model could emit a tool call or finish its text.
-    /// Raised by [`crate::session::Session::apply`] **after** appending
-    /// the partial assistant message, so re-prompting with `continue`
-    /// preserves the partial work as transcript context.
+    /// The assistant turn was cut off before the model finished — the
+    /// output cap ([`CutShort::OutputCap`]) or a mid-stream stall
+    /// ([`CutShort::Stalled`]).  Raised by [`crate::session::Session::apply`]
+    /// **after** appending the partial assistant message, so re-prompting
+    /// with `continue` preserves the partial work as transcript context.
     Truncated {
-        /// The provider's normalised reason as a string (e.g.
-        /// `"max_tokens"`, `"length"`, `"content_filter"`).
+        /// The cut-off cause as a string: the provider's normalised stop
+        /// reason (`"max_tokens"`) for an output-cap truncation, or the
+        /// stream cause for a stall.
         reason: String,
     },
     /// Anything else: rendered raw so the user has the original error
@@ -696,6 +713,22 @@ fn retry_after_header(headers: &HeaderMap) -> Option<Duration> {
     Some(Duration::from_secs(secs))
 }
 
+impl ProviderError {
+    /// The bare cause line, without the variant's framing — what a
+    /// [`CutShort::Stalled`] note wants to quote.  For the transient/other
+    /// failures a committed stall produces this is the raw stream cause
+    /// (e.g. `"stream idle: no event within timeout"`); for anything else
+    /// it falls back to the full `Display`.
+    fn brief(&self) -> String {
+        match self {
+            ProviderError::Transient { cause, .. }
+            | ProviderError::RateLimited { cause, .. } => cause.clone(),
+            ProviderError::Other(s) => s.clone(),
+            other => other.to_string(),
+        }
+    }
+}
+
 impl fmt::Display for ProviderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -723,8 +756,7 @@ impl fmt::Display for ProviderError {
             },
             ProviderError::Truncated { reason } => write!(
                 f,
-                "truncated by provider (stop_reason={reason}): output cap was hit \
-                 before the model finished — raise --max-tokens or split the turn"
+                "reply cut off before completion (reason={reason})"
             ),
             ProviderError::Other(s) => f.write_str(s),
         }
@@ -799,15 +831,14 @@ async fn backoff_sleep(attempt: u32, retry_after: Option<Duration>, max_delay_ms
 
 /// One attempt's outcome, as the retry driver sees it.
 enum Attempt<T> {
-    /// Success — return it.
+    /// Success — return it.  A committed mid-stream stall also lands here:
+    /// `complete` keeps the streamed prefix as a [`CutShort::Stalled`]
+    /// [`StepOut`] rather than retrying (a re-issue would double-render),
+    /// so the driver never needs a distinct "don't retry" failure class.
     Done(T),
     /// Failed; the driver retries when the error is transient/rate-limited
     /// and budget remains (see [`retry_limits`]), otherwise surfaces it.
     Failed(ProviderError),
-    /// Failed and must not be retried regardless of class — the stream
-    /// already committed partial output to the screen, so a re-issue would
-    /// double-render.  Surfaced immediately.
-    Committed(ProviderError),
 }
 
 /// Drive `one` under the transient/rate-limit retry policy: bounded,
@@ -828,7 +859,6 @@ async fn retry_with_backoff<T>(
         }
         let err = match one(attempt).await {
             Attempt::Done(v) => return Ok(v),
-            Attempt::Committed(e) => return Err(stamp_attempts(e, attempt)),
             Attempt::Failed(e @ ProviderError::Cancelled(_)) => return Err(e),
             Attempt::Failed(e) => e,
         };
@@ -1215,13 +1245,16 @@ impl Live {
             options = options.with_max_tokens(n);
         }
 
-        let end = self.runtime.block_on(retry_with_backoff(
+        let step = self.runtime.block_on(retry_with_backoff(
             "before request",
             cancel,
             async |_attempt| {
                 let mut req = req_template.clone();
                 req.tools = Some(tool_defs(tools));
                 let mut seen_any_token = false;
+                // Mirrors what `on_text` rendered, so a committed stall can
+                // commit exactly the prefix the user already saw.
+                let mut streamed = String::new();
                 let attempt_result: Result<StreamEnd, ProviderError> = async {
                     let mut resp = tokio::select! {
                         biased;
@@ -1271,9 +1304,8 @@ impl Live {
                         match event {
                             ChatStreamEvent::Start => {}
                             ChatStreamEvent::Chunk(c) => {
-                                if !c.content.is_empty() {
-                                    seen_any_token = true;
-                                }
+                                seen_any_token |= !c.content.is_empty();
+                                streamed.push_str(&c.content);
                                 on_text(&c.content);
                             }
                             ChatStreamEvent::End(end) => return Ok(end),
@@ -1297,17 +1329,23 @@ impl Live {
                 .await;
 
                 match attempt_result {
-                    Ok(end) => Attempt::Done(end),
+                    Ok(end) => Attempt::Done(step_out_from_end(model, end, self.metered())),
                     // A cancel is surfaced as-is regardless of streamed tokens.
                     Err(e @ ProviderError::Cancelled(_)) => Attempt::Failed(e),
-                    // Tokens already streamed: a re-issue would double-render.
-                    Err(e) if seen_any_token => Attempt::Committed(e),
+                    // Visible text already streamed, then the stream broke: a
+                    // re-issue would double-render, so commit the streamed
+                    // prefix as a cut-short turn and let the session continue
+                    // it (mirrors the output-cap truncation path) rather than
+                    // discarding the work and ending the run.
+                    Err(e) if seen_any_token => {
+                        Attempt::Done(stalled_step_out(model, &streamed, &e, self.metered()))
+                    }
                     Err(e) => Attempt::Failed(e),
                 }
             },
         ))?;
 
-        Ok(step_out_from_end(model, end, self.metered()))
+        Ok(step)
     }
 
     fn summarize(
@@ -1414,11 +1452,33 @@ fn step_out_from_end(model: &str, end: StreamEnd, metered: bool) -> StepOut {
     let reasoning = end.captured_reasoning_content.clone();
     let content = end.captured_content.clone().unwrap_or_default();
     let tool_calls = end.captured_into_tool_calls().unwrap_or_default();
+    let cut_short = stop_reason
+        .as_ref()
+        .filter(|r| matches!(r, StopReason::MaxTokens(_)))
+        .map(|_| CutShort::OutputCap);
     StepOut {
         assistant_message: ChatMessage::assistant(content).with_reasoning_content(reasoning),
         tool_calls,
         usage: usage_from(model, &raw_usage, metered),
         stop_reason,
+        cut_short,
+    }
+}
+
+/// Project a committed mid-stream interruption into a [`StepOut`].  Some
+/// visible text streamed (and was already rendered) before the stream
+/// stalled, errored, or closed without an `End` frame, so re-issuing would
+/// double-render: the streamed prefix becomes a text-only assistant message
+/// marked [`CutShort::Stalled`], which the session commits and continues
+/// from.  No `End` frame arrived, so there is no usage to meter and no tool
+/// call to capture.
+fn stalled_step_out(model: &str, streamed: &str, cause: &ProviderError, metered: bool) -> StepOut {
+    StepOut {
+        assistant_message: ChatMessage::assistant(streamed.to_string()),
+        tool_calls: Vec::new(),
+        usage: usage_from(model, &genai::chat::Usage::default(), metered),
+        stop_reason: None,
+        cut_short: Some(CutShort::Stalled(cause.brief())),
     }
 }
 
@@ -1550,7 +1610,7 @@ fn usage_from(model: &str, raw: &genai::chat::Usage, metered: bool) -> Usage {
 /// test that under-scripts its turn should fail loudly, not hang on a
 /// real request.
 pub mod scripted {
-    use super::{ProviderError, StepOut, SummaryOut, Usage};
+    use super::{CutShort, ProviderError, StepOut, SummaryOut, Usage};
     use genai::chat::{ChatMessage, StopReason, ToolCall};
     use std::collections::VecDeque;
     use std::sync::Mutex;
@@ -1574,6 +1634,26 @@ pub mod scripted {
                     tool_calls: Vec::new(),
                     usage: Usage::default(),
                     stop_reason: Some(StopReason::Completed("end_turn".into())),
+                    cut_short: None,
+                }),
+            }
+        }
+
+        /// A turn whose stream stalled after `text` had rendered: the
+        /// model-facing dual of a live committed mid-stream stall.  Streams
+        /// `text` to `on_text` and projects a [`CutShort::Stalled`] step so
+        /// the session commits the partial reply and continues the turn.
+        pub fn stalled(text: &str) -> Self {
+            Self {
+                text: text.to_string(),
+                outcome: Ok(StepOut {
+                    assistant_message: ChatMessage::assistant(text.to_string()),
+                    tool_calls: Vec::new(),
+                    usage: Usage::default(),
+                    stop_reason: None,
+                    cut_short: Some(CutShort::Stalled(
+                        "stream idle: no event within timeout".into(),
+                    )),
                 }),
             }
         }
@@ -1594,6 +1674,7 @@ pub mod scripted {
                     tool_calls: calls,
                     usage: Usage::default(),
                     stop_reason: Some(StopReason::ToolCall("tool_use".into())),
+                    cut_short: None,
                 }),
             }
         }
@@ -1613,6 +1694,7 @@ pub mod scripted {
                     tool_calls: calls,
                     usage: Usage::default(),
                     stop_reason: Some(StopReason::MaxTokens("max_tokens".into())),
+                    cut_short: Some(CutShort::OutputCap),
                 }),
             }
         }
@@ -1633,6 +1715,7 @@ pub mod scripted {
                     tool_calls: Vec::new(),
                     usage: Usage::default(),
                     stop_reason: Some(StopReason::Completed("end_turn".into())),
+                    cut_short: None,
                 }),
             }
         }
@@ -2217,28 +2300,34 @@ mod tests {
         }
     }
 
-    /// Once tokens have streamed, `complete` reports the idle timeout as
-    /// `Attempt::Committed(Transient)`: a re-issue would double-render, so
-    /// the retry loop surfaces it immediately on the first attempt.
+    /// Once visible text has streamed, a mid-stream stall is not retried:
+    /// `complete` keeps the streamed prefix as a [`CutShort::Stalled`]
+    /// [`StepOut`] so the session can commit it and continue the turn.
+    /// `stalled_step_out` is that projection — a text-only assistant
+    /// message, no tool calls, the stream cause carried for the note.
     #[test]
-    fn idle_timeout_after_token_surfaces_without_retry() {
-        let calls = std::cell::Cell::new(0u32);
-        let out: Result<(), ProviderError> = make_runtime().block_on(retry_with_backoff(
-            "test",
-            &cancel::Token::new(),
-            async |_attempt| {
-                calls.set(calls.get() + 1);
-                Attempt::Committed(ProviderError::Transient {
-                    cause: "stream idle: no event within timeout".into(),
-                    attempts: 1,
-                    body: None,
-                })
-            },
-        ));
-        assert_eq!(calls.get(), 1, "committed output is not re-issued");
+    fn stalled_step_out_keeps_streamed_prefix() {
+        let cause = ProviderError::Transient {
+            cause: "stream idle: no event within timeout".into(),
+            attempts: 1,
+            body: None,
+        };
+        let step = stalled_step_out("test-model", "partial answer so far", &cause, false);
+        assert_eq!(
+            step.cut_short,
+            Some(CutShort::Stalled(
+                "stream idle: no event within timeout".into()
+            )),
+            "the stall cause rides along for the operator note",
+        );
+        assert!(step.tool_calls.is_empty(), "no tool call survives a stall");
+        assert!(step.stop_reason.is_none(), "no End frame, so no stop reason");
         assert!(
-            matches!(out, Err(ProviderError::Transient { .. })),
-            "got {out:?}"
+            step.assistant_message
+                .content
+                .first_text()
+                .is_some_and(|t| t == "partial answer so far"),
+            "the committed message is exactly the rendered prefix",
         );
     }
 

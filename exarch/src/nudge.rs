@@ -282,7 +282,7 @@ fn on_truncated(r: &Result<TurnOutcome, ProviderError>) -> Option<(String, &'sta
     match r {
         Err(ProviderError::Truncated { .. }) => Some((
             "truncated".into(),
-            "Your previous reply was truncated by the output cap. \
+            "Your previous reply was cut off before it completed. \
              Continue concisely from where it stopped.",
         )),
         _ => None,

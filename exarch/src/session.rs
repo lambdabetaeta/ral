@@ -23,7 +23,7 @@ use crate::digest::{
 };
 use crate::event::{QuiesceReason, SessionLog, ToolResult as SessionToolResult};
 use crate::nudge;
-use crate::provider::{Provider, ProviderError, StepOut, StopReason, ToolCall};
+use crate::provider::{CutShort, Provider, ProviderError, StepOut, StopReason, ToolCall};
 use crate::shell_eval;
 use crate::tools::ToolSet;
 use crate::transcript::Transcript;
@@ -654,6 +654,7 @@ impl Session {
                 tool_calls,
                 usage,
                 stop_reason,
+                cut_short,
             } = match step_out {
                 Ok(s) => s,
                 Err(ProviderError::Cancelled(_)) => {
@@ -690,30 +691,49 @@ impl Session {
                     stop_reason.as_ref().map(|r| r.raw().to_string()),
                 )
                 .map_err(|e| ProviderError::Other(e.to_string()))?;
-            let truncated = matches!(stop_reason, Some(StopReason::MaxTokens(_)));
-            // `MaxTokens` truncated the assistant.  With no captured tool
-            // call there is nothing to dispatch and the assistant turn is
-            // final, so surface the truncation and nudge from the boundary.
-            // With captured tool calls, the assistant message carries
-            // `tool_ids` and the session is now `AwaitingToolResults`;
+            let truncated = cut_short.is_some();
+            // The assistant turn was cut short — the output cap or a
+            // mid-stream stall.  With no captured tool call there is nothing
+            // to dispatch and the assistant turn is final, so commit the
+            // partial reply (done above) and surface a `Truncated` so the
+            // nudge re-drives the turn with `continue`.  With captured tool
+            // calls (only the output cap leaves any) the assistant message
+            // carries `tool_ids` and the session is now `AwaitingToolResults`;
             // returning here would strand it there and the nudge's
             // `append_user` would fail "tool results pending" (X6).  Instead
             // fall through to dispatch the calls and continue the loop — the
             // next round-trip resumes the truncated turn with the results in
             // hand.
             if truncated && tool_calls.is_empty() {
-                let reason = stop_reason
-                    .as_ref()
-                    .map(|r| r.raw().to_string())
-                    .unwrap_or_else(|| "max_tokens".into());
-                self.note_error(
-                    format!(
-                        "turn truncated (stop_reason={reason}): output cap reached. \
-                         re-run with `--max-tokens N` for a larger ceiling, \
-                         or ask the agent to split the work into smaller turns.",
-                    ),
-                    emit,
-                );
+                let reason = match cut_short.as_ref().expect("truncated implies cut_short") {
+                    CutShort::OutputCap => {
+                        let reason = stop_reason
+                            .as_ref()
+                            .map(|r| r.raw().to_string())
+                            .unwrap_or_else(|| "max_tokens".into());
+                        self.note_error(
+                            format!(
+                                "turn truncated (stop_reason={reason}): output cap reached. \
+                                 re-run with `--max-tokens N` for a larger ceiling, \
+                                 or ask the agent to split the work into smaller turns.",
+                            ),
+                            emit,
+                        );
+                        reason
+                    }
+                    CutShort::Stalled(cause) => {
+                        // A transient transport hiccup we recovered from, not
+                        // a misconfiguration: an operational note, not an error.
+                        self.note(
+                            format!(
+                                "[stream stalled mid-reply ({cause}); committed the partial \
+                                 output and continuing the turn]"
+                            ),
+                            emit,
+                        );
+                        cause.clone()
+                    }
+                };
                 return Err(ProviderError::Truncated { reason });
             }
             if tool_calls.is_empty() {
