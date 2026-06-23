@@ -37,18 +37,17 @@ pub(super) const PURPLE: Color = Color::Rgb(175, 145, 210);
 pub(super) const ORANGE: Color = Color::Rgb(215, 145, 115);
 pub(super) const RED: Color = Color::Rgb(215, 110, 125);
 pub(super) const SLATE: Color = Color::Rgb(140, 150, 170);
-/// The human turn's raised, faintly cool background stratum — the *sole*
-/// background register.  Agents own the chromatic foreground (the rail
-/// hues), and machine text reads from the rail shape plus its white/lime
-/// ink, so the background plane carries one distinction only: the one party
-/// that is not an agent.  A band clearly lifted above the base, so a
-/// submitted prompt reads as a found-at-a-glance landmark by common region.
+/// The pending-prompt band — the raised, faintly cool fill behind the
+/// queued-prompt strip in the input area ([`queued_prompt`]), a "your text,
+/// still queued" affordance.  The *committed* prompt echo in the transcript
+/// wears no band: it reads by its [`PROMPT_INK`] body tint and rule fence,
+/// leaving the background plane to the machine's recessed [`CODE_BG`] panel.
 pub(super) const PROMPT_BG: Color = Color::Rgb(72, 78, 94);
-/// The human's rail-fence ink — the `❖` marking a prompt in the rail
-/// thumbnail.  A light cool neutral, distinct from the agent rail's [`SLATE`]
-/// and bright enough to read on the [`PROMPT_BG`] band: the human owns a
-/// neutral tone, agents own the matrix hues, so the fence never reads as just
-/// another agent's mark.
+/// The human's ink — the prompt body text and the `❖` fence marking a prompt
+/// in the rail thumbnail.  A light cool neutral, distinct from the agent
+/// rail's [`SLATE`] and dimmer than the machine's white prose: the human owns
+/// the neutral tone, agents own the matrix hues, so a prompt reads as a quiet
+/// island and its fence never aliases another agent's mark.
 pub(super) const PROMPT_INK: Color = Color::Rgb(170, 180, 200);
 /// The recessed machine-text panel — a grey fill behind a code block or a run
 /// of observation output, marking it as a contiguous machine *region* (an
@@ -243,18 +242,21 @@ pub(super) fn step(_n: usize) -> Vec<Line<'static>> {
     vec![Line::default()]
 }
 
-/// Scrollback echo of the user's submitted prompt. The human's turn is the
-/// one block in the light stratum: the flatten paints a full-width raised
-/// background band behind it ([`wash`] with [`PROMPT_BG`], keyed on
-/// [`super::block::Block::is_prompt`]), so it reads as a found-at-a-glance
-/// landmark by common region — no marginal rail glyph, the band is the mark.
-/// Reverse video stays reserved for an active selection alone
-/// ([`super::App::paint_selection`]); the band is a fill, not an inversion.
-/// The body is flush-left at regular weight — the band carries the emphasis,
-/// so the text needs none — every line banded alike.
+/// Scrollback echo of the user's submitted prompt — the human's turn, the
+/// one party that is not an agent.  Its body is tinted the human's neutral
+/// [`PROMPT_INK`] (cooler and dimmer than the machine's white prose), so the
+/// turn reads as a quiet, cool island in the bright, chromatic machine
+/// stream: agents own the matrix hues, the human owns the neutral tone.  The
+/// flatten adds the full-width rule fence ([`prompt_fence`]) just above the
+/// first row as the turn's opening seam, and the `❖` rides the rail there.
+/// No background band — background is the machine's ([`CODE_BG`]); reverse
+/// video stays reserved for an active selection alone
+/// ([`super::App::paint_selection`]).  Flush-left at regular weight, every
+/// line tinted alike.
 pub(super) fn user_prompt(s: &str) -> Vec<Line<'static>> {
+    let ink = Style::default().fg(PROMPT_INK);
     let mut ls: Vec<Line<'static>> = vec![Line::default()];
-    ls.extend(s.lines().map(|l| Line::from(Span::raw(l.to_string()))));
+    ls.extend(s.lines().map(|l| Line::from(Span::styled(l.to_string(), ink))));
     ls
 }
 

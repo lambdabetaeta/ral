@@ -46,9 +46,10 @@ pub(super) enum RailShape {
     /// is an annotation, not a navigable block, so it earns no shape.
     #[default]
     Plain,
-    /// The human's submitted prompt — no marginal rail; its raised
-    /// background band ([`super::line::PROMPT_BG`], painted by the flatten)
-    /// is its mark.
+    /// The human's submitted prompt — marked by its [`super::line::PROMPT_INK`]
+    /// body tint and the `❖` rail fence, with a full-width rule above its first
+    /// row (painted by the flatten).  No background band — background is the
+    /// machine's.
     Prompt,
     /// A summary-less tool call (the `fff` query, an invalid-input header):
     /// nothing to dial, but a tool call all the same, so it wears the shut
@@ -602,8 +603,8 @@ impl Block {
                 RailShape::Step => Some(RailKind::Step),
                 RailShape::Error => Some(RailKind::Error),
                 RailShape::Plain => None,
-                // The band is the prompt's body mark; the `❖` fence is its
-                // margin mark — a rare landmark, reinforced on both axes.
+                // The PROMPT_INK body tint is the prompt's body mark; the `❖`
+                // fence is its margin mark — a rare landmark, on both axes.
                 RailShape::Prompt => Some(RailKind::Prompt),
                 // A summary-less tool call is still a tool call — the shut
                 // triangle `▸`, inert (there is nothing to dial open).

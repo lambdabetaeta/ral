@@ -737,9 +737,9 @@ impl Viewport {
         let mut row_block: Vec<usize> = Vec::new();
         let mut i = 0;
         while i < self.blocks.len() {
-            // `band` is `Some` only for the human turn — the flatten paints
-            // its raised light stratum here, where the content width is known,
-            // so the band reads edge-to-edge as a scrollback landmark.
+            // `prompt` is true only for the human turn — the flatten paints its
+            // full-width rule fence here, where the content width is known, so
+            // the rule spans the reading column as the turn's opening seam.
             let (anchor, lines, prompt) = if self.blocks[i].observation() {
                 let end = self.observation_run_end(i);
                 let anchor = self.group_anchor(i, end);
