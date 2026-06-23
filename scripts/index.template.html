@@ -53,26 +53,24 @@
     <div class="window" id="taste">
       <div class="window-body">
         <div class="taste-body">
-          <p class="taste-lead">A command is a system call whose inputs stay in view. Nothing slips in as text for the shell to split, glob, and re-read as a second command.</p>
+          <p class="taste-lead">In ral, output comes back as typed data, not text. Capture a command and you get a record or a list to work with — and when you fan work across cores, failures return as values instead of vanishing down a pipe.</p>
           <div class="compare">
             <div class="panel">
               <div class="panel-label">bash</div>
-<pre><span class="c"># no authority boundary —</span>
-<span class="c"># ssh can run anything, anywhere</span>
-cfg=$(curl -s "$api")
-hosts=$(echo "$cfg" | jq -r <span class="s">'.hosts[]'</span>)
-<span class="k">for</span> h <span class="k">in</span> $hosts; <span class="k">do</span>      <span class="c"># word-split on IFS</span>
-    ssh "$h" <span class="s">'systemctl restart app'</span>
-<span class="k">done</span></pre>
+<pre><span class="c"># which URLs failed? you don't find out.</span>
+cat urls.txt | xargs -P8 -I{} \
+  curl -fsSL -o "out/$(basename {})" {}</pre>
             </div>
             <div class="panel">
               <div class="panel-label">ral</div>
-<pre><span class="k">let</span> cfg = curl -s $api | from-json
-<span class="k">for</span> $cfg[hosts] { |h|  <span class="c"># typed; no split</span>
-    <span class="k">grant</span> [exec: [ssh: []]] { <span class="c"># only ssh</span>
-        ssh $h <span class="s">'systemctl restart app'</span>
-    }
-}</pre>
+<pre><span class="k">let</span> urls = from-lines-list <span class="s">'urls.txt'</span>
+<span class="k">let</span> report = <span class="k">par</span> { |u|
+    <span class="k">try</span> {
+        <span class="k">let</span> body = curl -fsSL $u
+        <span class="k">return</span> [url: $u, ok: true, bytes: !{length $body}]
+    } { |e| <span class="k">return</span> [url: $u, ok: false, bytes: 0] }
+} $urls 8
+to-json $report &gt; <span class="s">'manifest.json'</span></pre>
             </div>
           </div>
         </div>
@@ -96,9 +94,9 @@ hosts=$(echo "$cfg" | jq -r <span class="s">'.hosts[]'</span>)
           string you have to re-split and re-quote by hand.</p>
           <p>A command is a system call, and ral owns the moment it runs: catch
           its output into a typed variable, catch its failure, substitute your
-          own interpretation, or confine it to a set of permissions — which files
-          it may touch, which programs it may run, whether the network exists at
-          all — all enforced before the process starts. And because every command
+          own interpretation, or confine it in an OS sandbox — which files
+          it may touch, which programs it may run, whether the network is
+          reachable — set up before it starts. And because every command
           passes through ral, you can audit the whole tree a script produced:
           every command run, its arguments, its output, and the permission
           decisions that framed it.</p>
