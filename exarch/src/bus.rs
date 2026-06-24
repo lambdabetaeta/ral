@@ -197,6 +197,22 @@ impl InboxMsg {
         }
     }
 
+    /// Whether this message is a *user-issued* turn-boundary barrier that the
+    /// mid-turn steering drain must not reorder past.  A slash command — typed
+    /// as a [`InboxMsg::Command`] or carried as a slash [`InboxMsg::UserSteering`]
+    /// — is part of the human's own ordered sequence: a `/model` then a prompt
+    /// must run *after* the swap, so later steering may not jump ahead of it.
+    /// Asynchronous host/peer deliveries (a wakeup, an agent result, a settled
+    /// `spawn`'s surface, a self-nudge) carry no ordering relation to the
+    /// human's typing, so steering passes them freely.
+    fn is_user_barrier(&self) -> bool {
+        match self {
+            InboxMsg::Command(_) => true,
+            InboxMsg::UserSteering(s) => s.trim_start().starts_with('/'),
+            _ => false,
+        }
+    }
+
     /// The text the model sees when this message is drained into context.
     /// User steering is verbatim; the rest render with their source marker
     /// so the model can tell a wakeup or an agent reply from a human.  A
@@ -483,12 +499,37 @@ impl Inbox {
         }
     }
 
-    /// Mid-turn drain at a tool-call boundary: take the leading run of
-    /// tool-boundary messages (user steering that is not a slash command),
-    /// rendered and joined.  Stops at the first turn-boundary message.
+    /// Mid-turn drain at a tool-call boundary: take *every* tool-boundary
+    /// message (user steering that is not a slash command) from the queue,
+    /// rendered and joined, leaving the rest in their original order.
+    ///
+    /// Steering deliberately scans past asynchronous turn-boundary deliveries
+    /// — a settled detached agent's [`InboxMsg::AgentResult`], a `spawn`'s
+    /// [`InboxMsg::Surface`], a [`InboxMsg::ScheduledWakeup`] — rather than
+    /// bailing at the first one.  Those drain only at the turn boundary
+    /// ([`Self::next_or_idle`]), which a long tool-call loop never reaches, so a
+    /// leading-run scan would let a single such message at the head starve all
+    /// steering behind it for the rest of the turn.  The scan stops only at a
+    /// *user-issued* barrier ([`InboxMsg::is_user_barrier`]), past which the
+    /// human's own ordering must hold.
     pub fn drain_tool(&self) -> Option<String> {
         let mut q = self.shared.queue.lock().expect("inbox lock poisoned");
-        drain_run(&mut q, |msg| msg.boundary() == Boundary::Tool)
+        let mut text = String::new();
+        let mut kept = VecDeque::with_capacity(q.len());
+        let mut barrier = false;
+        while let Some(msg) = q.pop_front() {
+            if !barrier && msg.boundary() == Boundary::Tool {
+                if !text.is_empty() {
+                    text.push_str("\n\n");
+                }
+                text.push_str(&msg.render());
+                continue;
+            }
+            barrier |= msg.is_user_barrier();
+            kept.push_back(msg);
+        }
+        *q = kept;
+        (!text.is_empty()).then_some(text)
     }
 
     /// Turn-boundary drain: the next deliverable, tagged with its source, or
@@ -604,23 +645,6 @@ fn pop_turn(q: &mut VecDeque<InboxMsg>) -> Option<Turn> {
             }
         }
     }
-}
-
-/// Take the leading run of messages matching `keep` from a locked queue,
-/// rendered and joined by a blank line.  `None` when the front does not match.
-fn drain_run(q: &mut VecDeque<InboxMsg>, keep: impl Fn(&InboxMsg) -> bool) -> Option<String> {
-    if q.front().is_none_or(|m| !keep(m)) {
-        return None;
-    }
-    let mut text = String::new();
-    while q.front().is_some_and(&keep) {
-        let msg = q.pop_front().expect("front checked before pop");
-        if !text.is_empty() {
-            text.push_str("\n\n");
-        }
-        text.push_str(&msg.render());
-    }
-    Some(text)
 }
 
 pub struct Event {
@@ -1359,7 +1383,7 @@ mod tests {
         inbox.push_user("steer".into());
         inbox.push(wakeup("nightly", "0 3 * * *", "run the tests"));
 
-        // Tool boundary takes the user prefix only, stopping at the wakeup.
+        // Tool boundary takes the user steering and leaves the wakeup queued.
         assert_eq!(inbox.drain_tool().as_deref(), Some("steer"));
         assert_eq!(inbox.drain_tool(), None);
         // Turn boundary delivers the wakeup, tagged as a wakeup and rendered
@@ -1371,6 +1395,54 @@ mod tests {
             ),
             "the wakeup drains as a marked Wakeup turn",
         );
+        assert!(inbox.is_empty());
+    }
+
+    /// Steering queued *behind* an asynchronous turn-boundary delivery still
+    /// drains mid-turn.  A detached agent that settles during a long tool-call
+    /// loop pushes its `AgentResult` to the head of the queue; that message
+    /// drains only at the turn boundary, which the loop never reaches, so a
+    /// leading-run scan would let it starve every steering prompt behind it.
+    /// The whole-queue drain scans past it, leaving it queued for its turn.
+    #[test]
+    fn inbox_tool_drain_passes_async_turn_messages() {
+        let inbox = Inbox::new();
+        // The order a settling subagent then a barging human produce.
+        inbox.push(wakeup("nightly", "@", "go"));
+        inbox.push_user("redirect now".into());
+        inbox.push_user("and also this".into());
+
+        assert_eq!(
+            inbox.drain_tool().as_deref(),
+            Some("redirect now\n\nand also this"),
+            "steering drains past the async wakeup at the head",
+        );
+        assert_eq!(inbox.drain_tool(), None);
+        assert!(
+            matches!(inbox.drain_turn(), Some(Turn::Wakeup(_))),
+            "the wakeup is left intact for the turn boundary",
+        );
+        assert!(inbox.is_empty());
+    }
+
+    /// A *user-issued* slash barrier still holds the line: steering typed after
+    /// a mid-turn `/model` must run after the swap, so it is not pulled ahead.
+    /// An async delivery sitting before the barrier is still passed.
+    #[test]
+    fn inbox_tool_drain_stops_at_user_barrier_past_async() {
+        let inbox = Inbox::new();
+        inbox.push_user("before".into());
+        inbox.push(wakeup("x", "@", "p"));
+        inbox.push(InboxMsg::Command("/model".into()));
+        inbox.push_user("after model".into());
+
+        // "before" drains; the wakeup is skipped; the /model barrier stops the
+        // scan, so "after model" stays behind it.
+        assert_eq!(inbox.drain_tool().as_deref(), Some("before"));
+        assert_eq!(inbox.drain_tool(), None);
+        assert!(matches!(inbox.drain_turn(), Some(Turn::Wakeup(_))));
+        assert!(matches!(inbox.drain_turn(), Some(Turn::Command(s)) if s == "/model"));
+        assert!(matches!(inbox.drain_turn(), Some(Turn::Human(s)) if s == "after model"));
         assert!(inbox.is_empty());
     }
 
