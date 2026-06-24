@@ -720,12 +720,26 @@ fn parse_json_body(s: &str) -> Option<serde_json::Value> {
     serde_json::from_str(s).ok()
 }
 
+/// The error-detail object inside a provider JSON body.  Providers wrap
+/// differently — OpenAI nests the detail under `error`, Anthropic sends
+/// `{"type":"error","error":{…}}` — so prefer the inner `error` object,
+/// falling back to the body itself when there is no such nesting.  The one
+/// home of the nest-or-flat convention: classification
+/// ([`json_status_code`]), the cross-boundary [`ProviderError::summary`],
+/// and the structured renderer all read their fields through it.
+pub(crate) fn error_object(
+    body: &serde_json::Value,
+) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    body.get("error")
+        .and_then(serde_json::Value::as_object)
+        .or_else(|| body.as_object())
+}
+
 /// Read a status code from a provider JSON error body, accepting both the
 /// nested `{"error":{"code":NNN}}` and the flat `{"code":NNN}` shapes.
 fn json_status_code(body: &serde_json::Value) -> Option<u16> {
-    body.get("error")
-        .and_then(|e| e.get("code"))
-        .or_else(|| body.get("code"))
+    error_object(body)?
+        .get("code")
         .and_then(serde_json::Value::as_u64)
         .and_then(|c| u16::try_from(c).ok())
 }
@@ -761,6 +775,69 @@ impl ProviderError {
             other => other.to_string(),
         }
     }
+
+    /// A single-line human summary, for a failure that crosses an agent
+    /// boundary as a flat string — a sub-agent's outcome a parent receives.
+    /// The full structured [`crate::tui::line::provider_error`] block is
+    /// unreachable there, and the verbose [`fmt::Display`] (which splices the
+    /// raw HTTP `Body:` JSON into `cause`) would land as an unreadable wall in
+    /// the one-line breadcrumb.  So this prefers the provider's own parsed
+    /// `body` message — the same field the structured block surfaces — over
+    /// `cause`, falling back to the variant's kind label when no body message
+    /// is present.
+    pub fn summary(&self) -> String {
+        match self {
+            ProviderError::Cancelled(where_) => format!("cancelled {where_}"),
+            ProviderError::Transient { body, .. } => {
+                with_body_message("web stream failed", body.as_ref())
+            }
+            ProviderError::RateLimited { body, .. } => {
+                with_body_message("rate limited", body.as_ref())
+            }
+            ProviderError::Api {
+                status,
+                message,
+                body,
+                ..
+            } => {
+                let detail = body
+                    .as_ref()
+                    .and_then(body_message)
+                    .unwrap_or_else(|| first_line(message).to_string());
+                match status {
+                    Some(s) => format!("api error {s}: {detail}"),
+                    None => format!("api error: {detail}"),
+                }
+            }
+            ProviderError::Truncated { reason } => format!("reply cut off ({reason})"),
+            ProviderError::Other(s) => first_line(s).to_string(),
+        }
+    }
+}
+
+/// The kind label, suffixed with the provider's own JSON message when the
+/// `body` carries one (`rate limited: Weekly usage limit reached…`).
+fn with_body_message(kind: &str, body: Option<&serde_json::Value>) -> String {
+    match body.and_then(body_message) {
+        Some(m) => format!("{kind}: {m}"),
+        None => kind.to_string(),
+    }
+}
+
+/// The human message a provider's JSON error body carries, if any — the
+/// error object's `message`, read through the shared [`error_object`].
+fn body_message(body: &serde_json::Value) -> Option<String> {
+    error_object(body)?
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+/// The first line of a possibly multi-line cause — a one-line breadcrumb
+/// cannot carry the rest, and the trailing lines are usually the genai
+/// `Cause:`/`Status:`/`Body:` framing the summary deliberately drops.
+fn first_line(s: &str) -> &str {
+    s.lines().next().unwrap_or(s).trim_end()
 }
 
 impl fmt::Display for ProviderError {
@@ -2046,6 +2123,45 @@ mod tests {
             }
             other => panic!("expected RateLimited, got {other:?}"),
         }
+    }
+
+    /// A rate-limit failure that crosses an agent boundary (a sub-agent's
+    /// outcome a parent receives) must `summary()` to one clean line carrying
+    /// the provider's own JSON message — never the verbose `Display`, which
+    /// splices the raw HTTP `Body:` JSON and would render as a wall of JSON in
+    /// the parent's one-line breadcrumb.
+    #[test]
+    fn summary_reads_body_message_not_the_json_wall() {
+        let e = ProviderError::RateLimited {
+            retry_after: None,
+            cause: "Web stream error for model 'glm-5.2 (adapter: OpenAI)'.\n\
+                    Cause: HTTP error.\nStatus: 429 Too Many Requests\nBody:\n  \
+                    {\"error\":{\"message\":\"Weekly usage limit reached. Resets in 4 days.\"}}"
+                .into(),
+            body: Some(serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": "GoUsageLimitError",
+                    "message": "Weekly usage limit reached. Resets in 4 days.",
+                },
+            })),
+        };
+        let s = e.summary();
+        assert_eq!(s, "rate limited: Weekly usage limit reached. Resets in 4 days.");
+        assert!(!s.contains('{'), "summary must not leak the raw JSON body: {s}");
+        assert!(!s.contains('\n'), "summary must stay one line: {s}");
+    }
+
+    /// With no parsed body the summary degrades to the bare kind label,
+    /// never the verbose `cause` — the breadcrumb has no room for it.
+    #[test]
+    fn summary_without_body_is_the_kind_label() {
+        let e = ProviderError::RateLimited {
+            retry_after: None,
+            cause: "Web stream error.\nStatus: 429".into(),
+            body: None,
+        };
+        assert_eq!(e.summary(), "rate limited");
     }
 
     /// The DeepSeek failure from the session log: a hard 400 arriving on

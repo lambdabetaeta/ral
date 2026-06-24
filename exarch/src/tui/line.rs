@@ -17,7 +17,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::borrow::Cow;
 use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
@@ -1425,21 +1425,11 @@ fn human_secs(s: u64) -> String {
     }
 }
 
-/// The error payload object inside a parsed `body`.  Providers wrap
-/// differently — OpenAI nests the detail under `error`, Anthropic sends
-/// `{"type":"error","error":{…}}` — so prefer the inner `error` object,
-/// falling back to the body itself when there is no such nesting.
-fn error_object(body: &Value) -> Option<&Map<String, Value>> {
-    body.get("error")
-        .and_then(Value::as_object)
-        .or_else(|| body.as_object())
-}
-
 /// The retry-after wait carried by a parsed `body`, if any: the first of
 /// the recognised second-count keys whose value reads as a number.  Used
 /// only when the response header didn't already supply the wait.
 fn wait_from_body(body: &Value) -> Option<u64> {
-    let obj = error_object(body)?;
+    let obj = provider::error_object(body)?;
     ["resets_in_seconds", "retry_after_seconds", "retry_after"]
         .iter()
         .find_map(|k| {
@@ -1470,7 +1460,7 @@ fn value_display(v: &Value) -> Option<String> {
 /// `message` trails last because it is the one field that wraps.  A body
 /// with no error object yields no fields.
 fn body_fields(body: &Value, consumed: &[&str]) -> Vec<FieldRow> {
-    let Some(obj) = error_object(body) else {
+    let Some(obj) = provider::error_object(body) else {
         return vec![];
     };
     let mut fs = Vec::new();

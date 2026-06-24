@@ -1272,7 +1272,7 @@ fn agent_digest(
         Ok(TurnOutcome::Stopped { reason }) => (AgentOutcome::Stopped(reason.clone()), None),
         Ok(TurnOutcome::Cancelled) => (AgentOutcome::Cancelled, None),
         Ok(TurnOutcome::Capped) => (AgentOutcome::Stopped("step cap reached".into()), None),
-        Err(e) => (AgentOutcome::Failed(e.to_string()), None),
+        Err(e) => (AgentOutcome::Failed(e.summary()), None),
     }
 }
 
