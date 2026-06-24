@@ -152,7 +152,6 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("exarch/src/config.rs", "io-door:silent:provider-config"),
     ("exarch/src/event.rs", "io-door:silent:events-file"),
     ("exarch/src/event.rs", "io-door:silent:session-dir"),
-    ("exarch/src/headless.rs", "io-door:silent:transcript-file"),
     ("exarch/src/models.rs", "io-door:silent:models-cache-read"),
     ("exarch/src/models.rs", "io-door:silent:models-cache-write"),
     (
@@ -175,6 +174,11 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("exarch/src/state.rs", "io-door:silent:state-read"),
     ("exarch/src/state.rs", "io-door:silent:state-write"),
     ("exarch/src/tools/fff.rs", "io-door:silent:fff-db-dir"),
+    (
+        "exarch/src/transcript.rs",
+        "io-door:silent:transcript-file",
+    ),
+    ("exarch/src/tui.rs", "io-door:silent:editor-compose"),
     ("exarch/src/tui.rs", "io-door:silent:stderr-log"),
     ("exarch/src/tui/viewport.rs", "io-door:silent:export"),
     ("exarch/src/tui/viewport.rs", "io-door:silent:viewport-log"),
