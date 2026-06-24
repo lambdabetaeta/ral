@@ -73,8 +73,8 @@ is *not* `flat_rate`. `Live::metered` is false when either holds.
   initial select and on every loop iteration: it bounds connect +
   time-to-first-event and the gap *between* chunks, not the total response, so
   a connection that goes silent surfaces as a retryable transport error rather
-  than blocking `next()` until the terminal-bench harness wall. It stays well
-  under that wall even across the full transient retry budget.
+  than blocking `next()` indefinitely. The total idle budget stays bounded even
+  across the full transient retry budget.
 - `summarize` — one non-streamed call producing a compaction summary; used by
   [[map/exarch/agent|`Agent::compact`]]. The same idle timeout bounds the
   whole `exec_chat` request (no incremental events to idle between). A summary
@@ -91,11 +91,13 @@ is *not* `flat_rate`. `Live::metered` is false when either holds.
 ## Retry driver
 
 Both paths run on a tokio runtime through **one retry driver**,
-`retry_with_backoff` over an `Attempt<T>` (`Done` / `Failed` / `Committed`):
+`retry_with_backoff` over an `Attempt<T>` (`Done` / `Failed`):
 
-- `Committed` is the streaming-specific rule: once any token has flowed to
+- The streaming-specific rule rides on `Done`: once any token has flowed to
   `on_text` the UI has committed to a partial render, so a re-issue that would
-  double tokens is surfaced immediately rather than retried.
+  double tokens is *not* retried — `stalled_step_out` projects the streamed
+  prefix into a `CutShort::Stalled` `StepOut` returned as `Attempt::Done`, and
+  the session commits it. No third "don't retry" variant is needed.
 - Rate limits get a larger budget and a higher backoff ceiling than transient
   failures (`retry_limits`), and an explicit `retry-after` is honoured.
 
@@ -105,16 +107,19 @@ only model-behaviour outcomes, not transport.
 ## Structural error classification
 
 `ProviderError::from_genai` **reads retryability from genai's typed variants,
-not from its `Display` string.** `status_of` recovers an HTTP `StatusCode`,
-the response `HeaderMap`, and the parsed JSON error body across the three paths
-a non-2xx reaches us by — `HttpError`, `WebModelCall(ResponseFailedStatus)`,
-the `HttpError` boxed inside a streaming `WebStream`, and a mid-stream
-`ChatResponse` frame whose code lives in `body["error"]["code"]` /
-`body["code"]`. The status drives the `RateLimited` (429) / `Transient` (5xx) /
-`Api` (other 4xx) split; a `retry-after` header is read directly when carried.
-Only when no status can be recovered does it fall back to a transport predicate
-and the `Display`/substring heuristic, for the residual stream/network shapes
-that carry no structured status (X3, [[invariants/transcript-admission|transcript-admission]]).
+not from its `Display` string.** A single structural walk, `Fault::of`, descends
+each error to one of three leaves — `Status` (a non-2xx HTTP response), `Transport`
+(a `reqwest` fault with no status), or `Terminal` (no recoverable leaf) — recovering
+the `StatusCode`, the response `HeaderMap`, and the parsed JSON body across the four
+paths a non-2xx reaches us by: `HttpError`, `WebModelCall(ResponseFailedStatus)`,
+the `HttpError` boxed inside a streaming `WebStream` (recursion), and a mid-stream
+`ChatResponse` frame whose code lives in `body["error"]["code"]` / `body["code"]`.
+The status drives the `RateLimited` (429) / `Transient` (5xx) / `Api` (other 4xx)
+split; a `retry-after` header is read directly when carried. The `_ => Terminal`
+floor makes the walk total — a contract breach (a non-JSON 2xx) or an unrecognised
+shape surfaces raw rather than being retried on a `Display`-string guess. The full
+tutorial is [[internals/provider-fault-recovery|provider-fault-recovery]]
+([[invariants/transcript-admission|transcript-admission]]).
 
 Each retryable and 4xx variant carries the parsed body as
 `Option<serde_json::Value>` to the boundary, so the renderer can print a

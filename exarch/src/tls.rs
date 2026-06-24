@@ -18,14 +18,12 @@ use std::time::Duration;
 /// frame that genai consumes without emitting a decoded `ChatStreamEvent`
 /// all keep the stream alive.  It is *not* a total cap on the response: a
 /// legitimately slow completion that keeps dribbling bytes runs as long as
-/// it likes, bounded only by the harness wall.  Without it a connection
-/// that goes silent (TCP open, bytes stopped) blocks the stream forever;
-/// under the terminal-bench harness that hang is reaped only by the 900s
-/// wall, which kills the run and emits an empty result.json.  120s is
-/// generous enough not to trip on a slow time-to-first-token, yet — even
-/// after the transient retry budget (~3 attempts, see [`MAX_ATTEMPTS`]) —
-/// stays well under that wall, so a truly stalled stream surfaces as a
-/// retryable transport error instead of hanging.
+/// it likes.  Without it a connection that goes silent (TCP open, bytes
+/// stopped) blocks the stream forever — `next()` never wakes.  The timeout
+/// turns that dead silence into a retryable transport error instead; 120s is
+/// generous enough not to trip on a slow time-to-first-token, and the total
+/// idle budget stays bounded across the transient retry budget (~3 attempts,
+/// see [`MAX_ATTEMPTS`]).
 ///
 /// [`MAX_ATTEMPTS`]: crate::provider::MAX_ATTEMPTS
 pub(crate) const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);

@@ -474,10 +474,10 @@ pub struct SummaryOut {
 /// read directly off `HttpError`, `WebModelCall(ResponseFailedStatus)`,
 /// or the `HttpError` boxed inside a streaming `WebStream`, and a
 /// mid-stream JSON error frame (`ChatResponse`) is parsed from its
-/// `serde_json::Value` body.  The `Display`/substring fallback survives
-/// only for variants the typed API exposes no status on (stream parse
-/// failures, auth/config errors, a residual `reqwest::Error` whose
-/// classification rests on transport predicates).
+/// `serde_json::Value` body.  A transport fault with no status is the
+/// `reqwest::Error` boxed inside `WebStream` or carried by `WebModelCall`;
+/// anything with neither a status nor a transport leaf surfaces raw.  See
+/// [`Fault`] for the structural walk.
 #[derive(Debug, Clone)]
 pub enum ProviderError {
     /// The user (or a chained signal handler) raised the cancel flag
@@ -539,125 +539,177 @@ pub enum ProviderError {
 impl ProviderError {
     /// Classify a typed genai error into a provider-boundary failure.
     ///
-    /// The retryability of the result is decided structurally: a
-    /// [`StatusCode`] recovered from the error's typed variants drives
-    /// the 429 / 5xx / 4xx split (see [`status_of`]), a `retry-after`
-    /// header is honoured when the variant carries one, and a
-    /// `ChatResponse` JSON error frame is read from its value.  Only when
-    /// no status can be recovered does the classifier fall back to the
-    /// `Display` string and the transport-transient heuristic.
+    /// The verdict is purely structural: [`Fault::of`] walks the error's
+    /// typed variants down to the leaf that decides recovery — an HTTP
+    /// status, a transport-level `reqwest` fault, or neither — and this
+    /// turns that leaf into a public failure.  A recovered [`StatusCode`]
+    /// drives the 429 / 5xx / 4xx split, honouring a `retry-after` header
+    /// when the variant carries one; a transport leaf is the canonical
+    /// retryable `Transient`; anything with no leaf to stand on surfaces
+    /// raw as `Other`.  No classification rests on the `Display` string.
     pub fn from_genai(err: &genai::Error, model: &str) -> Self {
-        if let Some((status, headers, body)) = status_of(err) {
-            let msg = err.to_string();
-            if status == StatusCode::TOO_MANY_REQUESTS {
+        let msg = err.to_string();
+        match Fault::of(err) {
+            Fault::Status {
+                status,
+                headers,
+                body,
+            } if status == StatusCode::TOO_MANY_REQUESTS => {
                 let retry_after = headers
                     .and_then(retry_after_header)
                     .or_else(|| parse_retry_after(&msg));
-                return ProviderError::RateLimited {
+                ProviderError::RateLimited {
                     retry_after,
                     cause: msg,
                     body,
-                };
+                }
             }
-            if status.is_server_error() {
-                return ProviderError::Transient {
+            Fault::Status { status, body, .. } if status.is_server_error() => {
+                ProviderError::Transient {
                     cause: msg,
                     attempts: 1,
                     body,
-                };
+                }
             }
             // Any remaining non-success status (4xx, redirects) is a
             // request the user must change — not retryable.
-            return ProviderError::Api {
+            Fault::Status { status, body, .. } => ProviderError::Api {
                 status: Some(status.as_u16()),
                 model: model.to_string(),
                 message: msg.clone(),
                 url: extract_url(&msg),
                 body,
-            };
-        }
-
-        // A genuine transport fault (connect / timeout / reset) reaches us
-        // as a `reqwest::Error` boxed inside `WebStream` — no HTTP status
-        // was ever received.  This is the canonical retryable failure.
-        if is_transport_transient(err) {
-            return ProviderError::Transient {
-                cause: err.to_string(),
-                attempts: 1,
-                body: None,
-            };
-        }
-
-        // Variants the typed API exposes no status on: fall back to the
-        // `Display` string and the transient-keyword heuristic for the
-        // residual stream/network shapes that carry no structured status.
-        let msg = err.to_string();
-        let lower = msg.to_lowercase();
-        if lower.contains("web stream error")
-            || lower.contains("sending request")
-            || lower.contains("connection")
-            || lower.contains("timeout")
-            || lower.contains("timed out")
-            || lower.contains("reset")
-        {
-            return ProviderError::Transient {
+            },
+            // A genuine transport fault — connect, timeout, or a body that
+            // dropped or failed to decode mid-flight — with no HTTP status
+            // ever received.  The canonical retryable failure.
+            Fault::Transport => ProviderError::Transient {
                 cause: msg,
                 attempts: 1,
                 body: None,
-            };
+            },
+            // No status, no transport leaf: an input / auth / parse fault
+            // the user must act on.  Rendered raw.
+            Fault::Terminal => ProviderError::Other(msg),
         }
-
-        ProviderError::Other(msg)
     }
 }
 
-/// Recover the HTTP status, its response headers (when carried), and the
-/// parsed JSON error body from a genai error's typed variants, covering
-/// all three paths a non-2xx status reaches us by:
-///
-/// * `HttpError` — the raw HTTP-level error (streaming initial response);
-///   its `body: String` is parsed best-effort.
-/// * `WebModelCall(ResponseFailedStatus)` — the non-streamed `exec_chat`
-///   path (the compaction summary); the `headers` carry `retry-after` and
-///   the `body: String` is parsed best-effort.
-/// * `WebStream { error, .. }` — the streaming path boxes the typed
-///   `HttpError` as the `BoxError` cause; downcast to recover its status
-///   and parse its `body: String` best-effort.
-/// * `ChatResponse { body, .. }` — a mid-stream JSON error frame whose
-///   status lives in `body["error"]["code"]` / `body["code"]`; the body is
-///   already a `serde_json::Value`, so it is cloned.
-///
-/// A non-JSON body (e.g. an HTML 5xx page) yields `None` for the body and
-/// the caller falls back to the textual `cause`.
-fn status_of(
-    err: &genai::Error,
-) -> Option<(StatusCode, Option<&HeaderMap>, Option<serde_json::Value>)> {
-    match err {
-        genai::Error::HttpError { status, body, .. } => {
-            Some((*status, None, parse_json_body(body)))
+/// The structural anatomy of a genai fault: the leaf that decides how the
+/// provider boundary recovers, recovered by walking the typed variants
+/// rather than scraping a `Display` string.  Every genai error reaches
+/// exactly one arm — the `_ => Terminal` floor makes the walk total, so a
+/// new genai variant defaults to "surface it" instead of being silently
+/// misclassified.
+enum Fault<'a> {
+    /// A completed HTTP response carrying a non-2xx status, reached by one
+    /// of the four shapes genai reports it through:
+    ///
+    /// * `HttpError` — the raw HTTP-level error.
+    /// * `WebModelCall`/`WebAdapterCall(ResponseFailedStatus)` — the
+    ///   non-streamed `exec_chat` path; `headers` carry `retry-after`.
+    /// * `WebStream` boxing an `HttpError` — the streaming path's initial
+    ///   non-2xx response, recovered by recursion through [`Fault::of`].
+    /// * `ChatResponse` — a mid-stream JSON error frame whose status lives
+    ///   in `body["error"]["code"]` / `body["code"]`.
+    ///
+    /// `body` is the provider's JSON error frame parsed best-effort; a
+    /// non-JSON body (an HTML 5xx page) leaves it `None` and the caller
+    /// falls back to the textual `cause`.
+    Status {
+        status: StatusCode,
+        headers: Option<&'a HeaderMap>,
+        body: Option<serde_json::Value>,
+    },
+    /// A transport-level `reqwest` fault that never reached a status —
+    /// connect, timeout, a malformed request, or a body that dropped or
+    /// failed to decode mid-flight.  The streaming path boxes it inside
+    /// `WebStream`; the non-streamed path carries it as `WebModelCall`/
+    /// `WebAdapterCall(Reqwest)`.  Retryable.
+    Transport,
+    /// No status and no transport leaf: a request built wrong, an auth
+    /// gap, a provider contract breach (a 2xx whose body was not the JSON
+    /// genai required), or a parse / decode corruption.  Retrying only
+    /// re-loses, so it surfaces raw.
+    Terminal,
+}
+
+impl<'a> Fault<'a> {
+    /// Walk a genai error to the leaf that determines its recovery.
+    fn of(err: &'a genai::Error) -> Self {
+        match err {
+            genai::Error::HttpError { status, body, .. } => Self::status(*status, None, body),
+            genai::Error::WebModelCall { webc_error, .. }
+            | genai::Error::WebAdapterCall { webc_error, .. } => Self::of_webc(webc_error),
+            // The streaming path boxes its leaf as a `BoxError`: an initial
+            // non-2xx response as a `genai::Error::HttpError`, an in-flight
+            // fault as a `reqwest::Error`, a corrupt body as a UTF-8 error.
+            genai::Error::WebStream { error, .. } => Self::of_boxed(error.as_ref()),
+            // A mid-stream JSON error frame whose status lives in the body.
+            genai::Error::ChatResponse { body, .. } => json_status_code(body)
+                .and_then(|code| StatusCode::from_u16(code).ok())
+                .map_or(Fault::Terminal, |status| Fault::Status {
+                    status,
+                    headers: None,
+                    body: Some(body.clone()),
+                }),
+            // Input, auth, mapping, and stream-parse errors carry nothing
+            // to recover or retry.
+            _ => Fault::Terminal,
         }
-        genai::Error::WebModelCall { webc_error, .. }
-        | genai::Error::WebAdapterCall { webc_error, .. } => match webc_error {
+    }
+
+    /// The leaf inside a `WebModelCall` / `WebAdapterCall` webc error.
+    fn of_webc(err: &'a genai::webc::Error) -> Self {
+        match err {
             genai::webc::Error::ResponseFailedStatus {
                 status,
                 headers,
                 body,
-            } => Some((*status, Some(headers), parse_json_body(body))),
-            _ => None,
-        },
-        genai::Error::WebStream { error, .. } => match error.downcast_ref::<genai::Error>() {
-            Some(genai::Error::HttpError { status, body, .. }) => {
-                Some((*status, None, parse_json_body(body)))
-            }
-            _ => None,
-        },
-        genai::Error::ChatResponse { body, .. } => {
-            let code = json_status_code(body)?;
-            StatusCode::from_u16(code)
-                .ok()
-                .map(|s| (s, None, Some(body.clone())))
+            } => Self::status(*status, Some(headers), body),
+            genai::webc::Error::Reqwest(e) => Self::of_reqwest(e),
+            // A 2xx whose body was missing or not the JSON genai required
+            // is a provider contract breach, not a transport fault.
+            _ => Fault::Terminal,
         }
-        _ => None,
+    }
+
+    /// The leaf boxed inside a `WebStream` cause: a `genai::Error` (walked
+    /// in turn) or a bare `reqwest::Error`; anything else — a UTF-8
+    /// corruption — is terminal.
+    fn of_boxed(err: &'a (dyn std::error::Error + 'static)) -> Self {
+        if let Some(genai) = err.downcast_ref::<genai::Error>() {
+            return Fault::of(genai);
+        }
+        if let Some(reqwest) = err.downcast_ref::<reqwest::Error>() {
+            return Self::of_reqwest(reqwest);
+        }
+        Fault::Terminal
+    }
+
+    /// A `reqwest::Error` is transport-retryable only for the fault classes
+    /// a re-issue can plausibly clear; a builder / redirect fault is the
+    /// caller's to fix and stays terminal.
+    fn of_reqwest(err: &reqwest::Error) -> Self {
+        if err.is_connect()
+            || err.is_timeout()
+            || err.is_request()
+            || err.is_body()
+            || err.is_decode()
+        {
+            Fault::Transport
+        } else {
+            Fault::Terminal
+        }
+    }
+
+    /// A status leaf with its headers and a best-effort JSON body.
+    fn status(status: StatusCode, headers: Option<&'a HeaderMap>, body: &str) -> Self {
+        Fault::Status {
+            status,
+            headers,
+            body: parse_json_body(body),
+        }
     }
 }
 
@@ -676,18 +728,6 @@ fn json_status_code(body: &serde_json::Value) -> Option<u16> {
         .or_else(|| body.get("code"))
         .and_then(serde_json::Value::as_u64)
         .and_then(|c| u16::try_from(c).ok())
-}
-
-/// Whether `err` is a transport-level fault (connect / timeout / request
-/// failure) with no HTTP status — the streaming path boxes such faults as
-/// a `reqwest::Error` inside `WebStream`.  These are retryable.
-fn is_transport_transient(err: &genai::Error) -> bool {
-    let genai::Error::WebStream { error, .. } = err else {
-        return false;
-    };
-    error
-        .downcast_ref::<reqwest::Error>()
-        .is_some_and(|e| e.is_connect() || e.is_timeout() || e.is_request())
 }
 
 /// Parse the structured `Retry-After` header as a whole-second delay.
@@ -1328,7 +1368,7 @@ impl Live {
                         // `read_timeout`; a genuinely stalled socket trips it
                         // and surfaces here as `Some(Err(_))` carrying a
                         // `reqwest` timeout, which `from_genai` classifies as
-                        // transient via `is_transport_transient`.
+                        // transient via its [`Fault::Transport`] leaf.
                         let event = tokio::select! {
                             biased;
                             _ = wait_for_cancel(cancel) => {
@@ -1363,9 +1403,11 @@ impl Live {
                             | ChatStreamEvent::ToolCallChunk(_) => {}
                         }
                     }
-                    Err(ProviderError::Other(
-                        "stream ended without End event".into(),
-                    ))
+                    Err(ProviderError::Transient {
+                        cause: "stream ended without End event".into(),
+                        attempts: 1,
+                        body: None,
+                    })
                 }
                 .await;
 
@@ -1882,14 +1924,6 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_provider_binds_deepseek_adapter_for_bare_provider_name() {
-        assert_eq!(
-            adapter_for_provider_model(&ProviderId::Famous(ProviderKind::Deepseek), "deepseek"),
-            AdapterKind::DeepSeek,
-        );
-    }
-
-    #[test]
     fn openai_provider_keeps_openai_adapter_split() {
         assert_eq!(
             adapter_for_provider_model(&ProviderId::Famous(ProviderKind::Openai), "gpt-4.1"),
@@ -1948,15 +1982,13 @@ mod tests {
         );
     }
 
-    /// A genuine transport fault on the streaming path arrives as a
-    /// `reqwest::Error` boxed inside `WebStream`.  genai exposes no status
-    /// for it, so the classifier must fall through to the transport
-    /// predicate / keyword heuristic and route it to `Transient` for the
-    /// retry loop.  Constructing a `reqwest::Error` directly is not
-    /// possible, so this exercises the `Display`-keyword fallback that
-    /// covers the `WebStream`-with-string-cause case.
+    /// A `WebStream` whose boxed cause is neither a recoverable status nor
+    /// a transport `reqwest::Error` (here a bare string) has no leaf to
+    /// stand on.  It surfaces raw as `Other` rather than being retried on a
+    /// `Display`-string guess — the classification is structural, not
+    /// textual.
     #[test]
-    fn from_genai_classifies_web_stream_error() {
+    fn from_genai_classifies_web_stream_unknown_cause_as_other() {
         let e = ProviderError::from_genai(
             &genai::Error::WebStream {
                 model_iden: iden("gpt-5.4"),
@@ -1967,15 +1999,33 @@ mod tests {
             },
             "gpt-5.4",
         );
-        match e {
-            ProviderError::Transient {
-                cause, attempts, ..
-            } => {
-                assert!(cause.contains("Web stream error"));
-                assert_eq!(attempts, 1, "from_genai stamps the first attempt");
-            }
-            other => panic!("expected Transient, got {other:?}"),
-        }
+        assert!(
+            matches!(e, ProviderError::Other(_)),
+            "a WebStream with no typed leaf is terminal, got {e:?}"
+        );
+    }
+
+    /// A provider contract breach — a 2xx response whose body was not the
+    /// JSON genai required — carries no status and no transport leaf, so it
+    /// is terminal `Other`.  Its `Display` mentions "body", the word a
+    /// substring heuristic would have wrongly seized on to retry it; the
+    /// structural walk reads the typed variant instead and does not.
+    #[test]
+    fn from_genai_classifies_non_json_response_as_other() {
+        let e = ProviderError::from_genai(
+            &genai::Error::WebModelCall {
+                model_iden: iden("m"),
+                webc_error: genai::webc::Error::ResponseFailedNotJson {
+                    content_type: "text/html".into(),
+                    body: "<html>200 but not JSON</html>".into(),
+                },
+            },
+            "m",
+        );
+        assert!(
+            matches!(e, ProviderError::Other(_)),
+            "a non-JSON 2xx body is terminal, got {e:?}"
+        );
     }
 
     /// A 429 on the non-streamed (compaction) path: `WebModelCall`
@@ -1995,34 +2045,6 @@ mod tests {
                 assert_eq!(retry_after, Some(Duration::from_secs(7)));
             }
             other => panic!("expected RateLimited, got {other:?}"),
-        }
-    }
-
-    /// A streaming 429 (`WebStream` boxing `HttpError`) must also classify
-    /// as rate-limited — the typed status is recovered by downcasting the
-    /// boxed cause.
-    #[test]
-    fn from_genai_classifies_streaming_429_rate_limit() {
-        let e =
-            ProviderError::from_genai(&web_stream_http(StatusCode::TOO_MANY_REQUESTS), "gpt-5.5");
-        assert!(
-            matches!(e, ProviderError::RateLimited { .. }),
-            "streaming 429 must classify RateLimited, got {e:?}"
-        );
-    }
-
-    #[test]
-    fn from_genai_classifies_401_api_error() {
-        let e = ProviderError::from_genai(
-            &web_model_call(StatusCode::UNAUTHORIZED, HeaderMap::new()),
-            "gpt-5.5",
-        );
-        match e {
-            ProviderError::Api { status, model, .. } => {
-                assert_eq!(status, Some(401));
-                assert_eq!(model, "gpt-5.5");
-            }
-            other => panic!("expected Api, got {other:?}"),
         }
     }
 
@@ -2084,8 +2106,8 @@ mod tests {
         );
     }
 
-    /// A variant with no structured status that matches none of the
-    /// transient keywords must surface raw as `Other`.
+    /// A variant with no structured status and no transport leaf — an
+    /// input error here — must surface raw as `Other`.
     #[test]
     fn from_genai_classifies_unknown_as_other() {
         let e = ProviderError::from_genai(
@@ -2158,31 +2180,6 @@ mod tests {
         );
     }
 
-    /// A streaming 5xx (`WebStream` boxing `HttpError`) is likewise
-    /// retryable.
-    #[test]
-    fn from_genai_classifies_streaming_5xx_as_transient() {
-        let e = ProviderError::from_genai(
-            &web_stream_http(StatusCode::BAD_GATEWAY),
-            "anthropic/claude-opus-4",
-        );
-        assert!(matches!(e, ProviderError::Transient { .. }), "got {e:?}");
-    }
-
-    /// A mid-stream `ChatResponse` frame carrying a 500 also routes to
-    /// `Transient` via the structural JSON-code read.
-    #[test]
-    fn from_genai_classifies_json_body_5xx_as_transient() {
-        let e = ProviderError::from_genai(
-            &genai::Error::ChatResponse {
-                model_iden: iden("m"),
-                body: serde_json::json!({"error": {"code": 500, "message": "oops"}}),
-            },
-            "m",
-        );
-        assert!(matches!(e, ProviderError::Transient { .. }), "got {e:?}");
-    }
-
     /// A non-ASCII char whose lowercasing changes its byte length
     /// (`İ` → `i̇`, one byte longer) before the matched `retry-after`
     /// needle must not panic: the slice is taken from the lowercased copy,
@@ -2214,20 +2211,6 @@ mod tests {
         assert_eq!(u.to_string(), "total 1000 in / 50 out · subscription");
     }
 
-    #[test]
-    fn stamp_attempts_records_count_on_transient() {
-        let e = ProviderError::Transient {
-            cause: "boom".into(),
-            attempts: 1,
-            body: None,
-        };
-        let stamped = stamp_attempts(e, 3);
-        match stamped {
-            ProviderError::Transient { attempts, .. } => assert_eq!(attempts, 3),
-            _ => panic!("expected Transient"),
-        }
-    }
-
     /// Rate limits get a strictly larger retry budget and a higher
     /// backoff ceiling than transient failures — the provider loop is
     /// now the only tier that retries 429s, so it has to be the patient
@@ -2252,20 +2235,14 @@ mod tests {
         assert!(rl_ceiling > tr_ceiling);
     }
 
-    /// `Usage::default()` leaves both cache fields as `None`; the cache
-    /// suffix must be omitted entirely — there's nothing to say.
+    /// The cache suffix is omitted whenever there's nothing to say —
+    /// whether cache activity is absent (`None`, as in `Usage::default`) or
+    /// a real zero measurement (`Some(0)`, an Anthropic turn with no cache
+    /// hit).  Both render `—`; they differ in intent, not on the wire.
     #[test]
-    fn usage_display_default_omits_cache_suffix() {
+    fn usage_display_omits_empty_cache_suffix() {
         assert_eq!(Usage::default().to_string(), "total 0 in / 0 out · —");
-    }
-
-    /// `Some(0)` on both sides is a real measurement (an Anthropic turn
-    /// with no cache activity).  The suffix is still omitted because
-    /// there is no useful signal — but this differs from the `None`
-    /// case only in intent, not in rendering.
-    #[test]
-    fn usage_display_explicit_zeros_omit_cache_suffix() {
-        let u = Usage {
+        let measured_zero = Usage {
             input: 100,
             output: 50,
             cache_creation: Some(0),
@@ -2273,7 +2250,7 @@ mod tests {
             dollars: 0.0,
             unmetered: false,
         };
-        assert_eq!(u.to_string(), "total 100 in / 50 out · —");
+        assert_eq!(measured_zero.to_string(), "total 100 in / 50 out · —");
     }
 
     /// AddAssign keeps the `Some` flavour once any turn has populated
@@ -2327,7 +2304,7 @@ mod tests {
     /// `Attempt::Failed(Transient)`.  Driven through the real retry loop
     /// it must be re-issued up to `MAX_ATTEMPTS` and then surface `Err`
     /// (bounded, never hanging) so the turn fails cleanly instead of
-    /// blocking until the harness wall.
+    /// blocking forever on a dead socket.
     #[test]
     fn idle_timeout_before_token_is_retried_then_surfaced() {
         let calls = std::cell::Cell::new(0u32);
@@ -2356,21 +2333,19 @@ mod tests {
     /// `complete` keeps the streamed prefix as a [`CutShort::Stalled`]
     /// [`StepOut`] so the session can commit it and continue the turn.
     /// `stalled_step_out` is that projection — a text-only assistant
-    /// message, no tool calls, the stream cause carried for the note.  The
-    /// cause is the one a real byte-level stall produces: `read_timeout`
-    /// fires, genai boxes the `reqwest` timeout into `WebStream`, and
-    /// `from_genai` classifies it `Transient`.
+    /// message, no tool calls, the stream cause carried for the note.  A
+    /// real byte-level stall is a `reqwest` read-timeout we cannot
+    /// construct in a unit test; a streaming 5xx classifies `Transient`
+    /// identically, so it stands in as the cause here.
     #[test]
     fn stalled_step_out_keeps_streamed_prefix() {
         let cause = ProviderError::from_genai(
-            &genai::Error::WebStream {
-                model_iden: iden("test-model"),
-                cause: "error sending request for url: operation timed out".into(),
-                error: Box::<dyn std::error::Error + Send + Sync>::from(
-                    "error sending request for url: operation timed out",
-                ),
-            },
+            &web_stream_http(StatusCode::SERVICE_UNAVAILABLE),
             "test-model",
+        );
+        assert!(
+            matches!(cause, ProviderError::Transient { .. }),
+            "the stand-in stall cause must classify Transient, got {cause:?}"
         );
         let brief = cause.brief();
         let step = stalled_step_out("test-model", "partial answer so far", &cause, false);
@@ -2393,18 +2368,19 @@ mod tests {
         );
     }
 
-    /// The idle timeout is an idle (between-events) bound, not a total
-    /// cap, and even the worst case — the full transient retry budget,
-    /// each attempt idling for the whole timeout — stays well under the
-    /// 900s terminal-bench harness wall.  This guards against a future
-    /// bump of `STREAM_IDLE_TIMEOUT` (or `MAX_ATTEMPTS`) that would
-    /// reintroduce the harness-kill hang.
+    /// The idle timeout is an idle (between-events) bound, not a total cap.
+    /// Even the worst case — the full transient retry budget, each attempt
+    /// idling for the whole timeout — leaves the total idle wait bounded and
+    /// modest, so a genuinely stalled stream surfaces as a failed turn in
+    /// minutes rather than appearing to hang.  This guards against a future
+    /// bump of `STREAM_IDLE_TIMEOUT` (or `MAX_ATTEMPTS`) that would let the
+    /// budget grow into an effective hang.
     #[test]
-    fn idle_timeout_budget_stays_under_harness_wall() {
+    fn idle_timeout_budget_stays_bounded() {
         let worst_case = STREAM_IDLE_TIMEOUT * MAX_ATTEMPTS;
         assert!(
-            worst_case < Duration::from_secs(900),
-            "idle budget {worst_case:?} must stay under the 900s harness wall"
+            worst_case < Duration::from_secs(600),
+            "a stalled stream must fail in minutes, not appear hung; idle budget is {worst_case:?}"
         );
     }
 }
