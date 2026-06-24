@@ -22,6 +22,9 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph};
+use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config, Matcher, Utf32Str};
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
 /// One provider's model-list fetch state.
@@ -170,26 +173,59 @@ impl Picker {
     }
 
     /// The filtered rows: every loaded model whose `provider / model` label
-    /// contains the (lowercased) query as a substring, plus a synthetic
-    /// manual-entry row when the query is non-empty (so a model that is not
-    /// listed, or a provider whose fetch failed, is still reachable).
+    /// fuzzy-matches the query (ranked by `nucleo_matcher` score, ties keeping
+    /// listed order), plus a synthetic manual-entry row when the query is
+    /// non-empty (so a model that's not listed, or a provider whose fetch
+    /// failed, is still reachable). An empty query shows every model unfiltered.
     fn rows(&self) -> Vec<Row> {
-        let q = self.query.trim().to_lowercase();
-        let mut rows = Vec::new();
+        let q = self.query.trim();
+
+        // (provider, model) pairs paired positionally with their haystacks.
+        let mut candidates: Vec<(ProviderId, String)> = Vec::new();
+        let mut haystacks: Vec<String> = Vec::new();
         for id in &self.providers {
             if let Some(ModelsState::Loaded(models)) = self.models.get(id) {
                 let label = self.label(id);
-                for m in models {
-                    let hay = format!("{label} / {m}").to_lowercase();
-                    if q.is_empty() || hay.contains(&q) {
-                        rows.push(Row::Model(id.clone(), m.clone()));
-                    }
+                for model in models {
+                    haystacks.push(format!("{label} / {model}"));
+                    candidates.push((id.clone(), model.clone()));
                 }
             }
         }
-        if !q.is_empty() {
-            rows.push(Row::Manual(self.query.trim().to_string()));
+
+        // Empty query: show every loaded model, in listed order.
+        if q.is_empty() {
+            return candidates
+                .into_iter()
+                .map(|(id, model)| Row::Model(id, model))
+                .collect();
         }
+
+        // Fuzzy-match each haystack, keeping its index so the row survives
+        // even when two providers list the same model name.
+        let pattern = Pattern::parse(q, CaseMatching::Smart, Normalization::Smart);
+        let mut buf = Vec::new();
+        // A fresh per-call matcher is cheap here (one keystroke produces one
+        // `rows()` call over a small list); we cannot borrow a stored one
+        // mutably through `&self`.
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let mut scored: Vec<(usize, u32)> = haystacks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, hay)| {
+                pattern
+                    .score(Utf32Str::new(hay, &mut buf), &mut matcher)
+                    .map(|score| (i, score))
+            })
+            .collect();
+        // Descending score; stable sort keeps listed order on ties.
+        scored.sort_by_key(|(_, score)| Reverse(*score));
+
+        let mut rows: Vec<Row> = scored
+            .into_iter()
+            .map(|(i, _)| Row::Model(candidates[i].0.clone(), candidates[i].1.clone()))
+            .collect();
+        rows.push(Row::Manual(q.to_string()));
         rows
     }
 

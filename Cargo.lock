@@ -1249,6 +1249,7 @@ dependencies = [
  "ignore",
  "jiff",
  "libc",
+ "nucleo-matcher",
  "os_info",
  "pulldown-cmark",
  "ral-core",
