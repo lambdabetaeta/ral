@@ -17,7 +17,7 @@
 use super::block::{AgentSlot, Block, RailShape, wrap_line};
 use super::fidelity::{self, Fidelity};
 use super::group;
-use super::line::{READ_W, is_blank, plain, prompt_fence, size_bar};
+use super::line::{READ_W, coalesced_queries, is_blank, plain, prompt_fence, size_bar};
 use super::rail::{self, RailKind};
 use crate::bus::Hunk;
 use crate::card::Card;
@@ -365,21 +365,32 @@ impl Viewport {
     }
 
     /// Append pre-rendered chrome (step header, error, banner, subagent
-    /// breadcrumb, summary-less tool call).  `shape` lets the rail dispatch
-    /// on the chrome sub-kind.
+    /// breadcrumb).  `shape` lets the rail dispatch on the chrome sub-kind.
     pub(super) fn push_chrome(&mut self, shape: RailShape, lines: Vec<Line<'static>>) {
         self.push_block(Block::chrome(shape, lines));
     }
 
+    /// Append a summary-less query call.  Adjacent same-tool queries coalesce
+    /// on screen into one `tool : q1, q2, …` line ([`Self::render_query_run`]);
+    /// `query` is `None` for an invisible parse-failure boundary.
+    pub(super) fn push_query(&mut self, tool: &'static str, query: Option<String>) {
+        self.push_block(Block::query(tool, query));
+    }
+
     /// Attach a tool result's magnitude — `text.lines().count()` — to the
-    /// most-recent [`Block::is_tool_call`] block, searched backward from
-    /// the tail since `Patch` / `Wrote` side effects may land between a
-    /// call and its result.  Marks the flatten stale so the collapsed
-    /// header re-renders with its size-bar.  A no-op when no tool call
-    /// precedes the result (e.g. `fff`, whose call is summary-less chrome).
+    /// call it belongs to: the most-recent call-bearing block, searched
+    /// backward from the tail since `Patch` / `Wrote` side effects may land
+    /// between a call and its result.  The search halts at the first
+    /// [`Block::is_call`] — a dialable tool call *or* a summary-less query —
+    /// so a query's result stops there and never reaches past it to clobber an
+    /// earlier dialable call's size bar.  Only a dialable call carries a size
+    /// bar, so landing on a query (which has none) is a no-op that still halts.
+    /// Marks the flatten stale so the collapsed header re-renders.
     pub(super) fn set_result_size(&mut self, text: &str) {
         let n = text.lines().count() as u32;
-        if let Some(block) = self.blocks.iter_mut().rev().find(|b| b.is_tool_call()) {
+        if let Some(block) = self.blocks.iter_mut().rev().find(|b| b.is_call())
+            && block.is_tool_call()
+        {
             block.set_result_size(n);
             self.flat.dirty = true;
         }
@@ -699,12 +710,14 @@ impl Viewport {
     /// ([`Block::observation`] — a call and its reads/greps/execs, bridged
     /// across the interior step boundaries between consecutive calls,
     /// [`Self::observation_run_end`]) folds into one dialable ral block
-    /// ([`super::group`]); every genuine barrier — a diff, a write, a
-    /// surfaced card, markdown, a subagent result, or chrome — renders as its
-    /// own block exactly as before, save a step boundary interior to a run,
-    /// which is folded away.  The projection reads what arrival order already
-    /// adjoins; nothing about how blocks are pushed, logged, or aggregated
-    /// changes.
+    /// ([`super::group`]); a run of adjacent same-tool summary-less queries
+    /// ([`Block::is_query`], bridged the same way) folds into one flat
+    /// `tool : …` line ([`Self::render_query_run`]); every genuine barrier — a
+    /// diff, a write, a surfaced card, markdown, a subagent result, or chrome —
+    /// renders as its own block exactly as before, save a step boundary interior
+    /// to a run, which is folded away.  The projection reads what arrival order
+    /// already adjoins; nothing about how blocks are pushed, logged, or
+    /// aggregated changes.
     /// Each visual row maps to its source block index — a group's rows to
     /// its anchor call — so the dial, click, and copy paths address whole
     /// projected blocks.  Each segment's leading blank collapses against an
@@ -727,6 +740,15 @@ impl Viewport {
                 let end = self.observation_run_end(i);
                 let anchor = self.group_anchor(i, end);
                 let segment = (anchor, self.render_group(i, end, anchor, content_w), false);
+                i = end;
+                segment
+            } else if self.blocks[i].is_query() {
+                // A run of adjacent same-tool query calls coalesces into one
+                // `tool : …` line.  It anchors on its first block — inert, since
+                // a query never dials — and bridges interior step boundaries.
+                let tool = self.blocks[i].query_tool();
+                let end = self.run_end(i, |b| b.query_tool() == tool);
+                let segment = (i, self.render_query_run(i, end, content_w), false);
                 i = end;
                 segment
             } else {
@@ -772,24 +794,31 @@ impl Viewport {
 
     /// The end (exclusive) of the maximal observation run starting at
     /// `start` — the span of [`Block::observation`] blocks the projection
-    /// coalesces into one ral block, **bridged across the step boundaries
-    /// interior to it**.  Each `ral` call is its own provider round-trip, so
-    /// a [`Block::is_step`] chrome (`Kind::Step`) lands between consecutive
-    /// calls; left a barrier it would cut every burst back to a single call.
-    /// A step boundary is provider bookkeeping, not content: when it falls
-    /// *between* observations it is subsumed into the run (and never
-    /// rendered); a step at the run's tail — before genuine content
-    /// (markdown, a diff, a surfaced card, other chrome) or at the buffer's
-    /// end — is left out, so it still renders as the boundary it is.
+    /// coalesces into one ral block.  [`Self::run_end`] over the observation
+    /// predicate.
     fn observation_run_end(&self, start: usize) -> usize {
-        // `end` advances only past an observation, so a trailing step (whose
-        // following observation has not arrived) stays outside the run; an
-        // interior step is folded in once a later observation commits `end`
-        // past it.
+        self.run_end(start, Block::observation)
+    }
+
+    /// The end (exclusive) of the maximal run of `in_run` blocks starting at
+    /// `start`, **bridged across the step boundaries interior to it** — the one
+    /// genuinely shared piece between the ral observation group and the `fff`
+    /// query coalesce.  Each call is its own provider round-trip, so a
+    /// [`Block::is_step`] chrome (`Kind::Step`) lands between consecutive calls;
+    /// left a barrier it would cut every burst back to a single call.  A step
+    /// boundary is provider bookkeeping, not content: when it falls *between*
+    /// run members it is subsumed (and never rendered); a step at the run's tail
+    /// — before genuine content (markdown, a diff, a surfaced card, other
+    /// chrome, a different tool's query) or at the buffer's end — is left out,
+    /// so it still renders as the boundary it is.
+    fn run_end(&self, start: usize, in_run: impl Fn(&Block) -> bool) -> usize {
+        // `end` advances only past a run member, so a trailing step (whose
+        // following member has not arrived) stays outside the run; an interior
+        // step is folded in once a later member commits `end` past it.
         let mut end = start;
         let mut i = start;
         while i < self.blocks.len() {
-            if self.blocks[i].observation() {
+            if in_run(&self.blocks[i]) {
                 i += 1;
                 end = i;
             } else if self.blocks[i].is_step() {
@@ -858,6 +887,33 @@ impl Viewport {
             calls.push(group::Call::new(prev, effects));
         }
         calls
+    }
+
+    /// Render a coalesced query run `start..end` as one `tool : q1, q2, …` line
+    /// ([`coalesced_queries`]), seating the shut `▸` rail on its head row
+    /// exactly as [`Self::render_group`] does.  Placeholder queries
+    /// ([`Block::query_text`] `None`) drop out; an all-placeholder run renders
+    /// nothing — the invisible boundary.  The run's blocks share a tool by
+    /// construction ([`Self::run_end`]'s predicate), so any member names the head.
+    fn render_query_run(&self, start: usize, end: usize, width: u16) -> Vec<Line<'static>> {
+        let queries: Vec<&str> = self.blocks[start..end]
+            .iter()
+            .filter_map(Block::query_text)
+            .collect();
+        if queries.is_empty() {
+            return Vec::new();
+        }
+        let tool = self.blocks[start..end]
+            .iter()
+            .find_map(Block::query_tool)
+            .unwrap_or_default();
+        let mut lines = coalesced_queries(tool, &queries, width);
+        let rail = rail::span(RailKind::ToolCall(false), self.agent, None);
+        let idx = lines.iter().position(|l| !is_blank(l)).unwrap_or(0);
+        if let Some(line) = lines.get_mut(idx) {
+            line.spans.insert(0, rail);
+        }
+        lines
     }
 }
 

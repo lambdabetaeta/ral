@@ -8,7 +8,7 @@
 //! The full prompt — every line — is rendered to the rail before spawn, so the
 //! user can see what the child was asked to do.
 
-use super::{Tool, invalid_input, u64_field};
+use super::{INVALID_INPUT, Tool, invalid_input, u64_field};
 use crate::agent::Agent;
 use crate::bus::{AgentOutcome, AgentResult, Emitter, InboxMsg, Kind};
 use crate::event::ToolResult as SessionToolResult;
@@ -153,7 +153,7 @@ and keeps the result addressable (e.g. the line-hash `edit` needs).  \
             permissions,
         } = match parse_args(&input) {
             Ok(a) => a,
-            Err(reason) => return invalid_input(id, "agent", "<invalid input>", &reason, emit),
+            Err(reason) => return invalid_input(id, "agent", INVALID_INPUT, &reason, emit),
         };
         // The child's authority is the parent's narrowed to the requested base
         // (`parent ⊓ base`), frozen against the child's cwd.  Meet only ever
@@ -162,7 +162,7 @@ and keeps the result addressable (e.g. the line-hash `edit` needs).  \
         let child_caps =
             match crate::policy::narrow(session.caps(), &permissions, &cwd.to_string_lossy()) {
                 Ok(c) => c,
-                Err(reason) => return invalid_input(id, "agent", "<invalid input>", &reason, emit),
+                Err(reason) => return invalid_input(id, "agent", INVALID_INPUT, &reason, emit),
             };
         let mut child = match session.fork(child_caps) {
             Ok(c) => c,
@@ -391,7 +391,7 @@ A no-op if no live agent has that id."
                 return invalid_input(
                     id,
                     "agent_cancel",
-                    "<invalid input>",
+                    INVALID_INPUT,
                     "missing required integer field `id`",
                     emit,
                 );

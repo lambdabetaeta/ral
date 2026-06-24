@@ -504,11 +504,11 @@ fn push_code_row(ls: &mut Vec<Line<'static>>, line: Line<'static>, width: u16) {
     }
 }
 
-/// A tool call with no separate summary — the `fff` query, an
-/// invalid-input header.  There is nothing to dial open, so it is pushed as
-/// inert chrome (`RailShape::ToolCall`) wearing the shut triangle `▸` — a
-/// tool call still, not the prompt's `❖`: `cmd`'s first line is the label,
-/// any remainder follows 2-space indented.
+/// A summary-less query call rendered alone — the per-block `user.log` tee of
+/// a [`super::block::BlockKind::Query`], where there is no run to coalesce.
+/// `cmd`'s first line is the `tool  query` label, any remainder follows
+/// 2-space indented; the block wears the shut triangle `▸`.  On screen the
+/// flatten coalesces a run of these into [`coalesced_queries`] instead.
 pub(super) fn tool_call_static(cmd: &str, tool: &str) -> Vec<Line<'static>> {
     let mut ls = vec![Line::default()];
     ls.extend(tool_call_header(
@@ -524,6 +524,37 @@ pub(super) fn tool_call_static(cmd: &str, tool: &str) -> Vec<Line<'static>> {
         ]));
     }
     ls
+}
+
+/// A coalesced run of summary-less query calls as one line: the `tool` label
+/// in [`SLATE`], a ` : ` separator, then the `queries` joined by `, ` in
+/// [`CYAN`] — the query text reads as the figure, the tool as ground.  The
+/// caller ([`super::viewport`]) prepends the shut `▸` rail to the head row, so
+/// the prefix reserves [`RAIL_W`]; wrapped continuations hang under the first
+/// query column.  Leads with the one blank every block opens with.  `queries`
+/// is never empty — an all-placeholder run renders nothing and never reaches
+/// here.
+pub(super) fn coalesced_queries(tool: &str, queries: &[&str], width: u16) -> Vec<Line<'static>> {
+    const SEP: &str = " : ";
+    let prefix_w = RAIL_W + UnicodeWidthStr::width(tool) + UnicodeWidthStr::width(SEP);
+    let body_w = (width as usize).saturating_sub(prefix_w).max(8);
+    let joined = queries.join(", ");
+    let mut out = vec![Line::default()];
+    push_wrapped(&mut out, &joined, body_w, |chunk, first| {
+        if first {
+            Line::from(vec![
+                Span::styled(tool.to_string(), Style::default().fg(SLATE)),
+                Span::styled(SEP, Style::default().fg(SLATE)),
+                Span::styled(chunk, Style::default().fg(CYAN)),
+            ])
+        } else {
+            Line::from(vec![
+                Span::raw(" ".repeat(prefix_w)),
+                Span::styled(chunk, Style::default().fg(CYAN)),
+            ])
+        }
+    });
+    out
 }
 
 /// The one-line header for an async subagent's landed result: a leading

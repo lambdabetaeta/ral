@@ -51,10 +51,6 @@ pub(super) enum RailShape {
     /// row (painted by the flatten).  No background band — background is the
     /// machine's.
     Prompt,
-    /// A summary-less tool call (the `fff` query, an invalid-input header):
-    /// nothing to dial, but a tool call all the same, so it wears the shut
-    /// tool-call triangle `▸` — not the prompt's `❖`.
-    ToolCall,
 }
 
 /// Where a [`BlockKind::Card`] came from — the distinction the coalescing
@@ -89,13 +85,24 @@ pub(super) struct Reasoning {
 pub(super) enum BlockKind {
     /// A tool call worth revealing: `summary` is the one-line label
     /// shown reduced, `cmd` the full ral source shown revealed.
-    /// Summary-less calls (the `fff` query, an invalid-input header) have
-    /// nothing to reveal and arrive as [`BlockKind::Chrome`] instead, wearing
-    /// the shut `▸` ([`RailShape::ToolCall`]) — inert, but a tool call still.
+    /// Summary-less calls (the `fff` query, an invalid-input placeholder) have
+    /// nothing to reveal and arrive as [`BlockKind::Query`] instead.
     ToolCall {
         tool: &'static str,
         summary: String,
         cmd: String,
+    },
+    /// A summary-less tool call — the `fff` query that coalesces with its
+    /// neighbours into one `fff : q1, q2, …` line ([`super::group`]'s flat
+    /// cousin, projected in [`super::viewport`]).  `query` is the text to show,
+    /// or `None` for a parse-failure placeholder ([`crate::tools::INVALID_INPUT`]):
+    /// such a call renders nothing, present only as the boundary a stray
+    /// [`Block::set_result_size`] stops at so it cannot reach back to an earlier
+    /// call.  Inert (nothing to dial); on the per-block log tee it renders alone
+    /// as `tool  query`, wearing the shut tool-call triangle `▸`.
+    Query {
+        tool: &'static str,
+        query: Option<String>,
     },
     /// Streamed assistant prose; re-wrapped from source at every width.
     /// Plain prose (`reasoning: None`) is product — always full, inert to
@@ -260,6 +267,12 @@ impl Block {
     pub(super) fn chrome(shape: RailShape, lines: Vec<Line<'static>>) -> Self {
         Self::new(BlockKind::Chrome { shape, lines }, Fidelity::default())
     }
+    /// A summary-less query call.  `query` is the text to coalesce into the
+    /// `tool : …` line, or `None` for an invalid-input placeholder (an invisible
+    /// call boundary).
+    pub(super) fn query(tool: &'static str, query: Option<String>) -> Self {
+        Self::new(BlockKind::Query { tool, query }, Fidelity::default())
+    }
 
     /// The block's current disclosure level (`0..=3`).
     pub(super) fn level(&self) -> u8 {
@@ -304,7 +317,7 @@ impl Block {
             BlockKind::ToolCall { .. } | BlockKind::Subagent { .. } => true,
             BlockKind::Markdown { reasoning, .. } => reasoning.is_some(),
             BlockKind::Card { card, .. } => card.has_diff(),
-            BlockKind::Chrome { .. } => false,
+            BlockKind::Query { .. } | BlockKind::Chrome { .. } => false,
         }
     }
 
@@ -312,6 +325,39 @@ impl Block {
     /// attaches to via [`Self::set_result_size`].
     pub(super) fn is_tool_call(&self) -> bool {
         matches!(self.kind, BlockKind::ToolCall { .. })
+    }
+
+    /// True for a summary-less query call — the flatten enters its coalescing
+    /// branch here ([`super::viewport::Viewport::reflow`]).
+    pub(super) fn is_query(&self) -> bool {
+        matches!(self.kind, BlockKind::Query { .. })
+    }
+
+    /// True for a *call-bearing* block — a dialable tool call or a summary-less
+    /// query.  [`Self::set_result_size`] walks back to the first of these so a
+    /// query's result halts here rather than reaching past it to clobber an
+    /// earlier dialable call's size bar.
+    pub(super) fn is_call(&self) -> bool {
+        self.is_tool_call() || self.is_query()
+    }
+
+    /// A query call's tool, the key a coalesced run groups by; `None` on any
+    /// non-query block.  Set for both a shown query and an invisible
+    /// placeholder, so the run scan bridges either.
+    pub(super) fn query_tool(&self) -> Option<&'static str> {
+        match self.kind {
+            BlockKind::Query { tool, .. } => Some(tool),
+            _ => None,
+        }
+    }
+
+    /// The query text to render in a coalesced `tool : …` line — `None` for a
+    /// parse-failure placeholder (rendered invisibly) or any non-query block.
+    pub(super) fn query_text(&self) -> Option<&str> {
+        match &self.kind {
+            BlockKind::Query { query, .. } => query.as_deref(),
+            _ => None,
+        }
     }
 
     /// True for a block the coalescing projection folds into a ral block —
@@ -559,14 +605,18 @@ impl Block {
             // gutter up to it. A diff's rows are already inset, so the hang is a
             // no-op for them; a flush surfaced card is the case it rescues.
             let idx = lines.iter().position(|l| !is_blank(l)).unwrap_or(0);
-            shrink_leading_ws(&mut lines[idx], RAIL_W);
-            for (i, line) in lines.iter_mut().enumerate() {
-                let short = RAIL_W.saturating_sub(leading_ws(line));
-                if i != idx && short > 0 && !is_blank(line) {
-                    line.spans.insert(0, Span::raw(" ".repeat(short)));
+            // A block that renders no row at all — an invisible query
+            // placeholder on the log tee — seats no rail.
+            if idx < lines.len() {
+                shrink_leading_ws(&mut lines[idx], RAIL_W);
+                for (i, line) in lines.iter_mut().enumerate() {
+                    let short = RAIL_W.saturating_sub(leading_ws(line));
+                    if i != idx && short > 0 && !is_blank(line) {
+                        line.spans.insert(0, Span::raw(" ".repeat(short)));
+                    }
                 }
+                lines[idx].spans.insert(0, rail);
             }
-            lines[idx].spans.insert(0, rail);
         }
         lines
     }
@@ -641,6 +691,14 @@ impl Block {
                     line::render_card(card, level)
                 }
             }
+            // The per-block log tee renders a query alone as `tool  query`,
+            // matching a standalone tool call's header; an invisible
+            // placeholder renders nothing.  On screen the flatten coalesces a
+            // run of these into one `tool : …` line instead ([`super::viewport`]).
+            BlockKind::Query { tool, query } => match query {
+                Some(q) => line::tool_call_static(q, tool),
+                None => Vec::new(),
+            },
             BlockKind::Chrome { lines, .. } => lines.clone(),
         }
     }
@@ -653,6 +711,11 @@ impl Block {
     fn rail_kind(&self, level: u8) -> Option<RailKind> {
         match &self.kind {
             BlockKind::ToolCall { .. } => Some(RailKind::ToolCall(level >= 2)),
+            // A summary-less query is a tool call still — the shut triangle
+            // `▸`, inert (nothing to dial open).  Only the per-block log tee
+            // renders a query alone and reaches this; on screen the coalesced
+            // run prepends its own rail.
+            BlockKind::Query { .. } => Some(RailKind::ToolCall(false)),
             // A reasoned answer wears `∴` (the conclusion follows from a
             // folded deliberation); plain prose keeps `·`.
             BlockKind::Markdown {
@@ -685,9 +748,6 @@ impl Block {
                 // The PROMPT_INK body tint is the prompt's body mark; the `❖`
                 // fence is its margin mark — a rare landmark, on both axes.
                 RailShape::Prompt => Some(RailKind::Prompt),
-                // A summary-less tool call is still a tool call — the shut
-                // triangle `▸`, inert (there is nothing to dial open).
-                RailShape::ToolCall => Some(RailKind::ToolCall(false)),
             },
         }
     }

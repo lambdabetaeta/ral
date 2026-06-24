@@ -13,7 +13,7 @@
 //! exits; LMDB locking keeps two concurrent `exarch` processes from
 //! colliding because each pid gets a disjoint directory.
 
-use super::{Tool, invalid_input};
+use super::{INVALID_INPUT, Tool, invalid_input};
 use crate::agent::Agent;
 use crate::bus::{Emitter, Kind};
 use crate::digest::{FFF_CAP, clip};
@@ -244,7 +244,7 @@ grepping their contents."
     ) -> SessionToolResult {
         let args = match parse_args(&input) {
             Ok(a) => a,
-            Err(reason) => return invalid_input(id, "fff", "<invalid input>", &reason, emit),
+            Err(reason) => return invalid_input(id, "fff", INVALID_INPUT, &reason, emit),
         };
         emit.emit(Kind::ToolCall {
             tool: "fff",

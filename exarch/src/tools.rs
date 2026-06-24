@@ -129,10 +129,19 @@ pub(crate) fn find(name: &str) -> Option<&'static dyn Tool> {
         .map(|b| b.as_ref())
 }
 
+/// The placeholder a malformed call passes for `display` when the JSON did
+/// not even parse into args — a cross-tool sentinel.  The frontend reads it
+/// to route such a call to an invisible boundary rather than render a
+/// stand-in token: there is nothing meaningful to show, only the error the
+/// model receives through the result body.  A call that *did* recover a real
+/// offending value (a bad cron string, say) passes that value instead, and
+/// it renders.
+pub(crate) const INVALID_INPUT: &str = "<invalid input>";
+
 /// Render the rail header and an error block for a malformed tool
 /// call, returning the [`SessionToolResult`] the dispatcher commits.
 /// `display` is the partial label the rail should show — typically
-/// the field that did parse, or `"<invalid input>"` when nothing did.
+/// the field that did parse, or [`INVALID_INPUT`] when nothing did.
 pub(super) fn invalid_input(
     id: String,
     tool: &'static str,

@@ -4,7 +4,7 @@
 //! parsing: a missing `cmd` or a non-object input each becomes an
 //! inline error block on the rail with no detour through the session.
 
-use super::{Tool, invalid_input};
+use super::{INVALID_INPUT, Tool, invalid_input};
 use crate::agent::Agent;
 use crate::bus::{Emitter, Kind};
 use crate::event::ToolResult as SessionToolResult;
@@ -107,7 +107,7 @@ impl Tool for RalTool {
     ) -> SessionToolResult {
         let args = match parse_args(&input) {
             Ok(a) => a,
-            Err(reason) => return invalid_input(id, "ral", "<invalid input>", &reason, emit),
+            Err(reason) => return invalid_input(id, "ral", INVALID_INPUT, &reason, emit),
         };
         emit.emit(Kind::ToolCall {
             tool: "ral",

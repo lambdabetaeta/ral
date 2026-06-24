@@ -9,7 +9,7 @@
 //! computation.  Self-scheduling is gated behind `--allow-schedule`: an
 //! agent that can wake itself indefinitely holds real authority.
 
-use super::{Tool, invalid_input, u64_field};
+use super::{INVALID_INPUT, Tool, invalid_input, u64_field};
 use crate::agent::Agent;
 use crate::bus::{Emitter, Kind};
 use crate::event::ToolResult as SessionToolResult;
@@ -93,7 +93,7 @@ woken, not code.  List live ones with `schedules`; remove one with \
             return invalid_input(
                 id,
                 "schedule",
-                "<invalid input>",
+                INVALID_INPUT,
                 "tool input is not a JSON object",
                 emit,
             );
@@ -104,7 +104,7 @@ woken, not code.  List live ones with `schedules`; remove one with \
                 return invalid_input(
                     id,
                     "schedule",
-                    "<invalid input>",
+                    INVALID_INPUT,
                     "missing required string field `prompt`",
                     emit,
                 );
@@ -129,7 +129,7 @@ woken, not code.  List live ones with `schedules`; remove one with \
                 return invalid_input(
                     id,
                     "schedule",
-                    "<invalid input>",
+                    INVALID_INPUT,
                     "give exactly one trigger: `cron` or `after`, not both",
                     emit,
                 );
@@ -138,7 +138,7 @@ woken, not code.  List live ones with `schedules`; remove one with \
                 return invalid_input(
                     id,
                     "schedule",
-                    "<invalid input>",
+                    INVALID_INPUT,
                     "give one trigger: `cron` or `after`",
                     emit,
                 );
@@ -263,7 +263,7 @@ no schedule has that id."
                 return invalid_input(
                     id,
                     "unschedule",
-                    "<invalid input>",
+                    INVALID_INPUT,
                     "missing required integer field `id`",
                     emit,
                 );
