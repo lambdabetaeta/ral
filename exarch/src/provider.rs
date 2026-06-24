@@ -7,6 +7,7 @@
 use crate::cancel;
 use crate::credential::Credential;
 use crate::oauth;
+use crate::tls::STREAM_IDLE_TIMEOUT;
 use crate::tools::ToolSet;
 use clap::ValueEnum;
 use futures_util::StreamExt;
@@ -45,7 +46,7 @@ pub fn caps_for(model: &str) -> crate::pricing::ModelCaps {
 
 /// Retry budget for transient stream/network failures.  Three attempts
 /// means up to two retries before surfacing the error.
-const MAX_ATTEMPTS: u32 = 3;
+pub(crate) const MAX_ATTEMPTS: u32 = 3;
 /// Retry budget for rate-limit (429) failures.  Larger than the
 /// transient budget: a 429 is the server explicitly asking us to wait,
 /// not a broken request, and exarch's headless mode has no human to
@@ -62,20 +63,6 @@ const MAX_DELAY_MS: u64 = 8_000;
 /// ceiling so a server-supplied `retry-after` of up to half a minute is
 /// honoured rather than clamped down to 8s.
 const RATE_LIMIT_MAX_DELAY_MS: u64 = 30_000;
-/// Idle timeout for the streaming request: the maximum gap we tolerate
-/// *between* stream events (and, on the initial select, the bound on
-/// connect + time-to-first-event).  It is reset on every received chunk
-/// — not a total cap on the response — because [`tls::client`]
-/// deliberately sets no request timeout to keep long, legitimately slow
-/// completions alive.  Without it a connection that goes silent (TCP
-/// open, bytes stopped) blocks `resp.stream.next()` forever; under the
-/// terminal-bench harness that hang is reaped only by the 900s wall,
-/// which kills the run and emits an empty result.json.  120s is generous
-/// enough not to trip on a slow time-to-first-token or a long inter-token
-/// gap, yet — even after the transient retry budget (~3 attempts, see
-/// [`MAX_ATTEMPTS`]) — stays well under that wall, so a truly stalled
-/// stream surfaces as a retryable transport error instead of hanging.
-const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ProviderKind {
@@ -717,8 +704,9 @@ impl ProviderError {
     /// The bare cause line, without the variant's framing — what a
     /// [`CutShort::Stalled`] note wants to quote.  For the transient/other
     /// failures a committed stall produces this is the raw stream cause
-    /// (e.g. `"stream idle: no event within timeout"`); for anything else
-    /// it falls back to the full `Display`.
+    /// (e.g. the `reqwest` read-timeout text genai surfaces as a
+    /// `"Web stream error"`); for anything else it falls back to the full
+    /// `Display`.
     fn brief(&self) -> String {
         match self {
             ProviderError::Transient { cause, .. } | ProviderError::RateLimited { cause, .. } => {
@@ -1310,10 +1298,11 @@ impl Live {
                         _ = wait_for_cancel(cancel) => {
                             return Err(ProviderError::Cancelled("before request"));
                         }
-                        // A fresh `sleep` per select entry bounds connect +
-                        // time-to-first-event; surfaced as a transient
-                        // transport error so the retry budget re-issues it
-                        // (no token has streamed yet).
+                        // A fresh `sleep` per select entry bounds the connect
+                        // phase — which `tls::client`'s `read_timeout` does
+                        // not cover — and time-to-first-event; surfaced as a
+                        // transient transport error so the retry budget
+                        // re-issues it (no token has streamed yet).
                         _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
                             return Err(ProviderError::Transient {
                                 cause: "stream idle: no response within timeout".into(),
@@ -1326,21 +1315,19 @@ impl Live {
                         }
                     };
                     loop {
+                        // No idle timer here: a `ping`, an SSE keepalive, or a
+                        // partial frame that genai consumes without yielding a
+                        // decoded `ChatStreamEvent` would falsely read as idle
+                        // at this level even while bytes flow.  Liveness is
+                        // measured at the byte/SSE level by `tls::client`'s
+                        // `read_timeout`; a genuinely stalled socket trips it
+                        // and surfaces here as `Some(Err(_))` carrying a
+                        // `reqwest` timeout, which `from_genai` classifies as
+                        // transient via `is_transport_transient`.
                         let event = tokio::select! {
                             biased;
                             _ = wait_for_cancel(cancel) => {
                                 return Err(ProviderError::Cancelled("mid-stream"));
-                            }
-                            // Re-armed each loop iteration, so it is a
-                            // per-chunk idle timeout: a stream that stops
-                            // emitting events surfaces as a transient error
-                            // rather than blocking `next()` forever.
-                            _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
-                                return Err(ProviderError::Transient {
-                                    cause: "stream idle: no event within timeout".into(),
-                                    attempts: 1,
-                                    body: None,
-                                });
                             }
                             ev = resp.stream.next() => match ev {
                                 Some(Ok(ev)) => ev,
@@ -1430,11 +1417,14 @@ impl Live {
                     }
                     // `summarize` is non-streaming, so there are no
                     // incremental events to idle between: the same budget
-                    // bounds the whole `exec_chat` request.  `tls::client`
-                    // sets no timeout, so without this a stalled connection
-                    // hangs here exactly as it did in `complete` — reaped
-                    // only by the 900s harness wall.  No partial output is
-                    // ever rendered, so it is `Failed` (retryable), never
+                    // bounds the whole `exec_chat` request.  `tls::client`'s
+                    // `read_timeout` already covers a stall once bytes are
+                    // flowing, but not the connect phase that precedes it;
+                    // this select bounds connect too and yields an explicit
+                    // typed `Transient` rather than leaning on the `Display`
+                    // heuristic that a non-streaming `reqwest` timeout would
+                    // otherwise fall through to.  No partial output is ever
+                    // rendered, so it is `Failed` (retryable), never
                     // `Committed`.
                     _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
                         return Attempt::Failed(ProviderError::Transient {
@@ -1701,7 +1691,7 @@ pub mod scripted {
                     usage: Usage::default(),
                     stop_reason: None,
                     cut_short: Some(CutShort::Stalled(
-                        "stream idle: no event within timeout".into(),
+                        "Web stream error: operation timed out".into(),
                     )),
                 }),
             }
@@ -2319,8 +2309,8 @@ mod tests {
         );
     }
 
-    /// A stalled stream surfaces from `complete`'s select as a
-    /// `Transient` error *before* any token streamed — modelled here as
+    /// A stream that stalls before any response surfaces from `complete`'s
+    /// before-request select as a `Transient` error — modelled here as
     /// `Attempt::Failed(Transient)`.  Driven through the real retry loop
     /// it must be re-issued up to `MAX_ATTEMPTS` and then surface `Err`
     /// (bounded, never hanging) so the turn fails cleanly instead of
@@ -2334,7 +2324,7 @@ mod tests {
             async |_attempt| {
                 calls.set(calls.get() + 1);
                 Attempt::Failed(ProviderError::Transient {
-                    cause: "stream idle: no event within timeout".into(),
+                    cause: "stream idle: no response within timeout".into(),
                     attempts: 1,
                     body: None,
                 })
@@ -2353,20 +2343,27 @@ mod tests {
     /// `complete` keeps the streamed prefix as a [`CutShort::Stalled`]
     /// [`StepOut`] so the session can commit it and continue the turn.
     /// `stalled_step_out` is that projection — a text-only assistant
-    /// message, no tool calls, the stream cause carried for the note.
+    /// message, no tool calls, the stream cause carried for the note.  The
+    /// cause is the one a real byte-level stall produces: `read_timeout`
+    /// fires, genai boxes the `reqwest` timeout into `WebStream`, and
+    /// `from_genai` classifies it `Transient`.
     #[test]
     fn stalled_step_out_keeps_streamed_prefix() {
-        let cause = ProviderError::Transient {
-            cause: "stream idle: no event within timeout".into(),
-            attempts: 1,
-            body: None,
-        };
+        let cause = ProviderError::from_genai(
+            &genai::Error::WebStream {
+                model_iden: iden("test-model"),
+                cause: "error sending request for url: operation timed out".into(),
+                error: Box::<dyn std::error::Error + Send + Sync>::from(
+                    "error sending request for url: operation timed out",
+                ),
+            },
+            "test-model",
+        );
+        let brief = cause.brief();
         let step = stalled_step_out("test-model", "partial answer so far", &cause, false);
         assert_eq!(
             step.cut_short,
-            Some(CutShort::Stalled(
-                "stream idle: no event within timeout".into()
-            )),
+            Some(CutShort::Stalled(brief)),
             "the stall cause rides along for the operator note",
         );
         assert!(step.tool_calls.is_empty(), "no tool call survives a stall");
