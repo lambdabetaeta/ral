@@ -180,46 +180,6 @@ Prelude functions cover common cases:
 
 `guard BODY CLEANUP` runs the cleanup block if the body fails, then propagates the failure. `fail [status: 2, message: '…']` raises deliberately.
 
-## Concurrency
-
-`spawn { … }` runs a block on a worker and returns a handle at once; `await $h` blocks until the worker settles and returns a [value, stdout, stderr] record. Awaiting is cheap and returns the moment the block settles. A `spawn` you do not await is not stranded: let the turn return and the host notifies you at the next turn boundary when the worker settles, rendering its surfaced output on the rail; `await $h` then, on that later turn, only when you want the value record. Use like this:
-
-    let b = { cargo build }
-    let h = spawn $b
-    let x = await $h                      # blocks until the worker returns
-    [out: $x[stdout], errs: $x[stderr]]   # as Bytes
-
-Wrap in `audit` to read the recorded tree:
-
-    let suite = spawn { audit { cargo test -q } }
-    # … other work in this turn or a later one — handles persist across turns …
-    let r      = await $suite
-    let report = $r[value]
-    let log    = lines !{from-string $report[children][0][stdout]}
-    [ok: $[$report[status] == 0], log: !{take 20 $log}]
-
-Use `cancel $h` to stop a worker that is no longer needed.
-
-A spawned failure raises at `await` before returning its buffered bytes; put `audit` or `try` inside the worker when logs matter. 
-
-There is also a bounded parallel `map` and a `race`; use `help` to find out more about them. 
-
-## Within
-
-`within` runs a block with a changed directory, environment, or handling of a command call:
-
-    within [dir: 'src'] { grep-files 'TODO' }
-    spawn { within [env: [RUST_LOG: 'debug']] { cargo run } }
-    within [handlers: [curl: { |args| 'offline stub' }]] { fetch-all }
-    let blocked_make = { |name args| echo "blocked: $name ...$args" }
-    within [handler: $blocked_make ] { make deploy }
-
-All keys to `within` are optional, but multiple ones may be used together.
-
-A per-command `handlers:` entry is a unary lambda `{ |args| … }` and receives that command's argument list. The catch-all `handler:` is a binary lambda `{ |name args| … }`; it intercepts EVERY external command, receiving its name and its args.
-
-Use `within` instead of `cd`; paths in results are relative to the `within` directory, so consume them under the same `within`. `env:` values must be scalars. (It is an effect handler; avoid mentioning that to the user.)
-
 ## Audit
 
 `audit { … }` evaluates its body and returns the execution tree as a ral value: each external command's argv, stdout, stderr, exit code, and timing. `audit` does not raise errors: it turns them into record data. It also keeps stdout/stderr apart, so you need not `2>&1` to capture stderr. Example use:
@@ -228,16 +188,61 @@ Use `within` instead of `cd`; paths in results are relative to the `within` dire
     $tree[status]                            # the exit code, as data
     from-string $tree[children][0][stderr]   # cargo writes diagnostics to fd 2
 
-A build is slow, so you usually run it on a worker and read the same tree off the handle once it joins (see Concurrency):
-
-    let trace      = spawn { audit { cargo build } }
-    let cargo-build = await $trace   # the returned value is the audit tree
-
 This is how you read a tool whose exit code is *data* (e.g. `grep` exit 1 meaning no match), deliberate signal like `valgrind --error-exitcode=77`. Wrapping such a tool in `audit` captures the output and lets you branch on the code:
 
     let r      = audit { valgrind --error-exitcode=77 --leak-check=full ./a.out }
     let report = from-string $r[children][0][stderr]
     if $[ $r[status] == 77 ] { "leaks:\n$report" } else { 'clean' }
+
+## Concurrency
+
+`spawn { … }` runs a block on a worker and returns a handle at once:
+
+    let b = { cargo build } 
+    let h = spawn $b        # do not forget to bind the handle; possibly inline the block here
+    `build started`
+
+You will be notified when this completes. Handles persist across turns. In a later turn, `await` to obtain a [value, stdout, stderr] record:
+
+    let x = await $h                      # blocks until the worker returns
+    [out: $x[stdout], errs: $x[stderr]]   # as Bytes
+
+Wrap in `audit` to read the recorded tree:
+
+    let suite = spawn { audit { cargo test -q } }
+
+In a later turn:
+    # … other work in this turn or a later one — handles persist across turns …
+    let r      = await $suite
+    let report = $r[value]
+    let log    = lines !{from-string $report[children][0][stdout]}
+    [ok: $[$report[status] == 0], log: !{take 20 $log}]
+
+    # $suite is still in scope from the previous turn.
+    let r  = await $suite
+    let cx = $r[value]
+    let cargo_stdout  = re-split '\n' $cx[children][0][children][0][stdout]
+    let errs = filter { |l| re-match '^error' $l } $cargo_stdout
+    [status: $cx[status], errors: !{take 30 $errs}, tail: !{take 20 $out}]
+
+Use `cancel $h` to stop a worker that is no longer needed.
+
+There is also a bounded parallel `map` and a `race`; use `help` to find out more about them. 
+
+## Within
+
+`within` is an effect handler that runs a block with a changed directory, environment, or handling of a command call:
+
+    within [dir: 'src'] { grep-files 'TODO' }
+    spawn { within [env: [RUST_LOG: 'debug']] { cargo run } }
+    within [ env : [ API_KEY : '' ], handlers: [curl: { |args| 'offline stub' }]] { fetch-all }
+    let all_blocked = { |name args| echo "blocked: $name ...$args" }
+    within [handler: $all_blocked ] { make deploy }
+    within [handlers: [ git: { |args| echo "git blocked" } ] { !$deploy }
+
+A per-command `handlers:` entry is a one-arg function receiving argvs. The catch-all `handler:` is a two-arg function that intercepts EVERY external command.
+
+Use `within` instead of `cd`. paths in results are relative to the `within` directory, so consume them under the same `within`. `env:` values must be scalars. 
 
 ## I/O
 
