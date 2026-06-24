@@ -519,7 +519,7 @@ pub struct App {
     /// `dying` linger window -- because the unbounded bus channel can still
     /// carry tokens the worker emitted between the cancel and when the
     /// streaming select notices the flag (at most one `wait_for_cancel` poll).
-    /// Re-armed when the next `UserPromptEcho` arrives.
+    /// Disarmed when the next `UserPromptEcho` arrives.
     root_clear_drain: bool,
 }
 
@@ -756,13 +756,13 @@ impl App {
         // left in the unbounded bus -- the tokens and trailing chrome the
         // worker emitted before the streaming `select!` noticed the cancel
         // flag, at most one `wait_for_cancel` poll (~50 ms) of queued events.
-        // The first `UserPromptEcho` is the genuine next prompt: re-arm the
+        // The first `UserPromptEcho` is the genuine next prompt: disarm the
         // guard and let it through unchanged.  A `Born`/`Died` carries a
         // sub-agent own id, never root, so the dying guard above owns them;
         // for root we drop the lot.
         if id == self.root && self.root_clear_drain {
             let echo = matches!(kind, Kind::UserPromptEcho(_));
-            self.root_clear_drain = echo;
+            self.root_clear_drain = !echo;
             if !echo {
                 return;
             }
