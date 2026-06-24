@@ -584,9 +584,10 @@ impl Block {
                 _ => line::tool_call_collapsed(summary, tool, self.result_size, width),
             },
             // Plain prose renders whole. A reasoned answer leads with the
-            // deliberation header, then the answer prose (always), then — as
-            // the level dials up — the reasoning prose unfolds below it,
-            // drained so it reads as the answer's lower-authority shadow.
+            // deliberation header; as the level dials up the reasoning prose
+            // unfolds beneath it — drained, the answer's lower-authority
+            // shadow — and the answer prose (always shown) follows below, so
+            // the block reads top-to-bottom as deliberation then conclusion.
             BlockKind::Markdown {
                 src,
                 reasoning: None,
@@ -596,16 +597,16 @@ impl Block {
                 reasoning: Some(r),
             } => {
                 let mut ls = line::reasoning_header(&r.text, r.say_chars);
-                ls.extend(md::render_md(src, width, MD_INDENT, self.fidelity));
                 if level >= 2 {
-                    ls.push(Line::default());
                     let shadow = md::render_reasoning(&r.text, width, MD_INDENT);
                     ls.extend(if level >= 3 {
                         shadow
                     } else {
                         first_rows(shadow, N)
                     });
+                    ls.push(Line::default());
                 }
+                ls.extend(md::render_md(src, width, MD_INDENT, self.fidelity));
                 ls
             }
             BlockKind::Subagent {
