@@ -991,5 +991,4 @@ mod tests {
         );
         assert!(vp.sticky, "re-armed at the bottom after the clamp");
     }
-    }
 }
