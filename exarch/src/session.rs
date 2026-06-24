@@ -356,7 +356,7 @@ impl Session {
         Ok(())
     }
 
-    pub(crate) fn fork(&self) -> io::Result<Session> {
+    pub(crate) fn fork(&self, caps: ral_core::types::Capabilities) -> io::Result<Session> {
         // The child is an independent fork of the parent session: it snapshots
         // the parent's scope (prelude, agent library, accumulated bindings),
         // dynamic context (cwd, env, grants), and installed builtin table (the
@@ -364,13 +364,15 @@ impl Session {
         // fresh in control counters and session state — its own inbox, its own
         // (fresh) cancellation token, no terminal authority, no flow-back.
         // Core owns the flow matrix, so the builtin table can't be silently
-        // dropped here the way a hand-copied field once was.
+        // dropped here the way a hand-copied field once was.  Its capabilities
+        // are supplied by the spawn site: the parent's verbatim, or the
+        // parent's narrowed to a requested base (`parent ⊓ base`).
         let shell = self.shell.fork_session();
         let child_id = fresh_id();
         let log = self.log.fork(child_id, self.system.len())?;
         Self::assemble(Build {
             system: self.system.clone(),
-            caps: self.caps.clone(),
+            caps,
             shell,
             log,
             is_root: false,
@@ -956,6 +958,12 @@ impl Session {
         self.shell.cwd()
     }
 
+    /// This session's ambient authority — read by the spawn site to compute a
+    /// child's capabilities, either inherited verbatim or narrowed to a base.
+    pub(crate) fn caps(&self) -> &ral_core::types::Capabilities {
+        &self.caps
+    }
+
     /// Best-effort dual-write: log the chrome line, then forward it
     /// through `emit`.  A log write-failure must not block the user line.
     pub(crate) fn note_error(&mut self, msg: String, emit: &Emitter) {
@@ -1344,7 +1352,7 @@ mod tests {
             session.shell.lookup_builtin("window-hash").is_some(),
             "the parent boot shell must carry the exarch host builtins"
         );
-        let child = session.fork().expect("fork child session");
+        let child = session.fork(session.caps().clone()).expect("fork child session");
         for name in ["window-hash", "grep-files", "edit", "explore-dir", "line-hash"] {
             assert!(
                 child.shell.lookup_builtin(name).is_some(),
@@ -1388,7 +1396,7 @@ mod tests {
     fn sub_agent_returns_through_reply() {
         let dir = tmp("reply-terminal");
         let parent = Session::for_test(&dir, "system").unwrap();
-        let mut child = parent.fork().expect("fork child");
+        let mut child = parent.fork(parent.caps().clone()).expect("fork child");
         child.seed("write a report".into());
         let provider = scripted(
             "test-model",
@@ -1418,7 +1426,7 @@ mod tests {
     fn sub_agent_reply_renders_a_structured_payload() {
         let dir = tmp("reply-structured");
         let parent = Session::for_test(&dir, "system").unwrap();
-        let mut child = parent.fork().expect("fork child");
+        let mut child = parent.fork(parent.caps().clone()).expect("fork child");
         child.seed("list the files".into());
         let provider = scripted(
             "test-model",
@@ -1444,7 +1452,7 @@ mod tests {
     fn sub_agent_without_reply_is_re_nudged_then_fails() {
         let dir = tmp("reply-missing");
         let parent = Session::for_test(&dir, "system").unwrap();
-        let mut child = parent.fork().expect("fork child");
+        let mut child = parent.fork(parent.caps().clone()).expect("fork child");
         child.seed("do the thing".into());
         // More prose-only replies than the nudge budget will consume: once it
         // is spent the un-replied finish is accepted and the surplus is never
@@ -1477,7 +1485,7 @@ mod tests {
             "a returning root hands its result back, so it must hold `reply`"
         );
         // A peer (fork) returns through `reply` too.
-        let child = root.fork().expect("fork child");
+        let child = root.fork(root.caps().clone()).expect("fork child");
         assert!(
             child.tools.allows(reply),
             "a peer returns through `reply`, so it must hold it"

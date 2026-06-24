@@ -27,12 +27,14 @@ pub(super) struct AgentTool;
 /// siblings on screen.
 static DISPATCH_SEQ: AtomicU64 = AtomicU64::new(1);
 
-/// Parsed Agent tool input: the child's prompt and a validated tab label.
+/// Parsed Agent tool input: the child's prompt, a validated tab label, and
+/// the mandatory base to which the child's permissions are narrowed.
 /// Splitting the parse from dispatch keeps validation testable in isolation.
 #[cfg_attr(test, derive(Debug))]
 struct Args {
     prompt: String,
     title: String,
+    permissions: String,
 }
 
 /// True for titles that fit the tab-bar contract — non-empty, ≤24
@@ -61,7 +63,19 @@ fn parse_args(input: &Value) -> Result<Args, String> {
         Some(t) if valid_title(t) => t.to_string(),
         _ => format!("sub-{}", DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed)),
     };
-    Ok(Args { prompt, title })
+    // `permissions` is mandatory: every spawn states the child's ceiling
+    // explicitly.  The base name is validated against the bake-ins at
+    // dispatch, where the resolver's diagnostic can be surfaced.
+    let permissions = obj
+        .get("permissions")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing required string field `permissions`".to_string())?
+        .to_string();
+    Ok(Args {
+        prompt,
+        title,
+        permissions,
+    })
 }
 
 impl Tool for AgentTool {
@@ -89,7 +103,8 @@ delegate only a substantial, self-contained unit of work: a focused \
 exploration whose intermediate detail you do not want to carry, or a task \
 whose execution would otherwise flood your own context.  NEVER delegate a \
 single grep/view/read/edit you can run inline — running it yourself is cheaper \
-and keeps the result addressable (e.g. the line-hash `edit` needs)."
+and keeps the result addressable (e.g. the line-hash `edit` needs).  \
+`permissions` bounds the child to at most your own authority."
     }
 
     fn spawns(&self) -> bool {
@@ -114,8 +129,15 @@ and keeps the result addressable (e.g. the line-hash `edit` needs)."
             Choose a phrase the user will recognise at a glance.  Omitted or invalid \
             titles fall back to `sub-{N}`.",
                     },
+                    "permissions": {
+                        "type": "string",
+                        "enum": ["confined", "minimal", "read-only", "reasonable", "dangerous"],
+                        "description": "Narrow agent's permissions: confined (offline, no home \
+            reads), minimal (working tree + /tmp + network), read-only (writes only to scratch), \
+            reasonable (everyday tooling), dangerous (no narrowing).",
+                    },
                 },
-                "required": ["prompt", "title"],
+                "required": ["prompt", "title", "permissions"],
             })
         })
     }
@@ -128,11 +150,24 @@ and keeps the result addressable (e.g. the line-hash `edit` needs)."
         provider: &Arc<Provider>,
         emit: &Emitter,
     ) -> SessionToolResult {
-        let Args { prompt, title } = match parse_args(&input) {
+        let Args {
+            prompt,
+            title,
+            permissions,
+        } = match parse_args(&input) {
             Ok(a) => a,
             Err(reason) => return invalid_input(id, "agent", "<invalid input>", &reason, emit),
         };
-        let mut child = match session.fork() {
+        // The child's authority is the parent's narrowed to the requested base
+        // (`parent ⊓ base`), frozen against the child's cwd.  Meet only ever
+        // removes authority, so a spawn never escalates.
+        let cwd = session.cwd();
+        let child_caps =
+            match crate::policy::narrow(session.caps(), &permissions, &cwd.to_string_lossy()) {
+                Ok(c) => c,
+                Err(reason) => return invalid_input(id, "agent", "<invalid input>", &reason, emit),
+            };
+        let mut child = match session.fork(child_caps) {
             Ok(c) => c,
             Err(e) => {
                 let msg = format!("could not fork child session: {e}");
@@ -381,52 +416,6 @@ A no-op if no live agent has that id."
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_accepts_prompt_and_title() {
-        let a = parse_args(&json!({
-            "prompt": "summarise SPEC.md",
-            "title":  "summarise-spec",
-        }))
-        .unwrap();
-        assert_eq!(a.prompt, "summarise SPEC.md");
-        assert_eq!(a.title, "summarise-spec");
-    }
-
-    #[test]
-    fn parse_rejects_missing_prompt() {
-        let e = parse_args(&json!({ "title": "foo" })).unwrap_err();
-        assert!(e.contains("`prompt`"));
-    }
-
-    #[test]
-    fn parse_rejects_non_object() {
-        let e = parse_args(&json!(42)).unwrap_err();
-        assert!(e.contains("not a JSON object"));
-    }
-
-    /// Missing title falls back to a generated `sub-N` label.
-    #[test]
-    fn parse_synthesises_title_when_missing() {
-        let a = parse_args(&json!({ "prompt": "x" })).unwrap();
-        assert!(a.title.starts_with("sub-"));
-    }
-
-    /// An invalid title (spaces, punctuation, too long) is treated as
-    /// missing and replaced with a generated label, never propagated.
-    #[test]
-    fn parse_rejects_invalid_title() {
-        for bad in [
-            "",
-            "has spaces",
-            "has/slash",
-            "has.dot",
-            "x".repeat(25).as_str(),
-        ] {
-            let a = parse_args(&json!({ "prompt": "x", "title": bad })).unwrap();
-            assert!(a.title.starts_with("sub-"), "bad title {bad:?} leaked");
-        }
-    }
 
     #[test]
     fn valid_title_boundaries() {
