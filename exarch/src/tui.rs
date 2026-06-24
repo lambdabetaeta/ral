@@ -3205,7 +3205,7 @@ fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) -> io::Result<()> {
         .provider(tui.app.focused())
         .map(|p| p.current().tuning().clone())
         .unwrap_or_default();
-    let mut picker = Picker::new(available, subscription, initial_tuning);
+    let mut picker = Picker::new(available, subscription, initial_tuning, provider::caps_for);
     // Seed each provider from the catalog's cache instantly; spawn a background
     // fetch for the rest so the UI shows "loading…" rather than freezing on the
     // network. A ChatGPT plan login has no catalog endpoint, so its curated plan

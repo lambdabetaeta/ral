@@ -103,13 +103,18 @@ pub struct ModelCaps {
 
 #[allow(dead_code)]
 impl ModelCaps {
-    /// Does the model advertise `tools` as a supported parameter?
+    /// Does the model advertise `param` in its `supported_parameters`?
     /// Returns `true` when the list is empty (unknown / catalog miss):
-    /// callers shouldn't refuse tool calls just because the catalog
-    /// didn't list the field — the data is informative, not a gate.
-    pub fn supports_tools(&self) -> bool {
+    /// the data is informative, not a gate, so a caller shouldn't refuse
+    /// a parameter just because the catalog didn't surface the field.
+    pub fn supports(&self, param: &str) -> bool {
         self.supported_parameters.is_empty()
-            || self.supported_parameters.iter().any(|p| p == "tools")
+            || self.supported_parameters.iter().any(|p| p == param)
+    }
+
+    /// Does the model advertise `tools` as a supported parameter?
+    pub fn supports_tools(&self) -> bool {
+        self.supports("tools")
     }
 }
 

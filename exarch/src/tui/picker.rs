@@ -25,6 +25,14 @@
 //! always routes to the search box; `Enter` applies the whole selection
 //! (model + tuning) from any field; `Esc` dismisses.
 //!
+//! The tuning rows gate themselves on the *highlighted* model's catalog
+//! `supported_parameters`: a model that doesn't admit `reasoning` (or
+//! `temperature`) grays that row out, ignores its arrows, and masks the knob
+//! out of the emitted [`Tuning`] so it is never sent — but the picker keeps the
+//! user's setting for the next model that does admit it. An unknown model (a
+//! catalog miss, or the manual row) reads as supported, so a row only grays
+//! when the catalog *positively* reports the parameter absent.
+//!
 //! The picker is a pure display+input component: it holds the query, the
 //! per-provider model lists as they arrive, the selection, and the live
 //! tuning. Fetching lives in the REPL (which owns the credential-backed
@@ -177,6 +185,12 @@ pub struct Picker {
     effort_idx: usize,
     /// The chosen temperature, or `None` for auto (unset).
     temperature: Option<f64>,
+    /// Capability lookup for the *highlighted* model: the tuning rows gate
+    /// themselves on its `supported_parameters` so effort/temperature gray out
+    /// (and stop being sent) on a model that doesn't admit them. Injected
+    /// (production passes [`crate::provider::caps_for`]) so the picker stays a
+    /// pure component the tests can drive with a stub.
+    caps: fn(&str) -> crate::pricing::ModelCaps,
 }
 
 impl Picker {
@@ -189,6 +203,7 @@ impl Picker {
         providers: Vec<ProviderId>,
         subscription: BTreeMap<ProviderId, Subscription>,
         initial: Tuning,
+        caps: fn(&str) -> crate::pricing::ModelCaps,
     ) -> Self {
         let models = providers
             .iter()
@@ -211,6 +226,7 @@ impl Picker {
             focus: Focus::Search,
             effort_idx,
             temperature: initial.temperature,
+            caps,
         }
     }
 
@@ -249,11 +265,42 @@ impl Picker {
             .any(|id| matches!(self.models.get(id), Some(ModelsState::Loading)))
     }
 
-    /// The live tuning the controls currently express.
+    /// The model on the highlighted row, if it is a listed model (the manual
+    /// row and a still-empty list have no model to gate against).
+    fn highlighted_model(&self) -> Option<String> {
+        match self.rows().into_iter().nth(self.selected) {
+            Some(Row::Model(_, model)) => Some(model),
+            _ => None,
+        }
+    }
+
+    /// Whether the highlighted model admits `param` (its catalog
+    /// `supported_parameters`). Unknown models — a catalog miss, the manual
+    /// row, or a still-loading list — read as supported, so the controls are
+    /// only ever grayed when the catalog *positively* says the parameter is
+    /// absent.
+    fn supports(&self, param: &str) -> bool {
+        match self.highlighted_model() {
+            Some(model) => (self.caps)(&model).supports(param),
+            None => true,
+        }
+    }
+
+    /// The live tuning the controls express *for the highlighted model* — a
+    /// knob the model doesn't admit (`reasoning` / `temperature` absent from
+    /// its catalog `supported_parameters`) is masked to `None` so it is neither
+    /// sent nor persisted, while the picker keeps the user's setting for the
+    /// next model that does admit it.
     fn tuning(&self) -> Tuning {
         Tuning {
-            effort: LADDER[self.effort_idx].effort.clone(),
-            temperature: self.temperature,
+            effort: self
+                .supports("reasoning")
+                .then(|| LADDER[self.effort_idx].effort.clone())
+                .flatten(),
+            temperature: self
+                .supports("temperature")
+                .then_some(self.temperature)
+                .flatten(),
         }
     }
 
@@ -324,6 +371,9 @@ impl Picker {
                 }
             }
             Focus::Effort => {
+                if !self.supports("reasoning") {
+                    return;
+                }
                 self.effort_idx = if up {
                     (self.effort_idx + 1).min(LADDER.len() - 1)
                 } else {
@@ -331,6 +381,9 @@ impl Picker {
                 };
             }
             Focus::Temperature => {
+                if !self.supports("temperature") {
+                    return;
+                }
                 self.temperature = if up {
                     Some(snap(self.temperature.map_or(0.0, |t| (t + TEMP_STEP).min(TEMP_MAX))))
                 } else {
@@ -480,8 +533,14 @@ impl Picker {
         f.render_widget(Paragraph::new(self.search_line()).style(plane), chunks[0]);
         f.render_widget(Paragraph::new(self.status_line()).style(plane), chunks[1]);
         self.render_list(f, chunks[2], plane);
-        f.render_widget(Paragraph::new(self.effort_line()).style(plane), chunks[3]);
-        f.render_widget(Paragraph::new(self.temp_line()).style(plane), chunks[4]);
+        f.render_widget(
+            Paragraph::new(self.effort_line(self.supports("reasoning"))).style(plane),
+            chunks[3],
+        );
+        f.render_widget(
+            Paragraph::new(self.temp_line(self.supports("temperature"))).style(plane),
+            chunks[4],
+        );
         let notes = self.failed_lines();
         if !notes.is_empty() {
             f.render_widget(Paragraph::new(notes).style(plane), chunks[5]);
@@ -572,10 +631,28 @@ impl Picker {
         f.render_widget(Paragraph::new(lines).style(plane), list_area);
     }
 
+    /// A grayed tuning row for a model that doesn't admit the parameter — the
+    /// label plus a dim note, so the knob reads as deliberately disabled rather
+    /// than missing.
+    fn unsupported_row(label: &str) -> Line<'static> {
+        let dim = Style::default().fg(SLATE).add_modifier(Modifier::DIM);
+        Line::from(vec![
+            Span::styled(format!("{label:<7}"), dim),
+            Span::styled(
+                "— not supported by this model",
+                dim.add_modifier(Modifier::ITALIC),
+            ),
+        ])
+    }
+
     /// The effort ladder: an ascending block ramp, each rung brightening with
     /// its ordinal (value) as the glyph grows (size); the chosen rung is
-    /// reversed and its label printed.
-    fn effort_line(&self) -> Line<'static> {
+    /// reversed and its label printed. Grayed when the highlighted model has
+    /// no reasoning effort to set.
+    fn effort_line(&self, supported: bool) -> Line<'static> {
+        if !supported {
+            return Self::unsupported_row("effort");
+        }
         let focused = self.focus == Focus::Effort;
         let last = LADDER.len().saturating_sub(1).max(1) as f64;
         let mut spans = vec![self.field_label("effort", Focus::Effort)];
@@ -602,8 +679,12 @@ impl Picker {
 
     /// The temperature track: `TRACK_W` cells coloured along a cold→warm
     /// gradient, filled to the value's fraction of [`TEMP_MAX`] (size), unset
-    /// cells dimmed. Auto draws the whole track faint.
-    fn temp_line(&self) -> Line<'static> {
+    /// cells dimmed. Auto draws the whole track faint; grayed when the
+    /// highlighted model doesn't admit a temperature.
+    fn temp_line(&self, supported: bool) -> Line<'static> {
+        if !supported {
+            return Self::unsupported_row("temp");
+        }
         let focused = self.focus == Focus::Temperature;
         let mut spans = vec![self.field_label("temp", Focus::Temperature)];
 
@@ -674,11 +755,19 @@ mod tests {
         }))
     }
 
+    /// A caps stub that knows nothing — an empty `supported_parameters` reads
+    /// as "supports everything", so the tuning rows stay live (the common case
+    /// these tests assume).
+    fn caps_unknown(_: &str) -> crate::pricing::ModelCaps {
+        crate::pricing::ModelCaps::default()
+    }
+
     fn loaded_picker() -> Picker {
         let mut p = Picker::new(
             vec![fam(ProviderKind::Anthropic), fam(ProviderKind::Deepseek)],
             BTreeMap::new(),
             Tuning::default(),
+            caps_unknown,
         );
         p.set_models(
             &fam(ProviderKind::Anthropic),
@@ -723,6 +812,7 @@ mod tests {
             vec![fam(ProviderKind::Openai)],
             BTreeMap::from([(fam(ProviderKind::Openai), Subscription::ChatGpt)]),
             Tuning::default(),
+            caps_unknown,
         );
         p.set_models(
             &fam(ProviderKind::Openai),
@@ -759,6 +849,7 @@ mod tests {
             vec![fam(ProviderKind::OpencodeGo)],
             BTreeMap::from([(fam(ProviderKind::OpencodeGo), Subscription::FlatRate)]),
             Tuning::default(),
+            caps_unknown,
         );
         p.set_models(
             &fam(ProviderKind::OpencodeGo),
@@ -829,7 +920,12 @@ mod tests {
     #[test]
     fn custom_provider_lists_and_selects() {
         let llama = custom("local-llama");
-        let mut p = Picker::new(vec![llama.clone()], BTreeMap::new(), Tuning::default());
+        let mut p = Picker::new(
+            vec![llama.clone()],
+            BTreeMap::new(),
+            Tuning::default(),
+            caps_unknown,
+        );
         p.set_models(&llama, ModelsState::Loaded(vec!["llama-3".into()]));
         let rows = p.rows();
         assert!(matches!(&rows[0], Row::Model(id, m) if id == &llama && m == "llama-3"));
@@ -955,8 +1051,72 @@ mod tests {
                 effort: Some(ReasoningEffort::Medium),
                 temperature: Some(0.5),
             },
+            caps_unknown,
         );
         assert_eq!(LADDER[p.effort_idx].label, "med");
         assert_eq!(p.temperature, Some(0.5));
+    }
+
+    /// A model whose catalog lists `temperature` but not `reasoning`: effort
+    /// is masked out of the tuning and its arrows do nothing, while
+    /// temperature stays live — and the masked effort is restored when a
+    /// reasoning-capable model is highlighted again.
+    fn caps_split(model: &str) -> crate::pricing::ModelCaps {
+        let supported_parameters = if model == "chat-only" {
+            vec!["temperature".to_string()]
+        } else {
+            vec!["reasoning".to_string(), "temperature".to_string()]
+        };
+        crate::pricing::ModelCaps {
+            supported_parameters,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn unsupported_effort_is_masked_and_remembered() {
+        let mut p = Picker::new(
+            vec![fam(ProviderKind::Anthropic)],
+            BTreeMap::new(),
+            Tuning::default(),
+            caps_split,
+        );
+        p.set_models(
+            &fam(ProviderKind::Anthropic),
+            ModelsState::Loaded(vec!["reasoner".into(), "chat-only".into()]),
+        );
+
+        // On the reasoning-capable row, set effort=high and temp=0.1.
+        p.key(KeyCode::Tab); // Effort
+        for _ in 0..4 {
+            p.key(KeyCode::Right); // auto → none → low → med → high
+        }
+        p.key(KeyCode::Tab); // Temperature
+        p.key(KeyCode::Right); // auto → 0.0
+        p.key(KeyCode::Right); // 0.0 → 0.1
+        let live = p.tuning();
+        assert_eq!(live.effort.as_ref().map(|e| e.variant_name()), Some("high"));
+        assert_eq!(live.temperature, Some(0.1));
+
+        // Highlight the chat-only model: effort masked out, temperature kept.
+        p.key(KeyCode::Tab); // Search
+        p.key(KeyCode::Down); // → chat-only
+        let masked = p.tuning();
+        assert!(masked.effort.is_none(), "reasoning masked for chat-only");
+        assert_eq!(masked.temperature, Some(0.1));
+
+        // Its effort arrows are inert.
+        p.key(KeyCode::Tab); // Effort
+        p.key(KeyCode::Left);
+        assert_eq!(LADDER[p.effort_idx].label, "high", "rung unchanged");
+
+        // Back on the reasoning model the setting returns.
+        p.key(KeyCode::Tab); // Temperature
+        p.key(KeyCode::Tab); // Search
+        p.key(KeyCode::Up); // → reasoner
+        assert_eq!(
+            p.tuning().effort.as_ref().map(|e| e.variant_name()),
+            Some("high")
+        );
     }
 }
