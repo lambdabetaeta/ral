@@ -12,11 +12,13 @@
 //! The block dials through three levels, with **no L0** and **L1 the
 //! floor** — a coalesced block always shows at least its live tip:
 //!
-//! - **L1, the live tip** — one line: the latest call's intent and a
-//!   *vertical* sparkline (one bar per call, height ∝ its result magnitude,
-//!   left→right in call order), then that latest call's effects.  Earlier
-//!   calls are just their bar; the text refreshes to the newest call as the
-//!   block grows.  The bar count *is* the count — no `×N`.
+//! - **L1, the live tip** — one line: the latest *settled* call's intent and
+//!   a *vertical* sparkline (one bar per call, height ∝ its result magnitude,
+//!   left→right in call order), then that call's effects.  Earlier calls are
+//!   just their bar; the text refreshes to the newest call once its result
+//!   lands — a call still in flight registers only as its bar, so the settled
+//!   tip below never blanks between one call and the next.  The bar count *is*
+//!   the count — no `×N`.
 //! - **L2, the full list** — every call: its intent, its effects, and its
 //!   bar.
 //! - **L3, everything** — L2 plus each call's full ral `cmd` source.
@@ -116,7 +118,21 @@ pub(super) fn body(calls: &[Call], level: u8, width: usize) -> Vec<Line<'static>
 /// Only the newest call shows as text; every earlier call is just its bar in
 /// the sparkline.
 fn live_tip(calls: &[Call], width: usize) -> Vec<Line<'static>> {
-    let latest = calls.last().expect("a run has at least one call");
+    // The tip narrates the latest *settled* call — the most recent one whose
+    // result has landed (`magnitude.is_some()`) — not a call still in flight.
+    // A pending call has no effects yet, so anchoring the tip on `calls.last()`
+    // would blank the prior call's reads the instant the next call opens, then
+    // refill them when its result arrives a frame later: a momentary shrink
+    // that reads as a flicker. The in-flight call still registers as its own
+    // bar in the sparkline (the growing edge reads as accruing volume), while
+    // the settled tip below holds a finished image until the new result
+    // replaces it atomically. Falls back to the run's opening call — in flight,
+    // with nothing yet to show — before any result has landed.
+    let tip = calls
+        .iter()
+        .rev()
+        .find(|c| c.magnitude.is_some())
+        .unwrap_or_else(|| calls.last().expect("a run has at least one call"));
     let head = head_span(calls);
     let lead_w = UnicodeWidthStr::width(head.content.as_ref()) + GAP;
     let mut ls = vec![Line::default()];
@@ -127,8 +143,8 @@ fn live_tip(calls: &[Call], width: usize) -> Vec<Line<'static>> {
         // bake in its width and the bars target `bar_col - RAIL_W` to land at
         // `bar_col` once the row shifts.
         RAIL_W + lead_w,
-        &latest.intent,
-        latest.context,
+        &tip.intent,
+        tip.context,
         sparkline(calls),
         calls.len(),
         bar_col(width).saturating_sub(RAIL_W),
@@ -138,7 +154,7 @@ fn live_tip(calls: &[Call], width: usize) -> Vec<Line<'static>> {
     // once the viewport prepends the rail — so each observation reads as
     // belonging to the call above it, and its machine wash starts there.
     let effect_indent = " ".repeat(RAIL_W + lead_w);
-    ls.extend(indent_rows(&latest.effects, &effect_indent, width));
+    ls.extend(indent_rows(&tip.effects, &effect_indent, width));
     ls
 }
 
@@ -398,6 +414,30 @@ mod tests {
 
         let lead_w = UnicodeWidthStr::width("ral") + GAP;
         assert_eq!(indent_of(&rows[1]), RAIL_W + lead_w);
+    }
+
+    /// A call still in flight (no result yet, `magnitude: None`) carries no
+    /// effects, so anchoring the tip on `calls.last()` would blank the prior
+    /// call's reads until the new result lands.  The tip instead narrates the
+    /// latest *settled* call, while the pending call still adds its bar to the
+    /// sparkline — the count stays the real count and the settled image below
+    /// never blanks between one call and the next.
+    #[test]
+    fn live_tip_anchors_on_latest_settled_call_not_a_pending_one() {
+        let width = 100;
+        let calls = vec![call("settled read", Some(7)), call("pending grep", None)];
+        let rows = nonblank(&body(&calls, 1, width));
+
+        let head = &rows[0];
+        assert!(head.contains("settled read"), "tip narrates the settled call");
+        assert!(!head.contains("pending grep"), "not the in-flight call");
+        // The pending call still counts toward the sparkline, as its shortest
+        // bar — the row width stays pinned to the run's full count.
+        assert!(head.ends_with(line::spark_glyph(None)));
+        assert_eq!(
+            UnicodeWidthStr::width(head.as_str()),
+            bar_col(width) - RAIL_W + 1
+        );
     }
 
     /// L2 list row: the bare `ral` head, then per-call intent rows whose
