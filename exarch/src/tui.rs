@@ -46,7 +46,10 @@ use std::sync::Arc;
 
 use crossterm::{
     cursor::Show,
-    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
+    event::{
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
     terminal::{
         BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
@@ -121,6 +124,10 @@ const SCROLL_STEP: usize = 3;
 const YANK_CAP: usize = 6000;
 
 static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Whether the kitty keyboard-enhancement flags are currently pushed, so the
+/// matching pop runs exactly once even when the panic hook and `Drop` both
+/// reach [`restore_terminal_modes`] on an unwind.
+static KBD_ENHANCED: AtomicBool = AtomicBool::new(false);
 static PANIC_RESTORE_HOOK: Once = Once::new();
 
 fn install_panic_restore_hook() {
@@ -135,20 +142,43 @@ fn install_panic_restore_hook() {
     });
 }
 
-fn enter_terminal_modes() -> io::Result<Term> {
+/// Apply the raw-mode + alternate-screen + bracketed-paste + mouse-capture
+/// modes to the current `stdout`, and opt into the kitty keyboard protocol.
+/// Split out from [`enter_terminal_modes`] so the editor hatch
+/// ([`compose_in_editor`]) can re-enter the same modes after suspending the
+/// TUI for a child editor, without building a second [`Term`].
+fn apply_terminal_modes() -> io::Result<()> {
     enable_raw_mode()?;
     execute!(
         io::stdout(),
         EnterAlternateScreen,
         EnableBracketedPaste,
-        EnableMouseCapture
+        EnableMouseCapture,
     )?;
+    // Without the enhancement protocol the Meta/Alt chords the emacs keymap
+    // binds — M-f, M-b, M-d, M-<, M-> — never reach crossterm as ALT events.
+    // Terminals that do not implement it ignore the sequence; the matching pop
+    // in `restore_terminal_modes` is gated on `KBD_ENHANCED` so it stays
+    // balanced either way.
+    execute!(
+        io::stdout(),
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    )?;
+    KBD_ENHANCED.store(true, Ordering::Release);
+    Ok(())
+}
+
+fn enter_terminal_modes() -> io::Result<Term> {
+    apply_terminal_modes()?;
     let mut term = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     term.hide_cursor()?;
     Ok(term)
 }
 
 fn restore_terminal_modes() {
+    if KBD_ENHANCED.swap(false, Ordering::AcqRel) {
+        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+    }
     let _ = execute!(
         io::stdout(),
         Show,
@@ -157,6 +187,72 @@ fn restore_terminal_modes() {
         LeaveAlternateScreen
     );
     let _ = disable_raw_mode();
+}
+
+/// Resolve the editor to launch for `C-x C-e`: `$VISUAL`, then `$EDITOR`,
+/// then `vi`.  The value is split on whitespace so a spec like `emacsclient
+/// -t` or `code --wait` keeps its arguments.
+fn editor_command() -> (String, Vec<String>) {
+    let spec = std::env::var("VISUAL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("EDITOR").ok().filter(|s| !s.trim().is_empty()))
+        .unwrap_or_else(|| "vi".to_string());
+    let mut parts = spec.split_whitespace().map(str::to_string);
+    let program = parts.next().unwrap_or_else(|| "vi".to_string());
+    (program, parts.collect())
+}
+
+/// Compose `draft` in the user's `$EDITOR`: write it to a scratch file, suspend
+/// the TUI's terminal modes so the child editor owns the tty, run it, then
+/// re-enter and read the result back.  Returns the edited text with one
+/// trailing newline trimmed (the prompt is newline-joined, so the editor's
+/// final newline would otherwise add a blank last row), or `None` when the
+/// editor could not be launched, exited non-zero, or left nothing readable —
+/// in every such case the original draft is kept.  Only a failure to re-enter
+/// the terminal modes (a broken tty) propagates, since the TUI cannot continue.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:editor-compose] writes the prompt draft to a scratch file, spawns the user's $EDITOR on it, and reads it back for the C-x C-e hatch; a UI action on a temp file, not turn-time model I/O"
+)]
+fn edit_text_in_editor(draft: &str) -> io::Result<Option<String>> {
+    let path = std::env::temp_dir().join(format!("exarch-prompt-{}.md", std::process::id()));
+    if std::fs::write(&path, draft).is_err() {
+        return Ok(None);
+    }
+    let (program, args) = editor_command();
+
+    restore_terminal_modes();
+    let status = std::process::Command::new(&program)
+        .args(&args)
+        .arg(&path)
+        .status();
+    apply_terminal_modes()?;
+
+    let edited = match status {
+        Ok(s) if s.success() => match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let text = text.strip_suffix('\n').unwrap_or(&text);
+                Some(text.strip_suffix('\r').unwrap_or(text).to_string())
+            }
+            Err(_) => None,
+        },
+        _ => None,
+    };
+    let _ = std::fs::remove_file(&path);
+    Ok(edited)
+}
+
+/// Drive the `C-x C-e` editor hatch from the UI loop, which owns the terminal
+/// the editor must borrow.  Adopts the edited text as the prompt draft and
+/// forces a full repaint over whatever the editor left on the screen.
+fn compose_in_editor(tui: &mut Tui) -> io::Result<()> {
+    let draft = tui.app.prompt_text();
+    if let Some(edited) = edit_text_in_editor(&draft)? {
+        tui.app.adopt_draft(&edited);
+    }
+    tui.guard.term().clear()?;
+    Ok(())
 }
 
 /// RAII guard for the raw-mode + bracketed-paste + alternate-screen +
@@ -396,6 +492,12 @@ pub struct App {
     /// textarea; when `None`, the prompt edits exactly as it did before vi
     /// mode existed.  Started in [`Mode::Insert`] (see [`App::new`]).
     vim: Option<Vim>,
+    /// The first key of a `C-x …` editor-command chord has been seen; the next
+    /// keystroke completes or cancels it (see [`App::key`]).
+    cx_pending: bool,
+    /// `C-x C-e` was pressed: the UI loop should suspend the TUI and compose the
+    /// prompt in `$EDITOR`.  Set here, drained by [`App::take_editor_request`].
+    editor_request: bool,
 }
 
 /// Where the content area sat in the last drawn frame.
@@ -500,6 +602,8 @@ impl App {
             press: None,
             matrix_sort: MatrixSort::default(),
             vim,
+            cx_pending: false,
+            editor_request: false,
         }
     }
 
@@ -1253,7 +1357,22 @@ impl App {
     }
 
     pub fn paste(&mut self, s: &str) {
+        self.cx_pending = false;
         self.textarea.insert_str(s);
+    }
+
+    /// Adopt `text` returned by the external editor as the live prompt draft,
+    /// leaving any in-progress history browse so a later Up/Down does not
+    /// overwrite the edit.
+    fn adopt_draft(&mut self, text: &str) {
+        self.hist_pos = None;
+        self.set_prompt(text);
+    }
+
+    /// Take the pending `C-x C-e` request, if any: the UI loop calls this after
+    /// each edit key to learn whether it must suspend for the external editor.
+    fn take_editor_request(&mut self) -> bool {
+        std::mem::take(&mut self.editor_request)
     }
 
     /// The prompt's current contents, lines newline-joined.
@@ -1329,20 +1448,22 @@ impl App {
         if self.picker.is_some() {
             return;
         }
-        // Ctrl+Y yanks the focused tab's full committed history to the
-        // system clipboard via OSC 52 — works on any tab, including
-        // subagents (handy when you want to grab the run's transcript
-        // before its linger window expires).  Native terminal selection
-        // is still the right tool for sub-ranges; this is the
-        // "grab everything" shortcut.
-        if k.code == KeyCode::Char('y') && k.modifiers.contains(KeyModifiers::CONTROL) {
-            if let Some(vp) = self.viewports.get(&self.focused()) {
-                // OSC 52 has a per-sequence cap (see `osc52_copy`); a full
-                // transcript blows past it and the terminal drops the whole
-                // sequence, copying nothing.  Bound the payload to its tail —
-                // the most-recent content, which is what Ctrl-Y is for.
-                let _ = osc52_copy(tail_bytes(&vp.yank_text(), YANK_CAP));
+        // Ctrl-X opens the editor-command prefix (emacs convention).  The next
+        // key completes the chord: Ctrl-E composes the prompt in `$EDITOR` (the
+        // request is drained by the UI loop, which owns the terminal it must
+        // suspend); any other key cancels.  The widget's own Ctrl-X (cut) yields
+        // to the prefix — killing stays on Ctrl-W / Ctrl-K.
+        if std::mem::take(&mut self.cx_pending) {
+            if can_edit
+                && k.code == KeyCode::Char('e')
+                && k.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                self.editor_request = true;
             }
+            return;
+        }
+        if can_edit && k.code == KeyCode::Char('x') && k.modifiers.contains(KeyModifiers::CONTROL) {
+            self.cx_pending = true;
             return;
         }
         // Tab cycles regardless of focus; every other key is delivered to
@@ -1426,6 +1547,7 @@ impl App {
     /// block it landed on.  Shift+left falls through to the terminal's
     /// own selection, so we never see — or fight — it.
     pub fn mouse(&mut self, me: MouseEvent) {
+        self.cx_pending = false;
         match me.kind {
             // Over the rail glyph of a dialable block, the wheel dials the
             // block's disclosure level (up reveals, down reduces) and
@@ -1589,7 +1711,7 @@ impl App {
     /// The focused tab's latest assistant reply as raw markdown — the
     /// trailing run of prose blocks (see [`Viewport::latest_reply_md`]).
     /// Empty when the tab has no viewport or its last block is not prose.
-    /// `/copy` reads this; the focused tab matches `Ctrl+Y`'s target.
+    /// `/copy` reads this for the focused tab.
     pub(in crate::tui) fn latest_reply(&self) -> String {
         self.viewports
             .get(&self.focused())
@@ -2373,7 +2495,7 @@ fn footer_hint() -> Line<'static> {
     let st = Style::default()
         .fg(SLATE)
         .add_modifier(Modifier::DIM | Modifier::ITALIC);
-    let hint = " Tab pane • ⇧Tab reorder • click ▸ expand • wheel ▸ dial • drag copy (⇧ native) • wheel/PgUp scroll • Ctrl-Y yank • Ctrl-C cancel • /quit to leave ";
+    let hint = " Tab pane • ⇧Tab reorder • click ▸ expand • wheel ▸ dial • drag copy (⇧ native) • wheel/PgUp scroll • Ctrl-X Ctrl-E editor • Ctrl-C cancel • /quit to leave ";
     Line::from(Span::styled(hint, st))
 }
 
@@ -2803,7 +2925,12 @@ fn ui_loop(
                                 // mailbox is gone, so the line is dropped.
                             }
                         }
-                        KeyAction::Edit => tui.app.key(k, steerable),
+                        KeyAction::Edit => {
+                            tui.app.key(k, steerable);
+                            if tui.app.take_editor_request() {
+                                compose_in_editor(tui)?;
+                            }
+                        }
                     }
                 }
                 CtEvent::Paste(s) => tui.app.paste(&s),
@@ -2884,9 +3011,9 @@ fn cmd_legend(app: &mut App) {
 
 /// Copy the latest assistant reply — the focused tab's trailing prose, as raw
 /// markdown — to the system clipboard via OSC 52.  An oversized reply exceeds
-/// the terminal's per-sequence limit, so copy its tail (the same bound `Ctrl+Y`
-/// uses) and say so, rather than let the terminal drop the whole sequence and
-/// copy nothing silently.
+/// the terminal's per-sequence limit, so copy its tail (bounded by `YANK_CAP`)
+/// and say so, rather than let the terminal drop the whole sequence and copy
+/// nothing silently.
 fn cmd_copy(app: &mut App) {
     let id = app.root;
     let reply = app.latest_reply();

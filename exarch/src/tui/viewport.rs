@@ -585,16 +585,6 @@ impl Viewport {
         tail.concat().trim().to_owned()
     }
 
-    /// Plain text of the whole buffer, the projection `Ctrl+Y` yanks.
-    pub(super) fn yank_text(&self) -> String {
-        self.flat
-            .rows
-            .iter()
-            .map(plain)
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
     // ── rendering ────────────────────────────────────────────────────────
 
     /// The provisional rail seat for the in-flight response: a single row
