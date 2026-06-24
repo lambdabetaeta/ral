@@ -50,7 +50,7 @@ pub(super) struct Viewport {
     offset: usize,
     /// Follow the tail: while set, [`Self::render_window`] pins the trailing
     /// segment's head row in place (see [`Self::tail_anchored_offset`]).
-    /// Cleared when the user scrolls up, re-armed when they scroll back down.
+    /// Cleared when the user scrolls (either direction), re-armed when they scroll back down.
     sticky: bool,
     /// Memoised flatten of [`Self::blocks`] into wrapped visual rows.
     flat: Flat,
@@ -524,6 +524,7 @@ impl Viewport {
         self.offset = self.offset.saturating_sub(n);
     }
     pub(super) fn scroll_down(&mut self, n: usize) {
+        self.sticky = false;
         self.offset = self.offset.saturating_add(n);
     }
 
@@ -950,5 +951,45 @@ mod tests {
             !plain(w.lines.last().expect("committed rows")).contains('░'),
             "an idle viewport shows no streaming seat"
         );
+    }
+
+    /// Scrolling down while sticky must not over-scroll past `max_off`.
+    /// Before the fix, `scroll_down` left `sticky` set, so
+    /// [`Self::tail_anchored_offset`]—whose `.max(self.offset)` floor is meant
+    /// to keep the view from receding as content grows—instead let the offset
+    /// creep up to the tail segment head row, blanking the lower rows.
+    /// Clearing `sticky` on every user scroll routes through the non-sticky
+    /// clamp in [`Self::render_window`], which bounds `offset` to `max_off`.
+    #[test]
+    fn scroll_down_while_sticky_clamps_to_max_off() {
+        let mut vp = viewport();
+        // Enough chrome blocks to overflow a 10-row window.
+        for i in 0..10 {
+            vp.push_chrome(RailShape::Plain, vec![
+                Line::from(format!("block {i} line a")),
+                Line::from(format!("block {i} line b")),
+                Line::from(format!("block {i} line c")),
+            ]);
+        }
+        let height = 10;
+        // First render establishes sticky at the bottom.
+        let w0 = vp.render_window(READ_W, height);
+        assert!(vp.sticky, "a fresh viewport follows the tail");
+        let max_off = w0.offset;
+        // Scrolling down while sticky should be a no-op (already at the
+        // bottom), not an over-scroll blanking rows below.
+        vp.scroll_down(5);
+        let w1 = vp.render_window(READ_W, height);
+        assert_eq!(
+            w1.offset, max_off,
+            "scroll_down while sticky stays at max_off, not past it"
+        );
+        assert_eq!(
+            w1.lines.len(),
+            height,
+            "the window fills every row — no blank space below the tail"
+        );
+        assert!(vp.sticky, "re-armed at the bottom after the clamp");
+    }
     }
 }
