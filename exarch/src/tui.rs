@@ -449,8 +449,8 @@ pub struct App {
     /// steer the next assistant step ([`Agent::dispatch`]) and the remainder
     /// at the next turn boundary ([`Inbox::next_or_idle`]). Until drained,
     /// pending messages render in the strip above the input
-    /// ([`line::queued_prompt`]) and bare Up on an empty prompt pulls the newest
-    /// one back for editing.
+    /// ([`line::queued_prompt`]) and bare Up on an empty prompt pulls the
+    /// whole queued run back into the editor for revision.
     inbox: Inbox,
     total_usage: Usage,
     /// Last turn's prompt size (genai's `prompt_tokens`, which already
@@ -1400,17 +1400,19 @@ impl App {
         }
     }
 
-    /// Pull the newest pending prompt back into the editor for revision.
-    /// A non-empty live draft wins over queue editing: Up keeps its ordinary
-    /// history behaviour rather than discarding text the user has started.
+    /// Pull every pending prompt back into the editor for revision, joined
+    /// with a blank line so each queued message stays distinct.  A non-empty
+    /// live draft wins over queue editing: Up keeps its ordinary history
+    /// behaviour rather than discarding text the user has started.
     fn edit_queued_prompt(&mut self) -> bool {
         if self.hist_pos.is_some() || self.textarea.lines().iter().any(|line| !line.is_empty()) {
             return false;
         }
-        let Some(prompt) = self.inbox.pop_back_user() else {
+        let Some(prompts) = self.inbox.pop_back_user_all() else {
             return false;
         };
-        self.set_prompt(&prompt);
+        let joined = prompts.join("\n\n");
+        self.set_prompt(&joined);
         true
     }
 
@@ -1559,8 +1561,8 @@ impl App {
             // prompt's edge rows: with the cursor mid-text in a
             // multi-line draft they fall through and move the cursor.
             // When the prompt is empty and prompts are queued above it,
-            // Up first pulls the newest queued prompt back down for
-            // editing, removing it from the pending queue.
+            // Up pulls the entire queued run back down into the editor,
+            // dequeueing all of them so the user can revise the whole batch.
             KeyCode::Up if self.focused() == self.root && k.modifiers.is_empty() => {
                 if self.textarea.cursor().0 == 0 {
                     if !self.edit_queued_prompt() {

@@ -507,18 +507,27 @@ impl Inbox {
             .collect()
     }
 
-    /// Pull the newest pending *user* prompt back out for editing — but
-    /// only if the tail is user steering.  A pending wakeup or agent result
-    /// is not the user's draft and is never pulled into the editor.
-    pub fn pop_back_user(&self) -> Option<String> {
+    /// Pull every pending user prompt back out for editing at once — all the
+    /// `UserSteering` messages in the queue, wherever they sit, leaving any
+    /// non-user deliveries (a wakeup, an agent result, a `spawn`'s surface) in
+    /// place for the turn boundary.  A user prompt queued behind a wakeup is
+    /// still the user's draft and should come back with the rest; the wakeup is
+    /// not the user's draft and stays queued.
+    ///
+    /// Returns oldest-first (the order they appear in the pending-prompt strip),
+    /// or `None` if no user prompts are queued.
+    pub fn pop_back_user_all(&self) -> Option<Vec<String>> {
         let mut q = self.shared.queue.lock().expect("inbox lock poisoned");
-        match q.back() {
-            Some(InboxMsg::UserSteering(_)) => match q.pop_back() {
-                Some(InboxMsg::UserSteering(s)) => Some(s),
-                _ => unreachable!("tail just checked to be user steering"),
-            },
-            _ => None,
+        let mut prompts: Vec<String> = Vec::new();
+        let mut kept: VecDeque<InboxMsg> = VecDeque::with_capacity(q.len());
+        while let Some(msg) = q.pop_front() {
+            match msg {
+                InboxMsg::UserSteering(s) => prompts.push(s),
+                other => kept.push_back(other),
+            }
         }
+        *q = kept;
+        (!prompts.is_empty()).then_some(prompts)
     }
 
     /// Mid-turn drain at a tool-call boundary: take *every* tool-boundary
@@ -1488,15 +1497,46 @@ mod tests {
         assert!(inbox.is_empty());
     }
 
-    /// A non-user tail is never pulled into the editor by `pop_back_user`,
-    /// and a wakeup is reported at the turn boundary only.
+    /// A queue with no user prompts yields `None`: a sole wakeup is not the
+    /// user's draft and stays for the turn boundary.
     #[test]
-    fn inbox_pop_back_user_ignores_non_user_tail() {
+    fn inbox_pop_back_user_all_no_user_prompts() {
         let inbox = Inbox::new();
-        inbox.push_user("draft".into());
         inbox.push(wakeup("x", "@", "p"));
-        assert_eq!(inbox.pop_back_user(), None, "tail is a wakeup, not a draft");
-        assert_eq!(wakeup("x", "@", "p").boundary(), Boundary::Turn);
+        assert_eq!(
+            inbox.pop_back_user_all(),
+            None,
+            "no user prompts to recall",
+        );
+        assert!(matches!(inbox.drain_turn(), Some(Turn::Wakeup(_))));
+    }
+
+    /// `pop_back_user_all` extracts every user prompt from the queue — even
+    /// ones sandwiched between non-user deliveries — and leaves the non-user
+    /// messages in their original order for the turn boundary.
+    #[test]
+    fn inbox_pop_back_user_all_extracts_all_leaving_non_user_in_order() {
+        let inbox = Inbox::new();
+        inbox.push_user("first".into());
+        inbox.push(wakeup("x", "@", "p"));
+        inbox.push_user("second".into());
+        inbox.push_user("third".into());
+        inbox.push(InboxMsg::Command("/model".into()));
+        inbox.push_user("fourth".into());
+        assert_eq!(
+            inbox.pop_back_user_all(),
+            Some(vec![
+                "first".to_string(),
+                "second".to_string(),
+                "third".to_string(),
+                "fourth".to_string(),
+            ]),
+            "all user prompts come back oldest-first, past interspersed deliveries",
+        );
+        // The non-user messages survive in their original order.
+        assert!(matches!(inbox.drain_turn(), Some(Turn::Wakeup(_))));
+        assert!(matches!(inbox.drain_turn(), Some(Turn::Command(s)) if s == "/model"));
+        assert!(inbox.is_empty());
     }
 
     /// A detached `spawn` worker's flushed surface batch, terminated by the
