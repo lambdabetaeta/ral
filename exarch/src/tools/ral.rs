@@ -34,7 +34,7 @@ const CALL_TIMEOUT_SECS: u64 = 30;
 /// for the user-facing rail, not a paragraph; oversize inputs are
 /// rejected at parse time so the model fixes the call rather than
 /// silently flooding the transcript.
-const DESCRIPTION_MAX: usize = 240;
+const DESCRIPTION_MAX: usize = 60;
 
 /// Read the JSON object the model emitted into a [`RalArgs`], or a
 /// short reason string suitable for the rail's error block.
@@ -87,13 +87,9 @@ impl Tool for RalTool {
                     "description": {
                         "type": "string",
                         "maxLength": DESCRIPTION_MAX,
-                        "description": "One-line summary (≤240 chars) of what this call \
-            does, written in the present continuous, e.g. \"Counting TODOs in src/ and \
-            sampling the first five hits.\" or \"Appending the next section to \
-            docs/SPEC.md.\". This is what the user sees on the rail (the full ral source \
-            is one click away), so it must stand on its own — name the files touched, \
-            the action taken, the metric reported. No newlines. Do not echo the ral \
-            source; paraphrase the intent.",
+                        "description": "One line (≤60 chars) stating the script's \
+            intent — what it is for, not what it types. Present continuous, e.g. \
+            \"Counting TODOs across src/.\". Shown on the rail; no newlines. Do not echo the source, or the mechanics of ral.",
                     },
                 },
                 "required": ["cmd", "description"],
