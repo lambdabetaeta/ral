@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 129914e
+generated_at_commit: f1c187e
 generated_at_date: 2026-06-24
-covers_paths: [exarch/src/main.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/prompt.rs, exarch/data/system.md, exarch/data/ral.md, exarch/data/script-style.md]
+covers_paths: [exarch/src/main.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/credential.rs, exarch/src/prompt.rs, exarch/data/system.md, exarch/data/ral.md, exarch/data/script-style.md]
 ---
 
 # Map: exarch
@@ -57,6 +57,32 @@ provider — there is no second account dimension.
 
 The token store holds a list of logins keyed by account id; `run` resolves each
 into its own OAuth-backed provider, ordered after the API-key providers.
+
+## Credentials and the env scrub
+
+`credential.rs` resolves every provider's secret once at startup and **scrubs
+the key variables from the process environment, so no child a tool call spawns
+can inherit a live key.**
+
+- **`CredentialStore::resolve_and_scrub`** sweeps every known provider — the
+  famous `ProviderKind`s and the `custom` providers from `config.ral` — reading
+  each one's conventional key variable (`key_env`) into the in-memory store, then
+  removing from the environment *every key variable that was present*, whether or
+  not it yielded a usable key. A malformed value (a pasted newline) is still a
+  live secret, so it is swept too.
+- The scrub makes resolution **eager**: once a variable is gone it cannot be
+  re-read, so a key absent at startup stays absent for the run. Read and removal
+  happen while the process is still single-threaded — before any session worker —
+  so the env mutation cannot race.
+- A signed-in **ChatGPT account** never touches the environment: its login is
+  loaded from the OAuth token store into an `OAuth` credential cell ([[#Accounts]]),
+  a distinct identity from an `OPENAI_API_KEY` provider, so the two coexist.
+- This is the subtractive half of exarch's env shaping; the additive half —
+  `NO_COLOR`, `$EXARCH_SCRATCH`, and the redirected tool homes — is seeded onto the
+  session shell ([[#Bootstrap]]). Per-spawn loader-variable hardening (stripping
+  `LD_PRELOAD`/`LD_AUDIT`/`LD_LIBRARY_PATH` under an active grant) is [[map/core|ral-core]]'s,
+  not exarch's. The *why* is [[decisions/260613_provider-config-ral-script|provider-config-ral-script]];
+  the boundary a child actually inherits is ral's [[design/grant|grant]].
 
 ## Bootstrap
 
