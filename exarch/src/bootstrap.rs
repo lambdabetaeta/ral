@@ -3,7 +3,7 @@
 //! One-shot bootstrap pieces that live for the lifetime of the process
 //! (or, for [`Scratch`], for the lifetime of one root session).
 //! Nothing here participates in the per-turn loop.  Per-session disk
-//! state (the canonical event log) lives in [`crate::event::SessionLog`].
+//! state (the canonical event log) lives in [`crate::event::AgentLog`].
 
 use crate::{agent_builtins, cancel, shell_eval};
 use ral_core::io::TerminalState;
@@ -12,7 +12,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-/// Probe the terminal in the same mode `boot_shell` and `Session::fork`
+/// Probe the terminal in the same mode `boot_shell` and `Agent::fork`
 /// both want — honours `RAL_INTERACTIVE_MODE` if set.
 pub fn probe_terminal() -> TerminalState {
     let (_mode, terminal, _warn) = TerminalState::probe_from_env();
@@ -211,7 +211,7 @@ fn project_slug(cwd: &str) -> String {
 /// Seed `name` into `shell` as both an environment variable (so spawned
 /// child processes inherit it) and a ral-side scope binding (so `$name`
 /// resolves in ral source).  Shared by [`Scratch::install_into`] and the
-/// per-session `EXARCH_SESSION_DIR` seeding in [`crate::session`].
+/// per-agent `EXARCH_SESSION_DIR` seeding in [`crate::agent`].
 pub(crate) fn seed_var(shell: &mut Shell, name: &str, value: &str) {
     shell.set_env_var(name, value);
     shell.set_var(name.into(), ral_core::types::Value::String(value.into()));

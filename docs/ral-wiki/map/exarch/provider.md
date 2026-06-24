@@ -32,7 +32,7 @@ and the `/model` picker — and three arms supply it:
   over OAuth. **Each account is its own selectable identity**, so switching
   accounts *is* switching the selected provider — no second selection
   dimension. It holds only the account label and id; the live tokens live in
-  the [[map/exarch/session|credential]] store's `OAuth` cell, not here.
+  the [[map/exarch/agent|credential]] store's `OAuth` cell, not here.
 
 **The flat-rate vs OAuth split is two distinct unmetered axes.** A subscription
 turn carries no per-token price, and a provider reaches that state two ways:
@@ -76,7 +76,7 @@ is *not* `flat_rate`. `Live::metered` is false when either holds.
   than blocking `next()` until the terminal-bench harness wall. It stays well
   under that wall even across the full transient retry budget.
 - `summarize` — one non-streamed call producing a compaction summary; used by
-  [[map/exarch/session|`Session::compact`]]. The same idle timeout bounds the
+  [[map/exarch/agent|`Agent::compact`]]. The same idle timeout bounds the
   whole `exec_chat` request (no incremental events to idle between). A summary
   that itself hit the 1024-token budget is surfaced as `Truncated`, so
   `compact` keeps the un-summarised history rather than committing a half
@@ -86,7 +86,7 @@ is *not* `flat_rate`. `Live::metered` is false when either holds.
   token, so two concurrent requests no longer share one process-global slot —
   the provider-side seam of [[decisions/260617_async-agent-tool|async-agent-tool]];
   the registry and inbox belong to [[map/exarch/tools|tools]] and
-  [[map/exarch/session|session]].
+  [[map/exarch/agent|agent]].
 
 ## Retry driver
 
@@ -99,7 +99,7 @@ Both paths run on a tokio runtime through **one retry driver**,
 - Rate limits get a larger budget and a higher backoff ceiling than transient
   failures (`retry_limits`), and an explicit `retry-after` is honoured.
 
-Transport retry lives here, so the [[map/exarch/session|nudge]] rules cover
+Transport retry lives here, so the [[map/exarch/agent|nudge]] rules cover
 only model-behaviour outcomes, not transport.
 
 ## Structural error classification

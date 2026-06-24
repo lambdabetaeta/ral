@@ -7,12 +7,12 @@
 //! the consumer ([`super::App::handle`]) calls into here to turn them
 //! into `Line`s.
 
+use super::block::wrap_line;
+use super::highlight::highlight_ral;
 use crate::bus::{Hunk, Row};
 use crate::card::{Card, Field as CardField, FieldVal, Mark, Measure, Role, Span as CardSpan};
 use crate::event::ProviderErrorRecord;
 use crate::provider;
-use super::block::wrap_line;
-use super::highlight::highlight_ral;
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -256,7 +256,10 @@ pub(super) fn step(_n: usize) -> Vec<Line<'static>> {
 pub(super) fn user_prompt(s: &str) -> Vec<Line<'static>> {
     let ink = Style::default().fg(PROMPT_INK);
     let mut ls: Vec<Line<'static>> = vec![Line::default()];
-    ls.extend(s.lines().map(|l| Line::from(Span::styled(l.to_string(), ink))));
+    ls.extend(
+        s.lines()
+            .map(|l| Line::from(Span::styled(l.to_string(), ink))),
+    );
     ls
 }
 
@@ -756,7 +759,12 @@ const CARD_INDENT: usize = 4;
 /// band and the rail-glyph trace of incremental work.  `width` bounds the box;
 /// the frame wears the neutral rail ink, since identity lives in the matrix.
 pub(super) fn render_card_framed(card: &Card, width: u16) -> Vec<Line<'static>> {
-    render_framed(card, CARD_INDENT, Style::default().fg(SLATE), width.min(READ_W))
+    render_framed(
+        card,
+        CARD_INDENT,
+        Style::default().fg(SLATE),
+        width.min(READ_W),
+    )
 }
 
 /// Render a pinned register card: framed in its producing agent's `hue`, flush
@@ -805,8 +813,7 @@ fn render_framed(card: &Card, indent_w: usize, border: Style, width: u16) -> Vec
             Mark::Diff { .. } => {}
         }
     }
-    let wrapped: Vec<Line<'static>> =
-        body.iter().flat_map(|l| wrap_line(l, max_inner)).collect();
+    let wrapped: Vec<Line<'static>> = body.iter().flat_map(|l| wrap_line(l, max_inner)).collect();
 
     // Inner width: the widest row, and at least one column past the title so
     // the top rule's `╭─ title ─╮` always closes.  Capped at the budget.
@@ -864,7 +871,11 @@ fn render_framed(card: &Card, indent_w: usize, border: Style, width: u16) -> Vec
 /// top-down.  Each framed card leads with a blank row, so the stack carries its
 /// own inter-card gutter; the slot keys are identity, not shown — a pinned card
 /// carries its own label.
-pub(super) fn render_register(pins: &[(String, Card)], width: u16, hue: Color) -> Vec<Line<'static>> {
+pub(super) fn render_register(
+    pins: &[(String, Card)],
+    width: u16,
+    hue: Color,
+) -> Vec<Line<'static>> {
     pins.iter()
         .flat_map(|(_key, card)| render_pin(card, width, hue))
         .collect()
@@ -1502,16 +1513,31 @@ mod tests {
         let top = text(rows[0]);
         let bottom = text(rows[rows.len() - 1]);
         assert!(top.contains('╭') && top.contains('╮'), "top rule: {top:?}");
-        assert!(top.contains("hello cutie"), "heading set into the rule: {top:?}");
+        assert!(
+            top.contains("hello cutie"),
+            "heading set into the rule: {top:?}"
+        );
         assert!(!top.contains("rainy"), "body stays inside, not in the rule");
-        assert!(bottom.contains('╰') && bottom.contains('╯'), "bottom rule: {bottom:?}");
+        assert!(
+            bottom.contains('╰') && bottom.contains('╯'),
+            "bottom rule: {bottom:?}"
+        );
 
         let w = span_run_width(&rows[0].spans);
         for r in &rows {
-            assert_eq!(span_run_width(&r.spans), w, "ragged box edge: {:?}", text(r));
+            assert_eq!(
+                span_run_width(&r.spans),
+                w,
+                "ragged box edge: {:?}",
+                text(r)
+            );
         }
         for r in &rows[1..rows.len() - 1] {
-            assert!(text(r).contains('│'), "content row not flanked: {:?}", text(r));
+            assert!(
+                text(r).contains('│'),
+                "content row not flanked: {:?}",
+                text(r)
+            );
         }
     }
 

@@ -12,7 +12,7 @@
 //! surfaces tool summaries, patches, writes, and tasks instead.
 
 use crate::agent_registry::AgentRegistry;
-use crate::bus::{Emitter, InboxMsg, Kind, Mailbox, SessionId};
+use crate::bus::{AgentId, Emitter, InboxMsg, Kind, Mailbox};
 use crate::card::{done_card, io_card, value_to_card, value_to_done, value_to_io, value_to_pin};
 use ral_core::types::{Boundary, BoundarySink, Break, Escape};
 use ral_core::{
@@ -167,7 +167,7 @@ struct InboxBoundary {
     mailbox: Mailbox,
     /// The root session id, stamped on every batch so a spawn worker's cards
     /// render in the root viewport.
-    root: SessionId,
+    root: AgentId,
     registry: AgentRegistry,
     /// The registry generation captured at construction; a batch flushed after
     /// a `/clear` advanced it is dropped.
@@ -195,7 +195,7 @@ impl BoundarySink for InboxBoundary {
 /// over `emit`'s session inbox, stamping batches with `root` and guarding them
 /// with `registry`'s current generation.  Cloned into the worker's turn state
 /// by core, so a nested `spawn` inherits it and flushes at its own completion.
-pub fn boundary_sink(emit: &Emitter, root: SessionId, registry: &AgentRegistry) -> Boundary {
+pub fn boundary_sink(emit: &Emitter, root: AgentId, registry: &AgentRegistry) -> Boundary {
     Arc::new(InboxBoundary {
         mailbox: emit.mailbox(),
         root,
@@ -825,7 +825,15 @@ keep-bottom
 let hits = grep-files 'unique target'
 edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
         );
-        let r = match run_shell(&mut shell, &Capabilities::root(), &src, 30, &emit, None, None) {
+        let r = match run_shell(
+            &mut shell,
+            &Capabilities::root(),
+            &src,
+            30,
+            &emit,
+            None,
+            None,
+        ) {
             Outcome::Ran(r) => r,
             Outcome::Static(s) => panic!("static failure: {s}"),
         };
@@ -970,10 +978,7 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
     fn agent_sink_routes_io_and_card_distinctly() {
         use crate::card::IoEvent;
         let (emit, rx) = dummy_emitter();
-        let sink = AgentSink {
-            emit,
-            pins: None,
-        };
+        let sink = AgentSink { emit, pins: None };
 
         // An io value routes to Kind::Io, carrying the decoded event and a
         // card rendered from it.
@@ -1136,7 +1141,7 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
 
         // A `/clear` bumps the registry generation; the boundary captured the
         // old one, so a later flush is dropped rather than posted.
-        registry.clear();
+        registry.clear_subtree(7);
         boundary.deliver(vec![RalValue::Unit], Arc::new(Mutex::new(false)));
         assert!(
             inbox.is_empty(),
@@ -1425,7 +1430,15 @@ let hits = grep-files 'TARGET'
 each {{ |h| edit $h[file] [[$h[hash], 'REPLACED']] }} $hits
 return !{{length $hits}}"#
         );
-        let r = match run_shell(&mut shell, &Capabilities::root(), &src, 30, &emit, None, None) {
+        let r = match run_shell(
+            &mut shell,
+            &Capabilities::root(),
+            &src,
+            30,
+            &emit,
+            None,
+            None,
+        ) {
             Outcome::Ran(r) => r,
             Outcome::Static(s) => panic!("static failure: {s}"),
         };
@@ -1807,7 +1820,15 @@ return !{{length $hits}}"#
 let hits = grep-files 'unique target'
 edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
         );
-        let r = match run_shell(&mut shell, &Capabilities::root(), &src, 30, &emit, None, None) {
+        let r = match run_shell(
+            &mut shell,
+            &Capabilities::root(),
+            &src,
+            30,
+            &emit,
+            None,
+            None,
+        ) {
             Outcome::Ran(r) => r,
             Outcome::Static(s) => panic!("static failure: {s}"),
         };
@@ -1857,7 +1878,10 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
         let v = serde_json::json!({ "findings": ["a", "b"] });
         let out = super::json_to_text(&v).expect("an object renders");
         assert!(out.contains("\"findings\""));
-        assert!(out.contains('\n'), "pretty-printing keeps the shape on lines");
+        assert!(
+            out.contains('\n'),
+            "pretty-printing keeps the shape on lines"
+        );
     }
 
     /// A JSON null renders to nothing — the empty-reply case that settles

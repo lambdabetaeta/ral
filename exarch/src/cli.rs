@@ -32,7 +32,7 @@ pub struct Cli {
     pub file: Option<std::path::PathBuf>,
     #[arg(long = "system", value_name = "FILE")]
     pub system_files: Vec<std::path::PathBuf>,
-    /// Session ceiling.  Five bake-ins, ordered from most to least
+    /// Agent ceiling.  Five bake-ins, ordered from most to least
     /// authority: `dangerous` (no attenuation; expects an outer
     /// trust boundary like a Docker container), `reasonable`
     /// (default; everyday tooling + standard binary dirs),
@@ -82,14 +82,6 @@ pub struct Cli {
     /// `--headless`, which clap enforces when this flag is given.
     #[arg(long = "output-format", value_enum, default_value_t = OutputFormat::Text, requires = "headless")]
     pub output_format: OutputFormat,
-    /// In headless mode, gate turn completion on a single self-confirming
-    /// nudge: a turn that never used a tool is nudged to engage, and a turn
-    /// that did is nudged to verify its output against the task before
-    /// finishing. Each nudge fires at most once per turn. Off by default so
-    /// plain question-answering (the common headless use) is unaffected.
-    #[arg(long = "expect-action", requires = "headless")]
-    pub expect_action: bool,
-
     /// Authorise the agent to schedule its own wakeups (the `schedule`,
     /// `schedules`, `unschedule` tools).  Off by default: an agent that can
     /// wake itself indefinitely holds real authority, so opt in explicitly.

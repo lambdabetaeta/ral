@@ -1,5 +1,5 @@
 //! Agent / frontend boundary.  Workers stamp [`Kind`]s with their
-//! [`SessionId`] through an [`Emitter`]; consumers implement [`Sink`].
+//! [`AgentId`] through an [`Emitter`]; consumers implement [`Sink`].
 
 use crate::cancel;
 use crate::card::{Card, IoEvent};
@@ -16,14 +16,12 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel}
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-pub type SessionId = u64;
-
-/// The identity of an async agent worker.  An async `agent` call forks a
-/// child [`Session`](crate::session::Session); its child id *is* its
-/// `AgentId`, so the `agents` listing and `agent_cancel` reuse the session
-/// identity rather than minting a parallel one.  Opaque: a capability for
-/// status and cancellation, not a content hash.
-pub type AgentId = SessionId;
+/// The identity of an agent node.  Every agent — the trunk and every forked
+/// child alike — has one; a child's id *is* its `AgentId`, so the `agents`
+/// listing and `agent_cancel` reuse the node identity rather than minting a
+/// parallel one.  Opaque: a capability for status and cancellation, not a
+/// content hash.
+pub type AgentId = u64;
 
 /// When a message in the inbox may be drained into the model's context.
 ///
@@ -38,6 +36,23 @@ pub enum Boundary {
     Tool,
     /// Drains only at the turn boundary, as its own fresh turn.
     Turn,
+}
+
+/// How [`Inbox::next_or_idle`] should treat an empty inbox — the computed
+/// `should_park` verdict, re-evaluated on every wake (focus moves under a
+/// parked agent, and a schedule can arm or disarm).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ParkMode {
+    /// A present human is attached — the conversing trunk, or the focused
+    /// agent.  Park *and ignore cancellation*: an Esc cancels the current
+    /// *turn*, not the agent, which keeps waiting for the next human line.
+    Held,
+    /// No human, but a self-schedule is armed and may fire a wakeup.  Park,
+    /// but a cancellation (`agent_cancel`, the ceiling) terminates at once —
+    /// stop now rather than wait for the schedule.
+    UntilCancelled,
+    /// Nothing will ever feed this agent again: terminate at quiescence.
+    Quiesce,
 }
 
 /// How an async agent settled, already reduced to what the parent's
@@ -167,7 +182,7 @@ pub enum InboxMsg {
     /// A session-affecting slash command (`/clear`, `/model`, `/compact`,
     /// `/quit`) the frontend posted at the turn boundary.  The drive loop —
     /// which owns the session the command mutates — hands it to its
-    /// [`Control`](crate::session::Control); view-only commands (`/help`,
+    /// [`Control`](crate::agent::Control); view-only commands (`/help`,
     /// `/copy`, …) are handled frontend-side and never reach here.  Carries
     /// the raw command line.
     Command(String),
@@ -182,7 +197,7 @@ pub enum InboxMsg {
     /// drain renders this batch only if it wins the test-and-set on the flag,
     /// so a replay that already rendered the cards in-turn suppresses it.
     Surface {
-        id: SessionId,
+        id: AgentId,
         values: Vec<Value>,
         joined: Arc<Mutex<bool>>,
     },
@@ -325,14 +340,14 @@ pub enum Turn {
     /// A session-affecting slash command for the drive loop's [`Control`]
     /// (`/clear`, `/model`, `/compact`, `/quit`).  Carries the raw line.
     ///
-    /// [`Control`]: crate::session::Control
+    /// [`Control`]: crate::agent::Control
     Command(String),
     /// A detached `spawn` worker flushed its deferred `surface` batch at
     /// completion.  The `commit_turn` arm decodes `values` with the shared
     /// surface decoder and feeds the resulting cards/io into the *root*
     /// viewport (the carried `id`) exactly as a live tool turn would; the
     /// model is woken with [`Self::text`]'s notice.
-    Surface { id: SessionId, values: Vec<Value> },
+    Surface { id: AgentId, values: Vec<Value> },
 }
 
 impl Turn {
@@ -384,7 +399,7 @@ const PARK_POLL: Duration = Duration::from_millis(100);
 /// The cloneable **sender** side of a session's inbox.  Producers hold a
 /// `Mailbox`, never the [`Inbox`]: a schedule re-arms through its own
 /// session's `Mailbox`, a finishing child posts its one result through its
-/// parent's `Mailbox` ([`Session::outbox`](crate::session::Session)), a
+/// parent's `Mailbox` ([`Agent::outbox`](crate::agent::Agent)), a
 /// `spawn` worker flushes its surface batch through the owning session's
 /// `Mailbox`.  The registry holds each peer's `Mailbox` so the frontend can
 /// steer a focused tab, but only the frontend (and root) ever obtains the
@@ -411,6 +426,13 @@ impl Mailbox {
     /// Post a user-typed steering prompt — the TUI `Enter`-while-busy path.
     pub fn push_user(&self, prompt: String) {
         self.push(InboxMsg::UserSteering(prompt));
+    }
+
+    /// Wake a parked consumer without enqueuing a message, so it re-evaluates
+    /// its park verdict — the `TAB` focus-change signal the frontend sends
+    /// through the registry's mailboxes.
+    pub fn wake(&self) {
+        self.shared.signal.notify_all();
     }
 }
 
@@ -541,38 +563,42 @@ impl Inbox {
     }
 
     /// The drive loop's turn-boundary pull.  Returns the next deliverable; on
-    /// an empty queue it either **parks** (the consumer has, or may yet get, a
-    /// producer) or **terminates** (`None`):
+    /// an empty queue the `park` verdict — recomputed on every wake — decides
+    /// whether to park or terminate ([`ParkMode`]):
     ///
-    /// - `park` — an ever-present upstream writer (the human, at an
-    ///   interactive root).  Parks until a push or `cancel`.
-    /// - `schedules_armed` — a live self-schedule may fire a wakeup.  Parks
-    ///   until it does (or `cancel`).
-    /// - neither — nothing will ever feed this agent again: returns `None`, so
-    ///   a peer (and a headless root) terminates at quiescence.
+    /// - [`ParkMode::Held`] — a human is attached (the conversing trunk or the
+    ///   focused agent).  Parks, ignoring cancellation: an Esc cancels the
+    ///   current *turn*, not the agent.
+    /// - [`ParkMode::UntilCancelled`] — a self-schedule may fire.  Parks, but a
+    ///   cancellation terminates at once.
+    /// - [`ParkMode::Quiesce`] — nothing will feed this agent again: returns
+    ///   `None`, so a de-focused, unscheduled agent (and a headless trunk)
+    ///   terminates at quiescence.
     ///
-    /// A push wakes the park at once through the condvar; a cancellation does
-    /// not notify, so the park re-checks `cancel` every [`PARK_POLL`].  A
-    /// cancelled token short-circuits to `None`.
+    /// `park` is re-evaluated each iteration, so a `TAB` that de-focuses a
+    /// parked agent (which [`wake`](Self::wake)s its inbox) flips `Held` to
+    /// `Quiesce` and the agent terminates.  A push wakes the park at once
+    /// through the condvar; a cancellation does not notify, so a non-`Held`
+    /// park re-checks `cancel` every [`PARK_POLL`].
     pub fn next_or_idle(
         &self,
-        park: bool,
-        schedules_armed: bool,
+        park: impl Fn() -> ParkMode,
         cancel: &cancel::Token,
     ) -> Option<Turn> {
         let mut q = self.shared.queue.lock().expect("inbox lock poisoned");
         loop {
-            // A cancelled token terminates a *peer* at once (drop any queued
-            // messages — `agent_cancel` means stop now).  The root never
-            // terminates here: its token is per-turn and may carry a prior
-            // turn's Esc, which must not end the session, so `park` overrides.
-            if !park && cancel.is_cancelled() {
+            let mode = park();
+            // A non-`Held` park (schedule-only, or quiescent) terminates the
+            // instant the token trips — `agent_cancel`/ceiling means stop now,
+            // dropping any queued messages.  A `Held` park ignores it: the
+            // human is present, and an Esc cancels a turn, not the agent.
+            if mode != ParkMode::Held && cancel.is_cancelled() {
                 return None;
             }
             if let Some(turn) = pop_turn(&mut q) {
                 return Some(turn);
             }
-            if !(park || schedules_armed) {
+            if mode == ParkMode::Quiesce {
                 return None;
             }
             let (guard, _timeout) = self
@@ -584,7 +610,15 @@ impl Inbox {
         }
     }
 
-    /// Drop every pending message — `/clear` rebuilds the root, so neither
+    /// Wake a parked [`next_or_idle`](Self::next_or_idle) without enqueuing a
+    /// message, so it re-evaluates its `park` verdict.  The frontend calls it
+    /// on a `TAB` focus change, on both the de-focused and newly-focused
+    /// agents, so a de-focused idle agent observes the change and reaps.
+    pub fn wake(&self) {
+        self.shared.signal.notify_all();
+    }
+
+    /// Drop every pending message — `/clear` rebuilds the agent, so neither
     /// queued user prompts nor stale non-human deliveries carry across.
     pub fn clear(&self) {
         self.shared
@@ -648,7 +682,7 @@ fn pop_turn(q: &mut VecDeque<InboxMsg>) -> Option<Turn> {
 }
 
 pub struct Event {
-    pub id: SessionId,
+    pub id: AgentId,
     pub kind: Kind,
 }
 
@@ -661,11 +695,15 @@ pub const WORKER_PANIC_PREFIX: &str = "worker panicked: ";
 pub enum Kind {
     Born {
         log_dir: PathBuf,
-        /// Short human-readable label for this session, chosen by the
+        /// Short human-readable label for this agent, chosen by the
         /// dispatching agent (ASCII alnum / `-` / `_`, 1–24 chars).
         /// Falls back to `sub-{N}` when omitted or invalid.  The TUI
         /// surfaces it in the tab bar; headless ignores it.
         title: String,
+        /// The spawning agent's id — the tab's parent.  The TUI records it so
+        /// that when a focused agent ends (`reply`), focus falls back to its
+        /// parent, recursing toward the trunk.
+        parent: AgentId,
     },
     Died,
     Token(String),
@@ -707,7 +745,11 @@ pub enum Kind {
     /// it; the display surfaces it as it sees fit (a stderr line in headless,
     /// quiet on the TUI rail).  Its `events.json` twin is the model-view
     /// forensic breadcrumb.
-    Nudge { used: u32, max: u32, cause: String },
+    Nudge {
+        used: u32,
+        max: u32,
+        cause: String,
+    },
     ProviderError(ProviderErrorRecord),
     /// Emitted by the `agent` tool when a subagent finishes — *after*
     /// the child's own `Kind::Died` and *before* the spawn rejoins the
@@ -794,7 +836,7 @@ pub enum Row {
 /// A run-scoped usage accumulator.  Where a [`Transcript`] is **per-session**
 /// — each session records its own trace — this meter is **per-run**: the root
 /// and every child, muted or live, share the single instance the
-/// [`SessionBus`] mints.  That shared lifetime is the whole point: an async
+/// [`FleetBus`] mints.  That shared lifetime is the whole point: an async
 /// sub-agent's display channel is dead in headless, so its usage never reaches
 /// a sink, but its `emit` still tees here, so the run total counts it.
 /// Accounting follows the event, not its emitter, exactly as recording does.
@@ -816,7 +858,7 @@ impl UsageMeter {
 #[derive(Clone)]
 pub struct Emitter {
     tx: Sender<Event>,
-    id: SessionId,
+    id: AgentId,
     /// The **owning** session's mailbox — root's for the root emitter, the
     /// child's own for a child emitter.  Used by the `spawn` boundary sink to
     /// post a deferred surface batch into the agent that ran the spawn.  An
@@ -845,11 +887,11 @@ pub struct Emitter {
 impl Emitter {
     /// An emitter with a standalone, orphan mailbox and no transcript — for
     /// tests, whose events land nowhere durable.
-    pub fn new(tx: Sender<Event>, id: SessionId) -> Self {
+    pub fn new(tx: Sender<Event>, id: AgentId) -> Self {
         Self::with_mailbox(tx, id, Inbox::new().mailbox())
     }
 
-    pub fn with_mailbox(tx: Sender<Event>, id: SessionId, mailbox: Mailbox) -> Self {
+    pub fn with_mailbox(tx: Sender<Event>, id: AgentId, mailbox: Mailbox) -> Self {
         Self {
             tx,
             id,
@@ -867,7 +909,7 @@ impl Emitter {
     /// own operational trace and tees its usage to the inherited run meter,
     /// because recording and accounting are run properties, not display ones.
     /// Display-muted, accounting-live.
-    pub fn muted_child(&self, id: SessionId, transcript: Transcript) -> Self {
+    pub fn muted_child(&self, id: AgentId, transcript: Transcript) -> Self {
         let (tx, _rx) = channel();
         Self {
             tx,
@@ -885,7 +927,7 @@ impl Emitter {
     /// run [`UsageMeter`] — so the child's surface batches land in the child's
     /// box and its events in the child's trace, never the parent's, while its
     /// usage still folds into the one run total.
-    pub fn child(&self, id: SessionId, mailbox: Mailbox, transcript: Transcript) -> Self {
+    pub fn child(&self, id: AgentId, mailbox: Mailbox, transcript: Transcript) -> Self {
         Self {
             tx: self.tx.clone(),
             id,
@@ -911,7 +953,7 @@ impl Emitter {
     }
 
     /// Whether a detached worker may clone this emitter for a live tab.
-    /// True only off a session-lived bus ([`SessionBus::session`]); an async
+    /// True only off a session-lived bus ([`FleetBus::session`]); an async
     /// `agent` reads it to choose a streaming tab over its muted log.
     pub fn is_session_lived(&self) -> bool {
         self.session_lived
@@ -934,7 +976,7 @@ impl Emitter {
 ///
 /// Either way [`pump_on`] borrows the channel — completion is the per-turn
 /// `done` flag, never the channel's lifetime.
-pub struct SessionBus {
+pub struct FleetBus {
     tx: Sender<Event>,
     rx: Receiver<Event>,
     mailbox: Mailbox,
@@ -947,7 +989,7 @@ pub struct SessionBus {
     meter: UsageMeter,
 }
 
-impl SessionBus {
+impl FleetBus {
     /// A session-lived bus over `inbox` (the TUI root's inbox).  Emitters
     /// minted from it are session-lived, so detached async children stream.
     pub fn session(inbox: Inbox) -> Self {
@@ -981,7 +1023,7 @@ impl SessionBus {
     /// mailbox, session-lived flag, and run [`UsageMeter`].  The root drive
     /// worker takes one; a child emitter is derived with [`Emitter::child`] /
     /// [`Emitter::muted_child`], inheriting the same meter.
-    pub fn emitter(&self, id: SessionId, transcript: Transcript) -> Emitter {
+    pub fn emitter(&self, id: AgentId, transcript: Transcript) -> Emitter {
         Emitter {
             tx: self.tx.clone(),
             id,
@@ -1130,8 +1172,8 @@ pub trait Sink {
 /// either bus, cannot keep the loop — hence the turn — from ending.
 pub fn pump<S, R>(
     sink: &mut S,
-    bus: &SessionBus,
-    root_id: SessionId,
+    bus: &FleetBus,
+    root_id: AgentId,
     transcript: Transcript,
     work: impl Send + FnOnce(&Emitter) -> R,
 ) -> io::Result<Option<R>>
@@ -1168,7 +1210,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        Boundary, Emitter, Event, Inbox, InboxMsg, Kind, Pass, SessionBus, Sink, Transcript, Turn,
+        Boundary, Emitter, Event, FleetBus, Inbox, InboxMsg, Kind, Pass, Sink, Transcript, Turn,
         drain_pass, pump,
     };
     use std::sync::Arc;
@@ -1328,7 +1370,7 @@ mod tests {
         let mut sink = CountSink(0);
         // A session-lived bus, as the TUI uses it: its sender outlives the
         // turn, so a detached worker's clone never disconnects the channel.
-        let bus = SessionBus::session(Inbox::new());
+        let bus = FleetBus::session(Inbox::new());
         // Outlives `pump`: holds an `Emitter` clone whose `Sender` keeps the
         // channel from ever disconnecting, exactly as a detached worker would.
         let holder: Mutex<Option<Emitter>> = Mutex::new(None);
@@ -1554,7 +1596,7 @@ mod tests {
             ..Usage::default()
         };
 
-        let bus = SessionBus::per_turn(Inbox::new());
+        let bus = FleetBus::per_turn(Inbox::new());
         let root = bus.emitter(0, Transcript::none());
         // The muted child: a fresh dead channel, but the root run's meter.
         let child = root.muted_child(1, Transcript::none());

@@ -1,12 +1,13 @@
 //! Exarch — a delegate driving ral in process under a user-chosen grant
 //! policy.  This library crate holds the whole agent: the CLI, the
-//! capability composition, the [`session::Session`] turn driver, the
+//! capability composition, the [`agent::Agent`] turn driver, the
 //! [`provider::Provider`] transport, and the two frontends
 //! ([`tui::run`] / [`headless::run`]).  The `exarch` binary is a thin
 //! shell over [`run`]; integration tests in `tests/` link this library
-//! directly to drive [`session::Session::apply`] through a scripted
+//! directly to drive [`agent::Agent::apply`] through a scripted
 //! provider (see [`provider::Provider::scripted`]).
 
+pub mod agent;
 pub mod agent_builtins;
 pub mod agent_registry;
 pub mod bootstrap;
@@ -18,6 +19,7 @@ pub mod config;
 pub mod credential;
 pub mod digest;
 pub mod event;
+pub mod fleet;
 pub mod headless;
 pub mod host;
 pub mod models;
@@ -28,7 +30,6 @@ pub mod pricing;
 pub mod prompt;
 pub mod provider;
 pub mod schedule;
-pub mod session;
 pub mod shell_eval;
 pub mod state;
 pub mod tls;
@@ -36,9 +37,9 @@ pub mod tools;
 pub mod transcript;
 pub mod tui;
 
+use agent::Agent;
 use clap::Parser;
 use provider::Provider;
-use session::Session;
 use tui::SessionInfo;
 
 /// Pre-`main` trampoline shared by the binary and every test binary.
@@ -85,7 +86,7 @@ fn init_lib_test_binary() {
 
 /// The binary's entry point, lifted into the library so integration
 /// tests can link the whole crate.  Parses the CLI, composes the
-/// capability lattice, builds a [`Session`] + [`Provider`], and hands
+/// capability lattice, builds a [`Agent`] + [`Provider`], and hands
 /// off to a frontend.
 pub fn run() -> Result<(), String> {
     let c = cli::Cli::parse();
@@ -196,18 +197,18 @@ pub fn run() -> Result<(), String> {
     // clone to outlive its spawning turn, and a `/model` switch swaps this
     // for a fresh one without disturbing children already running.
     let provider = std::sync::Arc::new(Provider::build(&id, model.clone(), &cred, c.max_tokens));
-    let mut session = Session::root(
+    let mut session = Agent::root(
         system,
         caps,
         &scratch,
         &run_dir,
         &model,
         label,
-        c.expect_action,
         c.allow_schedule,
-        // Interactive (TUI) roots park for the human; a headless root
-        // terminates once its seeded work is idle.
+        // The interactive (TUI) trunk converses and parks for the human; a
+        // headless trunk terminates once its seeded work is idle.
         !c.headless,
+        std::sync::Arc::clone(&provider),
     )
     .map_err(|e| format!("session init: {e}"))?;
 
@@ -228,7 +229,7 @@ pub fn run() -> Result<(), String> {
         cwd: &cwd,
     };
     if c.headless {
-        headless::run(&mut session, &provider, &info, seed, c.output_format)
+        headless::run(&mut session, &info, seed, c.output_format)
     } else {
         tui::run(
             &mut session,

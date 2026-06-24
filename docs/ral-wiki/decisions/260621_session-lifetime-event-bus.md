@@ -201,5 +201,5 @@ axis bus lifetime mirrors),
 [[invariants/turn-ends-ready|turn-ends-ready]],
 [[internals/a-turn-end-to-end|a-turn-end-to-end]],
 [[internals/output-capture-and-detachment|output-capture-and-detachment]],
-[[map/exarch/frontend|frontend]], [[map/exarch/session|session]],
+[[map/exarch/frontend|frontend]], [[map/exarch/agent|agent]],
 [[map/exarch/tools|tools]].

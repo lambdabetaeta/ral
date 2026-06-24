@@ -44,7 +44,7 @@ pub const OPAQUE_CAP: usize = 3000;
 pub const AGENT_REPLY_CAP: usize = 16_000;
 
 /// Fallback compaction trigger, in serialised model-view bytes, for
-/// [`crate::session::Session::compact`] — used only when the model's
+/// [`crate::agent::Agent::compact`] — used only when the model's
 /// context window is unknown (a native provider with no fetched catalog).
 /// When the window *is* known, compaction tracks real token pressure
 /// against the window via [`compaction_due`].  500 KB keeps roughly a

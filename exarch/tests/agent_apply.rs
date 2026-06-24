@@ -1,6 +1,6 @@
 #![allow(clippy::disallowed_methods)]
 
-//! End-to-end tests for [`exarch::session::Session::apply`] driven through
+//! End-to-end tests for [`exarch::agent::Agent::apply`] driven through
 //! a scripted provider backend (`exarch::provider::Provider::scripted`).
 //! This is the composition the protocol machine (`event.rs`) is exercised
 //! under in production: `apply` renders the transcript, calls the provider,
@@ -13,10 +13,10 @@
 //! round-tripping the committed messages through the same genai
 //! `ChatMessage` serialisation the live request uses.
 
-use exarch::bus::{Emitter, Kind, SessionId};
+use exarch::agent::{Agent, TurnOutcome};
+use exarch::bus::{AgentId, Emitter, Kind};
 use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{Provider, ProviderError};
-use exarch::session::{Session, TurnOutcome};
 use genai::chat::{ChatRole, ContentPart, ToolCall};
 use std::sync::Arc;
 use std::sync::mpsc::channel;
@@ -50,15 +50,16 @@ fn tmp(tag: &str) -> std::path::PathBuf {
 /// Run one `apply` against a fresh `Emitter`/collector pair, returning
 /// the outcome plus every event the worker emitted.
 fn drive_apply(
-    session: &mut Session,
+    session: &mut Agent,
     provider: &Arc<Provider>,
     prompt: Option<&str>,
 ) -> (Result<TurnOutcome, ProviderError>, Vec<Kind>) {
-    let id: SessionId = session.id;
+    let id: AgentId = session.id;
     let (tx, rx) = channel();
     let emit = Emitter::new(tx, id);
-    let root = exarch::cancel::mint_root();
-    let outcome = session.apply(provider, prompt.map(str::to_string), root.token(), &emit);
+    let token = exarch::cancel::Token::new();
+    let _slot = exarch::cancel::publish(&token);
+    let outcome = session.apply(provider, prompt.map(str::to_string), &token, &emit);
     drop(emit);
     let kinds = rx.into_iter().map(|e| e.kind).collect();
     (outcome, kinds)
@@ -80,7 +81,7 @@ fn ral_call(id: &str, cmd: &str) -> ToolCall {
 /// Assert every committed model-view message serialises (the proxy for
 /// "every provider accepts the request") and that no assistant message
 /// is empty.
-fn assert_admissible(session: &Session) {
+fn assert_admissible(session: &Agent) {
     for m in session.rendered_messages() {
         let json = serde_json::to_string(&m).expect("committed message must serialise");
         if m.role == ChatRole::Assistant {
@@ -95,7 +96,7 @@ fn assert_admissible(session: &Session) {
 #[test]
 fn plain_text_turn_completes() {
     let dir = tmp("plain-text");
-    let mut session = Session::for_test(&dir, "system").unwrap();
+    let mut session = Agent::for_test(&dir, "system").unwrap();
     let provider = scripted("test-model", Script::new().then(Reply::text("hello")));
 
     let (outcome, _kinds) = drive_apply(&mut session, &provider, Some("hi"));
@@ -111,7 +112,7 @@ fn plain_text_turn_completes() {
 #[test]
 fn tool_call_then_completion() {
     let dir = tmp("tool-then-complete");
-    let mut session = Session::for_test(&dir, "system").unwrap();
+    let mut session = Agent::for_test(&dir, "system").unwrap();
     let provider = scripted(
         "test-model",
         Script::new()
@@ -141,7 +142,7 @@ fn tool_call_then_completion() {
 #[test]
 fn bindings_persist_across_tool_calls() {
     let dir = tmp("bindings-persist");
-    let mut session = Session::for_test(&dir, "system").unwrap();
+    let mut session = Agent::for_test(&dir, "system").unwrap();
     let provider = scripted(
         "test-model",
         Script::new()
@@ -183,7 +184,7 @@ fn bindings_persist_across_tool_calls() {
 #[test]
 fn truncated_with_tool_calls_dispatches_and_continues() {
     let dir = tmp("truncated-with-tools");
-    let mut session = Session::for_test(&dir, "system").unwrap();
+    let mut session = Agent::for_test(&dir, "system").unwrap();
     let provider = scripted(
         "test-model",
         Script::new()
@@ -217,7 +218,7 @@ fn truncated_with_tool_calls_dispatches_and_continues() {
 #[test]
 fn stalled_stream_commits_partial_and_truncates() {
     let dir = tmp("stalled-stream");
-    let mut session = Session::for_test(&dir, "system").unwrap();
+    let mut session = Agent::for_test(&dir, "system").unwrap();
     let provider = scripted(
         "test-model",
         Script::new().then(Reply::stalled("partial answer before the stall")),
@@ -247,7 +248,9 @@ fn stalled_stream_commits_partial_and_truncates() {
     // A recovered stall is operational, not a misconfiguration: it surfaces
     // as a dim note, never the red error chrome.
     assert!(
-        kinds.iter().any(|k| matches!(k, Kind::SystemNote(t) if t.contains("stream stalled"))),
+        kinds
+            .iter()
+            .any(|k| matches!(k, Kind::SystemNote(t) if t.contains("stream stalled"))),
         "the stall recovery must surface as a SystemNote",
     );
     assert!(
@@ -264,7 +267,7 @@ fn stalled_stream_commits_partial_and_truncates() {
 #[test]
 fn empty_reply_commits_a_stub_not_empty_content() {
     let dir = tmp("empty-reply");
-    let mut session = Session::for_test(&dir, "system").unwrap();
+    let mut session = Agent::for_test(&dir, "system").unwrap();
     let provider = scripted("test-model", Script::new().then(Reply::empty()));
 
     let (outcome, _kinds) = drive_apply(&mut session, &provider, Some("say nothing"));
@@ -293,7 +296,7 @@ fn empty_reply_commits_a_stub_not_empty_content() {
 #[test]
 fn malformed_tool_arguments_are_normalised_to_object() {
     let dir = tmp("malformed-tool-args");
-    let mut session = Session::for_test(&dir, "system").unwrap();
+    let mut session = Agent::for_test(&dir, "system").unwrap();
     let bad_call = ToolCall {
         call_id: "c1".into(),
         fn_name: "ral".into(),

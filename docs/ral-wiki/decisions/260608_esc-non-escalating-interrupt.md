@@ -57,4 +57,4 @@ remaining phase, if any, actually wedges is left to measurement: the phase label
 and the debug `dbg_trace!` timing are the instrument, not a speculative rewrite.
 
 Maps: [[map/core/io-process|io-process]], [[map/exarch/frontend|frontend]],
-[[map/exarch/session|session]].
+[[map/exarch/agent|agent]].

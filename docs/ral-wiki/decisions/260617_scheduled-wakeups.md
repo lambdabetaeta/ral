@@ -30,7 +30,7 @@ reason to start a turn. The pieces a wakeup composes from already exist:
   turn-boundary drain (`exarch/src/bus.rs`, [[map/exarch/frontend|frontend]]);
   this is the channel that generalises into the *inbox* below;
 - **the synthetic-prompt path** — `nudge` already manufactures a next prompt and
-  feeds it through `append_user` (`exarch/src/nudge.rs`, [[map/exarch/session|session]]);
+  feeds it through `append_user` (`exarch/src/nudge.rs`, [[map/exarch/agent|session]]);
 - **timers as data** — `process::reaper` is a single daemon over a
   `BinaryHeap<Scheduled>` woken by a `Condvar`, firing one action at each entry's
   `when` (`core/src/process/reaper.rs`); it is the death-clock and the foreground
@@ -117,7 +117,7 @@ wake, not a burst).
 
 - **Ephemeral and per-session.** A schedule lives on the `Session`. It dies when
   the session ends and when `/clear` rebuilds the root
-  ([[map/exarch/session|session]]). There is no persistence, no boot-time reload,
+  ([[map/exarch/agent|session]]). There is no persistence, no boot-time reload,
   no operator config file. A `fork` does not inherit its parent's schedules —
   they are host state, not shell state, like the headless `expect_action` flag.
   Cron describes only the *when*; ephemerality is the *lifetime*, and the two do

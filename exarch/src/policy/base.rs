@@ -283,11 +283,7 @@ mod tests {
         shell
             .with_cwd(work.to_path_buf(), |sh| {
                 sh.with_capabilities(caps, |sh| {
-                    sh.check_exec_args(
-                        "./configure",
-                        &["./configure", "/work/proj/configure"],
-                        &[],
-                    )
+                    sh.check_exec_args("./configure", &["./configure", "/work/proj/configure"], &[])
                 })
             })
             .expect("./configure under cwd: must be admitted");

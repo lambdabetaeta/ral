@@ -206,7 +206,7 @@ The reaper is not a panic button.
   aborted handles remain, and `poll` / `await` can report that the worker was
   aborted.
 - **`/clear`** or a session reset drops the shell and all bindings by
-  constructing a fresh root shell as [[map/exarch/session|session]] already
+  constructing a fresh root shell as [[map/exarch/agent|session]] already
   describes.
 - **Long-running durable jobs are separate.** A future durable-job mechanism
   may move a handle out of ordinary scratch into a host-managed registry with
@@ -266,4 +266,4 @@ The reaper is not a panic button.
 See also [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]],
 [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]],
 [[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-leak-into-exarch]],
-[[map/core/shell-state|shell-state]], and [[map/exarch/session|session]].
+[[map/core/shell-state|shell-state]], and [[map/exarch/agent|agent]].

@@ -2,7 +2,7 @@
 //!
 //! A [`Tool`] knows how to advertise itself to the provider (name,
 //! description, JSON schema) and how to dispatch one parsed JSON input
-//! against a live [`Session`], returning a [`SessionToolResult`].  Every tool
+//! against a live [`Agent`], returning a [`SessionToolResult`].  Every tool
 //! returns synchronously: a tool that forks a child session (`agent`) launches
 //! a detached peer and returns a start receipt, so dispatch never blocks and
 //! there is no join phase.
@@ -14,10 +14,10 @@
 //! module under `tools/` and listing it in [`registry`]; nothing in
 //! `provider.rs` or `session.rs` needs to know its shape.
 
+use crate::agent::Agent;
 use crate::bus::{Emitter, Kind};
 use crate::event::ToolResult as SessionToolResult;
 use crate::provider::Provider;
-use crate::session::Session;
 use serde_json::Value;
 use std::sync::{Arc, OnceLock};
 
@@ -27,69 +27,46 @@ mod ral;
 mod reply;
 mod schedule;
 
-/// Which tools a session advertises to the provider and may dispatch — the
+/// Which tools an agent advertises to the provider and may dispatch — the
 /// single source of truth for both advertisement (`provider.complete`) and
-/// enforcement ([`Session`]'s dispatch path), replacing the old
-/// `advertise_root_only` bool and the `is_subagent` dispatch check.
+/// enforcement ([`Agent`]'s dispatch path).
 ///
-/// Two genuinely orthogonal axes decide membership: whether the agent may
-/// **spawn** children (the `agent` family) and whether it **returns** a value
-/// (`reply`). They are independent booleans, not mirror-image variants, because
-/// the three live agents occupy three of the four combinations
-/// ([[decisions/260623_reply-terminates-returning-agents]]):
+/// One axis decides membership: whether the agent **returns** a value
+/// (`reply`).  Spawning is now universal — every agent may spawn, so the tree
+/// is unbounded in depth ([[decisions/260624_uniform-agent-nodes]], superseding
+/// the depth-1 `spawns()` axis) — leaving exactly two sets:
 ///
-/// - the **interactive root** spawns but does not return — it converses with
-///   the user across turns and never hands a value back;
-/// - the **headless (returning) root** both spawns and returns — it is seeded
-///   once, produces one result through `reply`, and the process exits;
-/// - a **peer** returns but does not spawn — so it can hand its result back and
-///   the spawn tree stays one level deep.
+/// - the **conversing** set (the interactive trunk): spawns, but withholds
+///   `reply`, because it converses with the user across turns and never hands
+///   a value back;
+/// - the **returning** set (everyone else — a headless trunk and every
+///   sub-agent at any depth): spawns and holds `reply`, its way of returning.
 #[derive(Clone, Copy)]
 pub struct ToolSet {
-    spawns: bool,
     returns: bool,
 }
 
 impl ToolSet {
-    /// An interactive root: spawns children, never returns (it converses with
-    /// the user across turns), so `reply` is withheld.
-    pub(crate) fn interactive_root() -> Self {
-        Self {
-            spawns: true,
-            returns: false,
-        }
+    /// The conversing set (the interactive trunk): withholds `reply`.
+    pub(crate) fn conversing() -> Self {
+        Self { returns: false }
     }
 
-    /// A headless root: a returning agent that also spawns — it holds both the
-    /// spawn family and `reply`.
-    pub(crate) fn returning_root() -> Self {
-        Self {
-            spawns: true,
-            returns: true,
-        }
+    /// The returning set (a headless trunk and every sub-agent): holds `reply`.
+    pub(crate) fn returning() -> Self {
+        Self { returns: true }
     }
 
-    /// A peer: returns through `reply` but may not spawn, so the spawn tree
-    /// stays one level deep.
-    pub(crate) fn peer() -> Self {
-        Self {
-            spawns: false,
-            returns: true,
-        }
-    }
-
-    /// Whether `tool` is advertised and permitted under this set: it must
-    /// satisfy every axis it touches — a spawner needs `spawns`, a replier
-    /// needs `returns` — so a tool on neither axis is always allowed, and the
-    /// two axes are checked independently rather than assuming a tool sits on
-    /// at most one.
+    /// Whether `tool` is advertised and permitted under this set.  The only
+    /// gate left is the *returns* axis: a replier needs `returns`; every other
+    /// tool — the spawn family included — is universally allowed.
     pub(crate) fn allows(&self, tool: &dyn Tool) -> bool {
-        (!tool.spawns() || self.spawns) && (!tool.replies() || self.returns)
+        !tool.replies() || self.returns
     }
 }
 
 /// One registered tool.  The registry stores `Box<dyn Tool>` and
-/// dispatches by name; [`Session`] holds no tool-specific knowledge.
+/// dispatches by name; [`Agent`] holds no tool-specific knowledge.
 pub(crate) trait Tool: Send + Sync {
     /// Stable identifier used by the model and the wire schema.
     fn name(&self) -> &'static str;
@@ -101,20 +78,11 @@ pub(crate) trait Tool: Send + Sync {
     /// inside the impl; cheap to call.
     fn schema(&self) -> &'static Value;
 
-    /// True for the spawn family (`agent` / `agents` / `agent_cancel`).
-    /// These are withheld from a peer's [`ToolSet`] — both unadvertised and
-    /// refused — so a sub-agent cannot spawn its own children and the spawn
-    /// tree stays one level deep.  Everything else (including `schedule`, so a
-    /// peer may wake itself) defaults to `false`.
-    fn spawns(&self) -> bool {
-        false
-    }
-
     /// True only for `reply` — the *returns* axis of the [`ToolSet`].  It is
-    /// held by every returning agent (a peer and the headless root) and
-    /// withheld only from the interactive root (unadvertised and refused),
-    /// which talks to the user across turns and never returns a value, so
-    /// returning-and-terminating is meaningless there.
+    /// held by every returning agent (a sub-agent at any depth, and a headless
+    /// trunk) and withheld only from the interactive trunk (unadvertised and
+    /// refused), which talks to the user across turns and never returns a
+    /// value, so returning-and-terminating is meaningless there.
     fn replies(&self) -> bool {
         false
     }
@@ -129,7 +97,7 @@ pub(crate) trait Tool: Send + Sync {
         &self,
         id: String,
         input: Value,
-        session: &mut Session,
+        session: &mut Agent,
         provider: &Arc<Provider>,
         emit: &Emitter,
     ) -> SessionToolResult;

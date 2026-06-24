@@ -1,12 +1,12 @@
 //! Per-session operational trace.
 //!
-//! Every [`Session`](crate::session::Session) — the root and each forked
+//! Every [`Agent`](crate::agent::Agent) — the root and each forked
 //! child, in both the TUI and headless — owns a [`Transcript`]: a
 //! `transcript.jsonl` in the session's log dir, one JSON object per bus event.
 //! It is the *operational* view — what the agent did: every tool call and its
 //! result, step, usage delta, structural I/O effect, stop reason, error, and
 //! sub-agent boundary — the sibling of the model-view `events.json` the
-//! [`SessionLog`](crate::event::SessionLog) keeps.
+//! [`AgentLog`](crate::event::AgentLog) keeps.
 //!
 //! Pure rendering events — a composed [`Card`](crate::card::Card), the card a
 //! [`Kind::Io`] draws, a [`Kind::Phase`] progress label — are deliberately
@@ -19,7 +19,7 @@
 //! from the screen still records its full trace, because recording is a
 //! property of the session, not of the frontend.
 
-use crate::bus::{Kind, SessionId};
+use crate::bus::{AgentId, Kind};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -67,7 +67,7 @@ impl Transcript {
     /// shape by [`event_record`]. Rendering-only events project to `None` and
     /// are skipped before the lock is ever taken, so the token stream — the
     /// one high-frequency `Kind` — costs nothing here.
-    pub fn record(&self, id: SessionId, kind: &Kind) {
+    pub fn record(&self, id: AgentId, kind: &Kind) {
         let Some(inner) = &self.0 else { return };
         let t_ms = inner.started.elapsed().as_millis();
         let Some(rec) = event_record(t_ms, id, kind) else {
@@ -89,12 +89,16 @@ impl Transcript {
 /// (prose belongs to the model view), and the interactive-only chrome
 /// ([`Kind::Boundary`], [`Kind::UserPromptEcho`], the pin register). The
 /// exhaustive match means a new [`Kind`] won't silently fall out of the trace.
-pub(crate) fn event_record(t_ms: u128, id: SessionId, kind: &Kind) -> Option<serde_json::Value> {
+pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde_json::Value> {
     use serde_json::json;
     let (name, mut obj) = match kind {
-        Kind::Born { log_dir, title } => (
+        Kind::Born {
+            log_dir,
+            title,
+            parent,
+        } => (
             "born",
-            json!({ "log_dir": log_dir.to_string_lossy(), "title": title }),
+            json!({ "log_dir": log_dir.to_string_lossy(), "title": title, "parent": parent }),
         ),
         Kind::Died => ("died", json!({})),
         Kind::Usage(u) => (
@@ -116,10 +120,9 @@ pub(crate) fn event_record(t_ms: u128, id: SessionId, kind: &Kind) -> Option<ser
         Kind::StopReason(raw) => ("stop_reason", json!({ "raw": raw })),
         Kind::Error(msg) => ("error", json!({ "msg": msg })),
         Kind::SystemNote(text) => ("system_note", json!({ "text": text })),
-        Kind::Nudge { used, max, cause } => (
-            "nudge",
-            json!({ "used": used, "max": max, "cause": cause }),
-        ),
+        Kind::Nudge { used, max, cause } => {
+            ("nudge", json!({ "used": used, "max": max, "cause": cause }))
+        }
         Kind::ProviderError(error) => ("provider_error", json!({ "error": error })),
         Kind::SubagentDone {
             title,

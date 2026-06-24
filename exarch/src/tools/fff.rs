@@ -14,11 +14,11 @@
 //! colliding because each pid gets a disjoint directory.
 
 use super::{Tool, invalid_input};
+use crate::agent::Agent;
 use crate::bus::{Emitter, Kind};
 use crate::digest::{FFF_CAP, clip};
 use crate::event::ToolResult as SessionToolResult;
 use crate::provider::Provider;
-use crate::session::Session;
 use fff_search::file_picker::FilePicker;
 use fff_search::{
     FFFMode, FilePickerOptions, FrecencyTracker, FuzzySearchOptions, PaginationArgs, QueryParser,
@@ -238,7 +238,7 @@ grepping their contents."
         &self,
         id: String,
         input: Value,
-        session: &mut Session,
+        session: &mut Agent,
         _provider: &Arc<Provider>,
         emit: &Emitter,
     ) -> SessionToolResult {

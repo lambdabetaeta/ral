@@ -530,7 +530,7 @@ pub enum ProviderError {
     },
     /// The assistant turn was cut off before the model finished — the
     /// output cap ([`CutShort::OutputCap`]) or a mid-stream stall
-    /// ([`CutShort::Stalled`]).  Raised by [`crate::session::Session::apply`]
+    /// ([`CutShort::Stalled`]).  Raised by [`crate::agent::Agent::apply`]
     /// **after** appending the partial assistant message, so re-prompting
     /// with `continue` preserves the partial work as transcript context.
     Truncated {
@@ -721,8 +721,9 @@ impl ProviderError {
     /// it falls back to the full `Display`.
     fn brief(&self) -> String {
         match self {
-            ProviderError::Transient { cause, .. }
-            | ProviderError::RateLimited { cause, .. } => cause.clone(),
+            ProviderError::Transient { cause, .. } | ProviderError::RateLimited { cause, .. } => {
+                cause.clone()
+            }
             ProviderError::Other(s) => s.clone(),
             other => other.to_string(),
         }
@@ -754,10 +755,9 @@ impl fmt::Display for ProviderError {
                 Some(s) => write!(f, "api error {s} ({model}): {message}"),
                 None => write!(f, "api error ({model}): {message}"),
             },
-            ProviderError::Truncated { reason } => write!(
-                f,
-                "reply cut off before completion (reason={reason})"
-            ),
+            ProviderError::Truncated { reason } => {
+                write!(f, "reply cut off before completion (reason={reason})")
+            }
             ProviderError::Other(s) => f.write_str(s),
         }
     }
@@ -1077,7 +1077,7 @@ impl Provider {
     /// A test provider that replays scripted outcomes instead of
     /// talking to genai.  No tokio runtime, no network: `complete` and
     /// `summarize` pop their next outcome from `script` in order.  This
-    /// is the seam the `tests/` harness drives [`crate::session::Session::apply`]
+    /// is the seam the `tests/` harness drives [`crate::agent::Agent::apply`]
     /// through — see [`scripted::Script`].
     pub fn scripted(model: &str, script: scripted::Script) -> Self {
         Self {
@@ -1173,7 +1173,9 @@ impl Provider {
         cancel: &cancel::Token,
     ) -> Result<SummaryOut, ProviderError> {
         match &self.backend {
-            Backend::Live(live) => live.summarize(&self.model, system, messages, max_tokens, cancel),
+            Backend::Live(live) => {
+                live.summarize(&self.model, system, messages, max_tokens, cancel)
+            }
             Backend::Scripted(s) => s.summarize(&self.model),
         }
     }
@@ -1405,7 +1407,7 @@ impl Live {
 
         // A summary that itself hit the `max_tokens` cap is incomplete;
         // committing it would silently drop everything past the cut-off.
-        // Surface it as `Truncated` so `Session::compact` keeps the
+        // Surface it as `Truncated` so `Agent::compact` keeps the
         // un-summarised history rather than compacting to a half summary.
         if matches!(resp.stop_reason, Some(StopReason::MaxTokens(_))) {
             return Err(ProviderError::Truncated {
@@ -1603,7 +1605,7 @@ fn usage_from(model: &str, raw: &genai::chat::Usage, metered: bool) -> Usage {
 }
 
 /// Scripted provider backend used by the `tests/` harness to drive
-/// [`crate::session::Session::apply`] end-to-end with no network.  A
+/// [`crate::agent::Agent::apply`] end-to-end with no network.  A
 /// [`Script`] is a queue of canned `complete` replies (each optionally
 /// streaming some text first) and a queue of `summarize` replies,
 /// consumed in order.  Running past the end of either queue panics — a
@@ -2321,7 +2323,10 @@ mod tests {
             "the stall cause rides along for the operator note",
         );
         assert!(step.tool_calls.is_empty(), "no tool call survives a stall");
-        assert!(step.stop_reason.is_none(), "no End frame, so no stop reason");
+        assert!(
+            step.stop_reason.is_none(),
+            "no End frame, so no stop reason"
+        );
         assert!(
             step.assistant_message
                 .content

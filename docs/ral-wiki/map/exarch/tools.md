@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 129914e
+generated_at_commit: 3e5ce15
 generated_at_date: 2026-06-24
 covers_paths: [exarch/src/tools.rs, exarch/src/tools/]
 ---
@@ -8,28 +8,28 @@ covers_paths: [exarch/src/tools.rs, exarch/src/tools/]
 
 `tools.rs` is the tool registry. **A `Tool` advertises itself to the
 [[map/exarch/provider|provider]] (name, description, JSON schema) and dispatches
-one parsed JSON input against a live [[map/exarch/session|`Session`]], returning
+one parsed JSON input against a live [[map/exarch/agent|`Agent`]], returning
 a `SessionToolResult` synchronously** — every tool returns now, so there is no
 join phase. Each tool owns its own input parsing and invalid-input UX; nothing
-in `provider.rs` or `session.rs` knows a tool's shape. Adding a tool is a
+in `provider.rs` or `agent.rs` knows a tool's shape. Adding a tool is a
 sibling module under `tools/` listed in `registry()`.
 
-**Two orthogonal axes decide which tools a session holds** — whether it may
-**spawn** children and whether it **returns** a value — gating both
-advertisement (`provider.complete`) and dispatch (`Session::stage`) through one
-`ToolSet::allows` check:
+**One axis decides which tools an agent holds** — whether it **returns** a value
+(`reply`) — gating both advertisement (`provider.complete`) and dispatch
+(`Agent::stage`) through one `ToolSet::allows` check. Spawning is now *universal*
+— every agent may spawn, so the tree is unbounded in depth
+([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]], superseding the
+depth-1 `spawns()` axis) — leaving exactly two constructors:
 
-- `spawns()` is true for the spawn family; a peer withholds it, so the spawn
-  tree stays one level deep.
-- `replies()` is true for `reply`; it is held by every *returning* agent and
-  withheld only from the interactive root, which converses across turns and
-  never returns a value
+- `ToolSet::conversing()` — the interactive trunk: spawns, but withholds `reply`,
+  because it converses with the user across turns and never hands a value back.
+- `ToolSet::returning()` — everyone else (a headless trunk and every sub-agent at
+  any depth): spawns *and* holds `reply`, its way of returning
   ([[decisions/260623_reply-terminates-returning-agents]]).
-- The two booleans are independent, so the three live agents occupy three
-  combinations: the **interactive root** spawns but does not return
-  (`ToolSet::interactive_root`); the **headless (returning) root** does both
-  (`ToolSet::returning_root`); a **peer** returns but does not spawn
-  (`ToolSet::peer`).
+
+`Tool::replies()` is true only for `reply`; `Tool::spawns()` is gone. `allows` is
+just `!tool.replies() || self.returns` — the spawn family and every other tool
+are universally permitted.
 
 The tools that ship:
 
@@ -40,41 +40,41 @@ The tools that ship:
   tool-call block). A fixed 30s call timeout bounds inline work; anything longer
   belongs in a `spawn` that outlives the turn.
 - the **spawn family** — `agent` / `agents` / `agent_cancel` (`tools/agent.rs`),
-  gated by `spawns()`. `agent` is launch-only and always asynchronous
-  ([[decisions/260617_async-agent-tool|async-agent-tool]]): it `fork`s a child
-  [[map/exarch/session|session]] from a value-snapshot of the parent shell, runs
-  it on a detached thread through the same `Session::drive` loop, and returns a
-  start receipt at once; the child's single reply is delivered later as a marked
-  `Turn` through the [[map/exarch/frontend|inbox]]. It takes a **mandatory
-  `permissions`** parameter — one of the five [[map/exarch/policy|base]] names
-  (`confined`, `minimal`, `read-only`, `reasonable`, `dangerous`) — so every
+  held by *every* agent (spawning is universal). `agent` is launch-only and always
+  asynchronous ([[decisions/260617_async-agent-tool|async-agent-tool]]): it
+  `fork`s a child [[map/exarch/agent|agent]] from a value-snapshot of the parent
+  shell, runs it on a detached thread through the same `Agent::drive` loop, and
+  returns a start receipt at once; the child's single reply is delivered later as
+  a marked `Turn` through the parent's [[map/exarch/frontend|inbox]]. It takes a
+  **mandatory `permissions`** parameter — one of the five [[map/exarch/policy|base]]
+  names (`confined`, `minimal`, `read-only`, `reasonable`, `dangerous`) — so every
   spawn states the child's ceiling explicitly. The child is born with
   `parent ⊓ resolve_base(permissions)` (`policy::narrow`): a lattice *meet*, so
   the base can only **narrow** the child below the parent, never escalate it past
   the parent's authority — naming a base looser than the parent simply changes
   nothing, and `dangerous` is the lattice top, meaning *inherit the parent's
   authority verbatim*. `agents` lists live workers (id, title, elapsed, log dir);
-  `agent_cancel` stops one by id. A peer is denied the family, so the tree stays
-  one level deep. The whole sub-agent model — roles, spawning, returning,
-  narrowing — is [[design/agents|agents]].
+  `agent_cancel` stops one by id and cascades to its subtree. A child may itself
+  spawn, so the tree is unbounded in depth. The whole sub-agent model — the
+  `parent` predicate, spawning, returning, narrowing — is [[design/agents|agents]].
 - `reply` (`tools/reply.rs`), gated by `replies()` — a returning agent's
   deliberate return value ([[decisions/260622_agent-reply-tool|agent-reply-tool]],
-  extended to the headless root by
+  extended to the headless trunk by
   [[decisions/260623_reply-terminates-returning-agents]]). Its `result` argument
-  is stashed on the session as the *faithful* value the model passed and lifted
+  is stashed on the agent as the *faithful* value the model passed and lifted
   into a `Replied` terminal once the tool-call batch drains — it hard-terminates
-  the agent. Each consumer renders it at its own edge by the shared value→text
-  rule ([[map/exarch/shell-eval|shell-eval]]'s `json_to_text`: a string passes
-  through raw, an object/array is pretty-printed), except the headless harness,
-  which writes the structure faithfully to its json `result`. `reply` is the
-  *sole* return path — there is no prose scrape — so a returning agent that
-  never calls it returns nothing and fails (re-nudged within the
-  [[map/exarch/session|nudge]] budget first). Withheld only from the interactive
-  root.
+  the agent regardless of focus. Each consumer renders it at its own edge by the
+  shared value→text rule ([[map/exarch/shell-eval|shell-eval]]'s `json_to_text`: a
+  string passes through raw, an object/array is pretty-printed), except the
+  headless harness, which writes the structure faithfully to its json `result`.
+  `reply` is the *sole* return path — there is no prose scrape — so a returning
+  agent that never calls it returns nothing and fails (re-nudged within the
+  [[map/exarch/agent|nudge]] budget first). Withheld only from the conversing
+  (interactive) trunk.
 - the **schedule family** — `schedule` / `schedules` / `unschedule`
   (`tools/schedule.rs`) — self-armed wakeups (a cron expression or `after <dur>`)
-  posted into the session's *own* inbox. Gated not by `ToolSet` but by
-  `schedule_authority`, so a peer may wake itself when its root was launched
+  posted into the agent's *own* inbox. Gated not by `ToolSet` but by
+  `schedule_authority`, so a sub-agent may wake itself when the trunk was launched
   `--allow-schedule`.
 - `fff` (`tools/fff.rs`) — frecency-ranked fuzzy filename search over the working
   tree via the `fff-search` crate. The first call per directory blocks on a

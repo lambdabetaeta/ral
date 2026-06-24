@@ -167,7 +167,7 @@ config file or a shell script.
    `login` subcommand + picker entry).
 
 See [[design/exarch-architecture|exarch-architecture]],
-[[map/exarch/provider|provider map]], [[map/exarch/session|session map]],
+[[map/exarch/provider|provider map]], [[map/exarch/agent|agent map]],
 [[map/exarch/frontend|frontend map]], [[map/exarch/policy|policy map]],
 [[design/grant|grant]], and
 [[decisions/260601_xdg-resolver-consolidation|xdg-resolver-consolidation]].

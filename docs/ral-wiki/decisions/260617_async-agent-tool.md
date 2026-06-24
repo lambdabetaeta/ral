@@ -196,5 +196,5 @@ verb this is deliberately *not*),
 study that mapped provider sharing and a registry),
 [[decisions/260616_tool-boundary-steering|tool-boundary-steering]] (why sync
 agents are still fork-join, and why inbox delivery is not steering),
-[[invariants/turn-ends-ready|turn-ends-ready]], [[map/exarch/session|session]],
+[[invariants/turn-ends-ready|turn-ends-ready]], [[map/exarch/agent|agent]],
 [[map/exarch/tools|tools]], and `docs/SPEC.md` §13.

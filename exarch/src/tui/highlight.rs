@@ -62,7 +62,10 @@ fn highlighted_spans(src: &str, tokens: &[(Token, ral_core::source::Span)]) -> V
     for (tok, span) in tokens {
         let range = span.range();
         if range.start > cursor {
-            spans.push(Span::styled(src[cursor..range.start].to_string(), default_ink()));
+            spans.push(Span::styled(
+                src[cursor..range.start].to_string(),
+                default_ink(),
+            ));
         }
         if range.end > range.start {
             spans.push(Span::styled(src[range.clone()].to_string(), class(tok)));
@@ -186,7 +189,10 @@ mod tests {
         let lines = highlight_ral("let x = 'unterminated");
         assert_eq!(lines.len(), 1);
         assert!(
-            lines[0].spans.iter().all(|s| s.style.fg == Some(Color::White)),
+            lines[0]
+                .spans
+                .iter()
+                .all(|s| s.style.fg == Some(Color::White)),
             "fallback colours nothing"
         );
         assert_eq!(text(&lines[0]), "let x = 'unterminated");
