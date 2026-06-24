@@ -173,12 +173,7 @@ impl Block {
     /// its coalesced intent line drains its saturation under context
     /// pressure exactly as committed prose does (Move 7); echo does not
     /// apply — an intent is the model's stated purpose, not committed prose.
-    pub(super) fn tool_call(
-        tool: &'static str,
-        summary: String,
-        cmd: String,
-        context: u8,
-    ) -> Self {
+    pub(super) fn tool_call(tool: &'static str, summary: String, cmd: String, context: u8) -> Self {
         Self::new(
             BlockKind::ToolCall { tool, summary, cmd },
             Fidelity { context, echo: 0 },
@@ -893,12 +888,7 @@ mod tests {
     /// never reduces below its one-line summary.
     #[test]
     fn dialable_kinds_floor_at_l1() {
-        let tool = Block::tool_call(
-            "ral",
-            "read lib".into(),
-            "read src/lib.rs".into(),
-            0,
-        );
+        let tool = Block::tool_call("ral", "read lib".into(), "read src/lib.rs".into(), 0);
         for mut block in [tool, diff_block(), subagent_block()] {
             assert!(block.dialable());
             // Dial hard down: the level pins at the floor, never below it.

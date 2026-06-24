@@ -13,10 +13,11 @@
 //! through the [`crate::transcript`] and [`crate::event`] seams, in headless
 //! exactly as in the TUI, for the root and every forked child alike.
 
-use crate::bus::{AgentOutcome, Event, Kind, Row, SessionBus, SessionId, Sink, pump};
+use crate::agent::Agent;
+use crate::bus::{AgentId, AgentOutcome, Event, FleetBus, Kind, Row, Sink, pump};
 use crate::card::{Card, FieldVal, Mark};
-use crate::provider::{Provider, Usage};
-use crate::session::Session;
+use crate::fleet::Fleet;
+use crate::provider::Usage;
 use crate::tui::SessionInfo;
 use std::io::{self, Write};
 use std::time::Instant;
@@ -41,7 +42,7 @@ pub struct Headless {
     /// The root session's id.  Only this session's tokens reach
     /// stdout; sub-agent token streams stay off the main surface
     /// (they'd interleave) and surface as `SubagentDone` breadcrumbs.
-    root_id: SessionId,
+    root_id: AgentId,
     /// Start instant for the run's wall-clock, surfaced at the end and in
     /// the JSON result.
     started: Instant,
@@ -76,7 +77,7 @@ pub struct Headless {
 }
 
 impl Headless {
-    fn new(json_mode: bool, root_id: SessionId) -> Self {
+    fn new(json_mode: bool, root_id: AgentId) -> Self {
         Self {
             usage: Usage::default(),
             root_id,
@@ -301,8 +302,7 @@ impl Sink for Headless {
 }
 
 pub fn run(
-    session: &mut Session,
-    provider: &std::sync::Arc<Provider>,
+    session: &mut Agent,
     info: &SessionInfo<'_>,
     seed: Option<String>,
     format: OutputFormat,
@@ -317,28 +317,36 @@ pub fn run(
     // The root's trace handle, attached to the emitter `pump` drives it
     // through; bound before `session` is borrowed into the worker closure.
     let root_transcript = session.transcript();
-    // A per-turn bus over the session's *own* inbox, so the drive worker's
-    // emitter and any in-turn producer share one queue.  Headless has no idle
-    // loop and no tabs, so the channel closes when the worker finishes and
-    // async children stay muted *on the display* — but each still records its
-    // own trace, the behaviour we want everywhere.
-    let bus = SessionBus::per_turn(session.inbox());
-    // Seed the launch prompt into that same inbox; the headless root is
-    // `park_when_idle=false`, so `drive` runs the seeded work and returns once
-    // it is idle.
+    // The fleet for this one-shot run: the trunk's shared registry, focus
+    // handle, and human-attachment, plus a per-turn bus over the trunk's *own*
+    // inbox (so the drive worker's emitter and any in-turn producer share one
+    // queue).  Headless has no idle loop and no tabs, so the channel closes when
+    // the worker finishes and async children stay muted *on the display* — but
+    // each still records its own trace, the behaviour we want everywhere.
+    let fleet = Fleet::new(
+        session.agents.clone(),
+        FleetBus::per_turn(session.inbox()),
+        session.focus_handle(),
+        session.interactive(),
+    );
+    // Seed the launch prompt into that same inbox; the headless trunk is a
+    // returning agent that does not park, so `drive` runs the seeded work and
+    // returns once it is idle.
     session.seed(prompt);
-    // A fixed provider handle — headless never swaps the model mid-run.
-    let provider = crate::session::ProviderHandle::new(std::sync::Arc::clone(provider));
     // Headless has no slash commands, so the drive loop's `Control` is a no-op;
     // declared here so its `&mut` borrow outlives the worker closure `pump`
-    // runs on its scoped thread.
-    let mut control = crate::session::NoControl;
+    // runs on its scoped thread.  The trunk drives on its own provider handle.
+    let mut control = crate::agent::NoControl;
     // Drive on a scoped worker thread while the main thread drives the sink.
     // `pump` returns the worker's `(outcome, text)`, or `None` if it panicked.
     let root_id = session.id;
-    let outcome = pump(&mut headless, &bus, root_id, root_transcript, |emit| {
-        session.drive(provider.clone(), &mut control, emit)
-    });
+    let outcome = pump(
+        &mut headless,
+        &fleet.bus,
+        root_id,
+        root_transcript,
+        |emit| session.drive(&mut control, emit),
+    );
     // `pump` returns the drive digest — the outcome and the root's faithful
     // `reply` payload.  The payload is the json `result` (a string stays a
     // string, an object/array stays structured); the outcome drives the
@@ -363,7 +371,7 @@ pub fn run(
     // sub-agent — including async children muted on this per-turn bus, whose
     // usage never reached the sink.  This is the single source of truth the
     // JSON result and the `[done]` line both read.
-    headless.usage = bus.usage_total();
+    headless.usage = fleet.bus.usage_total();
     let elapsed = headless.started.elapsed();
     if json {
         // The streamed text was held back, so this single result object
@@ -374,7 +382,7 @@ pub fn run(
         // when the streamed reply did not end with one.
         println!();
     }
-    eprintln!("Session log: {}", session.log_dir().display());
+    eprintln!("Agent log: {}", session.log_dir().display());
     eprintln!(
         "[done] {} turns · {:.1}s · {} · ${:.4}",
         headless.turns,
@@ -395,7 +403,7 @@ mod tests {
     /// recognised only by the `Kind::Error` the bus emits.
     #[test]
     fn recovered_worker_panic_reports_error_not_success() {
-        let root: SessionId = 1;
+        let root: AgentId = 1;
         let mut h = Headless::new(true, root);
         h.handle(Event {
             id: root,
@@ -413,8 +421,8 @@ mod tests {
     /// report only the final segment. Sub-agent steps must not count.
     #[test]
     fn num_turns_counts_root_steps_across_segments() {
-        let root: SessionId = 1;
-        let sub: SessionId = 2;
+        let root: AgentId = 1;
+        let sub: AgentId = 2;
         let mut h = Headless::new(true, root);
         // Two root segments whose per-segment indices reset (1..3, then
         // 1..2), with a sub-agent step interleaved that must be ignored.
@@ -440,7 +448,7 @@ mod tests {
     /// Claude Code's always-string shape.
     #[test]
     fn structured_result_is_faithful_not_stringified() {
-        let root: SessionId = 1;
+        let root: AgentId = 1;
         let mut h = Headless::new(true, root);
         h.result = Some(serde_json::json!({ "files": ["a.rs", "b.rs"] }));
         let out = result_json(&h, &Ok(()), std::time::Duration::ZERO);
@@ -458,7 +466,7 @@ mod tests {
     /// reason rather than the misleading "completed".
     #[test]
     fn no_reply_root_is_error_with_null_result() {
-        let root: SessionId = 1;
+        let root: AgentId = 1;
         // `result` stays `None` — the run errored before producing a reply.
         let h = Headless::new(true, root);
         let out = result_json(

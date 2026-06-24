@@ -156,7 +156,7 @@ default for a store that is not the session's:
   parent's `context`, source cursor, and builtin table without touching its IO /
   audit / REPL scratch; no flow-back.
 - `fork_session` — the host session fork (the sub-agent case), the session-scoped
-  specialisation of `child_from`. See [[map/exarch/session|session]].
+  specialisation of `child_from`. See [[map/exarch/agent|agent]].
 
 Every genuine fork copies `session.builtins` (the dispatch table), so dispatch
 reaches the child; the same-thread β-step shares it by identity.

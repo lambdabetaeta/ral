@@ -8,7 +8,7 @@ single bad commit can wedge the whole run on a strict backend (Anthropic 400s,
 the run dies — misclassified as fatal). The protocol state machine
 ([[map/exarch/frontend|`event.rs`]]) enforces *role alternation*; this invariant
 enforces *per-message admissibility* at the one place messages enter the log:
-the `apply` commit boundary in [[map/exarch/session|session]].
+the `apply` commit boundary in [[map/exarch/agent|agent]].
 
 Three commit-time obligations, all in `Session::apply` (the deep-review X-tags):
 
@@ -48,5 +48,5 @@ exarch analogue of the wire-hop discipline
 complete values.
 
 See also [[invariants/turn-ends-ready|turn-ends-ready]] (the role-alternation
-half), [[map/exarch/session|session]] (`apply`, `admit_assistant`, `compact`),
+half), [[map/exarch/agent|agent]] (`apply`, `admit_assistant`, `compact`),
 [[map/exarch/provider|provider]] (`from_genai`, `parse_4xx_status`).

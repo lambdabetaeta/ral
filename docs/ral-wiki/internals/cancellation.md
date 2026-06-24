@@ -234,5 +234,5 @@ gesture is REPL Ctrl-`\`, not a TUI key.
   [[internals/pipeline-execution|pipeline-execution]] — the foreground-deadline and
   group-teardown paths that read the scope.
 - [[map/core/io-process|io-process]] (signals, process groups), [[map/repl/jobs|jobs]]
-  (relay, fg/bg), [[map/exarch/session|session]] (the turn loop the token wraps),
+  (relay, fg/bg), [[map/exarch/agent|agent]] (the turn loop the token wraps),
   and `core/src/process/signal.rs` itself.

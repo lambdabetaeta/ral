@@ -5,10 +5,10 @@
 //! inline error block on the rail with no detour through the session.
 
 use super::{Tool, invalid_input};
+use crate::agent::Agent;
 use crate::bus::{Emitter, Kind};
 use crate::event::ToolResult as SessionToolResult;
 use crate::provider::Provider;
-use crate::session::Session;
 use serde_json::{Value, json};
 use std::sync::{Arc, OnceLock};
 
@@ -105,7 +105,7 @@ impl Tool for RalTool {
         &self,
         id: String,
         input: Value,
-        session: &mut Session,
+        session: &mut Agent,
         _provider: &Arc<Provider>,
         emit: &Emitter,
     ) -> SessionToolResult {

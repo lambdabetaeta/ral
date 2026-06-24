@@ -1,6 +1,6 @@
 //! Per-session canonical event log.
 //!
-//! [`SessionLog`] is the single source of truth for one continuous agent
+//! [`AgentLog`] is the single source of truth for one continuous agent
 //! session.  It owns:
 //!
 //! - an in-memory `Vec<SessionEvent>` (used to render the next provider
@@ -24,7 +24,7 @@
 //! which skips whitespace between values.  Appending is just
 //! `to_writer_pretty + "\n"`; no closing array bracket to maintain.
 
-use crate::bus::SessionId;
+use crate::bus::AgentId;
 use crate::provider::{ProviderError, Usage};
 use genai::chat::{ChatMessage, ChatRole, ToolResponse};
 use serde::{Deserialize, Serialize};
@@ -169,8 +169,8 @@ pub enum SessionEvent {
     /// enough static metadata (model, provider, parent) that the file
     /// is self-describing without external context.
     SessionStarted {
-        session_id: SessionId,
-        parent: Option<SessionId>,
+        session_id: AgentId,
+        parent: Option<AgentId>,
         model: String,
         provider: String,
         system_prompt_bytes: usize,
@@ -181,7 +181,7 @@ pub enum SessionEvent {
     /// or a steering interjection drained after tool results and before the
     /// next assistant reply.
     UserPrompt { text: String },
-    /// Marks the start of one inner step of `Session::apply`.  Several
+    /// Marks the start of one inner step of `Agent::apply`.  Several
     /// steps may share a single user prompt when the model issues tool
     /// calls.
     StepStarted { n: u32 },
@@ -203,10 +203,10 @@ pub enum SessionEvent {
     UsageDelta { usage: UsageDelta },
     /// The user pressed Ctrl-C / Esc mid-turn.  Whatever events were
     /// pending have been synthesised back to a `ReadyForUser` state by
-    /// [`SessionLog::quiesce`].
+    /// [`AgentLog::quiesce`].
     Cancelled,
     /// History was compacted.  The live model view (the summary plus the
-    /// kept suffix) is held in [`SessionLog::compaction`]; this event is
+    /// kept suffix) is held in [`AgentLog::compaction`]; this event is
     /// just the archival breadcrumb so post-mortem tooling can spot where
     /// the truncation happened and read the summary it produced.
     Compacted {
@@ -227,7 +227,7 @@ pub enum SessionEvent {
     /// [`ProviderErrorRecord`] so the on-screen render is fully
     /// reconstructable from events.json.
     ProviderError { error: ProviderErrorRecord },
-    /// Bookend at the tail.  Written when the owning [`SessionLog`] is
+    /// Bookend at the tail.  Written when the owning [`AgentLog`] is
     /// dropped (root session) or when a forked child completes.
     SessionEnded,
 }
@@ -288,9 +288,9 @@ pub enum QuiesceReason {
 /// on-disk writer, the protocol state machine, and the static origin
 /// metadata (model, provider, sessions root) needed to (re)record
 /// `SessionStarted` on `clear` and to set up forked children — keyed
-/// throughout to one [`SessionId`].
-pub struct SessionLog {
-    id: SessionId,
+/// throughout to one [`AgentId`].
+pub struct AgentLog {
+    id: AgentId,
     dir: PathBuf,
     /// Append-only writer over `events.json`.  Held open so each
     /// `record` is a buffered append + flush — no reopen-per-event cost,
@@ -341,7 +341,7 @@ fn summary_prompt(summary: &str) -> String {
 }
 
 /// Serialised model-message bytes an event contributes — the per-event
-/// unit [`SessionLog::history_bytes`] sums and the suffix budget measures.
+/// unit [`AgentLog::history_bytes`] sums and the suffix budget measures.
 fn event_message_bytes(e: &SessionEvent) -> usize {
     e.clone()
         .into_chat_messages()
@@ -350,13 +350,13 @@ fn event_message_bytes(e: &SessionEvent) -> usize {
         .sum()
 }
 
-impl SessionLog {
+impl AgentLog {
     /// Build a fresh root session log under `sessions_root` (typically
     /// `<scratch>/sessions/`).  Wipes any prior directory with the same
     /// session id so the events file starts empty.
     pub fn root(
         sessions_root: &Path,
-        session_id: SessionId,
+        session_id: AgentId,
         model: &str,
         provider: &str,
         system_prompt_bytes: usize,
@@ -375,7 +375,7 @@ impl SessionLog {
     /// `sessions_root`, `model`, and `provider`, recording the parent
     /// id inside the child's `SessionStarted` event so the on-disk file
     /// is self-describing.
-    pub fn fork(&self, child_id: SessionId, system_prompt_bytes: usize) -> io::Result<Self> {
+    pub fn fork(&self, child_id: AgentId, system_prompt_bytes: usize) -> io::Result<Self> {
         let mut s = Self::open_fresh(
             self.sessions_root.clone(),
             child_id,
@@ -386,7 +386,7 @@ impl SessionLog {
         Ok(s)
     }
 
-    pub fn id(&self) -> SessionId {
+    pub fn id(&self) -> AgentId {
         self.id
     }
 
@@ -409,7 +409,7 @@ impl SessionLog {
 
     /// Approximate context size as serialised model-view message bytes.
     /// The fallback compaction trigger in
-    /// [`crate::session::Session::compact`], used when the model's context
+    /// [`crate::agent::Agent::compact`], used when the model's context
     /// window is unknown; otherwise compaction tracks token pressure
     /// against the window.
     pub fn history_bytes(&self) -> usize {
@@ -592,7 +592,9 @@ impl SessionLog {
                     starts.push(i);
                     ready = false;
                 }
-                SessionEvent::AssistantMessage { pending_tool_ids, .. } => {
+                SessionEvent::AssistantMessage {
+                    pending_tool_ids, ..
+                } => {
                     ready = pending_tool_ids.is_empty();
                 }
                 SessionEvent::ToolResults { .. } => ready = false,
@@ -620,7 +622,10 @@ impl SessionLog {
         let mut acc = 0usize;
         let mut upper = self.events.len();
         for &cand in candidates.iter().rev() {
-            acc += self.events[cand..upper].iter().map(event_message_bytes).sum::<usize>();
+            acc += self.events[cand..upper]
+                .iter()
+                .map(event_message_bytes)
+                .sum::<usize>();
             if acc <= keep_budget_bytes {
                 cut = cand;
                 upper = cand;
@@ -639,7 +644,10 @@ impl SessionLog {
         for e in &self.events[visible_start..cut] {
             prefix_messages.extend(e.clone().into_chat_messages());
         }
-        Some(CompactionPlan { suffix_start: cut, prefix_messages })
+        Some(CompactionPlan {
+            suffix_start: cut,
+            prefix_messages,
+        })
     }
 
     /// Commit a planned compaction: record the archival `Compacted`
@@ -658,7 +666,10 @@ impl SessionLog {
             after_bytes: 0,
             summary: summary.clone(),
         })?;
-        self.compaction = Some(Compaction { summary, suffix_start });
+        self.compaction = Some(Compaction {
+            summary,
+            suffix_start,
+        });
         self.state = State::ReadyForUser;
         let after = self.history_bytes();
         if let Some(SessionEvent::Compacted { after_bytes, .. }) = self.events.last_mut() {
@@ -714,7 +725,7 @@ impl SessionLog {
     )]
     fn open_fresh(
         sessions_root: PathBuf,
-        session_id: SessionId,
+        session_id: AgentId,
         model: String,
         provider: String,
     ) -> io::Result<Self> {
@@ -741,7 +752,7 @@ impl SessionLog {
     /// origin metadata.  Used by `root`, `fork`, and `clear`.
     fn record_started(
         &mut self,
-        parent: Option<SessionId>,
+        parent: Option<AgentId>,
         system_prompt_bytes: usize,
     ) -> io::Result<()> {
         let ev = SessionEvent::SessionStarted {
@@ -843,9 +854,9 @@ mod tests {
         p
     }
 
-    fn fresh_root(tag: &str) -> SessionLog {
+    fn fresh_root(tag: &str) -> AgentLog {
         let root = sessions_root(tag);
-        SessionLog::root(&root, 0, "model", "provider", 0).expect("log")
+        AgentLog::root(&root, 0, "model", "provider", 0).expect("log")
     }
 
     fn assistant_with_tool(id: &str) -> ChatMessage {

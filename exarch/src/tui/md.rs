@@ -226,10 +226,9 @@ impl Composer {
             Event::Start(t) => self.start(t, p),
             Event::End(e) => self.end(e),
             Event::Text(t) => self.text(&t),
-            Event::Code(t) => self.push_span(Span::styled(
-                t.into_string(),
-                Style::default().fg(LIME),
-            )),
+            Event::Code(t) => {
+                self.push_span(Span::styled(t.into_string(), Style::default().fg(LIME)))
+            }
             Event::Html(t) | Event::InlineHtml(t) => self.text(&t),
             Event::SoftBreak => self.push_space(),
             Event::HardBreak => self.flush_line(),
@@ -665,10 +664,9 @@ fn render_table<'a, I: Iterator<Item = Event<'a>>>(
                 _ => {}
             },
             Event::Text(t) => cur_cell.push(Span::styled(t.into_string(), style)),
-            Event::Code(t) => cur_cell.push(Span::styled(
-                t.into_string(),
-                Style::default().fg(LIME),
-            )),
+            Event::Code(t) => {
+                cur_cell.push(Span::styled(t.into_string(), Style::default().fg(LIME)))
+            }
             Event::SoftBreak | Event::HardBreak => cur_cell.push(Span::raw(" ".to_string())),
             _ => {}
         }

@@ -13,18 +13,18 @@
 //! The format is JSON: this is state, not config-as-code, so a simple
 //! robust serialisation is right.
 
-use crate::provider::ProviderId;
+use crate::provider::{ProviderId, ReasoningEffort, Tuning};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// The state file name within a project's [`crate::bootstrap::project_dir`].
 const STATE_FILE: &str = "state.json";
 
-/// The persisted runtime state. Only the model selection lives here in
-/// this slice; tuning (slice 2) will extend this struct, so unknown future
-/// fields must not break an older binary — hence `#[serde(default)]` on
-/// what we add later, and a tolerant load.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+/// The persisted runtime state: the model selection plus its tuning. The
+/// tuning fields are `#[serde(default)]` so a state file written by an older
+/// binary (model only) still loads — its tuning reads as "auto" — and a
+/// hand-edited or future file with unknown keys is tolerated by [`load`].
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct State {
     /// The active provider, by its stable label
     /// ([`ProviderId::label`]) so the file is human-readable. A famous
@@ -33,14 +33,42 @@ pub struct State {
     pub provider: String,
     /// The active model name.
     pub model: String,
+    /// The reasoning-effort keyword ([`ReasoningEffort::as_keyword`]), or
+    /// absent for "auto". Stored as a keyword so the file stays
+    /// human-readable; an unrecognised keyword resolves back to "auto".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// The sampling temperature, or absent for "auto".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
 }
 
 impl State {
-    /// Build state from a resolved selection.
-    pub fn new(provider: &ProviderId, model: &str) -> Self {
+    /// Build state from a resolved selection and its tuning. An effort that
+    /// has no keyword (genai's `Budget`, which the overlay never produces) is
+    /// dropped to "auto" rather than persisted opaquely.
+    pub fn new(provider: &ProviderId, model: &str, tuning: &Tuning) -> Self {
         Self {
             provider: provider.label().to_string(),
             model: model.to_string(),
+            effort: tuning
+                .effort
+                .as_ref()
+                .and_then(|e| e.as_keyword().map(str::to_string)),
+            temperature: tuning.temperature,
+        }
+    }
+
+    /// The persisted tuning, resolved back to live values. An effort keyword
+    /// that no longer parses ([`ReasoningEffort::from_keyword`]) reads as
+    /// "auto".
+    pub fn tuning(&self) -> Tuning {
+        Tuning {
+            effort: self
+                .effort
+                .as_deref()
+                .and_then(ReasoningEffort::from_keyword),
+            temperature: self.temperature,
         }
     }
 
@@ -119,7 +147,11 @@ mod tests {
     fn save_load_round_trip() {
         use crate::provider::ProviderKind;
         let dir = tmp_dir();
-        let state = State::new(&fam(ProviderKind::Deepseek), "deepseek-reasoner");
+        let state = State::new(
+            &fam(ProviderKind::Deepseek),
+            "deepseek-reasoner",
+            &Tuning::default(),
+        );
         save(&dir, &state).unwrap();
         let loaded = load(&dir).expect("state should load");
         assert_eq!(loaded, state);
@@ -142,7 +174,7 @@ mod tests {
             endpoint: "https://llama.example/v1/".into(),
             adapter: genai::adapter::AdapterKind::OpenAI,
         }));
-        let state = State::new(&custom, "llama-3");
+        let state = State::new(&custom, "llama-3", &Tuning::default());
         save(&dir, &state).unwrap();
         let loaded = load(&dir).expect("state should load");
         assert_eq!(loaded.provider, "local-llama");
@@ -175,8 +207,43 @@ mod tests {
         let state = State {
             provider: "mistral".into(),
             model: "m".into(),
+            effort: None,
+            temperature: None,
         };
         let available = [fam(ProviderKind::Anthropic)];
         assert!(state.provider_id(&available).is_none());
+    }
+
+    /// Tuning round-trips through the keyword + temperature fields, and the
+    /// resolved [`Tuning`] matches what was saved.
+    #[test]
+    fn tuning_round_trips() {
+        use crate::provider::ProviderKind;
+        let dir = tmp_dir();
+        let tuning = Tuning {
+            effort: Some(ReasoningEffort::High),
+            temperature: Some(0.7),
+        };
+        let state = State::new(&fam(ProviderKind::Anthropic), "claude-opus-4", &tuning);
+        assert_eq!(state.effort.as_deref(), Some("high"));
+        save(&dir, &state).unwrap();
+        let loaded = load(&dir).expect("state should load");
+        assert_eq!(loaded.tuning(), tuning);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A state file written before tuning existed (model only) still loads,
+    /// and its tuning reads as "auto" (both knobs unset).
+    #[test]
+    fn pre_tuning_file_loads_as_auto() {
+        let dir = tmp_dir();
+        std::fs::write(
+            path_in(&dir),
+            br#"{"provider":"anthropic","model":"claude-opus-4"}"#,
+        )
+        .unwrap();
+        let loaded = load(&dir).expect("state should load");
+        assert_eq!(loaded.tuning(), Tuning::default());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

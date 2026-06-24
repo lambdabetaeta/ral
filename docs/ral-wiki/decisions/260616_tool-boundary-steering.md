@@ -67,4 +67,4 @@ it steers the next assistant step.
 
 A queued prompt reaches the model at the first safe boundary: after all currently pending tool ids have results. It is never inserted between an assistant tool-call message and the required tool responses, and slash-prefixed prompts are left to the REPL command path.
 
-See also [[decisions/260613_prompt-queue|prompt-queue]], [[map/exarch/frontend|frontend]], and [[map/exarch/session|session]].
+See also [[decisions/260613_prompt-queue|prompt-queue]], [[map/exarch/frontend|frontend]], and [[map/exarch/agent|agent]].

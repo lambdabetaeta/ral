@@ -67,6 +67,6 @@ A queued prompt reaches the model only at a turn boundary, through the REPL's
 ordinary prompt path — never injected into a live turn. The frontend stays a
 pure consumer of the event stream.
 
-See also [[map/exarch/frontend|frontend]], [[map/exarch/session|session]], and
+See also [[map/exarch/frontend|frontend]], [[map/exarch/agent|agent]], and
 [[invariants/turn-ends-ready|turn-ends-ready]].
 

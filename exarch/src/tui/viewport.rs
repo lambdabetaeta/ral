@@ -611,8 +611,8 @@ impl Viewport {
         // the whole buffer fits, so the rule line shows no readout.  `offset`
         // is clamped to `max_off` because a head-anchored shrunken tail group
         // can run it past the bottom (a gap opens below).
-        let scroll_pct = (max_off > 0)
-            .then(|| (self.offset.min(max_off) * 100 / max_off).min(100) as u16);
+        let scroll_pct =
+            (max_off > 0).then(|| (self.offset.min(max_off) * 100 / max_off).min(100) as u16);
         // Committed rows fill the window up to the seat's row (`committed`);
         // the seat itself lands only once the window reaches past them — i.e.
         // the tail is in view.
@@ -707,8 +707,13 @@ impl Viewport {
                 segment
             } else {
                 let prompt = self.blocks[i].is_prompt();
-                let lead = opens_rail_run(i.checked_sub(1).map(|j| &self.blocks[j]), &self.blocks[i]);
-                let segment = (i, self.blocks[i].lines(content_w, agent, lead).to_vec(), prompt);
+                let lead =
+                    opens_rail_run(i.checked_sub(1).map(|j| &self.blocks[j]), &self.blocks[i]);
+                let segment = (
+                    i,
+                    self.blocks[i].lines(content_w, agent, lead).to_vec(),
+                    prompt,
+                );
                 i += 1;
                 segment
             };
@@ -849,12 +854,7 @@ mod tests {
     fn pins_overwrite_in_place_and_keep_insertion_order() {
         use crate::card::Mark;
         let raw = |b: &[u8]| Card(vec![Mark::Raw { bytes: b.to_vec() }]);
-        let keys = |vp: &Viewport| {
-            vp.pins()
-                .iter()
-                .map(|(k, _)| k.clone())
-                .collect::<Vec<_>>()
-        };
+        let keys = |vp: &Viewport| vp.pins().iter().map(|(k, _)| k.clone()).collect::<Vec<_>>();
         let mut vp = viewport();
         vp.set_pin("tasks".into(), raw(b"v1"));
         vp.set_pin("build".into(), raw(b"ok"));
@@ -906,7 +906,10 @@ mod tests {
         assert!(vp.open.is_empty());
         let w = vp.render_window(READ_W, 24);
         let all = w.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
-        assert!(all.contains("let x = 1"), "committed prose now renders: {all:?}");
+        assert!(
+            all.contains("let x = 1"),
+            "committed prose now renders: {all:?}"
+        );
         assert!(
             !plain(w.lines.last().expect("committed rows")).contains('░'),
             "no provisional seat remains after commit: {all:?}"

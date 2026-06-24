@@ -89,4 +89,4 @@ See also [[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-inte
 (the delivery half — what an Esc *does* once it raises the token),
 [[decisions/260504_hot-path-cancellation|hot-path-cancellation]] (ral's
 per-subtree `CancelScope`, the in-evaluator analogue), [[map/exarch/frontend]],
-[[map/exarch/session]], and [[invariants/turn-ends-ready]].
+[[map/exarch/agent]], and [[invariants/turn-ends-ready]].

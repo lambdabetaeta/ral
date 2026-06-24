@@ -3,7 +3,7 @@
 //! One [`Sink`] implementation, plus the REPL loop the user types into.
 //! The TUI owns raw-mode, bracketed-paste, the alternate screen, and
 //! mouse capture through [`TerminalGuard`]; the agent core in
-//! [`crate::bus`] and [`crate::session`] sees only an
+//! [`crate::bus`] and [`crate::agent`] sees only an
 //! [`crate::bus::Emitter`] / [`Event`] channel.
 //!
 //! The app owns its scrollback rather than delegating it to the host
@@ -30,16 +30,18 @@ use rail::RailKind;
 
 use line::usage_text;
 
+use crate::agent::{Agent, Control, ControlFlow};
+use crate::agent_registry::AgentRegistry;
 use crate::bootstrap::Scratch;
 use crate::bus::{
-    Emitter, Event, Hunk, Inbox, InboxMsg, Kind, Mailbox, Pass, SessionBus, SessionId, drain_pass,
+    AgentId, Emitter, Event, FleetBus, Hunk, Inbox, InboxMsg, Kind, Mailbox, Pass, drain_pass,
 };
 use crate::cancel;
 use crate::card::{Card, Field, FieldVal, IoEvent, Mark, Role, Span as CardSpan};
 use crate::credential::CredentialStore;
+use crate::fleet::{Fleet, NO_FOCUS};
 use crate::models::{LiveSource, ModelCatalog, ModelSource};
 use crate::provider::{self, Provider, Usage};
-use crate::session::{Control, ControlFlow, ProviderHandle, Session};
 use crate::state;
 use ral_core::path::sigil::expand_path_prefix;
 use std::sync::Arc;
@@ -76,15 +78,15 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Once,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
 use textarea_vim::{Mode, Vim, place_native_cursor};
 
 use line::{
-    AGENT_HUES, BANNER_GOLD, BANNER_PINK, CYAN, PINK, PURPLE, RAIL_DIAL_W, RAIL_W, READ_W, SLATE,
-    bold,
+    AGENT_HUES, BANNER_GOLD, BANNER_PINK, CYAN, OVERLAY_BG, PINK, PURPLE, RAIL_DIAL_W, RAIL_W,
+    READ_W, SLATE, bold,
 };
 use viewport::Viewport;
 
@@ -196,7 +198,11 @@ fn editor_command() -> (String, Vec<String>) {
     let spec = std::env::var("VISUAL")
         .ok()
         .filter(|s| !s.trim().is_empty())
-        .or_else(|| std::env::var("EDITOR").ok().filter(|s| !s.trim().is_empty()))
+        .or_else(|| {
+            std::env::var("EDITOR")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
         .unwrap_or_else(|| "vi".to_string());
     let mut parts = spec.split_whitespace().map(str::to_string);
     let program = parts.next().unwrap_or_else(|| "vi".to_string());
@@ -397,26 +403,34 @@ pub struct App {
     /// Per-session scrollback.  Populated by `Born`, retained across
     /// `Died` and across tab-bar expiry so [`Self::flush_logs`] can
     /// still write each session's `user.log` at session end.
-    viewports: HashMap<SessionId, Viewport>,
+    viewports: HashMap<AgentId, Viewport>,
     /// Insertion order of viewports — root first, then subagents as
     /// they were born.  Drives [`Self::flush_logs`] for stable
     /// per-session log paths across runs.
-    dispatch_order: Vec<SessionId>,
+    dispatch_order: Vec<AgentId>,
     /// Tabs visible in the tab bar.  Always starts with `root`; sub-
     /// agents are appended on `Born` and removed when their entry in
     /// `dying` ages out past [`LINGER`].
-    tabs: Vec<SessionId>,
+    tabs: Vec<AgentId>,
     /// Per-session label.  Root maps to [`ROOT_TITLE`]; subagents to
     /// the `title` field of their `Kind::Born` event.
-    titles: HashMap<SessionId, String>,
+    titles: HashMap<AgentId, String>,
     /// Death timestamps for subagents in their linger window.  Tabs
     /// drop from [`Self::tabs`] once [`LINGER`] elapses; the viewport
     /// stays alive for log flushing.
-    dying: HashMap<SessionId, Instant>,
-    root: SessionId,
-    /// Tab the user is currently viewing.  Reads route through
-    /// [`Self::focused`] so a stale id (expired tab) resolves to root.
-    focus: SessionId,
+    dying: HashMap<AgentId, Instant>,
+    root: AgentId,
+    /// The fleet's focused-agent handle, shared with the agents' drive loops
+    /// (an [`AtomicU64`] of an [`AgentId`], or `NO_FOCUS`).  `TAB` stores into
+    /// it; the focused agent reads it in its park predicate and parks for the
+    /// human.  Reads route through [`Self::focused`] so a stale id (an expired
+    /// tab, or the no-focus sentinel) resolves to root.  Bound to the trunk's
+    /// shared handle by [`Self::bind_focus`].
+    focus: Arc<AtomicU64>,
+    /// Each tab's parent (the spawning agent), recorded from `Kind::Born`, so
+    /// focus can fall back to the parent — recursing toward the trunk — when a
+    /// focused agent ends.
+    parents: HashMap<AgentId, AgentId>,
     pub textarea: TextArea<'static>,
     /// Submitted prompts, oldest first.  Up from the prompt's first
     /// row and Down from its last row walk this list shell-style.
@@ -432,7 +446,7 @@ pub struct App {
     /// start so the input editor, the pending strip, and the worker's drive
     /// loop all share one queue. A submitted prompt is pushed onto it (through a
     /// `Mailbox`); the worker drains a non-slash prefix after a tool result to
-    /// steer the next assistant step ([`Session::dispatch`]) and the remainder
+    /// steer the next assistant step ([`Agent::dispatch`]) and the remainder
     /// at the next turn boundary ([`Inbox::next_or_idle`]). Until drained,
     /// pending messages render in the strip above the input
     /// ([`line::queued_prompt`]) and bare Up on an empty prompt pulls the newest
@@ -522,7 +536,7 @@ struct Press {
 
 /// Accumulator backing [`App::patch_buf`].
 struct PatchBuf {
-    id: SessionId,
+    id: AgentId,
     path: String,
     hunks: Vec<Hunk>,
 }
@@ -534,7 +548,7 @@ struct PatchBuf {
 /// spans so flush-time rendering can reuse the exact `io_card` span idioms via
 /// [`crate::card::io_group_card`].
 struct IoBuf {
-    id: SessionId,
+    id: AgentId,
     /// Read paths, first-seen order, deduped.
     reads: Vec<String>,
     /// `Exec` events, deduped by `argv`.
@@ -547,7 +561,7 @@ struct IoBuf {
 
 impl App {
     pub fn new(
-        root_id: SessionId,
+        root_id: AgentId,
         root_log_dir: &Path,
         context_window: Option<u64>,
         vi: bool,
@@ -584,7 +598,10 @@ impl App {
             titles,
             dying: HashMap::new(),
             root: root_id,
-            focus: root_id,
+            // A placeholder until [`Self::bind_focus`] wires the trunk's shared
+            // handle; `focused()` resolves the no-focus sentinel to root.
+            focus: Arc::new(AtomicU64::new(NO_FOCUS)),
+            parents: HashMap::new(),
             textarea,
             history: Vec::new(),
             hist_pos: None,
@@ -633,6 +650,27 @@ impl App {
         self.inbox = inbox;
     }
 
+    /// Bind the App's focus to the fleet's shared handle (the trunk's), so a
+    /// `TAB` here and the focused agent's park predicate read and write one
+    /// [`AtomicU64`].  Called once at REPL start, like [`Self::bind_inbox`].
+    pub fn bind_focus(&mut self, focus: Arc<AtomicU64>) {
+        self.focus = focus;
+    }
+
+    /// Walk up the `parents` chain from a (dying) agent to the nearest still-
+    /// live ancestor tab, falling back to root — the focus target when a
+    /// focused agent ends.
+    fn parent_focus(&self, id: AgentId) -> AgentId {
+        let mut cur = id;
+        while let Some(&p) = self.parents.get(&cur) {
+            if self.tabs.contains(&p) {
+                return p;
+            }
+            cur = p;
+        }
+        self.root
+    }
+
     /// Mutable access to the active picker, for the REPL's picker loop.
     fn picker_mut(&mut self) -> Option<&mut Picker> {
         self.picker.as_mut()
@@ -662,11 +700,11 @@ impl App {
         // already dying keeps its earlier death instant, so a child that died
         // just before the clear is not given a fresh full window.
         let now = Instant::now();
-        let retiring: Vec<SessionId> = self.tabs.iter().copied().filter(|&id| id != root).collect();
+        let retiring: Vec<AgentId> = self.tabs.iter().copied().filter(|&id| id != root).collect();
         for id in retiring {
             self.dying.entry(id).or_insert(now);
         }
-        self.focus = root;
+        self.focus.store(root, Ordering::Relaxed);
         if let Some(vp) = self.viewports.get_mut(&root) {
             vp.reset();
         }
@@ -706,13 +744,20 @@ impl App {
             vp.clear_phase();
         }
         match kind {
-            Kind::Born { log_dir, title } => {
+            Kind::Born {
+                log_dir,
+                title,
+                parent,
+            } => {
                 if let std::collections::hash_map::Entry::Vacant(slot) = self.viewports.entry(id) {
                     let agent = AgentSlot((self.tabs.len() as u8) % AGENT_HUES.len() as u8);
                     slot.insert(Viewport::new(log_dir.join("user.log"), agent));
                     self.dispatch_order.push(id);
                 }
                 self.titles.insert(id, title);
+                // Record the spawn edge so focus can fall back to the parent
+                // when this agent ends while focused.
+                self.parents.insert(id, parent);
                 if !self.tabs.contains(&id) {
                     self.tabs.push(id);
                 }
@@ -727,6 +772,14 @@ impl App {
                 // long as the program does.
                 if id != self.root {
                     self.dying.insert(id, Instant::now());
+                    // A `reply` ends an agent even while the human is focused on
+                    // it; the conversation ends out from under them, so focus
+                    // falls back to its parent, recursing toward the trunk.  A
+                    // de-focused agent that reaps already moved focus on `TAB`,
+                    // so this only fires for the focused one.
+                    if self.focus.load(Ordering::Relaxed) == id {
+                        self.focus.store(self.parent_focus(id), Ordering::Relaxed);
+                    }
                 }
             }
             Kind::Usage(u) => {
@@ -826,7 +879,7 @@ impl App {
                     "tui",
                     "Card id={id} viewports={:?} focus={} diff={}",
                     self.viewports.keys().copied().collect::<Vec<_>>(),
-                    self.focus,
+                    self.focused(),
                     card.single_diff().is_some()
                 );
                 match card.into_single_diff() {
@@ -864,7 +917,7 @@ impl App {
     /// to `f`.  Any other content closes both grouping windows: a pending io
     /// group or `▎ diff` must land before the new block, or the merged block
     /// would appear *after* whatever follows it on the rail.
-    fn with_viewport(&mut self, id: SessionId, f: impl FnOnce(&mut Viewport)) {
+    fn with_viewport(&mut self, id: AgentId, f: impl FnOnce(&mut Viewport)) {
         self.flush_surfaces();
         match self.viewports.get_mut(&id) {
             Some(vp) => f(vp),
@@ -878,7 +931,7 @@ impl App {
         }
     }
 
-    fn push_chrome(&mut self, id: SessionId, shape: RailShape, lines: Vec<Line<'static>>) {
+    fn push_chrome(&mut self, id: AgentId, shape: RailShape, lines: Vec<Line<'static>>) {
         self.with_viewport(id, |vp| vp.push_chrome(shape, lines));
     }
 
@@ -886,14 +939,14 @@ impl App {
     /// legend row, a clipboard or export ack) that names nothing about the run,
     /// so it is *drawn, not recorded*: it never becomes an event, the way the
     /// rendered `Kind::SystemNote` does at the emit seam.
-    fn push_note(&mut self, id: SessionId, text: String) {
+    fn push_note(&mut self, id: AgentId, text: String) {
         self.push_chrome(id, RailShape::Plain, line::dim(&text));
     }
 
     /// Draw an error line straight to the viewport — the UI-thread twin of
-    /// [`Session::note_error`], for the view commands that surface their own
+    /// [`Agent::note_error`], for the view commands that surface their own
     /// failures.  Drawn, not recorded.
-    fn push_error(&mut self, id: SessionId, message: String) {
+    fn push_error(&mut self, id: AgentId, message: String) {
         self.push_chrome(id, RailShape::Error, line::error(&message));
     }
 
@@ -903,7 +956,7 @@ impl App {
     /// buffer so they later render as a single `▎ diff <path>` block of
     /// located hunks — the way a unified diff presents several changes to
     /// one file.
-    fn absorb_patch(&mut self, id: SessionId, path: String, hunks: Vec<Hunk>) {
+    fn absorb_patch(&mut self, id: AgentId, path: String, hunks: Vec<Hunk>) {
         let same = self
             .patch_buf
             .as_ref()
@@ -937,7 +990,7 @@ impl App {
     /// block.  Unlike [`Self::with_viewport`], this accumulates directly: the
     /// shared [`Self::flush_surfaces`] boundary is what would flush the very
     /// buffer being filled, so routing through it would defeat the grouping.
-    fn absorb_io(&mut self, id: SessionId, event: IoEvent) {
+    fn absorb_io(&mut self, id: AgentId, event: IoEvent) {
         if self.io_buf.as_ref().is_some_and(|b| b.id != id) {
             self.flush_io_buf();
         }
@@ -1042,12 +1095,10 @@ impl App {
     pub fn draw(&mut self, term: &mut Term) -> io::Result<()> {
         let (cols, rows) = size().unwrap_or((READ_W, 24));
         let area = Rect::new(0, 0, cols, rows);
-        // The picker takes over the prompt region and wants more rows than
-        // a one-line prompt; otherwise the prompt box sizes to its draft.
-        let prompt_h = match &self.picker {
-            Some(p) => p.height(area.height),
-            None => prompt_height(&self.textarea, area.width, area.height),
-        };
+        // The prompt box sizes to its draft; the `/model` picker floats as an
+        // overlay above this whole layout (drawn last over a cleared centre),
+        // so it no longer claims the prompt region.
+        let prompt_h = prompt_height(&self.textarea, area.width, area.height);
         let tab_h = if self.tabs.len() > 1 {
             self.tabs.len() as u16
         } else {
@@ -1144,7 +1195,10 @@ impl App {
                         .get(vp.agent().0 as usize)
                         .copied()
                         .unwrap_or(AGENT_HUES[0]);
-                    (line::render_register(vp.pins(), REGISTER_W, hue), Vec::new())
+                    (
+                        line::render_register(vp.pins(), REGISTER_W, hue),
+                        Vec::new(),
+                    )
                 }
                 Some(vp) if pin_band_h > 0 => (Vec::new(), line::pin_band(vp.pins())),
                 _ => (Vec::new(), Vec::new()),
@@ -1179,7 +1233,7 @@ impl App {
         // live: one row per agent, each owning its `Line` so the `'static`
         // draw closure captures no borrow of `self`.
         let matrix_lines = (self.tabs.len() > 1).then(|| {
-            let rows: Vec<(SessionId, &Viewport)> = self
+            let rows: Vec<(AgentId, &Viewport)> = self
                 .tabs
                 .iter()
                 .filter_map(|&id| self.viewports.get(&id).map(|vp| (id, vp)))
@@ -1227,14 +1281,13 @@ impl App {
                 )),
                 status_rect,
             );
-            // The `/model` picker takes over the prompt region while open —
-            // a flat strip, not a floating overlay. Input lives in main
-            // only; a subagent tab shows a watch-only hint in the prompt
-            // slot, and the textarea keeps its draft for when the user tabs
-            // home.
-            match (picker, prompt_hint) {
-                (Some(p), _) => p.render(f, prompt_row),
-                (None, Some(line)) => {
+            // The prompt region draws normally; the `/model` picker, when
+            // open, floats over the whole frame below (its own [`Clear`]ed
+            // centre), so it never displaces the input. Input lives in main
+            // only; a subagent tab shows a watch-only hint in the prompt slot,
+            // and the textarea keeps its draft for when the user tabs home.
+            match prompt_hint {
+                Some(line) => {
                     let block = ratatui::widgets::Block::default()
                         .borders(ratatui::widgets::Borders::ALL)
                         .border_type(ratatui::widgets::BorderType::Rounded)
@@ -1242,19 +1295,25 @@ impl App {
                         .padding(ratatui::widgets::Padding::horizontal(PROMPT_PAD_H));
                     f.render_widget(Paragraph::new(line).block(block), prompt_row);
                 }
-                (None, None) => {
+                None => {
                     f.render_widget(&self.textarea, prompt_row);
-                    // Show the terminal's native cursor at the edit point, every
-                    // mode.  The textarea's block (border + horizontal padding)
-                    // insets the text, so position within that inner rect.
-                    let inner = ratatui::widgets::Block::default()
-                        .borders(ratatui::widgets::Borders::ALL)
-                        .padding(ratatui::widgets::Padding::horizontal(PROMPT_PAD_H))
-                        .inner(prompt_row);
-                    place_native_cursor(f, inner, &self.textarea);
+                    // Show the terminal's native cursor at the edit point —
+                    // but not while the picker overlay owns the keyboard, or
+                    // the cursor would peek out beneath the modal.
+                    if picker.is_none() {
+                        let inner = ratatui::widgets::Block::default()
+                            .borders(ratatui::widgets::Borders::ALL)
+                            .padding(ratatui::widgets::Padding::horizontal(PROMPT_PAD_H))
+                            .inner(prompt_row);
+                        place_native_cursor(f, inner, &self.textarea);
+                    }
                 }
             }
             f.render_widget(Paragraph::new(footer_hint()), footer_row);
+            // Last: the floating picker, over the dimmed session.
+            if let Some(p) = picker {
+                p.render(f, area);
+            }
         });
         execute!(io::stdout(), EndSynchronizedUpdate)?;
         drawn?;
@@ -1279,7 +1338,7 @@ impl App {
 
     /// The watch-only banner shown in the prompt slot on a subagent tab,
     /// or `None` on main where the textarea is editable.
-    fn prompt_hint(&self, focused: SessionId) -> Option<Line<'static>> {
+    fn prompt_hint(&self, focused: AgentId) -> Option<Line<'static>> {
         if focused == self.root {
             return None;
         }
@@ -1292,22 +1351,19 @@ impl App {
         )))
     }
 
-    /// Currently focused tab.  Resolves a stale focus (subagent that
-    /// aged out of the tab bar) to the root.
-    pub(in crate::tui) fn focused(&self) -> SessionId {
-        if self.tabs.contains(&self.focus) {
-            self.focus
-        } else {
-            self.root
-        }
+    /// Currently focused tab.  Resolves a stale focus (a subagent that aged
+    /// out of the tab bar, or the no-focus sentinel) to the root.
+    pub(in crate::tui) fn focused(&self) -> AgentId {
+        let f = self.focus.load(Ordering::Relaxed);
+        if self.tabs.contains(&f) { f } else { self.root }
     }
 
     /// Expire `dying` entries that have outlived [`LINGER`].  Called
     /// once per frame from the event loop.  When the focused tab
-    /// expires, focus snaps back to root.
+    /// expires, focus falls back to its parent (recursing toward the trunk).
     pub fn tick(&mut self) {
         let now = Instant::now();
-        let expired: Vec<SessionId> = self
+        let expired: Vec<AgentId> = self
             .dying
             .iter()
             .filter(|&(_, &t)| now.duration_since(t) >= LINGER)
@@ -1317,9 +1373,11 @@ impl App {
             self.dying.remove(&id);
             self.tabs.retain(|&t| t != id);
             self.titles.remove(&id);
-            if self.focus == id {
-                self.focus = self.root;
+            if self.focus.load(Ordering::Relaxed) == id {
+                let fallback = self.parent_focus(id);
+                self.focus.store(fallback, Ordering::Relaxed);
             }
+            self.parents.remove(&id);
         }
     }
 
@@ -1483,7 +1541,8 @@ impl App {
                 if self.tabs.len() > 1 {
                     let current = self.focused();
                     if let Some(pos) = self.tabs.iter().position(|&id| id == current) {
-                        self.focus = self.tabs[(pos + 1) % self.tabs.len()];
+                        let next = self.tabs[(pos + 1) % self.tabs.len()];
+                        self.focus.store(next, Ordering::Relaxed);
                     }
                 }
             }
@@ -1932,7 +1991,11 @@ fn legend_panel() -> Vec<Line<'static>> {
                 let label = if slot == 0 { "root" } else { "subagent" };
                 (
                     label,
-                    vec![rail::span(RailKind::ToolCall(false), AgentSlot(slot as u8), None)],
+                    vec![rail::span(
+                        RailKind::ToolCall(false),
+                        AgentSlot(slot as u8),
+                        None,
+                    )],
                 )
             })
             .collect(),
@@ -1964,9 +2027,15 @@ fn legend_panel() -> Vec<Line<'static>> {
     ls.extend(line::legend_rows(vec![
         (
             "code",
-            swatch("scripts and shell output — a recessed panel", Some(line::CODE_BG)),
+            swatch(
+                "scripts and shell output — a recessed panel",
+                Some(line::CODE_BG),
+            ),
         ),
-        ("prose", swatch("model narration and replies — the base", None)),
+        (
+            "prose",
+            swatch("model narration and replies — the base", None),
+        ),
     ]));
 
     // ── the ordered bars ───────────────────────────────────────────────
@@ -2242,10 +2311,10 @@ fn contains(rect: Rect, col: u16, row: u16) -> bool {
 /// when there's more than one tab — root-only sessions skip the row
 /// entirely.
 fn tab_bar(
-    tabs: &[SessionId],
-    titles: &HashMap<SessionId, String>,
-    focused: SessionId,
-    dying: &HashMap<SessionId, Instant>,
+    tabs: &[AgentId],
+    titles: &HashMap<AgentId, String>,
+    focused: AgentId,
+    dying: &HashMap<AgentId, Instant>,
 ) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(tabs.len() * 2);
     for (i, &id) in tabs.iter().enumerate() {
@@ -2290,14 +2359,14 @@ const MATRIX_STEPS_W: usize = 8;
 /// derived from the viewport: step cells, lines touched, token spend);
 /// `titles`/`focused`/`dying` carry the same row state `tab_bar` reads.
 fn matrix_bar(
-    rows: &[(SessionId, &Viewport)],
-    titles: &HashMap<SessionId, String>,
-    focused: SessionId,
-    dying: &HashMap<SessionId, Instant>,
+    rows: &[(AgentId, &Viewport)],
+    titles: &HashMap<AgentId, String>,
+    focused: AgentId,
+    dying: &HashMap<AgentId, Instant>,
     sort: MatrixSort,
 ) -> Vec<Line<'static>> {
     if rows.len() <= 1 {
-        let tabs: Vec<SessionId> = rows.iter().map(|(id, _)| *id).collect();
+        let tabs: Vec<AgentId> = rows.iter().map(|(id, _)| *id).collect();
         return vec![tab_bar(&tabs, titles, focused, dying)];
     }
     // Render-time row order: spawn keeps `rows` (the `tabs` order); cost
@@ -2335,11 +2404,11 @@ fn matrix_bar(
 /// agent's rail slot.  Focused row bold; dying rows dim and carry the
 /// `LINGER` countdown in place of the size bar's right margin.
 fn matrix_row(
-    id: SessionId,
+    id: AgentId,
     vp: &Viewport,
-    titles: &HashMap<SessionId, String>,
-    focused: SessionId,
-    dying: &HashMap<SessionId, Instant>,
+    titles: &HashMap<AgentId, String>,
+    focused: AgentId,
+    dying: &HashMap<AgentId, Instant>,
     max_tokens: u64,
 ) -> Line<'static> {
     let hue = AGENT_HUES
@@ -2565,7 +2634,7 @@ pub struct Tui {
 
 impl Tui {
     pub fn new(
-        root_id: SessionId,
+        root_id: AgentId,
         root_log_dir: &Path,
         context_window: Option<u64>,
         stderr_log: &Path,
@@ -2675,26 +2744,28 @@ fn is_slash_command(text: &str) -> bool {
     lookup_command(text.trim()).is_some()
 }
 
-/// The session-affecting slash command hook the worker's [`Session::drive`]
-/// calls at the turn boundary, where the drive thread owns the session the
-/// command mutates.  `/clear` rebuilds the session (its viewport was already
-/// cleared UI-side), `/compact` summarizes the history, `/quit` ends the
-/// drive loop — which sets `done`, so the UI loop's next drain returns `Stop`
-/// and exits.  Every other command is handled UI-side and never reaches here.
+/// The agent-affecting slash command hook the worker's [`Agent::drive`]
+/// calls at the turn boundary, where the drive thread owns the agent the
+/// command mutates.  `/clear` rebuilds the agent's context (its viewport was
+/// already cleared UI-side), `/compact` summarizes the history, `/quit` ends
+/// the drive loop — which sets `done`, so the UI loop's next drain returns
+/// `Stop` and exits.  Every other command is handled UI-side and never reaches
+/// here.  Only the trunk drives with this `Control` (a sub-agent uses
+/// [`NoControl`](crate::agent::NoControl)), so a slash command always targets
+/// the trunk's own context and provider.
 struct ReplControl<'a> {
-    provider: ProviderHandle,
     scratch: &'a Scratch,
 }
 
 impl Control for ReplControl<'_> {
-    fn command(&mut self, raw: &str, session: &mut Session, emit: &Emitter) -> ControlFlow {
+    fn command(&mut self, raw: &str, session: &mut Agent, emit: &Emitter) -> ControlFlow {
         match raw.trim() {
             "/clear" => {
                 let _ = session.clear(self.scratch);
                 ControlFlow::Continue
             }
             "/compact" => {
-                let p = self.provider.current();
+                let p = session.current_provider();
                 let token = session.cancel_token().clone();
                 session.compact(&p, emit, true, &token);
                 ControlFlow::Continue
@@ -2709,7 +2780,7 @@ impl Control for ReplControl<'_> {
 /// paths + usage on the restored shell.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
-    session: &mut Session,
+    session: &mut Agent,
     provider: Arc<Provider>,
     info: &SessionInfo<'_>,
     store: &CredentialStore,
@@ -2731,55 +2802,57 @@ pub fn run(
     .map_err(|e| format!("ratatui init: {e}"))?;
     let status_provider = crate::oauth::provider_label(provider.subscription(), info.provider);
     tui.app.set_status_model(&status_provider, info.model);
-    // Bind the App's inbox to the session's own queue, then mint the
-    // session-lived bus over it: input, the pending strip, async-agent results,
-    // and the worker's drive loop all read and write this one inbox.
+    // Bind the App's inbox and focus to the trunk's shared handles, then build
+    // the fleet: a session-lived bus over the trunk's inbox, plus the shared
+    // registry and focus handle.  Input, the pending strip, async-agent
+    // results, and the worker's drive loop all read and write this one inbox;
+    // `TAB` and the focused agent's park predicate share one focus handle.
     tui.app.bind_inbox(session.inbox());
-    let bus = SessionBus::session(session.inbox());
+    tui.app.bind_focus(session.focus_handle());
+    let fleet = Fleet::new(
+        session.agents.clone(),
+        FleetBus::session(session.inbox()),
+        session.focus_handle(),
+        session.interactive(),
+    );
     if let Some(s) = seed {
         session.seed(s);
     }
-    let provider = ProviderHandle::new(provider);
     tui.app
         .banner(tui.guard.term(), info)
         .map_err(|e| e.to_string())?;
 
-    // The worker thread runs the whole session via `Session::drive`, parking on
-    // an empty inbox (an interactive root) until a `/quit` command tells its
-    // `Control` to quit; it then sets `done`, and the UI loop's next drain
-    // returns `Stop`. The UI loop renders the bus and routes input in one
-    // continuous loop alongside it.
+    // The worker thread runs the trunk via `Agent::drive`, parking on an empty
+    // inbox (the conversing trunk) until a `/quit` command tells its `Control`
+    // to quit; it then sets `done`, and the UI loop's next drain returns
+    // `Stop`. The UI loop renders the bus and routes input in one continuous
+    // loop alongside it.  The trunk drives on its own provider handle.
     let done = AtomicBool::new(false);
     let done_ref = &done;
-    let mut control = ReplControl {
-        provider: provider.clone(),
-        scratch,
-    };
-    // The worker captures the session emitter, not `&bus`: `SessionBus` is not
-    // `Sync` (its `Receiver` is single-consumer), so the receiver stays on the
-    // UI thread. The emitter is `Send` and is all the worker needs.  It carries
-    // the root's `Transcript`, so the TUI records `transcript.jsonl` too — the
-    // operational view beside `user.log`'s rendered one.
-    let worker_emit = bus.emitter(session.id, session.transcript());
+    let mut control = ReplControl { scratch };
+    // The worker captures the trunk's emitter, not `&fleet.bus`: `FleetBus` is
+    // not `Sync` (its `Receiver` is single-consumer), so the receiver stays on
+    // the UI thread. The emitter is `Send` and is all the worker needs.  It
+    // carries the trunk's `Transcript`, so the TUI records `transcript.jsonl`
+    // too — the operational view beside `user.log`'s rendered one.
+    let worker_emit = fleet.bus.emitter(session.id, session.transcript());
     // A recording emitter for the UI thread, minted from the bus *before* the
-    // worker takes the session: it carries the root's `transcript()`, so a
+    // worker takes the trunk: it carries the trunk's `transcript()`, so a
     // UI-caused operational event — a `/model` switch — records in the trace
     // and draws through the normal bus path, exactly as a worker-raised note
     // does.  The worker takes `worker_emit`; this clone stays on the UI thread.
-    let ui_emit = bus.emitter(session.id, session.transcript());
-    let worker_provider = provider.clone();
-    // A `Mailbox` onto the session inbox, so a UI-loop failure can wake the
-    // parked worker with a `/quit` before joining — without it the worker
-    // (an interactive root) parks forever and `join` would deadlock.
+    let ui_emit = fleet.bus.emitter(session.id, session.transcript());
+    // A `Mailbox` onto the trunk inbox, so a UI-loop failure can wake the
+    // parked worker with a `/quit` before joining — without it the conversing
+    // trunk parks forever and `join` would deadlock.
     let quit_mailbox = session.inbox().mailbox();
-    // A clone of the registry the worker mutates — same `Arc<Mutex<…>>`, so a
-    // peer the worker registers is visible to the UI immediately.  The UI looks
-    // a focused peer's `Mailbox` up here to route a steering line into it.
-    let agents = session.agents.clone();
     // The UI thread's command context: the handles `route_submit` and the
-    // `/model` path service a submitted line against, threaded as one.
+    // `/model` path service a submitted line against, threaded as one.  The
+    // registry is the same shared map the worker mutates, so an agent it
+    // registers is visible to the UI at once — for steering, `wake`, and a
+    // `/model` swap on the focused agent's handle.
     let mut cmd_ctx = CommandCtx {
-        provider: &provider,
+        agents: &fleet.agents,
         store,
         catalog,
         info,
@@ -2787,11 +2860,11 @@ pub fn run(
     };
     std::thread::scope(|scope| -> Result<(), String> {
         let worker = scope.spawn(move || {
-            let out = session.drive(worker_provider, &mut control, &worker_emit);
+            let out = session.drive(&mut control, &worker_emit);
             done_ref.store(true, Ordering::Release);
             out
         });
-        let r = ui_loop(&mut tui, &bus, done_ref, &agents, &mut cmd_ctx);
+        let r = ui_loop(&mut tui, &fleet.bus, done_ref, &mut cmd_ctx);
         if r.is_err() {
             quit_mailbox.push(InboxMsg::Command("/quit".into()));
         }
@@ -2799,7 +2872,10 @@ pub fn run(
         r.map_err(|e| e.to_string())
     })?;
 
-    let logs = tui.app.flush_logs().map_err(|e| format!("session logs: {e}"));
+    let logs = tui
+        .app
+        .flush_logs()
+        .map_err(|e| format!("session logs: {e}"));
     let usage = tui.app.total_usage();
     // Restore the terminal before printing so log paths land on the
     // user's normal shell rather than the alt screen.
@@ -2807,8 +2883,8 @@ pub fn run(
     if let Ok(paths) = &logs {
         for p in paths {
             match p.parent() {
-                Some(dir) => println!("Session logs: {} (user.log + events.json)", dir.display()),
-                None => println!("Session log: {}", p.display()),
+                Some(dir) => println!("Agent logs: {} (user.log + events.json)", dir.display()),
+                None => println!("Agent log: {}", p.display()),
             }
         }
     } else if let Err(e) = logs {
@@ -2823,13 +2899,14 @@ pub fn run(
 type FetchRx = std::sync::mpsc::Receiver<(provider::ProviderId, Result<Vec<String>, String>)>;
 
 /// The long-lived handles the UI thread services a submitted line against: the
-/// provider it can hot-swap, the credential store and model catalog the
+/// fleet registry (for steering, `wake`, and the focused agent's provider
+/// handle a `/model` swap targets), the credential store and model catalog the
 /// `/model` picker reads, the static session info, and the recording emitter a
 /// UI-caused operational event (a model switch) rides.  Bundled so the command
 /// path — `ui_loop` → `route_submit` → `pick_model` → `apply_model_switch` —
 /// threads one context rather than a fistful of handles.
 struct CommandCtx<'a> {
-    provider: &'a ProviderHandle,
+    agents: &'a AgentRegistry,
     store: &'a CredentialStore,
     catalog: &'a mut ModelCatalog<LiveSource>,
     info: &'a SessionInfo<'a>,
@@ -2837,19 +2914,19 @@ struct CommandCtx<'a> {
 }
 
 /// The merged render + input loop, running on the UI thread alongside the
-/// worker's [`Session::drive`].  It drains the session-lived bus into the App
+/// worker's [`Agent::drive`].  It drains the session-lived bus into the App
 /// (the same `App::handle` the old per-turn drive used), ticks and redraws at
 /// ~60 FPS, and routes the user's keystrokes: scrollback / picker keys edit the
 /// App, a submitted line is routed by [`route_submit`] (view commands run here;
-/// session commands and plain prompts go onto the session inbox the worker
-/// drains), and Esc / Ctrl-C raise the published cancel token the worker's
-/// current turn reads.  Returns when the worker finishes (a `/quit`), draining
-/// its final events for one last frame.
+/// agent commands and plain prompts go onto the focused agent's inbox), and Esc
+/// / Ctrl-C cancel the focused agent's turn and its subtree.  A `TAB` that moves
+/// focus `wake`s the de-focused and newly-focused agents so each re-evaluates
+/// its park verdict.  Returns when the worker finishes (a `/quit`), draining its
+/// final events for one last frame.
 fn ui_loop(
     tui: &mut Tui,
-    bus: &SessionBus,
+    bus: &FleetBus,
     done: &AtomicBool,
-    agents: &crate::agent_registry::AgentRegistry,
     ctx: &mut CommandCtx<'_>,
 ) -> io::Result<()> {
     const BATCH: usize = 64;
@@ -2866,6 +2943,10 @@ fn ui_loop(
     // jitter that churn caused).
     let mut last_draw = Instant::now() - frame;
     loop {
+        // Focus as of the start of this iteration; compared at the end so a
+        // `TAB`, or a focused agent ending mid-drain, wakes the agents whose
+        // park verdict just changed.
+        let prev_focus = tui.app.focused();
         // The explicit-done completion contract (shared with the headless
         // `Sink::drive`): drain a batch, then stop only when the worker is
         // *done* — never when the channel empties or disconnects, so a detached
@@ -2907,21 +2988,32 @@ fn ui_loop(
                     // prompts) or a live peer with a registered inbox; on a
                     // steerable tab Enter submits and text entry is allowed.
                     let focused = tui.app.focused();
-                    let steerable = focused == tui.app.root || agents.mailbox(focused).is_some();
+                    let steerable =
+                        focused == tui.app.root || ctx.agents.mailbox(focused).is_some();
                     match key_action(KeyMode::Running, &k, steerable) {
-                        // Esc / Ctrl-C raise the published root token the
-                        // worker's current turn reads.
-                        KeyAction::Cancel => cancel::raise_interrupt(),
+                        // Esc / Ctrl-C cancel the *focused* agent's turn and its
+                        // subtree.  On the trunk that is the published-slot path
+                        // (the token and the ral foreground); the cascade then
+                        // reaps any descendants.  On a focused sub-agent only the
+                        // registry cascade fires — its eval is detached, not the
+                        // foreground, so the slot/foreground path would target
+                        // the trunk by mistake.
+                        KeyAction::Cancel => {
+                            if focused == tui.app.root {
+                                cancel::raise_interrupt();
+                            }
+                            ctx.agents.cancel(focused);
+                        }
                         KeyAction::Submit => {
                             if let Some(text) = tui.app.submit() {
                                 if focused == tui.app.root {
                                     route_submit(text, tui, &mailbox, ctx)?;
-                                } else if let Some(mb) = agents.mailbox(focused) {
-                                    // Steer the live peer: the whole line is
-                                    // steering text — no slash, no revival.
+                                } else if let Some(mb) = ctx.agents.mailbox(focused) {
+                                    // Steer the focused agent: the whole line is
+                                    // its next turn — no slash, no revival.
                                     mb.push_user(text);
                                 }
-                                // The peer died between focus and submit: its
+                                // The agent died between focus and submit: its
                                 // mailbox is gone, so the line is dropped.
                             }
                         }
@@ -2936,6 +3028,19 @@ fn ui_loop(
                 CtEvent::Paste(s) => tui.app.paste(&s),
                 CtEvent::Mouse(m) => tui.app.mouse(m),
                 _ => {}
+            }
+        }
+        // A focus change this iteration (a `TAB`, or a focused agent ending)
+        // wakes both the de-focused and newly-focused agents, so each
+        // re-evaluates its park verdict: the de-focused, unscheduled, idle one
+        // flips to `Quiesce` and reaps; the newly-focused one stays `Held`.
+        let now_focus = tui.app.focused();
+        if now_focus != prev_focus {
+            if let Some(mb) = ctx.agents.mailbox(prev_focus) {
+                mb.wake();
+            }
+            if let Some(mb) = ctx.agents.mailbox(now_focus) {
+                mb.wake();
             }
         }
     }
@@ -3029,7 +3134,10 @@ fn cmd_copy(app: &mut App) {
     let note = if payload.len() < reply.len() {
         format!("[reply exceeds the clipboard limit — copied its last {YANK_CAP} bytes]")
     } else {
-        format!("[copied the latest reply — {} lines]", reply.lines().count())
+        format!(
+            "[copied the latest reply — {} lines]",
+            reply.lines().count()
+        )
     };
     app.push_note(id, note);
 }
@@ -3089,7 +3197,15 @@ fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) -> io::Result<()> {
             Some((id.clone(), kind))
         })
         .collect();
-    let mut picker = Picker::new(available, subscription);
+    // Seed the tuning controls from the focused provider's live values, so the
+    // overlay opens showing the effort/temperature currently in force (a
+    // settled agent with no live handle falls back to the defaults).
+    let initial_tuning = ctx
+        .agents
+        .provider(tui.app.focused())
+        .map(|p| p.current().tuning().clone())
+        .unwrap_or_default();
+    let mut picker = Picker::new(available, subscription, initial_tuning);
     // Seed each provider from the catalog's cache instantly; spawn a background
     // fetch for the rest so the UI shows "loading…" rather than freezing on the
     // network. A ChatGPT plan login has no catalog endpoint, so its curated plan
@@ -3133,20 +3249,20 @@ fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) -> io::Result<()> {
     tui.app.picker = Some(picker);
     let outcome = drive_picker(tui, store, ctx.catalog, rx);
     tui.app.picker = None;
-    if let Some((id, model)) = outcome {
-        apply_model_switch(tui, ctx, id, model);
+    if let Some((id, model, tuning)) = outcome {
+        apply_model_switch(tui, ctx, id, model, tuning);
     }
     Ok(())
 }
 
 /// Poll keys and background-fetch results until the picker resolves.  Returns
-/// the chosen `(provider, model)`, or `None` on cancel.
+/// the chosen `(provider, model, tuning)`, or `None` on cancel.
 fn drive_picker(
     tui: &mut Tui,
     store: &CredentialStore,
     catalog: &mut ModelCatalog<LiveSource>,
     rx: Option<FetchRx>,
-) -> Option<(provider::ProviderId, String)> {
+) -> Option<(provider::ProviderId, String, provider::Tuning)> {
     loop {
         // Fold any landed fetch results into the picker (and the catalog's
         // caches), on this thread, so the disk write stays single-threaded.
@@ -3183,11 +3299,13 @@ fn drive_picker(
         match action {
             picker::PickAction::None => {}
             picker::PickAction::Cancelled => return None,
-            picker::PickAction::Selected(id, model) => return Some((id, model)),
-            picker::PickAction::Manual(query) => {
+            picker::PickAction::Selected(id, model, tuning) => {
+                return Some((id, model, tuning));
+            }
+            picker::PickAction::Manual(query, tuning) => {
                 let available = store.available();
                 match crate::models::resolve_model_provider(&query, &available, catalog) {
-                    Ok(id) => return Some((id, query)),
+                    Ok(id) => return Some((id, query, tuning)),
                     Err(e) => {
                         let root = tui.app.root;
                         tui.app.push_error(root, e);
@@ -3199,13 +3317,14 @@ fn drive_picker(
 }
 
 /// Rebuild the provider for the chosen `kind` + `model` over the same
-/// transcript, swap it into the shared [`ProviderHandle`] (the worker's next
-/// turn reads it), persist the selection to the project state dir, and update
-/// the live status bar. A persistence failure is noted but does not undo the
-/// in-memory switch.
+/// transcript and swap it into the **focused agent's** own provider handle
+/// (its next turn reads it), persist the selection to the project state dir,
+/// and update the live status bar. A persistence failure is noted but does not
+/// undo the in-memory switch.  A focused agent that settled between the picker
+/// opening and the selection has no handle to swap, so the switch is dropped.
 ///
 /// A model switch is a *real* operational event, so it goes through `emit` —
-/// the UI-thread recording emitter carrying the root's transcript — as a
+/// the UI-thread recording emitter carrying the trunk's transcript — as a
 /// [`Kind::SystemNote`].  It records in the trace and draws through the normal
 /// bus path, like a worker-raised note; the UI never fabricates an `Event` for
 /// it.  Its own failures, by contrast, are view chrome ([`App::push_error`]).
@@ -3214,8 +3333,8 @@ fn apply_model_switch(
     ctx: &CommandCtx<'_>,
     provider_id: provider::ProviderId,
     model: String,
+    tuning: provider::Tuning,
 ) {
-    let provider = ctx.provider;
     let store = ctx.store;
     let info = ctx.info;
     let emit = ctx.emit;
@@ -3227,22 +3346,47 @@ fn apply_model_switch(
         );
         return;
     };
+    // Swap the *focused* agent's handle; if it has settled, there is nothing to
+    // swap and the selection is dropped (the user can reopen on a live tab).
+    let focused = tui.app.focused();
+    let Some(provider) = ctx.agents.provider(focused) else {
+        tui.app
+            .push_error(id, "the focused agent is no longer live".to_string());
+        return;
+    };
     let new_provider = Arc::new(Provider::build(
         &provider_id,
         model.clone(),
         &cred,
         info.max_tokens_override,
+        tuning.clone(),
     ));
     let label = provider_id.label();
     let status_provider = crate::oauth::provider_label(new_provider.subscription(), label);
     provider.swap(new_provider);
     tui.app.set_status_model(&status_provider, &model);
     let state_dir = crate::bootstrap::project_dir(info.cwd);
-    if let Err(e) = state::save(&state_dir, &state::State::new(&provider_id, &model)) {
+    if let Err(e) = state::save(&state_dir, &state::State::new(&provider_id, &model, &tuning)) {
         tui.app
             .push_error(id, format!("could not persist selection: {e}"));
     }
-    emit.emit(Kind::SystemNote(format!("[switched to {label} {model}]")));
+    emit.emit(Kind::SystemNote(format!(
+        "[switched to {label} {model}{}]",
+        tuning_suffix(&tuning)
+    )));
+}
+
+/// A human-readable suffix for the switch note describing any non-default
+/// tuning, e.g. ` · effort high · temp 0.7`. Empty when both knobs are auto.
+fn tuning_suffix(tuning: &provider::Tuning) -> String {
+    let mut parts = String::new();
+    if let Some(effort) = &tuning.effort {
+        parts.push_str(&format!(" · effort {}", effort.variant_name()));
+    }
+    if let Some(temperature) = tuning.temperature {
+        parts.push_str(&format!(" · temp {temperature:.1}"));
+    }
+    parts
 }
 
 fn ctrl_key(k: &KeyEvent, c: char) -> bool {
@@ -3252,7 +3396,7 @@ fn ctrl_key(k: &KeyEvent, c: char) -> bool {
 /// The two live input contexts: the running UI loop (the worker drives the
 /// whole session, so the prompt is never an idle read) and the modal `/model`
 /// picker overlay.  There is no idle mode — an interactive root's worker parks
-/// in [`Session::drive`] rather than returning, so the session ends through
+/// in [`Agent::drive`] rather than returning, so the session ends through
 /// `/quit`, never a keystroke.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum KeyMode {

@@ -10,11 +10,11 @@
 //! agent that can wake itself indefinitely holds real authority.
 
 use super::{Tool, invalid_input, u64_field};
+use crate::agent::Agent;
 use crate::bus::{Emitter, Kind};
 use crate::event::ToolResult as SessionToolResult;
 use crate::provider::Provider;
 use crate::schedule::{CronSchedule, Trigger, parse_duration};
-use crate::session::Session;
 use serde_json::{Value, json};
 use std::sync::{Arc, OnceLock};
 
@@ -73,7 +73,7 @@ woken, not code.  List live ones with `schedules`; remove one with \
         &self,
         id: String,
         input: Value,
-        session: &mut Session,
+        session: &mut Agent,
         _provider: &Arc<Provider>,
         emit: &Emitter,
     ) -> SessionToolResult {
@@ -150,10 +150,7 @@ woken, not code.  List live ones with `schedules`; remove one with \
             summary: label.clone(),
         });
         let mailbox = session.mailbox();
-        let content = match session
-            .schedules
-            .schedule(trigger, prompt, label, mailbox)
-        {
+        let content = match session.schedules.schedule(trigger, prompt, label, mailbox) {
             Ok(sid) => format!("scheduled (id {sid})"),
             Err(e) => format!("could not schedule: {e}"),
         };
@@ -191,7 +188,7 @@ schedule ids after a context compaction, then `unschedule` to remove one."
         &self,
         id: String,
         _input: Value,
-        session: &mut Session,
+        session: &mut Agent,
         _provider: &Arc<Provider>,
         emit: &Emitter,
     ) -> SessionToolResult {
@@ -256,7 +253,7 @@ no schedule has that id."
         &self,
         id: String,
         input: Value,
-        session: &mut Session,
+        session: &mut Agent,
         _provider: &Arc<Provider>,
         emit: &Emitter,
     ) -> SessionToolResult {

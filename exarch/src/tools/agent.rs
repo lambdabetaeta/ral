@@ -1,7 +1,7 @@
 //! `agent` tool — fork a child session and launch a sub-agent.
 //!
 //! Launch-only and always asynchronous: every call forks a child, runs it on a
-//! detached thread through the same [`Session::drive`] loop, and returns a
+//! detached thread through the same [`Agent::drive`] loop, and returns a
 //! start receipt immediately.  The child's single result is delivered later to
 //! the parent's inbox at quiescence.
 //!
@@ -9,10 +9,10 @@
 //! user can see what the child was asked to do.
 
 use super::{Tool, invalid_input, u64_field};
+use crate::agent::Agent;
 use crate::bus::{AgentOutcome, AgentResult, Emitter, InboxMsg, Kind};
 use crate::event::ToolResult as SessionToolResult;
 use crate::provider::Provider;
-use crate::session::Session;
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -90,8 +90,9 @@ with a start receipt `{id, title, status, log_dir}`.  The child runs the same \
 agent loop off your critical path; its single reply is delivered to you LATER \
 as its own marked turn when it finishes.  To fan out independent work, spawn \
 several and combine their results when they land; poll live ones with `agents` \
-and stop one with `agent_cancel`.  A sub-agent cannot itself spawn \
-sub-agents.\n\n\
+and stop one with `agent_cancel`.  A sub-agent may itself spawn sub-agents, so \
+deep delegation trees are possible — `agent_cancel` on one stops its whole \
+subtree.\n\n\
 This is expensive: the child is a fresh session that re-pays the entire system \
 prompt and does not share your conversation — it sees a value-snapshot of your \
 shell (your `let` bindings, cwd, env) but none of your reasoning or message \
@@ -105,10 +106,6 @@ whose execution would otherwise flood your own context.  NEVER delegate a \
 single grep/view/read/edit you can run inline — running it yourself is cheaper \
 and keeps the result addressable (e.g. the line-hash `edit` needs).  \
 `permissions` bounds the child to at most your own authority."
-    }
-
-    fn spawns(&self) -> bool {
-        true
     }
 
     fn schema(&self) -> &'static Value {
@@ -146,8 +143,8 @@ and keeps the result addressable (e.g. the line-hash `edit` needs).  \
         &self,
         id: String,
         input: Value,
-        session: &mut Session,
-        provider: &Arc<Provider>,
+        session: &mut Agent,
+        _provider: &Arc<Provider>,
         emit: &Emitter,
     ) -> SessionToolResult {
         let Args {
@@ -176,24 +173,34 @@ and keeps the result addressable (e.g. the line-hash `edit` needs).  \
             }
         };
         // Capture everything off the child before it moves into the worker
-        // thread: its identity, log directory, and own cancellation token, the
-        // registry entry's generation, the parent's mailbox (the child's
-        // upward result edge), an owned registry handle and provider clone.
+        // thread: its identity, log directory, own cancellation token and
+        // provider handle, the registry entry's generation, and the parent's
+        // mailbox (the child's upward result edge).  The child is registered
+        // under *this* agent as its parent, so the subtree cascade reaches it.
         let agent_id = child.id;
         let log_dir = child.log_dir().to_path_buf();
         let log_dir_str = log_dir.display().to_string();
         let cancel = child.cancel_token().clone();
-        // The child's inbox sender, registered so the frontend can steer this
-        // peer's tab.  Cheap-clone, taken off `child` before it moves into the
-        // worker thread (alongside the one the streaming `child_emit` carries).
+        // The child's inbox sender, registered so the frontend can steer or
+        // wake this tab.  Cheap-clone, taken off `child` before it moves into
+        // the worker thread (alongside the one the streaming `child_emit`
+        // carries).
         let child_mailbox = child.mailbox();
-        let generation =
-            session
-                .agents
-                .register(agent_id, title.clone(), log_dir.clone(), cancel, child_mailbox);
+        // The child's own provider handle (seeded at `fork` from this agent's
+        // current provider), registered so a `/model` on this tab swaps the
+        // child's provider alone.
+        let child_provider = child.provider_handle();
+        let generation = session.agents.register(
+            agent_id,
+            Some(session.id),
+            title.clone(),
+            log_dir.clone(),
+            cancel,
+            child_mailbox,
+            child_provider,
+        );
         let parent_mailbox = session.mailbox();
         let registry = session.agents.clone();
-        let provider = Arc::clone(provider);
         // A live tab whenever the bus outlives the turn (the TUI): a real
         // emitter cloned off the session sender, stamped with the child's id
         // and carrying the child's own mailbox.  Off a per-turn bus (headless)
@@ -201,7 +208,7 @@ and keeps the result addressable (e.g. the line-hash `edit` needs).  \
         // already dropped — so it never streams; but either way it carries the
         // child's own `Transcript`, so its operational trace is recorded
         // regardless of whether anyone is watching.  Its model view returns
-        // through its forked `SessionLog`, its reply through the inbox.
+        // through its forked `AgentLog`, its reply through the inbox.
         let child_emit = if emit.is_session_lived() {
             emit.child(agent_id, child.mailbox(), child.transcript())
         } else {
@@ -209,6 +216,7 @@ and keeps the result addressable (e.g. the line-hash `edit` needs).  \
         };
         let started = Instant::now();
         let born_title = title.clone();
+        let born_parent = session.id;
         let worker_title = title.clone();
         // Seed the launch turn into the child's own inbox: the only downward
         // edge is this one write.
@@ -231,23 +239,22 @@ and keeps the result addressable (e.g. the line-hash `edit` needs).  \
                 child_emit.emit(Kind::Born {
                     log_dir: log_dir.clone(),
                     title: born_title,
+                    parent: born_parent,
                 });
-                let (outcome, payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    // The peer wraps a snapshot of the provider at spawn, so a
-                    // later root `/model` never disturbs an already-running child.
-                    child.drive(
-                        crate::session::ProviderHandle::new(provider),
-                        &mut crate::session::NoControl,
-                        &child_emit,
-                    )
-                }))
-                .unwrap_or_else(|_| (AgentOutcome::Failed("sub-agent panicked".into()), None));
+                let (outcome, payload) =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        // The child drives on its own provider handle, seeded at
+                        // `fork` from this agent's current provider, so a later
+                        // `/model` on either never disturbs the other.
+                        child.drive(&mut crate::agent::NoControl, &child_emit)
+                    }))
+                    .unwrap_or_else(|_| (AgentOutcome::Failed("sub-agent panicked".into()), None));
                 child_emit.emit(Kind::Died);
                 // A model parent reads the reply as prose in its context, so the
                 // peer edge renders the faithful payload to text here.
                 let text = payload
                     .as_ref()
-                    .map(crate::session::render_reply)
+                    .map(crate::agent::render_reply)
                     .unwrap_or_default();
                 // Deliver only if still the live worker of the current
                 // generation; a result from before a `/clear` is dropped, not
@@ -294,10 +301,6 @@ straggler.  Settled agents are not listed: their replies arrive on their own \
 as marked turns."
     }
 
-    fn spawns(&self) -> bool {
-        true
-    }
-
     fn schema(&self) -> &'static Value {
         static S: OnceLock<Value> = OnceLock::new();
         S.get_or_init(|| {
@@ -313,7 +316,7 @@ as marked turns."
         &self,
         id: String,
         _input: Value,
-        session: &mut Session,
+        session: &mut Agent,
         _provider: &Arc<Provider>,
         emit: &Emitter,
     ) -> SessionToolResult {
@@ -322,7 +325,7 @@ as marked turns."
             cmd: "agents".into(),
             summary: None,
         });
-        let live = session.agents.list();
+        let live = session.agents.list(session.id);
         let content = if live.is_empty() {
             "no live async agents".to_string()
         } else {
@@ -358,10 +361,6 @@ asked to stop at its next checkpoint; it then delivers a cancelled result.  \
 A no-op if no live agent has that id."
     }
 
-    fn spawns(&self) -> bool {
-        true
-    }
-
     fn schema(&self) -> &'static Value {
         static S: OnceLock<Value> = OnceLock::new();
         S.get_or_init(|| {
@@ -382,7 +381,7 @@ A no-op if no live agent has that id."
         &self,
         id: String,
         input: Value,
-        session: &mut Session,
+        session: &mut Agent,
         _provider: &Arc<Provider>,
         emit: &Emitter,
     ) -> SessionToolResult {

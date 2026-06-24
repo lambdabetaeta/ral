@@ -7,18 +7,18 @@
 //! Records each nudge to both the `events.json` breadcrumb and the operational
 //! trace (`Kind::Nudge`); the display decides whether to surface it.
 //!
-//! The registry is **per-session** ([`Session::nudges`]): the drive loop runs
-//! one [`Session::apply`] per inbox message, not one whole turn, so the
-//! one-shot latches must outlive a single `apply`.  They reset on a genuine
+//! The registry is **per-session** ([`Agent::nudges`]): the drive loop runs
+//! one [`Agent::apply`] per inbox message, not one whole turn, so the
+//! per-turn state must outlive a single `apply`.  It resets on a genuine
 //! turn-boundary message via [`Registry::reset`], never on a self-nudge.
 //!
-//! [`Session::apply`]: crate::session::Session::apply
-//! [`Session::nudges`]: crate::session::Session
+//! [`Agent::apply`]: crate::agent::Agent::apply
+//! [`Agent::nudges`]: crate::agent::Agent
 
+use crate::agent::TurnOutcome;
 use crate::bus::{Emitter, Kind};
-use crate::event::SessionLog;
+use crate::event::AgentLog;
 use crate::provider::ProviderError;
-use crate::session::TurnOutcome;
 
 /// Outer-attempt budget per user turn.  Independent of, and stacked
 /// on top of, the provider's inner retry budget.
@@ -34,24 +34,22 @@ const REMIND_EVERY: u32 = 12;
 type Rule = fn(&Result<TurnOutcome, ProviderError>) -> Option<(String, &'static str)>;
 
 /// The rule set the binary ships with.  Every rule reacts to a
-/// model-behaviour outcome shape from [`Session::apply`] by continuing
+/// model-behaviour outcome shape from [`Agent::apply`] by continuing
 /// with a synthetic nudge.  Transport failures (transient, rate-limit)
 /// are deliberately absent: they are retried with backoff inside the
 /// provider loop, and once that budget is spent they surface and end
 /// the turn rather than re-issuing the request without backoff.
 ///
-/// [`Session::apply`]: crate::session::Session::apply
+/// [`Agent::apply`]: crate::agent::Agent::apply
 const RULES: &[Rule] = &[on_empty_turn, on_early_stop, on_truncated];
 
-/// Per-attempt expectations that depend on the *driving* session, not
-/// the attempt outcome: whether this run wants the model to act (set by
-/// `--expect-action`, root + headless only) and whether it has acted in
-/// the current turn.  Threaded in by [`Session::drive`].
+/// Per-attempt expectations that depend on the agent rather than the
+/// attempt outcome: whether this agent returns through `reply`
+/// ([`must_reply`](Self::must_reply)) and its current pinned state
+/// ([`pinned`](Self::pinned)).  Threaded in by [`Agent::drive`].
 ///
-/// [`Session::drive`]: crate::session::Session::drive
+/// [`Agent::drive`]: crate::agent::Agent::drive
 pub(crate) struct NudgeCtx {
-    pub expect_action: bool,
-    pub acted: bool,
     /// Whether this session returns through `reply` — true for a returning
     /// agent (a peer or a headless root), false for the interactive root.  A
     /// returning agent that finishes a tool-call-free step without having
@@ -63,24 +61,18 @@ pub(crate) struct NudgeCtx {
     pub pinned: Option<String>,
 }
 
-/// Per-session nudge state.  Lives on the [`Session`](crate::session::Session)
+/// Per-session nudge state.  Lives on the [`Agent`](crate::agent::Agent)
 /// and is reset at each genuine turn boundary by [`Self::reset`];
 /// [`Self::react`] is the only post-attempt entry point.
 pub(crate) struct Registry {
     used: u32,
-    /// One-shot latch for the idle-completion nudge: it fires at most
-    /// once per turn and never draws on the [`BUDGET`] counter.
-    idle_nudged: bool,
-    /// One-shot latch for the verify-before-finish nudge: same contract —
-    /// at most once per turn, never drawing on the [`BUDGET`] counter.
-    verify_nudged: bool,
     /// Genuine turns since the last pinned-state reminder, bumped once per
-    /// turn-boundary message by [`Self::reset`].  Unlike the latches it
+    /// turn-boundary message by [`Self::reset`].  Unlike the latch it
     /// accumulates *across* turns; the reminder fires once it reaches
     /// [`REMIND_EVERY`], then it returns to zero.
     turns_since_pin_reminder: u32,
     /// One-shot latch for the pinned-state reminder: at most once per turn,
-    /// budget-free, like the completion gates.
+    /// budget-free.
     pin_reminded: bool,
 }
 
@@ -88,24 +80,20 @@ impl Registry {
     pub fn new() -> Self {
         Self {
             used: 0,
-            idle_nudged: false,
-            verify_nudged: false,
             turns_since_pin_reminder: 0,
             pin_reminded: false,
         }
     }
 
-    /// Reset the per-turn state — the retry budget and the one-shot latches —
+    /// Reset the per-turn state — the retry budget and the one-shot latch —
     /// and count this turn toward the periodic pinned-state reminder.  Called
-    /// by [`Session::drive`] on a genuine turn-boundary message, never on a
+    /// by [`Agent::drive`] on a genuine turn-boundary message, never on a
     /// self-nudge (which is the same turn continuing), so the turn counter
     /// advances once per real turn.
     ///
-    /// [`Session::drive`]: crate::session::Session::drive
+    /// [`Agent::drive`]: crate::agent::Agent::drive
     pub fn reset(&mut self) {
         self.used = 0;
-        self.idle_nudged = false;
-        self.verify_nudged = false;
         self.turns_since_pin_reminder += 1;
         self.pin_reminded = false;
     }
@@ -121,35 +109,11 @@ impl Registry {
         attempt: &Result<TurnOutcome, ProviderError>,
         ctx: NudgeCtx,
         emit: &Emitter,
-        log: &mut SessionLog,
+        log: &mut AgentLog,
     ) -> Option<String> {
         let Some((cause, message)) = RULES.iter().find_map(|&r| r(attempt)) else {
             // (No RULE matched.)
             //
-            // Under `--expect-action`, a clean completion is gated by two
-            // one-shot, budget-free nudges before it is accepted: a turn
-            // that never used a tool earns the idle nudge to engage, and a
-            // turn that did earns the verify nudge to check its output
-            // against the task before claiming done.  These fire *ahead* of
-            // the no-reply nudge, so a returning agent under `--expect-action`
-            // still earns its quality nudges on the path to replying.
-            if ctx.expect_action && matches!(attempt, Ok(TurnOutcome::Complete(_))) {
-                if !ctx.acted && !self.idle_nudged {
-                    self.idle_nudged = true;
-                    record_nudge(emit, log, self.used, "idle-completion (expect-action)".into());
-                    return Some(IDLE_MESSAGE.into());
-                }
-                if ctx.acted && !self.verify_nudged {
-                    self.verify_nudged = true;
-                    record_nudge(
-                        emit,
-                        log,
-                        self.used,
-                        "verify-before-finish (expect-action)".into(),
-                    );
-                    return Some(VERIFY_MESSAGE.into());
-                }
-            }
             // A returning agent reached a tool-call-free `Complete` without
             // calling `reply` — its sole return path, no scrape — so insist on
             // it.  Re-nudge within the per-turn budget, then give up honestly:
@@ -160,7 +124,12 @@ impl Registry {
             if ctx.must_reply && matches!(attempt, Ok(TurnOutcome::Complete(_))) {
                 if self.used < BUDGET {
                     self.used += 1;
-                    record_nudge(emit, log, self.used, "no-reply finish (returning agent)".into());
+                    record_nudge(
+                        emit,
+                        log,
+                        self.used,
+                        "no-reply finish (returning agent)".into(),
+                    );
                     return Some(REPLY_MESSAGE.into());
                 }
                 let msg = "agent finished without calling `reply` after the nudge budget; \
@@ -203,7 +172,7 @@ impl Registry {
 
 /// Record a nudge to both views: the `events.json` forensic breadcrumb and the
 /// operational trace (`Kind::Nudge`, which the display surfaces as it sees fit).
-fn record_nudge(emit: &Emitter, log: &mut SessionLog, used: u32, cause: String) {
+fn record_nudge(emit: &Emitter, log: &mut AgentLog, used: u32, cause: String) {
     let _ = log.record_nudge(used, BUDGET, cause.clone());
     emit.emit(Kind::Nudge {
         used,
@@ -215,7 +184,7 @@ fn record_nudge(emit: &Emitter, log: &mut SessionLog, used: u32, cause: String) 
 fn surface_provider_error(
     attempt: &Result<TurnOutcome, ProviderError>,
     emit: &Emitter,
-    log: &mut SessionLog,
+    log: &mut AgentLog,
 ) {
     if let Err(e) = attempt {
         let _ = log.record_provider_error(e);
@@ -225,32 +194,12 @@ fn surface_provider_error(
 
 // ── Rules ────────────────────────────────────────────────────────────
 
-/// The one-shot idle-completion nudge (gated by `--expect-action`).  Not
-/// a [`Rule`]: it fires on a clean `Complete` only when the run expects
-/// action and none was taken, so it lives outside the always-on rule set.
-const IDLE_MESSAGE: &str = "You produced a final answer but used no tools this turn — \
-    you have not inspected the workspace or made any changes. If the task requires \
-    modifying files, start now (explore and edit with the ral tool). If you are \
-    certain no change is needed, restate your conclusion and it will be accepted.";
-
-/// The one-shot verify-before-finish nudge (gated by `--expect-action`).
-/// The complement of [`IDLE_MESSAGE`]: it fires on a clean `Complete` when
-/// the run expects action and the turn *did* act, turning a plausible-but-
-/// unchecked result into one verification pass before completion. A clean
-/// exit is not a correct answer, so the model is asked to re-read its
-/// output against the task's stated requirements.
-const VERIFY_MESSAGE: &str = "Before finishing: re-read the output you produced and confirm it \
-    satisfies every requirement the task stated — the named tool or library, the output path and \
-    format, and the success criteria. A clean run is not a correct answer: an exit code of 0 means \
-    the command ran, not that the result is right, so check the result against what was asked. If \
-    you have already verified it against the task, restate your conclusion and it will be accepted.";
-
 /// The no-reply reminder (gated by [`NudgeCtx::must_reply`], so it fires for a
 /// returning agent — a peer or a headless root).  The agent finished with prose
 /// but never called `reply`, its sole return path, so as things stand it
 /// returns nothing; this asks it to return through `reply` before the run ends.
-/// Unlike the idle/verify gates it is *budgeted*: re-issued each un-replied
-/// finish until the [`BUDGET`] is spent, then the run fails.
+/// It is *budgeted*: re-issued each un-replied finish until the [`BUDGET`] is
+/// spent, then the run fails.
 const REPLY_MESSAGE: &str = "You ended your turn without calling `reply`, so your parent will \
     receive nothing. Return your result now by calling `reply` — pass a markdown report as \
     `result`, or a JSON object/array for structured findings. This is the only way to hand \
@@ -315,10 +264,10 @@ mod tests {
         Emitter::new(tx, 0)
     }
 
-    fn fresh_log(tag: &str) -> SessionLog {
+    fn fresh_log(tag: &str) -> AgentLog {
         let root = std::env::temp_dir().join(format!("exarch-nudge-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        SessionLog::root(&root, 0, "test", "test", 0).expect("session log")
+        AgentLog::root(&root, 0, "test", "test", 0).expect("session log")
     }
 
     /// A surfaced rate-limit is a transport condition the provider loop
@@ -337,8 +286,6 @@ mod tests {
             reg.react(
                 &attempt,
                 NudgeCtx {
-                    expect_action: false,
-                    acted: false,
                     must_reply: false,
                     pinned: None,
                 },
@@ -364,8 +311,6 @@ mod tests {
             reg.react(
                 &attempt,
                 NudgeCtx {
-                    expect_action: false,
-                    acted: false,
                     must_reply: false,
                     pinned: None,
                 },
@@ -385,8 +330,6 @@ mod tests {
         match reg.react(
             &Ok(TurnOutcome::Empty),
             NudgeCtx {
-                expect_action: false,
-                acted: false,
                 must_reply: false,
                 pinned: None,
             },
@@ -409,8 +352,6 @@ mod tests {
                 reg.react(
                     &Ok(TurnOutcome::Empty),
                     NudgeCtx {
-                        expect_action: false,
-                        acted: false,
                         must_reply: false,
                         pinned: None,
                     },
@@ -424,8 +365,6 @@ mod tests {
             reg.react(
                 &Ok(TurnOutcome::Empty),
                 NudgeCtx {
-                    expect_action: false,
-                    acted: false,
                     must_reply: false,
                     pinned: None,
                 },
@@ -436,52 +375,15 @@ mod tests {
         );
     }
 
-    /// Under `--expect-action`, a tool-less `Complete` earns one
-    /// self-confirming nudge; a second identical attempt is accepted
-    /// (the one-shot latch is spent) and ends the turn.
+    /// A clean `Complete` ends the turn.
     #[test]
-    fn idle_completion_nudges_once_then_accepts() {
+    fn completion_stops() {
         let mut reg = Registry::new();
-        let mut log = fresh_log("idle");
-        let ctx = || NudgeCtx {
-            expect_action: true,
-            acted: false,
-            must_reply: false,
-            pinned: None,
-        };
-        match reg.react(
-            &Ok(TurnOutcome::Complete("essay".into())),
-            ctx(),
-            &emit(),
-            &mut log,
-        ) {
-            Some(msg) => assert!(msg.contains("no tools")),
-            None => panic!("idle completion under expect-action must nudge"),
-        }
-        assert!(
-            reg.react(
-                &Ok(TurnOutcome::Complete("essay".into())),
-                ctx(),
-                &emit(),
-                &mut log,
-            )
-            .is_none()
-        );
-        assert_eq!(reg.used, 0, "idle nudge must not draw on the budget");
-    }
-
-    /// With `--expect-action` off, a clean `Complete` ends the turn as
-    /// before — the idle path is inert.
-    #[test]
-    fn completion_without_expect_action_stops() {
-        let mut reg = Registry::new();
-        let mut log = fresh_log("noexpect");
+        let mut log = fresh_log("complete");
         assert!(
             reg.react(
                 &Ok(TurnOutcome::Complete("done".into())),
                 NudgeCtx {
-                    expect_action: false,
-                    acted: false,
                     must_reply: false,
                     pinned: None,
                 },
@@ -490,40 +392,6 @@ mod tests {
             )
             .is_none()
         );
-    }
-
-    /// Under `--expect-action`, a turn that used a tool earns one
-    /// verify-before-finish nudge on completion; a second identical attempt
-    /// is accepted (the one-shot latch is spent) and ends the turn.
-    #[test]
-    fn verify_nudges_once_then_accepts() {
-        let mut reg = Registry::new();
-        let mut log = fresh_log("verify");
-        let ctx = || NudgeCtx {
-            expect_action: true,
-            acted: true,
-            must_reply: false,
-            pinned: None,
-        };
-        match reg.react(
-            &Ok(TurnOutcome::Complete("done".into())),
-            ctx(),
-            &emit(),
-            &mut log,
-        ) {
-            Some(msg) => assert!(msg.contains("Before finishing")),
-            None => panic!("an acted completion under expect-action must nudge to verify"),
-        }
-        assert!(
-            reg.react(
-                &Ok(TurnOutcome::Complete("done".into())),
-                ctx(),
-                &emit(),
-                &mut log,
-            )
-            .is_none()
-        );
-        assert_eq!(reg.used, 0, "verify nudge must not draw on the budget");
     }
 
     /// A returning agent (`must_reply`) that finishes a tool-call-free
@@ -536,8 +404,6 @@ mod tests {
         let mut reg = Registry::new();
         let mut log = fresh_log("no-reply");
         let ctx = || NudgeCtx {
-            expect_action: false,
-            acted: true,
             must_reply: true,
             pinned: None,
         };
@@ -551,11 +417,16 @@ mod tests {
             ) {
                 Some(msg) => assert!(msg.contains("`reply`")),
                 None => {
-                    panic!("a returning agent that did not reply must re-nudge while budget remains")
+                    panic!(
+                        "a returning agent that did not reply must re-nudge while budget remains"
+                    )
                 }
             }
         }
-        assert_eq!(reg.used, BUDGET, "the no-reply nudge now draws on the budget");
+        assert_eq!(
+            reg.used, BUDGET,
+            "the no-reply nudge now draws on the budget"
+        );
         // Past the budget the un-replied finish is accepted so the run ends.
         assert!(
             reg.react(
@@ -579,8 +450,6 @@ mod tests {
             reg.react(
                 &Ok(TurnOutcome::Complete("answer to the user".into())),
                 NudgeCtx {
-                    expect_action: false,
-                    acted: true,
                     must_reply: false,
                     pinned: None,
                 },
@@ -591,26 +460,21 @@ mod tests {
         );
     }
 
-    /// [`Registry::reset`] clears the per-turn budget and both one-shot
-    /// latches, so a fresh turn-boundary message starts with a full budget
-    /// and re-armed completion gates.
+    /// [`Registry::reset`] clears the per-turn budget, so a fresh
+    /// turn-boundary message starts with a full budget.
     #[test]
-    fn reset_clears_budget_and_latches() {
+    fn reset_clears_budget() {
         let mut reg = Registry::new();
         let mut log = fresh_log("reset");
         let ctx = || NudgeCtx {
-            expect_action: true,
-            acted: false,
             must_reply: false,
             pinned: None,
         };
-        // Spend the idle latch and a unit of budget.
+        // Spend a unit of budget.
         let _ = reg.react(&Ok(TurnOutcome::Empty), ctx(), &emit(), &mut log);
-        let _ = reg.react(&Ok(TurnOutcome::Complete("x".into())), ctx(), &emit(), &mut log);
-        assert!(reg.used >= 1 || reg.idle_nudged);
+        assert!(reg.used >= 1);
         reg.reset();
         assert_eq!(reg.used, 0, "reset clears the budget");
-        assert!(!reg.idle_nudged && !reg.verify_nudged, "reset re-arms the gates");
     }
 
     /// With state pinned, the periodic reminder fires once on the twelfth
@@ -621,8 +485,6 @@ mod tests {
         let mut reg = Registry::new();
         let mut log = fresh_log("pin-reminder");
         let ctx = || NudgeCtx {
-            expect_action: false,
-            acted: false,
             must_reply: false,
             pinned: Some("tasks 3/8".into()),
         };
@@ -630,15 +492,28 @@ mod tests {
         for _ in 1..REMIND_EVERY {
             reg.reset();
             assert!(
-                reg.react(&Ok(TurnOutcome::Complete("x".into())), ctx(), &emit(), &mut log)
-                    .is_none(),
+                reg.react(
+                    &Ok(TurnOutcome::Complete("x".into())),
+                    ctx(),
+                    &emit(),
+                    &mut log
+                )
+                .is_none(),
                 "no reminder before the twelfth turn"
             );
         }
         // The twelfth turn fires it, naming the pinned state.
         reg.reset();
-        match reg.react(&Ok(TurnOutcome::Complete("x".into())), ctx(), &emit(), &mut log) {
-            Some(msg) => assert!(msg.contains("tasks 3/8"), "the reminder names the pinned state"),
+        match reg.react(
+            &Ok(TurnOutcome::Complete("x".into())),
+            ctx(),
+            &emit(),
+            &mut log,
+        ) {
+            Some(msg) => assert!(
+                msg.contains("tasks 3/8"),
+                "the reminder names the pinned state"
+            ),
             None => panic!("the twelfth turn must remind"),
         }
         assert_eq!(reg.used, 0, "the pin reminder must not draw on the budget");
@@ -655,8 +530,6 @@ mod tests {
                 reg.react(
                     &Ok(TurnOutcome::Complete("x".into())),
                     NudgeCtx {
-                        expect_action: false,
-                        acted: false,
                         must_reply: false,
                         pinned: None,
                     },

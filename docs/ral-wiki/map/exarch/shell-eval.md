@@ -38,7 +38,7 @@ and `run_shell` owns only the request it builds and the outcome it formats:
 - **`io: TurnIo::Capture`** — core mints the stdout/stderr buffers and returns
   them in `TurnReport::Ran`'s `captured`: the full, model-visible and logged
   text. Nothing echoes live; the [[map/exarch/frontend|rail]] surfaces cards
-  instead, and the [[map/exarch/session|digest]] caps shape only the model's
+  instead, and the [[map/exarch/agent|digest]] caps shape only the model's
   history view;
 - **`terminal: RequestedTerminalAccess::Denied`** — a tool turn holds no
   [[decisions/260619_terminal-lease|terminal lease]], so the foreground handoff
@@ -68,7 +68,7 @@ terminal access — is core's `TurnGuard`, which self-heals on a caught worker
 panic as well as on the normal return
 ([[decisions/260612_exarch-panic-recovery|panic-recovery]]); exarch installs no
 per-call `IoGuard` of its own. The dynamic-context half of the contract lives in
-[[map/exarch/session|session]].
+[[map/exarch/agent|agent]].
 
 **Surface host sink.** `run_shell` passes `surface: Some(Arc::new(AgentSink(emit)))`
 in the request; core installs it as the turn-local

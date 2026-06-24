@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f1c187e
+generated_at_commit: 3e5ce15
 generated_at_date: 2026-06-24
 covers_paths: [exarch/src/main.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/credential.rs, exarch/src/prompt.rs, exarch/data/system.md, exarch/data/ral.md, exarch/data/script-style.md]
 ---
@@ -40,9 +40,10 @@ crate) is the session path; `main.rs` is the thin shell over it.
   below), `--model` and the session flags are ignored on this path.
 - **Session.** Absent a subcommand, `run` resolves the initial provider+model,
   composes the capability lattice (`policy::for_invocation`, → [[map/exarch/policy|policy]]),
-  assembles the system prompt (`prompt::assemble`), builds a `Session` + `Provider`,
-  and hands off to one frontend — the inline TUI or, under `--headless`, the
-  pipe-friendly headless runner.
+  assembles the system prompt (`prompt::assemble`), builds the trunk
+  [[map/exarch/agent|`Agent`]] + `Provider`, and hands off to one frontend — the
+  inline TUI or, under `--headless`, the pipe-friendly headless runner — which
+  wraps the trunk's shared handles in a [[map/exarch/agent|`Fleet`]].
 
 ## Accounts
 
@@ -147,15 +148,17 @@ user-supplied section (the user takes responsibility for the tool reference);
 
 ## Subsystems
 
-- [[map/exarch/session|session]] — the turn loop: provider round-trips, tool dispatch
-  with prompt-queue steering, auto-compaction, the nudge-retry policy, sub-agent fork.
+- [[map/exarch/agent|agent]] — the uniform node and the thin `Fleet`: the turn loop
+  (provider round-trips, tool dispatch with prompt-queue steering, auto-compaction,
+  the nudge-retry policy, sub-agent fork), the `parent` predicate, the owned
+  hot-swappable provider, dynamic focus, and the subtree cancel cascade.
 - [[map/exarch/provider|provider]] — LLM transport over genai: streaming, the retry
   driver, prompt caching, usage and dollar accounting.
 - [[map/exarch/shell-eval|shell-eval]] — one tool call as a ral top-level turn under a
   pushed capabilities frame; the streaming digest and the surface host sink.
 - [[map/exarch/policy|policy]] — capability composition (base ∨ extend ⊓ restrict) and
   the bake-in profiles; the boundary *is* ral's [[design/grant|grant]].
-- [[map/exarch/tools|tools]] — the tool registry: `ral`, the spawn family, `reply`, the schedule family, `fff`; two mirror axes (`spawns`/`replies`) gate root vs peer. The sub-agent model these axes describe is [[design/agents|agents]].
+- [[map/exarch/tools|tools]] — the tool registry: `ral`, the universal spawn family, `reply`, the schedule family, `fff`; one axis (`replies`) gates the conversing trunk vs every returning agent. The sub-agent model this axis describes is [[design/agents|agents]].
 - [[map/exarch/builtins|builtins]] — the resident host atoms: the hash-addressed edit
   primitives and the `agent.ral` helpers ([[design/hash-addressed-editing|why]]).
 - [[map/exarch/frontend|frontend]] — the agent/UI boundary (event bus, session log) and
@@ -183,10 +186,10 @@ see `exarch/PROFILES.md` and [[map/exarch/policy|policy]].
 With `--allow-schedule`, the agent may schedule its own wakeups (`schedule`,
 `schedules`, `unschedule`) — a cron expression or a one-shot `after <dur>`. A
 wakeup schedules the *agent*, not a worker: at its time a synthetic user turn is
-posted to the session inbox and delivered at the turn boundary, re-engaging the
-loop with no human present. It is off by default — waking yourself indefinitely
-is real authority. The inbox/reaper mechanics live on the
-[[map/exarch/frontend|frontend]] and [[map/exarch/session|session]] pages; see
+posted to the agent's own inbox and delivered at the turn boundary, re-engaging
+the loop with no human present. It is off by default — waking yourself
+indefinitely is real authority. The inbox/reaper mechanics live on the
+[[map/exarch/frontend|frontend]] and [[map/exarch/agent|agent]] pages; see
 [[decisions/260617_scheduled-wakeups|scheduled-wakeups]].
 
 ## Where to look

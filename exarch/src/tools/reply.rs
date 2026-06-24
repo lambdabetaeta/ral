@@ -17,10 +17,10 @@
 //! rail shows that render as the call's display line.
 
 use super::Tool;
+use crate::agent::Agent;
 use crate::bus::{Emitter, Kind};
 use crate::event::ToolResult as SessionToolResult;
 use crate::provider::Provider;
-use crate::session::Session;
 use crate::shell_eval;
 use serde_json::{Value, json};
 use std::sync::{Arc, OnceLock};
@@ -70,7 +70,7 @@ without calling `reply`, your parent receives nothing."
         &self,
         id: String,
         input: Value,
-        session: &mut Session,
+        session: &mut Agent,
         _provider: &Arc<Provider>,
         emit: &Emitter,
     ) -> SessionToolResult {
@@ -115,11 +115,10 @@ mod tests {
         assert!(s["properties"]["result"].is_object());
     }
 
-    /// `reply` is the one tool that flips the `replies` axis; it does not
-    /// spawn.
+    /// `reply` is the one tool that flips the `replies` axis — the sole
+    /// remaining tool-set gate.
     #[test]
-    fn reply_flips_only_the_reply_axis() {
+    fn reply_flips_the_reply_axis() {
         assert!(ReplyTool.replies());
-        assert!(!ReplyTool.spawns());
     }
 }

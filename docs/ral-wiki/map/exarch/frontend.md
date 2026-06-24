@@ -45,7 +45,7 @@ finishes, keeping async children muted to their own log.
 - a pretty-printed `events.json`, appended as each event lands — the post-mortem
   "model view";
 - the spill directory, where oversize tool outputs land under a content-hashed
-  name for [[map/exarch/session|`cap_and_spill`]].
+  name for [[map/exarch/agent|`cap_and_spill`]].
 
 The TUI writes a sibling `user.log` from the same stream — the "user view" —
 flushed as each block lands so it survives an abnormal exit. Both files live

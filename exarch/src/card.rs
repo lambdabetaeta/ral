@@ -624,7 +624,12 @@ pub fn summary_line(card: &Card) -> String {
             }
             Mark::Measure(m) => {
                 let bound = m.max.map(|mx| format!("/{mx}")).unwrap_or_default();
-                format!("{} {}{bound}{}", m.label, m.value, m.unit.as_deref().unwrap_or(""))
+                format!(
+                    "{} {}{bound}{}",
+                    m.label,
+                    m.value,
+                    m.unit.as_deref().unwrap_or("")
+                )
             }
             Mark::Fields { rows } => rows
                 .iter()

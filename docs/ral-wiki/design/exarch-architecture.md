@@ -5,7 +5,7 @@ deliberately thin architecture.** A model is given one `shell` tool (alongside
 `agent` and `fff`), and every tool call is evaluated as a ral top-level turn
 against a persistent in-process `Shell`. The agent loop is just provider
 round-trips, repeated until the model emits no tool call
-([[map/exarch/session|session]]):
+([[map/exarch/agent|agent]]):
 
 - render the transcript;
 - stream a reply;
@@ -50,6 +50,6 @@ See also [[design/grant|grant]], [[design/cbpv|cbpv]], [[design/audit|audit]],
 
 **Realised in** [[internals/a-turn-end-to-end|a-turn-end-to-end]].
 
-Code maps: [[map/exarch|exarch]] hub, [[map/exarch/session|session]],
+Code maps: [[map/exarch|exarch]] hub, [[map/exarch/agent|agent]],
 [[map/exarch/shell-eval|shell-eval]], [[map/exarch/policy|policy]]. Human docs:
 `exarch/README.md`, `exarch/PROFILES.md`.

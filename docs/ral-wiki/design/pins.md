@@ -57,8 +57,8 @@ card is already safe:
 ## The model watches its own pins
 
 Because pinned state is something the *user is watching* on the rail, the
-[[map/exarch/session|nudge]] facility periodically reminds the model of it. The
-session keeps a small `key → one-line summary` mirror of the pins as they flow
+[[map/exarch/agent|nudge]] facility periodically reminds the model of it. The
+agent keeps a small `key → one-line summary` mirror of the pins as they flow
 past — the session is otherwise pin-blind, the events going straight to the
 frontend — and when anything is pinned, a **budget-free** reminder fires every so
 many turns, naming the pinned state. With nothing pinned it never fires. This is
@@ -93,5 +93,5 @@ this is the model-authored dual of, and the encode-don't-stream doctrine),
 [[map/exarch/cards|cards]] (the render document the body decodes through),
 [[map/exarch/frontend|frontend]] (the viewport register and the draw layout),
 [[map/exarch/shell-eval|shell-eval]] (the host sink and the pin-first decode),
-[[map/exarch/session|session]] (the nudge that reminds the model of its pins), and
+[[map/exarch/agent|agent]] (the nudge that reminds the model of its pins), and
 `kit/tasks.ral` (the first client).

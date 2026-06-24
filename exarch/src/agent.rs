@@ -1,27 +1,33 @@
-//! One continuous agent session: canonical event log, persistent shell,
-//! capability set, and the shared turn driver every agent runs.
+//! The uniform agent node: canonical event log, persistent shell, capability
+//! set, an owned hot-swappable provider, and the shared turn driver every node
+//! runs.  An exarch run is a *fleet* of these arranged in a tree
+//! ([[decisions/260624_uniform-agent-nodes]]); the [`Fleet`](crate::fleet::Fleet)
+//! holds what is shared (the registry, the one event bus, the focused-agent
+//! handle, whether a human is attached), and each `Agent` is one node.
 //!
-//! [`Session::apply`] runs one round-trip against the provider;
-//! [`Session::drive`] is the one loop — root and sub-agent alike — that pulls
-//! turn-boundary messages from the session's own [`Inbox`], runs one `apply`
+//! [`Agent::apply`] runs one round-trip against the provider;
+//! [`Agent::drive`] is the one loop — every node alike — that pulls
+//! turn-boundary messages from the node's own [`Inbox`], runs one `apply`
 //! per message, and turns a nudge-worthy outcome into a self-posted
-//! [`InboxMsg::Nudge`].  The only differences between agents are structural:
-//! `is_root` (may spawn, mints the Esc token per turn), `park_when_idle` (an
-//! interactive root parks for the human; a headless root and every peer
-//! terminate at quiescence), `expect_action`, and `tools`.  A peer's single
-//! result is delivered up its parent's mailbox by the spawn site, not here, so
-//! `drive` itself is identical for both.
+//! [`InboxMsg::Nudge`].  No node is privileged by special-case code; the
+//! distinctions reduce to *position*: the parent-less **trunk** publishes its
+//! cancel token for the OS-signal path, and `replies`/parking fall out of the
+//! `parent`/`interactive`/`focus` predicates ([`Self::returns`],
+//! [`Self::park_mode`]).  A child's single result is delivered up its parent's
+//! mailbox by the spawn site, not here, so `drive` itself is identical for all.
 
 use crate::bootstrap::Scratch;
 use crate::bus::{
-    AgentOutcome, Emitter, Inbox, InboxMsg, Kind, Mailbox, SessionId, Turn, WORKER_PANIC_PREFIX,
+    AgentId, AgentOutcome, Emitter, Inbox, InboxMsg, Kind, Mailbox, ParkMode, Turn,
+    WORKER_PANIC_PREFIX,
 };
 use crate::cancel;
 use crate::digest::{
     AGENT_REPLY_CAP, COMPACT_THRESHOLD, OPAQUE_CAP, SUMMARY_CAP_FALLBACK_TOKENS, clip,
     compaction_due, render, suffix_keep_budget, summary_cap_tokens,
 };
-use crate::event::{QuiesceReason, SessionLog, ToolResult as SessionToolResult};
+use crate::event::{AgentLog, QuiesceReason, ToolResult as SessionToolResult};
+use crate::fleet::NO_FOCUS;
 use crate::nudge;
 use crate::provider::{CutShort, Provider, ProviderError, StepOut, StopReason, ToolCall};
 use crate::shell_eval;
@@ -29,13 +35,13 @@ use crate::tools::ToolSet;
 use crate::transcript::Transcript;
 use ral_core::Shell;
 use std::io;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
-pub struct Session {
-    pub id: SessionId,
+pub struct Agent {
+    pub id: AgentId,
     pub(crate) system: String,
-    log: SessionLog,
+    log: AgentLog,
     /// This session's operational trace (`transcript.jsonl`), written at the
     /// emit seam through the [`Emitter`](crate::bus::Emitter) the frontend
     /// builds from [`Self::transcript`].  The sibling of [`Self::log`]: the
@@ -44,46 +50,49 @@ pub struct Session {
     transcript: Transcript,
     shell: Shell,
     caps: ral_core::types::Capabilities,
-    /// This session's own inbox — the consumer side of its message queue.
-    /// [`Session::drive`] pulls turn-boundary deliverables from here;
-    /// [`Session::apply`] drains tool-boundary steering from it mid-round-trip.
+    /// This agent's parent, or `None` for the **trunk**.  The sole structural
+    /// distinction: the trunk publishes its cancel token for the OS-signal path
+    /// and, when `interactive`, converses (withholding `reply` and parking
+    /// indefinitely); every asymmetry is read from this field plus
+    /// `interactive`/`focus`, never an `is_root` branch.
+    parent: Option<AgentId>,
+    /// This agent's own hot-swappable provider.  A `/model` on the focused
+    /// agent swaps *its* handle alone; a `fork` seeds the child's own handle
+    /// from this one's current provider, so neither disturbs the other.  The
+    /// drive loop reads it once per turn.
+    provider: ProviderHandle,
+    /// The fleet's focused-agent handle, shared with the frontend and every
+    /// node.  The drive loop reads it in [`Self::park_mode`]: a focused agent
+    /// parks for the human like the conversing trunk.  Off the TUI it holds
+    /// [`NO_FOCUS`] and never changes.
+    focus: Arc<AtomicU64>,
+    /// Whether a human is attached to the fleet (the TUI).  With `parent =
+    /// None` it makes this the *conversing* trunk; off the TUI (`false`) the
+    /// trunk is a one-shot headless agent.  Inherited by every fork.
+    interactive: bool,
+    /// This agent's own inbox — the consumer side of its message queue.
+    /// [`Agent::drive`] pulls turn-boundary deliverables from here;
+    /// [`Agent::apply`] drains tool-boundary steering from it mid-round-trip.
     /// Self-nudges and self-armed wakeups land here; a child's result lands in
     /// its *parent's* inbox, never reaching across into a sibling's.
     inbox: Inbox,
-    /// Whether this session may spawn children — it holds the `agent` family
-    /// and owns a populated [`Self::agents`].  The one structural bit `drive`
-    /// branches on: only a root mints the process Esc token per turn; a peer
-    /// holds one sticky token for life.
-    is_root: bool,
-    /// Whether `drive` parks on an empty inbox or terminates.  True only for
-    /// an interactive root, whose human is an ever-present writer; a headless
-    /// root and every peer terminate at quiescence (a peer still parks while a
-    /// self-schedule is armed).
-    park_when_idle: bool,
-    /// When set (root only), turn completion is gated by two one-shot,
-    /// budget-free nudges: a turn that used no tool is nudged to engage, one
-    /// that did is nudged to verify.  Peers never carry it.
-    expect_action: bool,
-    /// Per-session nudge state — the retry budget and the one-shot completion
+    /// Per-agent nudge state — the retry budget and the one-shot completion
     /// gates.  Its latches reset on a genuine turn-boundary message, never on
     /// a self-[`InboxMsg::Nudge`], so a multi-step nudge sequence runs to
     /// completion within one turn.
     nudges: nudge::Registry,
-    /// This session's cancellation token.  A peer owns one sticky token for
-    /// life (registered, cancelled by `agent_cancel` / `/clear` / its
-    /// ceiling).  The root re-mints a fresh *published* token at each turn
-    /// boundary (the X5 reset), so this field holds the root's current turn
-    /// token; an Esc on one turn never bleeds into the next.
+    /// This agent's cancellation token — one sticky token for its life,
+    /// registered in the fleet so the subtree cascade (`agent_cancel`, the
+    /// ceiling, an Esc on the focused subtree) always reaches the live turn.
+    /// The drive loop [`reset`](cancel::Token::reset)s its flag at each genuine
+    /// turn boundary, so an Esc on one turn never bleeds into the next; the
+    /// trunk additionally [`publish`](cancel::publish)es it for OS signals.
     cancel: cancel::Token,
-    /// Which tools this session advertises and may dispatch — the single
+    /// Which tools this agent advertises and may dispatch — the single
     /// source of truth for both, read by `provider.complete` (advertisement)
-    /// and [`Self::stage`] (enforcement).  Full at the root; full minus the
-    /// spawn family at a peer, so the spawn tree stays one level deep.
+    /// and [`Self::stage`] (enforcement).  Every agent spawns; the only gate is
+    /// `reply`, withheld from the conversing (interactive) trunk.
     tools: ToolSet,
-    /// Whether the current turn has dispatched any tool call.  Reset on each
-    /// genuine turn-boundary message; read by the completion-gate nudges to
-    /// choose between the idle and verify prompts.
-    acted: bool,
     /// A returning agent's staged return value, set by the `reply` tool's
     /// dispatch (via [`Self::set_reply`]) and lifted by [`Self::apply`] into a
     /// [`TurnOutcome::Replied`] once the current tool-call batch finishes
@@ -100,13 +109,15 @@ pub struct Session {
     /// `run_shell` right before each dispatch, so it always holds the dynamic
     /// context completed calls left behind.  Read by [`Self::drive`] after a
     /// caught worker panic to roll the panicking call's dynamic-context
-    /// effects back; it lives on `Session` precisely so it survives the
+    /// effects back; it lives on `Agent` precisely so it survives the
     /// `catch_unwind` boundary.
     durable: ral_core::types::MobileSnapshot,
-    /// Live async `agent` workers spawned this session.  Only a root populates
-    /// it (`agent` is in the root tool set); a peer carries an empty one it
-    /// never uses.  Survives `/clear`: the generation is bumped and workers
-    /// cancelled, so a worker that settles after the clear drops its result.
+    /// The **fleet's** agent registry — one shared map, cloned to every node,
+    /// so "all live agents" is its contents.  Every agent registers itself here
+    /// and registers its own children, so the registry is the spawn tree at any
+    /// depth.  Survives `/clear`: [`clear_subtree`](crate::agent_registry::AgentRegistry::clear_subtree)
+    /// bumps the generation and reaps the focused agent's descendants, so a
+    /// worker that settles after the clear drops its result.
     pub(crate) agents: crate::agent_registry::AgentRegistry,
     /// Live scheduled wakeups (cron / after).  A peer may self-schedule (it
     /// posts wakeups into its own inbox), so this is no longer root-only; it
@@ -129,7 +140,7 @@ pub struct Session {
     pins: shell_eval::PinDigests,
 }
 
-/// Outcome of one [`Session::apply`].  Degenerate cases (`Empty`,
+/// Outcome of one [`Agent::apply`].  Degenerate cases (`Empty`,
 /// `Stopped`) become nudges; `Cancelled` and `Capped` do not; hard
 /// failures travel through [`ProviderError`].
 #[derive(Debug)]
@@ -155,7 +166,7 @@ pub enum TurnOutcome {
     Capped,
 }
 
-/// Hard ceiling on provider round-trips in one [`Session::apply`].  The
+/// Hard ceiling on provider round-trips in one [`Agent::apply`].  The
 /// interactive frontend has Esc to halt a runaway turn; headless and
 /// autonomous sub-agent runs have nothing, so a model that keeps
 /// emitting tool calls would loop until the token budget or the wall
@@ -164,7 +175,7 @@ pub enum TurnOutcome {
 /// reaches it.
 const MAX_STEPS: u32 = 250;
 
-pub(crate) fn fresh_id() -> SessionId {
+pub(crate) fn fresh_id() -> AgentId {
     static N: AtomicU64 = AtomicU64::new(0);
     N.fetch_add(1, Ordering::Relaxed)
 }
@@ -198,7 +209,7 @@ impl ProviderHandle {
     }
 }
 
-/// What [`Session::drive`] should do after handing a session-affecting slash
+/// What [`Agent::drive`] should do after handing a session-affecting slash
 /// command to [`Control`].
 pub enum ControlFlow {
     Continue,
@@ -215,7 +226,7 @@ pub enum ControlFlow {
 pub trait Control {
     /// Run `raw` (a slash-command line) against the session the drive loop
     /// owns, returning whether the loop should quit.
-    fn command(&mut self, raw: &str, session: &mut Session, emit: &Emitter) -> ControlFlow;
+    fn command(&mut self, raw: &str, session: &mut Agent, emit: &Emitter) -> ControlFlow;
 }
 
 /// The no-op control for drivers with no slash commands (headless, peers,
@@ -223,42 +234,53 @@ pub trait Control {
 pub struct NoControl;
 
 impl Control for NoControl {
-    fn command(&mut self, _raw: &str, _session: &mut Session, _emit: &Emitter) -> ControlFlow {
+    fn command(&mut self, _raw: &str, _session: &mut Agent, _emit: &Emitter) -> ControlFlow {
         ControlFlow::Continue
     }
 }
 
-/// The launch configuration threaded into [`Session::assemble`] — bundled so
+/// The trunk's registry title.  The trunk lists its descendants, never itself,
+/// so this is never shown — it only fills the entry the frontend looks up by id
+/// for the trunk's mailbox and provider.
+const TRUNK_TITLE: &str = "main";
+
+/// The launch configuration threaded into [`Agent::assemble`] — bundled so
 /// the one constructor reads at the call site rather than as a wall of bare
-/// booleans.
+/// fields.
 struct Build {
     system: String,
     caps: ral_core::types::Capabilities,
     shell: Shell,
-    log: SessionLog,
-    is_root: bool,
-    park_when_idle: bool,
-    expect_action: bool,
+    log: AgentLog,
+    parent: Option<AgentId>,
+    provider: ProviderHandle,
+    focus: Arc<AtomicU64>,
+    interactive: bool,
     schedule_authority: bool,
     tools: ToolSet,
+    /// The fleet's shared registry — fresh for the trunk, the parent's clone
+    /// for a fork — so every node registers into one map.
+    agents: crate::agent_registry::AgentRegistry,
 }
 
-impl Session {
+impl Agent {
     fn assemble(b: Build) -> io::Result<Self> {
         let Build {
             system,
             caps,
             mut shell,
             log,
-            is_root,
-            park_when_idle,
-            expect_action,
+            parent,
+            provider,
+            focus,
+            interactive,
             schedule_authority,
             tools,
+            agents,
         } = b;
         seed_session_dir(&mut shell, &log);
         let durable = shell.mobile_snapshot();
-        // Every session — root and each fork, both modes — owns its trace,
+        // Every agent — the trunk and each fork, both modes — owns its trace,
         // born in the same dir as its `events.json`.
         let transcript = Transcript::create(&log.dir().join("transcript.jsonl"))?;
         Ok(Self {
@@ -268,22 +290,38 @@ impl Session {
             transcript,
             shell,
             caps,
+            parent,
+            provider,
+            focus,
+            interactive,
             inbox: Inbox::new(),
-            is_root,
-            park_when_idle,
-            expect_action,
             nudges: nudge::Registry::new(),
             cancel: cancel::Token::new(),
             tools,
-            acted: false,
             reply: None,
             durable,
-            agents: crate::agent_registry::AgentRegistry::new(),
+            agents,
             schedules: crate::schedule::ScheduleRegistry::new(),
             schedule_authority,
             last_input: 0,
             pins: Default::default(),
         })
+    }
+
+    /// Register this agent in the fleet registry — under its `parent` (`None`
+    /// for the trunk).  The trunk calls it at construction so the frontend sees
+    /// it from the start; a child is registered by its spawn site (which also
+    /// arms the ceiling).  Idempotent enough: a re-register overwrites in place.
+    fn register_self(&self) {
+        self.agents.register(
+            self.id,
+            self.parent,
+            TRUNK_TITLE.to_string(),
+            self.log.dir().to_path_buf(),
+            self.cancel.clone(),
+            self.inbox.mailbox(),
+            self.provider.clone(),
+        );
     }
 
     fn replace_shell(&mut self, mut shell: Shell) {
@@ -292,6 +330,11 @@ impl Session {
         self.shell = shell;
     }
 
+    /// The trunk — the parent-less root of a fresh fleet.  Creates the fleet's
+    /// shared registry and focused-agent handle, wraps the initial `provider`,
+    /// and registers itself, so the frontend builds its [`Fleet`](crate::fleet::Fleet)
+    /// by reading these handles back.  `interactive` makes it the *conversing*
+    /// trunk (TUI); off it, a one-shot headless trunk.
     #[allow(clippy::too_many_arguments)] // launch config, threaded once at boot
     pub(crate) fn root(
         system: String,
@@ -300,33 +343,63 @@ impl Session {
         run_dir: &std::path::Path,
         model: &str,
         provider_label: &str,
-        expect_action: bool,
         allow_schedule: bool,
         interactive: bool,
+        provider: Arc<Provider>,
     ) -> io::Result<Self> {
         let shell = boot_root_shell(scratch);
         let sessions_root = run_dir.join("sessions");
         let id = fresh_id();
-        let log = SessionLog::root(&sessions_root, id, model, provider_label, system.len())?;
-        Self::assemble(Build {
+        let log = AgentLog::root(&sessions_root, id, model, provider_label, system.len())?;
+        let agent = Self::assemble(Build {
             system,
             caps,
             shell,
             log,
-            is_root: true,
-            // Only an interactive root has an ever-present human writer to park
-            // for; a headless root terminates once its seeded work is idle.
-            park_when_idle: interactive,
-            expect_action,
+            parent: None,
+            provider: ProviderHandle::new(provider),
+            // The focus handle is fleet-shared; off the TUI it never moves, so
+            // it starts at the no-focus sentinel.  The conversing trunk parks
+            // via `interactive`, not via focus, so the trunk need not name
+            // itself here.
+            focus: Arc::new(AtomicU64::new(NO_FOCUS)),
+            interactive,
             schedule_authority: allow_schedule,
-            // The interactive root converses and never returns, so it withholds
-            // `reply`; a headless root is a returning agent that also spawns.
+            // The interactive trunk converses and never returns, so it withholds
+            // `reply`; a headless trunk is a returning agent.
             tools: if interactive {
-                ToolSet::interactive_root()
+                ToolSet::conversing()
             } else {
-                ToolSet::returning_root()
+                ToolSet::returning()
             },
-        })
+            agents: crate::agent_registry::AgentRegistry::new(),
+        })?;
+        agent.register_self();
+        Ok(agent)
+    }
+
+    /// The fleet's focused-agent handle, shared with the frontend and every
+    /// fork — the TUI binds its `App` to this and mutates it on `TAB`.
+    pub(crate) fn focus_handle(&self) -> Arc<AtomicU64> {
+        self.focus.clone()
+    }
+
+    /// Whether a human is attached to the fleet.
+    pub(crate) fn interactive(&self) -> bool {
+        self.interactive
+    }
+
+    /// This agent's own provider handle — read by the spawn site to register it
+    /// (so a `/model` on the child's tab swaps the child alone) and by the
+    /// frontend to build the [`Fleet`](crate::fleet::Fleet).
+    pub(crate) fn provider_handle(&self) -> ProviderHandle {
+        self.provider.clone()
+    }
+
+    /// The provider in force for this agent's next turn — for a slash command
+    /// (`/compact`) the drive loop runs against the agent's own handle.
+    pub(crate) fn current_provider(&self) -> Arc<Provider> {
+        self.provider.current()
     }
 
     pub(crate) fn clear(&mut self, scratch: &Scratch) -> io::Result<()> {
@@ -342,11 +415,12 @@ impl Session {
         // Drop every queued message: a rebuilt context carries neither stale
         // user steering nor non-human deliveries across the clear.
         self.inbox.clear();
-        // Cancel every live async agent and advance the generation so any
-        // worker that settles after this clear drops its result rather than
-        // delivering it into the rebuilt context.
-        self.agents.clear();
-        // Drop every schedule too: a fresh root carries no pending wakeups.
+        // Cancel and reap this agent's subtree and advance the generation, so
+        // any worker that settles after this clear drops its result rather than
+        // delivering it into the rebuilt context.  This agent itself stays
+        // registered — `/clear` rebuilds its context, it does not tear it down.
+        self.agents.clear_subtree(self.id);
+        // Drop every schedule too: a rebuilt agent carries no pending wakeups.
         self.schedules.clear();
         // A rebuilt context wears no pinned state: the frontend wipes its
         // register on `/clear`, so the session's mirror must follow.
@@ -356,12 +430,12 @@ impl Session {
         Ok(())
     }
 
-    pub(crate) fn fork(&self, caps: ral_core::types::Capabilities) -> io::Result<Session> {
-        // The child is an independent fork of the parent session: it snapshots
-        // the parent's scope (prelude, agent library, accumulated bindings),
+    pub(crate) fn fork(&self, caps: ral_core::types::Capabilities) -> io::Result<Agent> {
+        // The child is an independent fork of the parent: it snapshots the
+        // parent's scope (prelude, agent library, accumulated bindings),
         // dynamic context (cwd, env, grants), and installed builtin table (the
         // host's `window-hash`/`grep-files`/`edit` and the rest), and starts
-        // fresh in control counters and session state — its own inbox, its own
+        // fresh in control counters and per-agent state — its own inbox, its own
         // (fresh) cancellation token, no terminal authority, no flow-back.
         // Core owns the flow matrix, so the builtin table can't be silently
         // dropped here the way a hand-copied field once was.  Its capabilities
@@ -375,18 +449,24 @@ impl Session {
             caps,
             shell,
             log,
-            is_root: false,
-            // A peer has no human; it terminates at quiescence (parking only
-            // while a self-schedule it armed is still live).
-            park_when_idle: false,
-            expect_action: false,
-            // Self-scheduling authority is inherited: a `--allow-schedule` root
-            // grants its peers the same right to wake themselves.
+            // The spawning agent is the child's parent — the tree edge that
+            // makes the child a node at this depth and carries the cascade.
+            parent: Some(self.id),
+            // The child seeds its own handle from the parent's current provider,
+            // so a later `/model` on either never disturbs the other.
+            provider: ProviderHandle::new(self.provider.current()),
+            // The fleet's focus and human-attachment are shared, not re-derived:
+            // a child becomes parkable the instant the human `TAB`s to it.
+            focus: self.focus.clone(),
+            interactive: self.interactive,
+            // Self-scheduling authority is inherited: a `--allow-schedule` trunk
+            // grants its descendants the same right to wake themselves.
             schedule_authority: self.schedule_authority,
-            // A peer may not spawn — withholding the spawn family from its tool
-            // set bounds recursion to depth 1, advertised and enforced.  It
-            // keeps `reply`, its way of returning.
-            tools: ToolSet::peer(),
+            // Every agent spawns now; a sub-agent returns through `reply`.
+            tools: ToolSet::returning(),
+            // One shared fleet registry: the child registers into the same map,
+            // so the tree is whole at any depth.
+            agents: self.agents.clone(),
         })
     }
 
@@ -428,34 +508,41 @@ impl Session {
         self.inbox.push_user(prompt);
     }
 
-    /// Build a root session against a throwaway sessions root under
-    /// `dir`, with default (unrestricted) capabilities and a baked
-    /// shell.  The harness in `tests/` uses this to drive [`Self::apply`]
-    /// and [`Self::drive`] through a [`Provider::scripted`] backend.
+    /// Build a trunk against a throwaway sessions root under `dir`, with
+    /// default (unrestricted) capabilities, a baked shell, and an empty
+    /// scripted provider (tests that drive set their own).  The harness in
+    /// `tests/` uses this to drive [`Self::apply`] and [`Self::drive`] through
+    /// a [`Provider::scripted`] backend.  Non-interactive, so it terminates at
+    /// quiescence like any returning agent and `drive` never blocks.
     pub fn for_test(dir: &std::path::Path, system: &str) -> io::Result<Self> {
         let shell = crate::bootstrap::boot_shell();
         let id = fresh_id();
-        let log = SessionLog::root(
+        let log = AgentLog::root(
             &dir.join("sessions"),
             id,
             "test-model",
             "test",
             system.len(),
         )?;
-        Self::assemble(Build {
+        let provider = ProviderHandle::new(Arc::new(Provider::scripted(
+            "test-model",
+            crate::provider::scripted::Script::new(),
+        )));
+        let agent = Self::assemble(Build {
             system: system.to_string(),
             caps: ral_core::types::Capabilities::default(),
             shell,
             log,
-            is_root: true,
-            // Tests drive `apply`/`drive` directly and must never block; a test
-            // root terminates at quiescence like a peer, so it is a returning
-            // root — it both spawns and returns through `reply`.
-            park_when_idle: false,
-            expect_action: false,
+            parent: None,
+            provider,
+            focus: Arc::new(AtomicU64::new(NO_FOCUS)),
+            interactive: false,
             schedule_authority: false,
-            tools: ToolSet::returning_root(),
-        })
+            tools: ToolSet::returning(),
+            agents: crate::agent_registry::AgentRegistry::new(),
+        })?;
+        agent.register_self();
+        Ok(agent)
     }
 
     /// Whether the session is at a settled turn boundary — every turn
@@ -478,57 +565,49 @@ impl Session {
         self.log.history_bytes()
     }
 
-    /// The one shared turn loop — root and peer alike.  Pull a turn-boundary
+    /// The one shared turn loop — every node alike.  Pull a turn-boundary
     /// deliverable from the inbox, run one [`Self::apply`], let the nudge
     /// registry post any retry as a self-[`InboxMsg::Nudge`], and repeat.  An
-    /// empty inbox either parks (an interactive root, or any agent with a live
-    /// self-schedule) or terminates (a peer / headless root at quiescence).
+    /// empty inbox parks or terminates by [`Self::park_mode`]: a present human
+    /// (the conversing trunk or the focused agent) holds it; a live schedule
+    /// holds it until cancelled; otherwise it terminates at quiescence.
     ///
     /// Per-`apply` panic recovery lives here — the `catch_unwind` rolls the
     /// dynamic context back to the last clean tool-call boundary and continues
-    /// the loop, so one crashing turn never sinks the session.  Returns the
+    /// the loop, so one crashing turn never sinks the agent.  Returns the
     /// final turn's `(outcome, payload)` digest, where `payload` is the
     /// faithful [`serde_json::Value`] a `reply` carried (else `None`); the
-    /// interactive root ignores it, a peer's spawn site renders it to text, and
-    /// the headless sink writes it faithfully.
+    /// interactive trunk ignores it, a child's spawn site renders it to text,
+    /// and the headless sink writes it faithfully.
     ///
-    /// `provider` is the shared [`ProviderHandle`] the loop reads once per
-    /// turn, so a `/model` swap on the UI thread takes effect next turn;
-    /// `control` handles session-affecting slash commands ([`NoControl`] off
-    /// the TUI).
+    /// The provider is the agent's own [`ProviderHandle`], read once per turn,
+    /// so a `/model` swap on this agent takes effect next turn; `control`
+    /// handles agent-affecting slash commands ([`NoControl`] off the TUI).
     pub fn drive(
         &mut self,
-        provider: ProviderHandle,
         control: &mut dyn Control,
         emit: &Emitter,
     ) -> (AgentOutcome, Option<serde_json::Value>) {
-        // The root's published Esc token, re-minted per turn boundary; held
-        // here so the slot stays valid for the whole turn and is retired when
-        // the next mint (or this loop's end) drops it.  A peer mints nothing.
-        let mut guard: Option<cancel::RootGuard> = None;
+        // The trunk publishes its sticky token for the OS-signal path, held for
+        // the whole drive; a sub-agent's token is reached through the registry
+        // cascade, never the slot, so it publishes nothing.
+        let _slot = self.parent.is_none().then(|| cancel::publish(&self.cancel));
         let mut digest = (AgentOutcome::Empty, None);
         loop {
-            let armed = self.schedules.armed();
-            let Some(turn) = self
-                .inbox
-                .next_or_idle(self.park_when_idle, armed, &self.cancel)
-            else {
+            // The park verdict ([`Self::park_mode`]) is recomputed on every wake
+            // inside `next_or_idle`, so a `TAB` that de-focuses this agent (and
+            // wakes its inbox) flips it from `Held` to `Quiesce` and it reaps.
+            let Some(turn) = self.inbox.next_or_idle(|| self.park_mode(), &self.cancel) else {
                 break;
             };
-            // A genuine turn boundary resets the nudge latches and, at the
-            // root, re-mints the cancellation token (minting is itself the
-            // reset, so a prior turn's Esc cannot carry into this one).  A
-            // self-nudge is the same turn continuing and resets neither.
+            // A genuine turn boundary resets the nudge latches and clears the
+            // sticky cancel token, so a prior turn's Esc cannot carry into this
+            // one.  A self-nudge is the same turn continuing and resets neither.
             if turn.resets_turn() {
                 self.nudges.reset();
-                self.acted = false;
-                if self.is_root {
-                    let g = cancel::mint_root();
-                    self.cancel = g.token().clone();
-                    guard = Some(g);
-                }
+                self.cancel.reset();
             }
-            // Session-affecting slash commands run against the owned session,
+            // Agent-affecting slash commands run against the owned agent,
             // never the model.
             if let Turn::Command(raw) = &turn {
                 match control.command(raw, self, emit) {
@@ -537,9 +616,9 @@ impl Session {
                 }
             }
             announce(&turn, emit);
-            // Read the provider in force for this turn; a `/model` swap lands
-            // here next turn, never mid-turn.
-            let active = provider.current();
+            // Read the provider in force for this turn; a `/model` swap on this
+            // agent lands here next turn, never mid-turn.
+            let active = self.provider.current();
             let token = self.cancel.clone();
             let prompt = Some(turn.text());
             let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -557,38 +636,47 @@ impl Session {
                     self.shell.restore_mobile(self.durable.clone());
                     let msg = panic_msg(&p);
                     self.note_error(format!("{WORKER_PANIC_PREFIX}{msg}"), emit);
-                    digest = (AgentOutcome::Failed(format!("worker panicked: {msg}")), None);
+                    digest = (
+                        AgentOutcome::Failed(format!("worker panicked: {msg}")),
+                        None,
+                    );
                     continue;
                 }
             };
             digest = agent_digest(&outcome);
             let ctx = nudge::NudgeCtx {
-                expect_action: self.expect_action,
-                acted: self.acted,
-                // Every returning agent (a peer or a headless root) hands its
-                // value back through `reply`; an un-replied finish is re-nudged
-                // within budget, then fails.  Only the interactive root, which
-                // converses and never returns, is exempt.
+                // Every returning agent (a sub-agent or a headless trunk) hands
+                // its value back through `reply`; an un-replied finish is
+                // re-nudged within budget, then fails.  Only the interactive
+                // trunk, which converses and never returns, is exempt.
                 must_reply: self.returns(),
                 pinned: self.pinned_digest(),
             };
             if let Some(msg) = self.nudges.react(&outcome, ctx, emit, &mut self.log) {
                 self.inbox.push(InboxMsg::Nudge(msg));
             }
-            // `reply` hard-terminates: end the drive loop even if a self-armed
-            // schedule would otherwise keep the peer parked.
+            // `reply` hard-terminates: end the drive loop regardless of focus or
+            // a self-armed schedule — the agent returns its value and is gone.
             if matches!(outcome, Ok(TurnOutcome::Replied(_))) {
                 break;
             }
         }
-        // The loop always hands the session back ready for the next prompt: a
+        // The loop always hands the agent back ready for the next prompt: a
         // surfaced error or caught panic can leave the committed prompt
         // stranded mid-protocol; wind it back here through the single exit.
         if !self.log.is_ready() {
             self.log.quiesce(QuiesceReason::Aborted);
         }
-        debug_assert!(self.log.is_ready(), "drive must leave the session ReadyForUser");
-        drop(guard);
+        debug_assert!(
+            self.log.is_ready(),
+            "drive must leave the agent ReadyForUser"
+        );
+        // The trunk removes itself at termination (a child is removed by its
+        // spawn site through `settle`), so the fleet empties when the last
+        // agent is gone.
+        if self.parent.is_none() {
+            self.agents.deregister(self.id);
+        }
         digest
     }
 
@@ -772,7 +860,6 @@ impl Session {
                     emit,
                 );
             }
-            self.acted = true;
             let Dispatch { results, steering } = self.dispatch(provider, tool_calls, token, emit);
             self.log
                 .append_tool_results(results)
@@ -860,7 +947,10 @@ impl Session {
                     return;
                 }
                 emit.emit(Kind::Usage(summary.usage));
-                if let Err(e) = self.log.apply_compaction(summary.summary, plan.suffix_start) {
+                if let Err(e) = self
+                    .log
+                    .apply_compaction(summary.summary, plan.suffix_start)
+                {
                     self.note_error(format!("compact failed: {e}"), emit);
                     return;
                 }
@@ -910,32 +1000,44 @@ impl Session {
         self.inbox.drain_tool()
     }
 
-    /// A returning agent — a peer or a headless root — hands a value back
-    /// through `reply` and terminates; only the interactive root converses
-    /// across turns and parks for its human.  "Returns a value" and "does not
-    /// park" are the same fact, read here in one place.
+    /// A returning agent — every node but the *conversing* (interactive) trunk
+    /// — hands a value back through `reply` and terminates.  Only the conversing
+    /// trunk converses across turns and never returns.  Read in one place from
+    /// position: the inverse of `parent = None ∧ interactive`.
     fn returns(&self) -> bool {
-        !self.park_when_idle
+        !(self.parent.is_none() && self.interactive)
     }
 
-    fn stage(&mut self, provider: &Arc<Provider>, call: ToolCall, emit: &Emitter) -> SessionToolResult {
+    /// The `should_park` predicate ([`ParkMode`]), recomputed on every wake.  A
+    /// present human holds this agent parked — the *conversing* trunk (`parent
+    /// = None ∧ interactive`) or the agent the human has `TAB`bed to (`focus =
+    /// id`); a live self-schedule holds it until cancelled; otherwise it
+    /// terminates at quiescence.
+    fn park_mode(&self) -> ParkMode {
+        let conversing = self.parent.is_none() && self.interactive;
+        if conversing || self.focus.load(Ordering::Relaxed) == self.id {
+            ParkMode::Held
+        } else if self.schedules.armed() {
+            ParkMode::UntilCancelled
+        } else {
+            ParkMode::Quiesce
+        }
+    }
+
+    fn stage(
+        &mut self,
+        provider: &Arc<Provider>,
+        call: ToolCall,
+        emit: &Emitter,
+    ) -> SessionToolResult {
         match crate::tools::find(&call.fn_name) {
             Some(t) if !self.tools.allows(t) => {
-                // The allow-check is the backstop for two unadvertised cases:
-                // a peer reaching for the spawn family, or the interactive root
-                // (the only non-returning agent) reaching for `reply`.  Name
-                // the right one.
-                let msg = if t.spawns() {
-                    format!(
-                        "tool `{}` is not available to sub-agents — do this work yourself",
-                        call.fn_name
-                    )
-                } else {
-                    format!(
-                        "tool `{}` is not available here — you converse with the user across turns and never return a value; finish by replying to them directly",
-                        call.fn_name
-                    )
-                };
+                // The only withheld tool is `reply`, refused to the conversing
+                // (interactive) trunk, which never returns a value.
+                let msg = format!(
+                    "tool `{}` is not available here — you converse with the user across turns and never return a value; finish by replying to them directly",
+                    call.fn_name
+                );
                 self.note_error(msg.clone(), emit);
                 SessionToolResult {
                     id: call.call_id,
@@ -1068,7 +1170,7 @@ impl Session {
     }
 }
 
-impl Drop for Session {
+impl Drop for Agent {
     fn drop(&mut self) {
         let _ = self.log.record_session_ended();
     }
@@ -1120,7 +1222,9 @@ fn announce(turn: &Turn, emit: &Emitter) {
 /// return path, a returning agent that never replied did not complete its
 /// contract: it (like a genuinely empty turn) settles `Failed`.  Every other
 /// shape carries only its tag.
-fn agent_digest(r: &Result<TurnOutcome, ProviderError>) -> (AgentOutcome, Option<serde_json::Value>) {
+fn agent_digest(
+    r: &Result<TurnOutcome, ProviderError>,
+) -> (AgentOutcome, Option<serde_json::Value>) {
     match r {
         Ok(TurnOutcome::Replied(v)) => match shell_eval::json_to_text(v) {
             // Any value that renders to text carries content; a null or
@@ -1133,9 +1237,10 @@ fn agent_digest(r: &Result<TurnOutcome, ProviderError>) -> (AgentOutcome, Option
         // never replied did not complete its contract, so it fails honestly
         // rather than handing up a trailing fragment that masquerades as the
         // answer.  Re-nudged within budget first (see [`nudge`]).
-        Ok(TurnOutcome::Complete(_)) | Ok(TurnOutcome::Empty) => {
-            (AgentOutcome::Failed("ended without calling `reply`".into()), None)
-        }
+        Ok(TurnOutcome::Complete(_)) | Ok(TurnOutcome::Empty) => (
+            AgentOutcome::Failed("ended without calling `reply`".into()),
+            None,
+        ),
         Ok(TurnOutcome::Stopped { reason }) => (AgentOutcome::Stopped(reason.clone()), None),
         Ok(TurnOutcome::Cancelled) => (AgentOutcome::Cancelled, None),
         Ok(TurnOutcome::Capped) => (AgentOutcome::Stopped("step cap reached".into()), None),
@@ -1148,7 +1253,10 @@ fn agent_digest(r: &Result<TurnOutcome, ProviderError>) -> (AgentOutcome, Option
 /// The peer edge (the `agent` tool's settle site) and the `drive_peer` test
 /// helper share it; the headless edge instead writes the value faithfully.
 pub(crate) fn render_reply(v: &serde_json::Value) -> String {
-    clip(&shell_eval::json_to_text(v).unwrap_or_default(), AGENT_REPLY_CAP)
+    clip(
+        &shell_eval::json_to_text(v).unwrap_or_default(),
+        AGENT_REPLY_CAP,
+    )
 }
 
 /// The message of a recovered panic payload, for either string shape.
@@ -1166,10 +1274,10 @@ fn boot_root_shell(scratch: &Scratch) -> Shell {
 }
 
 /// Seed `EXARCH_SESSION_DIR` into `shell` from `log`'s directory.  Run
-/// at construction and again after [`Session::clear`] rebuilds the
+/// at construction and again after [`Agent::clear`] rebuilds the
 /// shell, so the name always points at the live session's event-log
 /// directory.
-fn seed_session_dir(shell: &mut Shell, log: &SessionLog) {
+fn seed_session_dir(shell: &mut Shell, log: &AgentLog) {
     let dir = log.dir().to_string_lossy().into_owned();
     crate::bootstrap::seed_var(shell, "EXARCH_SESSION_DIR", &dir);
 }
@@ -1290,7 +1398,7 @@ mod tests {
     fn worker_panic_preserves_completed_bindings_and_clean_context() {
         ral_core::builtins::register_builtins(PANIC_BUILTINS);
         let dir = tmp("panic-recovery");
-        let mut session = Session::for_test(&dir, "system").unwrap();
+        let mut session = Agent::for_test(&dir, "system").unwrap();
         session.shell.install_builtins(PANIC_BUILTINS);
         // Refresh `durable` so the snapshot reflects the just-installed
         // builtin frame, matching the production boundary where the
@@ -1306,10 +1414,11 @@ mod tests {
                 .then(Reply::tool_calls(vec![ral_call("c1", "let a4_x = 7")]))
                 .then(Reply::tool_calls(vec![ral_call("c2", "a4-panic-now")])),
         );
+        session.provider = ProviderHandle::new(provider);
         session.seed("compute then crash".into());
         let (tx, _rx) = std::sync::mpsc::channel();
         let emit = Emitter::new(tx, session.id);
-        let _ = session.drive(ProviderHandle::new(provider), &mut NoControl, &emit);
+        let _ = session.drive(&mut NoControl, &emit);
 
         // The completed call's binding survives the panic.
         assert!(
@@ -1334,37 +1443,76 @@ mod tests {
         let provider2 = scripted("test-model", Script::new().then(Reply::text("ok")));
         let (tx, _rx) = std::sync::mpsc::channel();
         let emit = Emitter::new(tx, session.id);
-        let root = cancel::mint_root();
-        match session.apply(&provider2, Some("continue".into()), root.token(), &emit) {
+        let token = cancel::Token::new();
+        let _slot = cancel::publish(&token);
+        match session.apply(&provider2, Some("continue".into()), &token, &emit) {
             Ok(TurnOutcome::Complete(s)) => assert_eq!(s, "ok"),
             other => panic!("next turn on the healed shell must complete, got {other:?}"),
         }
     }
 
     /// A forked child inherits the parent's installed builtin surface, not
-    /// just the core set a bare `Shell::new` seeds, and is denied the spawn
-    /// family (so the tree stays one level deep).
+    /// just the core set a bare `Shell::new` seeds, and may itself spawn — the
+    /// tree is unbounded in depth.
     #[test]
-    fn fork_inherits_host_builtins_and_cannot_spawn() {
+    fn fork_inherits_host_builtins_and_can_spawn() {
         let dir = tmp("fork-builtins");
-        let session = Session::for_test(&dir, "system").unwrap();
+        let session = Agent::for_test(&dir, "system").unwrap();
         assert!(
             session.shell.lookup_builtin("window-hash").is_some(),
             "the parent boot shell must carry the exarch host builtins"
         );
-        let child = session.fork(session.caps().clone()).expect("fork child session");
-        for name in ["window-hash", "grep-files", "edit", "explore-dir", "line-hash"] {
+        let child = session
+            .fork(session.caps().clone())
+            .expect("fork child session");
+        for name in [
+            "window-hash",
+            "grep-files",
+            "edit",
+            "explore-dir",
+            "line-hash",
+        ] {
             assert!(
                 child.shell.lookup_builtin(name).is_some(),
                 "the forked child must inherit the host builtin `{name}`"
             );
         }
-        // The child's tool set withholds the spawn family, so a peer cannot
-        // spawn its own children and the tree stays one level deep.
+        // Spawning is universal now: a sub-agent may spawn its own children, so
+        // the delegation tree is unbounded in depth.
         let agent = crate::tools::find("agent").expect("agent tool registered");
         assert!(
-            !child.tools.allows(agent),
-            "a peer must not be permitted the `agent` spawn tool"
+            child.tools.allows(agent),
+            "a sub-agent may itself spawn sub-agents"
+        );
+        // The child is registered under its parent, so the cascade reaches it.
+        assert_eq!(
+            child.parent,
+            Some(session.id),
+            "a fork records its parent for the subtree cascade"
+        );
+    }
+
+    /// The provider is per-agent: a `fork` seeds its own handle from the
+    /// parent's *current* provider, and a later swap on either never disturbs
+    /// the other — the property `/model` on the focused agent relies on.
+    #[test]
+    fn fork_seeds_its_own_provider_handle() {
+        let dir = tmp("provider-per-agent");
+        let parent = Agent::for_test(&dir, "system").unwrap();
+        parent.provider.swap(scripted("p-a", Script::new()));
+        let child = parent.fork(parent.caps().clone()).expect("fork child");
+        assert_eq!(
+            child.provider.current().model(),
+            "p-a",
+            "the child seeds its handle from the parent's current provider"
+        );
+        // A later swap on the parent leaves the child's own handle untouched.
+        parent.provider.swap(scripted("p-b", Script::new()));
+        assert_eq!(parent.provider.current().model(), "p-b");
+        assert_eq!(
+            child.provider.current().model(),
+            "p-a",
+            "a swap on the parent never disturbs an already-forked child"
         );
     }
 
@@ -1381,10 +1529,11 @@ mod tests {
     /// Drive a forked peer to quiescence through `provider`, returning the
     /// `(outcome, text)` its parent's spawn site would deliver — it renders the
     /// faithful reply payload to text exactly as the peer edge does.
-    fn drive_peer(child: &mut Session, provider: Arc<Provider>) -> (AgentOutcome, String) {
+    fn drive_peer(child: &mut Agent, provider: Arc<Provider>) -> (AgentOutcome, String) {
         let (tx, _rx) = std::sync::mpsc::channel();
         let emit = Emitter::new(tx, child.id);
-        let (outcome, payload) = child.drive(ProviderHandle::new(provider), &mut NoControl, &emit);
+        child.provider = ProviderHandle::new(provider);
+        let (outcome, payload) = child.drive(&mut NoControl, &emit);
         let text = payload.as_ref().map(render_reply).unwrap_or_default();
         (outcome, text)
     }
@@ -1395,7 +1544,7 @@ mod tests {
     #[test]
     fn sub_agent_returns_through_reply() {
         let dir = tmp("reply-terminal");
-        let parent = Session::for_test(&dir, "system").unwrap();
+        let parent = Agent::for_test(&dir, "system").unwrap();
         let mut child = parent.fork(parent.caps().clone()).expect("fork child");
         child.seed("write a report".into());
         let provider = scripted(
@@ -1425,7 +1574,7 @@ mod tests {
     #[test]
     fn sub_agent_reply_renders_a_structured_payload() {
         let dir = tmp("reply-structured");
-        let parent = Session::for_test(&dir, "system").unwrap();
+        let parent = Agent::for_test(&dir, "system").unwrap();
         let mut child = parent.fork(parent.caps().clone()).expect("fork child");
         child.seed("list the files".into());
         let provider = scripted(
@@ -1451,7 +1600,7 @@ mod tests {
     #[test]
     fn sub_agent_without_reply_is_re_nudged_then_fails() {
         let dir = tmp("reply-missing");
-        let parent = Session::for_test(&dir, "system").unwrap();
+        let parent = Agent::for_test(&dir, "system").unwrap();
         let mut child = parent.fork(parent.caps().clone()).expect("fork child");
         child.seed("do the thing".into());
         // More prose-only replies than the nudge budget will consume: once it
@@ -1466,35 +1615,38 @@ mod tests {
             matches!(outcome, AgentOutcome::Failed(_)),
             "an un-replied finish settles Failed, got {outcome:?}"
         );
-        assert!(text.is_empty(), "the final prose must not be scraped: {text:?}");
+        assert!(
+            text.is_empty(),
+            "the final prose must not be scraped: {text:?}"
+        );
         assert!(child.is_ready());
     }
 
-    /// `reply` is held by every returning agent — a peer and a (returning,
-    /// i.e. non-interactive) root — and withheld only from the interactive
-    /// root, which converses across turns and never returns a value.
+    /// `reply` is held by every returning agent — a sub-agent and a (returning,
+    /// i.e. non-interactive) headless trunk — and withheld only from the
+    /// conversing (interactive) trunk, which never returns a value.
     #[test]
-    fn reply_is_held_by_returning_agents_and_withheld_from_the_interactive_root() {
+    fn reply_is_held_by_returning_agents_and_withheld_from_the_conversing_trunk() {
         let dir = tmp("reply-gating");
         let reply = crate::tools::find("reply").expect("reply tool registered");
-        // A `for_test` root is non-interactive, so it is a returning root and
+        // A `for_test` trunk is non-interactive, so it is a returning trunk and
         // holds `reply`.
-        let root = Session::for_test(&dir, "system").unwrap();
+        let root = Agent::for_test(&dir, "system").unwrap();
         assert!(
             root.tools.allows(reply),
-            "a returning root hands its result back, so it must hold `reply`"
+            "a returning trunk hands its result back, so it must hold `reply`"
         );
-        // A peer (fork) returns through `reply` too.
+        // A sub-agent (fork) returns through `reply` too.
         let child = root.fork(root.caps().clone()).expect("fork child");
         assert!(
             child.tools.allows(reply),
-            "a peer returns through `reply`, so it must hold it"
+            "a sub-agent returns through `reply`, so it must hold it"
         );
-        // The interactive root is the one non-returning agent: it withholds
-        // `reply` while keeping the spawn family.
+        // The conversing (interactive) trunk is the one non-returning agent: it
+        // withholds `reply` while still spawning.
         assert!(
-            !ToolSet::interactive_root().allows(reply),
-            "the interactive root converses and never returns, so it withholds `reply`"
+            !ToolSet::conversing().allows(reply),
+            "the conversing trunk converses and never returns, so it withholds `reply`"
         );
     }
 }

@@ -16,7 +16,7 @@ use genai::chat::{
     CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatStreamEvent, MessageOptions,
     StreamEnd, Tool,
 };
-pub use genai::chat::{StopReason, ToolCall};
+pub use genai::chat::{ReasoningEffort, StopReason, ToolCall};
 use genai::resolver::{AuthData, AuthResolver, Endpoint, ServiceTargetResolver};
 use genai::{Client, ModelIden, ServiceTarget};
 use reqwest::StatusCode;
@@ -530,7 +530,7 @@ pub enum ProviderError {
     },
     /// The assistant turn was cut off before the model finished — the
     /// output cap ([`CutShort::OutputCap`]) or a mid-stream stall
-    /// ([`CutShort::Stalled`]).  Raised by [`crate::session::Session::apply`]
+    /// ([`CutShort::Stalled`]).  Raised by [`crate::agent::Agent::apply`]
     /// **after** appending the partial assistant message, so re-prompting
     /// with `continue` preserves the partial work as transcript context.
     Truncated {
@@ -721,8 +721,9 @@ impl ProviderError {
     /// it falls back to the full `Display`.
     fn brief(&self) -> String {
         match self {
-            ProviderError::Transient { cause, .. }
-            | ProviderError::RateLimited { cause, .. } => cause.clone(),
+            ProviderError::Transient { cause, .. } | ProviderError::RateLimited { cause, .. } => {
+                cause.clone()
+            }
             ProviderError::Other(s) => s.clone(),
             other => other.to_string(),
         }
@@ -754,10 +755,9 @@ impl fmt::Display for ProviderError {
                 Some(s) => write!(f, "api error {s} ({model}): {message}"),
                 None => write!(f, "api error ({model}): {message}"),
             },
-            ProviderError::Truncated { reason } => write!(
-                f,
-                "reply cut off before completion (reason={reason})"
-            ),
+            ProviderError::Truncated { reason } => {
+                write!(f, "reply cut off before completion (reason={reason})")
+            }
             ProviderError::Other(s) => f.write_str(s),
         }
     }
@@ -884,6 +884,31 @@ async fn retry_with_backoff<T>(
     }
 }
 
+/// The per-selection request tuning the `/model` overlay carries alongside the
+/// model: the reasoning effort and the sampling temperature.  Each is `None`
+/// for "auto" — the option is then *not* set on the wire and genai applies the
+/// adapter's per-model default, exactly as before tuning existed.  The overlay
+/// edits it, [`crate::state`] persists it, and [`Live::complete`] folds it into
+/// the [`ChatOptions`].
+#[derive(Clone, Default, Debug)]
+pub struct Tuning {
+    /// The reasoning effort, or `None` for the adapter default.
+    pub effort: Option<ReasoningEffort>,
+    /// The sampling temperature in `0.0..=2.0`, or `None` for the adapter
+    /// default.
+    pub temperature: Option<f64>,
+}
+
+/// Effort identity by variant name — genai's [`ReasoningEffort`] is not
+/// `PartialEq`, and two efforts are the same iff they name the same rung
+/// (the overlay never constructs the value-carrying `Budget`).
+impl PartialEq for Tuning {
+    fn eq(&self, other: &Self) -> bool {
+        let key = |e: &Option<ReasoningEffort>| e.as_ref().map(|e| e.variant_name());
+        key(&self.effort) == key(&other.effort) && self.temperature == other.temperature
+    }
+}
+
 pub struct Provider {
     backend: Backend,
     model: String,
@@ -892,6 +917,9 @@ pub struct Provider {
     /// (the correct path for Opus, Sonnet, Haiku and the other adapters
     /// that ship their own resolution tables).
     max_tokens_override: Option<u32>,
+    /// The reasoning-effort + temperature tuning for this selection, set by
+    /// the `/model` overlay (or restored from persisted state at startup).
+    tuning: Tuning,
 }
 
 /// The transport behind a [`Provider`].  The live backend owns the
@@ -1052,6 +1080,7 @@ impl Provider {
         model: String,
         cred: &Credential,
         max_tokens_override: Option<u32>,
+        tuning: Tuning,
     ) -> Self {
         let runtime = make_runtime();
         prime_pricing(&runtime);
@@ -1071,19 +1100,21 @@ impl Provider {
             }),
             model,
             max_tokens_override,
+            tuning,
         }
     }
 
     /// A test provider that replays scripted outcomes instead of
     /// talking to genai.  No tokio runtime, no network: `complete` and
     /// `summarize` pop their next outcome from `script` in order.  This
-    /// is the seam the `tests/` harness drives [`crate::session::Session::apply`]
+    /// is the seam the `tests/` harness drives [`crate::agent::Agent::apply`]
     /// through — see [`scripted::Script`].
     pub fn scripted(model: &str, script: scripted::Script) -> Self {
         Self {
             backend: Backend::Scripted(script),
             model: model.to_string(),
             max_tokens_override: None,
+            tuning: Tuning::default(),
         }
     }
 
@@ -1092,6 +1123,12 @@ impl Provider {
     /// per-model default at request time.
     pub fn max_tokens_override(&self) -> Option<u32> {
         self.max_tokens_override
+    }
+
+    /// The reasoning-effort + temperature tuning bound at build time — read
+    /// by the `/model` overlay to seed its controls with the live values.
+    pub fn tuning(&self) -> &Tuning {
+        &self.tuning
     }
 
     /// The resolved model name, used by the banner and the capabilities
@@ -1150,6 +1187,7 @@ impl Provider {
             Backend::Live(live) => live.complete(
                 &self.model,
                 self.max_tokens_override,
+                &self.tuning,
                 system,
                 messages,
                 tools,
@@ -1173,7 +1211,9 @@ impl Provider {
         cancel: &cancel::Token,
     ) -> Result<SummaryOut, ProviderError> {
         match &self.backend {
-            Backend::Live(live) => live.summarize(&self.model, system, messages, max_tokens, cancel),
+            Backend::Live(live) => {
+                live.summarize(&self.model, system, messages, max_tokens, cancel)
+            }
             Backend::Scripted(s) => s.summarize(&self.model),
         }
     }
@@ -1221,6 +1261,7 @@ impl Live {
         &self,
         model: &str,
         max_tokens_override: Option<u32>,
+        tuning: &Tuning,
         system: &str,
         messages: Vec<ChatMessage>,
         tools: &ToolSet,
@@ -1243,6 +1284,14 @@ impl Live {
         // here and silently truncated long Opus turns.
         if let Some(n) = max_tokens_override {
             options = options.with_max_tokens(n);
+        }
+        // The `/model` overlay's tuning, set only when the user moved a knob
+        // off "auto"; an unset knob leaves the adapter's default in force.
+        if let Some(effort) = &tuning.effort {
+            options = options.with_reasoning_effort(effort.clone());
+        }
+        if let Some(temperature) = tuning.temperature {
+            options = options.with_temperature(temperature);
         }
 
         let step = self.runtime.block_on(retry_with_backoff(
@@ -1405,7 +1454,7 @@ impl Live {
 
         // A summary that itself hit the `max_tokens` cap is incomplete;
         // committing it would silently drop everything past the cut-off.
-        // Surface it as `Truncated` so `Session::compact` keeps the
+        // Surface it as `Truncated` so `Agent::compact` keeps the
         // un-summarised history rather than compacting to a half summary.
         if matches!(resp.stop_reason, Some(StopReason::MaxTokens(_))) {
             return Err(ProviderError::Truncated {
@@ -1603,7 +1652,7 @@ fn usage_from(model: &str, raw: &genai::chat::Usage, metered: bool) -> Usage {
 }
 
 /// Scripted provider backend used by the `tests/` harness to drive
-/// [`crate::session::Session::apply`] end-to-end with no network.  A
+/// [`crate::agent::Agent::apply`] end-to-end with no network.  A
 /// [`Script`] is a queue of canned `complete` replies (each optionally
 /// streaming some text first) and a queue of `summarize` replies,
 /// consumed in order.  Running past the end of either queue panics — a
@@ -2321,7 +2370,10 @@ mod tests {
             "the stall cause rides along for the operator note",
         );
         assert!(step.tool_calls.is_empty(), "no tool call survives a stall");
-        assert!(step.stop_reason.is_none(), "no End frame, so no stop reason");
+        assert!(
+            step.stop_reason.is_none(),
+            "no End frame, so no stop reason"
+        );
         assert!(
             step.assistant_message
                 .content

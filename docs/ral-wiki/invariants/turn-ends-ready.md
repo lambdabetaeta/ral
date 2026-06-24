@@ -26,7 +26,7 @@ The hard rule: a path that ends a turn must leave the session `ReadyForUser`. Ad
 a new turn-ending outcome through `quiesce` (extend `QuiesceReason`), never by
 returning while a prompt sits unanswered mid-protocol. `is_ready` is the single
 predicate for "a fresh prompt is admissible"; compaction reads it too
-([[map/exarch/session|session]] `can_compact`).
+([[map/exarch/agent|agent]] `can_compact`).
 
 See also [[map/exarch/frontend|frontend]] (the state machine and `SessionLog`),
-[[map/exarch/session|session]] (`run_turn`, the turn driver).
+[[map/exarch/agent|agent]] (`run_turn`, the turn driver).

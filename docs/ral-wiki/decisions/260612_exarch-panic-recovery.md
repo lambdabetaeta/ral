@@ -80,6 +80,6 @@ snapshot at the `run_turn` panic boundary (the dynamic context). Never add a
 hand-written restore epilogue that a panic between install and restore would
 skip.
 
-See also [[map/exarch/shell-eval]], [[map/exarch/session]],
+See also [[map/exarch/shell-eval]], [[map/exarch/agent]],
 [[map/exarch/frontend]] (the event-log state machine), and
 [[invariants/turn-ends-ready]].
