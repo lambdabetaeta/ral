@@ -85,26 +85,25 @@ pub fn assemble(
 /// agent's own writable tree, so unlike `config.ral` it is untrusted — but it
 /// only adds prompt text, never capabilities, so it cannot widen the `Grant`.
 fn discover_agents(cwd: &Path, config_dir: &Path) -> Vec<PathBuf> {
-    let mut chain: Vec<PathBuf> = Vec::new();
-    let mut found_root = false;
-    for dir in cwd.ancestors() {
-        chain.push(dir.to_path_buf());
-        if ral_core::path::exists(&dir.join(".git").to_string_lossy()) {
-            found_root = true;
-            break;
+    let repo_root = cwd
+        .ancestors()
+        .find(|dir| ral_core::path::exists(&dir.join(".git").to_string_lossy()));
+    let mut scan: Vec<&Path> = match repo_root {
+        Some(root) => {
+            let mut dirs: Vec<&Path> = cwd.ancestors().take_while(|dir| *dir != root).collect();
+            dirs.push(root);
+            dirs
         }
-    }
-    if !found_root {
-        chain.truncate(1);
-    }
-    chain.reverse();
+        None => vec![cwd],
+    };
+    scan.reverse();
 
     let mut files = Vec::new();
     let global = config_dir.join("AGENTS.md");
     if ral_core::path::exists(&global.to_string_lossy()) {
         files.push(global);
     }
-    for dir in chain {
+    for dir in scan {
         let file = dir.join("AGENTS.md");
         if ral_core::path::exists(&file.to_string_lossy()) {
             files.push(file);
@@ -113,11 +112,12 @@ fn discover_agents(cwd: &Path, config_dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// Concatenate `--system` files with blank-line separators, in the
-/// order given on the command line.
+/// Concatenate the given files into one section body, blank-line separated and
+/// in order.  Serves both the `--system FILE...` files and the discovered
+/// `AGENTS.md` chain; the caller fixes the order.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:system-prompt-files] reads the --system prompt files at load time; not a turn-time door"
+    reason = "[io-door:silent:system-prompt-files] reads the --system prompt files and the discovered AGENTS.md chain (the repo/cwd ones untrusted, from the agent's own tree) into the system prompt at load time; not a turn-time door"
 )]
 fn read_files(files: &[PathBuf]) -> Result<String, String> {
     let mut buf = String::new();
