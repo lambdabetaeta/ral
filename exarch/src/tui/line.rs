@@ -43,6 +43,13 @@ pub(super) const SLATE: Color = Color::Rgb(140, 150, 170);
 /// wears no band: it reads by its [`PROMPT_INK`] body tint and rule fence,
 /// leaving the background plane to the machine's recessed [`CODE_BG`] panel.
 pub(super) const PROMPT_BG: Color = Color::Rgb(72, 78, 94);
+/// The `/model` overlay's plane — the deep blue fill behind the floating,
+/// bezel-framed picker ([`super::picker`]). A Norton-Commander indigo, but
+/// pulled toward the app's muted set so the modal reads as a recessed panel
+/// lifted *above* the session rather than a saturated intrusion. It is the
+/// one areal mark that means "modal has the focus": the dimmed session shows
+/// through nowhere the bezel covers.
+pub(super) const OVERLAY_BG: Color = Color::Rgb(28, 34, 66);
 /// The human's ink — the prompt body text and the `❖` fence marking a prompt
 /// in the rail thumbnail.  A light cool neutral, distinct from the agent
 /// rail's [`SLATE`] and dimmer than the machine's white prose: the human owns

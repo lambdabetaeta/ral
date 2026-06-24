@@ -156,7 +156,7 @@ pub fn run() -> Result<(), String> {
     // the persisted selection (when its provider is available),
     // else the first available provider's default model.
     let mut catalog = models::ModelCatalog::new(models::LiveSource::new(&store));
-    let (id, model) =
+    let (id, model, tuning) =
         resolve_initial_selection(c.model.as_deref(), &state_dir, &available, &mut catalog)?;
     let label = id.label();
     let cred = store
@@ -196,7 +196,8 @@ pub fn run() -> Result<(), String> {
     // Behind an `Arc` from the start: an async `agent` worker captures a
     // clone to outlive its spawning turn, and a `/model` switch swaps this
     // for a fresh one without disturbing children already running.
-    let provider = std::sync::Arc::new(Provider::build(&id, model.clone(), &cred, c.max_tokens));
+    let provider =
+        std::sync::Arc::new(Provider::build(&id, model.clone(), &cred, c.max_tokens, tuning));
     let mut session = Agent::root(
         system,
         caps,
@@ -261,19 +262,20 @@ fn resolve_initial_selection(
     state_dir: &std::path::Path,
     available: &[provider::ProviderId],
     catalog: &mut models::ModelCatalog<models::LiveSource>,
-) -> Result<(provider::ProviderId, String), String> {
+) -> Result<(provider::ProviderId, String, provider::Tuning), String> {
     if let Some(name) = model_override {
         let id = models::resolve_model_provider(name, available, catalog)?;
-        return Ok((id, name.to_string()));
+        return Ok((id, name.to_string(), provider::Tuning::default()));
     }
     if let Some(saved) = state::load(state_dir)
         && let Some(id) = saved.provider_id(available)
     {
-        return Ok((id, saved.model));
+        let tuning = saved.tuning();
+        return Ok((id, saved.model, tuning));
     }
     let id = available[0].clone();
     match id.famous() {
-        Some(kind) => Ok((id, kind.info().1.to_string())),
+        Some(kind) => Ok((id, kind.info().1.to_string(), provider::Tuning::default())),
         None => Err(format!(
             "custom provider '{}' has no default model — pass --model NAME \
              (it will be remembered) or open the /model picker",

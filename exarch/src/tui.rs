@@ -85,8 +85,8 @@ use std::{
 use textarea_vim::{Mode, Vim, place_native_cursor};
 
 use line::{
-    AGENT_HUES, BANNER_GOLD, BANNER_PINK, CYAN, PINK, PURPLE, RAIL_DIAL_W, RAIL_W, READ_W, SLATE,
-    bold,
+    AGENT_HUES, BANNER_GOLD, BANNER_PINK, CYAN, OVERLAY_BG, PINK, PURPLE, RAIL_DIAL_W, RAIL_W,
+    READ_W, SLATE, bold,
 };
 use viewport::Viewport;
 
@@ -1095,12 +1095,10 @@ impl App {
     pub fn draw(&mut self, term: &mut Term) -> io::Result<()> {
         let (cols, rows) = size().unwrap_or((READ_W, 24));
         let area = Rect::new(0, 0, cols, rows);
-        // The picker takes over the prompt region and wants more rows than
-        // a one-line prompt; otherwise the prompt box sizes to its draft.
-        let prompt_h = match &self.picker {
-            Some(p) => p.height(area.height),
-            None => prompt_height(&self.textarea, area.width, area.height),
-        };
+        // The prompt box sizes to its draft; the `/model` picker floats as an
+        // overlay above this whole layout (drawn last over a cleared centre),
+        // so it no longer claims the prompt region.
+        let prompt_h = prompt_height(&self.textarea, area.width, area.height);
         let tab_h = if self.tabs.len() > 1 {
             self.tabs.len() as u16
         } else {
@@ -1283,14 +1281,13 @@ impl App {
                 )),
                 status_rect,
             );
-            // The `/model` picker takes over the prompt region while open —
-            // a flat strip, not a floating overlay. Input lives in main
-            // only; a subagent tab shows a watch-only hint in the prompt
-            // slot, and the textarea keeps its draft for when the user tabs
-            // home.
-            match (picker, prompt_hint) {
-                (Some(p), _) => p.render(f, prompt_row),
-                (None, Some(line)) => {
+            // The prompt region draws normally; the `/model` picker, when
+            // open, floats over the whole frame below (its own [`Clear`]ed
+            // centre), so it never displaces the input. Input lives in main
+            // only; a subagent tab shows a watch-only hint in the prompt slot,
+            // and the textarea keeps its draft for when the user tabs home.
+            match prompt_hint {
+                Some(line) => {
                     let block = ratatui::widgets::Block::default()
                         .borders(ratatui::widgets::Borders::ALL)
                         .border_type(ratatui::widgets::BorderType::Rounded)
@@ -1298,19 +1295,25 @@ impl App {
                         .padding(ratatui::widgets::Padding::horizontal(PROMPT_PAD_H));
                     f.render_widget(Paragraph::new(line).block(block), prompt_row);
                 }
-                (None, None) => {
+                None => {
                     f.render_widget(&self.textarea, prompt_row);
-                    // Show the terminal's native cursor at the edit point, every
-                    // mode.  The textarea's block (border + horizontal padding)
-                    // insets the text, so position within that inner rect.
-                    let inner = ratatui::widgets::Block::default()
-                        .borders(ratatui::widgets::Borders::ALL)
-                        .padding(ratatui::widgets::Padding::horizontal(PROMPT_PAD_H))
-                        .inner(prompt_row);
-                    place_native_cursor(f, inner, &self.textarea);
+                    // Show the terminal's native cursor at the edit point —
+                    // but not while the picker overlay owns the keyboard, or
+                    // the cursor would peek out beneath the modal.
+                    if picker.is_none() {
+                        let inner = ratatui::widgets::Block::default()
+                            .borders(ratatui::widgets::Borders::ALL)
+                            .padding(ratatui::widgets::Padding::horizontal(PROMPT_PAD_H))
+                            .inner(prompt_row);
+                        place_native_cursor(f, inner, &self.textarea);
+                    }
                 }
             }
             f.render_widget(Paragraph::new(footer_hint()), footer_row);
+            // Last: the floating picker, over the dimmed session.
+            if let Some(p) = picker {
+                p.render(f, area);
+            }
         });
         execute!(io::stdout(), EndSynchronizedUpdate)?;
         drawn?;
@@ -3194,7 +3197,15 @@ fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) -> io::Result<()> {
             Some((id.clone(), kind))
         })
         .collect();
-    let mut picker = Picker::new(available, subscription);
+    // Seed the tuning controls from the focused provider's live values, so the
+    // overlay opens showing the effort/temperature currently in force (a
+    // settled agent with no live handle falls back to the defaults).
+    let initial_tuning = ctx
+        .agents
+        .provider(tui.app.focused())
+        .map(|p| p.current().tuning().clone())
+        .unwrap_or_default();
+    let mut picker = Picker::new(available, subscription, initial_tuning);
     // Seed each provider from the catalog's cache instantly; spawn a background
     // fetch for the rest so the UI shows "loading…" rather than freezing on the
     // network. A ChatGPT plan login has no catalog endpoint, so its curated plan
@@ -3238,20 +3249,20 @@ fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) -> io::Result<()> {
     tui.app.picker = Some(picker);
     let outcome = drive_picker(tui, store, ctx.catalog, rx);
     tui.app.picker = None;
-    if let Some((id, model)) = outcome {
-        apply_model_switch(tui, ctx, id, model);
+    if let Some((id, model, tuning)) = outcome {
+        apply_model_switch(tui, ctx, id, model, tuning);
     }
     Ok(())
 }
 
 /// Poll keys and background-fetch results until the picker resolves.  Returns
-/// the chosen `(provider, model)`, or `None` on cancel.
+/// the chosen `(provider, model, tuning)`, or `None` on cancel.
 fn drive_picker(
     tui: &mut Tui,
     store: &CredentialStore,
     catalog: &mut ModelCatalog<LiveSource>,
     rx: Option<FetchRx>,
-) -> Option<(provider::ProviderId, String)> {
+) -> Option<(provider::ProviderId, String, provider::Tuning)> {
     loop {
         // Fold any landed fetch results into the picker (and the catalog's
         // caches), on this thread, so the disk write stays single-threaded.
@@ -3288,11 +3299,13 @@ fn drive_picker(
         match action {
             picker::PickAction::None => {}
             picker::PickAction::Cancelled => return None,
-            picker::PickAction::Selected(id, model) => return Some((id, model)),
-            picker::PickAction::Manual(query) => {
+            picker::PickAction::Selected(id, model, tuning) => {
+                return Some((id, model, tuning));
+            }
+            picker::PickAction::Manual(query, tuning) => {
                 let available = store.available();
                 match crate::models::resolve_model_provider(&query, &available, catalog) {
-                    Ok(id) => return Some((id, query)),
+                    Ok(id) => return Some((id, query, tuning)),
                     Err(e) => {
                         let root = tui.app.root;
                         tui.app.push_error(root, e);
@@ -3320,6 +3333,7 @@ fn apply_model_switch(
     ctx: &CommandCtx<'_>,
     provider_id: provider::ProviderId,
     model: String,
+    tuning: provider::Tuning,
 ) {
     let store = ctx.store;
     let info = ctx.info;
@@ -3345,17 +3359,34 @@ fn apply_model_switch(
         model.clone(),
         &cred,
         info.max_tokens_override,
+        tuning.clone(),
     ));
     let label = provider_id.label();
     let status_provider = crate::oauth::provider_label(new_provider.subscription(), label);
     provider.swap(new_provider);
     tui.app.set_status_model(&status_provider, &model);
     let state_dir = crate::bootstrap::project_dir(info.cwd);
-    if let Err(e) = state::save(&state_dir, &state::State::new(&provider_id, &model)) {
+    if let Err(e) = state::save(&state_dir, &state::State::new(&provider_id, &model, &tuning)) {
         tui.app
             .push_error(id, format!("could not persist selection: {e}"));
     }
-    emit.emit(Kind::SystemNote(format!("[switched to {label} {model}]")));
+    emit.emit(Kind::SystemNote(format!(
+        "[switched to {label} {model}{}]",
+        tuning_suffix(&tuning)
+    )));
+}
+
+/// A human-readable suffix for the switch note describing any non-default
+/// tuning, e.g. ` · effort high · temp 0.7`. Empty when both knobs are auto.
+fn tuning_suffix(tuning: &provider::Tuning) -> String {
+    let mut parts = String::new();
+    if let Some(effort) = &tuning.effort {
+        parts.push_str(&format!(" · effort {}", effort.variant_name()));
+    }
+    if let Some(temperature) = tuning.temperature {
+        parts.push_str(&format!(" · temp {temperature:.1}"));
+    }
+    parts
 }
 
 fn ctrl_key(k: &KeyEvent, c: char) -> bool {
