@@ -640,9 +640,20 @@ impl Agent {
                         AgentOutcome::Failed(format!("worker panicked: {msg}")),
                         None,
                     );
+                    if !self.log.is_ready() {
+                        self.log.quiesce(QuiesceReason::Aborted);
+                    }
                     continue;
                 }
             };
+            // A provider error or step cap can leave the session
+            // mid-protocol (e.g. AwaitingAssistantAfterToolResults).
+            // The post-loop guard does the same but only on loop exit;
+            // quiesce per-iteration so the next prompt — nudge or user —
+            // is admissible (turn-ends-ready invariant, X12).
+            if !self.log.is_ready() {
+                self.log.quiesce(QuiesceReason::Aborted);
+            }
             digest = agent_digest(&outcome);
             let ctx = nudge::NudgeCtx {
                 // Every returning agent (a sub-agent or a headless trunk) hands
@@ -661,9 +672,10 @@ impl Agent {
                 break;
             }
         }
-        // The loop always hands the agent back ready for the next prompt: a
-        // surfaced error or caught panic can leave the committed prompt
-        // stranded mid-protocol; wind it back here through the single exit.
+        // Safety net: per-iteration quiescing (above) handles mid-loop
+        // errors, but a `break` from `Replied` or a future exit path could
+        // still bypass it.  This catch-all ensures the turn-ends-ready
+        // invariant holds regardless of how the loop exits.
         if !self.log.is_ready() {
             self.log.quiesce(QuiesceReason::Aborted);
         }
@@ -1648,5 +1660,61 @@ mod tests {
             !ToolSet::conversing().allows(reply),
             "the conversing trunk converses and never returns, so it withholds `reply`"
         );
+    }
+
+    /// X12: a provider error mid-turn (e.g. "stream ended without End
+    /// X12: a provider error mid-turn (e.g. "stream ended without End
+    /// event") must not wedge the session.  When `apply` returns `Err`
+    /// with the session stranded in `AwaitingAssistantAfterToolResults`,
+    /// the `drive` loop quiesces per-iteration so the next prompt is
+    /// admitted — not rejected with "tool results are pending".
+    #[test]
+    fn provider_error_mid_turn_does_not_wedge_session() {
+        let dir = tmp("x12-provider-error");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        // 1st round-trip: model requests a tool call (runs to completion,
+        // leaving the session `AwaitingAssistantAfterToolResults`);
+        // 2nd round-trip: stream error mid-protocol;
+        // 3rd–6th: clean replies for the second turn and its nudges.
+        let provider = scripted(
+            "test-model",
+            Script::new()
+                .then(Reply::tool_calls(vec![ral_call("c1", "let x12_a = 7")]))
+                .then(Reply::error(ProviderError::Other(
+                    "stream ended without End event".into(),
+                )))
+                .then(Reply::text("ok"))
+                .then(Reply::text("ok"))
+                .then(Reply::text("ok"))
+                .then(Reply::text("ok")),
+        );
+        session.provider = ProviderHandle::new(provider);
+        session.seed("first turn".into());
+        session.seed("second turn after error".into());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let emit = Emitter::new(tx, session.id);
+        let (outcome, _) = session.drive(&mut NoControl, &emit);
+        // The session is ready for the next prompt.
+        assert!(
+            session.is_ready(),
+            "session must be ReadyForUser after a mid-turn provider error"
+        );
+        // The binding from the completed tool call survived.
+        assert!(
+            session.shell.scope_lookup("x12_a").is_some(),
+            "a binding from a completed tool call must survive a later provider error"
+        );
+        // The second turn ran: the final outcome is the no-reply failure
+        // from the second turn's nudges, NOT a "tool results are pending"
+        // rejection from a wedged session.
+        match outcome {
+            AgentOutcome::Failed(msg) => {
+                assert!(
+                    !msg.contains("tool results are pending"),
+                    "second turn must not be rejected; got: {msg}"
+                );
+            }
+            other => panic!("expected Failed from no-reply nudges, got {other:?}"),
+        }
     }
 }

@@ -512,6 +512,15 @@ pub struct App {
     /// `C-x C-e` was pressed: the UI loop should suspend the TUI and compose the
     /// prompt in `$EDITOR`.  Set here, drained by [`App::take_editor_request`].
     editor_request: bool,
+    /// Set by [`Self::clear`] when the trunk viewport is blanked: drops leftover
+    /// events from a turn cancelled in flight (`Token`, `Boundary`, ...) until
+    /// the next prompt genuinely begins.  Only the root needs guarding --
+    /// retired sub-agent tabs are already dropped in [`Self::handle`] via the
+    /// `dying` linger window -- because the unbounded bus channel can still
+    /// carry tokens the worker emitted between the cancel and when the
+    /// streaming select notices the flag (at most one `wait_for_cancel` poll).
+    /// Re-armed when the next `UserPromptEcho` arrives.
+    root_clear_drain: bool,
 }
 
 /// Where the content area sat in the last drawn frame.
@@ -621,6 +630,7 @@ impl App {
             vim,
             cx_pending: false,
             editor_request: false,
+            root_clear_drain: false,
         }
     }
 
@@ -705,6 +715,13 @@ impl App {
             self.dying.entry(id).or_insert(now);
         }
         self.focus.store(root, Ordering::Relaxed);
+        // A `/clear` on the trunk cancels an in-flight model response in
+        // `route_submit`; the cancel trips within one `wait_for_cancel` poll
+        // (~50 ms), but the unbounded bus can still carry tokens the worker
+        // emitted before the streaming select noticed the flag.  Until the
+        // next prompt echoes genuinely, drop those stragglers in
+        // [`Self::handle`].
+        self.root_clear_drain = true;
         if let Some(vp) = self.viewports.get_mut(&root) {
             vp.reset();
         }
@@ -733,6 +750,22 @@ impl App {
         // Root never enters `dying`, so its events always pass.
         if self.dying.contains_key(&id) {
             return;
+        }
+        // While the trunk viewport is freshly cleared (`App::clear` armed
+        // `root_clear_drain`), drop the straggler events the cancelled turn
+        // left in the unbounded bus -- the tokens and trailing chrome the
+        // worker emitted before the streaming `select!` noticed the cancel
+        // flag, at most one `wait_for_cancel` poll (~50 ms) of queued events.
+        // The first `UserPromptEcho` is the genuine next prompt: re-arm the
+        // guard and let it through unchanged.  A `Born`/`Died` carries a
+        // sub-agent own id, never root, so the dying guard above owns them;
+        // for root we drop the lot.
+        if id == self.root && self.root_clear_drain {
+            let echo = matches!(kind, Kind::UserPromptEcho(_));
+            self.root_clear_drain = echo;
+            if !echo {
+                return;
+            }
         }
         // A phase label names the silent gap before the next thing
         // happens, so any other event supersedes it.  Clear the live
@@ -3071,8 +3104,21 @@ fn route_submit(
             "/model" => {
                 pick_model(tui, ctx)?;
             }
-            // The viewport blanks immediately; the worker rebuilds the session.
+            // The viewport blanks immediately, and the in-flight model response
+            // is cancelled first — otherwise streamed tokens sitting in the bus
+            // keep flowing into the cleared viewport until the worker, parked
+            // inside `apply`, hits its next poll (50 ms) and the model's turn
+            // ends on its own.  Raising the interrupt cancels the trunk's
+            // published token and the ral foreground, exactly as Esc does; the
+            // subtree cascade reaps any live descendants now rather than after
+            // the worker reaches the `Turn::Command`.  Stragglers already in the
+            // unbounded bus channel are dropped in `App::handle` by the
+            // clear-drain guard `root_clear_drain` arms.  Then the `/clear`
+            // itself reaches the worker's drive loop and rebuilds the session.
             "/clear" => {
+                let root = tui.app.root;
+                cancel::raise_interrupt();
+                ctx.agents.cancel(root);
                 tui.app.clear(info, tui.guard.term())?;
                 mailbox.push(InboxMsg::Command("/clear".into()));
             }

@@ -207,6 +207,10 @@ You will be notified when this completes. Handles persist across turns. In a lat
     let x = await $h                      # blocks until the worker returns
     [out: $x[stdout], errs: $x[stderr]]   # as Bytes
 
+If this fails you do not read to re-define `x` again, just read:
+
+    [out: $x[stdout], errs: $x[stderr]]   # as Bytes
+
 Wrap in `audit` to read the recorded tree:
 
     let suite = spawn { audit { cargo test -q } }

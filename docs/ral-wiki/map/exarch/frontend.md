@@ -135,7 +135,15 @@ Two `Sink` implementations:
  phase lives on `Viewport`, not `App`.
  Sub-agent sessions get tabs that linger after `Died`, each keeping its own
  scroll position; an async agent on the session-lived bus streams its tab the
- same way, and `/clear` retires every live sub-tab through the same linger
+ the same way, and `/clear` retires every live sub-tab through the same linger
+ window ([[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]]).
+ `/clear` also cancels the in-flight model turn: `route_submit` raises
+ `cancel::raise_interrupt` and cascades `agents.cancel(root)` *before* blanking
+ the viewport, so the streaming `select!` in `provider::complete` unwinds within
+ one `wait_for_cancel` poll (~50 ms) rather than running to its natural end.
+ Straggler tokens the worker already emitted into the unbounded bus before the
+ cancel noticed are dropped by `App`'s `root_clear_drain` guard, which arms in
+ `App::clear` and disarms at the next `UserPromptEcho`.
  window ([[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]]).
  It owns the REPL loop and the raw-mode / bracketed-paste /
  alt-screen / mouse-capture guard. A prompt the user submits while a turn runs
