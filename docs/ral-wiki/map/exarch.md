@@ -1,5 +1,5 @@
 ---
-generated_at_commit: b443215
+generated_at_commit: 129914e
 generated_at_date: 2026-06-24
 covers_paths: [exarch/src/main.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/prompt.rs, exarch/data/system.md, exarch/data/ral.md, exarch/data/script-style.md]
 ---
@@ -129,7 +129,7 @@ user-supplied section (the user takes responsibility for the tool reference);
   pushed capabilities frame; the streaming digest and the surface host sink.
 - [[map/exarch/policy|policy]] — capability composition (base ∨ extend ⊓ restrict) and
   the bake-in profiles; the boundary *is* ral's [[design/grant|grant]].
-- [[map/exarch/tools|tools]] — the tool registry: `ral`, the spawn family, `reply`, the schedule family, `fff`; two mirror axes (`spawns`/`replies`) gate root vs peer.
+- [[map/exarch/tools|tools]] — the tool registry: `ral`, the spawn family, `reply`, the schedule family, `fff`; two mirror axes (`spawns`/`replies`) gate root vs peer. The sub-agent model these axes describe is [[design/agents|agents]].
 - [[map/exarch/builtins|builtins]] — the resident host atoms: the hash-addressed edit
   primitives and the `agent.ral` helpers ([[design/hash-addressed-editing|why]]).
 - [[map/exarch/frontend|frontend]] — the agent/UI boundary (event bus, session log) and

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1baac6d
-generated_at_date: 2026-06-22
+generated_at_commit: 129914e
+generated_at_date: 2026-06-24
 covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 ---
 
@@ -33,6 +33,18 @@ composition could discard it. Loading reuses
 `ral_core::capability::load_capabilities_from_*` — the same surface as ral's
 `--capabilities <path>.ral` (`policy/load.rs` only wraps it with exarch's error
 format and the `absolute_in` cwd-join helper).
+
+`narrow(parent, base_name, cwd)` is the **meet-sibling of `for_invocation`**: it
+freezes the named base against the child's working directory and returns
+`parent ⊓ base`. Where `for_invocation` builds the *root's* ceiling (a join then
+meets), `narrow` bounds a *child's* — so the same lattice that grants the root's
+authority also attenuates a spawned [[design/agents|sub-agent]]'s. Meet only ever
+removes authority and the result is ≤ both operands, so a spawn can reduce a
+child's reach but never escalate it past the parent's: naming a base looser than
+the parent changes nothing (a network-off parent stays offline even under
+`minimal`, since `false ⊓ true = false`), and `dangerous` — the lattice top —
+leaves the parent's authority verbatim. The [[map/exarch/tools|`agent` tool]]
+calls it at the spawn site with a mandatory `permissions` base.
 
 `deny_paths` makes a restrict file's own bytes structurally unreachable: a
 restrict file shapes the agent's authority, so the agent must not be able to edit

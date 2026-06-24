@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f5dccde
-generated_at_date: 2026-06-22
+generated_at_commit: 129914e
+generated_at_date: 2026-06-24
 covers_paths: [exarch/src/tools.rs, exarch/src/tools/]
 ---
 
@@ -45,9 +45,18 @@ The tools that ship:
   [[map/exarch/session|session]] from a value-snapshot of the parent shell, runs
   it on a detached thread through the same `Session::drive` loop, and returns a
   start receipt at once; the child's single reply is delivered later as a marked
-  `Turn` through the [[map/exarch/frontend|inbox]]. `agents` lists live workers
-  (id, title, elapsed, log dir); `agent_cancel` stops one by id. A peer is denied
-  the family, so the tree stays one level deep.
+  `Turn` through the [[map/exarch/frontend|inbox]]. It takes a **mandatory
+  `permissions`** parameter — one of the five [[map/exarch/policy|base]] names
+  (`confined`, `minimal`, `read-only`, `reasonable`, `dangerous`) — so every
+  spawn states the child's ceiling explicitly. The child is born with
+  `parent ⊓ resolve_base(permissions)` (`policy::narrow`): a lattice *meet*, so
+  the base can only **narrow** the child below the parent, never escalate it past
+  the parent's authority — naming a base looser than the parent simply changes
+  nothing, and `dangerous` is the lattice top, meaning *inherit the parent's
+  authority verbatim*. `agents` lists live workers (id, title, elapsed, log dir);
+  `agent_cancel` stops one by id. A peer is denied the family, so the tree stays
+  one level deep. The whole sub-agent model — roles, spawning, returning,
+  narrowing — is [[design/agents|agents]].
 - `reply` (`tools/reply.rs`), gated by `replies()` — a returning agent's
   deliberate return value ([[decisions/260622_agent-reply-tool|agent-reply-tool]],
   extended to the headless root by

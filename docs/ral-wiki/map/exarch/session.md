@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 99300c0
-generated_at_date: 2026-06-21
+generated_at_commit: 129914e
+generated_at_date: 2026-06-24
 covers_paths: [exarch/src/session.rs, exarch/src/nudge.rs, exarch/src/digest.rs]
 ---
 
@@ -83,9 +83,12 @@ appending tool results, in `AwaitingAssistantAfterToolResults`, where
 turn-boundary Esc bails before the summarize request
 ([[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]).
 
-`fork` builds the child `Session` for the `agent` tool through
+`fork` builds the child `Session` for the [[design/agents|`agent` tool]] through
 `Shell::fork_session` ([[map/core/shell-state|the flow matrix]]) rather than
-hand-copying fields after a bare `Shell::new`. The child snapshots the parent's
+hand-copying fields after a bare `Shell::new`. It takes the child's
+`Capabilities` **as an argument**, so the spawn site owns the authority decision
+(the parent's verbatim, or `parent ⊓ base` via [[map/exarch/policy|`policy::narrow`]]).
+The child snapshots the parent's
 whole lexical scope (prelude, agent library, every accumulated binding), its
 dynamic context (cwd, env, grants, handlers), and the installed builtin table,
 and starts fresh in everything else — fresh control counters (a new session is
