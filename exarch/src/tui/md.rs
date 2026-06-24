@@ -61,6 +61,30 @@ pub(super) fn render_md(text: &str, w: u16, indent: u16, fidelity: Fidelity) -> 
     lines
 }
 
+/// The saturation drained from reasoning prose: enough that the answer's
+/// folded shadow visibly reads as lower-authority scratch work without
+/// losing legibility.
+const REASONING_DRAIN: f32 = 0.7;
+
+/// Render reasoning prose — the answer's dialed-open shadow.  Rendered
+/// sound, then desaturated wholesale toward grey at held luminance: the
+/// reasoning is a finished image like any other prose, but the colour has
+/// gone out of it, so it never borrows the committed answer's authority.
+/// This is intrinsic to the reasoning register, deliberately *not* the
+/// context / echo fidelity signals ([`modulate`]) — a reasoned answer's
+/// thinking is provisional whatever the turn's pressure.
+pub(super) fn render_reasoning(text: &str, w: u16, indent: u16) -> Vec<Line<'static>> {
+    let mut lines = render_md(text, w, indent, Fidelity::default());
+    for line in &mut lines {
+        for span in &mut line.spans {
+            if let Some(fg) = span.style.fg {
+                span.style.fg = Some(desaturate(fg, REASONING_DRAIN));
+            }
+        }
+    }
+    lines
+}
+
 /// Degrade finished lines so the medium tracks the model's reliability
 /// (Move 7, coherent degradation).  Both treatments walk the already-built
 /// spans — fixed-colour code, headings, and tables are *not* exempt, so the

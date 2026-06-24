@@ -769,6 +769,7 @@ impl Agent {
             let StepOut {
                 mut assistant_message,
                 tool_calls,
+                reasoning,
                 usage,
                 stop_reason,
                 cut_short,
@@ -779,6 +780,21 @@ impl Agent {
                 }
                 Err(e) => return Err(e),
             };
+            // The step's reasoning rides to the frontend as the answer's
+            // folded shadow — but only when the step produced prose for it
+            // to be the shadow *of*. A pure tool-call step has no answer
+            // block to attach to, so its reasoning round-trips to the model
+            // (on `assistant_message`) without a visual shadow. `last_text`
+            // is the whole turn's answer mass, the deliberation denominator.
+            if let Some(reasoning) = reasoning.as_deref()
+                && !reasoning.trim().is_empty()
+                && !last_text.trim().is_empty()
+            {
+                emit.emit(Kind::Reasoning {
+                    text: reasoning.to_string(),
+                    answer_chars: last_text.chars().count() as u32,
+                });
+            }
             // The tokens the model just saw — the live numerator for the
             // context-pressure compaction trigger at this turn's boundary.
             self.last_input = usage.input;

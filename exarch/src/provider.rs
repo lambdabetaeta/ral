@@ -425,6 +425,11 @@ impl fmt::Display for Usage {
 pub struct StepOut {
     pub assistant_message: ChatMessage,
     pub tool_calls: Vec<ToolCall>,
+    /// The model's reasoning trace for this step, captured at the `End`
+    /// frame.  Already attached to `assistant_message` for round-tripping;
+    /// surfaced separately here so the frontend can render it as the
+    /// answer's shadow without re-parsing the message's content parts.
+    pub reasoning: Option<String>,
     pub usage: Usage,
     /// Provider-normalised stop reason for this turn.  `None` means the
     /// adapter did not surface one (most non-Anthropic adapters do), or
@@ -1496,8 +1501,10 @@ fn step_out_from_end(model: &str, end: StreamEnd, metered: bool) -> StepOut {
         .filter(|r| matches!(r, StopReason::MaxTokens(_)))
         .map(|_| CutShort::OutputCap);
     StepOut {
-        assistant_message: ChatMessage::assistant(content).with_reasoning_content(reasoning),
+        assistant_message: ChatMessage::assistant(content)
+            .with_reasoning_content(reasoning.clone()),
         tool_calls,
+        reasoning,
         usage: usage_from(model, &raw_usage, metered),
         stop_reason,
         cut_short,
@@ -1515,6 +1522,7 @@ fn stalled_step_out(model: &str, streamed: &str, cause: &ProviderError, metered:
     StepOut {
         assistant_message: ChatMessage::assistant(streamed.to_string()),
         tool_calls: Vec::new(),
+        reasoning: None,
         usage: usage_from(model, &genai::chat::Usage::default(), metered),
         stop_reason: None,
         cut_short: Some(CutShort::Stalled(cause.brief())),
@@ -1671,6 +1679,7 @@ pub mod scripted {
                 outcome: Ok(StepOut {
                     assistant_message: ChatMessage::assistant(text.to_string()),
                     tool_calls: Vec::new(),
+                    reasoning: None,
                     usage: Usage::default(),
                     stop_reason: Some(StopReason::Completed("end_turn".into())),
                     cut_short: None,
@@ -1688,6 +1697,7 @@ pub mod scripted {
                 outcome: Ok(StepOut {
                     assistant_message: ChatMessage::assistant(text.to_string()),
                     tool_calls: Vec::new(),
+                    reasoning: None,
                     usage: Usage::default(),
                     stop_reason: None,
                     cut_short: Some(CutShort::Stalled(
@@ -1711,6 +1721,7 @@ pub mod scripted {
                 outcome: Ok(StepOut {
                     assistant_message: ChatMessage::assistant(parts),
                     tool_calls: calls,
+                    reasoning: None,
                     usage: Usage::default(),
                     stop_reason: Some(StopReason::ToolCall("tool_use".into())),
                     cut_short: None,
@@ -1731,6 +1742,7 @@ pub mod scripted {
                 outcome: Ok(StepOut {
                     assistant_message: ChatMessage::assistant(parts),
                     tool_calls: calls,
+                    reasoning: None,
                     usage: Usage::default(),
                     stop_reason: Some(StopReason::MaxTokens("max_tokens".into())),
                     cut_short: Some(CutShort::OutputCap),
@@ -1752,6 +1764,7 @@ pub mod scripted {
                         genai::chat::MessageContent::default(),
                     ),
                     tool_calls: Vec::new(),
+                    reasoning: None,
                     usage: Usage::default(),
                     stop_reason: Some(StopReason::Completed("end_turn".into())),
                     cut_short: None,

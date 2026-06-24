@@ -385,6 +385,29 @@ impl Viewport {
         }
     }
 
+    /// Attach the turn's reasoning to the answer it produced, as that
+    /// answer's folded shadow.  The answer commits piecewise as a trailing
+    /// run of markdown blocks ([`Self::flush_complete_paragraphs`]); the
+    /// shadow rides the *first* of that run — the conclusion's opening,
+    /// where the `∴` reads as a landmark in the rail thumbnail.  Searched as
+    /// the first block past the last non-markdown block, since tool-call
+    /// side effects and step chrome bound the run.  A no-op when the step
+    /// left no prose (nothing the run can start from).  `answer_chars` is
+    /// the whole turn's answer mass, the deliberation grain's denominator.
+    pub(super) fn attach_reasoning(&mut self, text: String, answer_chars: u32) {
+        let start = self
+            .blocks
+            .iter()
+            .rposition(|b| !b.is_markdown())
+            .map_or(0, |i| i + 1);
+        if let Some(block) = self.blocks.get_mut(start)
+            && block.is_markdown()
+        {
+            block.set_reasoning(text, answer_chars);
+            self.flat.dirty = true;
+        }
+    }
+
     /// Push streamed assistant text; commit any fence-safe paragraphs at
     /// the turn's `context_floor` (the degradation seed).
     pub(super) fn push_token(&mut self, text: &str, context_floor: u8) {

@@ -717,6 +717,15 @@ pub enum Kind {
     Died,
     Token(String),
     Boundary,
+    /// The step's model reasoning, emitted after [`Self::Boundary`] has
+    /// flushed the answer prose into blocks.  The frontend attaches `text`
+    /// to the turn's first prose block as its folded shadow; `answer_chars`
+    /// is the whole turn's answer mass, the deliberation grain's
+    /// denominator.  Emitted only for a step that produced prose.
+    Reasoning {
+        text: String,
+        answer_chars: u32,
+    },
     Usage(Usage),
     Step(u32),
     /// A transient label for the worker's current synchronous phase —

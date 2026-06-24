@@ -149,7 +149,7 @@ pub(super) fn is_blank(l: &Line<'_>) -> bool {
 /// [`plain`] drops a leading span whose content matches one of these so
 /// copied text carries the content, not the chrome glyph; [`super::block::wrap_line`]
 /// reuses the set to detect a rail-led row and indent its continuations.
-pub(super) const RAIL_GLYPHS: [&str; 8] = ["▎ ", "▸ ", "▽ ", "· ", "↘ ", "━ ", "╳ ", RAIL];
+pub(super) const RAIL_GLYPHS: [&str; 9] = ["▎ ", "▸ ", "▽ ", "· ", "∴ ", "↘ ", "━ ", "╳ ", RAIL];
 
 /// One scrollback line as the plain text a reader would copy: span
 /// contents joined, with a leading rail glyph dropped.
@@ -229,15 +229,59 @@ pub(super) fn grain_run(add: u32, del: u32) -> Span<'static> {
     let cell = if total == 0 {
         ' '
     } else {
-        let ratio = add as f32 / total as f32;
-        match (ratio * GRAIN_W as f32) as usize {
-            3.. => '⣿',
-            2 => '⣶',
-            1 => '⣤',
-            _ => '⣀',
-        }
+        grain_cell(add as f32 / total as f32)
     };
     Span::styled(cell.to_string().repeat(GRAIN_W), Style::default().fg(SLATE))
+}
+
+/// One braille cell for a `0.0..=1.0` ratio on the `⣿⣶⣤⣀` density ramp,
+/// bucketed into quartiles so the run reads pre-attentively: `≥0.75 → ⣿`,
+/// `≥0.50 → ⣶`, `≥0.25 → ⣤`, else `⣀`.
+fn grain_cell(ratio: f32) -> char {
+    match (ratio * GRAIN_W as f32) as usize {
+        3.. => '⣿',
+        2 => '⣶',
+        1 => '⣤',
+        _ => '⣀',
+    }
+}
+
+/// The deliberation grain: a [`GRAIN_W`]-cell run whose density encodes how
+/// dearly an answer was bought — reasoning mass over total, `think /
+/// (think + say)`, on the same ramp the patch grain uses. `⣿` is a
+/// heavily-deliberated answer (the model thought far more than it said),
+/// `⣀` a snap reply. A turn with neither (`think + say == 0`) renders
+/// blank.  Styled [`SLATE`] like the size-bar — decorative ink, not a
+/// data colour.
+pub(super) fn deliberation_grain(think: u32, say: u32) -> Span<'static> {
+    let total = think + say;
+    let cell = if total == 0 {
+        ' '
+    } else {
+        grain_cell(think as f32 / total as f32)
+    };
+    Span::styled(cell.to_string().repeat(GRAIN_W), Style::default().fg(SLATE))
+}
+
+/// The shadow header for a reasoned answer: a blank separator then the
+/// deliberation grain (think-vs-say ratio) beside a [`size_bar`] of the
+/// reasoning's own magnitude — "how dearly bought" and "how much
+/// thinking", at the head of the answer it produced. The reasoning prose
+/// itself stays folded until the block is dialed; this is the only mark
+/// it leaves at rest. `say_chars` is the whole turn's answer mass (the
+/// grain's denominator), passed in since the block holds only its own
+/// opening paragraph.
+pub(super) fn reasoning_header(reasoning: &str, say_chars: u32) -> Vec<Line<'static>> {
+    let think_chars = reasoning.chars().count() as u32;
+    let think_lines = reasoning.lines().count() as u32;
+    vec![
+        Line::default(),
+        Line::from(vec![
+            deliberation_grain(think_chars, say_chars),
+            Span::raw(" "),
+            size_bar(think_lines),
+        ]),
+    ]
 }
 
 // ── Public line builders ─────────────────────────────────────────────────────
