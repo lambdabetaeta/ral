@@ -266,10 +266,11 @@ fn add_bare_aliases<V: Clone>(map: &mut HashMap<String, V>) {
 
     let mut dash_count: HashMap<String, usize> = HashMap::new();
     for key in map.keys() {
-        if let Some((_, suffix)) = key.split_once('/') {
-            if unique_suffix(suffix) && suffix.contains('.') {
-                *dash_count.entry(suffix.replace('.', "-")).or_default() += 1;
-            }
+        if let Some((_, suffix)) = key.split_once('/')
+            && unique_suffix(suffix)
+            && suffix.contains('.')
+        {
+            *dash_count.entry(suffix.replace('.', "-")).or_default() += 1;
         }
     }
 
