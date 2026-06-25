@@ -995,11 +995,11 @@ async fn retry_with_backoff<T>(
 }
 
 /// The per-selection request tuning the `/model` overlay carries alongside the
-/// model: the reasoning effort and the sampling temperature.  Each is `None`
-/// for "auto" — the option is then *not* set on the wire and genai applies the
-/// adapter's per-model default, exactly as before tuning existed.  The overlay
-/// edits it, [`crate::state`] persists it, and [`Live::complete`] folds it into
-/// the [`ChatOptions`].
+/// model: the reasoning effort, the sampling temperature, and the
+/// nucleus-sampling top-p.  Each is `None` for "auto" — the option is then
+/// *not* set on the wire and genai applies the adapter's per-model default,
+/// exactly as before tuning existed.  The overlay edits it, [`crate::state`]
+/// persists it, and [`Live::complete`] folds it into the [`ChatOptions`].
 #[derive(Clone, Default, Debug)]
 pub struct Tuning {
     /// The reasoning effort, or `None` for the adapter default.
@@ -1007,6 +1007,9 @@ pub struct Tuning {
     /// The sampling temperature in `0.0..=2.0`, or `None` for the adapter
     /// default.
     pub temperature: Option<f64>,
+    /// The nucleus-sampling top-p in `0.0..=1.0`, or `None` for the adapter
+    /// default.
+    pub top_p: Option<f64>,
 }
 
 impl Tuning {
@@ -1020,6 +1023,7 @@ impl Tuning {
         Self {
             effort: Some(ReasoningEffort::XHigh),
             temperature: None,
+            top_p: None,
         }
     }
 }
@@ -1030,7 +1034,9 @@ impl Tuning {
 impl PartialEq for Tuning {
     fn eq(&self, other: &Self) -> bool {
         let key = |e: &Option<ReasoningEffort>| e.as_ref().map(|e| e.variant_name());
-        key(&self.effort) == key(&other.effort) && self.temperature == other.temperature
+        key(&self.effort) == key(&other.effort)
+            && self.temperature == other.temperature
+            && self.top_p == other.top_p
     }
 }
 
@@ -1417,6 +1423,9 @@ impl Live {
         }
         if let Some(temperature) = tuning.temperature {
             options = options.with_temperature(temperature);
+        }
+        if let Some(top_p) = tuning.top_p {
+            options = options.with_top_p(top_p);
         }
 
         let step = self.runtime.block_on(retry_with_backoff(

@@ -7,7 +7,7 @@
 //! [`super::App::key`] and its own [`drive_picker`](super::drive_picker) loop)
 //! and modal in *rendering*.
 //!
-//! It edits three things at once — the *selection* and *today's tuning*:
+//! It edits four things at once — the *selection* and *today's tuning*:
 //!
 //! * **Model** (nominal data) → **position**: a fuzzy-filtered vertical list
 //!   of `provider / model` rows, ranked by `nucleo_matcher`, the selected row
@@ -19,6 +19,10 @@
 //! * **Temperature** (quantitative data) → **hue + size**: a track coloured by
 //!   a cold-blue→warm-red gradient (literally apt) and filled to length, so
 //!   both the position-of-hue and the fill encode the value.
+//! * **Top-p** (quantitative data) → **size**: a single-hue track — top-p is
+//!   nucleus *mass*, not a temperature, so it earns no gradient; the fill
+//!   (length) alone encodes the value, the same chassis as the temperature
+//!   track with the hue held constant.
 //!
 //! Which field has the keyboard is itself shown with **value**: the active
 //! field brightens, the others dim. `Tab`/`BackTab` cycle the field; typing
@@ -26,10 +30,11 @@
 //! (model + tuning) from any field; `Esc` dismisses.
 //!
 //! The tuning rows gate themselves on the *highlighted* model's catalog
-//! `supported_parameters`: a model that doesn't admit `reasoning` (or
-//! `temperature`) grays that row out, ignores its arrows, and masks the knob
-//! out of the emitted [`Tuning`] so it is never sent — but the picker keeps the
-//! user's setting for the next model that does admit it. An unknown model (a
+//! `supported_parameters`: a model that doesn't admit `reasoning`,
+//! `temperature`, or `top_p` grays that row out, ignores its arrows, and masks
+//! the knob out of the emitted [`Tuning`] so it is never sent — but the picker
+//! keeps the user's setting for the next model that does admit it. An unknown
+//! model (a
 //! catalog miss, or the manual row) reads as supported, so a row only grays
 //! when the catalog *positively* reports the parameter absent.
 //!
@@ -95,6 +100,7 @@ enum Focus {
     Search,
     Effort,
     Temperature,
+    TopP,
 }
 
 /// One rung of the effort ladder: its short label, its ramp glyph (an
@@ -127,14 +133,37 @@ const LADDER: &[Rung] = &[
 /// by tenths and treats "below zero" as a return to auto (unset).
 const TEMP_MAX: f64 = 2.0;
 const TEMP_STEP: f64 = 0.1;
-/// Cells in the temperature track — the hue gradient and the fill both span
-/// this width.
+/// Decimal places the temperature readout (and its snap) keep.
+const TEMP_PLACES: usize = 1;
+/// Top-p bounds and step. genai accepts `0.0..=1.0`; the overlay steps by
+/// twentieths (so the common `0.9`/`0.95` land) and, like temperature, treats
+/// "below zero" as a return to auto (unset).
+const TOP_P_MAX: f64 = 1.0;
+const TOP_P_STEP: f64 = 0.05;
+/// Decimal places the top-p readout (and its snap) keep.
+const TOP_P_PLACES: usize = 2;
+/// Cells in a tuning track — the hue gradient and the fill both span this
+/// width, shared by the temperature and top-p tracks.
 const TRACK_W: usize = 24;
 
 /// Rows of the model list visible at once.
 const VISIBLE_ROWS: u16 = 8;
 /// The overlay's fixed content width; clamped to the frame when narrower.
 const OVERLAY_W: u16 = 64;
+
+/// The overlay's interior margins — the Norton-Commander "airy" padding held
+/// inside the bezel: [`PAD_X`] columns each side, [`PAD_Y`] rows top and
+/// bottom, so the controls never crowd the double-line frame.
+const PAD_X: u16 = 2;
+const PAD_Y: u16 = 1;
+/// The drop shadow's depth: the modal casts [`SHADOW_DEPTH`] columns of shade
+/// to its right and one row below, the classic Turbo-Vision/Norton-Commander
+/// lift that floats the overlay above the (dimmed) session.
+const SHADOW_DEPTH: u16 = 2;
+/// The shadow's foreground — cells under the shadow keep their glyph but are
+/// repainted this dark slate on black, so whatever lies beneath shows as a
+/// dim silhouette rather than being blanked.
+const SHADOW_FG: Color = Color::Rgb(28, 31, 40);
 
 /// The temperature gradient endpoints (cold blue → warm red) and the effort
 /// value-ramp endpoints (dim → bright cyan), as raw RGB for interpolation.
@@ -143,16 +172,38 @@ const WARM: (u8, u8, u8) = (228, 116, 96);
 const EFFORT_DIM: (u8, u8, u8) = (74, 86, 110);
 const EFFORT_BRIGHT: (u8, u8, u8) = (150, 205, 220);
 
+/// The top-p track's single hue — top-p is nucleus *mass*, not a temperature,
+/// so it carries no gradient; one constant colour across the track, the fill
+/// (size) alone encoding the value. A muted green, kept distinct from the
+/// effort ramp's cyan and the temperature track's blue→red.
+const NUCLEUS: Color = Color::Rgb(140, 196, 150);
+
 /// Linear RGB interpolation between two colours at `t ∈ [0, 1]`.
 fn lerp(a: (u8, u8, u8), b: (u8, u8, u8), t: f64) -> Color {
     let mix = |x: u8, y: u8| (x as f64 + (y as f64 - x as f64) * t).round() as u8;
     Color::Rgb(mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2))
 }
 
-/// Snap a temperature to one decimal place — keeps repeated `±0.1` steps from
+/// Snap `t` to `places` decimal places — keeps repeated `±step` additions from
 /// drifting into float noise like `0.30000000000000004`.
-fn snap(t: f64) -> f64 {
-    (t * 10.0).round() / 10.0
+fn snap(t: f64, places: usize) -> f64 {
+    let scale = 10f64.powi(places as i32);
+    (t * scale).round() / scale
+}
+
+/// Step a `0.0..=max` knob (temperature, top-p) by `step` in the `up`
+/// direction, snapping to `places` decimals. `auto` (`None`) is the floor:
+/// the first up-step lands on `0.0`, and stepping below zero returns to `auto`.
+fn step_knob(value: Option<f64>, up: bool, step: f64, max: f64, places: usize) -> Option<f64> {
+    if up {
+        Some(snap(value.map_or(0.0, |t| (t + step).min(max)), places))
+    } else {
+        match value {
+            None => None,
+            Some(t) if t - step < -f64::EPSILON => None,
+            Some(t) => Some(snap((t - step).max(0.0), places)),
+        }
+    }
 }
 
 /// Centre a `w × h` rect within `area`, clamped to fit.
@@ -164,6 +215,32 @@ fn centered(w: u16, h: u16, area: Rect) -> Rect {
         y: area.y + (area.height - h) / 2,
         width: w,
         height: h,
+    }
+}
+
+/// Cast a Turbo-Vision drop shadow down-and-right of `area`: the cells one row
+/// below and [`SHADOW_DEPTH`] columns to the right of the overlay are repainted
+/// dark, keeping their glyph as a dim silhouette so the modal reads as lifted
+/// off the session rather than punched into it. `cell_mut` bounds-checks, so
+/// cells that fall off the frame are simply skipped.
+fn render_shadow(f: &mut Frame, area: Rect) {
+    let shadow = Style::default().fg(SHADOW_FG).bg(Color::Black);
+    let buf = f.buffer_mut();
+    let mut cast = |x: u16, y: u16| {
+        if let Some(cell) = buf.cell_mut((x, y)) {
+            cell.set_style(shadow);
+        }
+    };
+    // The bottom edge, shifted right by the depth so the corner squares off.
+    for x in (area.x + SHADOW_DEPTH)..area.right().saturating_add(SHADOW_DEPTH) {
+        cast(x, area.bottom());
+    }
+    // The right edge, SHADOW_DEPTH columns deep, starting one row down so the
+    // top-right corner stays unshaded (the light falls from the upper left).
+    for y in (area.y + 1)..=area.bottom() {
+        for dx in 0..SHADOW_DEPTH {
+            cast(area.right() + dx, y);
+        }
     }
 }
 
@@ -185,6 +262,8 @@ pub struct Picker {
     effort_idx: usize,
     /// The chosen temperature, or `None` for auto (unset).
     temperature: Option<f64>,
+    /// The chosen top-p, or `None` for auto (unset).
+    top_p: Option<f64>,
     /// Capability lookup for the *highlighted* model: the tuning rows gate
     /// themselves on its `supported_parameters` so effort/temperature gray out
     /// (and stop being sent) on a model that doesn't admit them. Injected
@@ -226,6 +305,7 @@ impl Picker {
             focus: Focus::Search,
             effort_idx,
             temperature: initial.temperature,
+            top_p: initial.top_p,
             caps,
         }
     }
@@ -301,6 +381,7 @@ impl Picker {
                 .supports("temperature")
                 .then_some(self.temperature)
                 .flatten(),
+            top_p: self.supports("top_p").then_some(self.top_p).flatten(),
         }
     }
 
@@ -343,15 +424,18 @@ impl Picker {
         }
     }
 
-    /// The next focus in cycle order (`Search → Effort → Temperature → …`).
+    /// The next focus in cycle order
+    /// (`Search → Effort → Temperature → TopP → …`).
     fn cycle(&self, forward: bool) -> Focus {
         match (self.focus, forward) {
             (Focus::Search, true) => Focus::Effort,
             (Focus::Effort, true) => Focus::Temperature,
-            (Focus::Temperature, true) => Focus::Search,
-            (Focus::Search, false) => Focus::Temperature,
+            (Focus::Temperature, true) => Focus::TopP,
+            (Focus::TopP, true) => Focus::Search,
+            (Focus::Search, false) => Focus::TopP,
             (Focus::Effort, false) => Focus::Search,
             (Focus::Temperature, false) => Focus::Effort,
+            (Focus::TopP, false) => Focus::Temperature,
         }
     }
 
@@ -384,16 +468,13 @@ impl Picker {
                 if !self.supports("temperature") {
                     return;
                 }
-                self.temperature = if up {
-                    Some(snap(self.temperature.map_or(0.0, |t| (t + TEMP_STEP).min(TEMP_MAX))))
-                } else {
-                    // Stepping below zero returns to auto (unset).
-                    match self.temperature {
-                        None => None,
-                        Some(t) if t - TEMP_STEP < -f64::EPSILON => None,
-                        Some(t) => Some(snap((t - TEMP_STEP).max(0.0))),
-                    }
-                };
+                self.temperature = step_knob(self.temperature, up, TEMP_STEP, TEMP_MAX, TEMP_PLACES);
+            }
+            Focus::TopP => {
+                if !self.supports("top_p") {
+                    return;
+                }
+                self.top_p = step_knob(self.top_p, up, TOP_P_STEP, TOP_P_MAX, TOP_P_PLACES);
             }
         }
     }
@@ -477,25 +558,28 @@ impl Picker {
 
     /// The overlay's outer size: the fixed width (clamped to the frame) and a
     /// height that fits the search line, status line, bordered model list, the
-    /// two tuning rows, one note per failed provider, and the bezel.
+    /// three tuning rows, one note per failed provider, and the bezel.
     fn desired_size(&self, frame: Rect) -> (u16, u16) {
         let failed = self.failures().len() as u16;
-        // bezel(2) + search(1) + status(1) + list(VISIBLE+border) + effort(1)
-        //          + temp(1) + failed notes
-        let h = 2 + 1 + 1 + (VISIBLE_ROWS + 2) + 1 + 1 + failed;
+        // bezel(2) + airy pad(2·PAD_Y) + search(1) + status(1)
+        //          + list(VISIBLE+border) + effort(1) + temp(1) + top-p(1)
+        //          + failed notes
+        let h = 2 + 2 * PAD_Y + 1 + 1 + (VISIBLE_ROWS + 2) + 1 + 1 + 1 + failed;
         (OVERLAY_W.min(frame.width), h.min(frame.height.max(3)))
     }
 
     /// Draw the floating overlay over the centre of `frame`: a double-line
     /// bezel (the "above the session" affordance) holding the search box, the
-    /// fuzzy model list, the effort ramp, the temperature track, and the
-    /// function-key footer on the bottom border.
+    /// fuzzy model list, the effort ramp, the temperature and top-p tracks, and
+    /// the function-key footer on the bottom border.
     pub fn render(&self, f: &mut Frame, frame: Rect) {
         let (w, h) = self.desired_size(frame);
         let area = centered(w, h, frame);
         let plane = Style::default().bg(OVERLAY_BG);
 
-        // Blank the cells beneath, then paint the bezel.
+        // Cast the drop shadow first (down-right of the box), then blank the
+        // cells beneath the box itself and paint the bezel over them.
+        render_shadow(f, area);
         f.render_widget(Clear, area);
         let bezel = Block::default()
             .borders(Borders::ALL)
@@ -504,7 +588,7 @@ impl Picker {
             .style(plane)
             .title(
                 Line::from(Span::styled(
-                    " MODEL · EFFORT · TEMP ",
+                    " MODEL · EFFORT · TEMP · TOP-P ",
                     plane.fg(BANNER_GOLD).add_modifier(Modifier::BOLD),
                 ))
                 .centered(),
@@ -516,7 +600,7 @@ impl Picker {
                 ))
                 .centered(),
             )
-            .padding(Padding::horizontal(1));
+            .padding(Padding::new(PAD_X, PAD_X, PAD_Y, PAD_Y));
         let inner = bezel.inner(area);
         f.render_widget(bezel, area);
 
@@ -526,6 +610,7 @@ impl Picker {
             Constraint::Length(VISIBLE_ROWS + 2), // bordered model list
             Constraint::Length(1),              // effort
             Constraint::Length(1),              // temperature
+            Constraint::Length(1),              // top-p
             Constraint::Min(0),                 // failed-provider notes
         ])
         .split(inner);
@@ -541,9 +626,13 @@ impl Picker {
             Paragraph::new(self.temp_line(self.supports("temperature"))).style(plane),
             chunks[4],
         );
+        f.render_widget(
+            Paragraph::new(self.top_p_line(self.supports("top_p"))).style(plane),
+            chunks[5],
+        );
         let notes = self.failed_lines();
         if !notes.is_empty() {
-            f.render_widget(Paragraph::new(notes).style(plane), chunks[5]);
+            f.render_widget(Paragraph::new(notes).style(plane), chunks[6]);
         }
     }
 
@@ -677,34 +766,37 @@ impl Picker {
         Line::from(spans)
     }
 
-    /// The temperature track: `TRACK_W` cells coloured along a cold→warm
-    /// gradient, filled to the value's fraction of [`TEMP_MAX`] (size), unset
-    /// cells dimmed. Auto draws the whole track faint; grayed when the
-    /// highlighted model doesn't admit a temperature.
-    fn temp_line(&self, supported: bool) -> Line<'static> {
-        if !supported {
-            return Self::unsupported_row("temp");
-        }
-        let focused = self.focus == Focus::Temperature;
-        let mut spans = vec![self.field_label("temp", Focus::Temperature)];
+    /// A quantitative fill track for `field`: `TRACK_W` cells, each coloured by
+    /// `hue(i)`, filled to `value`'s fraction of `max` (size), unset cells and
+    /// an unfocused field dimmed; `auto` (value `None`) draws the whole track
+    /// faint. The readout prints the value to `places` decimals, or `auto`.
+    /// This is the chassis the temperature (cold→warm hue) and top-p
+    /// (single-hue) tracks share, differing only in their per-cell hue.
+    fn track_line(
+        &self,
+        label: &str,
+        field: Focus,
+        value: Option<f64>,
+        max: f64,
+        places: usize,
+        hue: impl Fn(usize) -> Color,
+    ) -> Line<'static> {
+        let focused = self.focus == field;
+        let mut spans = vec![self.field_label(label, field)];
 
-        let filled = self
-            .temperature
-            .map_or(0, |t| ((t / TEMP_MAX) * TRACK_W as f64).round() as usize);
-        let last = (TRACK_W - 1).max(1) as f64;
+        let filled = value.map_or(0, |t| ((t / max) * TRACK_W as f64).round() as usize);
         for i in 0..TRACK_W {
-            let hue = lerp(COLD, WARM, i as f64 / last);
-            let on = self.temperature.is_some() && i < filled;
+            let on = value.is_some() && i < filled;
             let glyph = if on { "█" } else { "░" };
-            let mut style = Style::default().fg(hue);
+            let mut style = Style::default().fg(hue(i));
             if !on || !focused {
                 style = style.add_modifier(Modifier::DIM);
             }
             spans.push(Span::styled(glyph, style));
         }
 
-        let readout = match self.temperature {
-            Some(t) => format!("  {t:.1}"),
+        let readout = match value {
+            Some(t) => format!("  {t:.*}", places),
             None => "  auto".to_string(),
         };
         let readout_style = if focused {
@@ -714,6 +806,42 @@ impl Picker {
         };
         spans.push(Span::styled(readout, readout_style));
         Line::from(spans)
+    }
+
+    /// The temperature track: cold→warm gradient (position-of-hue is literally
+    /// apt) filled to length. Grayed when the highlighted model doesn't admit a
+    /// temperature.
+    fn temp_line(&self, supported: bool) -> Line<'static> {
+        if !supported {
+            return Self::unsupported_row("temp");
+        }
+        let last = (TRACK_W - 1).max(1) as f64;
+        self.track_line(
+            "temp",
+            Focus::Temperature,
+            self.temperature,
+            TEMP_MAX,
+            TEMP_PLACES,
+            |i| lerp(COLD, WARM, i as f64 / last),
+        )
+    }
+
+    /// The top-p track: a single [`NUCLEUS`] hue, the fill (size) alone
+    /// encoding the value — top-p is nucleus mass, not a temperature, so it
+    /// earns no gradient. Grayed when the highlighted model doesn't admit a
+    /// top-p.
+    fn top_p_line(&self, supported: bool) -> Line<'static> {
+        if !supported {
+            return Self::unsupported_row("top-p");
+        }
+        self.track_line(
+            "top-p",
+            Focus::TopP,
+            self.top_p,
+            TOP_P_MAX,
+            TOP_P_PLACES,
+            |_| NUCLEUS,
+        )
     }
 
     fn failed_lines(&self) -> Vec<Line<'static>> {
@@ -960,9 +1088,9 @@ mod tests {
         assert!(matches!(p.key(KeyCode::Esc), PickAction::Cancelled));
     }
 
-    /// `Tab` cycles the focus Search → Effort → Temperature → Search, and the
-    /// arrows then drive the focused control: in Effort they climb the ladder,
-    /// in Temperature they warm the value.
+    /// `Tab` cycles the focus Search → Effort → Temperature → TopP → Search,
+    /// and the arrows then drive the focused control: in Effort they climb the
+    /// ladder, in Temperature they warm the value, in TopP they fill the track.
     #[test]
     fn tab_cycles_focus_and_arrows_drive_the_focused_control() {
         let mut p = loaded_picker();
@@ -980,6 +1108,13 @@ mod tests {
         p.key(KeyCode::Right);
         p.key(KeyCode::Right);
         assert_eq!(p.temperature, Some(0.1));
+
+        p.key(KeyCode::Tab);
+        assert_eq!(p.focus, Focus::TopP);
+        // From auto, one step right reaches 0.0, another 0.05.
+        p.key(KeyCode::Right);
+        p.key(KeyCode::Right);
+        assert_eq!(p.top_p, Some(0.05));
 
         p.key(KeyCode::Tab);
         assert_eq!(p.focus, Focus::Search);
@@ -1017,7 +1152,29 @@ mod tests {
         assert_eq!(p.temperature, None);
     }
 
-    /// The chosen effort + temperature ride along with the selection.
+    /// Top-p steps in twentieths, clamps at 1.0, and stepping below zero
+    /// returns to auto (unset).
+    #[test]
+    fn top_p_steps_clamps_and_floors_to_auto() {
+        let mut p = loaded_picker();
+        p.key(KeyCode::Tab); // Effort
+        p.key(KeyCode::Tab); // Temperature
+        p.key(KeyCode::Tab); // TopP
+        assert_eq!(p.top_p, None);
+        // Three steps up: auto → 0.0 → 0.05 → 0.1.
+        p.key(KeyCode::Right);
+        p.key(KeyCode::Right);
+        p.key(KeyCode::Right);
+        assert_eq!(p.top_p, Some(0.1));
+        // Down past zero returns to auto.
+        p.key(KeyCode::Left);
+        p.key(KeyCode::Left);
+        assert_eq!(p.top_p, Some(0.0));
+        p.key(KeyCode::Left);
+        assert_eq!(p.top_p, None);
+    }
+
+    /// The chosen effort + temperature + top-p ride along with the selection.
     #[test]
     fn selection_carries_the_live_tuning() {
         let mut p = loaded_picker();
@@ -1029,6 +1186,9 @@ mod tests {
         p.key(KeyCode::Tab); // Temperature
         p.key(KeyCode::Right); // auto → 0.0
         p.key(KeyCode::Right); // 0.0 → 0.1
+        p.key(KeyCode::Tab); // TopP
+        p.key(KeyCode::Right); // auto → 0.0
+        p.key(KeyCode::Right); // 0.0 → 0.05
         match p.key(KeyCode::Enter) {
             PickAction::Selected(_, _, tuning) => {
                 assert_eq!(
@@ -1036,6 +1196,7 @@ mod tests {
                     Some("high")
                 );
                 assert_eq!(tuning.temperature, Some(0.1));
+                assert_eq!(tuning.top_p, Some(0.05));
             }
             _ => panic!("expected Selected with tuning"),
         }
@@ -1050,11 +1211,13 @@ mod tests {
             Tuning {
                 effort: Some(ReasoningEffort::Medium),
                 temperature: Some(0.5),
+                top_p: Some(0.9),
             },
             caps_unknown,
         );
         assert_eq!(LADDER[p.effort_idx].label, "med");
         assert_eq!(p.temperature, Some(0.5));
+        assert_eq!(p.top_p, Some(0.9));
     }
 
     /// A model whose catalog lists `temperature` but not `reasoning`: effort
@@ -1099,6 +1262,7 @@ mod tests {
         assert_eq!(live.temperature, Some(0.1));
 
         // Highlight the chat-only model: effort masked out, temperature kept.
+        p.key(KeyCode::Tab); // TopP
         p.key(KeyCode::Tab); // Search
         p.key(KeyCode::Down); // → chat-only
         let masked = p.tuning();
@@ -1112,6 +1276,7 @@ mod tests {
 
         // Back on the reasoning model the setting returns.
         p.key(KeyCode::Tab); // Temperature
+        p.key(KeyCode::Tab); // TopP
         p.key(KeyCode::Tab); // Search
         p.key(KeyCode::Up); // → reasoner
         assert_eq!(

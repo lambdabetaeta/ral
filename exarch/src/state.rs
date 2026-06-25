@@ -41,6 +41,9 @@ pub struct State {
     /// The sampling temperature, or absent for "auto".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
+    /// The nucleus-sampling top-p, or absent for "auto".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
 }
 
 impl State {
@@ -56,6 +59,7 @@ impl State {
                 .as_ref()
                 .and_then(|e| e.as_keyword().map(str::to_string)),
             temperature: tuning.temperature,
+            top_p: tuning.top_p,
         }
     }
 
@@ -69,6 +73,7 @@ impl State {
                 .as_deref()
                 .and_then(ReasoningEffort::from_keyword),
             temperature: self.temperature,
+            top_p: self.top_p,
         }
     }
 
@@ -209,13 +214,14 @@ mod tests {
             model: "m".into(),
             effort: None,
             temperature: None,
+            top_p: None,
         };
         let available = [fam(ProviderKind::Anthropic)];
         assert!(state.provider_id(&available).is_none());
     }
 
-    /// Tuning round-trips through the keyword + temperature fields, and the
-    /// resolved [`Tuning`] matches what was saved.
+    /// Tuning round-trips through the keyword + temperature + top-p fields, and
+    /// the resolved [`Tuning`] matches what was saved.
     #[test]
     fn tuning_round_trips() {
         use crate::provider::ProviderKind;
@@ -223,6 +229,7 @@ mod tests {
         let tuning = Tuning {
             effort: Some(ReasoningEffort::High),
             temperature: Some(0.7),
+            top_p: Some(0.95),
         };
         let state = State::new(&fam(ProviderKind::Anthropic), "claude-opus-4", &tuning);
         assert_eq!(state.effort.as_deref(), Some("high"));
