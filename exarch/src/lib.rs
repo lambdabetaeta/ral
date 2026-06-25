@@ -265,7 +265,7 @@ fn resolve_initial_selection(
 ) -> Result<(provider::ProviderId, String, provider::Tuning), String> {
     if let Some(name) = model_override {
         let id = models::resolve_model_provider(name, available, catalog)?;
-        return Ok((id, name.to_string(), provider::Tuning::default()));
+        return Ok((id, name.to_string(), provider::Tuning::initial()));
     }
     if let Some(saved) = state::load(state_dir)
         && let Some(id) = saved.provider_id(available)
@@ -275,7 +275,7 @@ fn resolve_initial_selection(
     }
     let id = available[0].clone();
     match id.famous() {
-        Some(kind) => Ok((id, kind.info().1.to_string(), provider::Tuning::default())),
+        Some(kind) => Ok((id, kind.info().1.to_string(), provider::Tuning::initial())),
         None => Err(format!(
             "custom provider '{}' has no default model — pass --model NAME \
              (it will be remembered) or open the /model picker",

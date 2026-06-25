@@ -1009,6 +1009,21 @@ pub struct Tuning {
     pub temperature: Option<f64>,
 }
 
+impl Tuning {
+    /// The tuning a fresh selection starts with: reasoning on at `XHigh`,
+    /// temperature left to the adapter. Distinct from [`Tuning::default`]
+    /// (all-auto), which remains the honest "let the adapter decide" sentinel
+    /// the `auto` rung still selects — this is only the startup fallback so a
+    /// new session thinks by default rather than inheriting Anthropic's
+    /// thinking-off default.
+    pub fn initial() -> Self {
+        Self {
+            effort: Some(ReasoningEffort::XHigh),
+            temperature: None,
+        }
+    }
+}
+
 /// Effort identity by variant name — genai's [`ReasoningEffort`] is not
 /// `PartialEq`, and two efforts are the same iff they name the same rung
 /// (the overlay never constructs the value-carrying `Budget`).
