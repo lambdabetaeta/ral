@@ -89,34 +89,88 @@ a read and an edit always agree. This keeps exarch's
 [[design/exarch-architecture|thin architecture]]: editing is source ral over a
 few host atoms and ordinary redirects, not a separate edit protocol.
 
-## Reference
+## Comparison: anchor-based edit harnesses
 
-Can Bölük's
-[“The Harness Problem”](https://blog.can.ac/2026/02/12/the-harness-problem/)
-is the direct reference point for this shape. It argues that the edit harness is
-a major part of coding-agent performance, and presents *hashline*: read and grep
-results tag each line with a line number plus short content hash; edits name
-single lines, ranges, or insertion points by those tags; stale hashes reject the
-edit before corruption.
+**Two published coding-agent harnesses reach the same conclusion — name the line
+you read, do not reproduce it — and exarch sits between them.** Both replace the
+reproduced search block of a `str_replace` tool with a short *anchor*, cutting an
+edit's output from `O(search + replacement)` to `O(replacement)`; the divergence
+is in the anchor's identity.
 
-Exarch uses the same witnessed-anchor idea, with a narrower surface:
+**Can Bölük — [“The Harness Problem”](https://blog.can.ac/2026/02/12/the-harness-problem/)
+(2026-02-12)** is the framing reference for this shape. Its thesis: the edit
+harness is a dominant *uncontrolled* variable in agent performance, more so than
+which model runs.
 
-- **One verb, a batch of lines.** `edit path edits` applies a list of
-  `(hash, new-text)` pairs in one read/write pass; multi-line change is a batch of
-  single-line replacements resolved against one snapshot, rather than a range
-  primitive.
-- **Context is the address.** The line number is shown for the agent's reading,
-  but the edit selects by a hash that folds in ±3 lines of context, so the witness
-  distinguishes repeated lines without carrying a position the file can
-  invalidate.
-- **Ral-level composition.** The witness layer lives in `agent.ral`; Rust supplies
-  only `line-hash`, `_search-files`, and `explore-dir`.
-- **Rail patches.** The helper emits literal removed and added rows through
-  `surface`, so the user sees a diff-shaped event rather than an opaque anchor
-  operation.
-- **String-tagged hash.** Exarch's hash is the letter `h` followed by six hex
-  characters — larger than the shortest possible display handle, with a collision
-  budget aimed at ordinary source files, and un-lexable as a number so a bare
-  witness round-trips as a string through ral's value model.
+- *Diagnosis.* `str_replace` (Claude Code, Gemini) demands a whitespace-perfect
+  reproduction of the old text and rejects on zero or multiple matches — the
+  "String to replace not found" failure. Codex's patch format is tuned to one
+  model's token biases and collapses on others (Grok 4 50.7% patch-failure,
+  GLM-4.7 46.2%). Cursor papers over it with a fine-tuned 70B merge model —
+  conceding the harness, not solving it.
+- *Proposal — hashline.* Read and grep results tag each line `line#:hash|text`
+  with a 2–3 character content hash. Edits name single lines, ranges, or insertion
+  points by those tags; a stale hash rejects the edit before corruption. Output
+  drops ~20%; the weakest models gain most (Grok Code Fast 1 6.7% → 68.3%).
+
+**Dirac — [“Hash Anchors, Myers Diff, single-token edits”](https://dirac.run/posts/hash-anchors-myers-diff-single-token)**
+pushes the same idea to its stateful extreme, optimising the anchor for tokens
+rather than for content-derivation.
+
+- *Diagnosis.* Output tokens cost 5–6× input, so regenerating a whole block to
+  edit lines 101–150 is `O(search + replacement)` of wasted output.
+- *Proposal — single-token anchors over a state machine.* Despite the title, the
+  anchors are **not** content hashes: ~1,700 pre-generated single-*token* words
+  ("Moderator", "Qualifier"), assigned per-file per-session, separated from code
+  by a `§` delimiter. Five components carry it — an anchor pool, the delimiter, a
+  validator (full-line string match against stored state), a state manager
+  (line→anchor, no reuse, overflow to 2-token anchors), and a reconciler that runs
+  **Myers diff** after each edit to reassign changed lines' anchors. An edit gives
+  `{start_anchor, end_anchor, replacement}` → `O(replacement)`. Reported ~60%
+  cheaper, 8/8 tasks.
+
+All three share the win and the safety property: the model emits only the new
+text plus an anchor, and an anchor that no longer matches the live file rejects
+the edit rather than corrupting it. Where they diverge is the anchor's identity.
+
+| | anchor | derivation | disambiguates repeats by | width |
+|---|---|---|---|---|
+| **hashline** | `line#:hash` | content hash (stateless) | the line number | 2–3 chars |
+| **Dirac** | single-token word | pre-generated, state-tracked | construction (no reuse) | 1 token |
+| **exarch** | `h` + 6 hex | ±3-context window-hash (stateless) | folded-in neighbourhood | 7 chars |
+
+**Better than hashline on identity.** Hashline leans on the *line number* for
+uniqueness, with the hash a staleness check — and a line number is invalidated by
+any insertion above it. Exarch carries no line number into the anchor: the
+±3-context fold *is* the disambiguator, and a genuinely repeated neighbourhood is
+rejected by name rather than silently guessed. The witness goes stale only on a
+*local* change, not on every edit elsewhere in the file.
+
+**A deliberate trade against Dirac — the leaner side of it.** Both hit
+`O(replacement)` and both refuse to corrupt on drift; the split is statefulness.
+
+- *Dirac buys anchor stability.* Its anchors survive across edits because a Myers
+  reconciler reassigns them after every change, backed by a state manager and
+  anchor pool. The model edits repeatedly without re-reading — at the cost of a
+  five-component machine that can desync from the file.
+- *Exarch stays pure.* The witness is a function of file content alone, computed
+  by the same `window-hash` on the read and the edit side — no state manager, no
+  reconciler, no pool. The whole surface is one stateless read→resolve→rebuild→
+  write pass in source ral over a few host atoms, which keeps the
+  [[design/exarch-architecture|thin architecture]] thin.
+
+The price exarch pays for that purity is two-fold: a wider anchor (`h`+6 hex ≈
+3–4 input tokens vs. Dirac's single token), and no cross-edit stability — because
+the witness is context-sensitive, editing a line shifts its neighbours'
+witnesses. Exarch absorbs this *within* a batch, where every hash resolves
+against one snapshot before any write, so a multi-line change needs no re-read;
+only *separate* `edit` calls require a fresh `view-text`. Dirac's reconciler is
+the one mechanism here that avoids even that.
+
+Net: exarch takes hashline's witnessed-anchor idea, drops the brittle line number
+for a context fold, and reaches Dirac's output efficiency and corruption-safety
+without Dirac's stateful machine — an anchor that is a pure function of content,
+an atomic batch that blunts the re-read cost, and no background state to drift out
+of sync with the file.
 
 See also [[map/exarch/builtins|builtins]], [[map/exarch/shell-eval|shell-eval]].
