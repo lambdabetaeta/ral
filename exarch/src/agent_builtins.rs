@@ -82,9 +82,9 @@ fn builtin_line_hash(args: &[Value], _shell: &mut Shell) -> Settled<Value> {
 /// enough that the window saturates to the whole of it.  The window clamps at
 /// the ends of the file.
 ///
-/// Shared by `window-hash`, `grep-files`, and `edit`: a search result feeds
-/// straight into an `edit` because both stamp the same line against the same
-/// row list.
+/// Shared by `window-hash` and `edit`: a `view-text` read stamps each line it
+/// shows through this, and `edit` checks the same line against the same row
+/// list.
 fn window_hash(rows: &[String], i: usize) -> String {
     let n = rows.len();
     let lo = i.saturating_sub(3);
@@ -154,24 +154,18 @@ struct SearchHit {
 }
 
 /// Recursively search the cwd for `pattern` (ignore-aware, Rust regex),
-/// reading each matched file's bytes exactly once.  For every file the walk
-/// visits with at least one match, `per_file` receives the tree-relative path,
-/// the file's full bytes, and its hits in line order — so a caller may both
-/// report the matches and stamp them against the file's own line structure
-/// without a second read.
+/// reading each matched file's bytes exactly once and collecting every matching
+/// line — its tree-relative path, 1-based line number, and matched text — in
+/// walk order.
 ///
 /// Cancellation polling (`ral_core::process::check`), the per-file deny-path
 /// skip, and the `\x00` binary-detection quit all live here, the one search
-/// site `grep-files` composes over.  `scope` returns the cwd the walk roots at.
+/// site `grep-files` composes over.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:surface:grep-read] The grep door's per-matched-file read, in Rust below the ral line so it never reaches the redirect frame; the logical search emits exactly one `grep` surface (scope + pattern), not one read card per file."
 )]
-fn search_tree(
-    shell: &mut Shell,
-    pattern: &str,
-    mut per_file: impl FnMut(&str, &[u8], Vec<SearchHit>),
-) -> Settled<()> {
+fn search_tree(shell: &mut Shell, pattern: &str) -> Settled<Vec<SearchHit>> {
     let matcher = RegexMatcherBuilder::new()
         .build(pattern)
         .map_err(|e| sig(regex_err("grep-files", pattern, &e.to_string())))?;
@@ -181,6 +175,7 @@ fn search_tree(
         .binary_detection(BinaryDetection::quit(b'\x00'))
         .build();
 
+    let mut results = Vec::new();
     for raw in cancellable(WalkBuilder::new(&root).git_global(false)) {
         ral_core::process::check(shell)?;
         let entry = match raw {
@@ -200,20 +195,17 @@ fn search_tree(
         if shell.check_fs_read(&rp).is_err() {
             continue;
         }
-        // One read per file: the search runs over these same bytes, and the
-        // caller splits them into rows to witness each hit — never a second
-        // strict re-read.
+        // One read per file: the search runs over these bytes directly.
         let bytes = match fs::read(abs) {
             Ok(b) => b,
             Err(_) => continue,
         };
-        let mut hits = Vec::new();
         if searcher
             .search_slice(
                 &matcher,
                 &bytes,
                 Lossy(|line_num, line| {
-                    hits.push(SearchHit {
+                    results.push(SearchHit {
                         file: rel.clone(),
                         line: line_num,
                         text: line.trim_end_matches(['\r', '\n']).to_string(),
@@ -225,17 +217,13 @@ fn search_tree(
         {
             continue;
         }
-        if !hits.is_empty() {
-            per_file(&rel, &bytes, hits);
-        }
     }
-    Ok(())
+    Ok(results)
 }
 
-/// `grep-files PATTERN` — search the cwd and stamp each hit with the witness
-/// `edit` checks, in one read per matched file (see [`search_tree`]).  Returns
-/// `[{file, line, text, hash}]`; emits exactly one `grep` surface naming the
-/// scope and pattern.
+/// `grep-files PATTERN` — search the cwd in one read per matched file (see
+/// [`search_tree`]).  Returns `[{file, line, text}]`; emits exactly one `grep`
+/// surface naming the scope and pattern.
 fn builtin_grep_files(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "grep-files")?;
     let pattern = args[0].to_string();
@@ -247,27 +235,16 @@ fn builtin_grep_files(args: &[Value], shell: &mut Shell) -> Settled<Value> {
         ("pattern".into(), Value::String(pattern.clone())),
     ]));
 
-    let mut results = Vec::new();
-    search_tree(shell, &pattern, |_rel, bytes, hits| {
-        // The scan decodes lossily, so it can match a file that is not valid
-        // UTF-8; such a file cannot be split into witnessable rows and `edit`
-        // can never touch it, so rather than failing the whole search we flag
-        // its hits with an empty-string hash — a value no `window-hash` ever
-        // produces, so it resolves to no line and is unmistakably "no witness".
-        let rows = std::str::from_utf8(bytes).ok().map(rows_of);
-        for hit in hits {
-            let hash = match &rows {
-                Some(rows) => window_hash(rows, (hit.line - 1) as usize),
-                None => String::new(),
-            };
-            results.push(Value::map(vec![
+    let results = search_tree(shell, &pattern)?
+        .into_iter()
+        .map(|hit| {
+            Value::map(vec![
                 ("file".into(), Value::String(hit.file)),
                 ("line".into(), Value::Int(hit.line as i64)),
                 ("text".into(), Value::String(hit.text)),
-                ("hash".into(), Value::String(hash)),
-            ]));
-        }
-    })?;
+            ])
+        })
+        .collect();
     Ok(Value::list(results))
 }
 
@@ -334,7 +311,7 @@ fn builtin_edit(args: &[Value], shell: &mut Shell) -> Settled<Value> {
         match idxs.len() {
             0 => {
                 return Err(sig(format!(
-                    "edit: no line in {path} hashes to {want} — did the file change? Re-read with view-text/grep-files before editing."
+                    "edit: no line in {path} hashes to {want} — did the file change? Re-read with view-text/view-text-around before editing."
                 )));
             }
             1 => resolved.push(ResolvedEdit { at: idxs[0], new }),
@@ -609,7 +586,6 @@ fn scheme_grep_files(_u: &mut Unifier) -> Scheme {
                 ("file", Ty::String),
                 ("line", Ty::Int),
                 ("text", Ty::String),
-                ("hash", Ty::String),
             ])))),
         )),
     )
@@ -674,7 +650,7 @@ pub static EXARCH_BUILTINS: &[BuiltinEntry] = &[
     BuiltinEntry {
         name: Cow::Borrowed("grep-files"),
         type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_grep_files),
-        doc: "grep-files <pattern>  — recursively search the cwd (ignore-aware, Rust regex) in one read per matched file and stamp each hit with its window-hash, giving [{file, line, text, hash}] that feeds straight into `edit`.",
+        doc: "grep-files <pattern>  — recursively search the cwd (ignore-aware, Rust regex) in one read per matched file, giving [{file, line, text}].",
         body: BuiltinBody::Static(builtin_grep_files),
     },
     BuiltinEntry {

@@ -46,7 +46,7 @@ Blocks can be used with higher-order functions, such as `map`, `filter`, `each`,
     let in-src = { |h| re-match '^src/' $h[file] }
     filter $in-src $hits
 
-You have the standard prelude found in functional programming: `take`, `drop`, `length`, `elem`, `concat`, `intercalate`, `sum`, `zip`, `enumerate`, `first`, `reverse`, `sort-list`. For example, use `fold { |acc x| if !{elem $x $acc} { $acc } else { [...$acc, $x] } } [] $xs` for de-duplication.
+You have the standard prelude found in functional programming: `take`, `drop`, `length`, `elem`, `nub` (de-duplication, first-seen order), `concat`, `intercalate`, `sum`, `zip`, `enumerate`, `first`, `reverse`, `sort-list`.
 
 Omitting the `$` in `$in-src` makes `in-src` just a string argument in the above.
 
@@ -226,7 +226,7 @@ Use the following to search for files; all are `.gitignore` sensitive. Use these
 
 - `glob 'src/**/*.rs'` — matching paths as a ral list; skips dot files. Spread into a command: `mv ...!{glob …} out/`.
 - `explore-dir n` — entries of the current directory to depth `n` as a `ral` list; `.gitignore`-aware
-- `grep-files 'fn \w+_test'` — recursive grep of the current directory (Rust regex syntax); returns `ral` list of records `[file, line, text, hash]`.
+- `grep-files 'fn \w+_test'` — recursive grep of the current directory (Rust regex syntax); returns `ral` list of records `[file, line, text]`.
 - `list-dir`, `file-info`, `line-count`, `is-file`/`is-dir`/`exists` — structured metadata without parsing `ls`.
 
 Scope any of these with `within [dir: …]`.
@@ -257,11 +257,24 @@ The hash depends on the content of each line and its neighbours.
 
 Collect as many edits as possible in one call to ensure freshness.
 
-`edit` can also be used programmaticaly:
+`edit` composes with search: `grep-files` finds the lines but does not hash them; map a `view-text-around` over the hits to show every place with the witness hash `edit` checks, then read the hashes off into one batched `edit`:
 
-    let hits = grep-files …
-    let mine = filter { |h| equal $h[file] 'src/lib.rs' } $hits
-    edit 'src/lib.rs' !{map { |h| [$h[hash], '    // resolved'] } $mine}
+    let mine = filter { |h| equal $h[file] 'src/lib.rs' } !{grep-files 'old_name'}  # find all occurrences of `old_name` in `src/lib.rs`
+    each { |h| view-text-around $h[line] 3 < $h[file] } $mine                       # show each place + its hash
+    edit 'src/lib.rs' [ [h1b2c3, 'new_name'], [h4e5f6, 'new_name'] ]                # use hashes to edit
+
+But you do not need to view the text at all: use `window-hash ROWS I` to get the hash. E.g. to rewrite every `[TODO]` to `[DONE]`:
+
+    let hits  = grep-files #'\[TODO\]'#
+    let files = nub !{map { |h| $h[file] } $hits}    # one hit per matching line, so dedupe the paths
+    each { |f|
+      let rows = re-split #'\n'# !{from-string < $f}
+      let mine = filter { |h| equal $h[file] $f } $hits
+      edit $f !{map { |h|
+        let i = $[$h[line] - 1]
+        [ !{window-hash $rows $i}, !{re-replace #'\[TODO\]'# '[DONE]' $rows[$i]} ]
+      } $mine}
+    } $files
 
 ## Surfacing
 

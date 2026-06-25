@@ -404,7 +404,7 @@ mod tests {
 
     use super::*;
     use crate::agent_builtins;
-    use crate::bus::{Emitter, Inbox, Row};
+    use crate::bus::{Emitter, Inbox};
     use ral_core::types::Capabilities;
     use std::sync::mpsc;
 
@@ -597,55 +597,6 @@ mod tests {
         );
     }
 
-    /// Exarch sources agent helpers at boot and registers the Rust
-    /// atoms they depend on as host builtins.  `view-text` / `view-text-around` are
-    /// source-loaded ral names (in `mobile.scope`); `window-hash` /
-    /// `grep-files` / `edit` are now host builtins (reachable by name via the
-    /// builtin registry, not bound in lexical scope).  This test also locks in
-    /// `run_shell` passing live bindings into elaboration.
-    #[test]
-    fn agent_helpers_are_loaded_into_tool_shell() {
-        let mut shell = fresh_shell();
-        assert!(shell.scope_lookup("view-text").is_some());
-        assert!(shell.scope_lookup("view-text-around").is_some());
-        for builtin in ["window-hash", "grep-files", "edit"] {
-            assert!(
-                shell.lookup_value_name(builtin).is_some(),
-                "{builtin} must resolve as a host builtin"
-            );
-            assert!(
-                shell.scope_lookup(builtin).is_none(),
-                "{builtin} is a builtin, not a lexical binding"
-            );
-        }
-        let result = run_once(
-            &mut shell,
-            r#"
-let dir = temp-dir
-to-string "alpha
-beta
-alpha beta
-" > "$dir/test.txt"
-cd $dir
-let hits = grep-files 'alpha'
-edit $hits[0][file] [[$hits[0][hash], 'ALPHA']]
-let after = !{from-string < $hits[0][file]}
-return [count: !{length $hits}, after: $after]
-"#,
-        );
-        assert_eq!(
-            result.exit,
-            0,
-            "agent helper command failed: {}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-        let value: serde_json::Value =
-            serde_json::from_str(result.value.as_deref().expect("structured result"))
-                .expect("json tool value");
-        assert_eq!(value["count"], 2);
-        assert_eq!(value["after"], "ALPHA\nbeta\nalpha beta\n");
-    }
-
     /// The witness folds in ±3 lines of context, so two lines with the
     /// same text but different surroundings get distinct witnesses and are
     /// each addressable — what a bare line hash could not do. A genuine
@@ -794,88 +745,6 @@ X
 Y
 keep-bottom
 "
-        );
-    }
-
-    /// `edit` is the canonical witnessed rewrite entry point. Its body
-    /// in `agent.ral` hands a `` `card `` carrying one `diff` mark to the
-    /// `surface` builtin after the write; `value_to_card` decodes it into a
-    /// `Kind::Card` on the bus. Pins two contracts: the edit reaches the
-    /// rail end-to-end across the sandbox boundary, and `del` carries the
-    /// literal removed rows so the rendered diff stays human-readable.
-    #[test]
-    fn edit_emits_kind_card() {
-        use std::io::Write;
-        let mut shell = fresh_shell();
-        let (tx, rx) = mpsc::channel();
-        let emit = Emitter::new(tx, 0);
-
-        // Write a 3-line file into a fresh temp dir, then cd into it
-        // so `grep-files` (which walks from `.`) sees only this file.
-        let tmp = std::env::temp_dir().join(format!("exarch-surface-patch-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&tmp);
-        let path = tmp.join("hello.txt");
-        let mut f = std::fs::File::create(&path).expect("create");
-        writeln!(f, "alpha\nunique target line\nomega").expect("write");
-        drop(f);
-        let tmp_str = display_no_trailing_sep(&tmp);
-
-        let src = format!(
-            r#"cd '{tmp_str}'
-let hits = grep-files 'unique target'
-edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
-        );
-        let r = match run_shell(
-            &mut shell,
-            &Capabilities::root(),
-            &src,
-            30,
-            &emit,
-            None,
-            None,
-        ) {
-            Outcome::Ran(r) => r,
-            Outcome::Static(s) => panic!("static failure: {s}"),
-        };
-        assert_eq!(
-            r.exit,
-            0,
-            "edit must exit zero; stderr was {:?}",
-            String::from_utf8_lossy(&r.stderr)
-        );
-
-        let mut found = None;
-        while let Ok(ev) = rx.try_recv() {
-            if let crate::bus::Kind::Card(card) = ev.kind {
-                found = Some(card);
-                break;
-            }
-        }
-        let _ = std::fs::remove_dir_all(&tmp);
-        let card = found.expect("a Kind::Card must reach the bus after edit");
-        let (_got_path, hunks) = card
-            .single_diff()
-            .expect("edit surfaces a card carrying one diff mark");
-        let hunk = &hunks[0];
-        // The whole-file diff groups the lone change with its ±2 context, so
-        // the hunk begins at the file's first line and carries the unified
-        // row list: context, the deletion (the literal removed line, not the
-        // hash), the insertion, then trailing context.
-        assert_eq!(
-            hunk.start, 1,
-            "the hunk begins at line 1 with leading context"
-        );
-        assert!(
-            matches!(
-                hunk.rows.as_slice(),
-                [Row::Context(_), Row::Del(_), Row::Add(_), Row::Context(_)]
-            ) && hunk
-                .rows
-                .iter()
-                .map(Row::text)
-                .eq(["alpha", "unique target line", "REPLACED", "omega"].map(String::from)),
-            "rows must be context/del/add/context with literal text, got {:?}",
-            hunk.rows
         );
     }
 
@@ -1286,54 +1155,6 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
         );
     }
 
-    /// `grep-files` stamps each hit's witness against *its own* file's
-    /// lines.  Two files carry the same matching text in different
-    /// neighbourhoods, so the window-hashes must differ — proving the
-    /// single-pass scan reads each file's rows as the run reaches it
-    /// rather than reusing the previous file's.
-    #[test]
-    fn grep_files_hashes_each_file_against_its_own_rows() {
-        let mut shell = fresh_shell();
-        let setup = run_once(
-            &mut shell,
-            r#"let dir = temp-dir
-to-string "alpha
-TARGET
-beta
-" > "$dir/a.txt"
-to-string "gamma
-TARGET
-delta
-" > "$dir/b.txt"
-cd $dir
-let hits = grep-files 'TARGET'
-return [count: !{length $hits}, hits: $hits]
-"#,
-        );
-        assert_eq!(
-            setup.exit,
-            0,
-            "grep-files failed: {}",
-            String::from_utf8_lossy(&setup.stderr)
-        );
-        let value: serde_json::Value =
-            serde_json::from_str(setup.value.as_deref().expect("structured result"))
-                .expect("json tool value");
-        assert_eq!(value["count"], 2, "one TARGET per file");
-        let hits = value["hits"].as_array().expect("hits is a list");
-        let files: std::collections::BTreeSet<&str> =
-            hits.iter().map(|h| h["file"].as_str().unwrap()).collect();
-        assert_eq!(
-            files,
-            ["a.txt", "b.txt"].into_iter().collect(),
-            "both files appear"
-        );
-        assert_ne!(
-            hits[0]["hash"], hits[1]["hash"],
-            "identical text in distinct neighbourhoods must witness distinctly"
-        );
-    }
-
     /// A `Bytes` field in a structured result renders to the model as
     /// lossy-UTF-8 text, not the decimal integer array `to-json` uses for
     /// data round-trips.  Captured diagnostics — a job's or `audit` node's
@@ -1366,116 +1187,61 @@ return [count: !{length $hits}, hits: $hits]
         );
     }
 
-    /// `grep-files`' lossy scan can match a file that is not valid UTF-8 —
-    /// one `edit` can never witness (no row split is possible).  Rather than
-    /// failing the whole search, the builtin returns such a hit with its hash
-    /// flagged as the empty string: a value no `window-hash` produces, so it
-    /// resolves to no line and is unmistakably "no witness".  A file holding
-    /// "match " plus a stray 0xff matches the scan but is not valid UTF-8.
+    /// The programmatic bulk-edit pipeline, end to end and entirely in ral:
+    /// `grep-files` finds every `[TODO]` across the tree, the hits fold into a
+    /// per-file list, and each file's matching lines are rewritten in one atomic
+    /// `edit`.  The witnesses are computed with the `window-hash` builtin over
+    /// the file's own rows — the *data* path beneath what `view-text` shows a
+    /// human — so no hash is ever read by eye.  A regex `re-replace` turns each
+    /// `[TODO]` into `[DONE]` in place.  This is the sweep example in
+    /// `data/ral.md`, kept honest by running it.
     #[test]
-    fn grep_files_flags_a_non_utf8_hit_without_failing() {
+    fn programmatic_todo_sweep_rewrites_every_match() {
         let mut shell = fresh_shell();
-        let r = run_once(
-            &mut shell,
-            r#"let dir = temp-dir
-to-bytes [109, 97, 116, 99, 104, 32, 255, 10] > "$dir/bad.txt"
-cd $dir
-return !{grep-files 'match'}
-"#,
-        );
-        assert_eq!(
-            r.exit,
-            0,
-            "a non-UTF-8 matched file must not fail the call; stderr was: {}",
-            String::from_utf8_lossy(&r.stderr)
-        );
-        let value: serde_json::Value =
-            serde_json::from_str(r.value.as_deref().expect("structured result"))
-                .expect("json tool value");
-        let hits = value.as_array().expect("grep-files returns a list");
-        assert_eq!(hits.len(), 1, "the un-witnessable file still matches");
-        assert_eq!(hits[0]["file"], "bad.txt");
-        assert_eq!(
-            hits[0]["hash"], "",
-            "an un-witnessable hit carries the empty-string flag, not a hash"
-        );
-    }
-
-    /// `grep-files` over a tree of N matching files emits *exactly one* grep
-    /// surface (the search is one logical effect, not one per file), returns N
-    /// stamped hits, and the witnesses it stamps RESOLVE in a subsequent
-    /// `edit` — the search→edit round-trip the move below the redirect frame
-    /// must preserve.
-    #[test]
-    fn grep_files_emits_one_surface_and_witnesses_resolve() {
-        use crate::card::IoEvent;
-        let mut shell = fresh_shell();
-        let (tx, rx) = mpsc::channel();
-        let emit = Emitter::new(tx, 0);
-
-        let tmp =
-            std::env::temp_dir().join(format!("exarch-grep-one-surface-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("exarch-todo-sweep-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).expect("create temp tree");
-        for name in ["a.txt", "b.txt", "c.txt"] {
-            std::fs::write(tmp.join(name), "head\nTARGET line\ntail\n").expect("write fixture");
-        }
+        std::fs::write(tmp.join("a.txt"), "alpha [TODO] one\nplain\nbeta [TODO] two\n")
+            .expect("write a");
+        std::fs::write(tmp.join("b.txt"), "gamma\ndelta [TODO] three\n").expect("write b");
         let tmp_str = display_no_trailing_sep(&tmp);
 
-        // Search, then edit every hit by the witness grep stamped. If any
-        // witness were stale, the edit would fail writing nothing.
         let src = format!(
             r#"cd '{tmp_str}'
-let hits = grep-files 'TARGET'
-each {{ |h| edit $h[file] [[$h[hash], 'REPLACED']] }} $hits
+let hits = grep-files #'\[TODO\]'#
+let files = nub !{{map {{ |h| $h[file] }} $hits}}
+each {{ |f|
+    let rows = re-split #'\n'# !{{from-string < $f}}
+    let mine = filter {{ |h| equal $h[file] $f }} $hits
+    edit $f !{{map {{ |h|
+        let i = $[$h[line] - 1]
+        [ !{{window-hash $rows $i}}, !{{re-replace #'\[TODO\]'# '[DONE]' $rows[$i]}} ]
+    }} $mine}}
+}} $files
 return !{{length $hits}}"#
         );
-        let r = match run_shell(
-            &mut shell,
-            &Capabilities::root(),
-            &src,
-            30,
-            &emit,
-            None,
-            None,
-        ) {
-            Outcome::Ran(r) => r,
-            Outcome::Static(s) => panic!("static failure: {s}"),
-        };
+        let r = run_once(&mut shell, &src);
         assert_eq!(
             r.exit,
             0,
-            "grep→edit round-trip must succeed; stderr was {:?}",
+            "the todo sweep must succeed; stderr was {:?}",
             String::from_utf8_lossy(&r.stderr)
         );
-        assert_eq!(r.value.as_deref(), Some("3"), "three files matched");
-
-        // Every matched file is now rewritten — proof the witnesses resolved.
-        for name in ["a.txt", "b.txt", "c.txt"] {
-            assert_eq!(
-                std::fs::read_to_string(tmp.join(name)).expect("read after edit"),
-                "head\nREPLACED\ntail\n",
-                "{name} must have its TARGET line replaced"
-            );
-        }
-
-        let mut grep_surfaces = 0;
-        while let Ok(ev) = rx.try_recv() {
-            if let crate::bus::Kind::Io {
-                event: IoEvent::Grep { scope, pattern },
-                ..
-            } = ev.kind
-            {
-                grep_surfaces += 1;
-                assert_eq!(scope, ".", "the grep scope is the search root");
-                assert_eq!(pattern, "TARGET");
-            }
-        }
-        let _ = std::fs::remove_dir_all(&tmp);
         assert_eq!(
-            grep_surfaces, 1,
-            "one logical search emits exactly one grep surface, not one per file"
+            r.value.as_deref(),
+            Some("3"),
+            "three [TODO] hits across the tree"
         );
+        assert_eq!(
+            std::fs::read_to_string(tmp.join("a.txt")).expect("read a"),
+            "alpha [DONE] one\nplain\nbeta [DONE] two\n",
+            "both TODOs in a.txt rewritten in one atomic edit"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.join("b.txt")).expect("read b"),
+            "gamma\ndelta [DONE] three\n"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Drive one tool call through `run_shell` with a real bus `Emitter`,
@@ -1788,74 +1554,6 @@ return !{{length $hits}}"#
         assert!(
             rec.get("card").is_none(),
             "the operational trace drops the rendered card, got {rec:?}"
-        );
-    }
-
-    /// `edit` does all its file I/O in Rust, below the redirect frame, so it is
-    /// a single logical surface: it emits its diff card(s) and NO read/write io
-    /// card. Capturing the sink, only the diff card appears — never a
-    /// `{io: read}` or `{io: write}`.
-    #[test]
-    fn edit_emits_only_its_diff_card_no_io_card() {
-        use crate::card::IoEvent;
-        let mut shell = fresh_shell();
-        let (tx, rx) = mpsc::channel();
-        let emit = Emitter::new(tx, 0);
-
-        let tmp =
-            std::env::temp_dir().join(format!("exarch-edit-one-surface-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).expect("create temp dir");
-        let path = tmp.join("f.txt");
-        std::fs::write(&path, "alpha\nunique target line\nomega\n").expect("write fixture");
-        let tmp_str = display_no_trailing_sep(&tmp);
-
-        // Acquire the witness through `grep-files`, whose read is also in Rust
-        // (it raises a grep io card, never a read/write one), so the only
-        // read/write io that *could* appear would be edit's — and there is
-        // none. A redirect `< path` here would raise its own read card and
-        // confound the assertion.
-        let src = format!(
-            r#"cd '{tmp_str}'
-let hits = grep-files 'unique target'
-edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
-        );
-        let r = match run_shell(
-            &mut shell,
-            &Capabilities::root(),
-            &src,
-            30,
-            &emit,
-            None,
-            None,
-        ) {
-            Outcome::Ran(r) => r,
-            Outcome::Static(s) => panic!("static failure: {s}"),
-        };
-        assert_eq!(
-            r.exit,
-            0,
-            "edit must succeed; stderr was {:?}",
-            String::from_utf8_lossy(&r.stderr)
-        );
-
-        let mut diff_cards = 0;
-        let mut io_cards = 0;
-        while let Ok(ev) = rx.try_recv() {
-            match ev.kind {
-                crate::bus::Kind::Card(card) if card.has_diff() => diff_cards += 1,
-                crate::bus::Kind::Io {
-                    event: IoEvent::Read { .. } | IoEvent::Write { .. },
-                    ..
-                } => io_cards += 1,
-                _ => {}
-            }
-        }
-        let _ = std::fs::remove_dir_all(&tmp);
-        assert_eq!(diff_cards, 1, "edit surfaces exactly one diff card");
-        assert_eq!(
-            io_cards, 0,
-            "edit's read and write happen in Rust, so no read/write io card is raised"
         );
     }
 

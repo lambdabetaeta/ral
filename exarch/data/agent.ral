@@ -17,8 +17,8 @@ let _rows = { |s| re-split '\n' $s }
 ## Show the half-open range `[start, end)` of stdin (1-indexed, end
 ## exclusive — EWD-831): `view-text 100 150` yields fifty lines, 100 through
 ## 149.  Each line is tagged `<line-no>\t<window-hash>\t<text>`; the hash
-## is the witness `grep-files` reports and `edit` checks, so a read hands
-## you the edit witness directly.  Reads stdin — feed it via a pipe or
+## is the witness `edit` checks, so a read hands you the edit witness
+## directly.  Reads stdin — feed it via a pipe or
 ## `<`: `view-text 100 150 < foo.rs`, `git show HEAD:f.rs | view-text 100 150`.
 ## Both bounds must be `>= 1`; an empty range yields no output.
 let view-text = { |start end|

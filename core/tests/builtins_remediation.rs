@@ -265,6 +265,30 @@ fn sort_list_by_surfaces_uncomparable_keys() {
 }
 
 #[test]
+fn nub_drops_later_duplicates_preserving_first_seen_order() {
+    // The second 'b' and 'a' fall away; the survivors keep the order of
+    // their first appearance, not a sorted one.
+    assert_eq!(
+        string_list("return !{nub ['b', 'a', 'b', 'c', 'a']}"),
+        ["b", "a", "c"]
+    );
+}
+
+#[test]
+fn nub_dedups_mapped_fields_for_the_grep_sweep() {
+    // The grep→edit sweep maps hits to their `file` then nubs: three hits
+    // across two files collapse to the two distinct paths, in first-seen
+    // order, so each file is edited exactly once.
+    assert_eq!(
+        string_list(
+            "let hits = [[file: 'a', line: 1], [file: 'b', line: 2], [file: 'a', line: 9]]
+             return !{nub !{map { |h| $h[file] } $hits}}"
+        ),
+        ["a", "b"]
+    );
+}
+
+#[test]
 fn re_find_match_returns_first() {
     expect_string("return !{re-find-match '[0-9]+' 'a12b34'}", "12");
 }
