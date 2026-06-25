@@ -1,10 +1,17 @@
 # exarch capability profiles
 
 exarch wraps every model-emitted command in a `grant` block.  The
-`--base` flag selects the ceiling for that grant.  Five bake-ins
-ship in the binary, in descending order of authority:
+`--base` flag selects the ceiling for that grant.  Bake-ins ship
+in the binary, in descending order of authority:
 
 | profile      | net | reads                                              | writes                          | exec                                                                  |
+|--------------|-----|----------------------------------------------------|---------------------------------|-----------------------------------------------------------------------|
+| `dangerous`  | —   | inherit (no attenuation)                           | inherit                         | inherit                                                               |
+| `reasonable` | on  | broad: cwd + xdg:* + toolchain caches + ~/Library  | cwd + scratch + xdg:cache       | system bins + xdg:bin + /opt/homebrew + curated named tools incl. git |
+| `edit-only`  | on  | same as reasonable                                 | cwd + scratch                   | same as reasonable (build tools denied)                              |
+| `read-only`  | on  | same as reasonable                                 | scratch only                    | same as reasonable                                                    |
+| `minimal`    | on  | cwd + scratch                                      | cwd + scratch + xdg:cache       | `/bin/` + `/usr/bin/` + cwd + scratch (no git, no bash/zsh)           |
+| `confined`   | off | cwd + scratch                                      | cwd + scratch                   | `/bin/` + `/usr/bin/` + `/usr/local/bin/` + cwd + scratch             |
 |--------------|-----|----------------------------------------------------|---------------------------------|-----------------------------------------------------------------------|
 | `dangerous`  | —   | inherit (no attenuation)                           | inherit                         | inherit                                                               |
 | `reasonable` | on  | broad: cwd + xdg:* + toolchain caches + ~/Library  | cwd + scratch + xdg:cache       | system bins + xdg:bin + /opt/homebrew + curated named tools incl. git |
@@ -26,9 +33,10 @@ need network?
 └─ yes → need to write outside cwd?
          ├─ no  → read-only
          └─ yes → which tooling surface?
-                  ├─ system tools only        → minimal
-                  ├─ system + brew + xdg:bin  → reasonable
-                  └─ paranoid / custom        → dangerous + --restrict
+                  ├─ system tools only                 → minimal
+                  ├─ system + brew + xdg:bin           → reasonable
+                  ├─ edit only, no persistent writes   → edit-only
+                  └─ paranoid / custom                 → dangerous + --restrict
 ```
 
 ### `dangerous` — escape hatch / lattice top
@@ -195,6 +203,13 @@ binary at build time via `include_str!`:
 ```
 exarch/data/dangerous.exarch.ral
 exarch/data/reasonable.exarch.ral
+exarch/data/edit-only.exarch.ral
+exarch/data/read-only.exarch.ral
+exarch/data/minimal.exarch.ral
+exarch/data/confined.exarch.ral
+```
+exarch/data/dangerous.exarch.ral
+exarch/data/reasonable.exarch.ral
 exarch/data/read-only.exarch.ral
 exarch/data/minimal.exarch.ral
 exarch/data/confined.exarch.ral
@@ -203,4 +218,4 @@ exarch/data/confined.exarch.ral
 There is no directory convention for adding more — bases are
 bake-ins.  To use your own profile from disk, write a ral file
 and pass it via `--restrict` or `--extend-base` against one of the
-five built-ins.
+six built-ins.

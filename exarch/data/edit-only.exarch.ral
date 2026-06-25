@@ -1,0 +1,192 @@
+# `edit-only` bake-in.  Same shape as `read-only` for reads and
+# exec, but the agent may edit the project tree — writes go to the
+# working directory (plus ephemeral scratch/temp for tooling).
+#
+# Use when the agent's job is to edit the project tree — apply patches,
+# refactor, fix — without running a build or test suite.  Network is on
+# so the agent can fetch context (e.g. `gh pr view`, upstream docs).
+#
+# To forbid writes to a specific subtree, layer a `--restrict` (which
+# can only further attenuate, not widen).  To start read-only, use
+# `read-only`; to start broader, use `reasonable` and lock down via deny.
+
+return [
+  audit: false,
+  net:   true,
+
+  shell: [chdir: true],
+
+  # Reads as broad as `reasonable`: the agent should be able to read
+  # the full project tree, system caches, tool configs.  All the
+  # usual toolchain caches stay readable so e.g. `cargo metadata`
+  # can resolve without rebuilding.
+  fs: [
+    read: [
+      'cwd:',                  # the project tree the agent is editing
+      '/tmp',
+      'tempdir:',              # `$TMPDIR` on macOS — distinct from /tmp
+      'xdg:config',            # ${XDG_CONFIG_HOME:-~/.config}
+      'xdg:data',              # ${XDG_DATA_HOME:-~/.local/share}
+      'xdg:cache',             # ${XDG_CACHE_HOME:-~/.cache}
+      'xdg:state',             # ${XDG_STATE_HOME:-~/.local/state}
+      'xdg:bin',               # ${XDG_BIN_HOME:-~/.local/bin}
+      '~/Library/Caches',      # macOS-native CLI caches outside the XDG world
+      '~/.cargo/registry',
+      '~/.cargo/git',
+      '~/.rustup',
+      '~/go',
+      '~/.npm',
+      '~/.gem',
+      '~/.bundle',
+      '~/.gradle/caches',
+      '~/.m2/repository',
+      '~/.pyenv',
+      '~/.rbenv',
+      '~/.nvm',
+
+      # Git config — `git log`, `git show`, `git diff` are core to
+      # the editing use case.  See `reasonable` for the credential
+      # and signing analysis.
+      '~/.gitconfig',
+      '~/.gitignore_global',
+      'xdg:config/git',
+    ],
+    # Writes go to the working tree (the folder being edited) plus
+    # ephemeral scratch directories.  Unlike `read-only`, `cwd:` is
+    # writable so the agent can apply edits.
+    write: [
+      'cwd:',
+      '/tmp',
+      'tempdir:',
+    ],
+
+    # Same credential denies as `reasonable` — gh, op, gcloud tokens
+    # should never be readable, even in an editing session.
+    deny: [
+      'xdg:config/gh',
+      'xdg:config/op',
+      'xdg:config/gcloud',
+    ],
+  ],
+
+  # Exec mirrors `reasonable` — the agent has the same toolset.
+  # Unlike `read-only`, the write set includes `cwd:` so file
+  # mutations succeed.
+  exec: [
+    'xdg:bin/':            'allow',
+    '/usr/bin/':           'allow',
+    '/bin/':               'allow',
+    '/usr/local/bin/':     'allow',
+    '/opt/homebrew/bin/':  'allow',
+    '/opt/homebrew/sbin/': 'allow',
+    '/usr/local/sbin/':    'allow',
+    '/usr/sbin/':          'allow',
+    '/sbin/':              'allow',
+    'cwd:/':               'allow',
+    '/tmp/':               'allow',
+    'tempdir:/':           'allow',
+
+    # Coreutils
+    base64:    'allow',
+    basename:  'allow',
+    cat:       'allow',
+    comm:      'allow',
+    cp:        'allow',
+    cut:       'allow',
+    date:      'allow',
+    df:        'allow',
+    dirname:   'allow',
+    du:        'allow',
+    echo:      'allow',
+    env:       'allow',
+    head:      'allow',
+    hostname:  'allow',
+    join:      'allow',
+    ln:        'allow',
+    ls:        'allow',
+    mkdir:     'allow',
+    mktemp:    'allow',
+    mv:        'allow',
+    nproc:     'allow',
+    paste:     'allow',
+    printenv:  'allow',
+    printf:    'allow',
+    pwd:       'allow',
+    readlink:  'allow',
+    realpath:  'allow',
+    rm:        'allow',
+    rmdir:     'allow',
+    seq:       'allow',
+    sha256sum: 'allow',
+    sha512sum: 'allow',
+    shuf:      'allow',
+    sleep:     'allow',
+    sort:      'allow',
+    tac:       'allow',
+    tail:      'allow',
+    tee:       'allow',
+    test:      'allow',
+    touch:     'allow',
+    tr:        'allow',
+    truncate:  'allow',
+    uname:     'allow',
+    uniq:      'allow',
+    wc:        'allow',
+    whoami:    'allow',
+    yes:       'allow',
+
+    # Shells
+    sh:   'allow',
+    bash: 'deny',
+    zsh:  'deny',
+
+    # Version control.  `git` is denied — the agent edits files
+    # directly; committing is a human decision.  Use ral builtins
+    # (`grep-files`, `view-text`, `edit`) for code exploration and
+    # modification; use `gh pr view` or `curl` to fetch remote context.
+    # `gh` remains admitted for PR review and issue fetching.
+    git: 'deny',
+    gh:  'allow',
+
+    # Net fetch
+    curl: 'allow',
+    wget: 'allow',
+
+    # Search / inspect
+    rg:    'allow',
+    fd:    'allow',
+    jq:    'allow',
+    yq:    'allow',
+    awk:   'allow',
+    gawk:  'allow',
+    find:  'allow',
+    xargs: 'allow',
+    file:  'allow',
+    which: 'allow',
+
+    # Scripting runtimes (one-off scripts, common as tooling)
+    python:  'allow',
+    python3: 'allow',
+
+    # Archives
+    tar:     'allow',
+    gzip:    'allow',
+    gunzip:  'allow',
+    bzip2:   'allow',
+    bunzip2: 'allow',
+    xz:      'allow',
+    zip:     'allow',
+    unzip:   'allow',
+
+    # Diff / patch / docs
+    diff:  'allow',
+    patch: 'allow',
+    less:  'allow',
+    man:   'allow',
+
+    # Process inspection (read-only)
+    ps:    'allow',
+    lsof:  'allow',
+    pgrep: 'allow',
+  ],
+]
