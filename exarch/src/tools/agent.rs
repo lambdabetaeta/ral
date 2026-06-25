@@ -318,13 +318,13 @@ as marked turns."
         _input: Value,
         session: &mut Agent,
         _provider: &Arc<Provider>,
-        emit: &Emitter,
+        _emit: &Emitter,
     ) -> SessionToolResult {
-        emit.emit(Kind::ToolCall {
-            tool: "agents",
-            cmd: "agents".into(),
-            summary: None,
-        });
+        // A silent tool: an argument-less recovery poll the orchestrator runs
+        // to recover ids after a compaction, not a user-facing action.  It
+        // emits no `ToolCall`/`ToolResult`, so it leaves no trace on the rail
+        // (or the headless frontend, or `transcript.jsonl`) — the model still
+        // receives the listing through the returned result below.
         let live = session.agents.list(session.id);
         let content = if live.is_empty() {
             "no live async agents".to_string()
@@ -342,7 +342,6 @@ as marked turns."
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        emit.emit(Kind::ToolResult(content.clone()));
         SessionToolResult { id, content }
     }
 }
@@ -399,7 +398,7 @@ A no-op if no live agent has that id."
         };
         emit.emit(Kind::ToolCall {
             tool: "agent_cancel",
-            cmd: format!("agent_cancel {agent_id}"),
+            cmd: agent_id.to_string(),
             summary: None,
         });
         let content = if session.agents.cancel(agent_id) {

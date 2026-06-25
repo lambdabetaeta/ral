@@ -44,24 +44,41 @@ mod schedule;
 #[derive(Clone, Copy)]
 pub struct ToolSet {
     returns: bool,
+    schedules: bool,
 }
 
 impl ToolSet {
     /// The conversing set (the interactive trunk): withholds `reply`.
-    pub(crate) fn conversing() -> Self {
-        Self { returns: false }
+    /// `schedules` carries the session's self-wakeup grant (`--allow-schedule`).
+    pub(crate) fn conversing(schedules: bool) -> Self {
+        Self {
+            returns: false,
+            schedules,
+        }
     }
 
     /// The returning set (a headless trunk and every sub-agent): holds `reply`.
-    pub(crate) fn returning() -> Self {
-        Self { returns: true }
+    /// `schedules` carries the self-wakeup grant, inherited from the parent on
+    /// a fork.
+    pub(crate) fn returning(schedules: bool) -> Self {
+        Self {
+            returns: true,
+            schedules,
+        }
     }
 
-    /// Whether `tool` is advertised and permitted under this set.  The only
-    /// gate left is the *returns* axis: a replier needs `returns`; every other
-    /// tool — the spawn family included — is universally allowed.
+    /// Whether this set grants self-scheduling — read by a fork to inherit the
+    /// parent's wakeup authority.
+    pub(crate) fn grants_schedule(&self) -> bool {
+        self.schedules
+    }
+
+    /// Whether `tool` is advertised and permitted under this set.  Two
+    /// orthogonal gates: a replier needs the *returns* axis; the self-wakeup
+    /// family needs the *schedules* axis (the `--allow-schedule` grant).  Every
+    /// other tool — the spawn family included — is universally allowed.
     pub(crate) fn allows(&self, tool: &dyn Tool) -> bool {
-        !tool.replies() || self.returns
+        (!tool.replies() || self.returns) && (!tool.schedules() || self.schedules)
     }
 }
 
@@ -84,6 +101,14 @@ pub(crate) trait Tool: Send + Sync {
     /// refused), which talks to the user across turns and never returns a
     /// value, so returning-and-terminating is meaningless there.
     fn replies(&self) -> bool {
+        false
+    }
+
+    /// True for the self-wakeup family (`schedule`, `schedules`, `unschedule`)
+    /// — the *schedules* axis of the [`ToolSet`].  Advertised and dispatched
+    /// only when the session holds the `--allow-schedule` grant; otherwise the
+    /// whole family is unadvertised (and refused on the defensive path).
+    fn schedules(&self) -> bool {
         false
     }
 

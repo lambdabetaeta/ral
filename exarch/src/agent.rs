@@ -121,12 +121,9 @@ pub struct Agent {
     pub(crate) agents: crate::agent_registry::AgentRegistry,
     /// Live scheduled wakeups (cron / after).  A peer may self-schedule (it
     /// posts wakeups into its own inbox), so this is no longer root-only; it
-    /// is still gated by [`Self::schedule_authority`].
+    /// is still gated by the [`ToolSet`] *schedules* axis (`--allow-schedule`),
+    /// which decides whether the self-wakeup tools are advertised at all.
     pub(crate) schedules: crate::schedule::ScheduleRegistry,
-    /// Whether self-scheduling is authorised this session.  Off by default;
-    /// inherited by forks, so a `--allow-schedule` root grants its peers the
-    /// same authority.
-    pub(crate) schedule_authority: bool,
     /// Input tokens the model saw on the most recent completion — the live
     /// numerator for the context-pressure compaction trigger
     /// ([`Self::compact`]), the same signal the TUI's fidelity gauge reads.
@@ -256,7 +253,6 @@ struct Build {
     provider: ProviderHandle,
     focus: Arc<AtomicU64>,
     interactive: bool,
-    schedule_authority: bool,
     tools: ToolSet,
     /// The fleet's shared registry — fresh for the trunk, the parent's clone
     /// for a fork — so every node registers into one map.
@@ -274,7 +270,6 @@ impl Agent {
             provider,
             focus,
             interactive,
-            schedule_authority,
             tools,
             agents,
         } = b;
@@ -302,7 +297,6 @@ impl Agent {
             durable,
             agents,
             schedules: crate::schedule::ScheduleRegistry::new(),
-            schedule_authority,
             last_input: 0,
             pins: Default::default(),
         })
@@ -364,13 +358,13 @@ impl Agent {
             // itself here.
             focus: Arc::new(AtomicU64::new(NO_FOCUS)),
             interactive,
-            schedule_authority: allow_schedule,
             // The interactive trunk converses and never returns, so it withholds
-            // `reply`; a headless trunk is a returning agent.
+            // `reply`; a headless trunk is a returning agent.  Either way the
+            // session's self-wakeup grant rides the set.
             tools: if interactive {
-                ToolSet::conversing()
+                ToolSet::conversing(allow_schedule)
             } else {
-                ToolSet::returning()
+                ToolSet::returning(allow_schedule)
             },
             agents: crate::agent_registry::AgentRegistry::new(),
         })?;
@@ -459,11 +453,10 @@ impl Agent {
             // a child becomes parkable the instant the human `TAB`s to it.
             focus: self.focus.clone(),
             interactive: self.interactive,
+            // Every agent spawns now; a sub-agent returns through `reply`.
             // Self-scheduling authority is inherited: a `--allow-schedule` trunk
             // grants its descendants the same right to wake themselves.
-            schedule_authority: self.schedule_authority,
-            // Every agent spawns now; a sub-agent returns through `reply`.
-            tools: ToolSet::returning(),
+            tools: ToolSet::returning(self.tools.grants_schedule()),
             // One shared fleet registry: the child registers into the same map,
             // so the tree is whole at any depth.
             agents: self.agents.clone(),
@@ -537,8 +530,7 @@ impl Agent {
             provider,
             focus: Arc::new(AtomicU64::new(NO_FOCUS)),
             interactive: false,
-            schedule_authority: false,
-            tools: ToolSet::returning(),
+            tools: ToolSet::returning(false),
             agents: crate::agent_registry::AgentRegistry::new(),
         })?;
         agent.register_self();
@@ -1060,12 +1052,22 @@ impl Agent {
     ) -> SessionToolResult {
         match crate::tools::find(&call.fn_name) {
             Some(t) if !self.tools.allows(t) => {
-                // The only withheld tool is `reply`, refused to the conversing
-                // (interactive) trunk, which never returns a value.
-                let msg = format!(
-                    "tool `{}` is not available here — you converse with the user across turns and never return a value; finish by replying to them directly",
-                    call.fn_name
-                );
+                // Defensive only: a withheld tool is unadvertised, so a
+                // well-behaved model never reaches here.  `reply` is withheld
+                // from the conversing (interactive) trunk, which never returns a
+                // value; the self-wakeup family is withheld without the
+                // `--allow-schedule` grant.
+                let msg = if t.replies() {
+                    format!(
+                        "tool `{}` is not available here — you converse with the user across turns and never return a value; finish by replying to them directly",
+                        call.fn_name
+                    )
+                } else {
+                    format!(
+                        "tool `{}` is not available here — self-scheduling is off; start exarch with --allow-schedule to enable it",
+                        call.fn_name
+                    )
+                };
                 self.note_error(msg.clone(), emit);
                 SessionToolResult {
                     id: call.call_id,
@@ -1673,7 +1675,7 @@ mod tests {
         // The conversing (interactive) trunk is the one non-returning agent: it
         // withholds `reply` while still spawning.
         assert!(
-            !ToolSet::conversing().allows(reply),
+            !ToolSet::conversing(false).allows(reply),
             "the conversing trunk converses and never returns, so it withholds `reply`"
         );
     }

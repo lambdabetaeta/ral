@@ -7,7 +7,10 @@
 //! recurring calendar occurrence) or `after <dur>` (a one-shot relative
 //! delay); the payload is a string prompt the model acts on, not a
 //! computation.  Self-scheduling is gated behind `--allow-schedule`: an
-//! agent that can wake itself indefinitely holds real authority.
+//! agent that can wake itself indefinitely holds real authority, so without
+//! the grant the whole family is unadvertised — the model never sees these
+//! tools at all (the [`crate::tools::ToolSet`] *schedules* axis), rather than
+//! seeing them and being refused.
 
 use super::{INVALID_INPUT, Tool, invalid_input, u64_field};
 use crate::agent::Agent;
@@ -24,6 +27,10 @@ pub(super) struct ScheduleTool;
 impl Tool for ScheduleTool {
     fn name(&self) -> &'static str {
         "schedule"
+    }
+
+    fn schedules(&self) -> bool {
+        true
     }
 
     fn desc(&self) -> &'static str {
@@ -77,18 +84,6 @@ woken, not code.  List live ones with `schedules`; remove one with \
         _provider: &Arc<Provider>,
         emit: &Emitter,
     ) -> SessionToolResult {
-        if !session.schedule_authority {
-            let msg = "scheduling is not authorised in this session — start exarch with \
-                       --allow-schedule to enable self-wakeups"
-                .to_string();
-            emit.emit(Kind::ToolCall {
-                tool: "schedule",
-                cmd: "schedule".into(),
-                summary: None,
-            });
-            emit.emit(Kind::ToolResult(msg.clone()));
-            return SessionToolResult { id, content: msg };
-        }
         let Some(obj) = input.as_object() else {
             return invalid_input(
                 id,
@@ -167,6 +162,10 @@ impl Tool for SchedulesTool {
         "schedules"
     }
 
+    fn schedules(&self) -> bool {
+        true
+    }
+
     fn desc(&self) -> &'static str {
         "List the live scheduled wakeups — by id, with label, trigger, time \
 to the next fire, and how many times each has fired.  Use it to recover \
@@ -190,13 +189,12 @@ schedule ids after a context compaction, then `unschedule` to remove one."
         _input: Value,
         session: &mut Agent,
         _provider: &Arc<Provider>,
-        emit: &Emitter,
+        _emit: &Emitter,
     ) -> SessionToolResult {
-        emit.emit(Kind::ToolCall {
-            tool: "schedules",
-            cmd: "schedules".into(),
-            summary: None,
-        });
+        // A silent tool, like `agents`: an argument-less recovery poll to
+        // recover schedule ids after a compaction, not a user-facing action.
+        // It emits nothing, so it leaves no trace on the rail — the model
+        // still receives the listing through the returned result below.
         let live = session.schedules.list();
         let content = if live.is_empty() {
             "no live schedules".to_string()
@@ -215,7 +213,6 @@ schedule ids after a context compaction, then `unschedule` to remove one."
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        emit.emit(Kind::ToolResult(content.clone()));
         SessionToolResult { id, content }
     }
 }
@@ -226,6 +223,10 @@ pub(super) struct UnscheduleTool;
 impl Tool for UnscheduleTool {
     fn name(&self) -> &'static str {
         "unschedule"
+    }
+
+    fn schedules(&self) -> bool {
+        true
     }
 
     fn desc(&self) -> &'static str {
@@ -271,7 +272,7 @@ no schedule has that id."
         };
         emit.emit(Kind::ToolCall {
             tool: "unschedule",
-            cmd: format!("unschedule {sid}"),
+            cmd: sid.to_string(),
             summary: None,
         });
         let content = if session.schedules.unschedule(sid) {
