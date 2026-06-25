@@ -35,10 +35,12 @@ use std::time::Duration;
 
 /// Best-effort capability lookup for `model`.  Consults the OR
 /// catalog regardless of provider — OR republishes upstream cards for
-/// every vendor it routes, so a native Anthropic / OpenAI / DeepSeek
-/// launch hits the same context-window / tokenizer / canonical-slug
-/// data as the OR-fronted equivalent.  Missing entries default the
-/// record so the banner renders `—` for unknown fields.
+/// every vendor it routes, so a native Anthropic / OpenAI launch hits
+/// the same context-window / tokenizer / canonical-slug data as the
+/// OR-fronted equivalent.  (DeepSeek is the pricing exception, not a
+/// capabilities exception — capabilities still come from OR.)
+/// Missing entries default the record so the banner renders `—` for
+/// unknown fields.
 pub fn caps_for(model: &str) -> crate::pricing::ModelCaps {
     crate::pricing::caps(model).unwrap_or_default()
 }
@@ -1509,7 +1511,7 @@ impl Live {
                 .await;
 
                 match attempt_result {
-                    Ok(end) => Attempt::Done(step_out_from_end(model, end, self.metered())),
+                    Ok(end) => Attempt::Done(step_out_from_end(model, end, self.metered(), self.adapter)),
                     // A cancel is surfaced as-is regardless of streamed tokens.
                     Err(e @ ProviderError::Cancelled(_)) => Attempt::Failed(e),
                     // Visible text already streamed, then the stream broke: a
@@ -1518,7 +1520,7 @@ impl Live {
                     // it (mirrors the output-cap truncation path) rather than
                     // discarding the work and ending the run.
                     Err(e) if seen_any_token => {
-                        Attempt::Done(stalled_step_out(model, &streamed, &e, self.metered()))
+                        Attempt::Done(stalled_step_out(model, &streamed, &e, self.metered(), self.adapter))
                     }
                     Err(e) => Attempt::Failed(e),
                 }
@@ -1598,7 +1600,7 @@ impl Live {
         let text = resp.first_text().unwrap_or("").to_string();
         Ok(SummaryOut {
             summary: text,
-            usage: usage_from(model, &resp.usage, self.metered()),
+            usage: usage_from(model, &resp.usage, self.metered(), self.adapter),
         })
     }
 }
@@ -1629,7 +1631,7 @@ fn stamp_attempts(err: ProviderError, attempts: u32) -> ProviderError {
 /// attaches; `with_reasoning_content(None)` is a no-op, so providers that
 /// surface no reasoning are unaffected.  `captured_into_tool_calls`
 /// consumes `end`, so the other fields are read first.
-fn step_out_from_end(model: &str, end: StreamEnd, metered: bool) -> StepOut {
+fn step_out_from_end(model: &str, end: StreamEnd, metered: bool, adapter: AdapterKind) -> StepOut {
     let raw_usage = end.captured_usage.clone().unwrap_or_default();
     let stop_reason = end.captured_stop_reason.clone();
     let reasoning = end.captured_reasoning_content.clone();
@@ -1644,7 +1646,7 @@ fn step_out_from_end(model: &str, end: StreamEnd, metered: bool) -> StepOut {
             .with_reasoning_content(reasoning.clone()),
         tool_calls,
         reasoning,
-        usage: usage_from(model, &raw_usage, metered),
+        usage: usage_from(model, &raw_usage, metered, adapter),
         stop_reason,
         cut_short,
     }
@@ -1657,12 +1659,12 @@ fn step_out_from_end(model: &str, end: StreamEnd, metered: bool) -> StepOut {
 /// marked [`CutShort::Stalled`], which the session commits and continues
 /// from.  No `End` frame arrived, so there is no usage to meter and no tool
 /// call to capture.
-fn stalled_step_out(model: &str, streamed: &str, cause: &ProviderError, metered: bool) -> StepOut {
+fn stalled_step_out(model: &str, streamed: &str, cause: &ProviderError, metered: bool, adapter: AdapterKind) -> StepOut {
     StepOut {
         assistant_message: ChatMessage::assistant(streamed.to_string()),
         tool_calls: Vec::new(),
         reasoning: None,
-        usage: usage_from(model, &genai::chat::Usage::default(), metered),
+        usage: usage_from(model, &genai::chat::Usage::default(), metered, adapter),
         stop_reason: None,
         cut_short: Some(CutShort::Stalled(cause.brief())),
     }
@@ -1739,14 +1741,8 @@ fn prime_pricing(runtime: &tokio::runtime::Runtime) {
 }
 
 /// Extract our [`Usage`] from genai's raw usage record, applying the
-/// model's price card.  Used by both [`Provider::complete`] and
-/// [`Provider::summarize`] so the compaction call is accounted for
-/// identically — same cache_read/cache_write attribution, same dollars.
-/// A catalog miss bills $0 (rendered as `—`), matching the offline-
-/// start behaviour of [`prime_pricing`].  When `metered` is false the
-/// turn is a flat-subscription one: the price card is not consulted and
-/// the usage is marked unmetered, so the cost slot reads "subscription".
-fn usage_from(model: &str, raw: &genai::chat::Usage, metered: bool) -> Usage {
+/// model's price card for `adapter`.  Used by both [`Provider::complete`] and
+fn usage_from(model: &str, raw: &genai::chat::Usage, metered: bool, adapter: AdapterKind) -> Usage {
     let input = raw.prompt_tokens.unwrap_or(0) as u64;
     let output = raw.completion_tokens.unwrap_or(0) as u64;
     // Preserve the `None` vs `Some(0)` distinction: OpenAI-family
@@ -1764,7 +1760,7 @@ fn usage_from(model: &str, raw: &genai::chat::Usage, metered: bool) -> Usage {
         .and_then(|d| d.cached_tokens)
         .map(|n| n as u64);
     let dollars = if metered {
-        crate::pricing::lookup(model)
+        crate::pricing::lookup_for(model, adapter)
             .map(|p| {
                 p.dollars(
                     input,
@@ -2211,7 +2207,7 @@ mod tests {
             captured_reasoning_content: Some("let me think".into()),
             ..Default::default()
         };
-        let out = step_out_from_end("deepseek-v4-pro", end, true);
+        let out = step_out_from_end("deepseek-v4-pro", end, true, AdapterKind::DeepSeek);
         assert!(
             out.assistant_message.content.iter().any(|p| matches!(
                 p,
@@ -2231,7 +2227,7 @@ mod tests {
             captured_reasoning_content: None,
             ..Default::default()
         };
-        let out = step_out_from_end("deepseek-v4-pro", end, true);
+        let out = step_out_from_end("deepseek-v4-pro", end, true, AdapterKind::DeepSeek);
         assert!(
             !out.assistant_message
                 .content
@@ -2483,7 +2479,7 @@ mod tests {
             "the stand-in stall cause must classify Transient, got {cause:?}"
         );
         let brief = cause.brief();
-        let step = stalled_step_out("test-model", "partial answer so far", &cause, false);
+        let step = stalled_step_out("test-model", "partial answer so far", &cause, false, AdapterKind::OpenAI);
         assert_eq!(
             step.cut_short,
             Some(CutShort::Stalled(brief)),

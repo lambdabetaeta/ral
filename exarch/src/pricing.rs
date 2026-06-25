@@ -1,13 +1,13 @@
 //! Per-token pricing, fetched once per process from OpenRouter's
 //! `GET /api/v1/models` and cached.
 //!
-//! The catalog backs every provider, not only the OpenRouter wire:
-//! native Anthropic / OpenAI / DeepSeek launches reuse the same rates
-//! (OR republishes the upstream cards verbatim, including the
-//! Anthropic cache_write/cache_read multipliers), so one source of
-//! truth replaces a hand-maintained per-model match table that went
-//! stale on every model release.  Bare suffix lookups (`mercury-2`)
-//! resolve to their prefixed catalog entry via [`add_bare_aliases`].
+//! The catalog backs Anthropic, OpenAI, and the OpenRouter wire itself
+//! — OR republishes those upstream cards verbatim.  DeepSeek is the
+//! exception: OR lists its generic aliases as $0 (its own free-tier
+//! promotion), so native DeepSeek traffic consults a hardcoded table
+//! sourced from <https://api-docs.deepseek.com/quick_start/pricing>.
+//! Bare suffix lookups (`mercury-2`) resolve to their prefixed
+//! catalog entry via [`add_bare_aliases`].
 
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -138,9 +138,67 @@ pub async fn ensure_loaded() {
 
 /// Return the per-token pricing for `model` if `ensure_loaded` has been
 /// awaited and `model` is in the catalog.  Returns `None` otherwise.
+///
+/// Prefer [`lookup_for`] when the caller knows the wire adapter: the
+/// OpenRouter catalog is authoritative for Anthropic / OpenAI / OR
+/// itself, but DeepSeek's generic aliases are listed as $0 in OR
+/// (OpenRouter's own free-tier promotion) while the native DeepSeek
+/// API charges.  [`lookup_for`] routes to the correct source.
 pub fn lookup(model: &str) -> Option<ModelPricing> {
     CATALOG.get()?.prices.get(model).copied()
 }
+
+// region:    --- DeepSeek hardcoded pricing
+
+/// Return the official DeepSeek API per-token pricing for `model`.
+///
+/// OpenRouter lists many DeepSeek aliases as $0 (its own free-tier
+/// promotion), so the OR catalog is not authoritative for native
+/// DeepSeek traffic.  These rates come from
+/// <https://api-docs.deepseek.com/quick_start/pricing>.
+fn deepseek_price(model: &str) -> Option<ModelPricing> {
+    // Per 1M token rates divided into per-token.
+    // `deepseek-chat` / `deepseek-reasoner` are aliases for
+    // `deepseek-v4-flash` (non-thinking / thinking modes);
+    // pricing is identical between the two modes.
+    const FLASH_INPUT: f64       = 0.14 / 1_000_000.0;
+    const FLASH_OUTPUT: f64      = 0.28 / 1_000_000.0;
+    const FLASH_CACHE_READ: f64  = 0.0028 / 1_000_000.0;
+    const PRO_INPUT: f64         = 0.435 / 1_000_000.0;
+    const PRO_OUTPUT: f64        = 0.87 / 1_000_000.0;
+    const PRO_CACHE_READ: f64    = 0.003625 / 1_000_000.0;
+
+    let p = match model {
+        "deepseek-chat" | "deepseek-reasoner" | "deepseek-v4-flash" => ModelPricing {
+            input: FLASH_INPUT,
+            output: FLASH_OUTPUT,
+            cache_read: FLASH_CACHE_READ,
+            cache_write: 0.0,
+        },
+        "deepseek-v4-pro" => ModelPricing {
+            input: PRO_INPUT,
+            output: PRO_OUTPUT,
+            cache_read: PRO_CACHE_READ,
+            cache_write: 0.0,
+        },
+        _ => return None,
+    };
+    Some(p)
+}
+
+/// Return the per-token pricing for `model` from the correct source
+/// for `adapter`.  For DeepSeek this consults the official DeepSeek
+/// API rates first and falls back to the OpenRouter catalog; for
+/// every other adapter it uses the OR catalog directly.
+pub fn lookup_for(model: &str, adapter: genai::adapter::AdapterKind) -> Option<ModelPricing> {
+    if adapter == genai::adapter::AdapterKind::DeepSeek {
+        deepseek_price(model).or_else(|| lookup(model))
+    } else {
+        lookup(model)
+    }
+}
+
+// endregion: --- DeepSeek hardcoded pricing
 
 /// Return a cloned capability snapshot for `model` if the OpenRouter
 /// catalog has been fetched.  `None` for native-provider models —
