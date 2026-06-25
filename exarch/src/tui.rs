@@ -37,7 +37,7 @@ use crate::bus::{
     AgentId, Emitter, Event, FleetBus, Hunk, Inbox, InboxMsg, Kind, Mailbox, Pass, drain_pass,
 };
 use crate::cancel;
-use crate::card::{Card, Field, FieldVal, IoEvent, Mark, Role, Span as CardSpan};
+use crate::card::{Card, Field, FieldVal, IoEvent, IoKind, Mark, Role, Span as CardSpan};
 use crate::credential::CredentialStore;
 use crate::fleet::{Fleet, NO_FOCUS};
 use crate::models::{LiveSource, ModelCatalog, ModelSource};
@@ -53,6 +53,7 @@ use crossterm::{
         KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
+    style::Print,
     terminal::{
         BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
         disable_raw_mode, enable_raw_mode, size,
@@ -85,7 +86,7 @@ use std::{
 use textarea_vim::{Mode, Vim, place_native_cursor};
 
 use line::{
-    AGENT_HUES, BANNER_GOLD, BANNER_PINK, CYAN, OVERLAY_BG, PINK, PURPLE, RAIL_DIAL_W, RAIL_W,
+    AGENT_HUES, BANNER_GOLD, BANNER_PINK, CYAN, OVERLAY_BG, PINK, PURPLE, RAIL_W,
     READ_W, SLATE, bold,
 };
 use viewport::Viewport;
@@ -156,6 +157,12 @@ fn apply_terminal_modes() -> io::Result<()> {
         EnterAlternateScreen,
         EnableBracketedPaste,
         EnableMouseCapture,
+        // Any-motion mouse reporting (DECSET 1003), on top of the button
+        // tracking `EnableMouseCapture` turns on: the terminal reports
+        // pointer motion with no button held, so the hover-dial glyph can
+        // track the pointer.  Crossterm has no typed command for 1003, so
+        // the sequence is emitted raw; `restore_terminal_modes` pops it.
+        Print("\x1b[?1003h"),
     )?;
     // Without the enhancement protocol the Meta/Alt chords the emacs keymap
     // binds — M-f, M-b, M-d, M-<, M-> — never reach crossterm as ALT events.
@@ -184,6 +191,9 @@ fn restore_terminal_modes() {
     let _ = execute!(
         io::stdout(),
         Show,
+        // Pop any-motion reporting (1003) before the rest of mouse capture,
+        // balancing the raw enable in `apply_terminal_modes`.
+        Print("\x1b[?1003l"),
         DisableMouseCapture,
         DisableBracketedPaste,
         LeaveAlternateScreen
@@ -496,6 +506,12 @@ pub struct App {
     /// In-flight left-button gesture: the row pressed, the block under
     /// it, and whether the pointer has since moved (a drag, not a click).
     press: Option<Press>,
+    /// The dialable block the pointer currently rests over, if any — its
+    /// rail glyph is painted brightened so the dial target is legible
+    /// without hunting.  Tracked from pointer motion (any-motion mouse
+    /// reporting, enabled in [`apply_terminal_modes`]) and cleared when the
+    /// pointer leaves every dialable block.
+    hover: Option<usize>,
     /// How the multi-agent matrix orders its rows — toggled by `BackTab`
     /// (Shift+Tab) when more than one session is live.  A render-time
     /// projection; the `tabs`/focus model is untouched.
@@ -626,6 +642,7 @@ impl App {
             frame: None,
             selection: None,
             press: None,
+            hover: None,
             matrix_sort: MatrixSort::default(),
             vim,
             cx_pending: false,
@@ -1106,15 +1123,25 @@ impl App {
             return;
         };
         if let Some(vp) = self.viewports.get_mut(&buf.id) {
-            // Reads / greps / execs are *observations* the coalescing
-            // projection folds under their call; writes are *barriers* that
-            // end the ral block, so they push on a separate path even though
-            // both reconstruct from the same `io_group_card` span idioms.
-            for card in crate::card::io_group_card(&buf.reads, &buf.execs, &buf.greps, &[]) {
-                vp.push_io_card(card, false);
+            // One block per non-empty kind, in the fixed Read → Exec → Grep →
+            // Write order, each carrying its `IoKind` and the count it folds —
+            // the run's census tally.  Reads / greps / execs are *observations*
+            // the coalescing projection folds under their call; writes are
+            // *barriers* that end the ral block.  Each per-kind group yields one
+            // card (or none), reconstructed from the same `io_group_card` span
+            // idioms.
+            use crate::card::io_group_card;
+            for card in io_group_card(&buf.reads, &[], &[], &[]) {
+                vp.push_io_card(card, IoKind::Read, buf.reads.len() as u32);
             }
-            for card in crate::card::io_group_card(&[], &[], &[], &buf.writes) {
-                vp.push_io_card(card, true);
+            for card in io_group_card(&[], &buf.execs, &[], &[]) {
+                vp.push_io_card(card, IoKind::Exec, buf.execs.len() as u32);
+            }
+            for card in io_group_card(&[], &[], &buf.greps, &[]) {
+                vp.push_io_card(card, IoKind::Grep, buf.greps.len() as u32);
+            }
+            for card in io_group_card(&[], &[], &[], &buf.writes) {
+                vp.push_io_card(card, IoKind::Write, buf.writes.len() as u32);
             }
         }
     }
@@ -1254,6 +1281,7 @@ impl App {
             None => (Vec::new(), 0, None),
         };
         self.paint_selection(&mut lines, offset);
+        self.paint_hover(&mut lines, offset);
         self.frame = Some(FrameGeom {
             text: text_rect,
             offset,
@@ -1375,6 +1403,31 @@ impl App {
                 for span in &mut line.spans {
                     span.style = span.style.add_modifier(Modifier::REVERSED);
                 }
+            }
+        }
+    }
+
+    /// Brighten the rail glyph of the hovered dialable block so the dial
+    /// target reads as a lit button under the pointer.  Only the block's
+    /// first visible row carries the rail glyph (body rows have none), so
+    /// the reverse lands on the leading span of that row alone; a block
+    /// whose header has scrolled off the top shows no mark until it
+    /// returns into view.
+    fn paint_hover(&self, lines: &mut [Line<'static>], offset: usize) {
+        let Some(target) = self.hover else {
+            return;
+        };
+        let Some(vp) = self.viewports.get(&self.focused()) else {
+            return;
+        };
+        for (i, line) in lines.iter_mut().enumerate() {
+            let row = offset + i;
+            let head = row == 0 || vp.block_at(row - 1) != Some(target);
+            if vp.block_at(row) == Some(target) && head {
+                if let Some(glyph) = line.spans.first_mut() {
+                    glyph.style = glyph.style.add_modifier(Modifier::REVERSED);
+                }
+                break;
             }
         }
     }
@@ -1652,6 +1705,10 @@ impl App {
     /// own selection, so we never see — or fight — it.
     pub fn mouse(&mut self, me: MouseEvent) {
         self.cx_pending = false;
+        // Refresh the hover mark on every event — motion, wheel, or press —
+        // so the brightened dial glyph tracks the pointer the instant it
+        // crosses a dialable block.
+        self.hover = self.hover_block(me);
         match me.kind {
             // Over the rail glyph of a dialable block, the wheel dials the
             // block's disclosure level (up reveals, down reduces) and
@@ -1671,23 +1728,38 @@ impl App {
         }
     }
 
-    /// Map a wheel event over the rail *glyph* to its buffer row's block,
-    /// or `None` when the event falls outside the glyph cell (col 0 of the
-    /// content rect — the [`RAIL_DIAL_W`] target, not the full rail) or
-    /// past the buffer.  The trailing rail space (col 1) is inert margin:
-    /// a wheel resting there scrolls the page rather than dialing, so the
-    /// left margin never traps a scroll.
+    /// Map a wheel event over a block's rail to its buffer row's block, or
+    /// `None` when the event falls outside the rail columns (cols 0–1 of
+    /// the content rect — the [`RAIL_W`] target the click-cycle shares) or
+    /// past the buffer.  Both columns dial, so the wheel claims the same
+    /// two-wide strip the click does rather than a single-glyph needle.
     fn rail_block(&self, me: MouseEvent) -> Option<usize> {
         let frame = self.frame?;
-        let on_glyph = me.column >= frame.text.x
-            && (me.column as usize) < frame.text.x as usize + RAIL_DIAL_W
+        let on_rail = me.column >= frame.text.x
+            && (me.column as usize) < frame.text.x as usize + RAIL_W
             && me.row >= frame.text.y
             && me.row < frame.text.y + frame.text.height;
-        if !on_glyph {
+        if !on_rail {
             return None;
         }
         let row = frame.offset + (me.row - frame.text.y) as usize;
         self.viewports.get(&self.focused())?.block_at(row)
+    }
+
+    /// The dialable block under the pointer anywhere in the content rect,
+    /// or `None` over inert chrome, a non-dialable block, or past the
+    /// buffer.  Wider than [`Self::rail_block`]: the whole block row claims
+    /// the hover, so the dial glyph lights the moment the pointer reaches
+    /// the block and guides it to the rail rather than waiting for a hit.
+    fn hover_block(&self, me: MouseEvent) -> Option<usize> {
+        let frame = self.frame?;
+        if !contains(frame.text, me.column, me.row) {
+            return None;
+        }
+        let row = frame.offset + (me.row - frame.text.y) as usize;
+        let vp = self.viewports.get(&self.focused())?;
+        let idx = vp.block_at(row)?;
+        vp.block_dialable(idx).then_some(idx)
     }
 
     /// Dial the block under a rail-glyph wheel event by `delta`,

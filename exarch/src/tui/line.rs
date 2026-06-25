@@ -126,15 +126,10 @@ pub(super) const RAIL: &str = "❖ ";
 
 /// Rail width in columns: one shape glyph plus one trailing space. Every
 /// block's first content row carries a rail of this width; body rows do
-/// not, so a selection through the block copies as plain text.
+/// not, so a selection through the block copies as plain text.  The full
+/// rail is also the dial target — both the wheel and the click-cycle act
+/// on a block when the pointer sits anywhere in these two columns.
 pub(super) const RAIL_W: usize = 2;
-
-/// Width of the wheel-dialable rail target: the shape glyph alone, not
-/// the trailing space. The glyph is the cell that *bears* the mark, so
-/// the wheel dials the block's disclosure level only when it sits on it;
-/// the blank second column is inert margin that falls through to
-/// page-scroll, so resting the pointer there never traps the wheel.
-pub(super) const RAIL_DIAL_W: usize = 1;
 
 /// True when every span in `l` is empty or whitespace-only — i.e. the
 /// line carries no glyphs and reads as a vertical separator rather

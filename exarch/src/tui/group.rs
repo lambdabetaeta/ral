@@ -9,9 +9,14 @@
 //! current block, renders as its own always-visible block, and a fresh
 //! block starts after it.
 //!
-//! The block dials through three levels, with **no L0** and **L1 the
-//! floor** — a coalesced block always shows at least its live tip:
+//! The block dials through four [`Reveal`] rungs, the coalesced run being the
+//! one object that reaches the **L0 floor**:
 //!
+//! - **L0, the census** — one line tallying the run's `|>` effects by verb:
+//!   *"Ran 5 scripts, 3 binaries, read 4 files, searched 2 times."*  Scripts
+//!   are the run's calls; binaries/files/searches are its `|> exec`/`read`/
+//!   `grep` effects.  Writes never appear — a write is a barrier that ends the
+//!   run.  The run is dialed *down* to here; it never opens at L0.
 //! - **L1, the live tip** — one line: the latest *settled* call's intent and
 //!   a *vertical* sparkline (one bar per call, height ∝ its result magnitude,
 //!   left→right in call order), then that call's effects.  Earlier calls are
@@ -23,10 +28,11 @@
 //!   bar.
 //! - **L3, everything** — L2 plus each call's full ral `cmd` source.
 
-use super::block::wrap_line;
+use super::block::{Reveal, wrap_line};
 use super::highlight::highlight_ral;
 use super::line::{self, CODE_BG, RAIL_W, SLATE, push_wrapped, wash};
 use super::md;
+use crate::card::IoKind;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
@@ -43,30 +49,68 @@ pub(super) struct CallParts<'a> {
     pub(super) context: u8,
 }
 
+/// The `|>` effects a run folds, tallied by census bucket — the figures the
+/// L0 census line counts.  A write never enters an observation run (it is a
+/// barrier), so it has no bucket here; the script count is the call count, not
+/// a field.
+#[derive(Clone, Copy, Default)]
+pub(super) struct Tally {
+    /// `|> exec` — external programs run.
+    binaries: u32,
+    /// `|> read` — files read.
+    files: u32,
+    /// `|> grep` — searches.
+    searches: u32,
+}
+
+impl Tally {
+    /// Fold `n` effects of `kind` into the tally — the seam the viewport folds
+    /// each observation block through as it gathers a run.  A write is a run
+    /// barrier, never folded, so it counts toward nothing.
+    pub(super) fn add(&mut self, kind: IoKind, n: u32) {
+        match kind {
+            IoKind::Exec => self.binaries += n,
+            IoKind::Read => self.files += n,
+            IoKind::Grep => self.searches += n,
+            IoKind::Write => {}
+        }
+    }
+
+    /// Sum another call's tally into this one.
+    fn merge(&mut self, other: Tally) {
+        self.binaries += other.binaries;
+        self.files += other.files;
+        self.searches += other.searches;
+    }
+}
+
 /// One observation call as the projection renders it: the model's stated
 /// intent, the ral tool and script behind it, the call's result magnitude
 /// (drives its sparkline bar), the turn's context floor (distress on the
-/// intent line, never on a bar), and the pre-rendered, rail-less rows of
-/// the reads/greps/execs it produced.
+/// intent line, never on a bar), the census [`Tally`] of its `|>` effects, and
+/// the pre-rendered, rail-less rows of the reads/greps/execs it produced.
 pub(super) struct Call {
     intent: String,
     tool: String,
     cmd: String,
     magnitude: Option<u32>,
     context: u8,
+    tally: Tally,
     effects: Vec<Line<'static>>,
 }
 
 impl Call {
-    /// Build a call from its borrowed [`CallParts`] and the rail-less rows
-    /// of the effects that followed it in arrival order.
-    pub(super) fn new(parts: CallParts<'_>, effects: Vec<Line<'static>>) -> Self {
+    /// Build a call from its borrowed [`CallParts`], the census [`Tally`] of
+    /// the effects that followed it, and their rail-less rows — both gathered
+    /// in arrival order.
+    pub(super) fn new(parts: CallParts<'_>, tally: Tally, effects: Vec<Line<'static>>) -> Self {
         Self {
             intent: parts.intent.to_string(),
             tool: parts.tool.to_string(),
             cmd: parts.cmd.to_string(),
             magnitude: parts.magnitude,
             context: parts.context,
+            tally,
             effects,
         }
     }
@@ -105,11 +149,12 @@ pub(super) fn aggregate_magnitude(calls: &[Call]) -> Option<u32> {
 /// content row, exactly as it does for a single block.  `calls` is the
 /// run's calls in arrival order; it is never empty (a run is opened by its
 /// first call).
-pub(super) fn body(calls: &[Call], level: u8, width: usize) -> Vec<Line<'static>> {
+pub(super) fn body(calls: &[Call], level: Reveal, width: usize) -> Vec<Line<'static>> {
     match level {
-        1 => live_tip(calls, width),
-        2 => full_list(calls, false, width),
-        _ => full_list(calls, true, width),
+        Reveal::Census => census(calls, width),
+        Reveal::Summary => live_tip(calls, width),
+        Reveal::Context => full_list(calls, false, width),
+        Reveal::Full => full_list(calls, true, width),
     }
 }
 
@@ -156,6 +201,51 @@ fn live_tip(calls: &[Call], width: usize) -> Vec<Line<'static>> {
     let effect_indent = " ".repeat(RAIL_W + lead_w);
     ls.extend(indent_rows(&tip.effects, &effect_indent, width));
     ls
+}
+
+/// L0: the run reduced to one slate census line — its calls counted as
+/// scripts, its `|>` effects summed by bucket and named by verb.  Carries the
+/// leading blank every group body opens with; the viewport prepends the rail
+/// to the census row, so its continuations (a rare wrap) hang under [`RAIL_W`].
+fn census(calls: &[Call], width: usize) -> Vec<Line<'static>> {
+    let mut tally = Tally::default();
+    for call in calls {
+        tally.merge(call.tally);
+    }
+    let text = census_line(calls.len() as u32, tally);
+    let mut ls = vec![Line::default()];
+    push_wrapped(&mut ls, &text, width.saturating_sub(RAIL_W), |chunk, first| {
+        let mut spans = Vec::new();
+        if !first {
+            spans.push(Span::raw(" ".repeat(RAIL_W)));
+        }
+        spans.push(Span::styled(chunk, Style::default().fg(SLATE)));
+        Line::from(spans)
+    });
+    ls
+}
+
+/// Compose the census sentence: "Ran N scripts" always (a run has a call),
+/// then the non-empty buckets in fixed order — binaries under the shared
+/// "Ran", then the read and search verbs — each pluralised by its count.
+fn census_line(scripts: u32, tally: Tally) -> String {
+    let mut s = format!("Ran {}", count(scripts, "script", "scripts"));
+    if tally.binaries > 0 {
+        s.push_str(&format!(", {}", count(tally.binaries, "binary", "binaries")));
+    }
+    if tally.files > 0 {
+        s.push_str(&format!(", read {}", count(tally.files, "file", "files")));
+    }
+    if tally.searches > 0 {
+        s.push_str(&format!(", searched {}", count(tally.searches, "time", "times")));
+    }
+    s.push('.');
+    s
+}
+
+/// `"<n> <noun>"`, the noun pluralised by `n` — the census's count phrase.
+fn count(n: u32, singular: &str, plural: &str) -> String {
+    format!("{n} {}", if n == 1 { singular } else { plural })
 }
 
 /// L2/L3: every call as its own intent + right-aligned bar, its effects
@@ -337,6 +427,7 @@ mod tests {
                 magnitude,
                 context: 0,
             },
+            Tally::default(),
             Vec::new(),
         )
     }
@@ -356,6 +447,7 @@ mod tests {
                 magnitude: None,
                 context: 0,
             },
+            Tally::default(),
             Vec::new(),
         );
         let rows = source_rows(&c, 60);
@@ -402,7 +494,7 @@ mod tests {
     fn live_tip_pins_sparkline_and_hangs_intent() {
         let width = 100;
         let calls = vec![call("short", Some(3)), call(LONG, Some(40))];
-        let rows = nonblank(&body(&calls, 1, width));
+        let rows = nonblank(&body(&calls, Reveal::Summary, width));
 
         let head = &rows[0];
         assert!(head.starts_with("ral  "));
@@ -426,7 +518,7 @@ mod tests {
     fn live_tip_anchors_on_latest_settled_call_not_a_pending_one() {
         let width = 100;
         let calls = vec![call("settled read", Some(7)), call("pending grep", None)];
-        let rows = nonblank(&body(&calls, 1, width));
+        let rows = nonblank(&body(&calls, Reveal::Summary, width));
 
         let head = &rows[0];
         assert!(head.contains("settled read"), "tip narrates the settled call");
@@ -446,7 +538,7 @@ mod tests {
     #[test]
     fn intent_row_pins_bar_without_rail_offset() {
         let width = 100;
-        let rows = nonblank(&body(&[call(LONG, Some(12))], 2, width));
+        let rows = nonblank(&body(&[call(LONG, Some(12))], Reveal::Context, width));
 
         assert_eq!(rows[0], "ral");
         assert_eq!(UnicodeWidthStr::width(rows[1].as_str()), bar_col(width) + 1);

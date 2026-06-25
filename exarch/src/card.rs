@@ -305,6 +305,18 @@ pub enum IoEvent {
     },
 }
 
+/// Which `|>` effect a surfaced observation is — the census bucket it counts
+/// toward when a coalesced run reduces to its tally (the L0 census in
+/// [`super::tui`]).  A read, an exec, and a grep fold into a run; a write is a
+/// barrier that ends one, so it counts toward nothing inside a run.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IoKind {
+    Read,
+    Write,
+    Exec,
+    Grep,
+}
+
 /// Decode a runtime `Value` core surfaced into a structural [`IoEvent`].
 ///
 /// An io event is a `Map` whose `io` field names one of `read`/`write`/`exec`/

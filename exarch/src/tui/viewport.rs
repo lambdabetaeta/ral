@@ -14,13 +14,13 @@
 //! `user.log` — a tool call in full, script included — so the on-disk
 //! file is the durable counterpart to `events.json`.
 
-use super::block::{AgentSlot, Block, RailShape, wrap_line};
+use super::block::{AgentSlot, Block, RailShape, Reveal, wrap_line};
 use super::fidelity::{self, Fidelity};
 use super::group;
 use super::line::{READ_W, coalesced_queries, is_blank, plain, prompt_fence, size_bar};
 use super::rail::{self, RailKind};
 use crate::bus::Hunk;
-use crate::card::Card;
+use crate::card::{Card, IoKind};
 use crate::provider::Usage;
 use ratatui::text::Line;
 use std::fs;
@@ -356,12 +356,13 @@ impl Viewport {
         &self.pins
     }
 
-    /// Append a structural I/O effect card.  `write` marks a write redirect
-    /// — a barrier that ends the current ral block, like a diff; reads,
-    /// greps, and execs (`write == false`) are observations the projection
-    /// folds under their call.
-    pub(super) fn push_io_card(&mut self, card: Card, write: bool) {
-        self.push_block(Block::io_card(card, write));
+    /// Append a structural I/O effect card.  A write (`IoKind::Write`) is a
+    /// barrier that ends the current ral block, like a diff; a read, grep, or
+    /// exec is an observation the projection folds under its call, carrying the
+    /// `count` it represents for the run's census.  `kind` and `count` come
+    /// straight off the buffered effects the host grouped into this card.
+    pub(super) fn push_io_card(&mut self, card: Card, kind: IoKind, count: u32) {
+        self.push_block(Block::io_card(card, kind, count));
     }
 
     /// Append pre-rendered chrome (step header, error, banner, subagent
@@ -844,10 +845,10 @@ impl Viewport {
         anchor: usize,
         width: u16,
     ) -> Vec<Line<'static>> {
-        let level = self.blocks[anchor].level().max(1);
+        let level = self.blocks[anchor].level();
         let calls = self.group_calls(start, end);
         let mut lines = group::body(&calls, level, width as usize);
-        let open = level >= 2;
+        let open = level >= Reveal::Context;
         let magnitude = group::aggregate_magnitude(&calls);
         let rail = rail::span(RailKind::ToolCall(open), self.agent, magnitude);
         let idx = lines.iter().position(|l| !is_blank(l)).unwrap_or(0);
@@ -868,23 +869,32 @@ impl Viewport {
 
     /// Build the run's calls in arrival order: each tool call opens a
     /// [`group::Call`]; the observation cards that follow it (until the next
-    /// call) are its effects.
+    /// call) are its effects — both their rendered rows and their census
+    /// [`group::Tally`], folded by `|>` kind.
     fn group_calls(&self, start: usize, end: usize) -> Vec<group::Call> {
         let mut calls: Vec<group::Call> = Vec::new();
         let mut effects: Vec<Line<'static>> = Vec::new();
+        let mut tally = group::Tally::default();
         let mut pending: Option<group::CallParts<'_>> = None;
         for block in &self.blocks[start..end] {
             if let Some(parts) = block.call_view() {
                 if let Some(prev) = pending.take() {
-                    calls.push(group::Call::new(prev, std::mem::take(&mut effects)));
+                    calls.push(group::Call::new(
+                        prev,
+                        std::mem::take(&mut tally),
+                        std::mem::take(&mut effects),
+                    ));
                 }
                 pending = Some(parts);
             } else {
                 effects.extend(block.effect_lines());
+                if let Some((kind, count)) = block.io_tally() {
+                    tally.add(kind, count);
+                }
             }
         }
         if let Some(prev) = pending {
-            calls.push(group::Call::new(prev, effects));
+            calls.push(group::Call::new(prev, tally, effects));
         }
         calls
     }

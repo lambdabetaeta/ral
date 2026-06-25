@@ -19,7 +19,7 @@ use super::line::{self, RAIL_GLYPHS, RAIL_W, READ_W, is_blank};
 use super::md::{self, MD_INDENT};
 use super::rail::{self, RailKind};
 use crate::bus::Hunk;
-use crate::card::{Card, Mark};
+use crate::card::{Card, IoKind, Mark};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use std::time::Duration;
@@ -59,8 +59,10 @@ pub(super) enum RailShape {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum CardOrigin {
     /// A read / grep / exec the model's call produced — an observation
-    /// effect, foldable into the call's coalesced block.
-    Observation,
+    /// effect, foldable into the call's coalesced block.  Carries the `|>`
+    /// effect `kind` and the `count` it folds (a grouped card comma-joins
+    /// several of one kind), the census tally the coalesced run's L0 sums.
+    Observation { kind: IoKind, count: u32 },
     /// A write redirect — an effect, but never folded: a write ends the
     /// current ral block exactly as a diff does, and renders standalone.
     Write,
@@ -149,14 +151,51 @@ pub(super) enum BlockKind {
 /// `±N` context window for the partial views of every dialable kind.
 const N: usize = 3;
 
+/// How much of a dialable block the rail discloses, low to high — `Ord`
+/// compares the rungs.  The reachable band is `[floor, Full]`; only a `|>` run
+/// reaches `Census` (see [`Block::floor`]).  The wheel steps one rung and
+/// stops at the band edge; the click steps one rung and wraps `Full → floor`.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub(super) enum Reveal {
+    /// L0: a run's `|>` effects tallied — "Ran 5 scripts, read 4 files, …".
+    Census,
+    /// L1: the live tip, or a collapsed one-line header.
+    Summary,
+    /// L2: the summary plus [`N`] lines of context.
+    Context,
+    /// L3: the full source.
+    Full,
+}
+
+impl Reveal {
+    /// The next rung up, saturating at `Full`.
+    fn up(self) -> Self {
+        match self {
+            Self::Census => Self::Summary,
+            Self::Summary => Self::Context,
+            Self::Context | Self::Full => Self::Full,
+        }
+    }
+
+    /// The next rung down, saturating at `Census`.
+    fn down(self) -> Self {
+        match self {
+            Self::Full => Self::Context,
+            Self::Context => Self::Summary,
+            Self::Summary | Self::Census => Self::Census,
+        }
+    }
+}
+
 /// A block paired with the lines it last rendered, memoised by width.
 pub(super) struct Block {
     kind: BlockKind,
-    /// Disclosure level, `1..=3`: L1 summary, L2 summary + [`N`] lines of
-    /// context, L3 full source.  Set at construction per kind (conservative
-    /// defaults preserve today's rendering), dialed by [`Self::dial`].  Inert
-    /// on prose and chrome, which always render full.
-    level: u8,
+    /// Disclosure rung on the [`Reveal`] ladder.  Set at construction per kind
+    /// (conservative defaults preserve today's rendering), walked by
+    /// [`Self::dial`] (wheel) and [`Self::cycle`] (click) within the band
+    /// `[Self::floor, Full]`.  Inert on prose and chrome, which always render
+    /// full.
+    level: Reveal,
     /// The epistemic signal this block carries — context pressure and echo
     /// similarity, set at markdown commit (Move 7).  Sound (`0/0`) on every
     /// other kind, so only assistant prose degrades its medium.
@@ -185,8 +224,8 @@ impl Block {
             | BlockKind::Subagent { .. }
             | BlockKind::Markdown {
                 reasoning: Some(_), ..
-            } => 1,
-            _ => 3,
+            } => Reveal::Summary,
+            _ => Reveal::Full,
         };
         Self {
             kind,
@@ -243,14 +282,14 @@ impl Block {
         Self::card_with(card, CardOrigin::Surfaced)
     }
     /// A structural I/O effect: a read / grep / exec (foldable
-    /// [`CardOrigin::Observation`]) or a write ([`CardOrigin::Write`], a
-    /// barrier).  Distinct from [`Self::card`] so the projection can fold an
-    /// observation into its call yet keep a write standalone.
-    pub(super) fn io_card(card: Card, write: bool) -> Self {
-        let origin = if write {
-            CardOrigin::Write
-        } else {
-            CardOrigin::Observation
+    /// [`CardOrigin::Observation`], carrying the census `count` it folds) or a
+    /// write ([`CardOrigin::Write`], a barrier).  Distinct from [`Self::card`]
+    /// so the projection can fold an observation into its call yet keep a write
+    /// standalone.
+    pub(super) fn io_card(card: Card, kind: IoKind, count: u32) -> Self {
+        let origin = match kind {
+            IoKind::Write => CardOrigin::Write,
+            kind => CardOrigin::Observation { kind, count },
         };
         Self::card_with(card, origin)
     }
@@ -274,8 +313,8 @@ impl Block {
         Self::new(BlockKind::Query { tool, query }, Fidelity::default())
     }
 
-    /// The block's current disclosure level (`0..=3`).
-    pub(super) fn level(&self) -> u8 {
+    /// The block's current disclosure rung.
+    pub(super) fn level(&self) -> Reveal {
         self.level
     }
 
@@ -373,10 +412,23 @@ impl Block {
             self.kind,
             BlockKind::ToolCall { .. }
                 | BlockKind::Card {
-                    origin: CardOrigin::Observation,
+                    origin: CardOrigin::Observation { .. },
                     ..
                 }
         )
+    }
+
+    /// This observation's census contribution: the `|>` effect kind it
+    /// surfaces and how many it folds, for the coalesced run's L0 tally.
+    /// `None` on every block but a folded observation card.
+    pub(super) fn io_tally(&self) -> Option<(IoKind, u32)> {
+        match &self.kind {
+            BlockKind::Card {
+                origin: CardOrigin::Observation { kind, count },
+                ..
+            } => Some((*kind, *count)),
+            _ => None,
+        }
     }
 
     /// This call's projected view for the coalesced ral block: its intent
@@ -403,7 +455,7 @@ impl Block {
         match &self.kind {
             BlockKind::Card {
                 card,
-                origin: CardOrigin::Observation,
+                origin: CardOrigin::Observation { .. },
             } => line::render_card(card, 3),
             _ => Vec::new(),
         }
@@ -446,7 +498,7 @@ impl Block {
     pub(super) fn set_reasoning(&mut self, text: String, say_chars: u32) {
         if let BlockKind::Markdown { reasoning, .. } = &mut self.kind {
             *reasoning = Some(Reasoning { text, say_chars });
-            self.level = Self::LEVEL_FLOOR;
+            self.level = Reveal::Summary;
             self.cache = None;
         }
     }
@@ -497,40 +549,47 @@ impl Block {
         self.cache = None;
     }
 
-    /// The lowest level any dialable block reduces to: **L1, the summary**.
-    /// There is no per-block L0 — a block reduces to its summary, never to
-    /// the rail glyph alone.  (A tool call is the head of a coalesced ral
-    /// block, [`super::group`], whose L1 is the live tip; a diff and a
-    /// subagent reduce to their one-line headers.)
-    const LEVEL_FLOOR: u8 = 1;
-
-    /// Dial the disclosure level by `delta`, clamped to [`Self::LEVEL_FLOOR`]
-    /// `..=3`, dropping the memo when it changed so the body re-renders at the
-    /// new level.  A no-op on a non-dialable block or when already at the
-    /// clamp.
-    pub(super) fn dial(&mut self, delta: i8) {
-        if !self.dialable() {
-            return;
-        }
-        let next = (self.level as i8 + delta).clamp(Self::LEVEL_FLOOR as i8, 3) as u8;
-        if next != self.level {
-            self.level = next;
-            self.cache = None;
+    /// The lowest rung this block reduces to.  A coalesced `|>` run (anchored
+    /// on a tool call) bottoms out at [`Reveal::Census`] — its tallied effects;
+    /// every other dialable kind floors one rung higher, at [`Reveal::Summary`],
+    /// since a census of a lone diff or subagent is meaningless.
+    fn floor(&self) -> Reveal {
+        match self.kind {
+            BlockKind::ToolCall { .. } => Reveal::Census,
+            _ => Reveal::Summary,
         }
     }
 
-    /// Cycle a dialable block between its floor ([`Self::LEVEL_FLOOR`],
-    /// reduced) and L3 (revealed) — the click-on-rail affordance, preserving
-    /// today's click-to-expand.
-    pub(super) fn cycle(&mut self) {
-        if !self.dialable() {
-            return;
+    /// Dial the rung by one wheel notch — up reveals, down reduces — saturating
+    /// at the band's edges.  A no-op on a non-dialable block.
+    pub(super) fn dial(&mut self, delta: i8) {
+        if self.dialable() {
+            let next = if delta >= 0 {
+                self.level.up()
+            } else {
+                self.level.down().max(self.floor())
+            };
+            self.set_level(next);
         }
-        let next = if self.level >= 3 {
-            Self::LEVEL_FLOOR
-        } else {
-            3
-        };
+    }
+
+    /// Cycle the rung — the click affordance: one rung up, wrapping the ceiling
+    /// back to the floor, so a click steps through every reachable rung rather
+    /// than toggling the extremes.
+    pub(super) fn cycle(&mut self) {
+        if self.dialable() {
+            let next = if self.level == Reveal::Full {
+                self.floor()
+            } else {
+                self.level.up()
+            };
+            self.set_level(next);
+        }
+    }
+
+    /// Move to `next`, dropping the memo so the body re-renders — the one seam
+    /// both [`Self::dial`] and [`Self::cycle`] commit through.
+    fn set_level(&mut self, next: Reveal) {
         if next != self.level {
             self.level = next;
             self.cache = None;
@@ -565,10 +624,10 @@ impl Block {
         self.render_with(width, false, agent, lead)
     }
 
-    /// The level at which to render: the live [`Self::level`], or L3 when
-    /// `force_full` — the log path, which records the complete block.
-    fn render_level(&self, force_full: bool) -> u8 {
-        if force_full { 3 } else { self.level }
+    /// The rung at which to render: the live [`Self::level`], or [`Reveal::Full`]
+    /// when `force_full` — the log path, which records the complete block.
+    fn render_level(&self, force_full: bool) -> Reveal {
+        if force_full { Reveal::Full } else { self.level }
     }
 
     /// Build the block's body lines (rail-less) then prepend the
@@ -621,17 +680,24 @@ impl Block {
         lines
     }
 
-    /// The rail-less body at `width`, graded by `level` (`1..=3`): L1 the
-    /// one-line summary; L2 the summary plus [`N`] lines of context; L3 the
-    /// full source.  Plain prose and chrome ignore the level — they are
-    /// always full; a reasoned answer always shows its prose and grades
-    /// only the reasoning shadow folded beneath it.
-    fn body(&self, width: u16, level: u8) -> Vec<Line<'static>> {
+    /// The rail-less body at `width`, graded by `level`: [`Reveal::Summary`]
+    /// the one-line summary; [`Reveal::Context`] the summary plus [`N`] lines;
+    /// [`Reveal::Full`] the full source.  (A tool call's [`Reveal::Census`] is
+    /// rendered by [`super::group`], never here — a standalone call folds onto
+    /// its summary.)  Plain prose and chrome ignore the level — they are always
+    /// full; a reasoned answer always shows its prose and grades only the
+    /// reasoning shadow folded beneath it.
+    fn body(&self, width: u16, level: Reveal) -> Vec<Line<'static>> {
         match &self.kind {
             BlockKind::ToolCall { tool, summary, cmd } => match level {
-                3 => line::tool_call_expanded(summary, tool, cmd, width),
-                2 => line::tool_call_context(summary, tool, cmd, N, width),
-                _ => line::tool_call_collapsed(summary, tool, self.result_size, width),
+                Reveal::Full => line::tool_call_expanded(summary, tool, cmd, width),
+                Reveal::Context => line::tool_call_context(summary, tool, cmd, N, width),
+                // A standalone tool call never renders below its summary: the
+                // log tee forces full, and on screen a call is the head of a
+                // coalesced run, whose Census is rendered by `group`, not here.
+                Reveal::Summary | Reveal::Census => {
+                    line::tool_call_collapsed(summary, tool, self.result_size, width)
+                }
             },
             // Plain prose renders whole. A reasoned answer leads with the
             // deliberation header; as the level dials up the reasoning prose
@@ -647,9 +713,9 @@ impl Block {
                 reasoning: Some(r),
             } => {
                 let mut ls = line::reasoning_header(&r.text, r.say_chars);
-                if level >= 2 {
+                if level >= Reveal::Context {
                     let shadow = md::render_reasoning(&r.text, width, MD_INDENT);
-                    ls.extend(if level >= 3 {
+                    ls.extend(if level >= Reveal::Full {
                         shadow
                     } else {
                         first_rows(shadow, N)
@@ -672,12 +738,12 @@ impl Block {
                 // after it intact — the header is row 0 and the markdown's own
                 // first-rows/leading-blank logic never touches it.
                 match level {
-                    3 => ls.extend(md::render_md(text, width, MD_INDENT, self.fidelity)),
-                    2 => ls.extend(first_rows(
+                    Reveal::Full => ls.extend(md::render_md(text, width, MD_INDENT, self.fidelity)),
+                    Reveal::Context => ls.extend(first_rows(
                         md::render_md(text, width, MD_INDENT, self.fidelity),
                         N,
                     )),
-                    _ => {}
+                    Reveal::Summary | Reveal::Census => {}
                 }
                 ls
             }
@@ -688,7 +754,14 @@ impl Block {
                 if !card.has_diff() && *origin == CardOrigin::Surfaced {
                     line::render_card_framed(card, width)
                 } else {
-                    line::render_card(card, level)
+                    // A diff honours L1/L2/L3; Census never reaches a card, so
+                    // it folds onto the summary.
+                    let diff_level = match level {
+                        Reveal::Context => 2,
+                        Reveal::Full => 3,
+                        Reveal::Census | Reveal::Summary => 1,
+                    };
+                    line::render_card(card, diff_level)
                 }
             }
             // The per-block log tee renders a query alone as `tool  query`,
@@ -708,9 +781,9 @@ impl Block {
     /// the variant.  Plain chrome is ambient frame text and carries no
     /// rail.  A tool call's disclosure triangle tracks the level: `▽` once
     /// it reveals context (L2+), `▸` while reduced.
-    fn rail_kind(&self, level: u8) -> Option<RailKind> {
+    fn rail_kind(&self, level: Reveal) -> Option<RailKind> {
         match &self.kind {
-            BlockKind::ToolCall { .. } => Some(RailKind::ToolCall(level >= 2)),
+            BlockKind::ToolCall { .. } => Some(RailKind::ToolCall(level >= Reveal::Context)),
             // A summary-less query is a tool call still — the shut triangle
             // `▸`, inert (nothing to dial open).  Only the per-block log tee
             // renders a query alone and reaches this; on screen the coalesced
@@ -1018,9 +1091,17 @@ mod tests {
         );
         assert!(!block.dialable());
 
-        let full = block.body(READ_W, 3);
-        assert_eq!(block.body(READ_W, 1), full, "L1 must render full prose");
-        assert_eq!(block.body(READ_W, 2), full, "L2 must render full prose");
+        let full = block.body(READ_W, Reveal::Full);
+        assert_eq!(
+            block.body(READ_W, Reveal::Summary),
+            full,
+            "L1 must render full prose"
+        );
+        assert_eq!(
+            block.body(READ_W, Reveal::Context),
+            full,
+            "L2 must render full prose"
+        );
 
         let before = block.level();
         block.dial(-1);
@@ -1028,22 +1109,34 @@ mod tests {
         assert_eq!(block.level(), before, "gestures are inert on prose");
     }
 
-    /// Every dialable kind floors at L1 — there is no per-block L0, so a block
-    /// never reduces below its one-line summary.
+    /// A coalesced run's anchor (a tool call) floors at L0, the census; every
+    /// other dialable kind — a diff, a subagent — floors one rung higher, at
+    /// the summary.  The wheel saturates at each kind's floor.
     #[test]
-    fn dialable_kinds_floor_at_l1() {
-        let tool = Block::tool_call("ral", "read lib".into(), "read src/lib.rs".into(), 0);
-        for mut block in [tool, diff_block(), subagent_block()] {
+    fn the_floor_is_census_for_a_run_summary_otherwise() {
+        let cases = [
+            (
+                Block::tool_call("ral", "read lib".into(), "read src/lib.rs".into(), 0),
+                Reveal::Census,
+            ),
+            (diff_block(), Reveal::Summary),
+            (subagent_block(), Reveal::Summary),
+        ];
+        for (mut block, floor) in cases {
             assert!(block.dialable());
-            // Dial hard down: the level pins at the floor, never below it.
-            block.dial(-3);
-            assert_eq!(block.level(), Block::LEVEL_FLOOR);
-            assert_eq!(Block::LEVEL_FLOOR, 1);
-            // Cycling from full lands back on the floor, not L0.
-            block.dial(3);
-            assert_eq!(block.level(), 3);
+            // Each notch is one rung; dialing past the floor pins there.
+            for _ in 0..4 {
+                block.dial(-1);
+            }
+            assert_eq!(block.level(), floor);
+            // Dialing up past the ceiling pins at Full.
+            for _ in 0..4 {
+                block.dial(1);
+            }
+            assert_eq!(block.level(), Reveal::Full);
+            // From the ceiling, one click wraps straight to that same floor.
             block.cycle();
-            assert_eq!(block.level(), Block::LEVEL_FLOOR);
+            assert_eq!(block.level(), floor);
         }
     }
 
