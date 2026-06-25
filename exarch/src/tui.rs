@@ -673,8 +673,13 @@ impl App {
 
     /// Set the live `provider model` label shown in the status bar. Set
     /// once at startup and again on every `/model` switch.
-    pub fn set_status_model(&mut self, provider: &str, model: &str) {
-        self.status_model = format!("{provider} {model}");
+    /// Set the live model from the focused agent'\''s provider.  Updates the
+    /// status bar label and the context window — the denominator of the ctx%
+    /// gauge — so both follow `/model` and `TAB`.  Call at startup, after
+    /// every focus change, and after a model switch.
+    pub fn update_live_model(&mut self, lm: &LiveModel, status_provider: &str) {
+        self.status_model = format!("{status_provider} {}", lm.model);
+        self.context_window = lm.context_window;
     }
 
     /// Bind the App's inbox to the session's own queue, so the input editor,
@@ -729,7 +734,7 @@ impl App {
     /// the rebuilt session in the meantime.  `tick` then reaps the faded tabs
     /// (their viewports persist for `flush_logs`, exactly as a naturally-dead
     /// child's do).
-    pub fn clear(&mut self, info: &SessionInfo<'_>, term: &mut Term) -> io::Result<()> {
+    pub fn clear(&mut self, info: &SessionInfo<'_>, lm: &LiveModel, term: &mut Term) -> io::Result<()> {
         let root = self.root;
         // Retire every still-live non-root tab into the linger window. A tab
         // already dying keeps its earlier death instant, so a child that died
@@ -759,7 +764,7 @@ impl App {
         // A fresh root: drop queued user prompts and any stale non-human
         // deliveries (a wakeup or agent result that has not been drained).
         self.inbox.clear();
-        self.banner(term, info)
+        self.banner(term, info, lm)
     }
 
     /// Route one event to its viewport.  Born registers a pane; Died
@@ -1953,7 +1958,7 @@ impl App {
         Ok(vp.flush_log()?.to_path_buf())
     }
 
-    pub fn banner(&mut self, term: &mut Term, s: &SessionInfo<'_>) -> io::Result<()> {
+    pub fn banner(&mut self, term: &mut Term, s: &SessionInfo<'_>, lm: &LiveModel) -> io::Result<()> {
         // The wordmark + eagle: a branded splash, an image outside Bertin's
         // data variables, so it alone keeps the saturated palette and reads
         // as neon. It carries no rail — it is not a row on the plane.
@@ -1968,7 +1973,7 @@ impl App {
 
         if let Some(vp) = self.viewports.get_mut(&self.root) {
             vp.push_chrome(RailShape::Plain, splash);
-            vp.push_chrome(RailShape::Plain, line::render_card(&session_card(s), 3));
+            vp.push_chrome(RailShape::Plain, line::render_card(&session_card(s, lm), 3));
         }
         self.draw(term)
     }
@@ -1980,28 +1985,28 @@ impl App {
 /// rail-less Plain like the splash above it.  Hue is spent only where it
 /// names something: a path carries the Path identity, a `dangerous` base
 /// alarms; names and quantities stay plain ink.
-fn session_card(s: &SessionInfo<'_>) -> Card {
+fn session_card(s: &SessionInfo<'_>, lm: &LiveModel) -> Card {
     let mut rows: Vec<Field> = vec![
         meta_field("cwd", vec![meta_span(Role::Path, s.cwd)]),
-        meta_field("provider", vec![meta_span(Role::Strong, s.provider)]),
+        meta_field("provider", vec![meta_span(Role::Strong, &lm.provider)]),
     ];
 
-    let mut model_val = vec![meta_span(Role::Strong, s.model)];
-    if let Some(slug) = s.canonical_slug
-        && slug != s.model
+    let mut model_val = vec![meta_span(Role::Strong, &lm.model)];
+    if let Some(slug) = &lm.canonical_slug
+        && slug != &lm.model
     {
         model_val.push(meta_span(Role::Muted, format!(" ({slug})")));
     }
     rows.push(meta_field("model", model_val));
 
-    if let Some(ctx) = s.context_window {
+    if let Some(ctx) = lm.context_window {
         rows.push(meta_field(
             "context",
             vec![meta_plain(provider::humanize_tokens(ctx))],
         ));
     }
 
-    let max_t = match (s.max_tokens_override, s.max_output_tokens) {
+    let max_t = match (lm.max_tokens_override, lm.max_output_tokens) {
         (Some(n), _) => n.to_string(),
         (None, Some(catalog)) => {
             format!("auto (≤{})", provider::humanize_tokens(catalog as u64))
@@ -2009,7 +2014,6 @@ fn session_card(s: &SessionInfo<'_>) -> Card {
         (None, None) => "auto".into(),
     };
     rows.push(meta_field("max-tokens", vec![meta_plain(max_t)]));
-
     let base_role = if s.base == "dangerous" {
         Role::Bad
     } else {
@@ -2051,18 +2055,32 @@ fn session_card(s: &SessionInfo<'_>) -> Card {
     Card(vec![Mark::Fields { rows }])
 }
 
+#[derive(Clone)]
+pub struct LiveModel {
+    pub provider: String,
+    pub model: String,
+    pub canonical_slug: Option<String>,
+    pub max_tokens_override: Option<u32>,
+    pub context_window: Option<u64>,
+    pub max_output_tokens: Option<u32>,
+}
+
+impl LiveModel {
+    pub fn from_provider(p: &Provider) -> Self {
+        let caps = provider::caps_for(p.model());
+        LiveModel {
+            provider: p.id().label().to_string(),
+            model: p.model().to_string(),
+            canonical_slug: caps.canonical_slug,
+            max_tokens_override: p.max_tokens_override(),
+            context_window: caps.context_window,
+            max_output_tokens: caps.max_output_tokens,
+        }
+    }
+}
+
 /// Metadata shown in the startup banner.
 pub struct SessionInfo<'a> {
-    pub provider: &'a str,
-    pub model: &'a str,
-    /// Canonical catalog slug, shown after `model` when distinct.
-    pub canonical_slug: Option<&'a str>,
-    /// `None` means "auto" — genai's per-adapter default applies.
-    pub max_tokens_override: Option<u32>,
-    /// `None` for native providers (no fetched catalog).
-    pub context_window: Option<u64>,
-    /// Informational; the request-time override is what actually flies.
-    pub max_output_tokens: Option<u32>,
     pub system_size: usize,
     pub system_files: &'a [PathBuf],
     pub base: &'a str,
@@ -2071,7 +2089,6 @@ pub struct SessionInfo<'a> {
     pub scratch: &'a Path,
     pub cwd: &'a str,
 }
-
 /// A roled value span for the startup metadata matrix — names a nominal
 /// [`Role`] (the renderer binds it to a hue), never a colour.
 fn meta_span(role: Role, text: impl Into<String>) -> CardSpan {
@@ -2961,8 +2978,9 @@ pub fn run(
         vi,
     )
     .map_err(|e| format!("ratatui init: {e}"))?;
-    let status_provider = crate::oauth::provider_label(provider.subscription(), info.provider);
-    tui.app.set_status_model(&status_provider, info.model);
+    let initial_lm = LiveModel::from_provider(&provider);
+    let status_provider = crate::oauth::provider_label(provider.subscription(), &initial_lm.provider);
+    tui.app.update_live_model(&initial_lm, &status_provider);
     // Bind the App's inbox and focus to the trunk's shared handles, then build
     // the fleet: a session-lived bus over the trunk's inbox, plus the shared
     // registry and focus handle.  Input, the pending strip, async-agent
@@ -2981,7 +2999,7 @@ pub fn run(
         session.seed(s);
     }
     tui.app
-        .banner(tui.guard.term(), info)
+        .banner(tui.guard.term(), info, &initial_lm)
         .map_err(|e| e.to_string())?;
 
     // The worker thread runs the trunk via `Agent::drive`, parking on an empty
@@ -3206,6 +3224,15 @@ fn ui_loop(
             if let Some(mb) = ctx.agents.mailbox(now_focus) {
                 mb.wake();
             }
+            // Update the live model chrome to reflect the newly focused
+            // agent'\''s provider — the banner, status bar, and ctx% gauge
+            // must follow focus.
+            if let Some(ph) = ctx.agents.provider(now_focus) {
+                let p = ph.current();
+                let lm = LiveModel::from_provider(&*p);
+                let status_provider = crate::oauth::provider_label(p.subscription(), &lm.provider);
+                tui.app.update_live_model(&lm, &status_provider);
+            }
         }
     }
 }
@@ -3248,7 +3275,26 @@ fn route_submit(
                 let root = tui.app.root;
                 cancel::raise_interrupt();
                 ctx.agents.cancel(root);
-                tui.app.clear(info, tui.guard.term())?;
+                // Build a LiveModel from the focused agent'\''s provider for
+                // the banner redraw.  If the focused agent has settled (no
+                // provider), fall back to the root'\''s provider.
+                let focused = tui.app.focused();
+                let lm = ctx.agents.provider(focused)
+                    .map(|ph| LiveModel::from_provider(&*ph.current()))
+                    .or_else(|| ctx.agents.provider(root).map(|ph| LiveModel::from_provider(&*ph.current())));
+                if let Some(ref lm) = lm {
+                    tui.app.clear(info, lm, tui.guard.term())?;
+                } else {
+                    // No live provider at all — still clear, but skip banner.
+                    tui.app.clear(info, &LiveModel {
+                        provider: String::new(),
+                        model: String::new(),
+                        canonical_slug: None,
+                        max_tokens_override: None,
+                        context_window: None,
+                        max_output_tokens: None,
+                    }, tui.guard.term())?;
+                }
                 mailbox.push(InboxMsg::Command("/clear".into()));
             }
             // The worker's `ReplControl` compacts the history / returns Quit.
@@ -3531,18 +3577,22 @@ fn apply_model_switch(
             .push_error(id, "the focused agent is no longer live".to_string());
         return;
     };
+    // Capture the current provider'\''s max_tokens_override before we swap,
+    // so the new provider carries the same user override.
+    let current_override = provider.current().max_tokens_override();
     let engine = ctx.engine.clone();
     let new_provider = Arc::new(Provider::build(
         engine,
         &provider_id,
         model.clone(),
-        info.max_tokens_override,
+        current_override,
         tuning.clone(),
     ));
     let label = provider_id.label();
     let status_provider = crate::oauth::provider_label(new_provider.subscription(), label);
     provider.swap(new_provider);
-    tui.app.set_status_model(&status_provider, &model);
+    let lm = LiveModel::from_provider(&*provider.current());
+    tui.app.update_live_model(&lm, &status_provider);
     let state_dir = crate::bootstrap::project_dir(info.cwd);
     if let Err(e) = state::save(&state_dir, &state::State::new(&provider_id, &model, &tuning)) {
         tui.app
@@ -3615,7 +3665,7 @@ fn key_action(mode: KeyMode, k: &KeyEvent, enter_submits: bool) -> KeyAction {
 
 #[cfg(test)]
 mod banner_tests {
-    use super::{SessionInfo, legend_panel, line, rail, session_card};
+    use super::{LiveModel, SessionInfo, legend_panel, line, rail, session_card};
     use crate::card::{FieldVal, Mark, Role};
     use std::path::{Path, PathBuf};
 
@@ -3624,12 +3674,6 @@ mod banner_tests {
     #[allow(clippy::disallowed_methods)] // test scaffolding: a fixed literal scratch path, no path semantics to get wrong
     fn sample(base: &'static str) -> SessionInfo<'static> {
         SessionInfo {
-            provider: "anthropic",
-            model: "claude-opus-4-8",
-            canonical_slug: Some("claude-opus-4-8-20260101"),
-            max_tokens_override: None,
-            context_window: Some(200_000),
-            max_output_tokens: Some(64_000),
             system_size: 4096,
             system_files: &[],
             base,
@@ -3640,9 +3684,21 @@ mod banner_tests {
         }
     }
 
+
+    fn sample_lm() -> LiveModel {
+        LiveModel {
+            provider: "anthropic".into(),
+            model: "claude-opus-4-8".into(),
+            canonical_slug: Some("claude-opus-4-8-20260101".into()),
+            max_tokens_override: None,
+            context_window: Some(200_000),
+            max_output_tokens: Some(64_000),
+        }
+    }
+
     /// The `(label, value)` rows of the single `fields` mark the card carries.
-    fn rows(s: &SessionInfo<'_>) -> Vec<(String, FieldVal)> {
-        let card = session_card(s);
+    fn rows(s: &SessionInfo<'_>, lm: &LiveModel) -> Vec<(String, FieldVal)> {
+        let card = session_card(s, lm);
         match card.marks() {
             [Mark::Fields { rows }] => rows
                 .iter()
@@ -3665,7 +3721,7 @@ mod banner_tests {
     /// roles paths as Path, and leaves quantities as plain ink (no hue).
     #[test]
     fn session_card_orders_and_roles_fields() {
-        let rs = rows(&sample("read-only"));
+        let rs = rows(&sample("read-only"), &sample_lm());
         let labels: Vec<&str> = rs.iter().map(|(l, _)| l.as_str()).collect();
         assert_eq!(
             labels,
@@ -3696,7 +3752,7 @@ mod banner_tests {
     #[test]
     fn dangerous_base_is_the_one_field_that_earns_a_hue() {
         let base_role = |b: &'static str| {
-            let rs = rows(&sample(b));
+            let rs = rows(&sample(b), &sample_lm());
             lead_role(&rs.iter().find(|(l, _)| l == "base").unwrap().1)
         };
         assert_eq!(base_role("dangerous"), Some(Role::Bad));
@@ -3708,7 +3764,7 @@ mod banner_tests {
     /// absent or identical slug leaves the row a single span.
     #[test]
     fn model_slug_is_a_muted_suffix_only_when_distinct() {
-        let rs = rows(&sample("read-only"));
+        let rs = rows(&sample("read-only"), &sample_lm());
         let FieldVal::Inline(spans) = &rs.iter().find(|(l, _)| l == "model").unwrap().1 else {
             panic!("model is an inline value");
         };
@@ -3716,9 +3772,9 @@ mod banner_tests {
         assert_eq!(spans[1].role, Some(Role::Muted));
         assert!(spans[1].text.contains("claude-opus-4-8-20260101"));
 
-        let mut same = sample("read-only");
-        same.canonical_slug = Some("claude-opus-4-8");
-        let rs = rows(&same);
+        let mut same_lm = sample_lm();
+        same_lm.canonical_slug = Some("claude-opus-4-8".into());
+        let rs = rows(&sample("read-only"), &same_lm);
         let FieldVal::Inline(spans) = &rs.iter().find(|(l, _)| l == "model").unwrap().1 else {
             panic!("model is an inline value");
         };
@@ -3729,7 +3785,7 @@ mod banner_tests {
     /// ones read as a muted "none" rather than borrowing a hue.
     #[test]
     fn security_paths_are_roled_present_and_muted_when_absent() {
-        let rs = rows(&sample("read-only"));
+        let rs = rows(&sample("read-only"), &sample_lm());
         assert_eq!(
             lead_role(&rs.iter().find(|(l, _)| l == "extend-base").unwrap().1),
             Some(Role::Muted),
@@ -3741,7 +3797,7 @@ mod banner_tests {
         let mut s = sample("read-only");
         s.extend_base = Some(ext.as_path());
         s.restrict_files = &restr;
-        let rs = rows(&s);
+        let rs = rows(&s, &sample_lm());
         assert_eq!(
             lead_role(&rs.iter().find(|(l, _)| l == "extend-base").unwrap().1),
             Some(Role::Path)
@@ -3756,9 +3812,9 @@ mod banner_tests {
     /// each field line opens with a label cell of identical width.
     #[test]
     fn rendered_matrix_aligns_every_value_in_one_column() {
-        let card = session_card(&sample("dangerous"));
+        let card = session_card(&sample("dangerous"), &sample_lm());
         let lines = line::render_card(&card, 3);
-        let label_w = rows(&sample("dangerous"))
+        let label_w = rows(&sample("dangerous"), &sample_lm())
             .iter()
             .map(|(l, _)| l.chars().count())
             .max()

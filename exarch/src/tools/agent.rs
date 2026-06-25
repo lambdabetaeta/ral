@@ -128,9 +128,10 @@ and keeps the result addressable (e.g. the line-hash `edit` needs).  \
                     },
                     "permissions": {
                         "type": "string",
-                        "enum": ["confined", "minimal", "read-only", "reasonable", "dangerous"],
+                        "enum": ["confined", "minimal", "read-only", "edit-only", "reasonable", "dangerous"],
                         "description": "Narrow agent's permissions: confined (offline, no home \
             reads), minimal (working tree + /tmp + network), read-only (writes only to scratch), \
+            edit-only (edits working tree, no build tooling), \
             reasonable (everyday tooling), dangerous (no narrowing).",
                     },
                 },

@@ -1,17 +1,34 @@
 //! Built-in capability bases for exarch sessions.
 //!
-//! Five bake-ins are embedded from `.ral` capability scripts in
+//! Bake-ins are embedded from `.ral` capability scripts in
+//! `exarch/data/`.  Each profile is a ral script whose terminal
+//! expression is a map shaped like the argument of `grant [...] { body }`.
+//! Loading goes through [`ral_core::capability::load_capabilities_from_str`] —
+//! the same surface a `--capabilities <path>.ral` flag at the ral CLI
+//! consumes.  Two surfaces, one model.
+//!
+//! See `exarch/PROFILES.md` for the per-profile shapes and guidance
+//! on when to use each.
+//!
+//! Profiles that name `cwd:` and `tempdir:` sigils in their `fs` and
+//! `exec` entries have them resolved at session start by the freeze pass
+//! inside [`ral_core::capability::decode_capability_map`], so the
+//! per-invocation working directory is baked into the policy without
+//! exarch having to inject it dynamically.
+//!
+//! Six bake-ins are embedded from `.ral` capability scripts in
 //! `exarch/data/`, ordered loosely from no-attenuation down to tightest:
 //!
 //! - `dangerous`  — `Capabilities::root()`.  Lattice top; no attenuation.
 //! - `reasonable` — everyday tooling + standard binary dirs (default).
+//! - `edit-only`  — `reasonable` reads/exec, writes to working tree + scratch.
 //! - `read-only`  — `reasonable` reads/exec, but writes only to scratch.
 //! - `minimal`    — coreutils + cwd + /tmp + tempdir + net + chdir.
 //!   Small base for additive `--extend-base` composition.
 //! - `confined`   — build-jail shape (after BrianSwift's `confined.sb`):
 //!   tight reads/writes, no network, exec by subpath only.
 //!
-//! `minimal`, `confined`, `read-only`, and `reasonable` use `cwd:` and
+//! `minimal`, `confined`, `read-only`, `edit-only`, and `reasonable` use `cwd:` and
 //! `tempdir:` sigils in their `fs` and `exec` entries; the freeze pass
 //! inside [`ral_core::capability::decode_capability_map`] resolves them
 //! at session start, so the per-invocation working directory is baked
@@ -28,6 +45,7 @@ use ral_core::types::{Capabilities, FsPolicy, Shell};
 const MINIMAL_RAL: &str = include_str!("../../data/minimal.exarch.ral");
 const REASONABLE_RAL: &str = include_str!("../../data/reasonable.exarch.ral");
 const READ_ONLY_RAL: &str = include_str!("../../data/read-only.exarch.ral");
+const EDIT_ONLY_RAL: &str = include_str!("../../data/edit-only.exarch.ral");
 const CONFINED_RAL: &str = include_str!("../../data/confined.exarch.ral");
 const DANGEROUS_RAL: &str = include_str!("../../data/dangerous.exarch.ral");
 #[cfg(test)]
@@ -44,12 +62,13 @@ pub(super) fn resolve_base(
         "minimal" => MINIMAL_RAL,
         "reasonable" => REASONABLE_RAL,
         "read-only" => READ_ONLY_RAL,
+        "edit-only" => EDIT_ONLY_RAL,
         "confined" => CONFINED_RAL,
         "dangerous" => DANGEROUS_RAL,
         other => {
             return Err(format!(
                 "exarch: unknown base '{other}'; \
-                 expected one of: minimal, reasonable, read-only, confined, dangerous"
+                 expected one of: dangerous, reasonable, edit-only, read-only, minimal, confined"
             ));
         }
     };
@@ -118,6 +137,7 @@ mod tests {
             ("minimal", MINIMAL_RAL),
             ("reasonable", REASONABLE_RAL),
             ("read-only", READ_ONLY_RAL),
+            ("edit-only", EDIT_ONLY_RAL),
             ("confined", CONFINED_RAL),
             ("dangerous", DANGEROUS_RAL),
         ] {

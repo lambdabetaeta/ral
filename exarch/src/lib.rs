@@ -214,14 +214,7 @@ pub fn run() -> Result<(), String> {
     )
     .map_err(|e| format!("session init: {e}"))?;
 
-    let provider_caps = provider::caps_for(provider.model());
     let info = SessionInfo {
-        provider: label,
-        model: &model,
-        canonical_slug: provider_caps.canonical_slug.as_deref(),
-        max_tokens_override: provider.max_tokens_override(),
-        context_window: provider_caps.context_window,
-        max_output_tokens: provider_caps.max_output_tokens,
         system_size,
         system_files: &c.system_files,
         base: &c.base,
@@ -230,8 +223,9 @@ pub fn run() -> Result<(), String> {
         scratch: scratch.path(),
         cwd: &cwd,
     };
+    let initial_lm = tui::LiveModel::from_provider(&provider);
     if c.headless {
-        headless::run(&mut session, &info, seed, c.output_format, Arc::clone(&engine))
+        headless::run(&mut session, &info, &initial_lm, seed, c.output_format, Arc::clone(&engine))
     } else {
         tui::run(
             &mut session,
