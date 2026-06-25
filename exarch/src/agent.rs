@@ -11,10 +11,11 @@
 //! per message, and turns a nudge-worthy outcome into a self-posted
 //! [`InboxMsg::Nudge`].  No node is privileged by special-case code; the
 //! distinctions reduce to *position*: the parent-less **trunk** publishes its
-//! cancel token for the OS-signal path, and `replies`/parking fall out of the
-//! `parent`/`interactive`/`focus` predicates ([`Self::returns`],
-//! [`Self::park_mode`]).  A child's single result is delivered up its parent's
-//! mailbox by the spawn site, not here, so `drive` itself is identical for all.
+//! cancel token for the OS-signal path, holding `reply` falls out of the
+//! `interactive` predicate (via the agent's tool view from `tools_for`), and
+//! parking out of `interactive`/`focus` via `park_mode`.  A child's single
+//! result is delivered up its parent's mailbox by the spawn site, not
+//! here, so `drive` itself is identical for all.
 
 use crate::bootstrap::Scratch;
 use crate::bus::{
@@ -122,8 +123,9 @@ pub struct Agent {
     pub(crate) agents: crate::agent_registry::AgentRegistry,
     /// Live scheduled wakeups (cron / after).  A peer may self-schedule (it
     /// posts wakeups into its own inbox), so this is no longer root-only; it
-    /// is still gated by the [`ToolSet`] *schedules* axis (`--allow-schedule`),
-    /// which decides whether the self-wakeup tools are advertised at all.
+    /// is still gated by the [`Gate::Schedules`](crate::tools::Gate) axis
+    /// (`--allow-schedule`), which decides whether the self-wakeup tools are in
+    /// the agent's view at all.
     pub(crate) schedules: crate::schedule::ScheduleRegistry,
     /// Input tokens the model saw on the most recent completion — the live
     /// numerator for the context-pressure compaction trigger
