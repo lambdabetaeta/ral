@@ -8,7 +8,6 @@ use crate::cancel;
 use crate::credential::Credential;
 use crate::oauth;
 use crate::tls::STREAM_IDLE_TIMEOUT;
-use crate::tools::ToolSet;
 use clap::ValueEnum;
 use futures_util::StreamExt;
 use genai::Headers;
@@ -1306,11 +1305,11 @@ impl Provider {
     /// `agent_cancel` / `/clear` / the worker ceiling cancel it without
     /// touching the foreground request).  Two concurrent requests no longer
     /// share the one process-global slot.
-    pub fn complete<F: FnMut(&str)>(
+    pub(crate) fn complete<F: FnMut(&str)>(
         &self,
         system: &str,
         messages: Vec<ChatMessage>,
-        tools: &ToolSet,
+        tools: &[&'static dyn crate::tools::Tool],
         on_text: &mut F,
         cancel: &cancel::Token,
     ) -> Result<StepOut, ProviderError> {
@@ -1395,14 +1394,11 @@ impl Live {
         tuning: &Tuning,
         system: &str,
         messages: Vec<ChatMessage>,
-        tools: &ToolSet,
+        tools: &[&'static dyn crate::tools::Tool],
         on_text: &mut F,
         cancel: &cancel::Token,
     ) -> Result<StepOut, ProviderError> {
         self.refresh_if_stale();
-        // `ToolSet` is `Copy`, so the retry closure captures it by value
-        // and `tool_defs` consumes it fresh on every attempt.
-        let tools = *tools;
         let req_template = build_cached_request(self.adapter, system, messages);
         let mut options = ChatOptions::default()
             .with_capture_usage(true)
@@ -1714,10 +1710,9 @@ fn build_cached_request(
     ChatRequest::new(all)
 }
 
-fn tool_defs(tools: ToolSet) -> Vec<Tool> {
-    crate::tools::registry()
+fn tool_defs(tools: &[&'static dyn crate::tools::Tool]) -> Vec<Tool> {
+    tools
         .iter()
-        .filter(|t| tools.allows(t.as_ref()))
         .map(|t| {
             Tool::new(t.name())
                 .with_description(t.desc())

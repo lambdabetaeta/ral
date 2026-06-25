@@ -45,8 +45,8 @@ any remaining work in earlier calls; there is no turn after it.  If you finish \
 without calling `reply`, your parent receives nothing."
     }
 
-    fn replies(&self) -> bool {
-        true
+    fn gate(&self) -> super::Gate {
+        super::Gate::Returns
     }
 
     fn schema(&self) -> &'static Value {
@@ -113,12 +113,5 @@ mod tests {
         let s = ReplyTool.schema();
         assert_eq!(s["required"][0], "result");
         assert!(s["properties"]["result"].is_object());
-    }
-
-    /// `reply` is the one tool that flips the `replies` axis — the sole
-    /// remaining tool-set gate.
-    #[test]
-    fn reply_flips_the_reply_axis() {
-        assert!(ReplyTool.replies());
     }
 }

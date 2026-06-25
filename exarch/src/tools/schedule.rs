@@ -8,9 +8,9 @@
 //! delay); the payload is a string prompt the model acts on, not a
 //! computation.  Self-scheduling is gated behind `--allow-schedule`: an
 //! agent that can wake itself indefinitely holds real authority, so without
-//! the grant the whole family is unadvertised — the model never sees these
-//! tools at all (the [`crate::tools::ToolSet`] *schedules* axis), rather than
-//! seeing them and being refused.
+//! the grant the whole family is absent from the agent's view ([`super::Gate::Schedules`])
+//! — the model never sees these tools at all, rather than seeing them and
+//! being refused.
 
 use super::{INVALID_INPUT, Tool, invalid_input, u64_field};
 use crate::agent::Agent;
@@ -29,8 +29,8 @@ impl Tool for ScheduleTool {
         "schedule"
     }
 
-    fn schedules(&self) -> bool {
-        true
+    fn gate(&self) -> super::Gate {
+        super::Gate::Schedules
     }
 
     fn desc(&self) -> &'static str {
@@ -162,8 +162,8 @@ impl Tool for SchedulesTool {
         "schedules"
     }
 
-    fn schedules(&self) -> bool {
-        true
+    fn gate(&self) -> super::Gate {
+        super::Gate::Schedules
     }
 
     fn desc(&self) -> &'static str {
@@ -225,8 +225,8 @@ impl Tool for UnscheduleTool {
         "unschedule"
     }
 
-    fn schedules(&self) -> bool {
-        true
+    fn gate(&self) -> super::Gate {
+        super::Gate::Schedules
     }
 
     fn desc(&self) -> &'static str {

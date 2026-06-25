@@ -27,59 +27,27 @@ mod ral;
 mod reply;
 mod schedule;
 
-/// Which tools an agent advertises to the provider and may dispatch — the
-/// single source of truth for both advertisement (`provider.complete`) and
-/// enforcement ([`Agent`]'s dispatch path).
+/// The axis that gates a tool out of an agent's [`tools_for`] view.  Exactly
+/// one per tool, and mutually exclusive — a property a pair of independent
+/// booleans could not express, since no tool both returns and schedules.
 ///
-/// One axis decides membership: whether the agent **returns** a value
-/// (`reply`).  Spawning is now universal — every agent may spawn, so the tree
-/// is unbounded in depth ([[decisions/260624_uniform-agent-nodes]], superseding
-/// the depth-1 `spawns()` axis) — leaving exactly two sets:
-///
-/// - the **conversing** set (the interactive trunk): spawns, but withholds
-///   `reply`, because it converses with the user across turns and never hands
-///   a value back;
-/// - the **returning** set (everyone else — a headless trunk and every
-///   sub-agent at any depth): spawns and holds `reply`, its way of returning.
-#[derive(Clone, Copy)]
-pub struct ToolSet {
-    returns: bool,
-    schedules: bool,
-}
-
-impl ToolSet {
-    /// The conversing set (the interactive trunk): withholds `reply`.
-    /// `schedules` carries the session's self-wakeup grant (`--allow-schedule`).
-    pub(crate) fn conversing(schedules: bool) -> Self {
-        Self {
-            returns: false,
-            schedules,
-        }
-    }
-
-    /// The returning set (a headless trunk and every sub-agent): holds `reply`.
-    /// `schedules` carries the self-wakeup grant, inherited from the parent on
-    /// a fork.
-    pub(crate) fn returning(schedules: bool) -> Self {
-        Self {
-            returns: true,
-            schedules,
-        }
-    }
-
-    /// Whether this set grants self-scheduling — read by a fork to inherit the
-    /// parent's wakeup authority.
-    pub(crate) fn grants_schedule(&self) -> bool {
-        self.schedules
-    }
-
-    /// Whether `tool` is advertised and permitted under this set.  Two
-    /// orthogonal gates: a replier needs the *returns* axis; the self-wakeup
-    /// family needs the *schedules* axis (the `--allow-schedule` grant).  Every
-    /// other tool — the spawn family included — is universally allowed.
-    pub(crate) fn allows(&self, tool: &dyn Tool) -> bool {
-        (!tool.replies() || self.returns) && (!tool.schedules() || self.schedules)
-    }
+/// Membership *is* the gate: a tool absent from an agent's slice is neither
+/// advertised to the provider nor dispatchable, so there is no separate
+/// permission predicate to keep in sync.
+pub(crate) enum Gate {
+    /// Unconditionally present: `ral`, the spawn family, `fff`.
+    Always,
+    /// Present only on a **returning** agent — `reply`, the way an agent hands
+    /// a value back.  Withheld from the interactive trunk, which converses with
+    /// the user across turns and never returns, so returning is meaningless
+    /// there.  Spawning is universal ([[decisions/260624_uniform-agent-nodes]]),
+    /// so this is the only axis separating the trunk from its sub-agents.
+    Returns,
+    /// Present only under the `--allow-schedule` grant — the self-wakeup family
+    /// (`schedule`, `schedules`, `unschedule`).  An agent that can wake itself
+    /// indefinitely holds real authority, so the grant is off by default and
+    /// inherited by a fork from its parent.
+    Schedules,
 }
 
 /// One registered tool.  The registry stores `Box<dyn Tool>` and
@@ -95,21 +63,11 @@ pub(crate) trait Tool: Send + Sync {
     /// inside the impl; cheap to call.
     fn schema(&self) -> &'static Value;
 
-    /// True only for `reply` — the *returns* axis of the [`ToolSet`].  It is
-    /// held by every returning agent (a sub-agent at any depth, and a headless
-    /// trunk) and withheld only from the interactive trunk (unadvertised and
-    /// refused), which talks to the user across turns and never returns a
-    /// value, so returning-and-terminating is meaningless there.
-    fn replies(&self) -> bool {
-        false
-    }
-
-    /// True for the self-wakeup family (`schedule`, `schedules`, `unschedule`)
-    /// — the *schedules* axis of the [`ToolSet`].  Advertised and dispatched
-    /// only when the session holds the `--allow-schedule` grant; otherwise the
-    /// whole family is unadvertised (and refused on the defensive path).
-    fn schedules(&self) -> bool {
-        false
+    /// Which axis gates this tool out of an agent's view ([`tools_for`]);
+    /// [`Gate::Always`] for the unconditional majority.  Overridden by `reply`
+    /// ([`Gate::Returns`]) and the self-wakeup family ([`Gate::Schedules`]).
+    fn gate(&self) -> Gate {
+        Gate::Always
     }
 
     /// Read `input`, render the rail header, run the call, and return its
@@ -128,8 +86,9 @@ pub(crate) trait Tool: Send + Sync {
     ) -> SessionToolResult;
 }
 
-/// All registered tools, in the order they were added.  Built once.
-pub(crate) fn registry() -> &'static [Box<dyn Tool>] {
+/// Every tool, in the order they were added — the one static backing store the
+/// per-agent views ([`tools_for`]) point into.  Built once.
+fn registry() -> &'static [Box<dyn Tool>] {
     static R: OnceLock<Vec<Box<dyn Tool>>> = OnceLock::new();
     R.get_or_init(|| {
         vec![
@@ -146,12 +105,21 @@ pub(crate) fn registry() -> &'static [Box<dyn Tool>] {
     })
 }
 
-/// Look up a registered tool by name.
-pub(crate) fn find(name: &str) -> Option<&'static dyn Tool> {
+/// The tools an agent may call — a per-agent view into the static [`registry`],
+/// shaped by the two gate axes.  `returns` admits `reply`; `schedules` admits
+/// the self-wakeup family.  The result is the agent's single source of truth:
+/// it is both advertised to the provider and searched on dispatch, so a tool
+/// absent here is invisible and uncallable, with no separate predicate.
+pub(crate) fn tools_for(returns: bool, schedules: bool) -> Vec<&'static dyn Tool> {
     registry()
         .iter()
-        .find(|t| t.name() == name)
         .map(|b| b.as_ref())
+        .filter(|t| match t.gate() {
+            Gate::Always => true,
+            Gate::Returns => returns,
+            Gate::Schedules => schedules,
+        })
+        .collect()
 }
 
 /// The placeholder a malformed call passes for `display` when the JSON did
@@ -190,4 +158,44 @@ pub(super) fn u64_field(input: &Value, field: &str) -> Option<u64> {
         .as_object()
         .and_then(|o| o.get(field))
         .and_then(Value::as_u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two gate axes select tools independently: `reply` rides `returns`,
+    /// the self-wakeup family rides `schedules`, and the rest are unconditional.
+    #[test]
+    fn tools_for_gates_reply_and_the_wakeup_family() {
+        let names = |returns, schedules| {
+            tools_for(returns, schedules)
+                .iter()
+                .map(|t| t.name())
+                .collect::<Vec<_>>()
+        };
+
+        let granted = names(true, true);
+        assert!(granted.contains(&"reply"), "a returning view holds `reply`");
+        for f in ["schedule", "schedules", "unschedule"] {
+            assert!(granted.contains(&f), "a scheduling view holds `{f}`");
+        }
+        assert!(granted.contains(&"ral"), "the always-tools are present");
+
+        let withheld = names(false, false);
+        assert!(
+            !withheld.contains(&"reply"),
+            "the conversing view withholds `reply`"
+        );
+        for f in ["schedule", "schedules", "unschedule"] {
+            assert!(
+                !withheld.contains(&f),
+                "an ungranted view withholds the wakeup tool `{f}`"
+            );
+        }
+        assert!(
+            withheld.contains(&"ral"),
+            "the always-tools survive both axes off"
+        );
+    }
 }

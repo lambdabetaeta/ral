@@ -31,7 +31,6 @@ use crate::fleet::NO_FOCUS;
 use crate::nudge;
 use crate::provider::{CutShort, Provider, ProviderError, StepOut, StopReason, ToolCall};
 use crate::shell_eval;
-use crate::tools::ToolSet;
 use crate::transcript::Transcript;
 use ral_core::Shell;
 use std::io;
@@ -88,11 +87,13 @@ pub struct Agent {
     /// turn boundary, so an Esc on one turn never bleeds into the next; the
     /// trunk additionally [`publish`](cancel::publish)es it for OS signals.
     cancel: cancel::Token,
-    /// Which tools this agent advertises and may dispatch — the single
-    /// source of truth for both, read by `provider.complete` (advertisement)
-    /// and [`Self::stage`] (enforcement).  Every agent spawns; the only gate is
-    /// `reply`, withheld from the conversing (interactive) trunk.
-    tools: ToolSet,
+    /// This agent's view into the tool registry — the single source of truth
+    /// read by `provider.complete` (advertisement) and [`Self::stage`]
+    /// (dispatch).  Membership is the gate: a tool absent here is neither
+    /// advertised nor callable.  Every agent spawns; the views differ only by
+    /// `reply` (withheld from the conversing trunk) and the self-wakeup family
+    /// (the `--allow-schedule` grant).  See [`crate::tools::tools_for`].
+    tools: Vec<&'static dyn crate::tools::Tool>,
     /// A returning agent's staged return value, set by the `reply` tool's
     /// dispatch (via [`Self::set_reply`]) and lifted by [`Self::apply`] into a
     /// [`TurnOutcome::Replied`] once the current tool-call batch finishes
@@ -253,7 +254,7 @@ struct Build {
     provider: ProviderHandle,
     focus: Arc<AtomicU64>,
     interactive: bool,
-    tools: ToolSet,
+    tools: Vec<&'static dyn crate::tools::Tool>,
     /// The fleet's shared registry — fresh for the trunk, the parent's clone
     /// for a fork — so every node registers into one map.
     agents: crate::agent_registry::AgentRegistry,
@@ -360,12 +361,8 @@ impl Agent {
             interactive,
             // The interactive trunk converses and never returns, so it withholds
             // `reply`; a headless trunk is a returning agent.  Either way the
-            // session's self-wakeup grant rides the set.
-            tools: if interactive {
-                ToolSet::conversing(allow_schedule)
-            } else {
-                ToolSet::returning(allow_schedule)
-            },
+            // session's self-wakeup grant shapes the view.
+            tools: crate::tools::tools_for(!interactive, allow_schedule),
             agents: crate::agent_registry::AgentRegistry::new(),
         })?;
         agent.register_self();
@@ -456,7 +453,7 @@ impl Agent {
             // Every agent spawns now; a sub-agent returns through `reply`.
             // Self-scheduling authority is inherited: a `--allow-schedule` trunk
             // grants its descendants the same right to wake themselves.
-            tools: ToolSet::returning(self.tools.grants_schedule()),
+            tools: crate::tools::tools_for(true, self.grants_schedule()),
             // One shared fleet registry: the child registers into the same map,
             // so the tree is whole at any depth.
             agents: self.agents.clone(),
@@ -530,7 +527,7 @@ impl Agent {
             provider,
             focus: Arc::new(AtomicU64::new(NO_FOCUS)),
             interactive: false,
-            tools: ToolSet::returning(false),
+            tools: crate::tools::tools_for(true, false),
             agents: crate::agent_registry::AgentRegistry::new(),
         })?;
         agent.register_self();
@@ -1050,30 +1047,17 @@ impl Agent {
         call: ToolCall,
         emit: &Emitter,
     ) -> SessionToolResult {
-        match crate::tools::find(&call.fn_name) {
-            Some(t) if !self.tools.allows(t) => {
-                // Defensive only: a withheld tool is unadvertised, so a
-                // well-behaved model never reaches here.  `reply` is withheld
-                // from the conversing (interactive) trunk, which never returns a
-                // value; the self-wakeup family is withheld without the
-                // `--allow-schedule` grant.
-                let msg = if t.replies() {
-                    format!(
-                        "tool `{}` is not available here — you converse with the user across turns and never return a value; finish by replying to them directly",
-                        call.fn_name
-                    )
-                } else {
-                    format!(
-                        "tool `{}` is not available here — self-scheduling is off; start exarch with --allow-schedule to enable it",
-                        call.fn_name
-                    )
-                };
-                self.note_error(msg.clone(), emit);
-                SessionToolResult {
-                    id: call.call_id,
-                    content: msg,
-                }
-            }
+        // Dispatch searches this agent's own view, so a tool the agent does not
+        // hold is simply not found — there is no separate permission check.  A
+        // withheld tool (`reply` on the conversing trunk, the self-wakeup family
+        // without `--allow-schedule`) is also unadvertised, so a well-behaved
+        // model never names one here.
+        match self
+            .tools
+            .iter()
+            .find(|t| t.name() == call.fn_name)
+            .copied()
+        {
             Some(t) => t.dispatch(call.call_id, call.fn_arguments, self, provider, emit),
             None => {
                 let msg = format!("unknown tool `{}`", call.fn_name);
@@ -1094,6 +1078,15 @@ impl Agent {
     /// child's capabilities, either inherited verbatim or narrowed to a base.
     pub(crate) fn caps(&self) -> &ral_core::types::Capabilities {
         &self.caps
+    }
+
+    /// Whether this agent holds the self-wakeup family — read by [`Self::fork`]
+    /// so a child inherits the parent's `--allow-schedule` grant.  Derived from
+    /// the tool view itself, keeping it the one source of truth.
+    fn grants_schedule(&self) -> bool {
+        self.tools
+            .iter()
+            .any(|t| matches!(t.gate(), crate::tools::Gate::Schedules))
     }
 
     /// Best-effort dual-write: log the chrome line, then forward it
@@ -1507,13 +1500,6 @@ mod tests {
                 "the forked child must inherit the host builtin `{name}`"
             );
         }
-        // Spawning is universal now: a sub-agent may spawn its own children, so
-        // the delegation tree is unbounded in depth.
-        let agent = crate::tools::find("agent").expect("agent tool registered");
-        assert!(
-            child.tools.allows(agent),
-            "a sub-agent may itself spawn sub-agents"
-        );
         // The child is registered under its parent, so the cascade reaches it.
         assert_eq!(
             child.parent,
@@ -1650,34 +1636,6 @@ mod tests {
             "the final prose must not be scraped: {text:?}"
         );
         assert!(child.is_ready());
-    }
-
-    /// `reply` is held by every returning agent — a sub-agent and a (returning,
-    /// i.e. non-interactive) headless trunk — and withheld only from the
-    /// conversing (interactive) trunk, which never returns a value.
-    #[test]
-    fn reply_is_held_by_returning_agents_and_withheld_from_the_conversing_trunk() {
-        let dir = tmp("reply-gating");
-        let reply = crate::tools::find("reply").expect("reply tool registered");
-        // A `for_test` trunk is non-interactive, so it is a returning trunk and
-        // holds `reply`.
-        let root = Agent::for_test(&dir, "system").unwrap();
-        assert!(
-            root.tools.allows(reply),
-            "a returning trunk hands its result back, so it must hold `reply`"
-        );
-        // A sub-agent (fork) returns through `reply` too.
-        let child = root.fork(root.caps().clone()).expect("fork child");
-        assert!(
-            child.tools.allows(reply),
-            "a sub-agent returns through `reply`, so it must hold it"
-        );
-        // The conversing (interactive) trunk is the one non-returning agent: it
-        // withholds `reply` while still spawning.
-        assert!(
-            !ToolSet::conversing(false).allows(reply),
-            "the conversing trunk converses and never returns, so it withholds `reply`"
-        );
     }
 
     /// X12: a provider error mid-turn (e.g. "stream ended without End
