@@ -1094,6 +1094,11 @@ impl TransportKey {
 /// once and shared by every [`Provider`] on that credential.
 pub(crate) struct Transport {
     client: Client,
+    /// The wire adapter this transport speaks, resolved once at build time
+    /// from the `(id, model)` that fixed the client.  It is an intrinsic
+    /// property of the transport — the same value [`TransportKey`] keyed on —
+    /// so the request path reads it here rather than recomputing it per turn.
+    adapter: AdapterKind,
     /// The shared login cell when this credential authenticates off a ChatGPT
     /// plan; `None` for an API-key credential.  A turn refreshes through it
     /// before a request when the access token is near expiry.
@@ -1342,10 +1347,8 @@ impl Provider {
     ) -> Result<StepOut, ProviderError> {
         match &self.backend {
             Backend::Live { engine, transport } => {
-                let adapter = adapter_for_provider_model(&self.id, &self.model);
                 engine.complete(
                     transport,
-                    adapter,
                     &self.model,
                     self.max_tokens_override,
                     &self.tuning,
@@ -1374,8 +1377,7 @@ impl Provider {
     ) -> Result<SummaryOut, ProviderError> {
         match &self.backend {
             Backend::Live { engine, transport } => {
-                let adapter = adapter_for_provider_model(&self.id, &self.model);
-                engine.summarize(transport, adapter, &self.model, system, messages, max_tokens, cancel)
+                engine.summarize(transport, &self.model, system, messages, max_tokens, cancel)
             }
             Backend::Scripted(s) => s.summarize(&self.model),
         }
@@ -1391,9 +1393,10 @@ impl Transport {
             Credential::OAuth(cell) => Some(cell.clone()),
             Credential::ApiKey(_) => None,
         };
-        let (client, _adapter) = build_client(id, model, cred);
+        let (client, adapter) = build_client(id, model, cred);
         Arc::new(Self {
             client,
+            adapter,
             token_cell,
             flat_rate: id.flat_rate(),
         })
@@ -1479,7 +1482,6 @@ impl Engine {
     fn complete<F: FnMut(&str)>(
         &self,
         transport: &Transport,
-        adapter: AdapterKind,
         model: &str,
         max_tokens_override: Option<u32>,
         tuning: &Tuning,
@@ -1490,7 +1492,11 @@ impl Engine {
         cancel: &cancel::Token,
     ) -> Result<StepOut, ProviderError> {
         self.refresh_if_stale(transport);
+        let adapter = transport.adapter;
         let req_template = build_cached_request(adapter, system, messages);
+        // Resolved once: the tool set is identical across retry attempts, so
+        // the request closure clones this rather than rebuilding it per try.
+        let tool_defs = tool_defs(tools);
         let mut options = ChatOptions::default()
             .with_capture_usage(true)
             .with_capture_content(true)
@@ -1520,7 +1526,7 @@ impl Engine {
             cancel,
             async |_attempt| {
                 let mut req = req_template.clone();
-                req.tools = Some(tool_defs(tools));
+                req.tools = Some(tool_defs.clone());
                 let mut seen_any_token = false;
                 // Mirrors what `on_text` rendered, so a committed stall can
                 // commit exactly the prefix the user already saw.
@@ -1623,7 +1629,6 @@ impl Engine {
     fn summarize(
         &self,
         transport: &Transport,
-        adapter: AdapterKind,
         model: &str,
         system: &str,
         mut messages: Vec<ChatMessage>,
@@ -1631,6 +1636,7 @@ impl Engine {
         cancel: &cancel::Token,
     ) -> Result<SummaryOut, ProviderError> {
         self.refresh_if_stale(transport);
+        let adapter = transport.adapter;
         messages.push(ChatMessage::user(
             "Summarise the conversation so far concisely: \
             the user's task, what has been tried, what worked, what state the \
