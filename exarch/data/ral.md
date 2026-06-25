@@ -80,7 +80,7 @@ Every decoder also accepts its input as an explicit argument, which is how you d
   `$(name)` delimits variables from post-fixes that do not belong to them. A composite path must be one quoted word: `echo hi > "$dir/file"`.
 
 * Escapes are a fixed set (`\n`, `\r`, `\t`, `\\`, `\"`, `\$`, `\!`, `\0`, `\e`, `\xNN` for ASCII, `\u{…}`, and backslash-newline continuation).
-- Raw strings `#'…'#` are verbatim (with more hashes as needed: `##'…'##`, `###'…'###` and so on). Use these with real newlines instead of `\n`. Note that a sequence of `#` *not* followed by `'` instead marks everything to the end of the line as a comment.
+- Raw strings `#'…'#` are verbatim (with more hashes if `'#`, `'##` occur in the string, as many as needed, e.g.  `##'…'##`, `###'…'###`, …). Do not use escapes in raw strings. Note that a sequence of `#` *not* followed by `'` is a comment to the end of the line.
 - `dedent` strips the common leading indentation from a multiline string.
 - `ral` has no heredocs (`<<EOF …`). Raw strings `#'…'#` are multiline: write a file with `echo #'…'# > path`, or feed a program's stdin with `echo #'…'# | cmd`.
 
@@ -103,26 +103,23 @@ Arithmetic and Boolean expressions must be in `$[…]` blocks: `$[$x == 0]`, `$[
 
 `if` with both branches returns a value, so it can sit on the right of a `let`.
 
-## Lists, records, maps
+## Structured values
 
-    let xs = [a, b, c]                 # list — commas, not spaces
-    $xs[0]                             # 'a'
-    let r = [host: 'h', port: 80]      # record — fixed, heterogeneous fields
-    $r[host]                           # bare-key indexing
-    let [head, ...rest] = $xs          # destructuring
-    let wide = [...$xs, d, e]          # consing by spreading
-    let at_end = [d, e, ...$xs]        # appending by spreading
-    ls ...$flags ...$dirs              # …and to splice arguments
+    let xs = [a, b, c]                   # list — commas, not spaces
+    $xs[0]                               # 'a'
+    let r = [host: 'h', port: 80]        # record — fixed, heterogeneous fields
+    $r[host]                             # bare-key indexing
+    let [head, ...rest] = $xs            # destructuring
+    let wide = [...$xs, d, e]            # consing by spreading
+    let at_end = [d, e, ...$xs]          # appending by spreading
+    ls ...$flags ...$dirs                # …and to splice arguments
+    `file [bytes: ${file-info $p}[size]]
 
 Indexing `$h[key]` works in any context (pipelines, blocks, double quoted): e.g. `view-text-around $h[line] 3 < $h[file]`.
 
-A *map* is the homogeneous cousin (all values one type); only maps support `keys`, `values`, `has`, `get` (with default), `union`, `entries`. `[:]` is the empty map. 
+A map is a homogeneous record; only maps support `keys`, `values`, `has`, `get` (with default), `union`, `entries`. `[:]` is the empty map. 
 
-`range 1 11` returns the list `[1, …, 10]` (`seq` is the external coreutil, and prints bytes).
-
-## Variants and case
-
-A variant is a value tagged by a `` `tag ``, recording one of several outcomes along with some data, e.g. `` `file [bytes: 4096] `` For example, probing a path:
+A variant is a value tagged by a `` `tag ``, recording one of several outcomes along with some data, e.g. `` `file [bytes: 4096] ``:
 
     let probe = { |p|
       if    $[not !{exists $p}] { `absent }
@@ -130,7 +127,7 @@ A variant is a value tagged by a `` `tag ``, recording one of several outcomes a
       else                      { `file [bytes: !{file-info $p}[size]] }
     }
 
-`case` eliminates a variant: a tag-keyed table of handler blocks, each binding the matched tag's payload; only that label's block runs.
+`case` eliminates a variant; it accepts a table of blocks with tags as keys, and hands its record to the block:
 
     case !{probe $path} [
       `absent: { |_| "$path: not found" },
@@ -138,7 +135,10 @@ A variant is a value tagged by a `` `tag ``, recording one of several outcomes a
       `file:   { |f| "$path: file, $f[bytes] bytes" }
     ]
 
-The table must cover every tag. A nullary tag still hands its block a value — ignore it with `_`. Handlers nest: when a payload is itself a variant, match it with a `case` inside its block.
+A nullary tag still hands its block a value — ignore it with `_`. 
+
+`range 1 11` returns the list `[1, …, 10]` (`seq` is the external coreutil, and prints bytes).
+
 
 ## Failure
 
@@ -222,31 +222,40 @@ Multi-line text with awkward quotes goes through a raw string:
 
 ## Exploring
 
-- `glob 'src/**/*.rs'` — matching paths as a ral list (not stdout); spread into a command with `...!{glob …}`. Wildcards skip dotfiles; use `list-dir | filter` for those.
-- `explore-dir 2` — entries of the current directory to depth 2, `.gitignore`-aware, as a flat list of paths.
-- `grep-files 'fn \w+_test'` — recursive, ignore-aware search of the current directory (Rust regex). Each hit is a record `[file, line, text, hash]`.
+Use the following to search for files; all are `.gitignore` sensitive. Use these instead of `rg`/`find`/`ls`.
+
+- `glob 'src/**/*.rs'` — matching paths as a ral list; skips dot files. Spread into a command: `mv ...!{glob …} out/`.
+- `explore-dir n` — entries of the current directory to depth `n` as a `ral` list; `.gitignore`-aware
+- `grep-files 'fn \w+_test'` — recursive grep of the current directory (Rust regex syntax); returns `ral` list of records `[file, line, text, hash]`.
 - `list-dir`, `file-info`, `line-count`, `is-file`/`is-dir`/`exists` — structured metadata without parsing `ls`.
 
 Scope any of these with `within [dir: …]`.
 
-Prefer these to external `rg`/`find`/`ls`: each returns a ral list or record instead of stdout to reparse, and a `grep-files` hit already carries the witness hash that `edit` consumes — so search and edit are one motion. Reaching for `rg` costs a second read to recover that witness.
+For dot/ignored files you also have `rg` bundled.
 
 ## Reading and editing files
 
-- `view-text START END < PATH` shows the half-open line range `[START, END)`, each line tagged `<line-no>\t<hash>\t<text>`. Pipe from anything: `git show HEAD:f.rs | view-text 100 150`.
-- `view-text-around LINE PEEK < PATH` shows the `2*PEEK + 1` lines centred on `LINE`, tagged the same way.
+`view-text START END < PATH` shows the half-open line range `[START, END)`, each line tagged `<line-no>\t<hash>\t<text>`. Use it with files or pipe into it:
 
-The hash is a freshness witness: it identifies the line by its content and neighbourhood. Every `view-text`, `view-text-around`, and `grep-files` line carries it, as it is required to edit.
+    let tui-picker-now = view-text 100 150 < tui.rs
+    let tui-picker-yesterday = git show HEAD~1:tui.rs | view-text 100 150
+    [ 'picker-now' : $tui-picker-now, 'picker-yesterday' : $tui-picker-yesterday ]
 
-`edit PATH EDITS` applies a batch of `[HASH, NEW-TEXT]` pairs in one pass. Each pair replaces **only the unique line identified by the hash**; to replace an multiline block provide all hashes and replacement strings (one pair per line). `NEW-TEXT` is inserted verbatim, so newlines become actual newlines; pass the empty string `''` to delete a line. . Raw `#'…'#` is useful for replacements; never use interpolating double quotes for editing. All hashes resolve against the file as read before any write, so adjacent edits are safe and the edit is atomic. Example:
+`view-text-around LINE PEEK < PATH` shows the `2*PEEK + 1` lines centred on `LINE`, tagged the same way.
 
-    view-text 80 120 < src/lib.rs       # this allows you to view hashes
+The hash depends on the content of each line and its neighbours. 
+
+`edit PATH EDITS` applies a batch of edits. It accepts a list of `[HASH, NEWTEXT]` and atomically replaces each lines uniquely identified by `HASH` with `NEWTEXT` verbatim (adding newlines). It is batched because changing a line invalidates the hash of adjacent ones. Use raw strings `#'…'#` for `NEWTEXT` without any escapes. is useful for replacements; never use interpolating double quotes for editing. All hashes resolve against the file before edits:
+
+    view-text 80 120 < src/lib.rs       # view hashes
     edit 'src/lib.rs' [
       [h1b2c3, '    let n = 42
         let scaled = n * 2'],
       [h4e5f6, '    let m = 0'],
       [h7a8b9, '']
     ]
+
+Collect as many edits as possible in one call to ensure freshness.
 
 `edit` can also be used programmaticaly:
 
@@ -256,7 +265,7 @@ The hash is a freshness witness: it identifies the line by its content and neigh
 
 ## Surfacing
 
-`surface CARD` shows the user a render document on the rail. Surface your own card only when a result is worth the user seeing it (a build summary, a test matrix, a captured output). You declare both the *data* and its *level of measurement*; the host owns the appearance, so you name a role or a magnitude, never a colour.
+`surface CARD` shows the user a render document on the rail; use when a result is worth the user seeing it (a build summary, a test matrix, a captured output). Never repeat in words what you have surfaced.
 
 A card `` `card LIST-OF-MARKS` `` is an ordered stack of marks drawn top-to-bottom. There are five marks:
 
@@ -277,10 +286,4 @@ A `` `card `` may stack marks of different kinds, but within one homogeneous lis
 
 ## Help
 
-When you are unsure of the signature of something you must always call `help <name>`. This can be done as part of a turn:
-
-    let h = spawn { audit { make } }
-    let x = help 'view-text-around'
-    [view-text-around-help: $x]
-
-Many builtins are not covered above; call `help` on any of: `ask`, `watch`, `alias`/`unalias`, `source`, `use`, `shell-quote`/`shell-split`, `upper`/`lower`/`slice`, `str`, `re-split`/`re-find-match`/`re-find-matches`/`re-replace`, `resolve-path`/`cwd`/`cd`/`temp-dir`/`temp-file`, `is-link`/`is-readable`/`is-writable`/`is-empty`, `fold-lines`, `clear`/`reset`, `reduce`, `last`, `take-while`/`drop-while`, `words`, `intersection`/`difference`, `stream-cons`/`stream-nil`/`stream-take`/`stream-drop`, `map-lines`/`filter-lines`/`each-line`, `file-empty`, `par`, `ansi-…`/`styled`.
+When you are unsure of the signature of something you must always call `help <name>`. Many builtins are not covered above; call `help` on any of: `ask`, `watch`, `alias`/`unalias`, `source`, `use`, `shell-quote`/`shell-split`, `upper`/`lower`/`slice`, `str`, `re-split`/`re-find-match`/`re-find-matches`/`re-replace`, `resolve-path`/`cwd`/`cd`/`temp-dir`/`temp-file`, `is-link`/`is-readable`/`is-writable`/`is-empty`, `fold-lines`, `clear`/`reset`, `reduce`, `last`, `take-while`/`drop-while`, `words`, `intersection`/`difference`, `stream-cons`/`stream-nil`/`stream-take`/`stream-drop`, `map-lines`/`filter-lines`/`each-line`, `file-empty`, `par`, `ansi-…`/`styled`.
