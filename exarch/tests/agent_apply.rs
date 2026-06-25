@@ -16,7 +16,7 @@
 use exarch::agent::{Agent, TurnOutcome};
 use exarch::bus::{AgentId, Emitter, Kind};
 use exarch::provider::scripted::{Reply, Script};
-use exarch::provider::{Provider, ProviderError};
+use exarch::provider::{Provider, ProviderError, ProviderKind};
 use genai::chat::{ChatRole, ContentPart, ToolCall};
 use std::sync::Arc;
 use std::sync::mpsc::channel;
@@ -25,7 +25,7 @@ use std::sync::mpsc::channel;
 /// shape the live driver holds so an async `agent` worker could capture a
 /// clone.
 fn scripted(model: &str, script: Script) -> Arc<Provider> {
-    Arc::new(Provider::scripted(model, script))
+    Arc::new(Provider::scripted(model, ProviderKind::Openai, script))
 }
 
 /// Mirror the binary's pre-`main` re-exec dispatch — helper re-exec

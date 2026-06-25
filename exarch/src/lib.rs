@@ -223,9 +223,8 @@ pub fn run() -> Result<(), String> {
         scratch: scratch.path(),
         cwd: &cwd,
     };
-    let initial_lm = tui::LiveModel::from_provider(&provider);
     if c.headless {
-        headless::run(&mut session, &info, &initial_lm, seed, c.output_format, Arc::clone(&engine))
+        headless::run(&mut session, &info, &*provider, seed, c.output_format, Arc::clone(&engine))
     } else {
         tui::run(
             &mut session,

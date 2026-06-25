@@ -17,9 +17,9 @@ use crate::agent::Agent;
 use crate::bus::{AgentId, AgentOutcome, Event, FleetBus, Kind, Row, Sink, pump};
 use crate::card::{Card, FieldVal, Mark};
 use crate::fleet::Fleet;
-use crate::provider::{Engine, Usage};
+use crate::provider::{Engine, Provider, Usage};
 use std::sync::Arc;
-use crate::tui::{LiveModel, SessionInfo};
+use crate::tui::SessionInfo;
 use std::io::{self, Write};
 use std::time::Instant;
 
@@ -310,7 +310,7 @@ impl Sink for Headless {
 pub fn run(
     session: &mut Agent,
     info: &SessionInfo<'_>,
-    lm: &LiveModel,
+    p: &Provider,
     seed: Option<String>,
     format: OutputFormat,
     engine: Arc<Engine>,
@@ -318,7 +318,7 @@ pub fn run(
     let prompt = seed.ok_or_else(|| "--headless requires --prompt or --file".to_string())?;
     eprintln!(
         "exarch: provider={} model={} base={}",
-        lm.provider, lm.model, info.base
+        p.id().label(), p.model(), info.base
     );
     let json = format == OutputFormat::Json;
     let mut headless = Headless::new(json, session.id);

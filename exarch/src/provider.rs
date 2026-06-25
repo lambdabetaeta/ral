@@ -1222,10 +1222,10 @@ impl Provider {
     /// `summarize` pop their next outcome from `script` in order.  This
     /// is the seam the `tests/` harness drives [`crate::agent::Agent::apply`]
     /// through — see [`scripted::Script`].
-    pub fn scripted(model: &str, script: scripted::Script) -> Self {
+    pub fn scripted(model: &str, kind: ProviderKind, script: scripted::Script) -> Self {
         Self {
             backend: Backend::Scripted(script),
-            id: ProviderId::Famous(ProviderKind::Openai),
+            id: ProviderId::Famous(kind),
             model: model.to_string(),
             max_tokens_override: None,
             tuning: Tuning::default(),

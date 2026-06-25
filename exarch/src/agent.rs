@@ -30,7 +30,7 @@ use crate::digest::{
 use crate::event::{AgentLog, QuiesceReason, ToolResult as SessionToolResult};
 use crate::fleet::NO_FOCUS;
 use crate::nudge;
-use crate::provider::{CutShort, Provider, ProviderError, StepOut, StopReason, ToolCall};
+use crate::provider::{CutShort, Provider, ProviderError, ProviderKind, StepOut, StopReason, ToolCall};
 use crate::shell_eval;
 use crate::transcript::Transcript;
 use ral_core::Shell;
@@ -518,6 +518,7 @@ impl Agent {
         )?;
         let provider = ProviderHandle::new(Arc::new(Provider::scripted(
             "test-model",
+            ProviderKind::Openai,
             crate::provider::scripted::Script::new(),
         )));
         let agent = Self::assemble(Build {
@@ -1380,7 +1381,7 @@ mod tests {
 
     /// A scripted provider behind the `Arc` the turn driver threads.
     fn scripted(model: &str, script: Script) -> Arc<Provider> {
-        Arc::new(Provider::scripted(model, script))
+        Arc::new(Provider::scripted(model, ProviderKind::Openai, script))
     }
 
     /// A nullary builtin whose body panics — stands in for any Rust panic
