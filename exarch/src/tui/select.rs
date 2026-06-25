@@ -2,7 +2,7 @@
 //! character-range highlighting.
 use super::line::{RAIL_GLYPHS, RAIL_W, plain};
 use ratatui::{
-    style::{Modifier, Style},
+    style::Modifier,
     text::{Line, Span},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};

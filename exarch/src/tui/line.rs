@@ -1598,9 +1598,10 @@ mod tests {
         l.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
-    /// A diff row lifts its *changed* word: the emphasised segment renders
-    /// bold in the hot hue while the unchanged remainder is dimmed in the base
-    /// hue, and the gutter (line number + sign) leads the row.
+    /// A diff row lifts its *changed* word: the emphasised segment renders as
+    /// a bold white-on-hot highlight block while the unchanged remainder is
+    /// dimmed in the base hue, and the gutter (line number + sign) leads the
+    /// row.
     #[test]
     fn diff_row_lifts_the_changed_word() {
         let row = |emph: &str, hot_word: &str| {
@@ -1628,12 +1629,14 @@ mod tests {
                 .unwrap_or_else(|| panic!("a `{word}` span"))
                 .style
         };
-        // The deletion reads `- the quick brown fox`; only `brown` is hot.
+        // The deletion reads `- the quick brown fox`; only `brown` is hot,
+        // lifted as a bold white-on-hot block.
         assert!(text(&ls[0]).contains("- the quick brown fox"));
         let brown = span(&ls[0], "brown");
-        assert_eq!(brown.fg, Some(RED_HOT));
+        assert_eq!(brown.fg, Some(Color::White));
+        assert_eq!(brown.bg, Some(RED_HOT));
         assert!(brown.add_modifier.contains(Modifier::BOLD));
-        // Its unchanged neighbours are dimmed in the base red (same-style
+        // Its unchanged neighbours are dimmed in the base hot-red (same-style
         // words coalesce, so the prefix lands as one `the quick ` span).
         let quick = ls[0]
             .spans
@@ -1641,11 +1644,12 @@ mod tests {
             .find(|s| s.content.contains("quick"))
             .expect("the unchanged prefix")
             .style;
-        assert_eq!(quick.fg, Some(RED));
+        assert_eq!(quick.fg, Some(RED_HOT));
         assert!(quick.add_modifier.contains(Modifier::DIM));
-        // The insertion lifts `red` in the lime-hot hue.
+        // The insertion lifts `red` as a bold white-on-lime-hot block.
         let red = span(&ls[1], "red");
-        assert_eq!(red.fg, Some(LIME_HOT));
+        assert_eq!(red.fg, Some(Color::White));
+        assert_eq!(red.bg, Some(LIME_HOT));
         assert!(red.add_modifier.contains(Modifier::BOLD));
     }
 
