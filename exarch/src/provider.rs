@@ -1069,14 +1069,24 @@ enum Backend {
     Scripted(scripted::Script),
 }
 
-/// Opaque key for a credential — just the label for now; later it
-/// disambiguates transports when several credentials are live.
+/// Identifies a cached transport by the two things that fix a genai client:
+/// the credential (its label) and the wire `adapter`.  An OpenAI key spans
+/// both adapters — `gpt-4o` speaks chat completions, `gpt-5` the Responses API
+/// — so they must not share one client even though they share a credential;
+/// every other provider resolves a single, model-independent adapter and so
+/// keeps one entry per credential.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct TransportKey(String);
+pub(crate) struct TransportKey {
+    cred: String,
+    adapter: AdapterKind,
+}
 
 impl TransportKey {
-    fn for_id(id: &ProviderId) -> Self {
-        Self(id.label().to_string())
+    fn for_selection(id: &ProviderId, model: &str) -> Self {
+        Self {
+            cred: id.label().to_string(),
+            adapter: adapter_for_provider_model(id, model),
+        }
     }
 }
 
@@ -1423,15 +1433,16 @@ impl Engine {
     }
 
     /// The transport for `cred` bound to `id`+`model`, building and caching it
-    /// on first use.  One client per credential, deduped by [`TransportKey`],
-    /// so a `/model` re-selection onto an already-warmed credential — or a new
-    /// agent on it — reuses the client.  Touched only on this cold warm path;
-    /// the hot path holds the returned `Arc` directly.
+    /// on first use.  One client per credential and wire adapter, deduped by
+    /// [`TransportKey`], so a `/model` re-selection onto an already-warmed
+    /// (credential, adapter) — or a new agent on it — reuses the client.
+    /// Touched only on this cold warm path; the hot path holds the returned
+    /// `Arc` directly.
     fn transport_for(&self, id: &ProviderId, model: &str, cred: &Credential) -> Arc<Transport> {
         self.transports
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .entry(TransportKey::for_id(id))
+            .entry(TransportKey::for_selection(id, model))
             .or_insert_with(|| Transport::build(id, model, cred))
             .clone()
     }

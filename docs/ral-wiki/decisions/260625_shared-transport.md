@@ -24,7 +24,7 @@ chrome at the focused agent's live provider while it is there.
 | Piece | Per-agent? | Cost |
 |---|---|---|
 | `tokio::runtime::Runtime` (multi-thread, `make_runtime` `provider.rs:1094`) | **No** — process-wide | A worker-thread pool per instance |
-| `client` (`build_client` `provider.rs:1134`) | Per credential, not per agent — client binds auth, not the model; the model rides each request (`t.model.model_name` `1153`); the adapter is resolved dynamically from the model at request time | One client serves every model of a credential |
+| `client` (`build_client` `provider.rs:1134`) | Per credential *and wire adapter*, not per agent — the client binds auth and its adapter; the model rides each request (`t.model.model_name` `1153`) | One client per (credential, adapter); an OpenAI key spans both adapters, every other provider keeps one |
 | `cache_key` (`fresh_cache_key` `provider.rs:1090`) | **No** — per-process routing hint | — |
 | `token_cell` `Arc<Mutex<OAuthToken>>` | **No** — per-login, shared by clone | — |
 | `flat_rate` | tracks the credential | — |
@@ -59,11 +59,16 @@ struct Transport {
 }
 ```
 
-`TransportKey` is `(credential_hash, endpoint)` — the two things that actually
-determine a genai client. The adapter is *not* stored in `Transport`: it is
-resolved dynamically from the model name at request time via
+`TransportKey` is `(credential, adapter)` — the two things that actually fix a
+genai client, which binds both its auth and (via `with_adapter_kind`) its wire
+adapter. Most providers resolve a single, model-independent adapter per
+credential, so the map holds one entry each; an OpenAI key is the exception —
+`gpt-4o` speaks chat completions and `gpt-5` the Responses API — and so warms one
+client per adapter, never sharing a chat-pinned client with a Responses model.
+The adapter is *not* stored in `Transport`'s body, and the request-shaping
+adapter is still recomputed from the model at request time via
 `adapter_for_provider_model`, so the engine carries no per-model map and needs no
-update when a new model appears. One client per credential, deduped.
+update when a new model appears.
 
 ### `Provider` — per agent, cheap, the existing hot-swappable handle's payload
 
