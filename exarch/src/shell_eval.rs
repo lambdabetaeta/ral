@@ -868,12 +868,12 @@ edit $hits[0][file] [[$hits[0][hash], 'REPLACED']]"#
         assert!(
             matches!(
                 hunk.rows.as_slice(),
-                [Row::Context(a), Row::Del(d), Row::Add(b), Row::Context(o)]
-                    if a == "alpha"
-                        && d == "unique target line"
-                        && b == "REPLACED"
-                        && o == "omega"
-            ),
+                [Row::Context(_), Row::Del(_), Row::Add(_), Row::Context(_)]
+            ) && hunk
+                .rows
+                .iter()
+                .map(Row::text)
+                .eq(["alpha", "unique target line", "REPLACED", "omega"].map(String::from)),
             "rows must be context/del/add/context with literal text, got {:?}",
             hunk.rows
         );

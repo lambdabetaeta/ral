@@ -34,6 +34,7 @@ libc       = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 clap       = { workspace = true }
+shlex      = { workspace = true }
 ratatui      = { version = "0.30", features = ["unstable-rendered-line-info"] }
 crossterm    = { version = "0.29", features = ["bracketed-paste"] }
 pulldown-cmark = { version = "0.13", default-features = false }
@@ -59,7 +60,7 @@ getrandom  = "0.2"
 # diff (original vs final) and emits a single grouped-hunk card.  Default
 # features only — `from_lines`/`grouped_ops`/`iter_changes` are line-level;
 # `inline`/`unicode`/`bytes` are not pulled in.
-similar    = "2"
+similar    = { version = "2", features = ["inline", "unicode"] }
 # Calendar arithmetic for scheduled-wakeup cron evaluation (next occurrence
 # in the host-local timezone, DST-aware).  Already compiled in transitively
 # via ral-core -> uu_date -> jiff-icu -> jiff; declaring it directly resolves

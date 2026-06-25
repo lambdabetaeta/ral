@@ -841,14 +841,52 @@ pub struct Hunk {
     pub rows: Vec<Row>,
 }
 
-/// One row of a [`Hunk`]'s unified line list: unchanged context, a removed
-/// line, or an inserted line.  Line-level only — no inline word spans.
+/// One run of a diff row's text: a contiguous slice flagged `emph` when it is
+/// the part that actually changed against the row's paired line — the
+/// intra-line word diff `similar` computes.  A context row, and the unchanged
+/// stretches that surround a change on a del/add row, carry `emph: false`.
 #[derive(Clone, Debug, Serialize)]
-#[serde(tag = "tag", content = "text", rename_all = "snake_case")]
+pub struct Seg {
+    pub emph: bool,
+    pub text: String,
+}
+
+impl Seg {
+    /// A whole, unemphasised run — the shape a context row carries and the
+    /// default a plainly-constructed del/add row falls back to.
+    pub fn plain(text: impl Into<String>) -> Self {
+        Self {
+            emph: false,
+            text: text.into(),
+        }
+    }
+}
+
+/// One row of a [`Hunk`]'s unified line list: unchanged context, a removed
+/// line, or an inserted line.  Each carries its text as a run of [`Seg`]ments
+/// so a del/add can mark the words that changed against its paired line; a
+/// context row is a single unemphasised segment.
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "tag", content = "segs", rename_all = "snake_case")]
 pub enum Row {
-    Context(String),
-    Del(String),
-    Add(String),
+    Context(Vec<Seg>),
+    Del(Vec<Seg>),
+    Add(Vec<Seg>),
+}
+
+impl Row {
+    /// The row's segments, whatever its kind.
+    pub fn segs(&self) -> &[Seg] {
+        match self {
+            Row::Context(s) | Row::Del(s) | Row::Add(s) => s,
+        }
+    }
+
+    /// The row's full text — its segments concatenated, dropping the
+    /// inline-emphasis distinction (the plain-text/headless rendering).
+    pub fn text(&self) -> String {
+        self.segs().iter().map(|s| s.text.as_str()).collect()
+    }
 }
 
 /// A run-scoped usage accumulator.  Where a [`Transcript`] is **per-session**

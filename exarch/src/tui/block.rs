@@ -1052,7 +1052,7 @@ fn words(spans: &[Span<'static>]) -> Vec<(Vec<(String, Style)>, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bus::Row;
+    use crate::bus::{Row, Seg};
 
     fn plain(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
@@ -1065,7 +1065,10 @@ mod tests {
     fn diff_block() -> Block {
         let hunks = vec![Hunk {
             start: 1,
-            rows: vec![Row::Add("a new line".into()), Row::Add("another".into())],
+            rows: vec![
+                Row::Add(vec![Seg::plain("a new line")]),
+                Row::Add(vec![Seg::plain("another")]),
+            ],
         }];
         Block::patch("src/lib.rs".into(), hunks)
     }

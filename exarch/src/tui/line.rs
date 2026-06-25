@@ -9,7 +9,7 @@
 
 use super::block::wrap_line;
 use super::highlight::highlight_ral;
-use crate::bus::{Hunk, Row};
+use crate::bus::{Hunk, Row, Seg};
 use crate::card::{Card, Field as CardField, FieldVal, Mark, Measure, Role, Span as CardSpan};
 use crate::event::ProviderErrorRecord;
 use crate::provider;
@@ -37,6 +37,11 @@ pub(super) const PURPLE: Color = Color::Rgb(175, 145, 210);
 pub(super) const ORANGE: Color = Color::Rgb(215, 145, 115);
 pub(super) const RED: Color = Color::Rgb(215, 110, 125);
 pub(super) const SLATE: Color = Color::Rgb(140, 150, 170);
+/// Brighter siblings of [`LIME`]/[`RED`] for the *changed* run of a diff row —
+/// the inline word-diff emphasis (rendered bold), set against the dimmed base
+/// hue of the row's unchanged remainder.
+pub(super) const LIME_HOT: Color = Color::Rgb(196, 240, 182);
+pub(super) const RED_HOT: Color = Color::Rgb(242, 142, 158);
 /// The pending-prompt band — the raised, faintly cool fill behind the
 /// queued-prompt strip in the input area ([`queued_prompt`]), a "your text,
 /// still queued" affordance.  The *committed* prompt echo in the transcript
@@ -721,59 +726,84 @@ fn hunk_max_lineno(h: &Hunk) -> u32 {
 /// exists in both files), a deletion keeps its pre-edit (old) number, an
 /// insertion takes its post-edit (new) number.  This is the numbering
 /// invariant the diff shows — removed rows in red `-`, added rows in lime
-/// `+`, context in slate.
+/// `+`, context in slate, each row's *changed* words lifted brighter (see
+/// [`push_gutter_row`]).
 fn push_hunk(ls: &mut Vec<Line<'static>>, h: &Hunk, gutter: usize) {
     let (mut old, mut new) = (h.start, h.start);
     for row in &h.rows {
         match row {
-            Row::Context(line) => {
-                push_gutter_row(ls, gutter, new, ' ', line, SLATE);
+            Row::Context(segs) => {
+                push_gutter_row(ls, gutter, new, ' ', segs, SLATE, None);
                 old += 1;
                 new += 1;
             }
-            Row::Del(line) => {
-                push_gutter_row(ls, gutter, old, '-', line, RED);
+            Row::Del(segs) => {
+                push_gutter_row(ls, gutter, old, '-', segs, RED, Some(RED_HOT));
                 old += 1;
             }
-            Row::Add(line) => {
-                push_gutter_row(ls, gutter, new, '+', line, LIME);
+            Row::Add(segs) => {
+                push_gutter_row(ls, gutter, new, '+', segs, LIME, Some(LIME_HOT));
                 new += 1;
             }
         }
     }
 }
 
-/// Append one diff row — a two-column indent, a right-aligned line number
-/// in [`SLATE`], then a `<sign> text` body in `color` — wrapping the text
-/// to [`READ_W`] so long source lines fold onto continuation rows instead
-/// of clipping.  The number and sign sit on the first wrapped chunk only;
-/// continuation chunks blank both and align under the text column.  An
-/// empty `line` still emits a bare marker row so the diff stays faithful
-/// to the input.
+/// Append one diff row — a two-column indent, a right-aligned line number in
+/// [`SLATE`], the `<sign> ` marker in the row's `base` hue, then the row's
+/// segmented body — wrapping the body to [`READ_W`] so long source lines fold
+/// onto continuation rows instead of clipping.  The number and sign sit on the
+/// first wrapped row only; continuations blank both and align under the body
+/// column.  An empty body still emits a bare marker row so the diff stays
+/// faithful to the input.
+///
+/// `hot` is the inline-emphasis colour for a del/add (`None` for context): an
+/// emphasised segment — the bit `similar` flagged as actually changed — is
+/// painted bold in `hot`, the unchanged remainder dimmed in `base`, so the eye
+/// lands on the edit within the line.
 fn push_gutter_row(
     ls: &mut Vec<Line<'static>>,
     gutter: usize,
     lineno: u32,
     sign: char,
-    line: &str,
-    color: Color,
+    segs: &[Seg],
+    base: Color,
+    hot: Option<Color>,
 ) {
     // Body width: readable width minus the 2-col indent, the gutter, its
     // trailing space, and the 2-col "<sign> " marker, floored so
     // pathological widths wrap.
     let body_w = (READ_W as usize).saturating_sub(2 + gutter + 1 + 2).max(8);
-    push_wrapped(ls, line, body_w, |chunk, first| {
-        let (num, marker) = if first {
+    // Each segment painted by its emphasis: a changed run bold in `hot`, the
+    // rest dimmed in `base`; a context row (no `hot`) reads flat in `base`.
+    let body: Vec<Span<'static>> = segs
+        .iter()
+        .filter(|s| !s.text.is_empty())
+        .map(|s| {
+            let style = match (hot, s.emph) {
+                (Some(h), true) => Style::default().fg(h).add_modifier(Modifier::BOLD),
+                (Some(_), false) => Style::default().fg(base).add_modifier(Modifier::DIM),
+                (None, _) => Style::default().fg(base),
+            };
+            Span::styled(s.text.clone(), style)
+        })
+        .collect();
+    // Word-wrap the styled body, then prepend the gutter to each wrapped row:
+    // the real number + sign on the first, blanks on continuations.
+    for (i, wrapped) in wrap_line(&Line::from(body), body_w).into_iter().enumerate() {
+        let (num, marker) = if i == 0 {
             (format!("{lineno:>gutter$}"), format!("{sign} "))
         } else {
             (" ".repeat(gutter), "  ".to_string())
         };
-        Line::from(vec![
+        let mut spans = vec![
             Span::raw("  "),
             Span::styled(format!("{num} "), Style::default().fg(SLATE)),
-            Span::styled(format!("{marker}{chunk}"), Style::default().fg(color)),
-        ])
-    });
+            Span::styled(marker, Style::default().fg(base)),
+        ];
+        spans.extend(wrapped.spans);
+        ls.push(Line::from(spans));
+    }
 }
 
 // ── Card rendering ───────────────────────────────────────────────────────────
@@ -1566,6 +1596,57 @@ mod tests {
 
     fn text(l: &Line<'static>) -> String {
         l.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// A diff row lifts its *changed* word: the emphasised segment renders
+    /// bold in the hot hue while the unchanged remainder is dimmed in the base
+    /// hue, and the gutter (line number + sign) leads the row.
+    #[test]
+    fn diff_row_lifts_the_changed_word() {
+        let row = |emph: &str, hot_word: &str| {
+            vec![
+                Seg::plain("the quick "),
+                Seg {
+                    emph: true,
+                    text: hot_word.into(),
+                },
+                Seg::plain(emph),
+            ]
+        };
+        let h = Hunk {
+            start: 1,
+            rows: vec![Row::Del(row(" fox", "brown")), Row::Add(row(" fox", "red"))],
+        };
+        let mut ls = Vec::new();
+        push_hunk(&mut ls, &h, 3);
+        assert_eq!(ls.len(), 2, "one del row, one add row");
+
+        let span = |l: &Line<'static>, word: &str| {
+            l.spans
+                .iter()
+                .find(|s| s.content == word)
+                .unwrap_or_else(|| panic!("a `{word}` span"))
+                .style
+        };
+        // The deletion reads `- the quick brown fox`; only `brown` is hot.
+        assert!(text(&ls[0]).contains("- the quick brown fox"));
+        let brown = span(&ls[0], "brown");
+        assert_eq!(brown.fg, Some(RED_HOT));
+        assert!(brown.add_modifier.contains(Modifier::BOLD));
+        // Its unchanged neighbours are dimmed in the base red (same-style
+        // words coalesce, so the prefix lands as one `the quick ` span).
+        let quick = ls[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("quick"))
+            .expect("the unchanged prefix")
+            .style;
+        assert_eq!(quick.fg, Some(RED));
+        assert!(quick.add_modifier.contains(Modifier::DIM));
+        // The insertion lifts `red` in the lime-hot hue.
+        let red = span(&ls[1], "red");
+        assert_eq!(red.fg, Some(LIME_HOT));
+        assert!(red.add_modifier.contains(Modifier::BOLD));
     }
 
     /// A surfaced general card frames as a closed box: a `╭…╮` top rule with

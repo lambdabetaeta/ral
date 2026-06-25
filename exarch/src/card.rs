@@ -16,9 +16,10 @@
 //! is correct by construction.  See
 //! `docs/ral-wiki/decisions/260619_surface-carries-documents.md`.
 
-use crate::bus::{Hunk, Row};
+use crate::bus::{Hunk, Row, Seg};
 use ral_core::Value as RalValue;
 use serde::Serialize;
+use std::borrow::Cow;
 
 /// The closed nominal role set — the *selective* (identity) channel a
 /// [`Span`] may carry.  The renderer holds the one binding table mapping
@@ -390,12 +391,21 @@ pub fn io_card(event: &IoEvent) -> Card {
 /// command degrades to plain ink).  Shared by [`io_card`] (which frames it
 /// with the prompt and status) and [`io_group_card`] (which comma-joins
 /// several, dropping the per-event status — see its docs).
+///
+/// The surfaced `argv` is post-shell — word-split, quotes already consumed —
+/// so each token is re-quoted by [`shlex::try_quote`] *only* where the shell
+/// would otherwise reparse it.  A clean token rides bare (`ls README.md`); one
+/// carrying a space, a glob, or other shell metacharacter is re-wrapped, so
+/// the line round-trips back to a runnable command rather than a lie the shell
+/// would word-split differently.  `try_quote`'s sole error is an interior nul,
+/// which no real argv carries, so that degrades to the raw token.
 fn exec_cmd_spans(argv: &[String]) -> Vec<Span> {
+    let quote = |t: &str| shlex::try_quote(t).map_or_else(|_| t.to_string(), Cow::into_owned);
     match argv.split_first() {
         Some((prog, args)) => {
-            let mut spans = vec![span(Role::Path, prog)];
+            let mut spans = vec![span(Role::Path, &quote(prog))];
             for arg in args {
-                spans.push(span_plain(&format!(" {arg}")));
+                spans.push(span_plain(&format!(" {}", quote(arg))));
             }
             spans
         }
@@ -876,15 +886,27 @@ fn decode_hunk(m: &ral_core::types::Map) -> Hunk {
     }
 }
 
-/// Decode one row record: its `tag` (`context` / `del` / `add`) and `text`.
-/// An unrecognized or missing tag degrades to context — the row is never
-/// dropped or panicked on, so the whole diff still renders.
+/// Decode one row record: its `tag` (`context` / `del` / `add`) and its
+/// `segs` list.  An unrecognized or missing tag degrades to context — the row
+/// is never dropped or panicked on, so the whole diff still renders.
 fn decode_row(m: &ral_core::types::Map) -> Row {
-    let text = str_field(m, "text").unwrap_or_default();
+    let segs = match m.get("segs") {
+        Some(RalValue::List(items)) => items.iter().filter_map(map_of).map(decode_seg).collect(),
+        _ => Vec::new(),
+    };
     match str_field(m, "tag").as_deref() {
-        Some("del") => Row::Del(text),
-        Some("add") => Row::Add(text),
-        _ => Row::Context(text),
+        Some("del") => Row::Del(segs),
+        Some("add") => Row::Add(segs),
+        _ => Row::Context(segs),
+    }
+}
+
+/// Decode one segment record: its `emph` flag (defaulting to unemphasised)
+/// and `text`.
+fn decode_seg(m: &ral_core::types::Map) -> Seg {
+    Seg {
+        emph: matches!(m.get("emph"), Some(RalValue::Bool(true))),
+        text: str_field(m, "text").unwrap_or_default(),
     }
 }
 
@@ -985,6 +1007,18 @@ mod tests {
     fn list(items: Vec<RalValue>) -> RalValue {
         RalValue::list(items)
     }
+    /// A diff-row record: a `tag` and a one-segment `segs` list carrying
+    /// `text` (unemphasised) — the shape [`decode_row`] lifts back into a
+    /// [`Row`].
+    fn seg_row(tag: &str, text: &str) -> RalValue {
+        RalValue::map(vec![
+            ("tag".into(), s(tag)),
+            (
+                "segs".into(),
+                list(vec![RalValue::map(vec![("text".into(), s(text))])]),
+            ),
+        ])
+    }
 
     /// A full card with one of every mark decodes structurally, in order.
     #[test]
@@ -1011,14 +1045,8 @@ mod tests {
                             (
                                 "rows".into(),
                                 list(vec![
-                                    RalValue::map(vec![
-                                        ("tag".into(), s("del")),
-                                        ("text".into(), s("x")),
-                                    ]),
-                                    RalValue::map(vec![
-                                        ("tag".into(), s("add")),
-                                        ("text".into(), s("y")),
-                                    ]),
+                                    seg_row("del", "x"),
+                                    seg_row("add", "y"),
                                 ]),
                             ),
                         ])]),
@@ -1050,7 +1078,8 @@ mod tests {
         assert!(matches!(&marks[0], Mark::Text { spans } if spans[0].role == Some(Role::Strong)));
         assert!(matches!(&marks[1], Mark::Diff { path, hunks }
             if path == "a.rs" && hunks[0].start == 7
-                && matches!(hunks[0].rows.as_slice(), [Row::Del(d), Row::Add(a)] if d == "x" && a == "y")));
+                && matches!(hunks[0].rows.as_slice(), [Row::Del(_), Row::Add(_)])
+                && hunks[0].rows.iter().map(Row::text).eq(["x", "y"].map(String::from))));
         assert!(matches!(&marks[2], Mark::Fields { rows } if rows[0].label == "tests"));
         assert!(matches!(&marks[3], Mark::Measure(m) if m.value == 7 && m.max == Some(12)));
         assert!(matches!(&marks[4], Mark::Raw { bytes } if bytes == b"hi"));
@@ -1174,6 +1203,51 @@ mod tests {
                 scope: "src/".into(),
                 pattern: "TODO".into(),
             })
+        );
+    }
+
+    /// The flattened text of a card's first [`Mark::Text`], spans joined —
+    /// the on-screen line without its roling, for asserting exec rendering.
+    fn line(card: &Card) -> String {
+        let Card(marks) = card;
+        match &marks[0] {
+            Mark::Text { spans } => spans.iter().map(|s| s.text.as_str()).collect(),
+            _ => panic!("expected a text mark"),
+        }
+    }
+
+    /// A surfaced exec re-quotes each post-shell argv token *only* where the
+    /// shell would reparse it: a clean token rides bare, a space or glob is
+    /// single-quoted, and an embedded quote takes the `'\''` idiom — so the
+    /// rendered `$` line is always a runnable command.
+    #[test]
+    fn exec_requotes_only_where_the_shell_would_reparse() {
+        // The rendered command, without the `$ ` prompt and ` → status` tail.
+        let cmd = |argv: &[&str]| -> String {
+            let full = line(&io_card(&IoEvent::Exec {
+                argv: argv.iter().map(|s| s.to_string()).collect(),
+                outcome: ExecOutcome::Ok,
+                status: 0,
+            }));
+            full.strip_prefix("$ ")
+                .and_then(|s| s.strip_suffix(" → 0"))
+                .expect("the `$ … → status` frame")
+                .to_string()
+        };
+        // A clean argv rides bare — we re-quote per token rather than wrap
+        // everything, so nothing shell-safe gains quotes it didn't need.
+        assert_eq!(
+            cmd(&["grep", "-n", "why-the-ubuntu-22-fiction", "VM.md"]),
+            "grep -n why-the-ubuntu-22-fiction VM.md"
+        );
+        assert_eq!(cmd(&["ls", "README.md"]), "ls README.md");
+        // A metacharacter-laden argv round-trips: whatever quoting `shlex`
+        // chooses, our space-joined line word-splits back to the exact argv —
+        // i.e. the rendered command is faithful and runnable.
+        let tricky = ["echo", "hello world", "*.rs", "it's", ""];
+        assert_eq!(
+            shlex::split(&cmd(&tricky)).expect("the rendered line re-parses"),
+            tricky.map(String::from)
         );
     }
 
@@ -1302,9 +1376,9 @@ mod tests {
             hunks: vec![Hunk {
                 start: 1,
                 rows: vec![
-                    Row::Del("x".into()),
-                    Row::Add("y".into()),
-                    Row::Add("z".into()),
+                    Row::Del(vec![Seg::plain("x")]),
+                    Row::Add(vec![Seg::plain("y")]),
+                    Row::Add(vec![Seg::plain("z")]),
                 ],
             }],
         }]);

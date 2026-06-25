@@ -120,10 +120,11 @@ fn card_stderr(card: &Card) -> Vec<String> {
                 out.push(format!("[diff: {path}]"));
                 for h in hunks {
                     for row in &h.rows {
+                        let text = row.text();
                         out.push(match row {
-                            Row::Context(l) => format!("    {l}"),
-                            Row::Del(l) => format!("  - {l}"),
-                            Row::Add(l) => format!("  + {l}"),
+                            Row::Context(_) => format!("    {text}"),
+                            Row::Del(_) => format!("  - {text}"),
+                            Row::Add(_) => format!("  + {text}"),
                         });
                     }
                 }

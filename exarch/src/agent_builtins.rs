@@ -5,7 +5,7 @@
 //! plugins remain source/alias/hook loaders; this module only publishes
 //! the resident agent surface that core should not own.
 
-use crate::bus::{Hunk, Row};
+use crate::bus::{Hunk, Row, Seg};
 use grep::regex::RegexMatcherBuilder;
 use grep::searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
 use ignore::WalkBuilder;
@@ -398,19 +398,35 @@ fn whole_file_hunks(old: &str, new: &str) -> Vec<Hunk> {
         let start = first.old_range().start as u32 + 1;
         let mut rows = Vec::new();
         for op in &group {
-            for change in diff.iter_changes(op) {
-                // `from_lines` keeps a trailing `\n` on each change value;
-                // strip exactly one so the row carries the bare line, the way
-                // `rows_of` splits the file.
-                let text = change
-                    .value()
-                    .strip_suffix('\n')
-                    .unwrap_or(change.value())
-                    .to_string();
+            // The *inline* changes carry, per row, the intra-line word diff
+            // `similar` computes against the row's paired line: a run of
+            // `(emphasised, text)` segments, where the emphasised runs are the
+            // bits that actually differ.  A context row reduces to one
+            // unemphasised segment, exactly the old line-level shape.
+            for change in diff.iter_inline_changes(op) {
+                let mut segs: Vec<Seg> = change
+                    .iter_strings_lossy()
+                    .map(|(emph, text)| Seg {
+                        emph,
+                        text: text.into_owned(),
+                    })
+                    .collect();
+                // `from_lines` keeps a trailing `\n` on each row's final
+                // segment; strip exactly one so the row carries the bare line,
+                // the way `rows_of` splits the file, dropping a segment the
+                // strip empties.
+                if let Some(last) = segs.last_mut() {
+                    if let Some(bare) = last.text.strip_suffix('\n') {
+                        last.text = bare.to_string();
+                    }
+                    if last.text.is_empty() {
+                        segs.pop();
+                    }
+                }
                 rows.push(match change.tag() {
-                    ChangeTag::Equal => Row::Context(text),
-                    ChangeTag::Delete => Row::Del(text),
-                    ChangeTag::Insert => Row::Add(text),
+                    ChangeTag::Equal => Row::Context(segs),
+                    ChangeTag::Delete => Row::Del(segs),
+                    ChangeTag::Insert => Row::Add(segs),
                 });
             }
         }
@@ -431,14 +447,23 @@ fn diff_card_value(path: &str, hunks: Vec<Hunk>) -> Value {
                 .rows
                 .into_iter()
                 .map(|row| {
-                    let (tag, text) = match row {
-                        Row::Context(t) => ("context", t),
-                        Row::Del(t) => ("del", t),
-                        Row::Add(t) => ("add", t),
+                    let (tag, segs) = match row {
+                        Row::Context(s) => ("context", s),
+                        Row::Del(s) => ("del", s),
+                        Row::Add(s) => ("add", s),
                     };
+                    let seg_values: Vec<Value> = segs
+                        .into_iter()
+                        .map(|seg| {
+                            Value::map(vec![
+                                ("emph".into(), Value::Bool(seg.emph)),
+                                ("text".into(), Value::String(seg.text)),
+                            ])
+                        })
+                        .collect();
                     Value::map(vec![
                         ("tag".into(), Value::String(tag.into())),
-                        ("text".into(), Value::String(text)),
+                        ("segs".into(), Value::list(seg_values)),
                     ])
                 })
                 .collect();
@@ -680,6 +705,37 @@ mod tests {
     #[test]
     fn line_hash_ignores_trailing_whitespace() {
         assert_eq!(line_hash("x"), line_hash("x   "));
+    }
+
+    /// Our wiring of `similar`'s inline changes into [`Row`]s: a changed line
+    /// threads through as segments that concatenate back to the original line
+    /// (trailing newline stripped) and carry *both* an emphasised and an
+    /// unemphasised run, so the emph distinction the renderer needs survives.
+    /// *Which* words `similar` flags is its concern, not ours, so we don't
+    /// assert the boundary.
+    #[test]
+    fn whole_file_hunks_threads_inline_segments() {
+        let hunks = whole_file_hunks("alpha\nthe quick brown fox\n", "alpha\nthe quick red fox\n");
+        let rows: Vec<&Row> = hunks.iter().flat_map(|h| h.rows.iter()).collect();
+        let find = |want: fn(&Row) -> bool| *rows.iter().find(|r| want(r)).expect("the row");
+
+        // The shared `alpha` line maps to a context row of one unemphasised
+        // segment — our `Equal → Context` mapping.
+        let ctx = find(|r| matches!(r, Row::Context(_)));
+        assert_eq!(ctx.text(), "alpha");
+        assert!(ctx.segs().iter().all(|s| !s.emph));
+
+        // The edited line round-trips on each side, with the `\n` `from_lines`
+        // carries stripped, and keeps both an emphasised and an unchanged run.
+        for (row, text) in [
+            (find(|r| matches!(r, Row::Del(_))), "the quick brown fox"),
+            (find(|r| matches!(r, Row::Add(_))), "the quick red fox"),
+        ] {
+            assert_eq!(row.text(), text);
+            assert!(!row.segs().iter().any(|s| s.text.ends_with('\n')));
+            assert!(row.segs().iter().any(|s| s.emph), "an emphasised run");
+            assert!(row.segs().iter().any(|s| !s.emph), "an unchanged run");
+        }
     }
 
     /// The Rust `window_hash` reproduces the retired ral algorithm exactly.
