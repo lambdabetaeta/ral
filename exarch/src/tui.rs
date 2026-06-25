@@ -3207,7 +3207,7 @@ fn ui_loop(
             if let Some(ph) = ctx.agents.provider(now_focus) {
                 let p = ph.current();
                 let status_provider = crate::oauth::provider_label(p.subscription(), p.id().label());
-                tui.app.update_live_model(&*p, &status_provider);
+                tui.app.update_live_model(&p, &status_provider);
             }
         }
     }
@@ -3260,7 +3260,7 @@ fn route_submit(
                     .map(|ph| ph.current())
                     .or_else(|| ctx.agents.provider(root).map(|ph| ph.current()));
                 if let Some(guard) = provider_guard {
-                    tui.app.clear(info, &*guard, tui.guard.term())?;
+                    tui.app.clear(info, &guard, tui.guard.term())?;
                 } else {
                     let fallback = Provider::scripted("unknown", ProviderKind::Openai, Script::new());
                     tui.app.clear(info, &fallback, tui.guard.term())?;
@@ -3532,7 +3532,7 @@ fn apply_model_switch(
     let info = ctx.info;
     let emit = ctx.emit;
     let id = tui.app.root;
-    let Some(_cred) = store.get(&provider_id).cloned() else {
+    let Some(cred) = store.get(&provider_id).cloned() else {
         tui.app.push_error(
             id,
             format!("{} has no resolved credential", provider_id.label()),
@@ -3555,13 +3555,14 @@ fn apply_model_switch(
         engine,
         &provider_id,
         model.clone(),
+        &cred,
         current_override,
         tuning.clone(),
     ));
     let label = provider_id.label();
     let status_provider = crate::oauth::provider_label(new_provider.subscription(), label);
     provider.swap(new_provider);
-    tui.app.update_live_model(&*provider.current(), &status_provider);
+    tui.app.update_live_model(&provider.current(), &status_provider);
     let state_dir = crate::bootstrap::project_dir(info.cwd);
     if let Err(e) = state::save(&state_dir, &state::State::new(&provider_id, &model, &tuning)) {
         tui.app

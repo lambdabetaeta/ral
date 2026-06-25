@@ -194,11 +194,17 @@ pub fn run() -> Result<(), String> {
     )?;
     let system_size = system.len();
 
-    // One shared transport for the whole fleet: the runtime, cache key, and
-    // genai client are built once and borrowed by every Provider.
-    let engine = Engine::new(&cred, &id, &model);
-    let provider =
-        std::sync::Arc::new(Provider::build(engine.clone(), &id, model.clone(), c.max_tokens, tuning));
+    // One shared runtime for the whole fleet; per-credential transports warm
+    // lazily as providers are built and borrow it.
+    let engine = Engine::new();
+    let provider = std::sync::Arc::new(Provider::build(
+        engine.clone(),
+        &id,
+        model.clone(),
+        &cred,
+        c.max_tokens,
+        tuning,
+    ));
     let mut session = Agent::root(
         system,
         caps,
@@ -224,7 +230,7 @@ pub fn run() -> Result<(), String> {
         cwd: &cwd,
     };
     if c.headless {
-        headless::run(&mut session, &info, &*provider, seed, c.output_format, Arc::clone(&engine))
+        headless::run(&mut session, &info, &provider, seed, c.output_format, Arc::clone(&engine))
     } else {
         tui::run(
             &mut session,
