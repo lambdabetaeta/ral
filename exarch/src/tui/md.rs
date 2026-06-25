@@ -726,9 +726,17 @@ fn render_table<'a, I: Iterator<Item = Event<'a>>>(
     let avail = budget.saturating_sub(frame);
     let total: usize = widths.iter().sum();
     if total > avail && total > 0 {
-        let scale = avail as f32 / total as f32;
-        for w in widths.iter_mut() {
-            *w = ((*w as f32) * scale).floor().max(1.0) as usize;
+        // Shrink the widest column(s) until the table fits, so narrow
+        // columns keep their natural width and only wide columns yield.
+        while widths.iter().sum::<usize>() > avail {
+            if let Some(i) = (0..n_cols)
+                .filter(|&i| widths[i] > 1)
+                .max_by_key(|&i| widths[i])
+            {
+                widths[i] -= 1;
+            } else {
+                break;
+            }
         }
     }
 
