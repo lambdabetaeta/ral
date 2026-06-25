@@ -22,6 +22,7 @@ use genai::{Client, ModelIden, ServiceTarget};
 use reqwest::StatusCode;
 use reqwest::header::HeaderMap;
 use std::fmt;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -1081,7 +1082,7 @@ pub(crate) struct Transport {
 pub(crate) struct Engine {
     runtime: tokio::runtime::Runtime,
     cache_key: String,
-    transport: Transport,
+    transports: Mutex<HashMap<TransportKey, Arc<Transport>>>,
 }
 
 fn fresh_cache_key() -> String {
@@ -1283,9 +1284,11 @@ impl Provider {
     pub fn subscription(&self) -> oauth::Subscription {
         match &self.backend {
             Backend::Live(engine) => {
-                if engine.transport.token_cell.is_some() {
+                let key = TransportKey(self.id.label().to_string());
+                let t = engine.transport(&key);
+                if t.token_cell.is_some() {
                     oauth::Subscription::ChatGpt
-                } else if engine.transport.flat_rate {
+                } else if t.flat_rate {
                     oauth::Subscription::FlatRate
                 } else {
                     oauth::Subscription::Metered
@@ -1319,8 +1322,10 @@ impl Provider {
     ) -> Result<StepOut, ProviderError> {
         match &self.backend {
             Backend::Live(engine) => {
+                let key = TransportKey(self.id.label().to_string());
                 let adapter = adapter_for_provider_model(&self.id, &self.model);
                 engine.complete(
+                    &key,
                     adapter,
                     &self.model,
                     self.max_tokens_override,
@@ -1350,8 +1355,9 @@ impl Provider {
     ) -> Result<SummaryOut, ProviderError> {
         match &self.backend {
             Backend::Live(engine) => {
+                let key = TransportKey(self.id.label().to_string());
                 let adapter = adapter_for_provider_model(&self.id, &self.model);
-                engine.summarize(adapter, &self.model, system, messages, max_tokens, cancel)
+                engine.summarize(&key, adapter, &self.model, system, messages, max_tokens, cancel)
             }
             Backend::Scripted(s) => s.summarize(&self.model),
         }
@@ -1369,25 +1375,41 @@ impl Engine {
             Credential::ApiKey(_) => None,
         };
         let (client, _adapter) = build_client(id, model, cred);
-        Arc::new(Self {
-            runtime,
-            cache_key: fresh_cache_key(),
-            transport: Transport {
+        let mut transports = HashMap::new();
+        transports.insert(
+            TransportKey(id.label().to_string()),
+            Arc::new(Transport {
                 client,
                 token_cell,
                 flat_rate: id.flat_rate(),
-            },
+            }),
+        );
+        Arc::new(Self {
+            runtime,
+            cache_key: fresh_cache_key(),
+            transports: Mutex::new(transports),
         })
     }
 
+    /// Look up the transport for `key`, panicking with a clear message
+    /// when it has not been pre-warmed — a bug, not a runtime condition.
+    fn transport(&self, key: &TransportKey) -> Arc<Transport> {
+        self.transports.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| panic!("Engine: no transport pre-warmed for {key:?}"))
+    }
     /// Whether this engine'\''s transport is billed per token.
-    fn metered(&self) -> bool {
-        self.transport.token_cell.is_none() && !self.transport.flat_rate
+    fn metered(&self, key: &TransportKey) -> bool {
+        let t = self.transport(key);
+        t.token_cell.is_none() && !t.flat_rate
     }
 
     /// Renew the ChatGPT access token when it is near expiry.
-    fn refresh_if_stale(&self) {
-        let Some(cell) = &self.transport.token_cell else {
+    fn refresh_if_stale(&self, key: &TransportKey) {
+        let t = self.transport(key);
+        let Some(cell) = &t.token_cell else {
             return;
         };
         let current = {
@@ -1409,6 +1431,7 @@ impl Engine {
     #[allow(clippy::too_many_arguments)]
     fn complete<F: FnMut(&str)>(
         &self,
+        key: &TransportKey,
         adapter: AdapterKind,
         model: &str,
         max_tokens_override: Option<u32>,
@@ -1419,7 +1442,8 @@ impl Engine {
         on_text: &mut F,
         cancel: &cancel::Token,
     ) -> Result<StepOut, ProviderError> {
-        self.refresh_if_stale();
+        let transport = self.transport(key);
+        self.refresh_if_stale(key);
         let req_template = build_cached_request(adapter, system, messages);
         let mut options = ChatOptions::default()
             .with_capture_usage(true)
@@ -1461,7 +1485,7 @@ impl Engine {
                                 body: None,
                             });
                         }
-                        r = self.transport.client.exec_chat_stream(model, req, Some(&options)) => {
+                        r = transport.client.exec_chat_stream(model, req, Some(&options)) => {
                             r.map_err(|e| ProviderError::from_genai(&e, model))?
                         }
                     };
@@ -1501,10 +1525,10 @@ impl Engine {
                 .await;
 
                 match attempt_result {
-                    Ok(end) => Attempt::Done(step_out_from_end(model, end, self.metered(), adapter)),
+                    Ok(end) => Attempt::Done(step_out_from_end(model, end, self.metered(key), adapter)),
                     Err(e @ ProviderError::Cancelled(_)) => Attempt::Failed(e),
                     Err(e) if seen_any_token => {
-                        Attempt::Done(stalled_step_out(model, &streamed, &e, self.metered(), adapter))
+                        Attempt::Done(stalled_step_out(model, &streamed, &e, self.metered(key), adapter))
                     }
                     Err(e) => Attempt::Failed(e),
                 }
@@ -1516,6 +1540,7 @@ impl Engine {
 
     fn summarize(
         &self,
+        key: &TransportKey,
         adapter: AdapterKind,
         model: &str,
         system: &str,
@@ -1523,7 +1548,8 @@ impl Engine {
         max_tokens: u32,
         cancel: &cancel::Token,
     ) -> Result<SummaryOut, ProviderError> {
-        self.refresh_if_stale();
+        let transport = self.transport(key);
+        self.refresh_if_stale(key);
         messages.push(ChatMessage::user(
             "Summarise the conversation so far concisely: \
             the user'\''s task, what has been tried, what worked, what state the \
@@ -1553,7 +1579,7 @@ impl Engine {
                             body: None,
                         });
                     }
-                    r = self.transport.client.exec_chat(model, req, Some(&options)) => r,
+                    r = transport.client.exec_chat(model, req, Some(&options)) => r,
                 };
                 match r {
                     Ok(resp) => Attempt::Done(resp),
@@ -1570,7 +1596,7 @@ impl Engine {
         let text = resp.first_text().unwrap_or("").to_string();
         Ok(SummaryOut {
             summary: text,
-            usage: usage_from(model, &resp.usage, self.metered(), adapter),
+            usage: usage_from(model, &resp.usage, self.metered(key), adapter),
         })
     }
 }
