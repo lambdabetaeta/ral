@@ -18,6 +18,7 @@ use super::block::{AgentSlot, Block, RailShape, Reveal, wrap_line};
 use super::fidelity::{self, Fidelity};
 use super::group;
 use super::line::{READ_W, coalesced_queries, is_blank, plain, prompt_fence, size_bar};
+use super::select::plain_slice;
 use super::rail::{self, RailKind};
 use crate::bus::Hunk;
 use crate::card::{Card, IoKind};
@@ -563,18 +564,32 @@ impl Viewport {
         self.offset = self.offset.saturating_add(n);
     }
 
-    /// Plain text of the rows `lo..=hi` (rail stripped), the projection a
-    /// drag-selection copies.
-    pub(super) fn selection_text(&self, lo: usize, hi: usize) -> String {
-        let hi = hi.min(self.flat.rows.len().saturating_sub(1));
-        if self.flat.rows.is_empty() || lo > hi {
+    /// Plain text the drag-selection copies.  `lo` and `hi` are each
+    /// `(row, col)` where `col` is a cell-column within the text area
+    /// (0 = left edge); the rail glyph is stripped automatically.
+    pub(super) fn selection_text(&self, lo: (usize, u16), hi: (usize, u16)) -> String {
+        let (lo_row, lo_col) = lo;
+        let (hi_row, hi_col) = hi;
+        let last = self.flat.rows.len().saturating_sub(1);
+        if self.flat.rows.is_empty() || lo_row > last || hi_row > last {
             return String::new();
         }
-        self.flat.rows[lo..=hi]
-            .iter()
-            .map(plain)
-            .collect::<Vec<_>>()
-            .join("\n")
+        if lo_row == hi_row {
+            let (a, b) = if lo_col <= hi_col { (lo_col, hi_col) } else { (hi_col, lo_col) };
+            return plain_slice(&self.flat.rows[lo_row], a, b);
+        }
+        let (first_row, first_col) = if lo_row < hi_row { (lo_row, lo_col) } else { (hi_row, hi_col) };
+        let (last_row, last_col) = if lo_row < hi_row { (hi_row, hi_col) } else { (lo_row, lo_col) };
+        let mut parts: Vec<String> = Vec::new();
+        // First row: from first_col to end.
+        parts.push(plain_slice(&self.flat.rows[first_row], first_col, u16::MAX));
+        // Middle rows: full lines.
+        for row in (first_row + 1)..last_row {
+            parts.push(plain(&self.flat.rows[row]));
+        }
+        // Last row: from start to last_col.
+        parts.push(plain_slice(&self.flat.rows[last_row], 0, last_col));
+        parts.join("\n")
     }
 
     /// The assistant's latest reply as raw markdown: the trailing

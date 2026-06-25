@@ -23,6 +23,7 @@ mod line;
 mod md;
 mod picker;
 mod rail;
+mod select;
 mod viewport;
 use block::{AgentSlot, RailShape};
 use fidelity::Fidelity;
@@ -87,8 +88,9 @@ use textarea_vim::{Mode, Vim, place_native_cursor};
 
 use line::{
     AGENT_HUES, BANNER_GOLD, BANNER_PINK, CYAN, OVERLAY_BG, PINK, PURPLE, RAIL_W,
-    READ_W, SLATE, bold,
+    READ_W, SLATE, bold, LIME_HOT,
 };
+use select::highlight_range;
 use viewport::Viewport;
 
 pub(super) const PROMPT_PAD_H: u16 = 1;
@@ -500,9 +502,12 @@ pub struct App {
     /// Geometry of the content area as of the last [`Self::draw`], so a
     /// mouse event arriving between frames maps to a buffer row.
     frame: Option<FrameGeom>,
-    /// Active linewise drag-selection in focused-viewport row
-    /// coordinates, painted reversed and copied on release.
-    selection: Option<(usize, usize)>,
+    /// Active drag-selection in focused-viewport (row, col) coordinates,
+    /// painted reversed and copied on release.  Each position is a buffer
+    /// row and a cell-column within the text area (0 = left edge).
+    selection: Option<((usize, u16), (usize, u16))>,
+    /// Toast: "(N chars copied)" shown briefly on drag-copy, auto-dismissed.
+    copy_toast: Option<(usize, Instant)>,
     /// In-flight left-button gesture: the row pressed, the block under
     /// it, and whether the pointer has since moved (a drag, not a click).
     press: Option<Press>,
@@ -551,6 +556,8 @@ struct FrameGeom {
 struct Press {
     /// Buffer row under the press — the selection anchor.
     row: usize,
+    /// Cell column within the text area (0 = left edge) under the press.
+    col: u16,
     /// Block under the press, cycled on a rail click that never dragged.
     block: Option<usize>,
     /// Whether the press landed on the rail column (cols 0–1), where a
@@ -641,6 +648,7 @@ impl App {
             picker: None,
             frame: None,
             selection: None,
+            copy_toast: None,
             press: None,
             hover: None,
             matrix_sort: MatrixSort::default(),
@@ -1381,6 +1389,23 @@ impl App {
                 }
             }
             f.render_widget(Paragraph::new(footer_hint()), footer_row);
+            // Toast: short-lived copy confirmation, bottom-right.
+            if let Some((n, ts)) = self.copy_toast
+                && ts.elapsed() < Duration::from_secs(2)
+            {
+                let msg = format!("[{} characters copied]", n);
+                let w = (msg.len() as u16).min(footer_row.width);
+                let r = Rect {
+                    x: footer_row.x + footer_row.width.saturating_sub(w),
+                    y: footer_row.y,
+                    width: w,
+                    height: 1,
+                };
+                f.render_widget(
+                    Paragraph::new(msg).style(Style::default().fg(LIME_HOT)),
+                    r,
+                );
+            }
             // Last: the floating picker, over the dimmed session.
             if let Some(p) = picker {
                 p.render(f, area);
@@ -1391,15 +1416,27 @@ impl App {
         Ok(())
     }
 
-    /// Reverse-video the rows of the active selection that fall within
-    /// the visible window.
+    /// Reverse-video the character range of the active selection that
+    /// falls within the visible window.
     fn paint_selection(&self, lines: &mut [Line<'static>], offset: usize) {
         let Some((a, b)) = self.selection else {
             return;
         };
         let (lo, hi) = (a.min(b), a.max(b));
+        let (lo_row, lo_col) = lo;
+        let (hi_row, hi_col) = hi;
         for (i, line) in lines.iter_mut().enumerate() {
-            if (lo..=hi).contains(&(offset + i)) {
+            let row = offset + i;
+            if row < lo_row || row > hi_row {
+                continue;
+            }
+            if lo_row == hi_row {
+                highlight_range(line, lo_col, hi_col);
+            } else if row == lo_row {
+                highlight_range(line, lo_col, u16::MAX);
+            } else if row == hi_row {
+                highlight_range(line, 0, hi_col);
+            } else {
                 for span in &mut line.spans {
                     span.style = span.style.add_modifier(Modifier::REVERSED);
                 }
@@ -1805,6 +1842,7 @@ impl App {
     }
 
     /// Begin a left-button gesture: drop any prior selection, anchor at
+    /// the pressed row and column, and remember the block under it.
     /// the pressed row, and remember the block under it.
     fn press(&mut self, me: MouseEvent) {
         self.selection = None;
@@ -1814,29 +1852,32 @@ impl App {
             return;
         }
         let row = frame.offset + (me.row - frame.text.y) as usize;
+        let col = me.column.saturating_sub(frame.text.x);
         let id = self.focused();
         let block = self.viewports.get(&id).and_then(|vp| vp.block_at(row));
         let on_rail = (me.column as usize) < frame.text.x as usize + RAIL_W;
         self.press = Some(Press {
             row,
+            col,
             block,
             on_rail,
             dragged: false,
         });
     }
 
-    /// Extend the selection to the dragged-to row, clamped to the
-    /// visible window.
+    /// Extend the selection to the dragged-to row and column, clamped to
+    /// the visible window.
     fn drag(&mut self, me: MouseEvent) {
         let Some(frame) = self.frame else { return };
         let Some(press) = &mut self.press else { return };
         press.dragged = true;
-        let anchor = press.row;
+        let anchor = (press.row, press.col);
         let rel = me
             .row
             .saturating_sub(frame.text.y)
             .min(frame.text.height.saturating_sub(1));
-        self.selection = Some((anchor, frame.offset + rel as usize));
+        let cur = (frame.offset + rel as usize, me.column.saturating_sub(frame.text.x));
+        self.selection = Some((anchor, cur));
     }
 
     /// Finish a left-button gesture: a drag copies its selection, a bare
@@ -1851,7 +1892,9 @@ impl App {
             if let Some((a, b)) = self.selection
                 && let Some(vp) = self.viewports.get(&id)
             {
-                let _ = osc52_copy(&vp.selection_text(a.min(b), a.max(b)));
+                let text = vp.selection_text(a.min(b), a.max(b));
+                self.copy_toast = Some((text.len(), Instant::now()));
+                let _ = osc52_copy(&text);
             }
         } else if press.on_rail
             && let Some(idx) = press.block
