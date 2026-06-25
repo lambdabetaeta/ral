@@ -17,7 +17,8 @@ use crate::agent::Agent;
 use crate::bus::{AgentId, AgentOutcome, Event, FleetBus, Kind, Row, Sink, pump};
 use crate::card::{Card, FieldVal, Mark};
 use crate::fleet::Fleet;
-use crate::provider::Usage;
+use crate::provider::{Engine, Usage};
+use std::sync::Arc;
 use crate::tui::SessionInfo;
 use std::io::{self, Write};
 use std::time::Instant;
@@ -311,6 +312,7 @@ pub fn run(
     info: &SessionInfo<'_>,
     seed: Option<String>,
     format: OutputFormat,
+    engine: Arc<Engine>,
 ) -> Result<(), String> {
     let prompt = seed.ok_or_else(|| "--headless requires --prompt or --file".to_string())?;
     eprintln!(
@@ -333,6 +335,7 @@ pub fn run(
         FleetBus::per_turn(session.inbox()),
         session.focus_handle(),
         session.interactive(),
+        engine,
     );
     // Seed the launch prompt into that same inbox; the headless trunk is a
     // returning agent that does not park, so `drive` runs the seeded work and

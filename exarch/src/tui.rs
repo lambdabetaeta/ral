@@ -2949,6 +2949,7 @@ pub fn run(
     run_dir: &std::path::Path,
     seed: Option<String>,
     vi: bool,
+    engine: Arc<provider::Engine>,
 ) -> Result<(), String> {
     let caps = provider::caps_for(provider.model());
     let stderr_log = run_dir.join("stderr.log");
@@ -2974,6 +2975,7 @@ pub fn run(
         FleetBus::session(session.inbox()),
         session.focus_handle(),
         session.interactive(),
+        engine,
     );
     if let Some(s) = seed {
         session.seed(s);
@@ -3017,6 +3019,7 @@ pub fn run(
         catalog,
         info,
         emit: &ui_emit,
+        engine: fleet.engine(),
     };
     std::thread::scope(|scope| -> Result<(), String> {
         let worker = scope.spawn(move || {
@@ -3071,6 +3074,7 @@ struct CommandCtx<'a> {
     catalog: &'a mut ModelCatalog<LiveSource>,
     info: &'a SessionInfo<'a>,
     emit: &'a Emitter,
+    engine: &'a Arc<provider::Engine>,
 }
 
 /// The merged render + input loop, running on the UI thread alongside the
@@ -3512,7 +3516,7 @@ fn apply_model_switch(
     let info = ctx.info;
     let emit = ctx.emit;
     let id = tui.app.root;
-    let Some(cred) = store.get(&provider_id).cloned() else {
+    let Some(_cred) = store.get(&provider_id).cloned() else {
         tui.app.push_error(
             id,
             format!("{} has no resolved credential", provider_id.label()),
@@ -3527,10 +3531,11 @@ fn apply_model_switch(
             .push_error(id, "the focused agent is no longer live".to_string());
         return;
     };
+    let engine = ctx.engine.clone();
     let new_provider = Arc::new(Provider::build(
+        engine,
         &provider_id,
         model.clone(),
-        &cred,
         info.max_tokens_override,
         tuning.clone(),
     ));

@@ -1000,7 +1000,7 @@ async fn retry_with_backoff<T>(
 /// nucleus-sampling top-p.  Each is `None` for "auto" — the option is then
 /// *not* set on the wire and genai applies the adapter's per-model default,
 /// exactly as before tuning existed.  The overlay edits it, [`crate::state`]
-/// persists it, and [`Live::complete`] folds it into the [`ChatOptions`].
+/// persists it, and [`Engine::complete`] folds it into the [`ChatOptions`].
 #[derive(Clone, Default, Debug)]
 pub struct Tuning {
     /// The reasoning effort, or `None` for the adapter default.
@@ -1043,6 +1043,7 @@ impl PartialEq for Tuning {
 
 pub struct Provider {
     backend: Backend,
+    id: ProviderId,
     model: String,
     /// User-supplied `--max-tokens` override.  `None` means we don't
     /// set the option at all and genai applies its per-model default
@@ -1054,39 +1055,33 @@ pub struct Provider {
     tuning: Tuning,
 }
 
-/// The transport behind a [`Provider`].  The live backend owns the
-/// genai client and tokio runtime; the scripted backend (test-only)
-/// replays canned [`StepOut`] / [`SummaryOut`] outcomes so the session
-/// turn driver can be exercised end-to-end without a network.
+/// The transport behind a [`Provider`].  The live backend borrows the
+/// shared [`Engine`]; the scripted backend (test-only) replays canned
+/// [`StepOut`] / [`SummaryOut`] outcomes so the session turn driver can
+/// be exercised end-to-end without a network.
 enum Backend {
-    Live(Live),
+    Live(Arc<Engine>),
     Scripted(scripted::Script),
 }
 
-/// Live genai transport state.
-struct Live {
+/// Opaque key for a credential — just the label for now; later it
+/// disambiguates transports when several credentials are live.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
+pub(crate) struct TransportKey(String);
+
+/// What actually sends bytes to an LLM backend.
+pub(crate) struct Transport {
     client: Client,
-    runtime: tokio::runtime::Runtime,
-    /// Stable per-process identifier sent as OpenAI's `prompt_cache_key`
-    /// on every request.  OpenAI uses it as a routing hint so all calls
-    /// from one exarch process land on the same backend shard, raising
-    /// cache-hit rate.  Anthropic and other providers ignore unknown
-    /// fields, so it is harmless elsewhere.
-    cache_key: String,
-    /// The shared login cell when this provider authenticates off a ChatGPT
-    /// plan; `None` for an API-key provider.  A turn refreshes through it
-    /// before a request when the access token is near expiry.
     token_cell: Option<Arc<Mutex<oauth::OAuthToken>>>,
-    /// Whether this provider's plan is a flat subscription declared by its
-    /// [`ProviderId`] (opencode Go's $10/mo gateway) rather than by an OAuth
-    /// login.  Combined with [`Self::token_cell`] it is the second way a
-    /// provider's turns can be unmetered — see [`Live::metered`].
     flat_rate: bool,
-    /// The genai adapter this provider speaks, fixed at build time.  It
-    /// decides where the system prompt rides on the wire: the Responses
-    /// API takes it as top-level `instructions`, every other adapter as a
-    /// cache-marked system message (see [`build_cached_request`]).
-    adapter: AdapterKind,
+}
+
+/// One per process — the shared transport underneath all Providers.
+pub(crate) struct Engine {
+    runtime: tokio::runtime::Runtime,
+    cache_key: String,
+    transport: Transport,
 }
 
 fn fresh_cache_key() -> String {
@@ -1203,33 +1198,19 @@ fn build_oauth_client(cell: Arc<Mutex<oauth::OAuthToken>>) -> Client {
 }
 
 impl Provider {
-    /// Build a live provider for `kind` + `model`, binding the resolved
-    /// `cred`. The single live-transport construction path: `run` calls it
-    /// for the starting selection, and a `/model` switch calls it again for
-    /// the chosen provider+model over the same transcript.
-    pub fn build(
+    /// Build a live provider selection that borrows a shared [`Engine`].
+    /// The engine owns the transport; the provider records only which 
+    /// provider+model+knobs to use.  Cheap: no runtime, no client build.
+    pub(crate) fn build(
+        engine: Arc<Engine>,
         id: &ProviderId,
         model: String,
-        cred: &Credential,
         max_tokens_override: Option<u32>,
         tuning: Tuning,
     ) -> Self {
-        let runtime = make_runtime();
-        prime_pricing(&runtime);
-        let token_cell = match cred {
-            Credential::OAuth(cell) => Some(cell.clone()),
-            Credential::ApiKey(_) => None,
-        };
-        let (client, adapter) = build_client(id, &model, cred);
         Self {
-            backend: Backend::Live(Live {
-                client,
-                runtime,
-                cache_key: fresh_cache_key(),
-                token_cell,
-                flat_rate: id.flat_rate(),
-                adapter,
-            }),
+            backend: Backend::Live(engine),
+            id: id.clone(),
             model,
             max_tokens_override,
             tuning,
@@ -1244,6 +1225,7 @@ impl Provider {
     pub fn scripted(model: &str, script: scripted::Script) -> Self {
         Self {
             backend: Backend::Scripted(script),
+            id: ProviderId::Famous(ProviderKind::Openai),
             model: model.to_string(),
             max_tokens_override: None,
             tuning: Tuning::default(),
@@ -1268,6 +1250,19 @@ impl Provider {
     pub fn model(&self) -> &str {
         &self.model
     }
+    /// The shared engine this provider borrows its transport from.
+    pub(crate) fn engine(&self) -> &Arc<Engine> {
+        match &self.backend {
+            Backend::Live(engine) => engine,
+            Backend::Scripted(_) => panic!("scripted provider has no engine"),
+        }
+    }
+
+    /// The provider identity, used to resolve the adapter dynamically.
+    pub fn id(&self) -> &ProviderId {
+        &self.id
+    }
+
 
     /// This model's total context window in tokens, when the catalog
     /// lists it — the denominator the compaction trigger measures real
@@ -1287,8 +1282,15 @@ impl Provider {
     /// the generic flavour; a scripted backend is never a subscription.
     pub fn subscription(&self) -> oauth::Subscription {
         match &self.backend {
-            Backend::Live(live) if live.token_cell.is_some() => oauth::Subscription::ChatGpt,
-            Backend::Live(live) if live.flat_rate => oauth::Subscription::FlatRate,
+            Backend::Live(engine) => {
+                if engine.transport.token_cell.is_some() {
+                    oauth::Subscription::ChatGpt
+                } else if engine.transport.flat_rate {
+                    oauth::Subscription::FlatRate
+                } else {
+                    oauth::Subscription::Metered
+                }
+            }
             _ => oauth::Subscription::Metered,
         }
     }
@@ -1316,16 +1318,20 @@ impl Provider {
         cancel: &cancel::Token,
     ) -> Result<StepOut, ProviderError> {
         match &self.backend {
-            Backend::Live(live) => live.complete(
-                &self.model,
-                self.max_tokens_override,
-                &self.tuning,
-                system,
-                messages,
-                tools,
-                on_text,
-                cancel,
-            ),
+            Backend::Live(engine) => {
+                let adapter = adapter_for_provider_model(&self.id, &self.model);
+                engine.complete(
+                    adapter,
+                    &self.model,
+                    self.max_tokens_override,
+                    &self.tuning,
+                    system,
+                    messages,
+                    tools,
+                    on_text,
+                    cancel,
+                )
+            }
             Backend::Scripted(s) => s.complete(&self.model, on_text),
         }
     }
@@ -1343,33 +1349,47 @@ impl Provider {
         cancel: &cancel::Token,
     ) -> Result<SummaryOut, ProviderError> {
         match &self.backend {
-            Backend::Live(live) => {
-                live.summarize(&self.model, system, messages, max_tokens, cancel)
+            Backend::Live(engine) => {
+                let adapter = adapter_for_provider_model(&self.id, &self.model);
+                engine.summarize(adapter, &self.model, system, messages, max_tokens, cancel)
             }
             Backend::Scripted(s) => s.summarize(&self.model),
         }
     }
 }
 
-impl Live {
-    /// Whether this backend's turns are billed per token. An API-key
-    /// provider is metered; a flat subscription — a ChatGPT plan login
-    /// ([`Self::token_cell`]) or an [`ProviderId::flat_rate`] plan
-    /// ([`Self::flat_rate`]) — is unmetered.
-    fn metered(&self) -> bool {
-        self.token_cell.is_none() && !self.flat_rate
+impl Engine {
+    /// Build the shared transport for `cred` bound to `id`+`model`.
+    /// The runtime is created once; pricing is primed once.
+    pub(crate) fn new(cred: &Credential, id: &ProviderId, model: &str) -> Arc<Self> {
+        let runtime = make_runtime();
+        prime_pricing(&runtime);
+        let token_cell = match cred {
+            Credential::OAuth(cell) => Some(cell.clone()),
+            Credential::ApiKey(_) => None,
+        };
+        let (client, _adapter) = build_client(id, model, cred);
+        Arc::new(Self {
+            runtime,
+            cache_key: fresh_cache_key(),
+            transport: Transport {
+                client,
+                token_cell,
+                flat_rate: id.flat_rate(),
+            },
+        })
     }
 
-    /// Renew the ChatGPT access token when it is near expiry, so the request
-    /// that follows authenticates with a live token.  A no-op for an API-key
-    /// provider.  A refresh failure is logged and left to surface as the
-    /// request's own auth error rather than aborting the turn here.
+    /// Whether this engine'\''s transport is billed per token.
+    fn metered(&self) -> bool {
+        self.transport.token_cell.is_none() && !self.transport.flat_rate
+    }
+
+    /// Renew the ChatGPT access token when it is near expiry.
     fn refresh_if_stale(&self) {
-        let Some(cell) = &self.token_cell else {
+        let Some(cell) = &self.transport.token_cell else {
             return;
         };
-        // Copy the token out only when a refresh is actually due — the common
-        // case finds it fresh and returns under the lock without cloning.
         let current = {
             let token = cell.lock().unwrap_or_else(|e| e.into_inner());
             if !token.is_stale() {
@@ -1379,8 +1399,6 @@ impl Live {
         };
         match self.runtime.block_on(oauth::refresh(&current)) {
             Ok(fresh) => {
-                // Upsert this account's token, leaving any other signed-in
-                // account untouched — a whole-file overwrite would drop them.
                 let _ = oauth::save_one(&fresh);
                 *cell.lock().unwrap_or_else(|e| e.into_inner()) = fresh;
             }
@@ -1391,6 +1409,7 @@ impl Live {
     #[allow(clippy::too_many_arguments)]
     fn complete<F: FnMut(&str)>(
         &self,
+        adapter: AdapterKind,
         model: &str,
         max_tokens_override: Option<u32>,
         tuning: &Tuning,
@@ -1401,21 +1420,16 @@ impl Live {
         cancel: &cancel::Token,
     ) -> Result<StepOut, ProviderError> {
         self.refresh_if_stale();
-        let req_template = build_cached_request(self.adapter, system, messages);
+        let req_template = build_cached_request(adapter, system, messages);
         let mut options = ChatOptions::default()
             .with_capture_usage(true)
             .with_capture_content(true)
             .with_capture_tool_calls(true)
             .with_capture_reasoning_content(true)
             .with_prompt_cache_key(&self.cache_key);
-        // Only override genai's per-model default when the user
-        // explicitly asked.  The pre-fix code pinned a 4k constant
-        // here and silently truncated long Opus turns.
         if let Some(n) = max_tokens_override {
             options = options.with_max_tokens(n);
         }
-        // The `/model` overlay's tuning, set only when the user moved a knob
-        // off "auto"; an unset knob leaves the adapter's default in force.
         if let Some(effort) = &tuning.effort {
             options = options.with_reasoning_effort(effort.clone());
         }
@@ -1433,8 +1447,6 @@ impl Live {
                 let mut req = req_template.clone();
                 req.tools = Some(tool_defs(tools));
                 let mut seen_any_token = false;
-                // Mirrors what `on_text` rendered, so a committed stall can
-                // commit exactly the prefix the user already saw.
                 let mut streamed = String::new();
                 let attempt_result: Result<StreamEnd, ProviderError> = async {
                     let mut resp = tokio::select! {
@@ -1442,11 +1454,6 @@ impl Live {
                         _ = wait_for_cancel(cancel) => {
                             return Err(ProviderError::Cancelled("before request"));
                         }
-                        // A fresh `sleep` per select entry bounds the connect
-                        // phase — which `tls::client`'s `read_timeout` does
-                        // not cover — and time-to-first-event; surfaced as a
-                        // transient transport error so the retry budget
-                        // re-issues it (no token has streamed yet).
                         _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
                             return Err(ProviderError::Transient {
                                 cause: "stream idle: no response within timeout".into(),
@@ -1454,20 +1461,11 @@ impl Live {
                                 body: None,
                             });
                         }
-                        r = self.client.exec_chat_stream(model, req, Some(&options)) => {
+                        r = self.transport.client.exec_chat_stream(model, req, Some(&options)) => {
                             r.map_err(|e| ProviderError::from_genai(&e, model))?
                         }
                     };
                     loop {
-                        // No idle timer here: a `ping`, an SSE keepalive, or a
-                        // partial frame that genai consumes without yielding a
-                        // decoded `ChatStreamEvent` would falsely read as idle
-                        // at this level even while bytes flow.  Liveness is
-                        // measured at the byte/SSE level by `tls::client`'s
-                        // `read_timeout`; a genuinely stalled socket trips it
-                        // and surfaces here as `Some(Err(_))` carrying a
-                        // `reqwest` timeout, which `from_genai` classifies as
-                        // transient via its [`Fault::Transport`] leaf.
                         let event = tokio::select! {
                             biased;
                             _ = wait_for_cancel(cancel) => {
@@ -1483,20 +1481,12 @@ impl Live {
                         };
                         match event {
                             ChatStreamEvent::Start => {}
-                            ChatStreamEvent::Chunk(c) => {
-                                seen_any_token |= !c.content.is_empty();
-                                streamed.push_str(&c.content);
-                                on_text(&c.content);
+                            ChatStreamEvent::Chunk(chunk) => {
+                                on_text(&chunk.content);
+                                seen_any_token = true;
+                                streamed.push_str(&chunk.content);
                             }
                             ChatStreamEvent::End(end) => return Ok(end),
-                            // The remaining variants are captured in the
-                            // `End` frame (`captured_reasoning_content`,
-                            // the thought signatures and tool calls on the
-                            // assistant message) and replayed from there by
-                            // `step_out_from_end`, so no live action is
-                            // needed here.  Matched explicitly rather than
-                            // with a wildcard so a new genai stream variant
-                            // fails the build instead of vanishing (X10).
                             ChatStreamEvent::ReasoningChunk(_)
                             | ChatStreamEvent::ThoughtSignatureChunk(_)
                             | ChatStreamEvent::ToolCallChunk(_) => {}
@@ -1511,16 +1501,10 @@ impl Live {
                 .await;
 
                 match attempt_result {
-                    Ok(end) => Attempt::Done(step_out_from_end(model, end, self.metered(), self.adapter)),
-                    // A cancel is surfaced as-is regardless of streamed tokens.
+                    Ok(end) => Attempt::Done(step_out_from_end(model, end, self.metered(), adapter)),
                     Err(e @ ProviderError::Cancelled(_)) => Attempt::Failed(e),
-                    // Visible text already streamed, then the stream broke: a
-                    // re-issue would double-render, so commit the streamed
-                    // prefix as a cut-short turn and let the session continue
-                    // it (mirrors the output-cap truncation path) rather than
-                    // discarding the work and ending the run.
                     Err(e) if seen_any_token => {
-                        Attempt::Done(stalled_step_out(model, &streamed, &e, self.metered(), self.adapter))
+                        Attempt::Done(stalled_step_out(model, &streamed, &e, self.metered(), adapter))
                     }
                     Err(e) => Attempt::Failed(e),
                 }
@@ -1532,6 +1516,7 @@ impl Live {
 
     fn summarize(
         &self,
+        adapter: AdapterKind,
         model: &str,
         system: &str,
         mut messages: Vec<ChatMessage>,
@@ -1541,12 +1526,12 @@ impl Live {
         self.refresh_if_stale();
         messages.push(ChatMessage::user(
             "Summarise the conversation so far concisely: \
-            the user's task, what has been tried, what worked, what state the \
+            the user'\''s task, what has been tried, what worked, what state the \
             shell is in (cwd, env, defined names), and any open subtasks. \
             A prior summary may appear first — fold it in. \
             Return only the summary, no preamble.",
         ));
-        let req_template = build_cached_request(self.adapter, system, messages);
+        let req_template = build_cached_request(adapter, system, messages);
         let options = ChatOptions::default()
             .with_max_tokens(max_tokens)
             .with_prompt_cache_key(&self.cache_key);
@@ -1561,25 +1546,14 @@ impl Live {
                     _ = wait_for_cancel(cancel) => {
                         return Attempt::Failed(ProviderError::Cancelled("during summary"));
                     }
-                    // `summarize` is non-streaming, so there are no
-                    // incremental events to idle between: the same budget
-                    // bounds the whole `exec_chat` request.  `tls::client`'s
-                    // `read_timeout` already covers a stall once bytes are
-                    // flowing, but not the connect phase that precedes it;
-                    // this select bounds connect too and yields an explicit
-                    // typed `Transient` rather than leaning on the `Display`
-                    // heuristic that a non-streaming `reqwest` timeout would
-                    // otherwise fall through to.  No partial output is ever
-                    // rendered, so it is `Failed` (retryable), never
-                    // `Committed`.
                     _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
                         return Attempt::Failed(ProviderError::Transient {
-                            cause: "summary request: no response within timeout".into(),
+                            cause: "stream idle: no response within timeout (summary)".into(),
                             attempts: 1,
                             body: None,
                         });
                     }
-                    r = self.client.exec_chat(model, req, Some(&options)) => r,
+                    r = self.transport.client.exec_chat(model, req, Some(&options)) => r,
                 };
                 match r {
                     Ok(resp) => Attempt::Done(resp),
@@ -1588,10 +1562,6 @@ impl Live {
             },
         ))?;
 
-        // A summary that itself hit the `max_tokens` cap is incomplete;
-        // committing it would silently drop everything past the cut-off.
-        // Surface it as `Truncated` so `Agent::compact` keeps the
-        // un-summarised history rather than compacting to a half summary.
         if matches!(resp.stop_reason, Some(StopReason::MaxTokens(_))) {
             return Err(ProviderError::Truncated {
                 reason: "summary exceeded the compaction token budget".into(),
@@ -1600,7 +1570,7 @@ impl Live {
         let text = resp.first_text().unwrap_or("").to_string();
         Ok(SummaryOut {
             summary: text,
-            usage: usage_from(model, &resp.usage, self.metered(), self.adapter),
+            usage: usage_from(model, &resp.usage, self.metered(), adapter),
         })
     }
 }
@@ -1987,7 +1957,7 @@ mod tests {
     /// The non-streamed (`exec_chat`) failure shape: a non-2xx status
     /// surfaces as `WebModelCall(ResponseFailedStatus { status, headers })`
     /// — the path the compaction summary takes.  This is what
-    /// [`Live::summarize`] hands to `from_genai`.
+    /// [`Engine::summarize`] hands to `from_genai`.
     fn web_model_call(status: StatusCode, headers: HeaderMap) -> genai::Error {
         genai::Error::WebModelCall {
             model_iden: iden("m"),

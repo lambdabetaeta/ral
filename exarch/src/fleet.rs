@@ -15,6 +15,7 @@
 
 use crate::agent_registry::AgentRegistry;
 use crate::bus::{AgentId, FleetBus};
+use crate::provider;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -38,6 +39,7 @@ pub struct Fleet {
     /// Whether a human is attached (the TUI).  With the trunk's `parent = None`
     /// this is what makes it the *conversing* trunk.
     pub interactive: bool,
+    pub engine: Arc<provider::Engine>,
 }
 
 impl Fleet {
@@ -46,12 +48,14 @@ impl Fleet {
         bus: FleetBus,
         focus: Arc<AtomicU64>,
         interactive: bool,
+        engine: Arc<provider::Engine>,
     ) -> Self {
         Self {
             agents,
             bus,
             focus,
             interactive,
+            engine,
         }
     }
 
@@ -69,5 +73,10 @@ impl Fleet {
     pub fn focused(&self) -> Option<AgentId> {
         let f = self.focus.load(Ordering::Relaxed);
         (f != NO_FOCUS).then_some(f)
+    }
+
+    /// The shared transport borrowed by every provider in the fleet.
+    pub fn engine(&self) -> &Arc<provider::Engine> {
+        &self.engine
     }
 }

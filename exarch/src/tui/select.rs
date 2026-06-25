@@ -5,7 +5,7 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Extract plain text between two cell-column positions within a line.
 /// `start_cell` and `end_cell` are absolute cell columns within the text
@@ -23,7 +23,7 @@ pub(super) fn plain_slice(line: &Line<'_>, start_cell: u16, end_cell: u16) -> St
     let mut byte_lo = text.len();
     let mut byte_hi = text.len();
     for (i, ch) in text.char_indices() {
-        let w = UnicodeWidthStr::width(ch) as u16;
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
         if cell >= lo && byte_lo == text.len() {
             byte_lo = i;
         }
@@ -72,7 +72,7 @@ pub(super) fn highlight_range(line: &mut Line<'static>, start_cell: u16, end_cel
             let mut buf = String::new();
             let mut in_sel = cell >= lo;
             for ch in content.chars() {
-                let ch_w = UnicodeWidthStr::width(ch) as u16;
+                let ch_w = UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
                 let ch_end = char_cell + ch_w;
                 let ch_in_sel = char_cell < hi && ch_end > lo;
                 if ch_in_sel != in_sel {

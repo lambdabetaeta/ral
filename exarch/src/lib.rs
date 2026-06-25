@@ -39,7 +39,8 @@ pub mod tui;
 
 use agent::Agent;
 use clap::Parser;
-use provider::Provider;
+use provider::{Engine, Provider};
+use std::sync::Arc;
 use tui::SessionInfo;
 
 /// Pre-`main` trampoline shared by the binary and every test binary.
@@ -193,11 +194,11 @@ pub fn run() -> Result<(), String> {
     )?;
     let system_size = system.len();
 
-    // Behind an `Arc` from the start: an async `agent` worker captures a
-    // clone to outlive its spawning turn, and a `/model` switch swaps this
-    // for a fresh one without disturbing children already running.
+    // One shared transport for the whole fleet: the runtime, cache key, and
+    // genai client are built once and borrowed by every Provider.
+    let engine = Engine::new(&cred, &id, &model);
     let provider =
-        std::sync::Arc::new(Provider::build(&id, model.clone(), &cred, c.max_tokens, tuning));
+        std::sync::Arc::new(Provider::build(engine.clone(), &id, model.clone(), c.max_tokens, tuning));
     let mut session = Agent::root(
         system,
         caps,
@@ -230,7 +231,7 @@ pub fn run() -> Result<(), String> {
         cwd: &cwd,
     };
     if c.headless {
-        headless::run(&mut session, &info, seed, c.output_format)
+        headless::run(&mut session, &info, seed, c.output_format, Arc::clone(&engine))
     } else {
         tui::run(
             &mut session,
@@ -242,6 +243,7 @@ pub fn run() -> Result<(), String> {
             &run_dir,
             seed,
             c.vi,
+            Arc::clone(&engine),
         )
     }
 }
