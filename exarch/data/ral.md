@@ -3,21 +3,14 @@ Like every shell, `ral` runs commands:
     ls
     cat foo.txt | wc -l
     echo hello > /tmp/out
-    echo 'more'  >> /tmp/out
 
-Commands are sequenced by newlines or `;`, and an uncaught failure aborts the whole script: `./configure; make` runs `make` only if configuration succeeded. `?` runs the second command when the first failed: `cat VERSION ? 'unversioned'`. THERE IS NO `&&` NOR `||`.
+Commands are sequenced by newlines or `;`. An uncaught failure aborts the whole script: `./configure; make` runs `make` only when configuration succeeds. `?` runs the second command when the first failed: `cat VERSION ? 'unversioned'`. There is no `&&` nor `||`.
 
-Under the hood `ral` is really a version of call-by-push-value with full recursion, tail call optimisation, recursive types, and commands/exec-as-effects. 
-
-`ral` has value types and computation types. The basic value types are: Unit, Bool, Int, Float, String, Bytes, lists of values, records and maps, variants, blocks (= commands packaged as values), and concurrent handles. A command may not be used as a value. Should you wish to use one inline, you must make it into an anonymous block and force it: `!{cmd}`.
+`ral` is call-by-push-value with recursion, recursive types, and one effect: an exec call. Its value types are `Unit`, `Bool`, `Int`, `Float`, String, Bytes, lists, records, maps, variants, thread handles, and blocks (= parameterized thunked commands). A command may not be used as a value. Should you wish to use one inline, you must make it into an anonymous block and force it: `!{cmd}`.
 
 ## Definitions
 
-`let x = 42` is an immutable (but shadowable) definition, which can be used as `$x`. 
-
-A script whose last line is a `let` returns nothing; end with the value you mean to see.
-
-When used with a command a binding captures stdout:
+`let x = 42` defines `x` to be `42`. Use it as `$x`. When used with a command it captures stdout:
 
     let branch = git branch --show-current
     let body   = from-string < notes.txt
@@ -26,61 +19,49 @@ When used with a command a binding captures stdout:
 
 Captured output is a `String`: split it with `lines`, parse it with `int`/`float`, or decode it with a codec (`from-json $s`).
 
+A turn ending in `let` returns nothing; end with what you mean to see as `VALUE`.
+
 ## Blocks
 
-A block packages a command as a value; forcing runs it. A block in head position is forced; otherwise use `!`:
+A block packages a command as a value:
 
     let d = { date +%s }
-    d                # runs date, forcing the block
+    d                # runs date, forcing the block, even without !
     !$d              # the same, explicitly - NOT A NEGATION, SIMPLY FORCING A BLOCK
     !{date +%s}      # forcing an anonymous block, used in interpolation
 
-Blocks take space-separated parameters and are lexically scoped and curried:
+Blocks may take space-separated, lexically-scoped, curried parameters:
 
-    { ls }                       # thunk
-    { |path| cat $path }         # one parameter
-    { |a b| $[$a + $b] }         # two parameters
-    { |a, b| … }                 # PARSE ERROR — no commas
+    { ls }                                # thunk
+    let print-file = { |path| cat $path } # one parameter
+    let f = { |a b| $[$a + $b] }          # two parameters
+    { |a, b| … }                          # PARSE ERROR — no commas
 
-Blocks create scopes: in `!{ let x = 5; f $x }` the variable `x` is gone after the block.
-
-Blocks can be used with higher-order functions, such as `map`, `filter`, `each`, `fold`, `flat-map`, `sort-list-by`, …. Examples:
+Blocks can be used with higher-order functions, such as `map`, `filter`, `each`, `fold`, ...:
 
     map { |f| line-count $f } !{glob 'src/**/*.rs'}
     filter { |h| re-match '^src/' $h[file] } $hits
     fold { |acc x| $[$acc + $x[size]] } 0 !{list-dir '.'}
     for $hits { |h| echo "$h[file]:$h[line]" }
-
-You have the standard prelude found in functional programming: `take`, `drop`, `length`, `elem`, `concat`, `intercalate`, `sum`, `zip`, `enumerate`, `first`, `reverse`, `sort-list`. For example, use `fold { |acc x| if !{elem $x $acc} { $acc } else { [...$acc, $x] } } [] $xs` for de-duplication.
-
-Blocks are ordinary values. Define reusable functions pass them with `$`:
-
     let in-src = { |h| re-match '^src/' $h[file] }
     filter $in-src $hits
 
-NB: omitting the `$` in `$in-src` makes `in-src` just a string argument in the above.
+You have the standard prelude found in functional programming: `take`, `drop`, `length`, `elem`, `concat`, `intercalate`, `sum`, `zip`, `enumerate`, `first`, `reverse`, `sort-list`. For example, use `fold { |acc x| if !{elem $x $acc} { $acc } else { [...$acc, $x] } } [] $xs` for de-duplication.
+
+Omitting the `$` in `$in-src` makes `in-src` just a string argument in the above.
 
 Finally, blocks support recursive definitions.
 
 ## Pipelines
 
-`ral` has pipelines. Some pipes carry bytes from one command to the next (external, UNIX-style). Others pipe values from one `ral` script to another; then the equation `x | f = f !{x}` holds.
+`ral` has two kinds of pipes: some carry bytes from one command to the next (UNIX-style); others pipe values, satisfying the equation `x | f = f !{x}` holds.
 
-There are codecs that bridge the world of bytes to the world of values:
-
-    | Decoder       | In      | Out                              |
-    |---------------|---------|----------------------------------|
-    | `from-line`   | `Bytes` | `String` (trailing `\n` dropped) |
-    | `from-string` | `Bytes` | `String`                         |
-    | `from-lines`  | `Bytes` | lazy stream of `String`          |
-    | `from-json`   | `Bytes` | structured value                 |
-
-Text decoders require UTF-8; use `from-bytes` when bytes are not text. There are also corresponding `to-line`, `to-string`, `to-lines`, `to-json` in the opposite direction.
-
-Decode where the bytes flow, and capture only after decoding:
+There are commands that take bytes to values: There are codecs that bridge the world of bytes to the world of values: `from-line` takes `Bytes` to a `String` with no trailing `\n`, and `from-string` with it; `from-lines` gives a lazy stream of `String`; `from-json` turns JSON into a `ral` value. Decode where the bytes flow, and capture only after decoding:
 
     let cfg = curl -s https://api.example.com/cfg | from-json
     let os  = !{uname -s | from-line}
+
+There are also corresponding `to-line`, `to-string`, `to-lines`, `to-json` that take values to bytes. Text decoders require UTF-8; use `from-bytes` when bytes are not text. 
 
 Every decoder also accepts its input as an explicit argument, which is how you decode a value already in hand — `from-string $r[stdout]`, `from-json $captured`. Piping a String *value* into a decoder (.e.g `$captured | from-json`) is a type error.
 
@@ -94,12 +75,12 @@ Every decoder also accepts its input as an explicit argument, which is how you d
 - Single quotes ('…') are verbatim; NO ESCAPES, NO INTERPOLATION.
 - Double quotes may be used to interpolate variables, fields, and forces:
 
-      echo "hi $name: $h[file] line $h[line], host !{hostname | from-line}, sum $[2 + 3]"
+      echo "hi $first-name $(last-name): $h[file] line $h[line], host !{hostname | from-line}, sum $[2 + 3]"
 
-  A composite path must be one quoted word: `echo hi > "$dir/file"` (a bare `$dir/file` does not work).
+  `$(name)` delimits variables from post-fixes that do not belong to them. A composite path must be one quoted word: `echo hi > "$dir/file"`.
 
-  `$(name)` delimits a variable from adjacent text that would otherwise be glued to it; it interpolates the whole value, so index with `$h[file]`, not `$(h)[file]`. Escapes are a fixed set (`\n`, `\r`, `\t`, `\\`, `\"`, `\$`, `\!`, `\0`, `\e`, `\xNN` for ASCII, `\u{…}`, and backslash-newline continuation).
-- Raw strings `#'…'#` are verbatim (with more hashes as needed: `##'…'##`, `###'…'###` and so on). These must be used for multiline inputs, with real newlines instead of `\n`. Use enough hashes that the closing run is not in the body. Note that a `#` run *not* followed by `'` instead marks everything to the end of the line as a comment.
+* Escapes are a fixed set (`\n`, `\r`, `\t`, `\\`, `\"`, `\$`, `\!`, `\0`, `\e`, `\xNN` for ASCII, `\u{…}`, and backslash-newline continuation).
+- Raw strings `#'…'#` are verbatim (with more hashes as needed: `##'…'##`, `###'…'###` and so on). Use these with real newlines instead of `\n`. Note that a sequence of `#` *not* followed by `'` instead marks everything to the end of the line as a comment.
 - `dedent` strips the common leading indentation from a multiline string.
 - `ral` has no heredocs (`<<EOF …`). Raw strings `#'…'#` are multiline: write a file with `echo #'…'# > path`, or feed a program's stdin with `echo #'…'# | cmd`.
 
@@ -141,7 +122,7 @@ A *map* is the homogeneous cousin (all values one type); only maps support `keys
 
 ## Variants and case
 
-A variant is a backtick-tagged value. `` `absent `` is a bare (nullary) tag; `` `file [bytes: 4890] `` is a tag carrying a payload — usually a record. A tag records which of several outcomes occurred and its payload carries that outcome's data, so a function that probes the system records its finding as a variant:
+A variant is a value tagged by a `` `tag ``, recording one of several outcomes along with some data, e.g. `` `file [bytes: 4096] `` For example, probing a path:
 
     let probe = { |p|
       if    $[not !{exists $p}] { `absent }
@@ -198,40 +179,15 @@ This is how you read a tool whose exit code is *data* (e.g. `grep` exit 1 meanin
 
 `spawn { … }` runs a block on a worker and returns a handle at once:
 
-    let b = { cargo build } 
-    let h = spawn $b        # do not forget to bind the handle; possibly inline the block here
-    `build started`
+    let h = spawn { cargo build }  # do not forget to bind the handle!
+    'build started'
 
-You will be notified when this completes. Handles persist across turns. In a later turn, `await` to obtain a [value, stdout, stderr] record:
+You will be notified at a later turn, when this completes. Use `await` to obtain a `[value, stdout, stderr]` record:
 
     let x = await $h                      # blocks until the worker returns
     [out: $x[stdout], errs: $x[stderr]]   # as Bytes
 
-If this fails you do not read to re-define `x` again, just read:
-
-    [out: $x[stdout], errs: $x[stderr]]   # as Bytes
-
-Wrap in `audit` to read the recorded tree:
-
-    let suite = spawn { audit { cargo test -q } }
-
-In a later turn:
-    # … other work in this turn or a later one — handles persist across turns …
-    let r      = await $suite
-    let report = $r[value]
-    let log    = lines !{from-string $report[children][0][stdout]}
-    [ok: $[$report[status] == 0], log: !{take 20 $log}]
-
-    # $suite is still in scope from the previous turn.
-    let r  = await $suite
-    let cx = $r[value]
-    let cargo_stdout  = re-split '\n' $cx[children][0][children][0][stdout]
-    let errs = filter { |l| re-match '^error' $l } $cargo_stdout
-    [status: $cx[status], errors: !{take 30 $errs}, tail: !{take 20 $out}]
-
-Use `cancel $h` to stop a worker that is no longer needed.
-
-There is also a bounded parallel `map` and a `race`; use `help` to find out more about them. 
+Use `cancel $h` to stop a spawned thread that is no longer needed. There is also a bounded parallel `map` and a `race`; use `help` to find out more about them. 
 
 ## Within
 
@@ -321,7 +277,7 @@ A `` `card `` may stack marks of different kinds, but within one homogeneous lis
 
 ## Help
 
-When you are unsure of the signature of something you always call `help <name>`. This can be done as part of a turn:
+When you are unsure of the signature of something you must always call `help <name>`. This can be done as part of a turn:
 
     let h = spawn { audit { make } }
     let x = help 'view-text-around'
