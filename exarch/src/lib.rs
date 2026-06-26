@@ -157,8 +157,12 @@ pub fn run() -> Result<(), String> {
     // the persisted selection (when its provider is available),
     // else the first available provider's default model.
     let mut catalog = models::ModelCatalog::new(models::LiveSource::new(&store));
-    let (id, model, tuning) =
+    let (id, model, mut tuning) =
         resolve_initial_selection(c.model.as_deref(), &state_dir, &available, &mut catalog)?;
+    if let Some(keyword) = c.effort.as_deref() {
+        tuning.effort = Some(provider::ReasoningEffort::from_keyword(keyword)
+            .ok_or_else(|| format!("invalid effort '{keyword}' — expected none|low|medium|high|xhigh|max"))?);
+    }
     let label = id.label();
     let cred = store
         .get(&id)

@@ -1015,7 +1015,7 @@ pub struct Tuning {
 }
 
 impl Tuning {
-    /// The tuning a fresh selection starts with: reasoning on at `XHigh`,
+    /// The tuning a fresh selection starts with: reasoning on at `medium`,
     /// temperature left to the adapter. Distinct from [`Tuning::default`]
     /// (all-auto), which remains the honest "let the adapter decide" sentinel
     /// the `auto` rung still selects — this is only the startup fallback so a
@@ -1023,7 +1023,7 @@ impl Tuning {
     /// thinking-off default.
     pub fn initial() -> Self {
         Self {
-            effort: Some(ReasoningEffort::XHigh),
+            effort: Some(ReasoningEffort::Medium),
             temperature: None,
             top_p: None,
         }

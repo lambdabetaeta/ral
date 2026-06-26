@@ -65,6 +65,12 @@ pub struct Cli {
     /// running deep reasoning.
     #[arg(long = "max-tokens", value_name = "N")]
     pub max_tokens: Option<u32>,
+    /// Reasoning effort: `none`, `low`, `medium`, `high`, `xhigh`, or
+    /// `max`.  Overrides the default (`medium`) or any persisted effort.
+    /// The `/model` picker can adjust it further and persist the new
+    /// choice.
+    #[arg(long = "effort", value_name = "LEVEL")]
+    pub effort: Option<String>,
     /// Run one seed turn non-interactively: the assistant's reply
     /// streams to stdout, every other event (tool calls, results,
     /// errors) condenses to one line on stderr, and the process exits
