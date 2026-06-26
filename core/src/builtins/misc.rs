@@ -102,6 +102,14 @@ pub(super) fn prelude_doc(name: &str) -> Option<String> {
     prelude_docs().get(name).cloned()
 }
 
+/// The documented prelude function names (the keys of [`prelude_docs`]),
+/// unsorted.  An embedding host folds these into its own at-a-glance command
+/// index beside the builtins; `help <name>` then resolves each through
+/// [`prelude_doc`].
+pub fn prelude_names() -> Vec<&'static str> {
+    prelude_docs().keys().map(String::as_str).collect()
+}
+
 /// Return all prelude names with their doc strings, sorted alphabetically.
 pub(super) fn prelude_all_docs() -> Vec<(String, String)> {
     let mut v: Vec<_> = prelude_docs()

@@ -46,11 +46,11 @@ Blocks can be used with higher-order functions, such as `map`, `filter`, `each`,
     let in-src = { |h| re-match '^src/' $h[file] }
     filter $in-src $hits
 
-You have the standard prelude found in functional programming: `take`, `drop`, `length`, `elem`, `nub` (de-duplication, first-seen order), `concat`, `intercalate`, `sum`, `zip`, `enumerate`, `first`, `reverse`, `sort-list`.
-
 Omitting the `$` in `$in-src` makes `in-src` just a string argument in the above.
 
-Finally, blocks support recursive definitions.
+You have the standard prelude found in functional programming, listed below; call `help` to find out more about a function.
+
+Blocks support recursive definitions.
 
 ## Pipelines
 
@@ -299,4 +299,4 @@ A `` `card `` may stack marks of different kinds, but within one homogeneous lis
 
 ## Help
 
-When you are unsure of the signature of something you must always call `help <name>`. Many builtins are not covered above; call `help` on any of: `ask`, `watch`, `alias`/`unalias`, `source`, `use`, `shell-quote`/`shell-split`, `upper`/`lower`/`slice`, `str`, `re-split`/`re-find-match`/`re-find-matches`/`re-replace`, `resolve-path`/`cwd`/`cd`/`temp-dir`/`temp-file`, `is-link`/`is-readable`/`is-writable`/`is-empty`, `fold-lines`, `clear`/`reset`, `reduce`, `last`, `take-while`/`drop-while`, `words`, `intersection`/`difference`, `stream-cons`/`stream-nil`/`stream-take`/`stream-drop`, `map-lines`/`filter-lines`/`each-line`, `file-empty`, `par`, `ansi-…`/`styled`.
+When you are unsure of the signature of something you always call `help <name>`.

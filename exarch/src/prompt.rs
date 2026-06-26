@@ -9,28 +9,31 @@ use crate::host;
 use ral_core::types::{Capabilities, ExecDir};
 use std::path::{Path, PathBuf};
 
-/// Build the full system prompt.  Order: persona, Grant, Host, Ral,
-/// Script style, [Workspace], [Headless].  Grant sits directly under the persona so
-/// its constraints are encountered before the tool reference (`Ral`)
-/// tempts the model to use capabilities it does not hold.  The set of
-/// builtins is not listed here; the agent discovers it at runtime with
-/// `help`, which reads the live resolver and so cannot drift out of
-/// date.  With no `--system` files the bake-in persona
-/// (`data/system.md`), ral guide (`data/ral.md`), and scripting guide
-/// (`data/script-style.md`) appear as distinct sections; `--system
-/// FILE...` collapses them into one user-supplied section and the
-/// `Ral` / `Script style` slots are omitted (the user takes
-/// responsibility for the tool reference).  A `Workspace` section follows,
-/// present whenever any `AGENTS.md` is discovered (see [`discover_agents`]):
-/// the operator's own `<config>/AGENTS.md` then every repo `AGENTS.md` from
-/// the git root down to the cwd, the deepest last so its recency wins.  It
-/// carries project instructions, not authority — it cannot widen the `Grant`
-/// — and appears regardless of `--system`, the same orthogonality the
-/// headless note relies on.  When `headless`, a closing
-/// section (`data/headless.md`) tells the root it returns its result by
-/// calling `reply` exactly once (a finish without `reply` returns nothing
-/// and fails) — appended last, where its recency carries, and regardless of
-/// `--system` since it governs the return channel, not the persona.
+/// Build the full system prompt, in order:
+///
+/// 1. **persona** (unheaded) — the baked `data/system.md`, or the `--system
+///    FILE...` files when given.  `--system` replaces *only* the persona; every
+///    other section stands, so an operator can retune the voice without losing
+///    the tool reference.
+/// 2. **Ral** (`data/ral.md`) — the language and tool reference.
+/// 3. **Builtins** — every builtin and prelude function's **name** only (see
+///    [`builtin_index`]), a progressive-disclosure index right after the `Ral`
+///    prose that points `help` at it: the agent reads the whole surface at a
+///    glance and `help <name>`s any one for its signature and docs on demand,
+///    since the full help strings proved far too long to bake in.
+/// 4. **Script style** (`data/script-style.md`) — the scripting guide.
+/// 5. **Host** — the environment snapshot ([`host::snapshot`]) followed by the
+///    live `Grant`: where the agent stands on disk and when "now" is, then the
+///    authority it holds, read together as the facts of its situation.
+/// 6. **Workspace** (optional) — present whenever any `AGENTS.md` is discovered
+///    (see [`discover_agents`]): the operator's own `<config>/AGENTS.md` then
+///    every repo `AGENTS.md` from the git root down to the cwd, the deepest
+///    last so its recency wins.  Project instructions, not authority — it
+///    cannot widen the grant.
+/// 7. **Agent** (optional) — when `headless`, the closing return-channel
+///    contract (`data/agent.md`): the agent returns its result by calling
+///    `reply` exactly once, the contract a headless root and every sub-agent
+///    share.  Appended last, where its recency carries.
 pub fn assemble(
     files: &[PathBuf],
     caps: &Capabilities,
@@ -40,6 +43,7 @@ pub fn assemble(
     headless: bool,
 ) -> Result<String, String> {
     let mut sections: Vec<(Option<&str>, String)> = Vec::new();
+    // Persona is the only section `--system` replaces; the rest stand.
     sections.push((
         None,
         if files.is_empty() {
@@ -48,23 +52,65 @@ pub fn assemble(
             read_files(files)?
         },
     ));
-    sections.push((Some("Grant"), grant_summary(caps, scratch)));
-    sections.push((Some("Host"), host::snapshot()));
-    if files.is_empty() {
-        sections.push((Some("Ral"), include_str!("../data/ral.md").into()));
-        sections.push((
-            Some("Script style"),
-            include_str!("../data/script-style.md").into(),
-        ));
-    }
+    sections.push((Some("Ral"), include_str!("../data/ral.md").into()));
+    sections.push((Some("Builtins"), builtin_index()));
+    sections.push((
+        Some("Script style"),
+        include_str!("../data/script-style.md").into(),
+    ));
+    sections.push((Some("Host"), host_section(caps, scratch)));
     let agents = discover_agents(cwd, config_dir);
     if !agents.is_empty() {
         sections.push((Some("Workspace"), read_files(&agents)?));
     }
     if headless {
-        sections.push((Some("Headless"), include_str!("../data/headless.md").into()));
+        sections.push((Some("Agent"), include_str!("../data/agent.md").into()));
     }
     Ok(render(&sections))
+}
+
+/// Every command the agent can name, as one comma-separated line of **names**:
+/// the registered builtins (core's plus exarch's own surface — `grep-files`,
+/// `edit`, `window-hash`, …), the documented prelude functions, and the agent
+/// library (`view-text` and friends, which ride in as part of the prelude).
+/// Sorted and deduped, with `_`-prefixed internals filtered out — note
+/// `ral_core::builtins::builtin_names` does *not* drop the `_` names itself,
+/// only its callers do, so the filter lives here and covers all three sources.
+///
+/// This is a *progressive-disclosure* index, not a reference: the agent reads
+/// the whole surface at a glance, then `help <name>`s any one for its signature
+/// and docs on demand — baking every help string into the prompt proved far too
+/// long.  The set is fixed at build time and does not vary per agent, so it is
+/// assembled from the static tables, never a live shell.  Exarch's builtins are
+/// chained in explicitly because they are not yet in the process registry that
+/// `builtin_names` reads when the prompt is assembled (the session shell, which
+/// installs them, is booted afterwards).
+fn builtin_index() -> String {
+    let builtins = ral_core::builtins::builtin_names()
+        .into_iter()
+        .map(str::to_string)
+        .chain(
+            crate::agent_builtins::EXARCH_BUILTINS
+                .iter()
+                .map(|e| e.name.to_string()),
+        );
+    let prelude = ral_core::builtins::misc::prelude_names()
+        .into_iter()
+        .map(str::to_string);
+    let library = crate::agent_builtins::agent_library_docs()
+        .into_iter()
+        .map(|(name, _doc)| name);
+    let mut names: Vec<String> = builtins
+        .chain(prelude)
+        .chain(library)
+        .filter(|n| !n.starts_with('_'))
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    format!(
+        "Every builtin and prelude function, by name — call `help <name>` for any one's signature and docs:\n\n{}",
+        names.join(", ")
+    )
 }
 
 /// Discover the `AGENTS.md` instruction files to inject, outermost first so
@@ -145,6 +191,13 @@ fn render(sections: &[(Option<&str>, String)]) -> String {
         .collect::<Vec<_>>()
         .join("\n\n")
         + "\n"
+}
+
+/// The `Host` section body: the environment snapshot ([`host::snapshot`]) and
+/// the live grant, one under the other.  Where the agent stands and when "now"
+/// is, then the authority it holds — the facts of its situation, read together.
+fn host_section(caps: &Capabilities, scratch: &Path) -> String {
+    format!("{}\n{}", host::snapshot(), grant_summary(caps, scratch))
 }
 
 /// Render the live grant: a static legend (`data/grant-legend.md`)
