@@ -264,7 +264,6 @@ pub(crate) fn eval_grant(caps: &Val, body: &Val, shell: &mut Shell) -> Raw<Value
     let ctx = crate::path::sigil::FreezeCtx {
         home: &home,
         cwd: &cwd,
-        git_dir: None,
     };
     let caps = crate::capability::decode_capability_map(&caps_val, "grant", &ctx)?;
     let body = eval_val(body, shell)?;

@@ -132,7 +132,6 @@ mod tests {
         let ctx = FreezeCtx {
             home: &home,
             cwd: Path::new("/"),
-            git_dir: None,
         };
         for (name, text) in [
             ("minimal", MINIMAL_RAL),
@@ -158,7 +157,6 @@ mod tests {
         let ctx = FreezeCtx {
             home: "/h",
             cwd: Path::new("/work/proj"),
-            git_dir: None,
         };
         let caps = load("confined", CONFINED_RAL, &ctx);
         assert_eq!(caps.net, Some(false), "confined must have net off");
@@ -189,7 +187,6 @@ mod tests {
         let ctx = FreezeCtx {
             home: &home,
             cwd: Path::new("/work/proj"),
-            git_dir: None,
         };
         let caps = load("read-only", READ_ONLY_RAL, &ctx);
         let fs = caps.fs.as_ref().expect("read-only declares fs");
@@ -208,7 +205,6 @@ mod tests {
         let ctx = FreezeCtx {
             home: "/h",
             cwd: Path::new("/"),
-            git_dir: None,
         };
         assert_eq!(
             load("dangerous", DANGEROUS_RAL, &ctx),
@@ -226,7 +222,6 @@ mod tests {
         let ctx = FreezeCtx {
             home: &home,
             cwd: Path::new("/"),
-            git_dir: None,
         };
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
         let exec = caps.exec.as_ref().expect("reasonable should declare exec");
@@ -247,7 +242,7 @@ mod tests {
     fn minimal_and_reasonable_carry_cwd_and_tempdir_sigils() {
         let home = ral_core::path::home_from_env();
         let cwd = Path::new("/work/proj");
-        let ctx = FreezeCtx { home: &home, cwd, git_dir: None };
+        let ctx = FreezeCtx { home: &home, cwd };
         // Freeze folds away any trailing separator the platform temp
         // dir carries (macOS `$TMPDIR` ends in `/`), so compare against
         // the same normal form the frozen keys hold.
@@ -301,7 +296,6 @@ mod tests {
         let ctx = FreezeCtx {
             home: &home,
             cwd: work,
-            git_dir: None,
         };
         let caps = load("minimal", MINIMAL_RAL, &ctx);
 
@@ -329,7 +323,6 @@ mod tests {
         let ctx = FreezeCtx {
             home: &home,
             cwd: Path::new("/"),
-            git_dir: None,
         };
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
         assert!(
@@ -364,7 +357,6 @@ mod tests {
         let ctx = FreezeCtx {
             home: &home,
             cwd: Path::new("/"),
-            git_dir: None,
         };
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
         let cargo = format!(
@@ -388,7 +380,6 @@ mod tests {
         let ctx = FreezeCtx {
             home: &home,
             cwd: Path::new("/"),
-            git_dir: None,
         };
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
         let gobin = format!("{}/go/bin/goimports", home);
@@ -414,7 +405,6 @@ mod tests {
         let ctx = FreezeCtx {
             home: &home,
             cwd: Path::new("/"),
-            git_dir: None,
         };
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
         let node = format!("{}/.nvm/versions/node/v22.0.0/bin/node", home);
@@ -433,7 +423,6 @@ mod tests {
         let ctx = FreezeCtx {
             home: &home,
             cwd: Path::new("/"),
-            git_dir: None,
         };
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
         let versioned = format!("{}/.pyenv/versions/3.12.0/bin/python3", home);
@@ -462,7 +451,6 @@ mod tests {
         let ctx = FreezeCtx {
             home: &home,
             cwd: Path::new("/"),
-            git_dir: None,
         };
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
 
@@ -497,7 +485,6 @@ mod tests {
         let ctx = FreezeCtx {
             home: &home,
             cwd: Path::new("/"),
-            git_dir: None,
         };
         let gitconfig = expand_path_prefix("~/.gitconfig", &home);
         for (name, text) in [("reasonable", REASONABLE_RAL), ("read-only", READ_ONLY_RAL)] {
@@ -530,7 +517,6 @@ mod tests {
         let ctx = FreezeCtx {
             home: &home,
             cwd: Path::new("/work"),
-            git_dir: None,
         };
         let admits = |caps: ral_core::types::Capabilities, names: &[&str]| {
             let mut shell = Shell::default();
@@ -581,7 +567,6 @@ mod tests {
         let ctx = FreezeCtx {
             home: &home,
             cwd: Path::new("/"),
-            git_dir: None,
         };
         let gitconfig = expand_path_prefix("~/.gitconfig", &home);
         let xdg_config_git = expand_path_prefix("xdg:config/git", &home);

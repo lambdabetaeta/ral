@@ -170,6 +170,7 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
         "exarch/src/oauth/mod.rs",
         "io-door:silent:token-write-nonunix",
     ),
+    ("core/src/path/git.rs", "io-door:silent:git-dir-discovery"),
     ("exarch/src/prompt.rs", "io-door:silent:system-prompt-files"),
     ("exarch/src/state.rs", "io-door:silent:state-read"),
     ("exarch/src/state.rs", "io-door:silent:state-write"),

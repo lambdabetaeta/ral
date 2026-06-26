@@ -30,6 +30,7 @@ pub mod canon;
 pub mod config;
 pub mod lex;
 pub mod prefix_set;
+pub mod git;
 pub mod ral_path;
 pub mod resolved;
 pub mod resolver;
@@ -48,6 +49,7 @@ pub use prefix_set::PrefixSet;
 pub use resolved::{NormalizedPrefix, ResolvedPath};
 pub use resolver::{CanonMode, Resolver};
 pub use which::{commands_on_path, file_exists_on_path, locate, resolve_in_path};
+pub use git::{discover_git_dir, find_git_entry};
 
 /// Process working directory.  The one syscall behind the lint —
 /// `Shell::cwd` is the canonical accessor for shells; this helper is

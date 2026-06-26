@@ -131,7 +131,7 @@ fn builtin_index() -> String {
 /// agent's own writable tree, so unlike `config.ral` it is untrusted — but it
 /// only adds prompt text, never capabilities, so it cannot widen the `Grant`.
 fn discover_agents(cwd: &Path, config_dir: &Path) -> Vec<PathBuf> {
-    let repo_root = crate::policy::find_git_entry(cwd)
+    let repo_root = ral_core::path::find_git_entry(cwd)
         .and_then(|dot_git| dot_git.parent().map(Path::to_path_buf));
     let mut scan: Vec<PathBuf> = match repo_root {
         Some(root) => {

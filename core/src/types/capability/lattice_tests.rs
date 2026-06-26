@@ -790,6 +790,5 @@ fn test_ctx(home: &str) -> crate::path::sigil::FreezeCtx<'_> {
     crate::path::sigil::FreezeCtx {
         home,
         cwd: std::path::Path::new("/"),
-        git_dir: None,
     }
 }
