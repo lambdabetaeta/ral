@@ -65,7 +65,10 @@ pub(super) fn render_md(text: &str, w: u16, indent: u16, fidelity: Fidelity) -> 
 /// folded shadow visibly reads as lower-authority scratch work without
 /// losing legibility.
 const REASONING_DRAIN: f32 = 0.7;
-
+/// Dimming factor applied after desaturation: pulls the foreground
+/// toward a darker neutral so reasoning prose reads as the answer's
+/// shadow — visibly lower-luminance, not just lower-saturation.
+const REASONING_DIM: f32 = 0.35;
 /// Render reasoning prose — the answer's dialed-open shadow.  Rendered
 /// sound, then desaturated wholesale toward grey at held luminance: the
 /// reasoning is a finished image like any other prose, but the colour has
@@ -77,9 +80,8 @@ pub(super) fn render_reasoning(text: &str, w: u16, indent: u16) -> Vec<Line<'sta
     let mut lines = render_md(text, w, indent, Fidelity::default());
     for line in &mut lines {
         for span in &mut line.spans {
-            if let Some(fg) = span.style.fg {
-                span.style.fg = Some(desaturate(fg, REASONING_DRAIN));
-            }
+            let fg = desaturate(span.style.fg.unwrap_or(BASE_FG), REASONING_DRAIN);
+            span.style.fg = Some(mix(fg, Color::Rgb(80, 80, 80), REASONING_DIM));
         }
     }
     lines

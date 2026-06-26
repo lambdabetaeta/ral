@@ -714,6 +714,7 @@ impl Block {
             } => {
                 let mut ls = line::reasoning_header(&r.text, r.say_chars);
                 if level >= Reveal::Context {
+                    ls.push(Line::default());
                     let shadow = md::render_reasoning(&r.text, width, MD_INDENT);
                     ls.extend(if level >= Reveal::Full {
                         shadow
