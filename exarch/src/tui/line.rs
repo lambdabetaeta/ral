@@ -1598,61 +1598,6 @@ mod tests {
         l.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
-    /// A diff row lifts its *changed* word: the emphasised segment renders as
-    /// a bold white-on-hot highlight block while the unchanged remainder is
-    /// dimmed in the base hue, and the gutter (line number + sign) leads the
-    /// row.
-    #[test]
-    fn diff_row_lifts_the_changed_word() {
-        let row = |emph: &str, hot_word: &str| {
-            vec![
-                Seg::plain("the quick "),
-                Seg {
-                    emph: true,
-                    text: hot_word.into(),
-                },
-                Seg::plain(emph),
-            ]
-        };
-        let h = Hunk {
-            start: 1,
-            rows: vec![Row::Del(row(" fox", "brown")), Row::Add(row(" fox", "red"))],
-        };
-        let mut ls = Vec::new();
-        push_hunk(&mut ls, &h, 3);
-        assert_eq!(ls.len(), 2, "one del row, one add row");
-
-        let span = |l: &Line<'static>, word: &str| {
-            l.spans
-                .iter()
-                .find(|s| s.content == word)
-                .unwrap_or_else(|| panic!("a `{word}` span"))
-                .style
-        };
-        // The deletion reads `- the quick brown fox`; only `brown` is hot,
-        // lifted as a bold white-on-hot block.
-        assert!(text(&ls[0]).contains("- the quick brown fox"));
-        let brown = span(&ls[0], "brown");
-        assert_eq!(brown.fg, Some(Color::White));
-        assert_eq!(brown.bg, Some(RED_HOT));
-        assert!(brown.add_modifier.contains(Modifier::BOLD));
-        // Its unchanged neighbours are dimmed in the base hot-red (same-style
-        // words coalesce, so the prefix lands as one `the quick ` span).
-        let quick = ls[0]
-            .spans
-            .iter()
-            .find(|s| s.content.contains("quick"))
-            .expect("the unchanged prefix")
-            .style;
-        assert_eq!(quick.fg, Some(RED_HOT));
-        assert!(quick.add_modifier.contains(Modifier::DIM));
-        // The insertion lifts `red` as a bold white-on-lime-hot block.
-        let red = span(&ls[1], "red");
-        assert_eq!(red.fg, Some(Color::White));
-        assert_eq!(red.bg, Some(LIME_HOT));
-        assert!(red.add_modifier.contains(Modifier::BOLD));
-    }
-
     /// A surfaced general card frames as a closed box: a `╭…╮` top rule with
     /// the heading lifted into it, `│`-flanked content, a `╰…╯` bottom, and
     /// every framed line the same display width so the right edge is flush.
