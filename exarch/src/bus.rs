@@ -4,7 +4,7 @@
 use crate::cancel;
 use crate::card::{Card, IoEvent};
 use crate::event::ProviderErrorRecord;
-use crate::provider::Usage;
+use crate::provider::{Tuning, Usage};
 use crate::transcript::Transcript;
 use ral_core::Value;
 use serde::Serialize;
@@ -727,7 +727,7 @@ pub enum Kind {
         answer_chars: u32,
     },
     Usage(Usage),
-    Step(u32),
+    Step { n: u32, tuning: Tuning },
     /// A transient label for the worker's current synchronous phase —
     /// "rendering context", "waiting for model", "typechecking",
     /// "compacting history".  Emitted before a long op so the frontend
@@ -1270,6 +1270,7 @@ mod tests {
         drain_pass, pump,
     };
     use std::sync::Arc;
+    use crate::provider::Tuning;
 
     /// A scheduled-wakeup message with a fresh pending flag, for the inbox
     /// drain tests.
@@ -1302,12 +1303,12 @@ mod tests {
 
         tx.send(Event {
             id: 0,
-            kind: Kind::Step(1),
+            kind: Kind::Step { n: 1, tuning: Tuning::default() },
         })
         .unwrap();
         tx.send(Event {
             id: 0,
-            kind: Kind::Step(2),
+            kind: Kind::Step { n: 2, tuning: Tuning::default() },
         })
         .unwrap();
         done.store(true, Ordering::Release);
@@ -1434,7 +1435,7 @@ mod tests {
         let t0 = Instant::now();
         let r = pump(&mut sink, &bus, 0, Transcript::none(), |emit| {
             *holder.lock().unwrap() = Some(emit.clone());
-            emit.emit(Kind::Step(1));
+            emit.emit(Kind::Step { n: 1, tuning: Tuning::default() });
             "done"
         })
         .expect("pump returns Ok");

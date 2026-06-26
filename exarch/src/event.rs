@@ -25,7 +25,7 @@
 //! `to_writer_pretty + "\n"`; no closing array bracket to maintain.
 
 use crate::bus::AgentId;
-use crate::provider::{ProviderError, Usage};
+use crate::provider::{ProviderError, Tuning, Usage};
 use genai::chat::{ChatMessage, ChatRole, ToolResponse};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -184,7 +184,7 @@ pub enum SessionEvent {
     /// Marks the start of one inner step of `Agent::apply`.  Several
     /// steps may share a single user prompt when the model issues tool
     /// calls.
-    StepStarted { n: u32 },
+    StepStarted { n: u32, tuning: Tuning },
     /// The assistant's reply for this step.  Tool calls live inside
     /// `message.content` (genai's structured form); `pending_tool_ids`
     /// mirrors them out to the top level so the state machine can match
@@ -693,8 +693,8 @@ impl AgentLog {
 
     // ── Meta-events ───────────────────────────────────────────────────────
 
-    pub fn record_step(&mut self, n: u32) -> io::Result<()> {
-        self.record(SessionEvent::StepStarted { n })
+    pub fn record_step(&mut self, n: u32, tuning: Tuning) -> io::Result<()> {
+        self.record(SessionEvent::StepStarted { n, tuning })
     }
 
     pub fn record_usage(&mut self, usage: UsageDelta) -> io::Result<()> {

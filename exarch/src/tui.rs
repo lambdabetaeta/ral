@@ -878,7 +878,7 @@ impl App {
             Kind::Reasoning { text, answer_chars } => {
                 self.with_viewport(id, |vp| vp.attach_reasoning(text, answer_chars));
             }
-            Kind::Step(n) => self.push_chrome(id, RailShape::Step, line::step(n as usize)),
+            Kind::Step { n, .. } => self.push_chrome(id, RailShape::Step, line::step(n as usize)),
             // Route to the event's viewport; `set_phase` restarts the
             // elapsed-wait clock, so a consecutive Phase event simply
             // resets the bar to the new phase.

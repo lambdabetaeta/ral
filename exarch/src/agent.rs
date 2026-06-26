@@ -710,9 +710,9 @@ impl Agent {
                 return self.capped(emit);
             }
             self.log
-                .record_step(n)
+                .record_step(n, provider.tuning().clone())
                 .map_err(|e| ProviderError::Other(e.to_string()))?;
-            emit.emit(Kind::Step(n));
+            emit.emit(Kind::Step { n, tuning: provider.tuning().clone() });
             last_text.clear();
             emit.emit(Kind::Phase("rendering context".into()));
             #[cfg(debug_assertions)]

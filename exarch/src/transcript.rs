@@ -111,7 +111,7 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
                 "dollars": u.dollars,
             }),
         ),
-        Kind::Step(n) => ("step", json!({ "n": n })),
+        Kind::Step { n, tuning } => ("step", json!({ "n": n, "tuning": tuning })),
         Kind::ToolCall { tool, cmd, summary } => (
             "tool_call",
             json!({ "tool": tool, "cmd": cmd, "summary": summary }),

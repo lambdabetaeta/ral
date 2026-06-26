@@ -218,7 +218,7 @@ impl Sink for Headless {
             }
             Kind::Token(_) => {}
             Kind::Usage(_) => {}
-            Kind::Step(n) => {
+            Kind::Step { n, .. } => {
                 if id == self.root_id {
                     self.turns += 1;
                     eprintln!("[step {n}]");
@@ -405,6 +405,7 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::Tuning;
 
     /// A recovered worker panic must surface in the JSON result as an error,
     /// not a clean completion: `pump` absorbs the unwind and returns the worker
@@ -438,12 +439,12 @@ mod tests {
         for n in [1, 2, 3, 1, 2] {
             h.handle(Event {
                 id: root,
-                kind: Kind::Step(n),
+                kind: Kind::Step { n, tuning: Tuning::default() },
             });
         }
         h.handle(Event {
             id: sub,
-            kind: Kind::Step(1),
+            kind: Kind::Step { n: 1, tuning: Tuning::default() },
         });
         let out = result_json(&h, &Ok(()), std::time::Duration::ZERO);
         let v: serde_json::Value = serde_json::from_str(&out).expect("result is JSON");

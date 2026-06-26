@@ -25,6 +25,7 @@ use std::fmt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use serde::{Deserialize, Serialize};
 
 // Per-model max-tokens defaults live inside genai's own adapter table
 // (e.g. `AnthropicAdapter::resolve_max_tokens` picks 32k for Opus 4.x,
@@ -1002,7 +1003,7 @@ async fn retry_with_backoff<T>(
 /// *not* set on the wire and genai applies the adapter's per-model default,
 /// exactly as before tuning existed.  The overlay edits it, [`crate::state`]
 /// persists it, and [`Engine::complete`] folds it into the [`ChatOptions`].
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
 pub struct Tuning {
     /// The reasoning effort, or `None` for the adapter default.
     pub effort: Option<ReasoningEffort>,
