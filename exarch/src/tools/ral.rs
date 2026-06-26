@@ -28,7 +28,7 @@ struct RalArgs {
 /// Hard wall-clock bound on a single inline `ral` call. There is no
 /// per-call knob: work that outruns this belongs in a `spawn`ed block
 /// whose handle is polled and awaited across turns.
-const CALL_TIMEOUT_SECS: u64 = 30;
+const CALL_TIMEOUT_SECS: u64 = 60;
 
 /// Hard cap on `description` length.  The field is a one-line label
 /// for the user-facing rail, not a paragraph; oversize inputs are

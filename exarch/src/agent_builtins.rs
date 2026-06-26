@@ -19,6 +19,13 @@ use ral_core::{Shell, Value};
 use std::borrow::Cow;
 use std::fs;
 use std::io::Write;
+use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
+use fff_search::file_picker::FilePicker;
+use fff_search::{FFFMode, FilePickerOptions, FrecencyTracker, FuzzySearchOptions, PaginationArgs, QueryParser, QueryTracker, SharedFilePicker, SharedFrecency, SharedQueryTracker};
 
 const AGENT_SOURCE: &str = include_str!("../data/agent.ral");
 
@@ -620,6 +627,126 @@ fn scheme_edit(_u: &mut Unifier) -> Scheme {
         )),
     )
 }
+/// How long to wait for the initial filesystem scan before serving
+/// (possibly partial) results.  Big trees on slow disks can exceed
+/// this; the index keeps populating in the background regardless.
+const SCAN_TIMEOUT: Duration = Duration::from_secs(30);
+
+const DEFAULT_LIMIT: usize = 50;
+
+/// One indexed tree, kept alive for the process lifetime.  The
+/// [`SharedFilePicker`] owns the scan thread and the filesystem watcher;
+/// dropping it would tear them down, but we never drop — the registry
+/// hands out `&'static` borrows.
+struct Index {
+    picker: SharedFilePicker,
+    queries: SharedQueryTracker,
+}
+
+/// Process-global registry: one `Index` per canonical base path.
+/// Entries are leaked into `&'static` so the picker outlives any
+/// lock guard returned to a caller.
+fn registry() -> &'static Mutex<HashMap<PathBuf, &'static Index>> {
+    static R: OnceLock<Mutex<HashMap<PathBuf, &'static Index>>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn resolve_base(base: &Path) -> ral_core::path::ResolvedPath {
+    ral_core::path::Resolver {
+        home: String::new(),
+        cwd: None,
+        mode: ral_core::path::CanonMode::Lenient,
+    }
+    .resolve(&base.to_string_lossy())
+}
+
+/// Get-or-create the index for `base`.  Blocks the caller while the
+/// initial scan runs the first time `base` is seen; cheap on every
+/// subsequent call.
+fn index_for(base: &Path) -> Result<&'static Index, String> {
+    let canonical = resolve_base(base)
+        .canonicalise_strict()
+        .map_err(|e| format!("could not canonicalise {}: {e}", base.display()))?;
+    let mut guard = registry().lock().expect("fff registry mutex poisoned");
+    if let Some(idx) = guard.get(&canonical) {
+        return Ok(idx);
+    }
+    let idx: &'static Index = Box::leak(Box::new(build_index(&canonical)?));
+    guard.insert(canonical, idx);
+    Ok(idx)
+}
+
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:fff-db-dir] creates the fff index's temp db dir; cache infra, not turn-time data I/O"
+)]
+fn build_index(base: &Path) -> Result<Index, String> {
+    let db_root = std::env::temp_dir().join(format!(
+        "exarch-fff-{}-{:016x}",
+        std::process::id(),
+        path_hash(base),
+    ));
+    std::fs::create_dir_all(&db_root).map_err(|e| format!("fff db dir: {e}"))?;
+
+    let frecency = SharedFrecency::default();
+    frecency
+        .init(FrecencyTracker::open(db_root.join("frecency")).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+
+    let queries = SharedQueryTracker::default();
+    queries
+        .init(QueryTracker::open(db_root.join("queries")).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+
+    let picker = SharedFilePicker::default();
+    FilePicker::new_with_shared_state(
+        picker.clone(),
+        frecency,
+        FilePickerOptions {
+            base_path: base.to_string_lossy().into_owned(),
+            mode: FFFMode::Ai,
+            ..Default::default()
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    picker.wait_for_scan(SCAN_TIMEOUT);
+    Ok(Index { picker, queries })
+}
+
+fn path_hash(p: &Path) -> u64 {
+    let mut h = DefaultHasher::new();
+    p.hash(&mut h);
+    h.finish()
+}
+
+/// Run one search against `idx` and return matching paths.
+fn search_paths(idx: &Index, query: &str, limit: usize) -> Result<Vec<String>, String> {
+    let parser = QueryParser::default();
+    let parsed = parser.parse(query);
+    let picker_guard = idx.picker.read().map_err(|e: fff_search::Error| e.to_string())?;
+    let picker = picker_guard.as_ref().ok_or("fff index handle is empty (scan failed)")?;
+    let qt_guard = idx.queries.read().map_err(|e| e.to_string())?;
+    let result = picker.fuzzy_search(
+        &parsed,
+        qt_guard.as_ref(),
+        FuzzySearchOptions {
+            pagination: PaginationArgs { offset: 0, limit },
+            ..Default::default()
+        },
+    );
+    Ok(result.items.iter().map(|item| item.relative_path(picker)).collect())
+}
+
+/// `fff QUERY` — fuzzy file-name search (frecency-ranked) over the
+/// working tree, returning a list of matching paths.
+fn builtin_fff(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 1, "fff")?;
+    let query = args[0].to_string();
+    let cwd = checked_read_path(shell, ".")?;
+    let idx = index_for(&cwd).map_err(|e| sig(e))?;
+    let paths = search_paths(idx, &query, DEFAULT_LIMIT).map_err(|e| sig(e))?;
+    Ok(Value::list(paths.into_iter().map(Value::String).collect()))
+}
 
 fn scheme_explore_dir(_u: &mut Unifier) -> Scheme {
     scheme(
@@ -628,6 +755,9 @@ fn scheme_explore_dir(_u: &mut Unifier) -> Scheme {
         &[],
         thunk(fun(Ty::Int, pure(Ty::List(Box::new(Ty::String))))),
     )
+}
+fn scheme_fff(_u: &mut Unifier) -> Scheme {
+    scheme(&[], &[], &[], thunk(fun(Ty::String, pure(Ty::List(Box::new(Ty::String))))))
 }
 
 fn scheme_line_hash(_u: &mut Unifier) -> Scheme {
@@ -664,6 +794,12 @@ pub static EXARCH_BUILTINS: &[BuiltinEntry] = &[
         type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_explore_dir),
         doc: "explore-dir <n>  — list directory entries up to depth n respecting ignore files.",
         body: BuiltinBody::Static(builtin_explore_dir),
+    },
+    BuiltinEntry {
+        name: Cow::Borrowed("fff"),
+        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_fff),
+        doc: "fff <query>  — fuzzy file-name search (frecency-ranked) over the working tree, returning [String].",
+        body: BuiltinBody::Static(builtin_fff),
     },
 ];
 

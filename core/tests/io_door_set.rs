@@ -173,7 +173,7 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("exarch/src/prompt.rs", "io-door:silent:system-prompt-files"),
     ("exarch/src/state.rs", "io-door:silent:state-read"),
     ("exarch/src/state.rs", "io-door:silent:state-write"),
-    ("exarch/src/tools/fff.rs", "io-door:silent:fff-db-dir"),
+    ("exarch/src/agent_builtins.rs", "io-door:silent:fff-db-dir"),
     (
         "exarch/src/transcript.rs",
         "io-door:silent:transcript-file",

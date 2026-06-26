@@ -22,7 +22,6 @@ use serde_json::Value;
 use std::sync::{Arc, OnceLock};
 
 mod agent;
-mod fff;
 mod ral;
 mod reply;
 mod schedule;
@@ -99,7 +98,6 @@ fn registry() -> &'static [Box<dyn Tool>] {
             Box::new(schedule::ScheduleTool),
             Box::new(schedule::SchedulesTool),
             Box::new(schedule::UnscheduleTool),
-            Box::new(fff::FffTool),
             Box::new(reply::ReplyTool),
         ]
     })

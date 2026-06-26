@@ -184,7 +184,7 @@ This is how you read a tool whose exit code is *data* (e.g. `grep` exit 1 meanin
     let h = spawn { cargo build }  # do not forget to bind the handle!
     'build started'
 
-You will be notified at a later turn, when this completes. Use `await` to obtain a `[value, stdout, stderr]` record:
+If you have nothing else to do, ***WAIT, DO NOT POLL***; you will be notified when the build completes. When you receive the notification use `await` to obtain a `[value, stdout, stderr]` record:
 
     let x = await $h                      # blocks until the worker returns
     [out: $x[stdout], errs: $x[stderr]]   # as Bytes
