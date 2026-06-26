@@ -420,7 +420,7 @@ fn exec_cmd_spans(argv: &[String]) -> Vec<Span> {
         } else {
             t.to_string()
         };
-        shlex::try_quote(&s).map_or_else(|_| s, Cow::into_owned)
+        shlex::try_quote(&s).map_or_else(|_| s.clone(), Cow::into_owned)
     };
     match argv.split_first() {
         Some((prog, args)) => {

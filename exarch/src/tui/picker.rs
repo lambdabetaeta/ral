@@ -98,6 +98,7 @@ enum Row {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Focus {
     Search,
+    Upstream,
     Effort,
     Temperature,
     TopP,
@@ -258,6 +259,8 @@ pub struct Picker {
     selected: usize,
     /// Which control has the keyboard.
     focus: Focus,
+    /// Index into `upstreams`; 0 means "all" (no filter).
+    upstream_idx: usize,
     /// Index into [`LADDER`] — the chosen effort rung.
     effort_idx: usize,
     /// The chosen temperature, or `None` for auto (unset).
@@ -303,6 +306,7 @@ impl Picker {
             models,
             selected: 0,
             focus: Focus::Search,
+            upstream_idx: 0,
             effort_idx,
             temperature: initial.temperature,
             top_p: initial.top_p,
@@ -425,18 +429,21 @@ impl Picker {
     }
 
     /// The next focus in cycle order
-    /// (`Search → Effort → Temperature → TopP → …`).
+    /// (`Search → Upstream → Effort → Temperature → TopP → …`).
     fn cycle(&self, forward: bool) -> Focus {
-        match (self.focus, forward) {
-            (Focus::Search, true) => Focus::Effort,
-            (Focus::Effort, true) => Focus::Temperature,
-            (Focus::Temperature, true) => Focus::TopP,
-            (Focus::TopP, true) => Focus::Search,
-            (Focus::Search, false) => Focus::TopP,
-            (Focus::Effort, false) => Focus::Search,
-            (Focus::Temperature, false) => Focus::Effort,
-            (Focus::TopP, false) => Focus::Temperature,
-        }
+        let has_upstream = self.upstreams_for_selection().len() > 1;
+        let order: &[Focus] = if has_upstream {
+            &[Focus::Search, Focus::Upstream, Focus::Effort, Focus::Temperature, Focus::TopP]
+        } else {
+            &[Focus::Search, Focus::Effort, Focus::Temperature, Focus::TopP]
+        };
+        let pos = order.iter().position(|f| *f == self.focus).unwrap_or(0);
+        let next = if forward {
+            (pos + 1) % order.len()
+        } else {
+            (pos + order.len() - 1) % order.len()
+        };
+        order[next]
     }
 
     /// Move the focused control: in Search the model selection, in Effort the
@@ -452,6 +459,38 @@ impl Picker {
                     }
                 } else {
                     self.selected = self.selected.saturating_sub(1);
+                }
+                // Auto-sync upstream vendor filter to the newly selected model.
+                {
+                    let rows = self.rows();
+                    if self.selected < rows.len() {
+                        if let Row::Model(_, model) = &rows[self.selected] {
+                            self.upstream_idx = model
+                                .split_once('/')
+                                .and_then(|(vendor, _)| {
+                                    self.upstreams_for_selection().iter().position(|v| v == vendor)
+                                })
+                                .unwrap_or(0);
+                        }
+                    }
+                }
+            }
+            Focus::Upstream => {
+                let ups = self.upstreams_for_selection();
+                if ups.len() <= 1 {
+                    return; // nothing to cycle — only "all" exists
+                }
+                self.upstream_idx = if up {
+                    (self.upstream_idx + 1).min(ups.len() - 1)
+                } else {
+                    self.upstream_idx.saturating_sub(1)
+                };
+                // Clamp selection to the now-filtered list.
+                {
+                    let n = self.rows().len();
+                    if n > 0 {
+                        self.selected = self.selected.min(n - 1);
+                    }
                 }
             }
             Focus::Effort => {
@@ -500,6 +539,22 @@ impl Picker {
             }
         }
 
+        // Upstream filter: when a specific vendor prefix is selected (index > 0),
+        // keep only OpenRouter models matching that prefix; models without a `/`
+        // (non-OpenRouter) pass through unfiltered.
+        if self.upstream_idx > 0 {
+            if let Some(prefix) = self.upstreams().get(self.upstream_idx) {
+                let mut keep = vec![false; candidates.len()];
+                for (i, (_, model)) in candidates.iter().enumerate() {
+                    keep[i] = !model.contains('/') || model.starts_with(&format!("{prefix}/"));
+                }
+                let mut ci = 0;
+                candidates.retain(|_| { let k = keep[ci]; ci += 1; k });
+                let mut hi = 0;
+                haystacks.retain(|_| { let k = keep[hi]; hi += 1; k });
+            }
+        }
+
         // Empty query: show every loaded model, in listed order.
         if q.is_empty() {
             return candidates
@@ -539,8 +594,51 @@ impl Picker {
     fn clamp_selection(&mut self) {
         let n = self.rows().len();
         self.selected = if n == 0 { 0 } else { self.selected.min(n - 1) };
+        let ups = self.upstreams_for_selection();
+        self.upstream_idx = if ups.len() <= 1 { 0 } else { self.upstream_idx.min(ups.len() - 1) };
     }
 
+    /// The distinct upstream vendor prefixes extracted from the loaded model
+    /// names of OpenRouter providers (the `vendor` part of `vendor/model`).
+    /// The first entry is always `"all"` (no filter); subsequent entries are the
+    /// sorted distinct prefixes, so cycling through them always starts at "all".
+    fn upstreams(&self) -> Vec<String> {
+        let mut set = std::collections::BTreeSet::new();
+        for id in &self.providers {
+            if let Some(ModelsState::Loaded(models)) = self.models.get(id) {
+                for model in models {
+                    if let Some((prefix, _)) = model.split_once('/') {
+                        set.insert(prefix.to_string());
+                    }
+                }
+            }
+        }
+        let mut v: Vec<String> = vec!["all".to_string()];
+        v.extend(set);
+        v
+    }
+
+    /// Vendors for display: contextual to the selected model's provider when
+    /// one is highlighted, falling back to all loaded vendors otherwise.
+    fn upstreams_for_selection(&self) -> Vec<String> {
+        let rows = self.rows();
+        if self.selected < rows.len() {
+            if let Row::Model(id, _) = &rows[self.selected] {
+                let mut set = std::collections::BTreeSet::new();
+                if let Some(ModelsState::Loaded(models)) = self.models.get(id) {
+                    for model in models {
+                        if let Some((prefix, _)) = model.split_once('/') {
+                            set.insert(prefix.to_string());
+                        }
+                    }
+                }
+                let mut v: Vec<String> = vec!["all".to_string()];
+                v.extend(set);
+                return v;
+            }
+        }
+        vec!["all".to_string()]
+    }
     /// Providers whose fetch failed, with their reasons — surfaced as dim
     /// notes so the absent models are explained and the manual-entry fallback
     /// is obvious.
@@ -564,7 +662,9 @@ impl Picker {
         // bezel(2) + airy pad(2·PAD_Y) + search(1) + status(1)
         //          + list(VISIBLE+border) + effort(1) + temp(1) + top-p(1)
         //          + failed notes
-        let h = 2 + 2 * PAD_Y + 1 + 1 + (VISIBLE_ROWS + 2) + 1 + 1 + 1 + failed;
+        // Always reserve the upstream vendor row so the overlay size
+        // is stable; the row may be blank when only "all" exists.
+        let h = 2 + 2 * PAD_Y + 1 + 1 + (VISIBLE_ROWS + 2) + 1 + 1 + 1 + 1 + failed;
         (OVERLAY_W.min(frame.width), h.min(frame.height.max(3)))
     }
 
@@ -588,7 +688,7 @@ impl Picker {
             .style(plane)
             .title(
                 Line::from(Span::styled(
-                    " MODEL · EFFORT · TEMP · TOP-P ",
+                    " MODEL ",
                     plane.fg(BANNER_GOLD).add_modifier(Modifier::BOLD),
                 ))
                 .centered(),
@@ -604,36 +704,43 @@ impl Picker {
         let inner = bezel.inner(area);
         f.render_widget(bezel, area);
 
-        let chunks = Layout::vertical([
+        let mut constraints = vec![
             Constraint::Length(1),              // search
             Constraint::Length(1),              // status
             Constraint::Length(VISIBLE_ROWS + 2), // bordered model list
+        ];
+        // Always reserve the upstream vendor row for layout stability.
+        constraints.push(Constraint::Length(1));  // upstream vendor
+        constraints.extend_from_slice(&[
             Constraint::Length(1),              // effort
             Constraint::Length(1),              // temperature
             Constraint::Length(1),              // top-p
             Constraint::Min(0),                 // failed-provider notes
-        ])
-        .split(inner);
-
-        f.render_widget(Paragraph::new(self.search_line()).style(plane), chunks[0]);
-        f.render_widget(Paragraph::new(self.status_line()).style(plane), chunks[1]);
-        self.render_list(f, chunks[2], plane);
+        ]);
+        let chunks = Layout::vertical(constraints).split(inner);
+        let mut ci = 0; // chunk index
+        f.render_widget(Paragraph::new(self.search_line()).style(plane), chunks[ci]); ci += 1;
+        f.render_widget(Paragraph::new(self.status_line()).style(plane), chunks[ci]); ci += 1;
+        self.render_list(f, chunks[ci], plane); ci += 1;
+        // Always render the upstream row (may show just "auto" when empty).
+        f.render_widget(Paragraph::new(self.upstream_line()).style(plane), chunks[ci]); ci += 1;
         f.render_widget(
             Paragraph::new(self.effort_line(self.supports("reasoning"))).style(plane),
-            chunks[3],
-        );
+            chunks[ci],
+        ); ci += 1;
         f.render_widget(
             Paragraph::new(self.temp_line(self.supports("temperature"))).style(plane),
-            chunks[4],
-        );
+            chunks[ci],
+        ); ci += 1;
         f.render_widget(
             Paragraph::new(self.top_p_line(self.supports("top_p"))).style(plane),
-            chunks[5],
-        );
+            chunks[ci],
+        ); ci += 1;
         let notes = self.failed_lines();
         if !notes.is_empty() {
-            f.render_widget(Paragraph::new(notes).style(plane), chunks[6]);
+            f.render_widget(Paragraph::new(notes).style(plane), chunks[ci]);
         }
+
     }
 
     /// A field label, bright when focused and dim otherwise — focus rendered
@@ -734,6 +841,62 @@ impl Picker {
         ])
     }
 
+    /// The upstream vendor filter row — only rendered when there is more than
+    /// one choice (i.e. at least one OpenRouter provider has loaded models with
+    /// distinct prefixes).  It reads as a label followed by the current
+    /// selection, cycling `all → anthropic → openai → …`.
+    fn upstream_line(&self) -> Line<'static> {
+        let ups = self.upstreams_for_selection();
+        if ups.len() <= 1 {
+            let style = if self.focus == Focus::Upstream {
+                Style::default().fg(CYAN).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(SLATE).add_modifier(Modifier::DIM)
+            };
+            return Line::from(vec![
+                self.field_label("vendor", Focus::Upstream),
+                Span::styled(" auto ", style),
+            ]);
+        }
+        let focused = self.focus == Focus::Upstream;
+        // A palette of distinct hues for vendor tags — nominal data earns hue,
+        // the strongest Bertin variable for association.  Seven colours far
+        // apart on the hue circle so neighbouring tags never blur.
+        let colors: &[Color] = &[
+            Color::Rgb(130, 190, 230), // blue
+            Color::Rgb(230, 150, 120), // warm red
+            Color::Rgb(130, 210, 150), // green
+            Color::Rgb(210, 170, 110), // gold
+            Color::Rgb(180, 140, 210), // violet
+            Color::Rgb(110, 200, 200), // teal
+            Color::Rgb(220, 140, 180), // rose
+        ];
+        let label = self.field_label("vendor", Focus::Upstream);
+        let mut spans = vec![label];
+        for (i, vendor) in ups.iter().enumerate() {
+            if i == 0 && vendor == "all" {
+                let style = if i == self.upstream_idx {
+                    if focused {
+                        Style::default().fg(CYAN).add_modifier(Modifier::REVERSED | Modifier::BOLD)
+                    } else {
+                        Style::default().fg(SLATE).add_modifier(Modifier::DIM | Modifier::REVERSED)
+                    }
+                } else {
+                    Style::default().fg(SLATE).add_modifier(Modifier::DIM)
+                };
+                spans.push(Span::styled(" all ", style));
+            } else {
+                let hue = colors[(i - 1) % colors.len()];
+                let style = if i == self.upstream_idx {
+                    Style::default().fg(hue).add_modifier(Modifier::REVERSED | Modifier::BOLD)
+                } else {
+                    Style::default().fg(hue).add_modifier(Modifier::DIM)
+                };
+                spans.push(Span::styled(format!(" {vendor} "), style));
+            }
+        }
+        Line::from(spans)
+    }
     /// The effort ladder: an ascending block ramp, each rung brightening with
     /// its ordinal (value) as the glyph grows (size); the chosen rung is
     /// reversed and its label printed. Grayed when the highlighted model has
