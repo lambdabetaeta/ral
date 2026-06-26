@@ -716,10 +716,10 @@ pub enum Kind {
     Usage(Usage),
     Step { n: u32, tuning: Tuning },
     /// A transient label for the worker's current synchronous phase —
-    /// "rendering context", "waiting for model", "typechecking",
-    /// "compacting history".  Emitted before a long op so the frontend
+    /// "awaiting model", "compacting".  Emitted before a long op so
+    /// the frontend can paint a progress label alongside the spinner —
     /// can name what the worker is doing during an otherwise silent gap:
-    /// the spinner shows the label (a wedge reads "typechecking…", not a
+    /// the user sees what the worker is doing during a silent gap,
     /// bare dot, and the user can see Esc was not swallowed), and the
     /// headless `events.json` keeps it for post-mortem.  Superseded by
     /// the next event of any kind.

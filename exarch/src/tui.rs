@@ -518,9 +518,9 @@ pub struct App {
     /// reporting, enabled in [`apply_terminal_modes`]) and cleared when the
     /// pointer leaves every dialable block.
     hover: Option<usize>,
-    /// How the multi-agent matrix orders its rows — toggled by `BackTab`
-    /// (Shift+Tab) when more than one session is live.  A render-time
-    /// projection; the `tabs`/focus model is untouched.
+    /// How the multi-agent matrix orders its rows — a render-time
+    /// projection of the same `tabs`/`viewports` model, never a reshuffle
+    /// of the underlying state.
     matrix_sort: MatrixSort,
     /// Vi-mode editing state for the prompt, or `None` in the default
     /// emacs-style mode.  When `Some`, plain text input routes through the
@@ -1687,15 +1687,6 @@ impl App {
                     }
                 }
             }
-            // Shift+Tab toggles the matrix row order between spawn and
-            // cost — a render-time projection that surfaces the
-            // budget-burner; inert with a single session (no matrix).
-            KeyCode::BackTab if self.tabs.len() > 1 => {
-                self.matrix_sort = match self.matrix_sort {
-                    MatrixSort::Spawn => MatrixSort::Cost,
-                    MatrixSort::Cost => MatrixSort::Spawn,
-                };
-            }
             // Up/Down walk the prompt history, but only from the
             // prompt's edge rows: with the cursor mid-text in a
             // multi-line draft they fall through and move the cursor.
@@ -2319,11 +2310,10 @@ fn rule_line(
     // the exception flares rather than the constant baseline. The `Ns`
     // digit ticks once per second: a calm, unmistakable liveness signal,
     // and the bar ceasing to grow means the turn has wedged.
-    if let Some(elapsed) = wait_elapsed {
-        let bar = wait_bar(elapsed);
-        left_w += bar.iter().map(|s| s.width()).sum::<usize>();
-        spans.extend(bar);
-    }
+    let elapsed = wait_elapsed.unwrap_or(Duration::ZERO);
+    let bar = wait_bar(elapsed);
+    left_w += bar.iter().map(|s| s.width()).sum::<usize>();
+    spans.extend(bar);
     if let Some(p) = phase {
         let label = Span::styled(format!("{p}… "), Style::default().fg(SLATE));
         left_w += label.width();
@@ -2331,9 +2321,9 @@ fn rule_line(
     }
 
     // ── status model ──────────────────────────────────────────────────
-    if !status_model.is_empty() {
+    { // always show model
         let segment: Vec<Span<'static>> = vec![
-            Span::styled(status_model.to_string(), Style::default().fg(SLATE)),
+            Span::styled(if status_model.is_empty() { "…".to_owned() } else { status_model.to_owned() }, Style::default().fg(SLATE)),
             Span::styled(" · ", Style::default().fg(SLATE)),
         ];
         left_w += segment.iter().map(|s| s.width()).sum::<usize>();
@@ -2366,7 +2356,7 @@ fn rule_line(
     // when the whole buffer fits.
     if let Some(pct) = scroll_pct {
         let text = if pct >= 100 {
-            "⇣ bot ".to_string()
+            "⇣ end ".to_string()
         } else {
             format!("⇣ {pct}% ")
         };
@@ -2719,7 +2709,7 @@ fn footer_hint() -> Line<'static> {
     let st = Style::default()
         .fg(SLATE)
         .add_modifier(Modifier::DIM | Modifier::ITALIC);
-    let hint = " Tab pane • ⇧Tab reorder • click ▸ expand • wheel ▸ dial • drag copy (⇧ native) • wheel/PgUp scroll • Ctrl-X Ctrl-E editor • Ctrl-C cancel • /quit to leave ";
+    let hint = " Tab pane | drag copy (⇧ native) | Ctrl-X Ctrl-E editor | Ctrl-C cancel | /quit to leave ";
     Line::from(Span::styled(hint, st))
 }
 

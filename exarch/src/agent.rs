@@ -714,7 +714,6 @@ impl Agent {
                 .map_err(|e| ProviderError::Other(e.to_string()))?;
             emit.emit(Kind::Step { n, tuning: provider.tuning().clone() });
             last_text.clear();
-            emit.emit(Kind::Phase("rendering context".into()));
             #[cfg(debug_assertions)]
             let t_render = std::time::Instant::now();
             let messages = self
@@ -731,7 +730,7 @@ impl Agent {
             let t_req = std::time::Instant::now();
             #[cfg(debug_assertions)]
             let mut first_token: Option<std::time::Duration> = None;
-            emit.emit(Kind::Phase("waiting for model".into()));
+            emit.emit(Kind::Phase("awaiting model".into()));
             let step_out = {
                 let token_emit = emit.clone();
                 provider.complete(
@@ -959,7 +958,7 @@ impl Agent {
             return;
         };
         self.note(format!("[compacting history: {detail} → summary]"), emit);
-        emit.emit(Kind::Phase("compacting history".into()));
+        emit.emit(Kind::Phase("compacting".into()));
         match provider.summarize(&self.system, plan.prefix_messages, summary_cap, token) {
             Ok(summary) => {
                 if let Err(e) = self.log.record_usage(summary.usage.into()) {
