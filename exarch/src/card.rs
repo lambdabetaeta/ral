@@ -410,9 +410,18 @@ pub fn io_card(event: &IoEvent) -> Card {
 /// carrying a space, a glob, or other shell metacharacter is re-wrapped, so
 /// the line round-trips back to a runnable command rather than a lie the shell
 /// would word-split differently.  `try_quote`'s sole error is an interior nul,
-/// which no real argv carries, so that degrades to the raw token.
+/// which no real argv carries, so that degrades to the raw token.  Tokens longer
+/// than 80 chars are truncated with `…` before quoting to keep the rail legible.
 fn exec_cmd_spans(argv: &[String]) -> Vec<Span> {
-    let quote = |t: &str| shlex::try_quote(t).map_or_else(|_| t.to_string(), Cow::into_owned);
+    let quote = |t: &str| {
+        const CAP: usize = 80;
+        let s = if t.chars().count() > CAP {
+            format!("{}…", t.chars().take(CAP - 1).collect::<String>())
+        } else {
+            t.to_string()
+        };
+        shlex::try_quote(&s).map_or_else(|_| s, Cow::into_owned)
+    };
     match argv.split_first() {
         Some((prog, args)) => {
             let mut spans = vec![span(Role::Path, &quote(prog))];

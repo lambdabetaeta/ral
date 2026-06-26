@@ -189,6 +189,8 @@ If you have nothing else to do, ***WAIT, DO NOT POLL***; you will be notified wh
     let x = await $h                      # blocks until the worker returns
     [out: $x[stdout], errs: $x[stderr]]   # as Bytes
 
+If this fails, ***DO NOT SPAWN AGAIN**. In the next turn just await again: `let x = await $h`. Alternatively, yield to the user and you will be notified.
+
 Use `cancel $h` to stop a spawned thread that is no longer needed. There is also a bounded parallel `map` and a `race`; use `help` to find out more about them. 
 
 ## Within
