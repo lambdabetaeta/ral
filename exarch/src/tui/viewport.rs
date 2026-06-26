@@ -49,9 +49,9 @@ pub(super) struct Viewport {
     /// Top visible visual row.  Owned per-viewport so each tab keeps its
     /// place; recomputed against the frame height in [`Self::render_window`].
     offset: usize,
-    /// Follow the tail: while set, [`Self::render_window`] pins the trailing
-    /// segment's head row in place (see [`Self::tail_anchored_offset`]).
-    /// Cleared when the user scrolls (either direction), re-armed when they scroll back down.
+    /// Follow the tail: while set, [`Self::render_window`] pins the viewport
+    /// to the absolute bottom (the trailing row).  Cleared when the user
+    /// scrolls (either direction), re-armed when they scroll back down.
     sticky: bool,
     /// Memoised flatten of [`Self::blocks`] into wrapped visual rows.
     flat: Flat,
@@ -637,10 +637,6 @@ impl Viewport {
     /// segment while sticky ([`Self::tail_anchored_offset`]), clamped
     /// otherwise — and re-armed to sticky once it reaches the bottom.
     pub(super) fn render_window(&mut self, width: u16, height: usize) -> RenderWindow {
-        // A width change remaps every row, so the tail floor (below) must not
-        // carry the old offset across it; read it before `reflow` updates
-        // `flat.width`.
-        let reflowed = self.flat.width != width;
         self.reflow(width);
         // The provisional streaming seat (when a response is in flight) is the
         // trailing row, one past the committed flatten: a fixed-height mark
@@ -651,7 +647,7 @@ impl Viewport {
         let total = committed + seat.is_some() as usize;
         let max_off = total.saturating_sub(height);
         if self.sticky {
-            self.offset = self.tail_anchored_offset(height, total, reflowed);
+            self.offset = max_off;
         } else {
             self.offset = self.offset.min(max_off);
             self.sticky = self.offset >= max_off;
@@ -660,8 +656,7 @@ impl Viewport {
         // Scroll position as a percentage of the scrollable range: `0%` at the
         // top, `100%` once `offset` reaches `max_off` (the tail).  `None` when
         // the whole buffer fits, so the rule line shows no readout.  `offset`
-        // is clamped to `max_off` because a head-anchored shrunken tail group
-        // can run it past the bottom (a gap opens below).
+        // is clamped to `max_off` so it stays within the valid scroll range.
         let scroll_pct =
             (max_off > 0).then(|| (self.offset.min(max_off) * 100 / max_off).min(100) as u16);
         // Committed rows fill the window up to the seat's row (`committed`);
@@ -680,45 +675,7 @@ impl Viewport {
         }
     }
 
-    /// The tail-following offset that pins the trailing segment's head row.  At
-    /// the segment's current height it just fills to the bottom; a shorter
-    /// height leaves that much space empty below, and once taller than the
-    /// window the head pins at the top and the tail clips at the bottom edge —
-    /// so the call header stays put while its output churns rather than the
-    /// whole transcript shoving up and down.
-    ///
-    /// The pin is held by flooring the offset at its previous value: while
-    /// following the tail the view only ever advances, so a shrink (a call
-    /// landing before its result, or one trailing segment handing off to the
-    /// next) opens a gap below rather than receding the committed transcript
-    /// above.  The floor is capped at `head_row` so the trailing head never
-    /// scrolls off the top, and reset by `reflowed` — a width change remaps
-    /// every row, leaving the old offset meaningless.
-    fn tail_anchored_offset(&self, height: usize, total: usize, reflowed: bool) -> usize {
-        let Some(&block) = self.flat.row_block.last() else {
-            return 0;
-        };
-        let head_row = self.tail_segment_start(block);
-        let group_height = total - head_row;
-        let space_below = height.saturating_sub(group_height);
-        let anchored = head_row.saturating_sub(space_below);
-        if reflowed {
-            anchored
-        } else {
-            anchored.max(self.offset).min(head_row)
-        }
-    }
 
-    /// The first visual-row index of the trailing segment — the run of rows
-    /// at the buffer's end sharing `block` as their anchor.  Row anchors are
-    /// non-decreasing, so the segment is the final equal-valued run.
-    fn tail_segment_start(&self, block: usize) -> usize {
-        self.flat
-            .row_block
-            .iter()
-            .rposition(|&b| b != block)
-            .map_or(0, |p| p + 1)
-    }
 
     /// Rebuild [`Self::flat`] when stale or asked at a new width.
     ///
