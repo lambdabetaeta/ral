@@ -781,7 +781,7 @@ fn push_gutter_row(
         .filter(|s| !s.text.is_empty())
         .map(|s| {
             let style = match (hot, s.emph) {
-                (Some(h), true) => Style::default().fg(Color::White).bg(h).add_modifier(Modifier::BOLD),
+                (Some(h), true) => Style::default().fg(h).add_modifier(Modifier::BOLD),
                 (Some(_), false) => Style::default().fg(base).add_modifier(Modifier::DIM),
                 (None, _) => Style::default().fg(base),
             };
