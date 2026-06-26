@@ -55,6 +55,7 @@ return [
   fs: [
     read: [
       'cwd:',                   # the project tree the agent is working in
+      'gitdir:',               # the actual git directory (handles worktrees)
       '/tmp',
       'tempdir:',               # `$TMPDIR` on macOS — distinct from /tmp
       'xdg:config',             # ${XDG_CONFIG_HOME:-~/.config}
@@ -121,6 +122,7 @@ return [
       '/tmp',
       'tempdir:',
       'xdg:cache',
+      'gitdir:',
     ],
 
     # Per-tool credential subdirs of `xdg:config`.  The broad `xdg:config`

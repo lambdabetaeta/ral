@@ -40,7 +40,7 @@ pub fn looks_like_xdg(s: &str) -> bool {
 /// True when `s` is shaped like a path or path-prefix sigil — it
 /// either contains a path separator or starts with one of the four
 /// sigil tokens recognised by [`freeze_one`] (`~`, `xdg:`, `cwd:`,
-/// `tempdir:`).  Used by the unified exec map: bare command names
+/// `tempdir:`, `gitdir:`).  Used by the unified exec map: bare command names
 /// (no `/`, no sigil) pass through freeze unchanged; everything else
 /// gets sigil-resolved.
 pub fn looks_like_path_or_sigil(s: &str) -> bool {
@@ -49,6 +49,7 @@ pub fn looks_like_path_or_sigil(s: &str) -> bool {
         || s.starts_with("xdg:")
         || s.starts_with("cwd:")
         || s.starts_with("tempdir:")
+        || s.starts_with("gitdir:")
 }
 
 /// Parse `xdg:NAME[/sub]` into a kind plus optional sub-path.
@@ -84,14 +85,19 @@ pub fn expand_path_prefix(input: &str, home: &str) -> String {
     input.to_string()
 }
 
-/// Per-call inputs for the freeze pass.  `home` and `cwd` are
-/// supplied by the caller; `tempdir` is read from the process env
-/// (`std::env::temp_dir`) the same way XDG sigils read
+/// Per-call inputs for the freeze pass.  `home`, `cwd`, and
+/// `git_dir` are supplied by the caller; `tempdir` is read from the
+/// process env (`std::env::temp_dir`) the same way XDG sigils read
 /// `XDG_*_HOME`.  Bundled rather than passed positionally so new
 /// sigils can grow this struct without rippling through callers.
 pub struct FreezeCtx<'a> {
     pub home: &'a str,
     pub cwd: &'a Path,
+    /// The resolved git directory for `gitdir:` sigils, if `cwd`
+    /// sits inside a git repository.  When `None`, `gitdir:`
+    /// resolves to `cwd` — a safe fallback that keeps the
+    /// grant valid for non-git directories.
+    pub git_dir: Option<&'a Path>,
 }
 
 /// Resolve every sigil-bearing entry in `paths` against `ctx`,
@@ -143,6 +149,13 @@ pub fn freeze_one(entry: &str, ctx: &FreezeCtx<'_>) -> Result<NormalizedPrefix, 
     }
     if let Some(sub) = parse_literal_sigil(entry, "tempdir") {
         return Ok(join_sub(std::env::temp_dir(), sub));
+    }
+    if let Some(sub) = parse_literal_sigil(entry, "gitdir") {
+        let base = match ctx.git_dir {
+            Some(dir) => dir.to_path_buf(),
+            None => ctx.cwd.to_path_buf(),
+        };
+        return Ok(join_sub(base, sub));
     }
     if let Some(t) = TildePath::parse(entry) {
         require_home(ctx)?;
@@ -253,7 +266,7 @@ mod tests {
     use super::*;
 
     fn ctx<'a>(home: &'a str, cwd: &'a Path) -> FreezeCtx<'a> {
-        FreezeCtx { home, cwd }
+        FreezeCtx { home, cwd, git_dir: None }
     }
 
     fn frozen(paths: &[&str], ctx: &FreezeCtx<'_>) -> Result<Vec<String>, String> {

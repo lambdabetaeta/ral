@@ -95,6 +95,7 @@ pub fn apply_session_profiles(shell: &mut Shell, paths: &[std::path::PathBuf]) -
     let ctx = crate::path::sigil::FreezeCtx {
         home: &home,
         cwd: &cwd,
+        git_dir: None,
     };
     let mut composed = Capabilities::default();
     for path in paths {
@@ -128,6 +129,7 @@ mod tests {
         crate::path::sigil::FreezeCtx {
             home: "/h",
             cwd: std::path::Path::new("/"),
+            git_dir: None,
         }
     }
 

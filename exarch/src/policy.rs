@@ -20,7 +20,7 @@ mod load;
 
 use base::{resolve_base, root_fs_policy};
 use load::{absolute_in, load_capabilities_ral};
-use ral_core::path::{home_from_env, sigil::FreezeCtx, sigil::freeze_path_list};
+use ral_core::path::{home_from_env, sigil::FreezeCtx, sigil::freeze_path_list, NormalizedPrefix};
 use ral_core::types::{Capabilities, Shell};
 use std::path::{Path, PathBuf};
 
@@ -55,9 +55,11 @@ pub fn for_invocation(
 
     let cwd_path = PathBuf::from(cwd);
     let home = home_from_env();
+    let gd = discover_git_dir(&cwd_path);
     let ctx = FreezeCtx {
         home: &home,
         cwd: &cwd_path,
+        git_dir: gd.as_deref(),
     };
 
     let mut caps: Capabilities = resolve_base(base_name, &ctx)?;
@@ -102,9 +104,11 @@ pub fn for_invocation(
 pub fn narrow(parent: &Capabilities, base_name: &str, cwd: &str) -> Result<Capabilities, String> {
     let cwd_path = PathBuf::from(cwd);
     let home = home_from_env();
+    let gd = discover_git_dir(&cwd_path);
     let ctx = FreezeCtx {
         home: &home,
         cwd: &cwd_path,
+        git_dir: gd.as_deref(),
     };
     let base = resolve_base(base_name, &ctx)?;
     Ok(parent.clone().meet(base))
@@ -141,6 +145,54 @@ fn deny_paths(
     fs.deny_paths.sort();
     fs.deny_paths.dedup();
     Ok(())
+}
+
+/// Walk up from `cwd` and return the first `.git` entry found (file or
+/// directory).
+///
+/// Returns `None` when `cwd` is not inside a git repository.
+pub(crate) fn find_git_entry(cwd: &Path) -> Option<PathBuf> {
+    cwd.ancestors().find_map(|dir| {
+        let dg = dir.join(".git");
+        if dg.exists() { Some(dg) } else { None }
+    })
+}
+
+/// Discover the real git directory for `cwd`, handling worktrees where
+/// `.git` is a file pointing elsewhere.  Delegates to
+/// [`find_git_entry`] to locate the first `.git`; if it is a
+/// directory, returns it; if it is a file, parses the `gitdir:`
+/// pointer and resolves it.
+///
+/// Returns `None` when `cwd` is not inside a git repository.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:git-dir-discovery] reads the .git worktree pointer at session startup to discover the actual git directory; not turn-time I/O"
+)]
+fn discover_git_dir(cwd: &Path) -> Option<PathBuf> {
+    let dot_git = find_git_entry(cwd)?;
+
+    if dot_git.is_dir() {
+        return Some(dot_git);
+    }
+
+    // Worktree: .git is a file containing "gitdir: <path>"
+    let contents = std::fs::read_to_string(&dot_git).ok()?;
+    let gitdir_path = contents
+        .lines()
+        .find(|l| l.starts_with("gitdir:"))?
+        .strip_prefix("gitdir:")?
+        .trim();
+
+    let resolved = if ral_core::path::is_absolute(gitdir_path) {
+        PathBuf::from(gitdir_path)
+    } else {
+        // Relative to the .git file's parent directory
+        dot_git.parent()?.join(gitdir_path)
+    };
+
+    // Normalize through the same fold-dots kernel the grant side uses.
+    Some(NormalizedPrefix::from_surface(&resolved).as_path().to_path_buf())
 }
 
 #[cfg(test)]
