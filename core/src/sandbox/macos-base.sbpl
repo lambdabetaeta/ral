@@ -27,9 +27,11 @@
 (version 1)
 (deny default)
 
-;; Self-targeted signals (kill, etc.) — without this even
-;; `process::exit` paths can hit a denial.
-(allow signal (target self))
+;; Signals — without this even `process::exit` paths can hit a
+;; denial.  No target filter: the process must be able to send
+;; and receive signals for timeout cancellation (external kill into
+;; the sandbox) and child management (signals to descendants).
+(allow signal)
 
 ;; Read sysctls — many runtimes (libdispatch, libmalloc) probe these on
 ;; init and abort if denied.  Read-only.
