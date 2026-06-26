@@ -17,6 +17,8 @@ Commands are sequenced by newlines or `;`. An uncaught failure aborts the whole 
     let n      = line-count notes.txt
     echo "$branch has $n lines of notes"
 
+The variables `branch`, `body`, and `n` are then **AVAILABLE IN EVERY RAL TOOL CALL, OVER EVERY TURN, FOR THE REST OF THE SESSION**. **YOU DO NOT NEED TO RE-DEFINE THEM IN THE NEXT TURN, JUST USE THEM AGAIN.**
+
 Captured output is a `String`: split it with `lines`, parse it with `int`/`float`, or decode it with a codec (`from-json $s`).
 
 A turn ending in `let` returns nothing; end with what you mean to see as `VALUE`.
