@@ -363,9 +363,16 @@ let stream-each = { |f s|
 # above, and on Stream helpers here.
 
 ## Read a file as a materialised list of lines.
+## Refuses files larger than 10 MiB; for large files use
+## `from-lines` with stream operations instead.
 let from-lines-list = { |p|
-    let s = !{from-lines < $p}
-    stream-to-list $s
+    let info = file-info $p
+    if $[$info[size] > 10485760] {
+        fail [status: 1, message: "from-lines-list: file too large to materialise eagerly ($info[size] bytes, ~$[$info[size] / 1048576] MiB); use `from-lines < PATH` with stream operations (stream-take, stream-fold, stream-each) instead"]
+    } else {
+        let s = !{from-lines < $p}
+        stream-to-list $s
+    }
 }
 
 # JSON Lines — one JSON value per line, over the serde-backed `from-json`
@@ -390,13 +397,13 @@ let map-lines = { |f|
 ## Filter stdin lines by a predicate.
 let filter-lines = { |pred|
     fold-lines { |_ line|
-        if !{$pred $line} { echo $line } else { return unit }
+        if !{$pred $line} { echo $line }
         return unit
     } unit
 }
 ## Apply a function to each stdin line.
 let each-line = { |f|
-    fold-lines { |_ line| $f $line; return unit } unit
+    fold-lines { |_ line| !{$f $line}; return unit } unit
 }
 
 # ANSI styling

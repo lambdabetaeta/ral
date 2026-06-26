@@ -434,37 +434,17 @@ fn harvest_into(comp: &Comp, out: &mut Vec<(String, Scheme)>) {
 /// schemes blob come out of one checked pass; evaluating the annotated
 /// prelude installs each binding's scheme next to its value.
 ///
-/// The prelude elaborates to a top-level `Seq([Bind, Bind, …])`.  Normal
-/// inference of a `Seq` runs inside a fresh `TyEnv` frame
-/// (`Inferencer::infer_comp`'s `Seq` arm) so that aliases and lets
-/// introduced inside a `{…}` block don't leak past the block's lexical
-/// extent.  That framing is wrong here: we *want* the prelude's top-level
-/// bindings to survive into the harvested scheme list.  So when `comp` is
-/// a `Seq`, we hand its parts straight to
-/// `infer_seq_with_alias_bindings` without the surrounding `with_scope`,
-/// so each `Bind` accumulates into the root scope of `env`.  A non-`Seq`
-/// `comp` (a single-statement prelude) goes through normal inference —
-/// `Bind` itself does no push/pop, so the binding lands in the root
-/// scope directly.
+/// seeded with an empty session — builtins are resolved dynamically during
+/// inference, and no prior bindings exist at bake time.  A type error is
+/// fatal: the build script panics with the formatted errors.
 pub fn bake_prelude(comp: &Comp) -> (Comp, Vec<(String, Scheme)>) {
-    let mut ctx = InferCtx::new();
-    let mut env = TyEnv::new();
-    seed_builtins(&mut ctx.unifier, &mut env);
-    {
-        let mut inferencer = infer::Inferencer {
-            ctx: &mut ctx,
-            env: &mut env,
-        };
-        match &comp.item {
-            CompKind::Seq(parts) => {
-                inferencer.infer_seq_with_alias_bindings(parts, Ty::Unit);
-            }
-            _ => {
-                inferencer.infer_comp(comp);
-            }
+    let annotated = match typecheck(comp, SessionSchemes::default()) {
+        Ok(a) => a,
+        Err(errs) => {
+            let msgs: Vec<String> = errs.iter().map(|e| e.to_string()).collect();
+            panic!("prelude type errors:\n{}", msgs.join("\n"));
         }
-    }
-    let annotated = annotate(comp, &mut ctx, true);
+    };
     let schemes = harvest_schemes(&annotated)
         .into_iter()
         .filter(|(name, _)| !crate::builtins::is_builtin(name))
@@ -540,15 +520,3 @@ pub fn binding_value_scheme(
     scheme
 }
 
-/// Seed the typing environment with builtin names that may appear as
-/// variables (e.g. `$length` or in value-head position after prelude wraps them).
-///
-/// `builtin_scheme` allocates fresh unifier vars directly, so the returned
-/// scheme is already properly registered and can be stored as-is.
-fn seed_builtins(u: &mut Unifier, env: &mut TyEnv) {
-    for name in crate::builtins::builtin_names() {
-        if let Some(scheme) = builtins::builtin_scheme(name, u) {
-            env.bind((*name).to_string(), scheme);
-        }
-    }
-}
