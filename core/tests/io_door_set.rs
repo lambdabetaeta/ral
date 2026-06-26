@@ -85,6 +85,7 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("core/src/driver.rs", "io-door:silent:prelude-bake"),
     ("core/src/host.rs", "io-door:silent:date-launch"),
     ("core/src/host.rs", "io-door:silent:git-launch"),
+    ("core/src/evaluator/redirect.rs", "io-door:surface:write-snapshot"),
     ("core/src/path/which.rs", "io-door:silent:which-readdir"),
     ("core/src/path/which.rs", "io-door:silent:which-stat"),
     (
@@ -94,6 +95,10 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     (
         "core/src/runtime/command/redirect.rs",
         "io-door:surface:atomic-eligible",
+    ),
+    (
+        "core/src/runtime/command/redirect.rs",
+        "io-door:surface:atomic-temp-read",
     ),
     (
         "core/src/runtime/command/redirect.rs",
