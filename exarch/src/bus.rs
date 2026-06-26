@@ -276,18 +276,6 @@ impl InboxMsg {
     }
 }
 
-/// The settled `spawn`'s `cmd`, pulled from a surface batch's trailing
-/// `` `done `` event — the handle's `<handle:…>` form core stamped on it.  The
-/// model-facing notice names the spawn by it; an absent or malformed `done` (a
-/// batch the kit somehow flushed without one) degrades to `<spawn>`.
-fn surface_cmd(values: &[Value]) -> String {
-    values
-        .iter()
-        .rev()
-        .find_map(crate::card::value_to_done)
-        .map(|(cmd, _)| cmd)
-        .unwrap_or_else(|| "<spawn>".into())
-}
 
 /// The model-facing notice [`Turn::Surface`] delivers when a detached `spawn`
 /// worker settles un-awaited: which spawn finished, how it settled, and where
@@ -298,17 +286,16 @@ fn surface_cmd(values: &[Value]) -> String {
 /// pulled on demand with `await $h`.
 fn surface_notice(values: &[Value]) -> String {
     use crate::card::DoneOutcome;
-    let cmd = surface_cmd(values);
     let settled = match values.iter().rev().find_map(crate::card::value_to_done) {
-        Some((_, DoneOutcome::Ok)) => "returned".to_string(),
+        Some((_, DoneOutcome::Ok)) => "finished (exit 0)".to_string(),
         Some((_, DoneOutcome::Err { message, status })) => {
-            format!("failed (status {status}): {message}")
+            format!("finished (exit {status}): {message}")
         }
         Some((_, DoneOutcome::Panic { message })) => format!("panicked: {message}"),
-        None => "settled".to_string(),
+        None => "finished".to_string(),
     };
     format!(
-        "[spawn {cmd} {settled}] its output is on the rail; await its handle for the value record."
+        "Background block {settled}. Await its handle for the value."
     )
 }
 

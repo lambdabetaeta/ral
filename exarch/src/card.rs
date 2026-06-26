@@ -601,21 +601,24 @@ pub fn value_to_done(v: &RalValue) -> Option<(String, DoneOutcome)> {
 /// message and status, a panic is `Bad` carrying the message.  The outcome is a
 /// fixed-position value mark, not an animation — the worker has already settled
 /// when this renders.
-pub fn done_card(cmd: &str, outcome: &DoneOutcome) -> Card {
-    let mut spans = vec![span(Role::Strong, cmd), span_plain(" ")];
+pub fn done_card(_cmd: &str, outcome: &DoneOutcome) -> Card {
+    let mut spans = Vec::new();
     match outcome {
-        DoneOutcome::Ok => spans.push(span(Role::Ok, "done")),
+        DoneOutcome::Ok => {
+            spans.push(span(Role::Ok, "done"));
+            spans.push(span_plain("  Background block finished (exit 0)"));
+        }
         DoneOutcome::Err { message, status } => {
             spans.push(span(Role::Bad, &format!("failed ({status})")));
-            if !message.is_empty() {
-                spans.push(span_plain(&format!(": {message}")));
-            }
+            let mut body = String::from("  Background block error");
+            if !message.is_empty() { body.push_str(&format!(": {message}")); }
+            spans.push(span_plain(&body));
         }
         DoneOutcome::Panic { message } => {
             spans.push(span(Role::Bad, "panicked"));
-            if !message.is_empty() {
-                spans.push(span_plain(&format!(": {message}")));
-            }
+            let mut body = String::from("  Background block error");
+            if !message.is_empty() { body.push_str(&format!(": {message}")); }
+            spans.push(span_plain(&body));
         }
     }
     Card(vec![Mark::Text { spans }])
