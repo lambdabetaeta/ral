@@ -1107,6 +1107,7 @@ impl App {
                 path,
                 mode,
                 outcome,
+                ..
             } => {
                 // Keep the latest outcome: a re-write of the same path replaces
                 // the buffered entry rather than stacking a duplicate.
@@ -1114,6 +1115,8 @@ impl App {
                     path: path.clone(),
                     mode,
                     outcome,
+                    old_bytes: None,
+                    new_bytes: None,
                 };
                 match buf
                     .writes

@@ -20,6 +20,7 @@ use crate::bus::{Hunk, Row, Seg};
 use ral_core::Value as RalValue;
 use serde::Serialize;
 use std::borrow::Cow;
+use similar::{ChangeTag, TextDiff};
 
 /// The closed nominal role set — the *selective* (identity) channel a
 /// [`Span`] may carry.  The renderer holds the one binding table mapping
@@ -294,6 +295,8 @@ pub enum IoEvent {
         path: String,
         mode: WriteMode,
         outcome: WriteOutcome,
+        old_bytes: Option<Vec<u8>>,
+        new_bytes: Option<Vec<u8>>,
     },
     Exec {
         argv: Vec<String>,
@@ -335,15 +338,13 @@ pub fn value_to_io(v: &RalValue) -> Option<IoEvent> {
             path: str_field(m, "path")?,
             mode: WriteMode::parse(&str_field(m, "mode")?)?,
             outcome: WriteOutcome::parse(&str_field(m, "outcome")?)?,
+            old_bytes: bytes_field(m, "old_bytes"),
+            new_bytes: bytes_field(m, "new_bytes"),
         },
         "exec" => IoEvent::Exec {
             argv: strings_field(m, "argv"),
             outcome: ExecOutcome::parse(&str_field(m, "outcome")?)?,
             status: int_field(m, "status")?,
-        },
-        "grep" => IoEvent::Grep {
-            scope: str_field(m, "scope")?,
-            pattern: str_field(m, "pattern")?,
         },
         _ => return None,
     })
@@ -356,14 +357,22 @@ pub fn value_to_io(v: &RalValue) -> Option<IoEvent> {
 /// the subject — lifted by [`Role::Path`]'s hue against the muted label — and
 /// the outcome roled by its level.
 pub fn io_card(event: &IoEvent) -> Card {
+    let mut diff_mark: Option<Mark> = None;
     let spans = match event {
-        // `read path` — a muted verb, then the path as subject.
         IoEvent::Read { path } => read_spans(path),
-        // `write path outcome` — the verb, the path, then the outcome roled by
-        // how it settled.  The mode is recorded but not surfaced.
-        IoEvent::Write { path, outcome, .. } => write_spans(path, *outcome),
-        // `$ prog arg arg → status` — the program as a path, its args as
-        // code, and the exit status roled ok/bad.
+        IoEvent::Write {
+            path,
+            outcome,
+            old_bytes,
+            new_bytes,
+            ..
+        } => {
+            if *outcome == WriteOutcome::Committed {
+                diff_mark =
+                    try_diff_mark(path, old_bytes.as_deref(), new_bytes.as_deref());
+            }
+            write_spans(path, *outcome)
+        }
         IoEvent::Exec {
             argv,
             outcome: _,
@@ -376,14 +385,17 @@ pub fn io_card(event: &IoEvent) -> Card {
             spans.push(span(role, &status.to_string()));
             spans
         }
-        // `grep pattern in scope` — the pattern as code, the scope as path.
         IoEvent::Grep { scope, pattern } => {
             let mut spans = vec![span(Role::Muted, "grep ")];
             spans.extend(grep_spans(scope, pattern));
             spans
         }
     };
-    Card(vec![Mark::Text { spans }])
+    let mut marks = vec![Mark::Text { spans }];
+    if let Some(diff) = diff_mark {
+        marks.push(diff);
+    }
+    Card(marks)
 }
 
 /// The command of an exec, *without* its `$ ` prefix or `→ status` tail —
@@ -445,7 +457,65 @@ fn write_spans(path: &str, outcome: WriteOutcome) -> Vec<Span> {
         span(outcome.role(), outcome.label()),
     ]
 }
+/// Compute the whole-file line-level diff of `old` vs `new`, grouped into
+/// hunks with ±2 lines of context (matching `edit`'s diff).  Each hunk's
+/// `start` is the 1-indexed original line of its first row.
+fn whole_file_hunks(old: &str, new: &str) -> Vec<Hunk> {
+    let diff = TextDiff::from_lines(old, new);
+    let mut hunks = Vec::new();
+    for group in diff.grouped_ops(2) {
+        let first = group.first().expect("grouped_ops yields non-empty groups");
+        let start = first.old_range().start as u32 + 1;
+        let mut rows = Vec::new();
+        for op in &group {
+            for change in diff.iter_inline_changes(op) {
+                let mut segs: Vec<Seg> = change
+                    .iter_strings_lossy()
+                    .map(|(emph, text)| Seg {
+                        emph,
+                        text: text.into_owned(),
+                    })
+                    .collect();
+                if let Some(last) = segs.last_mut() {
+                    if let Some(bare) = last.text.strip_suffix('\n') {
+                        last.text = bare.to_string();
+                    }
+                    if last.text.is_empty() {
+                        segs.pop();
+                    }
+                }
+                rows.push(match change.tag() {
+                    ChangeTag::Equal => Row::Context(segs),
+                    ChangeTag::Delete => Row::Del(segs),
+                    ChangeTag::Insert => Row::Add(segs),
+                });
+            }
+        }
+        hunks.push(Hunk { start, rows });
+    }
+    hunks
+}
 
+/// Build a `Mark::Diff` from old/new file content, if both are valid UTF-8
+/// and the diff is non-empty and under 500 changed lines.
+fn try_diff_mark(path: &str, old: Option<&[u8]>, new: Option<&[u8]>) -> Option<Mark> {
+    let old_str = String::from_utf8(old?.to_vec()).ok()?;
+    let new_str = String::from_utf8(new?.to_vec()).ok()?;
+    let hunks = whole_file_hunks(&old_str, &new_str);
+    let changed: usize = hunks
+        .iter()
+        .flat_map(|h| &h.rows)
+        .filter(|r| matches!(r, Row::Del(_) | Row::Add(_)))
+        .count();
+    if changed > 0 && changed < 500 {
+        Some(Mark::Diff {
+            path: path.to_string(),
+            hunks,
+        })
+    } else {
+        None
+    }
+}
 /// Compose a run of buffered I/O surfaces — even interleaved, grouped by the
 /// TUI into per-kind buckets — into one [`Card`] *per non-empty kind*, in a
 /// fixed Read → Exec → Grep → Write order.  Each card is a single
@@ -945,7 +1015,13 @@ fn str_field(m: &ral_core::types::Map, field: &str) -> Option<String> {
         _ => None,
     }
 }
-
+/// An optional bytes-typed field of a record.
+fn bytes_field(m: &ral_core::types::Map, field: &str) -> Option<Vec<u8>> {
+    match m.get(field) {
+        Some(RalValue::Bytes(b)) => Some(b.clone()),
+        _ => None,
+    }
+}
 /// An integer-typed field clamped into `u32` (negatives floor to 0).
 fn count_field(m: &ral_core::types::Map, field: &str) -> Option<u32> {
     match m.get(field) {

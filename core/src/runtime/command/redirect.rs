@@ -138,6 +138,17 @@ pub(crate) struct AtomicCommit {
 }
 
 impl AtomicCommit {
+    /// Read the temp file content — a best-effort snapshot of what will
+    /// land at `target` if `commit` succeeds.  Used by the write surface
+    /// to seed a diff card.  Returns `None` on any OS error.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:surface:atomic-temp-read] Sub-step of the atomic `>` write door's diff surface: read the tmp file content before the rename commits it. The write card surfaces when the redirect frame settles; this read is not a separate model operation."
+    )]
+    pub(crate) fn temp_content(&self) -> Option<Vec<u8>> {
+        std::fs::read(self.tmp.path()).ok()
+    }
+
     #[allow(
         clippy::disallowed_methods,
         reason = "[io-door:surface:atomic-commit] The atomic `>` write door's commit step: re-open the target's parent directory only to fsync the rename durable. The write surface fires when the redirect frame settles (committed once this returns Ok); this open carries written bytes to disk, it is not a separate model read."

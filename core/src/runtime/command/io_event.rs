@@ -58,10 +58,18 @@ pub(crate) fn read(path: &str) -> Value {
     ])
 }
 
-/// `{io:"write", path:<path>, mode:…, outcome:…}` — an fd 1/2 file write
-/// target, settled at frame teardown.
-pub(crate) fn write(path: &str, mode: RedirectMode, outcome: WriteOutcome) -> Value {
-    Value::map(vec![
+/// `{io:"write", path:<path>, mode:…, outcome:…, old_bytes:<bytes|null>,
+/// new_bytes:<bytes|null>}` — an fd 1/2 file write target, settled at frame
+/// teardown.  `old_bytes` and `new_bytes` are set for committed writes
+/// where a diff card may be built by the host.
+pub(crate) fn write(
+    path: &str,
+    mode: RedirectMode,
+    outcome: WriteOutcome,
+    old_bytes: Option<&[u8]>,
+    new_bytes: Option<&[u8]>,
+) -> Value {
+    let mut fields = vec![
         ("io".to_string(), Value::String("write".into())),
         ("path".to_string(), Value::String(path.to_string())),
         ("mode".to_string(), Value::String(mode_str(mode).into())),
@@ -69,7 +77,14 @@ pub(crate) fn write(path: &str, mode: RedirectMode, outcome: WriteOutcome) -> Va
             "outcome".to_string(),
             Value::String(outcome.as_str().into()),
         ),
-    ])
+    ];
+    if let Some(b) = old_bytes {
+        fields.push(("old_bytes".to_string(), Value::Bytes(b.to_vec())));
+    }
+    if let Some(b) = new_bytes {
+        fields.push(("new_bytes".to_string(), Value::Bytes(b.to_vec())));
+    }
+    Value::map(fields)
 }
 
 /// `{io:"exec", argv:[prog, …args], outcome:…, status:…}` — an external
