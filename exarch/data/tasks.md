@@ -8,7 +8,7 @@ When you begin a task you only need to run
 
   let exarch-tasks = transition $exarch-tasks 1 `doing  # before you begin
 
-When that is finished, mark it as done and view the test:
+When that is finished, mark it as done and view the tasks:
 
   let exarch-tasks = transition $exarch-tasks 1 `done
   render-tasks $exarch-tasks                           # view remaining tasks
