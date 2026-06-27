@@ -25,16 +25,19 @@ pub type AgentId = u64;
 
 /// When a message in the inbox may be drained into the model's context.
 ///
-/// The boundary is a *per-message* property, not a global rule: user
-/// steering may barge in at the next tool-call boundary (mid-turn
-/// redirection), while a scheduled wakeup or a finished agent is a *fresh*
-/// turn and must wait for the turn boundary so it never pollutes the
-/// context of a turn already in motion.
+/// The boundary is a *per-message* property, not a global rule.  Everything
+/// drains at the next tool-call boundary — user steering, a finished agent's
+/// result, a scheduled wakeup, a settled `spawn`'s surface batch, a self-nudge
+/// — so it reaches the model as soon as the current tool batch settles rather
+/// than waiting out the whole turn.  The sole exception is a slash command:
+/// it is interpreted against the session (a `/model` swap, a `/clear`) by the
+/// drive loop's `Control`, never shown to the model, so it waits for the turn
+/// boundary where the session is `ReadyForUser`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Boundary {
-    /// May drain mid-turn, at a tool-call boundary (user steering).
+    /// May drain mid-turn, at a tool-call boundary — everything but a command.
     Tool,
-    /// Drains only at the turn boundary, as its own fresh turn.
+    /// Drains only at the turn boundary: a slash command, run by `Control`.
     Turn,
 }
 
@@ -153,8 +156,9 @@ pub enum InboxMsg {
     /// tool boundary, except a slash command, which waits for the turn
     /// boundary so the REPL command path interprets it.
     UserSteering(String),
-    /// A scheduled wakeup fired (cron / after).  A fresh, *marked* turn at
-    /// the turn boundary — never mid-turn.
+    /// A scheduled wakeup fired (cron / after).  Drains at the tool boundary
+    /// as a *marked* injection, so it reaches the model as soon as the current
+    /// tool batch settles.
     ScheduledWakeup {
         /// The human label the schedule was given (or its id).
         label: String,
@@ -170,7 +174,9 @@ pub enum InboxMsg {
         /// waits is dropped rather than stacked.
         pending: Arc<AtomicBool>,
     },
-    /// An async agent settled.  A fresh, *marked* turn at the turn boundary.
+    /// An async agent settled.  Drains at the tool boundary as a dialable `↘`
+    /// subagent block, so its result reaches the model as soon as the current
+    /// tool batch settles.
     AgentResult(AgentResult),
     /// A synthetic continuation the agent posted to *itself* after an attempt
     /// the nudge registry decided to retry (an empty turn, an early stop, a
@@ -191,8 +197,8 @@ pub enum InboxMsg {
     /// surface vocabulary (io maps, `` `card `` variants) terminated by a
     /// `` `done `` event; the boundary sink posts it here, stamped with the
     /// *root* session id so its cards render in the root viewport (a spawn
-    /// worker registers no tab of its own).  A fresh, marked turn at the turn
-    /// boundary, like a wakeup or an agent result.  `joined` is the worker's
+    /// worker registers no tab of its own).  Drains at the tool boundary, like
+    /// a wakeup or an agent result.  `joined` is the worker's
     /// deliver-once latch, shared with the eliminators (`await`/`race`): the
     /// drain renders this batch only if it wins the test-and-set on the flag,
     /// so a replay that already rendered the cards in-turn suppresses it.
@@ -204,27 +210,15 @@ pub enum InboxMsg {
 }
 
 impl InboxMsg {
-    /// Where this message may be drained.
+    /// Where this message may be drained.  Only a slash command waits for the
+    /// turn boundary (the `Control` interprets it against the session); every
+    /// other message — content or a self-nudge continuation — drains at the
+    /// next tool boundary.
     pub fn boundary(&self) -> Boundary {
         match self {
-            InboxMsg::UserSteering(s) if !s.trim_start().starts_with('/') => Boundary::Tool,
-            _ => Boundary::Turn,
-        }
-    }
-
-    /// Whether this message is a *user-issued* turn-boundary barrier that the
-    /// mid-turn steering drain must not reorder past.  A slash command — typed
-    /// as a [`InboxMsg::Command`] or carried as a slash [`InboxMsg::UserSteering`]
-    /// — is part of the human's own ordered sequence: a `/model` then a prompt
-    /// must run *after* the swap, so later steering may not jump ahead of it.
-    /// Asynchronous host/peer deliveries (a wakeup, an agent result, a settled
-    /// `spawn`'s surface, a self-nudge) carry no ordering relation to the
-    /// human's typing, so steering passes them freely.
-    fn is_user_barrier(&self) -> bool {
-        match self {
-            InboxMsg::Command(_) => true,
-            InboxMsg::UserSteering(s) => s.trim_start().starts_with('/'),
-            _ => false,
+            InboxMsg::Command(_) => Boundary::Turn,
+            InboxMsg::UserSteering(s) if s.trim_start().starts_with('/') => Boundary::Turn,
+            _ => Boundary::Tool,
         }
     }
 
@@ -514,37 +508,52 @@ impl Inbox {
         (!prompts.is_empty()).then_some(prompts)
     }
 
-    /// Mid-turn drain at a tool-call boundary: take *every* tool-boundary
-    /// message (user steering that is not a slash command) from the queue,
-    /// rendered and joined, leaving the rest in their original order.
+    /// Mid-turn drain at a tool-call boundary: take the leading run of
+    /// tool-boundary messages — every source but a slash command — and deliver
+    /// them, in order, each tagged with its source so the driver renders it in
+    /// its honest medium (a `↘` subagent block for an agent result, a marked
+    /// wakeup, the cards of a settled `spawn`).  A consecutive run of user
+    /// steering coalesces into one [`Turn::Human`].
     ///
-    /// Steering deliberately scans past asynchronous turn-boundary deliveries
-    /// — a settled detached agent's [`InboxMsg::AgentResult`], a `spawn`'s
-    /// [`InboxMsg::Surface`], a [`InboxMsg::ScheduledWakeup`] — rather than
-    /// bailing at the first one.  Those drain only at the turn boundary
-    /// ([`Self::next_or_idle`]), which a long tool-call loop never reaches, so a
-    /// leading-run scan would let a single such message at the head starve all
-    /// steering behind it for the rest of the turn.  The scan stops only at a
-    /// *user-issued* barrier ([`InboxMsg::is_user_barrier`]), past which the
-    /// human's own ordering must hold.
-    pub fn drain_tool(&self) -> Option<String> {
+    /// The scan stops at the first slash command: it is the only turn-boundary
+    /// message ([`Boundary::Turn`]), and it must run against a `ReadyForUser`
+    /// session, so it and everything queued behind it stay for the turn
+    /// boundary ([`Self::next_or_idle`]).  This is also what holds the human's
+    /// own ordering — a `/model` then a prompt swaps before the prompt runs —
+    /// since steering queued behind the command is left with it.
+    pub fn drain_tool(&self) -> Vec<Turn> {
         let mut q = self.shared.queue.lock().expect("inbox lock poisoned");
-        let mut text = String::new();
-        let mut kept = VecDeque::with_capacity(q.len());
-        let mut barrier = false;
-        while let Some(msg) = q.pop_front() {
-            if !barrier && msg.boundary() == Boundary::Tool {
-                if !text.is_empty() {
-                    text.push_str("\n\n");
+        let mut turns = Vec::new();
+        while q
+            .front()
+            .is_some_and(|m| m.boundary() == Boundary::Tool)
+        {
+            if matches!(q.front(), Some(InboxMsg::UserSteering(_))) {
+                // Coalesce the consecutive run of (non-slash) steering, as the
+                // turn-boundary drain does, so it lands as one human turn.
+                let mut text = String::new();
+                while let Some(InboxMsg::UserSteering(s)) = q.front() {
+                    if s.trim_start().starts_with('/') {
+                        break;
+                    }
+                    let s = match q.pop_front() {
+                        Some(InboxMsg::UserSteering(s)) => s,
+                        _ => unreachable!("front just checked to be user steering"),
+                    };
+                    if !text.is_empty() {
+                        text.push_str("\n\n");
+                    }
+                    text.push_str(&s);
                 }
-                text.push_str(&msg.render());
-                continue;
+                turns.push(Turn::Human(text));
+            } else {
+                let msg = q.pop_front().expect("front present and tool-boundary");
+                if let Some(turn) = to_turn(msg) {
+                    turns.push(turn);
+                }
             }
-            barrier |= msg.is_user_barrier();
-            kept.push_back(msg);
         }
-        *q = kept;
-        (!text.is_empty()).then_some(text)
+        turns
     }
 
     /// Turn-boundary drain: the next deliverable, tagged with its source, or
@@ -648,30 +657,41 @@ fn pop_turn(q: &mut VecDeque<InboxMsg>) -> Option<Turn> {
             }
             _ => {
                 let msg = q.pop_front().expect("front checked present");
-                msg.on_drain();
-                return Some(match msg {
-                    InboxMsg::ScheduledWakeup { .. } => Turn::Wakeup(msg.render()),
-                    InboxMsg::AgentResult(r) => Turn::Agent(r),
-                    InboxMsg::Nudge(s) => Turn::Nudge(s),
-                    InboxMsg::Command(s) => Turn::Command(s),
-                    InboxMsg::Surface { id, values, joined } => {
-                        let mut won = joined.lock().expect("surface joined latch poisoned");
-                        if *won {
-                            // An eliminator already replayed these cards in the
-                            // awaiting turn; drop the batch and try the next
-                            // message rather than return an empty turn.
-                            continue;
-                        }
-                        *won = true;
-                        Turn::Surface { id, values }
-                    }
-                    InboxMsg::UserSteering(_) => {
-                        unreachable!("user steering coalesced in the arm above")
-                    }
-                });
+                match to_turn(msg) {
+                    Some(turn) => return Some(turn),
+                    // A suppressed `Surface` yields nothing; try the next
+                    // message rather than return an empty turn.
+                    None => continue,
+                }
             }
         }
     }
+}
+
+/// Convert one non-user-steering message into the [`Turn`] it delivers,
+/// running its drain side effect ([`InboxMsg::on_drain`]).  Shared by the
+/// tool-boundary drain ([`Inbox::drain_tool`]) and the turn-boundary drain
+/// ([`pop_turn`]).  Yields `None` only for a `Surface` an eliminator already
+/// delivered (its deliver-once latch is set): the caller drops it.
+fn to_turn(msg: InboxMsg) -> Option<Turn> {
+    msg.on_drain();
+    Some(match msg {
+        InboxMsg::ScheduledWakeup { .. } => Turn::Wakeup(msg.render()),
+        InboxMsg::AgentResult(r) => Turn::Agent(r),
+        InboxMsg::Nudge(s) => Turn::Nudge(s),
+        InboxMsg::Command(s) => Turn::Command(s),
+        InboxMsg::Surface { id, values, joined } => {
+            let mut won = joined.lock().expect("surface joined latch poisoned");
+            if *won {
+                return None;
+            }
+            *won = true;
+            Turn::Surface { id, values }
+        }
+        InboxMsg::UserSteering(_) => {
+            unreachable!("user steering coalesced by the caller")
+        }
+    })
 }
 
 pub struct Event {
@@ -1448,11 +1468,11 @@ mod tests {
         assert!(holder.lock().unwrap().is_some());
     }
 
-    /// Tool-boundary steering drains only the non-command prefix.  Slash
-    /// prompts stay for the turn boundary, where `/clear`, `/model`, and
-    /// friends are interpreted by `handle_slash` instead of shown to the
-    /// model.  The whole leading user run then coalesces at the turn
-    /// boundary, preserving the old prompt-queue join.
+    /// Tool-boundary drain stops at the first slash command.  Slash prompts
+    /// wait for the turn boundary, where `/clear`, `/model`, and friends are
+    /// interpreted by `handle_slash` instead of shown to the model; the whole
+    /// leading user run then coalesces there, preserving the old prompt-queue
+    /// join.  The non-slash steering ahead of the command drains mid-turn.
     #[test]
     fn inbox_tool_drain_stops_before_slash_command() {
         let inbox = Inbox::new();
@@ -1460,8 +1480,11 @@ mod tests {
         inbox.push_user("/clear".into());
         inbox.push_user("after clear".into());
 
-        assert_eq!(inbox.drain_tool().as_deref(), Some("steer first"));
-        assert_eq!(inbox.drain_tool(), None);
+        assert!(
+            matches!(inbox.drain_tool().as_slice(), [Turn::Human(s)] if s == "steer first"),
+            "the non-slash steering drains; the command stops the run",
+        );
+        assert!(inbox.drain_tool().is_empty());
         assert!(
             matches!(inbox.drain_turn(), Some(Turn::Human(s)) if s == "/clear\n\nafter clear"),
             "the leading user run coalesces into one human turn",
@@ -1469,73 +1492,68 @@ mod tests {
         assert!(inbox.is_empty());
     }
 
-    /// A scheduled wakeup is a turn-boundary message: it never drains at a
-    /// tool boundary, and at the turn boundary it renders marked, on its
-    /// own, so the model can tell it from a human prompt.
+    /// A scheduled wakeup drains at the tool boundary, marked, alongside the
+    /// steering ahead of it — so it reaches the model as soon as the tool
+    /// batch settles rather than waiting out the whole turn.
     #[test]
-    fn inbox_wakeup_is_turn_boundary_and_marked() {
+    fn inbox_wakeup_drains_at_tool_boundary_marked() {
         let inbox = Inbox::new();
         inbox.push_user("steer".into());
         inbox.push(wakeup("nightly", "0 3 * * *", "run the tests"));
 
-        // Tool boundary takes the user steering and leaves the wakeup queued.
-        assert_eq!(inbox.drain_tool().as_deref(), Some("steer"));
-        assert_eq!(inbox.drain_tool(), None);
-        // Turn boundary delivers the wakeup, tagged as a wakeup and rendered
-        // marked so the driver can give it its own chrome.
         assert!(
             matches!(
-                inbox.drain_turn(),
-                Some(Turn::Wakeup(s)) if s == "[scheduled 'nightly' · 0 3 * * *] run the tests",
+                inbox.drain_tool().as_slice(),
+                [Turn::Human(h), Turn::Wakeup(w)]
+                    if h == "steer"
+                        && w == "[scheduled 'nightly' · 0 3 * * *] run the tests",
             ),
-            "the wakeup drains as a marked Wakeup turn",
+            "the wakeup drains mid-turn, marked, after the steering",
         );
         assert!(inbox.is_empty());
     }
 
-    /// Steering queued *behind* an asynchronous turn-boundary delivery still
-    /// drains mid-turn.  A detached agent that settles during a long tool-call
-    /// loop pushes its `AgentResult` to the head of the queue; that message
-    /// drains only at the turn boundary, which the loop never reaches, so a
-    /// leading-run scan would let it starve every steering prompt behind it.
-    /// The whole-queue drain scans past it, leaving it queued for its turn.
+    /// Asynchronous deliveries — a settled detached agent's `AgentResult`, a
+    /// `spawn`'s `Surface`, a `ScheduledWakeup` — drain at the tool boundary
+    /// too, in queue order, so a result that settles during a long tool-call
+    /// loop reaches the model at the next boundary, not at turn's end.
     #[test]
-    fn inbox_tool_drain_passes_async_turn_messages() {
+    fn inbox_tool_drain_takes_async_deliveries() {
         let inbox = Inbox::new();
-        // The order a settling subagent then a barging human produce.
+        // A wakeup that fired, then a barging human, in arrival order.
         inbox.push(wakeup("nightly", "@", "go"));
         inbox.push_user("redirect now".into());
         inbox.push_user("and also this".into());
 
-        assert_eq!(
-            inbox.drain_tool().as_deref(),
-            Some("redirect now\n\nand also this"),
-            "steering drains past the async wakeup at the head",
-        );
-        assert_eq!(inbox.drain_tool(), None);
         assert!(
-            matches!(inbox.drain_turn(), Some(Turn::Wakeup(_))),
-            "the wakeup is left intact for the turn boundary",
+            matches!(
+                inbox.drain_tool().as_slice(),
+                [Turn::Wakeup(_), Turn::Human(s)] if s == "redirect now\n\nand also this",
+            ),
+            "the async wakeup and the coalesced steering both drain, in order",
         );
         assert!(inbox.is_empty());
     }
 
-    /// A *user-issued* slash barrier still holds the line: steering typed after
-    /// a mid-turn `/model` must run after the swap, so it is not pulled ahead.
-    /// An async delivery sitting before the barrier is still passed.
+    /// A slash command holds the line: it is the lone turn-boundary message,
+    /// so the drain stops at it and everything queued behind — here steering
+    /// the human typed after a mid-turn `/model` — stays for the turn boundary,
+    /// running after the swap.  Async deliveries ahead of it still drain.
     #[test]
-    fn inbox_tool_drain_stops_at_user_barrier_past_async() {
+    fn inbox_tool_drain_stops_at_command_barrier() {
         let inbox = Inbox::new();
         inbox.push_user("before".into());
         inbox.push(wakeup("x", "@", "p"));
         inbox.push(InboxMsg::Command("/model".into()));
         inbox.push_user("after model".into());
 
-        // "before" drains; the wakeup is skipped; the /model barrier stops the
-        // scan, so "after model" stays behind it.
-        assert_eq!(inbox.drain_tool().as_deref(), Some("before"));
-        assert_eq!(inbox.drain_tool(), None);
-        assert!(matches!(inbox.drain_turn(), Some(Turn::Wakeup(_))));
+        // "before" and the wakeup drain; the /model command stops the run, so
+        // "after model" stays behind it for the turn boundary.
+        assert!(matches!(
+            inbox.drain_tool().as_slice(),
+            [Turn::Human(b), Turn::Wakeup(_)] if b == "before"
+        ));
+        assert!(inbox.drain_tool().is_empty());
         assert!(matches!(inbox.drain_turn(), Some(Turn::Command(s)) if s == "/model"));
         assert!(matches!(inbox.drain_turn(), Some(Turn::Human(s)) if s == "after model"));
         assert!(inbox.is_empty());
@@ -1636,21 +1654,29 @@ mod tests {
         );
     }
 
-    /// A `Surface` is a turn-boundary message — it never drains at a tool
-    /// boundary — and `clear` drops a queued batch for free (the deque is
-    /// emptied), so a `/clear` between flush and drain delivers nothing.
+    /// A `Surface` drains at the tool boundary, like any other delivery, and
+    /// `clear` drops a queued batch for free (the deque is emptied), so a
+    /// `/clear` between flush and drain delivers nothing.
     #[test]
-    fn inbox_surface_is_turn_boundary_and_cleared() {
+    fn inbox_surface_drains_at_tool_boundary_and_cleared() {
         let joined = Arc::new(Mutex::new(false));
         let inbox = Inbox::new();
+        assert_eq!(surface(&joined).boundary(), Boundary::Tool);
+
         inbox.push(surface(&joined));
-        assert_eq!(surface(&joined).boundary(), Boundary::Turn);
-        assert_eq!(inbox.drain_tool(), None, "a Surface never drains mid-turn");
         inbox.clear();
         assert!(
-            inbox.drain_turn().is_none(),
+            inbox.drain_tool().is_empty(),
             "a /clear drops the queued batch"
         );
+
+        // A fresh, un-cleared batch surfaces mid-turn.
+        let joined = Arc::new(Mutex::new(false));
+        inbox.push(surface(&joined));
+        assert!(matches!(
+            inbox.drain_tool().as_slice(),
+            [Turn::Surface { id, .. }] if *id == 0
+        ));
     }
 
     /// The run meter counts a muted child's usage.  Accounting follows the

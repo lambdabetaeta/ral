@@ -884,15 +884,26 @@ impl Agent {
                     emit,
                 );
             }
-            let Dispatch { results, steering } = self.dispatch(provider, tool_calls, token, emit);
+            let Dispatch { results, injected } = self.dispatch(provider, tool_calls, token, emit);
             self.log
                 .append_tool_results(results)
                 .map_err(|e| ProviderError::Other(e.to_string()))?;
-            if let Some(text) = steering {
+            // Everything that arrived during the batch lands now, mid-turn:
+            // each source renders its own chrome (a `↘` block for a subagent, a
+            // marked wakeup, a `spawn`'s cards), and their texts coalesce into
+            // the single steering message the protocol admits after a batch.
+            if !injected.is_empty() {
+                let mut text = String::new();
+                for turn in &injected {
+                    announce(turn, emit);
+                    if !text.is_empty() {
+                        text.push_str("\n\n");
+                    }
+                    text.push_str(&turn.text());
+                }
                 self.log
-                    .append_steering(text.clone())
+                    .append_steering(text)
                     .map_err(|e| ProviderError::Other(e.to_string()))?;
-                emit.emit(Kind::UserPromptEcho(text));
             }
             if token.is_cancelled() {
                 return self.cancelled(emit);
@@ -1013,15 +1024,12 @@ impl Agent {
         }
         Dispatch {
             results,
-            steering: self.take_steering(),
+            // The tool-boundary drain: every message that arrived during the
+            // batch — barged-in user steering, a settled subagent's result, a
+            // fired wakeup, a `spawn`'s surface — tagged with its source. A
+            // slash command is the lone exception, held for the turn boundary.
+            injected: self.inbox.drain_tool(),
         }
-    }
-
-    /// The tool-boundary steering drain: a non-slash user prompt that barged
-    /// in mid-turn, taken from this session's own inbox.  A peer has no human
-    /// writer, so its inbox holds no user steering and this is always `None`.
-    fn take_steering(&self) -> Option<String> {
-        self.inbox.drain_tool()
     }
 
     /// A returning agent — every node but the *conversing* (interactive) trunk
@@ -1208,14 +1216,15 @@ impl Drop for Agent {
 
 struct Dispatch {
     results: Vec<SessionToolResult>,
-    steering: Option<String>,
+    injected: Vec<Turn>,
 }
 
-/// The model-facing chrome a turn's source emits before its `apply`: a human
-/// prompt and a wakeup echo as their (possibly marked) text, an agent result
-/// renders as the dialable `↘` subagent block the sink already knows.  A
-/// self-nudge and a command are quiet — a nudge is an internal continuation, a
-/// command never reaches the model.
+/// The model-facing chrome a turn's source emits as it enters context —
+/// whether it opens a fresh turn at the boundary or lands mid-turn at a tool
+/// boundary: a human prompt and a wakeup echo as their (possibly marked) text,
+/// an agent result renders as the dialable `↘` subagent block the sink already
+/// knows.  A self-nudge and a command are quiet — a nudge is an internal
+/// continuation, a command never reaches the model.
 fn announce(turn: &Turn, emit: &Emitter) {
     match turn {
         Turn::Human(s) | Turn::Wakeup(s) => emit.emit(Kind::UserPromptEcho(s.clone())),
