@@ -1266,6 +1266,8 @@ mod tests {
                 path: "b.rs".into(),
                 mode: WriteMode::Append,
                 outcome: WriteOutcome::Committed,
+                old_bytes: None,
+                new_bytes: None,
             })
         );
         assert_eq!(
@@ -1368,6 +1370,8 @@ mod tests {
             path: "b.rs".into(),
             mode: WriteMode::Append,
             outcome: WriteOutcome::Failed,
+            old_bytes: None,
+            new_bytes: None,
         })
         .expect("an io event serialises");
         assert_eq!(v["io"], "write");

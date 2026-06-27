@@ -1361,6 +1361,8 @@ return !{{length $hits}}"#
                 path: path.clone(),
                 mode: WriteMode::Write,
                 outcome: WriteOutcome::Committed,
+                old_bytes: None,
+                new_bytes: None,
             },
             "the one io event is a committed write of the redirect path"
         );
@@ -1534,6 +1536,8 @@ return !{{length $hits}}"#
             path: "b.rs".into(),
             mode: crate::card::WriteMode::Append,
             outcome: crate::card::WriteOutcome::Committed,
+            old_bytes: None,
+            new_bytes: None,
         };
         let card = io_card(&event);
         let kind = Kind::Io {

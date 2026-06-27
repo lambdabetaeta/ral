@@ -492,6 +492,15 @@ impl Picker {
                         self.selected = self.selected.min(n - 1);
                     }
                 }
+                // Re-clamp upstream_idx to the selection's available upstreams.
+                {
+                    let new_ups = self.upstreams_for_selection();
+                    self.upstream_idx = if new_ups.len() <= 1 {
+                        0
+                    } else {
+                        self.upstream_idx.min(new_ups.len() - 1)
+                    };
+                }
             }
             Focus::Effort => {
                 if !self.supports("reasoning") {
@@ -539,14 +548,12 @@ impl Picker {
             }
         }
 
-        // Upstream filter: when a specific vendor prefix is selected (index > 0),
-        // keep only OpenRouter models matching that prefix; models without a `/`
-        // (non-OpenRouter) pass through unfiltered.
+        // Upstream filter: keep only models whose vendor prefix matches.
         if self.upstream_idx > 0 {
             if let Some(prefix) = self.upstreams().get(self.upstream_idx) {
                 let mut keep = vec![false; candidates.len()];
                 for (i, (_, model)) in candidates.iter().enumerate() {
-                    keep[i] = !model.contains('/') || model.starts_with(&format!("{prefix}/"));
+                    keep[i] = model.starts_with(&format!("{prefix}/"));
                 }
                 let mut ci = 0;
                 candidates.retain(|_| { let k = keep[ci]; ci += 1; k });
