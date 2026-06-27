@@ -237,13 +237,16 @@ fn leading_whitespace_chars(line: &str) -> usize {
     line.chars().take_while(|c| c.is_whitespace()).count()
 }
 
-/// Strip the common leading whitespace from every non-blank line of `s`.
+/// Strip the common leading whitespace from every non-blank line of `s`,
+/// then trim the surrounding whitespace of the block.
 ///
 /// The indent level is the minimum count of leading whitespace characters
 /// across all lines that contain at least one non-whitespace character.
-/// Blank lines (empty or all-whitespace) are preserved unchanged, as are
-/// the line terminators: `s` is split on `\n` and rejoined on `\n`, so a
-/// `\r` belonging to a CRLF terminator stays put.
+/// Interior blank lines (empty or all-whitespace) are preserved unchanged,
+/// and an interior `\r` belonging to a CRLF terminator stays put: `s` is
+/// split on `\n` and rejoined on `\n`.  Finally the whole block is trimmed,
+/// so the opening newline of a multiline literal and any trailing newline
+/// (CRLF and all) both fall away, matching the JS `dedent` package.
 fn dedent(s: &str) -> String {
     let min_indent = s
         .split('\n')
@@ -252,20 +255,24 @@ fn dedent(s: &str) -> String {
         .min()
         .unwrap_or(0);
 
-    if min_indent == 0 {
-        return s.to_owned();
-    }
+    let dedented = if min_indent == 0 {
+        Cow::Borrowed(s)
+    } else {
+        Cow::Owned(
+            s.split('\n')
+                .map(|line| {
+                    if line.trim().is_empty() {
+                        Cow::Borrowed(line)
+                    } else {
+                        Cow::Owned(line.chars().skip(min_indent).collect::<String>())
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    };
 
-    s.split('\n')
-        .map(|line| {
-            if line.trim().is_empty() {
-                Cow::Borrowed(line)
-            } else {
-                Cow::Owned(line.chars().skip(min_indent).collect())
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    dedented.trim().to_owned()
 }
 
 pub(super) fn builtin_to_int(args: &[Value]) -> Settled<Value> {

@@ -91,10 +91,19 @@ fn dedent_preserves_blank_lines_verbatim() {
 }
 
 #[test]
-fn dedent_does_not_normalise_crlf() {
+fn dedent_keeps_interior_crlf_but_trims_the_trailing_one() {
     // `s.lines()` + `join("\n")` silently rewrote CRLF to LF; splitting on
-    // `\n` keeps the `\r` that belongs to each CRLF terminator.
-    expect_string("dedent \"  a\r\n  b\r\n\"", "a\r\nb\r\n");
+    // `\n` keeps the `\r` of an interior CRLF terminator.  The final trim
+    // (JS `dedent` parity) removes the trailing CRLF along with it.
+    expect_string("dedent \"  a\r\n  b\r\n\"", "a\r\nb");
+}
+
+#[test]
+fn dedent_trims_the_opening_and_trailing_newline() {
+    // The common shape: content written on the line after the opening quote,
+    // closing quote on its own line.  The surrounding newlines are trimmed,
+    // leaving just the dedented block.
+    expect_string("dedent \"\n  foo\n  bar\n\"", "foo\nbar");
 }
 
 // ── B4 — `range` reports overflow rather than panicking ───────────────────
