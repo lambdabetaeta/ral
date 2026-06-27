@@ -250,14 +250,18 @@ For dot/ignored files you also have `rg` bundled.
 
 The hash depends on the content of each line and its neighbours. 
 
-`edit PATH EDITS` applies a batch of edits. It accepts a list of `[HASH, NEWTEXT]` and atomically replaces each line uniquely identified by `HASH` with `NEWTEXT` verbatim (adding newlines). It is batched because changing a line invalidates the hash of adjacent ones. Use raw strings `#'…'#` for `NEWTEXT` without any escapes. is useful for replacements; never use interpolating double quotes for editing. All hashes resolve against the file before edits:
+`edit PATH EDITS` applies a batch of edits. It accepts a list of `[HASH, NEWTEXT]` and atomically replaces each line uniquely identified by `HASH` with `NEWTEXT` verbatim (adding newlines). It is batched because changing a line invalidates the hash of adjacent ones. Use raw strings `#'…'#` for `NEWTEXT` without any escapes. is useful for replacements; never use interpolating double quotes for editing. All hashes resolve against the file before edits. Careful with indentation:
 
-    view-text 80 120 < src/lib.rs       # view hashes
+    view-text 80 120 < src/lib.rs   # view hashes
     edit 'src/lib.rs' [
-      [h1b2c3, '    let n = 42
-        let scaled = n * 2'],
-      [h4e5f6, '    let m = 0'],
-      [h7a8b9, '']
+      [h1b2c3, !{dedent #'
+        let m = f {
+          let scaled = n * 2
+          g 42
+        }
+      '#}]                          # multiline edit with indent stripped
+      [h4e5f6, #'    let m = 0'#],  # single-line edit
+      [h7a8b9, #''#]
     ]
 
 Collect as many edits as possible in one call to ensure freshness. You must mention the hash of each line you want changed: an edit may add new lines, but does not overwrite.
