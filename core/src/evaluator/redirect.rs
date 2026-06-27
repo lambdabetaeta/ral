@@ -87,6 +87,7 @@ struct WriteIntent {
     commit: Option<command::AtomicCommit>,
     old_bytes: Option<Vec<u8>>,
 }
+
 /// RAII frame holding the redirect state [`with_redirects`] installs:
 /// the stdin guard, any residual fd guard, pending atomic commits, the
 /// prior `stdout` / `stderr` sinks, and the fd-1/2 write intents whose
@@ -113,6 +114,7 @@ fn clone_redirect_sink(sink: &Sink, context: &str) -> Raw<Sink> {
     sink.try_clone()
         .map_err(|e| Break::Error(Error::new(format!("{context}: {e}"), 1)).into())
 }
+
 /// Read the current content of `path` if it is a regular file under 1 MB.
 /// Used to capture the "before" image for a write's diff card.  Returns
 /// `None` if the file doesn't exist, is not a regular file, is too large,
@@ -129,6 +131,7 @@ fn snapshot_old(path: &std::path::Path) -> Option<Vec<u8>> {
         _ => None,
     }
 }
+
 /// Open one fd-1/2 file write target and record its write intent. The
 /// intent is pushed *before* the open is consulted for a failure so the
 /// open-error path (handled by the caller) can surface a `failed` write

@@ -122,7 +122,6 @@ impl Call {
 /// comparable column down the page regardless of intent length.
 const BAR_PAD: usize = 4;
 
-
 /// Most calls shown in the sparkline bar chart.  Longer runs keep only their tail.
 const MAX_SPARKLINE: usize = 30;
 

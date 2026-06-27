@@ -287,11 +287,11 @@ impl InboxMsg {
 fn surface_notice(values: &[Value]) -> String {
     use crate::card::DoneOutcome;
     let settled = match values.iter().rev().find_map(crate::card::value_to_done) {
-        Some((_, DoneOutcome::Ok)) => "finished (exit 0)".to_string(),
-        Some((_, DoneOutcome::Err { message, status })) => {
+        Some(DoneOutcome::Ok) => "finished (exit 0)".to_string(),
+        Some(DoneOutcome::Err { message, status }) => {
             format!("finished (exit {status}): {message}")
         }
-        Some((_, DoneOutcome::Panic { message })) => format!("panicked: {message}"),
+        Some(DoneOutcome::Panic { message }) => format!("panicked: {message}"),
         None => "finished".to_string(),
     };
     format!(

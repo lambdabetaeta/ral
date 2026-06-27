@@ -134,8 +134,8 @@ pub fn decode_surface(ev: &RalValue) -> Option<Kind> {
         Some(Kind::Io { event, card })
     } else if let Some(card) = value_to_card(ev) {
         Some(Kind::Card(card))
-    } else if let Some((cmd, outcome)) = value_to_done(ev) {
-        Some(Kind::Card(done_card(&cmd, &outcome)))
+    } else if let Some(outcome) = value_to_done(ev) {
+        Some(Kind::Card(done_card(&outcome)))
     } else {
         None
     }
@@ -1361,8 +1361,10 @@ return !{{length $hits}}"#
                 path: path.clone(),
                 mode: WriteMode::Write,
                 outcome: WriteOutcome::Committed,
+                // Fresh target, so no `old_bytes`; the committed content is
+                // surfaced as `new_bytes` to seed the diff card.
                 old_bytes: None,
-                new_bytes: None,
+                new_bytes: Some(b"x".to_vec()),
             },
             "the one io event is a committed write of the redirect path"
         );

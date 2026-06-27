@@ -90,6 +90,8 @@ pub fn expand_path_prefix(input: &str, home: &str) -> String {
 /// (`std::env::temp_dir`) the same way XDG sigils read
 /// `XDG_*_HOME`; `gitdir:` resolves via [`discover_git_dir`]
 /// (which walks the filesystem).  Bundled rather than passed
+/// positionally so new sigils can grow this struct without
+/// rippling through callers.
 pub struct FreezeCtx<'a> {
     pub home: &'a str,
     pub cwd: &'a Path,

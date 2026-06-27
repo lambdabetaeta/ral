@@ -31,8 +31,6 @@ strip = true
 opt-level = "z"
 panic = "unwind"  # must unwind: catch_unwind in driver loop needs it to recover from tool panics
 
-
-
 # Same codegen as release, but with debug info kept and stripping disabled
 # so samply / perf can resolve symbols.  LTO stays on so inlining matches
 # release; the debuginfo just makes the inline tree readable.

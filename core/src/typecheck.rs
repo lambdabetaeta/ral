@@ -434,6 +434,7 @@ fn harvest_into(comp: &Comp, out: &mut Vec<(String, Scheme)>) {
 /// schemes blob come out of one checked pass; evaluating the annotated
 /// prelude installs each binding's scheme next to its value.
 ///
+/// The pass runs through the same [`typecheck`] entry the runtime uses,
 /// seeded with an empty session — builtins are resolved dynamically during
 /// inference, and no prior bindings exist at bake time.  A type error is
 /// fatal: the build script panics with the formatted errors.

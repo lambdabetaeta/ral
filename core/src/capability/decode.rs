@@ -247,6 +247,7 @@ fn freeze_exec_map(
 
     Ok(ExecMap { literals, dirs })
 }
+
 /// Split `$PATH`, normalise each absolute entry, skip empties and relatives.
 fn path_dirs(err_prefix: &str) -> Result<Vec<String>, String> {
     let path = std::env::var("PATH").unwrap_or_default();

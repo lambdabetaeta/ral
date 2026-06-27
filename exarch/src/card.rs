@@ -295,7 +295,13 @@ pub enum IoEvent {
         path: String,
         mode: WriteMode,
         outcome: WriteOutcome,
+        // Transient host-side input to the diff card only — never serialised
+        // into `events.json` (a committed write would otherwise embed the whole
+        // file as a JSON integer array). The forensic log keeps the write's
+        // shape; the rendered diff lives in the TUI's `user.log`.
+        #[serde(skip)]
         old_bytes: Option<Vec<u8>>,
+        #[serde(skip)]
         new_bytes: Option<Vec<u8>>,
     },
     Exec {
@@ -345,6 +351,10 @@ pub fn value_to_io(v: &RalValue) -> Option<IoEvent> {
             argv: strings_field(m, "argv"),
             outcome: ExecOutcome::parse(&str_field(m, "outcome")?)?,
             status: int_field(m, "status")?,
+        },
+        "grep" => IoEvent::Grep {
+            scope: str_field(m, "scope")?,
+            pattern: str_field(m, "pattern")?,
         },
         _ => return None,
     })
@@ -466,6 +476,7 @@ fn write_spans(path: &str, outcome: WriteOutcome) -> Vec<Span> {
         span(outcome.role(), outcome.label()),
     ]
 }
+
 /// Compute the whole-file line-level diff of `old` vs `new`, grouped into
 /// hunks with ±2 lines of context (matching `edit`'s diff).  Each hunk's
 /// `start` is the 1-indexed original line of its first row.
@@ -525,6 +536,7 @@ fn try_diff_mark(path: &str, old: Option<&[u8]>, new: Option<&[u8]>) -> Option<M
         None
     }
 }
+
 /// Compose a run of buffered I/O surfaces — even interleaved, grouped by the
 /// TUI into per-kind buckets — into one [`Card`] *per non-empty kind*, in a
 /// fixed Read → Exec → Grep → Write order.  Each card is a single
@@ -636,12 +648,14 @@ pub enum DoneOutcome {
 }
 
 /// Decode the `` `done `` value a detached worker flushes at completion into
-/// its `(cmd, outcome)`.  The shape is `` `done [cmd: "…", outcome: …] `` where
+/// its [`DoneOutcome`].  The shape is `` `done [cmd: "…", outcome: …] `` where
 /// `outcome` is the closed `` `ok ``/`` `err ``/`` `panic `` variant core mints;
-/// `err` carries the `{cmd, status, message, line, col}` error record.  Anything
-/// else returns `None`, the same graceful degradation as [`value_to_io`] and
-/// [`value_to_card`]; the decoder seam then drops it.
-pub fn value_to_done(v: &RalValue) -> Option<(String, DoneOutcome)> {
+/// `err` carries the `{cmd, status, message, line, col}` error record.  The
+/// `cmd` field is no longer surfaced — the card names the worker generically —
+/// so only `outcome` is read.  Anything else returns `None`, the same graceful
+/// degradation as [`value_to_io`] and [`value_to_card`]; the decoder seam then
+/// drops it.
+pub fn value_to_done(v: &RalValue) -> Option<DoneOutcome> {
     let RalValue::Variant { label, payload } = v else {
         return None;
     };
@@ -649,7 +663,6 @@ pub fn value_to_done(v: &RalValue) -> Option<(String, DoneOutcome)> {
         return None;
     }
     let m = map_of(payload.as_deref()?)?;
-    let cmd = str_field(m, "cmd")?;
     let RalValue::Variant { label, payload } = m.get("outcome")? else {
         return None;
     };
@@ -670,17 +683,16 @@ pub fn value_to_done(v: &RalValue) -> Option<(String, DoneOutcome)> {
         },
         _ => return None,
     };
-    Some((cmd, outcome))
+    Some(outcome)
 }
 
 /// Compose a `` `done `` event into a one-line [`Card`] using only the existing
-/// [`Mark::Text`] vocabulary — the `cmd` (the settled `spawn`, which renders as
-/// its `<handle:…>` form) lifted by [`Role::Strong`], then an outcome span roled
-/// by how it settled: a clean return is `Ok`, a raise is `Bad` carrying the
-/// message and status, a panic is `Bad` carrying the message.  The outcome is a
-/// fixed-position value mark, not an animation — the worker has already settled
-/// when this renders.
-pub fn done_card(_cmd: &str, outcome: &DoneOutcome) -> Card {
+/// [`Mark::Text`] vocabulary: an outcome span roled by how it settled — a clean
+/// return is `Ok`, a raise is `Bad` carrying the message and status, a panic is
+/// `Bad` carrying the message — followed by a plain gloss naming it as a
+/// background block.  The outcome is a fixed-position value mark, not an
+/// animation — the worker has already settled when this renders.
+pub fn done_card(outcome: &DoneOutcome) -> Card {
     let mut spans = Vec::new();
     match outcome {
         DoneOutcome::Ok => {
@@ -1024,6 +1036,7 @@ fn str_field(m: &ral_core::types::Map, field: &str) -> Option<String> {
         _ => None,
     }
 }
+
 /// An optional bytes-typed field of a record.
 fn bytes_field(m: &ral_core::types::Map, field: &str) -> Option<Vec<u8>> {
     match m.get(field) {
@@ -1031,6 +1044,7 @@ fn bytes_field(m: &ral_core::types::Map, field: &str) -> Option<Vec<u8>> {
         _ => None,
     }
 }
+
 /// An integer-typed field clamped into `u32` (negatives floor to 0).
 fn count_field(m: &ral_core::types::Map, field: &str) -> Option<u32> {
     match m.get(field) {
@@ -1416,7 +1430,7 @@ mod tests {
     fn value_to_done_decodes_each_outcome() {
         assert_eq!(
             value_to_done(&done_value("<block>", variant("ok", RalValue::Unit))),
-            Some(("<block>".into(), DoneOutcome::Ok))
+            Some(DoneOutcome::Ok)
         );
         let err = variant(
             "err",
@@ -1430,22 +1444,16 @@ mod tests {
         );
         assert_eq!(
             value_to_done(&done_value("<block>", err)),
-            Some((
-                "<block>".into(),
-                DoneOutcome::Err {
-                    message: "boom".into(),
-                    status: 2,
-                }
-            ))
+            Some(DoneOutcome::Err {
+                message: "boom".into(),
+                status: 2,
+            })
         );
         assert_eq!(
             value_to_done(&done_value("<block>", variant("panic", s("kaput")))),
-            Some((
-                "<block>".into(),
-                DoneOutcome::Panic {
-                    message: "kaput".into(),
-                }
-            ))
+            Some(DoneOutcome::Panic {
+                message: "kaput".into(),
+            })
         );
     }
 

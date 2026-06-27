@@ -259,8 +259,11 @@ pub struct Picker {
     selected: usize,
     /// Which control has the keyboard.
     focus: Focus,
-    /// Index into `upstreams`; 0 means "all" (no filter).
-    upstream_idx: usize,
+    /// The active upstream vendor filter (the `vendor` of `vendor/model`), or
+    /// `None` for "all".  Stored by name rather than by index so the displayed
+    /// tag and the applied filter cannot drift apart when the contextual and
+    /// global vendor lists differ.
+    upstream: Option<String>,
     /// Index into [`LADDER`] — the chosen effort rung.
     effort_idx: usize,
     /// The chosen temperature, or `None` for auto (unset).
@@ -306,7 +309,7 @@ impl Picker {
             models,
             selected: 0,
             focus: Focus::Search,
-            upstream_idx: 0,
+            upstream: None,
             effort_idx,
             temperature: initial.temperature,
             top_p: initial.top_p,
@@ -460,18 +463,12 @@ impl Picker {
                 } else {
                     self.selected = self.selected.saturating_sub(1);
                 }
-                // Auto-sync upstream vendor filter to the newly selected model.
+                // Auto-sync the upstream vendor filter to the newly selected
+                // model's vendor (or "all" for a vendorless model).
                 {
                     let rows = self.rows();
-                    if self.selected < rows.len() {
-                        if let Row::Model(_, model) = &rows[self.selected] {
-                            self.upstream_idx = model
-                                .split_once('/')
-                                .and_then(|(vendor, _)| {
-                                    self.upstreams_for_selection().iter().position(|v| v == vendor)
-                                })
-                                .unwrap_or(0);
-                        }
+                    if let Some(Row::Model(_, model)) = rows.get(self.selected) {
+                        self.upstream = model.split_once('/').map(|(vendor, _)| vendor.to_string());
                     }
                 }
             }
@@ -480,26 +477,21 @@ impl Picker {
                 if ups.len() <= 1 {
                     return; // nothing to cycle — only "all" exists
                 }
-                self.upstream_idx = if up {
-                    (self.upstream_idx + 1).min(ups.len() - 1)
+                let pos = self
+                    .upstream
+                    .as_ref()
+                    .and_then(|v| ups.iter().position(|u| u == v))
+                    .unwrap_or(0);
+                let next = if up {
+                    (pos + 1).min(ups.len() - 1)
                 } else {
-                    self.upstream_idx.saturating_sub(1)
+                    pos.saturating_sub(1)
                 };
+                self.upstream = (next > 0).then(|| ups[next].clone());
                 // Clamp selection to the now-filtered list.
-                {
-                    let n = self.rows().len();
-                    if n > 0 {
-                        self.selected = self.selected.min(n - 1);
-                    }
-                }
-                // Re-clamp upstream_idx to the selection's available upstreams.
-                {
-                    let new_ups = self.upstreams_for_selection();
-                    self.upstream_idx = if new_ups.len() <= 1 {
-                        0
-                    } else {
-                        self.upstream_idx.min(new_ups.len() - 1)
-                    };
+                let n = self.rows().len();
+                if n > 0 {
+                    self.selected = self.selected.min(n - 1);
                 }
             }
             Focus::Effort => {
@@ -549,17 +541,13 @@ impl Picker {
         }
 
         // Upstream filter: keep only models whose vendor prefix matches.
-        if self.upstream_idx > 0 {
-            if let Some(prefix) = self.upstreams().get(self.upstream_idx) {
-                let mut keep = vec![false; candidates.len()];
-                for (i, (_, model)) in candidates.iter().enumerate() {
-                    keep[i] = model.starts_with(&format!("{prefix}/"));
-                }
-                let mut ci = 0;
-                candidates.retain(|_| { let k = keep[ci]; ci += 1; k });
-                let mut hi = 0;
-                haystacks.retain(|_| { let k = keep[hi]; hi += 1; k });
-            }
+        if let Some(vendor) = &self.upstream {
+            let prefix = format!("{vendor}/");
+            let keep: Vec<bool> = candidates.iter().map(|(_, m)| m.starts_with(&prefix)).collect();
+            let mut ci = 0;
+            candidates.retain(|_| { let k = keep[ci]; ci += 1; k });
+            let mut hi = 0;
+            haystacks.retain(|_| { let k = keep[hi]; hi += 1; k });
         }
 
         // Empty query: show every loaded model, in listed order.
@@ -601,8 +589,13 @@ impl Picker {
     fn clamp_selection(&mut self) {
         let n = self.rows().len();
         self.selected = if n == 0 { 0 } else { self.selected.min(n - 1) };
-        let ups = self.upstreams_for_selection();
-        self.upstream_idx = if ups.len() <= 1 { 0 } else { self.upstream_idx.min(ups.len() - 1) };
+        // Drop the vendor filter if its vendor no longer exists in any loaded
+        // provider (a list reload/failure may have removed it).
+        if let Some(v) = &self.upstream {
+            if !self.upstreams().iter().any(|u| u == v) {
+                self.upstream = None;
+            }
+        }
     }
 
     /// The distinct upstream vendor prefixes extracted from the loaded model
@@ -880,9 +873,15 @@ impl Picker {
         ];
         let label = self.field_label("vendor", Focus::Upstream);
         let mut spans = vec![label];
+        // The lit tag is whichever entry names the active filter, "all" when none.
+        let active = self
+            .upstream
+            .as_ref()
+            .and_then(|v| ups.iter().position(|u| u == v))
+            .unwrap_or(0);
         for (i, vendor) in ups.iter().enumerate() {
             if i == 0 && vendor == "all" {
-                let style = if i == self.upstream_idx {
+                let style = if i == active {
                     if focused {
                         Style::default().fg(CYAN).add_modifier(Modifier::REVERSED | Modifier::BOLD)
                     } else {
@@ -894,7 +893,7 @@ impl Picker {
                 spans.push(Span::styled(" all ", style));
             } else {
                 let hue = colors[(i - 1) % colors.len()];
-                let style = if i == self.upstream_idx {
+                let style = if i == active {
                     Style::default().fg(hue).add_modifier(Modifier::REVERSED | Modifier::BOLD)
                 } else {
                     Style::default().fg(hue).add_modifier(Modifier::DIM)

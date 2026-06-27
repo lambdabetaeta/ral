@@ -128,7 +128,7 @@ mod tests {
         crate::path::sigil::FreezeCtx {
             home: "/h",
             cwd: std::path::Path::new("/"),
-            }
+        }
     }
 
     #[test]

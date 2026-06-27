@@ -131,7 +131,6 @@ impl Scratch {
 /// `$XDG_STATE_HOME/exarch/<project>/<run>/`, where `<project>` is the
 /// slugified absolute `cwd` (see [`project_slug`]) and `<run>` is
 /// `<YYYY-MM-DD-HHMMSS>-<pid>`, unique per launch so successive runs in the
-
 /// same project never overwrite one another.  Holds `stderr.log` and
 /// `sessions/<id>/{events.json,transcript.jsonl,user.log}`.  Unlike the disposable
 /// [`Scratch`] this is durable state under the user's XDG state home, so
@@ -142,7 +141,6 @@ impl Scratch {
 )]
 pub fn log_run_dir(cwd: &str) -> io::Result<PathBuf> {
     let stamp = format!("{}-{}", stamp_from_secs(now_secs()), std::process::id());
-
     let dir = project_dir(cwd).join(stamp);
     fs::create_dir_all(&dir)?;
     Ok(dir)
