@@ -222,27 +222,6 @@ impl InboxMsg {
         }
     }
 
-    /// The text the model sees when this message is drained into context.
-    /// User steering is verbatim; the rest render with their source marker
-    /// so the model can tell a wakeup or an agent reply from a human.  A
-    /// `Surface` batch never reaches here — `drain_turn` hands it straight to
-    /// [`Turn::Surface`], which composes its own notice from the `` `done ``
-    /// event ([`surface_notice`]) — so this never collapses it to a string.
-    fn render(&self) -> String {
-        match self {
-            InboxMsg::UserSteering(s) => s.clone(),
-            InboxMsg::ScheduledWakeup {
-                label,
-                trigger,
-                prompt,
-                ..
-            } => format!("[scheduled '{label}' · {trigger}] {prompt}"),
-            InboxMsg::AgentResult(r) => r.render(),
-            InboxMsg::Nudge(s) | InboxMsg::Command(s) => s.clone(),
-            InboxMsg::Surface { .. } => unreachable!("a Surface drains as Turn::Surface, not text"),
-        }
-    }
-
     /// The side effect of draining this message into context.  A scheduled
     /// wakeup clears its pending flag here, re-opening its schedule for the
     /// next occurrence — the overlap-skip holds only until the wakeup is
@@ -676,7 +655,12 @@ fn pop_turn(q: &mut VecDeque<InboxMsg>) -> Option<Turn> {
 fn to_turn(msg: InboxMsg) -> Option<Turn> {
     msg.on_drain();
     Some(match msg {
-        InboxMsg::ScheduledWakeup { .. } => Turn::Wakeup(msg.render()),
+        InboxMsg::ScheduledWakeup {
+            label,
+            trigger,
+            prompt,
+            ..
+        } => Turn::Wakeup(format!("[scheduled '{label}' · {trigger}] {prompt}")),
         InboxMsg::AgentResult(r) => Turn::Agent(r),
         InboxMsg::Nudge(s) => Turn::Nudge(s),
         InboxMsg::Command(s) => Turn::Command(s),
