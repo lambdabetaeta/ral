@@ -66,12 +66,9 @@
 (allow file-read* (literal "/private/var/db/timezone/icutz"))
 
 ;; libdispatch registers with the shared-memory notification center on
-;; first queue creation (libSystem init).  Even though the base profile
-;; carries an unfiltered (allow mach-lookup), macOS ≥ 14 resolves
-;; shared-memory services through a separate Mach task-port path that
-;; the global rule does not cover; the explicit global-name allow is the
-;; narrowest carve-out that closes this.
-(allow mach-lookup (global-name "apple.shm.notification_center"))
+;; first queue creation (libSystem init).  This is a POSIX shared-memory
+;; name, not a Mach service name.
+(allow ipc-posix-shm (ipc-posix-name "apple.shm.notification_center"))
 
 ;; The arm64 dynamic linker issues an fsctl ioctl during code-signature
 ;; validation.  The unfiltered form here is safe — and is standard in

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1baac6d
-generated_at_date: 2026-06-22
+generated_at_commit: b864280
+generated_at_date: 2026-06-27
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
 
@@ -132,6 +132,18 @@ Linux has no path-exec filter so there the in-process gate stands alone.
   the restricting SID set is unreadable to the child). The Windows backends supply
   resource caps and a profile dump; no path exists yet to confine a per-command
   child through them, so the entrypoint and launcher fail closed.
+
+`macos-base.sbpl` is the policy-independent Seatbelt base every rendered macOS
+profile inherits: deny-default, libSystem/dyld startup allowances, common device
+writes, and the runtime support needed before the policy-derived fs/net/exec rules
+can matter. Its broad `file-ioctl` compatibility allowance deliberately leaves
+`/dev/tty` configurable, because sandboxed full-screen children need termios and
+window-size ioctls when a turn has an explicit terminal loan. This is a known
+hole: the current `SandboxProjection` carries fs/net/exec, not terminal-loan
+state, so the Seatbelt profile cannot yet deny `/dev/tty` ioctls for ordinary
+Denied-terminal tool turns while admitting them for `_ed-tui`-style children.
+The notification-center carve-out is named in the POSIX shared-memory namespace
+(`ipc-posix-name "apple.shm.notification_center"`), matching Apple's profiles.
 
 Path-scoped *exec* confinement is unenforced on Linux (no landlock backend) —
 [[decisions/260530_linux-exec-confinement|linux-exec-confinement]].
