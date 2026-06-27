@@ -144,6 +144,11 @@ fn install_panic_restore_hook() {
                 restore_terminal_modes();
             }
             previous(info);
+            // Flush stderr so the panic message reaches the log before
+            // TerminalGuard::drop restores the fd — without this the
+            // message sits in the file buffer and is lost on abort.
+            use std::io::Write;
+            let _ = std::io::stderr().flush();
         }));
     });
 }

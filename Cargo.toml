@@ -29,7 +29,9 @@ lto = true
 codegen-units = 1
 strip = true
 opt-level = "z"
-panic = "abort"
+panic = "unwind"  # must unwind: catch_unwind in driver loop needs it to recover from tool panics
+
+
 
 # Same codegen as release, but with debug info kept and stripping disabled
 # so samply / perf can resolve symbols.  LTO stays on so inlining matches
