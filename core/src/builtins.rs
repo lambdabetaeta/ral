@@ -401,9 +401,12 @@ builtin_registry! {
     TypeOf { names: ["_type"], arity: 1, ty: Sig(sig::TYPE_PROBE),
         doc: "_type <val>  — print inferred type at compile time; passthrough at runtime.",
         call: |args, _shell| Ok(args.first().cloned().unwrap_or(Value::Unit)), },
-    Help { names: ["help"], arity: _, ty: Sig(sig::HELP),
-        doc: "help [name|pattern]  — print documentation; an exact name shows its type signature, a non-exact name searches by pattern.",
+    Help { names: ["help"], arity: 0, ty: Sig(sig::HELP),
+        doc: "help  — print an overview of builtins, prelude, and library; see also `explain`.",
         call: |args, shell| Ok(misc::builtin_help(args, shell)), },
+    Explain { names: ["explain"], arity: 1, ty: Sig(sig::EXPLAIN),
+        doc: "explain <name>  — print documentation for one name: doc, type signature, and source location.",
+        call: |args, shell| Ok(misc::builtin_explain(args, shell)), },
     // `_ed-*` builtins (16 entries) are registered by the `ral` crate's
     // host-builtins table at REPL startup; see
     // `ral::repl::plugin_ed_builtins::HOST_BUILTINS`.

@@ -415,7 +415,7 @@ impl CommandFailure {
             Self::Signal(sig) => Some(format!("the process terminated from {}", sig.display())),
             Self::StoppedByJobControl { stop_signal, .. } if stop_signal.is_background_tty_input() => Some(
                 format!(
-                    "ral killed the pipeline because {cmd} tried to read the terminal from a background process group. Is an earlier stage internal, an alias, a handler, or a builtin? Use `help {cmd}` to inspect command resolution."
+                    "ral killed the pipeline because {cmd} tried to read the terminal from a background process group. Is an earlier stage internal, an alias, a handler, or a builtin? Use `explain {cmd}` to inspect command resolution."
                 ),
             ),
             Self::StoppedByJobControl { stop_signal, .. } if stop_signal.is_background_tty_config() => Some(

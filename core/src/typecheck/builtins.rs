@@ -400,9 +400,15 @@ pub mod sig {
     pub const UNALIAS: BuiltinSig = command(ArgSig::Exact(ONE_STR), pure(TyTemplate::Unit), None);
 
     pub const HELP: BuiltinSig = command(
-        ArgSig::Variadic(ANY),
-        ret(ModeTemplate::Fresh, ModeTemplate::Bytes, TyTemplate::String),
+        ArgSig::Exact(NO_ARGS),
+        ret(ModeTemplate::Fresh, ModeTemplate::Bytes, TyTemplate::Unit),
         None,
+    );
+
+    pub const EXPLAIN: BuiltinSig = command(
+        ArgSig::Exact(ONE_STR),
+        ret(ModeTemplate::Fresh, ModeTemplate::Bytes, TyTemplate::Unit),
+        Some(scheme::explain_op),
     );
 
     pub const INT_TO_UNIT: BuiltinSig =
@@ -991,6 +997,8 @@ pub mod scheme {
     scheme!(pure_string: pure Ty::String);
 
     scheme!(pure_bool: pure Ty::Bool);
+    scheme!(explain_op: pipe [Ty::String] -> Ty::Unit);
+
 
     // ── First-class functions with pipeline modes ───────────────────────
 

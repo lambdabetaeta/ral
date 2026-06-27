@@ -361,8 +361,8 @@ body is itself a block — and a failing body stops the iteration.  There
 is no `break`.  For early termination, reach instead for a combinator:
 `take-while` / `drop-while` for predicates, `first` for the first
 matching element (which fails if none matches), or a `fold` that
-threads the decision through its accumulator.  Use `help NAME` for any
-function's exact signature, and `help --types NAME` for its inferred
+threads the decision through its accumulator.  Use `explain NAME` for any
+function'\''s exact signature.
 type.
 
 ## 11  Pipelines and codecs
@@ -710,8 +710,8 @@ The REPL adds line editing, history, completion, and job control:
 and Ctrl-Z to park a foreground job.  `quit` (or Ctrl-D) exits.
 
 `alias NAME { |args| … }` installs a command-callable alias;
-`unalias NAME` removes it.  `help` lists documentation, `help NAME`
-shows a function's signature, and `help --types NAME` adds inferred
+`unalias NAME` removes it.  `help` lists all commands, `explain NAME`
+shows a function'\''s signature and source location.
 types.
 
 Startup configuration lives in `~/.ralrc` (or

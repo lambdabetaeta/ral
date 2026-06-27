@@ -308,4 +308,4 @@ A `` `card `` may stack marks of different kinds, but within one homogeneous lis
 
 ## Help
 
-When you are unsure of the signature of something you always call `help <name>`.
+When you are unsure of the signature of something you always call `explain <name>`.

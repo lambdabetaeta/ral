@@ -104,7 +104,7 @@ pub(super) fn prelude_doc(name: &str) -> Option<String> {
 
 /// The documented prelude function names (the keys of [`prelude_docs`]),
 /// unsorted.  An embedding host folds these into its own at-a-glance command
-/// index beside the builtins; `help <name>` then resolves each through
+/// index beside the builtins; `explain <name>` then resolves each through
 /// [`prelude_doc`].
 pub fn prelude_names() -> Vec<&'static str> {
     prelude_docs().keys().map(String::as_str).collect()
@@ -120,7 +120,7 @@ pub(super) fn prelude_all_docs() -> Vec<(String, String)> {
     v
 }
 
-pub(super) fn builtin_help(args: &[Value], shell: &mut Shell) -> Value {
+pub(super) fn builtin_help(_args: &[Value], shell: &mut Shell) -> Value {
     let color = ansi::use_ui_color();
     let (bold, cyan, dim, reset) = if color {
         (BOLD, CYAN, DIM, RESET)
@@ -128,7 +128,7 @@ pub(super) fn builtin_help(args: &[Value], shell: &mut Shell) -> Value {
         ("", "", "", "")
     };
 
-    let fmt_entry = |name: &str, doc: &str, type_hint: &str, source: Option<&str>| -> String {
+    let _fmt_entry = |name: &str, doc: &str, type_hint: &str, source: Option<&str>| -> String {
         let mut s = format!("  {cyan}{name}{reset}{dim}:{reset} {doc}\n");
         s.push_str(&format!("  {dim}{type_hint}{reset}\n"));
         if let Some(src) = source {
@@ -142,7 +142,7 @@ pub(super) fn builtin_help(args: &[Value], shell: &mut Shell) -> Value {
         format!("  {cyan}{name}{reset} {dim}—{reset} {doc}\n")
     };
 
-    let out = if args.is_empty() {
+    let out = {
         let mut s = format!("{bold}Builtins:{reset}\n", bold = bold, reset = reset);
         let mut builtin_names: Vec<&str> = super::builtin_names()
             .iter()
@@ -174,46 +174,88 @@ pub(super) fn builtin_help(args: &[Value], shell: &mut Shell) -> Value {
                 s.push_str(&fmt_line(&name, &doc));
             }
         }
+        s.push_str(&format!(
+            "{dim}──{reset}\n",
+            dim = dim,
+            reset = reset
+        ));
+        s.push_str(&format!(
+            "{dim}Use `explain <name>` for the full type signature and source location of any entry.{reset}\n",
+            dim = dim,
+            reset = reset
+        ));
         s
+    };
+    let _ = shell.write_stdout(out.as_bytes());
+    shell.mobile.control.last_status = 0;
+    Value::Unit
+}
+pub(super) fn builtin_explain(args: &[Value], shell: &mut Shell) -> Value {
+    let color = ansi::use_ui_color();
+    let (_bold, cyan, dim, reset) = if color {
+        (BOLD, CYAN, DIM, RESET)
     } else {
-        let name = args[0].to_string();
-        let source = which_line(&name, shell);
-        let type_str = type_for(&name);
-        if let Some(doc) = super::builtin_doc(&name) {
-            fmt_entry(&name, doc, &type_str, source.as_deref())
-        } else if let Some(doc) = prelude_doc(&name) {
-            let pt = prelude_type_hint(&name).unwrap_or(type_str);
-            fmt_entry(&name, &doc, &pt, source.as_deref())
-        } else if let Some(doc) = library_doc(&name) {
-            fmt_entry(&name, &doc, &type_str, source.as_deref())
-        } else if let Some(src) = source {
-            format!("help: {src}\n")
+        ("", "", "", "")
+    };
+
+    let fmt_entry = |name: &str, doc: &str, type_hint: &str, source: Option<&str>| -> String {
+        let mut s = format!("  {cyan}{name}{reset}{dim}:{reset} {doc}\n");
+        s.push_str(&format!("  {dim}{type_hint}{reset}\n"));
+        if let Some(src) = source {
+            s.push_str(&format!("  {dim}{src}{reset}\n"));
+        }
+        s.push('\n');
+        s
+    };
+
+    let fmt_line = |name: &str, doc: &str| -> String {
+        format!("  {cyan}{name}{reset} {dim}—{reset} {doc}\n")
+    };
+
+    if args.is_empty() {
+        let _ = shell.write_stdout(b"explain: expected a name, e.g. `explain map`\n");
+        shell.mobile.control.last_status = 0;
+        return Value::Unit;
+    }
+
+    let name = args[0].to_string();
+    let source = which_line(&name, shell);
+    let type_str = type_for(&name);
+
+    let out = if let Some(doc) = super::builtin_doc(&name) {
+        fmt_entry(&name, doc, &type_str, source.as_deref())
+    } else if let Some(doc) = prelude_doc(&name) {
+        let pt = prelude_type_hint(&name).unwrap_or(type_str);
+        fmt_entry(&name, &doc, &pt, source.as_deref())
+    } else if let Some(doc) = library_doc(&name) {
+        fmt_entry(&name, &doc, &type_str, source.as_deref())
+    } else if let Some(src) = source {
+        format!("explain: {src}\n")
+    } else {
+        let mut hits: Vec<(String, String)> = Vec::new();
+        for n in super::builtin_names() {
+            if !n.starts_with('_')
+                && name_matches(&name, n)
+                && let Some(doc) = super::builtin_doc(n)
+            {
+                hits.push((n.to_string(), doc.to_string()));
+            }
+        }
+        for (n, doc) in prelude_all_docs() {
+            if name_matches(&name, &n) {
+                hits.push((n, doc));
+            }
+        }
+        for (n, doc) in library_all_docs() {
+            if name_matches(&name, &n) {
+                hits.push((n, doc));
+            }
+        }
+        if hits.is_empty() {
+            format!("explain: {name}: not found\n")
         } else {
-            let mut hits: Vec<(String, String)> = Vec::new();
-            for n in super::builtin_names() {
-                if !n.starts_with('_')
-                    && name_matches(&name, n)
-                    && let Some(doc) = super::builtin_doc(n)
-                {
-                    hits.push((n.to_string(), doc.to_string()));
-                }
-            }
-            for (n, doc) in prelude_all_docs() {
-                if name_matches(&name, &n) {
-                    hits.push((n, doc));
-                }
-            }
-            for (n, doc) in library_all_docs() {
-                if name_matches(&name, &n) {
-                    hits.push((n, doc));
-                }
-            }
-            if hits.is_empty() {
-                format!("help: {name}: not found\n")
-            } else {
-                hits.sort_by(|a, b| a.0.cmp(&b.0));
-                hits.iter().map(|(n, doc)| fmt_line(n, doc)).collect()
-            }
+            hits.sort_by(|a, b| a.0.cmp(&b.0));
+            hits.iter().map(|(n, doc)| fmt_line(n, doc)).collect()
         }
     };
     let _ = shell.write_stdout(out.as_bytes());

@@ -20,12 +20,12 @@ use std::path::{Path, PathBuf};
 /// 3. **Builtins** — every builtin and prelude function's **name** only (see
 ///    [`builtin_index`]), a progressive-disclosure index right after the `Ral`
 ///    prose that points `help` at it: the agent reads the whole surface at a
-///    glance and `help <name>`s any one for its signature and docs on demand,
+///    glance and `explain <name>`s any one for its signature and docs on demand,
 ///    since the full help strings proved far too long to bake in.
 /// 4. **Tasks** (`data/tasks.md`) — the task-management kit API reference:
 ///    `empty-tasks`, `add-task`, `remove-task`, `transition`, `status-counts`,
 ///    and the rendering/persistence surface.  Bindings are always live
-///    (sourced at boot alongside the agent library); call `help <name>` for
+///    (sourced at boot alongside the agent library); call `explain <name>` for
 ///    any one's full signature.
 /// 5. **Script style** (`data/script-style.md`) — the scripting guide.
 /// 6. **Host** — the environment snapshot ([`host::snapshot`]) followed by the
@@ -123,7 +123,7 @@ fn builtin_index() -> String {
     names.sort_unstable();
     names.dedup();
     format!(
-        "Every builtin and prelude function, by name — call `help <name>` for any one's signature and docs:\n\n{}",
+        "Every builtin and prelude function, by name — call `explain <name>` for any one'\''s signature and docs:\n\n{}",
         names.join(", ")
     )
 }
