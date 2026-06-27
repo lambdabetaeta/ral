@@ -523,6 +523,13 @@ impl Viewport {
         self.flat.row_block.get(row).copied()
     }
 
+    /// Rendered cell width of visual row `row` — its content's extent, not
+    /// the pane's — so a gesture can be bound tight to the text and ignore
+    /// the dead margin past where the line ends.  `None` past the buffer.
+    pub(super) fn row_width(&self, row: usize) -> Option<usize> {
+        self.flat.rows.get(row).map(Line::width)
+    }
+
     /// Whether the block at `idx` is dialable — a stable property of its
     /// kind, independent of its current level, so a wheel resting on its
     /// glyph can claim the gesture even when the level is already clamped.

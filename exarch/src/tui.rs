@@ -1759,11 +1759,13 @@ impl App {
         }
     }
 
-    /// The dialable block under the pointer anywhere in the content rect,
-    /// or `None` over inert chrome, a non-dialable block, or past the
+    /// The dialable block under the pointer, or `None` over inert chrome, a
+    /// non-dialable block, the dead margin past a line's end, or past the
     /// buffer.  The whole block claims the pointer — its entire vertical
     /// extent, not just the rail — so the dial glyph lights, the wheel
-    /// dials, and the click cycles anywhere over a coalesced run.
+    /// dials, and the click cycles anywhere over a coalesced run, but the
+    /// target hugs the rendered text: each row reaches only as far right as
+    /// its own content, never into the empty margin beside a short line.
     fn hover_block(&self, me: MouseEvent) -> Option<usize> {
         let frame = self.frame?;
         if !contains(frame.text, me.column, me.row) {
@@ -1772,7 +1774,8 @@ impl App {
         let row = frame.offset + (me.row - frame.text.y) as usize;
         let vp = self.viewports.get(&self.focused())?;
         let idx = vp.block_at(row)?;
-        vp.block_dialable(idx).then_some(idx)
+        let col = (me.column - frame.text.x) as usize;
+        (vp.block_dialable(idx) && col < vp.row_width(row)?).then_some(idx)
     }
 
     /// Dial the dialable block under a wheel event by `delta`, returning
@@ -1828,8 +1831,9 @@ impl App {
         }
         let row = frame.offset + (me.row - frame.text.y) as usize;
         let col = me.column.saturating_sub(frame.text.x);
-        let id = self.focused();
-        let block = self.viewports.get(&id).and_then(|vp| vp.block_at(row));
+        // The cycle target hugs the text exactly as the hover and wheel do,
+        // so a click in the dead margin clears selection rather than cycling.
+        let block = self.hover_block(me);
         self.press = Some(Press {
             row,
             col,
