@@ -967,12 +967,6 @@ impl Inferencer<'_> {
                         self.unify_arg_template(&actual, template);
                     }
                 }
-                ArgSig::Variadic(template) => {
-                    for arg in &positional {
-                        let actual = self.infer_val(arg);
-                        self.unify_arg_template(&actual, template);
-                    }
-                }
                 ArgSig::Any => self.infer_args(args),
             },
             None => self.infer_args(args),

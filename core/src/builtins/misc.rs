@@ -461,38 +461,14 @@ fn is_simple(val: &Value) -> bool {
             | Value::Block { .. }
     ) || matches!(val, Value::String(s) if s.len() < 60)
 }
-
-fn format_args(args: &[Value]) -> String {
-    args.iter()
-        .map(|v| match v {
-            Value::Map(_) => pretty_print(v, 0),
-            _ => v.to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-pub(super) fn builtin_echo(args: &[Value], shell: &mut Shell) -> Value {
-    let _ = shell.write_stdout(format!("{}\n", format_args(args)).as_bytes());
-    shell.mobile.control.last_status = 0;
-    Value::Unit
-}
-
-// ESC[H home, ESC[2J erase screen, ESC[3J erase scrollback.  Order matters:
-// some terminals snapshot the visible region into scrollback on ESC[2J, so
-// the scrollback erase must come after.
 const CLEAR_SEQ: &[u8] = b"\x1b[H\x1b[2J\x1b[3J";
-// ESC c — RIS (Reset to Initial State).  Cheap and universal, but does not
 // touch stty modes the way ncurses `reset` does; `^reset` reaches the real
-// terminfo-driven binary when that's actually needed.
 const RESET_SEQ: &[u8] = b"\x1bc";
-
 pub(super) fn builtin_clear(_args: &[Value], shell: &mut Shell) -> Value {
     let _ = shell.write_stdout(CLEAR_SEQ);
     shell.mobile.control.last_status = 0;
     Value::Unit
 }
-
 pub(super) fn builtin_reset(_args: &[Value], shell: &mut Shell) -> Value {
     let _ = shell.write_stdout(RESET_SEQ);
     shell.mobile.control.last_status = 0;

@@ -154,9 +154,6 @@ macro_rules! builtin_registry {
 }
 
 builtin_registry! {
-    Echo { names: ["echo"], arity: _, ty: Sig(sig::BYTES_VARIADIC),
-        doc: "echo <args...>  — write arguments to stdout.",
-        call: |args, shell| Ok(misc::builtin_echo(args, shell)), },
     Clear { names: ["clear"], arity: 0, ty: Sig(sig::TERMINAL_CONTROL),
         doc: "clear  — clear screen and scrollback (ESC[H ESC[2J ESC[3J). Shadows external `clear`; use `^clear` for the ncurses binary.",
         call: |args, shell| Ok(misc::builtin_clear(args, shell)), },

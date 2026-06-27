@@ -64,7 +64,6 @@ pub enum ArgSig {
     Exact(&'static [ArgTemplate]),
     DataLast(&'static [ArgTemplate]),
     Optional(ArgTemplate),
-    Variadic(ArgTemplate),
     Any,
 }
 
@@ -311,11 +310,6 @@ pub mod sig {
         }
     }
 
-    pub const BYTES_VARIADIC: BuiltinSig = command(
-        ArgSig::Variadic(ANY),
-        ret(ModeTemplate::Fresh, ModeTemplate::Bytes, TyTemplate::String),
-        None,
-    );
 
     pub const TERMINAL_CONTROL: BuiltinSig = command(
         ArgSig::Exact(NO_ARGS),

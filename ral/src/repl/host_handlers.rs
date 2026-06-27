@@ -52,7 +52,7 @@ fn job_id_arg(args: &[Value], jobs: &crate::jobs::JobTable) -> Option<usize> {
 fn build_jobs(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
     BuiltinEntry {
         name: Cow::Borrowed("jobs"),
-        type_rule: BuiltinTypeRule::Sig(sig::BYTES_VARIADIC),
+        type_rule: BuiltinTypeRule::Sig(sig::TERMINAL_CONTROL),
         doc: "jobs  — list active background and stopped jobs.",
         body: BuiltinBody::Captured(Arc::new(move |_args, _shell| {
             let jt = jobs.lock().unwrap();

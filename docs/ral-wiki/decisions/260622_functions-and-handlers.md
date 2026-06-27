@@ -1,5 +1,5 @@
 ---
-status: implemented (help→explain done 2026-06-27; echo→sugar pending)
+status: implemented (help→explain + echo→sugar done 2026-06-27; ArgSig::Variadic retired)
 ---
 
 # Functions and handlers, and the end of "alias"

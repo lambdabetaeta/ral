@@ -406,6 +406,14 @@ impl Elaborator {
             }),
 
             Ast::Call {
+                head: Head::Bare(s),
+                args,
+                redirects,
+            } if s == "echo" && !self.is_bound("echo") => {
+                return self.expand_echo(args, redirects, binds);
+            }
+
+            Ast::Call {
                 head,
                 args,
                 redirects,
@@ -1004,6 +1012,68 @@ impl Elaborator {
             }
         )
     }
+    /// Lower `echo <args...>` to `to-line !{ intercalate " " [str a, str b, ...] }`.
+    ///
+    /// Each argument is rendered via `str` before being collected into a list,
+    /// so unlike arguments share no type — the render-then-collect strategy
+    /// that makes echo work without a top type.  Spreads become `map str $xs`.
+    /// This is surface sugar per ADR 260622.
+    fn expand_echo(
+        &mut self,
+        args: &[Spanned<Ast>],
+        redirects: &[Redirect],
+        binds: &mut Vec<(IrPattern, Comp)>,
+    ) -> Comp {
+        use crate::syntax::ast::{Ast, Head, ListElem};
+
+        let mut list_elems: Vec<ListElem> = Vec::new();
+
+        for arg in args {
+            let elem = match &arg.item {
+                Ast::Spread(inner) => {
+                    let map_call = Ast::Call {
+                        head: Head::Bare("map".into()),
+                        args: vec![
+                            Spanned::synthetic(Ast::Variable("str".into())),
+                            Spanned::synthetic((*inner.item).clone()),
+                        ],
+                        redirects: vec![],
+                    };
+                    ListElem::Spread(Spanned::synthetic(map_call))
+                }
+                other => {
+                    let str_call = Ast::Call {
+                        head: Head::Bare("str".into()),
+                        args: vec![Spanned::synthetic(other.clone())],
+                        redirects: vec![],
+                    };
+                    ListElem::Single(Spanned::synthetic(str_call))
+                }
+            };
+            list_elems.push(elem);
+        }
+
+        let intercalate_call = Ast::Call {
+            head: Head::Bare("intercalate".into()),
+            args: vec![
+                Spanned::synthetic(Ast::Literal(" ".into())),
+                Spanned::synthetic(Ast::List(list_elems)),
+            ],
+            redirects: vec![],
+        };
+
+        let thunk_body = vec![Spanned::synthetic(intercalate_call)];
+        let force = Ast::Force(Spanned::synthetic(Box::new(Ast::Block(thunk_body))));
+
+        let lowered = Ast::Call {
+            head: Head::Bare("to-line".into()),
+            args: vec![Spanned::synthetic(force)],
+            redirects: redirects.to_vec(),
+        };
+
+        self.elab_expr(&lowered, binds)
+    }
+
 }
 
 /// Fold an accumulated list of `(pattern, comp)` bindings around an inner
@@ -1025,7 +1095,13 @@ fn wrap_binds(span: Option<Span>, binds: Vec<(IrPattern, Comp)>, inner: Comp) ->
                 },
             )
         })
-}
+    }
+    ///
+    /// Each argument is rendered via `str` before being collected into a list,
+    /// so unlike arguments share no type — the render-then-collect strategy
+    /// that makes echo work without a top type.  Spreads become `map str $xs`.
+    /// This is surface sugar per ADR 260622.
+
 
 /// Sugar `exit` / `quit` with no arguments into `exit 0` / `quit 0`.
 ///
