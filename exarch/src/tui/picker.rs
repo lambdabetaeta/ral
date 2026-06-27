@@ -787,7 +787,7 @@ impl Picker {
         self.render_list(f, chunks[ci], plane); ci += 1;
         // Always render the provider row (inert "OpenRouter routing only" for a
         // non-OpenRouter model), so the overlay's height stays stable.
-        f.render_widget(Paragraph::new(self.provider_line()).style(plane), chunks[ci]); ci += 1;
+        f.render_widget(Paragraph::new(self.provider_line(chunks[ci].width)).style(plane), chunks[ci]); ci += 1;
         f.render_widget(
             Paragraph::new(self.effort_line(self.supports("reasoning"))).style(plane),
             chunks[ci],
@@ -912,7 +912,7 @@ impl Picker {
     /// * loaded → an `auto` tag plus one hue-coded tag per serving provider,
     ///   each annotated with its context window and quantization (nominal data
     ///   earns hue, the magnitudes printed as values), the active one reversed.
-    fn provider_line(&self) -> Line<'static> {
+    fn provider_line(&self, width: u16) -> Line<'static> {
         let focused = self.focus == Focus::Provider;
         let label = self.field_label("provider", Focus::Provider);
         let dim = Style::default().fg(SLATE).add_modifier(Modifier::DIM);
@@ -983,7 +983,38 @@ impl Picker {
             };
             spans.push(Span::styled(provider_tag(endpoint), style));
         }
-        Line::from(spans)
+        let total: usize = spans.iter().map(|s| s.width()).sum();
+        if total <= width as usize {
+            return Line::from(spans);
+        }
+
+        // The line overflows — keep the label and a window of tags around the
+        // active one so the highlight never falls off the edge.
+        let active_span = active + 1; // index in spans: 1 = auto, 2 = first tag, …
+        let budget = width as usize - spans[0].width();
+
+        let mut lo = active_span;
+        let mut hi = active_span + 1; // exclusive
+        let mut used = spans[active_span].width();
+
+        while lo > 1 && used + spans[lo - 1].width() <= budget {
+            lo -= 1;
+            used += spans[lo].width();
+        }
+        while hi < spans.len() && used + spans[hi].width() <= budget {
+            used += spans[hi].width();
+            hi += 1;
+        }
+
+        let mut result = vec![spans[0].clone()];
+        if lo > 1 {
+            result.push(Span::styled(" … ", dim));
+        }
+        result.extend(spans[lo..hi].iter().cloned());
+        if hi < spans.len() {
+            result.push(Span::styled(" …", dim));
+        }
+        Line::from(result)
     }
     /// The effort ladder: an ascending block ramp, each rung brightening with
     /// its ordinal (value) as the glyph grows (size); the chosen rung is
