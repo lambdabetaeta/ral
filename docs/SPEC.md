@@ -1557,7 +1557,9 @@ backgrounded pipeline (`cmd > log &`, `cmd 2> err &`) sends bytes to
 the target instead and leaves the corresponding record buffer empty.
 
 If the block raised, `await` re-raises rather than producing a
-record. Wrap with `try` to recover:
+record — `await !{spawn { B }} = B` holds as an observational
+equivalence: same value on success, same failure propagation.
+Wrap with `try` to recover:
 
 ```
 try { let r = await $h; use $r[value] } { |e| recover $e[status] }

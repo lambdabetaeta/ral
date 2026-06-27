@@ -438,3 +438,8 @@ let elem = { |x items|
 ## De-duplicate a list, keeping the first occurrence of each element
 ## (compared with `equal`); the result preserves first-seen order.
 let nub = { |xs| fold { |acc x| if !{elem $x $acc} { $acc } else { [...$acc, $x] } } [] $xs }
+
+## Spawn a thunk under audit and return the handle.  The spawned block
+## never fails (failure is data in the audit tree), so `await $h` is
+## always safe and the handle survives turn boundaries.
+let defer = { |body| spawn { audit { !$body } } }
