@@ -781,13 +781,11 @@ impl Viewport {
     /// left a barrier it would cut every burst back to a single call.  A step
     /// boundary is provider bookkeeping, not content: when it falls *between*
     /// run members it is subsumed (and never rendered); a step at the run's tail
-    /// — before genuine content (markdown, a diff, a surfaced card, other
-    /// chrome, a different tool's query) or at the buffer's end — is left out,
-    /// so it still renders as the boundary it is.
+    /// is also subsumed — the step carries no content and the run's own rail
+    /// already marks its edge.
     fn run_end(&self, start: usize, in_run: impl Fn(&Block) -> bool) -> usize {
-        // `end` advances only past a run member, so a trailing step (whose
-        // following member has not arrived) stays outside the run; an interior
-        // step is folded in once a later member commits `end` past it.
+        // `end` advances past every run member and any step, so a trailing
+        // step is folded into the run rather than rendered as its own block.
         let mut end = start;
         let mut i = start;
         while i < self.blocks.len() {
@@ -795,7 +793,7 @@ impl Viewport {
                 i += 1;
                 end = i;
             } else if self.blocks[i].is_step() {
-                i += 1;
+                i += 1; end = i;
             } else {
                 break;
             }

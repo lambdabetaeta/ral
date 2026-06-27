@@ -122,6 +122,10 @@ impl Call {
 /// comparable column down the page regardless of intent length.
 const BAR_PAD: usize = 4;
 
+
+/// Most calls shown in the sparkline bar chart.  Longer runs keep only their tail.
+const MAX_SPARKLINE: usize = 30;
+
 /// Two-space indent for a call's intent in the L2/L3 list, and the gap that
 /// separates an intent from its right-pinned bars.
 const INTENT_INDENT: &str = "  ";
@@ -191,7 +195,7 @@ fn live_tip(calls: &[Call], width: usize) -> Vec<Line<'static>> {
         &tip.intent,
         tip.context,
         sparkline(calls),
-        calls.len(),
+        calls.len().min(MAX_SPARKLINE),
         bar_col(width).saturating_sub(RAIL_W),
     ));
     // The effects nest under the *intent*, not the `ral` head: they hang at
@@ -362,8 +366,9 @@ fn head_span(calls: &[Call]) -> Span<'static> {
 /// order, as one slate span — decorative ink reading as a bar chart of how
 /// much each call moved, the bar count standing in for an `×N`.
 fn sparkline(calls: &[Call]) -> Span<'static> {
+    let skip = calls.len().saturating_sub(MAX_SPARKLINE);
     let glyphs: String = calls
-        .iter()
+        .iter().skip(skip)
         .map(|c| line::spark_glyph(c.magnitude))
         .collect();
     Span::styled(glyphs, Style::default().fg(SLATE))
