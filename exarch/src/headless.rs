@@ -130,6 +130,15 @@ fn card_stderr(card: &Card) -> Vec<String> {
                     }
                 }
             }
+            Mark::Listing { bytes, more } => {
+                let text = String::from_utf8_lossy(bytes);
+                for (i, l) in text.lines().enumerate() {
+                    out.push(format!("  {:>3} {l}", i + 1));
+                }
+                if *more {
+                    out.push("    ⋮".to_string());
+                }
+            }
             Mark::Raw { bytes } => {
                 let text = String::from_utf8_lossy(bytes);
                 out.extend(text.lines().map(|l| format!("  {l}")));

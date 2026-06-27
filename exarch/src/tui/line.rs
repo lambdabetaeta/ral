@@ -686,7 +686,7 @@ fn diff_capped(path: &str, hunks: &[Hunk], cap: Option<usize>) -> Vec<Line<'stat
         if i > 0 {
             ls.push(Line::from(vec![
                 Span::raw("  "),
-                Span::styled(format!("{:>gutter$} ", "⋯"), Style::default().fg(SLATE)),
+                Span::styled(format!("{:>gutter$} ", "⋮"), Style::default().fg(SLATE)),
             ]));
         }
         push_hunk(&mut ls, h, gutter);
@@ -849,6 +849,7 @@ pub(super) fn render_card(card: &Card, level: u8) -> Vec<Line<'static>> {
             Mark::Measure(m) => ls.push(render_measure(m)),
             Mark::Fields { rows } => ls.extend(render_fields(rows)),
             Mark::Diff { path, hunks } => ls.extend(diff_body(path, hunks, level)),
+            Mark::Listing { bytes, more } => ls.extend(render_listing(bytes, *more)),
             Mark::Raw { bytes } => ls.extend(render_raw(bytes)),
         }
     }
@@ -915,6 +916,7 @@ fn render_framed(card: &Card, indent_w: usize, border: Style, width: u16) -> Vec
             Mark::Text { spans } => body.extend(render_text(spans)),
             Mark::Measure(m) => body.push(render_measure(m)),
             Mark::Fields { rows } => body.extend(render_fields(rows)),
+            Mark::Listing { bytes, more } => body.extend(render_listing(bytes, *more)),
             Mark::Raw { bytes } => body.extend(render_raw(bytes)),
             // A diff never reaches here — diff-bearing cards take the diff path.
             Mark::Diff { .. } => {}
@@ -1143,6 +1145,47 @@ fn render_raw(bytes: &[u8]) -> Vec<Line<'static>> {
         .lines()
         .map(|l| Line::from(Span::raw(l.to_string())))
         .collect()
+}
+
+/// Render a [`Mark::Listing`] — the head of a freshly-written file as a numbered
+/// source listing: each line ral-highlighted, fronted by a right-aligned
+/// [`SLATE`] line-number gutter counting from 1, long lines folded to [`READ_W`]
+/// with continuations hanging under the body column (the gutter blanked on
+/// them).  When `more`, a trailing `⋮` gutter row marks content elided past the
+/// preview cap — the same elision glyph [`diff_capped`] sets between hunks, so a
+/// write and a diff share one vocabulary for "there is more below".  This is the
+/// write card's body, kin to [`push_hunk`] minus the two-sided sign column: a
+/// write is not a diff but a listing of what now stands in the file.
+fn render_listing(bytes: &[u8], more: bool) -> Vec<Line<'static>> {
+    let text = String::from_utf8_lossy(bytes);
+    let rows = highlight_ral(&text);
+    let gutter = rows.len().to_string().len().max(3);
+    // Body width: readable width less the 2-col indent, the gutter, and its
+    // trailing space; floored so pathological widths still wrap.
+    let body_w = (READ_W as usize).saturating_sub(2 + gutter + 1).max(8);
+    let mut ls: Vec<Line<'static>> = Vec::new();
+    for (i, line) in rows.into_iter().enumerate() {
+        for (j, wrapped) in wrap_line(&line, body_w).into_iter().enumerate() {
+            let num = if j == 0 {
+                format!("{:>gutter$}", i + 1)
+            } else {
+                " ".repeat(gutter)
+            };
+            let mut spans = vec![
+                Span::raw("  "),
+                Span::styled(format!("{num} "), Style::default().fg(SLATE)),
+            ];
+            spans.extend(wrapped.spans);
+            ls.push(Line::from(spans));
+        }
+    }
+    if more {
+        ls.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(format!("{:>gutter$} ", "⋮"), Style::default().fg(SLATE)),
+        ]));
+    }
+    ls
 }
 
 /// Dim slate text — used for informational messages.

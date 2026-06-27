@@ -106,6 +106,8 @@ pub struct Field {
 /// - [`Mark::Measure`] — the *quantitative* mark (size + value).
 /// - [`Mark::Fields`] — the *matrix* mark: an aligned `(label, value)` table.
 /// - [`Mark::Diff`] — the *dense composite* mark (size + grain + value + shape).
+/// - [`Mark::Listing`] — a *numbered source listing*: the head of a written
+///   file, gutter-numbered and syntax-lit but one-sided (no `+`/`-`).
 /// - [`Mark::Raw`] — *un-encoded ink*: pre-formed bytes appended verbatim.
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "mark", rename_all = "snake_case")]
@@ -114,6 +116,7 @@ pub enum Mark {
     Measure(Measure),
     Fields { rows: Vec<Field> },
     Diff { path: String, hunks: Vec<Hunk> },
+    Listing { bytes: Vec<u8>, more: bool },
     Raw { bytes: Vec<u8> },
 }
 
@@ -374,7 +377,7 @@ pub fn io_card(event: &IoEvent) -> Card {
             ..
         } => {
             if *outcome == WriteOutcome::Committed {
-                body = write_preview(new_bytes.as_deref());
+                body.extend(write_preview(new_bytes.as_deref()));
             }
             write_spans(path, *outcome)
         }
@@ -475,31 +478,24 @@ fn write_spans(path: &str, outcome: WriteOutcome) -> Vec<Span> {
 const WRITE_PREVIEW_LINES: usize = 10;
 
 /// Preview a committed write's content: the first [`WRITE_PREVIEW_LINES`] lines
-/// of `new` as one [`Mark::Raw`], plus a muted `…` when the content continues
-/// past them.  `new` is a bounded prefix (the host caps the read), so the marker
-/// signals *there is more* without claiming an exact remaining count.  A write
-/// card shows *what was written* — its head, not a diff and not a one-line
-/// receipt.  Absent or empty content yields no marks, so the
-/// `write <path> <outcome>` heading stands alone (a zero-byte write).
-fn write_preview(new: Option<&[u8]>) -> Vec<Mark> {
-    let Some(bytes) = new else {
-        return Vec::new();
-    };
-    let text = String::from_utf8_lossy(bytes);
+/// of `new` as one [`Mark::Listing`] — a numbered source listing — its `more`
+/// flag set when the content continues past them.  `new` is a bounded prefix
+/// (the host caps the read), so the flag signals *there is more* without
+/// claiming an exact remaining count.  A write card shows *what was written* —
+/// its head, not a diff and not a one-line receipt.  Absent or empty content
+/// yields no marks, so the `write <path> <outcome>` heading stands alone (a
+/// zero-byte write).
+fn write_preview(new: Option<&[u8]>) -> Option<Mark> {
+    let text = String::from_utf8_lossy(new?);
     let mut lines = text.lines();
     let head: Vec<&str> = lines.by_ref().take(WRITE_PREVIEW_LINES).collect();
     if head.is_empty() {
-        return Vec::new();
+        return None;
     }
-    let mut marks = vec![Mark::Raw {
+    Some(Mark::Listing {
         bytes: head.join("\n").into_bytes(),
-    }];
-    if lines.next().is_some() {
-        marks.push(Mark::Text {
-            spans: vec![span(Role::Muted, "…")],
-        });
-    }
-    marks
+        more: lines.next().is_some(),
+    })
 }
 
 /// Compose a run of buffered observation surfaces — even interleaved, grouped
@@ -707,6 +703,7 @@ pub fn summary_line(card: &Card) -> String {
                 .collect::<Vec<_>>()
                 .join(", "),
             Mark::Diff { path, .. } => format!("diff {path}"),
+            Mark::Listing { bytes, .. } => collapse(&String::from_utf8_lossy(bytes)),
             Mark::Raw { bytes } => collapse(&String::from_utf8_lossy(bytes)),
         };
         if !part.is_empty() {
