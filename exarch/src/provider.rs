@@ -1043,6 +1043,19 @@ impl PartialEq for Tuning {
     }
 }
 
+/// The `extra_body` fragment that pins an OpenRouter request to a single
+/// serving provider: `{"provider": {"order": ["<slug>"], "allow_fallbacks":
+/// false}}`. `order` lists the provider in priority and `allow_fallbacks:false`
+/// forbids routing elsewhere, so the request lands on exactly that upstream.
+fn or_provider_extra_body(slug: &str) -> serde_json::Value {
+    serde_json::json!({
+        "provider": {
+            "order": [slug],
+            "allow_fallbacks": false,
+        }
+    })
+}
+
 pub struct Provider {
     backend: Backend,
     id: ProviderId,
@@ -1055,6 +1068,12 @@ pub struct Provider {
     /// The reasoning-effort + temperature tuning for this selection, set by
     /// the `/model` overlay (or restored from persisted state at startup).
     tuning: Tuning,
+    /// The chosen OpenRouter serving-provider slug for this selection, or `None`
+    /// for "auto" (OpenRouter routes). Set by the `/model` overlay's provider
+    /// control and restored from persisted state; folded into the request as
+    /// `provider.order` routing by [`Engine::complete`], and only for an
+    /// OpenRouter selection — it is inert on any other provider.
+    route: Option<String>,
 }
 
 /// The transport behind a [`Provider`].  The live backend borrows the shared
@@ -1250,6 +1269,7 @@ impl Provider {
         cred: &Credential,
         max_tokens_override: Option<u32>,
         tuning: Tuning,
+        route: Option<String>,
     ) -> Self {
         let transport = engine.transport_for(id, &model, cred);
         Self {
@@ -1258,6 +1278,7 @@ impl Provider {
             model,
             max_tokens_override,
             tuning,
+            route,
         }
     }
 
@@ -1273,6 +1294,7 @@ impl Provider {
             model: model.to_string(),
             max_tokens_override: None,
             tuning: Tuning::default(),
+            route: None,
         }
     }
 
@@ -1287,6 +1309,13 @@ impl Provider {
     /// by the `/model` overlay to seed its controls with the live values.
     pub fn tuning(&self) -> &Tuning {
         &self.tuning
+    }
+
+    /// The OpenRouter serving-provider slug bound at build time, or `None` for
+    /// auto — read by the `/model` overlay to seed the provider control, and
+    /// folded into the request by [`Engine::complete`].
+    pub fn route(&self) -> Option<&str> {
+        self.route.as_deref()
     }
 
     /// The resolved model name, used by the banner and the capabilities
@@ -1353,6 +1382,7 @@ impl Provider {
                     &self.model,
                     self.max_tokens_override,
                     &self.tuning,
+                    self.openrouter_route(),
                     system,
                     messages,
                     tools,
@@ -1361,6 +1391,17 @@ impl Provider {
                 )
             }
             Backend::Scripted(s) => s.complete(&self.model, on_text),
+        }
+    }
+
+    /// The serving-provider slug to route through, but only for an OpenRouter
+    /// selection — `provider.order` is OpenRouter's wire contract, meaningless
+    /// elsewhere, so a stray route on any other provider is dropped rather than
+    /// injected into a body that would not understand it.
+    fn openrouter_route(&self) -> Option<&str> {
+        match self.id.famous() {
+            Some(ProviderKind::Openrouter) => self.route.as_deref(),
+            _ => None,
         }
     }
 
@@ -1486,6 +1527,7 @@ impl Engine {
         model: &str,
         max_tokens_override: Option<u32>,
         tuning: &Tuning,
+        route: Option<&str>,
         system: &str,
         messages: Vec<ChatMessage>,
         tools: &[&'static dyn crate::tools::Tool],
@@ -1520,6 +1562,13 @@ impl Engine {
         }
         if let Some(top_p) = tuning.top_p {
             options = options.with_top_p(top_p);
+        }
+        // OpenRouter provider routing: pin the chosen serving provider and
+        // forbid fallback, so the request lands on exactly the upstream the
+        // user picked. Folded in as `extra_body` — the OpenAI adapter merges it
+        // into the request body, which is how OpenRouter reads the field.
+        if let Some(slug) = route {
+            options = options.with_extra_body(or_provider_extra_body(slug));
         }
 
         let step = self.runtime.block_on(retry_with_backoff(
@@ -2611,6 +2660,18 @@ mod tests {
         assert!(
             worst_case < Duration::from_secs(600),
             "a stalled stream must fail in minutes, not appear hung; idle budget is {worst_case:?}"
+        );
+    }
+
+    /// The provider-routing fragment pins exactly the chosen slug and forbids
+    /// fallback — the shape OpenRouter reads off the request body.
+    #[test]
+    fn or_provider_extra_body_pins_slug_without_fallback() {
+        assert_eq!(
+            or_provider_extra_body("deepinfra"),
+            serde_json::json!({
+                "provider": { "order": ["deepinfra"], "allow_fallbacks": false }
+            })
         );
     }
 }

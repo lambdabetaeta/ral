@@ -26,14 +26,42 @@ use std::time::Duration;
 /// while still picking up new models within a session or two.
 const TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// One upstream provider OpenRouter can route a given model to — a row of the
+/// `/model` overlay's provider control. OpenRouter fronts several serving
+/// providers per model (DeepInfra, Novita, …) that differ in context window and
+/// quantization; this is the picker's view of one such endpoint, distilled from
+/// OpenRouter's per-model `/endpoints` listing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProviderEndpoint {
+    /// The human display name, e.g. `"DeepInfra"`.
+    pub provider_name: String,
+    /// The routing slug — what `provider.order` wants in the request body. It is
+    /// the part of the endpoint `tag` before the `/` (`"deepinfra/fp4"` →
+    /// `"deepinfra"`), which equals the `/api/v1/providers` slug.
+    pub slug: String,
+    /// This endpoint's context window in tokens, when reported — often the
+    /// deciding factor between providers serving the same model.
+    pub context_length: Option<u64>,
+    /// The weight quantization (`"fp8"`, `"fp4"`, …), when reported — it bears
+    /// on output quality.
+    pub quantization: Option<String>,
+}
+
 /// The seam every fetch of a provider's model list goes through. The live
-/// implementation talks to genai; tests substitute an in-memory fake so no
-/// suite ever reaches the network.
+/// implementation talks to genai (model lists) and OpenRouter's REST API
+/// (per-model endpoints); tests substitute an in-memory fake so no suite ever
+/// reaches the network.
 pub trait ModelSource {
     /// Fetch the full model-name list for `id`, or an error message
     /// describing why the fetch failed (the caller degrades to manual
     /// entry).
     fn list(&self, id: &ProviderId) -> Result<Vec<String>, String>;
+
+    /// Fetch the upstream serving providers OpenRouter lists for `model`, or an
+    /// error message. Only meaningful for OpenRouter `vendor/model` ids — the
+    /// only provider that routes — so the picker calls this solely for an
+    /// OpenRouter selection.
+    fn endpoints(&self, model: &str) -> Result<Vec<ProviderEndpoint>, String>;
 }
 
 /// The live source: builds a genai client per provider from the in-memory
@@ -102,6 +130,88 @@ impl ModelSource for LiveSource {
             )
             .map_err(|e| format!("list models for {}: {e}", id.label()))
     }
+
+    /// `GET https://openrouter.ai/api/v1/models/{model}/endpoints`. The listing
+    /// is public, but the OpenRouter key is sent when available so the call
+    /// shares the account's rate budget rather than the anonymous one. A
+    /// short-lived current-thread runtime backs the request, as for [`Self::list`].
+    fn endpoints(&self, model: &str) -> Result<Vec<ProviderEndpoint>, String> {
+        let url = format!("https://openrouter.ai/api/v1/models/{model}/endpoints");
+        let key = self.keys.iter().find_map(|(id, k)| {
+            (id.famous() == Some(ProviderKind::Openrouter)).then(|| k.clone())
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("build endpoints runtime: {e}"))?;
+        runtime.block_on(async {
+            let mut request = crate::tls::client().get(&url);
+            if let Some(key) = key {
+                request = request.bearer_auth(key);
+            }
+            let response = request
+                .send()
+                .await
+                .map_err(|e| format!("list providers for {model}: {e}"))?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(format!("list providers for {model}: HTTP {status}"));
+            }
+            let body: EndpointsResponse = response
+                .json()
+                .await
+                .map_err(|e| format!("parse providers for {model}: {e}"))?;
+            Ok(body
+                .data
+                .endpoints
+                .into_iter()
+                .map(ProviderEndpoint::from_wire)
+                .collect())
+        })
+    }
+}
+
+/// OpenRouter's `/endpoints` envelope: the model object carries the serving
+/// `endpoints` array. Only the fields the picker shows (and the routing slug)
+/// are read; the rest of each entry (pricing, uptime, latency) is ignored.
+#[derive(Deserialize)]
+struct EndpointsResponse {
+    data: EndpointsData,
+}
+
+#[derive(Deserialize)]
+struct EndpointsData {
+    #[serde(default)]
+    endpoints: Vec<EndpointWire>,
+}
+
+#[derive(Deserialize)]
+struct EndpointWire {
+    #[serde(default)]
+    provider_name: String,
+    /// `provider-slug/variant`, e.g. `"deepinfra/fp4"`; the slug is its prefix.
+    #[serde(default)]
+    tag: String,
+    context_length: Option<u64>,
+    quantization: Option<String>,
+}
+
+impl ProviderEndpoint {
+    /// Distil a wire endpoint into the picker's view, deriving the routing slug
+    /// from the `tag` prefix (the whole tag when it carries no `/`).
+    fn from_wire(wire: EndpointWire) -> Self {
+        let slug = wire
+            .tag
+            .split_once('/')
+            .map(|(prefix, _)| prefix.to_string())
+            .unwrap_or(wire.tag);
+        Self {
+            provider_name: wire.provider_name,
+            slug,
+            context_length: wire.context_length,
+            quantization: wire.quantization,
+        }
+    }
 }
 
 /// One provider's cached list and when it was fetched.
@@ -131,6 +241,10 @@ pub struct ModelCatalog<S: ModelSource> {
     /// file path under `$XDG_CACHE_HOME/exarch/models.json`.
     cache_path: Option<PathBuf>,
     memo: BTreeMap<ProviderId, Vec<String>>,
+    /// In-session per-model serving-provider lists, keyed by OpenRouter model
+    /// id. Memo-only (no disk cache): provider availability is volatile and the
+    /// fetch is cheap, so it is refetched once per session rather than persisted.
+    endpoints_memo: BTreeMap<String, Vec<ProviderEndpoint>>,
 }
 
 impl<S: ModelSource> ModelCatalog<S> {
@@ -141,6 +255,7 @@ impl<S: ModelSource> ModelCatalog<S> {
             source,
             cache_path: cache_path(),
             memo: BTreeMap::new(),
+            endpoints_memo: BTreeMap::new(),
         }
     }
 
@@ -152,7 +267,22 @@ impl<S: ModelSource> ModelCatalog<S> {
             source,
             cache_path: None,
             memo: BTreeMap::new(),
+            endpoints_memo: BTreeMap::new(),
         }
+    }
+
+    /// `model`'s serving providers if already fetched this session, without
+    /// touching the network — the picker seeds instantly from this and spawns a
+    /// background fetch (through [`Self::source`]) only on a memo miss.
+    pub fn cached_endpoints(&self, model: &str) -> Option<Vec<ProviderEndpoint>> {
+        self.endpoints_memo.get(model).cloned()
+    }
+
+    /// Fold a freshly-fetched serving-provider list into the in-session memo.
+    /// The picker fetches on a background thread and hands the result back here,
+    /// on the main thread, mirroring [`Self::record`] for model lists.
+    pub fn record_endpoints(&mut self, model: &str, endpoints: Vec<ProviderEndpoint>) {
+        self.endpoints_memo.insert(model.to_string(), endpoints);
     }
 
     /// `id`'s model list. Served from the in-memory memo, then a fresh
@@ -334,6 +464,7 @@ mod tests {
     /// can assert the memo and TTL prevent redundant network calls.
     struct FakeSource {
         lists: BTreeMap<ProviderId, Result<Vec<String>, String>>,
+        endpoints: BTreeMap<String, Result<Vec<ProviderEndpoint>, String>>,
         calls: Cell<usize>,
     }
 
@@ -341,8 +472,17 @@ mod tests {
         fn new(lists: BTreeMap<ProviderId, Result<Vec<String>, String>>) -> Self {
             Self {
                 lists,
+                endpoints: BTreeMap::new(),
                 calls: Cell::new(0),
             }
+        }
+
+        fn with_endpoints(
+            mut self,
+            endpoints: BTreeMap<String, Result<Vec<ProviderEndpoint>, String>>,
+        ) -> Self {
+            self.endpoints = endpoints;
+            self
         }
     }
 
@@ -353,6 +493,13 @@ mod tests {
                 .get(id)
                 .cloned()
                 .unwrap_or_else(|| Err("no fake list".into()))
+        }
+
+        fn endpoints(&self, model: &str) -> Result<Vec<ProviderEndpoint>, String> {
+            self.endpoints
+                .get(model)
+                .cloned()
+                .unwrap_or_else(|| Err("no fake endpoints".into()))
         }
     }
 
@@ -381,6 +528,48 @@ mod tests {
             1,
             "memo must prevent a second fetch"
         );
+    }
+
+    /// The routing slug is the endpoint `tag` prefix; a tag with no `/`
+    /// (a single-variant provider) is its own slug.
+    #[test]
+    fn endpoint_slug_is_tag_prefix() {
+        let with_variant = ProviderEndpoint::from_wire(EndpointWire {
+            provider_name: "DeepInfra".into(),
+            tag: "deepinfra/fp4".into(),
+            context_length: Some(163_840),
+            quantization: Some("fp4".into()),
+        });
+        assert_eq!(with_variant.slug, "deepinfra");
+        let bare = ProviderEndpoint::from_wire(EndpointWire {
+            provider_name: "StreamLake".into(),
+            tag: "streamlake".into(),
+            context_length: Some(128_000),
+            quantization: None,
+        });
+        assert_eq!(bare.slug, "streamlake");
+    }
+
+    /// Recorded serving providers are served back from the in-session memo.
+    #[test]
+    fn endpoints_memo_round_trips() {
+        let model = "deepseek/deepseek-chat";
+        let mut endpoints = BTreeMap::new();
+        endpoints.insert(
+            model.to_string(),
+            Ok(vec![ProviderEndpoint {
+                provider_name: "DeepInfra".into(),
+                slug: "deepinfra".into(),
+                context_length: Some(163_840),
+                quantization: Some("fp4".into()),
+            }]),
+        );
+        let source = FakeSource::new(BTreeMap::new()).with_endpoints(endpoints);
+        let mut cat = ModelCatalog::in_memory(source);
+        assert!(cat.cached_endpoints(model).is_none());
+        let fetched = cat.source().endpoints(model).unwrap();
+        cat.record_endpoints(model, fetched.clone());
+        assert_eq!(cat.cached_endpoints(model), Some(fetched));
     }
 
     /// A custom provider lists through the same catalog/source seam as a

@@ -24,10 +24,19 @@
 //!   (length) alone encodes the value, the same chassis as the temperature
 //!   track with the hue held constant.
 //!
+//! When the highlighted model is an OpenRouter `vendor/model`, a fifth control
+//! appears — the **provider** row → **hue**: the upstream serving providers
+//! OpenRouter lists for *that* model (DeepInfra, Novita, …), one hue-coded tag
+//! each annotated with its context window and quantization, plus an `auto`
+//! default. Choosing one pins the request's `provider.order` route; it is a
+//! routing choice, not a filter, so it never moves the highlighted model. The
+//! row is inert (and skipped by `Tab`) for any non-OpenRouter model — only
+//! OpenRouter routes.
+//!
 //! Which field has the keyboard is itself shown with **value**: the active
 //! field brightens, the others dim. `Tab`/`BackTab` cycle the field; typing
 //! always routes to the search box; `Enter` applies the whole selection
-//! (model + tuning) from any field; `Esc` dismisses.
+//! (model + tuning + route) from any field; `Esc` dismisses.
 //!
 //! The tuning rows gate themselves on the *highlighted* model's catalog
 //! `supported_parameters`: a model that doesn't admit `reasoning`,
@@ -39,16 +48,20 @@
 //! when the catalog *positively* reports the parameter absent.
 //!
 //! The picker is a pure display+input component: it holds the query, the
-//! per-provider model lists as they arrive, the selection, and the live
-//! tuning. Fetching lives in the REPL (which owns the credential-backed
-//! catalog and the network seam); the REPL feeds results in via
-//! [`Picker::set_models`], so a provider's list shows "loading…" until its
-//! background fetch lands, and seeds the tuning from the focused provider's
-//! live values via [`Picker::new`].
+//! per-provider model lists and per-model serving-provider lists as they
+//! arrive, the selection, the live tuning, and the chosen route. Fetching lives
+//! in the REPL (which owns the credential-backed catalog and the network seam);
+//! the REPL feeds results in via [`Picker::set_models`] and
+//! [`Picker::set_endpoints`], so a list shows "loading…" until its background
+//! fetch lands, and seeds the tuning from the focused provider's live values
+//! via [`Picker::new`]. The serving-provider fetch is intent-driven: the REPL
+//! reads [`Picker::focused_or_model_needing_endpoints`] and fetches a model's
+//! providers only once the provider control is focused on it.
 
 use super::{BANNER_GOLD, CYAN, OVERLAY_BG, SLATE};
+use crate::models::ProviderEndpoint;
 use crate::oauth::Subscription;
-use crate::provider::{ProviderId, ReasoningEffort, Tuning};
+use crate::provider::{ProviderId, ProviderKind, ReasoningEffort, Tuning};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use ratatui::Frame;
@@ -69,19 +82,41 @@ pub enum ModelsState {
     Failed(String),
 }
 
+/// One model's serving-provider (OpenRouter `/endpoints`) fetch state. Keyed by
+/// model id, fetched intent-driven when the provider control is focused on it.
+pub enum EndpointsState {
+    /// The background fetch is in flight — the row reads "loading…".
+    Loading,
+    /// The serving providers OpenRouter lists for this model.
+    Loaded(Vec<ProviderEndpoint>),
+    /// The fetch failed; the route stays `auto` (OpenRouter decides).
+    Failed(String),
+}
+
+/// The chosen serving provider together with the model it was chosen for. The
+/// control shows it (and [`Picker::apply`] emits it) only while that model is
+/// the highlighted one — moving to another model leaves it inactive, so a route
+/// never rides a model whose providers it was not chosen from.
+struct Route {
+    model: String,
+    slug: String,
+}
+
 /// What a key press resolved to. The REPL acts on the non-`None` outcomes:
 /// rebuilding the provider with the chosen model *and* tuning, persisting the
 /// selection, and updating the status bar, or closing the picker.
 pub enum PickAction {
     /// Keep the picker open; redraw.
     None,
-    /// A listed `provider / model` row was chosen, with the live tuning.
-    Selected(ProviderId, String, Tuning),
+    /// A listed `provider / model` row was chosen, with the live tuning and the
+    /// chosen OpenRouter serving-provider slug (`None` for auto / non-OpenRouter).
+    Selected(ProviderId, String, Tuning, Option<String>),
     /// Enter on the synthetic manual row: take the raw query as a model
     /// name and let the REPL resolve its provider (the listing-or-name
     /// fallback) — the escape hatch when a fetch failed or the wanted model
-    /// is not listed. Carries the live tuning too.
-    Manual(String, Tuning),
+    /// is not listed. Carries the live tuning and route too (the route is
+    /// `None` here — a manual model has no fetched serving-provider list).
+    Manual(String, Tuning, Option<String>),
     /// Esc — dismiss without switching.
     Cancelled,
 }
@@ -98,7 +133,7 @@ enum Row {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Focus {
     Search,
-    Upstream,
+    Provider,
     Effort,
     Temperature,
     TopP,
@@ -208,6 +243,24 @@ fn step_knob(value: Option<f64>, up: bool, step: f64, max: f64, places: usize) -
     }
 }
 
+/// A serving-provider tag's text: the provider name, then its context window
+/// and quantization when reported — the magnitudes that tell apart providers of
+/// the same model — wrapped in spaces for the reversed-block look the active tag
+/// wears. Context length is humanised through the one shared token formatter so
+/// `163840` reads `163.8k`, matching every other token readout.
+fn provider_tag(endpoint: &ProviderEndpoint) -> String {
+    let mut text = endpoint.provider_name.clone();
+    if let Some(context_length) = endpoint.context_length {
+        text.push(' ');
+        text.push_str(&crate::provider::humanize_tokens(context_length));
+    }
+    if let Some(quantization) = &endpoint.quantization {
+        text.push(' ');
+        text.push_str(quantization);
+    }
+    format!(" {text} ")
+}
+
 /// Centre a `w × h` rect within `area`, clamped to fit.
 fn centered(w: u16, h: u16, area: Rect) -> Rect {
     let w = w.min(area.width);
@@ -256,15 +309,18 @@ pub struct Picker {
     /// metered and renders its bare name.
     subscription: BTreeMap<ProviderId, Subscription>,
     models: BTreeMap<ProviderId, ModelsState>,
+    /// Per-model serving-provider lists, keyed by OpenRouter model id, as they
+    /// arrive from the REPL's intent-driven fetch. Absent until the provider
+    /// control is first focused on that model.
+    endpoints: BTreeMap<String, EndpointsState>,
     /// Index into the current filtered [`Self::rows`].
     selected: usize,
     /// Which control has the keyboard.
     focus: Focus,
-    /// The active upstream vendor filter (the `vendor` of `vendor/model`), or
-    /// `None` for "all".  Stored by name rather than by index so the displayed
-    /// tag and the applied filter cannot drift apart as the vendor list shifts
-    /// with the query.
-    upstream: Option<String>,
+    /// The chosen OpenRouter serving provider, paired with the model it was
+    /// chosen for (see [`Route`]). Active — shown and emitted — only while that
+    /// model is highlighted; `None` is "auto" (OpenRouter decides).
+    route: Option<Route>,
     /// Index into [`LADDER`] — the chosen effort rung.
     effort_idx: usize,
     /// The chosen temperature, or `None` for auto (unset).
@@ -308,9 +364,10 @@ impl Picker {
             providers,
             subscription,
             models,
+            endpoints: BTreeMap::new(),
             selected: 0,
             focus: Focus::Search,
-            upstream: None,
+            route: None,
             effort_idx,
             temperature: initial.temperature,
             top_p: initial.top_p,
@@ -346,6 +403,25 @@ impl Picker {
         self.clamp_selection();
     }
 
+    /// Record a model's serving-provider fetch result (or its in-flight /
+    /// failed state), keyed by model id. Fed by the REPL's intent-driven fetch.
+    pub fn set_endpoints(&mut self, model: &str, state: EndpointsState) {
+        self.endpoints.insert(model.to_string(), state);
+    }
+
+    /// The OpenRouter model the provider control is focused on and whose serving
+    /// providers have not yet been requested — the REPL's cue to spawn the
+    /// fetch. `None` unless the provider control holds focus, an OpenRouter
+    /// model is highlighted, and no [`EndpointsState`] is recorded for it yet
+    /// (so seeding `Loading` before spawning naturally dedups the fetch).
+    pub fn focused_or_model_needing_endpoints(&self) -> Option<String> {
+        if self.focus != Focus::Provider {
+            return None;
+        }
+        let model = self.highlighted_or_model()?;
+        (!self.endpoints.contains_key(&model)).then_some(model)
+    }
+
     /// Whether any provider's fetch is still in flight.
     pub fn is_loading(&self) -> bool {
         self.providers
@@ -360,6 +436,41 @@ impl Picker {
             Some(Row::Model(_, model)) => Some(model),
             _ => None,
         }
+    }
+
+    /// The highlighted model iff it is served through OpenRouter — the only
+    /// provider that routes, so the only one the provider control applies to.
+    fn highlighted_or_model(&self) -> Option<String> {
+        match self.rows().into_iter().nth(self.selected) {
+            Some(Row::Model(id, model)) if id.famous() == Some(ProviderKind::Openrouter) => {
+                Some(model)
+            }
+            _ => None,
+        }
+    }
+
+    /// The routing slugs the highlighted OpenRouter model's loaded endpoints
+    /// offer, in listed order — the options the provider control cycles after
+    /// `auto`. Empty while loading/failed/unfetched or for a non-OpenRouter row.
+    fn endpoint_slugs(&self) -> Vec<String> {
+        let Some(model) = self.highlighted_or_model() else {
+            return Vec::new();
+        };
+        match self.endpoints.get(&model) {
+            Some(EndpointsState::Loaded(endpoints)) => {
+                endpoints.iter().map(|e| e.slug.clone()).collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The route slug in force *for the highlighted model* — `Some` only when a
+    /// route was chosen and that same model is still highlighted, so the choice
+    /// can never leak onto a different model. `None` is "auto".
+    fn active_route(&self) -> Option<&str> {
+        let route = self.route.as_ref()?;
+        (self.highlighted_or_model().as_deref() == Some(route.model.as_str()))
+            .then_some(route.slug.as_str())
     }
 
     /// Whether the highlighted model admits `param` (its catalog
@@ -403,20 +514,19 @@ impl Picker {
             KeyCode::Enter => return self.apply(),
             KeyCode::Tab => self.focus = self.cycle(true),
             KeyCode::BackTab => self.focus = self.cycle(false),
-            // Typing always means "filter models", whatever field had focus. A
-            // fresh search drops a vendor filter the new query no longer
-            // surfaces, so a stale narrowing can't hide its matches.
+            // Typing always means "filter models", whatever field had focus.
+            // The chosen route self-gates on the highlighted model (see
+            // [`Self::active_route`]), so a query that moves the highlight off
+            // that model simply deactivates the route — no pruning needed.
             KeyCode::Char(c) => {
                 self.focus = Focus::Search;
                 self.query.push(c);
                 self.selected = 0;
-                self.prune_upstream();
             }
             KeyCode::Backspace => {
                 self.focus = Focus::Search;
                 self.query.pop();
                 self.selected = 0;
-                self.prune_upstream();
             }
             KeyCode::Up => self.move_in_focus(false),
             KeyCode::Down => self.move_in_focus(true),
@@ -427,21 +537,25 @@ impl Picker {
         PickAction::None
     }
 
-    /// Resolve the highlighted row into a selection carrying the live tuning.
+    /// Resolve the highlighted row into a selection carrying the live tuning and
+    /// the route in force for that model.
     fn apply(&self) -> PickAction {
+        let route = self.active_route().map(str::to_string);
         match self.rows().into_iter().nth(self.selected) {
-            Some(Row::Model(id, model)) => PickAction::Selected(id, model, self.tuning()),
-            Some(Row::Manual(query)) => PickAction::Manual(query, self.tuning()),
+            Some(Row::Model(id, model)) => PickAction::Selected(id, model, self.tuning(), route),
+            Some(Row::Manual(query)) => PickAction::Manual(query, self.tuning(), route),
             None => PickAction::None,
         }
     }
 
     /// The next focus in cycle order
-    /// (`Search → Upstream → Effort → Temperature → TopP → …`).
+    /// (`Search → Provider → Effort → Temperature → TopP → …`). The provider
+    /// control joins the cycle only when an OpenRouter model is highlighted —
+    /// the only model the route applies to; for any other model it is skipped.
     fn cycle(&self, forward: bool) -> Focus {
-        let has_upstream = self.vendors().len() > 1;
-        let order: &[Focus] = if has_upstream {
-            &[Focus::Search, Focus::Upstream, Focus::Effort, Focus::Temperature, Focus::TopP]
+        let has_provider = self.highlighted_or_model().is_some();
+        let order: &[Focus] = if has_provider {
+            &[Focus::Search, Focus::Provider, Focus::Effort, Focus::Temperature, Focus::TopP]
         } else {
             &[Focus::Search, Focus::Effort, Focus::Temperature, Focus::TopP]
         };
@@ -469,27 +583,32 @@ impl Picker {
                     self.selected = self.selected.saturating_sub(1);
                 }
             }
-            Focus::Upstream => {
-                let ups = self.vendors();
-                if ups.len() <= 1 {
-                    return; // nothing to cycle — only "all" exists
+            Focus::Provider => {
+                // Cycle the highlighted OpenRouter model's serving providers
+                // `auto → slug₀ → slug₁ → …`, clamping at the ends. This is a
+                // routing choice for *that* model, so it deliberately leaves the
+                // selection untouched — the highlighted model never moves.
+                let Some(model) = self.highlighted_or_model() else {
+                    return;
+                };
+                let slugs = self.endpoint_slugs();
+                if slugs.is_empty() {
+                    return; // loading / failed / none — nothing to cycle yet
                 }
+                // Index 0 is "auto"; index i+1 is slugs[i].
                 let pos = self
-                    .upstream
-                    .as_ref()
-                    .and_then(|v| ups.iter().position(|u| u == v))
-                    .unwrap_or(0);
+                    .active_route()
+                    .and_then(|s| slugs.iter().position(|x| x == s))
+                    .map_or(0, |i| i + 1);
                 let next = if up {
-                    (pos + 1).min(ups.len() - 1)
+                    (pos + 1).min(slugs.len())
                 } else {
                     pos.saturating_sub(1)
                 };
-                self.upstream = (next > 0).then(|| ups[next].clone());
-                // The vendor set is derived from the query matches alone, so the
-                // chosen vendor always has a model under it; jump to the top of
-                // the now-filtered list rather than risk landing on the manual
-                // row.
-                self.selected = 0;
+                self.route = (next > 0).then(|| Route {
+                    model,
+                    slug: slugs[next - 1].clone(),
+                });
             }
             Focus::Effort => {
                 if !self.supports("reasoning") {
@@ -517,11 +636,8 @@ impl Picker {
     }
 
     /// The `(provider, model)` pairs matching the current fuzzy query, ranked
-    /// by `nucleo_matcher` score (ties keeping listed order). The vendor filter
-    /// is *not* applied here: both the displayed [`Self::rows`] and the vendor
-    /// option list [`Self::vendors`] derive from this, so cycling the vendor
-    /// never perturbs the set it cycles through. An empty query yields every
-    /// loaded model in listed order.
+    /// by `nucleo_matcher` score (ties keeping listed order). An empty query
+    /// yields every loaded model in listed order.
     fn query_matches(&self) -> Vec<(ProviderId, String)> {
         let q = self.query.trim();
 
@@ -564,16 +680,14 @@ impl Picker {
         scored.into_iter().map(|(i, _)| candidates[i].clone()).collect()
     }
 
-    /// The displayed rows: the query matches narrowed by the active vendor
-    /// filter, plus a synthetic manual-entry row when the query is non-empty
-    /// (so a model that's not listed, or a provider whose fetch failed, is still
-    /// reachable).
+    /// The displayed rows: the query matches, plus a synthetic manual-entry row
+    /// when the query is non-empty (so a model that's not listed, or a provider
+    /// whose fetch failed, is still reachable). The provider control is a
+    /// routing choice, not a filter, so it does not narrow this list.
     fn rows(&self) -> Vec<Row> {
-        let prefix = self.upstream.as_ref().map(|v| format!("{v}/"));
         let mut rows: Vec<Row> = self
             .query_matches()
             .into_iter()
-            .filter(|(_, m)| prefix.as_ref().is_none_or(|p| m.starts_with(p)))
             .map(|(id, model)| Row::Model(id, model))
             .collect();
         let q = self.query.trim();
@@ -584,37 +698,10 @@ impl Picker {
     }
 
     fn clamp_selection(&mut self) {
-        self.prune_upstream();
         let n = self.rows().len();
         self.selected = if n == 0 { 0 } else { self.selected.min(n - 1) };
     }
 
-    /// Drop the vendor filter when the current query no longer surfaces any
-    /// model under it — a list reload/failure that removed the vendor, or a
-    /// refined search that no longer matches it.
-    fn prune_upstream(&mut self) {
-        if let Some(v) = &self.upstream {
-            if !self.vendors().iter().any(|u| u == v) {
-                self.upstream = None;
-            }
-        }
-    }
-
-    /// The vendor filter's options: `"all"` (no filter) followed by the sorted
-    /// distinct `vendor/` prefixes present in the current query matches. Derived
-    /// from [`Self::query_matches`] — independent of both the active filter and
-    /// the selection — so it stays put while the vendor control cycles.
-    fn vendors(&self) -> Vec<String> {
-        let mut set = std::collections::BTreeSet::new();
-        for (_, model) in self.query_matches() {
-            if let Some((prefix, _)) = model.split_once('/') {
-                set.insert(prefix.to_string());
-            }
-        }
-        let mut v: Vec<String> = vec!["all".to_string()];
-        v.extend(set);
-        v
-    }
     /// Providers whose fetch failed, with their reasons — surfaced as dim
     /// notes so the absent models are explained and the manual-entry fallback
     /// is obvious.
@@ -638,8 +725,8 @@ impl Picker {
         // bezel(2) + airy pad(2·PAD_Y) + search(1) + status(1)
         //          + list(VISIBLE+border) + effort(1) + temp(1) + top-p(1)
         //          + failed notes
-        // Always reserve the upstream vendor row so the overlay size
-        // is stable; the row may be blank when only "all" exists.
+        // Always reserve the provider row so the overlay size is stable; the
+        // row reads "OpenRouter routing only" for a non-OpenRouter model.
         let h = 2 + 2 * PAD_Y + 1 + 1 + (VISIBLE_ROWS + 2) + 1 + 1 + 1 + 1 + failed;
         (OVERLAY_W.min(frame.width), h.min(frame.height.max(3)))
     }
@@ -685,8 +772,8 @@ impl Picker {
             Constraint::Length(1),              // status
             Constraint::Length(VISIBLE_ROWS + 2), // bordered model list
         ];
-        // Always reserve the upstream vendor row for layout stability.
-        constraints.push(Constraint::Length(1));  // upstream vendor
+        // Always reserve the provider row for layout stability.
+        constraints.push(Constraint::Length(1));  // serving provider
         constraints.extend_from_slice(&[
             Constraint::Length(1),              // effort
             Constraint::Length(1),              // temperature
@@ -698,8 +785,9 @@ impl Picker {
         f.render_widget(Paragraph::new(self.search_line()).style(plane), chunks[ci]); ci += 1;
         f.render_widget(Paragraph::new(self.status_line()).style(plane), chunks[ci]); ci += 1;
         self.render_list(f, chunks[ci], plane); ci += 1;
-        // Always render the upstream row (may show just "auto" when empty).
-        f.render_widget(Paragraph::new(self.upstream_line()).style(plane), chunks[ci]); ci += 1;
+        // Always render the provider row (inert "OpenRouter routing only" for a
+        // non-OpenRouter model), so the overlay's height stays stable.
+        f.render_widget(Paragraph::new(self.provider_line()).style(plane), chunks[ci]); ci += 1;
         f.render_widget(
             Paragraph::new(self.effort_line(self.supports("reasoning"))).style(plane),
             chunks[ci],
@@ -817,25 +905,57 @@ impl Picker {
         ])
     }
 
-    /// The upstream vendor filter row — only rendered when there is more than
-    /// one choice (i.e. at least one OpenRouter provider has loaded models with
-    /// distinct prefixes).  It reads as a label followed by the current
-    /// selection, cycling `all → anthropic → openai → …`.
-    fn upstream_line(&self) -> Line<'static> {
-        let ups = self.vendors();
-        if ups.len() <= 1 {
-            let style = if self.focus == Focus::Upstream {
-                Style::default().fg(CYAN).add_modifier(Modifier::BOLD)
+    /// The serving-provider row, rendered for the highlighted model:
+    /// * a non-OpenRouter model → a dim note (the row is inert; `Tab` skips it);
+    /// * an OpenRouter model whose providers are still loading → "loading…";
+    /// * a failed fetch → `auto`, with a dim note (the route stays auto);
+    /// * loaded → an `auto` tag plus one hue-coded tag per serving provider,
+    ///   each annotated with its context window and quantization (nominal data
+    ///   earns hue, the magnitudes printed as values), the active one reversed.
+    fn provider_line(&self) -> Line<'static> {
+        let focused = self.focus == Focus::Provider;
+        let label = self.field_label("provider", Focus::Provider);
+        let dim = Style::default().fg(SLATE).add_modifier(Modifier::DIM);
+        // The `auto` tag's style: lit (cyan) when active and focused, a dim
+        // reverse when active but unfocused, plain dim when not the choice.
+        let auto_style = |active: bool| {
+            if active && focused {
+                Style::default().fg(CYAN).add_modifier(Modifier::REVERSED | Modifier::BOLD)
+            } else if active {
+                Style::default().fg(SLATE).add_modifier(Modifier::DIM | Modifier::REVERSED)
             } else {
-                Style::default().fg(SLATE).add_modifier(Modifier::DIM)
-            };
+                dim
+            }
+        };
+
+        let Some(model) = self.highlighted_or_model() else {
             return Line::from(vec![
-                self.field_label("vendor", Focus::Upstream),
-                Span::styled(" auto ", style),
+                label,
+                Span::styled("— OpenRouter routing only", dim.add_modifier(Modifier::ITALIC)),
             ]);
-        }
-        let focused = self.focus == Focus::Upstream;
-        // A palette of distinct hues for vendor tags — nominal data earns hue,
+        };
+
+        let endpoints: &[ProviderEndpoint] = match self.endpoints.get(&model) {
+            Some(EndpointsState::Loaded(endpoints)) => endpoints,
+            Some(EndpointsState::Loading) => {
+                return Line::from(vec![label, Span::styled("loading…", dim)]);
+            }
+            Some(EndpointsState::Failed(reason)) => {
+                return Line::from(vec![
+                    label,
+                    Span::styled(" auto ", auto_style(true)),
+                    Span::styled(
+                        format!("  {reason}"),
+                        dim.add_modifier(Modifier::ITALIC),
+                    ),
+                ]);
+            }
+            // Not yet fetched (the control has not been focused on this model):
+            // show `auto` alone — focusing the control triggers the fetch.
+            None => &[],
+        };
+
+        // A palette of distinct hues for provider tags — nominal data earns hue,
         // the strongest Bertin variable for association.  Seven colours far
         // apart on the hue circle so neighbouring tags never blur.
         let colors: &[Color] = &[
@@ -847,35 +967,21 @@ impl Picker {
             Color::Rgb(110, 200, 200), // teal
             Color::Rgb(220, 140, 180), // rose
         ];
-        let label = self.field_label("vendor", Focus::Upstream);
-        let mut spans = vec![label];
-        // The lit tag is whichever entry names the active filter, "all" when none.
+        // Index 0 is `auto`; index i+1 is `endpoints[i]`.
         let active = self
-            .upstream
-            .as_ref()
-            .and_then(|v| ups.iter().position(|u| u == v))
-            .unwrap_or(0);
-        for (i, vendor) in ups.iter().enumerate() {
-            if i == 0 && vendor == "all" {
-                let style = if i == active {
-                    if focused {
-                        Style::default().fg(CYAN).add_modifier(Modifier::REVERSED | Modifier::BOLD)
-                    } else {
-                        Style::default().fg(SLATE).add_modifier(Modifier::DIM | Modifier::REVERSED)
-                    }
-                } else {
-                    Style::default().fg(SLATE).add_modifier(Modifier::DIM)
-                };
-                spans.push(Span::styled(" all ", style));
+            .active_route()
+            .and_then(|slug| endpoints.iter().position(|e| e.slug == slug))
+            .map_or(0, |i| i + 1);
+
+        let mut spans = vec![label, Span::styled(" auto ", auto_style(active == 0))];
+        for (i, endpoint) in endpoints.iter().enumerate() {
+            let hue = colors[i % colors.len()];
+            let style = if (i + 1) == active {
+                Style::default().fg(hue).add_modifier(Modifier::REVERSED | Modifier::BOLD)
             } else {
-                let hue = colors[(i - 1) % colors.len()];
-                let style = if i == active {
-                    Style::default().fg(hue).add_modifier(Modifier::REVERSED | Modifier::BOLD)
-                } else {
-                    Style::default().fg(hue).add_modifier(Modifier::DIM)
-                };
-                spans.push(Span::styled(format!(" {vendor} "), style));
-            }
+                Style::default().fg(hue).add_modifier(Modifier::DIM)
+            };
+            spans.push(Span::styled(provider_tag(endpoint), style));
         }
         Line::from(spans)
     }
@@ -1053,8 +1159,19 @@ mod tests {
         p
     }
 
+    /// A serving-provider endpoint fixture (context window and quantization
+    /// elided — the cycling/route tests only read the slug).
+    fn endpoint(name: &str, slug: &str) -> ProviderEndpoint {
+        ProviderEndpoint {
+            provider_name: name.into(),
+            slug: slug.into(),
+            context_length: None,
+            quantization: None,
+        }
+    }
+
     /// An OpenRouter provider whose models carry `vendor/model` ids — the case
-    /// the vendor filter exists for.
+    /// the serving-provider control exists for.
     fn openrouter_picker() -> Picker {
         let mut p = Picker::new(
             vec![fam(ProviderKind::Openrouter)],
@@ -1201,7 +1318,7 @@ mod tests {
         // Move to the second row (anthropic / claude-haiku-4).
         p.key(KeyCode::Down);
         match p.key(KeyCode::Enter) {
-            PickAction::Selected(id, m, _) if id.famous() == Some(ProviderKind::Anthropic) => {
+            PickAction::Selected(id, m, _, _) if id.famous() == Some(ProviderKind::Anthropic) => {
                 assert_eq!(m, "claude-haiku-4")
             }
             _ => panic!("expected Selected(anthropic, claude-haiku-4)"),
@@ -1224,7 +1341,7 @@ mod tests {
         let rows = p.rows();
         assert!(matches!(&rows[0], Row::Model(id, m) if id == &llama && m == "llama-3"));
         match p.key(KeyCode::Enter) {
-            PickAction::Selected(id, m, _) => {
+            PickAction::Selected(id, m, _, _) => {
                 assert_eq!(id, llama);
                 assert_eq!(m, "llama-3");
             }
@@ -1242,7 +1359,7 @@ mod tests {
         }
         // Only the manual row matches; it is selected at index 0.
         match p.key(KeyCode::Enter) {
-            PickAction::Manual(q, _) => assert_eq!(q, "claude-future-99"),
+            PickAction::Manual(q, _, _) => assert_eq!(q, "claude-future-99"),
             _ => panic!("expected Manual(claude-future-99)"),
         }
     }
@@ -1356,7 +1473,7 @@ mod tests {
         p.key(KeyCode::Right); // auto → 0.0
         p.key(KeyCode::Right); // 0.0 → 0.05
         match p.key(KeyCode::Enter) {
-            PickAction::Selected(_, _, tuning) => {
+            PickAction::Selected(_, _, tuning, _) => {
                 assert_eq!(
                     tuning.effort.as_ref().map(|e| e.variant_name()),
                     Some("high")
@@ -1451,58 +1568,117 @@ mod tests {
         );
     }
 
-    /// With OpenRouter `vendor/model` ids loaded, Tab reaches the vendor control
-    /// and Right cycles the filter through the prefixes present in the matches —
-    /// all → anthropic → deepseek → openai — clamping at the end, each step
-    /// keeping a real model under the cursor (never "auto" nor the manual row).
-    /// Left walks the filter back down to "all".
+    /// For a highlighted OpenRouter model with its serving providers loaded, Tab
+    /// reaches the provider control and Right cycles `auto → deepinfra → novita`,
+    /// clamping at the end; Left walks back to auto. Crucially, cycling the
+    /// provider never moves the highlighted model, and the chosen slug rides Enter.
     #[test]
-    fn vendor_cycles_through_match_prefixes_keeping_a_model_selected() {
+    fn provider_cycles_serving_endpoints_without_moving_the_model() {
         let mut p = openrouter_picker();
-        assert_eq!(p.vendors(), ["all", "anthropic", "deepseek", "openai"].map(String::from));
+        p.key(KeyCode::Down); // highlight deepseek/deepseek-chat
+        let model = "deepseek/deepseek-chat";
+        assert_eq!(p.highlighted_model().as_deref(), Some(model));
+        p.set_endpoints(
+            model,
+            EndpointsState::Loaded(vec![
+                endpoint("DeepInfra", "deepinfra"),
+                endpoint("Novita", "novita"),
+            ]),
+        );
 
-        p.key(KeyCode::Tab); // Search → Upstream
-        assert_eq!(p.focus, Focus::Upstream);
+        p.key(KeyCode::Tab); // Search → Provider
+        assert_eq!(p.focus, Focus::Provider);
 
-        for vendor in ["anthropic", "deepseek", "openai"] {
-            p.key(KeyCode::Right);
-            assert_eq!(p.upstream.as_deref(), Some(vendor));
-            assert!(
-                p.highlighted_model()
-                    .is_some_and(|m| m.starts_with(&format!("{vendor}/"))),
-                "a {vendor} model stays highlighted"
-            );
-        }
-        // Right at the end clamps — it does not wrap back to "all".
         p.key(KeyCode::Right);
-        assert_eq!(p.upstream.as_deref(), Some("openai"));
+        assert_eq!(p.active_route(), Some("deepinfra"));
+        assert_eq!(
+            p.highlighted_model().as_deref(),
+            Some(model),
+            "the highlighted model never moves when picking a provider"
+        );
+        p.key(KeyCode::Right);
+        assert_eq!(p.active_route(), Some("novita"));
+        // Right at the end clamps — it does not wrap back to auto.
+        p.key(KeyCode::Right);
+        assert_eq!(p.active_route(), Some("novita"));
+        p.key(KeyCode::Left);
+        assert_eq!(p.active_route(), Some("deepinfra"));
+        p.key(KeyCode::Left);
+        assert_eq!(p.active_route(), None);
 
-        p.key(KeyCode::Left); // deepseek
-        p.key(KeyCode::Left); // anthropic
-        p.key(KeyCode::Left); // all
-        assert_eq!(p.upstream, None);
+        // The chosen route rides Enter alongside the highlighted model.
+        p.key(KeyCode::Right); // auto → deepinfra
+        match p.key(KeyCode::Enter) {
+            PickAction::Selected(_, m, _, route) => {
+                assert_eq!(m, model);
+                assert_eq!(route.as_deref(), Some("deepinfra"));
+            }
+            _ => panic!("expected the highlighted model carrying its route"),
+        }
     }
 
-    /// The reported bug: after a fuzzy search, Tab into the vendor control and
-    /// Right picks the vendor — it does not reset to "all" nor swap the
-    /// selection to the manual row, and Enter applies the listed model.
+    /// The route is tied to the model it was chosen for: moving the highlight to
+    /// another model deactivates it (so it can never ride a model whose
+    /// providers it was not chosen from), and returning restores it.
     #[test]
-    fn vendor_right_after_search_picks_vendor_not_auto() {
+    fn route_is_inactive_off_its_model_and_returns_on_it() {
         let mut p = openrouter_picker();
-        for c in "deepseek".chars() {
-            p.key(KeyCode::Char(c));
-        }
-        // Only deepseek ids match, so the vendor choice is all ↔ deepseek.
-        assert_eq!(p.vendors(), ["all", "deepseek"].map(String::from));
+        p.key(KeyCode::Down); // deepseek/deepseek-chat
+        let model = "deepseek/deepseek-chat";
+        p.set_endpoints(
+            model,
+            EndpointsState::Loaded(vec![endpoint("DeepInfra", "deepinfra")]),
+        );
+        p.key(KeyCode::Tab); // Provider
+        p.key(KeyCode::Right); // choose deepinfra
+        assert_eq!(p.active_route(), Some("deepinfra"));
 
+        // Return to the search field and move the highlight to another model.
+        for _ in 0..4 {
+            p.key(KeyCode::Tab); // Provider → Effort → Temperature → TopP → Search
+        }
+        assert_eq!(p.focus, Focus::Search);
+        p.key(KeyCode::Down); // deepseek/deepseek-r1
+        assert_ne!(p.highlighted_model().as_deref(), Some(model));
+        assert_eq!(p.active_route(), None, "the route does not ride another model");
+
+        // Back on its own model, the choice is active again.
+        p.key(KeyCode::Up);
+        assert_eq!(p.highlighted_model().as_deref(), Some(model));
+        assert_eq!(p.active_route(), Some("deepinfra"));
+    }
+
+    /// A non-OpenRouter model has no routing, so `Tab` skips the provider
+    /// control (Search → Effort) and nothing requests endpoints for it.
+    #[test]
+    fn provider_control_skipped_for_non_openrouter_model() {
+        let mut p = loaded_picker();
+        assert!(p.highlighted_model().is_some());
         p.key(KeyCode::Tab);
-        assert_eq!(p.focus, Focus::Upstream);
+        assert_eq!(p.focus, Focus::Effort);
+        assert!(p.focused_or_model_needing_endpoints().is_none());
+    }
 
-        p.key(KeyCode::Right);
-        assert_eq!(p.upstream.as_deref(), Some("deepseek"));
-        match p.key(KeyCode::Enter) {
-            PickAction::Selected(_, m, _) => assert!(m.starts_with("deepseek/")),
-            _ => panic!("expected a listed deepseek model, not the manual row"),
-        }
+    /// Focusing the provider control on an OpenRouter model is the cue to fetch
+    /// its serving providers — and once the REPL seeds the in-flight state, the
+    /// fetch is not requested again.
+    #[test]
+    fn focusing_provider_requests_endpoints_once() {
+        let mut p = openrouter_picker(); // first row: anthropic/claude-3
+        assert!(
+            p.focused_or_model_needing_endpoints().is_none(),
+            "nothing requested before the control is focused"
+        );
+        p.key(KeyCode::Tab); // Search → Provider
+        assert_eq!(p.focus, Focus::Provider);
+        assert_eq!(
+            p.focused_or_model_needing_endpoints().as_deref(),
+            Some("anthropic/claude-3")
+        );
+        p.set_endpoints("anthropic/claude-3", EndpointsState::Loading);
+        assert!(
+            p.focused_or_model_needing_endpoints().is_none(),
+            "seeding Loading dedups the fetch"
+        );
     }
 }

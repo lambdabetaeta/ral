@@ -44,13 +44,20 @@ pub struct State {
     /// The nucleus-sampling top-p, or absent for "auto".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f64>,
+    /// The chosen OpenRouter serving-provider slug (`provider.order` routing),
+    /// or absent for "auto" (OpenRouter decides). Routing, not sampling, so it
+    /// is its own field rather than part of the tuning — meaningful only for an
+    /// OpenRouter selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<String>,
 }
 
 impl State {
-    /// Build state from a resolved selection and its tuning. An effort that
+    /// Build state from a resolved selection, its tuning, and its OpenRouter
+    /// route (the chosen serving-provider slug, `None` for auto). An effort that
     /// has no keyword (genai's `Budget`, which the overlay never produces) is
     /// dropped to "auto" rather than persisted opaquely.
-    pub fn new(provider: &ProviderId, model: &str, tuning: &Tuning) -> Self {
+    pub fn new(provider: &ProviderId, model: &str, tuning: &Tuning, route: Option<&str>) -> Self {
         Self {
             provider: provider.label().to_string(),
             model: model.to_string(),
@@ -60,6 +67,7 @@ impl State {
                 .and_then(|e| e.as_keyword().map(str::to_string)),
             temperature: tuning.temperature,
             top_p: tuning.top_p,
+            route: route.map(str::to_string),
         }
     }
 
@@ -156,6 +164,7 @@ mod tests {
             &fam(ProviderKind::Deepseek),
             "deepseek-reasoner",
             &Tuning::default(),
+            None,
         );
         save(&dir, &state).unwrap();
         let loaded = load(&dir).expect("state should load");
@@ -179,7 +188,7 @@ mod tests {
             endpoint: "https://llama.example/v1/".into(),
             adapter: genai::adapter::AdapterKind::OpenAI,
         }));
-        let state = State::new(&custom, "llama-3", &Tuning::default());
+        let state = State::new(&custom, "llama-3", &Tuning::default(), None);
         save(&dir, &state).unwrap();
         let loaded = load(&dir).expect("state should load");
         assert_eq!(loaded.provider, "local-llama");
@@ -215,6 +224,7 @@ mod tests {
             effort: None,
             temperature: None,
             top_p: None,
+            route: None,
         };
         let available = [fam(ProviderKind::Anthropic)];
         assert!(state.provider_id(&available).is_none());
@@ -231,11 +241,18 @@ mod tests {
             temperature: Some(0.7),
             top_p: Some(0.95),
         };
-        let state = State::new(&fam(ProviderKind::Anthropic), "claude-opus-4", &tuning);
+        let state = State::new(
+            &fam(ProviderKind::Anthropic),
+            "claude-opus-4",
+            &tuning,
+            Some("deepinfra"),
+        );
         assert_eq!(state.effort.as_deref(), Some("high"));
+        assert_eq!(state.route.as_deref(), Some("deepinfra"));
         save(&dir, &state).unwrap();
         let loaded = load(&dir).expect("state should load");
         assert_eq!(loaded.tuning(), tuning);
+        assert_eq!(loaded.route.as_deref(), Some("deepinfra"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

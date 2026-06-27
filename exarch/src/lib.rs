@@ -157,7 +157,7 @@ pub fn run() -> Result<(), String> {
     // the persisted selection (when its provider is available),
     // else the first available provider's default model.
     let mut catalog = models::ModelCatalog::new(models::LiveSource::new(&store));
-    let (id, model, mut tuning) =
+    let (id, model, mut tuning, route) =
         resolve_initial_selection(c.model.as_deref(), &state_dir, &available, &mut catalog)?;
     if let Some(keyword) = c.effort.as_deref() {
         tuning.effort = Some(provider::ReasoningEffort::from_keyword(keyword)
@@ -208,6 +208,7 @@ pub fn run() -> Result<(), String> {
         &cred,
         c.max_tokens,
         tuning,
+        route,
     ));
     let mut session = Agent::root(
         system,
@@ -267,20 +268,20 @@ fn resolve_initial_selection(
     state_dir: &std::path::Path,
     available: &[provider::ProviderId],
     catalog: &mut models::ModelCatalog<models::LiveSource>,
-) -> Result<(provider::ProviderId, String, provider::Tuning), String> {
+) -> Result<(provider::ProviderId, String, provider::Tuning, Option<String>), String> {
     if let Some(name) = model_override {
         let id = models::resolve_model_provider(name, available, catalog)?;
-        return Ok((id, name.to_string(), provider::Tuning::initial()));
+        return Ok((id, name.to_string(), provider::Tuning::initial(), None));
     }
     if let Some(saved) = state::load(state_dir)
         && let Some(id) = saved.provider_id(available)
     {
         let tuning = saved.tuning();
-        return Ok((id, saved.model, tuning));
+        return Ok((id, saved.model, tuning, saved.route));
     }
     let id = available[0].clone();
     match id.famous() {
-        Some(kind) => Ok((id, kind.info().1.to_string(), provider::Tuning::initial())),
+        Some(kind) => Ok((id, kind.info().1.to_string(), provider::Tuning::initial(), None)),
         None => Err(format!(
             "custom provider '{}' has no default model — pass --model NAME \
              (it will be remembered) or open the /model picker",

@@ -3058,6 +3058,11 @@ pub fn run(
 /// per-provider background fetch threads back to the picker loop.
 type FetchRx = std::sync::mpsc::Receiver<(provider::ProviderId, Result<Vec<String>, String>)>;
 
+/// Channel carrying `(model, fetched serving providers or failure)` from the
+/// per-model background endpoint-fetch threads back to the picker loop.
+type EndpointRx =
+    std::sync::mpsc::Receiver<(String, Result<Vec<crate::models::ProviderEndpoint>, String>)>;
+
 /// The long-lived handles the UI thread services a submitted line against: the
 /// fleet registry (for steering, `wake`, and the focused agent's provider
 /// handle a `/model` swap targets), the credential store and model catalog the
@@ -3444,20 +3449,26 @@ fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) -> io::Result<()> {
     tui.app.picker = Some(picker);
     let outcome = drive_picker(tui, store, ctx.catalog, rx);
     tui.app.picker = None;
-    if let Some((id, model, tuning)) = outcome {
-        apply_model_switch(tui, ctx, id, model, tuning);
+    if let Some((id, model, tuning, route)) = outcome {
+        apply_model_switch(tui, ctx, id, model, tuning, route);
     }
     Ok(())
 }
 
 /// Poll keys and background-fetch results until the picker resolves.  Returns
-/// the chosen `(provider, model, tuning)`, or `None` on cancel.
+/// the chosen `(provider, model, tuning, route)`, or `None` on cancel. The
+/// `route` is the chosen OpenRouter serving-provider slug (`None` for auto).
 fn drive_picker(
     tui: &mut Tui,
     store: &CredentialStore,
     catalog: &mut ModelCatalog<LiveSource>,
     rx: Option<FetchRx>,
-) -> Option<(provider::ProviderId, String, provider::Tuning)> {
+) -> Option<(provider::ProviderId, String, provider::Tuning, Option<String>)> {
+    // The serving-provider fetch is intent-driven and spawned from inside the
+    // loop, so its channel lives for the loop's whole duration (unlike the
+    // model-list `rx`, whose fetches are all kicked off before the loop). The
+    // sender's payload type follows from the receiver alias.
+    let (endpoint_tx, endpoint_rx): (_, EndpointRx) = std::sync::mpsc::channel();
     loop {
         // Fold any landed fetch results into the picker (and the catalog's
         // caches), on this thread, so the disk write stays single-threaded.
@@ -3473,6 +3484,44 @@ fn drive_picker(
                 if let Some(p) = tui.app.picker_mut() {
                     p.set_models(&id, state);
                 }
+            }
+        }
+        // Fold any landed serving-provider results the same way.
+        while let Ok((model, result)) = endpoint_rx.try_recv() {
+            let state = match result {
+                Ok(endpoints) => {
+                    catalog.record_endpoints(&model, endpoints.clone());
+                    picker::EndpointsState::Loaded(endpoints)
+                }
+                Err(reason) => picker::EndpointsState::Failed(reason),
+            };
+            if let Some(p) = tui.app.picker_mut() {
+                p.set_endpoints(&model, state);
+            }
+        }
+        // When the provider control is focused on an OpenRouter model whose
+        // serving providers we have not fetched, seed it from the catalog memo
+        // or spawn a background fetch. Seeding the state first dedups: the next
+        // poll no longer reports the model as needing a fetch.
+        let needed = tui
+            .app
+            .picker_mut()
+            .and_then(|p| p.focused_or_model_needing_endpoints());
+        if let Some(model) = needed {
+            if let Some(endpoints) = catalog.cached_endpoints(&model) {
+                if let Some(p) = tui.app.picker_mut() {
+                    p.set_endpoints(&model, picker::EndpointsState::Loaded(endpoints));
+                }
+            } else {
+                if let Some(p) = tui.app.picker_mut() {
+                    p.set_endpoints(&model, picker::EndpointsState::Loading);
+                }
+                let source = catalog.source().clone();
+                let endpoint_tx = endpoint_tx.clone();
+                std::thread::spawn(move || {
+                    let result = source.endpoints(&model);
+                    let _ = endpoint_tx.send((model, result));
+                });
             }
         }
         if tui.app.draw(tui.guard.term()).is_err() {
@@ -3494,13 +3543,13 @@ fn drive_picker(
         match action {
             picker::PickAction::None => {}
             picker::PickAction::Cancelled => return None,
-            picker::PickAction::Selected(id, model, tuning) => {
-                return Some((id, model, tuning));
+            picker::PickAction::Selected(id, model, tuning, route) => {
+                return Some((id, model, tuning, route));
             }
-            picker::PickAction::Manual(query, tuning) => {
+            picker::PickAction::Manual(query, tuning, route) => {
                 let available = store.available();
                 match crate::models::resolve_model_provider(&query, &available, catalog) {
-                    Ok(id) => return Some((id, query, tuning)),
+                    Ok(id) => return Some((id, query, tuning, route)),
                     Err(e) => {
                         let root = tui.app.root;
                         tui.app.push_error(root, e);
@@ -3529,6 +3578,7 @@ fn apply_model_switch(
     provider_id: provider::ProviderId,
     model: String,
     tuning: provider::Tuning,
+    route: Option<String>,
 ) {
     let store = ctx.store;
     let info = ctx.info;
@@ -3560,31 +3610,39 @@ fn apply_model_switch(
         &cred,
         current_override,
         tuning.clone(),
+        route.clone(),
     ));
     let label = provider_id.label();
     let status_provider = crate::oauth::provider_label(new_provider.subscription(), label);
     provider.swap(new_provider);
     tui.app.update_live_model(&provider.current(), &status_provider);
     let state_dir = crate::bootstrap::project_dir(info.cwd);
-    if let Err(e) = state::save(&state_dir, &state::State::new(&provider_id, &model, &tuning)) {
+    if let Err(e) = state::save(
+        &state_dir,
+        &state::State::new(&provider_id, &model, &tuning, route.as_deref()),
+    ) {
         tui.app
             .push_error(id, format!("could not persist selection: {e}"));
     }
     emit.emit(Kind::SystemNote(format!(
         "[switched to {label} {model}{}]",
-        tuning_suffix(&tuning)
+        tuning_suffix(&tuning, route.as_deref())
     )));
 }
 
 /// A human-readable suffix for the switch note describing any non-default
-/// tuning, e.g. ` · effort high · temp 0.7`. Empty when both knobs are auto.
-fn tuning_suffix(tuning: &provider::Tuning) -> String {
+/// tuning and route, e.g. ` · effort high · temp 0.7 · via deepinfra`. Empty
+/// when both knobs are auto and no route is pinned.
+fn tuning_suffix(tuning: &provider::Tuning, route: Option<&str>) -> String {
     let mut parts = String::new();
     if let Some(effort) = &tuning.effort {
         parts.push_str(&format!(" · effort {}", effort.variant_name()));
     }
     if let Some(temperature) = tuning.temperature {
         parts.push_str(&format!(" · temp {temperature:.1}"));
+    }
+    if let Some(slug) = route {
+        parts.push_str(&format!(" · via {slug}"));
     }
     parts
 }
