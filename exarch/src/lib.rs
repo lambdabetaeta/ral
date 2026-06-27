@@ -31,6 +31,7 @@ pub mod prompt;
 pub mod provider;
 pub mod schedule;
 pub mod shell_eval;
+pub mod skill;
 pub mod state;
 pub mod tls;
 pub mod tools;
@@ -160,8 +161,9 @@ pub fn run() -> Result<(), String> {
     let (id, model, mut tuning, route) =
         resolve_initial_selection(c.model.as_deref(), &state_dir, &available, &mut catalog)?;
     if let Some(keyword) = c.effort.as_deref() {
-        tuning.effort = Some(provider::ReasoningEffort::from_keyword(keyword)
-            .ok_or_else(|| format!("invalid effort '{keyword}' — expected none|low|medium|high|xhigh|max"))?);
+        tuning.effort = Some(provider::ReasoningEffort::from_keyword(keyword).ok_or_else(
+            || format!("invalid effort '{keyword}' — expected none|low|medium|high|xhigh|max"),
+        )?);
     }
     let label = id.label();
     let cred = store
@@ -235,7 +237,14 @@ pub fn run() -> Result<(), String> {
         cwd: &cwd,
     };
     if c.headless {
-        headless::run(&mut session, &info, &provider, seed, c.output_format, Arc::clone(&engine))
+        headless::run(
+            &mut session,
+            &info,
+            &provider,
+            seed,
+            c.output_format,
+            Arc::clone(&engine),
+        )
     } else {
         tui::run(
             &mut session,
@@ -268,7 +277,15 @@ fn resolve_initial_selection(
     state_dir: &std::path::Path,
     available: &[provider::ProviderId],
     catalog: &mut models::ModelCatalog<models::LiveSource>,
-) -> Result<(provider::ProviderId, String, provider::Tuning, Option<String>), String> {
+) -> Result<
+    (
+        provider::ProviderId,
+        String,
+        provider::Tuning,
+        Option<String>,
+    ),
+    String,
+> {
     if let Some(name) = model_override {
         let id = models::resolve_model_provider(name, available, catalog)?;
         return Ok((id, name.to_string(), provider::Tuning::initial(), None));
@@ -281,7 +298,12 @@ fn resolve_initial_selection(
     }
     let id = available[0].clone();
     match id.famous() {
-        Some(kind) => Ok((id, kind.info().1.to_string(), provider::Tuning::initial(), None)),
+        Some(kind) => Ok((
+            id,
+            kind.info().1.to_string(),
+            provider::Tuning::initial(),
+            None,
+        )),
         None => Err(format!(
             "custom provider '{}' has no default model — pass --model NAME \
              (it will be remembered) or open the /model picker",

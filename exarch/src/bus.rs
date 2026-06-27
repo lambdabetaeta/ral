@@ -276,7 +276,6 @@ impl InboxMsg {
     }
 }
 
-
 /// The model-facing notice [`Turn::Surface`] delivers when a detached `spawn`
 /// worker settles un-awaited: which spawn finished, how it settled, and where
 /// its output now lives.  This is the "host notifies, don't poll" wake — terse
@@ -294,9 +293,7 @@ fn surface_notice(values: &[Value]) -> String {
         Some(DoneOutcome::Panic { message }) => format!("panicked: {message}"),
         None => "finished".to_string(),
     };
-    format!(
-        "Background block {settled}. Await its handle for the value."
-    )
+    format!("Background block {settled}. Await its handle for the value.")
 }
 
 /// The next deliverable a turn-boundary drain yields, carrying both the
@@ -714,7 +711,10 @@ pub enum Kind {
         answer_chars: u32,
     },
     Usage(Usage),
-    Step { n: u32, tuning: Tuning },
+    Step {
+        n: u32,
+        tuning: Tuning,
+    },
     /// A transient label for the worker's current synchronous phase —
     /// "awaiting model", "compacting".  Emitted before a long op so
     /// the frontend can paint a progress label alongside the spinner —
@@ -1256,8 +1256,8 @@ mod tests {
         Boundary, Emitter, Event, FleetBus, Inbox, InboxMsg, Kind, Pass, Sink, Transcript, Turn,
         drain_pass, pump,
     };
-    use std::sync::Arc;
     use crate::provider::Tuning;
+    use std::sync::Arc;
 
     /// A scheduled-wakeup message with a fresh pending flag, for the inbox
     /// drain tests.
@@ -1290,12 +1290,18 @@ mod tests {
 
         tx.send(Event {
             id: 0,
-            kind: Kind::Step { n: 1, tuning: Tuning::default() },
+            kind: Kind::Step {
+                n: 1,
+                tuning: Tuning::default(),
+            },
         })
         .unwrap();
         tx.send(Event {
             id: 0,
-            kind: Kind::Step { n: 2, tuning: Tuning::default() },
+            kind: Kind::Step {
+                n: 2,
+                tuning: Tuning::default(),
+            },
         })
         .unwrap();
         done.store(true, Ordering::Release);
@@ -1422,7 +1428,10 @@ mod tests {
         let t0 = Instant::now();
         let r = pump(&mut sink, &bus, 0, Transcript::none(), |emit| {
             *holder.lock().unwrap() = Some(emit.clone());
-            emit.emit(Kind::Step { n: 1, tuning: Tuning::default() });
+            emit.emit(Kind::Step {
+                n: 1,
+                tuning: Tuning::default(),
+            });
             "done"
         })
         .expect("pump returns Ok");
@@ -1538,11 +1547,7 @@ mod tests {
     fn inbox_pop_back_user_all_no_user_prompts() {
         let inbox = Inbox::new();
         inbox.push(wakeup("x", "@", "p"));
-        assert_eq!(
-            inbox.pop_back_user_all(),
-            None,
-            "no user prompts to recall",
-        );
+        assert_eq!(inbox.pop_back_user_all(), None, "no user prompts to recall",);
         assert!(matches!(inbox.drain_turn(), Some(Turn::Wakeup(_))));
     }
 

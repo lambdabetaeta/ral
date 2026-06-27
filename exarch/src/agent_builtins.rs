@@ -6,6 +6,12 @@
 //! the resident agent surface that core should not own.
 
 use crate::bus::{Hunk, Row, Seg};
+use crate::skill;
+use fff_search::file_picker::FilePicker;
+use fff_search::{
+    FFFMode, FilePickerOptions, FrecencyTracker, FuzzySearchOptions, PaginationArgs, QueryParser,
+    QueryTracker, SharedFilePicker, SharedFrecency, SharedQueryTracker,
+};
 use grep::regex::RegexMatcherBuilder;
 use grep::searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
 use ignore::WalkBuilder;
@@ -17,15 +23,13 @@ use ral_core::typecheck::{Scheme, Ty, Unifier};
 use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Settled, sig};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
-use std::fs;
-use std::io::Write;
 use std::collections::HashMap;
+use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
-use fff_search::file_picker::FilePicker;
-use fff_search::{FFFMode, FilePickerOptions, FrecencyTracker, FuzzySearchOptions, PaginationArgs, QueryParser, QueryTracker, SharedFilePicker, SharedFrecency, SharedQueryTracker};
 
 const AGENT_SOURCE: &str = include_str!("../data/agent.ral");
 
@@ -723,8 +727,13 @@ fn path_hash(p: &Path) -> u64 {
 fn search_paths(idx: &Index, query: &str, limit: usize) -> Result<Vec<String>, String> {
     let parser = QueryParser::default();
     let parsed = parser.parse(query);
-    let picker_guard = idx.picker.read().map_err(|e: fff_search::Error| e.to_string())?;
-    let picker = picker_guard.as_ref().ok_or("fff index handle is empty (scan failed)")?;
+    let picker_guard = idx
+        .picker
+        .read()
+        .map_err(|e: fff_search::Error| e.to_string())?;
+    let picker = picker_guard
+        .as_ref()
+        .ok_or("fff index handle is empty (scan failed)")?;
     let qt_guard = idx.queries.read().map_err(|e| e.to_string())?;
     let result = picker.fuzzy_search(
         &parsed,
@@ -734,7 +743,11 @@ fn search_paths(idx: &Index, query: &str, limit: usize) -> Result<Vec<String>, S
             ..Default::default()
         },
     );
-    Ok(result.items.iter().map(|item| item.relative_path(picker)).collect())
+    Ok(result
+        .items
+        .iter()
+        .map(|item| item.relative_path(picker))
+        .collect())
 }
 
 /// `fff QUERY` — fuzzy file-name search (frecency-ranked) over the
@@ -757,11 +770,95 @@ fn scheme_explore_dir(_u: &mut Unifier) -> Scheme {
     )
 }
 fn scheme_fff(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], &[], thunk(fun(Ty::String, pure(Ty::List(Box::new(Ty::String))))))
+    scheme(
+        &[],
+        &[],
+        &[],
+        thunk(fun(Ty::String, pure(Ty::List(Box::new(Ty::String))))),
+    )
 }
 
 fn scheme_line_hash(_u: &mut Unifier) -> Scheme {
     scheme(&[], &[], &[], thunk(fun(Ty::String, pure(Ty::String))))
+}
+
+fn scheme_skill(_u: &mut Unifier) -> Scheme {
+    scheme(&[], &[], &[], thunk(fun(Ty::String, pure(Ty::String))))
+}
+
+/// `skill NAME` — load the full SKILL.md body of a skill (fresh scan at
+/// each call — picks up skills added or edited mid-session).
+fn builtin_skill(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 1, "skill")?;
+    let name = args[0].to_string();
+    // A malformed name can never name a discoverable skill, and rejecting it
+    // here keeps `root.join(&name)` from escaping the skills root.
+    if !skill::valid_skill_name(&name) {
+        return Settled::Ok(Value::String(format!("skill not found: {name}")));
+    }
+    let cwd = shell.cwd();
+    let config_dir = crate::bootstrap::xdg_app_dir(ral_core::path::basedir::XdgKind::Config);
+    for root in [
+        cwd.join(".exarch").join("skills"),
+        config_dir.join("skills"),
+    ] {
+        let dir = root.join(&name);
+        let sk_md = dir.join("SKILL.md");
+        let rp = shell.resolve(&sk_md.to_string_lossy());
+        if shell.check_fs_read(&rp).is_ok() {
+            let body = match skill::read_skill_body(&dir) {
+                Ok(body) => body,
+                Err(_) => {
+                    return Settled::Ok(Value::String(format!("could not read skill: {name}")));
+                }
+            };
+            // Surface only once the body is in hand, so the card never claims
+            // a load that did not happen.
+            shell.surface(Value::map(vec![
+                ("io".into(), Value::String("skill".into())),
+                ("name".into(), Value::String(name.clone())),
+                (
+                    "dir".into(),
+                    Value::String(dir.to_string_lossy().into_owned()),
+                ),
+            ]));
+            return Settled::Ok(Value::String(format!(
+                "// skill root: {}\n\n{}",
+                dir.display(),
+                body
+            )));
+        }
+    }
+    Settled::Ok(Value::String(format!("skill not found: {name}")))
+}
+
+fn scheme_skill_list(_u: &mut Unifier) -> Scheme {
+    scheme(&[], &[], &[], thunk(pure(Ty::String)))
+}
+
+/// `skill-list` — list all available skills (fresh scan, filtered by
+/// the live grant). Returns one `name: description` per line.
+fn builtin_skill_list(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    let cwd = shell.cwd();
+    let config_dir = crate::bootstrap::xdg_app_dir(ral_core::path::basedir::XdgKind::Config);
+    let all = skill::discover_all(&cwd, &config_dir);
+    let mut out = String::new();
+    for (name, dir) in &all {
+        let rp = shell.resolve(&dir.join("SKILL.md").to_string_lossy());
+        if shell.check_fs_read(&rp).is_ok()
+            && let Some(s) = skill::parse_skill(&dir.join("SKILL.md"), name)
+        {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&format!("{}: {}", s.name, s.description));
+        }
+    }
+    shell.surface(Value::map(vec![
+        ("io".into(), Value::String("skill-list".into())),
+        ("count".into(), Value::Int(out.lines().count() as i64)),
+    ]));
+    Settled::Ok(Value::String(out))
 }
 
 pub static EXARCH_BUILTINS: &[BuiltinEntry] = &[
@@ -794,6 +891,18 @@ pub static EXARCH_BUILTINS: &[BuiltinEntry] = &[
         type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_explore_dir),
         doc: "explore-dir <n>  — list directory entries up to depth n respecting ignore files.",
         body: BuiltinBody::Static(builtin_explore_dir),
+    },
+    BuiltinEntry {
+        name: Cow::Borrowed("skill-list"),
+        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_skill_list),
+        doc: "skill-list  — list all available skills (fresh scan, filtered by grant). Returns one `name: description` per line.",
+        body: BuiltinBody::Static(builtin_skill_list),
+    },
+    BuiltinEntry {
+        name: Cow::Borrowed("skill"),
+        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_skill),
+        doc: "skill <name>  — load the full SKILL.md body for the named skill (discovered from .exarch/skills/ and your config). Returns its Markdown instructions, or an error string if not found.",
+        body: BuiltinBody::Static(builtin_skill),
     },
     BuiltinEntry {
         name: Cow::Borrowed("fff"),

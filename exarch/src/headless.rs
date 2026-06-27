@@ -18,9 +18,9 @@ use crate::bus::{AgentId, AgentOutcome, Event, FleetBus, Kind, Row, Sink, pump};
 use crate::card::{Card, FieldVal, Mark};
 use crate::fleet::Fleet;
 use crate::provider::{Engine, Provider, Usage};
-use std::sync::Arc;
 use crate::tui::SessionInfo;
 use std::io::{self, Write};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// What the root agent's output looks like on stdout in headless mode.
@@ -318,7 +318,9 @@ pub fn run(
     let prompt = seed.ok_or_else(|| "--headless requires --prompt or --file".to_string())?;
     eprintln!(
         "exarch: provider={} model={} base={}",
-        p.id().label(), p.model(), info.base
+        p.id().label(),
+        p.model(),
+        info.base
     );
     let json = format == OutputFormat::Json;
     let mut headless = Headless::new(json, session.id);
@@ -439,12 +441,18 @@ mod tests {
         for n in [1, 2, 3, 1, 2] {
             h.handle(Event {
                 id: root,
-                kind: Kind::Step { n, tuning: Tuning::default() },
+                kind: Kind::Step {
+                    n,
+                    tuning: Tuning::default(),
+                },
             });
         }
         h.handle(Event {
             id: sub,
-            kind: Kind::Step { n: 1, tuning: Tuning::default() },
+            kind: Kind::Step {
+                n: 1,
+                tuning: Tuning::default(),
+            },
         });
         let out = result_json(&h, &Ok(()), std::time::Duration::ZERO);
         let v: serde_json::Value = serde_json::from_str(&out).expect("result is JSON");

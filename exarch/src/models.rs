@@ -137,9 +137,10 @@ impl ModelSource for LiveSource {
     /// short-lived current-thread runtime backs the request, as for [`Self::list`].
     fn endpoints(&self, model: &str) -> Result<Vec<ProviderEndpoint>, String> {
         let url = format!("https://openrouter.ai/api/v1/models/{model}/endpoints");
-        let key = self.keys.iter().find_map(|(id, k)| {
-            (id.famous() == Some(ProviderKind::Openrouter)).then(|| k.clone())
-        });
+        let key = self
+            .keys
+            .iter()
+            .find_map(|(id, k)| (id.famous() == Some(ProviderKind::Openrouter)).then(|| k.clone()));
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

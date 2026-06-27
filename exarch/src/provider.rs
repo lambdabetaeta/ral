@@ -21,11 +21,11 @@ use genai::resolver::{AuthData, AuthResolver, Endpoint, ServiceTargetResolver};
 use genai::{Client, ModelIden, ServiceTarget};
 use reqwest::StatusCode;
 use reqwest::header::HeaderMap;
-use std::fmt;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use serde::{Deserialize, Serialize};
 
 // Per-model max-tokens defaults live inside genai's own adapter table
 // (e.g. `AnthropicAdapter::resolve_max_tokens` picks 32k for Opus 4.x,
@@ -1329,7 +1329,6 @@ impl Provider {
         &self.id
     }
 
-
     /// This model's total context window in tokens, when the catalog
     /// lists it — the denominator the compaction trigger measures real
     /// context pressure against.  A live catalog lookup (a cheap `HashMap`
@@ -1376,20 +1375,18 @@ impl Provider {
         cancel: &cancel::Token,
     ) -> Result<StepOut, ProviderError> {
         match &self.backend {
-            Backend::Live { engine, transport } => {
-                engine.complete(
-                    transport,
-                    &self.model,
-                    self.max_tokens_override,
-                    &self.tuning,
-                    self.openrouter_route(),
-                    system,
-                    messages,
-                    tools,
-                    on_text,
-                    cancel,
-                )
-            }
+            Backend::Live { engine, transport } => engine.complete(
+                transport,
+                &self.model,
+                self.max_tokens_override,
+                &self.tuning,
+                self.openrouter_route(),
+                system,
+                messages,
+                tools,
+                on_text,
+                cancel,
+            ),
             Backend::Scripted(s) => s.complete(&self.model, on_text),
         }
     }
@@ -1656,7 +1653,9 @@ impl Engine {
                 .await;
 
                 match attempt_result {
-                    Ok(end) => Attempt::Done(step_out_from_end(model, end, transport.metered(), adapter)),
+                    Ok(end) => {
+                        Attempt::Done(step_out_from_end(model, end, transport.metered(), adapter))
+                    }
                     // A cancel is surfaced as-is regardless of streamed tokens.
                     Err(e @ ProviderError::Cancelled(_)) => Attempt::Failed(e),
                     // Visible text already streamed, then the stream broke: a
@@ -1664,9 +1663,13 @@ impl Engine {
                     // prefix as a cut-short turn and let the session continue
                     // it (mirrors the output-cap truncation path) rather than
                     // discarding the work and ending the run.
-                    Err(e) if seen_any_token => {
-                        Attempt::Done(stalled_step_out(model, &streamed, &e, transport.metered(), adapter))
-                    }
+                    Err(e) if seen_any_token => Attempt::Done(stalled_step_out(
+                        model,
+                        &streamed,
+                        &e,
+                        transport.metered(),
+                        adapter,
+                    )),
                     Err(e) => Attempt::Failed(e),
                 }
             },
@@ -1807,7 +1810,13 @@ fn step_out_from_end(model: &str, end: StreamEnd, metered: bool, adapter: Adapte
 /// marked [`CutShort::Stalled`], which the session commits and continues
 /// from.  No `End` frame arrived, so there is no usage to meter and no tool
 /// call to capture.
-fn stalled_step_out(model: &str, streamed: &str, cause: &ProviderError, metered: bool, adapter: AdapterKind) -> StepOut {
+fn stalled_step_out(
+    model: &str,
+    streamed: &str,
+    cause: &ProviderError,
+    metered: bool,
+    adapter: AdapterKind,
+) -> StepOut {
     StepOut {
         assistant_message: ChatMessage::assistant(streamed.to_string()),
         tool_calls: Vec::new(),
@@ -2310,8 +2319,14 @@ mod tests {
             })),
         };
         let s = e.summary();
-        assert_eq!(s, "rate limited: Weekly usage limit reached. Resets in 4 days.");
-        assert!(!s.contains('{'), "summary must not leak the raw JSON body: {s}");
+        assert_eq!(
+            s,
+            "rate limited: Weekly usage limit reached. Resets in 4 days."
+        );
+        assert!(
+            !s.contains('{'),
+            "summary must not leak the raw JSON body: {s}"
+        );
         assert!(!s.contains('\n'), "summary must stay one line: {s}");
     }
 
@@ -2627,7 +2642,13 @@ mod tests {
             "the stand-in stall cause must classify Transient, got {cause:?}"
         );
         let brief = cause.brief();
-        let step = stalled_step_out("test-model", "partial answer so far", &cause, false, AdapterKind::OpenAI);
+        let step = stalled_step_out(
+            "test-model",
+            "partial answer so far",
+            &cause,
+            false,
+            AdapterKind::OpenAI,
+        );
         assert_eq!(
             step.cut_short,
             Some(CutShort::Stalled(brief)),

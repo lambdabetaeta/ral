@@ -108,8 +108,7 @@ impl ModelCaps {
     /// the data is informative, not a gate, so a caller shouldn't refuse
     /// a parameter just because the catalog didn't surface the field.
     pub fn supports(&self, param: &str) -> bool {
-        self.supported_parameters.is_empty()
-            || self.supported_parameters.iter().any(|p| p == param)
+        self.supported_parameters.is_empty() || self.supported_parameters.iter().any(|p| p == param)
     }
 
     /// Does the model advertise `tools` as a supported parameter?
@@ -161,12 +160,12 @@ fn deepseek_price(model: &str) -> Option<ModelPricing> {
     // `deepseek-chat` / `deepseek-reasoner` are aliases for
     // `deepseek-v4-flash` (non-thinking / thinking modes);
     // pricing is identical between the two modes.
-    const FLASH_INPUT: f64       = 0.14 / 1_000_000.0;
-    const FLASH_OUTPUT: f64      = 0.28 / 1_000_000.0;
-    const FLASH_CACHE_READ: f64  = 0.0028 / 1_000_000.0;
-    const PRO_INPUT: f64         = 0.435 / 1_000_000.0;
-    const PRO_OUTPUT: f64        = 0.87 / 1_000_000.0;
-    const PRO_CACHE_READ: f64    = 0.003625 / 1_000_000.0;
+    const FLASH_INPUT: f64 = 0.14 / 1_000_000.0;
+    const FLASH_OUTPUT: f64 = 0.28 / 1_000_000.0;
+    const FLASH_CACHE_READ: f64 = 0.0028 / 1_000_000.0;
+    const PRO_INPUT: f64 = 0.435 / 1_000_000.0;
+    const PRO_OUTPUT: f64 = 0.87 / 1_000_000.0;
+    const PRO_CACHE_READ: f64 = 0.003625 / 1_000_000.0;
 
     let p = match model {
         "deepseek-chat" | "deepseek-reasoner" | "deepseek-v4-flash" => ModelPricing {

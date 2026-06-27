@@ -156,13 +156,41 @@ struct Rung {
 /// raw token count with no place on an ordered ladder, the latter is a legacy
 /// pre-gpt-5 alias for `low`).
 const LADDER: &[Rung] = &[
-    Rung { label: "auto", glyph: "·", effort: None },
-    Rung { label: "none", glyph: "▁", effort: Some(ReasoningEffort::None) },
-    Rung { label: "low", glyph: "▂", effort: Some(ReasoningEffort::Low) },
-    Rung { label: "med", glyph: "▄", effort: Some(ReasoningEffort::Medium) },
-    Rung { label: "high", glyph: "▆", effort: Some(ReasoningEffort::High) },
-    Rung { label: "xhigh", glyph: "▇", effort: Some(ReasoningEffort::XHigh) },
-    Rung { label: "max", glyph: "█", effort: Some(ReasoningEffort::Max) },
+    Rung {
+        label: "auto",
+        glyph: "·",
+        effort: None,
+    },
+    Rung {
+        label: "none",
+        glyph: "▁",
+        effort: Some(ReasoningEffort::None),
+    },
+    Rung {
+        label: "low",
+        glyph: "▂",
+        effort: Some(ReasoningEffort::Low),
+    },
+    Rung {
+        label: "med",
+        glyph: "▄",
+        effort: Some(ReasoningEffort::Medium),
+    },
+    Rung {
+        label: "high",
+        glyph: "▆",
+        effort: Some(ReasoningEffort::High),
+    },
+    Rung {
+        label: "xhigh",
+        glyph: "▇",
+        effort: Some(ReasoningEffort::XHigh),
+    },
+    Rung {
+        label: "max",
+        glyph: "█",
+        effort: Some(ReasoningEffort::Max),
+    },
 ];
 
 /// Temperature bounds and step. genai accepts `0.0..=2.0`; the overlay steps
@@ -555,9 +583,20 @@ impl Picker {
     fn cycle(&self, forward: bool) -> Focus {
         let has_provider = self.highlighted_or_model().is_some();
         let order: &[Focus] = if has_provider {
-            &[Focus::Search, Focus::Provider, Focus::Effort, Focus::Temperature, Focus::TopP]
+            &[
+                Focus::Search,
+                Focus::Provider,
+                Focus::Effort,
+                Focus::Temperature,
+                Focus::TopP,
+            ]
         } else {
-            &[Focus::Search, Focus::Effort, Focus::Temperature, Focus::TopP]
+            &[
+                Focus::Search,
+                Focus::Effort,
+                Focus::Temperature,
+                Focus::TopP,
+            ]
         };
         let pos = order.iter().position(|f| *f == self.focus).unwrap_or(0);
         let next = if forward {
@@ -624,7 +663,8 @@ impl Picker {
                 if !self.supports("temperature") {
                     return;
                 }
-                self.temperature = step_knob(self.temperature, up, TEMP_STEP, TEMP_MAX, TEMP_PLACES);
+                self.temperature =
+                    step_knob(self.temperature, up, TEMP_STEP, TEMP_MAX, TEMP_PLACES);
             }
             Focus::TopP => {
                 if !self.supports("top_p") {
@@ -677,7 +717,10 @@ impl Picker {
             .collect();
         // Descending score; stable sort keeps listed order on ties.
         scored.sort_by_key(|(_, score)| Reverse(*score));
-        scored.into_iter().map(|(i, _)| candidates[i].clone()).collect()
+        scored
+            .into_iter()
+            .map(|(i, _)| candidates[i].clone())
+            .collect()
     }
 
     /// The displayed rows: the query matches, plus a synthetic manual-entry row
@@ -768,43 +811,52 @@ impl Picker {
         f.render_widget(bezel, area);
 
         let mut constraints = vec![
-            Constraint::Length(1),              // search
-            Constraint::Length(1),              // status
+            Constraint::Length(1),                // search
+            Constraint::Length(1),                // status
             Constraint::Length(VISIBLE_ROWS + 2), // bordered model list
         ];
         // Always reserve the provider row for layout stability.
-        constraints.push(Constraint::Length(1));  // serving provider
+        constraints.push(Constraint::Length(1)); // serving provider
         constraints.extend_from_slice(&[
-            Constraint::Length(1),              // effort
-            Constraint::Length(1),              // temperature
-            Constraint::Length(1),              // top-p
-            Constraint::Min(0),                 // failed-provider notes
+            Constraint::Length(1), // effort
+            Constraint::Length(1), // temperature
+            Constraint::Length(1), // top-p
+            Constraint::Min(0),    // failed-provider notes
         ]);
         let chunks = Layout::vertical(constraints).split(inner);
         let mut ci = 0; // chunk index
-        f.render_widget(Paragraph::new(self.search_line()).style(plane), chunks[ci]); ci += 1;
-        f.render_widget(Paragraph::new(self.status_line()).style(plane), chunks[ci]); ci += 1;
-        self.render_list(f, chunks[ci], plane); ci += 1;
+        f.render_widget(Paragraph::new(self.search_line()).style(plane), chunks[ci]);
+        ci += 1;
+        f.render_widget(Paragraph::new(self.status_line()).style(plane), chunks[ci]);
+        ci += 1;
+        self.render_list(f, chunks[ci], plane);
+        ci += 1;
         // Always render the provider row (inert "OpenRouter routing only" for a
         // non-OpenRouter model), so the overlay's height stays stable.
-        f.render_widget(Paragraph::new(self.provider_line(chunks[ci].width)).style(plane), chunks[ci]); ci += 1;
+        f.render_widget(
+            Paragraph::new(self.provider_line(chunks[ci].width)).style(plane),
+            chunks[ci],
+        );
+        ci += 1;
         f.render_widget(
             Paragraph::new(self.effort_line(self.supports("reasoning"))).style(plane),
             chunks[ci],
-        ); ci += 1;
+        );
+        ci += 1;
         f.render_widget(
             Paragraph::new(self.temp_line(self.supports("temperature"))).style(plane),
             chunks[ci],
-        ); ci += 1;
+        );
+        ci += 1;
         f.render_widget(
             Paragraph::new(self.top_p_line(self.supports("top_p"))).style(plane),
             chunks[ci],
-        ); ci += 1;
+        );
+        ci += 1;
         let notes = self.failed_lines();
         if !notes.is_empty() {
             f.render_widget(Paragraph::new(notes).style(plane), chunks[ci]);
         }
-
     }
 
     /// A field label, bright when focused and dim otherwise — focus rendered
@@ -920,9 +972,13 @@ impl Picker {
         // reverse when active but unfocused, plain dim when not the choice.
         let auto_style = |active: bool| {
             if active && focused {
-                Style::default().fg(CYAN).add_modifier(Modifier::REVERSED | Modifier::BOLD)
+                Style::default()
+                    .fg(CYAN)
+                    .add_modifier(Modifier::REVERSED | Modifier::BOLD)
             } else if active {
-                Style::default().fg(SLATE).add_modifier(Modifier::DIM | Modifier::REVERSED)
+                Style::default()
+                    .fg(SLATE)
+                    .add_modifier(Modifier::DIM | Modifier::REVERSED)
             } else {
                 dim
             }
@@ -931,7 +987,10 @@ impl Picker {
         let Some(model) = self.highlighted_or_model() else {
             return Line::from(vec![
                 label,
-                Span::styled("— OpenRouter routing only", dim.add_modifier(Modifier::ITALIC)),
+                Span::styled(
+                    "— OpenRouter routing only",
+                    dim.add_modifier(Modifier::ITALIC),
+                ),
             ]);
         };
 
@@ -944,10 +1003,7 @@ impl Picker {
                 return Line::from(vec![
                     label,
                     Span::styled(" auto ", auto_style(true)),
-                    Span::styled(
-                        format!("  {reason}"),
-                        dim.add_modifier(Modifier::ITALIC),
-                    ),
+                    Span::styled(format!("  {reason}"), dim.add_modifier(Modifier::ITALIC)),
                 ]);
             }
             // Not yet fetched (the control has not been focused on this model):
@@ -977,7 +1033,9 @@ impl Picker {
         for (i, endpoint) in endpoints.iter().enumerate() {
             let hue = colors[i % colors.len()];
             let style = if (i + 1) == active {
-                Style::default().fg(hue).add_modifier(Modifier::REVERSED | Modifier::BOLD)
+                Style::default()
+                    .fg(hue)
+                    .add_modifier(Modifier::REVERSED | Modifier::BOLD)
             } else {
                 Style::default().fg(hue).add_modifier(Modifier::DIM)
             };
@@ -1671,7 +1729,11 @@ mod tests {
         assert_eq!(p.focus, Focus::Search);
         p.key(KeyCode::Down); // deepseek/deepseek-r1
         assert_ne!(p.highlighted_model().as_deref(), Some(model));
-        assert_eq!(p.active_route(), None, "the route does not ride another model");
+        assert_eq!(
+            p.active_route(),
+            None,
+            "the route does not ride another model"
+        );
 
         // Back on its own model, the choice is active again.
         p.key(KeyCode::Up);

@@ -1199,8 +1199,11 @@ keep-bottom
         let tmp = std::env::temp_dir().join(format!("exarch-todo-sweep-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).expect("create temp tree");
-        std::fs::write(tmp.join("a.txt"), "alpha [TODO] one\nplain\nbeta [TODO] two\n")
-            .expect("write a");
+        std::fs::write(
+            tmp.join("a.txt"),
+            "alpha [TODO] one\nplain\nbeta [TODO] two\n",
+        )
+        .expect("write a");
         std::fs::write(tmp.join("b.txt"), "gamma\ndelta [TODO] three\n").expect("write b");
         let tmp_str = display_no_trailing_sep(&tmp);
 

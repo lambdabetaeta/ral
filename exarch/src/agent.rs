@@ -30,7 +30,9 @@ use crate::digest::{
 use crate::event::{AgentLog, QuiesceReason, ToolResult as SessionToolResult};
 use crate::fleet::NO_FOCUS;
 use crate::nudge;
-use crate::provider::{CutShort, Provider, ProviderError, ProviderKind, StepOut, StopReason, ToolCall};
+use crate::provider::{
+    CutShort, Provider, ProviderError, ProviderKind, StepOut, StopReason, ToolCall,
+};
 use crate::shell_eval;
 use crate::transcript::Transcript;
 use ral_core::Shell;
@@ -712,7 +714,10 @@ impl Agent {
             self.log
                 .record_step(n, provider.tuning().clone())
                 .map_err(|e| ProviderError::Other(e.to_string()))?;
-            emit.emit(Kind::Step { n, tuning: provider.tuning().clone() });
+            emit.emit(Kind::Step {
+                n,
+                tuning: provider.tuning().clone(),
+            });
             last_text.clear();
             #[cfg(debug_assertions)]
             let t_render = std::time::Instant::now();

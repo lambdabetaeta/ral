@@ -66,6 +66,7 @@ similar    = { version = "2", features = ["inline", "unicode"] }
 # via ral-core -> uu_date -> jiff-icu -> jiff; declaring it directly resolves
 # to the same built crate at zero marginal cost.
 jiff       = "0.2"
+gray_matter = { version = "0.3", default-features = false, features = ["yaml"] }
 
 # Unix-only bundled tools (id / kill / stat / timeout / test / tac).  Pulled
 # in through `ral-core/coreutils-unix-only` only on Unix targets — the

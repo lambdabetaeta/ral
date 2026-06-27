@@ -36,7 +36,6 @@ pub(super) fn plain_slice(line: &Line<'_>, start_cell: u16, end_cell: u16) -> St
     text[byte_lo..byte_hi].to_string()
 }
 
-
 /// Apply [`Modifier::REVERSED`] to a cell-column range within a [`Line`],
 /// splitting any span that straddles the boundary so the highlight stays
 /// granular.  The rail glyph (first [`RAIL_W`] columns) is excluded.
@@ -102,4 +101,3 @@ pub(super) fn highlight_range(line: &mut Line<'static>, start_cell: u16, end_cel
     }
     line.spans = new_spans;
 }
-

@@ -6,6 +6,7 @@
 //! section is unheaded — it sets the tone, not a topic.
 
 use crate::host;
+use crate::skill;
 use ral_core::types::{Capabilities, ExecDir};
 use std::path::{Path, PathBuf};
 
@@ -34,6 +35,10 @@ use std::path::{Path, PathBuf};
 ///    contract (`data/agent.md`): the agent returns its result by calling
 ///    `reply` exactly once, the contract a headless root and every sub-agent
 ///    share.  Appended last, where its recency carries.
+/// 8. **Skills** (optional) — present whenever any skill is discovered and
+///    readable under the grant: `name: description` per skill, plus a
+///    note telling the agent to call `skill <name>` to load and
+///    `skill-list` to refresh mid-session.
 pub fn assemble(
     files: &[PathBuf],
     caps: &Capabilities,
@@ -62,6 +67,10 @@ pub fn assemble(
     let agents = discover_agents(cwd, config_dir);
     if !agents.is_empty() {
         sections.push((Some("Workspace"), read_files(&agents)?));
+    }
+    let skills = skill::discover_metadata(cwd, config_dir, caps);
+    if !skills.is_empty() {
+        sections.push((Some("Skills"), skills_section(&skills)));
     }
     if headless {
         sections.push((Some("Agent"), include_str!("../data/agent.md").into()));
@@ -323,4 +332,16 @@ fn or_none<S: AsRef<str>>(v: &[S]) -> String {
 /// `&str`, so this helper borrows each as `&str` before joining.
 fn join_str<S: AsRef<str>>(v: &[S]) -> String {
     v.iter().map(AsRef::as_ref).collect::<Vec<_>>().join(", ")
+}
+
+/// Render the Skills section: one `name: description` line per skill,
+/// with a brief note telling the agent how to load full instructions
+/// and discover new skills mid-session.
+fn skills_section(skills: &[skill::Skill]) -> String {
+    let mut body =
+        String::from("Available skills (call `skill <name>` to load, `skill-list` to refresh):\n");
+    for s in skills {
+        body.push_str(&format!("- {}: {}\n", s.name, s.description));
+    }
+    body
 }

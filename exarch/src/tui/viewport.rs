@@ -18,8 +18,8 @@ use super::block::{AgentSlot, Block, RailShape, Reveal, wrap_line};
 use super::fidelity::{self, Fidelity};
 use super::group;
 use super::line::{READ_W, coalesced_queries, is_blank, plain, prompt_fence, size_bar};
-use super::select::plain_slice;
 use super::rail::{self, RailKind};
+use super::select::plain_slice;
 use crate::bus::Hunk;
 use crate::card::{Card, IoKind};
 use crate::provider::Usage;
@@ -575,11 +575,23 @@ impl Viewport {
             return String::new();
         }
         if lo_row == hi_row {
-            let (a, b) = if lo_col <= hi_col { (lo_col, hi_col) } else { (hi_col, lo_col) };
+            let (a, b) = if lo_col <= hi_col {
+                (lo_col, hi_col)
+            } else {
+                (hi_col, lo_col)
+            };
             return plain_slice(&self.flat.rows[lo_row], a, b);
         }
-        let (first_row, first_col) = if lo_row < hi_row { (lo_row, lo_col) } else { (hi_row, hi_col) };
-        let (last_row, last_col) = if lo_row < hi_row { (hi_row, hi_col) } else { (lo_row, lo_col) };
+        let (first_row, first_col) = if lo_row < hi_row {
+            (lo_row, lo_col)
+        } else {
+            (hi_row, hi_col)
+        };
+        let (last_row, last_col) = if lo_row < hi_row {
+            (hi_row, hi_col)
+        } else {
+            (lo_row, lo_col)
+        };
         let mut parts: Vec<String> = Vec::new();
         // First row: from first_col to end.
         parts.push(plain_slice(&self.flat.rows[first_row], first_col, u16::MAX));
@@ -674,8 +686,6 @@ impl Viewport {
             scroll_pct,
         }
     }
-
-
 
     /// Rebuild [`Self::flat`] when stale or asked at a new width.
     ///
@@ -1023,11 +1033,14 @@ mod tests {
         let mut vp = viewport();
         // Enough chrome blocks to overflow a 10-row window.
         for i in 0..10 {
-            vp.push_chrome(RailShape::Plain, vec![
-                Line::from(format!("block {i} line a")),
-                Line::from(format!("block {i} line b")),
-                Line::from(format!("block {i} line c")),
-            ]);
+            vp.push_chrome(
+                RailShape::Plain,
+                vec![
+                    Line::from(format!("block {i} line a")),
+                    Line::from(format!("block {i} line b")),
+                    Line::from(format!("block {i} line c")),
+                ],
+            );
         }
         let height = 10;
         // First render establishes sticky at the bottom.

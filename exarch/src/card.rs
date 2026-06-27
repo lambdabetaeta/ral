@@ -19,8 +19,8 @@
 use crate::bus::{Hunk, Row, Seg};
 use ral_core::Value as RalValue;
 use serde::Serialize;
-use std::borrow::Cow;
 use similar::{ChangeTag, TextDiff};
+use std::borrow::Cow;
 
 /// The closed nominal role set — the *selective* (identity) channel a
 /// [`Span`] may carry.  The renderer holds the one binding table mapping
@@ -378,8 +378,7 @@ pub fn io_card(event: &IoEvent) -> Card {
             ..
         } => {
             if *outcome == WriteOutcome::Committed {
-                diff_mark =
-                    try_diff_mark(path, old_bytes.as_deref(), new_bytes.as_deref());
+                diff_mark = try_diff_mark(path, old_bytes.as_deref(), new_bytes.as_deref());
             }
             write_spans(path, *outcome)
         }
@@ -702,13 +701,17 @@ pub fn done_card(outcome: &DoneOutcome) -> Card {
         DoneOutcome::Err { message, status } => {
             spans.push(span(Role::Bad, &format!("failed ({status})")));
             let mut body = String::from("  Background block error");
-            if !message.is_empty() { body.push_str(&format!(": {message}")); }
+            if !message.is_empty() {
+                body.push_str(&format!(": {message}"));
+            }
             spans.push(span_plain(&body));
         }
         DoneOutcome::Panic { message } => {
             spans.push(span(Role::Bad, "panicked"));
             let mut body = String::from("  Background block error");
-            if !message.is_empty() { body.push_str(&format!(": {message}")); }
+            if !message.is_empty() {
+                body.push_str(&format!(": {message}"));
+            }
             spans.push(span_plain(&body));
         }
     }
@@ -1146,10 +1149,7 @@ mod tests {
                             ("start".into(), RalValue::Int(7)),
                             (
                                 "rows".into(),
-                                list(vec![
-                                    seg_row("del", "x"),
-                                    seg_row("add", "y"),
-                                ]),
+                                list(vec![seg_row("del", "x"), seg_row("add", "y")]),
                             ),
                         ])]),
                     ),

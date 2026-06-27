@@ -217,14 +217,19 @@ fn census(calls: &[Call], width: usize) -> Vec<Line<'static>> {
     }
     let text = census_line(calls.len() as u32, tally);
     let mut ls = vec![Line::default()];
-    push_wrapped(&mut ls, &text, width.saturating_sub(RAIL_W), |chunk, first| {
-        let mut spans = Vec::new();
-        if !first {
-            spans.push(Span::raw(" ".repeat(RAIL_W)));
-        }
-        spans.push(Span::styled(chunk, Style::default().fg(SLATE)));
-        Line::from(spans)
-    });
+    push_wrapped(
+        &mut ls,
+        &text,
+        width.saturating_sub(RAIL_W),
+        |chunk, first| {
+            let mut spans = Vec::new();
+            if !first {
+                spans.push(Span::raw(" ".repeat(RAIL_W)));
+            }
+            spans.push(Span::styled(chunk, Style::default().fg(SLATE)));
+            Line::from(spans)
+        },
+    );
     ls
 }
 
@@ -234,13 +239,19 @@ fn census(calls: &[Call], width: usize) -> Vec<Line<'static>> {
 fn census_line(scripts: u32, tally: Tally) -> String {
     let mut s = format!("Ran {}", count(scripts, "script", "scripts"));
     if tally.binaries > 0 {
-        s.push_str(&format!(", {}", count(tally.binaries, "binary", "binaries")));
+        s.push_str(&format!(
+            ", {}",
+            count(tally.binaries, "binary", "binaries")
+        ));
     }
     if tally.files > 0 {
         s.push_str(&format!(", read {}", count(tally.files, "file", "files")));
     }
     if tally.searches > 0 {
-        s.push_str(&format!(", searched {}", count(tally.searches, "time", "times")));
+        s.push_str(&format!(
+            ", searched {}",
+            count(tally.searches, "time", "times")
+        ));
     }
     s.push('.');
     s
@@ -367,7 +378,8 @@ fn head_span(calls: &[Call]) -> Span<'static> {
 fn sparkline(calls: &[Call]) -> Span<'static> {
     let skip = calls.len().saturating_sub(MAX_SPARKLINE);
     let glyphs: String = calls
-        .iter().skip(skip)
+        .iter()
+        .skip(skip)
         .map(|c| line::spark_glyph(c.magnitude))
         .collect();
     Span::styled(glyphs, Style::default().fg(SLATE))
@@ -525,7 +537,10 @@ mod tests {
         let rows = nonblank(&body(&calls, Reveal::Summary, width));
 
         let head = &rows[0];
-        assert!(head.contains("settled read"), "tip narrates the settled call");
+        assert!(
+            head.contains("settled read"),
+            "tip narrates the settled call"
+        );
         assert!(!head.contains("pending grep"), "not the in-flight call");
         // The pending call still counts toward the sparkline, as its shortest
         // bar — the row width stays pinned to the run's full count.

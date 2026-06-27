@@ -42,8 +42,8 @@ use crate::card::{Card, Field, FieldVal, IoEvent, IoKind, Mark, Role, Span as Ca
 use crate::credential::CredentialStore;
 use crate::fleet::{Fleet, NO_FOCUS};
 use crate::models::{LiveSource, ModelCatalog, ModelSource};
-use crate::provider::{self, Provider, ProviderKind, Usage};
 use crate::provider::scripted::Script;
+use crate::provider::{self, Provider, ProviderKind, Usage};
 use crate::state;
 use ral_core::path::sigil::expand_path_prefix;
 use std::sync::Arc;
@@ -88,8 +88,8 @@ use std::{
 use textarea_vim::{Mode, Vim, place_native_cursor};
 
 use line::{
-    AGENT_HUES, BANNER_GOLD, BANNER_PINK, CYAN, OVERLAY_BG, PINK, PURPLE, RAIL_W,
-    READ_W, SLATE, bold, LIME_HOT,
+    AGENT_HUES, BANNER_GOLD, BANNER_PINK, CYAN, LIME_HOT, OVERLAY_BG, PINK, PURPLE, RAIL_W, READ_W,
+    SLATE, bold,
 };
 use select::highlight_range;
 use viewport::Viewport;
@@ -740,7 +740,12 @@ impl App {
     /// the rebuilt session in the meantime.  `tick` then reaps the faded tabs
     /// (their viewports persist for `flush_logs`, exactly as a naturally-dead
     /// child's do).
-    pub fn clear(&mut self, info: &SessionInfo<'_>, p: &Provider, term: &mut Term) -> io::Result<()> {
+    pub fn clear(
+        &mut self,
+        info: &SessionInfo<'_>,
+        p: &Provider,
+        term: &mut Term,
+    ) -> io::Result<()> {
         let root = self.root;
         // Retire every still-live non-root tab into the linger window. A tab
         // already dying keeps its earlier death instant, so a child that died
@@ -900,7 +905,9 @@ impl App {
                     // parse-failure sentinel makes it an invisible boundary
                     // (`None`): present only so its result attaches there, never
                     // reaching back to clobber an earlier call's size bar.
-                    None => vp.push_query(tool, (cmd != crate::tools::INVALID_INPUT).then_some(cmd)),
+                    None => {
+                        vp.push_query(tool, (cmd != crate::tools::INVALID_INPUT).then_some(cmd))
+                    }
                 });
             }
             // A tool result's body is not rendered — the script the user
@@ -1415,10 +1422,7 @@ impl App {
                     width: w,
                     height: 1,
                 };
-                f.render_widget(
-                    Paragraph::new(msg).style(Style::default().fg(LIME_HOT)),
-                    r,
-                );
+                f.render_widget(Paragraph::new(msg).style(Style::default().fg(LIME_HOT)), r);
             }
             // Last: the floating picker, over the dimmed session.
             if let Some(p) = picker {
@@ -1881,7 +1885,10 @@ impl App {
             .row
             .saturating_sub(frame.text.y)
             .min(frame.text.height.saturating_sub(1));
-        let cur = (frame.offset + rel as usize, me.column.saturating_sub(frame.text.x));
+        let cur = (
+            frame.offset + rel as usize,
+            me.column.saturating_sub(frame.text.x),
+        );
         self.selection = Some((anchor, cur));
     }
 
@@ -2329,9 +2336,17 @@ fn rule_line(
     }
 
     // ── status model ──────────────────────────────────────────────────
-    { // always show model
+    {
+        // always show model
         let segment: Vec<Span<'static>> = vec![
-            Span::styled(if status_model.is_empty() { "…".to_owned() } else { status_model.to_owned() }, Style::default().fg(SLATE)),
+            Span::styled(
+                if status_model.is_empty() {
+                    "…".to_owned()
+                } else {
+                    status_model.to_owned()
+                },
+                Style::default().fg(SLATE),
+            ),
             Span::styled(" · ", Style::default().fg(SLATE)),
         ];
         left_w += segment.iter().map(|s| s.width()).sum::<usize>();
@@ -2717,7 +2732,8 @@ fn footer_hint() -> Line<'static> {
     let st = Style::default()
         .fg(SLATE)
         .add_modifier(Modifier::DIM | Modifier::ITALIC);
-    let hint = " Tab pane | drag copy (⇧ native) | Ctrl-X Ctrl-E editor | Ctrl-C cancel | /quit to leave ";
+    let hint =
+        " Tab pane | drag copy (⇧ native) | Ctrl-X Ctrl-E editor | Ctrl-C cancel | /quit to leave ";
     Line::from(Span::styled(hint, st))
 }
 
@@ -2954,7 +2970,8 @@ pub fn run(
         vi,
     )
     .map_err(|e| format!("ratatui init: {e}"))?;
-    let status_provider = crate::oauth::provider_label(provider.subscription(), provider.id().label());
+    let status_provider =
+        crate::oauth::provider_label(provider.subscription(), provider.id().label());
     tui.app.update_live_model(&provider, &status_provider);
     // Bind the App's inbox and focus to the trunk's shared handles, then build
     // the fleet: a session-lived bus over the trunk's inbox, plus the shared
@@ -3213,7 +3230,8 @@ fn ui_loop(
             // must follow focus.
             if let Some(ph) = ctx.agents.provider(now_focus) {
                 let p = ph.current();
-                let status_provider = crate::oauth::provider_label(p.subscription(), p.id().label());
+                let status_provider =
+                    crate::oauth::provider_label(p.subscription(), p.id().label());
                 tui.app.update_live_model(&p, &status_provider);
             }
         }
@@ -3263,13 +3281,16 @@ fn route_submit(
                 // If the focused agent has settled (no provider), fall back to
                 // the root'\''s provider.  If neither is available, use a
                 // throwaway scripted provider.
-                let provider_guard = ctx.agents.provider(focused)
+                let provider_guard = ctx
+                    .agents
+                    .provider(focused)
                     .map(|ph| ph.current())
                     .or_else(|| ctx.agents.provider(root).map(|ph| ph.current()));
                 if let Some(guard) = provider_guard {
                     tui.app.clear(info, &guard, tui.guard.term())?;
                 } else {
-                    let fallback = Provider::scripted("unknown", ProviderKind::Openai, Script::new());
+                    let fallback =
+                        Provider::scripted("unknown", ProviderKind::Openai, Script::new());
                     tui.app.clear(info, &fallback, tui.guard.term())?;
                 }
                 mailbox.push(InboxMsg::Command("/clear".into()));
@@ -3463,7 +3484,12 @@ fn drive_picker(
     store: &CredentialStore,
     catalog: &mut ModelCatalog<LiveSource>,
     rx: Option<FetchRx>,
-) -> Option<(provider::ProviderId, String, provider::Tuning, Option<String>)> {
+) -> Option<(
+    provider::ProviderId,
+    String,
+    provider::Tuning,
+    Option<String>,
+)> {
     // The serving-provider fetch is intent-driven and spawned from inside the
     // loop, so its channel lives for the loop's whole duration (unlike the
     // model-list `rx`, whose fetches are all kicked off before the loop). The
@@ -3615,7 +3641,8 @@ fn apply_model_switch(
     let label = provider_id.label();
     let status_provider = crate::oauth::provider_label(new_provider.subscription(), label);
     provider.swap(new_provider);
-    tui.app.update_live_model(&provider.current(), &status_provider);
+    tui.app
+        .update_live_model(&provider.current(), &status_provider);
     let state_dir = crate::bootstrap::project_dir(info.cwd);
     if let Err(e) = state::save(
         &state_dir,
@@ -3697,8 +3724,8 @@ fn key_action(mode: KeyMode, k: &KeyEvent, enter_submits: bool) -> KeyAction {
 mod banner_tests {
     use super::{SessionInfo, legend_panel, line, rail, session_card};
     use crate::card::{FieldVal, Mark, Role};
-    use crate::provider::{Provider, ProviderKind};
     use crate::provider::scripted::Script;
+    use crate::provider::{Provider, ProviderKind};
     use std::path::{Path, PathBuf};
 
     /// A representative session: a fetched-catalog model (distinct slug,
@@ -3715,7 +3742,6 @@ mod banner_tests {
             cwd: "/Users/me/projects/ral",
         }
     }
-
 
     fn sample_provider() -> Provider {
         Provider::scripted("claude-opus-4-8", ProviderKind::Anthropic, Script::new())
@@ -3792,7 +3818,11 @@ mod banner_tests {
         let FieldVal::Inline(spans) = &rs.iter().find(|(l, _)| l == "model").unwrap().1 else {
             panic!("model is an inline value");
         };
-        assert_eq!(spans.len(), 1, "without catalog data, no slug suffix appears");
+        assert_eq!(
+            spans.len(),
+            1,
+            "without catalog data, no slug suffix appears"
+        );
     }
 
     /// Present extend-base / restrict paths carry the Path identity; absent
