@@ -150,21 +150,22 @@ const TRACK_W: usize = 24;
 /// Rows of the model list visible at once.
 const VISIBLE_ROWS: u16 = 8;
 /// The overlay's fixed content width; clamped to the frame when narrower.
-const OVERLAY_W: u16 = 64;
+const OVERLAY_W: u16 = 74;
 
 /// The overlay's interior margins — the Norton-Commander "airy" padding held
 /// inside the bezel: [`PAD_X`] columns each side, [`PAD_Y`] rows top and
 /// bottom, so the controls never crowd the double-line frame.
-const PAD_X: u16 = 2;
+const PAD_X: u16 = 4;
 const PAD_Y: u16 = 1;
 /// The drop shadow's depth: the modal casts [`SHADOW_DEPTH`] columns of shade
-/// to its right and one row below, the classic Turbo-Vision/Norton-Commander
-/// lift that floats the overlay above the (dimmed) session.
+/// to its right and one row below — the canonical Turbo-Vision/Norton-Commander
+/// 2:1 lift (cells are ~2:1, so two columns read as square as one row) that
+/// floats the overlay above the (dimmed) session.
 const SHADOW_DEPTH: u16 = 2;
 /// The shadow's foreground — cells under the shadow keep their glyph but are
-/// repainted this dark slate on black, so whatever lies beneath shows as a
-/// dim silhouette rather than being blanked.
-const SHADOW_FG: Color = Color::Rgb(28, 31, 40);
+/// repainted this near-black slate, so whatever lies beneath shows as a faint
+/// silhouette rather than being blanked, the way Norton Commander inks its lift.
+const SHADOW_FG: Color = Color::Rgb(14, 16, 22);
 
 /// The temperature gradient endpoints (cold blue → warm red) and the effort
 /// value-ramp endpoints (dim → bright cyan), as raw RGB for interpolation.
@@ -261,8 +262,8 @@ pub struct Picker {
     focus: Focus,
     /// The active upstream vendor filter (the `vendor` of `vendor/model`), or
     /// `None` for "all".  Stored by name rather than by index so the displayed
-    /// tag and the applied filter cannot drift apart when the contextual and
-    /// global vendor lists differ.
+    /// tag and the applied filter cannot drift apart as the vendor list shifts
+    /// with the query.
     upstream: Option<String>,
     /// Index into [`LADDER`] — the chosen effort rung.
     effort_idx: usize,
@@ -402,16 +403,20 @@ impl Picker {
             KeyCode::Enter => return self.apply(),
             KeyCode::Tab => self.focus = self.cycle(true),
             KeyCode::BackTab => self.focus = self.cycle(false),
-            // Typing always means "filter models", whatever field had focus.
+            // Typing always means "filter models", whatever field had focus. A
+            // fresh search drops a vendor filter the new query no longer
+            // surfaces, so a stale narrowing can't hide its matches.
             KeyCode::Char(c) => {
                 self.focus = Focus::Search;
                 self.query.push(c);
                 self.selected = 0;
+                self.prune_upstream();
             }
             KeyCode::Backspace => {
                 self.focus = Focus::Search;
                 self.query.pop();
                 self.selected = 0;
+                self.prune_upstream();
             }
             KeyCode::Up => self.move_in_focus(false),
             KeyCode::Down => self.move_in_focus(true),
@@ -434,7 +439,7 @@ impl Picker {
     /// The next focus in cycle order
     /// (`Search → Upstream → Effort → Temperature → TopP → …`).
     fn cycle(&self, forward: bool) -> Focus {
-        let has_upstream = self.upstreams_for_selection().len() > 1;
+        let has_upstream = self.vendors().len() > 1;
         let order: &[Focus] = if has_upstream {
             &[Focus::Search, Focus::Upstream, Focus::Effort, Focus::Temperature, Focus::TopP]
         } else {
@@ -463,17 +468,9 @@ impl Picker {
                 } else {
                     self.selected = self.selected.saturating_sub(1);
                 }
-                // Auto-sync the upstream vendor filter to the newly selected
-                // model's vendor (or "all" for a vendorless model).
-                {
-                    let rows = self.rows();
-                    if let Some(Row::Model(_, model)) = rows.get(self.selected) {
-                        self.upstream = model.split_once('/').map(|(vendor, _)| vendor.to_string());
-                    }
-                }
             }
             Focus::Upstream => {
-                let ups = self.upstreams_for_selection();
+                let ups = self.vendors();
                 if ups.len() <= 1 {
                     return; // nothing to cycle — only "all" exists
                 }
@@ -488,11 +485,11 @@ impl Picker {
                     pos.saturating_sub(1)
                 };
                 self.upstream = (next > 0).then(|| ups[next].clone());
-                // Clamp selection to the now-filtered list.
-                let n = self.rows().len();
-                if n > 0 {
-                    self.selected = self.selected.min(n - 1);
-                }
+                // The vendor set is derived from the query matches alone, so the
+                // chosen vendor always has a model under it; jump to the top of
+                // the now-filtered list rather than risk landing on the manual
+                // row.
+                self.selected = 0;
             }
             Focus::Effort => {
                 if !self.supports("reasoning") {
@@ -519,12 +516,13 @@ impl Picker {
         }
     }
 
-    /// The filtered rows: every loaded model whose `provider / model` label
-    /// fuzzy-matches the query (ranked by `nucleo_matcher` score, ties keeping
-    /// listed order), plus a synthetic manual-entry row when the query is
-    /// non-empty (so a model that's not listed, or a provider whose fetch
-    /// failed, is still reachable). An empty query shows every model unfiltered.
-    fn rows(&self) -> Vec<Row> {
+    /// The `(provider, model)` pairs matching the current fuzzy query, ranked
+    /// by `nucleo_matcher` score (ties keeping listed order). The vendor filter
+    /// is *not* applied here: both the displayed [`Self::rows`] and the vendor
+    /// option list [`Self::vendors`] derive from this, so cycling the vendor
+    /// never perturbs the set it cycles through. An empty query yields every
+    /// loaded model in listed order.
+    fn query_matches(&self) -> Vec<(ProviderId, String)> {
         let q = self.query.trim();
 
         // (provider, model) pairs paired positionally with their haystacks.
@@ -540,22 +538,8 @@ impl Picker {
             }
         }
 
-        // Upstream filter: keep only models whose vendor prefix matches.
-        if let Some(vendor) = &self.upstream {
-            let prefix = format!("{vendor}/");
-            let keep: Vec<bool> = candidates.iter().map(|(_, m)| m.starts_with(&prefix)).collect();
-            let mut ci = 0;
-            candidates.retain(|_| { let k = keep[ci]; ci += 1; k });
-            let mut hi = 0;
-            haystacks.retain(|_| { let k = keep[hi]; hi += 1; k });
-        }
-
-        // Empty query: show every loaded model, in listed order.
         if q.is_empty() {
-            return candidates
-                .into_iter()
-                .map(|(id, model)| Row::Model(id, model))
-                .collect();
+            return candidates;
         }
 
         // Fuzzy-match each haystack, keeping its index so the row survives
@@ -563,8 +547,8 @@ impl Picker {
         let pattern = Pattern::parse(q, CaseMatching::Smart, Normalization::Smart);
         let mut buf = Vec::new();
         // A fresh per-call matcher is cheap here (one keystroke produces one
-        // `rows()` call over a small list); we cannot borrow a stored one
-        // mutably through `&self`.
+        // pass over a small list); we cannot borrow a stored one mutably
+        // through `&self`.
         let mut matcher = Matcher::new(Config::DEFAULT);
         let mut scored: Vec<(usize, u32)> = haystacks
             .iter()
@@ -577,67 +561,59 @@ impl Picker {
             .collect();
         // Descending score; stable sort keeps listed order on ties.
         scored.sort_by_key(|(_, score)| Reverse(*score));
+        scored.into_iter().map(|(i, _)| candidates[i].clone()).collect()
+    }
 
-        let mut rows: Vec<Row> = scored
+    /// The displayed rows: the query matches narrowed by the active vendor
+    /// filter, plus a synthetic manual-entry row when the query is non-empty
+    /// (so a model that's not listed, or a provider whose fetch failed, is still
+    /// reachable).
+    fn rows(&self) -> Vec<Row> {
+        let prefix = self.upstream.as_ref().map(|v| format!("{v}/"));
+        let mut rows: Vec<Row> = self
+            .query_matches()
             .into_iter()
-            .map(|(i, _)| Row::Model(candidates[i].0.clone(), candidates[i].1.clone()))
+            .filter(|(_, m)| prefix.as_ref().is_none_or(|p| m.starts_with(p)))
+            .map(|(id, model)| Row::Model(id, model))
             .collect();
-        rows.push(Row::Manual(q.to_string()));
+        let q = self.query.trim();
+        if !q.is_empty() {
+            rows.push(Row::Manual(q.to_string()));
+        }
         rows
     }
 
     fn clamp_selection(&mut self) {
+        self.prune_upstream();
         let n = self.rows().len();
         self.selected = if n == 0 { 0 } else { self.selected.min(n - 1) };
-        // Drop the vendor filter if its vendor no longer exists in any loaded
-        // provider (a list reload/failure may have removed it).
+    }
+
+    /// Drop the vendor filter when the current query no longer surfaces any
+    /// model under it — a list reload/failure that removed the vendor, or a
+    /// refined search that no longer matches it.
+    fn prune_upstream(&mut self) {
         if let Some(v) = &self.upstream {
-            if !self.upstreams().iter().any(|u| u == v) {
+            if !self.vendors().iter().any(|u| u == v) {
                 self.upstream = None;
             }
         }
     }
 
-    /// The distinct upstream vendor prefixes extracted from the loaded model
-    /// names of OpenRouter providers (the `vendor` part of `vendor/model`).
-    /// The first entry is always `"all"` (no filter); subsequent entries are the
-    /// sorted distinct prefixes, so cycling through them always starts at "all".
-    fn upstreams(&self) -> Vec<String> {
+    /// The vendor filter's options: `"all"` (no filter) followed by the sorted
+    /// distinct `vendor/` prefixes present in the current query matches. Derived
+    /// from [`Self::query_matches`] — independent of both the active filter and
+    /// the selection — so it stays put while the vendor control cycles.
+    fn vendors(&self) -> Vec<String> {
         let mut set = std::collections::BTreeSet::new();
-        for id in &self.providers {
-            if let Some(ModelsState::Loaded(models)) = self.models.get(id) {
-                for model in models {
-                    if let Some((prefix, _)) = model.split_once('/') {
-                        set.insert(prefix.to_string());
-                    }
-                }
+        for (_, model) in self.query_matches() {
+            if let Some((prefix, _)) = model.split_once('/') {
+                set.insert(prefix.to_string());
             }
         }
         let mut v: Vec<String> = vec!["all".to_string()];
         v.extend(set);
         v
-    }
-
-    /// Vendors for display: contextual to the selected model's provider when
-    /// one is highlighted, falling back to all loaded vendors otherwise.
-    fn upstreams_for_selection(&self) -> Vec<String> {
-        let rows = self.rows();
-        if self.selected < rows.len() {
-            if let Row::Model(id, _) = &rows[self.selected] {
-                let mut set = std::collections::BTreeSet::new();
-                if let Some(ModelsState::Loaded(models)) = self.models.get(id) {
-                    for model in models {
-                        if let Some((prefix, _)) = model.split_once('/') {
-                            set.insert(prefix.to_string());
-                        }
-                    }
-                }
-                let mut v: Vec<String> = vec!["all".to_string()];
-                v.extend(set);
-                return v;
-            }
-        }
-        vec!["all".to_string()]
     }
     /// Providers whose fetch failed, with their reasons — surfaced as dim
     /// notes so the absent models are explained and the manual-entry fallback
@@ -846,7 +822,7 @@ impl Picker {
     /// distinct prefixes).  It reads as a label followed by the current
     /// selection, cycling `all → anthropic → openai → …`.
     fn upstream_line(&self) -> Line<'static> {
-        let ups = self.upstreams_for_selection();
+        let ups = self.vendors();
         if ups.len() <= 1 {
             let style = if self.focus == Focus::Upstream {
                 Style::default().fg(CYAN).add_modifier(Modifier::BOLD)
@@ -1073,6 +1049,27 @@ mod tests {
         p.set_models(
             &fam(ProviderKind::Deepseek),
             ModelsState::Loaded(vec!["deepseek-chat".into()]),
+        );
+        p
+    }
+
+    /// An OpenRouter provider whose models carry `vendor/model` ids — the case
+    /// the vendor filter exists for.
+    fn openrouter_picker() -> Picker {
+        let mut p = Picker::new(
+            vec![fam(ProviderKind::Openrouter)],
+            BTreeMap::new(),
+            Tuning::default(),
+            caps_unknown,
+        );
+        p.set_models(
+            &fam(ProviderKind::Openrouter),
+            ModelsState::Loaded(vec![
+                "anthropic/claude-3".into(),
+                "deepseek/deepseek-chat".into(),
+                "deepseek/deepseek-r1".into(),
+                "openai/gpt-5".into(),
+            ]),
         );
         p
     }
@@ -1452,5 +1449,60 @@ mod tests {
             p.tuning().effort.as_ref().map(|e| e.variant_name()),
             Some("high")
         );
+    }
+
+    /// With OpenRouter `vendor/model` ids loaded, Tab reaches the vendor control
+    /// and Right cycles the filter through the prefixes present in the matches —
+    /// all → anthropic → deepseek → openai — clamping at the end, each step
+    /// keeping a real model under the cursor (never "auto" nor the manual row).
+    /// Left walks the filter back down to "all".
+    #[test]
+    fn vendor_cycles_through_match_prefixes_keeping_a_model_selected() {
+        let mut p = openrouter_picker();
+        assert_eq!(p.vendors(), ["all", "anthropic", "deepseek", "openai"].map(String::from));
+
+        p.key(KeyCode::Tab); // Search → Upstream
+        assert_eq!(p.focus, Focus::Upstream);
+
+        for vendor in ["anthropic", "deepseek", "openai"] {
+            p.key(KeyCode::Right);
+            assert_eq!(p.upstream.as_deref(), Some(vendor));
+            assert!(
+                p.highlighted_model()
+                    .is_some_and(|m| m.starts_with(&format!("{vendor}/"))),
+                "a {vendor} model stays highlighted"
+            );
+        }
+        // Right at the end clamps — it does not wrap back to "all".
+        p.key(KeyCode::Right);
+        assert_eq!(p.upstream.as_deref(), Some("openai"));
+
+        p.key(KeyCode::Left); // deepseek
+        p.key(KeyCode::Left); // anthropic
+        p.key(KeyCode::Left); // all
+        assert_eq!(p.upstream, None);
+    }
+
+    /// The reported bug: after a fuzzy search, Tab into the vendor control and
+    /// Right picks the vendor — it does not reset to "all" nor swap the
+    /// selection to the manual row, and Enter applies the listed model.
+    #[test]
+    fn vendor_right_after_search_picks_vendor_not_auto() {
+        let mut p = openrouter_picker();
+        for c in "deepseek".chars() {
+            p.key(KeyCode::Char(c));
+        }
+        // Only deepseek ids match, so the vendor choice is all ↔ deepseek.
+        assert_eq!(p.vendors(), ["all", "deepseek"].map(String::from));
+
+        p.key(KeyCode::Tab);
+        assert_eq!(p.focus, Focus::Upstream);
+
+        p.key(KeyCode::Right);
+        assert_eq!(p.upstream.as_deref(), Some("deepseek"));
+        match p.key(KeyCode::Enter) {
+            PickAction::Selected(_, m, _) => assert!(m.starts_with("deepseek/")),
+            _ => panic!("expected a listed deepseek model, not the manual row"),
+        }
     }
 }
