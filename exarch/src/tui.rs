@@ -3015,11 +3015,15 @@ pub fn run(
         engine: fleet.engine(),
     };
     std::thread::scope(|scope| -> Result<(), String> {
-        let worker = scope.spawn(move || {
-            let out = session.drive(&mut control, &worker_emit);
-            done_ref.store(true, Ordering::Release);
-            out
-        });
+        let worker = std::thread::Builder::new()
+            .stack_size(4 * 1024 * 1024)
+            .spawn_scoped(scope, move || {
+                let out = session.drive(&mut control, &worker_emit);
+                done_ref.store(true, Ordering::Release);
+                out
+            })
+            .expect("spawn agent worker");
+
         let r = ui_loop(&mut tui, &fleet.bus, done_ref, &mut cmd_ctx);
         if r.is_err() {
             quit_mailbox.push(InboxMsg::Command("/quit".into()));
