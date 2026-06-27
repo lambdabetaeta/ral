@@ -639,7 +639,8 @@ fn heading_style(level: HeadingLevel) -> Style {
 /// Consume events from `p` up to and including `End(Table)` and emit a
 /// boxed table.  Column widths are the natural max, scaled down
 /// proportionally if the total exceeds the budget.  Cell content beyond
-/// its column width is clipped with `…`.
+/// its column width word-wraps onto further rows ([`wrap_spans`]) rather
+/// than being clipped, so no content is lost to a budget squeeze.
 fn render_table<'a, I: Iterator<Item = Event<'a>>>(
     p: &mut I,
     aligns: Vec<Alignment>,
@@ -723,7 +724,8 @@ fn render_table<'a, I: Iterator<Item = Event<'a>>>(
             w.max(1)
         })
         .collect();
-    // Frame columns: "│ " + ("…" + " │ ") * (n-1) + "…" + " │"  =  3n + 1.
+    // Frame columns: "│ " + cell + (" │ " + cell) * (n-1) + " │"  =  3n + 1
+    // of fixed chrome, leaving the rest for cell content.
     let frame = 3 * n_cols + 1;
     let avail = budget.saturating_sub(frame);
     let total: usize = widths.iter().sum();
@@ -744,49 +746,64 @@ fn render_table<'a, I: Iterator<Item = Event<'a>>>(
 
     let mut out = Vec::with_capacity(2 + body_rows.len());
     if !head_cells.is_empty() {
-        out.push(render_table_row(&head_cells, &widths, &aligns));
+        out.extend(render_table_row(&head_cells, &widths, &aligns));
     }
     out.push(render_table_rule(&widths));
     for r in &body_rows {
-        out.push(render_table_row(r, &widths, &aligns));
+        out.extend(render_table_row(r, &widths, &aligns));
     }
     out
 }
 
+/// Render one table row, wrapping each cell to its column width.  The row
+/// is as tall as its tallest cell; cells with fewer wrapped lines pad the
+/// remainder with blanks so the column frame stays aligned.
 fn render_table_row(
     row: &[Vec<Span<'static>>],
     widths: &[usize],
     aligns: &[Alignment],
-) -> Line<'static> {
+) -> Vec<Line<'static>> {
+    let empty = Vec::new();
+    let wrapped: Vec<Vec<Vec<Span<'static>>>> = widths
+        .iter()
+        .enumerate()
+        .map(|(i, &w)| wrap_spans(row.get(i).unwrap_or(&empty), w))
+        .collect();
+    let height = wrapped.iter().map(Vec::len).max().unwrap_or(1).max(1);
+
     let bar = |s: &'static str| Span::styled(s, Style::default().fg(SLATE));
-    let mut spans: Vec<Span<'static>> = Vec::with_capacity(widths.len() * 4 + 2);
-    spans.push(bar("│ "));
-    for (i, &w) in widths.iter().enumerate() {
-        if i > 0 {
-            spans.push(bar(" │ "));
+    let blank: Vec<Span<'static>> = Vec::new();
+    let mut out = Vec::with_capacity(height);
+    for li in 0..height {
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(widths.len() * 4 + 2);
+        spans.push(bar("│ "));
+        for (i, &w) in widths.iter().enumerate() {
+            if i > 0 {
+                spans.push(bar(" │ "));
+            }
+            let cell = wrapped[i].get(li).unwrap_or(&blank);
+            let cell_w: usize = cell
+                .iter()
+                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
+            let pad = w.saturating_sub(cell_w);
+            let (lp, rp) = match aligns.get(i).copied().unwrap_or(Alignment::Left) {
+                Alignment::Right => (pad, 0),
+                Alignment::Center => (pad / 2, pad - pad / 2),
+                _ => (0, pad),
+            };
+            if lp > 0 {
+                spans.push(Span::raw(" ".repeat(lp)));
+            }
+            spans.extend(cell.iter().cloned());
+            if rp > 0 {
+                spans.push(Span::raw(" ".repeat(rp)));
+            }
         }
-        let empty = Vec::new();
-        let cell = row.get(i).unwrap_or(&empty);
-        let cell_w: usize = cell
-            .iter()
-            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-            .sum();
-        let pad = w.saturating_sub(cell_w.min(w));
-        let (lp, rp) = match aligns.get(i).copied().unwrap_or(Alignment::Left) {
-            Alignment::Right => (pad, 0),
-            Alignment::Center => (pad / 2, pad - pad / 2),
-            _ => (0, pad),
-        };
-        if lp > 0 {
-            spans.push(Span::raw(" ".repeat(lp)));
-        }
-        spans.extend(clip_spans(cell, w));
-        if rp > 0 {
-            spans.push(Span::raw(" ".repeat(rp)));
-        }
+        spans.push(bar(" │"));
+        out.push(Line::from(spans));
     }
-    spans.push(bar(" │"));
-    Line::from(spans)
+    out
 }
 
 fn render_table_rule(widths: &[usize]) -> Line<'static> {
@@ -801,38 +818,54 @@ fn render_table_rule(widths: &[usize]) -> Line<'static> {
     Line::from(Span::styled(s, Style::default().fg(SLATE)))
 }
 
-/// Clip a styled span sequence to at most `w` columns, replacing the tail
-/// with `…` when truncation occurs.  Spans that fit verbatim are passed
-/// through unchanged so cell styling is preserved.
-fn clip_spans(spans: &[Span<'static>], w: usize) -> Vec<Span<'static>> {
-    let mut out: Vec<Span<'static>> = Vec::with_capacity(spans.len());
-    let mut used = 0;
+/// Word-wrap a styled span sequence into lines of at most `w` columns,
+/// preserving each span's style.  Words wider than `w` on their own are
+/// broken by character.  Whitespace between words is normalised to a
+/// single space (table cells fold soft/hard breaks to spaces upstream).
+/// Always yields at least one line, possibly empty.
+fn wrap_spans(spans: &[Span<'static>], w: usize) -> Vec<Vec<Span<'static>>> {
+    let w = w.max(1);
+    let mut lines: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut cur: Vec<Span<'static>> = Vec::new();
+    let mut cur_w = 0;
     for s in spans {
-        if used >= w {
-            break;
-        }
-        let cw = UnicodeWidthStr::width(s.content.as_ref());
-        if used + cw <= w {
-            out.push(s.clone());
-            used += cw;
-            continue;
-        }
-        let rem = w.saturating_sub(used).saturating_sub(1);
-        let mut buf = String::new();
-        let mut bw = 0;
-        for ch in s.content.chars() {
-            let cwidth = UnicodeWidthChar::width(ch).unwrap_or(0);
-            if bw + cwidth > rem {
-                break;
+        for word in s.content.split_whitespace() {
+            let ww = UnicodeWidthStr::width(word);
+            if cur_w > 0 && cur_w + 1 + ww > w {
+                lines.push(std::mem::take(&mut cur));
+                cur_w = 0;
             }
-            buf.push(ch);
-            bw += cwidth;
+            if ww <= w {
+                if cur_w > 0 {
+                    cur.push(Span::styled(" ".to_string(), s.style));
+                    cur_w += 1;
+                }
+                cur.push(Span::styled(word.to_string(), s.style));
+                cur_w += ww;
+                continue;
+            }
+            // Word exceeds the budget on its own; break it by character.
+            let mut buf = String::new();
+            let mut bw = 0;
+            for ch in word.chars() {
+                let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if bw + cw > w && !buf.is_empty() {
+                    cur.push(Span::styled(std::mem::take(&mut buf), s.style));
+                    lines.push(std::mem::take(&mut cur));
+                    cur_w = 0;
+                    bw = 0;
+                }
+                buf.push(ch);
+                bw += cw;
+            }
+            if !buf.is_empty() {
+                cur.push(Span::styled(buf, s.style));
+                cur_w = bw;
+            }
         }
-        buf.push('…');
-        out.push(Span::styled(buf, s.style));
-        break;
     }
-    out
+    lines.push(cur);
+    lines
 }
 
 // ── syntax highlighting ──────────────────────────────────────────────────
