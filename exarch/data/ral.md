@@ -179,19 +179,20 @@ This is how you read a tool whose exit code is *data* (e.g. `grep` exit 1 meanin
 
 ## Concurrency
 
-`spawn { … }` runs a block on a worker and returns a handle at once:
+`defer { … }` runs a block on a worker and returns a handle at once; use it for long-running calls:
 
-    let h = spawn { cargo build }  # do not forget to bind the handle!
+    let b = { make } 
+    let h = defer $b        # or inline; do not forget to keep the handle!
     'build started'
 
-If you have nothing else to do, ***WAIT, DO NOT POLL***; you will be notified when the build completes. When you receive the notification use `await` to obtain a `[value, stdout, stderr]` record:
+If you have nothing else to do, inform the user and ***WAIT***; you will be notified when the build completes. When you receive the notification use `await` to obtain a `[value, stdout, stderr]` record:
 
     let x = await $h                      # blocks until the worker returns
     [out: $x[stdout], errs: $x[stderr]]   # as Bytes
 
 If this fails, ***DO NOT SPAWN AGAIN**. In the next turn just await again: `let x = await $h`. Alternatively, yield to the user and you will be notified.
 
-Use `cancel $h` to stop a spawned thread that is no longer needed. There is also a bounded parallel `map` and a `race`; use `help` to find out more about them. 
+Use `cancel $h` to stop a handle thread that is no longer needed. There is also a bounded parallel `map` and a `race`: use `help` to find out more about them. 
 
 ## Within
 
@@ -249,7 +250,7 @@ For dot/ignored files you also have `rg` bundled.
 
 The hash depends on the content of each line and its neighbours. 
 
-`edit PATH EDITS` applies a batch of edits. It accepts a list of `[HASH, NEWTEXT]` and atomically replaces each lines uniquely identified by `HASH` with `NEWTEXT` verbatim (adding newlines). It is batched because changing a line invalidates the hash of adjacent ones. Use raw strings `#'…'#` for `NEWTEXT` without any escapes. is useful for replacements; never use interpolating double quotes for editing. All hashes resolve against the file before edits:
+`edit PATH EDITS` applies a batch of edits. It accepts a list of `[HASH, NEWTEXT]` and atomically replaces each line uniquely identified by `HASH` with `NEWTEXT` verbatim (adding newlines). It is batched because changing a line invalidates the hash of adjacent ones. Use raw strings `#'…'#` for `NEWTEXT` without any escapes. is useful for replacements; never use interpolating double quotes for editing. All hashes resolve against the file before edits:
 
     view-text 80 120 < src/lib.rs       # view hashes
     edit 'src/lib.rs' [
@@ -259,7 +260,7 @@ The hash depends on the content of each line and its neighbours.
       [h7a8b9, '']
     ]
 
-Collect as many edits as possible in one call to ensure freshness.
+Collect as many edits as possible in one call to ensure freshness. You must mention the hash of each line you want changed: an edit may add new lines, but does not overwrite.
 
 `edit` composes with search: `grep-files` finds the lines but does not hash them; map a `view-text-around` over the hits to show every place with the witness hash `edit` checks, then read the hashes off into one batched `edit`:
 
