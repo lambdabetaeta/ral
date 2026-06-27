@@ -256,11 +256,10 @@ fn path_dirs(err_prefix: &str) -> Result<Vec<String>, String> {
         if entry.is_empty() {
             continue;
         }
-        let p = std::path::Path::new(entry);
-        if !p.is_absolute() {
+        if !crate::path::is_absolute(entry) {
             continue; // skip relative PATH entries silently
         }
-        let normalized = crate::path::NormalizedPrefix::from_surface(p);
+        let normalized = crate::path::NormalizedPrefix::from_surface(entry);
         dirs.push(normalized.into_string());
     }
     if dirs.is_empty() {

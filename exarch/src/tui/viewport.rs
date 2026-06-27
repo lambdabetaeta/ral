@@ -789,11 +789,10 @@ impl Viewport {
         let mut end = start;
         let mut i = start;
         while i < self.blocks.len() {
-            if in_run(&self.blocks[i]) {
+            // A run member or a step both fold into the run; anything else ends it.
+            if in_run(&self.blocks[i]) || self.blocks[i].is_step() {
                 i += 1;
                 end = i;
-            } else if self.blocks[i].is_step() {
-                i += 1; end = i;
             } else {
                 break;
             }

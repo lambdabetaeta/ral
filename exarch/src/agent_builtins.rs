@@ -743,8 +743,8 @@ fn builtin_fff(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "fff")?;
     let query = args[0].to_string();
     let cwd = checked_read_path(shell, ".")?;
-    let idx = index_for(&cwd).map_err(|e| sig(e))?;
-    let paths = search_paths(idx, &query, DEFAULT_LIMIT).map_err(|e| sig(e))?;
+    let idx = index_for(&cwd).map_err(sig)?;
+    let paths = search_paths(idx, &query, DEFAULT_LIMIT).map_err(sig)?;
     Ok(Value::list(paths.into_iter().map(Value::String).collect()))
 }
 

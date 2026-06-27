@@ -134,10 +134,8 @@ pub fn decode_surface(ev: &RalValue) -> Option<Kind> {
         Some(Kind::Io { event, card })
     } else if let Some(card) = value_to_card(ev) {
         Some(Kind::Card(card))
-    } else if let Some(outcome) = value_to_done(ev) {
-        Some(Kind::Card(done_card(&outcome)))
     } else {
-        None
+        value_to_done(ev).map(|outcome| Kind::Card(done_card(&outcome)))
     }
 }
 
