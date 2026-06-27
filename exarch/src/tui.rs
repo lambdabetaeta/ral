@@ -102,7 +102,7 @@ pub(super) const PROMPT_PAD_H: u16 = 1;
 const LEFT_MARGIN: u16 = 2;
 /// Width of the pinned-state register column, in columns — a framed gauge
 /// (`│ tasks ▓▓░ 3/8 │`) plus its borders and a padding column each side.
-const REGISTER_W: u16 = 28;
+const REGISTER_W: u16 = 35;
 /// Minimum reading gap between the `READ_W`-capped transcript and the register
 /// column.  The register is reserved only when the content area is at least
 /// `LEFT_MARGIN + READ_W + REGISTER_GAP + REGISTER_W` wide — wide enough that

@@ -118,17 +118,12 @@ let load-tasks = { |path|    from-json     < $path }
 let task-to-marks = { |t|
   let id-str = "#$t[id]  "
   let status-str = !{to-string $t[status] | from-string}
-  let tag-str = if !{is-empty $t[tags]} { "" } else { "  [!{intercalate "," $t[tags]}]" }
-  let note-str = if !{equal $t[notes] ""} { "" } else { "  -- $t[notes]" }
   let header =
     if    !{equal $t[status] `done}    { [[role: "muted", text: $id-str], [role: "ok",    text: $status-str]] }
     elsif !{equal $t[status] `doing}   { [[role: "muted", text: $id-str], [role: "warn",   text: $status-str]] }
     elsif !{equal $t[status] `blocked} { [[role: "muted", text: $id-str], [role: "bad",    text: $status-str]] }
     else                               { [[role: "muted", text: $id-str], [role: "muted",  text: $status-str]] }
-  let desc-span = [[role: "", text: "  $t[desc]"]]
-  let tag-span  = if !{is-empty $t[tags]}    { [] }  else { [[role: "code",  text: $tag-str]] }
-  let note-span = if !{equal $t[notes] ""}   { [] } else { [[role: "muted", text: $note-str]] }
-  let body = [...$desc-span, ...$tag-span, ...$note-span]
+  let body = [[role: "", text: "  $t[desc]"]]
   [`text [spans: $header], `text [spans: $body]]
 }
 
