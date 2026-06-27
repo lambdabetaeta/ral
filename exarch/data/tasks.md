@@ -1,12 +1,21 @@
 A task management kit is always loaded; use it to remember what to do next. Store tasks in `$exarch-tasks`, and update them across turns:
 
-  let exarch-tasks = empty-tasks
+  let exarch-tasks = $empty-tasks
   let exarch-tasks = add-task $exarch-tasks "do one thing"
   let exarch-tasks = add-task $exarch-tasks "do second thing"
-  render-tasks $exarch-tasks                           # view remaining tasks
+
+When you begin a task you only need to run
+
   let exarch-tasks = transition $exarch-tasks 1 `doing  # before you begin
-  let exarch-tasks = remove-task $exarch-tasks 2       # task no longer necessary
+
+When that is finished, mark it as done and view the test:
+
   let exarch-tasks = transition $exarch-tasks 1 `done
+  render-tasks $exarch-tasks                           # view remaining tasks
+
+If at this point task 2 is no longer necessary, run
+
+  let exarch-tasks = remove-task $exarch-tasks 2       # task no longer necessary
 
 Definitions - remember to use immutably:
 
