@@ -88,8 +88,8 @@ use std::{
 use textarea_vim::{Mode, Vim, place_native_cursor};
 
 use line::{
-    AGENT_HUES, BANNER_GOLD, BANNER_PINK, CYAN, LIME_HOT, OVERLAY_BG, PINK, PURPLE, RAIL_W, READ_W,
-    SLATE, bold,
+    AGENT_HUES, BANNER_GOLD, BANNER_PINK, CYAN, LIME_HOT, OVERLAY_BG, PINK, PURPLE, READ_W, SLATE,
+    bold,
 };
 use select::highlight_range;
 use viewport::Viewport;
@@ -564,11 +564,9 @@ struct Press {
     row: usize,
     /// Cell column within the text area (0 = left edge) under the press.
     col: u16,
-    /// Block under the press, cycled on a rail click that never dragged.
+    /// Block under the press, cycled on a click over it that never
+    /// dragged — a no-op when the block is not dialable.
     block: Option<usize>,
-    /// Whether the press landed on the rail column (cols 0–1), where a
-    /// click cycles the block; a click off the rail stays selection.
-    on_rail: bool,
     dragged: bool,
 }
 
@@ -1743,11 +1741,11 @@ impl App {
         // crosses a dialable block.
         self.hover = self.hover_block(me);
         match me.kind {
-            // Over the rail glyph of a dialable block, the wheel dials the
-            // block's disclosure level (up reveals, down reduces) and
-            // consumes the event; otherwise it scrolls the viewport.
-            MouseEventKind::ScrollUp if self.rail_dial(me, 1) => {}
-            MouseEventKind::ScrollDown if self.rail_dial(me, -1) => {}
+            // Anywhere over a dialable block, the wheel dials its disclosure
+            // level (up reveals, down reduces) and consumes the event; once
+            // the level clamps — or over inert chrome — it scrolls instead.
+            MouseEventKind::ScrollUp if self.wheel_dial(me, 1) => {}
+            MouseEventKind::ScrollDown if self.wheel_dial(me, -1) => {}
             MouseEventKind::ScrollUp => self.scroll(-(SCROLL_STEP as isize)),
             MouseEventKind::ScrollDown => self.scroll(SCROLL_STEP as isize),
             MouseEventKind::Down(MouseButton::Left)
@@ -1761,29 +1759,11 @@ impl App {
         }
     }
 
-    /// Map a wheel event over a block's rail to its buffer row's block, or
-    /// `None` when the event falls outside the rail columns (cols 0–1 of
-    /// the content rect — the [`RAIL_W`] target the click-cycle shares) or
-    /// past the buffer.  Both columns dial, so the wheel claims the same
-    /// two-wide strip the click does rather than a single-glyph needle.
-    fn rail_block(&self, me: MouseEvent) -> Option<usize> {
-        let frame = self.frame?;
-        let on_rail = me.column >= frame.text.x
-            && (me.column as usize) < frame.text.x as usize + RAIL_W
-            && me.row >= frame.text.y
-            && me.row < frame.text.y + frame.text.height;
-        if !on_rail {
-            return None;
-        }
-        let row = frame.offset + (me.row - frame.text.y) as usize;
-        self.viewports.get(&self.focused())?.block_at(row)
-    }
-
     /// The dialable block under the pointer anywhere in the content rect,
     /// or `None` over inert chrome, a non-dialable block, or past the
-    /// buffer.  Wider than [`Self::rail_block`]: the whole block row claims
-    /// the hover, so the dial glyph lights the moment the pointer reaches
-    /// the block and guides it to the rail rather than waiting for a hit.
+    /// buffer.  The whole block claims the pointer — its entire vertical
+    /// extent, not just the rail — so the dial glyph lights, the wheel
+    /// dials, and the click cycles anywhere over a coalesced run.
     fn hover_block(&self, me: MouseEvent) -> Option<usize> {
         let frame = self.frame?;
         if !contains(frame.text, me.column, me.row) {
@@ -1795,24 +1775,23 @@ impl App {
         vp.block_dialable(idx).then_some(idx)
     }
 
-    /// Dial the block under a rail-glyph wheel event by `delta`,
-    /// returning whether the event was consumed — `true` whenever it sat
-    /// on the glyph of a dialable block, so a wheel that overshoots the
-    /// clamp rests as an inert no-op rather than spilling into a page
-    /// scroll.  Only a glyph over inert chrome leaves the wheel to scroll.
-    fn rail_dial(&mut self, me: MouseEvent, delta: i8) -> bool {
-        let Some(idx) = self.rail_block(me) else {
+    /// Dial the dialable block under a wheel event by `delta`, returning
+    /// whether it dialed — `true` only when the level actually changed.  The
+    /// whole vertical extent of the block is the target (the region the
+    /// hover glyph lights), so the wheel dials anywhere over a coalesced
+    /// run, not just on its rail.  A wheel over inert chrome, over a
+    /// non-dialable block, or over a block already clamped at the requested
+    /// end returns `false` and falls through to a viewport scroll — so a
+    /// tall run never traps the wheel.
+    fn wheel_dial(&mut self, me: MouseEvent, delta: i8) -> bool {
+        let Some(idx) = self.hover_block(me) else {
             return false;
         };
         let id = self.focused();
         let Some(vp) = self.viewports.get_mut(&id) else {
             return false;
         };
-        if !vp.block_dialable(idx) {
-            return false;
-        }
-        vp.dial_block(idx, delta);
-        true
+        vp.dial_block(idx, delta)
     }
 
     /// Scroll the focused pane by `delta` rows (negative = up).
@@ -1851,12 +1830,10 @@ impl App {
         let col = me.column.saturating_sub(frame.text.x);
         let id = self.focused();
         let block = self.viewports.get(&id).and_then(|vp| vp.block_at(row));
-        let on_rail = (me.column as usize) < frame.text.x as usize + RAIL_W;
         self.press = Some(Press {
             row,
             col,
             block,
-            on_rail,
             dragged: false,
         });
     }
@@ -1880,8 +1857,8 @@ impl App {
     }
 
     /// Finish a left-button gesture: a drag copies its selection, a bare
-    /// click on the rail cycles the block it landed on (L1↔L3); a click
-    /// off the rail stays selection.
+    /// click over a dialable block cycles it (L1↔L3); a bare click over
+    /// inert content stays selection (a no-op clear).
     fn release(&mut self) {
         let Some(press) = self.press.take() else {
             return;
@@ -1895,9 +1872,7 @@ impl App {
                 self.copy_toast = Some((text.len(), Instant::now()));
                 let _ = osc52_copy(&text);
             }
-        } else if press.on_rail
-            && let Some(idx) = press.block
-        {
+        } else if let Some(idx) = press.block {
             if let Some(vp) = self.viewports.get_mut(&id) {
                 vp.cycle_block(idx);
             }
