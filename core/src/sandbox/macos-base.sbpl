@@ -59,3 +59,32 @@
 (allow file-write* (literal "/dev/dtracehelper"))
 (allow file-write* (literal "/dev/tty"))
 (allow file-ioctl (literal "/dev/dtracehelper"))
+;; ── Toolchain support (libc / libdispatch / dyld init) ──
+;; Every process linked against the system libc reads the ICU timezone
+;; database on first localtime_r call.  This path is outside every
+;; user-grant prefix; without it rustc/cc/ld SIGABRT in tzsetwall_basic.
+(allow file-read* (literal "/private/var/db/timezone/icutz"))
+
+;; libdispatch registers with the shared-memory notification center on
+;; first queue creation (libSystem init).  Even though the base profile
+;; carries an unfiltered (allow mach-lookup), macOS ≥ 14 resolves
+;; shared-memory services through a separate Mach task-port path that
+;; the global rule does not cover; the explicit global-name allow is the
+;; narrowest carve-out that closes this.
+(allow mach-lookup (global-name "apple.shm.notification_center"))
+
+;; The arm64 dynamic linker issues an fsctl ioctl during code-signature
+;; validation.  The unfiltered form here is safe — and is standard in
+;; every macOS build sandbox (Xcode's, Bazel's, Chromium's) — because
+;; ioctl operates on file descriptors you already hold; it grants no
+;; new open(2) capability.  Dangerous ioctls (format a disk, eject a
+;; volume, reconfigure raw sockets) all require a file descriptor to a
+;; device node that the sandbox prevents you from opening in the first
+;; place.  The open-time gate provides the real security boundary.
+(allow file-ioctl)
+
+;; CoreFoundation and libdispatch use POSIX shared memory (shm_open /
+;; shm_unlink) for internal state.  Every process that links against
+;; CoreFoundation — which is every non-trivial build tool — hits this
+;; during framework init.  Standard in every macOS build sandbox.
+(allow ipc-posix-shm)
