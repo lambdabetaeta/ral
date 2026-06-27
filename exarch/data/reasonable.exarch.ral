@@ -1,9 +1,10 @@
 # `reasonable` bake-in.  Coreutils + a curated everyday-tooling set
 # (shells, version control, net fetch, search/inspect, scripting,
 # archives), plus directory-based allowance (trailing-`/` keys in
-# `exec`) for the standard system / package-manager binary dirs so
-# build drivers (cargo, make, cc, npm, …) work out of the box.
-#
+# `exec`) for the standard system / package-manager binary dirs, plus
+# everything already on `$PATH` via the `path:` sigil, so
+# build drivers (cargo, make, cc, npm, …) work out of the box and
+# user-installed tooling is automatically visible.
 # In spirit similar to Claude Code's default tool set.  The OS
 # sandbox (Seatbelt fs/net rules) still does the real work — a
 # permissive exec list paired with a strict fs grant means the
@@ -143,6 +144,12 @@ return [
   # more-specific match, so `bash: 'deny'` overrides `'/bin/': 'allow'`
   # even though `/bin/bash` is under `/bin/`.
   exec: [
+    # Admit every binary on PATH.  Expands at freeze time: each `:`
+    # separator in `$PATH` becomes a `dirs` entry with this verdict.
+    # Per-name denies (`bash`, `zsh`) still beat the directory entries
+    # because literal keys win on more-specific match.
+    'path:': 'allow',
+
     'xdg:bin/':            'allow',   # ${XDG_BIN_HOME:-~/.local/bin}
     '/usr/bin/':           'allow',
     '/bin/':               'allow',

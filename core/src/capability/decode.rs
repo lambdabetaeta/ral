@@ -189,6 +189,11 @@ fn require_absolute(
 /// paths) carry sigils and must resolve absolute, while bare command
 /// names (`git`, `kubectl`) are names rather than paths and pass
 /// through unchanged.
+///
+/// The `path:` sigil is expanded here: it reads `$PATH`, splits on `:`,
+/// and inserts each absolute component as a `dirs` entry with the given
+/// verdict.  `path:` only accepts `allow`/`deny` — a subcommand list
+/// makes no sense against a directory prefix.
 fn freeze_exec_map(
     map: ExecMap,
     ctx: &crate::path::sigil::FreezeCtx<'_>,
@@ -200,21 +205,70 @@ fn freeze_exec_map(
         require_absolute(&frozen, key, err_prefix)?;
         Ok(frozen.into_string())
     };
+
     let mut literals = BTreeMap::new();
-    for (key, policy) in map.literals {
-        let key = if looks_like_path_or_sigil(&key) {
-            freeze_key(&key)?
-        } else {
-            key
-        };
-        literals.insert(key, policy);
-    }
     let mut dirs = BTreeMap::new();
-    for (key, dir) in map.dirs {
-        let frozen = freeze_key(&key)?;
-        dirs.insert(frozen, dir);
+
+    // Expand `path:` sigil — one directory entry per PATH component.
+    for (key, policy) in map.literals {
+        if key == "path:" {
+            let verdict = match policy {
+                ExecPolicy::Allow => ExecDir::Allow,
+                ExecPolicy::Deny => ExecDir::Deny,
+                _ => return Err(format!(
+                    "{err_prefix}: 'path:' only takes 'allow' or 'deny', not a subcommand list"
+                )),
+            };
+            for d in path_dirs(err_prefix)? {
+                dirs.insert(d, verdict.clone());
+            }
+        } else {
+            let key = if looks_like_path_or_sigil(&key) {
+                freeze_key(&key)?
+            } else {
+                key
+            };
+            literals.insert(key, policy);
+        }
     }
+
+    // Also expand `path:/` — the decoder strips the trailing `/`, so a
+    // `'path:/': 'allow'` entry lands here as `"path:"` in `dirs`.
+    for (key, dir) in map.dirs {
+        if key == "path:" {
+            for d in path_dirs(err_prefix)? {
+                dirs.insert(d, dir.clone());
+            }
+        } else {
+            let frozen = freeze_key(&key)?;
+            dirs.insert(frozen, dir);
+        }
+    }
+
     Ok(ExecMap { literals, dirs })
+}
+/// Split `$PATH`, normalise each absolute entry, skip empties and relatives.
+fn path_dirs(err_prefix: &str) -> Result<Vec<String>, String> {
+    let path = std::env::var("PATH").unwrap_or_default();
+    let mut dirs = Vec::new();
+    for entry in path.split(':') {
+        if entry.is_empty() {
+            continue;
+        }
+        let p = std::path::Path::new(entry);
+        if !p.is_absolute() {
+            continue; // skip relative PATH entries silently
+        }
+        let normalized = crate::path::NormalizedPrefix::from_surface(p);
+        dirs.push(normalized.into_string());
+    }
+    if dirs.is_empty() {
+        return Err(format!(
+            "{err_prefix}: 'path:' expands to zero absolute directories — \
+             PATH is empty, unset, or contains only relative entries"
+        ));
+    }
+    Ok(dirs)
 }
 
 // ── Exec policy decoder ───────────────────────────────────────────────────
