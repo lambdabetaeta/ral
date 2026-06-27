@@ -59,6 +59,18 @@ pub(crate) fn agent_library_docs() -> Vec<(String, String)> {
     [
         ("view-text", "view-text START END < PATH  — show the half-open line range [START, END), each line tagged `<line-no>\\t<hash>\\t<text>`; the hash is the ±3-context witness `edit` checks."),
         ("view-text-around", "view-text-around LINE PEEK < PATH  — show the 2*PEEK+1 lines centred on LINE, tagged like `view-text`, clamped at the top of the file."),
+        ("empty-tasks", "empty-tasks  — an empty task list; canonical initialiser"),
+        ("add-task", "add-task $exarch-tasks <desc>  — allocate fresh id, append task, update pinned gauge"),
+        ("remove-task", "remove-task $exarch-tasks <id>  — drop task by id, update pinned gauge"),
+        ("tag-task", "tag-task $exarch-tasks <id> <tag>  — add a tag to a task"),
+        ("untag-task", "untag-task $exarch-tasks <id> <tag>  — remove a tag from a task"),
+        ("note-task", "note-task $exarch-tasks <id> <note>  — set notes on a task"),
+        ("retag-task", "retag-task $exarch-tasks <id> <tags>  — replace all tags on a task"),
+        ("transition", "transition $exarch-tasks <id> <status>  — change status (validated: `open|`doing|`blocked|`done) + update pinned gauge"),
+        ("status-counts", "status-counts $exarch-tasks  — record of per-status counts (single fold)"),
+        ("render-tasks", "render-tasks $exarch-tasks  — echo each task to stdout"),
+        ("save-tasks", "save-tasks $exarch-tasks <path>  — write task list as JSON"),
+        ("load-tasks", "load-tasks <path>  — read task list from JSON"),
     ]
     .into_iter()
     .map(|(n, d)| (n.to_string(), d.to_string()))

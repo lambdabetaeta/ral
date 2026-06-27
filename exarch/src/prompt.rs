@@ -22,20 +22,25 @@ use std::path::{Path, PathBuf};
 ///    prose that points `help` at it: the agent reads the whole surface at a
 ///    glance and `help <name>`s any one for its signature and docs on demand,
 ///    since the full help strings proved far too long to bake in.
-/// 4. **Script style** (`data/script-style.md`) — the scripting guide.
-/// 5. **Host** — the environment snapshot ([`host::snapshot`]) followed by the
+/// 4. **Tasks** (`data/tasks.md`) — the task-management kit API reference:
+///    `empty-tasks`, `add-task`, `remove-task`, `transition`, `status-counts`,
+///    and the rendering/persistence surface.  Bindings are always live
+///    (sourced at boot alongside the agent library); call `help <name>` for
+///    any one's full signature.
+/// 5. **Script style** (`data/script-style.md`) — the scripting guide.
+/// 6. **Host** — the environment snapshot ([`host::snapshot`]) followed by the
 ///    live `Grant`: where the agent stands on disk and when "now" is, then the
 ///    authority it holds, read together as the facts of its situation.
-/// 6. **Workspace** (optional) — present whenever any `AGENTS.md` is discovered
+/// 7. **Workspace** (optional) — present whenever any `AGENTS.md` is discovered
 ///    (see [`discover_agents`]): the operator's own `<config>/AGENTS.md` then
 ///    every repo `AGENTS.md` from the git root down to the cwd, the deepest
 ///    last so its recency wins.  Project instructions, not authority — it
 ///    cannot widen the grant.
-/// 7. **Agent** (optional) — when `headless`, the closing return-channel
+/// 8. **Agent** (optional) — when `headless`, the closing return-channel
 ///    contract (`data/agent.md`): the agent returns its result by calling
 ///    `reply` exactly once, the contract a headless root and every sub-agent
 ///    share.  Appended last, where its recency carries.
-/// 8. **Skills** (optional) — present whenever any skill is discovered and
+/// 9. **Skills** (optional) — present whenever any skill is discovered and
 ///    readable under the grant: `name: description` per skill, plus a
 ///    note telling the agent to call `skill <name>` to load and
 ///    `skill-list` to refresh mid-session.
@@ -59,6 +64,7 @@ pub fn assemble(
     ));
     sections.push((Some("Ral"), include_str!("../data/ral.md").into()));
     sections.push((Some("Builtins"), builtin_index()));
+    sections.push((Some("Tasks"), include_str!("../data/tasks.md").into()));
     sections.push((
         Some("Script style"),
         include_str!("../data/script-style.md").into(),

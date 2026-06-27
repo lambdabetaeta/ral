@@ -144,7 +144,7 @@ impl Registry {
             // something is pinned, and only every `REMIND_EVERY` turns — so a
             // long-lived rail gauge stays in the model's attention without the
             // kit having to nag for it.
-            if let Some(desc) = &ctx.pinned
+            if ctx.pinned.is_some()
                 && matches!(attempt, Ok(TurnOutcome::Complete(_)))
                 && !self.pin_reminded
                 && self.turns_since_pin_reminder >= REMIND_EVERY
@@ -152,7 +152,7 @@ impl Registry {
                 self.pin_reminded = true;
                 self.turns_since_pin_reminder = 0;
                 record_nudge(emit, log, self.used, "pinned-state reminder".into());
-                return Some(format!("{PIN_REMINDER_PREFIX}{desc}{PIN_REMINDER_SUFFIX}"));
+                return Some(PIN_REMINDER.to_string());
             }
             surface_provider_error(attempt, emit, log);
             return None;
@@ -205,13 +205,7 @@ const REPLY_MESSAGE: &str = "You ended your turn without calling `reply`, so you
     `result`, or a JSON object/array for structured findings. This is the only way to hand \
     your work back; a final message on its own is not delivered.";
 
-/// The periodic pinned-state reminder, wrapped around the current pinned
-/// description.  Quiet and budget-free; kit-agnostic (it names no kit), so any
-/// kit that pins state earns it.
-const PIN_REMINDER_PREFIX: &str =
-    "Reminder — you have state pinned to the rail that the user is watching: ";
-const PIN_REMINDER_SUFFIX: &str =
-    ". Keep it current as your work moves on; if it is already accurate, just continue.";
+const PIN_REMINDER: &str = "Reminder: there are outstanding tasks; ignore if you are already working on them. Do not mention this reminder to the user.";
 
 fn on_empty_turn(r: &Result<TurnOutcome, ProviderError>) -> Option<(String, &'static str)> {
     match r {
@@ -477,47 +471,6 @@ mod tests {
         assert_eq!(reg.used, 0, "reset clears the budget");
     }
 
-    /// With state pinned, the periodic reminder fires once on the twelfth
-    /// turn's clean completion — not before — and names the pinned state,
-    /// free of the retry budget.
-    #[test]
-    fn pinned_state_reminder_fires_every_twelfth_turn() {
-        let mut reg = Registry::new();
-        let mut log = fresh_log("pin-reminder");
-        let ctx = || NudgeCtx {
-            must_reply: false,
-            pinned: Some("tasks 3/8".into()),
-        };
-        // The first eleven turns count toward the reminder but do not fire it.
-        for _ in 1..REMIND_EVERY {
-            reg.reset();
-            assert!(
-                reg.react(
-                    &Ok(TurnOutcome::Complete("x".into())),
-                    ctx(),
-                    &emit(),
-                    &mut log
-                )
-                .is_none(),
-                "no reminder before the twelfth turn"
-            );
-        }
-        // The twelfth turn fires it, naming the pinned state.
-        reg.reset();
-        match reg.react(
-            &Ok(TurnOutcome::Complete("x".into())),
-            ctx(),
-            &emit(),
-            &mut log,
-        ) {
-            Some(msg) => assert!(
-                msg.contains("tasks 3/8"),
-                "the reminder names the pinned state"
-            ),
-            None => panic!("the twelfth turn must remind"),
-        }
-        assert_eq!(reg.used, 0, "the pin reminder must not draw on the budget");
-    }
 
     /// With nothing pinned, the reminder never fires however many turns pass.
     #[test]

@@ -1,7 +1,7 @@
 ---
 generated_at_commit: 1baac6d
 generated_at_date: 2026-06-22
-covers_paths: [exarch/src/card.rs, exarch/src/tui/line.rs, exarch/src/tui/block.rs, exarch/src/tui/viewport.rs, exarch/data/agent.ral, kit/tasks.ral]
+covers_paths: [exarch/src/card.rs, exarch/src/tui/line.rs, exarch/src/tui/block.rs, exarch/src/tui/viewport.rs, exarch/data/agent.ral]
 ---
 
 # Map: exarch / cards
@@ -116,7 +116,7 @@ honestly so. The stderr condenser (`card_stderr`) walks marks generically.
 The kit declares data and its level of measurement; the host binds it to visual
 variables, and with no host `surface` is the identity, so a kit stays runnable in
 a bare ral REPL. The tasks library holds the small constructors so the mark
-grammar lives in one ral place: `task-card`/`meter-card` in `kit/tasks.ral` (the
+grammar lives in one ral place: `task-card`/`meter-card` in `exarch/data/agent.ral` (the tasks section, the
 kit owns the status→role mapping, since the host knows only the closed role set),
 surfaced per transition through `transition`/`add-task`/`surface-progress`.
 

@@ -25,7 +25,7 @@ only **placement**, the card vocabulary and its decoder reused verbatim:
 
 So a kit holding evolving state pins one rollup and overwrites it, rather than
 marching `tasks 0/3`, `tasks 1/3`, … down the scrollback — the streaming the rail
-doctrine forbids. `kit/tasks.ral` is the first client: `transition` pins one
+doctrine forbids. `exarch/data/agent.ral` (the tasks section) is the first client: `transition` pins one
 gauge that *fills in place*, and a per-task `open → done` move appends nothing.
 
 ## How it flows
@@ -80,7 +80,7 @@ watches is reminded to keep it true.
   it lands on.
 - **It makes the doctrine expressible.** "Encode the changing datum as a
   fixed-position magnitude, never streamed" was enforceable only on host marks; a
-  kit had no way to obey it. Pin extends it to kit state and turns `tasks.ral`
+  kit had no way to obey it. Pin extends it to kit state and turns the task-management kit
   from the doctrine's counterexample into its first exemplar.
 
 ## See also
@@ -94,4 +94,4 @@ this is the model-authored dual of, and the encode-don't-stream doctrine),
 [[map/exarch/frontend|frontend]] (the viewport register and the draw layout),
 [[map/exarch/shell-eval|shell-eval]] (the host sink and the pin-first decode),
 [[map/exarch/agent|agent]] (the nudge that reminds the model of its pins), and
-`kit/tasks.ral` (the first client).
+`exarch/data/agent.ral` (the tasks section — the first client).

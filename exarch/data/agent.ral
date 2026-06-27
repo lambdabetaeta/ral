@@ -43,3 +43,112 @@ let view-text-around = { |line peek|
     let lo = if $[$line > $peek] { return $[$line - $peek] } else { return 1 }
     view-text $lo $[$line + $peek + 1]
 }
+
+# --- task management ---------------------------------------------------------
+# Schema: { id: Int, desc: String, status: `open|`doing|`blocked|`done, tags: [String], notes: String }
+# Statuses: open | doing | blocked | done
+# Id allocation: max(ids) + 1; freed ids are recycled.
+# `surface-progress` pins a `tasks <done>/<total>` gauge to the rail register;
+# add-task, remove-task, and transition update it.  The pin clears when no work
+# is left.
+
+let mk-task = { |id desc|
+  [ id: $id, desc: $desc, status: `open, tags: [], notes: "" ]
+}
+
+let empty-tasks = drop 1 [ !{mk-task 0 ""} ]
+let valid-statuses = [`open, `doing, `blocked, `done]
+
+# --- per-field setters ---
+
+let set-desc   = { |t v| [id: $t[id], desc: $v,       status: $t[status], tags: $t[tags], notes: $t[notes]] }
+let set-status = { |t v| [id: $t[id], desc: $t[desc], status: $v,         tags: $t[tags], notes: $t[notes]] }
+let set-tags   = { |t v| [id: $t[id], desc: $t[desc], status: $t[status], tags: $v,       notes: $t[notes]] }
+let set-notes  = { |t v| [id: $t[id], desc: $t[desc], status: $t[status], tags: $t[tags], notes: $v        ] }
+
+let add-tag    = { |t g| set-tags $t [...$t[tags], $g] }
+let remove-tag = { |t g| set-tags $t !{filter { |x| $[not !{equal $x $g}] } $t[tags]} }
+
+# --- id allocation ---
+
+let next-id = { |ts|
+  let ids = map { |t| $t[id] } $ts
+  if !{is-empty $ids} { 1 }
+    else { $[!{fold { |acc x| if $[$x > $acc] { $x } else { $acc } } 0 $ids} + 1] }
+}
+
+# --- list operations ---
+
+let add-task = { |ts desc|
+  let new-ts = [...$ts, !{mk-task !{next-id $ts} $desc}]
+  surface-progress $new-ts
+  $new-ts
+}
+
+let remove-task = { |ts id|
+  let new-ts = filter { |t| $[$t[id] != $id] } $ts
+  surface-progress $new-ts
+  $new-ts
+}
+let find-task   = { |ts id|   first  { |t| $[$t[id] == $id] } $ts }
+let tag-task   = { |ts id tag|  map { |t| if $[$t[id] == $id] { add-tag    $t $tag  } else { $t } } $ts }
+let untag-task = { |ts id tag|  map { |t| if $[$t[id] == $id] { remove-tag $t $tag  } else { $t } } $ts }
+let note-task  = { |ts id note| map { |t| if $[$t[id] == $id] { set-notes  $t $note } else { $t } } $ts }
+let retag-task = { |ts id tags| map { |t| if $[$t[id] == $id] { set-tags   $t $tags } else { $t } } $ts }
+
+let by-status = { |ts s| filter { |t| equal $t[status] $s } $ts }
+
+# --- rendering ---
+
+let render-task = { |t|
+  let tag-str  = if !{is-empty $t[tags]}   { "" } else { " [!{intercalate "," $t[tags]}]" }
+  let note-str = if !{equal $t[notes] ""}  { "" } else { "  -- $t[notes]" }
+  "#$t[id]  !{to-string $t[status] | from-string}  $t[desc]$tag-str$note-str"
+}
+
+let render-tasks = { |ts| for $ts { |t| echo !{render-task $t} } }
+
+# --- persistence ---
+
+let save-tasks = { |ts path| to-json   $ts > $path }
+let load-tasks = { |path|    from-json     < $path }
+
+# --- host-rail surfacing ---
+
+let task-to-marks = { |t|
+  let id-str = "#$t[id]  "
+  let status-str = !{to-string $t[status] | from-string}
+  let tag-str = if !{is-empty $t[tags]} { "" } else { "  [!{intercalate "," $t[tags]}]" }
+  let note-str = if !{equal $t[notes] ""} { "" } else { "  -- $t[notes]" }
+  let header =
+    if    !{equal $t[status] `done}    { [[role: "muted", text: $id-str], [role: "ok",    text: $status-str]] }
+    elsif !{equal $t[status] `doing}   { [[role: "muted", text: $id-str], [role: "warn",   text: $status-str]] }
+    elsif !{equal $t[status] `blocked} { [[role: "muted", text: $id-str], [role: "bad",    text: $status-str]] }
+    else                               { [[role: "muted", text: $id-str], [role: "muted",  text: $status-str]] }
+  let desc-span = [[role: "", text: "  $t[desc]"]]
+  let tag-span  = if !{is-empty $t[tags]}    { [] }  else { [[role: "code",  text: $tag-str]] }
+  let note-span = if !{equal $t[notes] ""}   { [] } else { [[role: "muted", text: $note-str]] }
+  let body = [...$desc-span, ...$tag-span, ...$note-span]
+  [`text [spans: $header], `text [spans: $body]]
+}
+
+let surface-progress = { |ts|
+    let done  = !{length !{by-status $ts `done}}
+    let total = !{length $ts}
+    let gauge = `measure [label: "tasks", value: $done, max: $total]
+    let marks =
+      if $[$done == $total] { drop 1 [$gauge] }
+      else                  { [$gauge, ...!{flat-map $task-to-marks $ts}] }
+    surface `pin [key: "tasks", body: `card $marks]
+}
+
+let transition = { |ts id new-status|
+    if !{elem $new-status $valid-statuses} {
+        let new-ts = map { |t| if $[$t[id] == $id] { set-status $t $new-status } else { $t } } $ts
+        surface-progress $new-ts
+        $new-ts
+    } else {
+        echo "transition: invalid status -- !{to-string $new-status | from-string} (expected open|doing|blocked|done)" 1>&2
+        $ts
+    }
+}
