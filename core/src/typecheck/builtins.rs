@@ -268,6 +268,7 @@ pub mod sig {
     const ANY: ArgTemplate = ArgTemplate::Any;
     const STR: ArgTemplate = ArgTemplate::Ty(TyTemplate::String);
     const INT: ArgTemplate = ArgTemplate::Ty(TyTemplate::Int);
+    const FLOAT: ArgTemplate = ArgTemplate::Ty(TyTemplate::Float);
     const BLOCK: ArgTemplate = ArgTemplate::BlockOrLambda;
     const BYTES_OR_INT_LIST: &[ArgTemplate] = &[
         ArgTemplate::Ty(TyTemplate::Bytes),
@@ -278,6 +279,8 @@ pub mod sig {
     const ONE_ANY: &[ArgTemplate] = &[ANY];
     const ONE_STR: &[ArgTemplate] = &[STR];
     const ONE_INT: &[ArgTemplate] = &[INT];
+    const ONE_FLOAT: &[ArgTemplate] = &[FLOAT];
+    const FLOAT_INT: &[ArgTemplate] = &[FLOAT, INT];
     const TO_BYTES_ARGS: &[ArgTemplate] = &[ArgTemplate::OneOf(BYTES_OR_INT_LIST)];
     const TO_LINES_ARGS: &[ArgTemplate] = &[ArgTemplate::Ty(TyTemplate::ListAny)];
     const NO_ARGS: &[ArgTemplate] = &[];
@@ -387,6 +390,11 @@ pub mod sig {
         pure(TyTemplate::String),
         Some(scheme::any_to_string),
     );
+    /// `round <x> <places>` — a Float and an Int dial, yielding a Float.
+    pub const ROUND: BuiltinSig = command(ArgSig::Exact(FLOAT_INT), pure(TyTemplate::Float), None);
+    /// `floor` / `ceil` / `trunc` — one Float in, the Int in that direction.
+    pub const FLOAT_TO_INT: BuiltinSig =
+        command(ArgSig::Exact(ONE_FLOAT), pure(TyTemplate::Int), None);
 
     pub const ALIAS: BuiltinSig = command(ArgSig::Exact(ALIAS_ARGS), pure(TyTemplate::Unit), None);
     pub const UNALIAS: BuiltinSig = command(ArgSig::Exact(ONE_STR), pure(TyTemplate::Unit), None);

@@ -227,8 +227,44 @@ let intersection = { |a b| fold { |m k| return [...$m, $k: $a[$k]] } [:] !{filte
 let difference = { |a b| fold { |m k| if !{has $b $k} { return $m } else { return [...$m, $k: $a[$k]] } } [:] !{keys $a} }
 
 # Standard library
+## The identity function: returns its argument unchanged.  Useful as the
+## key for `-by` combinators when the element is already the magnitude.
+let id = { |x| return $x }
+
 ## Sum a list of numbers.
 let sum = { |items| fold { |acc x| return $[$acc + $x] } 0 $items }
+
+## Cartesian product of two lists, each pair combined by `f`.  Build a
+## record in `f` to mix element types — lists are homogeneous — and to chain
+## into higher dimensions; this is the meshgrid of a benchmark matrix:
+##   let grid = cross $progs $strats { |p s| [prog: $p, strat: $s] }
+##   cross $grid !{range 1 4} { |row r| [...$row, rep: $r] }
+let cross = { |a b f| flat-map { |x| map { |y| $f $x $y } $b } $a }
+
+## Partition `xs` into a map from string key to the list of elements that
+## share it, computed by `key-fn`; first-seen order is preserved within
+## each group.  Keys are strings (map keys always are) — build a composite
+## key with interpolation, e.g. `{ |r| "$r[prog]/$r[strat]" }`.
+let group-by = { |key-fn xs|
+    fold { |acc x|
+        let k = !{key-fn $x}
+        if !{has $acc $k} { [...$acc, $k: [...$acc[$k], $x]] } else { [...$acc, $k: [$x]] }
+    } [:] $xs
+}
+
+## The element of `xs` whose key is the median, ordered by `key-fn`.
+## Lower-middle on even length; fails on the empty list.
+let median-by = { |key-fn xs|
+    if !{is-empty $xs} {
+        fail [status: 1, message: "median-by: empty list has no median"]
+    } else {
+        let sorted = sort-list-by $key-fn $xs
+        return $sorted[$[(!{length $sorted} - 1) / 2]]
+    }
+}
+
+## The median element of `xs` ordered by its own value.
+let median = { |xs| median-by $id $xs }
 
 ## Zip two lists into a list of pairs (tail-recursive).
 let zip = { |a b|

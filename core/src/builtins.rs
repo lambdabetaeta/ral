@@ -33,6 +33,7 @@ mod codecs;
 mod collections;
 pub(crate) mod concurrency;
 mod fs;
+mod math;
 pub mod misc;
 pub mod modules;
 mod predicates;
@@ -267,6 +268,9 @@ builtin_registry! {
     FromJson { names: ["from-json"], arity: _, ty: Sig(sig::FROM_JSON),
         doc: "from-json  — decode JSON bytes from the channel to a value.",
         call: |args, shell| codecs::builtin_from_json(args, shell), },
+    FromCsv { names: ["from-csv"], arity: _, ty: Sig(sig::FROM_JSON),
+        doc: "from-csv  — decode CSV bytes from the channel to a list of records keyed by the header row (every field a String).",
+        call: |args, shell| codecs::builtin_from_csv(args, shell), },
     ToBytes { names: ["to-bytes"], arity: 1, ty: Sig(sig::TO_BYTES),
         doc: "to-bytes <value>  — pass Bytes (or list of Ints) through to the byte channel.",
         call: |args, shell| codecs::builtin_to_bytes(args, shell), },
@@ -282,6 +286,9 @@ builtin_registry! {
     ToJson { names: ["to-json"], arity: 1, ty: Sig(sig::TO_ANY_BYTES),
         doc: "to-json <value>  — encode a value as JSON bytes.",
         call: |args, shell| codecs::builtin_to_json(args, shell), },
+    ToCsv { names: ["to-csv"], arity: 1, ty: Sig(sig::TO_ANY_BYTES),
+        doc: "to-csv <records>  — encode a list of records as CSV bytes; columns are the first record's keys in sorted order.",
+        call: |args, shell| codecs::builtin_to_csv(args, shell), },
     Ask { names: ["ask"], arity: 1, ty: Scheme(None, scheme::ask),
         doc: "ask <prompt>  — prompt for interactive input, return string.",
         call: |args, _shell| misc::builtin_ask(args).map_err(Break::from), },
@@ -351,6 +358,18 @@ builtin_registry! {
     ToFloat { names: ["float"], arity: 1, ty: Sig(sig::FLOAT_PARSE),
         doc: "float <val>  — parse a value as a float.",
         call: |args, _shell| strings::builtin_to_float(args), },
+    Round { names: ["round"], arity: 2, ty: Sig(sig::ROUND),
+        doc: "round <x> <places>  — round a Float to <places> decimal places, halves away from zero; always returns a Float (round 3.7 0 is 4.0). Use int for a whole number.",
+        call: |args, _shell| math::builtin_round(args), },
+    Floor { names: ["floor"], arity: 1, ty: Sig(sig::FLOAT_TO_INT),
+        doc: "floor <x>  — the greatest Int not exceeding a Float.",
+        call: |args, _shell| math::builtin_floor(args), },
+    Ceil { names: ["ceil"], arity: 1, ty: Sig(sig::FLOAT_TO_INT),
+        doc: "ceil <x>  — the least Int not below a Float.",
+        call: |args, _shell| math::builtin_ceil(args), },
+    Trunc { names: ["trunc"], arity: 1, ty: Sig(sig::FLOAT_TO_INT),
+        doc: "trunc <x>  — drop a Float's fractional part toward zero, yielding an Int.",
+        call: |args, _shell| math::builtin_trunc(args), },
     Str { names: ["str"], arity: 1, ty: Sig(sig::STR_PARSE),
         doc: "str <val>  — convert a value to its string representation.",
         call: |args, _shell| strings::builtin_to_string(args), },

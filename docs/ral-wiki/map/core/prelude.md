@@ -15,7 +15,7 @@ environment ([[map/core/builtins|register]]).
 
 The prelude holds the *library-level* surface: higher-order list and string
 combinators (`for`, `reduce`, `take-while`, `drop-while`, `take`, `drop`,
-`enumerate`, `flat-map`, `zip`, `lines`, `words`, `map-lines`, the `stream-*`
+`enumerate`, `flat-map`, `zip`, `cross`, `group-by`, `median-by`, `lines`, `words`, `map-lines`, the `stream-*`
 eliminators, …) layered over the directly-registered Rust builtins (`each`,
 `map`, `filter`, `fold`, …). These are ordinary [[design/cbpv|values]] of fixed
 arity ([[invariants/fixed-arity|fixed-arity]]).

@@ -43,11 +43,18 @@ for a `Bytes` value (e.g. `$r[stdout]` from `await`). The decoders:
 - `from-string` → `String`, **strict** UTF-8;
 - `from-line` → `String`, strict, one trailing `\n` / `\r\n` stripped;
 - `from-json` → a decoded value, strict UTF-8 then JSON;
+- `from-csv` → a list of records keyed by the header row, every field a
+  `String` (CSV is untyped — coerce with `int` / `float`); the underlying
+  reader handles quoted fields, embedded commas, and embedded newlines;
 - `from-lines` → a line stream (below).
 
 `to-X` takes one value, writes its encoded form to the byte channel, and returns
 the `Bytes` it wrote: `to-bytes`, `to-string`, `to-line` (trailing newline),
-`to-lines` (newline-join a list), `to-json`. All five share the `encode` mode.
+`to-lines` (newline-join a list), `to-json`, `to-csv`. All share the `encode`
+mode. `to-csv` takes a list of records and emits a header plus one row each;
+columns are the first record's keys in sorted order (maps are key-ordered, so
+there is no original column order to recover) and a record missing a column
+contributes an empty field.
 `to-json` maps a ral value to JSON structurally: a record or `[String:A]` map
 becomes an object, a list an array, `Unit` becomes `null`, and a variant
 `` `tag payload `` becomes `{"tag": "tag", "payload": …}` — the `payload` key

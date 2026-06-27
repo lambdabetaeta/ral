@@ -57,6 +57,13 @@ pub fn as_list(val: &Value, ctx: &str) -> Settled<List> {
     }
 }
 
+pub fn as_map<'a>(val: &'a Value, ctx: &str) -> Settled<&'a crate::types::Map> {
+    match val {
+        Value::Map(m) => Ok(m),
+        _ => Err(sig(format!("{ctx} expects a Map, got {}", val.type_name()))),
+    }
+}
+
 pub(crate) fn as_byte_list(val: &Value, ctx: &str) -> Settled<Vec<u8>> {
     if let Value::Bytes(b) = val {
         return Ok(b.clone());
