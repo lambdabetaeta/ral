@@ -130,7 +130,8 @@ impl Scratch {
 /// The per-run log directory:
 /// `$XDG_STATE_HOME/exarch/<project>/<run>/`, where `<project>` is the
 /// slugified absolute `cwd` (see [`project_slug`]) and `<run>` is
-/// `<unix-seconds>-<pid>`, unique per launch so successive runs in the
+/// `<YYYY-MM-DD-HHMMSS>-<pid>`, unique per launch so successive runs in the
+
 /// same project never overwrite one another.  Holds `stderr.log` and
 /// `sessions/<id>/{events.json,transcript.jsonl,user.log}`.  Unlike the disposable
 /// [`Scratch`] this is durable state under the user's XDG state home, so
@@ -140,7 +141,8 @@ impl Scratch {
     reason = "[io-door:silent:log-run-dir] per-run log dir under XDG state; infra, not turn-time data I/O"
 )]
 pub fn log_run_dir(cwd: &str) -> io::Result<PathBuf> {
-    let stamp = format!("{}-{}", now_secs(), std::process::id());
+    let stamp = format!("{}-{}", stamp_from_secs(now_secs()), std::process::id());
+
     let dir = project_dir(cwd).join(stamp);
     fs::create_dir_all(&dir)?;
     Ok(dir)
@@ -154,6 +156,14 @@ pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+/// Format a Unix timestamp as `YYYY-MM-DD-HHMMSS` (UTC) via `jiff`.
+/// Falls back to the raw seconds string if the timestamp is out of range.
+fn stamp_from_secs(secs: u64) -> String {
+    jiff::Timestamp::from_second(secs as i64)
+        .map(|t| t.strftime("%Y-%m-%d-%H%M%S").to_string())
+        .unwrap_or_else(|_| secs.to_string())
 }
 
 /// The per-project directory `$XDG_STATE_HOME/exarch/<project>/`, where
