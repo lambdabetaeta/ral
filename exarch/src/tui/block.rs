@@ -19,7 +19,7 @@ use super::line::{self, RAIL_GLYPHS, RAIL_W, READ_W, is_blank};
 use super::md::{self, MD_INDENT};
 use super::rail::{self, RailKind};
 use crate::bus::Hunk;
-use crate::card::{Card, IoKind, Mark};
+use crate::card::{Card, ObservationKind, Mark};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use std::time::Duration;
@@ -62,7 +62,7 @@ pub(super) enum CardOrigin {
     /// effect, foldable into the call's coalesced block.  Carries the `|>`
     /// effect `kind` and the `count` it folds (a grouped card comma-joins
     /// several of one kind), the census tally the coalesced run's L0 sums.
-    Observation { kind: IoKind, count: u32 },
+    Observation { kind: ObservationKind, count: u32 },
     /// A write redirect — an effect, but never folded: a write ends the
     /// current ral block exactly as a diff does, and renders standalone.
     Write,
@@ -281,17 +281,17 @@ impl Block {
     pub(super) fn card(card: Card) -> Self {
         Self::card_with(card, CardOrigin::Surfaced)
     }
-    /// A structural I/O effect: a read / grep / exec (foldable
-    /// [`CardOrigin::Observation`], carrying the census `count` it folds) or a
-    /// write ([`CardOrigin::Write`], a barrier).  Distinct from [`Self::card`]
-    /// so the projection can fold an observation into its call yet keep a write
-    /// standalone.
-    pub(super) fn io_card(card: Card, kind: IoKind, count: u32) -> Self {
-        let origin = match kind {
-            IoKind::Write => CardOrigin::Write,
-            kind => CardOrigin::Observation { kind, count },
-        };
-        Self::card_with(card, origin)
+    /// A foldable observation effect: a read / grep / exec
+    /// ([`CardOrigin::Observation`], carrying the census `count` it folds).
+    /// Distinct from [`Self::card`] so the projection can fold it into its call.
+    pub(super) fn observation_card(card: Card, kind: ObservationKind, count: u32) -> Self {
+        Self::card_with(card, CardOrigin::Observation { kind, count })
+    }
+    /// A write effect ([`CardOrigin::Write`], a barrier): the `write <path>
+    /// <outcome>` heading and a preview of what it wrote.  Like a diff, it ends
+    /// the current ral block and renders standalone — never folded into a run.
+    pub(super) fn write_card(card: Card) -> Self {
+        Self::card_with(card, CardOrigin::Write)
     }
     fn card_with(card: Card, origin: CardOrigin) -> Self {
         Self::new(BlockKind::Card { card, origin }, Fidelity::default())
@@ -421,7 +421,7 @@ impl Block {
     /// This observation's census contribution: the `|>` effect kind it
     /// surfaces and how many it folds, for the coalesced run's L0 tally.
     /// `None` on every block but a folded observation card.
-    pub(super) fn io_tally(&self) -> Option<(IoKind, u32)> {
+    pub(super) fn io_tally(&self) -> Option<(ObservationKind, u32)> {
         match &self.kind {
             BlockKind::Card {
                 origin: CardOrigin::Observation { kind, count },

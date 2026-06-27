@@ -21,7 +21,7 @@ use super::line::{READ_W, coalesced_queries, is_blank, plain, prompt_fence, size
 use super::rail::{self, RailKind};
 use super::select::plain_slice;
 use crate::bus::Hunk;
-use crate::card::{Card, IoKind};
+use crate::card::{Card, ObservationKind};
 use crate::provider::Usage;
 use ratatui::text::Line;
 use std::fs;
@@ -357,13 +357,19 @@ impl Viewport {
         &self.pins
     }
 
-    /// Append a structural I/O effect card.  A write (`IoKind::Write`) is a
-    /// barrier that ends the current ral block, like a diff; a read, grep, or
-    /// exec is an observation the projection folds under its call, carrying the
-    /// `count` it represents for the run's census.  `kind` and `count` come
-    /// straight off the buffered effects the host grouped into this card.
-    pub(super) fn push_io_card(&mut self, card: Card, kind: IoKind, count: u32) {
-        self.push_block(Block::io_card(card, kind, count));
+    /// Append a foldable observation card — a read, grep, or exec the projection
+    /// folds under its call, carrying the `count` it represents for the run's
+    /// census.  `kind` and `count` come straight off the buffered effects the
+    /// host grouped into this card.  Writes use [`Self::push_write_card`].
+    pub(super) fn push_observation_card(&mut self, card: Card, kind: ObservationKind, count: u32) {
+        self.push_block(Block::observation_card(card, kind, count));
+    }
+
+    /// Append a write card — a barrier that ends the current ral block, like a
+    /// diff, never folded into a run.  The card carries the `write <path>
+    /// <outcome>` heading and a preview of what was written.
+    pub(super) fn push_write_card(&mut self, card: Card) {
+        self.push_block(Block::write_card(card));
     }
 
     /// Append pre-rendered chrome (step header, error, banner, subagent

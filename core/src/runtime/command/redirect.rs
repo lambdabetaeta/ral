@@ -137,16 +137,30 @@ pub(crate) struct AtomicCommit {
     target: std::path::PathBuf,
 }
 
+/// The largest prefix of a written file read to seed the host's write-card
+/// preview — generous enough to hold the first several lines of any realistic
+/// file, so a large write is never pulled into memory wholesale to show a head.
+const PREVIEW_CAP: u64 = 64 * 1024;
+
 impl AtomicCommit {
-    /// Read the temp file content — a best-effort snapshot of what will
-    /// land at `target` if `commit` succeeds.  Used by the write surface
-    /// to seed a diff card.  Returns `None` on any OS error.
+    /// Read a bounded prefix — at most [`PREVIEW_CAP`] bytes — of the temp
+    /// file: a best-effort snapshot of the *head* of what will land at `target`
+    /// if `commit` succeeds.  The write surface previews only the first few
+    /// lines, so the whole file (which may be large) is never read.  Returns
+    /// `None` on any OS error.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:surface:atomic-temp-read] Sub-step of the atomic `>` write door's diff surface: read the tmp file content before the rename commits it. The write card surfaces when the redirect frame settles; this read is not a separate model operation."
+        reason = "[io-door:surface:atomic-temp-read] Sub-step of the atomic `>` write door's preview surface: read the head of the tmp file before the rename commits it. The write card surfaces when the redirect frame settles; this read is not a separate model operation."
     )]
-    pub(crate) fn temp_content(&self) -> Option<Vec<u8>> {
-        std::fs::read(self.tmp.path()).ok()
+    pub(crate) fn temp_preview(&self) -> Option<Vec<u8>> {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        std::fs::File::open(self.tmp.path())
+            .ok()?
+            .take(PREVIEW_CAP)
+            .read_to_end(&mut buf)
+            .ok()?;
+        Some(buf)
     }
 
     #[allow(

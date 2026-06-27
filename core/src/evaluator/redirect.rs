@@ -85,7 +85,6 @@ struct WriteIntent {
     path: String,
     mode: RedirectMode,
     commit: Option<command::AtomicCommit>,
-    old_bytes: Option<Vec<u8>>,
 }
 
 /// RAII frame holding the redirect state [`with_redirects`] installs:
@@ -115,23 +114,6 @@ fn clone_redirect_sink(sink: &Sink, context: &str) -> Raw<Sink> {
         .map_err(|e| Break::Error(Error::new(format!("{context}: {e}"), 1)).into())
 }
 
-/// Read the current content of `path` if it is a regular file under 1 MB.
-/// Used to capture the "before" image for a write's diff card.  Returns
-/// `None` if the file doesn't exist, is not a regular file, is too large,
-/// or can't be read — the diff card is best-effort.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:surface:write-snapshot] The `>` write door's old-content snapshot for the diff card: reads the existing file before overwriting it. This is a sub-step of the surfacing write door; the write card is the operation's surface."
-)]
-fn snapshot_old(path: &std::path::Path) -> Option<Vec<u8>> {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_file() && meta.len() < 1_000_000 => {
-            std::fs::read(path).ok()
-        }
-        _ => None,
-    }
-}
-
 /// Open one fd-1/2 file write target and record its write intent. The
 /// intent is pushed *before* the open is consulted for a failure so the
 /// open-error path (handled by the caller) can surface a `failed` write
@@ -143,13 +125,10 @@ fn open_redirect_sink(
     shell: &mut Shell,
     intents: &mut Vec<WriteIntent>,
 ) -> Raw<Sink> {
-    let rp = shell.resolve(path);
-    let old_bytes = snapshot_old(rp.as_path());
     intents.push(WriteIntent {
         path: path.to_string(),
         mode,
         commit: None,
-        old_bytes,
     });
     let (file, commit) = command::open_file(path, &mode, shell)?;
     intents.last_mut().expect("intent pushed above").commit = commit;
@@ -227,7 +206,8 @@ fn emit_writes_failed(shell: &Shell, intents: Vec<WriteIntent>) {
         shell.emit_io(io_event::write(
             &intent.path,
             intent.mode,
-            WriteOutcome::Failed, None, None,
+            WriteOutcome::Failed,
+            None,
         ));
     }
 }
@@ -298,7 +278,7 @@ impl<'a> RedirectFrame<'a> {
                 outcome = WriteOutcome::Aborted;
                 new_bytes = None;
             } else if let Some(commit) = intent.commit {
-                new_bytes = commit.temp_content();
+                new_bytes = commit.temp_preview();
                 match commit.commit() {
                     Ok(()) => outcome = WriteOutcome::Committed,
                     Err(e) => {
@@ -317,7 +297,6 @@ impl<'a> RedirectFrame<'a> {
                 &intent.path,
                 intent.mode,
                 outcome,
-                intent.old_bytes.as_deref(),
                 new_bytes.as_deref(),
             ));
         }

@@ -19,7 +19,6 @@
 use crate::bus::{Hunk, Row, Seg};
 use ral_core::Value as RalValue;
 use serde::Serialize;
-use similar::{ChangeTag, TextDiff};
 use std::borrow::Cow;
 
 /// The closed nominal role set — the *selective* (identity) channel a
@@ -295,12 +294,11 @@ pub enum IoEvent {
         path: String,
         mode: WriteMode,
         outcome: WriteOutcome,
-        // Transient host-side input to the diff card only — never serialised
-        // into `events.json` (a committed write would otherwise embed the whole
-        // file as a JSON integer array). The forensic log keeps the write's
-        // shape; the rendered diff lives in the TUI's `user.log`.
-        #[serde(skip)]
-        old_bytes: Option<Vec<u8>>,
+        // A bounded prefix of the committed content (the host caps the read),
+        // input to the write card's preview only.  `#[serde(skip)]`: it never
+        // reaches `events.json` — the forensic log keeps the write's structural
+        // shape (path / mode / outcome); the rendered preview lives only in the
+        // TUI's `user.log`.
         #[serde(skip)]
         new_bytes: Option<Vec<u8>>,
     },
@@ -317,12 +315,12 @@ pub enum IoEvent {
 
 /// Which `|>` effect a surfaced observation is — the census bucket it counts
 /// toward when a coalesced run reduces to its tally (the L0 census in
-/// [`super::tui`]).  A read, an exec, and a grep fold into a run; a write is a
-/// barrier that ends one, so it counts toward nothing inside a run.
+/// [`super::tui`]).  Reads, execs, and greps fold into a run and tally here; a
+/// write is a barrier that ends a run, so it is not an observation kind — it is
+/// tracked by its card origin instead.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum IoKind {
+pub enum ObservationKind {
     Read,
-    Write,
     Exec,
     Grep,
 }
@@ -344,7 +342,6 @@ pub fn value_to_io(v: &RalValue) -> Option<IoEvent> {
             path: str_field(m, "path")?,
             mode: WriteMode::parse(&str_field(m, "mode")?)?,
             outcome: WriteOutcome::parse(&str_field(m, "outcome")?)?,
-            old_bytes: bytes_field(m, "old_bytes"),
             new_bytes: bytes_field(m, "new_bytes"),
         },
         "exec" => IoEvent::Exec {
@@ -360,25 +357,24 @@ pub fn value_to_io(v: &RalValue) -> Option<IoEvent> {
     })
 }
 
-/// Compose an [`IoEvent`] into a [`Card`] using only the existing marks — one
-/// [`Mark::Text`] of roled spans, zero new mark vocabulary.  Each row reads as
-/// a dim verb naming the operation (a nominal category, carried by a word
-/// rather than a mirror-orientation glyph) followed by the path or program as
-/// the subject — lifted by [`Role::Path`]'s hue against the muted label — and
-/// the outcome roled by its level.
+/// Compose an [`IoEvent`] into a [`Card`].  The heading is one [`Mark::Text`]
+/// of roled spans: a dim verb naming the operation (a nominal category, carried
+/// by a word rather than a mirror-orientation glyph) followed by the path or
+/// program as the subject — lifted by [`Role::Path`]'s hue against the muted
+/// label — and the outcome roled by its level.  A committed write appends a
+/// [`write_preview`] of what it wrote below that heading.
 pub fn io_card(event: &IoEvent) -> Card {
-    let mut diff_mark: Option<Mark> = None;
+    let mut body: Vec<Mark> = Vec::new();
     let spans = match event {
         IoEvent::Read { path } => read_spans(path),
         IoEvent::Write {
             path,
             outcome,
-            old_bytes,
             new_bytes,
             ..
         } => {
             if *outcome == WriteOutcome::Committed {
-                diff_mark = try_diff_mark(path, old_bytes.as_deref(), new_bytes.as_deref());
+                body = write_preview(new_bytes.as_deref());
             }
             write_spans(path, *outcome)
         }
@@ -401,16 +397,14 @@ pub fn io_card(event: &IoEvent) -> Card {
         }
     };
     let mut marks = vec![Mark::Text { spans }];
-    if let Some(diff) = diff_mark {
-        marks.push(diff);
-    }
+    marks.extend(body);
     Card(marks)
 }
 
 /// The command of an exec, *without* its `$ ` prefix or `→ status` tail —
 /// the program as a [`Role::Path`] span and each arg as plain ink (a missing
 /// command degrades to plain ink).  Shared by [`io_card`] (which frames it
-/// with the prompt and status) and [`io_group_card`] (which comma-joins
+/// with the prompt and status) and [`observation_group_card`] (which comma-joins
 /// several, dropping the per-event status — see its docs).
 ///
 /// The surfaced `argv` is post-shell — word-split, quotes already consumed —
@@ -455,7 +449,7 @@ fn grep_spans(scope: &str, pattern: &str) -> Vec<Span> {
 }
 
 /// A read row: the muted verb `read`, then the path as the subject.  Reused
-/// verbatim per entry in [`io_group_card`]'s comma-joined read run, so a lone
+/// verbatim per entry in [`observation_group_card`]'s comma-joined read run, so a lone
 /// read and a grouped one share one shape.
 fn read_spans(path: &str) -> Vec<Span> {
     vec![span(Role::Muted, "read "), span(Role::Path, path)]
@@ -465,8 +459,9 @@ fn read_spans(path: &str) -> Vec<Span> {
 /// outcome roled by how it settled (`committed`→`Ok`, `aborted`→`Warn`,
 /// `failed`→`Bad`).  Every write reads the same `write <path> <outcome>`,
 /// whatever its mode — the mode rides the recorded event, but the surface
-/// names only the act and how it landed.  Reused verbatim per entry in
-/// [`io_group_card`]'s comma-joined write run.
+/// names only the act and how it landed.  The heading line of a write card
+/// ([`io_card`]); a committed write previews its content below via
+/// [`write_preview`].
 fn write_spans(path: &str, outcome: WriteOutcome) -> Vec<Span> {
     vec![
         span(Role::Muted, "write "),
@@ -476,72 +471,44 @@ fn write_spans(path: &str, outcome: WriteOutcome) -> Vec<Span> {
     ]
 }
 
-/// Compute the whole-file line-level diff of `old` vs `new`, grouped into
-/// hunks with ±2 lines of context (matching `edit`'s diff).  Each hunk's
-/// `start` is the 1-indexed original line of its first row.
-fn whole_file_hunks(old: &str, new: &str) -> Vec<Hunk> {
-    let diff = TextDiff::from_lines(old, new);
-    let mut hunks = Vec::new();
-    for group in diff.grouped_ops(2) {
-        let first = group.first().expect("grouped_ops yields non-empty groups");
-        let start = first.old_range().start as u32 + 1;
-        let mut rows = Vec::new();
-        for op in &group {
-            for change in diff.iter_inline_changes(op) {
-                let mut segs: Vec<Seg> = change
-                    .iter_strings_lossy()
-                    .map(|(emph, text)| Seg {
-                        emph,
-                        text: text.into_owned(),
-                    })
-                    .collect();
-                if let Some(last) = segs.last_mut() {
-                    if let Some(bare) = last.text.strip_suffix('\n') {
-                        last.text = bare.to_string();
-                    }
-                    if last.text.is_empty() {
-                        segs.pop();
-                    }
-                }
-                rows.push(match change.tag() {
-                    ChangeTag::Equal => Row::Context(segs),
-                    ChangeTag::Delete => Row::Del(segs),
-                    ChangeTag::Insert => Row::Add(segs),
-                });
-            }
-        }
-        hunks.push(Hunk { start, rows });
+/// The number of leading lines a write card previews of the file it wrote.
+const WRITE_PREVIEW_LINES: usize = 10;
+
+/// Preview a committed write's content: the first [`WRITE_PREVIEW_LINES`] lines
+/// of `new` as one [`Mark::Raw`], plus a muted `…` when the content continues
+/// past them.  `new` is a bounded prefix (the host caps the read), so the marker
+/// signals *there is more* without claiming an exact remaining count.  A write
+/// card shows *what was written* — its head, not a diff and not a one-line
+/// receipt.  Absent or empty content yields no marks, so the
+/// `write <path> <outcome>` heading stands alone (a zero-byte write).
+fn write_preview(new: Option<&[u8]>) -> Vec<Mark> {
+    let Some(bytes) = new else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(bytes);
+    let mut lines = text.lines();
+    let head: Vec<&str> = lines.by_ref().take(WRITE_PREVIEW_LINES).collect();
+    if head.is_empty() {
+        return Vec::new();
     }
-    hunks
+    let mut marks = vec![Mark::Raw {
+        bytes: head.join("\n").into_bytes(),
+    }];
+    if lines.next().is_some() {
+        marks.push(Mark::Text {
+            spans: vec![span(Role::Muted, "…")],
+        });
+    }
+    marks
 }
 
-/// Build a `Mark::Diff` from old/new file content, if both are valid UTF-8
-/// and the diff is non-empty and under 500 changed lines.
-fn try_diff_mark(path: &str, old: Option<&[u8]>, new: Option<&[u8]>) -> Option<Mark> {
-    let old_str = String::from_utf8(old?.to_vec()).ok()?;
-    let new_str = String::from_utf8(new?.to_vec()).ok()?;
-    let hunks = whole_file_hunks(&old_str, &new_str);
-    let changed: usize = hunks
-        .iter()
-        .flat_map(|h| &h.rows)
-        .filter(|r| matches!(r, Row::Del(_) | Row::Add(_)))
-        .count();
-    if changed > 0 && changed < 500 {
-        Some(Mark::Diff {
-            path: path.to_string(),
-            hunks,
-        })
-    } else {
-        None
-    }
-}
-
-/// Compose a run of buffered I/O surfaces — even interleaved, grouped by the
-/// TUI into per-kind buckets — into one [`Card`] *per non-empty kind*, in a
-/// fixed Read → Exec → Grep → Write order.  Each card is a single
-/// [`Mark::Text`] reusing the exact `io_card` span vocabulary, so hues match;
-/// a lone surface (a group of one) renders identically to its `io_card`,
-/// modulo the deliberate exec departure below — no special case.
+/// Compose a run of buffered observation surfaces — even interleaved, grouped
+/// by the TUI into per-kind buckets — into one [`Card`] *per non-empty kind*,
+/// in a fixed Read → Exec → Grep order.  Each card is a single [`Mark::Text`]
+/// reusing the exact `io_card` span vocabulary, so hues match; a lone surface
+/// (a group of one) renders identically to its `io_card`, modulo the deliberate
+/// exec departure below — no special case.  Writes never reach here: a write is
+/// a barrier rendered standalone as its own card (header + content preview).
 ///
 /// The exec group **drops the `→ status` tail** that single `io_card` exec
 /// rows carry: a comma-joined run of commands reads as the *set of commands
@@ -549,12 +516,7 @@ fn try_diff_mark(path: &str, old: Option<&[u8]>, new: Option<&[u8]>) -> Option<M
 /// per-event noise on that line.  The status is not lost — it rides the bus
 /// in each `Kind::Io`'s structured event and reaches the transcript via
 /// `transcript::event_record`; only this grouped *presentation* omits it.
-pub fn io_group_card(
-    reads: &[String],
-    execs: &[IoEvent],
-    greps: &[IoEvent],
-    writes: &[IoEvent],
-) -> Vec<Card> {
+pub fn observation_group_card(reads: &[String], execs: &[IoEvent], greps: &[IoEvent]) -> Vec<Card> {
     let mut cards = Vec::new();
     // Read: `read p1, read p2, …` — each entry the verb + path, comma-joined.
     if !reads.is_empty() {
@@ -586,22 +548,11 @@ pub fn io_group_card(
         });
         cards.push(Card(vec![Mark::Text { spans }]));
     }
-    // Write: `write p1 committed, write p2 failed, …` — each entry the verb +
-    // path + roled outcome, comma-joined.
-    if !writes.is_empty() {
-        let mut spans = Vec::new();
-        join_spans(&mut spans, writes, |spans, e| {
-            if let IoEvent::Write { path, outcome, .. } = e {
-                spans.extend(write_spans(path, *outcome));
-            }
-        });
-        cards.push(Card(vec![Mark::Text { spans }]));
-    }
     cards
 }
 
 /// Append each of `items` to `spans` via `each`, separating entries with a
-/// plain `", "` — the comma-join shared by every [`io_group_card`] bucket.
+/// plain `", "` — the comma-join shared by every [`observation_group_card`] bucket.
 fn join_spans<T>(spans: &mut Vec<Span>, items: &[T], each: impl Fn(&mut Vec<Span>, &T)) {
     for (i, item) in items.iter().enumerate() {
         if i > 0 {
@@ -1280,7 +1231,6 @@ mod tests {
                 path: "b.rs".into(),
                 mode: WriteMode::Append,
                 outcome: WriteOutcome::Committed,
-                old_bytes: None,
                 new_bytes: None,
             })
         );
@@ -1384,7 +1334,6 @@ mod tests {
             path: "b.rs".into(),
             mode: WriteMode::Append,
             outcome: WriteOutcome::Failed,
-            old_bytes: None,
             new_bytes: None,
         })
         .expect("an io event serialises");

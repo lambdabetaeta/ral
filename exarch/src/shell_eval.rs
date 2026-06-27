@@ -1362,9 +1362,8 @@ return !{{length $hits}}"#
                 path: path.clone(),
                 mode: WriteMode::Write,
                 outcome: WriteOutcome::Committed,
-                // Fresh target, so no `old_bytes`; the committed content is
-                // surfaced as `new_bytes` to seed the diff card.
-                old_bytes: None,
+                // The committed content rides as `new_bytes`, seeding the write
+                // card's content preview.
                 new_bytes: Some(b"x".to_vec()),
             },
             "the one io event is a committed write of the redirect path"
@@ -1539,7 +1538,6 @@ return !{{length $hits}}"#
             path: "b.rs".into(),
             mode: crate::card::WriteMode::Append,
             outcome: crate::card::WriteOutcome::Committed,
-            old_bytes: None,
             new_bytes: None,
         };
         let card = io_card(&event);

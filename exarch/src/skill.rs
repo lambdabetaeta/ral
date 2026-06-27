@@ -73,22 +73,13 @@ pub fn discover_metadata(
         if !dir_readable(&dir, caps) {
             continue;
         }
-        let sk_md = dir.join("SKILL.md");
-        let raw = match std::fs::read_to_string(&sk_md) {
+        let raw = match std::fs::read_to_string(dir.join("SKILL.md")) {
             Ok(r) => r,
             Err(_) => continue,
         };
-        let (fm_name, desc) = match read_frontmatter(&raw) {
-            Some(v) => v,
-            None => continue,
-        };
-        if fm_name != name || !valid_skill_name(&fm_name) {
-            continue;
+        if let Some(skill) = skill_from_frontmatter(&raw, &name) {
+            skills.push(skill);
         }
-        skills.push(Skill {
-            name,
-            description: desc,
-        });
     }
     skills
 }
@@ -111,32 +102,30 @@ fn dir_readable(dir: &Path, caps: &ral_core::types::Capabilities) -> bool {
         .any(|p| ral_core::path::path_within(dir, p.as_path()))
 }
 
-/// Read and parse a SKILL.md's YAML frontmatter. Returns `(name, description)`.
-/// I/O-free — callers do their own `read_to_string` with the appropriate
-/// io-door annotation.
-fn read_frontmatter(raw: &str) -> Option<(String, String)> {
+/// Build a [`Skill`] from a `SKILL.md`'s raw text: parse the YAML frontmatter
+/// and accept it only when the declared `name` matches the directory it lives in
+/// (`dir_name`) and is a valid skill name.  I/O-free — callers do their own
+/// `read_to_string` under the appropriate io-door, so the silent (startup) and
+/// surface (turn-time) reads stay distinct doors while sharing this parse.
+fn skill_from_frontmatter(raw: &str, dir_name: &str) -> Option<Skill> {
     let matter = Matter::<YAML>::new();
     let parsed: gray_matter::ParsedEntity<gray_matter::Pod> = matter.parse(raw).ok()?;
     let data = parsed.data?;
     let name = data["name"].as_string().ok()?;
     let description = data["description"].as_string().ok()?;
-    Some((name, description))
+    (name == dir_name && valid_skill_name(&name)).then_some(Skill { name, description })
 }
 
-/// Parse a `SKILL.md` file: extract frontmatter fields and validate.
-/// `dir_name` is the expected skill name (the parent directory name).
-/// Called at turn time, gated by `check_fs_read` at the call site.
+/// Read a `SKILL.md` and parse its frontmatter into a [`Skill`].  `dir_name` is
+/// the expected skill name (the parent directory).  Called at turn time by
+/// `skill-list`, gated by `check_fs_read` at the call site.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:surface:skill-body] reads SKILL.md frontmatter for `skill-list`; the surface card justifies the read"
+    reason = "[io-door:surface:skill-list] reads a SKILL.md's frontmatter for the `skill-list` builtin; the surface card justifies the read"
 )]
 pub(crate) fn parse_skill(path: &Path, dir_name: &str) -> Option<Skill> {
     let raw = std::fs::read_to_string(path).ok()?;
-    let (name, description) = read_frontmatter(&raw)?;
-    if name != dir_name || !valid_skill_name(&name) {
-        return None;
-    }
-    Some(Skill { name, description })
+    skill_from_frontmatter(&raw, dir_name)
 }
 
 /// Read the Markdown body of `SKILL.md` — everything after the

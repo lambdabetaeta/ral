@@ -32,7 +32,7 @@ use super::block::{Reveal, wrap_line};
 use super::highlight::highlight_ral;
 use super::line::{self, CODE_BG, RAIL_W, SLATE, push_wrapped, wash};
 use super::md;
-use crate::card::IoKind;
+use crate::card::ObservationKind;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
@@ -65,14 +65,13 @@ pub(super) struct Tally {
 
 impl Tally {
     /// Fold `n` effects of `kind` into the tally — the seam the viewport folds
-    /// each observation block through as it gathers a run.  A write is a run
-    /// barrier, never folded, so it counts toward nothing.
-    pub(super) fn add(&mut self, kind: IoKind, n: u32) {
+    /// each observation block through as it gathers a run.  Writes never reach
+    /// here: a write is a run barrier (`CardOrigin::Write`), never folded.
+    pub(super) fn add(&mut self, kind: ObservationKind, n: u32) {
         match kind {
-            IoKind::Exec => self.binaries += n,
-            IoKind::Read => self.files += n,
-            IoKind::Grep => self.searches += n,
-            IoKind::Write => {}
+            ObservationKind::Exec => self.binaries += n,
+            ObservationKind::Read => self.files += n,
+            ObservationKind::Grep => self.searches += n,
         }
     }
 

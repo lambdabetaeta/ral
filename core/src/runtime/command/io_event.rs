@@ -58,15 +58,14 @@ pub(crate) fn read(path: &str) -> Value {
     ])
 }
 
-/// `{io:"write", path:<path>, mode:…, outcome:…, old_bytes:<bytes|null>,
-/// new_bytes:<bytes|null>}` — an fd 1/2 file write target, settled at frame
-/// teardown.  `old_bytes` and `new_bytes` are set for committed writes
-/// where a diff card may be built by the host.
+/// `{io:"write", path:<path>, mode:…, outcome:…, new_bytes:<bytes|null>}` — an
+/// fd 1/2 file write target, settled at frame teardown.  `new_bytes` is a
+/// bounded prefix of the committed content — the head the host previews in the
+/// write card, not the whole file.
 pub(crate) fn write(
     path: &str,
     mode: RedirectMode,
     outcome: WriteOutcome,
-    old_bytes: Option<&[u8]>,
     new_bytes: Option<&[u8]>,
 ) -> Value {
     let mut fields = vec![
@@ -78,9 +77,6 @@ pub(crate) fn write(
             Value::String(outcome.as_str().into()),
         ),
     ];
-    if let Some(b) = old_bytes {
-        fields.push(("old_bytes".to_string(), Value::Bytes(b.to_vec())));
-    }
     if let Some(b) = new_bytes {
         fields.push(("new_bytes".to_string(), Value::Bytes(b.to_vec())));
     }
