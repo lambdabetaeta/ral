@@ -55,6 +55,7 @@ pub fn install_child_hooks_and_serve_helpers() -> Option<u8> {
     ral_core::sandbox::set_child_shell_extension(|shell| {
         agent_builtins::install_on(shell);
     });
+    #[cfg(unix)]
     if std::env::args().any(|a| a == "--engine") {
         ral_core::engine::run_engine();
     }

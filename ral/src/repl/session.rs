@@ -163,10 +163,17 @@ impl Session {
     /// they cover a panic-unwind exit as well as this orderly one.
     pub(super) fn run(mut self) -> ExitCode {
         ral_core::dbg_trace!("repl", "entering REPL loop");
-        self.transport.attach(ral_core::transport::TerminalEndpoint {
-            lease: None,
-            state: ral_core::io::TerminalState::probe_from_env().1,
-        });
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+        self.transport.attach(
+            ral_core::transport::TerminalEndpoint {
+                lease: None,
+                state: ral_core::io::TerminalState::probe_from_env().1,
+            },
+            cwd,
+            std::path::PathBuf::from(&home),
+            None, // rc_path
+        );
         while let Flow::Continue = self.turn() {}
         ExitCode::from(self.exit_code)
     }

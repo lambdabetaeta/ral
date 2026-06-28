@@ -282,17 +282,27 @@ impl Agent {
         } = b;
         seed_session_dir(&mut shell, &log);
         let durable = shell.mobile_snapshot();
+        #[cfg(unix)]
         let wire = if std::env::var("RAL_WIRE").is_ok() {
             Some(ral_core::transport::WireTransport::new()
                 .expect("RAL_WIRE: failed to create WireTransport"))
         } else {
             None
         };
+        #[cfg(not(unix))]
+        let wire: Option<ral_core::transport::WireTransport> = None;
         let transport = ral_core::transport::IdentityTransport::new(shell);
-        transport.attach(ral_core::transport::TerminalEndpoint {
-            lease: None,
-            state: ral_core::io::TerminalState::probe_from_env().1,
-        });
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+        transport.attach(
+            ral_core::transport::TerminalEndpoint {
+                lease: None,
+                state: ral_core::io::TerminalState::probe_from_env().1,
+            },
+            cwd,
+            std::path::PathBuf::from(&home),
+            None, // rc_path
+        );
         // Every agent — the trunk and each fork, both modes — owns its trace,
         // born in the same dir as its `events.json`.
         let transcript = Transcript::create(&log.dir().join("transcript.jsonl"))?;
@@ -342,6 +352,7 @@ impl Agent {
         seed_session_dir(&mut shell, &self.log);
         self.durable = shell.mobile_snapshot();
         self.transport = ral_core::transport::IdentityTransport::new(shell);
+        #[cfg(unix)]
         if std::env::var("RAL_WIRE").is_ok() {
             self.wire = Some(ral_core::transport::WireTransport::new()
                 .expect("RAL_WIRE: failed to create WireTransport"));
@@ -1156,7 +1167,10 @@ impl Agent {
         // own inbox (via `emit`'s mailbox) and guarded by the agent registry's
         // generation (so a `/clear` drops a stale batch).
         let content = match shell_eval::run_shell(
+            #[cfg(unix)]
             if let Some(ref wire) = self.wire { wire as &dyn ral_core::transport::Transport } else { &self.transport },
+            #[cfg(not(unix))]
+            &self.transport,
             &self.caps,
             cmd,
             timeout_secs,

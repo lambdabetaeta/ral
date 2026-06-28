@@ -296,7 +296,10 @@ pub fn run_shell(
             let mut stderr_bytes = captured.1;
 
             let (exit, value) = match &result {
-                ResultMirror::Ok(v) => (0, Some(v.clone())),
+                ResultMirror::Ok(sv) => {
+                    let v = Some(sv.clone());
+                    (0, v)
+                },
                 ResultMirror::Err(break_mirror) => match break_mirror {
                     ral_core::transport::BreakMirror::Error(msg) => {
                         let e = if timed_out {

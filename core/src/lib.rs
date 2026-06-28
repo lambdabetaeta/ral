@@ -49,8 +49,8 @@ pub mod source;
 pub mod stream;
 pub(crate) mod subprocess;
 pub(crate) mod subprocess_codec;
-pub mod engine;
-pub(crate) mod wire;
+#[cfg(unix)] pub mod engine;
+#[cfg(unix)] pub(crate) mod wire;
 pub mod transport;
 pub mod syntax;
 #[cfg(test)]

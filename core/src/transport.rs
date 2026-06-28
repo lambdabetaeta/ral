@@ -22,12 +22,16 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::io;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::types::Boundary;
 use crate::types::SurfaceSink;
 use crate::types::Value;
 use std::sync::OnceLock;
 use crate::serial::{InternCtx, SerialValue};
+
+pub const PROTOCOL_VERSION: u32 = 1;
 
 static CURRENT_CONTROL: OnceLock<ControlSender> = OnceLock::new();
 
@@ -42,8 +46,19 @@ pub struct DispatchId(pub u64);
 /// One frame that crosses the host seam in either direction.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Frame {
-    /// Front-end conveys the session terminal endpoint.
-    Attach(TerminalEndpoint),
+    /// Front-end conveys the terminal endpoint, session bootstrap, and protocol version.
+    Attach {
+        /// The terminal endpoint for IO setup.
+        endpoint: TerminalEndpoint,
+        /// Working directory the engine should start in.
+        cwd: PathBuf,
+        /// Home directory for `~` expansion.
+        home: PathBuf,
+        /// Optional rc file to load at session start.
+        rc_path: Option<PathBuf>,
+        /// Protocol version the front-end speaks (checked against PROTOCOL_VERSION).
+        proto_version: u32,
+    },
     /// Front-end drops: cancel in-flight dispatch, reap foreground
     /// subtree, restore terminal state.
     Detach,
@@ -202,8 +217,8 @@ pub trait Transport: Send + Sync {
     /// The event stream the front-end drains.
     fn events(&self) -> &EventReceiver;
 
-    /// Convey the session terminal endpoint.
-    fn attach(&self, endpoint: TerminalEndpoint);
+    /// Convey the session terminal endpoint and bootstrap state.
+    fn attach(&self, endpoint: TerminalEndpoint, cwd: PathBuf, home: PathBuf, rc_path: Option<PathBuf>);
 
     /// Detach: cancel in-flight dispatch, reap foreground subtree,
     /// restore terminal state.
@@ -227,6 +242,7 @@ impl ControlSender {
         ControlSender { wire: None }
     }
 
+    #[cfg(unix)]
     pub(crate) fn new_wire(ch: Arc<Mutex<crate::wire::WireChannel>>) -> Self {
         ControlSender { wire: Some(ch) }
     }
@@ -475,7 +491,7 @@ impl Transport for IdentityTransport {
         &self.events_recv
     }
 
-    fn attach(&self, endpoint: TerminalEndpoint) {
+    fn attach(&self, endpoint: TerminalEndpoint, _cwd: PathBuf, _home: PathBuf, _rc_path: Option<PathBuf>) {
         let mut engine = self.engine.lock().unwrap();
         engine.terminal_lease = endpoint.lease;
     }
@@ -504,6 +520,7 @@ impl Transport for IdentityTransport {
 /// into the `EventReceiver` the front-end drains.  Writes — `Dispatch`,
 /// `Attach`, `Detach`, `Control` — go through a shared `Mutex<WireChannel>`
 /// so they are concurrent-safe with the reader thread.
+#[cfg(unix)]
 pub struct WireTransport {
     /// Event receiver fed by the reader thread.
     events_recv: EventReceiver,
@@ -516,8 +533,12 @@ pub struct WireTransport {
     /// Reader thread handle (never joined — the thread exits when the
     /// channel closes).  Wrapped in a `Mutex<Option<…>>` for `Sync`.
     _reader: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Set when the engine dies (EPIPE on write).  The reader thread
+    /// checks this to break early and close the event channel.
+    death: Arc<AtomicBool>,
 }
 
+#[cfg(unix)]
 impl WireTransport {
     /// Spawn the engine child and set up the wire channel.
     ///
@@ -555,6 +576,10 @@ impl WireTransport {
         // Engine end no longer needed in the parent.
         drop(engine);
 
+        // Death flag: set on EPIPE so the reader knows to tear down.
+        let death = Arc::new(AtomicBool::new(false));
+        let death_reader = death.clone();
+
         // Event channel: reader thread writes, front-end drains.
         let (event_tx, event_rx) = mpsc::channel();
 
@@ -562,6 +587,9 @@ impl WireTransport {
         let mut reader_ch = frontend;
         let reader = std::thread::spawn(move || {
             loop {
+                if death_reader.load(Ordering::SeqCst) {
+                    break;
+                }
                 match reader_ch.read_frame() {
                     Ok(Some(Frame::Event(id, ev))) => {
                         if event_tx.send(Frame::Event(id, ev)).is_err() {
@@ -587,6 +615,7 @@ impl WireTransport {
             write_tx,
             _child: child,
             _reader: Mutex::new(Some(reader)),
+            death,
         })
     }
 
@@ -595,9 +624,7 @@ impl WireTransport {
         match self.write_tx.lock().unwrap().write_frame(frame) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
-                // Phase 2 Task 8: engine died mid-turn.  A full
-                // teardown (cancelling the reader thread, waking any
-                // blocked events().recv()) needs a shared death flag.
+                self.death.store(true, Ordering::SeqCst);
                 eprintln!("wire: engine process died (EPIPE)");
             }
             Err(_) => {} // other write errors are non-fatal
@@ -605,6 +632,7 @@ impl WireTransport {
     }
     }
 
+#[cfg(unix)]
 impl Drop for WireTransport {
     fn drop(&mut self) {
         // Kill the engine child so the reader thread sees EOF and exits.
@@ -613,6 +641,7 @@ impl Drop for WireTransport {
     }
 }
 
+#[cfg(unix)]
 impl Transport for WireTransport {
     fn dispatch(&self, id: DispatchId, turn: Turn) {
         self.write(&Frame::Dispatch(id, turn));
@@ -630,11 +659,14 @@ impl Transport for WireTransport {
     /// controlling terminal fds over the socket via SCM_RIGHTS (Unix
     /// ancillary data).  For now the endpoint's lease field is
     /// `#[serde(skip)]` and the engine stores it as a placeholder.
-    fn attach(&self, endpoint: TerminalEndpoint) {
-        // TODO: if endpoint.lease.is_some(), use sendmsg with SCM_RIGHTS
-        // to convey stdin/stdout/stderr fds to the engine before the
-        // Attach frame.
-        self.write(&Frame::Attach(endpoint));
+    fn attach(&self, endpoint: TerminalEndpoint, cwd: PathBuf, home: PathBuf, rc_path: Option<PathBuf>) {
+        self.write(&Frame::Attach {
+            endpoint,
+            cwd,
+            home,
+            rc_path,
+            proto_version: PROTOCOL_VERSION,
+        });
     }
 
     fn detach(&self) {

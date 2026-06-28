@@ -5,13 +5,62 @@ use std::os::unix::io::FromRawFd;
 use std::os::unix::net::UnixStream;
 
 use crate::driver::TurnRequest;
-use crate::transport::{Control, Event, Frame, Turn, report_to_mirror};
+use crate::transport::{Control, DispatchId, Event, Frame, Turn, report_to_mirror};
 use crate::types::{Boundary, Shell, SurfaceSink, Value};
 use crate::wire::WireChannel;
 use crate::serial::{InternCtx, SerialValue};
 
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+
+/// A surface sink that writes Event::Surface frames live to the wire
+/// as values are produced, rather than buffering.
+struct ChannelSurfaceSink {
+    id: crate::transport::DispatchId,
+    writer: Arc<Mutex<WireChannel>>,
+    ctx: Mutex<InternCtx>,
+}
+
+impl crate::types::EventSink for ChannelSurfaceSink {
+    fn emit(&self, ev: &Value) {
+        if let Ok(sv) = SerialValue::from_runtime(ev, &mut self.ctx.lock().unwrap()) {
+            let _ = self.writer.lock().unwrap().write_frame(
+                &Frame::Event(self.id, Event::Surface(sv))
+            );
+        }
+    }
+}
+
+/// A boundary sink that writes Event::BoundarySurface frames to the wire.
+struct ChannelBoundarySink {
+    id: DispatchId,
+    writer: Arc<Mutex<WireChannel>>,
+    ctx: Mutex<InternCtx>,
+}
+
+impl crate::types::BoundarySink for ChannelBoundarySink {
+    fn deliver(
+        &self,
+        batch: Vec<Value>,
+        joined: std::sync::Arc<std::sync::Mutex<bool>>,
+    ) {
+        let already = {
+            let mut guard = joined.lock().unwrap();
+            let was = *guard;
+            *guard = true;
+            was
+        };
+        if already {
+            return;
+        }
+        let sv_batch: Vec<SerialValue> = batch
+            .into_iter()
+            .filter_map(|v| SerialValue::from_runtime(&v, &mut self.ctx.lock().unwrap()).ok())
+            .collect();
+        let _ = self.writer.lock().unwrap().write_frame(
+            &Frame::Event(self.id, Event::BoundarySurface(sv_batch))
+        );
+    }
+}
 
 /// Run the engine loop on an inherited socket (fd 3).
 /// The front-end passes the socket as fd 3 before exec.
@@ -19,170 +68,148 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub fn run_engine() -> ! {
     // SAFETY: fd 3 is the socket inherited from the front-end
     let stream = unsafe { UnixStream::from_raw_fd(3) };
-    let mut channel = WireChannel::from_stream(stream);
+    let reader_ch = WireChannel::from_stream(stream);
+    let writer_ch = reader_ch.try_clone().expect("try_clone engine channel");
+    let writer = Arc::new(Mutex::new(writer_ch));
 
-    // Boot a Shell with default configuration
     let shell = Shell::new(Default::default());
 
-    // Run the engine loop
-    let code = engine_loop(&mut channel, shell);
-    std::process::exit(code);
-}
+    // Rendezvous channel: try_send succeeds only when the worker is
+    // idle (blocked on recv).  While the worker runs a turn, try_send
+    // fails with Full → reply "engine busy".
+    let (turn_tx, turn_rx) = mpsc::sync_channel::<(crate::transport::DispatchId, Turn)>(0);
 
-/// A surface sink that buffers events in a Vec for flush after the turn.
-struct BufferSurfaceSink {
-    buf: Arc<Mutex<Vec<Value>>>,
-}
+    // ── Worker thread: owns the Shell ──────────────────────────────
+    let worker_writer = writer.clone();
+    std::thread::spawn(move || {
+        let mut shell = shell;
+        loop {
+            let Ok((id, turn)) = turn_rx.recv() else {
+                break; // channel closed
+            };
 
-impl crate::types::EventSink for BufferSurfaceSink {
-    fn emit(&self, ev: &Value) {
-        self.buf.lock().unwrap().push(ev.clone());
-    }
-}
+            // Extract the request mirror
+            let req = match &turn {
+                Turn::Source { req, .. } | Turn::Hook { req, .. } => req,
+            };
 
-/// The main engine loop: read frames, execute, write events back.
-fn engine_loop(channel: &mut WireChannel, mut shell: Shell) -> i32 {
-    let surface_buf: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
-    let current_dispatch = Arc::new(AtomicU64::new(0));
+            // Build the TurnRequest
+            let script_name = req.script_name.clone();
+            let surface_sink: SurfaceSink = Arc::new(ChannelSurfaceSink {
+                id,
+                writer: worker_writer.clone(),
+                ctx: Mutex::new(InternCtx::new()),
+            });
+            let boundary_sink: Option<Boundary> = Some(Arc::new(ChannelBoundarySink {
+                id,
+                writer: worker_writer.clone(),
+                ctx: Mutex::new(InternCtx::new()),
+            }));
 
+            let turn_req = TurnRequest {
+                script_name: &script_name,
+                caps: req.caps.clone(),
+                turn_limit: req.turn_limit,
+                detached_limit: req.detached_limit,
+                io: req.io,
+                terminal: req.terminal,
+                stdin: req.stdin,
+                surface: Some(surface_sink),
+                boundary: boundary_sink,
+                lifecycle: Box::new(()),
+            };
+
+            // Run the turn against the shell
+            let report = match turn {
+                Turn::Source { src, .. } => {
+                    shell.run_source_turn(&src, turn_req)
+                }
+                Turn::Hook { name, args, .. } => {
+                    let arcs: crate::serial::ScopeArcs = Vec::new();
+                    let live_args: Vec<Value> = args
+                        .into_iter()
+                        .filter_map(|sv| sv.into_runtime(&arcs).ok())
+                        .collect();
+                    shell.run_hook(&name, live_args, turn_req)
+                }
+            };
+
+            // Convert and send the terminal Report frame.
+            let report_mirror = report_to_mirror(report);
+            let _ = worker_writer.lock().unwrap().write_frame(
+                &Frame::Event(id, Event::Report(report_mirror))
+            );
+        }
+    });
+
+    // ── Reader loop (this thread) ──────────────────────────────────
+    let mut reader_ch = reader_ch;
     loop {
-        let frame = match channel.read_frame() {
-            Ok(Some(f)) => f,
-            Ok(None) => {
-                // EOF — front-end gone. Cancel in-flight, reap, exit.
+        match reader_ch.read_frame() {
+            Ok(Some(Frame::Dispatch(id, turn))) => {
+                match turn_tx.try_send((id, turn)) {
+                    Ok(()) => { /* worker accepted the turn */ }
+                    Err(mpsc::TrySendError::Full(_)) => {
+                        // Worker is busy — reply with a static diagnostic.
+                        use crate::driver::TurnReport;
+                        use crate::turn::StaticDiagnostics;
+                        let mirror = report_to_mirror(TurnReport::Static {
+                            diagnostics: StaticDiagnostics::Host(
+                                crate::types::Error::new("engine busy", 1)
+                            ),
+                        });
+                        let _ = writer.lock().unwrap().write_frame(
+                            &Frame::Event(id, Event::Report(mirror))
+                        );
+                    }
+                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                        break; // worker died
+                    }
+                }
+            }
+            Ok(Some(Frame::Control(Control::Cancel(_)))) => {
                 crate::process::request_foreground_cancel(
                     crate::process::CancelCause::Explicit
                 );
-                return 0;
+            }
+            Ok(Some(Frame::Control(Control::Resize(_winsize)))) => {
+                // no-op for now, TODO task 7
+            }
+            Ok(Some(Frame::Control(Control::Suspend))) => {}
+            Ok(Some(Frame::Control(Control::Resume))) => {}
+            Ok(Some(Frame::Attach { endpoint, cwd, home, rc_path, proto_version })) => {
+                // Check protocol version.
+                use crate::transport::PROTOCOL_VERSION;
+                if proto_version != PROTOCOL_VERSION {
+                    eprintln!(
+                        "engine: protocol version mismatch (front-end {}, engine {})",
+                        proto_version, PROTOCOL_VERSION
+                    );
+                    std::process::exit(1);
+                }
+                // Restore the session environment.
+                if let Err(e) = std::env::set_current_dir(&cwd) {
+                    eprintln!("engine: failed to set cwd to {}: {e}", cwd.display());
+                }
+                // SAFETY: single-threaded engine startup, no other threads
+                unsafe { std::env::set_var("HOME", &home); }
+                let _ = endpoint; // TODO Phase 2 Task 6: pass terminal fds via SCM_RIGHTS
+                let _ = rc_path; // TODO: load rc_path with Shell::load_rc when available
+            }
+            Ok(Some(Frame::Detach)) | Ok(None) => {
+                crate::process::request_foreground_cancel(
+                    crate::process::CancelCause::Explicit
+                );
+                break;
+            }
+            Ok(Some(Frame::Event(..))) => {
+                eprintln!("engine: unexpected Event frame");
             }
             Err(e) => {
                 eprintln!("engine: read error: {e}");
-                return 1;
-            }
-        };
-
-        match frame {
-            Frame::Attach(endpoint) => {
-                // Store the terminal endpoint.  The lease (if any) is
-                // conveyed via fd-passing (SCM_RIGHTS) rather than
-                // serialised (`#[serde(skip)]`).  Phase 2 Task 6:
-                //   - Receive fds with recvmsg + SCM_RIGHTS before the
-                //     Attach frame arrives.
-                //   - dup2 the received fds to 0,1,2.
-                //   - Mint a TerminalLease from them.
-                // For the initial implementation the endpoint is stored
-                // as-is; its lease field is None until fd-passing lands.
-                let _endpoint = endpoint;
-                // Store the terminal endpoint (lease conveyed via fd-passing).
-                // Full fd-passing happens in task 6.
-            }
-            Frame::Dispatch(id, turn) => {
-                // Execute the turn synchronously.
-                current_dispatch.store(id.0, Ordering::Relaxed);
-                surface_buf.lock().unwrap().clear();
-
-                // Extract the ReqMirror (same shape for both Source and Hook).
-                let req = match &turn {
-                    Turn::Source { req, .. } | Turn::Hook { req, .. } => req,
-                };
-
-                // Build the TurnRequest from the mirror.
-                let script_name = req.script_name.clone();
-                let surface_sink: SurfaceSink = Arc::new(BufferSurfaceSink {
-                    buf: surface_buf.clone(),
-                });
-                // Boundary sink: for now, a no-op that discards detached-worker
-                // surface batches.  Task 6 will wire this to the channel.
-                let boundary_sink: Option<Boundary> = None;
-
-                let turn_req = TurnRequest {
-                    script_name: &script_name,
-                    caps: req.caps.clone(),
-                    turn_limit: req.turn_limit,
-                    detached_limit: req.detached_limit,
-                    io: req.io,
-                    terminal: req.terminal,
-                    stdin: req.stdin,
-                    surface: Some(surface_sink),
-                    boundary: boundary_sink,
-                    lifecycle: Box::new(()),
-                };
-
-                // Run the turn against the shell.
-                let report = match turn {
-                    Turn::Source { src, .. } => {
-                        shell.run_source_turn(&src, turn_req)
-                    }
-                    Turn::Hook { name, args, .. } => {
-                        // Convert SerialValue args back to live Value.
-                        // For the initial implementation, use empty scope arcs
-                        // (handles only simple ground values — Int, String,
-                        // Bool, List, Map — not closures).
-                        let arcs: crate::serial::ScopeArcs = Vec::new();
-                        let live_args: Vec<Value> = args
-                            .into_iter()
-                            .filter_map(|sv| sv.into_runtime(&arcs).ok())
-                            .collect();
-                        shell.run_hook(&name, live_args, turn_req)
-                    }
-                };
-
-                // Flush buffered surface events as Event::Surface frames,
-                // then send the final Report.
-                {
-                    let mut ctx = InternCtx::new();
-                    let surface_values: Vec<Value> =
-                        std::mem::take(&mut *surface_buf.lock().unwrap());
-                    for v in &surface_values {
-                        if let Ok(sv) = SerialValue::from_runtime(v, &mut ctx) {
-                            let _ = channel.write_frame(
-                                &Frame::Event(id, Event::Surface(sv))
-                            );
-                        }
-                    }
-                    // Convert TurnReport → ReportMirror and send as terminal frame.
-                    let report_mirror = report_to_mirror(report);
-                    let _ = channel.write_frame(
-                        &Frame::Event(id, Event::Report(report_mirror))
-                    );
-                }
-            }
-            Frame::Control(Control::Cancel(_id)) => {
-                crate::process::request_foreground_cancel(
-                    crate::process::CancelCause::Explicit
-                );
-            }
-            Frame::Control(Control::Suspend) => {
-                // Phase 2 Task 7 (signal relocation): the front-end
-                // installs OS signal handlers and translates SIGTSTP
-                // into this Control frame.  The engine should suspend
-                // its process group here.
-                // no-op for now
-            }
-            Frame::Control(Control::Resume) => {
-                // Phase 2 Task 7 (signal relocation): the front-end
-                // translates SIGCONT into this Control frame.
-                // no-op for now
-            }
-            Frame::Control(Control::Resize(winsize)) => {
-                // Phase 2 Task 7 (signal relocation): the front-end
-                // translates SIGWINCH into this Control frame.  The
-                // engine should update its terminal state and forward
-                // to the foreground process group.
-                let _winsize = winsize;
-                // no-op for now
-            }
-            Frame::Detach => {
-                crate::process::request_foreground_cancel(
-                    crate::process::CancelCause::Explicit
-                );
-                return 0;
-            }
-            Frame::Event(..) => {
-                // Engine should never receive Event frames
-                eprintln!("engine: unexpected Event frame");
+                break;
             }
         }
     }
+    std::process::exit(0);
 }
-
