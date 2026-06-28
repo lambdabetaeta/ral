@@ -89,8 +89,6 @@ impl Session {
         let mut edit_mode = EditMode::Emacs;
         let mut bell = BellStyle::None;
         let mut surface = Surface::default();
-        boot::install_default_prompt(&mut shell);
-
         let jobs = Arc::new(Mutex::new(jobs::JobTable::new()));
         let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
 
@@ -115,6 +113,10 @@ impl Session {
         // `--capabilities` applies after rc files: rc is operator-trusted
         // session bootstrap, the user-supplied ceiling narrows from there.
         crate::apply_session_capabilities(&mut shell, &opts.run.capabilities)?;
+
+        // Install the default prompt only when rc files did not
+        // register one already (e.g. via the `prompt` key in ralrc).
+        boot::install_default_prompt(&mut shell);
 
         // Install the host surface — the editor (`_ed-*`) builtins and
         // `watch` — into this shell's builtin table.  The process registry

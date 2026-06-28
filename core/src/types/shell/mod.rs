@@ -428,8 +428,8 @@ impl Shell {
         self.install_script_context(name, text);
     }
 
-    /// Resolve the four pseudo-variables (`$env`, `$args`,
-    /// `$script`, `$nproc`).  These are computed at access time
+    /// Resolve the seven pseudo-variables (`$env`, `$args`,
+    /// `$script`, `$nproc`, `$CWD`, `$STATUS`, `$USER`).  These are
     /// rather than stored in scope, so they sit between the env
     /// check and the handler-stack walk in [`Self::resolve_value`].
     /// Any other name returns `None`.
@@ -476,6 +476,21 @@ impl Shell {
                     .map(|n| n.get() as i64)
                     .unwrap_or(1),
             )),
+            "CWD" => {
+                let p = self.cwd();
+                let s = p.to_string_lossy().to_string();
+                let home = crate::path::home_from_env();
+                let cwd_str = if !home.is_empty() && s.starts_with(&home) {
+                    format!("~{}", &s[home.len()..])
+                } else if s.is_empty() {
+                    "?".into()
+                } else {
+                    s
+                };
+                Some(Value::String(cwd_str))
+            },
+            "STATUS" => Some(Value::Int(i64::from(self.mobile.control.last_status))),
+            "USER" => Some(Value::String(crate::path::user_name_from_env())),
             _ => None,
         }
     }

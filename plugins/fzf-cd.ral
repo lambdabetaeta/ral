@@ -8,20 +8,20 @@
 # next prompt.
 #
 # Options:
-#   key   keybinding (default 'alt-c')
+#   key   keybinding (default "alt-c")
 
 return { |options|
-    let key = get $options key 'alt-c'
-    let _handler = {
-        let cmd = try { return $env[FZF_ALT_C_COMMAND] } { |_| return '' }
-        let user = try { return $env[FZF_DEFAULT_OPTS] } { |_| return '' }
-        let extra = try { return $env[FZF_ALT_C_OPTS] } { |_| return '' }
-        let height = try { return $env[FZF_TMUX_HEIGHT] } { |_| return '40%' }
+    let key = get $options key "alt-c"
+    let _handler = { |ctx|
+        let cmd = try { return $env[FZF_ALT_C_COMMAND] } { |_| return "" }
+        let user = try { return $env[FZF_DEFAULT_OPTS] } { |_| return "" }
+        let extra = try { return $env[FZF_ALT_C_OPTS] } { |_| return "" }
+        let height = try { return $env[FZF_TMUX_HEIGHT] } { |_| return "40%" }
         let opts = "--height $height --min-height 20+ --bind=ctrl-z:ignore --reverse --walker=dir,follow,hidden --scheme=path $user $extra +m"
         let r = _ed-tui {
             within [env: [
                 FZF_DEFAULT_COMMAND: $cmd,
-                FZF_DEFAULT_OPTS_FILE: '',
+                FZF_DEFAULT_OPTS_FILE: "",
                 FZF_DEFAULT_OPTS: $opts,
             ]] {
                 fzf
@@ -39,7 +39,8 @@ return { |options|
     }
 
     return [
-        name: 'fzf-cd',
+        name: "fzf-cd",
         keybindings: [[key: $key, handler: $_handler]],
     ]
 }
+

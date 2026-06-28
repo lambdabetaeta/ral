@@ -5,23 +5,23 @@
 # Renders inline (height-mode) like the upstream zsh plugin.
 #
 # Options:
-#   key   keybinding (default 'ctrl-r')
+#   key   keybinding (default "ctrl-r")
 
 return { |options|
-    let key = get $options key 'ctrl-r'
-    let _handler = {
+    let key = get $options key "ctrl-r"
+    let _handler = { |ctx|
         let query = _ed-lbuffer
-        let entries = _ed-history '' 0
-        let user = try { return $env[FZF_DEFAULT_OPTS] } { |_| return '' }
-        let extra = try { return $env[FZF_CTRL_R_OPTS] } { |_| return '' }
-        let height = try { return $env[FZF_TMUX_HEIGHT] } { |_| return '40%' }
+        let entries = _ed-history "" 0
+        let user = try { return $env[FZF_DEFAULT_OPTS] } { |_| return "" }
+        let extra = try { return $env[FZF_CTRL_R_OPTS] } { |_| return "" }
+        let height = try { return $env[FZF_TMUX_HEIGHT] } { |_| return "40%" }
         let opts = "--height $height --min-height 20+ --bind=ctrl-z:ignore --scheme=history --bind=ctrl-r:toggle-sort --highlight-line $user $extra"
         let r = _ed-tui {
             within [env: [
-                FZF_DEFAULT_OPTS_FILE: '',
+                FZF_DEFAULT_OPTS_FILE: "",
                 FZF_DEFAULT_OPTS: $opts,
             ]] {
-                to-lines $entries | fzf '--query' $query
+                to-lines $entries | fzf "--query" $query
             }
         }
         if $[$r[status] == 0 && not !{is-empty $r[output]}] {
@@ -33,7 +33,8 @@ return { |options|
     }
 
     return [
-        name: 'fzf-history',
+        name: "fzf-history",
         keybindings: [[key: $key, handler: $_handler]],
     ]
 }
+

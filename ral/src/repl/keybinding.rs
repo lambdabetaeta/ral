@@ -8,7 +8,7 @@
 //! push a new buffer onto the stack.
 
 use ral_core::types::Capabilities;
-use ral_core::{HookName, RequestedTerminalAccess, Shell};
+use ral_core::{HookName, RequestedTerminalAccess, Shell, Value};
 use std::sync::{Arc, Mutex};
 
 use super::frontend::EditBuffer;
@@ -92,7 +92,7 @@ pub(super) fn dispatch_keybinding(
             in_readline: false,
         },
         outputs: PluginOutputs::default(),
-        state_cell,
+        state_cell: state_cell.clone(),
         state_default_used: state_loaded,
     };
 
@@ -100,7 +100,15 @@ pub(super) fn dispatch_keybinding(
         shell,
         HookFor { name: &pk.plugin },
         &hook,
-        &[],
+        &[Value::map(vec![
+            ("line".into(), Value::String(current.to_string())),
+            ("cursor".into(), Value::Int(cursor_chars as i64)),
+            ("history".into(), Value::List(
+                lock(runtime).hooks.history.iter().cloned().map(Value::String).collect()
+            )),
+            ("keymap".into(), Value::String(keymap_name(keymap).to_string())),
+            ("state".into(), state_cell.clone().unwrap_or(Value::Unit)),
+        ])],
         Some(ctx_in),
         HookFraming::Framed(FramedHook {
             terminal: RequestedTerminalAccess::Leased,

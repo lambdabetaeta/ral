@@ -7,13 +7,13 @@
 #   chpwd hook   record each directory change in the zoxide database
 #
 # Load in rc:
-#   plugins: [[plugin: 'zoxide', options: [key: 'alt-z']]]
+#   plugins: [[plugin: "zoxide", options: [key: "alt-z"]]]
 #
 # Options:
-#   key   keybinding for the interactive picker (default 'alt-z')
+#   key   keybinding for the interactive picker (default "alt-z")
 
 return { |options|
-    let key = get $options key 'alt-z'
+    let key = get $options key "alt-z"
     let _z = { |args|
         if !{is-empty $args} {
             cd ~
@@ -21,12 +21,12 @@ return { |options|
             let here = !{cwd}
             let result = try {
                 return !{zoxide query --exclude $here -- ...$args | from-line}
-            } { |_| return '' }
+            } { |_| return "" }
             if $[not !{is-empty $result}] { cd $result }
         }
     }
 
-    let _zi = {
+    let _zi = { |ctx|
         let query = _ed-lbuffer
         let r = _ed-tui {
             zoxide query --interactive -- $query
@@ -44,18 +44,19 @@ return { |options|
     let _zi_cmd = { |args|
         let result = try {
             return !{zoxide query --interactive -- ...$args | from-line}
-        } { |_| return '' }
+        } { |_| return "" }
         if !{is-empty $result} {} else { cd $result }
     }
 
-    let _chpwd = { |_old new|
-        zoxide add -- $new 2>/dev/null
+    let _chpwd = { |ctx|
+        zoxide add -- $ctx[new] 2>/dev/null
     }
 
     return [
-        name: 'zoxide',
+        name: "zoxide",
         aliases: [z: $_z, zi: $_zi_cmd],
         hooks: [chpwd: $_chpwd],
         keybindings: [[key: $key, handler: $_zi]],
     ]
 }
+

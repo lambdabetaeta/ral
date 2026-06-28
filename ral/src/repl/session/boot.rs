@@ -156,12 +156,16 @@ pub(super) fn setup_panic_hook() {
 /// has `RAL_PROMPT` bound — [`render`](super::super::prompt::render)
 /// relies on this.
 pub(super) fn install_default_prompt(shell: &mut Shell) {
+    let hook_name = HookName::session("prompt");
+    if shell.has_hook(&hook_name) {
+        return;
+    }
     let src = format!("{{ return \"{}\" }}", super::super::prompt::DEFAULT_PROMPT);
     let comp = Arc::new(ral_core::compile(&src).expect("default prompt thunk compiles"));
     let block = evaluate(&comp, shell).expect("default prompt thunk evaluates");
     let origin = ral_core::source::Span::new(ral_core::source::FileId(0), 0, 0);
     let _ = shell.register_hook(
-        HookName::session("prompt"),
+        hook_name,
         block,
         HookSig::Prompt,
         DefaultPolicy::denied_capture(),

@@ -75,10 +75,10 @@ impl ReplLifecycle<'_> {
                 self.runtime,
                 shell,
                 "chpwd",
-                &[
-                    Value::String(old.to_string_lossy().into_owned()),
-                    Value::String(new.to_string_lossy().into_owned()),
-                ],
+                &[Value::map(vec![
+                    ("old".into(), Value::String(old.to_string_lossy().into_owned())),
+                    ("new".into(), Value::String(new.to_string_lossy().into_owned())),
+                ])],
             );
         }
         run_lifecycle_hook(

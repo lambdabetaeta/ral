@@ -404,17 +404,22 @@ impl Shell {
             return Err(RegisterError::AlreadyRegistered { name, origin });
         }
 
-        // 5. Validate (no-op seam for future mobility checks).
+        // 5. Validate arity and callability.
         let hook = Hook {
             binding,
             sig,
             policy,
             origin,
         };
-        hook.validate()?;
+        hook.validate(&name)?;
 
         self.mobile.context.hooks.insert(name, hook);
         Ok(())
+    }
+
+    /// Return true when a hook with the given `name` is registered.
+    pub fn has_hook(&self, name: &HookName) -> bool {
+        self.mobile.context.hooks.contains_key(name)
     }
 
     /// Run a registered hook by name, applying `args` as its

@@ -5,7 +5,8 @@
 # The ghost text is a display artifact only; pressing the right-arrow key
 # at end-of-line accepts it.
 
-let _handler = { |_old buf _cursor|
+let _handler = { |ctx|
+    let buf = $ctx[line]
     if $[not !{is-empty $buf}] {
         let hits = _ed-history $buf 1
         if $[not !{is-empty $hits}] {
@@ -13,14 +14,15 @@ let _handler = { |_old buf _cursor|
             let n = !{length $buf}
             _ed-ghost !{slice $suggestion $n $[!{length $suggestion} - $n]}
         } else {
-            _ed-ghost ''
+            _ed-ghost ""
         }
     } else {
-        _ed-ghost ''
+        _ed-ghost ""
     }
 }
 
 return [
-    name: 'autosuggestion',
+    name: "autosuggestion",
     hooks: [buffer-change: $_handler],
 ]
+

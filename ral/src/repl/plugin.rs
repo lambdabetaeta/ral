@@ -518,18 +518,18 @@ pub(super) fn run_buffer_change_hooks(runtime: &Arc<Mutex<PluginRuntime>>, line:
         (old_buf, handlers, hook_env, history, keymap)
     }; // lock released
 
-    let args = [
-        Value::String(old_buf),
-        Value::String(line.to_string()),
-        Value::Int(pos as i64),
-    ];
+    let args = [Value::map(vec![
+        ("old_buf".into(), Value::String(old_buf)),
+        ("line".into(), Value::String(line.to_string())),
+        ("pos".into(), Value::Int(pos as i64)),
+        ("history".into(), Value::List(history.iter().cloned().map(Value::String).collect())),
+        ("keymap".into(), Value::String(keymap.clone())),
+        ("state".into(), Value::Unit),
+    ])];
     let mut ghost: Option<String> = None;
     let mut spans: Vec<HighlightSpan> = Vec::new();
-
-    // ── Phase 2: run each handler with lock released around evaluator ────
     for (idx, name) in handlers {
         let hook = HookName::plugin(name.clone(), "buffer-change".to_string());
-
         // Snapshot state cell from the runtime.
         let state_cell = lock(runtime)
             .plugins

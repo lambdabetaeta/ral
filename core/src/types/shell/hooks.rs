@@ -17,6 +17,7 @@
 
 use crate::source::Span;
 use crate::types::Binding;
+use crate::types::Value;
 
 use std::fmt;
 use std::time::Duration;
@@ -177,17 +178,36 @@ pub struct Hook {
     /// Declaration site, for diagnostics.
     pub origin: Span,
 }
-
 impl Hook {
-    /// Marked seam for mobility enforcement.  No-op in Phase 0; in a
-    /// later phase this will validate that the hook's captured `Env`
-    /// holds only transportable state.
-    pub fn validate(&self) -> Result<(), RegisterError> {
-        let _ = &self.binding;
-        Ok(())
+    /// Validate arity: the handler's parameter count must match
+    /// the signature's expected arity (0 for Prompt, 1 for Hook/
+    /// Lifecycle/PluginFactory).  Returns `Err(RegisterError)` on
+    /// arity mismatch or non-callable value.
+    pub fn validate(&self, name: &HookName) -> Result<(), RegisterError> {
+        let expected = self.sig.expected_arity();
+        let actual = match &self.binding.value {
+            Value::Block { .. } => 0,
+            Value::Lambda { .. } => self.binding.value.lambda_arity().unwrap_or(0),
+            other => {
+            return Err(RegisterError::NotCallable {
+                name: name.clone(),
+                origin: self.origin,
+                actual: format!("{}", other),
+            });
+            }
+        };
+    if actual != expected {
+        return Err(RegisterError::ArityMismatch {
+            name: name.clone(),
+            origin: self.origin,
+            expected,
+            actual,
+            sig_label: self.sig.label().into(),
+        });
     }
+    Ok(())
 }
-
+}
 // ── Registration errors ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
