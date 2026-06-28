@@ -11,7 +11,7 @@
 //! captured builtins installed at boot (see [`super::host_handlers`]).
 
 use ral_core::transport::{
-    self, CapsMirror, DiagMirror, DispatchId, Event, Frame, IdentityTransport, ReqMirror,
+    self, DiagMirror, DispatchId, Event, Frame, IdentityTransport, ReqMirror,
     ReportMirror, ResultMirror, Transport, Turn,
 };
 use ral_core::{
@@ -118,7 +118,7 @@ pub(super) fn execute_input(
     // Build the transport-level Turn from the source text.
     let req = ReqMirror {
         script_name: "<stdin>".to_string(),
-        caps: CapsMirror::root(),
+        caps: ral_core::types::Capabilities::root(),
         turn_limit: None,
         detached_limit: None,
         io: TurnIo::Inherit,

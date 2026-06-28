@@ -20,14 +20,14 @@ use crate::types::Binding;
 
 use std::fmt;
 use std::time::Duration;
-
+use serde::{Serialize, Deserialize};
 // ── Hook identity ───────────────────────────────────────────────────────
 
 /// Plugin identity: the unique name a plugin was loaded under.
 pub type PluginId = String;
 
 /// Which namespace a hook lives in.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Namespace {
     /// Session-global: rc-declared prompt, startup block.
     Session,
@@ -36,7 +36,7 @@ pub enum Namespace {
 }
 
 /// Fully-qualified name of a registered hook.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HookName {
     pub namespace: Namespace,
     pub name: String,

@@ -16,7 +16,6 @@ use crate::bus::{AgentId, Emitter, InboxMsg, Kind, Mailbox};
 use crate::card::{done_card, io_card, value_to_card, value_to_done, value_to_io, value_to_pin};
 use ral_core::types::{Boundary, BoundarySink};
 use ral_core::Value as RalValue;
-use ral_core::transport::Transport;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -174,7 +173,7 @@ pub fn boundary_sink(emit: &Emitter, root: AgentId, registry: &AgentRegistry) ->
 /// a `Source` turn, drains surface events to the bus, and converts the
 /// terminal [`ReportMirror`] into the structured result.
 pub fn run_shell(
-    transport: &ral_core::transport::IdentityTransport,
+    transport: &dyn ral_core::transport::Transport,
     caps: &ral_core::types::Capabilities,
     cmd: &str,
     timeout_secs: u64,
@@ -312,8 +311,15 @@ pub fn run_shell(
                             ral_core::types::Error::new(msg.clone(), 1)
                         };
 
+                        // When using WireTransport, the shell is remote; fall back
+                        // to an empty source map for error formatting.
+                        // TODO Phase 2: include source map in ReportMirror.
+                        let sources = transport.as_any()
+                            .downcast_ref::<ral_core::transport::IdentityTransport>()
+                            .map(|t| t.shell_mut().shell.sources().clone())
+                            .unwrap_or_default();
                         let rendered = ral_core::diagnostic::format_runtime_error_auto(
-                            transport.shell_mut().shell.sources(),
+                            &sources,
                             &e,
                             _single_command,
                         );

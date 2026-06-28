@@ -22,7 +22,7 @@
 //! before any ANSI output because bundled uutils (uu_ls etc.) emit
 //! escape codes but rely on the host process to have switched the
 //! console into VTP mode first.
-
+use serde::{Serialize, Deserialize};
 /// Operating mode for the interactive frontend, resolved from
 /// `RAL_INTERACTIVE_MODE` at shell startup.
 ///
@@ -30,7 +30,7 @@
 /// `Minimal` forces every terminal round-trip and every ANSI emission off.
 /// `Full` forces ANSI on even when capability detection says otherwise
 /// (useful when piping ral into a wrapper that understands ANSI).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InteractiveMode {
     #[default]
     Auto,
@@ -86,7 +86,7 @@ impl InteractiveMode {
 /// escape sequences and which "hostile but common" environment we are running
 /// inside.  Population happens once via `TerminalState::probe_with_mode`;
 /// nothing re-queries the OS mid-session.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalState {
     pub startup_stdin_tty: bool,
     pub startup_stdout_tty: bool,

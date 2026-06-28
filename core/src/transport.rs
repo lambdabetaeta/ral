@@ -17,26 +17,30 @@
 //! frame types below is annotated with `// Phase 2: SerialValue`.
 //!
 //! See [[decisions/260628_host-seam-transport-parametric]].
-
+use serde::{Serialize, Deserialize};
 use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::io;
 
 use crate::types::Boundary;
 use crate::types::SurfaceSink;
 use crate::types::Value;
 use std::sync::OnceLock;
+use crate::serial::{InternCtx, SerialValue};
 
 static CURRENT_CONTROL: OnceLock<ControlSender> = OnceLock::new();
 
 // ── Dispatch identity ─────────────────────────────────────────────────
 
 /// Correlation token for one outstanding dispatch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DispatchId(pub u64);
 
 // ── Frame algebra ─────────────────────────────────────────────────────
 
 /// One frame that crosses the host seam in either direction.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Frame {
     /// Front-end conveys the session terminal endpoint.
     Attach(TerminalEndpoint),
@@ -53,6 +57,7 @@ pub enum Frame {
 }
 
 /// The program of one dispatch: either source text or a hook invocation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Turn {
     /// A top-level source turn: text compiled and typechecked against the
     /// live session.
@@ -61,24 +66,26 @@ pub enum Turn {
     /// ground arguments.  // Phase 2: args becomes Vec<SerialValue>
     Hook {
         name: crate::types::HookName,
-        args: Vec<Value>,
+        args: Vec<crate::serial::SerialValue>,
         req: ReqMirror,
     },
 }
 
 /// Engine → front-end event frame.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Event {
     /// A live surface value, ordered before this dispatch Report.
     /// Phase 2: becomes Surface(SerialValue)
-    Surface(Value),
+    Surface(crate::serial::SerialValue),
     /// A detached worker deferred batch, flushed at a turn boundary.
     /// Phase 2: becomes BoundarySurface(Vec<SerialValue>)
-    BoundarySurface(Vec<Value>),
+    BoundarySurface(Vec<crate::serial::SerialValue>),
     /// The dispatch sole terminal frame.
     Report(ReportMirror),
 }
 
 /// Front-end → engine out-of-band control frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Control {
     /// Cancel the named dispatch.
     Cancel(DispatchId),
@@ -91,7 +98,7 @@ pub enum Control {
 }
 
 /// Terminal window size in rows × columns.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Winsize {
     pub rows: u16,
     pub cols: u16,
@@ -100,8 +107,10 @@ pub struct Winsize {
 // ── Terminal endpoint ─────────────────────────────────────────────────
 
 /// The terminal endpoint the front-end conveys at attach.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalEndpoint {
     /// The session lease, if the front-end owns a terminal.
+    #[serde(skip)]
     pub lease: Option<crate::process::TerminalLease>,
     /// The terminal state for IO setup.
     pub state: crate::io::TerminalState,
@@ -112,14 +121,17 @@ pub struct TerminalEndpoint {
 /// Mirror of `TurnRequest`: everything a turn needs that is *data*.
 /// The live handles `surface`, `boundary`, `lifecycle` are not here —
 /// they become Event frames and engine-side defaults.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReqMirror {
     /// Label for the root source context.
     pub script_name: String,
     /// The capability ceiling.
-    pub caps: CapsMirror,
+    pub caps: crate::types::Capabilities,
     /// Foreground wall duration.
+    #[serde(skip)]
     pub turn_limit: Option<std::time::Duration>,
     /// Lifetime ceiling for detached workers.
+    #[serde(skip)]
     pub detached_limit: Option<std::time::Duration>,
     /// Byte IO regime.
     pub io: crate::driver::TurnIo,
@@ -129,36 +141,8 @@ pub struct ReqMirror {
     pub stdin: crate::driver::TurnStdin,
 }
 
-/// Mirror of `Capabilities`: a serialisable projection of the dynamic
-/// capability ceiling.
-#[derive(Clone)]
-pub enum CapsMirror {
-    /// The ⊤ element — full authority (REPL).
-    Root,
-    /// A narrowed capability profile.
-    Narrowed(Box<LiveCaps>),
-}
-
-/// Opaque wrapper so `CapsMirror` can hold live `Capabilities`.
-#[derive(Clone)]
-pub struct LiveCaps(pub(crate) crate::types::Capabilities);
-
-impl CapsMirror {
-    pub fn root() -> Self {
-        CapsMirror::Root
-    }
-    pub fn from_live(caps: crate::types::Capabilities) -> Self {
-        CapsMirror::Narrowed(Box::new(LiveCaps(caps)))
-    }
-    pub fn into_live(self) -> crate::types::Capabilities {
-        match self {
-            CapsMirror::Root => crate::types::Capabilities::root(),
-            CapsMirror::Narrowed(lc) => lc.0,
-        }
-    }
-}
-
 /// Mirror of `TurnReport`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ReportMirror {
     Static { diagnostics: DiagMirror },
     Ran {
@@ -172,6 +156,7 @@ pub enum ReportMirror {
 }
 
 /// Mirror of `StaticDiagnostics`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DiagMirror {
     Parse(String),
     Types(Vec<String>),
@@ -179,13 +164,16 @@ pub enum DiagMirror {
 }
 
 /// Mirror of `Settled<Value>`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ResultMirror {
     /// Phase 2: becomes Ok(SerialValue)
+    #[serde(skip)]
     Ok(Value),
     Err(BreakMirror),
 }
 
 /// Mirror of `Break`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BreakMirror {
     Error(String),
     Exit(i32),
@@ -220,6 +208,8 @@ pub trait Transport: Send + Sync {
     /// Detach: cancel in-flight dispatch, reap foreground subtree,
     /// restore terminal state.
     fn detach(&self);
+    /// Returns `self` as an `&dyn Any` for downcast support.
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 // ── Senders and receivers ─────────────────────────────────────────────
@@ -227,12 +217,18 @@ pub trait Transport: Send + Sync {
 /// Out-of-band control sender.
 #[derive(Clone)]
 pub struct ControlSender {
-
+    /// When `Some`, writes `Control` frames to a `WireChannel`.
+    /// When `None`, acts directly on the in-process foreground scope.
+    wire: Option<Arc<Mutex<crate::wire::WireChannel>>>,
 }
 
 impl ControlSender {
     pub(crate) fn new() -> Self {
-        ControlSender {}
+        ControlSender { wire: None }
+    }
+
+    pub(crate) fn new_wire(ch: Arc<Mutex<crate::wire::WireChannel>>) -> Self {
+        ControlSender { wire: Some(ch) }
     }
 
     pub(crate) fn publish(self) {
@@ -246,6 +242,13 @@ impl ControlSender {
     }
 
     pub fn send(&self, ctrl: Control) {
+        if let Some(ch) = &self.wire {
+            let frame = Frame::Control(ctrl);
+            // Phase 2 Task 8: EPIPE here means the engine died.
+            // A full teardown needs a shared death flag.
+            let _ = ch.lock().unwrap().write_frame(&frame);
+            return;
+        }
         match ctrl {
             Control::Cancel(_id) => {
                 // Trip the signal-reachable foreground scope — the same
@@ -299,12 +302,13 @@ impl EventReceiver {
 
 struct PerDispatchSink {
     event_tx: mpsc::Sender<Frame>,
+    ctx: std::sync::Mutex<InternCtx>,
     current: std::sync::Mutex<Option<DispatchId>>,
 }
 
 impl PerDispatchSink {
     fn new(event_tx: mpsc::Sender<Frame>) -> Self {
-        Self { event_tx, current: std::sync::Mutex::new(None) }
+        Self { event_tx, ctx: std::sync::Mutex::new(InternCtx::new()), current: std::sync::Mutex::new(None) }
     }
 
     fn set_dispatch(&self, id: DispatchId) {
@@ -319,8 +323,9 @@ impl PerDispatchSink {
 impl crate::types::EventSink for PerDispatchSink {
     fn emit(&self, ev: &Value) {
         if let Some(id) = *self.current.lock().unwrap() {
-            // Phase 2: convert Value -> SerialValue here
-            let _ = self.event_tx.send(Frame::Event(id, Event::Surface(ev.clone())));
+            if let Ok(sv) = SerialValue::from_runtime(ev, &mut self.ctx.lock().unwrap()) {
+                let _ = self.event_tx.send(Frame::Event(id, Event::Surface(sv)));
+            }
         }
     }
 }
@@ -427,7 +432,7 @@ impl Transport for IdentityTransport {
         let script_name = req.script_name.clone();
         let turn_req = crate::driver::TurnRequest {
             script_name: &script_name,
-            caps: req.caps.clone().into_live(),
+            caps: req.caps.clone(),
             turn_limit: req.turn_limit,
             detached_limit: req.detached_limit,
             io: req.io,
@@ -444,7 +449,13 @@ impl Transport for IdentityTransport {
                 engine.shell.run_source_turn(&src, turn_req)
             }
             Turn::Hook { name, args, .. } => {
-                engine.shell.run_hook(&name, args, turn_req)
+                // Convert SerialValue args back to live Value.
+                let arcs: crate::serial::ScopeArcs = Vec::new();
+                let live_args: Vec<Value> = args
+                    .into_iter()
+                    .filter_map(|sv| sv.into_runtime(&arcs).ok())
+                    .collect();
+                engine.shell.run_hook(&name, live_args, turn_req)
             }
         };
 
@@ -476,9 +487,163 @@ impl Transport for IdentityTransport {
         );
         self.engine.lock().unwrap().terminal_lease = None;
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 
+
+// ── Wire transport ────────────────────────────────────────────────────
+
+/// The out-of-process transport: engine runs as a child process,
+/// frames cross on a `WireChannel` (length-prefixed JSON over a
+/// Unix socketpair).
+///
+/// A dedicated reader thread forwards `Event` frames from the wire
+/// into the `EventReceiver` the front-end drains.  Writes — `Dispatch`,
+/// `Attach`, `Detach`, `Control` — go through a shared `Mutex<WireChannel>`
+/// so they are concurrent-safe with the reader thread.
+pub struct WireTransport {
+    /// Event receiver fed by the reader thread.
+    events_recv: EventReceiver,
+    /// Control sender that writes `Control` frames to the wire.
+    control: ControlSender,
+    /// Shared write end, behind a mutex for concurrent access.
+    write_tx: Arc<Mutex<crate::wire::WireChannel>>,
+    /// The engine child process.
+    _child: std::process::Child,
+    /// Reader thread handle (never joined — the thread exits when the
+    /// channel closes).  Wrapped in a `Mutex<Option<…>>` for `Sync`.
+    _reader: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl WireTransport {
+    /// Spawn the engine child and set up the wire channel.
+    ///
+    /// Creates a `WireChannel` socketpair, passes one end to the engine
+    /// child as fd 3, and starts a reader thread that funnels incoming
+    /// `Event` frames into the event receiver.
+    pub fn new() -> io::Result<Self> {
+        let (frontend, engine) = crate::wire::WireChannel::pair()?;
+
+        // Duplicate the front-end fd so we can read on one handle
+        // and write on the other concurrently.
+        let writer = frontend.try_clone()?;
+
+        // Spawn the engine child with the engine end of the socket on fd 3.
+        let engine_fd = engine.as_raw_fd();
+        let mut cmd = std::process::Command::new(
+            std::env::current_exe().map_err(io::Error::other)?,
+        );
+        cmd.arg("--engine");
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            cmd.pre_exec(move || {
+                if libc::dup2(engine_fd, 3) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // Close the original fd — only fd 3 should remain.
+                libc::close(engine_fd);
+                Ok(())
+            });
+        }
+        let child = cmd.spawn()?;
+        // Engine end no longer needed in the parent.
+        drop(engine);
+
+        // Event channel: reader thread writes, front-end drains.
+        let (event_tx, event_rx) = mpsc::channel();
+
+        // Reader thread: loop reading frames, forward Events.
+        let mut reader_ch = frontend;
+        let reader = std::thread::spawn(move || {
+            loop {
+                match reader_ch.read_frame() {
+                    Ok(Some(Frame::Event(id, ev))) => {
+                        if event_tx.send(Frame::Event(id, ev)).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) | Err(_) => break,
+                    // Ignore non-Event frames on the read side —
+                    // the engine only sends Events.
+                    _ => {}
+                }
+            }
+        });
+
+        let write_tx = Arc::new(Mutex::new(writer));
+        let control = ControlSender::new_wire(write_tx.clone());
+
+        Ok(WireTransport {
+            events_recv: EventReceiver {
+                rx: Mutex::new(event_rx),
+            },
+            control,
+            write_tx,
+            _child: child,
+            _reader: Mutex::new(Some(reader)),
+        })
+    }
+
+    /// Write a frame to the wire channel.
+    fn write(&self, frame: &Frame) {
+        match self.write_tx.lock().unwrap().write_frame(frame) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                // Phase 2 Task 8: engine died mid-turn.  A full
+                // teardown (cancelling the reader thread, waking any
+                // blocked events().recv()) needs a shared death flag.
+                eprintln!("wire: engine process died (EPIPE)");
+            }
+            Err(_) => {} // other write errors are non-fatal
+        }
+    }
+    }
+
+impl Drop for WireTransport {
+    fn drop(&mut self) {
+        // Kill the engine child so the reader thread sees EOF and exits.
+        let _ = self._child.kill();
+        let _ = self._child.wait();
+    }
+}
+
+impl Transport for WireTransport {
+    fn dispatch(&self, id: DispatchId, turn: Turn) {
+        self.write(&Frame::Dispatch(id, turn));
+    }
+
+    fn control(&self) -> &ControlSender {
+        &self.control
+    }
+
+    fn events(&self) -> &EventReceiver {
+        &self.events_recv
+    }
+
+    /// TODO Phase 2 Task 6: When the endpoint has a lease, pass the
+    /// controlling terminal fds over the socket via SCM_RIGHTS (Unix
+    /// ancillary data).  For now the endpoint's lease field is
+    /// `#[serde(skip)]` and the engine stores it as a placeholder.
+    fn attach(&self, endpoint: TerminalEndpoint) {
+        // TODO: if endpoint.lease.is_some(), use sendmsg with SCM_RIGHTS
+        // to convey stdin/stdout/stderr fds to the engine before the
+        // Attach frame.
+        self.write(&Frame::Attach(endpoint));
+    }
+
+    fn detach(&self) {
+        self.write(&Frame::Detach);
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
 
 // ── Transport boundary sink ───────────────────────────────────────────
 
@@ -509,15 +674,20 @@ impl crate::types::BoundarySink for TransportBoundarySink {
         if already {
             return;
         }
+        let mut ctx = InternCtx::new();
+        let sv_batch: Vec<SerialValue> = batch
+            .into_iter()
+            .filter_map(|v| SerialValue::from_runtime(&v, &mut ctx).ok())
+            .collect();
         let _ = self
             .event_tx
-            .send(Frame::Event(DispatchId(self.current_dispatch.load(std::sync::atomic::Ordering::Relaxed)), Event::BoundarySurface(batch)));
+            .send(Frame::Event(DispatchId(self.current_dispatch.load(std::sync::atomic::Ordering::Relaxed)), Event::BoundarySurface(sv_batch)));
     }
 }
 
 // ── Report conversion ─────────────────────────────────────────────────
 
-fn report_to_mirror(report: crate::driver::TurnReport) -> ReportMirror {
+pub(crate) fn report_to_mirror(report: crate::driver::TurnReport) -> ReportMirror {
     match report {
         crate::driver::TurnReport::Static { diagnostics } => {
             use crate::turn::StaticDiagnostics;

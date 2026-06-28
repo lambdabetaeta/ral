@@ -23,6 +23,7 @@
 /// on `SessionState`; lent as `&TerminalLease` to the post-startup foreground
 /// handoff only when the installed turn's access permits it (see
 /// [`Shell::terminal_lease`](crate::types::Shell::terminal_lease)).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalLease {
     _seal: (),
 }

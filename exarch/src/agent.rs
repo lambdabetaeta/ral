@@ -52,6 +52,7 @@ pub struct Agent {
     /// what the agent did.
     transcript: Transcript,
     transport: ral_core::transport::IdentityTransport,
+    wire: Option<ral_core::transport::WireTransport>,
     caps: ral_core::types::Capabilities,
     /// This agent's parent, or `None` for the **trunk**.  The sole structural
     /// distinction: the trunk publishes its cancel token for the OS-signal path
@@ -281,6 +282,12 @@ impl Agent {
         } = b;
         seed_session_dir(&mut shell, &log);
         let durable = shell.mobile_snapshot();
+        let wire = if std::env::var("RAL_WIRE").is_ok() {
+            Some(ral_core::transport::WireTransport::new()
+                .expect("RAL_WIRE: failed to create WireTransport"))
+        } else {
+            None
+        };
         let transport = ral_core::transport::IdentityTransport::new(shell);
         transport.attach(ral_core::transport::TerminalEndpoint {
             lease: None,
@@ -295,6 +302,7 @@ impl Agent {
             log,
             transcript,
             transport,
+            wire,
             caps,
             parent,
             provider,
@@ -334,6 +342,10 @@ impl Agent {
         seed_session_dir(&mut shell, &self.log);
         self.durable = shell.mobile_snapshot();
         self.transport = ral_core::transport::IdentityTransport::new(shell);
+        if std::env::var("RAL_WIRE").is_ok() {
+            self.wire = Some(ral_core::transport::WireTransport::new()
+                .expect("RAL_WIRE: failed to create WireTransport"));
+        }
     }
 
     /// The trunk — the parent-less root of a fresh fleet.  Creates the fleet's
@@ -1144,7 +1156,7 @@ impl Agent {
         // own inbox (via `emit`'s mailbox) and guarded by the agent registry's
         // generation (so a `/clear` drops a stale batch).
         let content = match shell_eval::run_shell(
-            &self.transport,
+            if let Some(ref wire) = self.wire { wire as &dyn ral_core::transport::Transport } else { &self.transport },
             &self.caps,
             cmd,
             timeout_secs,

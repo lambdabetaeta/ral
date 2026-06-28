@@ -153,6 +153,14 @@ pub fn raise_interrupt() {
 /// never `_exit`s; SIGTERM/SIGHUP forward into the escalating
 /// [`term_handler`], the right ladder for a deliberate termination request.
 #[cfg(unix)]
+/// Phase 2 Task 7 (signal relocation): When using `WireTransport`,
+/// the front-end owns signal handlers and translates SIGINT/SIGTSTP/
+/// SIGWINCH into `Control` frames sent through the `ControlSender`.
+/// The `RAL_SIGINT_HANDLER`/`RAL_TERM_HANDLER` cross-process chaining
+/// below is for the `IdentityTransport` path only — WireTransport
+/// must not install these; the engine receives cancellation through
+/// the wire, not a shared flag.
+#[cfg(unix)]
 pub fn install() {
     RAL_SIGINT_HANDLER.store(
         ral_core::process::relay_handler() as *mut (),

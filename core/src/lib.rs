@@ -44,11 +44,13 @@ pub(crate) mod prelude_manifest {
 pub mod process;
 pub(crate) mod runtime;
 pub mod sandbox;
-pub(crate) mod serial;
+pub mod serial;
 pub mod source;
 pub mod stream;
 pub(crate) mod subprocess;
 pub(crate) mod subprocess_codec;
+pub mod engine;
+pub(crate) mod wire;
 pub mod transport;
 pub mod syntax;
 #[cfg(test)]

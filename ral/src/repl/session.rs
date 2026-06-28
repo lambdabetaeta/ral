@@ -138,6 +138,12 @@ impl Session {
             runtime.clone(),
         );
 
+        // TODO Phase 2 Task 5: when RAL_WIRE is set, construct
+        // WireTransport instead of IdentityTransport.  The REPL
+        // session currently uses shell_mut() for prompt rendering,
+        // terminal title, and frontend.read(), which require
+        // IdentityTransport — these need WireTransport equivalents
+        // before the REPL can switch.
         let transport = ral_core::transport::IdentityTransport::new(shell);
 
         Ok(Self {

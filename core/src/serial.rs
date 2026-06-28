@@ -39,7 +39,7 @@ mod float_bits {
 /// produce an error when encountered.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum SerialValue {
+pub enum SerialValue {
     Unit,
     Bool {
         value: bool,
@@ -72,16 +72,16 @@ pub(crate) enum SerialValue {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub(crate) struct SerialLambda {
-    pub(crate) param: crate::ir::IrPattern,
-    pub(crate) body: Arc<Comp>,
-    pub(crate) captured: SerialEnvSnapshot,
+pub struct SerialLambda {
+    pub param: crate::ir::IrPattern,
+    pub body: Arc<Comp>,
+    pub captured: SerialEnvSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub(crate) struct SerialThunk {
-    pub(crate) body: Arc<Comp>,
-    pub(crate) captured: SerialEnvSnapshot,
+pub struct SerialThunk {
+    pub body: Arc<Comp>,
+    pub captured: SerialEnvSnapshot,
 }
 
 /// A shell snapshot in serialised form.  Each element of `scopes` is an
@@ -89,24 +89,24 @@ pub(crate) struct SerialThunk {
 /// envelope — see `child_eval`).  The table is a flat `Vec` of scope
 /// entries, serialised at most once per `Arc`-shared allocation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub(crate) struct SerialEnvSnapshot {
-    pub(crate) scopes: Vec<u32>,
+pub struct SerialEnvSnapshot {
+    pub scopes: Vec<u32>,
 }
 
 /// Serde mirror of a scope [`Binding`]: the value in wire form, the
 /// scheme as itself (already serde-round-trippable — it is what the
 /// prelude bake serialises).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub(crate) struct SerialBinding {
-    pub(crate) value: SerialValue,
-    pub(crate) scheme: Option<crate::typecheck::Scheme>,
+pub struct SerialBinding {
+    pub value: SerialValue,
+    pub scheme: Option<crate::typecheck::Scheme>,
 }
 
 /// The interned scope table: one row of `(name, SerialBinding)` pairs
 /// per `Arc`-shared scope allocation, in DFS intern order.  Owned by
 /// the request/response envelope and rebuilt into [`ScopeArcs`] by
 /// [`build_arcs`] on the receiving side.
-pub(crate) type ScopeTable = Vec<Vec<(String, SerialBinding)>>;
+pub type ScopeTable = Vec<Vec<(String, SerialBinding)>>;
 
 // ── Interning context ─────────────────────────────────────────────────────
 //
@@ -119,14 +119,14 @@ pub(crate) type ScopeTable = Vec<Vec<(String, SerialBinding)>>;
 // ones).  `build_arcs` therefore topologically sorts by dependency
 // instead of trusting id order.
 
-pub(crate) struct InternCtx {
-    pub(crate) scope_table: ScopeTable,
-    ptr_to_id: HashMap<usize, u32>,
-    in_progress: HashSet<usize>,
+pub struct InternCtx {
+    pub scope_table: ScopeTable,
+    pub ptr_to_id: HashMap<usize, u32>,
+    pub in_progress: HashSet<usize>,
 }
 
 impl InternCtx {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             scope_table: Vec::new(),
             ptr_to_id: HashMap::new(),
@@ -212,9 +212,9 @@ fn value_carries_handle(value: &Value) -> bool {
 /// through closures captured in its entries) and builds a scope only
 /// once all of its dependencies have been built.  A cycle in the graph
 /// is reported rather than silently producing a dangling reference.
-pub(crate) type ScopeArcs = Vec<Option<Arc<HashMap<String, Binding>>>>;
+pub type ScopeArcs = Vec<Option<Arc<HashMap<String, Binding>>>>;
 
-pub(crate) fn build_arcs(scope_table: &ScopeTable) -> Result<ScopeArcs, Error> {
+pub fn build_arcs(scope_table: &ScopeTable) -> Result<ScopeArcs, Error> {
     let n = scope_table.len();
     let mut arcs: ScopeArcs = vec![None; n];
     let deps: Vec<HashSet<u32>> = scope_table
@@ -311,7 +311,7 @@ fn collect_scope_deps(value: &SerialValue, out: &mut HashSet<u32>) {
 // ── Value conversions ─────────────────────────────────────────────────────
 
 impl SerialValue {
-    pub(crate) fn from_runtime(value: &Value, ctx: &mut InternCtx) -> Result<Self, Error> {
+    pub fn from_runtime(value: &Value, ctx: &mut InternCtx) -> Result<Self, Error> {
         Ok(match value {
             Value::Unit => Self::Unit,
             Value::Bool(v) => Self::Bool { value: *v },
@@ -368,7 +368,7 @@ impl SerialValue {
         })
     }
 
-    pub(crate) fn into_runtime(self, arcs: &ScopeArcs) -> Result<Value, Error> {
+    pub fn into_runtime(self, arcs: &ScopeArcs) -> Result<Value, Error> {
         Ok(match self {
             Self::Unit => Value::Unit,
             Self::Bool { value } => Value::Bool(value),
@@ -409,7 +409,7 @@ impl SerialValue {
 }
 
 impl SerialEnvSnapshot {
-    pub(crate) fn from_runtime(env: &Env, ctx: &mut InternCtx) -> Result<Self, Error> {
+    pub fn from_runtime(env: &Env, ctx: &mut InternCtx) -> Result<Self, Error> {
         let scopes = env
             .scope_iter()
             .map(|scope| ctx.intern_scope(scope))
@@ -417,7 +417,7 @@ impl SerialEnvSnapshot {
         Ok(Self { scopes })
     }
 
-    pub(crate) fn into_runtime(self, arcs: &ScopeArcs) -> Result<Env, Error> {
+    pub fn into_runtime(self, arcs: &ScopeArcs) -> Result<Env, Error> {
         let scopes = self
             .scopes
             .into_iter()
