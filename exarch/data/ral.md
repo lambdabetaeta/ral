@@ -246,31 +246,29 @@ For dot/ignored files you also have `rg` bundled.
 
 `view-text-around PATH LINE PEEK` shows the `2*PEEK + 1` lines centred on `LINE`, tagged the same way.
 
-The `<hash>` is the *witness*: an address for that exact line. It folds in the line's content plus enough of its neighbours (at least ±5, more where a line repeats) to name it uniquely, so two identical lines in different places get different witnesses, with no line number. Because it depends on the neighbourhood, a witness goes stale the moment the line or the code around it changes — which is the point: a stale witness is rejected rather than mis-applied. **Copy a witness from a read; never construct one.** It is only valid for the file it was read from.
+The `<hash>` is a unique freshness witness for that line, which depends on neighbouring lines. 
 
-`edit PATH EDITS` applies a batch of edits. `EDITS` is a list of records `[hash: HASH, line: NEWTEXT]`: each replaces the line named by `HASH` with `NEWTEXT`, taken verbatim. It is one atomic pass — every hash resolves against the file as read before anything is written, so the batch either applies whole or fails whole, untouched. Use raw strings `#'…'#` for `NEWTEXT` so nothing is escaped; never use interpolating double quotes for editing.
+`edit PATH EDITS` applies a batch of `EDITS`, a list of records `[hash: HASH, line: NEWTEXT]`. Each edit replaces the line identified by `HASH` verbatim with `NEWTEXT`. It is atomic: every hash is resolved against lines before editing; and a batch either applies whole or fails whole. Use raw strings `#'…'#` for `NEWTEXT` without any escapes.
 
-Three things `NEWTEXT` does, all by its content:
+There are three ways to use `edit`. To delete a line pass the empty string `#''#` as `NEWTEXT`. To replace a line pass a new line as `NEWTEXT`. To replace a line with multiple
+new lines put several newline characters (not escapes) in `NEWTEXT`, perhaps
+using `dedent` for proper indentation. Example:
 
-- **Replace** a line: give its new text.
-- **Delete** a line: give the empty string `#''#`.
-- **Split** one line into several: put real newlines in `NEWTEXT` (a literal `\n` does not split — only an actual newline does). `dedent` over a raw block is the clean way to write an indented multi-line replacement.
-
-Batch as many edits as you can into one call: each is witnessed from the same read, so they never interfere, and you avoid re-reading. Careful with indentation:
-
-    view-text 'src/lib.rs' 80 120   # read the witnesses
+    view-text 'src/lib.rs' 80 120   # read the hashes
     edit 'src/lib.rs' [
       [hash: h1b2c3, line: !{dedent #'
         let m = f {
           let scaled = n * 2
           g 42
         }
-      '#}],                              # split one line into several, indent stripped
-      [hash: h4e5f6, line: #'    let m = 0'#],   # replace
-      [hash: h7a8b9, line: #''#],                # delete
+      '#}],                                      # split one line into several, indent stripped
+      [hash: h4e5f6, line: #'    let m = 0'#],   # replace a line
+      [hash: h7a8b9, line: #''#],                # delete a line
     ]
 
-`edit` composes with search. A `grep-files` hit is a *location*, not an edit handle — it gives `{file, line, text}`, no witness. To edit, turn the locations into handles deliberately: map `view-text-around` over the hits to see each place with its witness, then read the witnesses off into one batched `edit`:
+Edits do not spill over; you **must** mention the hash of every line you wish to change.
+
+`edit` composes with search: map `view-text-around` over `grep-files` hits to see each place with its witness, then read the witnesses off into one batched `edit`:
 
     let mine = filter { |h| equal $h[file] 'src/lib.rs' } !{grep-files 'old_name'}  # locations of `old_name`
     each { |h| view-text-around $h[file] $h[line] 3 } $mine                          # show each place + its witness
