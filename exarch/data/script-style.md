@@ -36,7 +36,7 @@ When a helper has several independent options, pass a record and override only t
             let hits  = grep-files $cfg[needle]
             let focus = filter { |h| re-match $cfg[file] $h[file] } $hits
             let shown = take $cfg[limit] $focus
-            each { |h| view-text-around $h[line] $cfg[peek] < $h[file] } $shown
+            each { |h| view-text-around $h[file] $h[line] $cfg[peek] } $shown
         }
     }
 
@@ -58,7 +58,7 @@ When the skeleton is stable but the phase behaviour changes, make the phases exp
     let collect = { |cfg| within [dir: $cfg[root]] { grep-files $cfg[needle] } }
     let decide  = { |cfg facts| take $cfg[limit] $facts }
     let act     = { |cfg plan|
-        each { |h| view-text-around $h[line] $cfg[peek] < $h[file] } $plan
+        each { |h| view-text-around $h[file] $h[line] $cfg[peek] } $plan
     }
 
     run-with $collect $decide $act [root: 'exarch', needle: 'Session', limit: 5, peek: 3]
@@ -106,11 +106,11 @@ Survey a symbol: locate, drop tests, deduplicate files, and sample in one turn:
     let files = fold { |acc h| if !{elem $h[file] $acc} { $acc } else { [...$acc, $h[file]] } } [] $live
     [total: !{length $hits}, live: !{length $live}, files: $files, sample: !{take 3 $live}]
 
-Grep and read together: a `grep-files` hit carries its file and line; a `view-text-around` over the hit shows the place with the witness hash `edit` checks. Sample before reading context so output stays bounded:
+Grep and read together: a `grep-files` hit carries its file and line; a `view-text-around` over the hit shows the place with the witness `edit` checks. Sample before reading context so output stays bounded:
 
     let hits = grep-files 'fn parse_'
     let few  = take 5 $hits
-    each { |h| view-text-around $h[line] 3 < $h[file]; echo '---' } $few
+    each { |h| view-text-around $h[file] $h[line] 3; echo '---' } $few
     [total: !{length $hits}, shown: !{length $few}]
 
 Overlap slow work: start the suite, read the implementation while it runs, and use `audit` inside the worker when failure bytes matter:
@@ -248,7 +248,7 @@ body — a whole-script dry run:
 An elision in value/stdout/stderr means a command succeeded, but you asked to see too much. Narrow the call:
 - Scope the query: Use `within [dir: 'src'] { grep-files … }`, a tighter glob, or a `filter` before rendering.
 - Bind, then slice: `length $hits`, `take 20 $hits`, `filter { … } $hits`. Never echo a large value whole.
-- Pre-size files, then read windows: `line-count $f` first; then `view-text A B < $f` or `view-text-around LINE PEEK < $f`.
+- Pre-size files, then read windows: `line-count $f` first; then `view-text $f A B` or `view-text-around $f LINE PEEK`.
 - For tests, ask for less: Name the single failing test or capture and slice the final log lines before returning them.
 
 ## Writing large files

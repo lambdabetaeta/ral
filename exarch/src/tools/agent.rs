@@ -104,7 +104,7 @@ delegate only a substantial, self-contained unit of work: a focused \
 exploration whose intermediate detail you do not want to carry, or a task \
 whose execution would otherwise flood your own context.  NEVER delegate a \
 single grep/view/read/edit you can run inline — running it yourself is cheaper \
-and keeps the result addressable (e.g. the line-hash `edit` needs).  \
+and keeps the result addressable (e.g. the witness `edit` needs).  \
 `permissions` bounds the child to at most your own authority."
     }
 

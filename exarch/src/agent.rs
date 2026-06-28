@@ -429,7 +429,7 @@ impl Agent {
         // The child is an independent fork of the parent: it snapshots the
         // parent's scope (prelude, agent library, accumulated bindings),
         // dynamic context (cwd, env, grants), and installed builtin table (the
-        // host's `window-hash`/`grep-files`/`edit` and the rest), and starts
+        // host's `view-text`/`witnesses`/`grep-files`/`edit` and the rest), and starts
         // fresh in control counters and per-agent state — its own inbox, its own
         // (fresh) cancellation token, no terminal authority, no flow-back.
         // Core owns the flow matrix, so the builtin table can't be silently
@@ -1498,18 +1498,18 @@ mod tests {
         let dir = tmp("fork-builtins");
         let session = Agent::for_test(&dir, "system").unwrap();
         assert!(
-            session.shell.lookup_builtin("window-hash").is_some(),
+            session.shell.lookup_builtin("view-text").is_some(),
             "the parent boot shell must carry the exarch host builtins"
         );
         let child = session
             .fork(session.caps().clone())
             .expect("fork child session");
         for name in [
-            "window-hash",
+            "view-text",
+            "witnesses",
             "grep-files",
             "edit",
             "explore-dir",
-            "line-hash",
         ] {
             assert!(
                 child.shell.lookup_builtin(name).is_some(),

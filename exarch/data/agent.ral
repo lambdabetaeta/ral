@@ -1,47 +1,17 @@
 # exarch agent helper library — sourced into the shell at boot
 
-## Split a file body into rows that rejoin faithfully: a raw `\n` split
-## keeps the trailing empty a terminal newline produces, so
-## `intercalate "\n" !{_rows $body}` reproduces `$body` exactly.  The
-## prelude `lines` strips edge empties for general tokenizing; the
-## read/witness/rebuild round-trip here needs the byte-faithful split so
-## a file's trailing newline survives an edit and the window-hashes are
-## computed over the file's actual line structure.
-let _rows = { |s| re-split '\n' $s }
+## `view-text`, `witnesses`, `grep-files`, and `edit` are exarch host builtins
+## (`exarch/src/agent_builtins.rs`): each reads the whole file in Rust, below the
+## redirect frame, and is a single logical surface.  They all share one witness
+## algorithm, so the hash a read shows is exactly the handle `edit` checks.
+## `view-text-around` is the one thin ral helper over them.
 
-## `window-hash`, `grep-files`, and `edit` are now exarch host builtins
-## (`exarch/src/agent_builtins.rs`): their file I/O happens in Rust, below
-## the redirect frame, so each is a single logical surface.  `view-text` and
-## `view-text-around` stay ral over the `window-hash` builtin.
-
-## Show the half-open range `[start, end)` of stdin (1-indexed, end
-## exclusive — EWD-831): `view-text 100 150` yields fifty lines, 100 through
-## 149.  Each line is tagged `<line-no>\t<window-hash>\t<text>`; the hash
-## is the witness `edit` checks, so a read hands you the edit witness
-## directly.  Reads stdin — feed it via a pipe or
-## `<`: `view-text 100 150 < foo.rs`, `git show HEAD:f.rs | view-text 100 150`.
-## Both bounds must be `>= 1`; an empty range yields no output.
-let view-text = { |start end|
-    if $[$start < 1 || $end < 1] {
-        fail [status: 2, message: "view-text: bounds must be >= 1, got start=$start end=$end (range is half-open: end > start)"]
-    } else {
-        let rows = _rows !{from-string}
-        let n = length $rows
-        let hi = if $[$end - 1 < $n] { $[$end - 1] } else { $n }
-        let out = map { |i|
-            let h = window-hash $rows $i
-            let l = $rows[$i]
-            "$[$i + 1]\t$h\t$l"
-        } !{range $[$start - 1] $hi}
-        echo !{intercalate "\n" $out}
-    }
-}
-
-## Around a stdin file, show `peek` hashed lines on each side of `line`
-## (`2*peek + 1` total), clamped at the top of the file.
-let view-text-around = { |line peek|
+## Around a file, show `peek` hashed lines on each side of `line`
+## (`2*peek + 1` total), clamped at the top of the file.  Reads `path` the way
+## `view-text` does: `view-text-around foo.rs 120 3`.
+let view-text-around = { |path line peek|
     let lo = if $[$line > $peek] { return $[$line - $peek] } else { return 1 }
-    view-text $lo $[$line + $peek + 1]
+    view-text $path $lo $[$line + $peek + 1]
 }
 
 # --- task management ---------------------------------------------------------

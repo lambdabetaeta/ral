@@ -57,8 +57,7 @@ pub fn install_agent_library(shell: &mut Shell) -> Settled<Value> {
 /// agent library is as discoverable as the prelude.
 pub(crate) fn agent_library_docs() -> Vec<(String, String)> {
     [
-        ("view-text", "view-text START END < PATH  — show the half-open line range [START, END), each line tagged `<line-no>\\t<hash>\\t<text>`; the hash is the ±3-context witness `edit` checks."),
-        ("view-text-around", "view-text-around LINE PEEK < PATH  — show the 2*PEEK+1 lines centred on LINE, tagged like `view-text`, clamped at the top of the file."),
+        ("view-text-around", "view-text-around PATH LINE PEEK  — show the 2*PEEK+1 lines of PATH centred on LINE, tagged like `view-text`, clamped at the top of the file."),
         ("empty-tasks", "empty-tasks  — an empty task list; canonical initialiser"),
         ("add-task", "add-task $exarch-tasks <desc>  — allocate fresh id, append task, update pinned gauge"),
         ("remove-task", "remove-task $exarch-tasks <id>  — drop task by id, update pinned gauge"),
@@ -82,74 +81,203 @@ pub(crate) fn agent_library_docs() -> Vec<(String, String)> {
 /// The `h` prefix keeps the witness un-lexable as a number — a bare
 /// all-digit token in `edit`'s hash position would otherwise elaborate to
 /// `Val::Int` and never compare equal to the recomputed `String` hash.
+///
+/// Private: the witness is never something the model constructs, only one it
+/// copies out of a `view-text`/`witnesses` read, so neither this nor the
+/// window hash is exposed to ral — `view-text`, `view-text-around`,
+/// `witnesses`, and `edit` are the whole surface.
 fn line_hash(line: &str) -> String {
     let stripped = line.trim_end();
     let hex = blake3::hash(stripped.as_bytes()).to_hex();
     format!("h{}", &hex[..6])
 }
 
-/// Expose `line_hash` to ral.  This is the only irreducibly-Rust part
-/// of the read/edit surface: numbering, slicing, and tagging compose in
-/// the prelude (`view-text`), but the Blake3 digest cannot.
-fn builtin_line_hash(args: &[Value], _shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "line-hash")?;
-    Ok(Value::String(line_hash(&args[0].to_string())))
+/// The freshness floor: every witness folds in at least ±`MIN_RADIUS` lines of
+/// context, even a line unique on its own, so an edit anywhere within that
+/// window invalidates the witness and forces a re-read.  The adaptive-context
+/// search starts here and only grows.
+const MIN_RADIUS: usize = 5;
+
+/// The cap on how far a line's window grows before it falls back to its
+/// absolute index.  A line is addressed by the smallest symmetric window (at
+/// least ±[`MIN_RADIUS`]) that makes it unique (see [`window_hashes`]); only a
+/// run of identical lines longer than `2 * MAX_RADIUS` exhausts this, and the
+/// residual is then named by index — the honest positional floor for content
+/// that genuinely repeats.
+const MAX_RADIUS: usize = 64;
+
+/// How a line was distinguished from every other: by a window of some radius,
+/// or — only inside a long verbatim run — by its absolute index.
+enum Witness {
+    Window(usize),
+    Index,
 }
 
-/// The witness for line `i` (0-indexed) of the line list `rows`: the
-/// [`line_hash`] of the ±3 surrounding lines' own `line_hash`es, joined and
-/// prefixed with the target's offset within the window.  Folding the context
-/// into the hash gives two identical lines distinct witnesses whenever their
-/// neighbourhoods differ, so a repeated header, blank, or brace is addressable
-/// without a line number; the offset keeps lines distinct in a file short
-/// enough that the window saturates to the whole of it.  The window clamps at
-/// the ends of the file.
+/// The witness for *every* line of `rows`, addressing each by the smallest
+/// context that makes it unique.  A line's witness is the [`line_hash`] of the
+/// neighbours in the smallest symmetric window that no other line shares —
+/// prefixed by that radius and the target's offset within the (clamped) window.
+/// The window starts at ±[`MIN_RADIUS`] (the freshness floor: every witness
+/// folds in that much context, so an edit nearby invalidates it) and grows only
+/// as far as a repetition demands.  The witness carries no line number, so it
+/// goes stale on a *local* change, not on every insertion elsewhere; the lone
+/// exception is a verbatim run longer than `2 * MAX_RADIUS`, whose interior is
+/// named by index.
 ///
-/// Shared by `window-hash` and `edit`: a `view-text` read stamps each line it
-/// shows through this, and `edit` checks the same line against the same row
-/// list.
-fn window_hash(rows: &[String], i: usize) -> String {
+/// Computed by partition refinement, the shape of DFA minimisation: group the
+/// lines by their ±[`MIN_RADIUS`] window, then repeatedly split only the still-
+/// colliding classes by one more line of context on each side.  A line that
+/// becomes a singleton is resolved and never re-examined, so the work is bounded
+/// by the total size of collision classes across radii — linear on real files,
+/// where almost every line is unique at the floor.
+///
+/// Shared verbatim by `view-text`, `witnesses`, and `edit`, so a read and the
+/// edit that follows it derive identical witnesses from identical content.
+fn window_hashes(rows: &[String]) -> Vec<String> {
     let n = rows.len();
-    let lo = i.saturating_sub(3);
-    let hi = (i + 4).min(n);
-    let body: String = rows[lo..hi].iter().map(|line| line_hash(line)).collect();
-    line_hash(&format!("{}:{}", i - lo, body))
+    if n == 0 {
+        return Vec::new();
+    }
+    let lh: Vec<String> = rows.iter().map(|line| line_hash(line)).collect();
+
+    // The signature `edit` and `view-text` agree on: two lines share a radius-`r`
+    // witness exactly when their signatures here are equal — the target's offset
+    // within its clamped window, then that window's line-hashes in order.
+    let signature = |i: usize, r: usize| -> String {
+        let lo = i.saturating_sub(r);
+        let hi = (i + r + 1).min(n);
+        let mut s = format!("{}:", i - lo);
+        for h in &lh[lo..hi] {
+            s.push_str(h);
+        }
+        s
+    };
+
+    // Group a set of line indices by a key; the partition's building block.
+    let group = |members: &[usize], r: usize| -> Vec<Vec<usize>> {
+        let mut by_key: HashMap<String, Vec<usize>> = HashMap::new();
+        for &i in members {
+            by_key.entry(signature(i, r)).or_default().push(i);
+        }
+        by_key.into_values().collect()
+    };
+
+    let mut how: Vec<Witness> = (0..n).map(|_| Witness::Index).collect();
+    let all: Vec<usize> = (0..n).collect();
+    // Start at the freshness floor: lines unique within ±MIN_RADIUS resolve
+    // there; only collisions grow past it.
+    let mut classes = group(&all, MIN_RADIUS);
+    let mut r = MIN_RADIUS;
+    while !classes.is_empty() {
+        let mut next: Vec<Vec<usize>> = Vec::new();
+        for class in classes {
+            if class.len() == 1 {
+                how[class[0]] = Witness::Window(r);
+            } else if r >= MAX_RADIUS {
+                // A verbatim run deeper than the cap: name each by index.
+                for i in class {
+                    how[i] = Witness::Index;
+                }
+            } else {
+                next.extend(group(&class, r + 1));
+            }
+        }
+        classes = next;
+        r += 1;
+    }
+
+    (0..n)
+        .map(|i| match how[i] {
+            // Fold the radius in too, so witnesses from different radii cannot
+            // collide just because their windows happen to coincide.
+            Witness::Window(r) => {
+                let lo = i.saturating_sub(r);
+                let hi = (i + r + 1).min(n);
+                let mut body = format!("{}:{}:", r, i - lo);
+                for h in &lh[lo..hi] {
+                    body.push_str(h);
+                }
+                line_hash(&body)
+            }
+            Witness::Index => line_hash(&format!("idx:{i}")),
+        })
+        .collect()
 }
 
 /// Split a file body into rows that rejoin faithfully: a raw `\n` split keeps
 /// the trailing empty a terminal newline produces, so joining with `\n`
 /// reproduces the body exactly.  The byte-faithful split (as opposed to the
 /// edge-trimming `lines`) is what lets a file's trailing newline survive an
-/// edit and the window-hashes be computed over its actual line structure —
-/// the Rust twin of `agent.ral`'s `_rows`.
+/// edit and the window hashes be computed over its actual line structure.
 fn rows_of(body: &str) -> Vec<String> {
     body.split('\n').map(str::to_string).collect()
 }
 
-/// Expose [`window_hash`] to ral: `window-hash ROWS I`.  `view-text` (still ral)
-/// stamps each line it shows through this, so a read hands back the witness
-/// `edit` checks.
-fn builtin_window_hash(args: &[Value], _shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 2, "window-hash")?;
-    let rows: Vec<String> = match &args[0] {
-        Value::List(items) => items.iter().map(|v| v.to_string()).collect(),
-        other => {
-            return Err(sig(format!(
-                "window-hash: expected a List of lines, got {}",
-                other.type_name()
-            )));
+/// Surface the one `{io:"read", path}` card for a whole-file read.  `view-text`
+/// and `witnesses` read in Rust below the ral line (no `< path` redirect), so
+/// they raise their own read card — one logical surface per read, matching the
+/// shape the redirect frame would have pushed.  `edit` is the exception: it
+/// reads silently and speaks only its diff.
+fn surface_read(shell: &mut Shell, path: &str) {
+    shell.surface(Value::map(vec![
+        ("io".into(), Value::String("read".into())),
+        ("path".into(), Value::String(path.to_string())),
+    ]));
+}
+
+/// Parse a 1-or-greater bound argument for `view-text`.
+fn view_bound(arg: &Value, which: &str) -> Settled<usize> {
+    match arg.as_int() {
+        Some(n) if n >= 1 => Ok(n as usize),
+        _ => Err(sig(format!(
+            "view-text: {which} must be an Int >= 1 (range is half-open: end > start), got {}",
+            arg.type_name()
+        ))),
+    }
+}
+
+/// `view-text PATH START END` — show the half-open line range `[START, END)` of
+/// the file, each line tagged `<line-no>\t<hash>\t<text>`.  Reads the whole file
+/// (its witnesses depend on file-wide uniqueness), hashes it, and writes the
+/// requested slice; surfaces one read card.
+fn builtin_view_text(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 3, "view-text")?;
+    let path = args[0].to_string();
+    let start = view_bound(&args[1], "start")?;
+    let end = view_bound(&args[2], "end")?;
+
+    let body = read_text_file(shell, &path, "view-text")?;
+    surface_read(shell, &path);
+    let rows = rows_of(&body);
+    let hashes = window_hashes(&rows);
+    let n = rows.len();
+    let lo = start - 1;
+    let hi = (end - 1).min(n);
+
+    if lo < hi {
+        let mut out = String::new();
+        for i in lo..hi {
+            out.push_str(&format!("{}\t{}\t{}\n", i + 1, hashes[i], rows[i]));
         }
-    };
-    let i = match args[1].as_int() {
-        Some(n) if n >= 0 => n as usize,
-        _ => {
-            return Err(sig(format!(
-                "window-hash: expected a non-negative Int index, got {}",
-                args[1].type_name()
-            )));
-        }
-    };
-    Ok(Value::String(window_hash(&rows, i)))
+        let _ = shell.write_stdout(out.as_bytes());
+    }
+    Ok(Value::Unit)
+}
+
+/// `witnesses PATH` — the witness for every line of the file, in file order.
+/// The programmatic twin of `view-text`: a sweep reads the handles for the lines
+/// it means to change without a human-facing render.  Whole-file by
+/// construction (it reads the path itself), so the witnesses it returns always
+/// match the ones `edit` recomputes; surfaces one read card.
+fn builtin_witnesses(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 1, "witnesses")?;
+    let path = args[0].to_string();
+    let body = read_text_file(shell, &path, "witnesses")?;
+    surface_read(shell, &path);
+    let rows = rows_of(&body);
+    Ok(Value::list(
+        window_hashes(&rows).into_iter().map(Value::String).collect(),
+    ))
 }
 
 /// The one sanctioned [`WalkBuilder::build`](ignore::WalkBuilder::build) site.
@@ -278,18 +406,18 @@ struct ResolvedEdit {
     new: String,
 }
 
-/// `edit PATH EDITS` — apply a batch of `[hash, new-text]` pairs in one
+/// `edit PATH EDITS` — apply a batch of `[hash: …, line: …]` records in one
 /// read/rebuild/write pass, then surface one whole-file diff card.  All of it
 /// runs in Rust — the read is not a redirect and the write is atomic — so `edit`
 /// is a single logical surface emitting only its diff card, never a read or
 /// write io card.
 ///
-/// Every hash resolves against the file as read, before anything is written, so
+/// Each `hash` resolves against the file as read, before anything is written, so
 /// the edits never interfere (adjacent lines included) and the batch is atomic:
-/// it fails, writing nothing, unless every hash picks exactly one line (zero
-/// means the file moved, more than one means the line and its ±3 context both
-/// repeat) and no two pairs name the same line.  An empty `new-text` deletes the
-/// line; a real newline inside it splits the line into several.
+/// it fails, writing nothing, unless every hash picks exactly one line (a stale
+/// or now-ambiguous hash means the file moved) and no two records name the same
+/// line.  The `line` field is the replacement text, taken verbatim: empty
+/// deletes the line; a real newline inside it splits the line into several.
 fn builtin_edit(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 2, "edit")?;
     let path = args[0].to_string();
@@ -297,37 +425,51 @@ fn builtin_edit(args: &[Value], shell: &mut Shell) -> Settled<Value> {
         Value::List(items) => items,
         other => {
             return Err(sig(format!(
-                "edit: expected a List of [hash, new-text] pairs, got {}",
+                "edit: expected a List of [hash: …, line: …] records, got {}",
                 other.type_name()
             )));
         }
     };
     if edits.is_empty() {
         return Err(sig(
-            "edit: no edits given — pass a list of [hash, new-text] pairs.".to_string(),
+            "edit: no edits given — pass a list of [hash: …, line: …] records.".to_string(),
         ));
     }
 
-    let body = read_file_string(shell, &path)?;
+    let body = read_text_file(shell, &path, "edit")?;
     let rows = rows_of(&body);
     let n = rows.len();
-    let hashes: Vec<String> = (0..n).map(|i| window_hash(&rows, i)).collect();
+    let hashes = window_hashes(&rows);
 
-    // Resolve each pair to the unique index of the line its hash names, against
-    // the original snapshot.  A stale or repeated hash fails here, before the
-    // write — the failure messages are user-facing and pinned by tests.
+    // Resolve each record to the unique index of the line its hash names,
+    // against the original snapshot.  A stale hash fails here, before the write —
+    // the failure messages are user-facing and pinned by tests.
     let mut resolved = Vec::with_capacity(edits.len());
     for e in edits.iter() {
-        let (want, new) = match e {
-            Value::List(pair) if pair.len() >= 2 => (
-                pair.get(0).unwrap().to_string(),
-                pair.get(1).unwrap().to_string(),
-            ),
+        let m = match e {
+            Value::Map(m) => m,
             other => {
                 return Err(sig(format!(
-                    "edit: each edit must be a [hash, new-text] pair, got {}",
+                    "edit: each edit must be a [hash: …, line: …] record, got {}",
                     other.type_name()
                 )));
+            }
+        };
+        let want = match m.get("hash") {
+            Some(v) => v.to_string(),
+            None => {
+                return Err(sig(
+                    "edit: each edit needs a `hash` field — the witness from view-text/witnesses."
+                        .to_string(),
+                ));
+            }
+        };
+        let new = match m.get("line") {
+            Some(v) => v.to_string(),
+            None => {
+                return Err(sig(
+                    "edit: each edit needs a `line` field — the replacement text.".to_string(),
+                ));
             }
         };
         let idxs: Vec<usize> = (0..n).filter(|&i| hashes[i] == want).collect();
@@ -342,13 +484,13 @@ fn builtin_edit(args: &[Value], shell: &mut Shell) -> Settled<Value> {
                 let at: Vec<String> = idxs.iter().map(|i| (i + 1).to_string()).collect();
                 let r#where = at.join(", ");
                 return Err(sig(format!(
-                    "edit: hash {want} matches lines {} in {path} — the text repeats, so a hash alone cannot choose one.",
+                    "edit: hash {want} matches lines {} in {path} — re-read; the witness has gone stale.",
                     r#where
                 )));
             }
         }
     }
-    // Two pairs naming the same line is the analogue of the ral fold's
+    // Two records naming the same line is the analogue of the ral fold's
     // length-`hit` > 1 guard: caught before the write, nothing rebuilt.
     for w in 0..resolved.len() {
         for v in (w + 1)..resolved.len() {
@@ -486,22 +628,25 @@ fn diff_card_value(path: &str, hunks: Vec<Hunk>) -> Value {
     }
 }
 
-/// Read a file as a UTF-8 string for witnessed editing, gating the read through
-/// the active grant the way a `< path` redirect would.  This is `edit`'s read
-/// door: in Rust, so it never reaches the redirect frame and so raises no read
-/// io card.  A non-UTF-8 file is named (the witness layer cannot address it).
+/// Read a file as a UTF-8 string for the witness layer, gating the read through
+/// the active grant the way a `< path` redirect would.  The shared read door of
+/// `view-text`, `witnesses`, and `edit`: in Rust, below the ral line, so it
+/// never reaches the redirect frame.  Each caller decides its own surface —
+/// `view-text`/`witnesses` raise one read card, `edit` stays silent and speaks
+/// only its diff.  A non-UTF-8 file is named (the witness layer cannot address
+/// it); `tool` puts the calling builtin's name on the error.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:surface:edit-read] `edit`'s read door, in Rust below the ral line so it never reaches the redirect frame: edit is one logical surface that emits only its diff cards, never a separate read card. The grant is still checked, as a `< path` redirect would."
+    reason = "[io-door:surface:witness-read] The witness layer's read door (view-text/witnesses/edit), in Rust below the ral line so it never reaches the redirect frame. view-text and witnesses surface their own read card; edit emits only its diff. The grant is still checked, as a `< path` redirect would."
 )]
-fn read_file_string(shell: &mut Shell, path: &str) -> Settled<String> {
+fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<String> {
     let rp = shell.resolve(path);
     shell.check_fs_read(&rp)?;
     let bytes =
-        fs::read(rp.as_path()).map_err(|e| sig(format!("edit: cannot read {path}: {e}")))?;
+        fs::read(rp.as_path()).map_err(|e| sig(format!("{tool}: cannot read {path}: {e}")))?;
     String::from_utf8(bytes).map_err(|_| {
         sig(format!(
-            "edit: '{path}' is not valid UTF-8, so its lines cannot be witnessed for editing."
+            "{tool}: '{path}' is not valid UTF-8, so its lines cannot be witnessed."
         ))
     })
 }
@@ -614,21 +759,34 @@ fn scheme_grep_files(_u: &mut Unifier) -> Scheme {
     )
 }
 
-/// `window-hash :: [Str] → Int → F Str` — the witness for a line of a row list.
-fn scheme_window_hash(_u: &mut Unifier) -> Scheme {
+/// `view-text :: Str → Int → Int → F Unit` — `path`, then the half-open line
+/// range.  Writes the tagged slice to stdout; yields Unit.
+fn scheme_view_text(_u: &mut Unifier) -> Scheme {
     scheme(
         &[],
         &[],
         &[],
         thunk(fun(
-            Ty::List(Box::new(Ty::String)),
-            fun(Ty::Int, pure(Ty::String)),
+            Ty::String,
+            fun(Ty::Int, fun(Ty::Int, pure(Ty::Unit))),
         )),
     )
 }
 
-/// `edit :: Str → [[Str]] → F Unit` — `path` then a list of `[hash, new-text]`
-/// pairs.  Returns Unit: `edit` writes and surfaces, it does not yield a value.
+/// `witnesses :: Str → F [Str]` — the witness for every line of the file at
+/// `path`, in file order.
+fn scheme_witnesses(_u: &mut Unifier) -> Scheme {
+    scheme(
+        &[],
+        &[],
+        &[],
+        thunk(fun(Ty::String, pure(Ty::List(Box::new(Ty::String))))),
+    )
+}
+
+/// `edit :: Str → [{hash: Str, line: Str}] → F Unit` — `path` then a list of
+/// `[hash: …, line: …]` records.  Returns Unit: `edit` writes and surfaces, it
+/// does not yield a value.
 fn scheme_edit(_u: &mut Unifier) -> Scheme {
     scheme(
         &[],
@@ -637,7 +795,10 @@ fn scheme_edit(_u: &mut Unifier) -> Scheme {
         thunk(fun(
             Ty::String,
             fun(
-                Ty::List(Box::new(Ty::List(Box::new(Ty::String)))),
+                Ty::List(Box::new(closed_record(&[
+                    ("hash", Ty::String),
+                    ("line", Ty::String),
+                ]))),
                 pure(Ty::Unit),
             ),
         )),
@@ -790,10 +951,6 @@ fn scheme_fff(_u: &mut Unifier) -> Scheme {
     )
 }
 
-fn scheme_line_hash(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], &[], thunk(fun(Ty::String, pure(Ty::String))))
-}
-
 fn scheme_skill(_u: &mut Unifier) -> Scheme {
     scheme(&[], &[], &[], thunk(fun(Ty::String, pure(Ty::String))))
 }
@@ -875,16 +1032,16 @@ fn builtin_skill_list(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
 
 pub static EXARCH_BUILTINS: &[BuiltinEntry] = &[
     BuiltinEntry {
-        name: Cow::Borrowed("line-hash"),
-        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_line_hash),
-        doc: "line-hash <s>  — content hash of a line (an `h` tag plus six hex, trailing whitespace ignored); the witness `view-text` shows and `edit` checks.",
-        body: BuiltinBody::Static(builtin_line_hash),
+        name: Cow::Borrowed("view-text"),
+        type_rule: BuiltinTypeRule::Scheme(Some(3), scheme_view_text),
+        doc: "view-text <path> <start> <end>  — show the half-open line range [start, end) of PATH, each line tagged `<line-no>\\t<hash>\\t<text>`. The hash is the witness `edit` checks; copy it, never recompute it. Reads the whole file (the witness depends on file-wide uniqueness) and surfaces one read card.",
+        body: BuiltinBody::Static(builtin_view_text),
     },
     BuiltinEntry {
-        name: Cow::Borrowed("window-hash"),
-        type_rule: BuiltinTypeRule::Scheme(Some(2), scheme_window_hash),
-        doc: "window-hash <rows> <i>  — the witness for line i (0-indexed) of the line list ROWS: the line-hash of the ±3 surrounding lines' line-hashes, prefixed with the target's offset. What `view-text` shows and `edit` checks; folding in context distinguishes repeated lines without a position.",
-        body: BuiltinBody::Static(builtin_window_hash),
+        name: Cow::Borrowed("witnesses"),
+        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_witnesses),
+        doc: "witnesses <path>  — the edit witness for every line of PATH, one per line in file order. The programmatic twin of `view-text` for scripted edits: `witnesses $f` then `$w[$line - 1]` is the handle for that line. Surfaces one read card.",
+        body: BuiltinBody::Static(builtin_witnesses),
     },
     BuiltinEntry {
         name: Cow::Borrowed("grep-files"),
@@ -895,7 +1052,7 @@ pub static EXARCH_BUILTINS: &[BuiltinEntry] = &[
     BuiltinEntry {
         name: Cow::Borrowed("edit"),
         type_rule: BuiltinTypeRule::Scheme(Some(2), scheme_edit),
-        doc: "edit <path> <edits>  — apply a batch of [hash, new-text] pairs in one read/write pass: each replaces the line whose window-hash is HASH (NEW-TEXT is verbatim — a real newline inside '…' splits the line, \\n does not; empty deletes). Atomic — all hashes resolve against the file as read, so edits never interfere; fails writing nothing unless every hash picks exactly one line and no two pairs name the same one. Surfaces one whole-file diff card.",
+        doc: "edit <path> <edits>  — apply a batch of [hash: HASH, line: TEXT] records in one read/write pass: each replaces the line whose witness is HASH with TEXT verbatim (a real newline inside '…' splits the line into several, \\n does not; empty deletes). Atomic — all hashes resolve against the file as read, so edits never interfere; fails writing nothing unless every hash picks exactly one line and no two records name the same one. Surfaces one whole-file diff card.",
         body: BuiltinBody::Static(builtin_edit),
     },
     BuiltinEntry {
@@ -971,51 +1128,77 @@ mod tests {
         }
     }
 
-    /// The Rust `window_hash` reproduces the retired ral algorithm exactly.
-    /// The expected value is a hand-port of `agent.ral`'s `window-hash`: the
-    /// `line-hash` of `"<offset>:" ++ concat(line-hash of each ±3 window row)`.
+    /// Every witness folds in at least ±MIN_RADIUS of context (the freshness
+    /// floor).  In a file shorter than a full floor window every line's window
+    /// clamps to the whole file, so the lines are told apart by their offset
+    /// within it, each resolved at the floor radius.
     #[test]
-    fn window_hash_matches_the_retired_ral_algorithm() {
-        let rows: Vec<String> = ["a", "b", "c", "d", "e", "f", "g", "h"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+    fn window_hashes_floor_at_min_radius() {
+        let rows: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| s.to_string()).collect();
+        let hashes = window_hashes(&rows);
+        assert_eq!(hashes.len(), rows.len());
+        // The window clamps to the whole file, so every witness folds in the
+        // same body and differs only by the offset prefix, at radius MIN_RADIUS.
+        let body: String = rows.iter().map(|r| line_hash(r)).collect();
         for i in 0..rows.len() {
-            let lo = i.saturating_sub(3);
-            let hi = (i + 4).min(rows.len());
-            let body: String = rows[lo..hi].iter().map(|l| line_hash(l)).collect();
-            let expected = line_hash(&format!("{}:{}", i - lo, body));
-            assert_eq!(window_hash(&rows, i), expected, "row {i}");
+            let expected = line_hash(&format!("{MIN_RADIUS}:{i}:{body}"));
+            assert_eq!(hashes[i], expected, "row {i} at the floor radius");
         }
+        let distinct: std::collections::HashSet<&String> = hashes.iter().collect();
+        assert_eq!(distinct.len(), rows.len(), "all distinct");
     }
 
-    /// The window folds in ±3 lines of context, so two lines with identical
-    /// text but different neighbourhoods get distinct witnesses — what a bare
-    /// line hash could not do.  Both `target` rows hash the same with
-    /// `line_hash`, yet differ under `window_hash`.
+    /// Two identical lines, each deep enough in the interior to share the same
+    /// offset within its ±MIN_RADIUS window, are told apart only by the context
+    /// folded into the witness — what a bare line hash could not do.
     #[test]
-    fn window_hash_distinguishes_repeated_lines_by_context() {
-        let rows: Vec<String> = [
-            "section one:",
-            "target",
-            "    delete me",
-            "",
-            "section two:",
-            "target",
-            "    keep me",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        assert_eq!(
-            line_hash(&rows[1]),
-            line_hash(&rows[5]),
-            "same line content"
-        );
+    fn window_hashes_distinguish_repeated_lines_by_context() {
+        let mut rows: Vec<String> = vec!["fn alpha() {".to_string()];
+        for k in 0..5 {
+            rows.push(format!("    a{k}"));
+        }
+        let t1 = rows.len();
+        rows.push("    target".to_string());
+        for k in 0..6 {
+            rows.push(format!("    a{k}"));
+        }
+        rows.push("}".to_string());
+        rows.push("fn beta() {".to_string());
+        for k in 0..5 {
+            rows.push(format!("    b{k}"));
+        }
+        let t2 = rows.len();
+        rows.push("    target".to_string());
+        for k in 0..6 {
+            rows.push(format!("    b{k}"));
+        }
+        rows.push("}".to_string());
+
+        let hashes = window_hashes(&rows);
+        assert_eq!(line_hash(&rows[t1]), line_hash(&rows[t2]), "same line content");
         assert_ne!(
-            window_hash(&rows, 1),
-            window_hash(&rows, 5),
-            "distinct neighbourhoods must witness distinctly"
+            hashes[t1], hashes[t2],
+            "distinct neighbourhoods must witness distinctly, even at equal offsets"
+        );
+    }
+
+    /// The property the adaptive-context witness buys over a fixed window: even
+    /// a long run of byte-identical lines — where every fixed-radius window
+    /// repeats — yields all-distinct witnesses, because each line grows its
+    /// context to the run's boundary, and the residual interior folds in its
+    /// index.  No two lines share a witness, so `edit` never faces ambiguity.
+    #[test]
+    fn window_hashes_are_unique_across_a_long_identical_run() {
+        let mut rows: Vec<String> = vec!["head".to_string()];
+        rows.extend((0..200).map(|_| "dup".to_string()));
+        rows.push("tail".to_string());
+
+        let hashes = window_hashes(&rows);
+        let distinct: std::collections::HashSet<&String> = hashes.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            rows.len(),
+            "every line, even deep in a 200-line identical run, must witness uniquely"
         );
     }
 

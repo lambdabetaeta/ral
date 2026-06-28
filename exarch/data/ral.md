@@ -117,7 +117,7 @@ Arithmetic and Boolean expressions must be in `$[…]` blocks: `$[$x == 0]`, `$[
     ls ...$flags ...$dirs                # …and to splice arguments
     `file [bytes: ${file-info $p}[size]]
 
-Indexing `$h[key]` works in any context (pipelines, blocks, double quoted): e.g. `view-text-around $h[line] 3 < $h[file]`.
+Indexing `$h[key]` works in any context (pipelines, blocks, double quoted): e.g. `view-text-around $h[file] $h[line] 3`.
 
 A map is a homogeneous record; only maps support `keys`, `values`, `has`, `get` (with default), `union`, `entries`. `[:]` is the empty map. 
 
@@ -240,48 +240,51 @@ For dot/ignored files you also have `rg` bundled.
 
 ## Reading and editing files
 
-`view-text START END < PATH` shows the half-open line range `[START, END)`, each line tagged `<line-no>\t<hash>\t<text>`. Use it with files or pipe into it:
+`view-text PATH START END` shows the half-open line range `[START, END)`, each line tagged `<line-no>\t<hash>\t<text>`:
 
-    let tui-picker-now = view-text 100 150 < tui.rs
-    let tui-picker-yesterday = git show HEAD~1:tui.rs | view-text 100 150
-    [ 'picker-now' : $tui-picker-now, 'picker-yesterday' : $tui-picker-yesterday ]
+    view-text 'src/tui.rs' 100 150
 
-`view-text-around LINE PEEK < PATH` shows the `2*PEEK + 1` lines centred on `LINE`, tagged the same way.
+`view-text-around PATH LINE PEEK` shows the `2*PEEK + 1` lines centred on `LINE`, tagged the same way.
 
-The hash depends on the content of each line and its neighbours. 
+The `<hash>` is the *witness*: an address for that exact line. It folds in the line's content plus enough of its neighbours (at least ±5, more where a line repeats) to name it uniquely, so two identical lines in different places get different witnesses, with no line number. Because it depends on the neighbourhood, a witness goes stale the moment the line or the code around it changes — which is the point: a stale witness is rejected rather than mis-applied. **Copy a witness from a read; never construct one.** It is only valid for the file it was read from.
 
-`edit PATH EDITS` applies a batch of edits. It accepts a list of `[HASH, NEWTEXT]` and atomically replaces each line uniquely identified by `HASH` with `NEWTEXT` verbatim (adding newlines). It is batched because changing a line invalidates the hash of adjacent ones. Use raw strings `#'…'#` for `NEWTEXT` without any escapes. is useful for replacements; never use interpolating double quotes for editing. All hashes resolve against the file before edits. Careful with indentation:
+`edit PATH EDITS` applies a batch of edits. `EDITS` is a list of records `[hash: HASH, line: NEWTEXT]`: each replaces the line named by `HASH` with `NEWTEXT`, taken verbatim. It is one atomic pass — every hash resolves against the file as read before anything is written, so the batch either applies whole or fails whole, untouched. Use raw strings `#'…'#` for `NEWTEXT` so nothing is escaped; never use interpolating double quotes for editing.
 
-    view-text 80 120 < src/lib.rs   # view hashes
+Three things `NEWTEXT` does, all by its content:
+
+- **Replace** a line: give its new text.
+- **Delete** a line: give the empty string `#''#`.
+- **Split** one line into several: put real newlines in `NEWTEXT` (a literal `\n` does not split — only an actual newline does). `dedent` over a raw block is the clean way to write an indented multi-line replacement.
+
+Batch as many edits as you can into one call: each is witnessed from the same read, so they never interfere, and you avoid re-reading. Careful with indentation:
+
+    view-text 'src/lib.rs' 80 120   # read the witnesses
     edit 'src/lib.rs' [
-      [h1b2c3, !{dedent #'
+      [hash: h1b2c3, line: !{dedent #'
         let m = f {
           let scaled = n * 2
           g 42
         }
-      '#}]                          # multiline edit with indent stripped
-      [h4e5f6, #'    let m = 0'#],  # single-line edit
-      [h7a8b9, #''#]
+      '#}],                              # split one line into several, indent stripped
+      [hash: h4e5f6, line: #'    let m = 0'#],   # replace
+      [hash: h7a8b9, line: #''#],                # delete
     ]
 
-Collect as many edits as possible in one call to ensure freshness. You must mention the hash of each line you want changed: an edit may add new lines, but does not overwrite.
+`edit` composes with search. A `grep-files` hit is a *location*, not an edit handle — it gives `{file, line, text}`, no witness. To edit, turn the locations into handles deliberately: map `view-text-around` over the hits to see each place with its witness, then read the witnesses off into one batched `edit`:
 
-`edit` composes with search: `grep-files` finds the lines but does not hash them; map a `view-text-around` over the hits to show every place with the witness hash `edit` checks, then read the hashes off into one batched `edit`:
+    let mine = filter { |h| equal $h[file] 'src/lib.rs' } !{grep-files 'old_name'}  # locations of `old_name`
+    each { |h| view-text-around $h[file] $h[line] 3 } $mine                          # show each place + its witness
+    edit 'src/lib.rs' [ [hash: h1b2c3, line: 'new_name'], [hash: h4e5f6, line: 'new_name'] ]
 
-    let mine = filter { |h| equal $h[file] 'src/lib.rs' } !{grep-files 'old_name'}  # find all occurrences of `old_name` in `src/lib.rs`
-    each { |h| view-text-around $h[line] 3 < $h[file] } $mine                       # show each place + its hash
-    edit 'src/lib.rs' [ [h1b2c3, 'new_name'], [h4e5f6, 'new_name'] ]                # use hashes to edit
-
-But you do not need to view the text at all: use `window-hash ROWS I` to get the hash. E.g. to rewrite every `[TODO]` to `[DONE]`:
+For a mechanical sweep you do not need to view the text at all: `witnesses PATH` gives the witness for every line of a file, in order, so `$w[$line - 1]` is the handle for that line. E.g. to rewrite every `[TODO]` to `[DONE]`:
 
     let hits  = grep-files #'\[TODO\]'#
     let files = nub !{map { |h| $h[file] } $hits}    # one hit per matching line, so dedupe the paths
     each { |f|
-      let rows = re-split #'\n'# !{from-string < $f}
+      let w = witnesses $f
       let mine = filter { |h| equal $h[file] $f } $hits
       edit $f !{map { |h|
-        let i = $[$h[line] - 1]
-        [ !{window-hash $rows $i}, !{re-replace #'\[TODO\]'# '[DONE]' $rows[$i]} ]
+        [ hash: $w[$[$h[line] - 1]], line: !{re-replace #'\[TODO\]'# '[DONE]' $h[text]} ]
       } $mine}
     } $files
 

@@ -469,17 +469,19 @@ mod tests {
         }
     }
 
-    /// `view-text` is the one read primitive: a sourced prelude pipeline over
-    /// the `line-hash` builtin plus coreutils.  `echo "alpha" | view-text 1 2`
-    /// must number the line and tag it with its content hash, which means
-    /// `line-hash` dispatches as a builtin rather than falling through to
-    /// an external-command exec lookup ("command 'line-hash' not found on
-    /// PATH").  Each row is `<n>\t<hash>\t<text>`.
+    /// `view-text` is the human read primitive: `view-text PATH 1 2` numbers
+    /// the first line and tags it with its witness, each row `<n>\t<hash>\t<text>`.
     #[cfg(unix)]
     #[test]
     fn view_tags_lines_with_hash() {
         let mut shell = fresh_shell();
-        let r = run_once(&mut shell, "echo \"alpha\" | view-text 1 2");
+        let tmp = std::env::temp_dir().join(format!("exarch-view-tag-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let path = tmp.join("alpha.txt");
+        std::fs::write(&path, "alpha\n").expect("write view fixture");
+        let path_str = display_no_trailing_sep(&path);
+        let r = run_once(&mut shell, &format!("view-text '{path_str}' 1 2"));
+        let _ = std::fs::remove_dir_all(&tmp);
         assert_eq!(
             r.exit,
             0,
@@ -595,11 +597,11 @@ mod tests {
         );
     }
 
-    /// The witness folds in ±3 lines of context, so two lines with the
-    /// same text but different surroundings get distinct witnesses and are
-    /// each addressable — what a bare line hash could not do. A genuine
-    /// collision (a line whose whole neighbourhood repeats, deep in an
-    /// identical run) is still ambiguous and rejected, file untouched.
+    /// Each line is addressed by the smallest context that makes it unique, so
+    /// two lines with the same text but different surroundings get distinct
+    /// witnesses — what a bare line hash could not do — and even a line deep in
+    /// a run of identical lines grows its window to the run's edge and stays
+    /// addressable, so `edit` always picks exactly one line.
     #[test]
     fn edit_window_hash_addresses_repeated_lines() {
         let mut shell = fresh_shell();
@@ -619,19 +621,18 @@ target
 ";
         std::fs::write(&repeated, original).expect("write repeated fixture");
         let repeated_str = display_no_trailing_sep(&repeated);
-        // `target` is line 2 = index 1; its window-hash differs from line 6's.
+        // `target` is line 2 = index 1; its witness differs from line 6's.
         let edited = run_once(
             &mut shell,
             &format!(
-                "let rows = _rows !{{from-string < '{repeated_str}'}}\n\
-                 let wh = window-hash $rows 1\n\
-                 edit '{repeated_str}' [[$wh, 'FIRST']]"
+                "let whs = witnesses '{repeated_str}'\n\
+                 edit '{repeated_str}' [[hash: $whs[1], line: 'FIRST']]"
             ),
         );
         assert_eq!(
             edited.exit,
             0,
-            "editing the first `target` by its window-hash must succeed; stderr was: {}",
+            "editing the first `target` by its witness must succeed; stderr was: {}",
             String::from_utf8_lossy(&edited.stderr)
         );
         assert_eq!(
@@ -648,29 +649,31 @@ target
             "only the first `target` changes; the second is untouched"
         );
 
-        // A line buried in a run of identical lines: its whole window
-        // repeats, so the witness is ambiguous and the edit is rejected.
+        // A line buried in a run of identical lines: the adaptive-context
+        // witness grows each line's window to the run's boundary, so even the
+        // interior is uniquely addressable — the edit picks exactly one line.
         let run = tmp.join("run.txt");
         let run_original = "head\ndup\ndup\ndup\ndup\ndup\ndup\ndup\ndup\ntail\n";
         std::fs::write(&run, run_original).expect("write run fixture");
         let run_str = display_no_trailing_sep(&run);
-        let ambiguous = run_once(
+        let buried = run_once(
             &mut shell,
             &format!(
-                "let rows = _rows !{{from-string < '{run_str}'}}\n\
-                 let wh = window-hash $rows 5\n\
-                 edit '{run_str}' [[$wh, 'Z']]"
+                "let whs = witnesses '{run_str}'\n\
+                 edit '{run_str}' [[hash: $whs[5], line: 'Z']]"
             ),
         );
+        let after_run = std::fs::read_to_string(&run).expect("read run fixture after edit");
         let _ = std::fs::remove_dir_all(&tmp);
-        assert_ne!(
-            ambiguous.exit, 0,
-            "a line whose entire neighbourhood repeats must be ambiguous"
+        assert_eq!(
+            buried.exit,
+            0,
+            "a line deep in an identical run is now uniquely addressable; stderr was: {}",
+            String::from_utf8_lossy(&buried.stderr)
         );
         assert_eq!(
-            std::fs::read_to_string(&run).unwrap_or_else(|_| run_original.into()),
-            run_original,
-            "the rejected edit must leave the file untouched"
+            after_run, "head\ndup\ndup\ndup\ndup\nZ\ndup\ndup\ndup\ntail\n",
+            "exactly the witnessed line in the run changes; the rest stand"
         );
     }
 
@@ -697,13 +700,12 @@ keep-bottom
         let path_str = display_no_trailing_sep(&path);
 
         // One stale hash poisons the whole batch: nothing is written.
-        // `hzzzzzz` is not `h` + six hex, so it can match no window-hash.
+        // `hzzzzzz` is not `h` + six hex, so it can match no witness.
         let poisoned = run_once(
             &mut shell,
             &format!(
-                "let rows = _rows !{{from-string < '{path_str}'}}\n\
-                 let h1 = window-hash $rows 1\n\
-                 edit '{path_str}' [[$h1, 'X'], ['hzzzzzz', 'Y']]"
+                "let whs = witnesses '{path_str}'\n\
+                 edit '{path_str}' [[hash: $whs[1], line: 'X'], [hash: 'hzzzzzz', line: 'Y']]"
             ),
         );
         assert_ne!(poisoned.exit, 0, "a batch with a stale hash must fail");
@@ -718,11 +720,8 @@ keep-bottom
         let ok = run_once(
             &mut shell,
             &format!(
-                "let rows = _rows !{{from-string < '{path_str}'}}\n\
-                 let h1 = window-hash $rows 1\n\
-                 let h2 = window-hash $rows 2\n\
-                 let h3 = window-hash $rows 3\n\
-                 edit '{path_str}' [[$h1, 'REPLACED'], [$h2, ''], [$h3, 'X\nY']]"
+                "let whs = witnesses '{path_str}'\n\
+                 edit '{path_str}' [[hash: $whs[1], line: 'REPLACED'], [hash: $whs[2], line: ''], [hash: $whs[3], line: 'X\nY']]"
             ),
         );
         let after = std::fs::read_to_string(&path).expect("read after clean batch");
@@ -758,11 +757,12 @@ keep-bottom
     #[cfg(unix)]
     #[test]
     fn edit_accepts_numeric_witness_hash() {
-        // The witness `view-text` shows is the `window-hash`, not the bare line
-        // digest, so mirror that computation here to search for an all-digit
-        // one. For a file written as "{content}\n" the line list is
-        // [content, ""]; line 1 (index 0) saturates the window to the whole
-        // file, so its witness is line-hash("0:" ++ lh(content) ++ lh("")).
+        // The witness `view-text` shows is the adaptive-context hash, not the
+        // bare line digest, so mirror that computation here to search for an
+        // all-digit one. For a file written as "{content}\n" the line list is
+        // [content, ""]; that's shorter than a full ±MIN_RADIUS (5) window, so
+        // line 1 (index 0) clamps to the whole file at the floor radius and its
+        // witness is line-hash("5:0:" ++ lh(content) ++ lh("")).
         fn lh(s: &str) -> String {
             format!(
                 "h{}",
@@ -770,7 +770,7 @@ keep-bottom
             )
         }
         fn view_witness_line1(content: &str) -> String {
-            lh(&format!("0:{}{}", lh(content), lh("")))
+            lh(&format!("5:0:{}{}", lh(content), lh("")))
         }
         fn line_with_digit_digest(leading_zero: bool) -> String {
             for n in 0u64..2_000_000 {
@@ -781,7 +781,7 @@ keep-bottom
                 }
             }
             panic!(
-                "no all-digit six-hex window-hash in search space (leading_zero={leading_zero})"
+                "no all-digit six-hex witness in search space (leading_zero={leading_zero})"
             );
         }
 
@@ -797,7 +797,7 @@ keep-bottom
             let path_str = display_no_trailing_sep(&path);
 
             // Read the witness exactly as the agent would: from `view-text`.
-            let vr = run_once(&mut shell, &format!("view-text 1 2 < '{path_str}'"));
+            let vr = run_once(&mut shell, &format!("view-text '{path_str}' 1 2"));
             assert_eq!(
                 vr.exit,
                 0,
@@ -817,7 +817,7 @@ keep-bottom
             // agent copies it out of the read.
             let er = run_once(
                 &mut shell,
-                &format!("edit '{path_str}' [[{witness}, 'REPLACED']]"),
+                &format!("edit '{path_str}' [[hash: {witness}, line: 'REPLACED']]"),
             );
             let after = std::fs::read_to_string(&path).unwrap_or_default();
             let _ = std::fs::remove_dir_all(&tmp);
@@ -1188,10 +1188,10 @@ keep-bottom
     /// The programmatic bulk-edit pipeline, end to end and entirely in ral:
     /// `grep-files` finds every `[TODO]` across the tree, the hits fold into a
     /// per-file list, and each file's matching lines are rewritten in one atomic
-    /// `edit`.  The witnesses are computed with the `window-hash` builtin over
-    /// the file's own rows — the *data* path beneath what `view-text` shows a
-    /// human — so no hash is ever read by eye.  A regex `re-replace` turns each
-    /// `[TODO]` into `[DONE]` in place.  This is the sweep example in
+    /// `edit`.  The witnesses come from `witnesses $f` — the programmatic twin
+    /// of `view-text`, reading the whole file so its handles match what `edit`
+    /// recomputes — so no hash is ever read by eye.  A regex `re-replace` turns
+    /// each `[TODO]` into `[DONE]` in place.  This is the sweep example in
     /// `data/ral.md`, kept honest by running it.
     #[test]
     fn programmatic_todo_sweep_rewrites_every_match() {
@@ -1212,11 +1212,10 @@ keep-bottom
 let hits = grep-files #'\[TODO\]'#
 let files = nub !{{map {{ |h| $h[file] }} $hits}}
 each {{ |f|
-    let rows = re-split #'\n'# !{{from-string < $f}}
+    let whs = witnesses $f
     let mine = filter {{ |h| equal $h[file] $f }} $hits
     edit $f !{{map {{ |h|
-        let i = $[$h[line] - 1]
-        [ !{{window-hash $rows $i}}, !{{re-replace #'\[TODO\]'# '[DONE]' $rows[$i]}} ]
+        [ hash: $whs[$[$h[line] - 1]], line: !{{re-replace #'\[TODO\]'# '[DONE]' $h[text]}} ]
     }} $mine}}
 }} $files
 return !{{length $hits}}"#
@@ -1405,10 +1404,10 @@ return !{{length $hits}}"#
         );
     }
 
-    /// `view-text` is a ral closure that reads stdin, NOT an external image: a
-    /// `view-text 1 2 < a` reads its input through the `<` redirect, so the door
-    /// raises one READ card and no exec card — the closure dispatches in
-    /// process, never spawning a command.
+    /// `view-text` is a host builtin that reads its path in Rust, NOT an
+    /// external image: `view-text a 1 2` reads the whole file below the ral line
+    /// and surfaces exactly one READ card itself — one logical read surface, no
+    /// exec card, like `grep-files` and `edit`.
     #[cfg(unix)]
     #[test]
     fn view_is_a_helper_not_an_exec_image() {
@@ -1416,7 +1415,7 @@ return !{{length $hits}}"#
         let mut shell = fresh_shell();
         let (dir, path) = scratch_file("cov-view", "a", "alpha\nbeta\ngamma\n");
 
-        let (r, kinds) = run_capturing(&mut shell, &format!("view-text 1 2 < '{path}'"));
+        let (r, kinds) = run_capturing(&mut shell, &format!("view-text '{path}' 1 2"));
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
             r.exit,
@@ -1434,10 +1433,10 @@ return !{{length $hits}}"#
             .iter()
             .filter(|e| matches!(e, IoEvent::Exec { .. }))
             .count();
-        assert_eq!(reads, 1, "view-text's `< a` raises one read card");
+        assert_eq!(reads, 1, "view-text surfaces one read card for its file");
         assert_eq!(
             execs, 0,
-            "view-text is a ral closure, not an external image — no exec card, got {ios:?}"
+            "view-text is a host builtin, not an external image — no exec card, got {ios:?}"
         );
     }
 
