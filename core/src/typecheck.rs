@@ -520,4 +520,3 @@ pub fn binding_value_scheme(
     );
     scheme
 }
-

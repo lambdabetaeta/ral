@@ -388,12 +388,10 @@ pub(super) fn call_plugin_hook(
             // apply it directly inside the existing command frame.
             let result = match shell.mobile().context.programs.get(program_name) {
                 Some(prog) => ral_core::builtins::apply(&prog.binding.value, args, shell),
-                None => Err(Break::Error(
-                    ral_core::types::Error::new(
-                        format!("host program '{}' is not registered", program_name),
-                        1,
-                    ),
-                )),
+                None => Err(Break::Error(ral_core::types::Error::new(
+                    format!("host program '{}' is not registered", program_name),
+                    1,
+                ))),
             };
             (result, None, false)
         }
@@ -419,7 +417,10 @@ pub(super) fn call_plugin_hook(
                         StaticDiagnostics::Host(e) => e.message,
                         _ => "unknown static diagnostic".into(),
                     };
-                    (Err(Break::Error(ral_core::types::Error::new(msg, 1))), false)
+                    (
+                        Err(Break::Error(ral_core::types::Error::new(msg, 1))),
+                        false,
+                    )
                 }
             };
             // Render the fault here, while `shell.sources()` still holds this
@@ -553,9 +554,7 @@ pub(super) fn run_buffer_change_hooks(runtime: &Arc<Mutex<PluginRuntime>>, line:
 
         let hr = call_plugin_hook(
             &mut hook_env,
-            HookFor {
-                name: &name,
-            },
+            HookFor { name: &name },
             &program_name,
             &args,
             Some(ctx_in),
@@ -907,14 +906,7 @@ pub(crate) fn fold_hook<T>(
     let mut acc = init;
     for name in entries {
         let program_name = ProgramName::plugin(name.clone(), hook_name.to_string());
-        acc = step(
-            shell,
-            HookFor {
-                name: &name,
-            },
-            &program_name,
-            acc,
-        );
+        acc = step(shell, HookFor { name: &name }, &program_name, acc);
     }
     acc
 }
@@ -937,7 +929,14 @@ pub(crate) fn run_lifecycle_hook(
         (),
         |shell, plugin, program_name, ()| {
             let plugin_name = plugin.name.to_string();
-            let hr = call_plugin_hook(shell, plugin, program_name, args, None, HookFraming::InFrame);
+            let hr = call_plugin_hook(
+                shell,
+                plugin,
+                program_name,
+                args,
+                None,
+                HookFraming::InFrame,
+            );
             if let Err(Break::Error(e)) = &hr.result {
                 plugin_error(&plugin_name, &format!("hook '{hook_name}' failed"), e);
             }

@@ -147,8 +147,14 @@ fn non_finite_floats_are_refused() {
 
 #[test]
 fn floats_outside_the_integer_range_are_refused() {
-    expect_error("return !{floor !{float \"1e300\"}}", "outside the integer range");
-    expect_error("return !{trunc !{float \"-1e300\"}}", "outside the integer range");
+    expect_error(
+        "return !{floor !{float \"1e300\"}}",
+        "outside the integer range",
+    );
+    expect_error(
+        "return !{trunc !{float \"-1e300\"}}",
+        "outside the integer range",
+    );
 }
 
 #[test]

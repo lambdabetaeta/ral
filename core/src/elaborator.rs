@@ -1070,10 +1070,8 @@ impl Elaborator {
             args: vec![Spanned::synthetic(force)],
             redirects: redirects.to_vec(),
         };
-
         self.elab_expr(&lowered, binds)
     }
-
 }
 
 /// Fold an accumulated list of `(pattern, comp)` bindings around an inner
@@ -1095,13 +1093,7 @@ fn wrap_binds(span: Option<Span>, binds: Vec<(IrPattern, Comp)>, inner: Comp) ->
                 },
             )
         })
-    }
-    ///
-    /// Each argument is rendered via `str` before being collected into a list,
-    /// so unlike arguments share no type — the render-then-collect strategy
-    /// that makes echo work without a top type.  Spreads become `map str $xs`.
-    /// This is surface sugar per ADR 260622.
-
+}
 
 /// Sugar `exit` / `quit` with no arguments into `exit 0` / `quit 0`.
 ///

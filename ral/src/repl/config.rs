@@ -6,8 +6,8 @@
 //! Unknown keys are silently ignored so future versions can add knobs without
 //! breaking older configs.
 
+use ral_core::types::{DefaultPolicy, HookSig, ProgramName};
 use ral_core::{Map, Shell, Value};
-use ral_core::types::{ProgramName, HookSig, DefaultPolicy};
 
 use super::frontend::Surface;
 use super::theme::{OutputTheme, named_color, set_output_theme};

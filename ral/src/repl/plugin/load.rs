@@ -6,9 +6,9 @@
 //! bindings into `env`, and records the plugin in [`PluginRuntime`].
 //! Unloading reverses the env installation and drops the record.
 
-use ral_core::types::{Break, Error, Settled, DefaultPolicy, HookSig, ProgramName};
-use ral_core::{RequestedTerminalAccess, Shell, TurnReport, Value};
 use ral_core::source::Span;
+use ral_core::types::{Break, DefaultPolicy, Error, HookSig, ProgramName, Settled};
+use ral_core::{RequestedTerminalAccess, Shell, TurnReport, Value};
 use std::sync::{Arc, Mutex};
 
 use super::manifest::LoadedPlugin;

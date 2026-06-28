@@ -310,7 +310,6 @@ pub mod sig {
         }
     }
 
-
     pub const TERMINAL_CONTROL: BuiltinSig = command(
         ArgSig::Exact(NO_ARGS),
         ret(ModeTemplate::Fresh, ModeTemplate::Bytes, TyTemplate::Unit),
@@ -353,6 +352,12 @@ pub mod sig {
     pub const TO_ANY_BYTES: BuiltinSig = command(
         ArgSig::DataLast(ONE_ANY),
         ret(ModeTemplate::None, ModeTemplate::Bytes, TyTemplate::Bytes),
+        None,
+    );
+
+    pub const TO_LINE: BuiltinSig = command(
+        ArgSig::DataLast(ONE_ANY),
+        ret(ModeTemplate::None, ModeTemplate::Bytes, TyTemplate::Unit),
         None,
     );
 
@@ -992,7 +997,6 @@ pub mod scheme {
 
     scheme!(pure_bool: pure Ty::Bool);
     scheme!(explain_op: pipe [Ty::String] -> Ty::Unit);
-
 
     // ── First-class functions with pipeline modes ───────────────────────
 

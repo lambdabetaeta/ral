@@ -169,8 +169,8 @@ gg 2";
 /// `push_scope`.
 ///
 /// The observable assertion is on the audit tree shape: the second
-/// `audit { echo hi }` must record `echo` as a child node.  Pre-fix,
-/// that child list was empty.
+/// `audit { echo hi }` must record echo's lowered line writer (`to-line`) as a
+/// child node.  Pre-fix, that child list was empty.
 #[test]
 fn audit_recording_survives_consecutive_audit_blocks() {
     let mut shell = fresh_shell();
@@ -195,13 +195,13 @@ fn audit_recording_survives_consecutive_audit_blocks() {
         },
         other => panic!("audit {{ … }} must return a Map; got {other:?}"),
     };
-    let has_echo = children.iter().any(|c| match c {
-        Value::Map(m) => matches!(m.get("cmd"), Some(Value::String(s)) if s == "echo"),
+    let has_line_write = children.iter().any(|c| match c {
+        Value::Map(m) => matches!(m.get("cmd"), Some(Value::String(s)) if s == "to-line"),
         _ => false,
     });
     assert!(
-        has_echo,
-        "expected the second `audit {{ echo hi }}` to record an `echo` \
+        has_line_write,
+        "expected the second `audit {{ echo hi }}` to record echo's `to-line` \
          child node.  Pre-fix `with_scope` set `scope_pushed=true` \
          during the first block's `guard`; the flag survived into the \
          second block (trail was inactive in between, so \
@@ -406,16 +406,16 @@ fn audit_survives_background_amp() {
         },
         other => panic!("audit {{ … }} must return a Map; got {other:?}"),
     };
-    let echo_count = children
+    let line_write_count = children
         .iter()
         .filter(|c| match c {
-            Value::Map(m) => matches!(m.get("cmd"), Some(Value::String(s)) if s == "echo"),
+            Value::Map(m) => matches!(m.get("cmd"), Some(Value::String(s)) if s == "to-line"),
             _ => false,
         })
         .count();
     assert_eq!(
-        echo_count, 2,
-        "expected both foreground `echo` commands to be recorded around \
+        line_write_count, 2,
+        "expected both foreground `echo` commands' `to-line` writes to be recorded around \
          the background `&`.  Pre-fix `eval_background` moved the audit \
          trail into the fork via an unpaired `child_of` and dropped it, \
          losing the whole subtree — even `echo one`, recorded before the \
@@ -463,8 +463,8 @@ fn guard_cleanup_does_not_swallow_exit() {
 /// cleanup and return the body's value.  This pins that the fix did not
 /// over-rotate: the ordinary finalizer path is unchanged.  The body's
 /// value `7` is read from the `guard`'s own return; that the cleanup ran
-/// is read from the audit tree, where the cleanup's `echo` is recorded
-/// as a child of the `guard` scope node.
+/// is read from the audit tree, where the cleanup echo's lowered `to-line`
+/// is recorded as a child of the `guard` scope node.
 #[test]
 fn guard_normal_runs_cleanup_and_returns_body() {
     let mut shell = fresh_shell();
@@ -481,9 +481,9 @@ fn guard_normal_runs_cleanup_and_returns_body() {
     let tree = top_level(&mut shell, "audit { guard { return 7 } { echo cleaned } }")
         .expect("`audit { guard … }` must succeed");
     assert!(
-        audit_tree_has_cmd(&tree, "echo"),
+        audit_tree_has_cmd(&tree, "to-line"),
         "the `guard` cleanup must have run on the normal path (recording \
-         its `echo cleaned`); a normal guard returns the body value but \
+         its `echo cleaned` line write); a normal guard returns the body value but \
          still executes its finalizer.  tree = {tree:?}"
     );
 }

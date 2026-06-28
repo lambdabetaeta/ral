@@ -1733,6 +1733,7 @@ stream-shaped; materialise with `stream-to-list` (or prelude
 
 | Encoder      | In                | Out     |
 |--------------|-------------------|---------|
+| `to-line`    | any value         | `Unit`  |
 | `to-string`  | `String`          | `Bytes` |
 | `to-lines`   | `[String]`        | `Bytes` |
 | `to-json`    | JSON-serialisable | `Bytes` |
@@ -1855,7 +1856,7 @@ features.
 | Builtin | Purpose |
 |---|---|
 | `fail` | Raise a failure with an error record `fail [status: N, message?: M, ...]`; `fail $e` re-raises a caught error verbatim (`fail [status: 0]` is an error) |
-| `echo` | Write UTF-8 bytes to stdout; return as `String` |
+| `echo` | Write UTF-8 bytes plus newline to stdout; at a value boundary the final line is captured as `String` |
 | `source`, `use` | §8 |
 | `glob` | Sorted path glob |
 | `length` | Length of list, map, string, or bytes |

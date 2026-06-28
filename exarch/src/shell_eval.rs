@@ -261,6 +261,7 @@ pub fn run_shell(
                         .map(|e| diagnostic::format_type_error_ariadne(name, cmd, e))
                         .collect(),
                 ),
+                StaticDiagnostics::Host(e) => Outcome::Static(e.message),
             };
         }
         TurnReport::Ran {
@@ -780,9 +781,7 @@ keep-bottom
                     return s;
                 }
             }
-            panic!(
-                "no all-digit six-hex witness in search space (leading_zero={leading_zero})"
-            );
+            panic!("no all-digit six-hex witness in search space (leading_zero={leading_zero})");
         }
 
         fn assert_round_trips(label: &str, content: &str) {

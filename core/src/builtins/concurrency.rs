@@ -1134,15 +1134,21 @@ mod tests {
         // A worker that surfaces one card, then panics: the buffered card must
         // precede the `` `panic `` `done`, and the handle must still settle as a
         // panic when observed.
-        let handle = spawn_child(snap, &mut shell, ChildIoMode::Buffered, "<block>", |child| {
-            if let Some(sink) = child.turn.surface.as_ref() {
-                sink.emit(&Value::Variant {
-                    label: "card".into(),
-                    payload: None,
-                });
-            }
-            panic!("after surfacing");
-        })
+        let handle = spawn_child(
+            snap,
+            &mut shell,
+            ChildIoMode::Buffered,
+            "<block>",
+            |child| {
+                if let Some(sink) = child.turn.surface.as_ref() {
+                    sink.emit(&Value::Variant {
+                        label: "card".into(),
+                        payload: None,
+                    });
+                }
+                panic!("after surfacing");
+            },
+        )
         .unwrap();
 
         let batch = wait_for_batch(&batches).pop().unwrap();
@@ -1177,15 +1183,21 @@ mod tests {
         let mut shell = Shell::new(Default::default());
         assert!(shell.turn.boundary.is_none(), "a bare REPL installs none");
         let snap = Arc::new(shell.mobile().scope);
-        let handle = spawn_child(snap, &mut shell, ChildIoMode::Buffered, "<block>", |child| {
-            if let Some(sink) = child.turn.surface.as_ref() {
-                sink.emit(&Value::Variant {
-                    label: "card".into(),
-                    payload: None,
-                });
-            }
-            Ok(Value::Unit)
-        })
+        let handle = spawn_child(
+            snap,
+            &mut shell,
+            ChildIoMode::Buffered,
+            "<block>",
+            |child| {
+                if let Some(sink) = child.turn.surface.as_ref() {
+                    sink.emit(&Value::Variant {
+                        label: "card".into(),
+                        payload: None,
+                    });
+                }
+                Ok(Value::Unit)
+            },
+        )
         .unwrap();
 
         // Join through `await`: the worker has run and (with no boundary) flushed
@@ -1222,15 +1234,21 @@ mod tests {
         let batches = Arc::new(Mutex::new(Vec::new()));
         shell.turn.boundary = Some(Arc::new(RecBoundary(batches.clone())));
         let snap = Arc::new(shell.mobile().scope);
-        let handle = spawn_child(snap, &mut shell, ChildIoMode::Buffered, "<block>", |child| {
-            if let Some(sink) = child.turn.surface.as_ref() {
-                sink.emit(&Value::Variant {
-                    label: "card".into(),
-                    payload: None,
-                });
-            }
-            Ok(Value::Unit)
-        })
+        let handle = spawn_child(
+            snap,
+            &mut shell,
+            ChildIoMode::Buffered,
+            "<block>",
+            |child| {
+                if let Some(sink) = child.turn.surface.as_ref() {
+                    sink.emit(&Value::Variant {
+                        label: "card".into(),
+                        payload: None,
+                    });
+                }
+                Ok(Value::Unit)
+            },
+        )
         .unwrap();
 
         // The boundary wins the latch first, recording one batch.

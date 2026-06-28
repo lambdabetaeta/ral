@@ -98,9 +98,7 @@ pub(super) fn dispatch_keybinding(
 
     let hr = call_plugin_hook(
         shell,
-        HookFor {
-            name: &pk.plugin,
-        },
+        HookFor { name: &pk.plugin },
         &program_name,
         &[],
         Some(ctx_in),

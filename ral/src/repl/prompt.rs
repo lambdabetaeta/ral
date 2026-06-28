@@ -6,17 +6,14 @@
 //! Plugins may transform the result via the `prompt` lifecycle hook.
 
 use ral_core::types::{Break, Capabilities, ProgramName};
-use ral_core::{
-    RequestedTerminalAccess, Shell, TurnIo, TurnReport, TurnRequest, TurnStdin, Value,
-    diagnostic,
-};
 #[cfg(test)]
 use ral_core::{DefaultPolicy, HookSig};
+use ral_core::{
+    RequestedTerminalAccess, Shell, TurnIo, TurnReport, TurnRequest, TurnStdin, Value, diagnostic,
+};
 use std::sync::{Arc, Mutex};
 
-use super::plugin::{
-    FramedHook, HookFraming, PluginRuntime, call_plugin_hook, fold_hook,
-};
+use super::plugin::{FramedHook, HookFraming, PluginRuntime, call_plugin_hook, fold_hook};
 
 /// The default prompt.  Session boot registers it as the
 /// `Session/"prompt"` program (`install_default_prompt`); the failure
@@ -87,7 +84,9 @@ pub(super) fn eval_prompt(prompt: &Value, shell: &mut Shell) -> String {
 
     let (result, captured) = shell.with_preserved_status(|shell| {
         match shell.run_program(&ProgramName::session("__eval_prompt_test__"), vec![], req) {
-            TurnReport::Ran { result, captured, .. } => (result, captured),
+            TurnReport::Ran {
+                result, captured, ..
+            } => (result, captured),
             TurnReport::Static { .. } => {
                 unreachable!("a thunk prompt body never compiles source")
             }
@@ -283,9 +282,6 @@ mod tests {
     #[test]
     fn failing_prompt_thunk_falls_back_to_default() {
         let (mut shell, prompt) = evaluate_prompt_src("{ fail [status: 1, message: 'boom'] }");
-        assert_eq!(
-            eval_prompt(&prompt, &mut shell),
-            super::DEFAULT_PROMPT
-        );
+        assert_eq!(eval_prompt(&prompt, &mut shell), super::DEFAULT_PROMPT);
     }
 }

@@ -1,16 +1,16 @@
 # Test: generate log entries, process them, summarize.
 
-let dir = '/tmp/al-logs'
-mkdir -p $dir
+let logdir = '/tmp/al-logs'
+mkdir -p $logdir
 
 # Generate log lines into a single file
 let levels = [INFO, WARN, ERROR, INFO, INFO, ERROR, WARN, INFO, ERROR, INFO]
 for $levels { |level|
-    echo "$level: something happened" >> "$dir/app.log"
+    echo "$level: something happened" >> "$logdir/app.log"
 }
 
 # Read log file into list of lines
-let lines_stream = cat "$dir/app.log" | from-lines
+let lines_stream = cat "$logdir/app.log" | from-lines
 let lines = !{stream-to-list $lines_stream}
 let nlines = length $lines
 echo "total lines: $nlines"
@@ -30,16 +30,16 @@ let total = fold { |acc _| return $[$acc + 1] } 0 $lines
 echo "counted: $total"
 
 # Write summary
-echo "Log Summary" > "$dir/summary.txt"
-echo "Total: $nlines" >> "$dir/summary.txt"
-echo "Errors: $nerrors" >> "$dir/summary.txt"
-echo "Warnings: $nwarns" >> "$dir/summary.txt"
+echo "Log Summary" > "$logdir/summary.txt"
+echo "Total: $nlines" >> "$logdir/summary.txt"
+echo "Errors: $nerrors" >> "$logdir/summary.txt"
+echo "Warnings: $nwarns" >> "$logdir/summary.txt"
 
-let summary = cat "$dir/summary.txt"
+let summary = cat "$logdir/summary.txt"
 echo $summary
 
 # Clean up
-rm -rf $dir
-if $[not !{exists $dir}] {
+rm -rf $logdir
+if $[not !{exists $logdir}] {
     echo 'logs cleaned up'
 }

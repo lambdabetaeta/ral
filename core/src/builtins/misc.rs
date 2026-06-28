@@ -174,11 +174,7 @@ pub(super) fn builtin_help(_args: &[Value], shell: &mut Shell) -> Value {
                 s.push_str(&fmt_line(&name, &doc));
             }
         }
-        s.push_str(&format!(
-            "{dim}──{reset}\n",
-            dim = dim,
-            reset = reset
-        ));
+        s.push_str(&format!("{dim}──{reset}\n", dim = dim, reset = reset));
         s.push_str(&format!(
             "{dim}Use `explain <name>` for the full type signature and source location of any entry.{reset}\n",
             dim = dim,

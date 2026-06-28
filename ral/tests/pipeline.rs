@@ -1458,37 +1458,33 @@ fn grant_fs_write_through_symlinked_prefix_to_nonexistent_target() {
 // ── Capture semantics ────────────────────────────────────────────────────
 //
 // These tests verify the principle: `let` binds the return value of its RHS.
-// For byte-output commands the return value is the decoded String of the last
-// command's bytes.  For value-returning commands the return value is bound
-// directly.  Block and higher-order function cases follow the same rules.
+// For byte-output commands with no value return, the value is the decoded
+// String of the final command's bytes.  For value-returning commands the return
+// value is bound directly.  Non-final stdout remains an effect.
 
 #[test]
 fn block_return_captures_only_last_command() {
-    // The block's return value is the last command's bytes decoded — not a
-    // concatenation of all commands' output.  Non-final bytes flush to stdout
-    // (the outer stream), so the final `echo` of `$x` shows `[three]` last.
+    // A sequence returns its final computation's value.  Non-final stdout is an
+    // effect and remains visible.
     let o = run("let xv = !{ echo one; echo two; echo three }\necho \"[$xv]\"");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    let last = o.stdout.trim().lines().last().unwrap_or("");
-    assert_eq!(last, "[three]", "full stdout: {:?}", o.stdout);
+    let lines: Vec<_> = o.stdout.trim().lines().collect();
+    assert_eq!(
+        lines,
+        ["one", "two", "[three]"],
+        "full stdout: {:?}",
+        o.stdout
+    );
 }
 
 #[test]
 fn block_non_final_bytes_reach_terminal() {
-    // Non-final commands in a captured block flush their bytes to the outer
-    // stdout (the terminal) so side-effects are visible.
+    // Non-final commands in a value-bound sequence flush their bytes to the
+    // outer stdout so side-effects remain visible.
     let o = run("let xv = !{ echo log; echo result }\necho \"x=$xv\"");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert!(
-        o.stdout.contains("log"),
-        "non-final output missing: {}",
-        o.stdout
-    );
-    assert!(
-        o.stdout.contains("x=result"),
-        "final capture wrong: {}",
-        o.stdout
-    );
+    let lines: Vec<_> = o.stdout.trim().lines().collect();
+    assert_eq!(lines, ["log", "x=result"], "full stdout: {:?}", o.stdout);
 }
 
 #[test]
@@ -1533,15 +1529,38 @@ fn to_json_via_user_wrapper() {
 
 #[test]
 fn block_mixed_modes_returns_value() {
-    // When the last command of a block is value-returning, no capture buffer
-    // is installed; the value is bound directly.  Preceding byte-output
-    // commands' output goes to the terminal as a side-effect (visible in stdout
-    // since the test harness captures ral's stdout).
+    // When the final command of a block returns a value, that value is bound.
+    // Preceding byte-output commands' output goes to the terminal as an effect.
     let o = run("let xv = !{ echo hello; length [1, 2, 3] }\necho $xv");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    // "hello" appears from the non-captured echo; "3" appears from echo $x.
-    let last = o.stdout.trim().lines().last().unwrap_or("");
-    assert_eq!(last, "3", "full stdout: {:?}", o.stdout);
+    let lines: Vec<_> = o.stdout.trim().lines().collect();
+    assert_eq!(lines, ["hello", "3"], "full stdout: {:?}", o.stdout);
+}
+
+#[test]
+fn mixed_sequence_return_type_matches_runtime_value() {
+    // Regression: the checker and evaluator must agree that this binds the
+    // final Int value, not the non-final stdout string.
+    let o = run("let n = !{ echo hello; length [1, 2, 3] }\necho $[$n + 1]");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    let lines: Vec<_> = o.stdout.trim().lines().collect();
+    assert_eq!(lines, ["hello", "4"], "full stdout: {:?}", o.stdout);
+}
+
+#[test]
+fn function_non_final_stdout_does_not_replace_return_value() {
+    let o = run("let f = { |xs| echo hello; length $xs }\nlet y = f [1, 2, 3]\necho \"y=$y\"");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    let lines: Vec<_> = o.stdout.trim().lines().collect();
+    assert_eq!(lines, ["hello", "y=3"], "full stdout: {:?}", o.stdout);
+}
+
+#[test]
+fn try_handler_final_stdout_can_be_recovery_value() {
+    let o =
+        run("let recovered = try { fail [status: 7] } { |_| echo caught }\necho \"x=$recovered\"");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "x=caught", "full stdout: {:?}", o.stdout);
 }
 
 // ── Foreground-handoff race regressions ─────────────────────────────────────

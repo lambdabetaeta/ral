@@ -176,10 +176,7 @@ fn use_returns_a_map_and_does_not_leak() {
         }
         other => panic!("expected Map, got {other:?}"),
     }
-    assert!(
-        shell.scope_lookup("x").is_none(),
-        "`use` must not leak `x`"
-    );
+    assert!(shell.scope_lookup("x").is_none(), "`use` must not leak `x`");
 
     std::fs::remove_file(&path).ok();
 }

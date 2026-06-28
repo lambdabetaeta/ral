@@ -1,4 +1,4 @@
-# Test: §4.2/§4.3 capture semantics — let binds the return value of its RHS
+# Test: §4.2/§4.3 capture semantics — let binds the return value of its RHS.
 
 let assert_eq = { |name expected actual|
     if !{equal $expected $actual} {} else {
@@ -11,7 +11,8 @@ let assert_eq = { |name expected actual|
 let xs = !{ echo one; echo two; echo three }
 assert_eq 'block last only' three $xs
 
-# Value-returning last command: no capture; value bound directly.
+# Value-returning last command: non-final stdout remains an effect; the
+# final value is bound directly.
 let n = !{ echo hello; length [1, 2, 3] }
 assert_eq 'block mixed modes' 3 $n
 

@@ -10,9 +10,10 @@
 //!   - `try`, `guard`, `audit` leave their body's pipeline modes free: a
 //!     control wrapper runs a thunk that may itself read or write bytes
 //!     (`try { echo x } …`), so the body is `F[μ₀,μ₁] α`, not `F[none,none]`.
-//!     The wrapper *returns* a value, so the wrapper's own computation type
-//!     stays `F[none,none]`.  Pinning the body to `none` would clash with any
-//!     byte-output body now that mode unification is equality-strict
+//!     `try` also exposes byte output when either outcome can write bytes, so
+//!     a recovery arm such as `{ |_| echo missing }` observes like any other
+//!     final byte-output computation.  Pinning the body to `none` would clash
+//!     with any byte-output body now that mode unification is equality-strict
 //!     (`docs/SPEC.md` §4.2.1).
 //!   - `within`, `grant` allocate fresh mode vars and let body's modes
 //!     flow up unchanged — the scope is transparent to pipeline I/O.
@@ -126,25 +127,43 @@ impl Inferencer<'_> {
     }
 
     pub(super) fn infer_try(&mut self, body: &Val, handler: &Val) -> CompTy {
-        let alpha = self.infer_thunk_body(body);
-        // The handler runs on failure and must produce the same value type
-        // as the body — `try` yields one or the other.  Its own pipeline
+        let body_cty = self.infer_scope_body_passthrough(body);
+        let (body_raw, body_in, body_out) = self.extract_return(&body_cty);
+        let body_final_out = self.final_output_of_thunk_value(body, &body_cty);
+        let body_value = self.observed_value_ty(body_raw, body_final_out);
+
+        // The handler runs on failure and must produce the same observed value
+        // type as the body — `try` yields one or the other.  Its own pipeline
         // modes are independent of the body's, so the handler's result is
         // mode-polymorphic too.
-        let (handler_in, handler_out) =
-            (self.ctx.unifier.fresh_mode(), self.ctx.unifier.fresh_mode());
-        let handler_result = CompTy::Return(
-            PipeSpec {
-                input: handler_in,
-                output: handler_out,
-            },
-            Box::new(alpha.clone()),
+        let handler_value_raw = self.ctx.unifier.fresh_ty();
+        let handler_result =
+            CompTy::Return(self.ctx.unifier.fresh_spec(), Box::new(handler_value_raw));
+        let handler_inner = CompTy::Fun(
+            Box::new(try_error_record()),
+            Box::new(handler_result.clone()),
         );
-        let handler_inner = CompTy::Fun(Box::new(try_error_record()), Box::new(handler_result));
         let handler_ty = self.infer_val(handler);
         self.ctx
-            .unify_ty(&handler_ty, &Ty::Thunk(Box::new(handler_inner)));
-        CompTy::pure(alpha)
+            .unify_ty(&handler_ty, &Ty::Thunk(Box::new(handler_inner.clone())));
+
+        let (handler_raw, handler_in, handler_out) = self.extract_return(&handler_result);
+        let handler_final_out = self.final_output_of_thunk_value(handler, &handler_result);
+        let handler_value = self.observed_value_ty(handler_raw, handler_final_out);
+        self.ctx.unify_ty_hint(
+            &body_value,
+            &handler_value,
+            "both outcomes of a `try` must produce the same value when observed; \
+             if one arm only writes a line, that line counts as the value at the boundary",
+        );
+
+        CompTy::Return(
+            PipeSpec {
+                input: self.union_mode(body_in, handler_in),
+                output: self.join_byte_output(body_out, handler_out),
+            },
+            Box::new(body_value),
+        )
     }
 
     pub(super) fn infer_guard(&mut self, body: &Val, cleanup: &Val) -> CompTy {

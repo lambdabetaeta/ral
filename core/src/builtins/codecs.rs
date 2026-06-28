@@ -153,7 +153,12 @@ pub(super) fn builtin_from_csv(args: &[Value], shell: &mut Shell) -> Settled<Val
         let fields = headers
             .iter()
             .enumerate()
-            .map(|(i, h)| (h.clone(), Value::String(record.get(i).unwrap_or("").to_owned())))
+            .map(|(i, h)| {
+                (
+                    h.clone(),
+                    Value::String(record.get(i).unwrap_or("").to_owned()),
+                )
+            })
             .collect::<Vec<_>>();
         rows.push(Value::map(fields));
     }
@@ -183,9 +188,7 @@ pub(super) fn builtin_to_csv(args: &[Value], shell: &mut Shell) -> Settled<Value
                 .map_err(|e| sig(format!("to-csv: {e}")))?;
         }
     }
-    let bytes = wtr
-        .into_inner()
-        .map_err(|e| sig(format!("to-csv: {e}")))?;
+    let bytes = wtr.into_inner().map_err(|e| sig(format!("to-csv: {e}")))?;
     write_encoded("to-csv", bytes, shell)
 }
 
@@ -195,6 +198,7 @@ fn write_encoded(name: &str, bytes: Vec<u8>, shell: &mut Shell) -> Settled<Value
     shell
         .write_stdout(&bytes)
         .map_err(|e| sig(format!("{name}: {e}")))?;
+    shell.mobile.control.last_status = 0;
     Ok(Value::Bytes(bytes))
 }
 
@@ -213,7 +217,11 @@ pub(super) fn builtin_to_line(args: &[Value], shell: &mut Shell) -> Settled<Valu
     check_arity(args, 1, "to-line")?;
     let mut s = args[0].to_string();
     s.push('\n');
-    write_encoded("to-line", s.into_bytes(), shell)
+    shell
+        .write_stdout(s.as_bytes())
+        .map_err(|e| sig(format!("to-line: {e}")))?;
+    shell.mobile.control.last_status = 0;
+    Ok(Value::Unit)
 }
 
 pub(super) fn builtin_to_lines(args: &[Value], shell: &mut Shell) -> Settled<Value> {

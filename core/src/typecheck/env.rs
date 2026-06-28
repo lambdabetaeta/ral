@@ -321,6 +321,11 @@ pub struct InferCtx {
     /// read by the annotation pass, which grounds it into the node's
     /// `rhs_output` `ByteMode`.
     pub bind_outputs: HashMap<usize, PipeMode>,
+    /// The output mode of the final computation whose value a node returns.
+    /// A `Seq` may write bytes before its last statement; those bytes are
+    /// effects, not the returned value's byte source.  This map keeps the two
+    /// facts separate for `let` and `try` value-boundary typing.
+    pub final_outputs: HashMap<usize, PipeMode>,
 }
 
 impl Default for InferCtx {
@@ -339,6 +344,7 @@ impl InferCtx {
             stage_specs: HashMap::new(),
             stage_types: HashMap::new(),
             bind_outputs: HashMap::new(),
+            final_outputs: HashMap::new(),
         }
     }
 

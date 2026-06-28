@@ -19,11 +19,11 @@ echo !{re-replace-all a b 'a-a-a'}
 # Expected: b-b-b
 
 # re-replace errors on an ambiguous (>1 match) pattern
-try { re-replace a b 'a-a' } { |e| echo $e[message] }
+try { re-replace a b 'a-a' } { |e| echo $e[message]; return "" }
 # Expected: re-replace: pattern matches 2 times — must match exactly once; …
 
 # re-replace errors on a missing pattern
-try { re-replace xyz q 'hello' } { |e| echo $e[message] }
+try { re-replace xyz q 'hello' } { |e| echo $e[message]; return "" }
 # Expected: re-replace: pattern not found in input — …
 
 # re-split / intercalate

@@ -471,7 +471,6 @@ mod tests {
         assert_eq!(reg.used, 0, "reset clears the budget");
     }
 
-
     /// With nothing pinned, the reminder never fires however many turns pass.
     #[test]
     fn no_reminder_without_pinned_state() {

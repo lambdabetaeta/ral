@@ -503,10 +503,7 @@ impl Inbox {
     pub fn drain_tool(&self) -> Vec<Turn> {
         let mut q = self.shared.queue.lock().expect("inbox lock poisoned");
         let mut turns = Vec::new();
-        while q
-            .front()
-            .is_some_and(|m| m.boundary() == Boundary::Tool)
-        {
+        while q.front().is_some_and(|m| m.boundary() == Boundary::Tool) {
             if matches!(q.front(), Some(InboxMsg::UserSteering(_))) {
                 // Coalesce the consecutive run of (non-slash) steering, as the
                 // turn-boundary drain does, so it lands as one human turn.

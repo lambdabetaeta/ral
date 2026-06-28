@@ -51,5 +51,9 @@ pub fn discover_git_dir(cwd: &Path) -> Option<PathBuf> {
     };
 
     // Normalize through the same fold-dots kernel the grant side uses.
-    Some(crate::path::NormalizedPrefix::from_surface(&resolved).as_path().to_path_buf())
+    Some(
+        crate::path::NormalizedPrefix::from_surface(&resolved)
+            .as_path()
+            .to_path_buf(),
+    )
 }

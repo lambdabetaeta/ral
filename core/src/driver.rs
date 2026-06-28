@@ -26,8 +26,8 @@ use crate::io::{Source, TerminalState};
 use crate::ir::Comp;
 use crate::process::CancelCause;
 use crate::source::Span;
-use crate::typecheck::Scheme;
 use crate::turn::{StaticDiagnostics, TurnLifecycle};
+use crate::typecheck::Scheme;
 use crate::types::{Boundary, Capabilities, Settled, Shell, SurfaceSink, Value};
 use crate::types::{
     DefaultPolicy, HookSig, HostProgram, ProgramName, RegisterError, TerminalPolicy,
@@ -331,7 +331,6 @@ impl Shell {
             crate::evaluator::eval_top_level(&comp, s)
         })
     }
-
 
     /// Register a host-held [`Value`] (a compiled `Block` or `Lambda`)
     /// as a named turn-entry point in the session-lived program table.

@@ -904,7 +904,12 @@ mod tests {
         // Strip ANSI before asserting: ariadne colors the underlined span
         // character-by-character when color is on (a tty), so the raw bytes
         // of `fail` are split by escapes.  The test is about the visible text.
-        let out = ansi::strip(&format_runtime_error_ariadne(&db, Some(&loc), "kaboom", None));
+        let out = ansi::strip(&format_runtime_error_ariadne(
+            &db,
+            Some(&loc),
+            "kaboom",
+            None,
+        ));
         assert!(out.contains("R0001"));
         assert!(
             out.contains("mod.ral"),

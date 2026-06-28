@@ -3,30 +3,20 @@
 //!
 //! Both follow the same swap-restore-drain dance: replace a Sink on
 //! `shell.turn.io`, run the closure, restore the saved Sink, drain the
-//! buffer.  They differ on two axes:
+//! buffer.  They differ on visibility:
 //!
-//!   * **Visibility.**  [`with_capture`] *replaces* `shell.turn.io.stdout`
-//!     with `Sink::Buffer`, so the bytes are diverted away from the
-//!     terminal — the let-binding semantics of §4.3.
-//!     [`with_audit_capture`] *tees* through `Sink::Tee(Buffer, real)`,
+//!   * [`with_capture`] *replaces* `shell.turn.io.stdout` with
+//!     `Sink::Buffer`, diverting final byte output from the terminal so
+//!     it can be bound as a value.
+//!   * [`with_audit_capture`] *tees* through `Sink::Tee(Buffer, real)`,
 //!     so bytes are observed AND stay visible.
-//!
-//!   * **Surface.**  [`with_capture`] touches stdout only (and sets
-//!     `capture_outer` so a `Seq` flushes non-final stages to the
-//!     visible outer sink).  [`with_audit_capture`] touches both
-//!     stdout and stderr, recording each into its own per-command
-//!     buffer for `audit`'s execution tree.
 //!
 //! Reading the two side-by-side is the documentation: same shape,
 //! different policy.
-
 use crate::io::{Sink, new_buffer, take_buffer, tee_with_buffer};
 use crate::types::*;
-
 /// RAII guard for [`with_capture`]: swaps `shell.turn.io.stdout` for an
-/// in-memory buffer sink, stashes the prior stdout as `capture_outer` so a
-/// `Seq` can flush non-final stages to the visible sink, bumps
-/// `capture_depth`, and undoes all three on `Drop` — including on panic.
+/// in-memory buffer sink and restores it on `Drop` — including on panic.
 struct CaptureScope<'a> {
     shell: &'a mut Shell,
     saved_stdout: Option<Sink>,
@@ -62,13 +52,10 @@ impl Drop for CaptureScope<'_> {
 }
 
 /// Swap stdout for an in-memory buffer, run `f`, restore, return `(result, bytes)`.
-/// §4.3: lets callers bind the byte output of commands as a value.  Sets
-/// `shell.turn.io.capture_outer` so a `Seq` flushes non-final stages to the outer
-/// (visible) stdout, leaving only the last stage's bytes in the buffer —
-/// the let-binding semantics.  Restoration is RAII (see [`CaptureScope`]),
-/// so a panic from `f` still puts `stdout` / `capture_outer` /
-/// `capture_depth` back the way they were.
 ///
+/// A surrounding `Seq` flushes non-final byte effects to the saved
+/// outer sink, so the drained buffer represents the final byte value
+/// at the binding boundary.
 /// This is the sole capture primitive.  `try` does not capture: control
 /// flow and byte capture are kept separate (§10.1).  Use `audit` to record
 /// per-command bytes into the execution tree.

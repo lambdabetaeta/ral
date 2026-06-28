@@ -98,9 +98,7 @@ impl HookSig {
     pub fn expected_arity(&self) -> usize {
         match self {
             HookSig::PromptProgram => 0,
-            HookSig::Hook { .. }
-            | HookSig::PluginFactory
-            | HookSig::Lifecycle { .. } => 1,
+            HookSig::Hook { .. } | HookSig::PluginFactory | HookSig::Lifecycle { .. } => 1,
         }
     }
 
@@ -209,10 +207,7 @@ pub enum RegisterError {
         sig_label: String,
     },
     /// A program with this name is already registered.
-    AlreadyRegistered {
-        name: ProgramName,
-        origin: Span,
-    },
+    AlreadyRegistered { name: ProgramName, origin: Span },
 }
 
 impl fmt::Display for RegisterError {
@@ -250,4 +245,3 @@ impl fmt::Display for RegisterError {
         }
     }
 }
-

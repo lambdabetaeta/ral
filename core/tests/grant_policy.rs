@@ -305,7 +305,12 @@ fn broad_deny_set_does_not_admit_planted_path_invoked_basename() {
         ..Capabilities::root()
     };
     let result = shell.with_capabilities(grant, |sh| {
-        sh.check_exec_call("/tmp/evil/rg", &["/tmp/evil/rg", "rg"], &["/tmp/evil/rg"], &[])
+        sh.check_exec_call(
+            "/tmp/evil/rg",
+            &["/tmp/evil/rg", "rg"],
+            &["/tmp/evil/rg"],
+            &[],
+        )
     });
     assert!(
         result.is_err(),
@@ -327,7 +332,12 @@ fn literal_deny_on_resolved_absolute_still_vetoes() {
         ..Capabilities::root()
     };
     let result = shell.with_capabilities(grant, |sh| {
-        sh.check_exec_call("git", &["git", "/usr/bin/git"], &["git", "/usr/bin/git"], &[])
+        sh.check_exec_call(
+            "git",
+            &["git", "/usr/bin/git"],
+            &["git", "/usr/bin/git"],
+            &[],
+        )
     });
     assert!(
         result.is_err(),
@@ -351,9 +361,12 @@ fn bare_admit_and_subcommand_gating_unregressed() {
     };
     shell
         .with_capabilities(allow, |sh| {
-            sh.check_exec_call("git", &["git", "/usr/bin/git"], &["git", "/usr/bin/git"], &[
-                "status".into(),
-            ])
+            sh.check_exec_call(
+                "git",
+                &["git", "/usr/bin/git"],
+                &["git", "/usr/bin/git"],
+                &["status".into()],
+            )
         })
         .expect("bare git: Allow must admit");
 
@@ -371,15 +384,21 @@ fn bare_admit_and_subcommand_gating_unregressed() {
     };
     shell
         .with_capabilities(gated.clone(), |sh| {
-            sh.check_exec_call("git", &["git", "/usr/bin/git"], &["git", "/usr/bin/git"], &[
-                "status".into(),
-            ])
+            sh.check_exec_call(
+                "git",
+                &["git", "/usr/bin/git"],
+                &["git", "/usr/bin/git"],
+                &["status".into()],
+            )
         })
         .expect("git status must be admitted under Subcommands([status])");
     let denied = shell.with_capabilities(gated, |sh| {
-        sh.check_exec_call("git", &["git", "/usr/bin/git"], &["git", "/usr/bin/git"], &[
-            "push".into(),
-        ])
+        sh.check_exec_call(
+            "git",
+            &["git", "/usr/bin/git"],
+            &["git", "/usr/bin/git"],
+            &["push".into()],
+        )
     });
     assert!(
         denied.is_err(),

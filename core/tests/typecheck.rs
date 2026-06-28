@@ -992,7 +992,7 @@ fn value_lookup_does_not_reify_aliases_or_command_only_builtins() {
         r#"alias greet { |args| return "hi" }; let f = $greet; return $f"#,
         "handler entry",
     );
-    has_error("let f = $echo; return $f", "builtin command");
+    has_error("let f = $cd; return $f", "builtin command");
 }
 
 /// Alias lambda parameters receive the argv list, not one scalar command
@@ -1245,6 +1245,7 @@ fn bind_rhs_output_mode_is_ground() {
             rhs_output,
             ..
         } = &c.item
+            && !name.starts_with("_g")
         {
             binds.push((name.clone(), *rhs_output));
         }

@@ -910,11 +910,7 @@ struct MxRow {
 
 /// Every binding name currently in scope — the baseline snapshot.
 fn binding_names(shell: &Shell) -> HashSet<String> {
-    shell
-        .bindings()
-        .into_iter()
-        .map(|(n, _)| n)
-        .collect()
+    shell.bindings().into_iter().map(|(n, _)| n).collect()
 }
 
 /// The user's bindings — those added since the baseline — as a single

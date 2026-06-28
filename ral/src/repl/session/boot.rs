@@ -6,9 +6,9 @@
 //! construction.  Splitting them out of `session.rs` keeps the state
 //! machine itself focused on the run/turn/eval loop.
 
-use ral_core::types::{Break, Escape, DefaultPolicy, HookSig, ProgramName};
-use ral_core::{RequestedTerminalAccess, Shell, TurnReport, diagnostic, evaluator::evaluate};
 use ral_core::source::Span;
+use ral_core::types::{Break, DefaultPolicy, Escape, HookSig, ProgramName};
+use ral_core::{RequestedTerminalAccess, Shell, TurnReport, diagnostic, evaluator::evaluate};
 use rustyline::config::{BellStyle, EditMode};
 use std::sync::{Arc, Mutex};
 
@@ -342,7 +342,10 @@ fn source_config_inner(path: &str, ctx: &mut RcCtx<'_>) -> Result<(), String> {
             return Err(format!("{path}: startup: {}", e));
         }
         let req = framed_turn_request("<startup>", RequestedTerminalAccess::Denied);
-        match ctx.shell.run_program(&ProgramName::session("startup"), vec![], req) {
+        match ctx
+            .shell
+            .run_program(&ProgramName::session("startup"), vec![], req)
+        {
             TurnReport::Ran { result, .. } => match result {
                 Ok(_) | Err(Break::Escape(Escape::Exit(_))) => {}
                 Err(Break::Error(e)) => return Err(format!("{path}: startup: {}", e.message)),

@@ -38,7 +38,7 @@ use crate::bus::{
     AgentId, Emitter, Event, FleetBus, Hunk, Inbox, InboxMsg, Kind, Mailbox, Pass, drain_pass,
 };
 use crate::cancel;
-use crate::card::{Card, Field, FieldVal, IoEvent, ObservationKind, Mark, Role, Span as CardSpan};
+use crate::card::{Card, Field, FieldVal, IoEvent, Mark, ObservationKind, Role, Span as CardSpan};
 use crate::credential::CredentialStore;
 use crate::fleet::{Fleet, NO_FOCUS};
 use crate::models::{LiveSource, ModelCatalog, ModelSource};

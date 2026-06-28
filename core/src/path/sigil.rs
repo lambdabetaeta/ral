@@ -148,8 +148,7 @@ pub fn freeze_one(entry: &str, ctx: &FreezeCtx<'_>) -> Result<NormalizedPrefix, 
         return Ok(join_sub(std::env::temp_dir(), sub));
     }
     if let Some(sub) = parse_literal_sigil(entry, "gitdir") {
-        let base = crate::path::discover_git_dir(ctx.cwd)
-            .unwrap_or_else(|| ctx.cwd.to_path_buf());
+        let base = crate::path::discover_git_dir(ctx.cwd).unwrap_or_else(|| ctx.cwd.to_path_buf());
         return Ok(join_sub(base, sub));
     }
     if let Some(t) = TildePath::parse(entry) {

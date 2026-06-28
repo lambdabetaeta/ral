@@ -49,4 +49,5 @@ assert_eq 'elem absent' false !{elem dave $names}
 let empty_names = filter { |s| return false } $names
 assert_eq 'elem empty'  false !{elem alice $empty_names}
 
+true
 echo 'predicate tests done'

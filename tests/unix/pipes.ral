@@ -37,12 +37,12 @@ cat /tmp/al-test-append.txt
 # Expected: first (newline) second
 
 # Command substitution captures stdout
-let name = echo alice
+let name = echo alice | from-string
 echo "name is $name"
 # Expected: name is alice
 
 # Trailing newline stripped
-let result = echo hello
+let result = echo hello | from-string
 echo "[$result]"
 # Expected: [hello] (no trailing newline)
 

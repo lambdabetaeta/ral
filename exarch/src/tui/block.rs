@@ -19,7 +19,7 @@ use super::line::{self, RAIL_GLYPHS, RAIL_W, READ_W, is_blank};
 use super::md::{self, MD_INDENT};
 use super::rail::{self, RailKind};
 use crate::bus::Hunk;
-use crate::card::{Card, ObservationKind, Mark};
+use crate::card::{Card, Mark, ObservationKind};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use std::time::Duration;

@@ -73,7 +73,10 @@ fn expect_error(source: &str, needle: &str) {
 fn equal_bytes_is_reflexive() {
     // Pre-fix: `values_equal` had no Bytes arm, so `_ => false` made a Bytes
     // value unequal to itself.
-    expect_bool("let bb = !{to-bytes [65, 66]}; return !{equal $bb $bb}", true);
+    expect_bool(
+        "let bb = !{to-bytes [65, 66]}; return !{equal $bb $bb}",
+        true,
+    );
     expect_bool(
         "return !{equal !{to-bytes [1, 2]} !{to-bytes [1, 3]}}",
         false,

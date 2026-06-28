@@ -565,9 +565,11 @@ mod tests {
     #[test]
     fn mac_profile_names_notification_center_as_posix_shm() {
         let profile = build_profile(&SandboxProjection::default());
-        assert!(profile.contains(
-            "(allow ipc-posix-shm (ipc-posix-name \"apple.shm.notification_center\"))"
-        ));
+        assert!(
+            profile.contains(
+                "(allow ipc-posix-shm (ipc-posix-name \"apple.shm.notification_center\"))"
+            )
+        );
         assert!(
             !profile.contains("(global-name \"apple.shm.notification_center\")"),
             "notification_center is a POSIX shared-memory name, not a Mach service"

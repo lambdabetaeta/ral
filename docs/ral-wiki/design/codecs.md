@@ -48,10 +48,11 @@ for a `Bytes` value (e.g. `$r[stdout]` from `await`). The decoders:
   reader handles quoted fields, embedded commas, and embedded newlines;
 - `from-lines` → a line stream (below).
 
-`to-X` takes one value, writes its encoded form to the byte channel, and returns
-the `Bytes` it wrote: `to-bytes`, `to-string`, `to-line` (trailing newline),
-`to-lines` (newline-join a list), `to-json`, `to-csv`. All share the `encode`
-mode. `to-csv` takes a list of records and emits a header plus one row each;
+`to-X` takes one value and writes its encoded form to the byte channel.
+`to-bytes`, `to-string`, `to-lines` (newline-join a list), `to-json`, and
+`to-csv` return the `Bytes` they wrote; `to-line` is the line-writer used by
+`echo` and returns `Unit`, so a value boundary captures its final line as a
+`String`. All share the `encode` mode. `to-csv` takes a list of records and emits a header plus one row each;
 columns are the first record's keys in sorted order (maps are key-ordered, so
 there is no original column order to recover) and a record missing a column
 contributes an empty field.

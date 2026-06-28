@@ -253,7 +253,7 @@ impl Inferencer<'_> {
         }
     }
 
-    fn extract_return(&mut self, cty: &CompTy) -> (Ty, PipeMode, PipeMode) {
+    pub(super) fn extract_return(&mut self, cty: &CompTy) -> (Ty, PipeMode, PipeMode) {
         match self.ctx.unifier.resolve_comp_ty(cty) {
             CompTy::Return(spec, ty) => (*ty, spec.input, spec.output),
             _ => {
@@ -264,6 +264,22 @@ impl Inferencer<'_> {
                 self.ctx.unify_comp_ty(cty, &expected);
                 (ty, input, output)
             }
+        }
+    }
+
+    /// Value observed when a byte-output computation crosses a value boundary.
+    ///
+    /// Most computations carry their real value directly.  A byte-output
+    /// computation whose value is `Unit` is the one intentional exception:
+    /// the bytes are the value at `let`/force-like boundaries, decoded as a
+    /// `String` by the evaluator after stripping one trailing newline.
+    pub(super) fn observed_value_ty(&mut self, ty: Ty, output: PipeMode) -> Ty {
+        match (
+            self.ctx.unifier.resolve_mode(&output),
+            self.ctx.unifier.resolve_ty(&ty),
+        ) {
+            (PipeMode::Bytes, Ty::Unit) => Ty::String,
+            _ => ty,
         }
     }
 
@@ -338,11 +354,22 @@ impl Inferencer<'_> {
     /// variable on either side) unifies as usual.  A conditional that
     /// emits bytes in one arm and a value in the other (`if c { echo x }
     /// else {}`) is accepted rather than rejected.
-    fn union_mode(&mut self, a: PipeMode, b: PipeMode) -> PipeMode {
+    pub(super) fn union_mode(&mut self, a: PipeMode, b: PipeMode) -> PipeMode {
         if self.ctx.unifier.unify_mode(&a, &b).is_err() {
             self.ctx.unifier.fresh_mode()
         } else {
             a
+        }
+    }
+
+    pub(super) fn join_byte_output(&mut self, a: PipeMode, b: PipeMode) -> PipeMode {
+        match (
+            self.ctx.unifier.resolve_mode(&a),
+            self.ctx.unifier.resolve_mode(&b),
+        ) {
+            (PipeMode::Bytes, _) | (_, PipeMode::Bytes) => PipeMode::Bytes,
+            (PipeMode::None, PipeMode::None) => PipeMode::None,
+            _ => self.union_mode(a, b),
         }
     }
 
@@ -1881,13 +1908,71 @@ impl Inferencer<'_> {
         CompTy::pure(Ty::Unit)
     }
 
+    pub(super) fn final_output_of_comp(&mut self, comp: &Comp, fallback: &CompTy) -> PipeMode {
+        self.ctx
+            .final_outputs
+            .get(&(comp as *const Comp as usize))
+            .copied()
+            .unwrap_or_else(|| self.comp_output_mode(fallback))
+    }
+
+    pub(super) fn final_output_of_thunk_value(&mut self, val: &Val, fallback: &CompTy) -> PipeMode {
+        match val {
+            Val::Thunk(comp) => self.final_output_of_comp(comp, fallback),
+            _ => self.comp_output_mode(fallback),
+        }
+    }
+
+    fn record_final_output(&mut self, comp: &Comp, cty: &CompTy) {
+        let final_output = match &comp.item {
+            CompKind::Seq(parts) => parts
+                .last()
+                .and_then(|last| {
+                    self.ctx
+                        .final_outputs
+                        .get(&(last.as_ref() as *const Comp as usize))
+                        .copied()
+                })
+                .unwrap_or(PipeMode::None),
+            CompKind::Bind { rest, .. } => self.final_output_of_comp(rest, cty),
+            CompKind::Lam { body, .. } => self.final_output_of_comp(body, cty),
+            CompKind::Force(Val::Thunk(body)) => self.final_output_of_comp(body, cty),
+            CompKind::If { then, else_, .. } => {
+                let then_out = self.final_output_of_comp(then, cty);
+                let else_out = self.final_output_of_comp(else_, cty);
+                self.join_byte_output(then_out, else_out)
+            }
+            CompKind::Chain(parts) => parts.iter().fold(PipeMode::None, |acc, part| {
+                let out = self.final_output_of_comp(part, cty);
+                self.join_byte_output(acc, out)
+            }),
+            CompKind::Scope(ScopeOp::Within { body, .. })
+            | CompKind::Scope(ScopeOp::Grant { body, .. }) => {
+                self.final_output_of_thunk_value(body, cty)
+            }
+            CompKind::Scope(ScopeOp::Redirect { body, .. }) => self.final_output_of_comp(body, cty),
+            CompKind::Scope(ScopeOp::Try { body, handler }) => {
+                let body_out = self.final_output_of_thunk_value(body, cty);
+                let handler_out = self.final_output_of_thunk_value(handler, cty);
+                self.join_byte_output(body_out, handler_out)
+            }
+            CompKind::Scope(ScopeOp::Guard { body, .. }) => {
+                self.final_output_of_thunk_value(body, cty)
+            }
+            _ => self.comp_output_mode(cty),
+        };
+        self.ctx
+            .final_outputs
+            .insert(comp as *const Comp as usize, final_output);
+    }
+
     pub(super) fn infer_comp(&mut self, comp: &Comp) -> CompTy {
         // Update position from the node's span.
         if let Some(span) = comp.span {
             self.ctx.pos = Some(span);
         }
 
-        match &comp.item {
+        let cty = match &comp.item {
             CompKind::Return(value) => CompTy::pure(self.infer_val(value)),
             CompKind::Lam { param, body } => {
                 let param_ty = self.ctx.unifier.fresh_ty();
@@ -1918,11 +2003,17 @@ impl Inferencer<'_> {
                 // A `Fun` RHS is a lambda: evaluating it builds a closure
                 // and emits no bytes, so its output channel is `∅`.  Any
                 // other shape carries its `Return` spec's output mode.
+                //
+                // At a byte-output let boundary, `Unit` means "the bytes are
+                // the value"; value-returning byte computations (`hostname`:
+                // String, `to-json`: Bytes, `echo log; length xs`: Int) keep
+                // their proper return value.
                 let (bound_ty, rhs_output) = match self.ctx.unifier.resolve_comp_ty(&inner_ty) {
                     CompTy::Fun(..) => (Ty::Thunk(Box::new(inner_ty)), PipeMode::None),
                     _ => {
-                        let (ty, _, output) = self.extract_return(&inner_ty);
-                        (ty, output)
+                        let (ty, _, _) = self.extract_return(&inner_ty);
+                        let final_output = self.final_output_of_comp(inner, &inner_ty);
+                        (self.observed_value_ty(ty, final_output), final_output)
                     }
                 };
                 self.ctx
@@ -1976,7 +2067,9 @@ impl Inferencer<'_> {
                     for sub in crate::ir::args::iter_subvals(args) {
                         let _ = self.infer_val(sub);
                     }
-                    return self.ctx.unifier.fresh_comp_ty();
+                    let result = self.ctx.unifier.fresh_comp_ty();
+                    self.record_final_output(comp, &result);
+                    return result;
                 }
                 self.apply_args(head_ty, args)
             }
@@ -2056,6 +2149,8 @@ impl Inferencer<'_> {
                 // `Val`, so we infer it directly.
                 ScopeOp::Redirect { body, .. } => self.infer_comp(body),
             },
-        }
+        };
+        self.record_final_output(comp, &cty);
+        cty
     }
 }

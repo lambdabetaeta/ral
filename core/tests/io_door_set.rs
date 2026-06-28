@@ -144,7 +144,10 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ),
     ("core/src/types/shell/cwd.rs", "io-door:silent:cwd-stat"),
     // ── exarch ────────────────────────────────────────────────────────────
-    ("exarch/src/agent_builtins.rs", "io-door:surface:edit-read"),
+    (
+        "exarch/src/agent_builtins.rs",
+        "io-door:surface:witness-read",
+    ),
     ("exarch/src/agent_builtins.rs", "io-door:surface:grep-read"),
     ("exarch/src/agent_builtins.rs", "io-door:surface:grep-walk"),
     ("exarch/src/bootstrap.rs", "io-door:silent:log-run-dir"),
@@ -183,10 +186,7 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("exarch/src/state.rs", "io-door:silent:state-read"),
     ("exarch/src/state.rs", "io-door:silent:state-write"),
     ("exarch/src/agent_builtins.rs", "io-door:silent:fff-db-dir"),
-    (
-        "exarch/src/transcript.rs",
-        "io-door:silent:transcript-file",
-    ),
+    ("exarch/src/transcript.rs", "io-door:silent:transcript-file"),
     ("exarch/src/tui.rs", "io-door:silent:editor-compose"),
     ("exarch/src/tui.rs", "io-door:silent:stderr-log"),
     ("exarch/src/tui/viewport.rs", "io-door:silent:export"),

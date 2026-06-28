@@ -7,7 +7,7 @@ within [env: [TEST_VAR: hello]] {
 }
 
 # env doesn't leak
-try { printenv TEST_VAR } { |_| echo 'TEST_VAR correctly unset' }
+try { printenv TEST_VAR } { |_| echo 'TEST_VAR correctly unset'; return "" }
 
 # Nested env
 within [env: [A: 1]] {
@@ -45,7 +45,7 @@ within [handlers: [mycmd: { |args| echo 'got' ...$args }]] {
 }
 
 # Handler gone after block
-try { mycmd 2> /dev/null } { |_| echo 'mycmd gone' }
+try { mycmd 2> /dev/null } { |_| echo 'mycmd gone'; return "" }
 
 # Nesting: inner wins
 within [handlers: [mycmd: { |args| echo 'outer' }]] {

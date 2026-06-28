@@ -22,4 +22,5 @@ let subtracted = difference $left $right
 echo !{has $subtracted alice}
 echo !{has $subtracted bob}
 
+true
 echo 'set tests done'

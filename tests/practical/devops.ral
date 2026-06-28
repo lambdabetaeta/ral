@@ -26,7 +26,7 @@ for $files { |f|
 try {
     cat /nonexistent/file
 } { |err|
-    echo "caught error with status $err[status]"
+    echo "caught error with status $err[status]"; return ""
 }
 # Expected: caught error with status 1
 

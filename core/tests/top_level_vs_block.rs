@@ -549,7 +549,8 @@ fn lambda_enters_with_fresh_status() {
     shell.set_last_status(7);
     top_level(&mut shell, "f unit").expect("call f");
     assert_eq!(
-        shell.last_status(), 0,
+        shell.last_status(),
+        0,
         "a lambda body enters with a fresh $? (0), not the caller's 7; its \
          body set none, so 0 folds back"
     );
@@ -564,7 +565,8 @@ fn forced_block_keeps_caller_status_when_body_sets_none() {
     shell.set_last_status(7);
     top_level(&mut shell, "!{ return unit }").expect("forced block");
     assert_eq!(
-        shell.last_status(), 7,
+        shell.last_status(),
+        7,
         "a forced block keeps the caller's $? when its body sets none"
     );
 }
@@ -579,7 +581,8 @@ fn lambda_folds_back_body_status() {
     shell.set_last_status(5);
     top_level(&mut shell, "gg unit").expect("call gg");
     assert_eq!(
-        shell.last_status(), 1,
+        shell.last_status(),
+        1,
         "the lambda body's status (1, from a false comparison) folds back, \
          replacing the caller's 5"
     );
@@ -592,7 +595,8 @@ fn forced_block_folds_back_body_status() {
     shell.set_last_status(5);
     top_level(&mut shell, "!{ $[1 == 2] }").expect("forced block");
     assert_eq!(
-        shell.last_status(), 1,
+        shell.last_status(),
+        1,
         "the block body's status (1, from a false comparison) folds back, \
          replacing the caller's 5"
     );
@@ -656,13 +660,13 @@ fn function_body_records_into_enclosing_audit() {
         },
         other => panic!("audit {{ … }} must return a Map; got {other:?}"),
     };
-    let saw_echo = children.iter().any(|c| match c {
-        Value::Map(m) => matches!(m.get("cmd"), Some(Value::String(s)) if s == "echo"),
+    let saw_line_write = children.iter().any(|c| match c {
+        Value::Map(m) => matches!(m.get("cmd"), Some(Value::String(s)) if s == "to-line"),
         _ => false,
     });
     assert!(
-        saw_echo,
-        "the `echo` inside the function body must appear in the enclosing \
+        saw_line_write,
+        "the `echo` inside the function body must appear as its lowered `to-line` in the enclosing \
          audit tree; children = {children:?}"
     );
 }

@@ -38,9 +38,9 @@ mod host;
 mod inherit;
 mod init;
 pub(crate) mod modules;
+pub(crate) mod programs;
 pub(crate) mod repl;
 mod scope;
-pub(crate) mod programs;
 
 pub use host::TerminalLoan;
 pub use inherit::MobileSnapshot;

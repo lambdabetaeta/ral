@@ -215,9 +215,11 @@ fn freeze_exec_map(
             let verdict = match policy {
                 ExecPolicy::Allow => ExecDir::Allow,
                 ExecPolicy::Deny => ExecDir::Deny,
-                _ => return Err(format!(
-                    "{err_prefix}: 'path:' only takes 'allow' or 'deny', not a subcommand list"
-                )),
+                _ => {
+                    return Err(format!(
+                        "{err_prefix}: 'path:' only takes 'allow' or 'deny', not a subcommand list"
+                    ));
+                }
             };
             for d in path_dirs(err_prefix)? {
                 dirs.insert(d, verdict.clone());

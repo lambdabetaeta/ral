@@ -36,5 +36,5 @@ echo ...$words
 
 # Spread with map function
 let nums = [1, 2, 3]
-let doubled = map { |x| echo $[$x * 2] } $nums
+let doubled = map { |x| $[$x * 2] } $nums
 echo ...$doubled

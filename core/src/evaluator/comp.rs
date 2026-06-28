@@ -274,9 +274,9 @@ fn eval_index(target: &Val, keys: &[crate::source::Spanned<Val>], shell: &mut Sh
 /// Right-hand side of a `Bind`: evaluated under a non-trivial
 /// continuation ([`Tail::No`]), since its value is bound and the
 /// continuation `rest` runs after it.  Captures stdout when the RHS is
-/// byte-mode so the captured bytes become the bound value (SPEC §4.3).
-/// The byte-mode bit is the checker's ground output mode, written onto
-/// the node by the annotation pass.
+/// byte-mode so a command that writes bytes and returns `Unit` binds the
+/// decoded bytes.  Commands with a proper return value bind that value;
+/// non-final byte effects in a sequence are flushed by [`eval_seq`].
 fn eval_bind_rhs(
     m: &Arc<Comp>,
     rhs_output: crate::mode::ByteMode,
@@ -420,9 +420,9 @@ fn eval_if(
 ///
 /// Only the final element inherits the sequence's tail position, so
 /// non-final computations run under a non-trivial continuation and
-/// never observe themselves as tail-called. SPEC §4.3: non-final bytes
-/// are flushed to any active outer capture sink, so side-effects remain
-/// visible to a watching `with_capture` even if a later step fails.
+/// never observe themselves as tail-called.  When a sequence runs under
+/// a capture, non-final bytes are effects: flush them to the visible
+/// outer stream so the sequence's value is still just its final value.
 fn eval_seq(comps: &[Arc<Comp>], tail: Tail, shell: &mut Shell) -> Raw<Value> {
     let mut result = Value::Unit;
     let len = comps.len();
@@ -431,8 +431,6 @@ fn eval_seq(comps: &[Arc<Comp>], tail: Tail, shell: &mut Shell) -> Raw<Value> {
         let last = i == len - 1;
         let elem_tail = if last { tail } else { Tail::No };
         result = eval_comp(c, shell, elem_tail)?;
-        // SPEC §4.3: flush non-final bytes so side-effects remain
-        // visible to any outer capture sink.
         if !last && let Some(outer) = &shell.turn.io.capture_outer {
             shell
                 .turn

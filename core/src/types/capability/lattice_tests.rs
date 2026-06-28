@@ -280,7 +280,10 @@ fn join_exec_regrant_does_not_lift_deny() {
         ..Default::default()
     };
     let j = base.join(extend);
-    assert_eq!(j.exec.unwrap().literals.get("bash"), Some(&ExecPolicy::Deny));
+    assert_eq!(
+        j.exec.unwrap().literals.get("bash"),
+        Some(&ExecPolicy::Deny)
+    );
 }
 
 /// The dual of `meet_exec_preserves_one_sided_deny`: a base veto on

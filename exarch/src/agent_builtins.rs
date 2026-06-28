@@ -276,7 +276,10 @@ fn builtin_witnesses(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     surface_read(shell, &path);
     let rows = rows_of(&body);
     Ok(Value::list(
-        window_hashes(&rows).into_iter().map(Value::String).collect(),
+        window_hashes(&rows)
+            .into_iter()
+            .map(Value::String)
+            .collect(),
     ))
 }
 
@@ -766,10 +769,7 @@ fn scheme_view_text(_u: &mut Unifier) -> Scheme {
         &[],
         &[],
         &[],
-        thunk(fun(
-            Ty::String,
-            fun(Ty::Int, fun(Ty::Int, pure(Ty::Unit))),
-        )),
+        thunk(fun(Ty::String, fun(Ty::Int, fun(Ty::Int, pure(Ty::Unit))))),
     )
 }
 
@@ -1175,7 +1175,11 @@ mod tests {
         rows.push("}".to_string());
 
         let hashes = window_hashes(&rows);
-        assert_eq!(line_hash(&rows[t1]), line_hash(&rows[t2]), "same line content");
+        assert_eq!(
+            line_hash(&rows[t1]),
+            line_hash(&rows[t2]),
+            "same line content"
+        );
         assert_ne!(
             hashes[t1], hashes[t2],
             "distinct neighbourhoods must witness distinctly, even at equal offsets"

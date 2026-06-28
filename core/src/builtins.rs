@@ -274,7 +274,7 @@ builtin_registry! {
     ToString { names: ["to-string"], arity: 1, ty: Sig(sig::TO_ANY_BYTES),
         doc: "to-string <value>  — encode a value's String form to the byte channel.",
         call: |args, shell| codecs::builtin_to_string(args, shell), },
-    ToLine { names: ["to-line"], arity: 1, ty: Sig(sig::TO_ANY_BYTES),
+    ToLine { names: ["to-line"], arity: 1, ty: Sig(sig::TO_LINE),
         doc: "to-line <value>  — encode value with a trailing newline (inverse of from-line).",
         call: |args, shell| codecs::builtin_to_line(args, shell), },
     ToLines { names: ["to-lines"], arity: 1, ty: Sig(sig::TO_LINES),
