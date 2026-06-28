@@ -66,7 +66,10 @@ pub use driver::{Captured, RequestedTerminalAccess, TurnIo, TurnReport, TurnRequ
 pub use runtime::pipeline::helper::{try_run_bundled_tool, try_run_pipeline_stage_helper};
 pub use turn::{StaticDiagnostics, TurnLifecycle};
 pub use typecheck::{Scheme, SessionSchemes, TypeError, bake_prelude, typecheck};
-pub use types::{Break, Error, Escape, EventSink, Map, Settled, Shell, SurfaceSink, Value};
+pub use types::{
+    Break, DefaultPolicy, Error, Escape, EventSink, HookSig, Map, ProgramName, RegisterError,
+    Settled, Shell, SurfaceSink, Value,
+};
 
 // Compile-pipeline internals: reachable inside the crate (and used by
 // `compile` / `compile_and_typecheck` below), but no longer crate-root

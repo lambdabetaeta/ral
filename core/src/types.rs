@@ -78,4 +78,7 @@ pub use shell::{
     Boundary, BoundarySink, Context, DEFAULT_RECURSION_LIMIT, EventSink, LocalState, Mobile,
     MobileSnapshot, SessionState, Shell, SurfaceSink, TerminalLoan, TurnState,
 };
+pub use shell::programs::{
+    DefaultPolicy, HookSig, HostProgram, Namespace, ProgramName, RegisterError, TerminalPolicy,
+};
 pub(crate) use shell::{TerminalAccess, ThunkBody};

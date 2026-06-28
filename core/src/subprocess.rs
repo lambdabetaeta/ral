@@ -316,6 +316,7 @@ impl WireContext {
             dir: self.dir,
             grants: self.grants,
             handlers: HandlerStack::from(handlers),
+            programs: Default::default(),
             args: self.args,
             modules: self.modules.into_modules(arcs)?,
             cwd: self.cwd,

@@ -27,7 +27,8 @@ pub(super) mod manifest;
 
 use ral_core::types::{Break, Capabilities, Settled};
 use ral_core::{
-    RequestedTerminalAccess, Shell, TurnIo, TurnReport, TurnRequest, TurnStdin, Value, diagnostic,
+    ProgramName, RequestedTerminalAccess, Shell, StaticDiagnostics, TurnIo, TurnReport,
+    TurnRequest, TurnStdin, Value, diagnostic,
 };
 use std::time::Duration;
 
@@ -231,7 +232,6 @@ pub(super) struct PendingKeybinding {
 /// file and renders with a source arrow, exactly as a command fault does.
 pub(super) struct HookFor<'a> {
     pub(super) name: &'a str,
-    pub(super) source: &'a str,
 }
 
 /// Outcome of one [`call_plugin_hook`] invocation.
@@ -373,7 +373,7 @@ pub(super) struct FramedHook {
 pub(super) fn call_plugin_hook(
     shell: &mut Shell,
     plugin: HookFor<'_>,
-    hook: &Value,
+    program_name: &ProgramName,
     args: &[Value],
     ctx_in: Option<PluginContext>,
     framing: HookFraming,
@@ -383,34 +383,47 @@ pub(super) fn call_plugin_hook(
         shell.repl_mut().plugin_context = Some(Box::new(ctx));
     }
     let (result, rendered_error, timed_out) = match framing {
-        HookFraming::InFrame => (ral_core::builtins::apply(hook, args, shell), None, false),
+        HookFraming::InFrame => {
+            // Lifecycle hook: resolve the program from the table and
+            // apply it directly inside the existing command frame.
+            let result = match shell.mobile().context.programs.get(program_name) {
+                Some(prog) => ral_core::builtins::apply(&prog.binding.value, args, shell),
+                None => Err(Break::Error(
+                    ral_core::types::Error::new(
+                        format!("host program '{}' is not registered", program_name),
+                        1,
+                    ),
+                )),
+            };
+            (result, None, false)
+        }
         HookFraming::Framed(FramedHook {
             terminal,
             kind,
             caps,
             budget,
         }) => {
-            // Label the root context `kind:plugin` (e.g. `keybinding:fzf`), and
-            // install the plugin's own source as that context's text so a fault
-            // resolves to the right line of the plugin file.
+            // Label the root context `kind:plugin` (e.g. `keybinding:fzf`).
             let label = format!("{kind}:{}", plugin.name);
             let mut req = framed_turn_request(&label, terminal);
             req.caps = caps;
             req.turn_limit = budget;
-            let (result, timed_out) =
-                match shell.run_value_turn(hook.clone(), args.to_vec(), plugin.source, req) {
-                    TurnReport::Ran {
-                        result, timed_out, ..
-                    } => (result, timed_out),
-                    // A thunk hook never reaches the parse/typecheck phase, so the
-                    // value turn door cannot return `Static`.
-                    TurnReport::Static { .. } => {
-                        unreachable!("a thunk hook never compiles source")
-                    }
-                };
+            let report = shell.run_program(program_name, args.to_vec(), req);
+            let (result, timed_out) = match report {
+                TurnReport::Ran {
+                    result, timed_out, ..
+                } => (result, timed_out),
+                TurnReport::Static { diagnostics } => {
+                    // A host error (program not found, non-ground arg).
+                    let msg = match diagnostics {
+                        StaticDiagnostics::Host(e) => e.message,
+                        _ => "unknown static diagnostic".into(),
+                    };
+                    (Err(Break::Error(ral_core::types::Error::new(msg, 1))), false)
+                }
+            };
             // Render the fault here, while `shell.sources()` still holds this
-            // turn's registry — the next framed turn resets it, so deferring the
-            // raw `Error` would resolve its `FileId` against the wrong source.
+            // turn's registry.
             let rendered_error = match &result {
                 Err(Break::Error(e)) => Some(
                     diagnostic::format_runtime_error_auto(shell.sources(), e, false)
@@ -481,16 +494,13 @@ pub(super) fn run_buffer_change_hooks(runtime: &Arc<Mutex<PluginRuntime>>, line:
         let old_buf = std::mem::replace(&mut rt.hooks.previous.text, line.to_string());
         rt.hooks.previous.cursor = pos;
 
-        let handlers: Vec<(usize, String, std::sync::Arc<str>, Value)> = rt
+        let handlers: Vec<(usize, String)> = rt
             .plugins
             .iter()
             .enumerate()
             .filter(|(_, p)| !p.buffer_change_health.is_disabled())
-            .filter_map(|(i, p)| {
-                p.hooks
-                    .get("buffer-change")
-                    .map(|h| (i, p.name.clone(), p.source.clone(), h.clone()))
-            })
+            .filter(|(_, p)| p.hooks.contains_key("buffer-change"))
+            .map(|(i, p)| (i, p.name.clone()))
             .collect();
 
         if handlers.is_empty() {
@@ -516,9 +526,10 @@ pub(super) fn run_buffer_change_hooks(runtime: &Arc<Mutex<PluginRuntime>>, line:
     let mut spans: Vec<HighlightSpan> = Vec::new();
 
     // ── Phase 2: run each handler with lock released around evaluator ────
-    for (idx, name, source, handler) in handlers {
-        // Snapshot state cell from the runtime; the helper will load it into
-        // the PluginContext and surface any mutations back through `ctx_out`.
+    for (idx, name) in handlers {
+        let program_name = ProgramName::plugin(name.clone(), "buffer-change".to_string());
+
+        // Snapshot state cell from the runtime.
         let state_cell = lock(runtime)
             .plugins
             .get(idx)
@@ -544,9 +555,8 @@ pub(super) fn run_buffer_change_hooks(runtime: &Arc<Mutex<PluginRuntime>>, line:
             &mut hook_env,
             HookFor {
                 name: &name,
-                source: &source,
             },
-            &handler,
+            &program_name,
             &args,
             Some(ctx_in),
             // Buffer-change hooks fire per keystroke outside any frame and
@@ -846,10 +856,10 @@ impl PluginRuntime {
         &self,
         plugin: &str,
         binding_idx: usize,
-    ) -> Option<(usize, Value)> {
+    ) -> Option<(usize, String, Value)> {
         let idx = self.plugins.iter().position(|p| p.name == plugin)?;
-        let (_, handler) = self.plugins[idx].keybindings.get(binding_idx)?;
-        Some((idx, handler.clone()))
+        let (key_str, handler) = self.plugins[idx].keybindings.get(binding_idx)?;
+        Some((idx, key_str.clone(), handler.clone()))
     }
 
     /// Every plugin keybinding as a frontend-neutral `(plugin_name,
@@ -885,27 +895,24 @@ pub(crate) fn fold_hook<T>(
     shell: &mut Shell,
     hook_name: &str,
     init: T,
-    mut step: impl FnMut(&mut Shell, HookFor<'_>, &Value, T) -> T,
+    mut step: impl FnMut(&mut Shell, HookFor<'_>, &ProgramName, T) -> T,
 ) -> T {
-    let handlers: Vec<(String, std::sync::Arc<str>, Value)> = lock(runtime)
+    let entries: Vec<String> = lock(runtime)
         .plugins
         .iter()
-        .filter_map(|p| {
-            p.hooks
-                .get(hook_name)
-                .map(|h| (p.name.clone(), p.source.clone(), h.clone()))
-        })
+        .filter(|p| p.hooks.contains_key(hook_name))
+        .map(|p| p.name.clone())
         .collect();
 
     let mut acc = init;
-    for (name, source, handler) in handlers {
+    for name in entries {
+        let program_name = ProgramName::plugin(name.clone(), hook_name.to_string());
         acc = step(
             shell,
             HookFor {
                 name: &name,
-                source: &source,
             },
-            &handler,
+            &program_name,
             acc,
         );
     }
@@ -928,9 +935,9 @@ pub(crate) fn run_lifecycle_hook(
         shell,
         hook_name,
         (),
-        |shell, plugin, handler, ()| {
+        |shell, plugin, program_name, ()| {
             let plugin_name = plugin.name.to_string();
-            let hr = call_plugin_hook(shell, plugin, handler, args, None, HookFraming::InFrame);
+            let hr = call_plugin_hook(shell, plugin, program_name, args, None, HookFraming::InFrame);
             if let Err(Break::Error(e)) = &hr.result {
                 plugin_error(&plugin_name, &format!("hook '{hook_name}' failed"), e);
             }

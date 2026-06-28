@@ -25,9 +25,13 @@
 use crate::io::{Source, TerminalState};
 use crate::ir::Comp;
 use crate::process::CancelCause;
-use crate::turn::{StaticDiagnostics, TurnLifecycle};
+use crate::source::Span;
 use crate::typecheck::Scheme;
+use crate::turn::{StaticDiagnostics, TurnLifecycle};
 use crate::types::{Boundary, Capabilities, Settled, Shell, SurfaceSink, Value};
+use crate::types::{
+    DefaultPolicy, HookSig, HostProgram, ProgramName, RegisterError, TerminalPolicy,
+};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -160,21 +164,22 @@ pub fn bake_prelude_to_out_dir() {
         .expect("failed to write prelude_schemes.bin");
 }
 
-// ── The turn entries: two synchronous, runtime-agnostic host seams ─────────
+// ── The turn entries: three synchronous, runtime-agnostic host seams ─────────
 //
-// Hosts start an evaluation through exactly one of two doors:
+// Hosts start an evaluation through exactly one of three doors:
 // `Shell::run_source_turn(src, TurnRequest)` runs a turn from source text;
-// `Shell::run_value_turn(thunk, args, src, TurnRequest)` runs a turn from an
-// already-evaluated thunk applied to argument values (a REPL plugin hook, a
-// prompt body, an rc startup block), `src` being the thunk's defining source
-// for diagnostics. Both return one flat `TurnReport`. Hosts
-// describe *policy* (`TurnRequest`, `TurnIo`, `SurfaceSink`, lifecycle hooks);
-// core owns *resources* (`Sink`, `Source`, `TurnState`, guards, buffers,
-// signal slots). Completion is the call returning — never a channel
-// disconnecting — so a detached worker holding a surface clone cannot keep a
-// turn from ending. These doors are the only way into evaluation: the
-// reduction primitive behind them is crate-private, so a host cannot start an
-// unframed evaluation that would foreground or capture against a stale frame.
+// `Shell::register_program(name, program, sig, policy, origin)` stores a
+// compiled host program by name in the session-lived program table;
+// `Shell::run_program(name, args, TurnRequest)` dispatches a registered
+// program by name as the root of a fresh turn.  All three return one flat
+// `TurnReport`.  Hosts describe *policy* (`TurnRequest`, `TurnIo`,
+// `SurfaceSink`, lifecycle hooks); core owns *resources* (`Sink`, `Source`,
+// `TurnState`, guards, buffers, signal slots).  Completion is the call
+// returning — never a channel disconnecting — so a detached worker holding a
+// surface clone cannot keep a turn from ending.  These doors are the only
+// way into evaluation: the reduction primitive behind them is crate-private,
+// so a host cannot start an unframed evaluation that would foreground or
+// capture against a stale frame.
 
 /// The IO regime of a turn: intent, materialised into resources by the turn
 /// doors.
@@ -327,39 +332,163 @@ impl Shell {
         })
     }
 
-    /// Run one top-level turn that applies an already-evaluated `thunk`
-    /// (a `Block` or `Lambda`) to `args`, synchronously, under `req`. The
-    /// value door: a REPL plugin hook, a prompt body, or an rc startup block —
-    /// a program the host already holds as a [`Value`], not as source text.
+
+    /// Register a host-held [`Value`] (a compiled `Block` or `Lambda`)
+    /// as a named turn-entry point in the session-lived program table.
     ///
-    /// It shares the framed scaffold with [`Self::run_source_turn`]: the only
-    /// difference is the turn's program. Here that program is the in-frame
-    /// reduction [`crate::builtins::apply`], which applies a thunk while the
-    /// frame is installed and rejects a non-thunk `Value` with the same
-    /// descriptive error reduction raises — so the door never starts an
-    /// evaluation that escapes the frame. A turn run from a thunk is not a
-    /// single command, so the report carries `single_command: false`.
+    /// The program is stored by `name`; it is never readable as `$name`
+    /// and never invokable as a command — it fires only when the host
+    /// calls [`Self::run_program`] at a lifecycle moment (prompt render,
+    /// startup, plugin hook, keybinding).
     ///
-    /// `src` is the text the thunk's body was compiled from — the defining
-    /// source the body's spans index into. It is installed as the turn's root
-    /// context, so a fault inside the body resolves to the right line of the
-    /// right file and renders with a source arrow, exactly as a command does.
-    /// A host that holds no source for the thunk passes `""`, which renders
-    /// faults without an arrow (the body's spans would index into nothing).
-    pub fn run_value_turn(
+    /// Registration checks:
+    /// 1. `program` is a `Block` or `Lambda`.
+    /// 2. Its arity matches `sig` (0 for `PromptProgram`, 1 otherwise).
+    /// 3. `HostProgram::validate` — a no-op seam for future mobility
+    ///    checks.
+    ///
+    /// On success the program is inserted into `context.programs`,
+    /// keyed by `name`.  On failure a [`RegisterError`] is returned;
+    /// callers render it as a diagnostic at `origin`.
+    pub fn register_program(
         &mut self,
-        thunk: Value,
+        name: ProgramName,
+        program: Value,
+        sig: HookSig,
+        policy: DefaultPolicy,
+        origin: Span,
+    ) -> Result<(), RegisterError> {
+        // 1. Must be Block or Lambda.
+        let arity = match &program {
+            Value::Block { .. } => 0,
+            Value::Lambda { .. } => program.lambda_arity().unwrap_or(1),
+            _ => {
+                return Err(RegisterError::NotCallable {
+                    name,
+                    origin,
+                    actual: program.type_name().to_string(),
+                });
+            }
+        };
+
+        // 2. Arity must match the signature.
+        let expected = sig.expected_arity();
+        if arity != expected {
+            return Err(RegisterError::ArityMismatch {
+                name,
+                origin,
+                expected,
+                actual: arity,
+                sig_label: sig.label().to_string(),
+            });
+        }
+
+        // 3. Build the Binding with the same scheme inference an
+        //    ordinary session `let` uses.
+        let arm = match &program {
+            Value::Lambda { param, body, .. } => Some((Some(param), body)),
+            Value::Block { body, .. } => Some((None, body)),
+            _ => unreachable!("already checked above"),
+        };
+        let scheme = arm.map(|(param, body)| {
+            crate::typecheck::binding_value_scheme(param, body, self.session_schemes())
+        });
+        use crate::types::Binding;
+        let binding = Binding {
+            value: program,
+            scheme,
+        };
+
+        // 4. Check for duplicate registration.
+        if self.mobile.context.programs.contains_key(&name) {
+            return Err(RegisterError::AlreadyRegistered { name, origin });
+        }
+
+        // 5. Validate (no-op seam for future mobility checks).
+        let hp = HostProgram {
+            binding,
+            sig,
+            policy,
+            origin,
+        };
+        hp.validate()?;
+
+        self.mobile.context.programs.insert(name, hp);
+        Ok(())
+    }
+
+    /// Run a registered host program by name, applying `args` as its
+    /// arguments, through the shared framed scaffold
+    /// ([`Self::run_built`]).  Returns one flat [`TurnReport`].
+    ///
+    /// Every `arg` must satisfy [`Value::is_ground`] — the host conveys
+    /// data, not closures, across the dispatch boundary.
+    ///
+    /// `req` supplies the script label, capability ceiling, lifecycle
+    /// hooks, and surface sink; terminal access, capture, and budget
+    /// are taken from the program's registered [`DefaultPolicy`].
+    pub fn run_program(
+        &mut self,
+        name: &ProgramName,
         args: Vec<Value>,
-        src: &str,
         req: TurnRequest<'_>,
     ) -> TurnReport {
+        let Some(prog) = self.mobile.context.programs.get(name).cloned() else {
+            return TurnReport::Static {
+                diagnostics: StaticDiagnostics::Host(crate::types::Error::new(
+                    format!("host program '{}' is not registered", name),
+                    1,
+                )),
+            };
+        };
+
+        for (i, arg) in args.iter().enumerate() {
+            if !arg.is_ground() {
+                return TurnReport::Static {
+                    diagnostics: StaticDiagnostics::Host(crate::types::Error::new(
+                        format!(
+                            "argument {} to host program '{}' is not a ground value \
+                             (got {}); only plain data may cross the dispatch boundary",
+                            i + 1,
+                            name,
+                            arg.type_name()
+                        ),
+                        1,
+                    )),
+                };
+            }
+        }
+
         let foreground = self.durable_root().child();
-        let wall = req
-            .turn_limit
+        let wall = prog
+            .policy
+            .budget
             .map(|d| crate::process::arm_lifetime(foreground.as_scope().clone(), d));
 
-        self.run_built(req, foreground, wall, false, src, |s| {
-            crate::builtins::apply(&thunk, &args, s)
+        let terminal = match prog.policy.terminal {
+            TerminalPolicy::Denied => RequestedTerminalAccess::Denied,
+            TerminalPolicy::Leased => RequestedTerminalAccess::Leased,
+        };
+
+        let merged_req = TurnRequest {
+            script_name: req.script_name,
+            caps: req.caps,
+            io: if prog.policy.capture {
+                TurnIo::Capture
+            } else {
+                req.io
+            },
+            terminal,
+            stdin: req.stdin,
+            surface: req.surface,
+            boundary: req.boundary,
+            lifecycle: req.lifecycle,
+            turn_limit: prog.policy.budget.or(req.turn_limit),
+            detached_limit: req.detached_limit,
+        };
+
+        self.run_built(merged_req, foreground, wall, false, "", |s| {
+            crate::builtins::apply(&prog.binding.value, &args, s)
         })
     }
 

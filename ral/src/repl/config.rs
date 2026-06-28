@@ -7,6 +7,7 @@
 //! breaking older configs.
 
 use ral_core::{Map, Shell, Value};
+use ral_core::types::{ProgramName, HookSig, DefaultPolicy};
 
 use super::frontend::Surface;
 use super::theme::{OutputTheme, named_color, set_output_theme};
@@ -131,7 +132,18 @@ pub(crate) fn apply_rc_config(
                     ctx.shell.set_var(k, v);
                 }
             }
-            "prompt" => ctx.shell.set_var("RAL_PROMPT".into(), val),
+            "prompt" => {
+                let origin = ral_core::source::Span::new(ral_core::source::FileId(0), 0, 0);
+                if let Err(e) = ctx.shell.register_program(
+                    ProgramName::session("prompt"),
+                    val,
+                    HookSig::PromptProgram,
+                    DefaultPolicy::denied_capture(),
+                    origin,
+                ) {
+                    eprintln!("ralrc: {}", e);
+                }
+            }
             "aliases" => {
                 // A callable installs as an argv-handler alias; any other
                 // value falls through to a plain scope binding so the key

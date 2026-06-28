@@ -133,6 +133,9 @@ pub(super) fn execute_input(
                         diagnostic::format_type_errors_ariadne("<stdin>", trimmed, &errs)
                     );
                 }
+                StaticDiagnostics::Host(e) => {
+                    eprintln!("{}", e.message);
+                }
             }
             None
         }

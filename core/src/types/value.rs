@@ -256,6 +256,27 @@ impl Value {
         }
         Some(arity)
     }
+
+    /// True when this value carries only plain data — no closures,
+    /// thunks, or handles.  Ground values are the only kind the host
+    /// may pass as arguments across the dispatch boundary into a
+    /// [`run_program`](crate::Shell::run_program) call.
+    pub fn is_ground(&self) -> bool {
+        match self {
+            Value::Unit
+            | Value::Bool(_)
+            | Value::Int(_)
+            | Value::Float(_)
+            | Value::String(_)
+            | Value::Bytes(_) => true,
+            Value::List(vs) => vs.iter().all(Self::is_ground),
+            Value::Map(pairs) => pairs.iter().all(|(_, v)| Self::is_ground(v)),
+            Value::Variant { payload, .. } => {
+                payload.as_deref().map_or(true, Self::is_ground)
+            }
+            Value::Lambda { .. } | Value::Block { .. } | Value::Handle(_) => false,
+        }
+    }
 }
 
 /// Shared handle to a spawned computation.

@@ -48,6 +48,9 @@ impl TurnLifecycle for () {}
 pub enum StaticDiagnostics {
     Parse(ParseError),
     Types(Vec<TypeError>),
+    /// A host-level error that prevented the turn from running:
+    /// program not found, non-ground argument, etc.
+    Host(crate::types::Error),
 }
 
 /// The transport status of one settled turn: the success status for a

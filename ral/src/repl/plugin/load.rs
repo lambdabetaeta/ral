@@ -6,8 +6,9 @@
 //! bindings into `env`, and records the plugin in [`PluginRuntime`].
 //! Unloading reverses the env installation and drops the record.
 
-use ral_core::types::{Break, Error, Settled};
+use ral_core::types::{Break, Error, Settled, DefaultPolicy, HookSig, ProgramName};
 use ral_core::{RequestedTerminalAccess, Shell, TurnReport, Value};
+use ral_core::source::Span;
 use std::sync::{Arc, Mutex};
 
 use super::manifest::LoadedPlugin;
@@ -64,6 +65,52 @@ pub(crate) fn load_plugin(
     // The manifest value carries no source; retain the file text the handler
     // thunks were compiled from, so a fault inside one renders against it.
     plugin.source = std::sync::Arc::from(source.as_str());
+
+    // Register hook and keybinding handlers as host programs.
+    // Each fires via `run_program` rather than the old `run_value_turn`.
+    let origin = Span::new(ral_core::source::FileId(0), 0, 0);
+    for (hook_event, handler) in &plugin.hooks {
+        let sig = match hook_event.as_str() {
+            "buffer-change" | "keybinding" => HookSig::Hook {
+                kind: hook_event.clone(),
+            },
+            "prompt" => HookSig::Hook {
+                kind: "prompt hook".into(),
+            },
+            _ => HookSig::Lifecycle {
+                kind: hook_event.clone(),
+            },
+        };
+        if let Err(e) = shell.register_program(
+            ProgramName::plugin(plugin.name.clone(), hook_event.clone()),
+            handler.clone(),
+            sig,
+            DefaultPolicy::denied(),
+            origin,
+        ) {
+            return Err(Break::Error(load_err(format!(
+                "plugin '{}': hook '{}': {}",
+                plugin.name, hook_event, e
+            ))));
+        }
+    }
+    for (key_notation, handler) in &plugin.keybindings {
+        if let Err(e) = shell.register_program(
+            ProgramName::plugin(plugin.name.clone(), format!("key:{key_notation}")),
+            handler.clone(),
+            HookSig::Hook {
+                kind: "keybinding".into(),
+            },
+            DefaultPolicy::leased(),
+            origin,
+        ) {
+            return Err(Break::Error(load_err(format!(
+                "plugin '{}': keybinding '{}': {}",
+                plugin.name, key_notation, e
+            ))));
+        }
+    }
+
     check_not_loaded(&plugin.name, runtime)?;
     check_no_binding_conflicts(&bindings, &plugin.name, shell)?;
     install_bindings(&bindings, shell)?;
@@ -182,12 +229,21 @@ fn instantiate(
     let empty = Value::Map(ral_core::Map::new());
     match val {
         val @ (Value::Lambda { .. } | Value::Block { .. }) => {
+            let factory_name = ProgramName::plugin(name.to_string(), "factory");
+            let origin = Span::new(ral_core::source::FileId(0), 0, 0);
+            if let Err(e) = shell.register_program(
+                factory_name.clone(),
+                val,
+                HookSig::PluginFactory,
+                DefaultPolicy::denied(),
+                origin,
+            ) {
+                return Err(Break::Error(load_err(format!("plugin '{name}': {}", e))));
+            }
             let arg = options.cloned().unwrap_or(empty);
-            // The plugin factory runs through the value turn door: a fresh
-            // frame with the session's live streams and `Denied` terminal
-            // authority — instantiating a plugin must not foreground a child.
             let req = framed_turn_request("<plugin>", RequestedTerminalAccess::Denied);
-            match shell.run_value_turn(val, vec![arg], "", req) {
+            let report = shell.run_program(&factory_name, vec![arg], req);
+            match report {
                 TurnReport::Ran { result, .. } => result,
                 TurnReport::Static { .. } => {
                     unreachable!("a thunk plugin factory never compiles source")

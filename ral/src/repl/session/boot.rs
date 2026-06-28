@@ -6,8 +6,9 @@
 //! construction.  Splitting them out of `session.rs` keeps the state
 //! machine itself focused on the run/turn/eval loop.
 
-use ral_core::types::{Break, Escape};
+use ral_core::types::{Break, Escape, DefaultPolicy, HookSig, ProgramName};
 use ral_core::{RequestedTerminalAccess, Shell, TurnReport, diagnostic, evaluator::evaluate};
+use ral_core::source::Span;
 use rustyline::config::{BellStyle, EditMode};
 use std::sync::{Arc, Mutex};
 
@@ -158,7 +159,14 @@ pub(super) fn install_default_prompt(shell: &mut Shell) {
     let src = format!("{{ return \"{}\" }}", super::super::prompt::DEFAULT_PROMPT);
     let comp = Arc::new(ral_core::compile(&src).expect("default prompt thunk compiles"));
     let block = evaluate(&comp, shell).expect("default prompt thunk evaluates");
-    shell.set_var("RAL_PROMPT".into(), block);
+    let origin = ral_core::source::Span::new(ral_core::source::FileId(0), 0, 0);
+    let _ = shell.register_program(
+        ProgramName::session("prompt"),
+        block,
+        HookSig::PromptProgram,
+        DefaultPolicy::denied_capture(),
+        origin,
+    );
 }
 
 /// Mark the shell interactive and publish the probed terminal as the
@@ -323,13 +331,18 @@ fn source_config_inner(path: &str, ctx: &mut RcCtx<'_>) -> Result<(), String> {
         }
     };
     if let Some(block) = super::super::config::apply_rc_config(config, ctx, Some(&src)) {
-        // The startup block runs through the value turn door: a fresh frame
-        // with the session's live streams and `Denied` terminal authority (an
-        // rc block must not foreground a child). `Block` discards its mobile on
-        // exit, so `let`s inside it do not leak — the prior in-place `apply`
-        // behaviour, now properly framed.
+        let origin = Span::new(ral_core::source::FileId(0), 0, 0);
+        if let Err(e) = ctx.shell.register_program(
+            ProgramName::session("startup"),
+            block,
+            HookSig::PromptProgram,
+            DefaultPolicy::denied(),
+            origin,
+        ) {
+            return Err(format!("{path}: startup: {}", e));
+        }
         let req = framed_turn_request("<startup>", RequestedTerminalAccess::Denied);
-        match ctx.shell.run_value_turn(block, vec![], "", req) {
+        match ctx.shell.run_program(&ProgramName::session("startup"), vec![], req) {
             TurnReport::Ran { result, .. } => match result {
                 Ok(_) | Err(Break::Escape(Escape::Exit(_))) => {}
                 Err(Break::Error(e)) => return Err(format!("{path}: startup: {}", e.message)),

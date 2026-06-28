@@ -8,7 +8,7 @@
 //! push a new buffer onto the stack.
 
 use ral_core::types::Capabilities;
-use ral_core::{RequestedTerminalAccess, Shell};
+use ral_core::{ProgramName, RequestedTerminalAccess, Shell};
 use std::sync::{Arc, Mutex};
 
 use super::frontend::EditBuffer;
@@ -57,18 +57,21 @@ pub(super) fn dispatch_keybinding(
     let resolved = {
         let rt = lock(runtime);
         rt.resolve_keybinding(&pk.plugin, pk.binding_idx)
-            .map(|(idx, handler)| {
+            .map(|(idx, key_str, handler)| {
                 (
                     idx,
+                    key_str,
                     rt.plugins[idx].state_cell.clone(),
                     rt.plugins[idx].source.clone(),
                     handler,
                 )
             })
     };
-    let Some((idx, state_cell, source, handler)) = resolved else {
+    let Some((idx, key_str, state_cell, _source, _handler)) = resolved else {
         return KeybindingOutcome::Edit(current.to_string(), end_of(current));
     };
+
+    let program_name = ProgramName::plugin(pk.plugin.clone(), format!("key:{key_str}"));
 
     // rustyline supplied `pk.cursor_byte` in bytes; convert once for the
     // plugin surface (which speaks chars throughout).
@@ -93,18 +96,12 @@ pub(super) fn dispatch_keybinding(
         state_default_used: state_loaded,
     };
 
-    // Keybinding dispatch runs outside any turn frame (the frontend `read` is
-    // not a turn), so the hook must establish one. `Leased` is the load-bearing
-    // choice: a handler that runs `_ed-tui { … | fzf }` can then raise its
-    // terminal loan to `ExplicitLoan` and foreground the captured pipeline,
-    // rather than backgrounding it where `fzf` would block reading `/dev/tty`.
     let hr = call_plugin_hook(
         shell,
         HookFor {
             name: &pk.plugin,
-            source: &source,
         },
-        &handler,
+        &program_name,
         &[],
         Some(ctx_in),
         HookFraming::Framed(FramedHook {
@@ -180,17 +177,21 @@ mod tests {
         rt.plugins.push(plugin("b", "ctrl-r", Value::Int(2)));
 
         // Before unload, "a"'s binding resolves to slot 0 with handler 1.
-        assert_eq!(rt.resolve_keybinding("a", 0), Some((0, Value::Int(1))));
+        assert_eq!(
+            rt.resolve_keybinding("a", 0),
+            Some((0, "ctrl-t".into(), Value::Int(1)))
+        );
 
         // `unload_plugin` removes "a"; "b" shifts down to slot 0 — the
         // exact compaction that the old index-keyed dispatch mishandled.
         rt.plugins.remove(0);
 
         // The stale "a" binding now misses; it must NOT pick up "b"'s
-        // handler at the reused index.
+        assert_eq!(
+            rt.resolve_keybinding("b", 0),
+            Some((0, "ctrl-r".into(), Value::Int(2)))
+        );
         assert_eq!(rt.resolve_keybinding("a", 0), None);
-        // "b" still resolves, now at slot 0, to its own handler.
-        assert_eq!(rt.resolve_keybinding("b", 0), Some((0, Value::Int(2))));
     }
 
     /// A binding index past the named plugin's keybinding list misses
