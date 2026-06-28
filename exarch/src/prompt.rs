@@ -86,7 +86,7 @@ pub fn assemble(
 
 /// Every command the agent can name, as one comma-separated line of **names**:
 /// the registered builtins (core's plus exarch's own surface — `view-text`,
-/// `witnesses`, `grep-files`, `edit`, …), the documented prelude functions, and
+/// `grep-files`, `edit`, …), the documented prelude functions, and
 /// the agent library (`view-text-around`, which rides in as part of the prelude).
 /// Sorted and deduped, with `_`-prefixed internals filtered out — note
 /// `ral_core::builtins::builtin_names` does *not* drop the `_` names itself,

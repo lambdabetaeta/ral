@@ -436,7 +436,7 @@ impl Agent {
         // The child is an independent fork of the parent: it snapshots the
         // parent's scope (prelude, agent library, accumulated bindings),
         // dynamic context (cwd, env, grants), and installed builtin table (the
-        // host's `view-text`/`witnesses`/`grep-files`/`edit` and the rest), and starts
+        // host'\''s `view-text`/`grep-files`/`edit` and the rest), and starts
         // fresh in control counters and per-agent state — its own inbox, its own
         // (fresh) cancellation token, no terminal authority, no flow-back.
         // Core owns the flow matrix, so the builtin table can't be silently
@@ -1511,7 +1511,6 @@ mod tests {
             .expect("fork child session");
         for name in [
             "view-text",
-            "witnesses",
             "grep-files",
             "edit",
             "explore-dir",

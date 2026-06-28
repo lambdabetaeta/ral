@@ -83,9 +83,9 @@ pub(crate) fn agent_library_docs() -> Vec<(String, String)> {
 /// `Val::Int` and never compare equal to the recomputed `String` hash.
 ///
 /// Private: the witness is never something the model constructs, only one it
-/// copies out of a `view-text`/`witnesses` read, so neither this nor the
+/// copies out of a `view-text` read, so neither this nor the
 /// window hash is exposed to ral — `view-text`, `view-text-around`,
-/// `witnesses`, and `edit` are the whole surface.
+/// and `edit` are the whole surface.
 fn line_hash(line: &str) -> String {
     let stripped = line.trim_end();
     let hex = blake3::hash(stripped.as_bytes()).to_hex();
@@ -131,7 +131,7 @@ enum Witness {
 /// by the total size of collision classes across radii — linear on real files,
 /// where almost every line is unique at the floor.
 ///
-/// Shared verbatim by `view-text`, `witnesses`, and `edit`, so a read and the
+/// Shared verbatim by `view-text` and `edit`, so a read and the
 /// edit that follows it derive identical witnesses from identical content.
 fn window_hashes(rows: &[String]) -> Vec<String> {
     let n = rows.len();
@@ -264,24 +264,6 @@ fn builtin_view_text(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     Ok(Value::Unit)
 }
 
-/// `witnesses PATH` — the witness for every line of the file, in file order.
-/// The programmatic twin of `view-text`: a sweep reads the handles for the lines
-/// it means to change without a human-facing render.  Whole-file by
-/// construction (it reads the path itself), so the witnesses it returns always
-/// match the ones `edit` recomputes; surfaces one read card.
-fn builtin_witnesses(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "witnesses")?;
-    let path = args[0].to_string();
-    let body = read_text_file(shell, &path, "witnesses")?;
-    surface_read(shell, &path);
-    let rows = rows_of(&body);
-    Ok(Value::list(
-        window_hashes(&rows)
-            .into_iter()
-            .map(Value::String)
-            .collect(),
-    ))
-}
 
 /// The one sanctioned [`WalkBuilder::build`](ignore::WalkBuilder::build) site.
 ///
@@ -773,16 +755,6 @@ fn scheme_view_text(_u: &mut Unifier) -> Scheme {
     )
 }
 
-/// `witnesses :: Str → F [Str]` — the witness for every line of the file at
-/// `path`, in file order.
-fn scheme_witnesses(_u: &mut Unifier) -> Scheme {
-    scheme(
-        &[],
-        &[],
-        &[],
-        thunk(fun(Ty::String, pure(Ty::List(Box::new(Ty::String))))),
-    )
-}
 
 /// `edit :: Str → [{hash: Str, line: Str}] → F Unit` — `path` then a list of
 /// `[hash: …, line: …]` records.  Returns Unit: `edit` writes and surfaces, it
@@ -1036,12 +1008,6 @@ pub static EXARCH_BUILTINS: &[BuiltinEntry] = &[
         type_rule: BuiltinTypeRule::Scheme(Some(3), scheme_view_text),
         doc: "view-text <path> <start> <end>  — show the half-open line range [start, end) of PATH, each line tagged `<line-no>\\t<hash>\\t<text>`. The hash is the witness `edit` checks; copy it, never recompute it. Reads the whole file (the witness depends on file-wide uniqueness) and surfaces one read card.",
         body: BuiltinBody::Static(builtin_view_text),
-    },
-    BuiltinEntry {
-        name: Cow::Borrowed("witnesses"),
-        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_witnesses),
-        doc: "witnesses <path>  — the edit witness for every line of PATH, one per line in file order. The programmatic twin of `view-text` for scripted edits: `witnesses $f` then `$w[$line - 1]` is the handle for that line. Surfaces one read card.",
-        body: BuiltinBody::Static(builtin_witnesses),
     },
     BuiltinEntry {
         name: Cow::Borrowed("grep-files"),

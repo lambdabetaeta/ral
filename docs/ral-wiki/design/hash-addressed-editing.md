@@ -75,10 +75,10 @@ The two anchor harnesses below ([hashline](#comparison-anchor-based-edit-harness
 Dirac) are the direct lineage for the *witnessed-anchor* idea; the adaptive
 context is what exarch adds to it.
 
-## The surface: four tools, one witness, one door
+## The surface: three tools, one witness, one door
 
-`view-text`, `view-text-around`, `witnesses`, and `edit` are the whole editing
-surface. All four are **path-based**: each takes a path and reads the *whole*
+`view-text`, `view-text-around`, and `edit` are the whole editing
+surface. All three are **path-based**: each takes a path and reads the *whole*
 file in Rust, through one grant-checked read door, and computes witnesses with
 the same `window_hashes`. Nothing in the surface takes a line list or a stream.
 
@@ -86,9 +86,6 @@ the same `window_hashes`. Nothing in the surface takes a line list or a stream.
   `<line-no>\t<hash>\t<text>`. The human read.
 - `view-text-around PATH LINE PEEK` — the `2*PEEK + 1` lines centred on `LINE`,
   tagged the same way. A thin ral helper over `view-text`.
-- `witnesses PATH` — the witness for every line, in order. The programmatic twin
-  of `view-text`: a sweep reads handles for the lines it means to change without
-  a human-facing render.
 - `edit PATH EDITS` — apply the batch.
 
 This shape is forced, and it is what makes the witness trustworthy:
@@ -128,7 +125,7 @@ content at the moment of edit; there is no map of anchors to keep in sync.
   suffer on every insertion.
 
 **Uniqueness is by construction, so the model never sees an ambiguous hash.** The
-window grows until each line's witness is unique, so a `view-text`/`witnesses`
+window grows until each line's witness is unique, so a `view-text`
 read hands back handles that each name exactly one line. The only residual is a
 24-bit accidental Blake3 collision (a stale-edit check, not an authority
 boundary — the actual authority is ral's [[design/grant|grant]] frame) or the
@@ -154,14 +151,12 @@ of `[hash: HASH, line: NEWTEXT]` records.
 
 **A grep hit is a location, not an edit handle.** `grep-files` returns
 `[{file, line, text}]` with no witness: search finds *where*, and turning a
-location into an edit handle is a deliberate second step — `view-text-around` over
-the hit to read its witness by eye, or `witnesses $f` indexed by `$line - 1` for
-a mechanical sweep. The two stay separate on purpose.
+location into an edit handle is a deliberate second step — `view-text-around` over the hit to read its witness by eye.
 
 **The witness layer is ral over small atoms.** `line_hash` and `window_hashes`
 are private Rust — the witness is never something the model constructs, only one
 it copies out of a read — and `_search-files` (the ignore-aware ripgrep walk) is
-`_`-prefixed so `help` hides it. `view-text`, `witnesses`, `grep-files`, and
+`_`-prefixed so `help` hides it. `view-text`, `grep-files`, and
 `edit` are the host builtins; `view-text-around` is the one thin ral helper. This
 keeps exarch's [[design/exarch-architecture|thin architecture]]: editing is a few
 host atoms reading whole files below the ral line, not a separate edit protocol.

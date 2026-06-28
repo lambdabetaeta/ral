@@ -191,13 +191,13 @@ pub fn run_shell(
 
     // Build the transport-level Turn.
     use ral_core::transport::{
-        CapsMirror, DispatchId, Event, Frame, ReqMirror, ReportMirror, ResultMirror, Turn,
+        DispatchId, Event, Frame, ReqMirror, ReportMirror, ResultMirror, Turn,
     };
     use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
 
     let req = ReqMirror {
         script_name: name.to_string(),
-        caps: CapsMirror::from_live(caps.clone()),
+        caps: caps.clone(),
         turn_limit: Some(Duration::from_secs(timeout_secs)),
         detached_limit: Some(DETACHED_WORKER_CEILING),
         io: TurnIo::Capture,
@@ -223,27 +223,33 @@ pub fn run_shell(
         match frame {
             Frame::Event(did, event) if did == id => match event {
                 Event::Surface(val) => {
-                    if let Some(kind) = decode_surface(&val) {
-                        if let Some(pins) = &pins {
-                            if let Ok(mut m) = pins.lock() {
-                                match &kind {
-                                    Kind::Pin { key, card } => {
-                                        m.insert(key.clone(), crate::card::summary_line(card));
+                    let arcs: ral_core::serial::ScopeArcs = Vec::new();
+                    if let Ok(live_val) = val.into_runtime(&arcs) {
+                        if let Some(kind) = decode_surface(&live_val) {
+                            if let Some(pins) = &pins {
+                                if let Ok(mut m) = pins.lock() {
+                                    match &kind {
+                                        Kind::Pin { key, card } => {
+                                            m.insert(key.clone(), crate::card::summary_line(card));
+                                        }
+                                        Kind::Unpin { key } => {
+                                            m.remove(key);
+                                        }
+                                        _ => {}
                                     }
-                                    Kind::Unpin { key } => {
-                                        m.remove(key);
-                                    }
-                                    _ => {}
                                 }
                             }
+                            emit.emit(kind);
                         }
-                        emit.emit(kind);
                     }
                 }
                 Event::BoundarySurface(batch) => {
-                    for val in &batch {
-                        if let Some(kind) = decode_surface(val) {
-                            emit.emit(kind);
+                    let arcs: ral_core::serial::ScopeArcs = Vec::new();
+                    for val in batch {
+                        if let Ok(live_val) = val.into_runtime(&arcs) {
+                            if let Some(kind) = decode_surface(&live_val) {
+                                emit.emit(kind);
+                            }
                         }
                     }
                 }
@@ -708,7 +714,9 @@ target
         let edited = run_once(
             &mut shell,
             &format!(
-                "let whs = witnesses '{repeated_str}'\n\
+                "let lc = line-count '{repeated_str}'\n\
+                 let tagged = view-text '{repeated_str}' 1 $[$lc + 1]\n\
+                 let whs = map {{ |l| !{{re-split '\t' $l}}[1] }} !{{lines $tagged}}\n\
                  edit '{repeated_str}' [[hash: $whs[1], line: 'FIRST']]"
             ),
         );
@@ -742,7 +750,9 @@ target
         let buried = run_once(
             &mut shell,
             &format!(
-                "let whs = witnesses '{run_str}'\n\
+                "let lc = line-count '{run_str}'\n\
+                 let tagged = view-text '{run_str}' 1 $[$lc + 1]\n\
+                 let whs = map {{ |l| !{{re-split '\t' $l}}[1] }} !{{lines $tagged}}\n\
                  edit '{run_str}' [[hash: $whs[5], line: 'Z']]"
             ),
         );
@@ -787,7 +797,9 @@ keep-bottom
         let poisoned = run_once(
             &mut shell,
             &format!(
-                "let whs = witnesses '{path_str}'\n\
+                "let lc = line-count '{path_str}'\n\
+                 let tagged = view-text '{path_str}' 1 $[$lc + 1]\n\
+                 let whs = map {{ |l| !{{re-split '\t' $l}}[1] }} !{{lines $tagged}}\n\
                  edit '{path_str}' [[hash: $whs[1], line: 'X'], [hash: 'hzzzzzz', line: 'Y']]"
             ),
         );
@@ -803,7 +815,9 @@ keep-bottom
         let ok = run_once(
             &mut shell,
             &format!(
-                "let whs = witnesses '{path_str}'\n\
+                "let lc = line-count '{path_str}'\n\
+                 let tagged = view-text '{path_str}' 1 $[$lc + 1]\n\
+                 let whs = map {{ |l| !{{re-split '\t' $l}}[1] }} !{{lines $tagged}}\n\
                  edit '{path_str}' [[hash: $whs[1], line: 'REPLACED'], [hash: $whs[2], line: ''], [hash: $whs[3], line: 'X\nY']]"
             ),
         );
@@ -1217,9 +1231,9 @@ keep-bottom
     /// The programmatic bulk-edit pipeline, end to end and entirely in ral:
     /// `grep-files` finds every `[TODO]` across the tree, the hits fold into a
     /// per-file list, and each file's matching lines are rewritten in one atomic
-    /// `edit`.  The witnesses come from `witnesses $f` — the programmatic twin
-    /// of `view-text`, reading the whole file so its handles match what `edit`
-    /// recomputes — so no hash is ever read by eye.  A regex `re-replace` turns
+    /// `edit`.  The hashes come from `view-text`, reading the whole file so
+    /// its handles match what `edit` recomputes — no hash is ever read by eye.
+    /// A regex `re-replace` turns
     /// each `[TODO]` into `[DONE]` in place.  This is the sweep example in
     /// `data/ral.md`, kept honest by running it.
     #[test]
@@ -1241,7 +1255,9 @@ keep-bottom
 let hits = grep-files #'\[TODO\]'#
 let files = nub !{{map {{ |h| $h[file] }} $hits}}
 each {{ |f|
-    let whs = witnesses $f
+    let lc = line-count $f\n\
+    let tagged = view-text $f 1 $[$lc + 1]\n\
+    let whs = map {{ |l| !{{re-split '\t' $l}}[1] }} !{{lines $tagged}}
     let mine = filter {{ |h| equal $h[file] $f }} $hits
     edit $f !{{map {{ |h|
         [ hash: $whs[$[$h[line] - 1]], line: !{{re-replace #'\[TODO\]'# '[DONE]' $h[text]}} ]

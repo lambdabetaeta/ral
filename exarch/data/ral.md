@@ -268,17 +268,6 @@ Edits do not spill over; you **must** mention the hash of every line you wish to
     each { |h| view-text-around $h[file] $h[line] 3 } $mine                          # show each place + its witness
     edit 'src/lib.rs' [ [hash: h1b2c3, line: 'new_name'], [hash: h4e5f6, line: 'new_name'] ]
 
-For a mechanical sweep you do not need to view the text at all: `witnesses PATH` gives the witness for every line of a file, in order, so `$w[$line - 1]` is the handle for that line. E.g. to rewrite every `[TODO]` to `[DONE]`:
-
-    let hits  = grep-files #'\[TODO\]'#
-    let files = nub !{map { |h| $h[file] } $hits}    # one hit per matching line, so dedupe the paths
-    each { |f|
-      let w = witnesses $f
-      let mine = filter { |h| equal $h[file] $f } $hits
-      edit $f !{map { |h|
-        [ hash: $w[$[$h[line] - 1]], line: !{re-replace #'\[TODO\]'# '[DONE]' $h[text]} ]
-      } $mine}
-    } $files
 
 ## Surfacing
 

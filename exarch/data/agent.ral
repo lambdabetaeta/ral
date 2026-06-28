@@ -1,6 +1,6 @@
 # exarch agent helper library — sourced into the shell at boot
 
-## `view-text`, `witnesses`, `grep-files`, and `edit` are exarch host builtins
+## `view-text`, `grep-files`, and `edit` are exarch host builtins
 ## (`exarch/src/agent_builtins.rs`): each reads the whole file in Rust, below the
 ## redirect frame, and is a single logical surface.  They all share one witness
 ## algorithm, so the hash a read shows is exactly the handle `edit` checks.
