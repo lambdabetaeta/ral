@@ -32,9 +32,15 @@
 //! trunk publishes (a sub-agent's token is reached through the fleet
 //! registry, never the slot).
 //!
-//! Install order matters: ral's handler must be set first; then `install`
+//! Install order matters: ral's handlers must be set first; then `install`
 //! replaces the disposition with a handler that sets the current root token
-//! *and* forwards to ral's, so statement-level unwinding still works.
+//! *and* forwards to ral's, so statement-level unwinding still works.  A
+//! forwarded SIGINT goes to ral's *non-escalating* [`relay_handler`]
+//! (`ral_core::process::relay_handler`), not the [`term_handler`] whose
+//! third signal `_exit`s: a SIGINT reaching the supervising TUI — from a
+//! stray child, another process, anything — must only cancel the current
+//! turn, never force-exit exarch.  SIGTERM/SIGHUP keep ral's `term_handler`,
+//! since those are deliberate termination requests.
 //! [`crate::bootstrap::boot_shell`] owns that ceremony for exarch session
 //! shells, including `/clear` rebuilds.
 
@@ -140,12 +146,22 @@ pub fn raise_interrupt() {
 }
 
 /// Install the chained signal handler.  Must run *after*
-/// `ral_core::process::install_handlers` — we capture ral's handler and
-/// forward to it so its `SIGNAL_COUNT` semantics are preserved.
+/// `ral_core::process::install_handlers` — we capture ral's dispositions
+/// and forward into them so its cancel semantics are preserved.  SIGINT
+/// forwards into the non-escalating [`relay_handler`], which requests the
+/// cooperative foreground unwind and relays to external pipeline groups but
+/// never `_exit`s; SIGTERM/SIGHUP forward into the escalating
+/// [`term_handler`], the right ladder for a deliberate termination request.
 #[cfg(unix)]
 pub fn install() {
-    let ral = ral_core::process::term_handler();
-    RAL_HANDLER.store(ral as *mut (), Ordering::Release);
+    RAL_SIGINT_HANDLER.store(
+        ral_core::process::relay_handler() as *mut (),
+        Ordering::Release,
+    );
+    RAL_TERM_HANDLER.store(
+        ral_core::process::term_handler() as *mut (),
+        Ordering::Release,
+    );
     unsafe {
         libc::signal(libc::SIGINT, chained as *const () as libc::sighandler_t);
         libc::signal(libc::SIGTERM, chained as *const () as libc::sighandler_t);
@@ -159,19 +175,32 @@ pub fn install() {}
 #[cfg(unix)]
 type RalHandler = extern "C" fn(libc::c_int);
 
-/// ral's prior SIGINT/SIGTERM/SIGHUP disposition, published as a thin
-/// function pointer for the chained handler to forward into.  `install`
-/// always stores the same `term_handler` pointer, so this is a set-once
-/// slot read only from the signal handler — an `AtomicPtr`, the
+/// ral's prior SIGINT disposition — the non-escalating [`relay_handler`].
+/// Forwarding SIGINT here cancels the current turn's foreground scope and
+/// relays to external pipeline groups without ever ticking the third-signal
+/// `_exit` counter, so a forwarded SIGINT can only cancel the turn.
+/// `install` always stores the same pointer, so this is a set-once slot
+/// read only from the signal handler — an `AtomicPtr`, the
 /// signal-handler-safe analogue of [`CURRENT`], since a handler must not
 /// lock and a `static mut` read is unsound under concurrent install.
 #[cfg(unix)]
-static RAL_HANDLER: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+static RAL_SIGINT_HANDLER: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+
+/// ral's prior SIGTERM/SIGHUP disposition — the escalating [`term_handler`].
+/// These are deliberate termination requests, so ral's
+/// statement-unwind-then-force-exit ladder is the correct disposition.
+#[cfg(unix)]
+static RAL_TERM_HANDLER: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 
 #[cfg(unix)]
 extern "C" fn chained(sig: libc::c_int) {
     raise();
-    forward_into_ral(sig);
+    let slot = if sig == libc::SIGINT {
+        &RAL_SIGINT_HANDLER
+    } else {
+        &RAL_TERM_HANDLER
+    };
+    forward_into_ral(slot, sig);
 }
 
 /// Raw mode disables `ISIG`, so pressing Ctrl-C no longer causes the
@@ -193,14 +222,15 @@ fn deliver_interrupt() {
     ral_core::process::request_foreground_cancel(ral_core::process::CancelCause::Interrupt);
 }
 
-/// Feed a signal into ral's Unix interrupt handler.
+/// Feed a signal into the captured ral disposition for `slot`.
 #[cfg(unix)]
-fn forward_into_ral(sig: libc::c_int) {
-    let p = RAL_HANDLER.load(Ordering::Acquire);
+fn forward_into_ral(slot: &AtomicPtr<()>, sig: libc::c_int) {
+    let p = slot.load(Ordering::Acquire);
     if !p.is_null() {
-        // SAFETY: `install` publishes `term_handler`'s `extern "C" fn`
-        // pointer here and nowhere else, so a non-null slot is exactly
-        // that pointer cast back to its function-pointer type.
+        // SAFETY: `install` publishes a `relay_handler`/`term_handler`
+        // `extern "C" fn` pointer into these slots and nowhere else, so a
+        // non-null slot is exactly that pointer cast back to its
+        // function-pointer type.
         let h: RalHandler = unsafe { std::mem::transmute(p) };
         h(sig);
     }
@@ -243,30 +273,42 @@ mod tests {
     use std::sync::Mutex;
 
     /// Both tests touch process-global state (`SIGNAL_COUNT`, the
-    /// `CURRENT` slot, and the `RAL_HANDLER` slot that `install`
-    /// publishes), so they must not run concurrently.
+    /// `CURRENT` slot, and the handler slots that `install` publishes), so
+    /// they must not run concurrently.
     static SERIAL: Mutex<()> = Mutex::new(());
 
-    /// `install` publishes ral's handler into the `RAL_HANDLER` slot, and
-    /// always the same `term_handler` pointer: a second `install` (the
-    /// `/clear` re-chain) republishes the very same value, so the slot is
-    /// a true set-once.  The slot must round-trip to `term_handler`'s
-    /// pointer so the chained handler forwards into ral's own disposition.
+    /// `install` publishes ral's dispositions into the two handler slots:
+    /// the non-escalating `relay_handler` for SIGINT, the escalating
+    /// `term_handler` for SIGTERM/SIGHUP.  Both are set-once — a second
+    /// `install` (the `/clear` re-chain) republishes the very same
+    /// pointers — so the chained handler forwards each signal into the
+    /// right ral disposition.
     #[test]
-    fn install_publishes_term_handler_as_set_once() {
+    fn install_publishes_split_handlers_as_set_once() {
         let _g = SERIAL.lock().unwrap();
-        let expected = ral_core::process::term_handler() as *mut ();
+        let expected_int = ral_core::process::relay_handler() as *mut ();
+        let expected_term = ral_core::process::term_handler() as *mut ();
         install();
         assert_eq!(
-            RAL_HANDLER.load(Ordering::Acquire),
-            expected,
-            "install publishes ral's term_handler pointer"
+            RAL_SIGINT_HANDLER.load(Ordering::Acquire),
+            expected_int,
+            "install publishes ral's non-escalating relay_handler for SIGINT"
+        );
+        assert_eq!(
+            RAL_TERM_HANDLER.load(Ordering::Acquire),
+            expected_term,
+            "install publishes ral's term_handler for SIGTERM/SIGHUP"
         );
         install();
         assert_eq!(
-            RAL_HANDLER.load(Ordering::Acquire),
-            expected,
-            "re-install republishes the same pointer"
+            RAL_SIGINT_HANDLER.load(Ordering::Acquire),
+            expected_int,
+            "re-install republishes the same SIGINT pointer"
+        );
+        assert_eq!(
+            RAL_TERM_HANDLER.load(Ordering::Acquire),
+            expected_term,
+            "re-install republishes the same SIGTERM/SIGHUP pointer"
         );
     }
 
@@ -364,8 +406,14 @@ mod tests {
 
     /// `boot_shell` installs ral's bare handlers, then re-chains exarch's
     /// cancel handler before returning.  Without the re-install, the bare
-    /// ral handler would run alone after any shell rebuild and `raise` (the
-    /// token half of the chain) would never fire.
+    /// ral `term_handler` would run alone after any shell rebuild: `raise`
+    /// (the token half of the chain) would never fire, and the delivered
+    /// SIGINT would `fetch_add` ral's escalating counter.  With the chain
+    /// in place a SIGINT sets the token and routes into the *non-escalating*
+    /// `relay_handler`, which cancels the foreground turn without ever
+    /// ticking the third-signal `_exit` counter — so the two observable
+    /// signatures (token set, counter un-ticked) together prove the chain
+    /// is installed and a delivered SIGINT can only cancel, never force-exit.
     #[test]
     fn boot_shell_restores_the_chain_after_handler_clobber() {
         let _g = SERIAL.lock().unwrap();
@@ -383,8 +431,9 @@ mod tests {
             "boot_shell should return with exarch's cancel chain installed"
         );
         assert!(
-            ral_core::process::is_interrupted(),
-            "the re-chained handler still forwards into ral"
+            !ral_core::process::is_interrupted(),
+            "the re-chained SIGINT routes into the non-escalating relay handler, \
+             not ral's force-exit counter"
         );
         ral_core::process::clear();
     }

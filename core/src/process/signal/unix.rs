@@ -231,10 +231,13 @@ impl PgidPolicy {
     /// the parent.  Searching for `setpgid` should yield this method plus
     /// the parent-side mirror inside [`spawn_with_pgid`].
     pub fn apply(self) -> std::io::Result<()> {
+        // `setsid` returns the new sid (the caller's pid) on success;
+        // `setpgid` returns 0.  Both signal failure with `-1`.
         let rc = unsafe {
             match self {
                 PgidPolicy::Inherit => 0,
                 PgidPolicy::NewLeader => libc::setpgid(0, 0),
+                PgidPolicy::NewSession => libc::setsid(),
                 PgidPolicy::Join(Pgid(leader)) => libc::setpgid(0, leader),
             }
         };
@@ -250,10 +253,12 @@ impl PgidPolicy {
 ///   1. inside the child (post-fork, pre-exec): apply `pgid`, then
 ///      [`reset_child_signals`] (with the nohup rule);
 ///   2. inside the parent (post-spawn): mirror the `setpgid` so the child's
-///      pgid is established regardless of which side wins the race.
+///      pgid is established regardless of which side wins the race.  A
+///      `NewSession` child has no such mirror — only the child may `setsid`
+///      itself — so it relies on its own `pre_exec`.
 ///
 /// Returns the child plus its leader pgid: `Some` for `NewLeader` /
-/// `Join`, `None` for `Inherit`.  Callers that need the leader pgid for
+/// `NewSession` / `Join`, `None` for `Inherit`.  Callers that need the leader pgid for
 /// later [`wait_handling_stop`] or for the pipeline group simply read it
 /// off the return value — there is no separate registration step.
 ///
@@ -303,6 +308,13 @@ where
             let pid = child.id() as libc::pid_t;
             unsafe { libc::setpgid(pid, pid) };
             Some(Pgid(pid))
+        }
+        PgidPolicy::NewSession => {
+            // `setsid` can run only in the child — a process cannot move
+            // another into a new session — so there is no parent-side
+            // mirror to close the race: the child's `pre_exec` is the sole
+            // authority.  The new session's pgid equals the child's pid.
+            Some(Pgid(child.id() as libc::pid_t))
         }
         PgidPolicy::Join(p) => {
             let pid = child.id() as libc::pid_t;

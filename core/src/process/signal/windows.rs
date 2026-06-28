@@ -657,7 +657,11 @@ pub fn spawn_with_pgid(
             let child = cmd.spawn()?;
             Ok((child, None))
         }
-        PgidPolicy::NewLeader => {
+        // Windows has no POSIX sessions; a new console process group is the
+        // nearest isolation, so `NewSession` lands on the same path as
+        // `NewLeader`.  The Unix arm's controlling-terminal severance has no
+        // analogue here, and exarch's signal-escape path is Unix-only.
+        PgidPolicy::NewLeader | PgidPolicy::NewSession => {
             cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
             let child = cmd.spawn()?;
             let leader = win_groups::new_leader(&child);

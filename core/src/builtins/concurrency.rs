@@ -216,6 +216,14 @@ where
         child_env.turn.io.capture_outer = None;
         child_env.turn.io.stdout = stdout;
         child_env.turn.io.stderr = stderr;
+        // A detached worker is a background computation with no terminal: its
+        // stdout/stderr are buffers, and its stdin must not fall through to
+        // fd 0.  `spawn_thread` builds the worker from a defaulted `Io`
+        // (`Source::Terminal`), so without this an external in the body — a
+        // `cargo test` exercising signal code, say — would inherit the real
+        // terminal and could `tcgetpgrp(stdin)` / `kill(-fg, …)` whoever owns
+        // it.  `Empty` wires fd 0 to `/dev/null`.
+        child_env.turn.io.stdin = crate::io::Source::Empty;
         // The boundary flows onto the worker's turn so a nested `spawn` inside
         // the body installs its own `DeferredSurface` with the same boundary
         // and flushes at *its* own completion.

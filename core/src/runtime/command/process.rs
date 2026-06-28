@@ -71,7 +71,7 @@ pub(crate) fn build_command(plan: &SpawnPlan, shell: &Shell) -> Settled<Command>
 /// post-spawn boilerplate cannot drift.
 ///
 /// Returns the child plus its leader pgid: `Some` when `pgid` is
-/// `NewLeader` or `Join`, `None` for `Inherit`.
+/// `NewLeader`, `NewSession`, or `Join`, `None` for `Inherit`.
 pub(crate) fn spawn(
     cmd: &mut Command,
     pgid: crate::process::PgidPolicy,

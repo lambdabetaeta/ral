@@ -1,8 +1,9 @@
 //! Foreground-job decision for a standalone external command.
 //!
 //! Two correlated outputs depend on the same predicate: the [`PgidPolicy`]
-//! to spawn under (`NewLeader` if foreground, else `Inherit`) and the
-//! post-spawn handoff via [`ForegroundGuard::try_acquire`].  Bundling them
+//! to spawn under (`NewLeader` for a foreground leader, `NewSession` for a
+//! detached background worker, else `Inherit`) and the post-spawn handoff
+//! via [`ForegroundGuard::try_acquire`].  Bundling them
 //! in one witness keeps them in lock-step and parallels the
 //! [`super::stdio::TtyInputPermit`] discipline next door.
 //!
@@ -73,8 +74,9 @@ impl ForegroundDecision {
     }
 
     /// `PgidPolicy` for the spawn: `NewLeader` when the child takes the
-    /// foreground (as a foreground job leader) *or* when it is a
-    /// non-interactive top-level background child; `Inherit` otherwise.
+    /// foreground (a foreground job leader that needs the controlling
+    /// terminal to take it), `NewSession` for a detached non-interactive
+    /// top-level background child, `Inherit` otherwise.
     ///
     /// A non-interactive top-level standalone external (exarch's tool
     /// eval, `ral -c`, a script) leads its own group so a watchdog cancel
@@ -84,7 +86,12 @@ impl ForegroundDecision {
     /// a grandchild (`/bin/sh -c '… &'`, `python runtests.py` spawning
     /// workers) leaves the grandchild alive holding the stdout pipe open,
     /// and the pump drain blocks until it exits on its own — defeating
-    /// the timeout.
+    /// the timeout.  Such a child never takes the foreground, so it has no
+    /// use for the controlling terminal: `NewSession` (`setsid`) gives it
+    /// its own session, severing the terminal so the job — or anything it
+    /// spawns, e.g. a `cargo test` exercising signal code — cannot signal
+    /// the process that owns the tty.  The session's pgid still equals the
+    /// child's pid, so the subtree `kill(-pgid, …)` is unchanged.
     ///
     /// `Inherit` is kept for the two cases that depend on sharing ral's
     /// pgid: a *pipeline* stage (it must join the pipeline group so the
@@ -98,8 +105,10 @@ impl ForegroundDecision {
     /// is universal and lives in `signal::spawn_with_pgid`'s pre_exec,
     /// not here.
     pub(super) fn pgid_policy(&self) -> PgidPolicy {
-        if self.want_fg || self.own_group_when_background {
+        if self.want_fg {
             PgidPolicy::NewLeader
+        } else if self.own_group_when_background {
+            PgidPolicy::NewSession
         } else {
             PgidPolicy::Inherit
         }

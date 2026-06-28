@@ -637,15 +637,26 @@ impl Pgid {
 
 /// Process-group placement decision applied via `pre_exec` before `execve`.
 ///
-/// Single-command foreground jobs and pipeline first stages use
-/// `NewLeader`; subsequent pipeline stages use `Join(leader_pgid)`;
-/// non-pipeline non-foreground children use `Inherit`.
+/// Foreground job leaders and pipeline first stages use `NewLeader`;
+/// subsequent pipeline stages use `Join(leader_pgid)`; an interactive
+/// background child that must share the terminal's signal reach uses
+/// `Inherit`; a *detached* background worker (a `spawn`/non-interactive
+/// top-level child that never takes the foreground) uses `NewSession`.
 #[derive(Clone, Copy, Debug)]
 pub enum PgidPolicy {
     /// Inherit the parent's pgid — no `setpgid` call.
     Inherit,
-    /// Become the leader of a fresh process group (`setpgid(0, 0)`).
+    /// Become the leader of a fresh process group (`setpgid(0, 0)`),
+    /// keeping the parent's session and controlling terminal.
     NewLeader,
+    /// Become the leader of a fresh *session* (`setsid`): a new process
+    /// group with **no controlling terminal**.  A detached background
+    /// worker has no business holding the terminal, and severing the
+    /// session is what stops it from signalling — via the shared tty or
+    /// `tcgetpgrp` — whatever owns the controlling terminal (the REPL, or
+    /// a supervising frontend).  The new session's pgid equals the child's
+    /// pid, so the watchdog's `kill(-pgid, …)` still reaps the subtree.
+    NewSession,
     /// Join an existing pgid as a non-leader (`setpgid(0, leader)`).
     Join(Pgid),
 }
