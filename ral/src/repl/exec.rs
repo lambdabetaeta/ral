@@ -1,19 +1,25 @@
-//! Single-input parse / typecheck / evaluate cycle.
+//! Single-input parse / typecheck / evaluate cycle, now routed through
+//! the transport seam.
 //!
-//! [`step`] is the per-line entry point.  It dispatches directly to
-//! [`execute_input`], which runs the parser, typechecker, evaluator, and
-//! lifecycle hooks (`pre-exec`, `chpwd`, `post-exec`) and prints the
-//! result.  Job-control and plugin-lifecycle commands are handled by the
+//! [`step`] is the per-line entry point.  It dispatches a source turn
+//! through the [`IdentityTransport`] and drains the event stream for the
+//! terminal [`Report`](ral_core::transport::ReportMirror).  Lifecycle
+//! hooks (`pre-exec`, `chpwd`, `post-exec`) fire around the dispatch
+//! through [`IdentityTransport::with_shell`].
+//!
+//! Job-control and plugin-lifecycle commands are still handled by the
 //! captured builtins installed at boot (see [`super::host_handlers`]).
 
-use ral_core::types::{Break, Escape};
-use ral_core::{
-    RequestedTerminalAccess, StaticDiagnostics, TurnIo, TurnReport, TurnRequest, TurnStdin,
+use ral_core::transport::{
+    self, CapsMirror, DiagMirror, DispatchId, Event, Frame, IdentityTransport, ReqMirror,
+    ReportMirror, ResultMirror, Transport, Turn,
 };
-use ral_core::{Shell, Value, builtins, diagnostic};
+use ral_core::{
+    RequestedTerminalAccess, TurnIo, TurnStdin,
+};
+use ral_core::{Value, builtins};
 use std::sync::{Arc, Mutex};
 
-use super::errfmt::{format_repl_parse_error, should_use_compact_parse_error};
 use super::plugin::{PluginRuntime, run_lifecycle_hook};
 
 pub(super) enum Step {
@@ -38,19 +44,21 @@ fn print_result(val: &Value) {
                 && let Some(color) = &theme.value_color
             {
                 println!("{color}{}{s}{}", theme.value_prefix, ral_core::ansi::RESET);
-                return;
+            } else {
+                println!("{}{s}", theme.value_prefix);
             }
-            println!("{}{s}", theme.value_prefix);
         }
     }
 }
 
+/// The REPL lifecycle hooks, called through `transport.with_shell()` around
+/// each dispatch.
 struct ReplLifecycle<'a> {
     runtime: &'a Arc<Mutex<PluginRuntime>>,
 }
 
-impl ral_core::TurnLifecycle for ReplLifecycle<'_> {
-    fn pre_exec(&mut self, shell: &mut Shell, src: &str) {
+impl ReplLifecycle<'_> {
+    fn pre_exec(&self, shell: &mut ral_core::Shell, src: &str) {
         run_lifecycle_hook(
             self.runtime,
             shell,
@@ -59,9 +67,9 @@ impl ral_core::TurnLifecycle for ReplLifecycle<'_> {
         );
     }
 
-    fn post_exec(&mut self, shell: &mut Shell, src: &str, status: i32) {
+    fn post_exec(&self, shell: &mut ral_core::Shell, src: &str, status: i32) {
         // chpwd drain then post-exec — both side-effects; neither redefines
-        // the turn's status, which `run_source_turn` already computed.
+        // the turn status, which the transport already computed.
         if let Some((old, new)) = shell.repl_mut().pending_chpwd.take() {
             run_lifecycle_hook(
                 self.runtime,
@@ -85,8 +93,8 @@ impl ral_core::TurnLifecycle for ReplLifecycle<'_> {
     }
 }
 
-/// Parse, typecheck, and evaluate one trimmed REPL input, running
-/// pre-exec and post-exec hooks around the evaluation.
+/// Parse, typecheck, and evaluate one trimmed REPL input through the
+/// transport, running pre-exec and post-exec hooks around evaluation.
 /// Returns `Some(code)` when the shell should exit.
 ///
 /// `job_table` is threaded as the shared `Arc<Mutex<…>>` rather than a
@@ -97,101 +105,145 @@ impl ral_core::TurnLifecycle for ReplLifecycle<'_> {
 /// `jt.add` call.
 pub(super) fn execute_input(
     trimmed: &str,
-    shell: &mut Shell,
+    transport: &IdentityTransport,
     #[cfg(unix)] job_table: &Arc<Mutex<crate::jobs::JobTable>>,
     runtime: &Arc<Mutex<PluginRuntime>>,
     #[cfg(feature = "structural")] worksheet: &mut super::worksheet::Worksheet,
 ) -> Option<u8> {
-    let req = TurnRequest {
-        script_name: "<stdin>",
-        caps: ral_core::types::Capabilities::root(),
+    let lifecycle = ReplLifecycle { runtime };
+
+    // Fire pre-exec hook through transport shell access.
+    transport.with_shell(|shell| lifecycle.pre_exec(shell, trimmed));
+
+    // Build the transport-level Turn from the source text.
+    let req = ReqMirror {
+        script_name: "<stdin>".to_string(),
+        caps: CapsMirror::root(),
         turn_limit: None,
         detached_limit: None,
         io: TurnIo::Inherit,
         terminal: RequestedTerminalAccess::Leased,
         stdin: TurnStdin::Inherit,
-        surface: None,
-        boundary: None,
-        lifecycle: Box::new(ReplLifecycle { runtime }),
     };
-    match shell.run_source_turn(trimmed, req) {
-        TurnReport::Static { diagnostics } => {
+
+    // Simple counter for dispatch ids.
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = DispatchId(NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+
+    let turn = Turn::Source {
+        src: trimmed.to_string(),
+        req,
+    };
+
+    // Dispatch the turn synchronously.
+    transport.dispatch(id, turn);
+
+    // Drain events from the transport.  The REPL expects no Surface events
+    // (surface: None today), just the terminal Report.
+    let mut report: Option<ReportMirror> = None;
+    while let Some(frame) = transport.events().recv() {
+        match frame {
+            Frame::Event(did, event) if did == id => match event {
+                Event::Surface(_val) => {
+                    // REPL does not render surface events today; drop.
+                }
+                Event::BoundarySurface(_batch) => {
+                    // REPL has no detached workers with boundary; drop.
+                }
+                Event::Report(r) => {
+                    report = Some(r);
+                    break;
+                }
+            },
+            _ => {
+                // Stale or mismatched event; ignore.
+            }
+        }
+    }
+
+    let report = match report {
+        Some(r) => r,
+        None => {
+            eprintln!("ral: internal error: dispatch completed without a Report");
+            return None;
+        }
+    };
+
+    match report {
+        ReportMirror::Static { diagnostics } => {
             match diagnostics {
-                StaticDiagnostics::Parse(e) => {
-                    if should_use_compact_parse_error(trimmed, &e.message) {
-                        eprint!("{}", format_repl_parse_error(&e.message));
-                    } else {
-                        eprint!(
-                            "{}",
-                            diagnostic::format_parse_error_ariadne("<stdin>", trimmed, &e)
-                        );
+                DiagMirror::Parse(msg) => {
+                    eprintln!("parse error: {msg}");
+                }
+                DiagMirror::Types(errs) => {
+                    for e in &errs {
+                        eprintln!("{e}");
                     }
                 }
-                StaticDiagnostics::Types(errs) => {
-                    eprint!(
-                        "{}",
-                        diagnostic::format_type_errors_ariadne("<stdin>", trimmed, &errs)
-                    );
-                }
-                StaticDiagnostics::Host(e) => {
-                    eprintln!("{}", e.message);
+                DiagMirror::Host(msg) => {
+                    eprintln!("{}", msg);
                 }
             }
             None
         }
-        TurnReport::Ran {
+        ReportMirror::Ran {
             result,
-            single_command,
-            ..
-        } => match result {
-            Ok(val) => {
-                print_result(&val);
-                // The turn installed its bindings: record their dependency
-                // edges and effect verdict into the worksheet model, off the
-                // now-updated live session.  Only a successful turn reaches
-                // here, so a binding that failed to evaluate is never
-                // recorded.
-                #[cfg(feature = "structural")]
-                worksheet.record(trimmed, shell);
-                None
-            }
-            Err(Break::Escape(Escape::Exit(code))) => Some(code.clamp(0, 255) as u8),
-            Err(Break::Error(e)) => {
-                eprint!(
-                    "{}",
-                    diagnostic::format_runtime_error_auto(shell.sources(), &e, single_command,)
-                );
-                None
-            }
-            #[cfg(unix)]
-            Err(Break::Escape(Escape::Stopped { pgid, signal, .. })) => {
-                let id = job_table.lock().unwrap().add(
-                    pgid.0,
-                    trimmed.to_string(),
-                    crate::jobs::JobState::Stopped,
-                );
-                eprintln!(
-                    "[{id}] stopped\t{} ({})",
-                    trimmed,
-                    signal.name().unwrap_or("?")
-                );
-                None
-            }
-        },
+            status,
+            single_command: _single_command,
+            captured: _captured,
+            timed_out: _timed_out,
+        } => {
+            let exit_code = match result {
+                ResultMirror::Ok(val) => {
+                    print_result(&val);
+                    // The turn installed its bindings: record their dependency
+                    // edges and effect verdict into the worksheet model.
+                    #[cfg(feature = "structural")]
+                    transport.with_shell(|shell| worksheet.record(trimmed, shell));
+                    None
+                }
+                ResultMirror::Err(break_mirror) => match break_mirror {
+                    transport::BreakMirror::Error(msg) => {
+                        eprint!("{}", msg);
+                        None
+                    }
+                    transport::BreakMirror::Exit(code) => Some(code.clamp(0, 255) as u8),
+                    #[cfg(unix)]
+                    transport::BreakMirror::Stopped {
+                        pgid,
+                        signal: _,
+                        signal_name,
+                    } => {
+                        let id = job_table.lock().unwrap().add(
+                            pgid,
+                            trimmed.to_string(),
+                            crate::jobs::JobState::Stopped,
+                        );
+                        eprintln!("[{id}] stopped\t{trimmed} ({signal_name})");
+                        None
+                    }
+                },
+            };
+
+            // Fire post-exec hook.
+            transport.with_shell(|shell| lifecycle.post_exec(shell, trimmed, status));
+
+            exit_code
+        }
     }
 }
 
 /// Parse, typecheck, and evaluate one trimmed non-empty input line.
 pub(super) fn step(
     trimmed: &str,
-    shell: &mut Shell,
+    transport: &IdentityTransport,
     #[cfg(unix)] job_table: &Arc<Mutex<crate::jobs::JobTable>>,
     runtime: &Arc<Mutex<PluginRuntime>>,
     #[cfg(feature = "structural")] worksheet: &mut super::worksheet::Worksheet,
 ) -> Step {
     match execute_input(
         trimmed,
-        shell,
+        transport,
         #[cfg(unix)]
         job_table,
         runtime,

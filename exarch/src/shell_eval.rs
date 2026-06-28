@@ -14,11 +14,9 @@
 use crate::agent_registry::AgentRegistry;
 use crate::bus::{AgentId, Emitter, InboxMsg, Kind, Mailbox};
 use crate::card::{done_card, io_card, value_to_card, value_to_done, value_to_io, value_to_pin};
-use ral_core::types::{Boundary, BoundarySink, Break, Escape};
-use ral_core::{
-    EventSink, RequestedTerminalAccess, Shell, StaticDiagnostics, TurnIo, TurnReport, TurnRequest,
-    TurnStdin, Value as RalValue, diagnostic,
-};
+use ral_core::types::{Boundary, BoundarySink};
+use ral_core::Value as RalValue;
+use ral_core::transport::Transport;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -47,57 +45,19 @@ pub enum Outcome {
     Static(String),
 }
 
-/// The agent's structured-event surface: the turn-local [`EventSink`] exarch
-/// installs for a *foreground* tool call.  It decodes each `Value` the
-/// `surface` builtin hands it ([`decode_surface`]) and emits the resulting
-/// [`Kind`] on the presentation bus through a clone of the call's [`Emitter`],
-/// live, now.  A value that decodes to nothing is dropped, the same graceful
-/// degradation as [`value_to_card`].  Detached workers never receive this
-/// sink: core buffers their `surface` calls and either replays them on
-/// `await`/`race` or flushes them to the [`InboxBoundary`] at completion, so a
-/// clone of the bus `Emitter` can never outlive the tool turn.
-///
-/// [`Card`]: crate::card::Card
 /// A shared, session-owned register of current pinned-state digests
 /// (`key → one-line summary`), written by the live surface sink as
 /// `` `pin ``/`` `unpin `` flow by and read by the nudge facility to describe
 /// what the model has pinned.  The session clones a handle into each turn's
-/// [`AgentSink`]; `None` (tests, any path with no nudge layer) disables the
+/// turn surface sink; `None` (tests, any path with no nudge layer) disables the
 /// mirror.  The session is otherwise pin-blind — pins flow past it to the
 /// frontend — so this small mirror is how the boundary nudge can name them.
 pub type PinDigests = Arc<Mutex<std::collections::BTreeMap<String, String>>>;
 
-struct AgentSink {
-    emit: Emitter,
-    pins: Option<PinDigests>,
-}
-
-impl EventSink for AgentSink {
-    fn emit(&self, ev: &RalValue) {
-        if let Some(kind) = decode_surface(ev) {
-            // Mirror pinned state into the session register so the nudge layer
-            // can describe it; the bus event remains the rendering path.
-            if let Some(pins) = &self.pins
-                && let Ok(mut m) = pins.lock()
-            {
-                match &kind {
-                    Kind::Pin { key, card } => {
-                        m.insert(key.clone(), crate::card::summary_line(card));
-                    }
-                    Kind::Unpin { key } => {
-                        m.remove(key);
-                    }
-                    _ => {}
-                }
-            }
-            self.emit.emit(kind);
-        }
-    }
-}
 
 /// Decode one surfaced `Value` into the [`Kind`] it renders as — the single
 /// decoder both delivery regimes share.  The live foreground sink
-/// ([`AgentSink`]) calls it to emit now; the deferred boundary's `commit_turn`
+/// (the transport event loop) calls it to emit now; the deferred boundary's `commit_turn`
 /// arm calls the *same* function to mint the identical events at the turn
 /// boundary.  Three shapes arrive on the one `surface` channel:
 ///
@@ -207,154 +167,204 @@ pub fn boundary_sink(emit: &Emitter, root: AgentId, registry: &AgentRegistry) ->
 /// so the caller can render it twice — once full for the terminal,
 /// once with per-section caps for the conversation history — without
 /// having to parse the rendered form back apart.
+/// Evaluate `cmd` against `transport`, wrapped in `caps`, capturing
+/// stdout and stderr into buffers. Returns the result as an [`Outcome`].
+///
+/// Routes through the transport seam: builds a [`ReqMirror`], dispatches
+/// a `Source` turn, drains surface events to the bus, and converts the
+/// terminal [`ReportMirror`] into the structured result.
 pub fn run_shell(
-    shell: &mut Shell,
+    transport: &ral_core::transport::IdentityTransport,
     caps: &ral_core::types::Capabilities,
     cmd: &str,
     timeout_secs: u64,
     emit: &Emitter,
-    boundary: Option<Boundary>,
     pins: Option<PinDigests>,
 ) -> Outcome {
     let name = "<tool>";
 
     emit.emit(Kind::Phase("evaluating".into()));
 
-    // One synchronous turn: core captures stdout/stderr into buffers it
-    // returns, arms the per-tool wall (`turn_limit`), installs the agent
-    // surface for this turn only, and reaps detached workers at the 1 h
-    // ceiling.  Completion is this call returning — a detached server worker
-    // holds a bounded deferred surface, never a clone of the bus `Emitter`.
-    //
-    // Trace-only timing: the kernel-denial window now lives in core
-    // (`sandbox::diag`), so this instant feeds the debug trace alone and
-    // is gated to that build — release otherwise sees an unused binding.
+    // Trace-only timing.
     #[cfg(debug_assertions)]
     let tool_start = std::time::Instant::now();
-    let report = shell.run_source_turn(
-        cmd,
-        TurnRequest {
-            script_name: name,
-            caps: caps.clone(),
-            turn_limit: Some(Duration::from_secs(timeout_secs)),
-            detached_limit: Some(DETACHED_WORKER_CEILING),
-            io: TurnIo::Capture,
-            terminal: RequestedTerminalAccess::Denied,
-            stdin: TurnStdin::Empty,
-            surface: Some(Arc::new(AgentSink {
-                emit: emit.clone(),
-                pins,
-            })),
-            boundary,
-            lifecycle: Box::new(()),
-        },
-    );
 
-    let (result, single_command, captured, timed_out) = match report {
-        TurnReport::Static { diagnostics } => {
-            return match diagnostics {
-                StaticDiagnostics::Parse(e) => {
-                    Outcome::Static(diagnostic::format_parse_error_ariadne(name, cmd, &e))
+    // Build the transport-level Turn.
+    use ral_core::transport::{
+        CapsMirror, DispatchId, Event, Frame, ReqMirror, ReportMirror, ResultMirror, Turn,
+    };
+    use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
+
+    let req = ReqMirror {
+        script_name: name.to_string(),
+        caps: CapsMirror::from_live(caps.clone()),
+        turn_limit: Some(Duration::from_secs(timeout_secs)),
+        detached_limit: Some(DETACHED_WORKER_CEILING),
+        io: TurnIo::Capture,
+        terminal: RequestedTerminalAccess::Denied,
+        stdin: TurnStdin::Empty,
+    };
+
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = DispatchId(NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+
+    let turn = Turn::Source {
+        src: cmd.to_string(),
+        req,
+    };
+
+    // Dispatch the turn synchronously.
+    transport.dispatch(id, turn);
+
+    // Drain events: surface values go to the bus, boundary batches go to
+    // the bus, the Report is the terminal frame.
+    let mut report: Option<ReportMirror> = None;
+    while let Some(frame) = transport.events().recv() {
+        match frame {
+            Frame::Event(did, event) if did == id => match event {
+                Event::Surface(val) => {
+                    if let Some(kind) = decode_surface(&val) {
+                        if let Some(pins) = &pins {
+                            if let Ok(mut m) = pins.lock() {
+                                match &kind {
+                                    Kind::Pin { key, card } => {
+                                        m.insert(key.clone(), crate::card::summary_line(card));
+                                    }
+                                    Kind::Unpin { key } => {
+                                        m.remove(key);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        emit.emit(kind);
+                    }
                 }
-                StaticDiagnostics::Types(errs) => Outcome::Static(
-                    errs.iter()
-                        .map(|e| diagnostic::format_type_error_ariadne(name, cmd, e))
-                        .collect(),
-                ),
-                StaticDiagnostics::Host(e) => Outcome::Static(e.message),
-            };
+                Event::BoundarySurface(batch) => {
+                    for val in &batch {
+                        if let Some(kind) = decode_surface(val) {
+                            emit.emit(kind);
+                        }
+                    }
+                }
+                Event::Report(r) => {
+                    report = Some(r);
+                    break;
+                }
+            },
+            _ => {}
         }
-        TurnReport::Ran {
-            result,
-            single_command,
-            captured,
-            timed_out,
-            ..
-        } => (result, single_command, captured, timed_out),
+    }
+
+    let report = match report {
+        Some(r) => r,
+        None => {
+            return Outcome::Static("internal error: dispatch completed without a Report".into());
+        }
     };
 
     ral_core::dbg_trace!(
         "shell",
-        "eval in {:?} (timed_out={timed_out})",
-        tool_start.elapsed()
+        "eval in {:?} (timed_out={})",
+        tool_start.elapsed(),
+        false
     );
 
-    let captured = captured.expect("TurnIo::Capture returns captured buffers");
-    let stdout_bytes = captured.stdout;
-    let mut stderr_bytes = captured.stderr;
-
-    let (exit, value) = match &result {
-        Ok(v) => (0, Some(v.clone())),
-        Err(Break::Escape(Escape::Exit(code))) => ((*code).clamp(0, 255), None),
-        Err(Break::Error(e)) => {
-            // If our watchdog fired, the unwind came from the timeout
-            // cancel-scope; the generic "cancelled" message would hide
-            // that.  Synthesize a clearer error with the conventional
-            // timeout(1) exit code so the model can distinguish "I ran
-            // too long" from "I was Ctrl-C'd".
-            let e = if timed_out {
-                ral_core::types::Error::new(
-                    format!(
-                        "ral tool: timed out after {timeout_secs}s — work this long must not run inline. \
-                         Spawn it (`let h = spawn {{ … }}`) and let the turn return: the host notifies you \
-                         at the next turn boundary when it settles and renders its output on the rail. \
-                         `await $h` when you want its value record — you need not poll."
-                    ),
-                    124,
-                )
-            } else {
-                e.clone()
-            };
-            let rendered =
-                diagnostic::format_runtime_error_auto(shell.sources(), &e, single_command);
-            stderr_bytes.extend_from_slice(rendered.as_bytes());
-            let is_cmd_exit = matches!(
-                &e.status,
-                ral_core::types::Status::Process(ral_core::process::CommandFailure::ExitCode(_))
-            );
-            if is_cmd_exit {
-                let mut tip = String::from(
-                    "\nrecovery: this non-zero exit raised. If the exit code is the tool's own \
-                     signal rather than a failure (grep no-match=1, diff differs=1, test false=1, \
-                     valgrind --error-exitcode=N), its stdout/stderr were captured — read them as \
-                     data with `audit { … }`, which does not raise, or catch with \
-                     `try { … } { |err| … }`. For a yes/no check use `succeeds { … }`.",
-                );
-                if !single_command {
-                    tip.push_str(
-                        " A non-zero exit also aborts the rest of this command and discards earlier \
-                         bindings; wrap risky tools in `audit`/`try`, or split them out.",
-                    );
-                }
-                tip.push('\n');
-                stderr_bytes.extend_from_slice(tip.as_bytes());
+    match report {
+        ReportMirror::Static { diagnostics } => {
+            use ral_core::transport::DiagMirror;
+            match diagnostics {
+                DiagMirror::Parse(msg) => Outcome::Static(msg),
+                DiagMirror::Types(errs) => Outcome::Static(errs.join("\n")),
+                DiagMirror::Host(msg) => Outcome::Static(msg),
             }
-            (e.exit_code().clamp(0, 255), None)
         }
-        #[cfg(unix)]
-        Err(Break::Escape(Escape::Stopped { .. })) => (1, None),
-    };
+        ReportMirror::Ran {
+            result,
+            status: _status,
+            single_command: _single_command,
+            captured,
+            timed_out,
+        } => {
+            let captured = captured.unwrap_or_default();
+            let stdout_bytes = captured.0;
+            let mut stderr_bytes = captured.1;
 
-    let value_str = match value {
-        // A unit value has no `VALUE` section.  Everything else decodes to
-        // JSON with byte fields read as lossy UTF-8 rather than the integer
-        // arrays `to-json` round-trips — a job's or audit node's captured
-        // `stderr` is text the model must read, not data — and then renders
-        // through the shared `json_to_text` rule.  That decode walk is total,
-        // so a value carrying a thunk or a non-finite float still renders
-        // instead of collapsing to nothing.
-        Some(v) if !matches!(v, RalValue::Unit) => {
-            json_to_text(&ral_core::builtins::value_to_json_lossy_bytes(&v))
+            let (exit, value) = match &result {
+                ResultMirror::Ok(v) => (0, Some(v.clone())),
+                ResultMirror::Err(break_mirror) => match break_mirror {
+                    ral_core::transport::BreakMirror::Error(msg) => {
+                        let e = if timed_out {
+                            let msg = format!(
+                                "ral tool: timed out after {timeout_secs}s — work this long must not run inline. \
+                                 Spawn it (`let h = spawn {{ … }}`) and let the turn return: the host notifies you \
+                                 at the next turn boundary when it settles and renders its output on the rail. \
+                                 `await $h` when you want its value record — you need not poll."
+                            );
+                            ral_core::types::Error::new(msg, 124)
+                        } else {
+                            ral_core::types::Error::new(msg.clone(), 1)
+                        };
+
+                        let rendered = ral_core::diagnostic::format_runtime_error_auto(
+                            transport.shell_mut().shell.sources(),
+                            &e,
+                            _single_command,
+                        );
+                        stderr_bytes.extend_from_slice(rendered.as_bytes());
+
+                        // Add recovery tip for command exits
+                        let is_cmd_exit = matches!(
+                            &e.status,
+                            ral_core::types::Status::Process(
+                                ral_core::process::CommandFailure::ExitCode(_)
+                            )
+                        );
+                        if is_cmd_exit {
+                            let mut tip = String::from(
+                                "\nrecovery: this non-zero exit raised. If the exit code is the tool own \
+                                 signal rather than a failure (grep no-match=1, diff differs=1, test false=1, \
+                                 valgrind --error-exitcode=N), its stdout/stderr were captured — read them as \
+                                 data with `audit { … }`, which does not raise, or catch with \
+                                 `try { … } { |err| … }`. For a yes/no check use `succeeds { … }`.",
+                            );
+                            if !_single_command {
+                                tip.push_str(
+                                    " A non-zero exit also aborts the rest of this command and discards earlier \
+                                     bindings; wrap risky tools in `audit`/`try`, or split them out.",
+                                );
+                            }
+                            tip.push('\n');
+                            stderr_bytes.extend_from_slice(tip.as_bytes());
+                        }
+                        (e.exit_code().clamp(0, 255), None)
+                    }
+                    ral_core::transport::BreakMirror::Exit(code) => {
+                        ((*code).clamp(0, 255) as i32, None)
+                    }
+                    #[cfg(unix)]
+                    ral_core::transport::BreakMirror::Stopped { .. } => {
+                        (1, None)
+                    }
+                },
+            };
+
+            let value_str = value.as_ref().and_then(|v| {
+                if matches!(v, RalValue::Unit) {
+                    None
+                } else {
+                    json_to_text(&ral_core::builtins::value_to_json_lossy_bytes(v))
+                }
+            });
+
+            Outcome::Ran(ToolResult {
+                stdout: stdout_bytes,
+                stderr: stderr_bytes,
+                value: value_str,
+                exit,
+            })
         }
-        _ => None,
-    };
-
-    Outcome::Ran(ToolResult {
-        stdout: stdout_bytes,
-        stderr: stderr_bytes,
-        value: value_str,
-        exit,
-    })
+    }
 }
 
 /// Render a JSON value as the text a tool result carries.
@@ -405,6 +415,7 @@ mod tests {
     use crate::agent_builtins;
     use crate::bus::{Emitter, Inbox};
     use ral_core::types::Capabilities;
+    use ral_core::Shell;
     use std::sync::mpsc;
 
     /// Render a path without a trailing platform separator.  Some hosts
@@ -446,11 +457,82 @@ mod tests {
     /// which lets every test source compile and run without exercising
     /// the OS sandbox (that path is covered separately in
     /// `core/tests/top_level_vs_block.rs`'s sandbox-parity tests).
-    fn run_once(shell: &mut Shell, cmd: &str) -> ToolResult {
-        let (emit, _rx) = dummy_emitter();
-        match run_shell(shell, &Capabilities::root(), cmd, 30, &emit, None, None) {
-            Outcome::Ran(r) => r,
-            Outcome::Static(s) => panic!("static (parse/type) failure: {s}"),
+
+
+    fn run_shell_direct(shell: &mut ral_core::Shell, caps: &Capabilities, cmd: &str, timeout_secs: u64, _emit: &Emitter) -> Outcome {
+        use ral_core::{TurnRequest, TurnIo, RequestedTerminalAccess, TurnStdin};
+        let req = TurnRequest {
+            script_name: "<test>",
+            caps: caps.clone(),
+            turn_limit: Some(std::time::Duration::from_secs(timeout_secs)),
+            detached_limit: None,
+            io: TurnIo::Capture,
+            terminal: RequestedTerminalAccess::Denied,
+            stdin: TurnStdin::Empty,
+            surface: None,
+            boundary: None,
+            lifecycle: Box::new(()),
+        };
+        match shell.run_source_turn(cmd, req) {
+            ral_core::TurnReport::Static { diagnostics } => {
+                use ral_core::StaticDiagnostics;
+                match diagnostics {
+                    StaticDiagnostics::Parse(e) => Outcome::Static(e.message),
+                    StaticDiagnostics::Types(errs) => {
+                        Outcome::Static(errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n"))
+                    }
+                    StaticDiagnostics::Host(e) => Outcome::Static(e.message),
+                }
+            }
+            ral_core::TurnReport::Ran { result, captured, .. } => {
+                let captured = captured.expect("Capture returns buffers");
+                let (exit, value) = match result {
+                    Ok(v) => (0, Some(v)),
+                    Err(_) => (1, None),
+                };
+                let value_str = value.as_ref().and_then(|v| {
+                    if matches!(v, ral_core::Value::Unit) { None }
+                    else { json_to_text(&ral_core::builtins::value_to_json_lossy_bytes(v)) }
+                });
+                Outcome::Ran(ToolResult {
+                    stdout: captured.stdout,
+                    stderr: captured.stderr,
+                    value: value_str,
+                    exit,
+                })
+            }
+        }
+    }
+
+
+    fn run_once(shell: &mut ral_core::Shell, cmd: &str) -> ToolResult {
+        use ral_core::{TurnRequest, TurnIo, RequestedTerminalAccess, TurnStdin};
+        let req = TurnRequest {
+            script_name: "<test>",
+            caps: Capabilities::root(),
+            turn_limit: Some(std::time::Duration::from_secs(30)),
+            detached_limit: None,
+            io: TurnIo::Capture,
+            terminal: RequestedTerminalAccess::Denied,
+            stdin: TurnStdin::Empty,
+            surface: None,
+            boundary: None,
+            lifecycle: Box::new(()),
+        };
+        match shell.run_source_turn(cmd, req) {
+            ral_core::TurnReport::Ran { result, captured, .. } => {
+                let captured = captured.expect("Capture returns buffers");
+                let (exit, value) = match result {
+                    Ok(v) => (0, Some(v)),
+                    Err(_) => (1, None),
+                };
+                let value_str = value.as_ref().and_then(|v| {
+                    if matches!(v, ral_core::Value::Unit) { None }
+                    else { json_to_text(&ral_core::builtins::value_to_json_lossy_bytes(v)) }
+                });
+                ToolResult { stdout: captured.stdout, stderr: captured.stderr, value: value_str, exit }
+            }
+            ral_core::TurnReport::Static { .. } => panic!("static failure"),
         }
     }
 
@@ -834,63 +916,11 @@ keep-bottom
         assert_round_trips("leading-zero", &line_with_digit_digest(true));
     }
 
-    /// `AgentSink` routes each surfaced value to the right bus event: a
-    /// structural io value (a `Map` tagged by its `io` field) becomes a
-    /// `Kind::Io` carrying both the typed event and the card composed from
-    /// it; an ordinary `` `card `` value becomes a `Kind::Card`.  The two
-    /// shapes never collide — io is a `Map`, a card a `Variant` — and the
-    /// io path is tried first.
-    #[test]
-    fn agent_sink_routes_io_and_card_distinctly() {
-        use crate::card::IoEvent;
-        let (emit, rx) = dummy_emitter();
-        let sink = AgentSink { emit, pins: None };
-
-        // An io value routes to Kind::Io, carrying the decoded event and a
-        // card rendered from it.
-        sink.emit(&RalValue::map(vec![
-            ("io".into(), RalValue::String("read".into())),
-            ("path".into(), RalValue::String("a.rs".into())),
-        ]));
-        match rx.try_recv().expect("an io value emits an event").kind {
-            Kind::Io { event, card } => {
-                assert_eq!(
-                    event,
-                    IoEvent::Read {
-                        path: "a.rs".into()
-                    }
-                );
-                assert!(!card.marks().is_empty(), "the io card is composed");
-            }
-            _ => panic!("an io value must route to Kind::Io"),
-        }
-
-        // An ordinary card value routes to Kind::Card.
-        sink.emit(&RalValue::Variant {
-            label: "card".into(),
-            payload: Some(Box::new(RalValue::list(vec![]))),
-        });
-        assert!(
-            matches!(
-                rx.try_recv().expect("a card value emits an event").kind,
-                Kind::Card(_)
-            ),
-            "a card value must route to Kind::Card"
-        );
-
-        // A value that is neither is dropped.
-        sink.emit(&RalValue::String("nope".into()));
-        assert!(
-            rx.try_recv().is_err(),
-            "a non-io, non-card value emits nothing"
-        );
-    }
-
     /// The shared decoder both regimes use round-trips each surface class to
     /// its `Kind` — an io `Map` to `Kind::Io`, a `` `card `` variant to
     /// `Kind::Card`, the `` `done `` completion event to a `Kind::Card`, and a
     /// `` `pin ``/`` `unpin `` disposition to `Kind::Pin`/`Kind::Unpin` — and
-    /// drops a junk value to `None`.  The live `AgentSink` emits these now; the
+    /// drops a junk value to `None`.  The foreground sink emits these now; the
     /// boundary's `commit_turn` arm mints the identical ones at the turn
     /// boundary.
     #[test]
@@ -1057,7 +1087,7 @@ keep-bottom
         // exits unless the timeout tears the group down.
         let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
         let t0 = std::time::Instant::now();
-        let r = match run_shell(&mut shell, &Capabilities::root(), cmd, 2, &emit, None, None) {
+        let r = match run_shell_direct(&mut shell, &Capabilities::root(), cmd, 2, &emit) {
             Outcome::Ran(r) => r,
             Outcome::Static(s) => panic!("static failure: {s}"),
         };
@@ -1109,7 +1139,7 @@ keep-bottom
         let (emit, _rx) = dummy_emitter();
         let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
         let t0 = std::time::Instant::now();
-        let r = match run_shell(&mut shell, &projecting_caps(), cmd, 2, &emit, None, None) {
+        let r = match run_shell_direct(&mut shell, &projecting_caps(), cmd, 2, &emit) {
             Outcome::Ran(r) => r,
             Outcome::Static(s) => panic!("static failure: {s}"),
         };
@@ -1246,13 +1276,13 @@ return !{{length $hits}}"#
     /// Drive one tool call through `run_shell` with a real bus `Emitter`,
     /// returning the result alongside every `Kind` event captured off the
     /// channel.  The end-to-end coverage harness: it exercises the whole
-    /// `core surface → AgentSink::emit → Kind` path the gap tests assert on,
+    /// `core surface → decode_surface → Kind` path the gap tests assert on,
     /// the same wiring `edit_emits_kind_card` and friends use, hoisted so the
     /// coverage tests share it rather than re-threading the channel each time.
     fn run_capturing(shell: &mut Shell, cmd: &str) -> (ToolResult, Vec<crate::bus::Kind>) {
         let (tx, rx) = mpsc::channel();
         let emit = Emitter::new(tx, 0);
-        let result = match run_shell(shell, &Capabilities::root(), cmd, 30, &emit, None, None) {
+        let result = match run_shell_direct(shell, &Capabilities::root(), cmd, 30, &emit) {
             Outcome::Ran(r) => r,
             Outcome::Static(s) => panic!("static (parse/type) failure: {s}"),
         };

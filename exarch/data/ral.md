@@ -165,16 +165,10 @@ Prelude functions cover common cases:
 
 ## Audit
 
-`audit { … }` evaluates its body and returns the execution tree as a ral value: each external command's argv, stdout, stderr, exit code, and timing. `audit` does not raise errors: it turns them into record data. It also keeps stdout/stderr apart, so you need not `2>&1` to capture stderr. Example use:
-
-    let tree = audit { cargo build }         # never raises, even on a failed build
-    $tree[status]                            # the exit code, as data
-    from-string $tree[children][0][stderr]   # cargo writes diagnostics to fd 2
-
-This is how you read a tool whose exit code is *data* (e.g. `grep` exit 1 meaning no match), deliberate signal like `valgrind --error-exitcode=77`. Wrapping such a tool in `audit` captures the output and lets you branch on the code:
+`audit { … }` evaluates its body and returns the execution tree as a ral value: each external command's argv, stdout, stderr, exit code, and timing. `audit` does not raise errors: it turns them into record data. It also keeps stdout/stderr apart, so you need not `2>&1` to capture stderr. This is how you read a tool whose exit code is *data* (e.g. `grep` exit 1 meaning no match), deliberate signal like `valgrind --error-exitcode=77`. Wrapping such a tool in `audit` captures the output and lets you branch on the code:
 
     let r      = audit { valgrind --error-exitcode=77 --leak-check=full ./a.out }
-    let report = from-string $r[children][0][stderr]
+    $r
     if $[ $r[status] == 77 ] { "leaks:\n$report" } else { 'clean' }
 
 ## Concurrency
@@ -188,9 +182,9 @@ This is how you read a tool whose exit code is *data* (e.g. `grep` exit 1 meanin
 If you have nothing else to do, inform the user and ***WAIT***; you will be notified when the build completes. When you receive the notification use `await` to obtain a `[value, stdout, stderr]` record:
 
     let x = await $h                      # blocks until the worker returns
-    [out: $x[stdout], errs: $x[stderr]]   # as Bytes
+    [build-result: $x[stdout], build-errs: $x[stderr]]   # as Bytes
 
-If this fails, ***DO NOT SPAWN AGAIN**. In the next turn just await again: `let x = await $h`. Alternatively, yield to the user and you will be notified.
+If this fails, **DO NOT SPAWN AGAIN**. In the next turn just await again: `let x = await $h`. Alternatively, yield to the user and you will be notified.
 
 Use `cancel $h` to stop a handle thread that is no longer needed. There is also a bounded parallel `map` and a `race`: use `help` to find out more about them. 
 

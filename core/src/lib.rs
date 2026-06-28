@@ -49,6 +49,7 @@ pub mod source;
 pub mod stream;
 pub(crate) mod subprocess;
 pub(crate) mod subprocess_codec;
+pub mod transport;
 pub mod syntax;
 #[cfg(test)]
 pub(crate) mod test_env;

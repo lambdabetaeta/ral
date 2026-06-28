@@ -183,6 +183,7 @@ pub fn bake_prelude_to_out_dir() {
 
 /// The IO regime of a turn: intent, materialised into resources by the turn
 /// doors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnIo {
     /// Run on the session's live streams: the turn's byte sinks are cloned
     /// from the ambient `shell.turn`. The interactive REPL (whose stdout is
@@ -202,6 +203,7 @@ pub enum TurnIo {
 /// [`TerminalLease`](crate::process::TerminalLease) is reachable from it (see
 /// [`Shell::terminal_lease`]). `ExplicitLoan` is deliberately absent — a host
 /// cannot seed it; it is a within-turn elevation a loan token raises.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestedTerminalAccess {
     /// No child/job foreground handoff in this turn. exarch tool turns and any
     /// launch that does not own the terminal foreground.
@@ -217,6 +219,7 @@ pub enum RequestedTerminalAccess {
 /// [`RequestedTerminalAccess`] (foreground authority): a piped `ral -c` is
 /// `Denied` foreground yet still reads its inherited pipe (`Inherit`), while an
 /// exarch tool turn is `Denied` *and* reads no terminal (`Empty`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnStdin {
     /// Use the session stdin source — the inherited fd 0, which may be a
     /// terminal, a pipe, or a redirected file.

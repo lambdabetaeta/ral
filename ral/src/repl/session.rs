@@ -11,7 +11,7 @@
 
 mod boot;
 
-use ral_core::Shell;
+use ral_core::transport::Transport;
 use rustyline::config::{BellStyle, EditMode};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
@@ -37,7 +37,7 @@ pub(super) enum Flow {
 /// an unwinding panic too, not only on the orderly `run` exit — a crash
 /// must not orphan a stopped process group or lose the session's history.
 pub(super) struct Session {
-    shell: Shell,
+    transport: ral_core::transport::IdentityTransport,
     /// Job table shared with captured builtins installed at boot so
     /// `jobs`, `fg`, `bg`, and `disown` can mutate it from closures.
     jobs: Arc<Mutex<jobs::JobTable>>,
@@ -138,8 +138,10 @@ impl Session {
             runtime.clone(),
         );
 
+        let transport = ral_core::transport::IdentityTransport::new(shell);
+
         Ok(Self {
-            shell,
+            transport,
             jobs,
             frontend,
             runtime,
@@ -153,11 +155,14 @@ impl Session {
     /// Drive the loop until a frontend reports EOF or `exit` escapes the
     /// evaluator.  History flush and job reaping happen in [`Drop`], so
     /// they cover a panic-unwind exit as well as this orderly one.
-    pub(super) fn run(self) -> ExitCode {
+    pub(super) fn run(mut self) -> ExitCode {
         ral_core::dbg_trace!("repl", "entering REPL loop");
-        let mut session = self;
-        while let Flow::Continue = session.turn() {}
-        ExitCode::from(session.exit_code)
+        self.transport.attach(ral_core::transport::TerminalEndpoint {
+            lease: None,
+            state: ral_core::io::TerminalState::probe_from_env().1,
+        });
+        while let Flow::Continue = self.turn() {}
+        ExitCode::from(self.exit_code)
     }
 
     /// Run one iteration: reap children, draw prompt, read, eval.
@@ -171,18 +176,22 @@ impl Session {
         // unwind is done and the flag's only effect would be to make the
         // user's RAL_PROMPT thunk return Break::Error("interrupted").
         ral_core::process::clear();
-        write_terminal_title(&self.shell);
-        let prompt = render_prompt(&mut self.shell, &self.runtime);
+        write_terminal_title(&self.transport.shell_mut().shell);
+        let prompt = render_prompt(&mut self.transport.shell_mut().shell, &self.runtime);
 
-        match self.frontend.read(
-            &mut self.shell,
-            &prompt,
-            self.pending.take(),
-            #[cfg(unix)]
-            &self.jobs,
-            #[cfg(feature = "structural")]
-            &self.worksheet,
-        ) {
+        let read_result = {
+            let mut guard = self.transport.shell_mut();
+            self.frontend.read(
+                &mut guard.shell,
+                &prompt,
+                self.pending.take(),
+                #[cfg(unix)]
+                &self.jobs,
+                #[cfg(feature = "structural")]
+                &self.worksheet,
+            )
+        };
+        match read_result {
             Read::Line(input) => {
                 let trimmed = input.trim();
                 if trimmed.is_empty() {
@@ -197,6 +206,7 @@ impl Session {
             }
             Read::Interrupt => {
                 ral_core::process::clear();
+                ral_core::transport::ControlSender::cancel_current();
                 Flow::Continue
             }
             Read::Eof => Flow::Break,
@@ -208,7 +218,7 @@ impl Session {
     fn eval(&mut self, trimmed: &str) -> Flow {
         match step(
             trimmed,
-            &mut self.shell,
+            &self.transport,
             #[cfg(unix)]
             &self.jobs,
             &self.runtime,
@@ -230,6 +240,7 @@ impl Drop for Session {
     /// `Session`, so a crash mid-turn neither orphans a stopped process
     /// group nor drops the session's history.
     fn drop(&mut self) {
+        self.transport.detach();
         self.frontend.save_history();
         // A panic that poisons the JobTable still leaves it structurally
         // valid for a best-effort SIGTERM/SIGKILL sweep; recover the guard

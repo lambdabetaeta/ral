@@ -36,6 +36,7 @@ use crate::provider::{
 use crate::shell_eval;
 use crate::transcript::Transcript;
 use ral_core::Shell;
+use ral_core::transport::Transport;
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -50,7 +51,7 @@ pub struct Agent {
     /// model view (`events.json`) is what the model saw; the transcript is
     /// what the agent did.
     transcript: Transcript,
-    shell: Shell,
+    transport: ral_core::transport::IdentityTransport,
     caps: ral_core::types::Capabilities,
     /// This agent's parent, or `None` for the **trunk**.  The sole structural
     /// distinction: the trunk publishes its cancel token for the OS-signal path
@@ -280,6 +281,11 @@ impl Agent {
         } = b;
         seed_session_dir(&mut shell, &log);
         let durable = shell.mobile_snapshot();
+        let transport = ral_core::transport::IdentityTransport::new(shell);
+        transport.attach(ral_core::transport::TerminalEndpoint {
+            lease: None,
+            state: ral_core::io::TerminalState::probe_from_env().1,
+        });
         // Every agent — the trunk and each fork, both modes — owns its trace,
         // born in the same dir as its `events.json`.
         let transcript = Transcript::create(&log.dir().join("transcript.jsonl"))?;
@@ -288,7 +294,7 @@ impl Agent {
             system,
             log,
             transcript,
-            shell,
+            transport,
             caps,
             parent,
             provider,
@@ -323,10 +329,11 @@ impl Agent {
         );
     }
 
-    fn replace_shell(&mut self, mut shell: Shell) {
+    fn replace_shell(&mut self, shell: Shell) {
+        let mut shell = shell;
         seed_session_dir(&mut shell, &self.log);
         self.durable = shell.mobile_snapshot();
-        self.shell = shell;
+        self.transport = ral_core::transport::IdentityTransport::new(shell);
     }
 
     /// The trunk — the parent-less root of a fresh fleet.  Creates the fleet's
@@ -436,7 +443,7 @@ impl Agent {
         // dropped here the way a hand-copied field once was.  Its capabilities
         // are supplied by the spawn site: the parent's verbatim, or the
         // parent's narrowed to a requested base (`parent ⊓ base`).
-        let shell = self.shell.fork_session();
+        let shell = self.transport.shell_mut().shell.fork_session();
         let child_id = fresh_id();
         let log = self.log.fork(child_id, self.system.len())?;
         Self::assemble(Build {
@@ -627,7 +634,7 @@ impl Agent {
                     // Completed calls' effects live in the snapshot and survive;
                     // the panicking call's do not.  The IO frame self-heals in
                     // ral_core's own run_turn guard; this is the dynamic half.
-                    self.shell.restore_mobile(self.durable.clone());
+                    self.transport.shell_mut().shell.restore_mobile(self.durable.clone());
                     let msg = panic_msg(&p);
                     self.note_error(format!("{WORKER_PANIC_PREFIX}{msg}"), emit);
                     digest = (
@@ -1086,7 +1093,7 @@ impl Agent {
     }
 
     pub(crate) fn cwd(&self) -> std::path::PathBuf {
-        self.shell.cwd()
+        self.transport.shell_mut().shell.cwd()
     }
 
     /// This session's ambient authority — read by the spawn site to compute a
@@ -1131,19 +1138,17 @@ impl Agent {
         // returned, and none that this one is about to mutate.  If the
         // eval below panics, `drive` rebuilds the live context from
         // this snapshot, rolling the panicking call's effects back.
-        self.durable = self.shell.mobile_snapshot();
+        self.durable = self.transport.shell_mut().shell.mobile_snapshot();
         // The deferred-surface destination: a detached `spawn` worker flushes
         // its buffered batch here at completion, posted into this session's
         // own inbox (via `emit`'s mailbox) and guarded by the agent registry's
         // generation (so a `/clear` drops a stale batch).
-        let boundary = shell_eval::boundary_sink(emit, self.id, &self.agents);
         let content = match shell_eval::run_shell(
-            &mut self.shell,
+            &self.transport,
             &self.caps,
             cmd,
             timeout_secs,
             emit,
-            Some(boundary),
             Some(self.pins.clone()),
         ) {
             shell_eval::Outcome::Ran(r) => render(&r),
@@ -1438,12 +1443,12 @@ mod tests {
         ral_core::builtins::register_builtins(PANIC_BUILTINS);
         let dir = tmp("panic-recovery");
         let mut session = Agent::for_test(&dir, "system").unwrap();
-        session.shell.install_builtins(PANIC_BUILTINS);
+        session.transport.shell_mut().shell.install_builtins(PANIC_BUILTINS);
         // Refresh `durable` so the snapshot reflects the just-installed
         // builtin frame, matching the production boundary where the
         // baseline is the booted shell.
-        session.durable = session.shell.mobile_snapshot();
-        let baseline_grant_depth = session.shell.grant_depth();
+        session.durable = session.transport.shell_mut().shell.mobile_snapshot();
+        let baseline_grant_depth = session.transport.shell_mut().shell.grant_depth();
 
         // 1st call binds `a4_x` (completes); 2nd call panics mid-eval.  Both
         // round-trips happen inside one `apply`; `drive` catches the unwind.
@@ -1461,13 +1466,13 @@ mod tests {
 
         // The completed call's binding survives the panic.
         assert!(
-            session.shell.scope_lookup("a4_x").is_some(),
+            session.transport.shell_mut().shell.scope_lookup("a4_x").is_some(),
             "a binding from a completed tool call must survive a later call's panic"
         );
         // The dynamic context is rolled back to the clean boundary: no
         // leaked grant frame from the panicking call's `with_capabilities`.
         assert_eq!(
-            session.shell.grant_depth(),
+            session.transport.shell_mut().shell.grant_depth(),
             baseline_grant_depth,
             "the panicking call's grant frame must not leak into the next turn"
         );
@@ -1498,7 +1503,7 @@ mod tests {
         let dir = tmp("fork-builtins");
         let session = Agent::for_test(&dir, "system").unwrap();
         assert!(
-            session.shell.lookup_builtin("view-text").is_some(),
+            session.transport.shell_mut().shell.lookup_builtin("view-text").is_some(),
             "the parent boot shell must carry the exarch host builtins"
         );
         let child = session
@@ -1512,7 +1517,7 @@ mod tests {
             "explore-dir",
         ] {
             assert!(
-                child.shell.lookup_builtin(name).is_some(),
+                child.transport.shell_mut().shell.lookup_builtin(name).is_some(),
                 "the forked child must inherit the host builtin `{name}`"
             );
         }
@@ -1693,7 +1698,7 @@ mod tests {
         );
         // The binding from the completed tool call survived.
         assert!(
-            session.shell.scope_lookup("x12_a").is_some(),
+            session.transport.shell_mut().shell.scope_lookup("x12_a").is_some(),
             "a binding from a completed tool call must survive a later provider error"
         );
         // The second turn ran: the final outcome is the no-reply failure
