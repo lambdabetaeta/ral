@@ -30,7 +30,7 @@ use crate::turn::{StaticDiagnostics, TurnLifecycle};
 use crate::typecheck::Scheme;
 use crate::types::{Boundary, Capabilities, Settled, Shell, SurfaceSink, Value};
 use crate::types::{
-    DefaultPolicy, HookSig, HostProgram, ProgramName, RegisterError, TerminalPolicy,
+    DefaultPolicy, HookSig, Hook, HookName, RegisterError, TerminalPolicy,
 };
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -168,10 +168,10 @@ pub fn bake_prelude_to_out_dir() {
 //
 // Hosts start an evaluation through exactly one of three doors:
 // `Shell::run_source_turn(src, TurnRequest)` runs a turn from source text;
-// `Shell::register_program(name, program, sig, policy, origin)` stores a
-// compiled host program by name in the session-lived program table;
-// `Shell::run_program(name, args, TurnRequest)` dispatches a registered
-// program by name as the root of a fresh turn.  All three return one flat
+// `Shell::register_hook(name, value, sig, policy, origin)` stores a
+// compiled hook by name in the session-lived hook table;
+// `Shell::run_hook(name, args, TurnRequest)` dispatches a registered
+// hook by name as the root of a fresh turn.  All three return one flat
 // `TurnReport`.  Hosts describe *policy* (`TurnRequest`, `TurnIo`,
 // `SurfaceSink`, lifecycle hooks); core owns *resources* (`Sink`, `Source`,
 // `TurnState`, guards, buffers, signal slots).  Completion is the call
@@ -333,39 +333,39 @@ impl Shell {
     }
 
     /// Register a host-held [`Value`] (a compiled `Block` or `Lambda`)
-    /// as a named turn-entry point in the session-lived program table.
+    /// as a named turn-entry point in the session-lived hook table.
     ///
-    /// The program is stored by `name`; it is never readable as `$name`
+    /// The hook is stored by `name`; it is never readable as `$name`
     /// and never invokable as a command — it fires only when the host
-    /// calls [`Self::run_program`] at a lifecycle moment (prompt render,
+    /// calls [`Self::run_hook`] at a lifecycle moment (prompt render,
     /// startup, plugin hook, keybinding).
     ///
     /// Registration checks:
-    /// 1. `program` is a `Block` or `Lambda`.
-    /// 2. Its arity matches `sig` (0 for `PromptProgram`, 1 otherwise).
-    /// 3. `HostProgram::validate` — a no-op seam for future mobility
+    /// 1. `value` is a `Block` or `Lambda`.
+    /// 2. Its arity matches `sig` (0 for `Prompt`, 1 otherwise).
+    /// 3. `Hook::validate` — a no-op seam for future mobility
     ///    checks.
     ///
-    /// On success the program is inserted into `context.programs`,
+    /// On success the hook is inserted into `context.hooks`,
     /// keyed by `name`.  On failure a [`RegisterError`] is returned;
     /// callers render it as a diagnostic at `origin`.
-    pub fn register_program(
+    pub fn register_hook(
         &mut self,
-        name: ProgramName,
-        program: Value,
+        name: HookName,
+        value: Value,
         sig: HookSig,
         policy: DefaultPolicy,
         origin: Span,
     ) -> Result<(), RegisterError> {
         // 1. Must be Block or Lambda.
-        let arity = match &program {
+        let arity = match &value {
             Value::Block { .. } => 0,
-            Value::Lambda { .. } => program.lambda_arity().unwrap_or(1),
+            Value::Lambda { .. } => value.lambda_arity().unwrap_or(1),
             _ => {
                 return Err(RegisterError::NotCallable {
                     name,
                     origin,
-                    actual: program.type_name().to_string(),
+                    actual: value.type_name().to_string(),
                 });
             }
         };
@@ -384,7 +384,7 @@ impl Shell {
 
         // 3. Build the Binding with the same scheme inference an
         //    ordinary session `let` uses.
-        let arm = match &program {
+        let arm = match &value {
             Value::Lambda { param, body, .. } => Some((Some(param), body)),
             Value::Block { body, .. } => Some((None, body)),
             _ => unreachable!("already checked above"),
@@ -393,30 +393,27 @@ impl Shell {
             crate::typecheck::binding_value_scheme(param, body, self.session_schemes())
         });
         use crate::types::Binding;
-        let binding = Binding {
-            value: program,
-            scheme,
-        };
+        let binding = Binding { value, scheme };
 
         // 4. Check for duplicate registration.
-        if self.mobile.context.programs.contains_key(&name) {
+        if self.mobile.context.hooks.contains_key(&name) {
             return Err(RegisterError::AlreadyRegistered { name, origin });
         }
 
         // 5. Validate (no-op seam for future mobility checks).
-        let hp = HostProgram {
+        let hook = Hook {
             binding,
             sig,
             policy,
             origin,
         };
-        hp.validate()?;
+        hook.validate()?;
 
-        self.mobile.context.programs.insert(name, hp);
+        self.mobile.context.hooks.insert(name, hook);
         Ok(())
     }
 
-    /// Run a registered host program by name, applying `args` as its
+    /// Run a registered hook by name, applying `args` as its
     /// arguments, through the shared framed scaffold
     /// ([`Self::run_built`]).  Returns one flat [`TurnReport`].
     ///
@@ -425,17 +422,17 @@ impl Shell {
     ///
     /// `req` supplies the script label, capability ceiling, lifecycle
     /// hooks, and surface sink; terminal access, capture, and budget
-    /// are taken from the program's registered [`DefaultPolicy`].
-    pub fn run_program(
+    /// are taken from the hook's registered [`DefaultPolicy`].
+    pub fn run_hook(
         &mut self,
-        name: &ProgramName,
+        name: &HookName,
         args: Vec<Value>,
         req: TurnRequest<'_>,
     ) -> TurnReport {
-        let Some(prog) = self.mobile.context.programs.get(name).cloned() else {
+        let Some(hook) = self.mobile.context.hooks.get(name).cloned() else {
             return TurnReport::Static {
                 diagnostics: StaticDiagnostics::Host(crate::types::Error::new(
-                    format!("host program '{}' is not registered", name),
+                    format!("hook '{}' is not registered", name),
                     1,
                 )),
             };
@@ -446,7 +443,7 @@ impl Shell {
                 return TurnReport::Static {
                     diagnostics: StaticDiagnostics::Host(crate::types::Error::new(
                         format!(
-                            "argument {} to host program '{}' is not a ground value \
+                            "argument {} to hook '{}' is not a ground value \
                              (got {}); only plain data may cross the dispatch boundary",
                             i + 1,
                             name,
@@ -459,12 +456,12 @@ impl Shell {
         }
 
         let foreground = self.durable_root().child();
-        let wall = prog
+        let wall = hook
             .policy
             .budget
             .map(|d| crate::process::arm_lifetime(foreground.as_scope().clone(), d));
 
-        let terminal = match prog.policy.terminal {
+        let terminal = match hook.policy.terminal {
             TerminalPolicy::Denied => RequestedTerminalAccess::Denied,
             TerminalPolicy::Leased => RequestedTerminalAccess::Leased,
         };
@@ -472,7 +469,7 @@ impl Shell {
         let merged_req = TurnRequest {
             script_name: req.script_name,
             caps: req.caps,
-            io: if prog.policy.capture {
+            io: if hook.policy.capture {
                 TurnIo::Capture
             } else {
                 req.io
@@ -482,12 +479,12 @@ impl Shell {
             surface: req.surface,
             boundary: req.boundary,
             lifecycle: req.lifecycle,
-            turn_limit: prog.policy.budget.or(req.turn_limit),
+            turn_limit: hook.policy.budget.or(req.turn_limit),
             detached_limit: req.detached_limit,
         };
 
         self.run_built(merged_req, foreground, wall, false, "", |s| {
-            crate::builtins::apply(&prog.binding.value, &args, s)
+            crate::builtins::apply(&hook.binding.value, &args, s)
         })
     }
 
@@ -496,7 +493,7 @@ impl Shell {
     /// `foreground`, evaluate `body` under the capability ceiling and lifecycle
     /// hooks, then disarm the `wall` and fold the captured bytes and
     /// `timed_out` into the report. `body` is the turn's program — the source
-    /// door's `eval_top_level`, the value door's in-frame `apply`.
+    /// door's `eval_top_level`, the hook door's in-frame `apply`.
     fn run_built(
         &mut self,
         req: TurnRequest<'_>,

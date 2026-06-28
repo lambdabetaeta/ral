@@ -7,7 +7,7 @@
 //! Unloading reverses the env installation and drops the record.
 
 use ral_core::source::Span;
-use ral_core::types::{Break, DefaultPolicy, Error, HookSig, ProgramName, Settled};
+use ral_core::types::{Break, DefaultPolicy, Error, HookSig, HookName, Settled};
 use ral_core::{RequestedTerminalAccess, Shell, TurnReport, Value};
 use std::sync::{Arc, Mutex};
 
@@ -66,8 +66,8 @@ pub(crate) fn load_plugin(
     // thunks were compiled from, so a fault inside one renders against it.
     plugin.source = std::sync::Arc::from(source.as_str());
 
-    // Register hook and keybinding handlers as host programs.
-    // Each fires via `run_program` rather than the old `run_value_turn`.
+    // Register hook and keybinding handlers in the hook table.
+    // Each fires via `run_hook` rather than the old `run_value_turn`.
     let origin = Span::new(ral_core::source::FileId(0), 0, 0);
     for (hook_event, handler) in &plugin.hooks {
         let sig = match hook_event.as_str() {
@@ -81,8 +81,8 @@ pub(crate) fn load_plugin(
                 kind: hook_event.clone(),
             },
         };
-        if let Err(e) = shell.register_program(
-            ProgramName::plugin(plugin.name.clone(), hook_event.clone()),
+        if let Err(e) = shell.register_hook(
+            HookName::plugin(plugin.name.clone(), hook_event.clone()),
             handler.clone(),
             sig,
             DefaultPolicy::denied(),
@@ -95,8 +95,8 @@ pub(crate) fn load_plugin(
         }
     }
     for (key_notation, handler) in &plugin.keybindings {
-        if let Err(e) = shell.register_program(
-            ProgramName::plugin(plugin.name.clone(), format!("key:{key_notation}")),
+        if let Err(e) = shell.register_hook(
+            HookName::plugin(plugin.name.clone(), format!("key:{key_notation}")),
             handler.clone(),
             HookSig::Hook {
                 kind: "keybinding".into(),
@@ -229,9 +229,9 @@ fn instantiate(
     let empty = Value::Map(ral_core::Map::new());
     match val {
         val @ (Value::Lambda { .. } | Value::Block { .. }) => {
-            let factory_name = ProgramName::plugin(name.to_string(), "factory");
+            let factory_name = HookName::plugin(name.to_string(), "factory");
             let origin = Span::new(ral_core::source::FileId(0), 0, 0);
-            if let Err(e) = shell.register_program(
+            if let Err(e) = shell.register_hook(
                 factory_name.clone(),
                 val,
                 HookSig::PluginFactory,
@@ -242,7 +242,7 @@ fn instantiate(
             }
             let arg = options.cloned().unwrap_or(empty);
             let req = framed_turn_request("<plugin>", RequestedTerminalAccess::Denied);
-            let report = shell.run_program(&factory_name, vec![arg], req);
+            let report = shell.run_hook(&factory_name, vec![arg], req);
             match report {
                 TurnReport::Ran { result, .. } => result,
                 TurnReport::Static { .. } => {

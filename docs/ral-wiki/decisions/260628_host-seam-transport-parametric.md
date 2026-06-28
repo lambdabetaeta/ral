@@ -20,8 +20,10 @@ process and cross the seam as *typed messages*; and the cut falls only *around a
 whole turn*, never inside an effect scope. The local, in-process deployment is the
 identity instantiation of this one mechanism, not a privileged special case.
 
-This is a *direction* ADR, filed from a design conversation. Nothing here is
-built. It rests entirely on landed pieces — the
+This is a *direction* ADR, filed from a design conversation. **Phase 0 (the hook
+table) is now implemented** (commit `b2d8f1e`; see [Phase 0 in
+detail](#phase-0-in-detail-the-hook-table)); the transport itself (Phases 1–2)
+is not yet built. It rests entirely on landed pieces — the
 [[decisions/260610_evaluator-runtime-split|evaluator/runtime split]],
 [[decisions/260610_host-embedding-api|host-embedding-api]],
 [[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]],
@@ -492,16 +494,24 @@ died for.
 
 ### Phase 0 — Source-only host turns
 
+> **Implemented** (commit `b2d8f1e`). The realized, renamed plan is recorded in
+> full under [Phase 0 in detail](#phase-0-in-detail-the-hook-table) at the end of
+> this ADR; it supersedes the seed-map / wrapper sketch below. As built: `USER` /
+> `CWD` / `STATUS` became *ambient reads* (not seed-map entries), the engine
+> dispatches a named **hook** by `HookName` (not a `HookRef` carrying policy), and
+> a hook runs its already-compiled block directly, with no generated wrapper
+> source.
+
 **Make every computation scheduled by a front-end look like a source turn before
 any transport exists.** Lambdas and blocks remain first-class inside the
 evaluator, and `apply` remains the language's eliminator for them. What
 disappears is narrower: no host API accepts a live `Value::Block` or
 `Value::Lambda` as the program of a fresh turn.
 
-The target representation is a host program reference, not a runtime closure:
+The target representation is a hook reference, not a runtime closure:
 
 ```
-HostProgramRef {
+HookRef {
     namespace,      // session or plugin-private
     name,           // engine-minted or parser-validated
     origin,         // path plus source range for diagnostics
@@ -639,6 +649,248 @@ no new semantics.
 After Phase 2, the design has crossed a real process boundary while preserving the
 whole-turn cut. Phase 3 can replace the same-host terminal endpoint with a
 PTY-backed endpoint and put the engine in a VM.
+
+## Phase 0 in detail: the hook table
+
+*This is the realized Phase 0 plan, merged in from the former `Plan0.md` once
+Phase 0 landed (commit `b2d8f1e`). Scope: remove the one host construct that
+cannot survive a boundary — a live `Value` handed in as the program of a turn —
+and replace it with a **named hook table** dispatched by the engine itself. No
+transport, no serialisation, no new IR. Everything reuses machinery that already
+exists: `parse` → `elaborate` → `typecheck` → `apply` / `eval_top_level`, the
+`Env`, the handler stack, and the `pseudo_var` read path.*
+
+### The punchline
+
+A "hook" is just a `Value::Block` / `Value::Lambda` we already build while
+evaluating the rc file or a plugin file. **Registering** it = storing that value by
+name in a session-lived table instead of in a user variable or a host-held field.
+**Running** it = `apply(hook, args)` inside the existing `run_built` scaffold. A
+block's `body` is already an `Arc<Comp>` (the compiled IR), so the hook runs
+directly — there is no re-parsing and no generated "wrapper" source.
+
+The seam stops carrying a value; it carries a **name** the engine resolves against
+its own table. The block never leaves the engine.
+
+### Decisions locked in this plan
+
+1. **`RAL_PROMPT`-the-variable dies.** The prompt is no longer a value looked up in
+   the lexical scope and applied. It is a **declared hook** registered by name. You
+   change your prompt by re-declaring it, not by assigning a variable.
+2. **The prompt is a zero-input hook.** `USER` / `CWD` / `STATUS` are *not* passed
+   in. They become **ambient reads** served by `pseudo_var`, computed on read from
+   engine state the engine already owns. `PromptBindings` is deleted outright,
+   including the `set_var` / `set_env_var` side effects that today leak those three
+   into the user's scope and into every child process's environment.
+3. **Per-event hook input is deferred, per-site.** Whether a plugin hook's input
+   (buffer text, cursor, keystroke) arrives as a dispatched argument or as an
+   ambient read is decided per site, not here. Phase 0 routes hooks through the hook
+   table; it does not settle their input convention.
+4. **Mobility enforcement is deferred.** In-process, a hook's captured `Env` may
+   hold anything. The check that a registered hook captures only transportable state
+   belongs to the phase that adds a real boundary. Phase 0 leaves a single marked
+   seam (`Hook::validate`) where that check will live, and does nothing in it yet.
+
+### New machinery (small, and beside what exists)
+
+#### 1. The hook table
+
+> **It is a lexical binding, not a handler.** A registered hook is a name bound to
+> a `Value::Block`/`Lambda` that *captures a lexical environment* — exactly what a
+> session `Env` binding is, and exactly what `RAL_PROMPT` already was. It is **not**
+> a handler: handlers are dynamically scoped, resolved at command position, and
+> compose by the grant/handler meet; a hook has none of that. So we reuse the
+> **lexical** representation — `Binding { value, scheme }` with the scheme inferred
+> by the existing `bind_value` path — not `HandlerEntry`.
+
+Three namespaces, kept distinct:
+
+1. **user value/lexical namespace** (`Env`) — `$name`, lexical capture; a session
+   binding holding a block is *also command-invokable* (`foo args`).
+2. **handler namespace** (`HandlerStack`) — dynamic, command-dispatched, meet.
+3. **hook namespace** (new) — lexically-natured named definitions reachable only by
+   the host at lifecycle moments.
+
+A hook is a #1-natured thing (lexical capture, named definition, static — not #2's
+dynamic dispatch). It lives in #3 rather than literally in the user's `Env` for one
+reason: **hygiene**. In `Env` it would be readable as `$prompt`, invokable as a
+`prompt` command, and overwritable by user code, and it could not carry the
+`Plugin(id)` namespacing. A separate table keeps host entry points out of the
+user's value/command namespace.
+
+On `Context`, beside `scope` and `handlers`:
+
+```rust
+struct Hook {
+    binding: Binding,        // reuse the lexical shape: { value: Block/Lambda, scheme }
+    sig:     HookSig,        // engine-declared fixed-arity signature for this kind
+    policy:  DefaultPolicy,  // terminal access, capture, turn budget
+    origin:  Span,           // declaration site, for diagnostics
+}
+
+enum Namespace { Session, Plugin(PluginId) }
+struct HookName { namespace: Namespace, name: String }
+
+hooks: HashMap<HookName, Hook>
+```
+
+**The invariant that makes #3 a separate namespace: a hook is a turn root, never a
+command.** It is invoked only by the host, as the root of a fresh turn, via
+`apply`. It is never resolved by `$name` and never consulted at command position
+(command dispatch reads only `handlers`; value reads only `Env`). So `__prompt__`
+is not a user-invokable command and not a readable variable; a hook can never act
+as a `CatchAll`. Hooks are flat, stable session entries keyed by `HookName`, added
+and removed by host lifecycle (plugin load/unload, prompt re-declaration) — not
+pushed/popped within a turn, not part of the meet.
+
+The table is session-lived (survives across turns, like `handlers`). It is **not**
+part of the source type environment: Phase 0 dispatches hooks by name from host
+code, so references to them do not flow through `session_schemes()` / `seed_env`.
+(Plugin-internal calls between a plugin's own hooks are ordinary source resolved at
+plugin-load time against the plugin namespace, and are unaffected.)
+
+#### 2. Registration
+
+```rust
+impl Shell {
+    fn register_hook(&mut self, name: HookName, value: Value,
+                     sig: HookSig, policy: DefaultPolicy, origin: Span)
+        -> Result<(), RegisterError>;
+}
+```
+
+- Assert `value` is a `Block` or `Lambda`; otherwise error with `origin`.
+- Build the `Binding` with the **existing** lexical `bind_value` scheme inference —
+  the same path a session `let` of a block uses. The only difference from an
+  ordinary session binding is the destination: the private `hooks` table, not the
+  user's `Env` scope.
+- **Typecheck the hook against its kind's fixed signature `HookSig`** (see *§ Fixed-
+  arity hook signatures*): a prompt hook must be `() -> String`, a buffer-change
+  hook must match its declared record-in / record-out shape, or registration fails
+  *at declaration time* with `origin`.
+- `Hook::validate(&value)` — the marked seam for later mobility checks. A no-op in
+  Phase 0.
+- Insert into `hooks`.
+
+The value comes straight from the already-evaluated config/manifest `Map` — it was
+compiled by `parse`/`elaborate`/`typecheck` as a normal part of evaluating the rc
+or plugin file. No new compile path.
+
+#### 3. Dispatch
+
+```rust
+impl Shell {
+    fn run_hook(&mut self, name: &HookName, args: Vec<Value>, req: TurnRequest)
+        -> TurnReport;
+}
+```
+
+1. Look up the `Hook` (miss → `TurnReport` carrying a host diagnostic).
+2. Assert every arg satisfies `is_ground`.
+3. `self.run_built(req, …, |s| apply(&hook.binding.value, &args, s))`.
+
+`run_hook` *is* the old `run_value_turn` with two changes: the program is fetched
+from the engine's own table rather than handed in, and its arguments are required
+to be ground. The framing, IO, terminal lease, capture, and lifecycle are unchanged
+because it goes through the same `run_built`.
+
+#### 4. The ground-value predicate
+
+```rust
+fn is_ground(v: &Value) -> bool   // unit, bool, int, string, bytes,
+                                  // list/map/variant of ground; NOT Block/Lambda/handle
+```
+
+Used to guard `run_hook` arguments. This is the only place Phase 0 asserts the host
+conveys data, not closures, across the dispatch boundary.
+
+### Ambient reads for the prompt
+
+`Shell::pseudo_var` synthesises three derived entries on read, so source can query
+engine state without the prompt injecting it: `CWD` from `self.cwd()`, `STATUS`
+from `self.last_status()`, `USER` from `platform::user_name()`. They are readable
+by *any* hook at *any* time, derived from state the engine already maintains — not
+a per-cycle side effect of rendering the prompt.
+
+### Per-site lowering
+
+| Site | Today | After |
+| --- | --- | --- |
+| **prompt** | `scope_lookup("RAL_PROMPT")` → `PromptBindings` env surgery → `run_value_turn(thunk, [], …)` | register the `prompt:` block as `Session/"prompt"`; each render `run_hook(Session/"prompt", [], Denied + capture)`. Body reads ambient `$cwd` / `$?` / `$user`. |
+| **startup** | `run_value_turn(block, [], …)` | register the rc `startup:` block as `Session/"startup"`; `run_hook(Session/"startup", [], Denied)` once. |
+| **plugin factory** | `run_value_turn(factory, [options], …)` | register the factory as `Plugin(id)/"factory"`; `run_hook(…, [options], Denied)` once. `options` must be ground. |
+| **plugin hooks** | manifest stores handler *values*; `run_value_turn(hook, args, …)` | at load, `register_hook(Plugin(id)/hook_name, handler, policy)` checking the handler against the kind's `HookSig`; manifest stores **names**. Event: front-end conveys one fixed ground **context record**; `run_hook` returns one fixed ground **output record** — no mutable `PluginContext`. |
+| **keybindings** | as hooks, `Leased` | as hooks, fixed record in / record out, `Leased` policy. |
+| **lifecycle** (pre/post/chpwd) | direct `apply`, in-frame | manifest stores names; the in-frame call resolves the name and `apply`s it **inside the existing command frame**. No turn change, no `run_hook`. |
+
+For every hook-valued site the value is a literal in the rc/plugin source, so it is
+already a fully compiled `Block`/`Lambda` by the time the loader holds the manifest
+`Map`. Registration grabs it; nothing is recompiled.
+
+### Deletions
+
+- `Shell::run_value_turn` — the public door that accepted a host-held `Value` as a
+  turn program. After the lowerings above, nothing calls it.
+- `PromptBindings` and its `collect`/`apply`/`entries`, the `scope_lookup("RAL_PROMPT")`
+  in `render`, the value branch in `eval_prompt`, and the boot-time default-thunk
+  install into the `RAL_PROMPT` variable.
+
+`run_built` stays (private scaffold). `apply` and `eval_top_level` stay (private
+evaluator entries). The public host evaluation surface becomes exactly:
+`run_source_turn` (ad-hoc human/model source turns) + `run_hook` + `register_hook`.
+
+### Fixed-arity hook signatures
+
+**Where the data lives decides ambient vs argument.** The editor's buffer, cursor,
+keystroke, history, and keymap are owned by the front-end (rustyline); the engine
+holds *no* representation of the editing line. By contrast `cwd` / `last_status` /
+`user` are engine state. So the rule is sharp:
+
+> **ambient read ⇔ engine-owned standing state; argument ⇔ front-end-owned
+> per-event state.**
+
+**Arguments are fixed-arity, never variadic.** Each hook kind has a *known, fixed*
+input set, so each gets an engine-declared signature `HookSig` checked at
+registration. Because `Value::Lambda` is unary, "fixed-arity" is realised as **one
+fixed-shape ground record in, one fixed-shape ground record out**:
+
+| hook | context record (in) | output record (out) |
+| --- | --- | --- |
+| **prompt hook** | `{}` (zero input; reads ambient `cwd`/`status`/`user`) | `String` |
+| **prompt transform** | `{ base: String }` | `String` |
+| **buffer-change** | `{ old_buf, line: String, pos: Int, history: [String], keymap: String, state: S }` | `{ ghost: String?, highlights: [Span], state: S }` |
+| **keybinding** | `{ line: String, cursor: Int, history: [String], keymap: String, state: S }` | `{ line: String, cursor: Int, accept: Bool, push: (String, Int)?, state: S }` |
+| **lifecycle** (pre/post/chpwd) | `{ … per-event args }` | `Unit` (side-effecting, in-frame) |
+
+This dissolves the mutable `PluginContext`: inputs are the record argument, outputs
+the record return. The one consequence to accept:
+
+> **Plugin persistent state must be ground.** Prior state enters as the `state`
+> field and new state leaves in the `state` field — so it must be ground (no
+> closures/handles). This retires the `_ed-*` side-effecting builtins; a hook
+> *returns* its state and outputs instead of mutating a shared context.
+
+In-process this record threading is free; across a boundary it is exactly what
+crosses the wire. Doing it in Phase 0 keeps the phase honest — a shared mutable
+`PluginContext` is precisely the host↔hook channel that cannot cross a seam.
+
+### Suggested sequencing
+
+1. Add the `hooks` table to `Context` + `HookName` / `Hook` / `HookSig` /
+   `DefaultPolicy`, with `register_hook` (signature-checked) and the no-op
+   `validate`.
+2. Add `is_ground` and `run_hook` over `run_built`.
+3. Add the three ambient reads to `pseudo_var`.
+4. Lower **prompt** (the motivating case): register + `run_hook`, delete
+   `PromptBindings` and the `RAL_PROMPT` variable path.
+5. Lower **startup**, then **plugin factory**.
+6. Lower **hooks** + **keybindings** to the fixed record-in / record-out
+   signatures: declare each `HookSig`, dissolve `PluginContext`, retire the `_ed-*`
+   builtins, convert the manifest to store names; keep **lifecycle** hooks in-frame.
+7. Delete `run_value_turn`. The build now proves nothing hands a host `Value` across
+   the seam.
+
+Each step is independently testable in-process, and each leaves the tree building.
 
 ## See also
 

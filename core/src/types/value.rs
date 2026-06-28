@@ -260,7 +260,7 @@ impl Value {
     /// True when this value carries only plain data — no closures,
     /// thunks, or handles.  Ground values are the only kind the host
     /// may pass as arguments across the dispatch boundary into a
-    /// [`run_program`](crate::Shell::run_program) call.
+    /// [`run_hook`](crate::Shell::run_hook) call.
     pub fn is_ground(&self) -> bool {
         match self {
             Value::Unit

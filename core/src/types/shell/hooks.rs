@@ -1,17 +1,17 @@
-//! Host-program table: a session-lived namespace of named turn-entry
-//! points registered by the host (rc file, plugin loader) and dispatched
-//! by the engine at lifecycle moments — prompt render, startup, plugin
-//! hooks, keybindings.
+//! Hook table: a session-lived namespace of named turn-entry points
+//! registered by the host (rc file, plugin loader) and dispatched by the
+//! engine at lifecycle moments — prompt render, startup, plugin hooks,
+//! keybindings.
 //!
-//! A host program is a [`Value::Block`] / [`Value::Lambda`] the host
-//! already holds in compiled form.  **Registering** it = storing it by
-//! name in the session-lived [`Context::programs`] table.  **Running**
-//! it = [`Shell::run_program`], which looks up the program and applies it
-//! through the shared framed scaffold ([`Shell::run_built`]).
+//! A hook is a [`Value::Block`] / [`Value::Lambda`] the host already
+//! holds in compiled form.  **Registering** it = storing it by name in
+//! the session-lived [`Context::hooks`] table.  **Running** it =
+//! [`Shell::run_hook`], which looks up the hook and applies it through
+//! the shared framed scaffold ([`Shell::run_built`]).
 //!
 //! The table is a separate namespace from both the user lexical scope
-//! ([`Env`]) and the handler stack ([`HandlerStack`]): a program is a
-//! turn root, never a command; it is never resolved by `$name` and never
+//! ([`Env`]) and the handler stack ([`HandlerStack`]): a hook is a turn
+//! root, never a command; it is never resolved by `$name` and never
 //! consulted at command position.  This keeps host entry points out of
 //! the user's value/command namespace.
 
@@ -21,12 +21,12 @@ use crate::types::Binding;
 use std::fmt;
 use std::time::Duration;
 
-// ── Program identity ────────────────────────────────────────────────────
+// ── Hook identity ───────────────────────────────────────────────────────
 
 /// Plugin identity: the unique name a plugin was loaded under.
 pub type PluginId = String;
 
-/// Which namespace a program lives in.
+/// Which namespace a hook lives in.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Namespace {
     /// Session-global: rc-declared prompt, startup block.
@@ -35,14 +35,14 @@ pub enum Namespace {
     Plugin(PluginId),
 }
 
-/// Fully-qualified name of a registered host program.
+/// Fully-qualified name of a registered hook.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ProgramName {
+pub struct HookName {
     pub namespace: Namespace,
     pub name: String,
 }
 
-impl ProgramName {
+impl HookName {
     pub fn session(name: impl Into<String>) -> Self {
         Self {
             namespace: Namespace::Session,
@@ -58,7 +58,7 @@ impl ProgramName {
     }
 }
 
-impl fmt::Display for ProgramName {
+impl fmt::Display for HookName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.namespace {
             Namespace::Session => write!(f, "{}", self.name),
@@ -78,9 +78,9 @@ impl fmt::Display for ProgramName {
 /// human-readable label for diagnostics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookSig {
-    /// Zero-input program: `{ … }` — used for the prompt body and the
+    /// Zero-input hook: `{ … }` — used for the prompt body and the
     /// startup block.  A `Block` (no parameters).
-    PromptProgram,
+    Prompt,
     /// One-input hook receiving a ground record: `{ |ctx| … }` —
     /// prompt hook, buffer-change, keybinding, lifecycle hooks.
     Hook { kind: String },
@@ -93,11 +93,11 @@ pub enum HookSig {
 
 impl HookSig {
     /// The expected parameter count for a thunk registered under this
-    /// signature: 0 for a `PromptProgram` (Block), 1 for everything else
+    /// signature: 0 for a `Prompt` (Block), 1 for everything else
     /// (Lambda).
     pub fn expected_arity(&self) -> usize {
         match self {
-            HookSig::PromptProgram => 0,
+            HookSig::Prompt => 0,
             HookSig::Hook { .. } | HookSig::PluginFactory | HookSig::Lifecycle { .. } => 1,
         }
     }
@@ -105,7 +105,7 @@ impl HookSig {
     /// Human-readable label for diagnostics ("prompt body", "prompt hook", …).
     pub fn label(&self) -> &str {
         match self {
-            HookSig::PromptProgram => "prompt body",
+            HookSig::Prompt => "prompt body",
             HookSig::Hook { kind } => kind.as_str(),
             HookSig::PluginFactory => "plugin factory",
             HookSig::Lifecycle { kind } => kind.as_str(),
@@ -113,22 +113,22 @@ impl HookSig {
     }
 }
 
-// ── Per-program policy ──────────────────────────────────────────────────
+// ── Per-hook policy ─────────────────────────────────────────────────────
 
-/// Whether a program's turns may hand the controlling terminal to a child.
+/// Whether a hook's turns may hand the controlling terminal to a child.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalPolicy {
     Denied,
     Leased,
 }
 
-/// The host-stated policy for a registered program's turns: terminal
+/// The host-stated policy for a registered hook's turns: terminal
 /// access, capture regime, and optional turn budget.
 #[derive(Debug, Clone)]
 pub struct DefaultPolicy {
-    /// Terminal authority for turns run from this program.
+    /// Terminal authority for turns run from this hook.
     pub terminal: TerminalPolicy,
-    /// Capture stdout/stderr for this program's turns.
+    /// Capture stdout/stderr for this hook's turns.
     pub capture: bool,
     /// Optional per-turn wall; `None` = uncapped.
     pub budget: Option<Duration>,
@@ -160,27 +160,27 @@ impl DefaultPolicy {
     }
 }
 
-// ── Host program ────────────────────────────────────────────────────────
+// ── Hook ────────────────────────────────────────────────────────────────
 
-/// One entry in the program table: a named, typechecked, policy-tagged
+/// One entry in the hook table: a named, typechecked, policy-tagged
 /// turn root.
 #[derive(Debug, Clone)]
-pub struct HostProgram {
+pub struct Hook {
     /// The lexical binding — `{ value: Block/Lambda, scheme }` — built
     /// by the same scheme-inference path an ordinary session `let` uses.
     pub binding: Binding,
-    /// The engine-declared fixed-arity signature this program was
+    /// The engine-declared fixed-arity signature this hook was
     /// checked against at registration.
     pub sig: HookSig,
-    /// The host-stated default policy for turns run from this program.
+    /// The host-stated default policy for turns run from this hook.
     pub policy: DefaultPolicy,
     /// Declaration site, for diagnostics.
     pub origin: Span,
 }
 
-impl HostProgram {
+impl Hook {
     /// Marked seam for mobility enforcement.  No-op in Phase 0; in a
-    /// later phase this will validate that the program's captured `Env`
+    /// later phase this will validate that the hook's captured `Env`
     /// holds only transportable state.
     pub fn validate(&self) -> Result<(), RegisterError> {
         let _ = &self.binding;
@@ -194,20 +194,20 @@ impl HostProgram {
 pub enum RegisterError {
     /// The value is not a Block or Lambda.
     NotCallable {
-        name: ProgramName,
+        name: HookName,
         origin: Span,
         actual: String,
     },
     /// The value's arity does not match the expected signature.
     ArityMismatch {
-        name: ProgramName,
+        name: HookName,
         origin: Span,
         expected: usize,
         actual: usize,
         sig_label: String,
     },
-    /// A program with this name is already registered.
-    AlreadyRegistered { name: ProgramName, origin: Span },
+    /// A hook with this name is already registered.
+    AlreadyRegistered { name: HookName, origin: Span },
 }
 
 impl fmt::Display for RegisterError {
@@ -216,7 +216,7 @@ impl fmt::Display for RegisterError {
             RegisterError::NotCallable { name, actual, .. } => {
                 write!(
                     f,
-                    "cannot register '{}' as a host program: \
+                    "cannot register '{}' as a hook: \
                      expected a Block or Lambda, got {}",
                     name, actual
                 )
@@ -240,7 +240,7 @@ impl fmt::Display for RegisterError {
                 )
             }
             RegisterError::AlreadyRegistered { name, .. } => {
-                write!(f, "host program '{}' is already registered", name)
+                write!(f, "hook '{}' is already registered", name)
             }
         }
     }

@@ -6,7 +6,7 @@
 //! Unknown keys are silently ignored so future versions can add knobs without
 //! breaking older configs.
 
-use ral_core::types::{DefaultPolicy, HookSig, ProgramName};
+use ral_core::types::{DefaultPolicy, HookSig, HookName};
 use ral_core::{Map, Shell, Value};
 
 use super::frontend::Surface;
@@ -134,10 +134,10 @@ pub(crate) fn apply_rc_config(
             }
             "prompt" => {
                 let origin = ral_core::source::Span::new(ral_core::source::FileId(0), 0, 0);
-                if let Err(e) = ctx.shell.register_program(
-                    ProgramName::session("prompt"),
+                if let Err(e) = ctx.shell.register_hook(
+                    HookName::session("prompt"),
                     val,
-                    HookSig::PromptProgram,
+                    HookSig::Prompt,
                     DefaultPolicy::denied_capture(),
                     origin,
                 ) {

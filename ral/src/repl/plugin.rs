@@ -27,7 +27,7 @@ pub(super) mod manifest;
 
 use ral_core::types::{Break, Capabilities, Settled};
 use ral_core::{
-    ProgramName, RequestedTerminalAccess, Shell, StaticDiagnostics, TurnIo, TurnReport,
+    HookName, RequestedTerminalAccess, Shell, StaticDiagnostics, TurnIo, TurnReport,
     TurnRequest, TurnStdin, Value, diagnostic,
 };
 use std::time::Duration;
@@ -373,7 +373,7 @@ pub(super) struct FramedHook {
 pub(super) fn call_plugin_hook(
     shell: &mut Shell,
     plugin: HookFor<'_>,
-    program_name: &ProgramName,
+    hook: &HookName,
     args: &[Value],
     ctx_in: Option<PluginContext>,
     framing: HookFraming,
@@ -384,12 +384,12 @@ pub(super) fn call_plugin_hook(
     }
     let (result, rendered_error, timed_out) = match framing {
         HookFraming::InFrame => {
-            // Lifecycle hook: resolve the program from the table and
+            // Lifecycle hook: resolve the hook from the table and
             // apply it directly inside the existing command frame.
-            let result = match shell.mobile().context.programs.get(program_name) {
+            let result = match shell.mobile().context.hooks.get(hook) {
                 Some(prog) => ral_core::builtins::apply(&prog.binding.value, args, shell),
                 None => Err(Break::Error(ral_core::types::Error::new(
-                    format!("host program '{}' is not registered", program_name),
+                    format!("hook '{}' is not registered", hook),
                     1,
                 ))),
             };
@@ -406,13 +406,13 @@ pub(super) fn call_plugin_hook(
             let mut req = framed_turn_request(&label, terminal);
             req.caps = caps;
             req.turn_limit = budget;
-            let report = shell.run_program(program_name, args.to_vec(), req);
+            let report = shell.run_hook(hook, args.to_vec(), req);
             let (result, timed_out) = match report {
                 TurnReport::Ran {
                     result, timed_out, ..
                 } => (result, timed_out),
                 TurnReport::Static { diagnostics } => {
-                    // A host error (program not found, non-ground arg).
+                    // A host error (hook not found, non-ground arg).
                     let msg = match diagnostics {
                         StaticDiagnostics::Host(e) => e.message,
                         _ => "unknown static diagnostic".into(),
@@ -528,7 +528,7 @@ pub(super) fn run_buffer_change_hooks(runtime: &Arc<Mutex<PluginRuntime>>, line:
 
     // ── Phase 2: run each handler with lock released around evaluator ────
     for (idx, name) in handlers {
-        let program_name = ProgramName::plugin(name.clone(), "buffer-change".to_string());
+        let hook = HookName::plugin(name.clone(), "buffer-change".to_string());
 
         // Snapshot state cell from the runtime.
         let state_cell = lock(runtime)
@@ -555,7 +555,7 @@ pub(super) fn run_buffer_change_hooks(runtime: &Arc<Mutex<PluginRuntime>>, line:
         let hr = call_plugin_hook(
             &mut hook_env,
             HookFor { name: &name },
-            &program_name,
+            &hook,
             &args,
             Some(ctx_in),
             // Buffer-change hooks fire per keystroke outside any frame and
@@ -894,7 +894,7 @@ pub(crate) fn fold_hook<T>(
     shell: &mut Shell,
     hook_name: &str,
     init: T,
-    mut step: impl FnMut(&mut Shell, HookFor<'_>, &ProgramName, T) -> T,
+    mut step: impl FnMut(&mut Shell, HookFor<'_>, &HookName, T) -> T,
 ) -> T {
     let entries: Vec<String> = lock(runtime)
         .plugins
@@ -905,8 +905,8 @@ pub(crate) fn fold_hook<T>(
 
     let mut acc = init;
     for name in entries {
-        let program_name = ProgramName::plugin(name.clone(), hook_name.to_string());
-        acc = step(shell, HookFor { name: &name }, &program_name, acc);
+        let hook = HookName::plugin(name.clone(), hook_name.to_string());
+        acc = step(shell, HookFor { name: &name }, &hook, acc);
     }
     acc
 }
@@ -927,12 +927,12 @@ pub(crate) fn run_lifecycle_hook(
         shell,
         hook_name,
         (),
-        |shell, plugin, program_name, ()| {
+        |shell, plugin, hook, ()| {
             let plugin_name = plugin.name.to_string();
             let hr = call_plugin_hook(
                 shell,
                 plugin,
-                program_name,
+                hook,
                 args,
                 None,
                 HookFraming::InFrame,

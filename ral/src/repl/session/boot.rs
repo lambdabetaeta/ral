@@ -7,7 +7,7 @@
 //! machine itself focused on the run/turn/eval loop.
 
 use ral_core::source::Span;
-use ral_core::types::{Break, DefaultPolicy, Escape, HookSig, ProgramName};
+use ral_core::types::{Break, DefaultPolicy, Escape, HookSig, HookName};
 use ral_core::{RequestedTerminalAccess, Shell, TurnReport, diagnostic, evaluator::evaluate};
 use rustyline::config::{BellStyle, EditMode};
 use std::sync::{Arc, Mutex};
@@ -160,10 +160,10 @@ pub(super) fn install_default_prompt(shell: &mut Shell) {
     let comp = Arc::new(ral_core::compile(&src).expect("default prompt thunk compiles"));
     let block = evaluate(&comp, shell).expect("default prompt thunk evaluates");
     let origin = ral_core::source::Span::new(ral_core::source::FileId(0), 0, 0);
-    let _ = shell.register_program(
-        ProgramName::session("prompt"),
+    let _ = shell.register_hook(
+        HookName::session("prompt"),
         block,
-        HookSig::PromptProgram,
+        HookSig::Prompt,
         DefaultPolicy::denied_capture(),
         origin,
     );
@@ -332,10 +332,10 @@ fn source_config_inner(path: &str, ctx: &mut RcCtx<'_>) -> Result<(), String> {
     };
     if let Some(block) = super::super::config::apply_rc_config(config, ctx, Some(&src)) {
         let origin = Span::new(ral_core::source::FileId(0), 0, 0);
-        if let Err(e) = ctx.shell.register_program(
-            ProgramName::session("startup"),
+        if let Err(e) = ctx.shell.register_hook(
+            HookName::session("startup"),
             block,
-            HookSig::PromptProgram,
+            HookSig::Prompt,
             DefaultPolicy::denied(),
             origin,
         ) {
@@ -344,7 +344,7 @@ fn source_config_inner(path: &str, ctx: &mut RcCtx<'_>) -> Result<(), String> {
         let req = framed_turn_request("<startup>", RequestedTerminalAccess::Denied);
         match ctx
             .shell
-            .run_program(&ProgramName::session("startup"), vec![], req)
+            .run_hook(&HookName::session("startup"), vec![], req)
         {
             TurnReport::Ran { result, .. } => match result {
                 Ok(_) | Err(Break::Escape(Escape::Exit(_))) => {}

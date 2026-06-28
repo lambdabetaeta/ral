@@ -38,7 +38,7 @@ mod host;
 mod inherit;
 mod init;
 pub(crate) mod modules;
-pub(crate) mod programs;
+pub(crate) mod hooks;
 pub(crate) mod repl;
 mod scope;
 
@@ -107,12 +107,12 @@ pub struct Context {
     /// innermost last.
     pub handlers: HandlerStack,
 
-    /// Host-program dispatch table — session-lived named turn-entry
+    /// Hook dispatch table — session-lived named turn-entry
     /// points (rc-declared prompt, startup block, plugin hooks, …).
     /// A separate namespace from both the user lexical scope and the
-    /// handler stack: programs are turn roots, never commands or
+    /// handler stack: hooks are turn roots, never commands or
     /// readable variables.
-    pub programs: std::collections::HashMap<programs::ProgramName, programs::HostProgram>,
+    pub hooks: std::collections::HashMap<hooks::HookName, hooks::Hook>,
 
     // ── dynamic context, not attenuable ─────────────────────────────────
     /// Invocation positional args (`$args`, `$1`, …) passed on the

@@ -67,7 +67,7 @@ pub use runtime::pipeline::helper::{try_run_bundled_tool, try_run_pipeline_stage
 pub use turn::{StaticDiagnostics, TurnLifecycle};
 pub use typecheck::{Scheme, SessionSchemes, TypeError, bake_prelude, typecheck};
 pub use types::{
-    Break, DefaultPolicy, Error, Escape, EventSink, HookSig, Map, ProgramName, RegisterError,
+    Break, DefaultPolicy, Error, Escape, EventSink, HookSig, Map, HookName, RegisterError,
     Settled, Shell, SurfaceSink, Value,
 };
 

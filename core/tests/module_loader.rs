@@ -240,9 +240,13 @@ fn sourced_module_runtime_error_points_into_module() {
         !rendered.contains("<top>"),
         "the top-level source must not appear:\n{rendered}"
     );
+    // The caret must land on the module's failing line — line 3, where the
+    // division lives. We pin it via the rendered location header
+    // (`…ral_source_runtime_err.ral:3:…`) rather than the snippet text, which
+    // ariadne lays out from the span and is sensitive to caret width.
     assert!(
-        rendered.contains("$a / $z"),
-        "the underlined line must be the module's failing line:\n{rendered}"
+        rendered.contains("ral_source_runtime_err.ral:3"),
+        "the caret must point at the module's failing line (line 3):\n{rendered}"
     );
 
     std::fs::remove_file(&path).ok();

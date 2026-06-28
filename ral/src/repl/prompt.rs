@@ -1,11 +1,11 @@
 //! Prompt construction.
 //!
-//! The prompt body is a registered host program at `Session/"prompt"`,
-//! dispatched via [`Shell::run_program`].  CWD, STATUS, and USER are
+//! The prompt body is a registered hook at `Session/"prompt"`,
+//! dispatched via [`Shell::run_hook`].  CWD, STATUS, and USER are
 //! ambient pseudo-variables read by the prompt body directly.
 //! Plugins may transform the result via the `prompt` lifecycle hook.
 
-use ral_core::types::{Break, Capabilities, ProgramName};
+use ral_core::types::{Break, Capabilities, HookName};
 #[cfg(test)]
 use ral_core::{DefaultPolicy, HookSig};
 use ral_core::{
@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use super::plugin::{FramedHook, HookFraming, PluginRuntime, call_plugin_hook, fold_hook};
 
 /// The default prompt.  Session boot registers it as the
-/// `Session/"prompt"` program (`install_default_prompt`); the failure
+/// `Session/"prompt"` hook (`install_default_prompt`); the failure
 /// arms in [`render`] fall back to it directly, so a broken user thunk
 /// degrades to the out-of-box prompt beside its per-render diagnostic.
 /// The session survives a broken prompt: it is the place where the user
@@ -59,12 +59,12 @@ pub(super) fn eval_prompt(prompt: &Value, shell: &mut Shell) -> String {
         return prompt.to_string();
     };
 
-    // Register as a temporary program, run it, extract text.
+    // Register as a temporary hook, run it, extract text.
     let origin = ral_core::source::Span::new(ral_core::source::FileId(0), 0, 0);
-    let _ = shell.register_program(
-        ProgramName::session("__eval_prompt_test__"),
+    let _ = shell.register_hook(
+        HookName::session("__eval_prompt_test__"),
         prompt.clone(),
-        HookSig::PromptProgram,
+        HookSig::Prompt,
         DefaultPolicy::denied_capture(),
         origin,
     );
@@ -83,7 +83,7 @@ pub(super) fn eval_prompt(prompt: &Value, shell: &mut Shell) -> String {
     };
 
     let (result, captured) = shell.with_preserved_status(|shell| {
-        match shell.run_program(&ProgramName::session("__eval_prompt_test__"), vec![], req) {
+        match shell.run_hook(&HookName::session("__eval_prompt_test__"), vec![], req) {
             TurnReport::Ran {
                 result, captured, ..
             } => (result, captured),
@@ -137,10 +137,10 @@ pub(super) fn write_terminal_title(shell: &Shell) {
     let _ = std::io::stdout().flush();
 }
 
-/// Run the registered `Session/"prompt"` program, fold plugin `prompt`
+/// Run the registered `Session/"prompt"` hook, fold plugin `prompt`
 /// hooks, and produce the renderable [`PromptText`].
 ///
-/// The prompt program is registered at session boot and may be
+/// The prompt hook is registered at session boot and may be
 /// overwritten by the rc `prompt:` key.
 pub(super) fn render(shell: &mut Shell, runtime: &Arc<Mutex<PluginRuntime>>) -> PromptText {
     let req = TurnRequest {
@@ -156,7 +156,7 @@ pub(super) fn render(shell: &mut Shell, runtime: &Arc<Mutex<PluginRuntime>>) -> 
         lifecycle: Box::new(()),
     };
 
-    let base = match shell.run_program(&ProgramName::session("prompt"), vec![], req) {
+    let base = match shell.run_hook(&HookName::session("prompt"), vec![], req) {
         TurnReport::Ran {
             result, captured, ..
         } => match result {
@@ -187,14 +187,14 @@ pub(super) fn render(shell: &mut Shell, runtime: &Arc<Mutex<PluginRuntime>>) -> 
         shell,
         "prompt",
         base,
-        |shell, plugin, program_name, prompt| {
+        |shell, plugin, hook, prompt| {
             // The prompt hook runs during `read`, outside any frame, and only
             // transforms the prompt string — it never foregrounds a child, so
             // it frames with `Denied`.
             let hr = call_plugin_hook(
                 shell,
                 plugin,
-                program_name,
+                hook,
                 &[Value::String(prompt.clone())],
                 None,
                 HookFraming::Framed(FramedHook {
@@ -263,7 +263,7 @@ mod tests {
         assert_eq!(eval_prompt(&prompt, &mut shell), "[ ok ]");
     }
 
-    // TODO: update for program table — ambient $cwd/$user/$status need
+    // TODO: update for hook table — ambient $cwd/$user/$status need
     // per-test shell setup (user comes from platform::user_name())
     // #[test]
     // fn prompt_block_sees_dynamic_prompt_bindings() {

@@ -8,7 +8,7 @@
 //! push a new buffer onto the stack.
 
 use ral_core::types::Capabilities;
-use ral_core::{ProgramName, RequestedTerminalAccess, Shell};
+use ral_core::{HookName, RequestedTerminalAccess, Shell};
 use std::sync::{Arc, Mutex};
 
 use super::frontend::EditBuffer;
@@ -71,7 +71,7 @@ pub(super) fn dispatch_keybinding(
         return KeybindingOutcome::Edit(current.to_string(), end_of(current));
     };
 
-    let program_name = ProgramName::plugin(pk.plugin.clone(), format!("key:{key_str}"));
+    let hook = HookName::plugin(pk.plugin.clone(), format!("key:{key_str}"));
 
     // rustyline supplied `pk.cursor_byte` in bytes; convert once for the
     // plugin surface (which speaks chars throughout).
@@ -99,7 +99,7 @@ pub(super) fn dispatch_keybinding(
     let hr = call_plugin_hook(
         shell,
         HookFor { name: &pk.plugin },
-        &program_name,
+        &hook,
         &[],
         Some(ctx_in),
         HookFraming::Framed(FramedHook {

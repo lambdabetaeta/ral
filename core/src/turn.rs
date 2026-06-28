@@ -49,7 +49,7 @@ pub enum StaticDiagnostics {
     Parse(ParseError),
     Types(Vec<TypeError>),
     /// A host-level error that prevented the turn from running:
-    /// program not found, non-ground argument, etc.
+    /// hook not found, non-ground argument, etc.
     Host(crate::types::Error),
 }
 
