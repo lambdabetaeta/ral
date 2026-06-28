@@ -368,6 +368,29 @@ impl SerialValue {
         })
     }
 
+    /// Encode a *ground* value for the host seam: unit, bool, number,
+    /// string, bytes, and lists/maps/variants thereof — never a closure
+    /// or handle.  The seam carries no captured scopes, so no
+    /// [`InternCtx`] is threaded; a non-ground value is rejected outright,
+    /// which is the seam's ground-only discipline made loud rather than
+    /// left to fail silently at decode.
+    pub fn from_ground(value: &Value) -> Result<Self, Error> {
+        if !value.is_ground() {
+            return Err(Error::new(
+                "value is not ground: the host seam carries only data, not closures or handles",
+                1,
+            ));
+        }
+        Self::from_runtime(value, &mut InternCtx::new())
+    }
+
+    /// Decode a ground value off the host seam — the dual of
+    /// [`from_ground`](Self::from_ground).  The empty scope table is the
+    /// statement that no captured scope crosses here.
+    pub fn into_ground(self) -> Result<Value, Error> {
+        self.into_runtime(&Vec::new())
+    }
+
     pub fn into_runtime(self, arcs: &ScopeArcs) -> Result<Value, Error> {
         Ok(match self {
             Self::Unit => Value::Unit,

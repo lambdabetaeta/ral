@@ -195,9 +195,9 @@ pub(super) fn execute_input(
         } => {
             let exit_code = match result {
                 ResultMirror::Ok(sv) => {
-                    let val = Some(sv.clone());
-                    if let Some(ref v) = val {
-                        print_result(v);
+                    // Decode the ground result off the seam.
+                    if let Ok(v) = sv.into_ground() {
+                        print_result(&v);
                     }
                     // The turn installed its bindings: record their dependency
                     // edges and effect verdict into the worksheet model.

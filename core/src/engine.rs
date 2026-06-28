@@ -8,7 +8,7 @@ use crate::driver::TurnRequest;
 use crate::transport::{Control, DispatchId, Event, Frame, Turn, report_to_mirror};
 use crate::types::{Boundary, Shell, SurfaceSink, Value};
 use crate::wire::WireChannel;
-use crate::serial::{InternCtx, SerialValue};
+use crate::serial::SerialValue;
 
 use std::sync::{Arc, Mutex, mpsc};
 
@@ -17,12 +17,11 @@ use std::sync::{Arc, Mutex, mpsc};
 struct ChannelSurfaceSink {
     id: crate::transport::DispatchId,
     writer: Arc<Mutex<WireChannel>>,
-    ctx: Mutex<InternCtx>,
 }
 
 impl crate::types::EventSink for ChannelSurfaceSink {
     fn emit(&self, ev: &Value) {
-        if let Ok(sv) = SerialValue::from_runtime(ev, &mut self.ctx.lock().unwrap()) {
+        if let Ok(sv) = SerialValue::from_ground(ev) {
             let _ = self.writer.lock().unwrap().write_frame(
                 &Frame::Event(self.id, Event::Surface(sv))
             );
@@ -34,7 +33,6 @@ impl crate::types::EventSink for ChannelSurfaceSink {
 struct ChannelBoundarySink {
     id: DispatchId,
     writer: Arc<Mutex<WireChannel>>,
-    ctx: Mutex<InternCtx>,
 }
 
 impl crate::types::BoundarySink for ChannelBoundarySink {
@@ -54,7 +52,7 @@ impl crate::types::BoundarySink for ChannelBoundarySink {
         }
         let sv_batch: Vec<SerialValue> = batch
             .into_iter()
-            .filter_map(|v| SerialValue::from_runtime(&v, &mut self.ctx.lock().unwrap()).ok())
+            .filter_map(|v| SerialValue::from_ground(&v).ok())
             .collect();
         let _ = self.writer.lock().unwrap().write_frame(
             &Frame::Event(self.id, Event::BoundarySurface(sv_batch))
@@ -98,12 +96,10 @@ pub fn run_engine() -> ! {
             let surface_sink: SurfaceSink = Arc::new(ChannelSurfaceSink {
                 id,
                 writer: worker_writer.clone(),
-                ctx: Mutex::new(InternCtx::new()),
             });
             let boundary_sink: Option<Boundary> = Some(Arc::new(ChannelBoundarySink {
                 id,
                 writer: worker_writer.clone(),
-                ctx: Mutex::new(InternCtx::new()),
             }));
 
             let turn_req = TurnRequest {
@@ -125,10 +121,10 @@ pub fn run_engine() -> ! {
                     shell.run_source_turn(&src, turn_req)
                 }
                 Turn::Hook { name, args, .. } => {
-                    let arcs: crate::serial::ScopeArcs = Vec::new();
+                    // Decode the ground arguments off the seam.
                     let live_args: Vec<Value> = args
                         .into_iter()
-                        .filter_map(|sv| sv.into_runtime(&arcs).ok())
+                        .filter_map(|sv| sv.into_ground().ok())
                         .collect();
                     shell.run_hook(&name, live_args, turn_req)
                 }

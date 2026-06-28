@@ -29,7 +29,7 @@ use crate::types::Boundary;
 use crate::types::SurfaceSink;
 use crate::types::Value;
 use std::sync::OnceLock;
-use crate::serial::{InternCtx, SerialValue};
+use crate::serial::SerialValue;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -143,10 +143,8 @@ pub struct ReqMirror {
     /// The capability ceiling.
     pub caps: crate::types::Capabilities,
     /// Foreground wall duration.
-    #[serde(skip)]
     pub turn_limit: Option<std::time::Duration>,
     /// Lifetime ceiling for detached workers.
-    #[serde(skip)]
     pub detached_limit: Option<std::time::Duration>,
     /// Byte IO regime.
     pub io: crate::driver::TurnIo,
@@ -161,7 +159,7 @@ pub struct ReqMirror {
 pub enum ReportMirror {
     Static { diagnostics: DiagMirror },
     Ran {
-        /// Phase 2: result becomes a SerialValue-based mirror
+        /// The turn's settled result, `SerialValue`-encoded for the wire.
         result: ResultMirror,
         status: i32,
         single_command: bool,
@@ -178,12 +176,12 @@ pub enum DiagMirror {
     Host(String),
 }
 
-/// Mirror of `Settled<Value>`.
+/// Mirror of `Settled<Value>`.  `Ok` carries a `SerialValue` so a
+/// successful result crosses the wire; a non-transportable result
+/// (e.g. a live `Handle`) is reported as an error instead.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ResultMirror {
-    /// Phase 2: becomes Ok(SerialValue)
-    #[serde(skip)]
-    Ok(Value),
+    Ok(SerialValue),
     Err(BreakMirror),
 }
 
@@ -318,13 +316,12 @@ impl EventReceiver {
 
 struct PerDispatchSink {
     event_tx: mpsc::Sender<Frame>,
-    ctx: std::sync::Mutex<InternCtx>,
     current: std::sync::Mutex<Option<DispatchId>>,
 }
 
 impl PerDispatchSink {
     fn new(event_tx: mpsc::Sender<Frame>) -> Self {
-        Self { event_tx, ctx: std::sync::Mutex::new(InternCtx::new()), current: std::sync::Mutex::new(None) }
+        Self { event_tx, current: std::sync::Mutex::new(None) }
     }
 
     fn set_dispatch(&self, id: DispatchId) {
@@ -339,7 +336,7 @@ impl PerDispatchSink {
 impl crate::types::EventSink for PerDispatchSink {
     fn emit(&self, ev: &Value) {
         if let Some(id) = *self.current.lock().unwrap() {
-            if let Ok(sv) = SerialValue::from_runtime(ev, &mut self.ctx.lock().unwrap()) {
+            if let Ok(sv) = SerialValue::from_ground(ev) {
                 let _ = self.event_tx.send(Frame::Event(id, Event::Surface(sv)));
             }
         }
@@ -348,15 +345,38 @@ impl crate::types::EventSink for PerDispatchSink {
 
 // ── Identity transport ────────────────────────────────────────────────
 
+/// A session lock that cannot poison-panic.  A turn that unwinds drops its
+/// guard mid-mutation, which would otherwise poison the mutex and turn every
+/// later `lock()` into a second panic (`PoisonError`); recovering the guard
+/// instead means a panicking turn can never wedge the session.  This is the
+/// only lock over the engine state, so the failure is impossible by
+/// construction — there is no `unwrap()` to forget.
+struct SessionLock(std::sync::Mutex<EngineInner>);
+
+impl SessionLock {
+    fn new(inner: EngineInner) -> Self {
+        Self(std::sync::Mutex::new(inner))
+    }
+    fn lock(&self) -> std::sync::MutexGuard<'_, EngineInner> {
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    /// Consume the lock and recover the engine state, recovering poison the
+    /// same way `lock` does — a turn that unwound mid-mutation must not wedge
+    /// the move-out.
+    fn into_inner(self) -> EngineInner {
+        self.0.into_inner().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 /// The in-process transport: one kernel, one address space.
 ///
 /// `dispatch` runs the matching door synchronously on the calling thread.
 /// Surface events are written to the event channel during execution;
 /// control frames trip the foreground `CancelScope` directly.
 pub struct IdentityTransport {
-    /// The engine-side state, mutex-protected so `dispatch` can take
-    /// `&self`.
-    engine: std::sync::Mutex<EngineInner>,
+    /// The engine-side state, behind a poison-free [`SessionLock`] so
+    /// `dispatch` can take `&self`.
+    engine: SessionLock,
     /// Control sender (wired to the foreground cancel scope).
     control: ControlSender,
     /// Event receiver for the front-end.
@@ -398,7 +418,7 @@ impl IdentityTransport {
         };
 
         IdentityTransport {
-            engine: std::sync::Mutex::new(engine),
+            engine: SessionLock::new(engine),
             control,
             events_recv: EventReceiver { rx: std::sync::Mutex::new(event_rx) },
         }
@@ -406,7 +426,14 @@ impl IdentityTransport {
 
     /// Set the session boundary sink for deferred worker batches.
     pub fn set_boundary(&self, boundary: Boundary) {
-        self.engine.lock().unwrap().boundary_sink = Some(boundary);
+        self.engine.lock().boundary_sink = Some(boundary);
+    }
+
+    /// Consume the transport and recover the owned `Shell`.  The inverse of
+    /// [`IdentityTransport::new`]: a caller that handed a shell in to route a
+    /// turn through production can move it back out afterward.
+    pub fn into_shell(self) -> crate::types::Shell {
+        self.engine.into_inner().shell
     }
 
 
@@ -416,7 +443,7 @@ impl IdentityTransport {
     /// other borrows (e.g. the REPL session's frontend, jobs table).
     /// Prefer `with_shell` for simple operations.
     pub fn shell_mut(&self) -> std::sync::MutexGuard<'_, EngineInner> {
-        self.engine.lock().unwrap()
+        self.engine.lock()
     }
 
 
@@ -425,13 +452,13 @@ impl IdentityTransport {
     where
         F: FnOnce(&mut crate::types::Shell) -> R,
     {
-        f(&mut self.engine.lock().unwrap().shell)
+        f(&mut self.engine.lock().shell)
     }
 }
 
 impl Transport for IdentityTransport {
     fn dispatch(&self, id: DispatchId, turn: Turn) {
-        let mut engine = self.engine.lock().unwrap();
+        let mut engine = self.engine.lock();
 
         // Install the per-dispatch surface sink.
         engine.surface_sink.set_dispatch(id);
@@ -465,11 +492,10 @@ impl Transport for IdentityTransport {
                 engine.shell.run_source_turn(&src, turn_req)
             }
             Turn::Hook { name, args, .. } => {
-                // Convert SerialValue args back to live Value.
-                let arcs: crate::serial::ScopeArcs = Vec::new();
+                // Decode the ground arguments off the seam.
                 let live_args: Vec<Value> = args
                     .into_iter()
-                    .filter_map(|sv| sv.into_runtime(&arcs).ok())
+                    .filter_map(|sv| sv.into_ground().ok())
                     .collect();
                 engine.shell.run_hook(&name, live_args, turn_req)
             }
@@ -492,7 +518,7 @@ impl Transport for IdentityTransport {
     }
 
     fn attach(&self, endpoint: TerminalEndpoint, _cwd: PathBuf, _home: PathBuf, _rc_path: Option<PathBuf>) {
-        let mut engine = self.engine.lock().unwrap();
+        let mut engine = self.engine.lock();
         engine.terminal_lease = endpoint.lease;
     }
 
@@ -501,7 +527,7 @@ impl Transport for IdentityTransport {
         crate::process::request_foreground_cancel(
             crate::process::CancelCause::Explicit,
         );
-        self.engine.lock().unwrap().terminal_lease = None;
+        self.engine.lock().terminal_lease = None;
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -706,10 +732,9 @@ impl crate::types::BoundarySink for TransportBoundarySink {
         if already {
             return;
         }
-        let mut ctx = InternCtx::new();
         let sv_batch: Vec<SerialValue> = batch
             .into_iter()
-            .filter_map(|v| SerialValue::from_runtime(&v, &mut ctx).ok())
+            .filter_map(|v| SerialValue::from_ground(&v).ok())
             .collect();
         let _ = self
             .event_tx
@@ -741,7 +766,18 @@ pub(crate) fn report_to_mirror(report: crate::driver::TurnReport) -> ReportMirro
             timed_out,
         } => {
             let result_mirror = match result {
-                Ok(v) => ResultMirror::Ok(v),
+                Ok(v) => {
+                    // Encode the result so it crosses the wire.  A
+                    // non-transportable value (e.g. a live `Handle`) cannot
+                    // cross; surface it as a diagnostic rather than dropping
+                    // it silently.
+                    match SerialValue::from_ground(&v) {
+                        Ok(sv) => ResultMirror::Ok(sv),
+                        Err(_) => ResultMirror::Err(BreakMirror::Error(
+                            "turn result is not transportable across the host seam".into(),
+                        )),
+                    }
+                }
                 Err(break_) => ResultMirror::Err(break_to_mirror(break_)),
             };
             let captured_bytes = captured.map(|c| (c.stdout, c.stderr));

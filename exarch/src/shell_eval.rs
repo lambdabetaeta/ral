@@ -222,8 +222,7 @@ pub fn run_shell(
         match frame {
             Frame::Event(did, event) if did == id => match event {
                 Event::Surface(val) => {
-                    let arcs: ral_core::serial::ScopeArcs = Vec::new();
-                    if let Ok(live_val) = val.into_runtime(&arcs) {
+                    if let Ok(live_val) = val.into_ground() {
                         if let Some(kind) = decode_surface(&live_val) {
                             if let Some(pins) = &pins {
                                 if let Ok(mut m) = pins.lock() {
@@ -243,9 +242,8 @@ pub fn run_shell(
                     }
                 }
                 Event::BoundarySurface(batch) => {
-                    let arcs: ral_core::serial::ScopeArcs = Vec::new();
                     for val in batch {
-                        if let Ok(live_val) = val.into_runtime(&arcs) {
+                        if let Ok(live_val) = val.into_ground() {
                             if let Some(kind) = decode_surface(&live_val) {
                                 emit.emit(kind);
                             }
@@ -297,7 +295,8 @@ pub fn run_shell(
 
             let (exit, value) = match &result {
                 ResultMirror::Ok(sv) => {
-                    let v = Some(sv.clone());
+                    // Decode the ground result off the seam.
+                    let v = sv.clone().into_ground().ok();
                     (0, v)
                 },
                 ResultMirror::Err(break_mirror) => match break_mirror {
@@ -474,80 +473,40 @@ mod tests {
     /// `core/tests/top_level_vs_block.rs`'s sandbox-parity tests).
 
 
-    fn run_shell_direct(shell: &mut ral_core::Shell, caps: &Capabilities, cmd: &str, timeout_secs: u64, _emit: &Emitter) -> Outcome {
-        use ral_core::{TurnRequest, TurnIo, RequestedTerminalAccess, TurnStdin};
-        let req = TurnRequest {
-            script_name: "<test>",
-            caps: caps.clone(),
-            turn_limit: Some(std::time::Duration::from_secs(timeout_secs)),
-            detached_limit: None,
-            io: TurnIo::Capture,
-            terminal: RequestedTerminalAccess::Denied,
-            stdin: TurnStdin::Empty,
-            surface: None,
-            boundary: None,
-            lifecycle: Box::new(()),
-        };
-        match shell.run_source_turn(cmd, req) {
-            ral_core::TurnReport::Static { diagnostics } => {
-                use ral_core::StaticDiagnostics;
-                match diagnostics {
-                    StaticDiagnostics::Parse(e) => Outcome::Static(e.message),
-                    StaticDiagnostics::Types(errs) => {
-                        Outcome::Static(errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n"))
-                    }
-                    StaticDiagnostics::Host(e) => Outcome::Static(e.message),
-                }
-            }
-            ral_core::TurnReport::Ran { result, captured, .. } => {
-                let captured = captured.expect("Capture returns buffers");
-                let (exit, value) = match result {
-                    Ok(v) => (0, Some(v)),
-                    Err(_) => (1, None),
-                };
-                let value_str = value.as_ref().and_then(|v| {
-                    if matches!(v, ral_core::Value::Unit) { None }
-                    else { json_to_text(&ral_core::builtins::value_to_json_lossy_bytes(v)) }
-                });
-                Outcome::Ran(ToolResult {
-                    stdout: captured.stdout,
-                    stderr: captured.stderr,
-                    value: value_str,
-                    exit,
-                })
-            }
-        }
+    /// Run one tool turn through the **real** production [`run_shell`], so the
+    /// test path can never drift from what a live tool call does.  The only
+    /// thing the helper owns that production does not is the `&mut Shell`: it
+    /// moves the shell into a throwaway [`IdentityTransport`], routes the turn
+    /// through `run_shell` (which builds the `ReqMirror`, dispatches, drains the
+    /// surface stream into `emit`, and computes the exit code — including the
+    /// timeout→124 mapping and the full error rendering), then moves the shell
+    /// back out so the caller keeps its session across calls.
+    fn run_shell_direct(shell: &mut ral_core::Shell, caps: &Capabilities, cmd: &str, timeout_secs: u64, emit: &Emitter) -> Outcome {
+        // Move the live shell out behind a cheap throwaway so we can hand it to
+        // the transport, which owns its `Shell`.  The placeholder is discarded
+        // when we swap the real shell back in below.
+        let taken = std::mem::replace(
+            shell,
+            ral_core::Shell::new(ral_core::io::TerminalState::probe_from_env().1),
+        );
+        let transport = ral_core::transport::IdentityTransport::new(taken);
+        let outcome = run_shell(&transport, caps, cmd, timeout_secs, emit, None);
+        // Recover the (now-mutated) shell so `let`/`cd`/binding state persists
+        // into the caller's next turn — the across-calls contract these tests pin.
+        *shell = transport.into_shell();
+        outcome
     }
 
 
+    /// Run one tool turn and return its [`ToolResult`], delegating to
+    /// [`run_shell_direct`] so there is exactly one definition of "run a tool
+    /// turn."  Panics on a static (parse/type) failure, preserving the old
+    /// helper's behaviour so the out-of-scope `witnesses` tests still panic.
     fn run_once(shell: &mut ral_core::Shell, cmd: &str) -> ToolResult {
-        use ral_core::{TurnRequest, TurnIo, RequestedTerminalAccess, TurnStdin};
-        let req = TurnRequest {
-            script_name: "<test>",
-            caps: Capabilities::root(),
-            turn_limit: Some(std::time::Duration::from_secs(30)),
-            detached_limit: None,
-            io: TurnIo::Capture,
-            terminal: RequestedTerminalAccess::Denied,
-            stdin: TurnStdin::Empty,
-            surface: None,
-            boundary: None,
-            lifecycle: Box::new(()),
-        };
-        match shell.run_source_turn(cmd, req) {
-            ral_core::TurnReport::Ran { result, captured, .. } => {
-                let captured = captured.expect("Capture returns buffers");
-                let (exit, value) = match result {
-                    Ok(v) => (0, Some(v)),
-                    Err(_) => (1, None),
-                };
-                let value_str = value.as_ref().and_then(|v| {
-                    if matches!(v, ral_core::Value::Unit) { None }
-                    else { json_to_text(&ral_core::builtins::value_to_json_lossy_bytes(v)) }
-                });
-                ToolResult { stdout: captured.stdout, stderr: captured.stderr, value: value_str, exit }
-            }
-            ral_core::TurnReport::Static { .. } => panic!("static failure"),
+        let (emit, _rx) = dummy_emitter();
+        match run_shell_direct(shell, &Capabilities::root(), cmd, 30, &emit) {
+            Outcome::Ran(r) => r,
+            Outcome::Static(s) => panic!("static failure: {s}"),
         }
     }
 
