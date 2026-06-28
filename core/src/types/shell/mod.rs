@@ -550,3 +550,54 @@ impl Default for Shell {
         Self::new(Default::default())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pseudo_var_cwd_is_live() {
+        let shell = Shell::new(Default::default());
+        let val = shell.pseudo_var("CWD").expect("$CWD must resolve");
+        match val {
+            Value::String(s) => assert!(!s.is_empty(), "$CWD must be non-empty"),
+            other => panic!("$CWD must be a String, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pseudo_var_status_reflects_last_status() {
+        let mut shell = Shell::new(Default::default());
+        shell.set_status_from_bool(false);
+        let val = shell.pseudo_var("STATUS").expect("$STATUS must resolve");
+        assert_eq!(val, Value::Int(1));
+        shell.set_status_from_bool(true);
+        let val = shell.pseudo_var("STATUS").expect("$STATUS must resolve");
+        assert_eq!(val, Value::Int(0));
+    }
+
+    #[test]
+    fn pseudo_var_user_is_live() {
+        let shell = Shell::new(Default::default());
+        let val = shell.pseudo_var("USER").expect("$USER must resolve");
+        match val {
+            Value::String(s) => assert!(!s.is_empty(), "$USER must be non-empty"),
+            other => panic!("$USER must be a String, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pseudo_var_unknown_returns_none() {
+        let shell = Shell::new(Default::default());
+        assert!(shell.pseudo_var("NOSUCHVAR").is_none());
+    }
+
+    #[test]
+    fn lookup_value_name_sees_pseudo_vars() {
+        let shell = Shell::new(Default::default());
+        assert!(shell.lookup_value_name("CWD").is_some());
+        assert!(shell.lookup_value_name("STATUS").is_some());
+        assert!(shell.lookup_value_name("USER").is_some());
+    }
+}
+

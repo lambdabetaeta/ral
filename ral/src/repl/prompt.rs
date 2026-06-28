@@ -263,14 +263,20 @@ mod tests {
         assert_eq!(eval_prompt(&prompt, &mut shell), "[ ok ]");
     }
 
-    // TODO: update for hook table — ambient $cwd/$user/$status need
-    // per-test shell setup (user comes from platform::user_name())
-    // #[test]
-    // fn prompt_block_sees_dynamic_prompt_bindings() {
-    //     let (mut shell, prompt) = evaluate_prompt_src("return { return \"$USER:$CWD:$STATUS\" }");
-    //     let bindings = PromptBindings::with("alice", "~/src", 7);
-    //     assert_eq!(eval_prompt(&prompt, &mut shell, &bindings), "alice:~/src:7");
-    // }
+    // ambient pseudo-variables ($CWD, $STATUS, $USER) are live.
+
+    #[test]
+    fn prompt_block_sees_pseudo_vars() {
+        let source = "return { return \"$USER:$CWD:$STATUS\" }";
+        let (mut shell, prompt) = evaluate_prompt_src(source);
+        let result = eval_prompt(&prompt, &mut shell);
+        let parts: Vec<&str> = result.split(":").collect();
+
+        assert_eq!(parts.len(), 3, "expected user:cwd:status, got {result:?}");
+        assert!(!parts[0].is_empty(), "USER must be non-empty, got {result:?}");
+        assert!(!parts[1].is_empty(), "CWD must be non-empty, got {result:?}");
+        assert_eq!(parts[2], "0", "STATUS must be 0 after successful eval, got {result:?}");
+    }
 
     #[test]
     fn string_prompt_renders_as_itself() {
