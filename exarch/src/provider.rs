@@ -1089,23 +1089,65 @@ enum Backend {
     Scripted(scripted::Script),
 }
 
-/// Identifies a cached transport by the two things that fix a genai client:
-/// the credential (its label) and the wire `adapter`.  An OpenAI key spans
-/// both adapters — `gpt-4o` speaks chat completions, `gpt-5` the Responses API
-/// — so they must not share one client even though they share a credential;
-/// every other provider resolves a single, model-independent adapter and so
-/// keeps one entry per credential.
+/// Identifies a cached transport by the three things that fix a genai client:
+/// the credential's label, its secret (as a [`CredFingerprint`]), and the wire
+/// `adapter`.  An OpenAI key spans both adapters — `gpt-4o` speaks chat
+/// completions, `gpt-5` the Responses API — so they must not share one client
+/// even though they share a credential; every other provider resolves a single,
+/// model-independent adapter and so keeps one entry per (label, secret).
+///
+/// The secret fingerprint is what keeps the cache honest across a key rotation.
+/// An API key's bearer is captured *by value* inside the resolver closures
+/// [`build_client`] hands to genai, so the cached client holds the secret it was
+/// built with.  Were the same label ever resolved with a different secret, a
+/// label-and-adapter-only key would return that stale client.  Folding the
+/// secret's fingerprint into the key makes a changed secret a natural cache miss
+/// that rebuilds the client around the new one, while an unchanged secret keys
+/// to the same entry and stays a cheap hit.  The OAuth path is secret-immune by
+/// construction — it reads its token live from a shared cell per request — so it
+/// fingerprints to a single constant rather than to the changing token.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct TransportKey {
     cred: String,
+    fingerprint: CredFingerprint,
     adapter: AdapterKind,
 }
 
 impl TransportKey {
-    fn for_selection(id: &ProviderId, model: &str) -> Self {
+    fn for_selection(id: &ProviderId, model: &str, cred: &Credential) -> Self {
         Self {
             cred: id.label().to_string(),
+            fingerprint: CredFingerprint::of(cred),
             adapter: adapter_for_provider_model(id, model),
+        }
+    }
+}
+
+/// A non-secret fingerprint of a credential's secret, for keying the transport
+/// cache only — never the secret itself, so it is safe to derive `Debug` and
+/// carry in a logged key.  An API key fingerprints to a stable per-process hash
+/// of its bearer string: equal keys hash equal (the common case, a cheap cache
+/// hit), a rotated key hashes elsewhere (a rebuild).  An OAuth login carries no
+/// baked secret — its client reads the token live from a shared cell every
+/// request — so it fingerprints to a single constant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum CredFingerprint {
+    /// A non-reversible hash of an API key's bearer string.
+    ApiKey(u64),
+    /// The OAuth path: live-read per request, so secret-independent.
+    OAuth,
+}
+
+impl CredFingerprint {
+    fn of(cred: &Credential) -> Self {
+        match cred {
+            Credential::ApiKey(key) => {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                key.hash(&mut hasher);
+                Self::ApiKey(hasher.finish())
+            }
+            Credential::OAuth(_) => Self::OAuth,
         }
     }
 }
@@ -1475,16 +1517,17 @@ impl Engine {
     }
 
     /// The transport for `cred` bound to `id`+`model`, building and caching it
-    /// on first use.  One client per credential and wire adapter, deduped by
-    /// [`TransportKey`], so a `/model` re-selection onto an already-warmed
-    /// (credential, adapter) — or a new agent on it — reuses the client.
-    /// Touched only on this cold warm path; the hot path holds the returned
-    /// `Arc` directly.
+    /// on first use.  One client per (credential label, secret, wire adapter),
+    /// deduped by [`TransportKey`], so a `/model` re-selection onto an
+    /// already-warmed key — or a new agent on it — reuses the client, while a
+    /// rotated secret under the same label keys to a fresh entry and rebuilds
+    /// (see [`TransportKey`]).  Touched only on this cold warm path; the hot
+    /// path holds the returned `Arc` directly.
     fn transport_for(&self, id: &ProviderId, model: &str, cred: &Credential) -> Arc<Transport> {
         self.transports
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .entry(TransportKey::for_selection(id, model))
+            .entry(TransportKey::for_selection(id, model, cred))
             .or_insert_with(|| Transport::build(id, model, cred))
             .clone()
     }
@@ -2204,6 +2247,29 @@ mod tests {
         assert_eq!(
             adapter_for_provider_model(&id, "gpt-5.5"),
             AdapterKind::OpenAI,
+        );
+    }
+
+    /// The transport key folds in the credential's secret: the same API key
+    /// keys to the same entry (a cheap cache hit, the common case), a rotated
+    /// key under the same provider label keys elsewhere (a cache miss that
+    /// rebuilds the client around the new secret rather than serving the stale
+    /// one captured in the resolver closures).
+    #[test]
+    fn transport_key_separates_rotated_api_keys() {
+        let id = ProviderId::Famous(ProviderKind::Anthropic);
+        let key = |s: &str| {
+            TransportKey::for_selection(&id, "claude-opus-4", &Credential::ApiKey(s.into()))
+        };
+        assert_eq!(
+            key("sk-original"),
+            key("sk-original"),
+            "an unchanged secret must key to the same cached transport"
+        );
+        assert_ne!(
+            key("sk-original"),
+            key("sk-rotated"),
+            "a rotated secret must key to a fresh entry, never the stale client"
         );
     }
 
