@@ -254,14 +254,17 @@ fn builtin_view_text(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let lo = start - 1;
     let hi = (end - 1).min(n);
 
+    let mut result_rows = Vec::new();
     if lo < hi {
-        let mut out = String::new();
         for i in lo..hi {
-            out.push_str(&format!("{}\t{}\t{}\n", i + 1, hashes[i], rows[i]));
-        }
-        let _ = shell.write_stdout(out.as_bytes());
+            result_rows.push(Value::map(vec![
+                ("line".into(), Value::Int(i as i64 + 1)),
+                ("hash".into(), Value::String(hashes[i].clone())),
+                ("text".into(), Value::String(rows[i].clone())),
+]));
     }
-    Ok(Value::Unit)
+}
+Ok(Value::list(result_rows))
 }
 
 
@@ -744,15 +747,26 @@ fn scheme_grep_files(_u: &mut Unifier) -> Scheme {
     )
 }
 
-/// `view-text :: Str → Int → Int → F Unit` — `path`, then the half-open line
-/// range.  Writes the tagged slice to stdout; yields Unit.
+/// `view-text :: Str → Int → Int → F [[line: Int, hash: Str, text: Str]]` — `path`, then the half-open line
+/// range. Returns a list of records, one per line in [start, end).
 fn scheme_view_text(_u: &mut Unifier) -> Scheme {
-    scheme(
-        &[],
-        &[],
-        &[],
-        thunk(fun(Ty::String, fun(Ty::Int, fun(Ty::Int, pure(Ty::Unit))))),
-    )
+scheme(
+    &[],
+    &[],
+    &[],
+    thunk(fun(
+        Ty::String,
+        fun(Ty::Int,
+            fun(Ty::Int,
+                pure(Ty::List(Box::new(closed_record(&[
+                    ("line", Ty::Int),
+                    ("hash", Ty::String),
+                    ("text", Ty::String),
+                ]))))
+            )
+        )
+    )),
+)
 }
 
 
@@ -1006,7 +1020,7 @@ pub static EXARCH_BUILTINS: &[BuiltinEntry] = &[
     BuiltinEntry {
         name: Cow::Borrowed("view-text"),
         type_rule: BuiltinTypeRule::Scheme(Some(3), scheme_view_text),
-        doc: "view-text <path> <start> <end>  — show the half-open line range [start, end) of PATH, each line tagged `<line-no>\\t<hash>\\t<text>`. The hash is the witness `edit` checks; copy it, never recompute it. Reads the whole file (the witness depends on file-wide uniqueness) and surfaces one read card.",
+        doc: "view-text <path> <start> <end>  — show the half-open line range [start, end) of PATH, each line tagged `<line-no>\\t<hash>\\t<text>`. Returns a list of records [{line: Int, hash: String, text: String}]. The hash is the witness `edit` checks; copy it, never recompute it. Reads the whole file (the witness depends on file-wide uniqueness) and surfaces one read card.",
         body: BuiltinBody::Static(builtin_view_text),
     },
     BuiltinEntry {

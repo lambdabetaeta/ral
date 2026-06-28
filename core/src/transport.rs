@@ -571,6 +571,10 @@ impl WireTransport {
     /// Creates a `WireChannel` socketpair, passes one end to the engine
     /// child as fd 3, and starts a reader thread that funnels incoming
     /// `Event` frames into the event receiver.
+#[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:silent:engine-spawn] spawns the engine child process for the wire transport; an infrastructure handoff, not turn-time data I/O"
+    )]
     pub fn new() -> io::Result<Self> {
         let (frontend, engine) = crate::wire::WireChannel::pair()?;
 

@@ -537,7 +537,7 @@ mod tests {
         let path = tmp.join("alpha.txt");
         std::fs::write(&path, "alpha\n").expect("write view fixture");
         let path_str = display_no_trailing_sep(&path);
-        let r = run_once(&mut shell, &format!("view-text '{path_str}' 1 2"));
+        let r = run_once(&mut shell, &format!("let rows = view-text '{path_str}' 1 2; [line: $rows[0][line], hash: $rows[0][hash], text: $rows[0][text]]"));
         let _ = std::fs::remove_dir_all(&tmp);
         assert_eq!(
             r.exit,
@@ -545,26 +545,17 @@ mod tests {
             "view-text must run; stderr was: {}",
             String::from_utf8_lossy(&r.stderr)
         );
-        let out = String::from_utf8_lossy(&r.stdout);
-        let row = out.lines().next().unwrap_or_default();
-        let parts: Vec<&str> = row.splitn(3, '\t').collect();
-        assert_eq!(
-            parts.len(),
-            3,
-            "expected `<n>\\t<hash>\\t<text>`, got {row:?}"
-        );
-        assert_eq!(parts[0].trim(), "1", "first row is line 1");
-        let hash = parts[1];
-        assert_eq!(
-            hash.len(),
-            7,
-            "hash is an `h` tag plus six hex, got {hash:?}"
-        );
+        let val: serde_json::Value =
+            serde_json::from_str(r.value.as_deref().expect("view-text must return value"))
+                .expect("value must be valid JSON");
+        let hash = val["hash"].as_str().expect("hash must be string");
+        assert_eq!(val["line"].as_i64().expect("line must be integer"), 1);
+        assert_eq!(hash.len(), 7, "hash is an `h` tag plus six hex, got {hash:?}");
         assert!(
             hash.starts_with('h') && hash[1..].bytes().all(|b| b.is_ascii_hexdigit()),
             "hash is `h` followed by six hex chars, got {hash:?}"
         );
-        assert_eq!(parts[2], "alpha");
+        assert_eq!(val["text"].as_str().expect("text must be string"), "alpha");
     }
 
     /// Two-call sequence: `let persist_n = 41` then `$[$persist_n + 1]`.
@@ -682,10 +673,9 @@ target
         let edited = run_once(
             &mut shell,
             &format!(
-                "let lc = line-count '{repeated_str}'\n\
-                 let tagged = view-text '{repeated_str}' 1 $[$lc + 1]\n\
-                 let whs = map {{ |l| !{{re-split '\t' $l}}[1] }} !{{lines $tagged}}\n\
-                 edit '{repeated_str}' [[hash: $whs[1], line: 'FIRST']]"
+                "let n = line-count '{repeated_str}'\n\
+                 let rows = view-text '{repeated_str}' 1 $[$n + 1]\n\
+                 edit '{repeated_str}' [[hash: $rows[1][hash], line: 'FIRST']]"
             ),
         );
         assert_eq!(
@@ -718,10 +708,9 @@ target
         let buried = run_once(
             &mut shell,
             &format!(
-                "let lc = line-count '{run_str}'\n\
-                 let tagged = view-text '{run_str}' 1 $[$lc + 1]\n\
-                 let whs = map {{ |l| !{{re-split '\t' $l}}[1] }} !{{lines $tagged}}\n\
-                 edit '{run_str}' [[hash: $whs[5], line: 'Z']]"
+                "let n = line-count '{run_str}'\n\
+                 let rows = view-text '{run_str}' 1 $[$n + 1]\n\
+                 edit '{run_str}' [[hash: $rows[5][hash], line: 'Z']]"
             ),
         );
         let after_run = std::fs::read_to_string(&run).expect("read run fixture after edit");
@@ -765,10 +754,9 @@ keep-bottom
         let poisoned = run_once(
             &mut shell,
             &format!(
-                "let lc = line-count '{path_str}'\n\
-                 let tagged = view-text '{path_str}' 1 $[$lc + 1]\n\
-                 let whs = map {{ |l| !{{re-split '\t' $l}}[1] }} !{{lines $tagged}}\n\
-                 edit '{path_str}' [[hash: $whs[1], line: 'X'], [hash: 'hzzzzzz', line: 'Y']]"
+                "let n = line-count '{path_str}'\n\
+                 let rows = view-text '{path_str}' 1 $[$n + 1]\n\
+                 edit '{path_str}' [[hash: $rows[1][hash], line: 'X'], [hash: 'hzzzzzz', line: 'Y']]"
             ),
         );
         assert_ne!(poisoned.exit, 0, "a batch with a stale hash must fail");
@@ -783,10 +771,9 @@ keep-bottom
         let ok = run_once(
             &mut shell,
             &format!(
-                "let lc = line-count '{path_str}'\n\
-                 let tagged = view-text '{path_str}' 1 $[$lc + 1]\n\
-                 let whs = map {{ |l| !{{re-split '\t' $l}}[1] }} !{{lines $tagged}}\n\
-                 edit '{path_str}' [[hash: $whs[1], line: 'REPLACED'], [hash: $whs[2], line: ''], [hash: $whs[3], line: 'X\nY']]"
+                "let n = line-count '{path_str}'\n\
+                 let rows = view-text '{path_str}' 1 $[$n + 1]\n\
+                 edit '{path_str}' [[hash: $rows[1][hash], line: 'REPLACED'], [hash: $rows[2][hash], line: ''], [hash: $rows[3][hash], line: 'X\nY']]"
             ),
         );
         let after = std::fs::read_to_string(&path).expect("read after clean batch");
@@ -860,21 +847,14 @@ keep-bottom
             let path_str = display_no_trailing_sep(&path);
 
             // Read the witness exactly as the agent would: from `view-text`.
-            let vr = run_once(&mut shell, &format!("view-text '{path_str}' 1 2"));
+            let vr = run_once(&mut shell, &format!("let rows = view-text '{path_str}' 1 2; $rows[0][hash]"));
             assert_eq!(
                 vr.exit,
                 0,
                 "view-text must read the fixture; stderr was: {}",
                 String::from_utf8_lossy(&vr.stderr)
             );
-            let stdout = String::from_utf8_lossy(&vr.stdout);
-            let row = stdout.lines().next().unwrap_or_default();
-            let witness = row
-                .split('\t')
-                .nth(1)
-                .expect("view-text row tags a hash")
-                .trim()
-                .to_string();
+            let witness = vr.value.as_deref().expect("view-text must return a hash").trim_matches('"').to_string();
 
             // Feed the hash straight back as a *bare* token, the way the
             // agent copies it out of the read.
@@ -1223,12 +1203,11 @@ keep-bottom
 let hits = grep-files #'\[TODO\]'#
 let files = nub !{{map {{ |h| $h[file] }} $hits}}
 each {{ |f|
-    let lc = line-count $f\n\
-    let tagged = view-text $f 1 $[$lc + 1]\n\
-    let whs = map {{ |l| !{{re-split '\t' $l}}[1] }} !{{lines $tagged}}
+    let lc = line-count $f
+    let rows = view-text $f 1 $[$lc + 1]
     let mine = filter {{ |h| equal $h[file] $f }} $hits
     edit $f !{{map {{ |h|
-        [ hash: $whs[$[$h[line] - 1]], line: !{{re-replace #'\[TODO\]'# '[DONE]' $h[text]}} ]
+        [ hash: $rows[$[$h[line] - 1]][hash], line: !{{re-replace #'\[TODO\]'# '[DONE]' $h[text]}} ]
     }} $mine}}
 }} $files
 return !{{length $hits}}"#
