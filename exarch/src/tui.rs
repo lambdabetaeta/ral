@@ -549,6 +549,12 @@ pub struct App {
     /// Disarmed when the next `UserPromptEcho` arrives.
     root_clear_drain: bool,
     title_frame: u64,
+
+    /// Whether the currently focused tab is steerable — root always is, a live
+    /// sub-agent with a registered mailbox is, and a dead/lingering one is not.
+    /// Set by the UI loop on every keypress; also updated on focus-fallback so
+    /// the prompt hint flips at once rather than waiting for the next keystroke.
+    focused_steerable: bool,
 }
 
 /// Where the content area sat in the last drawn frame.
@@ -645,6 +651,7 @@ impl App {
             editor_request: false,
             root_clear_drain: false,
             title_frame: 0,
+            focused_steerable: true,
         }
     }
 
@@ -836,6 +843,7 @@ impl App {
                     // so this only fires for the focused one.
                     if self.focus.load(Ordering::Relaxed) == id {
                         self.focus.store(self.parent_focus(id), Ordering::Relaxed);
+                        self.focused_steerable = self.parent_focus(id) == self.root;
                     }
                 }
             }
@@ -1476,7 +1484,7 @@ impl App {
     /// The watch-only banner shown in the prompt slot on a subagent tab,
     /// or `None` on main where the textarea is editable.
     fn prompt_hint(&self, focused: AgentId) -> Option<Line<'static>> {
-        if focused == self.root {
+        if focused == self.root || self.focused_steerable {
             return None;
         }
         let title = self.titles.get(&focused).map(String::as_str).unwrap_or("?");
@@ -1513,6 +1521,7 @@ impl App {
             if self.focus.load(Ordering::Relaxed) == id {
                 let fallback = self.parent_focus(id);
                 self.focus.store(fallback, Ordering::Relaxed);
+                self.focused_steerable = fallback == self.root;
             }
             self.parents.remove(&id);
         }
@@ -3077,6 +3086,7 @@ fn ui_loop(
                     let focused = tui.app.focused();
                     let steerable =
                         focused == tui.app.root || ctx.agents.mailbox(focused).is_some();
+                    tui.app.focused_steerable = steerable;
                     match key_action(KeyMode::Running, &k, steerable) {
                         // Esc / Ctrl-C cancel the *focused* agent's turn and its
                         // subtree.  On the trunk that is the published-slot path
