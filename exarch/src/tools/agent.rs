@@ -231,8 +231,8 @@ and keeps the result addressable (e.g. the witness `edit` needs).  \
         });
         thread::Builder::new()
             .name(format!("exarch-agent-{agent_id}"))
+            .stack_size(8 * 1024 * 1024)
             .spawn(move || {
-                // `Born`/`Died` bracket the child's run so its tab is
                 // registered before the first token and ages out after the
                 // last; on a muted emitter both are no-ops.  The id routes
                 // every event to the child's own tab through the TUI's existing

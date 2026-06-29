@@ -2984,7 +2984,7 @@ pub fn run(
     };
     std::thread::scope(|scope| -> Result<(), String> {
         let worker = std::thread::Builder::new()
-            .stack_size(4 * 1024 * 1024)
+            .stack_size(8 * 1024 * 1024)
             .spawn_scoped(scope, move || {
                 let out = session.drive(&mut control, &worker_emit);
                 done_ref.store(true, Ordering::Release);
