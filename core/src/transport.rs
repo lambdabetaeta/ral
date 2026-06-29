@@ -18,10 +18,13 @@
 //!
 //! See [[decisions/260628_host-seam-transport-parametric]].
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(unix)]
 use std::sync::Mutex;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
@@ -240,12 +243,16 @@ pub trait Transport: Send + Sync {
 pub struct ControlSender {
     /// When `Some`, writes `Control` frames to a `WireChannel`.
     /// When `None`, acts directly on the in-process foreground scope.
+    #[cfg(unix)]
     wire: Option<Arc<Mutex<crate::wire::WireChannel>>>,
 }
 
 impl ControlSender {
     pub(crate) fn new() -> Self {
-        ControlSender { wire: None }
+        ControlSender {
+            #[cfg(unix)]
+            wire: None,
+        }
     }
 
     #[cfg(unix)]
@@ -264,6 +271,7 @@ impl ControlSender {
     }
 
     pub fn send(&self, ctrl: Control) {
+        #[cfg(unix)]
         if let Some(ch) = &self.wire {
             let frame = Frame::Control(ctrl);
             // Phase 2 Task 8: EPIPE here means the engine died.
