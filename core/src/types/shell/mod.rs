@@ -34,11 +34,11 @@ mod checks;
 mod context;
 pub(crate) mod control;
 pub(crate) mod cwd;
+pub(crate) mod hooks;
 mod host;
 mod inherit;
 mod init;
 pub(crate) mod modules;
-pub(crate) mod hooks;
 pub(crate) mod repl;
 mod scope;
 
@@ -488,7 +488,7 @@ impl Shell {
                     s
                 };
                 Some(Value::String(cwd_str))
-            },
+            }
             "STATUS" => Some(Value::Int(i64::from(self.mobile.control.last_status))),
             "USER" => Some(Value::String(crate::path::user_name_from_env())),
             _ => None,
@@ -600,4 +600,3 @@ mod tests {
         assert!(shell.lookup_value_name("USER").is_some());
     }
 }
-

@@ -19,9 +19,9 @@ use crate::source::Span;
 use crate::types::Binding;
 use crate::types::Value;
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::time::Duration;
-use serde::{Serialize, Deserialize};
 // ── Hook identity ───────────────────────────────────────────────────────
 
 /// Plugin identity: the unique name a plugin was loaded under.
@@ -189,24 +189,24 @@ impl Hook {
             Value::Block { .. } => 0,
             Value::Lambda { .. } => self.binding.value.lambda_arity().unwrap_or(0),
             other => {
-            return Err(RegisterError::NotCallable {
-                name: name.clone(),
-                origin: self.origin,
-                actual: format!("{}", other),
-            });
+                return Err(RegisterError::NotCallable {
+                    name: name.clone(),
+                    origin: self.origin,
+                    actual: format!("{}", other),
+                });
             }
         };
-    if actual != expected {
-        return Err(RegisterError::ArityMismatch {
-            name: name.clone(),
-            origin: self.origin,
-            expected,
-            actual,
-            sig_label: self.sig.label().into(),
-        });
+        if actual != expected {
+            return Err(RegisterError::ArityMismatch {
+                name: name.clone(),
+                origin: self.origin,
+                expected,
+                actual,
+                sig_label: self.sig.label().into(),
+            });
+        }
+        Ok(())
     }
-    Ok(())
-}
 }
 // ── Registration errors ─────────────────────────────────────────────────
 

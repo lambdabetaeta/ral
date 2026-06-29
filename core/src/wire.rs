@@ -1,9 +1,9 @@
 //! Duplex framed channel over a Unix socketpair for front-end ↔ engine IPC.
 
-use std::io;
-use std::os::unix::net::UnixStream;
-use std::os::unix::io::AsRawFd;
 use crate::transport::Frame;
+use std::io;
+use std::os::unix::io::AsRawFd;
+use std::os::unix::net::UnixStream;
 
 pub struct WireChannel {
     stream: UnixStream,
@@ -47,7 +47,6 @@ impl WireChannel {
         self.stream.as_raw_fd()
     }
 }
-
 
 #[cfg(test)]
 mod tests {

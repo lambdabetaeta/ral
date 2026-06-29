@@ -6,7 +6,7 @@
 //! Unknown keys are silently ignored so future versions can add knobs without
 //! breaking older configs.
 
-use ral_core::types::{DefaultPolicy, HookSig, HookName};
+use ral_core::types::{DefaultPolicy, HookName, HookSig};
 use ral_core::{Map, Shell, Value};
 
 use super::frontend::Surface;

@@ -11,12 +11,10 @@
 //! captured builtins installed at boot (see [`super::host_handlers`]).
 
 use ral_core::transport::{
-    self, DiagMirror, DispatchId, Event, Frame, IdentityTransport, ReqMirror,
-    ReportMirror, ResultMirror, Transport, Turn,
+    self, DiagMirror, DispatchId, Event, Frame, IdentityTransport, ReportMirror, ReqMirror,
+    ResultMirror, Transport, Turn,
 };
-use ral_core::{
-    RequestedTerminalAccess, TurnIo, TurnStdin,
-};
+use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
 use ral_core::{Value, builtins};
 use std::sync::{Arc, Mutex};
 
@@ -76,8 +74,14 @@ impl ReplLifecycle<'_> {
                 shell,
                 "chpwd",
                 &[Value::map(vec![
-                    ("old".into(), Value::String(old.to_string_lossy().into_owned())),
-                    ("new".into(), Value::String(new.to_string_lossy().into_owned())),
+                    (
+                        "old".into(),
+                        Value::String(old.to_string_lossy().into_owned()),
+                    ),
+                    (
+                        "new".into(),
+                        Value::String(new.to_string_lossy().into_owned()),
+                    ),
                 ])],
             );
         }

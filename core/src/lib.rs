@@ -41,6 +41,8 @@ pub mod path;
 pub(crate) mod prelude_manifest {
     include!(concat!(env!("OUT_DIR"), "/prelude_manifest.rs"));
 }
+#[cfg(unix)]
+pub mod engine;
 pub mod process;
 pub(crate) mod runtime;
 pub mod sandbox;
@@ -49,17 +51,17 @@ pub mod source;
 pub mod stream;
 pub(crate) mod subprocess;
 pub(crate) mod subprocess_codec;
-#[cfg(unix)] pub mod engine;
-#[cfg(unix)] pub(crate) mod wire;
-pub mod transport;
 pub mod syntax;
 #[cfg(test)]
 pub(crate) mod test_env;
 pub mod test_helper;
 pub mod text;
+pub mod transport;
 pub mod turn;
 pub mod typecheck;
 pub mod types;
+#[cfg(unix)]
+pub(crate) mod wire;
 
 // The crate-root host surface: the turn seam, the host-embedding re-exec
 // helpers, the typed-compile API, and ordinary value / rendering / diagnostic
@@ -70,8 +72,8 @@ pub use runtime::pipeline::helper::{try_run_bundled_tool, try_run_pipeline_stage
 pub use turn::{StaticDiagnostics, TurnLifecycle};
 pub use typecheck::{Scheme, SessionSchemes, TypeError, bake_prelude, typecheck};
 pub use types::{
-    Break, DefaultPolicy, Error, Escape, EventSink, HookSig, Map, HookName, RegisterError,
-    Settled, Shell, SurfaceSink, Value,
+    Break, DefaultPolicy, Error, Escape, EventSink, HookName, HookSig, Map, RegisterError, Settled,
+    Shell, SurfaceSink, Value,
 };
 
 // Compile-pipeline internals: reachable inside the crate (and used by

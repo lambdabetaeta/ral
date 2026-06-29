@@ -23,16 +23,14 @@
 //! blob, takes [`BakedPrelude::bake_runtime`] instead.
 
 use crate::io::{Source, TerminalState};
-use serde::{Serialize, Deserialize};
 use crate::ir::Comp;
 use crate::process::CancelCause;
 use crate::source::Span;
 use crate::turn::{StaticDiagnostics, TurnLifecycle};
 use crate::typecheck::Scheme;
 use crate::types::{Boundary, Capabilities, Settled, Shell, SurfaceSink, Value};
-use crate::types::{
-    DefaultPolicy, HookSig, Hook, HookName, RegisterError, TerminalPolicy,
-};
+use crate::types::{DefaultPolicy, Hook, HookName, HookSig, RegisterError, TerminalPolicy};
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 

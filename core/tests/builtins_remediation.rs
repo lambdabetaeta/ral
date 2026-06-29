@@ -15,7 +15,7 @@
 mod common;
 
 use ral_core::types::{Break, Capabilities, Escape, Settled, Shell, Status, Value};
-use ral_core::{builtins, RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
+use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin, builtins};
 
 fn fresh_shell() -> Shell {
     let mut shell = Shell::default();

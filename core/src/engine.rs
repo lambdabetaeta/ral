@@ -5,10 +5,10 @@ use std::os::unix::io::FromRawFd;
 use std::os::unix::net::UnixStream;
 
 use crate::driver::TurnRequest;
+use crate::serial::SerialValue;
 use crate::transport::{Control, DispatchId, Event, Frame, Turn, report_to_mirror};
 use crate::types::{Boundary, Shell, SurfaceSink, Value};
 use crate::wire::WireChannel;
-use crate::serial::SerialValue;
 
 use std::sync::{Arc, Mutex, mpsc};
 
@@ -22,9 +22,11 @@ struct ChannelSurfaceSink {
 impl crate::types::EventSink for ChannelSurfaceSink {
     fn emit(&self, ev: &Value) {
         if let Ok(sv) = SerialValue::from_ground(ev) {
-            let _ = self.writer.lock().unwrap().write_frame(
-                &Frame::Event(self.id, Event::Surface(sv))
-            );
+            let _ = self
+                .writer
+                .lock()
+                .unwrap()
+                .write_frame(&Frame::Event(self.id, Event::Surface(sv)));
         }
     }
 }
@@ -36,11 +38,7 @@ struct ChannelBoundarySink {
 }
 
 impl crate::types::BoundarySink for ChannelBoundarySink {
-    fn deliver(
-        &self,
-        batch: Vec<Value>,
-        joined: std::sync::Arc<std::sync::Mutex<bool>>,
-    ) {
+    fn deliver(&self, batch: Vec<Value>, joined: std::sync::Arc<std::sync::Mutex<bool>>) {
         let already = {
             let mut guard = joined.lock().unwrap();
             let was = *guard;
@@ -54,9 +52,11 @@ impl crate::types::BoundarySink for ChannelBoundarySink {
             .into_iter()
             .filter_map(|v| SerialValue::from_ground(&v).ok())
             .collect();
-        let _ = self.writer.lock().unwrap().write_frame(
-            &Frame::Event(self.id, Event::BoundarySurface(sv_batch))
-        );
+        let _ = self
+            .writer
+            .lock()
+            .unwrap()
+            .write_frame(&Frame::Event(self.id, Event::BoundarySurface(sv_batch)));
     }
 }
 
@@ -117,9 +117,7 @@ pub fn run_engine() -> ! {
 
             // Run the turn against the shell
             let report = match turn {
-                Turn::Source { src, .. } => {
-                    shell.run_source_turn(&src, turn_req)
-                }
+                Turn::Source { src, .. } => shell.run_source_turn(&src, turn_req),
                 Turn::Hook { name, args, .. } => {
                     // Decode the ground arguments off the seam.
                     let live_args: Vec<Value> = args
@@ -132,9 +130,10 @@ pub fn run_engine() -> ! {
 
             // Convert and send the terminal Report frame.
             let report_mirror = report_to_mirror(report);
-            let _ = worker_writer.lock().unwrap().write_frame(
-                &Frame::Event(id, Event::Report(report_mirror))
-            );
+            let _ = worker_writer
+                .lock()
+                .unwrap()
+                .write_frame(&Frame::Event(id, Event::Report(report_mirror)));
         }
     });
 
@@ -150,13 +149,15 @@ pub fn run_engine() -> ! {
                         use crate::driver::TurnReport;
                         use crate::turn::StaticDiagnostics;
                         let mirror = report_to_mirror(TurnReport::Static {
-                            diagnostics: StaticDiagnostics::Host(
-                                crate::types::Error::new("engine busy", 1)
-                            ),
+                            diagnostics: StaticDiagnostics::Host(crate::types::Error::new(
+                                "engine busy",
+                                1,
+                            )),
                         });
-                        let _ = writer.lock().unwrap().write_frame(
-                            &Frame::Event(id, Event::Report(mirror))
-                        );
+                        let _ = writer
+                            .lock()
+                            .unwrap()
+                            .write_frame(&Frame::Event(id, Event::Report(mirror)));
                     }
                     Err(mpsc::TrySendError::Disconnected(_)) => {
                         break; // worker died
@@ -164,16 +165,20 @@ pub fn run_engine() -> ! {
                 }
             }
             Ok(Some(Frame::Control(Control::Cancel(_)))) => {
-                crate::process::request_foreground_cancel(
-                    crate::process::CancelCause::Explicit
-                );
+                crate::process::request_foreground_cancel(crate::process::CancelCause::Explicit);
             }
             Ok(Some(Frame::Control(Control::Resize(_winsize)))) => {
                 // no-op for now, TODO task 7
             }
             Ok(Some(Frame::Control(Control::Suspend))) => {}
             Ok(Some(Frame::Control(Control::Resume))) => {}
-            Ok(Some(Frame::Attach { endpoint, cwd, home, rc_path, proto_version })) => {
+            Ok(Some(Frame::Attach {
+                endpoint,
+                cwd,
+                home,
+                rc_path,
+                proto_version,
+            })) => {
                 // Check protocol version.
                 use crate::transport::PROTOCOL_VERSION;
                 if proto_version != PROTOCOL_VERSION {
@@ -188,14 +193,14 @@ pub fn run_engine() -> ! {
                     eprintln!("engine: failed to set cwd to {}: {e}", cwd.display());
                 }
                 // SAFETY: single-threaded engine startup, no other threads
-                unsafe { std::env::set_var("HOME", &home); }
+                unsafe {
+                    std::env::set_var("HOME", &home);
+                }
                 let _ = endpoint; // TODO Phase 2 Task 6: pass terminal fds via SCM_RIGHTS
                 let _ = rc_path; // TODO: load rc_path with Shell::load_rc when available
             }
             Ok(Some(Frame::Detach)) | Ok(None) => {
-                crate::process::request_foreground_cancel(
-                    crate::process::CancelCause::Explicit
-                );
+                crate::process::request_foreground_cancel(crate::process::CancelCause::Explicit);
                 break;
             }
             Ok(Some(Frame::Event(..))) => {

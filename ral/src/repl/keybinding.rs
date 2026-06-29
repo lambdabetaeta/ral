@@ -103,10 +103,22 @@ pub(super) fn dispatch_keybinding(
         &[Value::map(vec![
             ("line".into(), Value::String(current.to_string())),
             ("cursor".into(), Value::Int(cursor_chars as i64)),
-            ("history".into(), Value::List(
-                lock(runtime).hooks.history.iter().cloned().map(Value::String).collect()
-            )),
-            ("keymap".into(), Value::String(keymap_name(keymap).to_string())),
+            (
+                "history".into(),
+                Value::List(
+                    lock(runtime)
+                        .hooks
+                        .history
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect(),
+                ),
+            ),
+            (
+                "keymap".into(),
+                Value::String(keymap_name(keymap).to_string()),
+            ),
             ("state".into(), state_cell.clone().unwrap_or(Value::Unit)),
         ])],
         Some(ctx_in),

@@ -22,7 +22,7 @@
 //! before any ANSI output because bundled uutils (uu_ls etc.) emit
 //! escape codes but rely on the host process to have switched the
 //! console into VTP mode first.
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 /// Operating mode for the interactive frontend, resolved from
 /// `RAL_INTERACTIVE_MODE` at shell startup.
 ///

@@ -273,9 +273,18 @@ mod tests {
         let parts: Vec<&str> = result.split(":").collect();
 
         assert_eq!(parts.len(), 3, "expected user:cwd:status, got {result:?}");
-        assert!(!parts[0].is_empty(), "USER must be non-empty, got {result:?}");
-        assert!(!parts[1].is_empty(), "CWD must be non-empty, got {result:?}");
-        assert_eq!(parts[2], "0", "STATUS must be 0 after successful eval, got {result:?}");
+        assert!(
+            !parts[0].is_empty(),
+            "USER must be non-empty, got {result:?}"
+        );
+        assert!(
+            !parts[1].is_empty(),
+            "CWD must be non-empty, got {result:?}"
+        );
+        assert_eq!(
+            parts[2], "0",
+            "STATUS must be 0 after successful eval, got {result:?}"
+        );
     }
 
     #[test]

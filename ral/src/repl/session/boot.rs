@@ -7,7 +7,7 @@
 //! machine itself focused on the run/turn/eval loop.
 
 use ral_core::source::Span;
-use ral_core::types::{Break, DefaultPolicy, Escape, HookSig, HookName};
+use ral_core::types::{Break, DefaultPolicy, Escape, HookName, HookSig};
 use ral_core::{RequestedTerminalAccess, Shell, TurnReport, diagnostic, evaluator::evaluate};
 use rustyline::config::{BellStyle, EditMode};
 use std::sync::{Arc, Mutex};

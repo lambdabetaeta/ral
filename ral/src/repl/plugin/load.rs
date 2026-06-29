@@ -7,7 +7,7 @@
 //! Unloading reverses the env installation and drops the record.
 
 use ral_core::source::Span;
-use ral_core::types::{Break, DefaultPolicy, Error, HookSig, HookName, Settled};
+use ral_core::types::{Break, DefaultPolicy, Error, HookName, HookSig, Settled};
 use ral_core::{RequestedTerminalAccess, Shell, TurnReport, Value};
 use std::sync::{Arc, Mutex};
 

@@ -27,8 +27,8 @@ pub(super) mod manifest;
 
 use ral_core::types::{Break, Capabilities, Settled};
 use ral_core::{
-    HookName, RequestedTerminalAccess, Shell, StaticDiagnostics, TurnIo, TurnReport,
-    TurnRequest, TurnStdin, Value, diagnostic,
+    HookName, RequestedTerminalAccess, Shell, StaticDiagnostics, TurnIo, TurnReport, TurnRequest,
+    TurnStdin, Value, diagnostic,
 };
 use std::time::Duration;
 
@@ -522,7 +522,10 @@ pub(super) fn run_buffer_change_hooks(runtime: &Arc<Mutex<PluginRuntime>>, line:
         ("old_buf".into(), Value::String(old_buf)),
         ("line".into(), Value::String(line.to_string())),
         ("pos".into(), Value::Int(pos as i64)),
-        ("history".into(), Value::List(history.iter().cloned().map(Value::String).collect())),
+        (
+            "history".into(),
+            Value::List(history.iter().cloned().map(Value::String).collect()),
+        ),
         ("keymap".into(), Value::String(keymap.clone())),
         ("state".into(), Value::Unit),
     ])];
@@ -922,26 +925,13 @@ pub(crate) fn run_lifecycle_hook(
     hook_name: &str,
     args: &[Value],
 ) {
-    fold_hook(
-        runtime,
-        shell,
-        hook_name,
-        (),
-        |shell, plugin, hook, ()| {
-            let plugin_name = plugin.name.to_string();
-            let hr = call_plugin_hook(
-                shell,
-                plugin,
-                hook,
-                args,
-                None,
-                HookFraming::InFrame,
-            );
-            if let Err(Break::Error(e)) = &hr.result {
-                plugin_error(&plugin_name, &format!("hook '{hook_name}' failed"), e);
-            }
-        },
-    );
+    fold_hook(runtime, shell, hook_name, (), |shell, plugin, hook, ()| {
+        let plugin_name = plugin.name.to_string();
+        let hr = call_plugin_hook(shell, plugin, hook, args, None, HookFraming::InFrame);
+        if let Err(Break::Error(e)) = &hr.result {
+            plugin_error(&plugin_name, &format!("hook '{hook_name}' failed"), e);
+        }
+    });
 }
 
 /// Snapshot rustyline history (most-recent-first) into the runtime so plugin

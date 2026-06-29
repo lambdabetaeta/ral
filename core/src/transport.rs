@@ -17,19 +17,19 @@
 //! frame types below is annotated with `// Phase 2: SerialValue`.
 //!
 //! See [[decisions/260628_host-seam-transport-parametric]].
-use serde::{Serialize, Deserialize};
-use std::sync::mpsc;
-use std::sync::Arc;
-use std::sync::Mutex;
+use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 
+use crate::serial::SerialValue;
 use crate::types::Boundary;
 use crate::types::SurfaceSink;
 use crate::types::Value;
 use std::sync::OnceLock;
-use crate::serial::SerialValue;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -157,7 +157,9 @@ pub struct ReqMirror {
 /// Mirror of `TurnReport`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ReportMirror {
-    Static { diagnostics: DiagMirror },
+    Static {
+        diagnostics: DiagMirror,
+    },
     Ran {
         /// The turn's settled result, `SerialValue`-encoded for the wire.
         result: ResultMirror,
@@ -216,7 +218,13 @@ pub trait Transport: Send + Sync {
     fn events(&self) -> &EventReceiver;
 
     /// Convey the session terminal endpoint and bootstrap state.
-    fn attach(&self, endpoint: TerminalEndpoint, cwd: PathBuf, home: PathBuf, rc_path: Option<PathBuf>);
+    fn attach(
+        &self,
+        endpoint: TerminalEndpoint,
+        cwd: PathBuf,
+        home: PathBuf,
+        rc_path: Option<PathBuf>,
+    );
 
     /// Detach: cancel in-flight dispatch, reap foreground subtree,
     /// restore terminal state.
@@ -268,9 +276,7 @@ impl ControlSender {
                 // Trip the signal-reachable foreground scope — the same
                 // static the SIGINT relay writes to.  This is the actual
                 // scope the turn runs under, not a transport-side sibling.
-                crate::process::request_foreground_cancel(
-                    crate::process::CancelCause::Explicit,
-                );
+                crate::process::request_foreground_cancel(crate::process::CancelCause::Explicit);
             }
             Control::Suspend | Control::Resume | Control::Resize(_) => {
                 // Under the identity transport these are handled by the
@@ -321,7 +327,10 @@ struct PerDispatchSink {
 
 impl PerDispatchSink {
     fn new(event_tx: mpsc::Sender<Frame>) -> Self {
-        Self { event_tx, current: std::sync::Mutex::new(None) }
+        Self {
+            event_tx,
+            current: std::sync::Mutex::new(None),
+        }
     }
 
     fn set_dispatch(&self, id: DispatchId) {
@@ -358,7 +367,9 @@ impl SessionLock {
         Self(std::sync::Mutex::new(inner))
     }
     fn lock(&self) -> std::sync::MutexGuard<'_, EngineInner> {
-        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
     /// Consume the lock and recover the engine state, recovering poison the
     /// same way `lock` does — a turn that unwound mid-mutation must not wedge
@@ -412,7 +423,10 @@ impl IdentityTransport {
             shell,
             event_tx,
             surface_sink,
-            boundary_sink: Some(Arc::new(TransportBoundarySink { event_tx: boundary_tx, current_dispatch: current_dispatch.clone() })),
+            boundary_sink: Some(Arc::new(TransportBoundarySink {
+                event_tx: boundary_tx,
+                current_dispatch: current_dispatch.clone(),
+            })),
             terminal_lease: None,
             current_dispatch: current_dispatch.clone(),
         };
@@ -420,7 +434,9 @@ impl IdentityTransport {
         IdentityTransport {
             engine: SessionLock::new(engine),
             control,
-            events_recv: EventReceiver { rx: std::sync::Mutex::new(event_rx) },
+            events_recv: EventReceiver {
+                rx: std::sync::Mutex::new(event_rx),
+            },
         }
     }
 
@@ -436,8 +452,6 @@ impl IdentityTransport {
         self.engine.into_inner().shell
     }
 
-
-
     /// Access the underlying `Shell` through the mutex guard directly.
     /// This is needed when the caller must combine shell access with
     /// other borrows (e.g. the REPL session's frontend, jobs table).
@@ -445,7 +459,6 @@ impl IdentityTransport {
     pub fn shell_mut(&self) -> std::sync::MutexGuard<'_, EngineInner> {
         self.engine.lock()
     }
-
 
     /// Access the underlying `Shell` mutably for session bootstrap.
     pub fn with_shell<F, R>(&self, f: F) -> R
@@ -462,8 +475,9 @@ impl Transport for IdentityTransport {
 
         // Install the per-dispatch surface sink.
         engine.surface_sink.set_dispatch(id);
-        engine.current_dispatch.store(id.0, std::sync::atomic::Ordering::Relaxed);
-
+        engine
+            .current_dispatch
+            .store(id.0, std::sync::atomic::Ordering::Relaxed);
 
         // Extract the ReqMirror (same shape for both Source and Hook).
         let req = match &turn {
@@ -488,9 +502,7 @@ impl Transport for IdentityTransport {
 
         // Run the turn against the shell.
         let report = match turn {
-            Turn::Source { src, .. } => {
-                engine.shell.run_source_turn(&src, turn_req)
-            }
+            Turn::Source { src, .. } => engine.shell.run_source_turn(&src, turn_req),
             Turn::Hook { name, args, .. } => {
                 // Decode the ground arguments off the seam.
                 let live_args: Vec<Value> = args
@@ -505,8 +517,12 @@ impl Transport for IdentityTransport {
         let report_mirror = report_to_mirror(report);
 
         engine.surface_sink.clear_dispatch();
-        engine.current_dispatch.store(0, std::sync::atomic::Ordering::Relaxed);
-        let _ = engine.event_tx.send(Frame::Event(id, Event::Report(report_mirror)));
+        engine
+            .current_dispatch
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        let _ = engine
+            .event_tx
+            .send(Frame::Event(id, Event::Report(report_mirror)));
     }
 
     fn control(&self) -> &ControlSender {
@@ -517,24 +533,26 @@ impl Transport for IdentityTransport {
         &self.events_recv
     }
 
-    fn attach(&self, endpoint: TerminalEndpoint, _cwd: PathBuf, _home: PathBuf, _rc_path: Option<PathBuf>) {
+    fn attach(
+        &self,
+        endpoint: TerminalEndpoint,
+        _cwd: PathBuf,
+        _home: PathBuf,
+        _rc_path: Option<PathBuf>,
+    ) {
         let mut engine = self.engine.lock();
         engine.terminal_lease = endpoint.lease;
     }
 
     fn detach(&self) {
         // Cancel any in-flight turn via the signal-reachable scope.
-        crate::process::request_foreground_cancel(
-            crate::process::CancelCause::Explicit,
-        );
+        crate::process::request_foreground_cancel(crate::process::CancelCause::Explicit);
         self.engine.lock().terminal_lease = None;
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
 }
-
-
 
 // ── Wire transport ────────────────────────────────────────────────────
 
@@ -571,7 +589,7 @@ impl WireTransport {
     /// Creates a `WireChannel` socketpair, passes one end to the engine
     /// child as fd 3, and starts a reader thread that funnels incoming
     /// `Event` frames into the event receiver.
-#[allow(
+    #[allow(
         clippy::disallowed_methods,
         reason = "[io-door:silent:engine-spawn] spawns the engine child process for the wire transport; an infrastructure handoff, not turn-time data I/O"
     )]
@@ -584,9 +602,8 @@ impl WireTransport {
 
         // Spawn the engine child with the engine end of the socket on fd 3.
         let engine_fd = engine.as_raw_fd();
-        let mut cmd = std::process::Command::new(
-            std::env::current_exe().map_err(io::Error::other)?,
-        );
+        let mut cmd =
+            std::process::Command::new(std::env::current_exe().map_err(io::Error::other)?);
         cmd.arg("--engine");
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::null());
@@ -660,7 +677,7 @@ impl WireTransport {
             Err(_) => {} // other write errors are non-fatal
         }
     }
-    }
+}
 
 #[cfg(unix)]
 impl Drop for WireTransport {
@@ -689,7 +706,13 @@ impl Transport for WireTransport {
     /// controlling terminal fds over the socket via SCM_RIGHTS (Unix
     /// ancillary data).  For now the endpoint's lease field is
     /// `#[serde(skip)]` and the engine stores it as a placeholder.
-    fn attach(&self, endpoint: TerminalEndpoint, cwd: PathBuf, home: PathBuf, rc_path: Option<PathBuf>) {
+    fn attach(
+        &self,
+        endpoint: TerminalEndpoint,
+        cwd: PathBuf,
+        home: PathBuf,
+        rc_path: Option<PathBuf>,
+    ) {
         self.write(&Frame::Attach {
             endpoint,
             cwd,
@@ -721,11 +744,7 @@ struct TransportBoundarySink {
 }
 
 impl crate::types::BoundarySink for TransportBoundarySink {
-    fn deliver(
-        &self,
-        batch: Vec<Value>,
-        joined: std::sync::Arc<std::sync::Mutex<bool>>,
-    ) {
+    fn deliver(&self, batch: Vec<Value>, joined: std::sync::Arc<std::sync::Mutex<bool>>) {
         // Test-and-set: only the first deliverer forwards the batch.
         let already = {
             let mut guard = joined.lock().unwrap();
@@ -740,9 +759,13 @@ impl crate::types::BoundarySink for TransportBoundarySink {
             .into_iter()
             .filter_map(|v| SerialValue::from_ground(&v).ok())
             .collect();
-        let _ = self
-            .event_tx
-            .send(Frame::Event(DispatchId(self.current_dispatch.load(std::sync::atomic::Ordering::Relaxed)), Event::BoundarySurface(sv_batch)));
+        let _ = self.event_tx.send(Frame::Event(
+            DispatchId(
+                self.current_dispatch
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            Event::BoundarySurface(sv_batch),
+        ));
     }
 }
 

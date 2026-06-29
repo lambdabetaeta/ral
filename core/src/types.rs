@@ -75,7 +75,7 @@ pub use audit::{
 // Shell state, Context.  See types/shell.rs.
 mod shell;
 pub use shell::hooks::{
-    DefaultPolicy, HookSig, Hook, Namespace, HookName, RegisterError, TerminalPolicy,
+    DefaultPolicy, Hook, HookName, HookSig, Namespace, RegisterError, TerminalPolicy,
 };
 pub use shell::{
     Boundary, BoundarySink, Context, DEFAULT_RECURSION_LIMIT, EventSink, LocalState, Mobile,
