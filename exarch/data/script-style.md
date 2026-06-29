@@ -76,27 +76,6 @@ Bindings are immutable, but shadowable. When behaviour should change, re-bind wi
 
 Blocks are lexical and capture environments. If a block uses a helper, e.g. `plan`, shadowing `plan` later DOES NOT ALTER the behaviour of `plan` in previous blocks. Either re-bind the helper, or use higher-order arguments in the first place (as in `run-with` above).
 
-## Long-running tasks
-
-Scripts that run longer than 30s belong in a `spawn { … }`, which run on a worker and return a handle immediately. `await` the handle for a blocking wait: it returns the value the moment the block settles. Should the block outlast 30s, the turn fails but the worker keeps running; await again. Do not busy-wait using `poll`.
-
-For example, stand up a package server and verify it like this:
-
-[turn 1]
-
-    ...
-    python -m build               # ≤30s, its own call
-
-[turn 2]
-
-    let srv = spawn { pypi-server run -p 8080 ./pkgs }   # detaches, survives
-    python -m venv /tmp/v; /tmp/v/bin/pip install --index-url http://localhost:8080/simple mypkg
-
-[turn 3] 
-
-    /tmp/v/bin/python -c 'import mypkg'   # the server from turn 2 is still up
-
-
 ## Examples
 
 Survey a symbol: locate, drop tests, deduplicate files, and sample in one turn:
@@ -125,8 +104,7 @@ Follow-ups index into the bindings — no re-grep, no re-run.
 
 ## One program, not a nervous probe
 
-A failing machine draws the worst out of a shell.  The instinct is to
-fire one probe, read it, fire the next:
+The instinct is to probe the machine in separate turns:
 
     uptime
     sysctl vm.swapusage
@@ -135,15 +113,7 @@ fire one probe, read it, fire the next:
     pkill -i zulip ; pkill -i "Microsoft Edge"
     sysctl vm.swapusage ; uptime          # ...did that help?
 
-Each line is gone the moment it scrolls past, and the numbers are
-correlated by eye.  But there are only **two questions** here — *how is
-memory?* and *what does killing the hogs buy back?* — so there should be
-two programs, each ending in one value.
-
-The first gathers every reading at once.  A single `grab` combinator
-lifts a capture group out of any line, and the heaviest processes parse
-into typed records — so `Code Helper (Renderer)` survives its spaces,
-the field-splitting that the bash `awk`-on-`split` idiom trips over:
+But there are only two questions here: how is memory, and what does killing the hogs buy back? Thus there should be two programs, each ending in one value. The first gathers every reading at once: `grab` lifts a capture group out of any line, and the heaviest processes parse into typed records — so `Code Helper (Renderer)` survives its spaces, the field-splitting that the bash `awk`-on-`split` idiom trips over:
 
     let grab = { |pat s| re-replace "(?s).*$pat.*" '$1' $s }
 
@@ -163,10 +133,7 @@ the field-splitting that the bash `awk`-on-`split` idiom trips over:
     [ram-gb: $ram, load: [m1: $load[0], m5: $load[1], m15: $load[2]],
      swap-mb: [used: $used, total: $total], free-pct: $freep, hogs: $hogs]
 
-The reading is a value now: index it, `take` from it, diff it against a
-later snapshot.  The second program acts, and reports what the action
-bought — the re-check is not a third step but a measurement taken either
-side of the kill (the file adds an argument guard):
+The reading is a value now: index it, `take` from it, diff it against a later snapshot.  The second program acts, and reports what the action bought — the re-check is not a third step but a measurement taken either side of the kill (the file adds an argument guard):
 
     let free   = { int !{grab 'free percentage: ([0-9]+)' !{memory_pressure 2>/dev/null}} }
 
@@ -188,33 +155,22 @@ side of the kill (the file adds an argument guard):
 
     [reaped: $reaped, total-mb: !{sum !{map { |r| $r[rss-mb] } $reaped}}, free-pct: [before: $before, after: $after]]
 
-The census is taken once and every app weighed against it before
-anything dies.  The kills cannot simply be sequenced — `pkill` exits
-nonzero on an empty match, which would halt the rest — so `attempt`
-absorbs the miss.  And `grab`, bound in the first call, is still in
-scope for the second: a session accretes vocabulary.  The answer to
-*did that help?* lands in the returned record, not in your head.
+The census is taken once and every app weighed against it before anything dies.  The kills cannot simply be sequenced — `pkill` exits nonzero on an empty match, which would halt the rest — so `attempt` absorbs the miss.  And `grab`, bound in the first call, is still in scope for the second: a session accretes vocabulary.  The answer to "did that help?" is in the returned record.
 
 The full runnable scripts are in `examples/mac-memory/{vitals,reap}.ral`.
 
 ## Mock with handlers
 
-`within [handlers: …]` rebinds a command by name for the extent of a
-block: inside, every call to that name runs your block instead of the
-real program.  Three uses follow from one mechanism.
+`within [handlers: …]` rebinds a command by name for the extent of a block: inside, every call to that name runs your block instead of the real program. 
 
-**Pin nondeterminism.**  Replace a clock, a random source, or a remote
-with a fixed answer, and a result becomes reproducible:
+**Pin nondeterminism.**  Replace a clock, a random source, or a remote with a fixed answer, and a result becomes reproducible:
 
     within [handlers: [date: { |args| echo '2026-01-01T00:00:00Z' }]] {
         let stamp = date -u +%Y-%m-%dT%H:%M:%SZ        # always the pinned value
         process-with $stamp
     }
 
-**Exercise a destructive program without consequence.**  `reap` above
-kills processes; with its commands rebound it reads a census you supply
-and kills nothing, yet still returns its full record — so the logic is
-tested in isolation:
+**Exercise a destructive program without consequence.**  `reap` above kills processes; with its commands rebound it reads a census you supply and kills nothing, yet still returns its full record — so the logic is tested in isolation:
 
     within [handlers: [
         ps:              { |args| echo ##'  RSS COMM
@@ -226,18 +182,13 @@ tested in isolation:
         source 'examples/mac-memory/reap.ral'          # nothing dies; record still computed
     }
 
-**Trace, by wrapping and forwarding.**  Handlers are *deep* — they hold
-for the whole body, nested calls included — and *self-masking*: inside a
-handler's own body a same-name call reaches the real command, so
-wrap-and-forward does not loop:
+**Trace, by wrapping and forwarding.**  Handlers are *deep* — they hold for the whole body, nested calls included — and *self-masking*: inside a handler's own body a same-name call reaches the real command, so wrap-and-forward does not loop:
 
     within [handlers: [git: { |args| echo "+ git !{str $args}" 1>&2 ; git ...$args }]] {
         deploy            # every git inside is logged, then run for real
     }
 
-For a blunt instrument, `handler:` (singular) is a catch-all binary
-block `{ |name args| … }` intercepting every external command in the
-body — a whole-script dry run:
+`handler:` (singular) is a catch-all binary block `{ |name args| … }` intercepting every external command in the body — a whole-script dry run:
 
     within [handler: { |name args| echo "[would run: $name !{str $args}]" }] {
         deploy            # prints the plan; runs none of it
@@ -251,16 +202,3 @@ An elision in value/stdout/stderr means a command succeeded, but you asked to se
 - Pre-size files, then read windows: `line-count $f` first; then `view-text $f A B` or `view-text-around $f LINE PEEK`.
 - For tests, ask for less: Name the single failing test or capture and slice the final log lines before returning them.
 
-## Writing large files
-
-A script that carries an entire long file in one raw string can exhaust the visible-output budget before the tool call is delivered. For any file beyond about 150 lines, write in chunks. 
-
-In the first turn:
-
-    echo #'<lines 1..N>'# > path/to/file
-
-In the second turn:
-
-    echo #'<next section>'# >> path/to/file
-
-Choose the hash count (e.g. `##'…'##`) so the closing delimiter does not occur in the content.
