@@ -479,3 +479,7 @@ let nub = { |xs| fold { |acc x| if !{elem $x $acc} { $acc } else { [...$acc, $x]
 ## never fails (failure is data in the audit tree), so `await $h` is
 ## always safe and the handle survives turn boundaries.
 let defer = { |body| spawn { audit { !$body } } }
+
+## Decode the stdout/stderr Bytes from an `await` result into a String.
+## Usage: `bytes-to-string $r[stdout]`.
+let bytes-to-string = { |bytes| to-bytes $bytes | from-string }

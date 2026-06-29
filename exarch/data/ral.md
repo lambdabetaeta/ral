@@ -2,7 +2,7 @@ Like every shell, `ral` runs commands:
 
     ls
     cat foo.txt | wc -l
-    echo hello > /tmp/out
+    echo "hello" > /tmp/out
 
 Commands are sequenced by newlines or `;`. An uncaught failure aborts the whole script: `./configure; make` runs `make` only when configuration succeeds. `?` runs the second command when the first failed: `cat VERSION ? 'unversioned'`. There is no `&&` nor `||`.
 
@@ -65,7 +65,7 @@ There are commands that take bytes to values: There are codecs that bridge the w
 
 There are also corresponding `to-line`, `to-string`, `to-lines`, `to-json` that take values to bytes. Text decoders require UTF-8; use `from-bytes` when bytes are not text. 
 
-Every decoder also accepts its input as an explicit argument, which is how you decode a value already in hand — `from-string $r[stdout]`, `from-json $captured`. Piping a String *value* into a decoder (.e.g `$captured | from-json`) is a type error.
+Decoders read from the byte channel.  To decode bytes in a definition, use `bytes-to-string $r[stdout]`.
 
 `from-lines` yields a lazy stream, which no function iterates implicitly (`x | f` is always `f !{x}`). Either eliminate it explicitly — `git log | from-lines | stream-each { |l| … }`, or `stream-to-list`/`stream-map`/`stream-fold` — or skip streams: `lines` splits a String into a materialised list, and `from-lines-list PATH` reads a file as a materialised list of lines:
 
@@ -181,8 +181,8 @@ Prelude functions cover common cases:
 
 If you have nothing else to do, inform the user and ***WAIT***; you will be notified when the build completes. When you receive the notification use `await` to obtain a `[value, stdout, stderr]` record:
 
-    let x = await $h                      # blocks until the worker returns
-    [build-result: $x[stdout], build-errs: $x[stderr]]   # as Bytes
+    let x = await $h                                                                                         # blocks until the worker returns
+    [build-result: !{to-bytes $x[stdout] | from-string}, build-errs: !{to-bytes $x[stderr] | from-string}]   # as Bytes
 
 If this fails, **DO NOT SPAWN AGAIN**. In the next turn just await again: `let x = await $h`. Alternatively, yield to the user and you will be notified.
 
@@ -214,9 +214,9 @@ Read with `from-X < PATH`, write with `to-X $v > PATH`:
     to-string $report >> $file         # append
     to-json   $cfg    >  $file         # JSON write
 
-Multi-line text with awkward quotes goes through a raw string:
+Multi-line text with awkward quotes should go through a raw string:
 
-    echo #'first line
+    to-string #'first line
     second 'quoted' line'# > $file
 
 ## Exploring
@@ -234,15 +234,15 @@ For dot/ignored files you also have `rg` bundled.
 
 ## Reading and editing files
 
-`view-text PATH START END` shows the half-open line range `[START, END)`, each line tagged `<line-no>\t<hash>\t<text>`:
+`view-text PATH START END` shows the half-open line range `[START, END)`:
 
     [tui-start : !{view-text 'src/tui.rs' 100 150}, tui-end: !{view-text 'src/tui.rs' 100 150} ]
 
-The `<hash>` is a unique freshness witness for that line, which depends on neighbouring lines. 
+The result is a `[hash, line-no, text]` record, where `<hash>` is a unique freshness witness for that line, which depends on neighbouring lines. 
 
 `view-text-around PATH LINE PEEK` shows the `2*PEEK + 1` lines centred on `LINE`, tagged the same way.
 
-`edit PATH EDITS` applies a batch of `EDITS`, a list of records `[hash: HASH, line: NEWTEXT]`. Each edit replaces the line identified by `HASH` verbatim with `NEWTEXT`. It is atomic: every hash is resolved against lines before editing; and a batch either applies whole or fails whole. Use raw strings `#'…'#` for `NEWTEXT` without any escapes.
+`edit PATH EDITS` applies a batch of `EDITS`, a list of records `[hash: HASH, line: NEWTEXT]`. Each edit replaces ONLY the line identified by `HASH` verbatim with `NEWTEXT`. It is atomic: every hash is resolved against lines before editing; and a batch either applies whole or fails whole. Use raw strings `#'…'#` for `NEWTEXT` without any escapes.
 
 There are three ways to use `edit`. To delete a line pass the empty string `#''#` as `NEWTEXT`. To replace a line pass a new line as `NEWTEXT`. To replace a line with multiple
 new lines put several newline characters (not escapes) in `NEWTEXT`, perhaps
