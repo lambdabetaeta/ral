@@ -3388,3 +3388,11 @@ Tidied the `ral` binary entry point by moving argv/mode parsing to `ral/src/cli.
 ## [2026-06-29] ingest | binding reaper restated for agent shells
 
 Replaced the old `260616_exarch-binding-reaping` sketch with [[decisions/260629_agent-binding-reaping|agent-binding-reaping]] after review against the landed Fleet/Agent split. The new proposal makes the lease ledger per-agent `Shell::local`, requires one lease-aware top-level write door and static read/write harvesting, recursively pins running handles, and makes immediate `Agent::durable` refresh part of committed pruning; current links in long-running work, scheduled wakeups, cancellation, and [[index|index]] now point at it.
+
+
+## [2026-06-29] migrate | TUI modularisation — 3,889 → 840 lines
+
+Split `exarch/src/tui.rs` into a façade + 13 focused modules per
+[[decisions/260629_tui_modular|ADR]].  All 301 tests pass, zero compilation
+errors, all 10 invariants verified.  See [[map/exarch/frontend]] for the new
+file layout.

@@ -58,7 +58,7 @@
 //! reads [`Picker::focused_or_model_needing_endpoints`] and fetches a model's
 //! providers only once the provider control is focused on it.
 
-use super::{BANNER_GOLD, CYAN, OVERLAY_BG, SLATE};
+use super::line::{BANNER_GOLD, CYAN, OVERLAY_BG, SLATE};
 use crate::models::ProviderEndpoint;
 use crate::oauth::Subscription;
 use crate::provider::{ProviderId, ProviderKind, ReasoningEffort, Tuning};

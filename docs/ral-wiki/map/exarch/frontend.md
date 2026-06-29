@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1baac6d
-generated_at_date: 2026-06-22
+generated_at_commit: 431fff08509d0cf29d57a337c76b7e85d6198114
+generated_at_date: 2026-06-29
 covers_paths: [exarch/src/bus.rs, exarch/src/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/host.rs]
 ---
 
@@ -58,7 +58,7 @@ destination but never reaches the filesystem itself.
 
 Two `Sink` implementations:
 
- `tui.rs` (+ `tui/{block,group,line,md,rail,viewport}.rs`) — the full-screen
+ `tui.rs` (+ `tui/{app,banner,block,commands,fidelity,gesture,group,highlight,line,matrix,md,model_picker,picker,prompt,rail,render,select,status,surface,tabs,terminal,tui_loop,viewport}.rs`) — the full-screen
  TUI. It owns the alternate screen and its own scrollback: each session is a
  `Vec<Block>` (`tui/block.rs`), and the whole frame is redrawn each tick from
  a memoised flatten of those blocks into wrapped visual rows. A tool call is
@@ -183,3 +183,16 @@ interrupts before library loading and returns with the cancel chain installed
 over ral's handlers. `/clear` therefore works after Esc and SIGINT after
 `/clear` still raises cancel. `host.rs` snapshots the machine (OS, date, cwd,
 user, git state) once at startup for the [[map/exarch/policy|system prompt]].
+        - `tui.rs` — thin façade (~840 lines): module declarations, re-exports, App struct with orchestration methods delegating to components
+        - `tui/tui_loop.rs` — REPL/ui loop: `run`, `Tui`, `CommandCtx`, `ReplControl`, `ui_loop`, `KeyMode`, `KeyAction`, `key_action`, `ctrl_key`
+        - `tui/terminal.rs` — terminal lifetime: `TerminalGuard`, raw mode, alt screen, panic hook, stderr redirect, editor hatch, `compose_in_editor`
+        - `tui/tabs.rs` — session/view lifecycle: `Tabs`, viewports, dispatch order, tabs, titles, dying linger, parent chain, focus management
+        - `tui/surface.rs` — event coalescing: `SurfaceBuffer`, `PatchBuf`, `ObservationBuf`, absorb/flush operations
+        - `tui/prompt.rs` — prompt editor state: `PromptState`, history, draft, editor request, key input
+        - `tui/gesture.rs` — mouse/selection: `GestureState`, `Press`, frame geometry, selection, copy toast, hover, scroll
+        - `tui/render.rs` — frame layout: `draw`, `FrameGeom`, `paint_selection`, `paint_hover`, `footer_hint`, `emit_tab_title`
+        - `tui/banner.rs` — startup metadata: `SessionInfo`, `session_card`, `legend_panel`, ART/EAGLE constants
+        - `tui/commands.rs` — slash command registry: `SlashCommand`, `lookup_command`, `route_submit`, handler functions
+        - `tui/status.rs` — status line: `StatusReadout`, `rule_line`, `ctx_ramp`, `wait_bar`, `wait_step`
+        - `tui/matrix.rs` — agent matrix: `MatrixSort`, `matrix_bar`, `matrix_row`, `step_cells`
+        - `tui/model_picker.rs` — model switching: `pick_model`, `drive_picker`, `apply_model_switch`
