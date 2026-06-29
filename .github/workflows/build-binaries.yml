@@ -11,8 +11,6 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 jobs:
   build-linux-x86_64:
     runs-on: ubuntu-latest
@@ -25,7 +23,7 @@ jobs:
       - name: Build
         run: cargo build --release -p ral --target x86_64-unknown-linux-musl
       - name: Upload
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ral-linux-x86_64
           path: target/x86_64-unknown-linux-musl/release/ral
@@ -42,7 +40,7 @@ jobs:
       - name: Build
         run: cargo build --release -p ral --target x86_64-unknown-linux-musl --features coreutils,diffutils,grep,ripgrep
       - name: Upload
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ral-linux-x86_64-allutils
           path: target/x86_64-unknown-linux-musl/release/ral
@@ -59,7 +57,7 @@ jobs:
       - name: Build
         run: cargo build --release -p ral --target aarch64-unknown-linux-musl
       - name: Upload
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ral-linux-arm64
           path: target/aarch64-unknown-linux-musl/release/ral
@@ -93,7 +91,7 @@ jobs:
       - name: Build
         run: cargo build --release -p ral --target aarch64-unknown-linux-musl --features coreutils,diffutils,grep,ripgrep
       - name: Upload
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ral-linux-arm64-allutils
           path: target/aarch64-unknown-linux-musl/release/ral
@@ -106,7 +104,7 @@ jobs:
       - name: Build
         run: cargo build --release -p ral
       - name: Upload
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ral-macos-arm64
           path: target/release/ral
@@ -119,7 +117,7 @@ jobs:
       - name: Build
         run: cargo build --release -p ral --features coreutils,diffutils,grep,ripgrep
       - name: Upload
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ral-macos-arm64-allutils
           path: target/release/ral
@@ -132,7 +130,7 @@ jobs:
       - name: Build
         run: cargo build --release -p ral
       - name: Upload
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ral-windows
           path: target/release/ral.exe
@@ -145,7 +143,7 @@ jobs:
       - name: Build
         run: cargo build --release -p ral --features coreutils,diffutils,grep,ripgrep
       - name: Upload
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ral-windows-allutils
           path: target/release/ral.exe
@@ -165,7 +163,7 @@ jobs:
       - name: Build
         run: cargo build --release -p exarch --target x86_64-unknown-linux-musl
       - name: Upload
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: exarch-linux-x86_64
           path: target/x86_64-unknown-linux-musl/release/exarch
@@ -182,7 +180,7 @@ jobs:
       - name: Build
         run: cargo build --release -p exarch --target aarch64-unknown-linux-musl
       - name: Upload
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: exarch-linux-arm64
           path: target/aarch64-unknown-linux-musl/release/exarch
@@ -195,7 +193,7 @@ jobs:
       - name: Build
         run: cargo build --release -p exarch
       - name: Upload
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: exarch-macos-arm64
           path: target/release/exarch
@@ -227,7 +225,7 @@ jobs:
       contents: write
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
@@ -252,7 +250,7 @@ jobs:
           done
 
       - name: Publish 'latest' prerelease
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: latest
           name: latest
@@ -291,7 +289,7 @@ jobs:
       contents: write
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
@@ -316,7 +314,7 @@ jobs:
           done
 
       - name: Publish versioned release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
