@@ -1,0 +1,11 @@
+[package]
+name = "prompt-editor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ratatui = "0.30"
+crossterm = "0.29"
+edtui = { version = "0.11.3", default-features = false }
+edtui-jagged = "0.1"
+textwrap = "0.16"

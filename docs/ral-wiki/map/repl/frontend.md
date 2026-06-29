@@ -51,21 +51,19 @@ dumb terminals whatever was asked):
   dispatches only after leaving `readline`; an `_ed-push` buffer is popped when
   nothing is pending.
 
-The structural surface and exarch's TUI share their editor-cursor handling
-through the `textarea-vim` crate: the vi dispatch fold (`Vim::advance`) and
-`place_native_cursor`, which positions the terminal's own (native, blinking)
-cursor at the edit point via the widget's wrap-aware `screen_cursor`. Both show
-that native cursor in **every** mode, the same shape throughout (no painted
-vi modal-mode block); the widget's own painted cursor cell is suppressed with a
+The structural surface and exarch TUI share their prompt editor through
+the `prompt-editor` crate (backed by `edtui` 0.11): the `PromptEditor` facade
+owns all cursor positioning, key dispatch (Emacs and Vim via edtui
+`EditorEventHandler`), height hinting, and highlight rendering. Both
+frontends show the terminal native cursor in **every** mode, the same shape
+throughout (no painted vi modal-mode block). One implementation, not a copy each.
 plain `set_cursor_style` at construction. One implementation, not a copy each.
-
-The structural surface intercepts the chords ratatui-textarea binds to editor
-rather than shell semantics: `shell_line_edit` remaps **Ctrl-U to
-kill-to-line-start** (`delete_line_by_head`, readline's unix-line-discard, not
-the textarea's `undo`), in emacs and in vi-Insert mode — vi Normal/Visual keep
-the vim keymap. Ctrl-D on a non-empty buffer deletes the char under the cursor;
+The structural surface handles shell-line chords before the editor:
+**Ctrl-U kills to line-start** (readline unix-line-discard, not edtui
+undo), in emacs and in vi-Insert mode. vi Normal/Visual keep the edtui keymap.
+Ctrl-D on a non-empty buffer deletes the char under the cursor;
 only an empty buffer reads as `Eof`.
-
+## Completion
 ## Completion
 
 The completion *engine* is frontend-neutral: `completion.rs` classifies the

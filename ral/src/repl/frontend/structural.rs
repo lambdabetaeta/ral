@@ -40,8 +40,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget, Wrap};
 use ratatui::{TerminalOptions, Viewport};
-use ratatui_textarea::{CursorMove, DataCursor, TextArea};
-use textarea_vim::{Mode, Vim, place_native_cursor};
+use prompt_editor::{EditMode, PromptEditor};
 
 use std::collections::HashSet;
 use std::io;
@@ -200,16 +199,11 @@ impl StructuralFrontend {
         let _guard = HookEnvGuard(self.runtime.clone());
         lock(&self.runtime).hooks.history = self.history.entries().iter().rev().cloned().collect();
 
-        let mut textarea = new_textarea();
+        let mut prompt = PromptEditor::new(if self.vi { EditMode::Vi } else { EditMode::Emacs });
         if let Some(p) = &initial {
-            textarea.insert_str(&p.text);
-            place_cursor(&mut textarea, p.cursor);
+            prompt.set_text(&p.text);
+            prompt.place_char_offset(p.cursor);
         }
-        // Vim emulation, only when the user runs vi keys.  A REPL prompt is a
-        // line you type into straight away, so the start mode is Insert (else
-        // every command would need a leading `i`).  Off (emacs), `vim` is
-        // `None` and the dispatch falls through to plain `textarea.input(k)`.
-        let mut vim: Option<Vim> = self.vi.then(|| Vim::new(Mode::Insert));
         let mut hist_pos: Option<usize> = None;
         let mut draft = String::new();
         // Lazily-built completion candidate snapshot, and the open menu (if
@@ -230,7 +224,7 @@ impl StructuralFrontend {
         // always sits — and `MAX_VIEWPORT` keeps scrollback in view.
         let height = viewport_height(
             prompt_lines.lead.len() as u16,
-            &textarea,
+            &prompt,
             &ws_rows,
             &matrix,
             rows,
@@ -249,7 +243,7 @@ impl StructuralFrontend {
         let mut last_buf: Option<String> = None;
 
         let result = loop {
-            let s = textarea.lines().join("\n");
+            let s = prompt.text();
             if last_buf.as_deref() != Some(s.as_str()) {
                 spine = build_spine(&s, shell);
                 last_buf = Some(s.clone());
@@ -259,7 +253,7 @@ impl StructuralFrontend {
             // dedups on (text, cursor) internally, so an idle redraw between
             // keystrokes re-runs no plugin code.  The ghost is hidden while the
             // completion menu owns the lower band.
-            run_buffer_change_hooks(&self.runtime, &s, joined_cursor_byte(&textarea));
+            run_buffer_change_hooks(&self.runtime, &s, prompt.cursor_byte_offset());
             let (ghost, highlights) = {
                 let rt = lock(&self.runtime);
                 (rt.hooks.ghost.clone(), rt.hooks.highlights.clone())
@@ -268,7 +262,7 @@ impl StructuralFrontend {
                 render(
                     frame,
                     &prompt_lines,
-                    &textarea,
+                    &mut prompt,
                     &spine,
                     &ws_rows,
                     &matrix,
@@ -308,7 +302,7 @@ impl StructuralFrontend {
                         continue;
                     }
                     KeyCode::Enter => {
-                        accept_completion(&mut textarea, &menu.take().unwrap());
+                        accept_completion(&mut prompt, &menu.take().unwrap());
                         continue;
                     }
                     KeyCode::Esc => {
@@ -325,55 +319,49 @@ impl StructuralFrontend {
 
             match k.code {
                 KeyCode::Char('c') if ctrl => {
-                    if is_empty(&textarea) {
+                    if prompt.is_empty() {
                         break Composed::Done(Read::Interrupt);
                     }
-                    textarea.select_all();
-                    textarea.cut();
-                }
+                    prompt.clear();
+                    }
                 KeyCode::Char('d') if ctrl => {
-                    if is_empty(&textarea) {
+                    if prompt.is_empty() {
                         break Composed::Done(Read::Eof);
                     }
                     // A non-empty buffer: Ctrl-D deletes the char under the
                     // cursor (readline's behaviour), not EOF.
-                    edit_key(&mut vim, &mut textarea, k);
+                    prompt.handle_key(k);
                 }
                 // Up/Down walk history only from the prompt's edge rows: with
                 // the cursor mid-text in a multi-line draft they fall through
-                // to the textarea and move the cursor instead.
+                // to the editor and move the cursor instead.
                 KeyCode::Up if k.modifiers.is_empty() => {
-                    if textarea.cursor().0 == 0 {
-                        self.history_prev(&mut textarea, &mut hist_pos, &mut draft);
+                    if prompt.row() == 0 {
+                        self.history_prev(&mut prompt, &mut hist_pos, &mut draft);
                     } else {
-                        edit_key(&mut vim, &mut textarea, k);
+                        prompt.handle_key(k);
                     }
                 }
                 KeyCode::Down if k.modifiers.is_empty() => {
-                    if textarea.cursor().0 == textarea.lines().len() - 1 {
-                        self.history_next(&mut textarea, &mut hist_pos, &mut draft);
+                    if prompt.row() == prompt.row_count() - 1 {
+                        self.history_next(&mut prompt, &mut hist_pos, &mut draft);
                     } else {
-                        edit_key(&mut vim, &mut textarea, k);
+                        prompt.handle_key(k);
                     }
                 }
                 KeyCode::Tab => {
                     // Build the candidate snapshot once, then complete the
                     // token under the cursor.  A unique match is applied in
                     // place; several open the menu; none is a no-op.
-                    let DataCursor(row, col) = textarea.cursor();
-                    let line = textarea.lines()[row].clone();
-                    let cursor_byte = char_to_byte(&line, col);
+                    let row = prompt.row();
+                    let col = prompt.col();
+                    let Some(line) = prompt.line(row) else { prompt.handle_key(k); continue; };
                     let src = sources.get_or_insert_with(|| Sources::from_shell(shell));
+                    let cursor_byte = char_to_byte(&line, col);
                     let (start, candidates) = completion::complete(&line, cursor_byte, src);
                     match candidates.as_slice() {
                         [] => {}
-                        [only] => apply_candidate(
-                            &mut textarea,
-                            row,
-                            start,
-                            cursor_byte,
-                            &only.replacement,
-                        ),
+                        [only] => { prompt.replace_row_bytes(row, start, cursor_byte, &only.replacement); },
                         _ => {
                             let anchor_col =
                                 prompt_lines.last_w + line[..start].chars().count() as u16;
@@ -391,15 +379,15 @@ impl StructuralFrontend {
                 // ghost (parity with rustyline's hint-accept); elsewhere it
                 // moves the cursor.
                 KeyCode::Right if k.modifiers.is_empty() => match &ghost {
-                    Some(g) if !g.is_empty() && at_buffer_end(&textarea) => {
-                        textarea.insert_str(g);
+                    Some(g) if !g.is_empty() && prompt.at_buffer_end() => {
+                        prompt.insert_str(g);
                     }
-                    _ => edit_key(&mut vim, &mut textarea, k),
+                    _ => { prompt.handle_key(k); },
                 },
                 KeyCode::Enter => {
-                    let line = textarea.lines().join("\n");
+                    let line = prompt.text();
                     if ral_core::syntax::parser::needs_continuation(&line) {
-                        textarea.insert_newline();
+                        prompt.insert_str("\n");
                     } else {
                         break Composed::Done(Read::Line(line));
                     }
@@ -418,10 +406,10 @@ impl StructuralFrontend {
                         break Composed::Keybinding(PendingKeybinding {
                             plugin,
                             binding_idx,
-                            cursor_byte: joined_cursor_byte(&textarea),
+                            cursor_byte: prompt.cursor_byte_offset(),
                         });
                     }
-                    edit_key(&mut vim, &mut textarea, k);
+                    prompt.handle_key(k);
                 }
             }
         };
@@ -458,7 +446,7 @@ impl StructuralFrontend {
             // line; Edit re-feeds the buffer (fzf-files / fzf-history land
             // here, the edited buffer reappearing on the next read).
             Composed::Keybinding(pk) => {
-                let buf = textarea.lines().join("\n");
+                let buf = prompt.text();
                 match dispatch_keybinding(pk, &buf, shell, &self.runtime, keymap) {
                     KeybindingOutcome::Accept(line) => Read::Line(line),
                     KeybindingOutcome::Edit(text, cursor) => {
@@ -478,7 +466,7 @@ impl StructuralFrontend {
     /// a no-op when history is empty.
     fn history_prev(
         &self,
-        textarea: &mut TextArea<'static>,
+        prompt: &mut PromptEditor,
         pos: &mut Option<usize>,
         draft: &mut String,
     ) {
@@ -488,14 +476,14 @@ impl StructuralFrontend {
         }
         let next = match *pos {
             None => {
-                *draft = textarea.lines().join("\n");
+                *draft = prompt.text();
                 entries.len() - 1
             }
             Some(0) => 0,
             Some(i) => i - 1,
         };
         *pos = Some(next);
-        set_text(textarea, &entries[next]);
+        prompt.set_text(&entries[next]);
     }
 
     /// Recall the next history entry (Down from the last row), or restore the
@@ -503,7 +491,7 @@ impl StructuralFrontend {
     /// not browsing history.
     fn history_next(
         &self,
-        textarea: &mut TextArea<'static>,
+        prompt: &mut PromptEditor,
         pos: &mut Option<usize>,
         draft: &mut String,
     ) {
@@ -512,13 +500,13 @@ impl StructuralFrontend {
             Some(i) if i + 1 < self.history.entries().len() => {
                 *pos = Some(i + 1);
                 let entry = self.history.entries()[i + 1].clone();
-                set_text(textarea, &entry);
+                prompt.set_text(&entry);
             }
             Some(_) => {
                 // Past the newest entry: restore the in-progress draft.
                 *pos = None;
                 let draft = std::mem::take(draft);
-                set_text(textarea, &draft);
+                prompt.set_text(&draft);
             }
         }
     }
@@ -567,88 +555,12 @@ impl Frontend for StructuralFrontend {
 /// cell is suppressed so the prompt shows the terminal's own (native, blinking)
 /// cursor instead, positioned each frame by [`render_prompt`].  The native
 /// cursor is the same in every mode; there is no painted vi modal-mode block.
-fn new_textarea() -> TextArea<'static> {
-    let mut ta = TextArea::default();
-    ta.set_cursor_line_style(Style::default());
-    ta.set_cursor_style(Style::default());
-    ta
-}
-
-/// Apply one keystroke to the editor.  The shell-line escape-hatch chords
-/// ([`shell_line_edit`] — currently Ctrl-U) are honoured first, since
-/// ratatui-textarea binds them to editor, not shell, semantics (Ctrl-U is
-/// `undo` there): in emacs always, and under vi keys while in Insert mode —
-/// where the [`textarea_vim::Vim::advance`] driver would otherwise pass them
-/// straight to `textarea.input`.  Everything else folds through that vim driver
-/// (vi) or `textarea.input` (emacs); vi Normal/Visual keep the vim keymap.  The
-/// single dispatch point both fallthrough arms and the final `_` arm route
-/// through.
-fn edit_key(
-    vim: &mut Option<Vim>,
-    textarea: &mut TextArea<'static>,
-    k: ratatui::crossterm::event::KeyEvent,
-) {
-    match vim.take() {
-        None => {
-            if !shell_line_edit(textarea, &k) {
-                textarea.input(k);
-            }
-        }
-        Some(v) => {
-            if v.mode() == Mode::Insert && shell_line_edit(textarea, &k) {
-                *vim = Some(v);
-            } else {
-                *vim = Some(v.advance(k.into(), textarea));
-            }
-        }
-    }
-}
-
-/// The shell-line editing chords ratatui-textarea's keymap gets wrong for a
-/// shell — currently Ctrl-U, which it binds to `undo`.  Remap it to
-/// unix-line-discard (kill from the cursor to the start of the line) so the
-/// structural surface matches rustyline, in both emacs and vi-Insert mode;
-/// returns whether the chord was consumed.  Anything not listed here is left to
-/// the textarea's / vim driver's own (correct) bindings — Ctrl-A/E, Ctrl-K/W,
-/// and the movement keys already agree with readline.
-fn shell_line_edit(textarea: &mut TextArea<'static>, k: &KeyEvent) -> bool {
-    if !k.modifiers.contains(KeyModifiers::CONTROL) || k.modifiers.contains(KeyModifiers::ALT) {
-        return false;
-    }
-    match k.code {
-        // unix-line-discard: kill from the cursor back to the start of the line.
-        KeyCode::Char('u') => {
-            textarea.delete_line_by_head();
-            true
-        }
-        _ => false,
-    }
-}
-
-/// Whether the editor holds no text at all (every line empty).
-fn is_empty(ta: &TextArea<'static>) -> bool {
-    ta.lines().iter().all(|l| l.is_empty())
-}
-
 /// Whether the cursor sits at the very end of the buffer (last row, last
 /// column) — the position fish-style autosuggestion is accepted from.
-fn at_buffer_end(ta: &TextArea<'static>) -> bool {
-    let DataCursor(row, col) = ta.cursor();
-    let lines = ta.lines();
-    row + 1 == lines.len() && col == lines[row].chars().count()
-}
-
 /// The cursor's absolute byte offset into the `\n`-joined buffer — the unit the
 /// buffer-change hooks and [`dispatch_keybinding`] expect (both convert to
 /// chars internally).  Sums each prior row's bytes plus its newline, then the
 /// cursor's byte column within its row.
-fn joined_cursor_byte(ta: &TextArea<'static>) -> usize {
-    let DataCursor(row, col) = ta.cursor();
-    let lines = ta.lines();
-    let prior: usize = lines.iter().take(row).map(|l| l.len() + 1).sum();
-    prior + char_to_byte(&lines[row], col)
-}
-
 /// Whether a crossterm key event matches a frontend-neutral plugin [`KeyChord`].
 /// Ctrl/Alt must match exactly; Shift is ignored, as no bindable chord carries
 /// it.
@@ -678,72 +590,25 @@ fn key_matches(k: &KeyEvent, chord: &KeyChord) -> bool {
 
 /// Replace the editor's contents, leaving the cursor at the end — the unit of
 /// every history recall and draft restore.
-fn set_text(ta: &mut TextArea<'static>, s: &str) {
-    ta.select_all();
-    ta.cut();
-    ta.insert_str(s);
-}
-
 /// Move the cursor to a character offset into the (just-filled) buffer,
 /// clamped to its length — restores an [`EditBuffer`]'s saved cursor as
 /// closely as the row/col editor allows.
-fn place_cursor(ta: &mut TextArea<'static>, char_offset: usize) {
-    ta.move_cursor(CursorMove::Top);
-    ta.move_cursor(CursorMove::Head);
-    for _ in 0..char_offset {
-        ta.move_cursor(CursorMove::Forward);
-    }
-}
-
 // ── Completion ───────────────────────────────────────────────────────────────
 
 /// Apply the selected candidate of an open [`Menu`]: replace the token from
 /// the menu's `replace_from` to the current cursor (which has not moved while
 /// the menu owned the keys) with the chosen replacement.  Aborts if the cursor
 /// has left the trigger row.
-fn accept_completion(ta: &mut TextArea<'static>, menu: &Menu) {
-    let DataCursor(row, col) = ta.cursor();
+fn accept_completion(prompt: &mut PromptEditor, menu: &Menu) {
+    let row = prompt.row();
     if row != menu.row {
         return;
     }
-    let end = char_to_byte(&ta.lines()[row], col);
+    let line = match prompt.line(row) { Some(l) => l, None => return, };
+    let end = char_to_byte(&line, prompt.col());
     let replacement = menu.candidates[menu.selected].replacement.clone();
-    apply_candidate(ta, row, menu.replace_from, end, &replacement);
+    prompt.replace_row_bytes(row, menu.replace_from, end, &replacement);
 }
-
-/// Replace bytes `[start, end)` of editor row `row` with `replacement`, then
-/// park the cursor at the end of the inserted text.  Rebuilds the buffer
-/// through the same primitives history recall uses ([`set_text`] +
-/// [`place_cursor`]), so no row-local TextArea edit API is needed; a stale
-/// offset (not on a char boundary, or out of range) is a no-op.
-fn apply_candidate(
-    ta: &mut TextArea<'static>,
-    row: usize,
-    start: usize,
-    end: usize,
-    replacement: &str,
-) {
-    let lines: Vec<String> = ta.lines().to_vec();
-    let (new_row, abs) = {
-        let Some(r) = lines.get(row) else {
-            return;
-        };
-        if start > end || !r.is_char_boundary(start) || !r.is_char_boundary(end) {
-            return;
-        }
-        let new_col = r[..start].chars().count() + replacement.chars().count();
-        let new_row = format!("{}{replacement}{}", &r[..start], &r[end..]);
-        // Absolute char offset across the buffer: every prior row plus its
-        // newline, then the cursor's column within the rebuilt row.
-        let prior: usize = lines.iter().take(row).map(|l| l.chars().count() + 1).sum();
-        (new_row, prior + new_col)
-    };
-    let mut lines = lines;
-    lines[row] = new_row;
-    set_text(ta, &lines.join("\n"));
-    place_cursor(ta, abs);
-}
-
 // ── Projection 1: the typed spine ───────────────────────────────────────────
 
 /// One pipeline stage's row in the spine: its source slice and value type.
@@ -760,7 +625,7 @@ enum Spine {
     Stages(Vec<SpineRow>),
     /// A type error — underlined in place on the prompt, ariadne-style.
     /// `span` is a half-open CHAR range into the prompt buffer (the same
-    /// coordinate system the TextArea's char cursor uses); `None` when the
+    /// coordinate system the editor's char cursor uses); `None` when the
     /// error carries no location, in which case only the dim headline shows.
     TypeError {
         span: Option<(usize, usize)>,
@@ -1124,15 +989,15 @@ fn split_prompt(prompt: &PromptText) -> PromptLines {
 
 /// The editor's own visible row count: one row per logical line.  (The
 /// `WrapMode::None` editor does not soft-wrap, so logical lines are rows.)
-fn prompt_rows(textarea: &TextArea<'static>) -> u16 {
-    textarea.lines().len().max(1) as u16
+fn prompt_rows(prompt: &PromptEditor) -> u16 {
+    prompt.row_count().max(1) as u16
 }
 
 /// Size the inline viewport to its content at entry — spine, prompt, and the
 /// projections' header-plus-rows — clamped to hug the bottom of the screen.
 fn viewport_height(
     lead: u16,
-    textarea: &TextArea<'static>,
+    prompt: &PromptEditor,
     worksheet: &[WsRow],
     matrix: &[MxRow],
     rows: u16,
@@ -1145,7 +1010,7 @@ fn viewport_height(
     // which can flare on any keystroke: the viewport is sized once per read,
     // so it must afford that row up front rather than steal it from the
     // projections when the error appears.
-    let prompt = lead + prompt_rows(textarea);
+    let prompt = lead + prompt_rows(prompt);
     let ws = 1 + worksheet.len().max(1) as u16;
     let mx = 1 + matrix.len().max(1) as u16;
     // The lower band holds either the projections or a completion menu,
@@ -1163,7 +1028,7 @@ fn viewport_height(
 fn render(
     frame: &mut ratatui::Frame,
     prompt: &PromptLines,
-    textarea: &TextArea<'static>,
+    editor: &mut PromptEditor,
     spine: &Spine,
     worksheet: &[WsRow],
     matrix: &[MxRow],
@@ -1173,7 +1038,7 @@ fn render(
 ) {
     let area = frame.area();
     let lead_rows = prompt.lead.len() as u16;
-    let editor_rows = prompt_rows(textarea);
+    let editor_rows = prompt_rows(editor);
 
     // A type error replaces the per-stage rows above the prompt with a single
     // caret/label row beneath it; the stage spine keeps its rows above and
@@ -1202,19 +1067,19 @@ fn render(
     .areas(prompt_area);
 
     render_spine(frame, spine_area, spine);
-    render_prompt(frame, lead_area, editor_band, prompt, textarea);
+    render_prompt(frame, lead_area, editor_band, prompt, editor);
     // The plugin overlays and the type-error underline all read the cells the
     // TextArea just painted, so they run after `render_prompt`.  Order matters
     // on conflict: highlights first, ghost (past the typed text) next, then the
     // type-error flare last so it wins any cell a highlight also claimed.
-    overlay_highlights(frame, editor_band, prompt.last_w, textarea, highlights);
-    overlay_ghost(frame, editor_band, prompt.last_w, textarea, ghost);
+    overlay_highlights(frame, editor_band, prompt.last_w, editor, highlights);
+    overlay_ghost(frame, editor_band, prompt.last_w, editor, ghost);
     overlay_type_error(
         frame,
         editor_band,
         caret_area,
         prompt.last_w,
-        textarea,
+        editor,
         spine,
     );
     render_projections(frame, rest, worksheet, matrix);
@@ -1263,7 +1128,7 @@ fn overlay_type_error(
     editor_area: Rect,
     caret_area: Rect,
     last_w: u16,
-    textarea: &TextArea<'static>,
+    editor: &PromptEditor,
     spine: &Spine,
 ) {
     let Spine::TypeError {
@@ -1284,7 +1149,7 @@ fn overlay_type_error(
     // row.  In the common single-line buffer the span's char offsets map
     // straight onto columns past the prefix; a span starting beyond the first
     // row belongs to a continuation line we do not underline.
-    let first_row_len = textarea.lines().first().map_or(0, |l| l.chars().count());
+    let first_row_len = editor.lines().first().map_or(0, |l| l.chars().count());
 
     match span {
         // A located error on the (single-line) prompt: underline it in place
@@ -1345,7 +1210,7 @@ fn overlay_ghost(
     frame: &mut ratatui::Frame,
     band: Rect,
     last_w: u16,
-    textarea: &TextArea<'static>,
+    editor: &PromptEditor,
     ghost: Option<&str>,
 ) {
     let Some(ghost) = ghost.filter(|g| !g.is_empty()) else {
@@ -1354,7 +1219,8 @@ fn overlay_ghost(
     if band.height == 0 {
         return;
     }
-    let DataCursor(row, col) = textarea.cursor();
+    let row = editor.row();
+    let col = editor.col();
     let y = band.y + row as u16;
     let max_x = band.x + band.width;
     if y >= band.y + band.height {
@@ -1383,13 +1249,13 @@ fn overlay_highlights(
     frame: &mut ratatui::Frame,
     band: Rect,
     last_w: u16,
-    textarea: &TextArea<'static>,
+    editor: &PromptEditor,
     highlights: &[HighlightSpan],
 ) {
     if highlights.is_empty() || band.height == 0 {
         return;
     }
-    let lines = textarea.lines();
+    let lines = editor.lines();
     let max_x = band.x + band.width;
     let max_y = band.y + band.height;
     let buf = frame.buffer_mut();
@@ -1398,7 +1264,7 @@ fn overlay_highlights(
             continue;
         };
         for abs in hs.span.range() {
-            let Some((row, col)) = abs_char_to_row_col(lines, abs) else {
+            let Some((row, col)) = abs_char_to_row_col(&lines, abs) else {
                 continue;
             };
             let x = band.x + last_w + col as u16;
@@ -1459,7 +1325,7 @@ fn render_prompt(
     lead_area: Rect,
     editor_band: Rect,
     prompt: &PromptLines,
-    textarea: &TextArea<'static>,
+    editor: &mut PromptEditor,
 ) {
     if lead_area.height > 0 {
         frame.render_widget(Paragraph::new(prompt.lead.clone()), lead_area);
@@ -1480,11 +1346,15 @@ fn render_prompt(
         width: editor_band.width.saturating_sub(prompt.last_w),
         ..editor_band
     };
-    frame.render_widget(textarea, editor_area);
+    editor.render(frame, editor_area);
     // No block on this editor, so the render area is the text rect.  The native
     // cursor shows in every mode; the widget's painted cell is suppressed (set
     // to a plain style in `new_textarea`).
-    place_native_cursor(frame, editor_area, textarea);
+    if let Some(pos) = editor.cursor_screen_position() {
+        let x = editor_area.x + pos.x.min(editor_area.width.saturating_sub(1));
+        let y = editor_area.y + pos.y.min(editor_area.height.saturating_sub(1));
+        frame.set_cursor_position(Position::new(x, y));
+    }
 }
 
 fn render_projections(
@@ -1703,128 +1573,6 @@ mod tests {
         assert!(pipeline_stage_rows(&comp, "/bin/echo hi").is_none());
     }
 
-    /// Pre-filling the editor from an [`EditBuffer`] restores the text and
-    /// lands the cursor at the saved char offset — across a newline, the
-    /// row/col cursor sits on the right row and column.
-    #[test]
-    fn place_cursor_restores_offset_across_newlines() {
-        let mut ta = new_textarea();
-        ta.insert_str("ab\ncd");
-        place_cursor(&mut ta, 0);
-        assert_eq!(ta.cursor(), (0, 0));
-        place_cursor(&mut ta, 2);
-        assert_eq!(ta.cursor(), (0, 2)); // before the newline
-        place_cursor(&mut ta, 3);
-        assert_eq!(ta.cursor(), (1, 0)); // the newline counts as one forward step
-        place_cursor(&mut ta, 4);
-        assert_eq!(ta.cursor(), (1, 1));
-        // An over-range offset clamps at the end rather than panicking.
-        place_cursor(&mut ta, 99);
-        assert_eq!(ta.cursor(), (1, 2));
-    }
-
-    /// Replacing the editor's contents (history recall / draft restore)
-    /// swaps the text wholesale and parks the cursor at the end.
-    #[test]
-    fn set_text_replaces_contents() {
-        let mut ta = new_textarea();
-        ta.insert_str("first draft");
-        set_text(&mut ta, "recalled entry");
-        assert_eq!(ta.lines(), ["recalled entry"]);
-        assert_eq!(ta.cursor(), (0, "recalled entry".chars().count()));
-        // A multi-line recall round-trips its newlines.
-        set_text(&mut ta, "a\nb");
-        assert_eq!(ta.lines(), ["a", "b"]);
-    }
-
-    /// Applying a completion splices the chosen replacement over the token's
-    /// byte span and lands the cursor just past it — the path case: `re`
-    /// becomes `repl/` inside `cd src/re`.
-    #[test]
-    fn apply_candidate_splices_path_token() {
-        let mut ta = new_textarea();
-        ta.insert_str("cd src/re");
-        // The name needle `re` occupies bytes 7..9; the engine's replacement
-        // for a directory carries the trailing slash.
-        apply_candidate(&mut ta, 0, 7, 9, "repl/");
-        assert_eq!(ta.lines(), ["cd src/repl/"]);
-        assert_eq!(ta.cursor(), (0, "cd src/repl/".chars().count()));
-    }
-
-    /// A completion on a continuation row replaces only that row and places the
-    /// cursor on it — the absolute offset accounts for the rows above.
-    #[test]
-    fn apply_candidate_targets_the_right_row() {
-        let mut ta = new_textarea();
-        ta.insert_str("ls |\nca");
-        // Replace `ca` (bytes 0..2 of row 1) with the command `cat`.
-        apply_candidate(&mut ta, 1, 0, 2, "cat");
-        assert_eq!(ta.lines(), ["ls |", "cat"]);
-        assert_eq!(ta.cursor(), (1, 3));
-    }
-
-    /// A stale span (offsets past the row, or off a char boundary) is a no-op
-    /// rather than a panic.
-    #[test]
-    fn apply_candidate_ignores_a_stale_span() {
-        let mut ta = new_textarea();
-        ta.insert_str("hi");
-        apply_candidate(&mut ta, 0, 1, 99, "xyz");
-        assert_eq!(ta.lines(), ["hi"]);
-    }
-
-    /// Ctrl-U is readline's unix-line-discard: kill from the cursor back to the
-    /// start of the line, not the textarea keymap's `undo`.  The chord is
-    /// consumed so no `u` is inserted.
-    #[test]
-    fn ctrl_u_kills_to_line_start() {
-        let mut ta = new_textarea();
-        ta.insert_str("abcdef");
-        place_cursor(&mut ta, 3); // between `c` and `d`
-        let consumed = shell_line_edit(
-            &mut ta,
-            &KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
-        );
-        assert!(consumed);
-        assert_eq!(ta.lines(), ["def"]);
-        assert_eq!(ta.cursor(), (0, 0));
-    }
-
-    /// Under vi keys the Ctrl-U escape hatch applies while in Insert mode —
-    /// otherwise the vim driver routes it to the textarea's `undo`.  The editor
-    /// stays in Insert mode (the chord is handled before `advance`).
-    #[test]
-    fn ctrl_u_kills_to_line_start_in_vi_insert() {
-        let mut ta = new_textarea();
-        ta.insert_str("abcdef");
-        place_cursor(&mut ta, 3);
-        let mut vim = Some(Vim::new(Mode::Insert));
-        edit_key(
-            &mut vim,
-            &mut ta,
-            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
-        );
-        assert_eq!(ta.lines(), ["def"]);
-        assert_eq!(vim.map(|v| v.mode()), Some(Mode::Insert));
-    }
-
-    /// In vi Normal mode Ctrl-U is left to the vim keymap (a no-op there), not
-    /// remapped — the cursor and buffer are untouched and the mode is kept.
-    #[test]
-    fn ctrl_u_is_left_to_vim_in_normal_mode() {
-        let mut ta = new_textarea();
-        ta.insert_str("abcdef");
-        place_cursor(&mut ta, 3);
-        let mut vim = Some(Vim::new(Mode::Normal));
-        edit_key(
-            &mut vim,
-            &mut ta,
-            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
-        );
-        assert_eq!(ta.lines(), ["abcdef"]);
-        assert_eq!(vim.map(|v| v.mode()), Some(Mode::Normal));
-    }
-
     /// A long value preview is truncated with an ellipsis.
     #[test]
     fn preview_truncates() {
@@ -1890,37 +1638,6 @@ mod tests {
         assert_eq!(rows[0].name, "legacy");
         assert_eq!(rows[0].depth, 0);
         assert!(!rows[0].effectful);
-    }
-
-    /// The cursor's absolute byte offset into the `\n`-joined buffer accounts
-    /// for each prior row plus its newline — the unit the buffer-change hooks
-    /// and keybinding dispatch consume.
-    #[test]
-    fn joined_cursor_byte_spans_rows() {
-        let mut ta = new_textarea();
-        ta.insert_str("ab\ncd");
-        place_cursor(&mut ta, 0);
-        assert_eq!(joined_cursor_byte(&ta), 0);
-        place_cursor(&mut ta, 2); // end of the first row, before the newline
-        assert_eq!(joined_cursor_byte(&ta), 2);
-        place_cursor(&mut ta, 3); // start of the second row (newline consumed)
-        assert_eq!(joined_cursor_byte(&ta), 3);
-        place_cursor(&mut ta, 5); // end of the buffer
-        assert_eq!(joined_cursor_byte(&ta), 5);
-    }
-
-    /// `at_buffer_end` is true only at the last row's last column — the one
-    /// position the autosuggestion ghost is accepted from.
-    #[test]
-    fn at_buffer_end_only_at_the_tail() {
-        let mut ta = new_textarea();
-        ta.insert_str("ab\ncd");
-        place_cursor(&mut ta, 5);
-        assert!(at_buffer_end(&ta));
-        place_cursor(&mut ta, 2); // end of the first row, not the buffer
-        assert!(!at_buffer_end(&ta));
-        place_cursor(&mut ta, 4); // mid second row
-        assert!(!at_buffer_end(&ta));
     }
 
     /// Absolute char offsets map onto editor `(row, col)`; an offset that lands

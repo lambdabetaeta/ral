@@ -69,12 +69,12 @@ use ratatui::{
         Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
         MouseEventKind, poll as ct_poll, read as ct_read,
     },
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
 };
-use ratatui_textarea::TextArea;
+use prompt_editor::{EditMode, PromptEditor};
 use std::{
     collections::HashMap,
     io::{self, Stdout},
@@ -85,7 +85,6 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use textarea_vim::{Mode, Vim, place_native_cursor};
 
 use line::{
     AGENT_HUES, BANNER_GOLD, BANNER_PINK, CYAN, LIME_HOT, OVERLAY_BG, PINK, PURPLE, READ_W, SLATE,
@@ -456,7 +455,7 @@ pub struct App {
     /// focus can fall back to the parent — recursing toward the trunk — when a
     /// focused agent ends.
     parents: HashMap<AgentId, AgentId>,
-    pub textarea: TextArea<'static>,
+    pub prompt: PromptEditor,
     /// Submitted prompts, oldest first.  Up from the prompt's first
     /// row and Down from its last row walk this list shell-style.
     history: Vec<String>,
@@ -534,12 +533,6 @@ pub struct App {
     /// projection of the same `tabs`/`viewports` model, never a reshuffle
     /// of the underlying state.
     matrix_sort: MatrixSort,
-    /// Vi-mode editing state for the prompt, or `None` in the default
-    /// emacs-style mode.  When `Some`, plain text input routes through the
-    /// shared [`textarea_vim`] state machine instead of straight to the
-    /// textarea; when `None`, the prompt edits exactly as it did before vi
-    /// mode existed.  Started in [`Mode::Insert`] (see [`App::new`]).
-    vim: Option<Vim>,
     /// The first key of a `C-x …` editor-command chord has been seen; the next
     /// keystroke completes or cancels it (see [`App::key`]).
     cx_pending: bool,
@@ -616,24 +609,9 @@ impl App {
         );
         let mut titles = HashMap::new();
         titles.insert(root_id, ROOT_TITLE.to_string());
-        let mut textarea = TextArea::default();
-        textarea.set_wrap_mode(ratatui_textarea::WrapMode::WordOrGlyph);
-        textarea.set_style(Style::default().fg(Color::White));
-        textarea.set_cursor_line_style(Style::default().fg(Color::White));
-        // Suppress the widget's painted cursor cell (plain style): the prompt
-        // shows the terminal's own (native, blinking) cursor in every mode,
-        // positioned each frame by `place_native_cursor`.
-        textarea.set_cursor_style(Style::default());
-        textarea.set_block(
-            ratatui::widgets::Block::default()
-                .borders(ratatui::widgets::Borders::ALL)
-                .border_type(ratatui::widgets::BorderType::Rounded)
-                .border_style(Style::default().fg(PINK))
-                .padding(ratatui::widgets::Padding::horizontal(PROMPT_PAD_H)),
-        );
-        // Vi mode opens in insert, so editing starts where an emacs user
-        // would expect.
-        let vim = vi.then(|| Vim::new(Mode::Insert));
+        let mut prompt =
+            PromptEditor::new(if vi { EditMode::Vi } else { EditMode::Emacs }).wrap(true);
+        prompt.set_base_style(Style::default().fg(Color::White));
         Self {
             viewports,
             dispatch_order: vec![root_id],
@@ -645,7 +623,7 @@ impl App {
             // handle; `focused()` resolves the no-focus sentinel to root.
             focus: Arc::new(AtomicU64::new(NO_FOCUS)),
             parents: HashMap::new(),
-            textarea,
+            prompt,
             history: Vec::new(),
             hist_pos: None,
             draft: String::new(),
@@ -663,7 +641,6 @@ impl App {
             press: None,
             hover: None,
             matrix_sort: MatrixSort::default(),
-            vim,
             cx_pending: false,
             editor_request: false,
             root_clear_drain: false,
@@ -1191,7 +1168,8 @@ impl App {
         // The prompt box sizes to its draft; the `/model` picker floats as an
         // overlay above this whole layout (drawn last over a cleared centre),
         // so it no longer claims the prompt region.
-        let prompt_h = prompt_height(&self.textarea, area.width, area.height);
+        let text_w = area.width.saturating_sub(2 + 2 * PROMPT_PAD_H);
+        let prompt_h = self.prompt.height_hint(text_w, area.height);
         let tab_h = if self.tabs.len() > 1 {
             self.tabs.len() as u16
         } else {
@@ -1375,16 +1353,26 @@ impl App {
                     f.render_widget(Paragraph::new(line).block(block), prompt_row);
                 }
                 None => {
-                    f.render_widget(&self.textarea, prompt_row);
+                    // The prompt's rounded border is exarch chrome, not the
+                    // editor's: the facade renders bare text, so the box is
+                    // drawn here and the editor fills its padded interior.
+                    let block = ratatui::widgets::Block::default()
+                        .borders(ratatui::widgets::Borders::ALL)
+                        .border_type(ratatui::widgets::BorderType::Rounded)
+                        .border_style(Style::default().fg(PINK))
+                        .padding(ratatui::widgets::Padding::horizontal(PROMPT_PAD_H));
+                    let inner = block.inner(prompt_row);
+                    f.render_widget(block, prompt_row);
+                    self.prompt.render(f, inner);
                     // Show the terminal's native cursor at the edit point —
                     // but not while the picker overlay owns the keyboard, or
                     // the cursor would peek out beneath the modal.
-                    if picker.is_none() {
-                        let inner = ratatui::widgets::Block::default()
-                            .borders(ratatui::widgets::Borders::ALL)
-                            .padding(ratatui::widgets::Padding::horizontal(PROMPT_PAD_H))
-                            .inner(prompt_row);
-                        place_native_cursor(f, inner, &self.textarea);
+                    if picker.is_none()
+                        && let Some(pos) = self.prompt.cursor_screen_position()
+                    {
+                        let x = inner.x + pos.x.min(inner.width.saturating_sub(1));
+                        let y = inner.y + pos.y.min(inner.height.saturating_sub(1));
+                        f.set_cursor_position(Position::new(x, y));
                     }
                 }
             }
@@ -1545,7 +1533,7 @@ impl App {
             }
             self.hist_pos = None;
             self.draft.clear();
-            self.textarea.clear();
+            self.prompt.clear();
             Some(prompt)
         }
     }
@@ -1555,7 +1543,7 @@ impl App {
     /// live draft wins over queue editing: Up keeps its ordinary history
     /// behaviour rather than discarding text the user has started.
     fn edit_queued_prompt(&mut self) -> bool {
-        if self.hist_pos.is_some() || self.textarea.lines().iter().any(|line| !line.is_empty()) {
+        if self.hist_pos.is_some() || !self.prompt.is_empty() {
             return false;
         }
         let Some(prompts) = self.inbox.pop_back_user_all() else {
@@ -1568,7 +1556,7 @@ impl App {
 
     pub fn paste(&mut self, s: &str) {
         self.cx_pending = false;
-        self.textarea.insert_str(s);
+        self.prompt.insert_str(s);
     }
 
     /// Adopt `text` returned by the external editor as the live prompt draft,
@@ -1587,7 +1575,7 @@ impl App {
 
     /// The prompt's current contents, lines newline-joined.
     fn prompt_text(&self) -> String {
-        self.textarea.lines().join("\n")
+        self.prompt.text()
     }
 
     /// Recolor the prompt text in place: a line that names a known slash
@@ -1600,14 +1588,13 @@ impl App {
         } else {
             Style::default().fg(Color::White)
         };
-        self.textarea.set_style(style);
-        self.textarea.set_cursor_line_style(style);
+        self.prompt.set_base_style(style);
     }
 
     /// Replace the prompt's contents, leaving the cursor at the end.
     fn set_prompt(&mut self, s: &str) {
-        self.textarea.clear();
-        self.textarea.insert_str(s);
+        self.prompt.clear();
+        self.prompt.insert_str(s);
     }
 
     /// Recall the previous prompt (Up from the first row).  The live
@@ -1705,7 +1692,7 @@ impl App {
             // Up pulls the entire queued run back down into the editor,
             // dequeueing all of them so the user can revise the whole batch.
             KeyCode::Up if self.focused() == self.root && k.modifiers.is_empty() => {
-                if self.textarea.cursor().0 == 0 {
+                if self.prompt.row() == 0 {
                     if !self.edit_queued_prompt() {
                         self.history_prev();
                     }
@@ -1714,8 +1701,8 @@ impl App {
                 }
             }
             KeyCode::Down if self.focused() == self.root && k.modifiers.is_empty() => {
-                let last_row = self.textarea.lines().len() - 1;
-                if self.textarea.cursor().0 == last_row {
+                let last_row = self.prompt.row_count() - 1;
+                if self.prompt.row() == last_row {
                     self.history_next();
                 } else {
                     self.edit_input(k);
@@ -1728,20 +1715,11 @@ impl App {
         }
     }
 
-    /// Route a plain text-input key into the editable prompt — the single
-    /// dispatch point for the three [`Self::key`] arms that previously each
-    /// called `self.textarea.input(k)` directly.  In the default emacs mode
-    /// (`self.vim == None`) it is byte-for-byte that call.  In vi mode it folds
-    /// the key through the shared [`textarea_vim::Vim::advance`] driver, which
-    /// re-styles the cursor on a mode change and treats `Quit` as a no-op (a
-    /// REPL prompt has no editor to quit).
+    /// Route a plain text-input key into the prompt.  Dispatches to
+    /// [`PromptEditor::handle_key`], which folds in vi-mode handling
+    /// and shell-line-edit chords (Ctrl-U) internally.
     fn edit_input(&mut self, k: KeyEvent) {
-        match self.vim.take() {
-            None => {
-                self.textarea.input(k);
-            }
-            Some(vim) => self.vim = Some(vim.advance(k.into(), &mut self.textarea)),
-        }
+        self.prompt.handle_key(k);
     }
 
     /// Route a mouse event: the wheel scrolls, a left-drag selects (and
@@ -2716,60 +2694,6 @@ fn footer_hint() -> Line<'static> {
         " Tab pane | drag copy (⇧ native) | Ctrl-X Ctrl-E editor | Ctrl-C cancel | /quit to leave ";
     Line::from(Span::styled(hint, st))
 }
-
-/// Count visual lines after soft-wrapping each logical line at `width`.
-///
-/// This re-derives the wrap independently of the widget: `ratatui-
-/// textarea` wraps with its own engine (the configured
-/// [`ratatui_textarea::WrapMode::WordOrGlyph`]) and exposes no query
-/// for its rendered height, so the box height is sized from this
-/// parallel computation.
-/// The two engines agree for the common case (ASCII, no tabs) but can
-/// disagree on tab expansion, wide/CJK glyphs, multi-codepoint
-/// graphemes, and the cursor sitting one past an exactly-full row.
-/// An undersize is not self-correcting: the widget's viewport scrolls
-/// down to chase the cursor and never scrolls back up when slack
-/// opens, so one short frame would hide the head of the draft for the
-/// rest of the edit.  [`prompt_height`] therefore floors the height at
-/// the widget's own cursor row.  Keep `width` the widget's effective
-/// text width (the rect minus its border and [`PROMPT_PAD_H`] padding)
-/// and this wrap aligned with the textarea's configured
-/// [`TextArea::set_wrap_mode`] so the divergence stays in that corner.
-fn prompt_visual_line_count(textarea: &TextArea<'_>, width: u16) -> usize {
-    textarea
-        .lines()
-        .iter()
-        .map(|line| {
-            if line.is_empty() {
-                1
-            } else {
-                textwrap::wrap(
-                    line,
-                    textwrap::Options::new(width as usize).break_words(true),
-                )
-                .len()
-                .max(1)
-            }
-        })
-        .sum()
-}
-
-/// Compute prompt-box height: visual line count plus the two rows the
-/// rounded border eats (top + bottom), clamped to ⅔ of the available
-/// height with a floor of 3 (one text row + the border).  The block
-/// has [`PROMPT_PAD_H`] columns of horizontal padding inside its left
-/// and right borders; wrap inside that.
-fn prompt_height(textarea: &TextArea<'_>, width: u16, max_h: u16) -> u16 {
-    let text_w = width.saturating_sub(2 + 2 * PROMPT_PAD_H);
-    // Floor at the widget's own cursor row: its viewport scrolls down
-    // to chase a cursor the box is too short for and never scrolls
-    // back, so the box must always have room for the cursor's row.
-    let rows =
-        prompt_visual_line_count(textarea, text_w).max(textarea.screen_cursor().row + 1) as u16;
-    let with_border = rows.saturating_add(2);
-    with_border.min((max_h * 2 / 3).max(3)).max(3).min(max_h)
-}
-
 // ── Sink + REPL ─────────────────────────────────────────────────────────
 
 /// Pairs the terminal lifetime with the app so the worker thread and the UI
