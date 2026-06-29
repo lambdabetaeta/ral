@@ -1411,12 +1411,13 @@ impl Provider {
     /// `agent_cancel` / `/clear` / the worker ceiling cancel it without
     /// touching the foreground request).  Two concurrent requests no longer
     /// share the one process-global slot.
-    pub(crate) fn complete<F: FnMut(&str)>(
+    pub(crate) fn complete<F: FnMut(&str), G: FnMut(&str)>(
         &self,
         system: &str,
         messages: Vec<ChatMessage>,
         tools: &[&'static dyn crate::tools::Tool],
         on_text: &mut F,
+        on_think: &mut G,
         cancel: &cancel::Token,
     ) -> Result<StepOut, ProviderError> {
         match &self.backend {
@@ -1430,9 +1431,10 @@ impl Provider {
                 messages,
                 tools,
                 on_text,
+                on_think,
                 cancel,
             ),
-            Backend::Scripted(s) => s.complete(&self.model, on_text),
+            Backend::Scripted(s) => s.complete(&self.model, on_text, on_think),
         }
     }
 
@@ -1564,7 +1566,7 @@ impl Engine {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn complete<F: FnMut(&str)>(
+    fn complete<F: FnMut(&str), G: FnMut(&str)>(
         &self,
         transport: &Transport,
         model: &str,
@@ -1575,6 +1577,7 @@ impl Engine {
         messages: Vec<ChatMessage>,
         tools: &[&'static dyn crate::tools::Tool],
         on_text: &mut F,
+        on_think: &mut G,
         cancel: &cancel::Token,
     ) -> Result<StepOut, ProviderError> {
         self.refresh_if_stale(transport);
@@ -1685,7 +1688,9 @@ impl Engine {
                             // needed here.  Matched explicitly rather than
                             // with a wildcard so a new genai stream variant
                             // fails the build instead of vanishing (X10).
-                            ChatStreamEvent::ReasoningChunk(_)
+                            ChatStreamEvent::ReasoningChunk(c) => {
+                                on_think(&c.content);
+                            }
                             | ChatStreamEvent::ThoughtSignatureChunk(_)
                             | ChatStreamEvent::ToolCallChunk(_) => {}
                         }
@@ -2139,10 +2144,11 @@ pub mod scripted {
             self
         }
 
-        pub(super) fn complete<F: FnMut(&str)>(
+        pub(super) fn complete<F: FnMut(&str), G: FnMut(&str)>(
             &self,
             _model: &str,
             on_text: &mut F,
+            _on_think: &mut G,
         ) -> Result<StepOut, ProviderError> {
             let reply = self
                 .completes

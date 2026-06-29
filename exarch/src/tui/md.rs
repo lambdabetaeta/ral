@@ -61,21 +61,21 @@ pub(super) fn render_md(text: &str, w: u16, indent: u16, fidelity: Fidelity) -> 
     lines
 }
 
-/// The saturation drained from reasoning prose: enough that the answer's
-/// folded shadow visibly reads as lower-authority scratch work without
-/// losing legibility.
+/// The saturation drained from reasoning prose: enough that the thinking
+/// trace visibly reads as lower-authority scratch work without losing
+/// legibility.
 const REASONING_DRAIN: f32 = 0.7;
 /// Dimming factor applied after desaturation: pulls the foreground
-/// toward a darker neutral so reasoning prose reads as the answer's
-/// shadow — visibly lower-luminance, not just lower-saturation.
+/// toward a darker neutral so reasoning prose reads as scratch work —
+/// visibly lower-luminance, not just lower-saturation.
 const REASONING_DIM: f32 = 0.35;
-/// Render reasoning prose — the answer's dialed-open shadow.  Rendered
-/// sound, then desaturated wholesale toward grey at held luminance: the
-/// reasoning is a finished image like any other prose, but the colour has
-/// gone out of it, so it never borrows the committed answer's authority.
+/// Render reasoning prose. Rendered sound, then desaturated wholesale toward
+/// grey at held luminance: the reasoning is a finished image like any other
+/// prose, but the colour has gone out of it, so it never borrows the
+/// committed answer's authority.
 /// This is intrinsic to the reasoning register, deliberately *not* the
-/// context / echo fidelity signals ([`modulate`]) — a reasoned answer's
-/// thinking is provisional whatever the turn's pressure.
+/// context / echo fidelity signals ([`modulate`]) — thinking is provisional
+/// whatever the turn's pressure.
 pub(super) fn render_reasoning(text: &str, w: u16, indent: u16) -> Vec<Line<'static>> {
     let mut lines = render_md(text, w, indent, Fidelity::default());
     for line in &mut lines {

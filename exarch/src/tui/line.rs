@@ -263,15 +263,11 @@ pub(super) fn deliberation_grain(think: u32, say: u32) -> Span<'static> {
     Span::styled(cell.to_string().repeat(GRAIN_W), Style::default().fg(SLATE))
 }
 
-/// The shadow header for a reasoned answer: a blank separator then the
+/// The collapsed header for a thinking block: a blank separator then the
 /// deliberation grain (think-vs-say ratio) beside a [`size_bar`] of the
-/// reasoning's own magnitude — "how dearly bought" and "how much
-/// thinking", at the head of the answer it produced. The reasoning prose
-/// itself stays folded until the block is dialed; this is the only mark
-/// it leaves at rest. `say_chars` is the whole turn's answer mass (the
-/// grain's denominator), passed in since the block holds only its own
-/// opening paragraph.
-pub(super) fn reasoning_header(reasoning: &str, say_chars: u32) -> Vec<Line<'static>> {
+/// reasoning's own magnitude — "how dearly bought" and "how much thinking".
+/// The reasoning prose itself stays folded until the block is dialed.
+pub(super) fn thinking_header(reasoning: &str, say_chars: u32) -> Vec<Line<'static>> {
     let think_chars = reasoning.chars().count() as u32;
     let think_lines = reasoning.lines().count() as u32;
     vec![

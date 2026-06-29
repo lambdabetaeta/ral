@@ -300,14 +300,15 @@ impl Sink for Headless {
             // (the operational trace omits presentation events).  A message
             // boundary is no longer scraped for the json `result`: that value
             // is the root's deliberate `reply`, captured from the drive digest.
-            // Reasoning is the TUI's answer-shadow; its content already
-            // round-trips to the model on the assistant message, so headless
-            // neither prints nor records the presentation event.
+            // Reasoning / thinking are TUI-only presentation blocks; the
+            // content already round-trips to the model on the assistant
+            // message, so headless neither prints nor records them.
             Kind::Boundary
             | Kind::Born { .. }
             | Kind::Died
             | Kind::UserPromptEcho(_)
             | Kind::Reasoning { .. }
+            | Kind::Thinking(_)
             | Kind::Phase(_) => {}
             // Pinned state is a TUI register; headless has no register to
             // overwrite, so a pin neither prints nor logs.

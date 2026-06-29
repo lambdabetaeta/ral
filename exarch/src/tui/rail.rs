@@ -43,12 +43,9 @@ pub(super) enum RailKind {
     /// to dial, but a tool call is a tool call.
     ToolCall(bool),
     Markdown,
-    /// A reasoned answer — the `∴` therefore shape, worn by an assistant
-    /// prose block that carries the model's reasoning as its folded shadow
-    /// ([`super::block::Block::set_reasoning`]) in place of the plain `·`:
-    /// the conclusion *follows from* a deliberation the user can dial into
-    /// view. Plain prose keeps `·`, so the rail thumbnail shows at a glance
-    /// which answers were hard-won.
+    /// A model thinking trace — the `∴` therefore shape, dialable as its own
+    /// block. The answer it produced remains a separate plain prose `·`
+    /// block, so deliberation and conclusion stay distinct in the rail.
     Thinking,
     /// An async subagent's landed result — the `↘` delegated-result shape.
     Subagent,
@@ -88,7 +85,7 @@ pub(super) const RAIL_SHAPES: &[(RailKind, &str)] = &[
     (RailKind::ToolCall(false), "tool call, shut"),
     (RailKind::ToolCall(true), "tool call, open"),
     (RailKind::Markdown, "model prose"),
-    (RailKind::Thinking, "reasoned answer — thinking folded"),
+    (RailKind::Thinking, "thinking trace"),
     (RailKind::Subagent, "subagent result"),
     (RailKind::Step, "step boundary"),
     (RailKind::Error, "error"),

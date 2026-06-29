@@ -293,6 +293,9 @@ impl App {
                     vp.push_token(&text, floor);
                 }
             }
+            Kind::Thinking(text) => {
+                self.with_viewport(id, |vp| vp.push_thinking(&text));
+            }
             Kind::Boundary => {
                 self.surface.flush_surfaces(self.tabs.viewports_mut());
                 let floor = self.context_floor();
@@ -300,11 +303,10 @@ impl App {
                     vp.close_boundary(floor);
                 }
             }
-            // Arrives after `Boundary` has flushed the answer prose into
-            // blocks, so the turn's first prose block exists to wear the
-            // shadow.
+            // Final reasoning is its own block; the answer's markdown run
+            // remains a separate `·` block.
             Kind::Reasoning { text, answer_chars } => {
-                self.with_viewport(id, |vp| vp.attach_reasoning(text, answer_chars));
+                self.with_viewport(id, |vp| vp.commit_thinking(text, answer_chars));
             }
             Kind::Step { n, .. } => self.push_chrome(id, RailShape::Step, line::step(n as usize)),
             // Route to the event's viewport; `set_phase` restarts the

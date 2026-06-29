@@ -17,13 +17,17 @@
 use super::block::{AgentSlot, Block, RailShape, Reveal, wrap_line};
 use super::fidelity::{self, Fidelity};
 use super::group;
-use super::line::{READ_W, coalesced_queries, is_blank, plain, prompt_fence, size_bar};
+use super::line::{
+    READ_W, coalesced_queries, deliberation_grain, is_blank, plain, prompt_fence, size_bar,
+};
+use super::md;
 use super::rail::{self, RailKind};
 use super::select::plain_slice;
 use crate::bus::Hunk;
 use crate::card::{Card, ObservationKind};
 use crate::provider::Usage;
 use ratatui::text::Line;
+use ratatui::text::Span;
 use std::fs;
 use std::io;
 use std::io::Write;
@@ -46,6 +50,10 @@ pub(super) struct Viewport {
     /// ([`Self::streaming_seat`]) until a fence-safe break or the turn's end
     /// commits it as a [`Block::markdown`].
     open: String,
+    /// In-progress reasoning text.  Grows as `Kind::Thinking` events arrive;
+    /// rendered as a live deliberation block above the answer stream. Cleared
+    /// when the final reasoning commits as its own [`Block::thinking`].
+    thinking: String,
     /// Top visible visual row.  Owned per-viewport so each tab keeps its
     /// place; recomputed against the frame height in [`Self::render_window`].
     offset: usize,
@@ -100,6 +108,9 @@ struct Flat {
     rows: Vec<Line<'static>>,
     row_block: Vec<usize>,
     dirty: bool,
+    virtual_think_at: usize,
+    virtual_think_len: usize,
+    virtual_think_widths: Vec<usize>,
 }
 
 /// Walk `open` for the latest paragraph break reached at fence depth
@@ -163,6 +174,29 @@ fn open_log(path: &Path) -> io::BufWriter<Box<dyn io::Write + Send>> {
     io::BufWriter::new(sink)
 }
 
+/// Return the trailing `n` lines of `s` as a single string.
+fn tail_lines(s: &str, n: usize) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
+}
+
+fn extend_visible_lines(
+    out: &mut Vec<Line<'static>>,
+    window_start: usize,
+    window_end: usize,
+    segment_start: usize,
+    segment: &[Line<'static>],
+) {
+    let segment_end = segment_start + segment.len();
+    if window_start >= segment_end || window_end <= segment_start {
+        return;
+    }
+    let start = window_start.saturating_sub(segment_start);
+    let end = window_end.saturating_sub(segment_start).min(segment.len());
+    out.extend_from_slice(&segment[start..end]);
+}
+
 /// Copy an already-flushed `user.log` at `src` to the user-chosen `dest`
 /// for `/export`.  The caller resolves `dest`, refuses to overwrite it, and
 /// flushes the log first; this is the doored copy, kept beside [`open_log`]
@@ -184,6 +218,7 @@ impl Viewport {
             agent,
             usage: Usage::default(),
             open: String::new(),
+            thinking: String::new(),
             offset: 0,
             sticky: true,
             flat: Flat::default(),
@@ -273,6 +308,7 @@ impl Viewport {
         self.blocks.clear();
         self.usage = Usage::default();
         self.open.clear();
+        self.thinking.clear();
         self.offset = 0;
         self.sticky = true;
         self.flat = Flat::default();
@@ -404,27 +440,23 @@ impl Viewport {
         }
     }
 
-    /// Attach the turn's reasoning to the answer it produced, as that
-    /// answer's folded shadow.  The answer commits piecewise as a trailing
-    /// run of markdown blocks ([`Self::flush_complete_paragraphs`]); the
-    /// shadow rides the *first* of that run — the conclusion's opening,
-    /// where the `∴` reads as a landmark in the rail thumbnail.  Searched as
-    /// the first block past the last non-markdown block, since tool-call
-    /// side effects and step chrome bound the run.  A no-op when the step
-    /// left no prose (nothing the run can start from).  `answer_chars` is
-    /// the whole turn's answer mass, the deliberation grain's denominator.
-    pub(super) fn attach_reasoning(&mut self, text: String, answer_chars: u32) {
-        let start = self
-            .blocks
-            .iter()
-            .rposition(|b| !b.is_markdown())
-            .map_or(0, |i| i + 1);
-        if let Some(block) = self.blocks.get_mut(start)
-            && block.is_markdown()
-        {
-            block.set_reasoning(text, answer_chars);
-            self.flat.dirty = true;
-        }
+    /// Commit the turn's reasoning as its own dialable block.  If answer
+    /// paragraphs already committed, insert the thinking block before that
+    /// trailing markdown run so `∴` and the answer's `·` stay separate and
+    /// ordered as deliberation then conclusion.  `answer_chars` is the whole
+    /// turn's answer mass, the deliberation grain's denominator.
+    pub(super) fn commit_thinking(&mut self, text: String, answer_chars: u32) {
+        self.thinking.clear();
+        self.insert_thinking(text, answer_chars);
+    }
+
+    /// Append a live reasoning chunk from the model's thinking phase.
+    /// Grows the provisional thinking buffer; `thinking_seat` renders it above
+    /// the streaming answer seat until `commit_thinking` supersedes it with a
+    /// real block.
+    pub(super) fn push_thinking(&mut self, text: &str) {
+        self.thinking.push_str(text);
+        self.flat.dirty = true;
     }
 
     /// Push streamed assistant text; commit any fence-safe paragraphs at
@@ -436,6 +468,11 @@ impl Viewport {
 
     /// End a streaming step: commit whatever remains in `open`.
     pub(super) fn close_boundary(&mut self, context_floor: u8) {
+        if !self.thinking.trim().is_empty() {
+            let text = std::mem::take(&mut self.thinking);
+            let answer_chars = self.current_answer_chars();
+            self.insert_thinking(text, answer_chars);
+        }
         self.flush_open(context_floor);
     }
 
@@ -493,12 +530,65 @@ impl Viewport {
         self.flat.dirty = true;
     }
 
+    fn current_answer_chars(&self) -> u32 {
+        let committed = self
+            .blocks
+            .iter()
+            .rev()
+            .map_while(Block::markdown_src)
+            .fold(0u32, |n, text| {
+                n.saturating_add(text.chars().count() as u32)
+            });
+        committed.saturating_add(self.open.chars().count() as u32)
+    }
+
+    fn insert_thinking(&mut self, text: String, answer_chars: u32) {
+        if text.trim().is_empty() {
+            return;
+        }
+        let block = Block::thinking(text, answer_chars);
+        let start = self
+            .blocks
+            .iter()
+            .rposition(|b| !b.is_markdown())
+            .map_or(0, |i| i + 1);
+        if start < self.blocks.len() && self.blocks[start].is_markdown() {
+            self.blocks.insert(start, block);
+            self.rewrite_log();
+            self.flat.dirty = true;
+        } else {
+            self.push_block(block);
+        }
+    }
+
     /// Tee a block's full content to `user.log`, collapsing redundant
     /// blank separators against the previous line exactly as the screen
     /// flatten does.
     fn log_block(&mut self, block: &Block) {
         let lead = opens_rail_run(self.blocks.last(), block);
-        for line in block.log_lines(self.agent, lead) {
+        let lines = block.log_lines(self.agent, lead);
+        self.write_log_lines(lines);
+    }
+
+    fn rewrite_log(&mut self) {
+        let entries = self
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(i, block)| {
+                let lead = opens_rail_run(i.checked_sub(1).map(|j| &self.blocks[j]), block);
+                block.log_lines(self.agent, lead)
+            })
+            .collect::<Vec<_>>();
+        self.log = open_log(&self.log_path);
+        self.log_prev_blank = true;
+        for lines in entries {
+            self.write_log_lines(lines);
+        }
+    }
+
+    fn write_log_lines(&mut self, lines: Vec<Line<'static>>) {
+        for line in lines {
             if is_blank(&line) {
                 if self.log_prev_blank {
                     continue;
@@ -520,14 +610,30 @@ impl Viewport {
     /// The block owning visual row `row`, or `None` past the buffer's
     /// end.  Valid against the most recent [`Self::render_window`].
     pub(super) fn block_at(&self, row: usize) -> Option<usize> {
-        self.flat.row_block.get(row).copied()
+        let think_at = self.flat.virtual_think_at;
+        let think_len = self.flat.virtual_think_len;
+        if think_len == 0 || row < think_at {
+            return self.flat.row_block.get(row).copied();
+        }
+        if row < think_at + think_len {
+            return None;
+        }
+        self.flat.row_block.get(row - think_len).copied()
     }
 
     /// Rendered cell width of visual row `row` — its content's extent, not
     /// the pane's — so a gesture can be bound tight to the text and ignore
     /// the dead margin past where the line ends.  `None` past the buffer.
     pub(super) fn row_width(&self, row: usize) -> Option<usize> {
-        self.flat.rows.get(row).map(Line::width)
+        let think_at = self.flat.virtual_think_at;
+        let think_len = self.flat.virtual_think_len;
+        if think_len == 0 || row < think_at {
+            return self.flat.rows.get(row).map(Line::width);
+        }
+        if row < think_at + think_len {
+            return self.flat.virtual_think_widths.get(row - think_at).copied();
+        }
+        self.flat.rows.get(row - think_len).map(Line::width)
     }
 
     /// Whether the block at `idx` is dialable — a stable property of its
@@ -637,6 +743,55 @@ impl Viewport {
 
     // ── rendering ────────────────────────────────────────────────────────
 
+    /// The provisional seat for in-flight reasoning: `RailKind::Thinking` (∴)
+    /// with a live size bar and the trailing N lines of reasoning text,
+    /// rendered drained.  Persists until the final reasoning commits as a real
+    /// block.
+    fn thinking_seat(&self, width: u16) -> Vec<Line<'static>> {
+        if self.thinking.trim().is_empty() {
+            return vec![];
+        }
+        let think_chars = self.thinking.chars().count() as u32;
+        let think_lines = self.thinking.lines().count() as u32;
+        let mut ls = vec![
+            Line::default(),
+            Line::from(vec![
+                rail::span(RailKind::Thinking, self.agent, Some(think_lines)),
+                Span::raw(" "),
+                deliberation_grain(think_chars, 0),
+                Span::raw(" "),
+                size_bar(think_lines),
+            ]),
+        ];
+        let tail = tail_lines(&self.thinking, 12);
+        ls.push(Line::default());
+        ls.extend(md::render_reasoning(&tail, width.saturating_sub(4), 4));
+        ls
+    }
+
+    fn trailing_markdown_start(&self) -> Option<usize> {
+        let start = self
+            .blocks
+            .iter()
+            .rposition(|b| !b.is_markdown())
+            .map_or(0, |i| i + 1);
+        self.blocks
+            .get(start)
+            .is_some_and(Block::is_markdown)
+            .then_some(start)
+    }
+
+    fn provisional_thinking_row(&self) -> usize {
+        let Some(start) = self.trailing_markdown_start() else {
+            return self.flat.rows.len();
+        };
+        self.flat
+            .row_block
+            .iter()
+            .position(|&block| block >= start)
+            .unwrap_or(self.flat.rows.len())
+    }
+
     /// The provisional rail seat for the in-flight response: a single row
     /// projecting only the *magnitude* of the streamed-but-uncommitted
     /// [`Self::open`] buffer — the markdown rail shape (`·`), lightened by its
@@ -663,13 +818,22 @@ impl Viewport {
     /// otherwise — and re-armed to sticky once it reaches the bottom.
     pub(super) fn render_window(&mut self, width: u16, height: usize) -> RenderWindow {
         self.reflow(width);
-        // The provisional streaming seat (when a response is in flight) is the
-        // trailing row, one past the committed flatten: a fixed-height mark
-        // that grows in place, so it joins the scroll arithmetic as one extra
-        // row rather than a block churning the memoised flatten each token.
+        // The provisional thinking seat (when the model is reasoning) renders
+        // before the trailing markdown answer run.  That lets answer
+        // paragraphs keep committing live without visually jumping ahead of
+        // the deliberation they follow.
+        let think = self.thinking_seat(width);
         let seat = self.streaming_seat();
         let committed = self.flat.rows.len();
-        let total = committed + seat.is_some() as usize;
+        let think_at = if think.is_empty() {
+            committed
+        } else {
+            self.provisional_thinking_row()
+        };
+        self.flat.virtual_think_at = think_at;
+        self.flat.virtual_think_len = think.len();
+        self.flat.virtual_think_widths = think.iter().map(Line::width).collect();
+        let total = committed + think.len() + seat.is_some() as usize;
         let max_off = total.saturating_sub(height);
         if self.sticky {
             self.offset = max_off;
@@ -684,14 +848,27 @@ impl Viewport {
         // is clamped to `max_off` so it stays within the valid scroll range.
         let scroll_pct =
             (max_off > 0).then(|| (self.offset.min(max_off) * 100 / max_off).min(100) as u16);
-        // Committed rows fill the window up to the seat's row (`committed`);
-        // the seat itself lands only once the window reaches past them — i.e.
-        // the tail is in view.
-        let mut lines = self.flat.rows[self.offset.min(committed)..end.min(committed)].to_vec();
-        if let Some(seat) = seat
-            && end > committed
+        let mut lines = Vec::new();
+        extend_visible_lines(
+            &mut lines,
+            self.offset,
+            end,
+            0,
+            &self.flat.rows[..think_at.min(committed)],
+        );
+        extend_visible_lines(&mut lines, self.offset, end, think_at, &think);
+        extend_visible_lines(
+            &mut lines,
+            self.offset,
+            end,
+            think_at + think.len(),
+            &self.flat.rows[think_at.min(committed)..],
+        );
+        if let Some(s) = seat
+            && end > committed + think.len()
+            && self.offset <= committed + think.len()
         {
-            lines.push(seat);
+            lines.push(s);
         }
         RenderWindow {
             lines,
@@ -785,6 +962,9 @@ impl Viewport {
             rows,
             row_block,
             dirty: false,
+            virtual_think_at: 0,
+            virtual_think_len: 0,
+            virtual_think_widths: Vec::new(),
         };
     }
 
@@ -928,6 +1108,16 @@ mod tests {
         Viewport::new(path, AgentSlot(0))
     }
 
+    fn rail_rows(lines: &[Line<'static>], glyph: &str) -> Vec<usize> {
+        lines
+            .iter()
+            .enumerate()
+            .filter_map(|(i, line)| {
+                (line.spans.first().map(|s| s.content.as_ref()) == Some(glyph)).then_some(i)
+            })
+            .collect()
+    }
+
     /// The register is keyed state: a repeated key overwrites its slot in
     /// place (no new slot, order preserved), `drop_pin` removes just that
     /// slot, and `reset` wipes the whole register — the generation discipline
@@ -995,6 +1185,60 @@ mod tests {
         assert!(
             !plain(w.lines.last().expect("committed rows")).contains('░'),
             "no provisional seat remains after commit: {all:?}"
+        );
+    }
+
+    #[test]
+    fn live_thinking_precedes_streamed_markdown_without_hiding_it() {
+        let mut vp = viewport();
+        vp.push_thinking("considering the shape\n");
+        vp.push_token("First paragraph.\n\nSecond paragraph still streaming", 0);
+
+        let w = vp.render_window(READ_W, 24);
+        let all = w.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
+        assert!(
+            all.contains("First paragraph."),
+            "fence-safe markdown still commits while thinking is live: {all:?}"
+        );
+
+        let thinking = rail_rows(&w.lines, "∴ ");
+        let markdown = rail_rows(&w.lines, "· ");
+        assert!(!thinking.is_empty(), "live thinking has its own rail");
+        assert!(
+            !markdown.is_empty(),
+            "committed markdown keeps its answer rail"
+        );
+        assert!(
+            thinking[0] < markdown[0],
+            "thinking renders before the answer rail: {all:?}"
+        );
+    }
+
+    #[test]
+    fn final_thinking_is_separate_from_the_answer_run() {
+        let mut vp = viewport();
+        vp.push_thinking("draft trace\n");
+        vp.push_token("First paragraph.\n\nSecond paragraph.", 0);
+        vp.commit_thinking("final trace\nline two".into(), vp.current_answer_chars());
+        vp.close_boundary(0);
+
+        assert_eq!(
+            vp.latest_reply_md(),
+            "First paragraph.\n\nSecond paragraph."
+        );
+
+        let w = vp.render_window(READ_W, 24);
+        let all = w.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
+        let thinking = rail_rows(&w.lines, "∴ ");
+        let markdown = rail_rows(&w.lines, "· ");
+        assert!(!thinking.is_empty(), "final thinking is a real rail block");
+        assert!(
+            !markdown.is_empty(),
+            "answer remains a separate markdown block"
+        );
+        assert!(
+            thinking[0] < markdown[0],
+            "thinking block stays before the answer block: {all:?}"
         );
     }
 

@@ -151,6 +151,7 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
         Kind::Card(_)
         | Kind::Phase(_)
         | Kind::Token(_)
+        | Kind::Thinking(_)
         | Kind::Boundary
         | Kind::Reasoning { .. }
         | Kind::UserPromptEcho(_)

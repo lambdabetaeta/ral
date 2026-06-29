@@ -188,8 +188,11 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("exarch/src/state.rs", "io-door:silent:state-write"),
     ("exarch/src/agent_builtins.rs", "io-door:silent:fff-db-dir"),
     ("exarch/src/transcript.rs", "io-door:silent:transcript-file"),
-    ("exarch/src/tui.rs", "io-door:silent:editor-compose"),
-    ("exarch/src/tui.rs", "io-door:silent:stderr-log"),
+    (
+        "exarch/src/tui/terminal.rs",
+        "io-door:silent:editor-compose",
+    ),
+    ("exarch/src/tui/terminal.rs", "io-door:silent:stderr-log"),
     ("exarch/src/tui/viewport.rs", "io-door:silent:export"),
     ("exarch/src/tui/viewport.rs", "io-door:silent:viewport-log"),
     // ── ral / ral-sh ──────────────────────────────────────────────────────

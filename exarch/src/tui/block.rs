@@ -72,14 +72,13 @@ pub(super) enum CardOrigin {
     Surfaced,
 }
 
-/// The reasoning a turn produced, attached to the answer it generated as
-/// that answer's folded shadow.  `text` is the model's full reasoning;
-/// `say_chars` is the whole turn's answer mass — the deliberation grain's
-/// denominator (`text` length over it), passed in because the shadow rides
-/// the turn's *first* prose block, which holds only its opening paragraph.
-pub(super) struct Reasoning {
+/// The reasoning a turn produced. It is its own dialable block: the
+/// collapsed form gives only a grain and size; higher rungs reveal the
+/// drained trace. `answer_chars` is the whole turn's answer mass, the
+/// deliberation grain's denominator.
+pub(super) struct Thinking {
     pub(super) text: String,
-    pub(super) say_chars: u32,
+    pub(super) answer_chars: u32,
 }
 
 /// What a block carries.  Each variant renders as a pure function of its
@@ -107,15 +106,12 @@ pub(super) enum BlockKind {
         query: Option<String>,
     },
     /// Streamed assistant prose; re-wrapped from source at every width.
-    /// Plain prose (`reasoning: None`) is product — always full, inert to
-    /// the dial, wearing `·`. When the turn carried model reasoning it is
-    /// attached as the answer's folded shadow ([`Block::set_reasoning`]):
-    /// the block becomes dialable, wears `∴`, and shows a deliberation
-    /// header at rest (L1) with the reasoning prose dialed in below (L3).
-    Markdown {
-        src: String,
-        reasoning: Option<Reasoning>,
-    },
+    /// Prose is product — always full, inert to the dial, wearing `·`.
+    Markdown { src: String },
+    /// A model reasoning trace, separate from the answer it produced.
+    /// It is dialable: L1 is the deliberation header, L2 a few rows of
+    /// drained trace, L3 the full trace.
+    Thinking(Thinking),
     /// An async subagent's final result, landed in root's scrollback.
     /// Dialable like a tool call: collapsed (L1) to a one-line header
     /// (`title` · `elapsed` · a size-bar for `text` length, plus an error
@@ -220,11 +216,9 @@ impl Block {
     /// (today's full render).
     fn new(kind: BlockKind, fidelity: Fidelity) -> Self {
         let level = match kind {
-            BlockKind::ToolCall { .. }
-            | BlockKind::Subagent { .. }
-            | BlockKind::Markdown {
-                reasoning: Some(_), ..
-            } => Reveal::Summary,
+            BlockKind::ToolCall { .. } | BlockKind::Subagent { .. } | BlockKind::Thinking(_) => {
+                Reveal::Summary
+            }
             _ => Reveal::Full,
         };
         Self {
@@ -248,12 +242,14 @@ impl Block {
         )
     }
     pub(super) fn markdown(src: String, fidelity: Fidelity) -> Self {
+        Self::new(BlockKind::Markdown { src }, fidelity)
+    }
+    /// A completed thinking trace. It is logged and rendered as its own
+    /// dialable block; answer prose remains a separate markdown run.
+    pub(super) fn thinking(text: String, answer_chars: u32) -> Self {
         Self::new(
-            BlockKind::Markdown {
-                src,
-                reasoning: None,
-            },
-            fidelity,
+            BlockKind::Thinking(Thinking { text, answer_chars }),
+            Fidelity::default(),
         )
     }
     /// An async subagent's final result. `fidelity` rides the existing
@@ -327,6 +323,7 @@ impl Block {
         match &self.kind {
             BlockKind::Card { card, .. } => card.magnitude(),
             BlockKind::Markdown { src, .. } => Some(src.lines().count() as u32),
+            BlockKind::Thinking(t) => Some(t.text.lines().count() as u32),
             BlockKind::Subagent { text, .. } => Some(text.lines().count() as u32),
             _ => None,
         }
@@ -347,16 +344,18 @@ impl Block {
 
     /// True for the block kinds whose disclosure [`Self::level`] the user
     /// can dial — those with something foldable: tool calls, subagent
-    /// results, a card carrying a `diff` mark, and a reasoned answer (the
-    /// reasoning shadow folds, though the answer itself always shows).
+    /// results, a thinking trace, and a card carrying a `diff` mark.
     /// Plain prose has only product to read, so it is inert; a diff-less
     /// card is chrome-level, and chrome is inert.
     pub(super) fn dialable(&self) -> bool {
         match &self.kind {
-            BlockKind::ToolCall { .. } | BlockKind::Subagent { .. } => true,
-            BlockKind::Markdown { reasoning, .. } => reasoning.is_some(),
+            BlockKind::ToolCall { .. } | BlockKind::Subagent { .. } | BlockKind::Thinking(_) => {
+                true
+            }
             BlockKind::Card { card, .. } => card.has_diff(),
-            BlockKind::Query { .. } | BlockKind::Chrome { .. } => false,
+            BlockKind::Markdown { .. } | BlockKind::Query { .. } | BlockKind::Chrome { .. } => {
+                false
+            }
         }
     }
 
@@ -483,24 +482,9 @@ impl Block {
         }
     }
 
-    /// True for an assistant prose block — the one kind a turn's reasoning
-    /// shadow attaches to via [`Self::set_reasoning`].
+    /// True for an assistant prose block.
     pub(super) fn is_markdown(&self) -> bool {
         matches!(self.kind, BlockKind::Markdown { .. })
-    }
-
-    /// Attach a turn's `reasoning` to this prose block as its folded
-    /// shadow, with `say_chars` the whole turn's answer mass (the
-    /// deliberation grain's denominator).  Makes the block dialable, swaps
-    /// its rail to `∴`, and folds to L1 so the reasoning stays hidden until
-    /// dialed — the answer keeps showing throughout.  A no-op on a
-    /// non-prose block.  Drops the memo so the new shape re-renders.
-    pub(super) fn set_reasoning(&mut self, text: String, say_chars: u32) {
-        if let BlockKind::Markdown { reasoning, .. } = &mut self.kind {
-            *reasoning = Some(Reasoning { text, say_chars });
-            self.level = Reveal::Summary;
-            self.cache = None;
-        }
     }
 
     /// True for a step-boundary chrome block — the column unit the
@@ -692,9 +676,8 @@ impl Block {
     /// the one-line summary; [`Reveal::Context`] the summary plus [`N`] lines;
     /// [`Reveal::Full`] the full source.  (A tool call's [`Reveal::Census`] is
     /// rendered by [`super::group`], never here — a standalone call folds onto
-    /// its summary.)  Plain prose and chrome ignore the level — they are always
-    /// full; a reasoned answer always shows its prose and grades only the
-    /// reasoning shadow folded beneath it.
+    /// its summary.) Plain prose and chrome ignore the level — they are always
+    /// full; thinking grades from header to partial trace to full trace.
     fn body(&self, width: u16, level: Reveal) -> Vec<Line<'static>> {
         match &self.kind {
             BlockKind::ToolCall { tool, summary, cmd } => match level {
@@ -707,31 +690,18 @@ impl Block {
                     line::tool_call_collapsed(summary, tool, self.result_size, width)
                 }
             },
-            // Plain prose renders whole. A reasoned answer leads with the
-            // deliberation header; as the level dials up the reasoning prose
-            // unfolds beneath it — drained, the answer's lower-authority
-            // shadow — and the answer prose (always shown) follows below, so
-            // the block reads top-to-bottom as deliberation then conclusion.
-            BlockKind::Markdown {
-                src,
-                reasoning: None,
-            } => md::render_md(src, width, MD_INDENT, self.fidelity),
-            BlockKind::Markdown {
-                src,
-                reasoning: Some(r),
-            } => {
-                let mut ls = line::reasoning_header(&r.text, r.say_chars);
+            BlockKind::Markdown { src } => md::render_md(src, width, MD_INDENT, self.fidelity),
+            BlockKind::Thinking(t) => {
+                let mut ls = line::thinking_header(&t.text, t.answer_chars);
                 if level >= Reveal::Context {
                     ls.push(Line::default());
-                    let shadow = md::render_reasoning(&r.text, width, MD_INDENT);
+                    let shadow = md::render_reasoning(&t.text, width, MD_INDENT);
                     ls.extend(if level >= Reveal::Full {
                         shadow
                     } else {
                         first_rows(shadow, N)
                     });
-                    ls.push(Line::default());
                 }
-                ls.extend(md::render_md(src, width, MD_INDENT, self.fidelity));
                 ls
             }
             BlockKind::Subagent {
@@ -798,14 +768,8 @@ impl Block {
             // renders a query alone and reaches this; on screen the coalesced
             // run prepends its own rail.
             BlockKind::Query { .. } => Some(RailKind::ToolCall(false)),
-            // A reasoned answer wears `∴` (the conclusion follows from a
-            // folded deliberation); plain prose keeps `·`.
-            BlockKind::Markdown {
-                reasoning: Some(_), ..
-            } => Some(RailKind::Thinking),
-            BlockKind::Markdown {
-                reasoning: None, ..
-            } => Some(RailKind::Markdown),
+            BlockKind::Markdown { .. } => Some(RailKind::Markdown),
+            BlockKind::Thinking(_) => Some(RailKind::Thinking),
             // The `↘` keeps the delegated-result identity even on error; the
             // failure reads in the header suffix, not a swapped glyph.
             BlockKind::Subagent { .. } => Some(RailKind::Subagent),

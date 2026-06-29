@@ -701,12 +701,14 @@ pub enum Kind {
     },
     Died,
     Token(String),
+    /// A live reasoning token, streamed during the model's thinking phase.
+    /// Accumulated by the frontend into a provisional deliberation seat until
+    /// the final `Reasoning` event commits a real thinking block.
+    Thinking(String),
     Boundary,
-    /// The step's model reasoning, emitted after [`Self::Boundary`] has
-    /// flushed the answer prose into blocks.  The frontend attaches `text`
-    /// to the turn's first prose block as its folded shadow; `answer_chars`
-    /// is the whole turn's answer mass, the deliberation grain's
-    /// denominator.  Emitted only for a step that produced prose.
+    /// The step's final model reasoning. The frontend commits `text` as a
+    /// standalone dialable thinking block; `answer_chars` is the whole turn's
+    /// answer mass, the deliberation grain's denominator.
     Reasoning {
         text: String,
         answer_chars: u32,
