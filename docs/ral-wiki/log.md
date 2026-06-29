@@ -2467,7 +2467,7 @@ hatch remains future host-managed work rather than a per-spawn timeout knob, and
 
 ## [2026-06-16] ingest | propose exarch binding leases
 
-Added [[decisions/260616_exarch-binding-reaping|exarch-binding-reaping]]:
+Added `260616_exarch-binding-reaping`:
 exarch may reap stale top-level scratch bindings through core-owned accessors,
 using idle age (`last_used_at`) rather than creation age. The ADR keeps Ctrl-`\`
 as root cancellation, `/clear` as full shell reset, and records tombstones for
@@ -2475,14 +2475,14 @@ helpful undefined-name diagnostics.
 
 ## [2026-06-16] ingest | set binding idle lease
 
-Refined [[decisions/260616_exarch-binding-reaping|exarch-binding-reaping]] with
+Refined `260616_exarch-binding-reaping` with
 the first death policy: an unpinned exarch scratch binding dies after one day
 since last use or 256 unused ral calls, with a one-boundary grace for fresh or
 just-used names. Tombstones last seven days or 1024 ral-tool epochs.
 
 ## [2026-06-16] ingest | fix binding lease seams
 
-Revised [[decisions/260616_exarch-binding-reaping|exarch-binding-reaping]] around
+Revised `260616_exarch-binding-reaping` around
 Plan C's split: leases live on `Shell::local`, epochs are host-supplied data,
 and generation is complete only when every top-level write routes through a
 lease-aware shell operation. The ADR now nails the genesis/fork boundary,
@@ -2491,7 +2491,7 @@ unchecked-name read tracking, committed-tool-result reaping site, and
 
 ## [2026-06-16] ingest | close prune snapshot leak
 
-Clarified [[decisions/260616_exarch-binding-reaping|exarch-binding-reaping]]:
+Clarified `260616_exarch-binding-reaping`:
 because pruning removes names from the live `Env`, exarch must refresh the
 durable `Mobile` snapshot after a committed prune. Without that refresh, the
 snapshot could retain large values and resurrect pruned names after an unrelated
@@ -2613,7 +2613,7 @@ core-mechanism / host-affordance split from
 [[decisions/260617_watch-repl-builtin|watch-repl-builtin]] (not the REPL, whose
 `disown` already names POSIX job control); and it births into a *listable*
 durable-job registry, pinned against
-[[decisions/260616_exarch-binding-reaping|exarch-binding-reaping]] so the model
+`260616_exarch-binding-reaping` so the model
 rediscovers jobs by id after compaction loses the binding name. Left *open* — the
 headline question — is which lifetime regime(s) to support: Regime 1 in-process
 durable (real `Handle`, small) versus Regime 2 survives-exit (`setsid` process,
@@ -2649,7 +2649,7 @@ substrate is monotonic `Instant`, and `host.rs` shells to `date(1)` to keep
 produces a message, host-owned per [[decisions/260617_watch-repl-builtin|watch-repl-builtin]]),
 turn-boundary delivery (not [[decisions/260616_tool-boundary-steering|steering]]),
 overlap-skip, a listable registry pinned against
-[[decisions/260616_exarch-binding-reaping|binding-reaping]]. The one new
+`260616_exarch-binding-reaping`. The one new
 mechanism: the idle wait becomes a select over `{input, wake}`. Status
 *proposed*; persistence and a durable cron left out of scope.
 
@@ -2947,7 +2947,7 @@ Revised [[decisions/260620_same-thread-body-shares-the-session|same-thread-body-
 
 ## [2026-06-20] ingest | binding reaper plan simplified
 
-Revised [[decisions/260616_exarch-binding-reaping|exarch-binding-reaping]] after design review. The first implementation now uses only ral-tool-call epochs, baseline pins, live-handle pins, static turn read/write sets, and generation-guarded idle pruning; tombstones, retained-size eviction, wall-clock expiry, explicit pin syntax, and callable-specific TTL are deferred.
+Revised `260616_exarch-binding-reaping` after design review. The first implementation now uses only ral-tool-call epochs, baseline pins, live-handle pins, static turn read/write sets, and generation-guarded idle pruning; tombstones, retained-size eviction, wall-clock expiry, explicit pin syntax, and callable-specific TTL are deferred.
 Updated [[index|index]] with the smaller v1 contract.
 
 ## [2026-06-21] ingest | sync/async agent paths studied; bus-lifetime decision filed
@@ -3384,3 +3384,7 @@ Fixed `dedent` in `core/src/builtins/strings.rs` so multiline raw-block framing 
 ## [2026-06-29] ingest | ral startup split across main, cli, and batch
 
 Tidied the `ral` binary entry point by moving argv/mode parsing to `ral/src/cli.rs` and non-interactive execution to `ral/src/batch.rs`, leaving `main.rs` as process setup plus mode dispatch. Re-stamped [[map/repl/startup|startup]] and updated [[index|index]] for the new file boundary; the CLI long help now avoids repository document paths and names `RAL_TIMING` as a batch timing presence flag.
+
+## [2026-06-29] ingest | binding reaper restated for agent shells
+
+Replaced the old `260616_exarch-binding-reaping` sketch with [[decisions/260629_agent-binding-reaping|agent-binding-reaping]] after review against the landed Fleet/Agent split. The new proposal makes the lease ledger per-agent `Shell::local`, requires one lease-aware top-level write door and static read/write harvesting, recursively pins running handles, and makes immediate `Agent::durable` refresh part of committed pruning; current links in long-running work, scheduled wakeups, cancellation, and [[index|index]] now point at it.

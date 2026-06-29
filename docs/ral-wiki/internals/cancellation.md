@@ -174,7 +174,7 @@ fix the interactive dispositions:
   slot array (`PipelineRelay` RAII). It *also* `request_foreground_cancel`s so an
   in-process foreground computation unwinds. It is a no-op when idle.
 - **SIGQUIT → `sigquit_handler`**, the louder "reap everything" gesture
-  ([[decisions/260616_exarch-binding-reaping|exarch-binding-reaping]] keeps it as
+  ([[decisions/260629_agent-binding-reaping|agent-binding-reaping]] keeps it as
   *cancellation*, never deletion). It is a cooperative `request_root_cancel`, not
   the default core-dump — so it satisfies "Ctrl-`\` must not core-dump the shell"
   *by reaping*, not by ignoring. (A prior `boot` line re-bound SIGQUIT to
