@@ -73,6 +73,7 @@ pub enum ProviderKind {
     Openai,
     Openrouter,
     Deepseek,
+    Gemini,
     OpencodeZen,
     OpencodeGo,
     Xai,
@@ -91,6 +92,7 @@ impl ProviderKind {
                 "OPENROUTER_API_KEY",
             ),
             Self::Deepseek => ("deepseek", "deepseek-chat", "DEEPSEEK_API_KEY"),
+            Self::Gemini => ("gemini", "gemini-2.5-pro", "GEMINI_API_KEY"),
             // opencode issues one key per account and tells Zen from Go apart
             // by endpoint, so both read the same `OPENCODE_API_KEY`.
             Self::OpencodeZen => ("opencode-zen", "glm-5.1", "OPENCODE_API_KEY"),
@@ -123,6 +125,7 @@ impl ProviderKind {
             Self::Openai => AdapterKind::OpenAIResp,
             Self::Openrouter => AdapterKind::OpenAI,
             Self::Deepseek => AdapterKind::DeepSeek,
+            Self::Gemini => AdapterKind::Gemini,
             Self::OpencodeZen | Self::OpencodeGo => AdapterKind::OpenAI,
             Self::Xai => AdapterKind::Xai,
             Self::Qwen => AdapterKind::OpenAI,
