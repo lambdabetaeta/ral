@@ -647,6 +647,14 @@ impl Block {
     ) -> Vec<Line<'static>> {
         let level = self.render_level(force_full);
         let mut lines = self.body(width, level);
+        // Markdown is the one body that omits the opening blank every other
+        // kind wears, so a lead prose answer would abut the tool call above it.
+        // Restore that blank on the response head; continuation paragraphs
+        // (lead = false) stay tight, and reflow folds it against any trailing
+        // blank so the gap never doubles.
+        if lead && self.markdown_src().is_some() && !lines.first().is_some_and(is_blank) {
+            lines.insert(0, Line::default());
+        }
         if let Some(kind) = self.rail_kind(level) {
             // A continuation prose paragraph keeps the gutter but blanks its
             // glyph — one response, one `·`, on its head row.
