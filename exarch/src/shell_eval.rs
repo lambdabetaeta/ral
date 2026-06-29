@@ -457,7 +457,7 @@ fn bracketed(parts: Vec<String>, indent: usize, open: &str, close: &str) -> Stri
 }
 
 fn quote_ral_string(body: &str) -> String {
-    let level = quote_bump_level(body);
+    let level = quote_bump_level(body).max(1);
     let hashes = "#".repeat(level);
     format!("{hashes}'{body}'{hashes}")
 }
@@ -640,10 +640,10 @@ mod tests {
             "line renders as a ral field: {val:?}"
         );
         assert!(
-            val.contains("text: 'alpha'"),
+            val.contains("text: #'alpha'#"),
             "text renders as a ral field: {val:?}"
         );
-        let hash_start = val.find("hash: '").expect("hash field") + "hash: '".len();
+        let hash_start = val.find("hash: #'").expect("hash field") + "hash: #'".len();
         let hash = &val[hash_start..hash_start + 7];
         assert_eq!(
             hash.len(),
@@ -1271,7 +1271,7 @@ keep-bottom
         );
         let value = r.value.as_deref().expect("structured result");
         assert!(
-            value.contains("stderr: 'killed"),
+            value.contains("stderr: #'killed"),
             "the readable prefix renders inside a ral string, got {value:?}"
         );
         assert!(
@@ -1712,7 +1712,7 @@ return !{{length $hits}}"#
         };
         let out = super::ral_value_to_text(&v).expect("variant renders");
         assert!(out.starts_with("`done ["));
-        assert!(out.contains("files: ['a.rs']"));
+        assert!(out.contains("files: [#'a.rs'#]"));
         assert!(out.contains("tests: 12"));
         assert!(!out.contains("\"tag\""));
         assert!(!out.contains("\"payload\""));
