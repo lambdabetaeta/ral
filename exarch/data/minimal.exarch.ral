@@ -63,9 +63,8 @@ return [
   # `core/src/sandbox/macos.rs::system_paths`.  Building from source
   # works without listing each tool here.
   #
-  # `bash` and `zsh` carry over from `reasonable`'s explicit denies:
-  # both shells live under `/bin/` (admitted by subpath above), but a
-  # literal-match `'deny'` overrides the subpath rule.  Autoconf-style
+  # `bash` and `zsh` live under `/bin/` (admitted by subpath above), but
+  # a literal-match `'deny'` overrides the subpath rule.  Autoconf-style
   # `configure` scripts and `make` recipes shell out via `/bin/sh -c`
   # and need `sh` itself; bash/zsh are agent quality-of-life only.
   exec: [

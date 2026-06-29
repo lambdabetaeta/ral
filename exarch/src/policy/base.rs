@@ -437,40 +437,6 @@ mod tests {
         }
     }
 
-    /// `reasonable` lists the standard system `bin` directories as
-    /// subpath keys in `exec`, which would otherwise admit
-    /// `/bin/bash` and `/usr/bin/zsh`.  An explicit `'deny'` per-name
-    /// entry in the same map is the override knob: literal-match
-    /// wins over subpath-match, so the agent cannot reach those
-    /// tools through the admitted dirs.  `/bin/sh` remains allowed:
-    /// it is build infrastructure, not an interactive shell surface.
-    #[cfg(unix)]
-    #[test]
-    fn reasonable_denies_bash_and_zsh_despite_bin_in_exec_dirs() {
-        let home = ral_core::path::home_from_env();
-        let ctx = FreezeCtx {
-            home: &home,
-            cwd: Path::new("/"),
-        };
-        let caps = load("reasonable", REASONABLE_RAL, &ctx);
-
-        for (name, abs) in [("bash", "/bin/bash"), ("zsh", "/bin/zsh")] {
-            let mut shell = Shell::default();
-            let r = shell.with_capabilities(caps.clone(), |sh| {
-                sh.check_exec_args(name, &[name, abs], &[])
-            });
-            assert!(
-                r.is_err(),
-                "{name} should be denied even though its parent dir is in exec_dirs"
-            );
-        }
-
-        let mut shell = Shell::default();
-        shell
-            .with_capabilities(caps, |sh| sh.check_exec_args("sh", &["sh", "/bin/sh"], &[]))
-            .expect("sh should remain allowed for build infrastructure");
-    }
-
     /// `git` is admitted in `reasonable` and `read-only` so commit
     /// flows ("commit please") work without `--extend-base`.  Pin
     /// this so a future profile edit doesn't silently re-deny.

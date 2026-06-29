@@ -141,12 +141,12 @@ return [
   # Directory-based exec admittance.  A key ending in `/` is a subpath
   # prefix: any binary whose resolved absolute path lies inside the
   # directory is admitted with `'allow'`.  Per-name entries below win on
-  # more-specific match, so `bash: 'deny'` overrides `'/bin/': 'allow'`
+  # more-specific match; a literal key always wins over a directory prefix.
   # even though `/bin/bash` is under `/bin/`.
   exec: [
     # Admit every binary on PATH.  Expands at freeze time: each `:`
     # separator in `$PATH` becomes a `dirs` entry with this verdict.
-    # Per-name denies (`bash`, `zsh`) still beat the directory entries
+    # Per-name entries still beat the directory entries
     # because literal keys win on more-specific match.
     'path:': 'allow',
 
@@ -252,8 +252,6 @@ return [
 
     # Shells
     sh:   'allow',
-    bash: 'deny',
-    zsh:  'deny',
 
     # Version control.  `git` is admitted; the fs grant above adds
     # ~/.gitconfig and xdg:config/git for read so commits and the
