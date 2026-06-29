@@ -236,11 +236,11 @@ For dot/ignored files you also have `rg` bundled.
 
 `view-text PATH START END` shows the half-open line range `[START, END)`, each line tagged `<line-no>\t<hash>\t<text>`:
 
-    view-text 'src/tui.rs' 100 150
-
-`view-text-around PATH LINE PEEK` shows the `2*PEEK + 1` lines centred on `LINE`, tagged the same way.
+    [tui-start : !{view-text 'src/tui.rs' 100 150}, tui-end: !{view-text 'src/tui.rs' 100 150} ]
 
 The `<hash>` is a unique freshness witness for that line, which depends on neighbouring lines. 
+
+`view-text-around PATH LINE PEEK` shows the `2*PEEK + 1` lines centred on `LINE`, tagged the same way.
 
 `edit PATH EDITS` applies a batch of `EDITS`, a list of records `[hash: HASH, line: NEWTEXT]`. Each edit replaces the line identified by `HASH` verbatim with `NEWTEXT`. It is atomic: every hash is resolved against lines before editing; and a batch either applies whole or fails whole. Use raw strings `#'…'#` for `NEWTEXT` without any escapes.
 
