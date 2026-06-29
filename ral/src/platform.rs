@@ -29,13 +29,6 @@ pub(crate) fn home_dir() -> String {
     ral_core::path::home_from_env_or_dot()
 }
 
-/// Current user name: `$USER` on Unix, `%USERNAME%` on Windows.
-/// Routes through [`ral_core::path::user_name_from_env`] so the
-/// resolution rule lives in one place.
-pub(crate) fn user_name() -> String {
-    ral_core::path::user_name_from_env()
-}
-
 static DEFAULT_EXIT_HINTS: &str = include_str!("../../data/exit-hints.txt");
 
 /// Load exit-code hints: user override in data dir, else the embedded default.

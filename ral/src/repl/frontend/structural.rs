@@ -588,11 +588,11 @@ fn key_matches(k: &KeyEvent, chord: &KeyChord) -> bool {
     }
 }
 
-/// Replace the editor's contents, leaving the cursor at the end — the unit of
-/// every history recall and draft restore.
-/// Move the cursor to a character offset into the (just-filled) buffer,
-/// clamped to its length — restores an [`EditBuffer`]'s saved cursor as
-/// closely as the row/col editor allows.
+// Replace the editor contents, leaving the cursor at the end — the unit of
+// every history recall and draft restore.
+// Move the cursor to a character offset into the (just-filled) buffer,
+// clamped to its length — restores an [`EditBuffer`] saved cursor as
+// closely as the row/col editor allows.
 // ── Completion ───────────────────────────────────────────────────────────────
 
 /// Apply the selected candidate of an open [`Menu`]: replace the token from

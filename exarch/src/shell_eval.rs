@@ -221,10 +221,10 @@ pub fn run_shell(
         match frame {
             Frame::Event(did, event) if did == id => match event {
                 Event::Surface(val) => {
-                    if let Ok(live_val) = val.into_ground() {
-                        if let Some(kind) = decode_surface(&live_val) {
-                            if let Some(pins) = &pins {
-                                if let Ok(mut m) = pins.lock() {
+                    if let Ok(live_val) = val.into_ground()
+                        && let Some(kind) = decode_surface(&live_val) {
+                            if let Some(pins) = &pins
+                                && let Ok(mut m) = pins.lock() {
                                     match &kind {
                                         Kind::Pin { key, card } => {
                                             m.insert(key.clone(), crate::card::summary_line(card));
@@ -234,19 +234,16 @@ pub fn run_shell(
                                         }
                                         _ => {}
                                     }
-                                }
                             }
                             emit.emit(kind);
                         }
-                    }
                 }
                 Event::BoundarySurface(batch) => {
                     for val in batch {
-                        if let Ok(live_val) = val.into_ground() {
-                            if let Some(kind) = decode_surface(&live_val) {
+                        if let Ok(live_val) = val.into_ground()
+                            && let Some(kind) = decode_surface(&live_val) {
                                 emit.emit(kind);
                             }
-                        }
                     }
                 }
                 Event::Report(r) => {
@@ -354,7 +351,7 @@ pub fn run_shell(
                         (e.exit_code().clamp(0, 255), None)
                     }
                     ral_core::transport::BreakMirror::Exit(code) => {
-                        ((*code).clamp(0, 255) as i32, None)
+                        ((*code).clamp(0, 255), None)
                     }
                     #[cfg(unix)]
                     ral_core::transport::BreakMirror::Stopped { .. } => (1, None),
@@ -551,7 +548,6 @@ mod tests {
     /// which lets every test source compile and run without exercising
     /// the OS sandbox (that path is covered separately in
     /// `core/tests/top_level_vs_block.rs`'s sandbox-parity tests).
-
     /// Run one tool turn through the **real** production [`run_shell`], so the
     /// test path can never drift from what a live tool call does.  The only
     /// thing the helper owns that production does not is the `&mut Shell`: it

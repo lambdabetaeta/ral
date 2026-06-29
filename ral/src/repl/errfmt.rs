@@ -59,6 +59,7 @@ pub(super) fn plugin_warning(plugin_name: &str, msg: &str) {
     eprintln!("{yellow}plugin{reset} '{plugin_name}': warning: {msg}");
 }
 
+#[allow(dead_code, reason = "used only in tests")]
 pub(super) fn format_repl_parse_error(message: &str) -> String {
     let c = ansi::use_color();
     format!(
@@ -66,12 +67,6 @@ pub(super) fn format_repl_parse_error(message: &str) -> String {
         ansi::when(c, BOLD_RED),
         ansi::when(c, RESET),
     )
-}
-
-pub(super) fn should_use_compact_parse_error(trimmed: &str, message: &str) -> bool {
-    !trimmed.contains('\n')
-        && !trimmed.contains(';')
-        && message.contains("value cannot appear in command position")
 }
 
 #[cfg(test)]

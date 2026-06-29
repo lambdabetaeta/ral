@@ -31,7 +31,6 @@ use super::line::{self, READ_W, LIME_HOT, SLATE, CYAN, PINK, AGENT_HUES};
 use super::status::{StatusReadout, rule_line};
 use super::matrix::matrix_bar;
 use super::terminal::Term;
-use super::viewport::Viewport;
 use super::select::highlight_range;
 use super::App;
 use super::{LEFT_MARGIN, REGISTER_W, REGISTER_GAP, PROMPT_PAD_H, SPINNER, LINGER};

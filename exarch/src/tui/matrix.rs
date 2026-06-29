@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::style::{Modifier, Style};
 use crate::bus::AgentId;
 use crate::provider;
-use super::line::{self, AGENT_HUES, SLATE, size_bar};
+use super::line::{self, AGENT_HUES, SLATE};
 use super::rail;
 use super::viewport::Viewport;
 use super::render::tab_bar;

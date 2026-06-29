@@ -410,7 +410,7 @@ impl Elaborator {
                 args,
                 redirects,
             } if s == "echo" && !self.is_bound("echo") => {
-                return self.expand_echo(args, redirects, binds);
+                self.expand_echo(args, redirects, binds)
             }
 
             Ast::Call {

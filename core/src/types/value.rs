@@ -271,7 +271,7 @@ impl Value {
             | Value::Bytes(_) => true,
             Value::List(vs) => vs.iter().all(Self::is_ground),
             Value::Map(pairs) => pairs.iter().all(|(_, v)| Self::is_ground(v)),
-            Value::Variant { payload, .. } => payload.as_deref().map_or(true, Self::is_ground),
+            Value::Variant { payload, .. } => payload.as_deref().is_none_or(Self::is_ground),
             Value::Lambda { .. } | Value::Block { .. } | Value::Handle(_) => false,
         }
     }

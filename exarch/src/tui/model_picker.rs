@@ -9,17 +9,14 @@ use ratatui::crossterm::event::{
     Event as CtEvent, KeyEventKind, poll as ct_poll, read as ct_read,
 };
 
-use crate::bootstrap;
 use crate::bus::Kind;
 use crate::credential::CredentialStore;
 use crate::models::{LiveSource, ModelCatalog, ModelSource};
-use crate::oauth;
 use crate::provider::{self, Provider};
 use crate::state;
 
 use super::picker::{self, Picker};
 use super::render::draw;
-use super::App;
 use super::tui_loop::{key_action, CommandCtx, KeyAction, KeyMode, Tui};
 
 type FetchRx = std::sync::mpsc::Receiver<(provider::ProviderId, Result<Vec<String>, String>)>;

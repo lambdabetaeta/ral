@@ -177,6 +177,12 @@ impl InternCtx {
     }
 }
 
+impl Default for InternCtx {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// True when `value` transitively contains a `Handle` reachable without
 /// crossing a `Thunk` boundary.  Thunks carry their own captured env, which
 /// `intern_scope` sanitizes recursively, so a handle deep inside a thunk's

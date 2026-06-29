@@ -22,7 +22,7 @@ use crate::{
     agent_registry::AgentRegistry,
     bootstrap::Scratch,
     bus::{
-        AgentId, Emitter, FleetBus, InboxMsg, Mailbox, Pass, drain_pass,
+        AgentId, Emitter, FleetBus, InboxMsg, Pass, drain_pass,
     },
     cancel,
     credential::CredentialStore,
@@ -36,7 +36,7 @@ use super::{
     banner,
     commands,
     render::draw,
-    terminal::{self, TerminalGuard, Term},
+    terminal::{self, TerminalGuard},
     App,
 };
 use super::banner::SessionInfo;
@@ -69,7 +69,6 @@ impl Tui {
 /// The table is metadata only — names, help, and the argument shape; dispatch
 /// is a direct match by name in [`route_submit`], split by where the work must
 /// run (the UI thread or the session's drive loop).
-
 /// The agent-affecting slash command hook the worker's [`Agent::drive`]
 /// calls at the turn boundary, where the drive thread owns the agent the
 /// command mutates.  `/clear` rebuilds the agent's context (its viewport was

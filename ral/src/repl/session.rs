@@ -165,7 +165,8 @@ impl Session {
     /// they cover a panic-unwind exit as well as this orderly one.
     pub(super) fn run(mut self) -> ExitCode {
         ral_core::dbg_trace!("repl", "entering REPL loop");
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+#[allow(clippy::disallowed_methods, reason = "REPL startup reads process cwd once to tell the engine where we are; Shell does not exist yet")]
+let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
         self.transport.attach(
             ral_core::transport::TerminalEndpoint {

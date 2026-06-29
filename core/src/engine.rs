@@ -81,10 +81,7 @@ pub fn run_engine() -> ! {
     let worker_writer = writer.clone();
     std::thread::spawn(move || {
         let mut shell = shell;
-        loop {
-            let Ok((id, turn)) = turn_rx.recv() else {
-                break; // channel closed
-            };
+        while let Ok((id, turn)) = turn_rx.recv() {
 
             // Extract the request mirror
             let req = match &turn {
@@ -189,7 +186,8 @@ pub fn run_engine() -> ! {
                     std::process::exit(1);
                 }
                 // Restore the session environment.
-                if let Err(e) = std::env::set_current_dir(&cwd) {
+#[allow(clippy::disallowed_methods, reason = "engine cwd restore during Attach — sets engine process cwd, not Shell logical cwd")]
+if let Err(e) = std::env::set_current_dir(&cwd) {
                     eprintln!("engine: failed to set cwd to {}: {e}", cwd.display());
                 }
                 // SAFETY: single-threaded engine startup, no other threads

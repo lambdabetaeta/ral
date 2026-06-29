@@ -1120,9 +1120,9 @@ mod tests {
         // The window clamps to the whole file, so every witness folds in the
         // same body and differs only by the offset prefix, at radius MIN_RADIUS.
         let body: String = rows.iter().map(|r| line_hash(r)).collect();
-        for i in 0..rows.len() {
+        for (i, hash) in hashes.iter().enumerate() {
             let expected = line_hash(&format!("{MIN_RADIUS}:{i}:{body}"));
-            assert_eq!(hashes[i], expected, "row {i} at the floor radius");
+            assert_eq!(*hash, expected, "row {i} at the floor radius");
         }
         let distinct: std::collections::HashSet<&String> = hashes.iter().collect();
         assert_eq!(distinct.len(), rows.len(), "all distinct");

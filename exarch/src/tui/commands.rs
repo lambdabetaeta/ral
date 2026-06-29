@@ -4,7 +4,6 @@ use std::io;
 use std::path::PathBuf;
 
 use ral_core::path::sigil::expand_path_prefix;
-use crate::cancel;
 use crate::provider::{Provider, ProviderKind};
 use crate::provider::scripted::Script;
 use crate::bus::{InboxMsg, Mailbox};

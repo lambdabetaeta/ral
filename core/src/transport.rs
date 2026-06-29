@@ -32,6 +32,7 @@ use crate::serial::SerialValue;
 use crate::types::Boundary;
 use crate::types::SurfaceSink;
 use crate::types::Value;
+use crate::process::ChildHandle;
 use std::sync::OnceLock;
 
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -352,10 +353,9 @@ impl PerDispatchSink {
 
 impl crate::types::EventSink for PerDispatchSink {
     fn emit(&self, ev: &Value) {
-        if let Some(id) = *self.current.lock().unwrap() {
-            if let Ok(sv) = SerialValue::from_ground(ev) {
+        if let Some(id) = *self.current.lock().unwrap()
+            && let Ok(sv) = SerialValue::from_ground(ev) {
                 let _ = self.event_tx.send(Frame::Event(id, Event::Surface(sv)));
-            }
         }
     }
 }
@@ -581,7 +581,7 @@ pub struct WireTransport {
     /// Shared write end, behind a mutex for concurrent access.
     write_tx: Arc<Mutex<crate::wire::WireChannel>>,
     /// The engine child process.
-    _child: std::process::Child,
+    _child: ChildHandle,
     /// Reader thread handle (never joined — the thread exits when the
     /// channel closes).  Wrapped in a `Mutex<Option<…>>` for `Sync`.
     _reader: Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -668,7 +668,7 @@ impl WireTransport {
             },
             control,
             write_tx,
-            _child: child,
+            _child: ChildHandle::from_std(child),
             _reader: Mutex::new(Some(reader)),
             death,
         })
@@ -692,7 +692,7 @@ impl Drop for WireTransport {
     fn drop(&mut self) {
         // Kill the engine child so the reader thread sees EOF and exits.
         let _ = self._child.kill();
-        let _ = self._child.wait();
+        let _ = self._child.wait_handling_stop(None, false);
     }
 }
 

@@ -42,7 +42,7 @@ fn to_int(name: &str, args: &[Value], op: fn(f64) -> f64) -> Settled<Value> {
     check_arity(args, 1, name)?;
     let x = finite_float(name, &args[0])?;
     let r = op(x);
-    if r >= I64_BOUND || r < -I64_BOUND {
+    if !(-I64_BOUND..I64_BOUND).contains(&r) {
         Err(sig(format!("{name}: {x} is outside the integer range")))
     } else {
         Ok(Value::Int(r as i64))
