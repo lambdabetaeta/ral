@@ -1,15 +1,16 @@
 ---
-generated_at_commit: 1baac6d
-generated_at_date: 2026-06-22
-covers_paths: [ral/src/main.rs, ral/src/platform.rs, ral/build.rs]
+generated_at_commit: 1c2a010
+generated_at_date: 2026-06-29
+covers_paths: [ral/src/main.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/platform.rs, ral/build.rs]
 ---
 
 # Map: repl / startup
 
-`ral/src/main.rs` is the process entry point: **it distils argv into a `Mode`,
-runs batch programs through core's framed turn door, and hands interactive
-sessions to the REPL** — all above a pre-clap dispatch that lets the binary
-re-enter itself in confined or helper roles.
+The `ral` binary startup is a three-part front door: **`main.rs` performs
+process dispatch, `cli.rs` distils argv into a `Mode`, and `batch.rs` runs
+non-interactive programs through core's framed turn door**. Interactive sessions
+then hand to the REPL, above a pre-clap dispatch that lets the binary re-enter
+itself in confined or helper roles.
 
 ## Pre-`main` dispatch
 
@@ -43,8 +44,8 @@ run setuid on Unix.
 
 ## Modes
 
-`Cli` (clap) parses the surface, and `Cli::into_mode` distils it into a `Mode`:
-`Login(InteractiveOpts)`, `Interactive(InteractiveOpts)`, `Script`, or
+`ral/src/cli.rs` owns the clap surface. `Cli::into_mode` distils it into a
+`Mode`: `Login(InteractiveOpts)`, `Interactive(InteractiveOpts)`, `Script`, or
 `Command`. The login bit (`-l` or a `-`-prefixed argv\[0\]) does not
 short-circuit: a login shell with `-c` or a script positional resolves to
 `Command`/`Script` and runs it, as cron, `su -`, and `$SHELL -l -c …` require;
@@ -68,16 +69,18 @@ every mode; `BatchOpts` adds `--audit` / `--pretty` / `--check` / `--dump-ast`;
   axis stays the `RAL_INTERACTIVE_MODE` env var — the escape hatch for setups
   that do not own argv — and still wins over the surface choice. Surface
   internals live in [[map/repl/frontend|frontend]].
-- **Interactive/script fork.** Decided in `main`: `-s` forces stdin-as-script,
-  `-i` forces the REPL, otherwise stdin being a tty decides. The REPL path hands
-  off to [[map/repl/loop|`repl::run_interactive`]].
+- **Interactive/script fork.** `InteractiveOpts::reads_stdin_as_script` encodes
+  the precedence: `-s` forces stdin-as-script, `-i` forces the REPL, otherwise
+  stdin being a tty decides. The REPL path hands off to
+  [[map/repl/loop|`repl::run_interactive`]].
 
 ## Batch execution
 
-`run_batch` is the whole non-interactive pipeline. It parses, elaborates,
-typechecks, then **runs the program through core's framed turn door rather than
-evaluating it directly** ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]):
-the same `Shell::run_source_turn` entry every host shares
+`ral/src/batch.rs` owns the whole non-interactive pipeline. `run_batch` parses,
+elaborates, typechecks, then **runs the program through core's framed turn door
+rather than evaluating it directly**
+([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]): the same
+`Shell::run_source_turn` entry every host shares
 ([[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]]).
 
 - **The check.** The inference pass is not optional — it writes the mode wires

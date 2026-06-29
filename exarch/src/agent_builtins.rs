@@ -261,12 +261,11 @@ fn builtin_view_text(args: &[Value], shell: &mut Shell) -> Settled<Value> {
                 ("line".into(), Value::Int(i as i64 + 1)),
                 ("hash".into(), Value::String(hashes[i].clone())),
                 ("text".into(), Value::String(rows[i].clone())),
-]));
+            ]));
+        }
     }
+    Ok(Value::list(result_rows))
 }
-Ok(Value::list(result_rows))
-}
-
 
 /// The one sanctioned [`WalkBuilder::build`](ignore::WalkBuilder::build) site.
 ///
@@ -750,25 +749,26 @@ fn scheme_grep_files(_u: &mut Unifier) -> Scheme {
 /// `view-text :: Str → Int → Int → F [[line: Int, hash: Str, text: Str]]` — `path`, then the half-open line
 /// range. Returns a list of records, one per line in [start, end).
 fn scheme_view_text(_u: &mut Unifier) -> Scheme {
-scheme(
-    &[],
-    &[],
-    &[],
-    thunk(fun(
-        Ty::String,
-        fun(Ty::Int,
-            fun(Ty::Int,
-                pure(Ty::List(Box::new(closed_record(&[
-                    ("line", Ty::Int),
-                    ("hash", Ty::String),
-                    ("text", Ty::String),
-                ]))))
-            )
-        )
-    )),
-)
+    scheme(
+        &[],
+        &[],
+        &[],
+        thunk(fun(
+            Ty::String,
+            fun(
+                Ty::Int,
+                fun(
+                    Ty::Int,
+                    pure(Ty::List(Box::new(closed_record(&[
+                        ("line", Ty::Int),
+                        ("hash", Ty::String),
+                        ("text", Ty::String),
+                    ])))),
+                ),
+            ),
+        )),
+    )
 }
-
 
 /// `edit :: Str → [{hash: Str, line: Str}] → F Unit` — `path` then a list of
 /// `[hash: …, line: …]` records.  Returns Unit: `edit` writes and surfaces, it

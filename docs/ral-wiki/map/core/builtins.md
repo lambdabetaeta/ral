@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1baac6d
-generated_at_date: 2026-06-22
+generated_at_commit: 1c2a010
+generated_at_date: 2026-06-29
 covers_paths: [core/src/builtins/, core/src/builtins.rs]
 ---
 
@@ -26,7 +26,10 @@ sink installs it while an agent host omits it
 
 Bodies are grouped by concern, one submodule each:
 
-- `strings.rs`, `collections.rs`, `predicates.rs`, `fs.rs`, `codecs.rs`;
+- `strings.rs` — string and regex primitives. `dedent` owns the raw-block
+  framing rule: blank lines around a multiline block fall away before the
+  common margin is stripped, while content-line whitespace is preserved;
+- `collections.rs`, `predicates.rs`, `fs.rs`, `codecs.rs`;
 - `shell.rs` — `cd`, `alias` / `unalias`;
 - `concurrency.rs` — `spawn` / `watch` and the handle verbs `await` / `poll` /
   `race` / `cancel` (builtins under their bare names; `par` and the `is-done`

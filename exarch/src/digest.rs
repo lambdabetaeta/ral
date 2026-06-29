@@ -18,14 +18,13 @@ use std::fmt::Write;
 
 /// Head+tail caps, one per tool-result section.  [`clip`] keeps ~half
 /// the cap as head and ~half as tail, so a section over its cap is
-/// elided in the middle rather than truncated at the end.  Sized by how
-/// cheap the elided part is to recover: a value is bound and re-sliced
-/// for free (`take`/index), so it stays tight; stdout is ephemeral and
-/// only recoverable by re-running the command, so it gets room to spare
-/// the re-run; stderr is diagnostic and wants to survive whole.
-const VALUE_CAP: usize = 1500;
-const STDOUT_CAP: usize = 4000;
-const STDERR_CAP: usize = 3000;
+/// elided in the middle rather than truncated at the end.  Values get
+/// the most room because structured returns often carry the agent's
+/// working set; stdout and stderr keep enough context for ordinary
+/// command output and diagnostics without becoming the reporting path.
+const VALUE_CAP: usize = 20_000;
+const STDOUT_CAP: usize = 10_000;
+const STDERR_CAP: usize = 10_000;
 
 /// Cap for one `fff` tool result.
 pub const FFF_CAP: usize = 2000;
@@ -310,12 +309,12 @@ mod tests {
     }
 
     #[test]
-    fn render_value_clamps_tighter_than_stdout() {
-        // A body between the two caps is clamped as a VALUE (1500) but
-        // passes through as STDOUT (4000) — the caps differ by section.
-        let body = "x".repeat(1800);
-        assert!(render(&tr("", "", Some(&body), 0)).contains("elided"));
-        assert!(!render(&tr(&body, "", None, 0)).contains("elided"));
+    fn render_value_gets_more_room_than_stdout() {
+        // A body between the two caps passes through as VALUE (20_000)
+        // but is clamped as STDOUT (10_000) — the caps differ by section.
+        let body = "x".repeat(12_000);
+        assert!(!render(&tr("", "", Some(&body), 0)).contains("elided"));
+        assert!(render(&tr(&body, "", None, 0)).contains("elided"));
     }
 
     #[test]

@@ -14,8 +14,8 @@
 use crate::agent_registry::AgentRegistry;
 use crate::bus::{AgentId, Emitter, InboxMsg, Kind, Mailbox};
 use crate::card::{done_card, io_card, value_to_card, value_to_done, value_to_io, value_to_pin};
-use ral_core::types::{Boundary, BoundarySink};
 use ral_core::Value as RalValue;
+use ral_core::types::{Boundary, BoundarySink};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -52,7 +52,6 @@ pub enum Outcome {
 /// mirror.  The session is otherwise pin-blind — pins flow past it to the
 /// frontend — so this small mirror is how the boundary nudge can name them.
 pub type PinDigests = Arc<Mutex<std::collections::BTreeMap<String, String>>>;
-
 
 /// Decode one surfaced `Value` into the [`Kind`] it renders as — the single
 /// decoder both delivery regimes share.  The live foreground sink
@@ -190,7 +189,7 @@ pub fn run_shell(
 
     // Build the transport-level Turn.
     use ral_core::transport::{
-        DispatchId, Event, Frame, ReqMirror, ReportMirror, ResultMirror, Turn,
+        DispatchId, Event, Frame, ReportMirror, ReqMirror, ResultMirror, Turn,
     };
     use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
 
@@ -298,7 +297,7 @@ pub fn run_shell(
                     // Decode the ground result off the seam.
                     let v = sv.clone().into_ground().ok();
                     (0, v)
-                },
+                }
                 ResultMirror::Err(break_mirror) => match break_mirror {
                     ral_core::transport::BreakMirror::Error(msg) => {
                         let e = if timed_out {
@@ -316,7 +315,8 @@ pub fn run_shell(
                         // When using WireTransport, the shell is remote; fall back
                         // to an empty source map for error formatting.
                         // TODO Phase 2: include source map in ReportMirror.
-                        let sources = transport.as_any()
+                        let sources = transport
+                            .as_any()
                             .downcast_ref::<ral_core::transport::IdentityTransport>()
                             .map(|t| t.shell_mut().shell.sources().clone())
                             .unwrap_or_default();
@@ -357,19 +357,11 @@ pub fn run_shell(
                         ((*code).clamp(0, 255) as i32, None)
                     }
                     #[cfg(unix)]
-                    ral_core::transport::BreakMirror::Stopped { .. } => {
-                        (1, None)
-                    }
+                    ral_core::transport::BreakMirror::Stopped { .. } => (1, None),
                 },
             };
 
-            let value_str = value.as_ref().and_then(|v| {
-                if matches!(v, RalValue::Unit) {
-                    None
-                } else {
-                    json_to_text(&ral_core::builtins::value_to_json_lossy_bytes(v))
-                }
-            });
+            let value_str = value.as_ref().and_then(ral_value_to_text);
 
             Outcome::Ran(ToolResult {
                 stdout: stdout_bytes,
@@ -381,24 +373,112 @@ pub fn run_shell(
     }
 }
 
-/// Render a JSON value as the text a tool result carries.
+/// Render a JSON value as text at JSON-speaking edges.
 ///
 /// A JSON **string** passes through raw, so a markdown report keeps real
 /// newlines rather than the escaped `\n` a serializer would emit; any other
 /// shape is **pretty-printed** so its structure stays legible; a JSON **null**
 /// renders to nothing (`None`).
 ///
-/// Shared by two callers with the same rendering need: the `ral` value section
-/// — which decodes its [`RalValue`] to JSON with `value_to_json_lossy_bytes`
-/// first, so byte fields read as text — and the `reply` tool, whose argument
-/// arrives as JSON already.  Keeping one rule means a sub-agent's markdown
-/// reply and a `view-text` value clip and elide identically downstream.
+/// The `reply` tool uses this because its argument arrives as JSON already.
+/// A `ral` tool's `VALUE` section uses [`ral_value_to_text`] instead, preserving
+/// ral's own value syntax rather than detouring through JSON.
 pub(crate) fn json_to_text(json: &serde_json::Value) -> Option<String> {
     match json {
         serde_json::Value::Null => None,
         serde_json::Value::String(s) => Some(s.clone()),
         other => serde_json::to_string_pretty(other).ok(),
     }
+}
+
+/// Render a ral value as the text the `VALUE` section carries.
+///
+/// Top-level strings and bytes are payloads, so they pass through raw: file
+/// windows, markdown reports, and captured byte text keep their exact lines.
+/// Structured values print in ral surface syntax instead of detouring through
+/// JSON, so variants stay variants and records stay records.
+fn ral_value_to_text(value: &RalValue) -> Option<String> {
+    match value {
+        RalValue::Unit => None,
+        RalValue::String(s) => Some(s.clone()),
+        RalValue::Bytes(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
+        other => Some(ral_value(other, 0)),
+    }
+}
+
+fn ral_value(value: &RalValue, indent: usize) -> String {
+    match value {
+        RalValue::Unit => "unit".into(),
+        RalValue::Bool(b) => b.to_string(),
+        RalValue::Int(n) => n.to_string(),
+        RalValue::Float(f) => f.to_string(),
+        RalValue::String(s) => quote_ral_string(s),
+        RalValue::Bytes(bytes) => quote_ral_string(&String::from_utf8_lossy(bytes)),
+        RalValue::List(items) => {
+            if items.is_empty() {
+                return "[]".into();
+            }
+            let parts = items
+                .iter()
+                .map(|item| ral_value(item, indent + 1))
+                .collect::<Vec<_>>();
+            bracketed(parts, indent, "[", "]")
+        }
+        RalValue::Map(pairs) => {
+            if pairs.is_empty() {
+                return "[:]".into();
+            }
+            let parts = pairs
+                .iter()
+                .map(|(key, value)| format!("{key}: {}", ral_value(value, indent + 1)))
+                .collect::<Vec<_>>();
+            bracketed(parts, indent, "[", "]")
+        }
+        RalValue::Variant { label, payload } => match payload {
+            None => format!("`{label}"),
+            Some(payload) => format!("`{label} {}", ral_value(payload, indent)),
+        },
+        RalValue::Lambda { .. } | RalValue::Block { .. } | RalValue::Handle(_) => value.to_string(),
+    }
+}
+
+fn bracketed(parts: Vec<String>, indent: usize, open: &str, close: &str) -> String {
+    let inline = format!("{open}{}{close}", parts.join(", "));
+    if inline.len() <= 120 && !inline.contains('\n') {
+        return inline;
+    }
+
+    let pad = "  ".repeat(indent + 1);
+    let end_pad = "  ".repeat(indent);
+    format!(
+        "{open}\n{pad}{}\n{end_pad}{close}",
+        parts.join(&format!(",\n{pad}"))
+    )
+}
+
+fn quote_ral_string(body: &str) -> String {
+    let level = quote_bump_level(body);
+    let hashes = "#".repeat(level);
+    format!("{hashes}'{body}'{hashes}")
+}
+
+fn quote_bump_level(body: &str) -> usize {
+    let bytes = body.as_bytes();
+    let mut best = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            i += 1;
+            let start = i;
+            while i < bytes.len() && bytes[i] == b'#' {
+                i += 1;
+            }
+            best = best.max(i - start + 1);
+        } else {
+            i += 1;
+        }
+    }
+    best
 }
 
 #[cfg(test)]
@@ -428,8 +508,8 @@ mod tests {
     use super::*;
     use crate::agent_builtins;
     use crate::bus::{Emitter, Inbox};
-    use ral_core::types::Capabilities;
     use ral_core::Shell;
+    use ral_core::types::Capabilities;
     use std::sync::mpsc;
 
     /// Render a path without a trailing platform separator.  Some hosts
@@ -472,7 +552,6 @@ mod tests {
     /// the OS sandbox (that path is covered separately in
     /// `core/tests/top_level_vs_block.rs`'s sandbox-parity tests).
 
-
     /// Run one tool turn through the **real** production [`run_shell`], so the
     /// test path can never drift from what a live tool call does.  The only
     /// thing the helper owns that production does not is the `&mut Shell`: it
@@ -481,7 +560,13 @@ mod tests {
     /// surface stream into `emit`, and computes the exit code — including the
     /// timeout→124 mapping and the full error rendering), then moves the shell
     /// back out so the caller keeps its session across calls.
-    fn run_shell_direct(shell: &mut ral_core::Shell, caps: &Capabilities, cmd: &str, timeout_secs: u64, emit: &Emitter) -> Outcome {
+    fn run_shell_direct(
+        shell: &mut ral_core::Shell,
+        caps: &Capabilities,
+        cmd: &str,
+        timeout_secs: u64,
+        emit: &Emitter,
+    ) -> Outcome {
         // Move the live shell out behind a cheap throwaway so we can hand it to
         // the transport, which owns its `Shell`.  The placeholder is discarded
         // when we swap the real shell back in below.
@@ -496,7 +581,6 @@ mod tests {
         *shell = transport.into_shell();
         outcome
     }
-
 
     /// Run one tool turn and return its [`ToolResult`], delegating to
     /// [`run_shell_direct`] so there is exactly one definition of "run a tool
@@ -537,7 +621,12 @@ mod tests {
         let path = tmp.join("alpha.txt");
         std::fs::write(&path, "alpha\n").expect("write view fixture");
         let path_str = display_no_trailing_sep(&path);
-        let r = run_once(&mut shell, &format!("let rows = view-text '{path_str}' 1 2; [line: $rows[0][line], hash: $rows[0][hash], text: $rows[0][text]]"));
+        let r = run_once(
+            &mut shell,
+            &format!(
+                "let rows = view-text '{path_str}' 1 2; [line: $rows[0][line], hash: $rows[0][hash], text: $rows[0][text]]"
+            ),
+        );
         let _ = std::fs::remove_dir_all(&tmp);
         assert_eq!(
             r.exit,
@@ -545,17 +634,26 @@ mod tests {
             "view-text must run; stderr was: {}",
             String::from_utf8_lossy(&r.stderr)
         );
-        let val: serde_json::Value =
-            serde_json::from_str(r.value.as_deref().expect("view-text must return value"))
-                .expect("value must be valid JSON");
-        let hash = val["hash"].as_str().expect("hash must be string");
-        assert_eq!(val["line"].as_i64().expect("line must be integer"), 1);
-        assert_eq!(hash.len(), 7, "hash is an `h` tag plus six hex, got {hash:?}");
+        let val = r.value.as_deref().expect("view-text must return value");
+        assert!(
+            val.contains("line: 1"),
+            "line renders as a ral field: {val:?}"
+        );
+        assert!(
+            val.contains("text: 'alpha'"),
+            "text renders as a ral field: {val:?}"
+        );
+        let hash_start = val.find("hash: '").expect("hash field") + "hash: '".len();
+        let hash = &val[hash_start..hash_start + 7];
+        assert_eq!(
+            hash.len(),
+            7,
+            "hash is an `h` tag plus six hex, got {hash:?}"
+        );
         assert!(
             hash.starts_with('h') && hash[1..].bytes().all(|b| b.is_ascii_hexdigit()),
             "hash is `h` followed by six hex chars, got {hash:?}"
         );
-        assert_eq!(val["text"].as_str().expect("text must be string"), "alpha");
     }
 
     /// Two-call sequence: `let persist_n = 41` then `$[$persist_n + 1]`.
@@ -573,10 +671,8 @@ mod tests {
             "second tool call must succeed; stderr was: {}",
             String::from_utf8_lossy(&second.stderr)
         );
-        // Tool results render scalars as raw strings (see the
-        // `RalValue::String` branch in `run_shell`'s `value_str`);
-        // structured non-string scalars route through JSON pretty.  An
-        // Int returns its JSON form.
+        // Tool results render scalars in the direct ral value printer.
+        // An Int returns its ordinary surface form.
         assert_eq!(
             second.value.as_deref(),
             Some("42"),
@@ -847,14 +943,22 @@ keep-bottom
             let path_str = display_no_trailing_sep(&path);
 
             // Read the witness exactly as the agent would: from `view-text`.
-            let vr = run_once(&mut shell, &format!("let rows = view-text '{path_str}' 1 2; $rows[0][hash]"));
+            let vr = run_once(
+                &mut shell,
+                &format!("let rows = view-text '{path_str}' 1 2; $rows[0][hash]"),
+            );
             assert_eq!(
                 vr.exit,
                 0,
                 "view-text must read the fixture; stderr was: {}",
                 String::from_utf8_lossy(&vr.stderr)
             );
-            let witness = vr.value.as_deref().expect("view-text must return a hash").trim_matches('"').to_string();
+            let witness = vr
+                .value
+                .as_deref()
+                .expect("view-text must return a hash")
+                .trim_matches('"')
+                .to_string();
 
             // Feed the hash straight back as a *bare* token, the way the
             // agent copies it out of the read.
@@ -1167,8 +1271,8 @@ keep-bottom
         );
         let value = r.value.as_deref().expect("structured result");
         assert!(
-            value.contains("\"killed"),
-            "the readable prefix renders inside a JSON string, got {value:?}"
+            value.contains("stderr: 'killed"),
+            "the readable prefix renders inside a ral string, got {value:?}"
         );
         assert!(
             !value.contains("107") && !value.contains("255"),
@@ -1555,7 +1659,7 @@ return !{{length $hits}}"#
 
     /// A JSON string renders raw — no escaping — so a markdown report keeps
     /// real newlines rather than literal `\n`.  This is the shape a `reply`
-    /// payload and a `view-text` value share.
+    /// payload uses.
     #[test]
     fn json_to_text_passes_a_string_through_raw() {
         let v = serde_json::json!("# Report\nline one\nline two");
@@ -1583,5 +1687,44 @@ return !{{length $hits}}"#
     #[test]
     fn json_to_text_renders_null_to_nothing() {
         assert_eq!(super::json_to_text(&serde_json::Value::Null), None);
+    }
+
+    #[test]
+    fn ral_value_to_text_passes_top_level_strings_through_raw() {
+        let v = RalValue::String("# Report\nline one\nline two".into());
+        assert_eq!(
+            super::ral_value_to_text(&v).as_deref(),
+            Some("# Report\nline one\nline two"),
+        );
+    }
+
+    #[test]
+    fn ral_value_to_text_renders_structures_in_ral_syntax() {
+        let v = RalValue::Variant {
+            label: "done".into(),
+            payload: Some(Box::new(RalValue::map(vec![
+                (
+                    "files".into(),
+                    RalValue::list(vec![RalValue::String("a.rs".into())]),
+                ),
+                ("tests".into(), RalValue::Int(12)),
+            ]))),
+        };
+        let out = super::ral_value_to_text(&v).expect("variant renders");
+        assert!(out.starts_with("`done ["));
+        assert!(out.contains("files: ['a.rs']"));
+        assert!(out.contains("tests: 12"));
+        assert!(!out.contains("\"tag\""));
+        assert!(!out.contains("\"payload\""));
+    }
+
+    #[test]
+    fn ral_value_to_text_uses_multiline_layout_for_wide_structures() {
+        let items = (0..64).map(RalValue::Int).collect::<Vec<_>>();
+        let out = super::ral_value_to_text(&RalValue::list(items)).expect("list renders");
+        assert!(
+            out.contains('\n'),
+            "wide structures should clip on useful lines"
+        );
     }
 }

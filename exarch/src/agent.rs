@@ -284,8 +284,10 @@ impl Agent {
         let durable = shell.mobile_snapshot();
         #[cfg(unix)]
         let wire = if std::env::var("RAL_WIRE").is_ok() {
-            Some(ral_core::transport::WireTransport::new()
-                .expect("RAL_WIRE: failed to create WireTransport"))
+            Some(
+                ral_core::transport::WireTransport::new()
+                    .expect("RAL_WIRE: failed to create WireTransport"),
+            )
         } else {
             None
         };
@@ -354,8 +356,10 @@ impl Agent {
         self.transport = ral_core::transport::IdentityTransport::new(shell);
         #[cfg(unix)]
         if std::env::var("RAL_WIRE").is_ok() {
-            self.wire = Some(ral_core::transport::WireTransport::new()
-                .expect("RAL_WIRE: failed to create WireTransport"));
+            self.wire = Some(
+                ral_core::transport::WireTransport::new()
+                    .expect("RAL_WIRE: failed to create WireTransport"),
+            );
         }
     }
 
@@ -657,7 +661,10 @@ impl Agent {
                     // Completed calls' effects live in the snapshot and survive;
                     // the panicking call's do not.  The IO frame self-heals in
                     // ral_core's own run_turn guard; this is the dynamic half.
-                    self.transport.shell_mut().shell.restore_mobile(self.durable.clone());
+                    self.transport
+                        .shell_mut()
+                        .shell
+                        .restore_mobile(self.durable.clone());
                     let msg = panic_msg(&p);
                     self.note_error(format!("{WORKER_PANIC_PREFIX}{msg}"), emit);
                     digest = (
@@ -1168,7 +1175,11 @@ impl Agent {
         // generation (so a `/clear` drops a stale batch).
         let content = match shell_eval::run_shell(
             #[cfg(unix)]
-            if let Some(ref wire) = self.wire { wire as &dyn ral_core::transport::Transport } else { &self.transport },
+            if let Some(ref wire) = self.wire {
+                wire as &dyn ral_core::transport::Transport
+            } else {
+                &self.transport
+            },
             #[cfg(not(unix))]
             &self.transport,
             &self.caps,
@@ -1469,7 +1480,11 @@ mod tests {
         ral_core::builtins::register_builtins(PANIC_BUILTINS);
         let dir = tmp("panic-recovery");
         let mut session = Agent::for_test(&dir, "system").unwrap();
-        session.transport.shell_mut().shell.install_builtins(PANIC_BUILTINS);
+        session
+            .transport
+            .shell_mut()
+            .shell
+            .install_builtins(PANIC_BUILTINS);
         // Refresh `durable` so the snapshot reflects the just-installed
         // builtin frame, matching the production boundary where the
         // baseline is the booted shell.
@@ -1492,7 +1507,12 @@ mod tests {
 
         // The completed call's binding survives the panic.
         assert!(
-            session.transport.shell_mut().shell.scope_lookup("a4_x").is_some(),
+            session
+                .transport
+                .shell_mut()
+                .shell
+                .scope_lookup("a4_x")
+                .is_some(),
             "a binding from a completed tool call must survive a later call's panic"
         );
         // The dynamic context is rolled back to the clean boundary: no
@@ -1529,20 +1549,25 @@ mod tests {
         let dir = tmp("fork-builtins");
         let session = Agent::for_test(&dir, "system").unwrap();
         assert!(
-            session.transport.shell_mut().shell.lookup_builtin("view-text").is_some(),
+            session
+                .transport
+                .shell_mut()
+                .shell
+                .lookup_builtin("view-text")
+                .is_some(),
             "the parent boot shell must carry the exarch host builtins"
         );
         let child = session
             .fork(session.caps().clone())
             .expect("fork child session");
-        for name in [
-            "view-text",
-            "grep-files",
-            "edit",
-            "explore-dir",
-        ] {
+        for name in ["view-text", "grep-files", "edit", "explore-dir"] {
             assert!(
-                child.transport.shell_mut().shell.lookup_builtin(name).is_some(),
+                child
+                    .transport
+                    .shell_mut()
+                    .shell
+                    .lookup_builtin(name)
+                    .is_some(),
                 "the forked child must inherit the host builtin `{name}`"
             );
         }
@@ -1723,7 +1748,12 @@ mod tests {
         );
         // The binding from the completed tool call survived.
         assert!(
-            session.transport.shell_mut().shell.scope_lookup("x12_a").is_some(),
+            session
+                .transport
+                .shell_mut()
+                .shell
+                .scope_lookup("x12_a")
+                .is_some(),
             "a binding from a completed tool call must survive a later provider error"
         );
         // The second turn ran: the final outcome is the no-reply failure

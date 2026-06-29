@@ -237,42 +237,50 @@ fn leading_whitespace_chars(line: &str) -> usize {
     line.chars().take_while(|c| c.is_whitespace()).count()
 }
 
-/// Strip the common leading whitespace from every non-blank line of `s`,
-/// then trim the surrounding whitespace of the block.
+/// Strip the common leading whitespace from every non-blank line of `s`.
 ///
 /// The indent level is the minimum count of leading whitespace characters
 /// across all lines that contain at least one non-whitespace character.
-/// Interior blank lines (empty or all-whitespace) are preserved unchanged,
-/// and an interior `\r` belonging to a CRLF terminator stays put: `s` is
-/// split on `\n` and rejoined on `\n`.  Finally the whole block is trimmed,
-/// so the opening newline of a multiline literal and any trailing newline
-/// (CRLF and all) both fall away, matching the JS `dedent` package.
+/// Blank framing lines around the block fall away, so the common
+/// `dedent #'\n  text\n'#` shape does not leave an opener/closer line in
+/// the value.  Interior blank lines are preserved unchanged, and an interior
+/// `\r` belonging to a CRLF terminator stays put: `s` is split on `\n` and
+/// rejoined on `\n`.
 fn dedent(s: &str) -> String {
-    let min_indent = s
-        .split('\n')
-        .filter(|l| !l.trim().is_empty())
-        .map(leading_whitespace_chars)
-        .min()
-        .unwrap_or(0);
-
-    let dedented = if min_indent == 0 {
-        Cow::Borrowed(s)
-    } else {
-        Cow::Owned(
-            s.split('\n')
-                .map(|line| {
-                    if line.trim().is_empty() {
-                        Cow::Borrowed(line)
-                    } else {
-                        Cow::Owned(line.chars().skip(min_indent).collect::<String>())
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-        )
+    let lines = s.split('\n').collect::<Vec<_>>();
+    let start = lines.iter().position(|line| !line.trim().is_empty());
+    let Some(start) = start else {
+        return String::new();
     };
+    let end = lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .expect("start found a non-blank line");
+    let block = &lines[start..=end];
+    let min_indent = block
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|line| leading_whitespace_chars(line))
+        .min()
+        .expect("block contains a non-blank line");
 
-    dedented.trim().to_owned()
+    block
+        .iter()
+        .enumerate()
+        .map(|(offset, line)| {
+            let line = if start + offset == end && end + 1 < lines.len() {
+                line.strip_suffix('\r').unwrap_or(line)
+            } else {
+                line
+            };
+            if line.trim().is_empty() || min_indent == 0 {
+                Cow::Borrowed(line)
+            } else {
+                Cow::Owned(line.chars().skip(min_indent).collect::<String>())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub(super) fn builtin_to_int(args: &[Value]) -> Settled<Value> {
