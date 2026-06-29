@@ -118,6 +118,13 @@ const LINGER: Duration = Duration::from_secs(60);
 /// Display label for the root session in the tab bar.
 const ROOT_TITLE: &str = "main";
 
+/// Braille spinner glyphs for the terminal tab title, rotated 4 ticks per frame (~15 fps).
+const SPINNER: &[char] = &[
+    '\u{280B}', '\u{2819}', '\u{2839}', '\u{2838}',
+    '\u{283C}', '\u{2834}', '\u{2826}', '\u{2827}',
+    '\u{2807}', '\u{280F}',
+];
+
 pub type Term = Terminal<CrosstermBackend<Stdout>>;
 
 /// Rows a wheel notch moves the view; paging keys move a frame-height at
@@ -548,6 +555,7 @@ pub struct App {
     /// streaming select notices the flag (at most one `wait_for_cancel` poll).
     /// Disarmed when the next `UserPromptEcho` arrives.
     root_clear_drain: bool,
+    title_frame: u64,
 }
 
 /// Where the content area sat in the last drawn frame.
@@ -659,6 +667,7 @@ impl App {
             cx_pending: false,
             editor_request: false,
             root_clear_drain: false,
+            title_frame: 0,
         }
     }
 
@@ -1400,8 +1409,27 @@ impl App {
             }
         });
         execute!(io::stdout(), EndSynchronizedUpdate)?;
+        self.emit_tab_title(phase.is_some());
         drawn?;
         Ok(())
+    }
+
+    /// Emit the terminal tab title: a spinner when working, a block when idle.
+    fn emit_tab_title(&self, working: bool) {
+        use std::io::Write;
+        let cwd = std::env::current_dir()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "?".into());
+        let glyph = if working {
+            SPINNER[(self.title_frame / 4) as usize % SPINNER.len()]
+        } else {
+            '\u{2588}'
+        };
+        let title = format!("{glyph} exarch: {cwd}");
+        let seq = ral_core::ansi::osc_set_title(&title);
+        let _ = std::io::stdout().write_all(seq.as_bytes());
+        let _ = std::io::stdout().flush();
     }
 
     /// Reverse-video the character range of the active selection that
@@ -1500,6 +1528,7 @@ impl App {
             }
             self.parents.remove(&id);
         }
+        self.title_frame += 1;
     }
 
     pub fn submit(&mut self) -> Option<String> {
