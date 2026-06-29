@@ -53,13 +53,13 @@ grep       = "0.4"
 ignore     = "0.4"
 tempfile   = "3.27"
 base64     = { workspace = true }
-sha2       = "0.10"
-getrandom  = "0.2"
+sha2       = "0.11"
+getrandom  = "0.4"
 # Line-level structured diffing: `edit` computes one canonical whole-file
 # diff (original vs final) and emits a single grouped-hunk card.  Default
 # features only — `from_lines`/`grouped_ops`/`iter_changes` are line-level;
 # `inline`/`unicode`/`bytes` are not pulled in.
-similar    = { version = "2", features = ["inline", "unicode"] }
+similar    = { version = "3", features = ["inline", "unicode"] }
 # Calendar arithmetic for scheduled-wakeup cron evaluation (next occurrence
 # in the host-local timezone, DST-aware).  Already compiled in transitively
 # via ral-core -> uu_date -> jiff-icu -> jiff; declaring it directly resolves

@@ -416,7 +416,7 @@ pub(super) fn pkce() -> (String, String) {
 /// `n_bytes` of OS randomness encoded as URL-safe base64 without padding.
 pub(super) fn random_b64url(n_bytes: usize) -> String {
     let mut bytes = vec![0u8; n_bytes];
-    getrandom::getrandom(&mut bytes).expect("OS randomness");
+    getrandom::fill(&mut bytes).expect("OS randomness");
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
