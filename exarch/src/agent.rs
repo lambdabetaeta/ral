@@ -463,7 +463,7 @@ impl Agent {
         // The child is an independent fork of the parent: it snapshots the
         // parent's scope (prelude, agent library, accumulated bindings),
         // dynamic context (cwd, env, grants), and installed builtin table (the
-        // host'\''s `view-text`/`grep-files`/`edit` and the rest), and starts
+        // host's `view-text`/`grep-files`/`edit` and the rest), and starts
         // fresh in control counters and per-agent state — its own inbox, its own
         // (fresh) cancellation token, no terminal authority, no flow-back.
         // Core owns the flow matrix, so the builtin table can't be silently
@@ -1173,6 +1173,7 @@ impl Agent {
         // its buffered batch here at completion, posted into this session's
         // own inbox (via `emit`'s mailbox) and guarded by the agent registry's
         // generation (so a `/clear` drops a stale batch).
+        self.transport.set_boundary(shell_eval::boundary_sink(emit, self.id, &self.agents));
         let content = match shell_eval::run_shell(
             #[cfg(unix)]
             if let Some(ref wire) = self.wire {
