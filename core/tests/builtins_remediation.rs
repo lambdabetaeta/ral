@@ -125,6 +125,14 @@ fn dedent_preserves_trailing_spaces_on_last_content_line() {
     );
 }
 
+#[test]
+fn dedent_single_line_preserves_indentation() {
+    // A single content line has no peers to share a common indent with,
+    // so its leading whitespace is not a "common prefix" to strip.
+    // Before the fix, `dedent "  hello"` returned "hello" (all indent gone).
+    expect_string("dedent \"  hello\"", "  hello");
+}
+
 // ── B4 — `range` reports overflow rather than panicking ───────────────────
 
 #[test]

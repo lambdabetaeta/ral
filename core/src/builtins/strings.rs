@@ -263,6 +263,10 @@ fn dedent(s: &str) -> String {
         .map(|line| leading_whitespace_chars(line))
         .min()
         .expect("block contains a non-blank line");
+    // A single content line has no peers to share a common indent with:
+    // its own leading whitespace *is* the minimum.  Stripping it would erase
+    // all indentation, so leave `min_indent` at zero.
+    let min_indent = if start == end { 0 } else { min_indent };
 
     block
         .iter()
