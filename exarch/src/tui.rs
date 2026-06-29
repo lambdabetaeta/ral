@@ -1214,20 +1214,18 @@ impl App {
             .is_some_and(|vp| !vp.pins().is_empty());
         let show_register =
             has_pins && area.width >= LEFT_MARGIN + READ_W + REGISTER_GAP + REGISTER_W;
-        let pin_band_h = (has_pins && !show_register) as u16;
         let layout = Layout::vertical([
             Constraint::Min(1),
             Constraint::Length(1), // breathing row between output and chrome
             Constraint::Length(tab_h),
-            Constraint::Length(pin_band_h), // collapsed register, beside the matrix
             Constraint::Length(queued_h),
             Constraint::Length(prompt_h),
             Constraint::Length(1), // rule_line: sits below prompt, above footer
             Constraint::Length(1),
         ])
         .split(area);
-        let (content, tab_row, pin_band_row, queued_row, prompt_row, status_row, footer_row) = (
-            layout[0], layout[2], layout[3], layout[4], layout[5], layout[6], layout[7],
+        let (content, tab_row, queued_row, prompt_row, status_row, footer_row) = (
+            layout[0], layout[2], layout[3], layout[4], layout[5], layout[6],
         );
         // Split the content row by hand into the rail's left gutter, the
         // transcript, and — on a wide enough terminal — the register glued to
@@ -1249,19 +1247,13 @@ impl App {
                 content.height,
             )
         });
-        // Inset the queued-prompt strip, pin band, and rule line to share the
+        // Inset the queued-prompt strip and rule line to share the
         // transcript's left gutter.
         let queued_rect = Rect::new(
             queued_row.x + LEFT_MARGIN,
             queued_row.y,
             queued_row.width.saturating_sub(LEFT_MARGIN),
             queued_row.height,
-        );
-        let pin_band_rect = Rect::new(
-            pin_band_row.x + LEFT_MARGIN,
-            pin_band_row.y,
-            pin_band_row.width.saturating_sub(LEFT_MARGIN),
-            pin_band_row.height,
         );
         let status_rect = Rect::new(
             status_row.x + LEFT_MARGIN,
@@ -1270,23 +1262,18 @@ impl App {
             status_row.height,
         );
         // Pre-render the register's content (the focused session's pins, in its
-        // agent hue) before the borrow needed by `render_window`: as the full
-        // right column when shown, else as the collapsed one-row band.
-        let (register_lines, pin_band_lines): (Vec<Line<'static>>, Vec<Line<'static>>) =
-            match self.viewports.get(&focused) {
-                Some(vp) if show_register => {
-                    let hue = AGENT_HUES
-                        .get(vp.agent().0 as usize)
-                        .copied()
-                        .unwrap_or(AGENT_HUES[0]);
-                    (
-                        line::render_register(vp.pins(), REGISTER_W, hue),
-                        Vec::new(),
-                    )
-                }
-                Some(vp) if pin_band_h > 0 => (Vec::new(), line::pin_band(vp.pins())),
-                _ => (Vec::new(), Vec::new()),
-            };
+        // agent hue) before the borrow needed by `render_window`: the full
+        // right column, shown only when the terminal is wide enough.
+        let register_lines: Vec<Line<'static>> = match self.viewports.get(&focused) {
+            Some(vp) if show_register => {
+                let hue = AGENT_HUES
+                    .get(vp.agent().0 as usize)
+                    .copied()
+                    .unwrap_or(AGENT_HUES[0]);
+                line::render_register(vp.pins(), REGISTER_W, hue)
+            }
+            _ => Vec::new(),
+        };
         let (mut lines, offset, scroll_pct) = match self.viewports.get_mut(&focused) {
             Some(vp) => {
                 let w = vp.render_window(text_rect.width, text_rect.height as usize);
@@ -1338,12 +1325,10 @@ impl App {
         execute!(io::stdout(), BeginSynchronizedUpdate)?;
         let drawn = term.draw(|f| {
             f.render_widget(Paragraph::new(lines), text_rect);
-            // The register column (or its collapsed band) — the focused
-            // session's pinned state, painted in place on the right edge.
+            // The register column — the focused session's pinned state,
+            // shown only when wide enough, painted on the right edge.
             if let Some(reg) = register_rect {
                 f.render_widget(Paragraph::new(register_lines), reg);
-            } else if !pin_band_lines.is_empty() {
-                f.render_widget(Paragraph::new(pin_band_lines), pin_band_rect);
             }
             if let Some(matrix) = matrix_lines {
                 f.render_widget(Paragraph::new(matrix), tab_row);

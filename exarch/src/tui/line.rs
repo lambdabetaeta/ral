@@ -990,33 +990,6 @@ pub(super) fn render_register(
         .collect()
 }
 
-/// One pin reduced to its first non-blank rendered row — the digest the
-/// collapsed pin band shows when the terminal is too narrow for the column.
-fn pin_digest(card: &Card) -> Vec<Span<'static>> {
-    render_card(card, 3)
-        .into_iter()
-        .find(|l| !is_blank(l))
-        .map(|l| l.spans)
-        .unwrap_or_default()
-}
-
-/// The collapsed register: every pin's digest on one row, separated by a gap —
-/// the narrow-terminal fallback for the register column.  Empty (no row) when
-/// there are no pins; overflow past the strip is clipped by the paragraph.
-pub(super) fn pin_band(pins: &[(String, Card)]) -> Vec<Line<'static>> {
-    if pins.is_empty() {
-        return Vec::new();
-    }
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    for (_key, card) in pins {
-        if !spans.is_empty() {
-            spans.push(Span::styled("   ", Style::default().fg(SLATE)));
-        }
-        spans.extend(pin_digest(card));
-    }
-    vec![Line::from(spans)]
-}
-
 /// Total display width of a span run, unicode-aware.
 fn span_run_width(spans: &[Span<'static>]) -> usize {
     spans.iter().map(|s| s.width()).sum()
