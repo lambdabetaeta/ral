@@ -205,9 +205,13 @@ Value ::= Unit | Bytes | String | Int | Float | Bool
 `String` is UTF-8 text. `Bytes` is a finite byte sequence, possibly
 containing NUL; equality is bytewise and `length` counts bytes.
 `Bytes` is opaque to language operations — it has no literal form,
-and string operations refuse it — but a `Bytes` value renders as
-lossy UTF-8 when printed (in `echo`, the REPL, and the `ral --audit`
-JSON dump), so byte fields stay readable without an explicit decode.
+string-manipulation operations (`upper`, `re-replace`, …) take `String`
+and so reject it, and interpolation refuses it (scalars only). But a
+`Bytes` value renders as lossy UTF-8 when displayed: `str` produces this
+form (as it does for `List`/`Map`, equally non-round-trippable), and the
+same form is what reaches output in `echo`, the REPL, and the `ral --audit`
+JSON dump, so byte fields stay readable without an explicit decode.
+Faithful byte→text conversion is `from-string`, which errors on invalid UTF-8.
 `Bytes` values arise from `from-bytes` (terminating a byte pipeline),
 from encoders (`to-X`, §15), and from I/O builtins whose declared
 return type is `Bytes`.  External commands and byte-output builtins

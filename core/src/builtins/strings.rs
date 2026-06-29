@@ -339,14 +339,11 @@ pub(super) fn builtin_to_float(args: &[Value]) -> Settled<Value> {
     }
 }
 
+/// `str <val>` renders any value to its `String` form via [`Value`]'s
+/// `Display`.  Bytes render as lossy UTF-8 (like `List`/`Map`, which are
+/// equally non-round-trippable); faithful byte→text decoding is `from-string`,
+/// which errors on invalid UTF-8.  This is the renderer `echo` lowers through.
 pub(super) fn builtin_to_string(args: &[Value]) -> Settled<Value> {
     check_arity(args, 1, "str")?;
-    let val = &args[0];
-    match val {
-        Value::Bytes(_) => Err(sig_hint(
-            "str does not accept Bytes",
-            "decode bytes first: to-bytes $bytes | from-string",
-        )),
-        _ => Ok(Value::String(val.to_string())),
-    }
+    Ok(Value::String(args[0].to_string()))
 }

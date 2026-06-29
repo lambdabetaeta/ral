@@ -51,4 +51,10 @@ assert_eq 'bytes codec length' 2 !{length $b2}
 let b2_txt = !{to-bytes $b2 | from-string}
 assert_eq 'bytes codec string' 'Hi' $b2_txt
 
+# str renders Bytes as lossy UTF-8 (like List/Map); echo lowers through str,
+# so `echo $bytes` blurts the same form to stdout.
+assert_eq 'str renders bytes' 'Hi' !{str $b2}
+let echoed = !{echo $b2 | from-string}
+assert_eq 'echo renders bytes' "Hi\n" $echoed
+
 echo 'codec adapter tests done'
