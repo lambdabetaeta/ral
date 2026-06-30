@@ -23,14 +23,19 @@ use crate::provider::ProviderError;
 /// Outer-attempt budget per user turn.  Independent of, and stacked
 /// on top of, the provider's inner retry budget.
 const BUDGET: u32 = 3;
-
+/// How many times to nudge the model when it yields with pinned state
+/// before accepting the turn.  Resets whenever the pinned digest changes,
+/// so progress (a task completed, a goal updated) restores the budget.
+const OPEN_TASKS_BUDGET: u32 = 5;
 /// How many genuine turns elapse between pinned-state reminders.  A gentle
 /// cadence: often enough that a stale gauge is caught, rare enough not to nag.
 const REMIND_EVERY: u32 = 12;
-
-/// A firing rule: inspect the turn outcome and, when it matches, return
-/// the cause (for the forensic log) and the synthetic user message to
-/// continue with.  Walked in order; the first `Some` wins.
+/// A shared bracket for every synthetic nudge message, so the model can
+/// distinguish a system reminder from genuine user input.  The opening
+/// bracket carries the "do not mention" instruction; the closing bracket
+/// delimits where the system text ends.
+const EXARCH_REMINDER_OPEN: &str = "[EXARCH_REMINDER // Do not mention to user.] ";
+const EXARCH_REMINDER_CLOSE: &str = " [/EXARCH_REMINDER]";
 type Rule = fn(&Result<TurnOutcome, ProviderError>) -> Option<(String, &'static str)>;
 
 /// The rule set the binary ships with.  Every rule reacts to a
@@ -74,6 +79,13 @@ pub(crate) struct Registry {
     /// One-shot latch for the pinned-state reminder: at most once per turn,
     /// budget-free.
     pin_reminded: bool,
+    /// Open-tasks nudge counter: how many times the model has been nudged
+    /// for yielding with pinned state.  Resets when the digest changes.
+    open_tasks_nudges: u32,
+
+    /// Snapshot of the pinned digest at the last open-tasks nudge, to detect
+    /// changes that reset the budget.
+    last_pinned_digest: Option<String>,
 }
 
 impl Registry {
@@ -82,6 +94,8 @@ impl Registry {
             used: 0,
             turns_since_pin_reminder: 0,
             pin_reminded: false,
+            open_tasks_nudges: 0,
+            last_pinned_digest: None,
         }
     }
 
@@ -130,7 +144,7 @@ impl Registry {
                         self.used,
                         "no-reply finish (returning agent)".into(),
                     );
-                    return Some(REPLY_MESSAGE.into());
+                    return Some(format!("{EXARCH_REMINDER_OPEN}{REPLY_MESSAGE}{EXARCH_REMINDER_CLOSE}"));
                 }
                 let msg = "agent finished without calling `reply` after the nudge budget; \
                            returning a failure"
@@ -139,11 +153,11 @@ impl Registry {
                 emit.emit(Kind::Error(msg));
                 return None;
             }
-            // A periodic, budget-free reminder of the model's pinned state —
-            // at most once per turn, only on a clean completion, only when
-            // something is pinned, and only every `REMIND_EVERY` turns — so a
-            // long-lived rail gauge stays in the model's attention without the
-            // kit having to nag for it.
+            // Periodic, budget-free reminders on the pin register —
+            // at most once per turn, only on a clean completion, every
+            // `REMIND_EVERY` turns.  When something is pinned the model is
+            // reminded what; when nothing is pinned it is nudged to set a
+            // goal or track tasks.
             if ctx.pinned.is_some()
                 && matches!(attempt, Ok(TurnOutcome::Complete(_)))
                 && !self.pin_reminded
@@ -152,7 +166,27 @@ impl Registry {
                 self.pin_reminded = true;
                 self.turns_since_pin_reminder = 0;
                 record_nudge(emit, log, self.used, "pinned-state reminder".into());
-                return Some(PIN_REMINDER.to_string());
+                return Some(format!("{EXARCH_REMINDER_OPEN}There is pinned state: {}{EXARCH_REMINDER_CLOSE}", ctx.pinned.as_deref().unwrap_or("none")));
+            } else if matches!(attempt, Ok(TurnOutcome::Complete(_)))
+                && !self.pin_reminded
+                && self.turns_since_pin_reminder >= REMIND_EVERY
+            {
+                self.pin_reminded = true;
+                self.turns_since_pin_reminder = 0;
+                record_nudge(emit, log, self.used, "no-pins reminder".into());
+                return Some(format!("{EXARCH_REMINDER_OPEN}Nothing is pinned — consider calling `set-goal` to remember what you are working on, or tracking some tasks with `add-task`.{EXARCH_REMINDER_CLOSE}"));
+            } else if ctx.pinned.is_some()
+                && matches!(attempt, Ok(TurnOutcome::Complete(_)))
+            {
+                if self.last_pinned_digest.as_deref() != ctx.pinned.as_deref() {
+                    self.open_tasks_nudges = 0;
+                    self.last_pinned_digest = ctx.pinned.clone();
+                }
+                if self.open_tasks_nudges < OPEN_TASKS_BUDGET {
+                    self.open_tasks_nudges += 1;
+                    record_nudge(emit, log, self.used, "open-tasks nudge".into());
+                    return Some(format!("{EXARCH_REMINDER_OPEN}there is pinned state: {}{EXARCH_REMINDER_CLOSE}", ctx.pinned.as_deref().unwrap_or("none")));
+                }
             }
             surface_provider_error(attempt, emit, log);
             return None;
@@ -166,7 +200,7 @@ impl Registry {
         }
         self.used += 1;
         record_nudge(emit, log, self.used, cause);
-        Some(message.into())
+        Some(format!("{EXARCH_REMINDER_OPEN}{message}{EXARCH_REMINDER_CLOSE}"))
     }
 }
 
@@ -204,8 +238,6 @@ const REPLY_MESSAGE: &str = "You ended your turn without calling `reply`, so you
     receive nothing. Return your result now by calling `reply` — pass a markdown report as \
     `result`, or a JSON object/array for structured findings. This is the only way to hand \
     your work back; a final message on its own is not delivered.";
-
-const PIN_REMINDER: &str = "Reminder: there are outstanding tasks; ignore if you are already working on them. Do not mention this reminder to the user.";
 
 fn on_empty_turn(r: &Result<TurnOutcome, ProviderError>) -> Option<(String, &'static str)> {
     match r {

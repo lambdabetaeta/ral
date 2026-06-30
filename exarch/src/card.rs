@@ -686,7 +686,7 @@ pub fn summary_line(card: &Card) -> String {
     for mark in card.marks() {
         let part = match mark {
             Mark::Text { spans } => {
-                collapse(&spans.iter().map(|s| s.text.as_str()).collect::<String>())
+                collapse(&spans.iter().map(|s| if s.role == Some(Role::Strong) { format!("{}: ", s.text) } else { s.text.clone() }).collect::<String>())
             }
             Mark::Measure(m) => {
                 let bound = m.max.map(|mx| format!("/{mx}")).unwrap_or_default();

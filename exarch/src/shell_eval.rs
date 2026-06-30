@@ -51,7 +51,7 @@ pub enum Outcome {
 /// turn surface sink; `None` (tests, any path with no nudge layer) disables the
 /// mirror.  The session is otherwise pin-blind — pins flow past it to the
 /// frontend — so this small mirror is how the boundary nudge can name them.
-pub type PinDigests = Arc<Mutex<std::collections::BTreeMap<String, String>>>;
+pub type PinDigests = Arc<Mutex<std::collections::BTreeMap<String, crate::card::Card>>>;
 
 /// Decode one surfaced `Value` into the [`Kind`] it renders as — the single
 /// decoder both delivery regimes share.  The live foreground sink
@@ -229,7 +229,7 @@ pub fn run_shell(
                         {
                             match &kind {
                                 Kind::Pin { key, card } => {
-                                    m.insert(key.clone(), crate::card::summary_line(card));
+                                    m.insert(key.clone(), card.clone());
                                 }
                                 Kind::Unpin { key } => {
                                     m.remove(key);

@@ -117,3 +117,18 @@ let transition = { |ts id new-status|
         $ts
     }
 }
+# --- goal ----------------------------------------------------------------------
+
+## Pin a session goal so the periodic nudge reminder keeps it visible.  A
+## single plain-text card under the "goal" register key; call again to replace.
+
+let set-goal = { |text|
+  surface `pin [key: "goal", body: `card [`text [spans: [[role: "strong", text: "goal"], [role: "", text: $text]]]]]
+}
+
+## Drop the goal pin — when the session's aim is met or abandoned.  Idempotent:
+## calling it with nothing pinned is a quiet no-op.
+
+let clear-goal = {
+  surface `unpin [key: "goal"]
+}
