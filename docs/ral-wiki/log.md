@@ -3396,3 +3396,12 @@ Split `exarch/src/tui.rs` into a façade + 13 focused modules per
 [[decisions/260629_tui_modular|ADR]].  All 301 tests pass, zero compilation
 errors, all 10 invariants verified.  See [[map/exarch/frontend]] for the new
 file layout.
+
+## [2026-06-30] query | long-session resource budgets filed
+
+Surveyed the exarch TUI/bus/inbox/shell pressure points for days-long sessions
+and filed [[decisions/260630_long-session-resource-budgets|long-session-resource-budgets]]
+as a proposed hardening direction. The ADR separates provider-context compaction
+from heap/disk reclamation and proposes bounded presentation, non-lossy inbox
+quotas, event-prefix reclamation, shell residency diagnostics, and a `/resources`
+view.
