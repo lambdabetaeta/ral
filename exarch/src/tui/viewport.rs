@@ -435,7 +435,7 @@ impl Viewport {
     /// Commit the turn's reasoning.  If a thinking block already exists for
     /// this turn (no prompt separates it from the end), append to it so all
     /// deliberation in one turn coalesces into one `∴` block.  Otherwise
-    /// insert a new thinking block after the last prompt (turn boundary).
+    /// insert a new thinking block before the trailing markdown run.
     /// `answer_chars` is the current turn's answer mass, the deliberation
     pub(super) fn commit_thinking(&mut self, text: String, answer_chars: u32) {
         let preserve_scrollback = !self.sticky
@@ -551,7 +551,7 @@ impl Viewport {
         }
         // Find the most recent Thinking block. If found and no Prompt
         // separates it from the end (i.e. it belongs to the current turn),
-        // append to it. Otherwise insert a new block after the last prompt.
+        // append to it. Otherwise insert before the trailing markdown run.
         let existing = self.blocks.iter().rposition(|b| b.is_thinking());
         if let Some(idx) = existing {
             let blocked = self.blocks[idx..].iter().any(|b| b.is_prompt());
@@ -562,17 +562,21 @@ impl Viewport {
                 return;
             }
         }
-        // No existing thinking block for this turn: insert a new one after
-        // the last prompt (turn boundary), or at the start if none.
+        // No existing thinking block for this turn: insert before the trailing
+        // markdown run, or push to the end if none.
         let insert_at = self
             .blocks
             .iter()
-            .rposition(|b| b.is_prompt())
+            .rposition(|b| !b.is_markdown() && !b.is_thinking())
             .map_or(0, |i| i + 1);
         let block = Block::thinking(text, answer_chars);
-        self.blocks.insert(insert_at, block);
-        self.rewrite_log();
-        self.flat.dirty = true;
+        if insert_at < self.blocks.len() && self.blocks[insert_at].is_markdown() {
+            self.blocks.insert(insert_at, block);
+            self.rewrite_log();
+            self.flat.dirty = true;
+        } else {
+            self.push_block(block);
+        }
     }
 
     /// Tee a block's full content to `user.log`, collapsing redundant
@@ -1377,5 +1381,50 @@ mod tests {
             "the window fills every row — no blank space below the tail"
         );
         assert!(vp.sticky, "re-armed at the bottom after the clamp");
+    }
+
+    /// A committed thinking block must stay visible in a sticky viewport.
+    /// The provisional seat renders near the bottom (before the trailing
+    /// markdown run); the committed block must land at the same position,
+    /// not jump to after the last prompt where a sticky viewport would
+    /// scroll past it.
+    #[test]
+    fn committed_thinking_stays_visible_in_sticky_viewport() {
+        let mut vp = viewport();
+        vp.push_chrome(
+            RailShape::Prompt,
+            vec![Line::from("hello cutie")],
+        );
+        // Fill enough chrome to overflow a small window.
+        for i in 0..8 {
+            vp.push_chrome(
+                RailShape::Plain,
+                vec![
+                    Line::from(format!("block {i} line a")),
+                    Line::from(format!("block {i} line b")),
+                ],
+            );
+        }
+        vp.push_thinking("considering the shape\n");
+        vp.push_token("First paragraph.\n\nSecond paragraph.", 0);
+        // While thinking is live, the provisional seat is visible.
+        let live = vp.render_window(READ_W, 8);
+        let live_text = live.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
+        let live_thinking = rail_rows(&live.lines, "∴ ");
+        assert!(
+            !live_thinking.is_empty(),
+            "live thinking has its rail: {live_text:?}"
+        );
+        // Commit the thinking — the real block should land where the
+        // provisional seat was, not jump above the visible window.
+        vp.commit_thinking("considering the shape\n".into(), vp.current_answer_chars());
+        vp.close_boundary(0);
+        let committed = vp.render_window(READ_W, 8);
+        let committed_text = committed.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
+        let committed_thinking = rail_rows(&committed.lines, "∴ ");
+        assert!(
+            !committed_thinking.is_empty(),
+            "committed thinking stays visible in sticky viewport: {committed_text:?}"
+        );
     }
 }
