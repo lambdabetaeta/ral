@@ -215,9 +215,13 @@ fn render(sections: &[(Option<&str>, String)]) -> String {
 /// the live grant, one under the other.  Where the agent stands and when "now"
 /// is, then the authority it holds — the facts of its situation, read together.
 fn host_section(caps: &Capabilities, scratch: &Path) -> String {
-    format!("{}\n{}", host::snapshot(), grant_summary(caps, scratch))
+    let state = crate::bootstrap::xdg_app_dir(ral_core::path::basedir::XdgKind::State);
+    format!(
+        "{}\n{}",
+        host::snapshot(&state),
+        grant_summary(caps, scratch)
+    )
 }
-
 /// Render the live grant: a static legend (`data/grant-legend.md`)
 /// followed by the live bullet list.  The legend trains the model to
 /// read the notation and to recognise the runtime denial string; the

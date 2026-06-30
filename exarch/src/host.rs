@@ -9,10 +9,10 @@
 //! which uses `os_info` for a richer version/codename string than the
 //! std target constants can provide.
 
-/// Multi-line markdown list — `os`, `now`, `cwd`, `user`, `home`, and
-/// (when cwd is inside a repo) `git`.  Stable for the process
-/// lifetime, so safe inside the cached system prefix.
-pub fn snapshot() -> String {
+/// Multi-line markdown list — `os`, `now`, `cwd`, `user`, `home`,
+/// `exarch logs`, and (when cwd is inside a repo) `git`.  Stable for
+/// the process lifetime, so safe inside the cached system prefix.
+pub fn snapshot(exarch_state: &std::path::Path) -> String {
     let mut out = String::new();
     out.push_str(&format!("- os: {}\n", os_line()));
     if let Some(d) = ral_core::host::now() {
@@ -32,6 +32,7 @@ pub fn snapshot() -> String {
     if let Some(g) = git_line() {
         out.push_str(&format!("- git: {g}\n"));
     }
+    out.push_str(&format!("- exarch logs: {}\n", exarch_state.display()));
     out
 }
 

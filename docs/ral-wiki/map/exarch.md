@@ -95,8 +95,8 @@ can inherit a live key.**
   exarch's host builtins and source the `agent.ral` library, register its docs,
   suppress ANSI colour at the source, and seed the exit hints.
 - **Machine probing** — `host::snapshot` formats the live machine into the
-  prompt's `Host` section over core's `ral_core::host` probes (`os`, `now`, `cwd`,
-  `user`, `home`, `git`), best-effort: a missing value drops its line.
+  prompt'\''s `Host` section over core'\''s `ral_core::host` probes (`os`, `now`, `cwd`,
+  `user`, `home`, `git`, `exarch logs`), best-effort: a missing value drops its line.
 - **`Scratch`** — the disposable per-session directory exposed as
   `$EXARCH_SCRATCH`, with the legacy build-tool homes (`CARGO_HOME`, …) redirected
   into it so a write lands inside the grant rather than in a denied real cache.
