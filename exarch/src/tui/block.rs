@@ -487,6 +487,25 @@ impl Block {
         matches!(self.kind, BlockKind::Markdown { .. })
     }
 
+    /// True for a committed thinking block.
+    pub(super) fn is_thinking(&self) -> bool {
+        matches!(self.kind, BlockKind::Thinking(_))
+    }
+
+    /// Append `more` to an existing thinking block's trace, accumulating
+    /// `answer_chars` into its deliberation-grain denominator.  A no-op on
+    /// any non-`Thinking` block.
+    pub(super) fn append_thinking(&mut self, more: &str, answer_chars: u32) {
+        if let BlockKind::Thinking(t) = &mut self.kind {
+            if !t.text.is_empty() && !more.is_empty() {
+                t.text.push('\n');
+            }
+            t.text.push_str(more);
+            t.answer_chars = t.answer_chars.saturating_add(answer_chars);
+            self.cache = None;
+        }
+    }
+
     /// True for a step-boundary chrome block — the column unit the
     /// matrix's per-agent step cells count.
     pub(super) fn is_step(&self) -> bool {

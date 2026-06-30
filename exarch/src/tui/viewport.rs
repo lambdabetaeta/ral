@@ -432,17 +432,17 @@ impl Viewport {
         }
     }
 
-    /// Commit the turn's reasoning as its own dialable block.  If answer
-    /// paragraphs already committed, insert the thinking block before that
-    /// trailing markdown run so `∴` and the answer's `·` stay separate and
-    /// ordered as deliberation then conclusion.  `answer_chars` is the whole
-    /// turn's answer mass, the deliberation grain's denominator.
+    /// Commit the turn's reasoning.  If a thinking block already exists for
+    /// this turn (no prompt separates it from the end), append to it so all
+    /// deliberation in one turn coalesces into one `∴` block.  Otherwise
+    /// insert a new thinking block after the last prompt (turn boundary).
+    /// `answer_chars` is the current turn's answer mass, the deliberation
     pub(super) fn commit_thinking(&mut self, text: String, answer_chars: u32) {
         let preserve_scrollback = !self.sticky
             && self.flat.virtual_think_len > 0
             && self.offset <= self.flat.virtual_think_at + self.flat.virtual_think_len;
         self.thinking.clear();
-        self.insert_thinking(text, answer_chars);
+        self.upsert_thinking(text, answer_chars);
         if preserve_scrollback {
             // The live header is about to become a real collapsed block. If
             // the viewport was looking at the scrollback it had pushed down,
@@ -474,7 +474,7 @@ impl Viewport {
         if !self.thinking.trim().is_empty() {
             let text = std::mem::take(&mut self.thinking);
             let answer_chars = self.current_answer_chars();
-            self.insert_thinking(text, answer_chars);
+            self.upsert_thinking(text, answer_chars);
         }
         self.flush_open(context_floor);
     }
@@ -545,23 +545,34 @@ impl Viewport {
         committed.saturating_add(self.open.chars().count() as u32)
     }
 
-    fn insert_thinking(&mut self, text: String, answer_chars: u32) {
+    fn upsert_thinking(&mut self, text: String, answer_chars: u32) {
         if text.trim().is_empty() {
             return;
         }
-        let block = Block::thinking(text, answer_chars);
-        let start = self
+        // Find the most recent Thinking block. If found and no Prompt
+        // separates it from the end (i.e. it belongs to the current turn),
+        // append to it. Otherwise insert a new block after the last prompt.
+        let existing = self.blocks.iter().rposition(|b| b.is_thinking());
+        if let Some(idx) = existing {
+            let blocked = self.blocks[idx..].iter().any(|b| b.is_prompt());
+            if !blocked {
+                self.blocks[idx].append_thinking(&text, answer_chars);
+                self.rewrite_log();
+                self.flat.dirty = true;
+                return;
+            }
+        }
+        // No existing thinking block for this turn: insert a new one after
+        // the last prompt (turn boundary), or at the start if none.
+        let insert_at = self
             .blocks
             .iter()
-            .rposition(|b| !b.is_markdown())
+            .rposition(|b| b.is_prompt())
             .map_or(0, |i| i + 1);
-        if start < self.blocks.len() && self.blocks[start].is_markdown() {
-            self.blocks.insert(start, block);
-            self.rewrite_log();
-            self.flat.dirty = true;
-        } else {
-            self.push_block(block);
-        }
+        let block = Block::thinking(text, answer_chars);
+        self.blocks.insert(insert_at, block);
+        self.rewrite_log();
+        self.flat.dirty = true;
     }
 
     /// Tee a block's full content to `user.log`, collapsing redundant
@@ -772,7 +783,7 @@ impl Viewport {
         let start = self
             .blocks
             .iter()
-            .rposition(|b| !b.is_markdown())
+            .rposition(|b| !b.is_markdown() && !b.is_thinking())
             .map_or(0, |i| i + 1);
         self.blocks
             .get(start)
