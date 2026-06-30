@@ -19,7 +19,7 @@ If at this point task 2 is no longer necessary, run
 
 Definitions - remember to use immutably:
 
-  empty-tasks                             — empty task list
+  $empty-tasks                            — empty task list
   add-task $exarch-tasks <desc>           — add a task with a fresh id
   transition $exarch-tasks <id> <status>  — change status
   remove-task $exarch-tasks <id>          — drop a task

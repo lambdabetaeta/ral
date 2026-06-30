@@ -16,33 +16,33 @@
 //! live preview row.
 mod app;
 mod banner;
-mod prompt;
 mod block;
 mod commands;
 mod fidelity;
+mod gesture;
 mod group;
 mod highlight;
 mod line;
-mod md;
-mod picker;
-mod model_picker;
-mod rail;
-mod gesture;
-mod render;
 mod matrix;
-mod status;
+mod md;
+mod model_picker;
+mod picker;
+mod prompt;
+mod rail;
+mod render;
 mod select;
-mod terminal;
+mod status;
 mod surface;
-mod viewport;
 mod tabs;
+mod terminal;
 mod tui_loop;
+mod viewport;
 
 use std::time::Duration;
 
+pub(super) use app::App;
 pub use banner::SessionInfo;
 pub use tui_loop::run;
-pub(super) use app::App;
 
 // ---------------------------------------------------------------------------
 // Layout constants
@@ -71,7 +71,6 @@ pub(super) const ROOT_TITLE: &str = "main";
 
 /// Braille spinner glyphs for the terminal tab title, rotated 4 ticks per frame (~15 fps).
 pub(super) const SPINNER: &[char] = &[
-    '\u{280B}', '\u{2819}', '\u{2839}', '\u{2838}',
-    '\u{283C}', '\u{2834}', '\u{2826}', '\u{2827}',
+    '\u{280B}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283C}', '\u{2834}', '\u{2826}', '\u{2827}',
     '\u{2807}', '\u{280F}',
 ];

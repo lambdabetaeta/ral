@@ -20,7 +20,6 @@ use super::group;
 use super::line::{
     READ_W, coalesced_queries, deliberation_grain, is_blank, plain, prompt_fence, size_bar,
 };
-use super::md;
 use super::rail::{self, RailKind};
 use super::select::plain_slice;
 use crate::bus::Hunk;
@@ -172,13 +171,6 @@ fn open_log(path: &Path) -> io::BufWriter<Box<dyn io::Write + Send>> {
         Err(_) => Box::new(io::sink()),
     };
     io::BufWriter::new(sink)
-}
-
-/// Return the trailing `n` lines of `s` as a single string.
-fn tail_lines(s: &str, n: usize) -> String {
-    let lines: Vec<&str> = s.lines().collect();
-    let start = lines.len().saturating_sub(n);
-    lines[start..].join("\n")
 }
 
 fn extend_visible_lines(
@@ -446,8 +438,18 @@ impl Viewport {
     /// ordered as deliberation then conclusion.  `answer_chars` is the whole
     /// turn's answer mass, the deliberation grain's denominator.
     pub(super) fn commit_thinking(&mut self, text: String, answer_chars: u32) {
+        let preserve_scrollback = self.flat.virtual_think_len > 0
+            && self.offset <= self.flat.virtual_think_at + self.flat.virtual_think_len;
         self.thinking.clear();
         self.insert_thinking(text, answer_chars);
+        if preserve_scrollback {
+            // The live header is about to become a real collapsed block. If
+            // the viewport was looking at the scrollback it had pushed down,
+            // do not immediately tail-follow and yank those rows back up; let
+            // the next render clamp only if the buffer truly no longer has
+            // enough rows to hold this offset.
+            self.sticky = false;
+        }
     }
 
     /// Append a live reasoning chunk from the model's thinking phase.
@@ -744,16 +746,16 @@ impl Viewport {
     // ── rendering ────────────────────────────────────────────────────────
 
     /// The provisional seat for in-flight reasoning: `RailKind::Thinking` (∴)
-    /// with a live size bar and the trailing N lines of reasoning text,
-    /// rendered drained.  Persists until the final reasoning commits as a real
-    /// block.
-    fn thinking_seat(&self, width: u16) -> Vec<Line<'static>> {
+    /// with a live size bar and deliberation grain, but no prose. The final
+    /// committed thinking block is dialable, so the trace stays available
+    /// without a tall live seat that snaps shut at the boundary.
+    fn thinking_seat(&self) -> Vec<Line<'static>> {
         if self.thinking.trim().is_empty() {
             return vec![];
         }
         let think_chars = self.thinking.chars().count() as u32;
         let think_lines = self.thinking.lines().count() as u32;
-        let mut ls = vec![
+        vec![
             Line::default(),
             Line::from(vec![
                 rail::span(RailKind::Thinking, self.agent, Some(think_lines)),
@@ -762,11 +764,7 @@ impl Viewport {
                 Span::raw(" "),
                 size_bar(think_lines),
             ]),
-        ];
-        let tail = tail_lines(&self.thinking, 12);
-        ls.push(Line::default());
-        ls.extend(md::render_reasoning(&tail, width.saturating_sub(4), 4));
-        ls
+        ]
     }
 
     fn trailing_markdown_start(&self) -> Option<usize> {
@@ -822,7 +820,7 @@ impl Viewport {
         // before the trailing markdown answer run.  That lets answer
         // paragraphs keep committing live without visually jumping ahead of
         // the deliberation they follow.
-        let think = self.thinking_seat(width);
+        let think = self.thinking_seat();
         let seat = self.streaming_seat();
         let committed = self.flat.rows.len();
         let think_at = if think.is_empty() {
@@ -1189,7 +1187,7 @@ mod tests {
     }
 
     #[test]
-    fn live_thinking_precedes_streamed_markdown_without_hiding_it() {
+    fn live_thinking_header_precedes_streamed_markdown_without_showing_trace() {
         let mut vp = viewport();
         vp.push_thinking("considering the shape\n");
         vp.push_token("First paragraph.\n\nSecond paragraph still streaming", 0);
@@ -1199,6 +1197,10 @@ mod tests {
         assert!(
             all.contains("First paragraph."),
             "fence-safe markdown still commits while thinking is live: {all:?}"
+        );
+        assert!(
+            !all.contains("considering the shape"),
+            "live thinking hides the trace prose until it commits: {all:?}"
         );
 
         let thinking = rail_rows(&w.lines, "∴ ");
@@ -1211,6 +1213,40 @@ mod tests {
         assert!(
             thinking[0] < markdown[0],
             "thinking renders before the answer rail: {all:?}"
+        );
+    }
+
+    #[test]
+    fn live_thinking_header_keeps_height_when_committed() {
+        let mut vp = viewport();
+        for i in 0..8 {
+            vp.push_chrome(
+                RailShape::Plain,
+                vec![
+                    Line::from(format!("block {i} line a")),
+                    Line::from(format!("block {i} line b")),
+                ],
+            );
+        }
+        vp.push_thinking("hidden trace\nline two\n");
+
+        let height = 8;
+        let live = vp.render_window(READ_W, height);
+        let live_offset = live.offset;
+        let live_text = live.lines.iter().map(plain).collect::<Vec<_>>();
+
+        vp.commit_thinking("hidden trace\nline two\n".into(), 0);
+        let committed = vp.render_window(READ_W, height);
+        let committed_text = committed.lines.iter().map(plain).collect::<Vec<_>>();
+
+        assert_eq!(
+            committed.offset, live_offset,
+            "committing the hidden trace keeps the scrollback offset stable"
+        );
+        assert_eq!(
+            committed_text.len(),
+            live_text.len(),
+            "the live header and collapsed block occupy the same row budget"
         );
     }
 
@@ -1239,6 +1275,17 @@ mod tests {
         assert!(
             thinking[0] < markdown[0],
             "thinking block stays before the answer block: {all:?}"
+        );
+
+        let idx = vp
+            .block_at(w.offset + thinking[0])
+            .expect("thinking rail row maps to its block");
+        assert!(vp.cycle_block(idx), "thinking block is dialable");
+        let w = vp.render_window(READ_W, 24);
+        let all = w.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
+        assert!(
+            all.contains("final trace"),
+            "dialing the committed thinking block reveals the trace: {all:?}"
         );
     }
 

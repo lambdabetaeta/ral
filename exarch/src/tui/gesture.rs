@@ -5,14 +5,14 @@
 //! focused viewport.  Methods that need viewport access receive it as a
 //! parameter — GestureState is a pure data+policy bundle.
 
-use std::collections::HashMap;
-use std::time::Instant;
-use ratatui::crossterm::event::MouseEvent;
-use crate::bus::AgentId;
-use super::terminal::osc52_copy;
 use super::render::FrameGeom;
 use super::render::contains;
+use super::terminal::osc52_copy;
 use super::viewport::Viewport;
+use crate::bus::AgentId;
+use ratatui::crossterm::event::MouseEvent;
+use std::collections::HashMap;
+use std::time::Instant;
 
 /// A left-button press in progress.
 pub(super) struct Press {
@@ -49,7 +49,13 @@ pub(super) struct GestureState {
 
 impl GestureState {
     pub(super) fn new() -> Self {
-        Self { frame: None, selection: None, copy_toast: None, press: None, hover: None }
+        Self {
+            frame: None,
+            selection: None,
+            copy_toast: None,
+            press: None,
+            hover: None,
+        }
     }
 
     /// Save the frame geometry from the last draw.
@@ -79,7 +85,7 @@ impl GestureState {
         let idx = vp.block_at(row)?;
         let col = (me.column - frame.text.x) as usize;
         (vp.block_dialable(idx) && col < vp.row_width(row)?).then_some(idx)
-}
+    }
 
     /// The dialable block the pointer currently rests over, if any.
     pub(super) fn hover(&self) -> Option<usize> {
@@ -90,7 +96,6 @@ impl GestureState {
     pub(super) fn set_hover(&mut self, idx: Option<usize>) {
         self.hover = idx;
     }
-
 
     /// Begin a left-button gesture: drop any prior selection, anchor at
     /// the pressed row and column, and remember the block under it.
@@ -140,11 +145,7 @@ impl GestureState {
     /// Finish a left-button gesture: a drag copies its selection, a bare
     /// click over a dialable block cycles it (L1↔L3); a bare click over
     /// inert content stays selection (a no-op clear).
-    pub(super) fn release(
-        &mut self,
-        viewports: &mut HashMap<AgentId, Viewport>,
-        focused: AgentId,
-    ) {
+    pub(super) fn release(&mut self, viewports: &mut HashMap<AgentId, Viewport>, focused: AgentId) {
         let Some(press) = self.press.take() else {
             return;
         };
@@ -194,18 +195,18 @@ impl GestureState {
             .unwrap_or(10);
         self.scroll(viewports, focused, dir * page);
     }
-  pub(super) fn clear_selection(&mut self) {
-      self.selection = None;
-      self.press = None;
-  }
-  /// The active drag-selection, if any, as ((anchor_row, anchor_col), (head_row, head_col))
-  /// in buffer coordinates.  Rendered reversed; copied on release.
-  pub(super) fn selection(&self) -> Option<((usize, u16), (usize, u16))> {
-    self.selection
-  }
+    pub(super) fn clear_selection(&mut self) {
+        self.selection = None;
+        self.press = None;
+    }
+    /// The active drag-selection, if any, as ((anchor_row, anchor_col), (head_row, head_col))
+    /// in buffer coordinates.  Rendered reversed; copied on release.
+    pub(super) fn selection(&self) -> Option<((usize, u16), (usize, u16))> {
+        self.selection
+    }
 
-  /// The copy-confirmation toast, if still live: (char_count, born_at).
-  pub(super) fn copy_toast(&self) -> Option<&(usize, Instant)> {
-    self.copy_toast.as_ref()
-  }
+    /// The copy-confirmation toast, if still live: (char_count, born_at).
+    pub(super) fn copy_toast(&self) -> Option<&(usize, Instant)> {
+        self.copy_toast.as_ref()
+    }
 }

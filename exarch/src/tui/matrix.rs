@@ -1,14 +1,14 @@
-use std::collections::HashMap;
-use std::time::Instant;
-use ratatui::text::{Line, Span};
-use ratatui::style::{Modifier, Style};
-use crate::bus::AgentId;
-use crate::provider;
+use super::LINGER;
 use super::line::{self, AGENT_HUES, SLATE};
 use super::rail;
-use super::viewport::Viewport;
 use super::render::tab_bar;
-use super::LINGER;
+use super::viewport::Viewport;
+use crate::bus::AgentId;
+use crate::provider;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use std::collections::HashMap;
+use std::time::Instant;
 
 /// How the agent×step matrix orders its rows — a render-time projection
 /// of the same `tabs`/`viewports` model, never a reshuffle of the

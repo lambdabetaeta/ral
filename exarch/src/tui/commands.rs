@@ -3,17 +3,17 @@
 use std::io;
 use std::path::PathBuf;
 
-use ral_core::path::sigil::expand_path_prefix;
-use crate::provider::{Provider, ProviderKind};
-use crate::provider::scripted::Script;
-use crate::bus::{InboxMsg, Mailbox};
+use super::App;
 use super::banner::{self, SessionInfo};
 use super::block::RailShape;
-use super::viewport;
 use super::model_picker::pick_model;
-use super::terminal::{tail_bytes, osc52_copy, YANK_CAP};
-use super::App;
+use super::terminal::{YANK_CAP, osc52_copy, tail_bytes};
 use super::tui_loop::Tui;
+use super::viewport;
+use crate::bus::{InboxMsg, Mailbox};
+use crate::provider::scripted::Script;
+use crate::provider::{Provider, ProviderKind};
+use ral_core::path::sigil::expand_path_prefix;
 pub(super) struct SlashCommand {
     pub(super) name: &'static str,
     pub(super) aliases: &'static [&'static str],

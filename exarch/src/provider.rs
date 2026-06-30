@@ -1691,7 +1691,7 @@ impl Engine {
                             ChatStreamEvent::ReasoningChunk(c) => {
                                 on_think(&c.content);
                             }
-                            | ChatStreamEvent::ThoughtSignatureChunk(_)
+                            ChatStreamEvent::ThoughtSignatureChunk(_)
                             | ChatStreamEvent::ToolCallChunk(_) => {}
                         }
                     }

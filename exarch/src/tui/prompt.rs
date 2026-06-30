@@ -1,7 +1,7 @@
-use prompt_editor::{EditMode, PromptEditor};
-use crate::bus::Inbox;
-use ratatui::style::{Color, Modifier, Style};
 use super::commands;
+use crate::bus::Inbox;
+use prompt_editor::{EditMode, PromptEditor};
+use ratatui::style::{Color, Modifier, Style};
 /// The prompt editing state: editor, history, and draft management.
 ///
 /// Extracted from [`super::App`] to keep the TUI struct flat and
@@ -18,8 +18,7 @@ pub(super) struct PromptState {
 impl PromptState {
     pub(super) fn new(vi: bool) -> Self {
         let mut editor =
-            PromptEditor::new(if vi { EditMode::Vi } else { EditMode::Emacs })
-                .wrap(true);
+            PromptEditor::new(if vi { EditMode::Vi } else { EditMode::Emacs }).wrap(true);
         editor.set_base_style(Style::default().fg(Color::White));
         Self {
             editor,
@@ -75,7 +74,7 @@ impl PromptState {
     /// each edit key to learn whether it must suspend for the external editor.
     pub(super) fn take_editor_request(&mut self) -> bool {
         std::mem::take(&mut self.editor_request)
-}
+    }
 
     /// Note that Ctrl-X was just pressed: the next `C-e` opens the editor.
     pub(super) fn set_cx_pending(&mut self) {
@@ -98,7 +97,6 @@ impl PromptState {
         self.editor_request = true;
     }
 
-
     /// The prompt'\''s current contents, lines newline-joined.
     pub fn prompt_text(&self) -> String {
         self.editor.text()
@@ -111,7 +109,9 @@ impl PromptState {
     pub(super) fn style_prompt(&mut self, focused_steerable: bool) {
         let text = self.editor.text();
         let style = if focused_steerable && commands::is_slash_command(&text) {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
         };
@@ -166,23 +166,23 @@ impl PromptState {
     pub(super) fn edit_input(&mut self, k: ratatui::crossterm::event::KeyEvent) {
         self.editor.handle_key(k);
     }
-  pub(super) fn height_hint(&self, text_width: u16, area_height: u16) -> u16 {
-      self.editor.height_hint(text_width, area_height)
-  }
+    pub(super) fn height_hint(&self, text_width: u16, area_height: u16) -> u16 {
+        self.editor.height_hint(text_width, area_height)
+    }
 
-  pub(super) fn row(&self) -> usize {
-      self.editor.row()
-  }
+    pub(super) fn row(&self) -> usize {
+        self.editor.row()
+    }
 
-  pub(super) fn row_count(&self) -> usize {
-      self.editor.row_count()
-  }
+    pub(super) fn row_count(&self) -> usize {
+        self.editor.row_count()
+    }
 
-  pub(super) fn render(&mut self, f: &mut ratatui::Frame<'_>, inner: ratatui::layout::Rect) {
-      self.editor.render(f, inner);
-  }
+    pub(super) fn render(&mut self, f: &mut ratatui::Frame<'_>, inner: ratatui::layout::Rect) {
+        self.editor.render(f, inner);
+    }
 
-  pub(super) fn cursor_screen_position(&self) -> Option<(u16, u16)> {
-      self.editor.cursor_screen_position().map(|p| (p.x, p.y))
-  }
+    pub(super) fn cursor_screen_position(&self) -> Option<(u16, u16)> {
+        self.editor.cursor_screen_position().map(|p| (p.x, p.y))
+    }
 }

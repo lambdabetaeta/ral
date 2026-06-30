@@ -6,16 +6,14 @@
 //! and hover highlights into the line buffer before it reaches the
 //! terminal.
 
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::str;
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crossterm::{
     execute,
-    terminal::{
-        BeginSynchronizedUpdate, EndSynchronizedUpdate, size,
-    },
+    terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate, size},
 };
 
 use ratatui::{
@@ -27,13 +25,13 @@ use ratatui::{
 
 use crate::bus::AgentId;
 
-use super::line::{self, READ_W, LIME_HOT, SLATE, CYAN, PINK, AGENT_HUES};
-use super::status::{StatusReadout, rule_line};
-use super::matrix::matrix_bar;
-use super::terminal::Term;
-use super::select::highlight_range;
 use super::App;
-use super::{LEFT_MARGIN, REGISTER_W, REGISTER_GAP, PROMPT_PAD_H, SPINNER, LINGER};
+use super::line::{self, AGENT_HUES, CYAN, LIME_HOT, PINK, READ_W, SLATE};
+use super::matrix::matrix_bar;
+use super::select::highlight_range;
+use super::status::{StatusReadout, rule_line};
+use super::terminal::Term;
+use super::{LEFT_MARGIN, LINGER, PROMPT_PAD_H, REGISTER_GAP, REGISTER_W, SPINNER};
 
 /// Where the content area sat in the last drawn frame.
 #[derive(Clone, Copy)]
@@ -120,8 +118,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         .tabs
         .viewport(focused)
         .is_some_and(|vp| !vp.pins().is_empty());
-    let show_register =
-        has_pins && area.width >= LEFT_MARGIN + READ_W + REGISTER_GAP + REGISTER_W;
+    let show_register = has_pins && area.width >= LEFT_MARGIN + READ_W + REGISTER_GAP + REGISTER_W;
     let layout = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(1), // breathing row between output and chrome
@@ -214,9 +211,20 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     // draw closure captures no borrow of `app`.
     let matrix_lines = (app.tabs.len() > 1).then(|| {
         let rows = app.tabs.matrix_rows();
-        matrix_bar(&rows, app.tabs.titles(), focused, app.tabs.dying_map(), app.matrix_sort)
+        matrix_bar(
+            &rows,
+            app.tabs.titles(),
+            focused,
+            app.tabs.dying_map(),
+            app.matrix_sort,
+        )
     });
-    let prompt_hint = prompt_hint(app.tabs.root(), app.tabs.is_steerable(), app.tabs.titles(), focused);
+    let prompt_hint = prompt_hint(
+        app.tabs.root(),
+        app.tabs.is_steerable(),
+        app.tabs.titles(),
+        focused,
+    );
     let picker = app.picker.as_ref();
 
     // Bracket the frame's terminal writes in a synchronized update so the
@@ -319,7 +327,6 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     Ok(())
 }
 
-
 /// Emit the terminal tab title: a spinner when working, a block when idle.
 fn emit_tab_title(app: &App, working: bool) {
     let cwd = std::env::current_dir()
@@ -392,7 +399,12 @@ fn paint_hover(app: &App, lines: &mut [Line<'static>], offset: usize) {
 
 /// The watch-only banner shown in the prompt slot on a subagent tab,
 /// or `None` on main where the textarea is editable.
-fn prompt_hint(root: AgentId, focused_steerable: bool, titles: &HashMap<AgentId, String>, focused: AgentId) -> Option<Line<'static>> {
+fn prompt_hint(
+    root: AgentId,
+    focused_steerable: bool,
+    titles: &HashMap<AgentId, String>,
+    focused: AgentId,
+) -> Option<Line<'static>> {
     if focused == root || focused_steerable {
         return None;
     }

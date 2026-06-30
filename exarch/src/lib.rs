@@ -6,7 +6,10 @@
 //! shell over [`run`]; integration tests in `tests/` link this library
 //! directly to drive [`agent::Agent::apply`] through a scripted
 //! provider (see [`provider::Provider::scripted`]).
-#![allow(clippy::disallowed_methods, reason = "exarch is an application, not the ral shell; the clippy.toml invariants target ral-core's Shell path/cwd/fs discipline")]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "exarch is an application, not the ral shell; the clippy.toml invariants target ral-core's Shell path/cwd/fs discipline"
+)]
 pub mod agent;
 pub mod agent_builtins;
 pub mod agent_registry;

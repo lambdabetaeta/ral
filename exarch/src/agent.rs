@@ -1179,7 +1179,8 @@ impl Agent {
         // its buffered batch here at completion, posted into this session's
         // own inbox (via `emit`'s mailbox) and guarded by the agent registry's
         // generation (so a `/clear` drops a stale batch).
-        self.transport.set_boundary(shell_eval::boundary_sink(emit, self.id, &self.agents));
+        self.transport
+            .set_boundary(shell_eval::boundary_sink(emit, self.id, &self.agents));
         let content = match shell_eval::run_shell(
             #[cfg(unix)]
             if let Some(ref wire) = self.wire {

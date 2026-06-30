@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
+use super::viewport::Viewport;
 use crate::bus::{AgentId, Hunk};
 use crate::card::{IoEvent, ObservationKind};
-use super::viewport::Viewport;
 
 pub(super) struct SurfaceBuffer {
     patch_buf: Option<PatchBuf>,
@@ -35,7 +35,10 @@ struct ObservationBuf {
 
 impl SurfaceBuffer {
     pub(super) fn new() -> Self {
-        Self { patch_buf: None, observation_buf: None }
+        Self {
+            patch_buf: None,
+            observation_buf: None,
+        }
     }
     /// Absorb a single-`diff` card's hunks into [`SurfaceBuffer::patch_buf`], or
     /// flush + open a fresh buffer when the path or session changes.
@@ -174,8 +177,8 @@ impl SurfaceBuffer {
         self.flush_observations(viewports);
         self.flush_patch_buf(viewports);
     }
-  pub(super) fn clear(&mut self) {
-      self.patch_buf = None;
-      self.observation_buf = None;
-  }
+    pub(super) fn clear(&mut self) {
+        self.patch_buf = None;
+        self.observation_buf = None;
+    }
 }

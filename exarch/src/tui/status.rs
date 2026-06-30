@@ -1,9 +1,9 @@
-use std::time::Duration;
+use super::line::{CYAN, PURPLE, SLATE, usage_text};
+use super::rail;
+use crate::provider::Usage;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use crate::provider::Usage;
-use super::line::{usage_text, CYAN, PURPLE, SLATE};
-use super::rail;
+use std::time::Duration;
 
 /// The rule line's right-side status readout: model name, the ctx%
 /// value-ramp inputs (`last_input` against `context_window`), and the
@@ -182,4 +182,3 @@ pub(super) fn wait_bar(elapsed: Duration) -> Vec<Span<'static>> {
     ));
     spans
 }
-

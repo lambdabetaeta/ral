@@ -31,6 +31,7 @@ use ral_core::types::HandleState;
 use ral_core::{CompileOutcome, Value};
 
 use ansi_to_tui::IntoText;
+use prompt_editor::{EditMode, PromptEditor};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -40,7 +41,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget, Wrap};
 use ratatui::{TerminalOptions, Viewport};
-use prompt_editor::{EditMode, PromptEditor};
 
 use std::collections::HashSet;
 use std::io;
@@ -199,7 +199,11 @@ impl StructuralFrontend {
         let _guard = HookEnvGuard(self.runtime.clone());
         lock(&self.runtime).hooks.history = self.history.entries().iter().rev().cloned().collect();
 
-        let mut prompt = PromptEditor::new(if self.vi { EditMode::Vi } else { EditMode::Emacs });
+        let mut prompt = PromptEditor::new(if self.vi {
+            EditMode::Vi
+        } else {
+            EditMode::Emacs
+        });
         if let Some(p) = &initial {
             prompt.set_text(&p.text);
             prompt.place_char_offset(p.cursor);
@@ -323,7 +327,7 @@ impl StructuralFrontend {
                         break Composed::Done(Read::Interrupt);
                     }
                     prompt.clear();
-                    }
+                }
                 KeyCode::Char('d') if ctrl => {
                     if prompt.is_empty() {
                         break Composed::Done(Read::Eof);
@@ -355,13 +359,18 @@ impl StructuralFrontend {
                     // place; several open the menu; none is a no-op.
                     let row = prompt.row();
                     let col = prompt.col();
-                    let Some(line) = prompt.line(row) else { prompt.handle_key(k); continue; };
+                    let Some(line) = prompt.line(row) else {
+                        prompt.handle_key(k);
+                        continue;
+                    };
                     let src = sources.get_or_insert_with(|| Sources::from_shell(shell));
                     let cursor_byte = char_to_byte(&line, col);
                     let (start, candidates) = completion::complete(&line, cursor_byte, src);
                     match candidates.as_slice() {
                         [] => {}
-                        [only] => { prompt.replace_row_bytes(row, start, cursor_byte, &only.replacement); },
+                        [only] => {
+                            prompt.replace_row_bytes(row, start, cursor_byte, &only.replacement);
+                        }
                         _ => {
                             let anchor_col =
                                 prompt_lines.last_w + line[..start].chars().count() as u16;
@@ -382,7 +391,9 @@ impl StructuralFrontend {
                     Some(g) if !g.is_empty() && prompt.at_buffer_end() => {
                         prompt.insert_str(g);
                     }
-                    _ => { prompt.handle_key(k); },
+                    _ => {
+                        prompt.handle_key(k);
+                    }
                 },
                 KeyCode::Enter => {
                     let line = prompt.text();
@@ -464,12 +475,7 @@ impl StructuralFrontend {
     /// Recall the previous history entry (Up from the first row).  The live
     /// draft is stashed on entry and navigation clamps at the oldest entry;
     /// a no-op when history is empty.
-    fn history_prev(
-        &self,
-        prompt: &mut PromptEditor,
-        pos: &mut Option<usize>,
-        draft: &mut String,
-    ) {
+    fn history_prev(&self, prompt: &mut PromptEditor, pos: &mut Option<usize>, draft: &mut String) {
         let entries = self.history.entries();
         if entries.is_empty() {
             return;
@@ -489,12 +495,7 @@ impl StructuralFrontend {
     /// Recall the next history entry (Down from the last row), or restore the
     /// stashed draft once browsing walks past the newest entry.  A no-op when
     /// not browsing history.
-    fn history_next(
-        &self,
-        prompt: &mut PromptEditor,
-        pos: &mut Option<usize>,
-        draft: &mut String,
-    ) {
+    fn history_next(&self, prompt: &mut PromptEditor, pos: &mut Option<usize>, draft: &mut String) {
         match *pos {
             None => {}
             Some(i) if i + 1 < self.history.entries().len() => {
@@ -604,7 +605,10 @@ fn accept_completion(prompt: &mut PromptEditor, menu: &Menu) {
     if row != menu.row {
         return;
     }
-    let line = match prompt.line(row) { Some(l) => l, None => return, };
+    let line = match prompt.line(row) {
+        Some(l) => l,
+        None => return,
+    };
     let end = char_to_byte(&line, prompt.col());
     let replacement = menu.candidates[menu.selected].replacement.clone();
     prompt.replace_row_bytes(row, menu.replace_from, end, &replacement);
@@ -1074,14 +1078,7 @@ fn render(
     // type-error flare last so it wins any cell a highlight also claimed.
     overlay_highlights(frame, editor_band, prompt.last_w, editor, highlights);
     overlay_ghost(frame, editor_band, prompt.last_w, editor, ghost);
-    overlay_type_error(
-        frame,
-        editor_band,
-        caret_area,
-        prompt.last_w,
-        editor,
-        spine,
-    );
+    overlay_type_error(frame, editor_band, caret_area, prompt.last_w, editor, spine);
     render_projections(frame, rest, worksheet, matrix);
     // The completion menu drops down over the top of the projection band,
     // anchored under the token being completed; it owns the keys while open,

@@ -109,8 +109,10 @@ fn expect_static_reject(source: &str) {
 fn round_dials_decimal_places_and_returns_float() {
     expect_float("return !{round 3.7 0}", 4.0);
     expect_float("return !{round 3.4 0}", 3.0);
-    #[allow(clippy::approx_constant)] expect_float("return !{round 3.14159 2}", 3.14);
-    #[allow(clippy::approx_constant)] expect_float("return !{round 2.71828 3}", 2.718);
+    #[allow(clippy::approx_constant)]
+    expect_float("return !{round 3.14159 2}", 3.14);
+    #[allow(clippy::approx_constant)]
+    expect_float("return !{round 2.71828 3}", 2.718);
 }
 
 #[test]

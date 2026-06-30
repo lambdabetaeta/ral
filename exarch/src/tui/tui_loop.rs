@@ -6,24 +6,22 @@ use std::{
     io::{self},
     path::Path,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
 };
 
 use crossterm::event::{
-    Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-    poll as ct_poll, read as ct_read,
+    Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, poll as ct_poll,
+    read as ct_read,
 };
 
 use crate::{
     agent::{Agent, Control, ControlFlow},
     agent_registry::AgentRegistry,
     bootstrap::Scratch,
-    bus::{
-        AgentId, Emitter, FleetBus, InboxMsg, Pass, drain_pass,
-    },
+    bus::{AgentId, Emitter, FleetBus, InboxMsg, Pass, drain_pass},
     cancel,
     credential::CredentialStore,
     fleet::Fleet,
@@ -32,14 +30,12 @@ use crate::{
     provider::{self, Provider},
 };
 
+use super::banner::SessionInfo;
 use super::{
-    banner,
-    commands,
+    App, banner, commands,
     render::draw,
     terminal::{self, TerminalGuard},
-    App,
 };
-use super::banner::SessionInfo;
 
 /// Pairs the terminal lifetime with the app so the worker thread and the UI
 /// loop can split the two: the worker borrows the session through
@@ -126,8 +122,7 @@ pub fn run(
         vi,
     )
     .map_err(|e| format!("ratatui init: {e}"))?;
-    let status_provider =
-        oauth::provider_label(provider.subscription(), provider.id().label());
+    let status_provider = oauth::provider_label(provider.subscription(), provider.id().label());
     tui.app.update_live_model(&provider, &status_provider);
     // Bind the App's inbox and focus to the trunk's shared handles, then build
     // the fleet: a session-lived bus over the trunk's inbox, plus the shared
@@ -288,7 +283,8 @@ fn ui_loop(
             Pass::Stop => {
                 tui.app.busy_off();
                 let focused = tui.app.tabs.focused();
-                let steerable = focused == tui.app.tabs.root() || ctx.agents.mailbox(focused).is_some();
+                let steerable =
+                    focused == tui.app.tabs.root() || ctx.agents.mailbox(focused).is_some();
                 tui.app.tabs.set_steerable(steerable);
                 draw(&mut tui.app, tui.guard.term())?;
                 draw(&mut tui.app, tui.guard.term())?;
@@ -386,14 +382,12 @@ fn ui_loop(
             // must follow focus.
             if let Some(ph) = ctx.agents.provider(now_focus) {
                 let p = ph.current();
-                let status_provider =
-                    oauth::provider_label(p.subscription(), p.id().label());
+                let status_provider = oauth::provider_label(p.subscription(), p.id().label());
                 tui.app.update_live_model(&p, &status_provider);
             }
         }
     }
 }
-
 
 /// Open the `/model` picker over the available providers, fetch their model
 /// lists (cache-first, then background), and drive the modal loop until the
@@ -446,4 +440,3 @@ pub fn key_action(mode: KeyMode, k: &KeyEvent, enter_submits: bool) -> KeyAction
         KeyAction::Edit
     }
 }
-

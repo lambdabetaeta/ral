@@ -1,9 +1,9 @@
 use crossterm::event::KeyEvent;
 use edtui::{EditorEventHandler, EditorMode, EditorState, EditorTheme, EditorView, Index2, Lines};
 use edtui_jagged::index::RowIndex;
+use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
-use ratatui::Frame;
 
 pub enum EditMode {
     Emacs,
@@ -65,11 +65,18 @@ impl PromptEditor {
     }
 
     pub fn lines(&self) -> Vec<String> {
-        self.state.lines.iter_row().map(|r| r.iter().collect()).collect()
+        self.state
+            .lines
+            .iter_row()
+            .map(|r| r.iter().collect())
+            .collect()
     }
 
     pub fn line(&self, row: usize) -> Option<String> {
-        self.state.lines.get(RowIndex::new(row)).map(|r| r.iter().collect())
+        self.state
+            .lines
+            .get(RowIndex::new(row))
+            .map(|r| r.iter().collect())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -101,7 +108,11 @@ impl PromptEditor {
         let row = self.state.cursor.row;
         let col = self.state.cursor.col;
         let prior: usize = (0..row)
-            .map(|r| row_to_string(&self.state.lines, r).map(|s| s.len() + 1).unwrap_or(0))
+            .map(|r| {
+                row_to_string(&self.state.lines, r)
+                    .map(|s| s.len() + 1)
+                    .unwrap_or(0)
+            })
             .sum();
         let byte_col = row_to_string(&self.state.lines, row)
             .map(|s| char_to_byte(&s, col))
@@ -124,7 +135,8 @@ impl PromptEditor {
 
     pub fn set_text(&mut self, text: &str) {
         self.clear();
-        self.handler.on_paste_event(text.to_string(), &mut self.state);
+        self.handler
+            .on_paste_event(text.to_string(), &mut self.state);
         // Park cursor at end: on_paste_event may leave it one short
         let last_row = self.state.lines.len().saturating_sub(1);
         let last_col = self.state.lines.len_col(last_row).unwrap_or(0);
@@ -132,7 +144,8 @@ impl PromptEditor {
     }
 
     pub fn insert_str(&mut self, text: &str) {
-        self.handler.on_paste_event(text.to_string(), &mut self.state);
+        self.handler
+            .on_paste_event(text.to_string(), &mut self.state);
     }
 
     pub fn place_char_offset(&mut self, offset: usize) {
@@ -230,7 +243,9 @@ impl PromptEditor {
             .base(self.base_style.unwrap_or_default())
             .cursor_style(Style::default())
             .hide_status_line();
-        let view = EditorView::new(&mut self.state).theme(theme).wrap(self.wrap);
+        let view = EditorView::new(&mut self.state)
+            .theme(theme)
+            .wrap(self.wrap);
         frame.render_widget(view, area);
         self.last_area = area;
     }

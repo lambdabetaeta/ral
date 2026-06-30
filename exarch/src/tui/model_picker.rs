@@ -5,9 +5,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ratatui::crossterm::event::{
-    Event as CtEvent, KeyEventKind, poll as ct_poll, read as ct_read,
-};
+use ratatui::crossterm::event::{Event as CtEvent, KeyEventKind, poll as ct_poll, read as ct_read};
 
 use crate::bus::Kind;
 use crate::credential::CredentialStore;
@@ -17,7 +15,7 @@ use crate::state;
 
 use super::picker::{self, Picker};
 use super::render::draw;
-use super::tui_loop::{key_action, CommandCtx, KeyAction, KeyMode, Tui};
+use super::tui_loop::{CommandCtx, KeyAction, KeyMode, Tui, key_action};
 
 type FetchRx = std::sync::mpsc::Receiver<(provider::ProviderId, Result<Vec<String>, String>)>;
 

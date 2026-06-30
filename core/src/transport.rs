@@ -28,11 +28,11 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
+use crate::process::ChildHandle;
 use crate::serial::SerialValue;
 use crate::types::Boundary;
 use crate::types::SurfaceSink;
 use crate::types::Value;
-use crate::process::ChildHandle;
 use std::sync::OnceLock;
 
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -354,8 +354,9 @@ impl PerDispatchSink {
 impl crate::types::EventSink for PerDispatchSink {
     fn emit(&self, ev: &Value) {
         if let Some(id) = *self.current.lock().unwrap()
-            && let Ok(sv) = SerialValue::from_ground(ev) {
-                let _ = self.event_tx.send(Frame::Event(id, Event::Surface(sv)));
+            && let Ok(sv) = SerialValue::from_ground(ev)
+        {
+            let _ = self.event_tx.send(Frame::Event(id, Event::Surface(sv)));
         }
     }
 }

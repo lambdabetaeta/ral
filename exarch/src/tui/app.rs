@@ -4,10 +4,12 @@
 //! the event-routing logic that turns a [`crate::bus::Event`] stream
 //! into scrollback blocks.
 
+use super::banner;
 use super::block::{AgentSlot, RailShape};
 use super::fidelity::{self, Fidelity};
 use super::gesture::GestureState;
 use super::line;
+use super::line::{AGENT_HUES, BANNER_GOLD, BANNER_PINK, bold};
 use super::matrix::MatrixSort;
 use super::picker::Picker;
 use super::prompt::PromptState;
@@ -16,17 +18,12 @@ use super::surface::SurfaceBuffer;
 use super::tabs::Tabs;
 use super::terminal::Term;
 use super::viewport::Viewport;
-use super::banner;
-use super::line::{bold, BANNER_GOLD, BANNER_PINK, AGENT_HUES};
-use crate::bus::{
-    AgentId, Event, Inbox, Kind,
-};
+use crate::bus::{AgentId, Event, Inbox, Kind};
 use crate::card::IoEvent;
 use crate::provider::{self, Provider, Usage};
 use ratatui::{
     crossterm::event::{
-        KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
-        MouseEventKind,
+        KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     },
     text::{Line, Span},
 };
@@ -35,7 +32,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -43,7 +39,6 @@ use std::{
 /// Rows a wheel notch moves the view; paging keys move a frame-height at
 /// a time, derived per-keystroke from the last drawn content height.
 const SCROLL_STEP: usize = 3;
-
 
 // ---------------------------------------------------------------------------
 // App struct
@@ -159,8 +154,6 @@ impl App {
     pub fn bind_inbox(&mut self, inbox: Inbox) {
         self.inbox = inbox;
     }
-
-
 
     /// Mutable access to the active picker, for the REPL's picker loop.
     pub(super) fn picker_mut(&mut self) -> Option<&mut Picker> {
@@ -389,7 +382,10 @@ impl App {
                     card.single_diff().is_some()
                 );
                 match card.into_single_diff() {
-                    Ok((path, hunks)) => self.surface.absorb_patch(self.tabs.viewports_mut(), id, path, hunks),
+                    Ok((path, hunks)) => {
+                        self.surface
+                            .absorb_patch(self.tabs.viewports_mut(), id, path, hunks)
+                    }
                     Err(card) => self.with_viewport(id, |vp| vp.push_card(card)),
                 }
             }
@@ -412,7 +408,10 @@ impl App {
             // flush, and the structured per-event record already reached the
             // transcript at the emit seam (`Emitter::emit`), upstream of this UI
             // handler, so nothing is lost.
-            Kind::Io { event, .. } => self.surface.absorb_observation(self.tabs.viewports_mut(), id, event),
+            Kind::Io { event, .. } => {
+                self.surface
+                    .absorb_observation(self.tabs.viewports_mut(), id, event)
+            }
             // Pinned state: write or drop a register slot in place.  Routed
             // directly, *not* through `with_viewport` — a pin is ambient state
             // like `Kind::Usage`, never a scrollback barrier, so it must not
@@ -504,8 +503,14 @@ impl App {
         match k.code {
             // Paging scrolls the focused pane on any tab; bare Up/Down
             // stay bound to prompt history below.
-            KeyCode::PageUp => { let f = self.tabs.focused(); self.gesture.scroll_page(self.tabs.viewports_mut(), f, -1); }
-            KeyCode::PageDown => { let f = self.tabs.focused(); self.gesture.scroll_page(self.tabs.viewports_mut(), f, 1); }
+            KeyCode::PageUp => {
+                let f = self.tabs.focused();
+                self.gesture.scroll_page(self.tabs.viewports_mut(), f, -1);
+            }
+            KeyCode::PageDown => {
+                let f = self.tabs.focused();
+                self.gesture.scroll_page(self.tabs.viewports_mut(), f, 1);
+            }
             // Not collapsible into a match guard: with <=1 tab, Tab must
             // be a no-op, not fall through to the textarea-input arm below.
             #[allow(clippy::collapsible_match)]
@@ -552,26 +557,41 @@ impl App {
         // Refresh the hover mark on every event — motion, wheel, or press —
         // so the brightened dial glyph tracks the pointer the instant it
         // crosses a dialable block.
-        self.gesture.set_hover(self.gesture.hover_block(me, self.tabs.viewports(), self.tabs.focused()));
+        self.gesture.set_hover(self.gesture.hover_block(
+            me,
+            self.tabs.viewports(),
+            self.tabs.focused(),
+        ));
         match me.kind {
             // Anywhere over a dialable block, the wheel dials its disclosure
             // level (up reveals, down reduces) and consumes the event; once
             // the level clamps — or over inert chrome — it scrolls instead.
             MouseEventKind::ScrollUp if self.wheel_dial(me, 1) => {}
             MouseEventKind::ScrollDown if self.wheel_dial(me, -1) => {}
-            MouseEventKind::ScrollUp => { let f = self.tabs.focused(); self.gesture.scroll(self.tabs.viewports_mut(), f, -(SCROLL_STEP as isize)); }
-            MouseEventKind::ScrollDown => { let f = self.tabs.focused(); self.gesture.scroll(self.tabs.viewports_mut(), f, SCROLL_STEP as isize); }
+            MouseEventKind::ScrollUp => {
+                let f = self.tabs.focused();
+                self.gesture
+                    .scroll(self.tabs.viewports_mut(), f, -(SCROLL_STEP as isize));
+            }
+            MouseEventKind::ScrollDown => {
+                let f = self.tabs.focused();
+                self.gesture
+                    .scroll(self.tabs.viewports_mut(), f, SCROLL_STEP as isize);
+            }
             MouseEventKind::Down(MouseButton::Left)
                 if !me.modifiers.contains(KeyModifiers::SHIFT) =>
             {
-                { let f = self.tabs.focused(); self.gesture.press(me, self.tabs.viewports(), f) }
+                let f = self.tabs.focused();
+                self.gesture.press(me, self.tabs.viewports(), f)
             }
             MouseEventKind::Drag(MouseButton::Left) => self.gesture.drag(me),
-            MouseEventKind::Up(MouseButton::Left) => { let f = self.tabs.focused(); self.gesture.release(self.tabs.viewports_mut(), f); }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let f = self.tabs.focused();
+                self.gesture.release(self.tabs.viewports_mut(), f);
+            }
             _ => {}
         }
     }
-
 
     /// Dial the dialable block under a wheel event by `delta`, returning
     /// whether it dialed — `true` only when the level actually changed.  The
@@ -582,7 +602,10 @@ impl App {
     /// end returns `false` and falls through to a viewport scroll — so a
     /// tall run never traps the wheel.
     fn wheel_dial(&mut self, me: MouseEvent, delta: i8) -> bool {
-        let Some(idx) = self.gesture.hover_block(me, self.tabs.viewports(), self.tabs.focused()) else {
+        let Some(idx) = self
+            .gesture
+            .hover_block(me, self.tabs.viewports(), self.tabs.focused())
+        else {
             return false;
         };
         let id = self.tabs.focused();
@@ -640,7 +663,12 @@ impl App {
         Ok(vp.flush_log()?.to_path_buf())
     }
 
-    pub fn banner(&mut self, term: &mut Term, s: &banner::SessionInfo<'_>, p: &Provider) -> io::Result<()> {
+    pub fn banner(
+        &mut self,
+        term: &mut Term,
+        s: &banner::SessionInfo<'_>,
+        p: &Provider,
+    ) -> io::Result<()> {
         // The wordmark + eagle: a branded splash, an image outside Bertin's
         // data variables, so it alone keeps the saturated palette and reads
         // as neon. It carries no rail — it is not a row on the plane.
@@ -655,7 +683,10 @@ impl App {
 
         if let Some(vp) = self.tabs.viewport_mut(self.tabs.root()) {
             vp.push_chrome(RailShape::Plain, splash);
-            vp.push_chrome(RailShape::Plain, line::render_card(&banner::session_card(s, p), 3));
+            vp.push_chrome(
+                RailShape::Plain,
+                line::render_card(&banner::session_card(s, p), 3),
+            );
         }
         draw(self, term)
     }

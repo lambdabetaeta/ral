@@ -13,9 +13,9 @@ use std::time::Instant;
 use crate::bus::AgentId;
 use crate::fleet::NO_FOCUS;
 
+use super::block::AgentSlot;
 use super::viewport::Viewport;
 use super::{LINGER, ROOT_TITLE};
-use super::block::AgentSlot;
 
 /// Session/view lifecycle state.
 ///
@@ -143,127 +143,138 @@ impl Tabs {
     pub fn bind_focus(&mut self, focus: Arc<AtomicU64>) {
         self.focus = focus;
     }
-  /// Register a born sub-agent: create viewport, record title and parent, push tab.
-  pub(super) fn born(&mut self, id: AgentId, log_dir: &Path, title: String, parent: AgentId, agent_slot: AgentSlot) {
-      if let std::collections::hash_map::Entry::Vacant(slot) = self.viewports.entry(id) {
-          slot.insert(Viewport::new(log_dir.join("user.log"), agent_slot));
-          self.dispatch_order.push(id);
-      }
-      self.titles.insert(id, title);
-      self.parents.insert(id, parent);
-      if !self.tabs.contains(&id) {
-          self.tabs.push(id);
-      }
-  }
+    /// Register a born sub-agent: create viewport, record title and parent, push tab.
+    pub(super) fn born(
+        &mut self,
+        id: AgentId,
+        log_dir: &Path,
+        title: String,
+        parent: AgentId,
+        agent_slot: AgentSlot,
+    ) {
+        if let std::collections::hash_map::Entry::Vacant(slot) = self.viewports.entry(id) {
+            slot.insert(Viewport::new(log_dir.join("user.log"), agent_slot));
+            self.dispatch_order.push(id);
+        }
+        self.titles.insert(id, title);
+        self.parents.insert(id, parent);
+        if !self.tabs.contains(&id) {
+            self.tabs.push(id);
+        }
+    }
 
-  /// Mark a sub-agent as died: enter the linger window and fall back focus if needed.
-  pub(super) fn died(&mut self, id: AgentId) {
-      if id != self.root {
-          self.dying.insert(id, Instant::now());
-          if self.focus.load(Ordering::Relaxed) == id {
-              self.focus.store(self.parent_focus(id), Ordering::Relaxed);
-          }
-      }
-  }
+    /// Mark a sub-agent as died: enter the linger window and fall back focus if needed.
+    pub(super) fn died(&mut self, id: AgentId) {
+        if id != self.root {
+            self.dying.insert(id, Instant::now());
+            if self.focus.load(Ordering::Relaxed) == id {
+                self.focus.store(self.parent_focus(id), Ordering::Relaxed);
+            }
+        }
+    }
 
-  /// Retire every non-root tab into the linger window (used by /clear).
-  pub(super) fn retire_all(&mut self) {
-      let now = Instant::now();
-      let retiring: Vec<AgentId> = self.tabs.iter().copied().filter(|&id| id != self.root).collect();
-      for id in retiring {
-          self.dying.entry(id).or_insert(now);
-      }
-      self.focus.store(self.root, Ordering::Relaxed);
-  }
+    /// Retire every non-root tab into the linger window (used by /clear).
+    pub(super) fn retire_all(&mut self) {
+        let now = Instant::now();
+        let retiring: Vec<AgentId> = self
+            .tabs
+            .iter()
+            .copied()
+            .filter(|&id| id != self.root)
+            .collect();
+        for id in retiring {
+            self.dying.entry(id).or_insert(now);
+        }
+        self.focus.store(self.root, Ordering::Relaxed);
+    }
 
-  /// Cycle focus to the next tab (used by Tab key).
-  pub(super) fn focus_next(&mut self) {
-      let current = self.focused();
-      let pos = self.tabs.iter().position(|&id| id == current).unwrap_or(0);
-      let next = (pos + 1) % self.tabs.len();
-      let next_id = self.tabs[next];
-      self.focus.store(next_id, Ordering::Relaxed);
-  }
+    /// Cycle focus to the next tab (used by Tab key).
+    pub(super) fn focus_next(&mut self) {
+        let current = self.focused();
+        let pos = self.tabs.iter().position(|&id| id == current).unwrap_or(0);
+        let next = (pos + 1) % self.tabs.len();
+        let next_id = self.tabs[next];
+        self.focus.store(next_id, Ordering::Relaxed);
+    }
 
-  /// Immutable access to a viewport by id.
-  pub(super) fn viewport(&self, id: AgentId) -> Option<&Viewport> {
-      self.viewports.get(&id)
-  }
+    /// Immutable access to a viewport by id.
+    pub(super) fn viewport(&self, id: AgentId) -> Option<&Viewport> {
+        self.viewports.get(&id)
+    }
 
-  /// Mutable access to a viewport by id.
-  pub(super) fn viewport_mut(&mut self, id: AgentId) -> Option<&mut Viewport> {
-      self.viewports.get_mut(&id)
-  }
+    /// Mutable access to a viewport by id.
+    pub(super) fn viewport_mut(&mut self, id: AgentId) -> Option<&mut Viewport> {
+        self.viewports.get_mut(&id)
+    }
 
-  /// The root agent id.
-  pub(super) fn root(&self) -> AgentId {
-      self.root
-  }
+    /// The root agent id.
+    pub(super) fn root(&self) -> AgentId {
+        self.root
+    }
 
-  /// Number of tabs visible in the tab bar.
-  pub(super) fn len(&self) -> usize {
-      self.tabs.len()
-  }
+    /// Number of tabs visible in the tab bar.
+    pub(super) fn len(&self) -> usize {
+        self.tabs.len()
+    }
 
-  /// Whether `id` is in the linger window.
-  pub(super) fn is_dying(&self, id: AgentId) -> bool {
-      self.dying.contains_key(&id)
-  }
+    /// Whether `id` is in the linger window.
+    pub(super) fn is_dying(&self, id: AgentId) -> bool {
+        self.dying.contains_key(&id)
+    }
 
-  /// Rows for the matrix/tab bar: each visible tab paired with its viewport.
-  pub(super) fn matrix_rows(&self) -> Vec<(AgentId, &Viewport)> {
-      self.tabs
-          .iter()
-          .filter_map(|&id| self.viewports.get(&id).map(|vp| (id, vp)))
-          .collect()
-  }
+    /// Rows for the matrix/tab bar: each visible tab paired with its viewport.
+    pub(super) fn matrix_rows(&self) -> Vec<(AgentId, &Viewport)> {
+        self.tabs
+            .iter()
+            .filter_map(|&id| self.viewports.get(&id).map(|vp| (id, vp)))
+            .collect()
+    }
 
-  /// Dispatch order of viewports (root first, then subagents in birth order).
-  pub(super) fn dispatch_order(&self) -> &[AgentId] {
-      &self.dispatch_order
-  }
+    /// Dispatch order of viewports (root first, then subagents in birth order).
+    pub(super) fn dispatch_order(&self) -> &[AgentId] {
+        &self.dispatch_order
+    }
 
-  /// Per-session titles.
-  pub(super) fn titles(&self) -> &HashMap<AgentId, String> {
-      &self.titles
-  }
+    /// Per-session titles.
+    pub(super) fn titles(&self) -> &HashMap<AgentId, String> {
+        &self.titles
+    }
 
-  /// Death timestamps for subagents in the linger window.
-  pub(super) fn dying_map(&self) -> &HashMap<AgentId, Instant> {
-      &self.dying
-  }
+    /// Death timestamps for subagents in the linger window.
+    pub(super) fn dying_map(&self) -> &HashMap<AgentId, Instant> {
+        &self.dying
+    }
 
-  /// Immutable access to all viewports.
-  pub(super) fn viewports(&self) -> &HashMap<AgentId, Viewport> {
-      &self.viewports
-  }
+    /// Immutable access to all viewports.
+    pub(super) fn viewports(&self) -> &HashMap<AgentId, Viewport> {
+        &self.viewports
+    }
 
-  /// Mutable access to all viewports.
-  pub(super) fn viewports_mut(&mut self) -> &mut HashMap<AgentId, Viewport> {
-      &mut self.viewports
-  }
+    /// Mutable access to all viewports.
+    pub(super) fn viewports_mut(&mut self) -> &mut HashMap<AgentId, Viewport> {
+        &mut self.viewports
+    }
 
-  /// All viewport ids.
-  pub(super) fn viewport_keys(&self) -> Vec<AgentId> {
-      self.viewports.keys().copied().collect()
-  }
+    /// All viewport ids.
+    pub(super) fn viewport_keys(&self) -> Vec<AgentId> {
+        self.viewports.keys().copied().collect()
+    }
 
-  /// Whether the focused tab is steerable.
-  pub(super) fn is_steerable(&self) -> bool {
-      self.focused_steerable
-  }
+    /// Whether the focused tab is steerable.
+    pub(super) fn is_steerable(&self) -> bool {
+        self.focused_steerable
+    }
 
-  /// Set the steerable flag.
-  pub(super) fn set_steerable(&mut self, s: bool) {
-      self.focused_steerable = s;
-  }
+    /// Set the steerable flag.
+    pub(super) fn set_steerable(&mut self, s: bool) {
+        self.focused_steerable = s;
+    }
 
-  /// Frame counter for the terminal tab-title spinner.
-  pub(super) fn title_frame(&self) -> u64 {
-      self.title_frame
-  }
+    /// Frame counter for the terminal tab-title spinner.
+    pub(super) fn title_frame(&self) -> u64 {
+        self.title_frame
+    }
 }
-
 
 #[cfg(test)]
 mod tests {

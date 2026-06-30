@@ -3,10 +3,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ratatui::text::{Line, Span};
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 
-use crate::card::{Card, Span as CardSpan, Field, FieldVal, Mark, Role};
+use crate::card::{Card, Field, FieldVal, Mark, Role, Span as CardSpan};
 use crate::provider::{self, Provider};
 
 use super::block::AgentSlot;
@@ -314,10 +314,10 @@ pub(super) fn legend_panel() -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::{SessionInfo, legend_panel, session_card};
-    use crate::tui::{line, rail};
     use crate::card::{FieldVal, Mark, Role};
     use crate::provider::scripted::Script;
     use crate::provider::{Provider, ProviderKind};
+    use crate::tui::{line, rail};
     use std::path::{Path, PathBuf};
 
     /// A representative session: a fetched-catalog model (distinct slug,
