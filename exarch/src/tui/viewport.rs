@@ -438,7 +438,8 @@ impl Viewport {
     /// ordered as deliberation then conclusion.  `answer_chars` is the whole
     /// turn's answer mass, the deliberation grain's denominator.
     pub(super) fn commit_thinking(&mut self, text: String, answer_chars: u32) {
-        let preserve_scrollback = self.flat.virtual_think_len > 0
+        let preserve_scrollback = !self.sticky
+            && self.flat.virtual_think_len > 0
             && self.offset <= self.flat.virtual_think_at + self.flat.virtual_think_len;
         self.thinking.clear();
         self.insert_thinking(text, answer_chars);
