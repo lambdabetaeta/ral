@@ -5,7 +5,9 @@
 //! — OR republishes those upstream cards verbatim.  DeepSeek is the
 //! exception: OR lists its generic aliases as $0 (its own free-tier
 //! promotion), so native DeepSeek traffic consults a hardcoded table
-//! sourced from <https://api-docs.deepseek.com/quick_start/pricing>.
+//! sourced from <https://api-docs.deepseek.com/quick_start/pricing>,
+//! which also carries a peak-hour surcharge on top of the regular
+//! rate (see [`is_peak_hour`]).
 //! Bare suffix lookups (`mercury-2`) resolve to their prefixed
 //! catalog entry via [`add_bare_aliases`].
 
@@ -149,40 +151,79 @@ pub fn lookup(model: &str) -> Option<ModelPricing> {
 
 // region:    --- DeepSeek hardcoded pricing
 
+/// One side (regular or peak) of a DeepSeek rate card, in dollars per
+/// 1M tokens.
+#[derive(Clone, Copy)]
+struct DeepSeekRates {
+    input: f64,
+    output: f64,
+    cache_read: f64,
+}
+
+/// True when `hour` (0..=23, UTC) falls in one of DeepSeek's
+/// peak-pricing windows: 01:00-04:00 and 06:00-10:00 UTC.  Peak
+/// pricing was announced alongside the v4 rate card but is not live
+/// yet; wiring the window in now means exarch bills the right rate
+/// the moment DeepSeek turns it on, with no code change needed then.
+fn is_peak_hour(hour: i8) -> bool {
+    (1..4).contains(&hour) || (6..10).contains(&hour)
+}
+
 /// Return the official DeepSeek API per-token pricing for `model`.
 ///
 /// OpenRouter lists many DeepSeek aliases as $0 (its own free-tier
 /// promotion), so the OR catalog is not authoritative for native
-/// DeepSeek traffic.  These rates come from
-/// <https://api-docs.deepseek.com/quick_start/pricing>.
+/// DeepSeek traffic.  These rates, including the peak-hour surcharge,
+/// come from <https://api-docs.deepseek.com/quick_start/pricing>.
 fn deepseek_price(model: &str) -> Option<ModelPricing> {
-    // Per 1M token rates divided into per-token.
     // `deepseek-chat` / `deepseek-reasoner` are aliases for
-    // `deepseek-v4-flash` (non-thinking / thinking modes);
-    // pricing is identical between the two modes.
-    const FLASH_INPUT: f64 = 0.14 / 1_000_000.0;
-    const FLASH_OUTPUT: f64 = 0.28 / 1_000_000.0;
-    const FLASH_CACHE_READ: f64 = 0.0028 / 1_000_000.0;
-    const PRO_INPUT: f64 = 0.435 / 1_000_000.0;
-    const PRO_OUTPUT: f64 = 0.87 / 1_000_000.0;
-    const PRO_CACHE_READ: f64 = 0.003625 / 1_000_000.0;
+    // `deepseek-v4-flash` (non-thinking / thinking modes); pricing is
+    // identical between the two modes.
+    const FLASH: DeepSeekRates = DeepSeekRates {
+        input: 0.14,
+        output: 0.28,
+        cache_read: 0.0028,
+    };
+    const FLASH_PEAK: DeepSeekRates = DeepSeekRates {
+        input: 0.28,
+        output: 0.56,
+        cache_read: 0.0056,
+    };
+    const PRO: DeepSeekRates = DeepSeekRates {
+        input: 0.435,
+        output: 0.87,
+        cache_read: 0.003625,
+    };
+    const PRO_PEAK: DeepSeekRates = DeepSeekRates {
+        input: 0.87,
+        output: 1.74,
+        cache_read: 0.00725,
+    };
 
-    let p = match model {
-        "deepseek-chat" | "deepseek-reasoner" | "deepseek-v4-flash" => ModelPricing {
-            input: FLASH_INPUT,
-            output: FLASH_OUTPUT,
-            cache_read: FLASH_CACHE_READ,
-            cache_write: 0.0,
-        },
-        "deepseek-v4-pro" => ModelPricing {
-            input: PRO_INPUT,
-            output: PRO_OUTPUT,
-            cache_read: PRO_CACHE_READ,
-            cache_write: 0.0,
-        },
+    let peak = is_peak_hour(jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).hour());
+    let r = match model {
+        "deepseek-chat" | "deepseek-reasoner" | "deepseek-v4-flash" => {
+            if peak {
+                FLASH_PEAK
+            } else {
+                FLASH
+            }
+        }
+        "deepseek-v4-pro" => {
+            if peak {
+                PRO_PEAK
+            } else {
+                PRO
+            }
+        }
         _ => return None,
     };
-    Some(p)
+    Some(ModelPricing {
+        input: r.input / 1_000_000.0,
+        output: r.output / 1_000_000.0,
+        cache_read: r.cache_read / 1_000_000.0,
+        cache_write: 0.0,
+    })
 }
 
 /// Return the per-token pricing for `model` from the correct source
@@ -413,6 +454,18 @@ struct Architecture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Peak windows are 01:00-04:00 and 06:00-10:00 UTC; every other
+    /// hour is regular-priced.  Boundaries are half-open (start
+    /// inclusive, end exclusive), matching how DeepSeek documents
+    /// the windows.
+    #[test]
+    fn is_peak_hour_matches_documented_windows() {
+        for h in 0i8..24 {
+            let expected = matches!(h, 1..=3 | 6..=9);
+            assert_eq!(is_peak_hour(h), expected, "hour {h}");
+        }
+    }
 
     #[test]
     fn parse_price_accepts_dollar_strings() {
