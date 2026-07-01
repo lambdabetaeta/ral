@@ -1650,19 +1650,30 @@ impl Engine {
                         }
                     };
                     loop {
-                        // No idle timer here: a `ping`, an SSE keepalive, or a
-                        // partial frame that genai consumes without yielding a
-                        // decoded `ChatStreamEvent` would falsely read as idle
-                        // at this level even while bytes flow.  Liveness is
-                        // measured at the byte/SSE level by `tls::client`'s
-                        // `read_timeout`; a genuinely stalled socket trips it
-                        // and surfaces here as `Some(Err(_))` carrying a
-                        // `reqwest` timeout, which `from_genai` classifies as
-                        // transient via its [`Fault::Transport`] leaf.
+                        // `tls::client`'s `read_timeout` bounds a stalled
+                        // *socket*, but a live socket fed by keepalive pings
+                        // whose bytes genai consumes without ever yielding a
+                        // decoded `ChatStreamEvent` stays "live" at that layer
+                        // forever — observed in production as a 900s hang
+                        // with zero events past `Start`.  This deadline
+                        // instead bounds time-between-*decoded-events*: it
+                        // resets every time `resp.stream.next()` resolves
+                        // (matching the connect-phase and `summarize` idle
+                        // pattern above), so ordinary keepalives and partial
+                        // frames that do eventually decode never trip it —
+                        // only a generation that goes fully silent at this
+                        // level for the whole budget does.
                         let event = tokio::select! {
                             biased;
                             _ = wait_for_cancel(cancel) => {
                                 return Err(ProviderError::Cancelled("mid-stream"));
+                            }
+                            _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
+                                return Err(ProviderError::Transient {
+                                    cause: "stream idle: no event within timeout".into(),
+                                    attempts: 1,
+                                    body: None,
+                                });
                             }
                             ev = resp.stream.next() => match ev {
                                 Some(Ok(ev)) => ev,
