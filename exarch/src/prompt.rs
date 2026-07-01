@@ -80,6 +80,8 @@ pub fn assemble(
     }
     if headless {
         sections.push((Some("Agent"), include_str!("../data/agent.md").into()));
+    } else {
+        sections.push((Some("Surfacing"), include_str!("../data/surface.md").into()));
     }
     Ok(render(&sections))
 }
