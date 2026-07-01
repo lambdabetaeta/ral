@@ -25,3 +25,7 @@ A `` `card `` may stack marks of different kinds, but within one homogeneous lis
       `measure [label: "crates", value: 7, max: 12],
     ]
     surface $card
+
+Remember that the user CANNOT see `VALUE`, `STDOUT` and `STDERR`. To show something to them use `surface` (see below). If they ask to see part of a file, use `surface` to directly relay it to them, without reading the file.
+
+

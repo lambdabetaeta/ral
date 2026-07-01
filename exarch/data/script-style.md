@@ -74,7 +74,7 @@ Bindings are immutable, but shadowable. When behaviour should change, re-bind wi
     # Later: quieter default.
     let cargo-in = { |root args| within [dir: $root] { cargo -q ...$args } }
 
-Blocks are lexical and capture environments. If a block uses a helper, e.g. `plan`, shadowing `plan` later DOES NOT ALTER the behaviour of `plan` in previous blocks. Either re-bind the helper, or use higher-order arguments in the first place (as in `run-with` above).
+Blocks are lexical and capture environments. If a block uses a helper, e.g. `plan`, shadowing `plan` later DOES NOT AFFECT the behaviour of `plan` in previous blocks. Either re-bind the helper, or use higher-order arguments in the first place (as in `run-with` above).
 
 ## Examples
 

@@ -145,7 +145,7 @@ A nullary tag still hands its block a value — ignore it with `_`.
 
 `try` catches a failed command; without it, a non-zero exit aborts the entire script. When a tool reports through its exit code rather than failing (`grep`, `diff`, `test`, `valgrind --error-exitcode`), wrap it in `audit` to read its output as data instead of raising.
 
-Its handler receives an error record of with fields `status`, `cmd`, `message`, `line`, `col`:
+Its handler receives an error record with fields `status`, `cmd`, `message`, `line`, `col`:
 
     let log =
       try { make 2>&1 | from-string } { |err| 
@@ -199,11 +199,11 @@ Use `cancel $h` to stop a handle thread that is no longer needed. There is also 
     within [ env : [ API_KEY : #''# ], handlers: [curl: { |args| #'offline stub'# }]] { fetch-all }
     let all_blocked = { |name args| echo "blocked: $name ...$args" }
     within [handler: $all_blocked ] { make deploy }
-    within [handlers: [ git: { |args| echo "git blocked" } ] { !$deploy }
+    within [handlers: [ git: { |args| echo "git blocked" } ] ] { !$deploy }
 
 A per-command `handlers:` entry is a one-arg function receiving argvs. The catch-all `handler:` is a two-arg function that intercepts EVERY external command.
 
-Use `within` instead of `cd`. paths in results are relative to the `within` directory, so consume them under the same `within`. `env:` values must be scalars. 
+Use `within` instead of `cd`. Paths in results are relative to the `within` directory, so consume them under the same `within`. `env:` values must be scalars. 
 
 ## I/O
 
