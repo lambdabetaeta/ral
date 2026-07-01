@@ -20,13 +20,13 @@ use std::time::Duration;
 /// legitimately slow completion that keeps dribbling bytes runs as long as
 /// it likes.  Without it a connection that goes silent (TCP open, bytes
 /// stopped) blocks the stream forever — `next()` never wakes.  The timeout
-/// turns that dead silence into a retryable transport error instead; 120s is
-/// generous enough not to trip on a slow time-to-first-token, and the total
+/// turns that dead silence into a retryable transport error instead; 180s is
+/// generous enough not to trip on a slow high-effort time-to-first-token, and the total
 /// idle budget stays bounded across the transient retry budget (~3 attempts,
 /// see [`MAX_ATTEMPTS`]).
 ///
 /// [`MAX_ATTEMPTS`]: crate::provider::MAX_ATTEMPTS
-pub(crate) const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// rustls config validating against the bundled Mozilla webpki roots.
 pub(crate) fn config() -> rustls::ClientConfig {

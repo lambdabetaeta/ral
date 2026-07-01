@@ -38,15 +38,15 @@ const EXARCH_REMINDER_OPEN: &str = "[EXARCH_REMINDER // Do not mention to user.]
 const EXARCH_REMINDER_CLOSE: &str = " [/EXARCH_REMINDER]";
 type Rule = fn(&Result<TurnOutcome, ProviderError>) -> Option<(String, &'static str)>;
 
-/// The rule set the binary ships with.  Every rule reacts to a
-/// model-behaviour outcome shape from [`Agent::apply`] by continuing
-/// with a synthetic nudge.  Transport failures (transient, rate-limit)
-/// are deliberately absent: they are retried with backoff inside the
-/// provider loop, and once that budget is spent they surface and end
-/// the turn rather than re-issuing the request without backoff.
+/// The rule set the binary ships with.
 ///
 /// [`Agent::apply`]: crate::agent::Agent::apply
-const RULES: &[Rule] = &[on_empty_turn, on_early_stop, on_truncated];
+const RULES: &[Rule] = &[
+    on_empty_turn,
+    on_early_stop,
+    on_truncated,
+    on_provider_recoverable,
+];
 
 /// Per-attempt expectations that depend on the agent rather than the
 /// attempt outcome: whether this agent returns through `reply`
@@ -272,6 +272,19 @@ fn on_truncated(r: &Result<TurnOutcome, ProviderError>) -> Option<(String, &'sta
     }
 }
 
+fn on_provider_recoverable(
+    r: &Result<TurnOutcome, ProviderError>,
+) -> Option<(String, &'static str)> {
+    match r {
+        Err(ProviderError::Transient { .. } | ProviderError::RateLimited { .. }) => Some((
+            "provider retry budget exhausted".into(),
+            "The previous provider request failed before producing output. \
+             Continue from the current workspace state.",
+        )),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
@@ -296,11 +309,10 @@ mod tests {
         AgentLog::root(&root, 0, "test", "test", 0).expect("session log")
     }
 
-    /// A surfaced rate-limit is a transport condition the provider loop
-    /// already retried with backoff.  It must end the turn (`None`), not draw
-    /// on the semantic nudge budget and re-issue the request.
+    /// A surfaced rate-limit already exhausted the provider loop's backoff
+    /// budget; the outer nudge gives the model one fresh turn.
     #[test]
-    fn rate_limit_ends_turn_without_consuming_budget() {
+    fn rate_limit_nudges_after_provider_budget() {
         let mut reg = Registry::new();
         let mut log = fresh_log("ratelimit");
         let attempt = Err(ProviderError::RateLimited {
@@ -308,8 +320,8 @@ mod tests {
             cause: "429".into(),
             body: None,
         });
-        assert!(
-            reg.react(
+        let msg = reg
+            .react(
                 &attempt,
                 NudgeCtx {
                     must_reply: false,
@@ -318,14 +330,14 @@ mod tests {
                 &emit(),
                 &mut log,
             )
-            .is_none()
-        );
-        assert_eq!(reg.used, 0, "transport failure must not spend nudge budget");
+            .expect("rate limit should nudge after provider budget");
+        assert!(msg.contains("provider request failed"));
+        assert_eq!(reg.used, 1);
     }
 
     /// Same contract for a generic transient failure.
     #[test]
-    fn transient_ends_turn_without_consuming_budget() {
+    fn transient_nudges_after_provider_budget() {
         let mut reg = Registry::new();
         let mut log = fresh_log("transient");
         let attempt = Err(ProviderError::Transient {
@@ -333,8 +345,8 @@ mod tests {
             attempts: 3,
             body: None,
         });
-        assert!(
-            reg.react(
+        let msg = reg
+            .react(
                 &attempt,
                 NudgeCtx {
                     must_reply: false,
@@ -343,9 +355,9 @@ mod tests {
                 &emit(),
                 &mut log,
             )
-            .is_none()
-        );
-        assert_eq!(reg.used, 0);
+            .expect("transient should nudge after provider budget");
+        assert!(msg.contains("provider request failed"));
+        assert_eq!(reg.used, 1);
     }
 
     /// A model-behaviour outcome still nudges and spends one unit of budget.
