@@ -503,25 +503,30 @@ mod tests {
         assert_eq!(reg.used, 0, "reset clears the budget");
     }
 
-    /// With nothing pinned, the reminder never fires however many turns pass.
+    /// With nothing pinned, the periodic reminder nudges toward `set-goal` /
+    /// `add-task` every `REMIND_EVERY` turns instead of the pinned-state
+    /// message — firing exactly once per `REMIND_EVERY`-turn window, not on
+    /// every turn in between.
     #[test]
-    fn no_reminder_without_pinned_state() {
+    fn no_pins_reminder_fires_every_remind_every_turns() {
         let mut reg = Registry::new();
         let mut log = fresh_log("no-pin-reminder");
-        for _ in 0..(REMIND_EVERY + 3) {
+        let ctx = || NudgeCtx {
+            must_reply: false,
+            pinned: None,
+        };
+        let mut fires = 0;
+        for turn in 1..=(REMIND_EVERY + 3) {
             reg.reset();
-            assert!(
-                reg.react(
-                    &Ok(TurnOutcome::Complete("x".into())),
-                    NudgeCtx {
-                        must_reply: false,
-                        pinned: None,
-                    },
-                    &emit(),
-                    &mut log,
-                )
-                .is_none()
-            );
+            if let Some(msg) = reg.react(&Ok(TurnOutcome::Complete("x".into())), ctx(), &emit(), &mut log) {
+                assert_eq!(
+                    turn, REMIND_EVERY,
+                    "no-pins reminder should only fire on the {REMIND_EVERY}th turn"
+                );
+                assert!(msg.contains("set-goal"));
+                fires += 1;
+            }
         }
+        assert_eq!(fires, 1, "no-pins reminder should fire exactly once in this window");
     }
 }
