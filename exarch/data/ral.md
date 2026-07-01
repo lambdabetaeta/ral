@@ -281,7 +281,7 @@ A card `` `card LIST-OF-MARKS` `` is an ordered stack of marks drawn top-to-bott
 - `` `diff [path: "…", start: N, before: […], del: […], add: […], after: […]] `` — one located hunk (`del` rewritten to `add` at line `start`, with context). Pass `hunks: [[…], …]` for several. The host renders the size bar, add/del grain, and graded disclosure.
 - `` `raw [bytes: "…"] `` — pre-formed bytes appended verbatim, for output outside the grammar. Honest about being un-encoded ink.
 
-A `` `card `` may stack marks of different kinds, but within one homogeneous list — a span list, a `fields` row list — every element is one type, so give every span a `role` and keep a table's values one kind. `edit` builds and surfaces its own diff card; the tasks kit adds `task-card`/`meter-card` constructors. Compose marks directly for anything else:
+A `` `card `` may stack marks of different kinds, but within one homogeneous list — a span list, a `fields` row list — every element is one type, so give every span a `role` and keep a table'"'"'s values one kind. `edit` builds and surfaces its own diff card; the tasks kit adds `task-card`/`meter-card` constructors. **The backtick and tag name must be on the same line** (`` `card ``, not `` `\ncard ``); the payload may span lines freely. Compose marks directly for anything else:
 
     surface `card [
       `text    [spans: [[role: "strong", text: "tests "], [role: "ok", text: "42 passed"]]],
@@ -289,6 +289,13 @@ A `` `card `` may stack marks of different kinds, but within one homogeneous lis
       `fields  [rows: [[label: "suite",  value: `text [spans: [[role: "",   text: "unit" ]]]],
                        [label: "status", value: `text [spans: [[role: "ok", text: "green"]]]]]]
     ]
+
+    # A let binding keeps complex cards readable:
+    let card = `card [
+      `text    [spans: [[role: "strong", text: "tests "], [role: "ok", text: "42 passed"]]],
+      `measure [label: "crates", value: 7, max: 12],
+    ]
+    surface $card
 
 ## Help
 
