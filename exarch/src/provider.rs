@@ -50,6 +50,28 @@ pub fn caps_for(model: &str) -> crate::pricing::ModelCaps {
 /// Retry budget for transient stream/network failures.  Three attempts
 /// means up to two retries before surfacing the error.
 pub(crate) const MAX_ATTEMPTS: u32 = 3;
+/// Stream-idle bound for retry attempts.  The first attempt gets the full
+/// [`STREAM_IDLE_TIMEOUT`] — generous, so a slow high-effort
+/// time-to-first-token is never mistaken for a stall.  But once an attempt
+/// *has* idled out, the working hypothesis flips from "slow" to "broken",
+/// and a retry that stalls the same way should fail fast rather than
+/// re-spend the full budget: with keep-alive probes evicting dead
+/// connections (see [`crate::tls::client`]) a healthy retry produces its
+/// first event quickly, so a retry that is silent for a whole minute is
+/// almost certainly stalled again.  Cuts the worst-case per-turn idle burn
+/// from `3 × 180s` to `180s + 2 × 60s`.
+const RETRY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The stream-idle bound for the given 1-based attempt: the full
+/// [`STREAM_IDLE_TIMEOUT`] on the first try, [`RETRY_IDLE_TIMEOUT`] on
+/// retries (see there for why).
+fn idle_timeout(attempt: u32) -> Duration {
+    if attempt <= 1 {
+        STREAM_IDLE_TIMEOUT
+    } else {
+        RETRY_IDLE_TIMEOUT
+    }
+}
 /// Retry budget for rate-limit (429) failures.  Larger than the
 /// transient budget: a 429 is the server explicitly asking us to wait,
 /// not a broken request, and exarch's headless mode has no human to
@@ -1620,7 +1642,7 @@ impl Engine {
         let step = self.runtime.block_on(retry_with_backoff(
             "before request",
             cancel,
-            async |_attempt| {
+            async |attempt| {
                 let mut req = req_template.clone();
                 req.tools = Some(tool_defs.clone());
                 let mut seen_any_token = false;
@@ -1637,8 +1659,9 @@ impl Engine {
                         // phase — which `tls::client`'s `read_timeout` does
                         // not cover — and time-to-first-event; surfaced as a
                         // transient transport error so the retry budget
-                        // re-issues it (no token has streamed yet).
-                        _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
+                        // re-issues it (no token has streamed yet).  Retries
+                        // get the shorter bound — see [`idle_timeout`].
+                        _ = tokio::time::sleep(idle_timeout(attempt)) => {
                             return Err(ProviderError::Transient {
                                 cause: "stream idle: no response within timeout".into(),
                                 attempts: 1,
@@ -1662,13 +1685,14 @@ impl Engine {
                         // pattern above), so ordinary keepalives and partial
                         // frames that do eventually decode never trip it —
                         // only a generation that goes fully silent at this
-                        // level for the whole budget does.
+                        // level for the whole budget does.  Retries get the
+                        // shorter bound — see [`idle_timeout`].
                         let event = tokio::select! {
                             biased;
                             _ = wait_for_cancel(cancel) => {
                                 return Err(ProviderError::Cancelled("mid-stream"));
                             }
-                            _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
+                            _ = tokio::time::sleep(idle_timeout(attempt)) => {
                                 return Err(ProviderError::Transient {
                                     cause: "stream idle: no event within timeout".into(),
                                     attempts: 1,
@@ -1767,7 +1791,7 @@ impl Engine {
         let resp = self.runtime.block_on(retry_with_backoff(
             "during summary",
             cancel,
-            async |_attempt| {
+            async |attempt| {
                 let req = req_template.clone();
                 let r = tokio::select! {
                     biased;
@@ -1784,8 +1808,9 @@ impl Engine {
                     // heuristic that a non-streaming `reqwest` timeout would
                     // otherwise fall through to.  No partial output is ever
                     // rendered, so it is `Failed` (retryable), never
-                    // `Committed`.
-                    _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
+                    // `Committed`.  Retries get the shorter bound — see
+                    // [`idle_timeout`].
+                    _ = tokio::time::sleep(idle_timeout(attempt)) => {
                         return Attempt::Failed(ProviderError::Transient {
                             cause: "summary request: no response within timeout".into(),
                             attempts: 1,
@@ -2756,17 +2781,22 @@ mod tests {
 
     /// The idle timeout is an idle (between-events) bound, not a total cap.
     /// Even the worst case — the full transient retry budget, each attempt
-    /// idling for the whole timeout — leaves the total idle wait bounded and
-    /// modest, so a genuinely stalled stream surfaces as a failed turn in
-    /// minutes rather than appearing to hang.  This guards against a future
-    /// bump of `STREAM_IDLE_TIMEOUT` (or `MAX_ATTEMPTS`) that would let the
-    /// budget grow into an effective hang.
+    /// idling for its whole per-attempt bound — leaves the total idle wait
+    /// bounded and modest, so a genuinely stalled stream surfaces as a failed
+    /// turn in minutes rather than appearing to hang.  This guards against a
+    /// future bump of `STREAM_IDLE_TIMEOUT`, `RETRY_IDLE_TIMEOUT`, or
+    /// `MAX_ATTEMPTS` that would let the budget grow into an effective hang.
     #[test]
     fn idle_timeout_budget_stays_bounded() {
-        let worst_case = STREAM_IDLE_TIMEOUT * MAX_ATTEMPTS;
+        let worst_case: Duration = (1..=MAX_ATTEMPTS).map(idle_timeout).sum();
         assert!(
             worst_case < Duration::from_secs(600),
             "a stalled stream must fail in minutes, not appear hung; idle budget is {worst_case:?}"
+        );
+        assert_eq!(idle_timeout(1), STREAM_IDLE_TIMEOUT, "first attempt gets the full bound");
+        assert!(
+            idle_timeout(2) < STREAM_IDLE_TIMEOUT,
+            "retries fail faster than the first attempt"
         );
     }
 

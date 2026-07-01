@@ -43,16 +43,38 @@ pub(crate) fn config() -> rustls::ClientConfig {
     .with_no_client_auth()
 }
 
+/// How often to probe an HTTP/2 connection with a PING frame, and how long
+/// to wait for the PONG before judging the connection dead.  Without these,
+/// a black-holed connection (TCP open, bytes silently dropped by a NAT or
+/// LB) sits in reqwest's pool looking healthy, and every retry of a stalled
+/// request is dealt onto the *same* dead connection — observed in production
+/// as a run burning its whole provider retry budget on back-to-back
+/// `STREAM_IDLE_TIMEOUT` stalls while a fresh process succeeded at once.
+/// PINGs turn that silence into a transport error in ~45s and evict the
+/// connection, so the next attempt dials fresh.
+const H2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
+const H2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(15);
+/// TCP-level keepalive: the same dead-peer detection for HTTP/1.1
+/// connections, which h2 PINGs do not cover.
+const TCP_KEEP_ALIVE: Duration = Duration::from_secs(30);
+
 /// A `reqwest::Client` bound to [`config`], for the genai transport and model
 /// listing — which would otherwise let genai build a client against the system
 /// trust store. No *total* request timeout, so a long, legitimately slow
 /// completion stays alive; the only liveness bound is [`STREAM_IDLE_TIMEOUT`]
 /// as a per-read timeout, which resets on every byte and so detects a stalled
 /// socket at the byte/SSE level rather than at the decoded-event level.
+/// Keep-alive probes (h2 PING + TCP keepalive) additionally detect a dead
+/// connection *between* requests, so a retry never reuses a pooled socket
+/// that has already gone dark.
 pub(crate) fn client() -> reqwest::Client {
     reqwest::Client::builder()
         .use_preconfigured_tls(config())
         .read_timeout(STREAM_IDLE_TIMEOUT)
+        .tcp_keepalive(TCP_KEEP_ALIVE)
+        .http2_keep_alive_interval(H2_KEEP_ALIVE_INTERVAL)
+        .http2_keep_alive_timeout(H2_KEEP_ALIVE_TIMEOUT)
+        .http2_keep_alive_while_idle(true)
         .build()
         .expect("preconfigured rustls reqwest client")
 }
