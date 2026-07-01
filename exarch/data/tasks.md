@@ -30,4 +30,13 @@ Definitions - remember to use immutably:
   render-tasks $exarch-tasks              — read tasks on stdout
   save-tasks $exarch-tasks <path> / load-tasks <path>
 
-Schema: [ id: Int, desc: String, status: `open |`doing | `blocked |`done, tags: [String], notes: String ]
+Schema: [ id: Int, desc: String, status: `open | `doing | `blocked | `done, tags: [String], notes: String ]
+
+## Goal
+
+Alongside the task list, hold the session's overarching aim so it survives across turns:
+
+  set-goal "land the parser refactor"   # record the current goal; call again to replace
+  clear-goal                            # drop it once the aim is met or abandoned
+
+One goal is held at a time: `set-goal` replaces the previous, and `clear-goal` is idempotent (a quiet no-op when nothing is set). While a goal is set, the periodic reminder keeps it in front of you.

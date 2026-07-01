@@ -19,7 +19,7 @@ Commands are sequenced by newlines or `;`. An uncaught failure aborts the whole 
 
 The variables `branch`, `body`, and `n` are then **AVAILABLE IN EVERY RAL TOOL CALL, OVER EVERY TURN, FOR THE REST OF THE SESSION**. **YOU DO NOT NEED TO RE-DEFINE THEM IN THE NEXT TURN, JUST USE THEM AGAIN.**
 
-Captured output is a `String`: split it with `lines`, parse it with `int`/`float`, or decode it with a codec (`from-json $s`).
+Captured output is a `String`: split it with `lines`, parse it with `int`/`float`, or decode it by putting it back on the byte channel (`to-string $s | from-json`).
 
 A turn ending in `let` returns nothing; end with what you mean to see as `VALUE`.
 
@@ -56,9 +56,9 @@ Blocks support recursive definitions.
 
 ## Pipelines
 
-`ral` has two kinds of pipes: some carry bytes from one command to the next (UNIX-style); others pipe values, satisfying the equation `x | f = f !{x}` holds.
+`ral` has two kinds of pipes: some carry bytes from one command to the next (UNIX-style); others pipe values, satisfying the equation `x | f = f !{x}`.
 
-There are commands that take bytes to values: There are codecs that bridge the world of bytes to the world of values: `from-line` takes `Bytes` to a `String` with no trailing `\n`, and `from-string` with it; `from-lines` gives a lazy stream of `String`; `from-json` turns JSON into a `ral` value. Decode where the bytes flow, and capture only after decoding:
+Codecs bridge the world of bytes to the world of values: `from-line` takes `Bytes` to a `String` with no trailing `\n`, and `from-string` with it; `from-lines` gives a lazy stream of `String`; `from-json` turns JSON into a `ral` value. Decode where the bytes flow, and capture only after decoding:
 
     let cfg = curl -s https://api.example.com/cfg | from-json
     let os  = !{uname -s | from-line}
@@ -114,7 +114,6 @@ Arithmetic and Boolean expressions must be in `$[…]` blocks: `$[$x == 0]`, `$[
     let wide = [...$xs, d, e]            # consing by spreading
     let at_end = [d, e, ...$xs]          # appending by spreading
     ls ...$flags ...$dirs                # …and to splice arguments
-    `file [bytes: ${file-info $p}[size]]
 
 Indexing `$h[key]` works in any context (pipelines, blocks, double quoted): e.g. `view-text-around $h[file] $h[line] 3`.
 
@@ -172,13 +171,13 @@ Prelude functions cover common cases:
 
 ## Concurrency
 
-`defer { … }` wraps its body in `audit` and runs it on a worker, returning a handle at once; use it for long-running calls.  The audit wrapping means the spawned block never fails — errors become data in the audit tree:
+`defer { … }` wraps its body in `audit` and runs it on a worker, returning a handle at once; use it for long-running calls.  The audit wrapping means the deferred block never fails — errors become data in the audit tree:
 
     let b = { make } 
-    let h = defer $b        # effectively spawn { audit { … } }; keep the handle!
+    let h = defer $b        # keep the handle!
     #'build started'#
 
-`await` returns `[value, stdout, stderr]`.  Because `defer` wraps in `audit`, `$r[value]` is the **audit tree** — a record with `cmd`, `status`, `children`, and a `value` field holding the block's own result.  `$r[stdout]`/`$r[stderr]` are the worker process output (usually empty); per-command stdout/stderr are inside `$r[value][children]`:
+`await` returns a record with `value`, `stdout`, and `stderr` fields.  Because `defer` wraps in `audit`, `$r[value]` is the **audit tree** — a record with `cmd`, `status`, `children`, and a `value` field holding the block's own result.  `$r[stdout]`/`$r[stderr]` are the worker process output (usually empty); per-command stdout/stderr are inside `$r[value][children]`:
 
     let r = await $h
     # outer .value is the await record field; inner .value is the audit tree's result
@@ -195,7 +194,7 @@ Use `cancel $h` to stop a handle thread that is no longer needed. There is also 
 `within` is an effect handler that runs a block with a changed directory, environment, or handling of a command call:
 
     within [dir: #'src'#] { grep-files #'TODO'# }
-    spawn { within [env: [RUST_LOG: #'debug'#]] { cargo run } }
+    let h = defer { within [env: [RUST_LOG: #'debug'#]] { cargo run } }
     within [ env : [ API_KEY : #''# ], handlers: [curl: { |args| #'offline stub'# }]] { fetch-all }
     let all_blocked = { |name args| echo "blocked: $name ...$args" }
     within [handler: $all_blocked ] { make deploy }
@@ -238,9 +237,9 @@ For dot/ignored files you also have `rg` bundled.
 
 `view-text PATH START END` shows the half-open line range `[START, END)`:
 
-    [tui-start : !{view-text #'src/tui.rs'# 100 150}, tui-end: !{view-text #'src/tui.rs'# 100 150} ]
+    [tui-start: !{view-text #'src/tui.rs'# 100 150}, tui-end: !{view-text #'src/tui.rs'# 300 350}]
 
-The result is a `[hash, line-no, text]` record, where `<hash>` is a unique freshness witness for that line, which depends on neighbouring lines. 
+The result is a list of `[line, hash, text]` records, where `<hash>` is a unique freshness witness for that line, which depends on neighbouring lines. 
 
 `view-text-around PATH LINE PEEK` shows the `2*PEEK + 1` lines centred on `LINE`, tagged the same way.
 
@@ -248,7 +247,7 @@ The result is a `[hash, line-no, text]` record, where `<hash>` is a unique fresh
 
 There are three ways to use `edit`. To delete a line pass the empty string `#''#` as `NEWTEXT`. To replace a line pass a new line as `NEWTEXT`. To replace a line with multiple
 new lines put several newline characters (not escapes) in `NEWTEXT`. The
-replacement must already have the exact indentation needed at the insertion point; write it directly with a raw string at the target indentation, or use `!{indent N !{dedent #'"'"'...'"'"'#}}` to author at natural indentation then shift. Example:
+replacement must already have the exact indentation needed at the insertion point; write it directly with a raw string at the target indentation, or use `!{indent N !{dedent #'...'#}}` to author at natural indentation then shift. Example:
 
     view-text #'src/lib.rs'# 80 120   # read the hashes
     edit #'src/lib.rs'# [
