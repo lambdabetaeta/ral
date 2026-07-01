@@ -472,13 +472,18 @@ impl Viewport {
     /// End a streaming step: commit whatever remains in `open`.
     pub(super) fn close_boundary(&mut self, context_floor: u8) {
         if !self.thinking.trim().is_empty() {
+            let preserve_scrollback = !self.sticky
+                && self.flat.virtual_think_len > 0
+                && self.offset <= self.flat.virtual_think_at + self.flat.virtual_think_len;
             let text = std::mem::take(&mut self.thinking);
             let answer_chars = self.current_answer_chars();
             self.upsert_thinking(text, answer_chars);
+            if preserve_scrollback {
+                self.sticky = false;
+            }
         }
         self.flush_open(context_floor);
     }
-
     /// Commit the longest fence-safe prefix of `open` as one markdown
     /// block.  Committing elsewhere would split a code fence across two
     /// `render_md` calls, so when no safe break exists the buffer keeps
@@ -761,22 +766,21 @@ impl Viewport {
 
     // ── rendering ────────────────────────────────────────────────────────
 
-    /// The provisional seat for in-flight reasoning: `RailKind::Thinking` (∴)
-    /// with a live size bar and deliberation grain, but no prose. The final
-    /// committed thinking block is dialable, so the trace stays available
-    /// without a tall live seat that snaps shut at the boundary.
+    /// The provisional seat for in-flight reasoning, matching the committed
+    /// block's collapsed (L1) header: a blank separator, then the deliberation
+    /// grain beside a size_bar — no prose.  The caller seats the `∴` rail glyph
+    /// on the first content row (matching `render_with`).
     fn thinking_seat(&self) -> Vec<Line<'static>> {
         if self.thinking.trim().is_empty() {
             return vec![];
         }
         let think_chars = self.thinking.chars().count() as u32;
         let think_lines = self.thinking.lines().count() as u32;
+        let answer_chars = self.current_answer_chars();
         vec![
             Line::default(),
             Line::from(vec![
-                rail::span(RailKind::Thinking, self.agent, Some(think_lines)),
-                Span::raw(" "),
-                deliberation_grain(think_chars, 0),
+                deliberation_grain(think_chars, answer_chars),
                 Span::raw(" "),
                 size_bar(think_lines),
             ]),
@@ -836,7 +840,14 @@ impl Viewport {
         // before the trailing markdown answer run.  That lets answer
         // paragraphs keep committing live without visually jumping ahead of
         // the deliberation they follow.
-        let think = self.thinking_seat();
+        let mut think = self.thinking_seat();
+        // Seat the rail on the thinking rows, matching committed-block rendering.
+        if !think.is_empty() {
+            let think_lines = self.thinking.lines().count() as u32;
+            if let Some(idx) = think.iter().position(|l| !is_blank(l)) {
+                think[idx].spans.insert(0, rail::span(RailKind::Thinking, self.agent, Some(think_lines)));
+            }
+        }
         let seat = self.streaming_seat();
         let committed = self.flat.rows.len();
         let think_at = if think.is_empty() {
