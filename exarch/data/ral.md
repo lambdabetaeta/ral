@@ -248,7 +248,7 @@ The result is a `[hash, line-no, text]` record, where `<hash>` is a unique fresh
 
 There are three ways to use `edit`. To delete a line pass the empty string `#''#` as `NEWTEXT`. To replace a line pass a new line as `NEWTEXT`. To replace a line with multiple
 new lines put several newline characters (not escapes) in `NEWTEXT`. The
-replacement must already have the exact indentation needed at the insertion point; write it directly with a raw string at the target indentation. Example:
+replacement must already have the exact indentation needed at the insertion point; write it directly with a raw string at the target indentation, or use `!{indent N !{dedent #'"'"'...'"'"'#}}` to author at natural indentation then shift. Example:
 
     view-text #'src/lib.rs'# 80 120   # read the hashes
     edit #'src/lib.rs'# [
