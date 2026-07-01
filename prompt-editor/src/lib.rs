@@ -221,18 +221,18 @@ impl PromptEditor {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        if !self.highlights.is_empty() {
-            let edtui_highlights: Vec<edtui::Highlight> = self
-                .highlights
-                .iter()
-                .map(|h| edtui::Highlight {
-                    start: Index2::new(h.row, h.col_start),
-                    end: Index2::new(h.row, h.col_end.saturating_sub(1)),
-                    style: h.style,
-                })
-                .collect();
-            self.state.set_highlights(edtui_highlights);
-        }
+        // Always sync highlights onto the edtui state, even when empty:
+        // otherwise stale spans from a prior frame persist in the widget.
+        let edtui_highlights: Vec<edtui::Highlight> = self
+            .highlights
+            .iter()
+            .map(|h| edtui::Highlight {
+                start: Index2::new(h.row, h.col_start),
+                end: Index2::new(h.row, h.col_end.saturating_sub(1)),
+                style: h.style,
+            })
+            .collect();
+        self.state.set_highlights(edtui_highlights);
         // The frontends supply their own chrome and drive the terminal's
         // native cursor, so the widget renders bare: the caller's text style
         // over the terminal background (no opaque fill), no painted cursor
