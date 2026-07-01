@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = ["core", "ral", "ral-sh", "exarch", "prompt-editor", "vendor/ripgrep-core"]
-exclude = ["vendor/genai"]
 
 # Shared third-party versions.  Member crates point at these with
 # `dep = { workspace = true }` so a version bump happens in one place.
@@ -40,11 +39,3 @@ panic = "unwind"  # must unwind: catch_unwind in driver loop needs it to recover
 inherits = "release"
 strip = false
 debug = "full"
-
-# genai 0.6.5's WebClient::default() — the transport behind its model-listing
-# adapter paths, which take no injectable client — builds a reqwest client
-# against rustls-platform-verifier and aborts where no system trust store
-# exists. The vendored copy binds that default to the bundled webpki roots,
-# matching exarch/src/tls.rs.
-[patch.crates-io]
-genai = { path = "vendor/genai" }
