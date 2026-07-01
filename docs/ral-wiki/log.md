@@ -3405,3 +3405,27 @@ as a proposed hardening direction. The ADR separates provider-context compaction
 from heap/disk reclamation and proposes bounded presentation, non-lossy inbox
 quotas, event-prefix reclamation, shell residency diagnostics, and a `/resources`
 view.
+
+
+## [2026-07-01] ingest | async-agent-tool confirmed landed, flipped to active
+
+Verified [[decisions/260617_async-agent-tool|async-agent-tool]] against the shipped
+code (`exarch/src/tools/agent.rs`, `bus.rs`, `agent_registry.rs`) and flipped it
+proposed → active. The landed shape is stricter than proposed: `agent` carries no
+`mode` field at all — every call is launch-only and always asynchronous, the
+`mode: "sync"` dependency edge never shipped. `AgentResult`/`InboxMsg` delivery,
+the listable `agents`/`agent_cancel` registry, request-local provider
+cancellation, and `/clear` generation rejection are all present as proposed.
+Reworded the [[index|index]] entry to record the mode-collapse divergence.
+
+
+## [2026-07-01] ingest | shared-transport confirmed landed, flipped to active
+
+Verified [[decisions/260625_shared-transport|shared-transport]] against the shipped
+code (`exarch/src/provider.rs`, `fleet.rs`): `Engine`/`Transport` split exactly as
+sketched, `Fleet` holds `Arc<Engine>`, `make_runtime()` now called only once at
+`Engine::new()` (plus one unrelated test helper) instead of per `/model` switch,
+`SessionInfo` reduced to static fields, and the banner reads the focused agent's
+live `provider().current()`. The sketched `Engine::Scripted` test seam shipped as
+`Backend::Scripted` instead — same effect, no runtime built. Flipped proposed →
+active and added the missing [[index|index]] entry (absent since filing).

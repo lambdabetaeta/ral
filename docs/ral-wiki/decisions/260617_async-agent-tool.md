@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: active
 ---
 
 # `agent` has sync and async modes

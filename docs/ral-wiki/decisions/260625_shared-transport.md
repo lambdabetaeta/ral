@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: active
 ---
 
 # A shared transport beneath the per-agent providers
