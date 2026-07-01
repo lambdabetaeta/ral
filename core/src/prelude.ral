@@ -121,6 +121,13 @@ let words = { |s|
     let parts = re-split '\s+' $s
     _trim-empties $parts
 }
+## Prepend n spaces to every non-empty line.
+let indent = { |n s|
+    let spaces = fold { |acc _| "$acc " } '' !{range 1 $[$n + 1]}
+    let lns = lines $s
+    let indented = map { |l| if $[not !{equal $l ''}] { "$spaces$l" } else { $l } } $lns
+    intercalate "\n" $indented
+}
 
 # Error handling — `try` itself is a control-operator keyword (§10.1).
 ## Retry body up to n times on failure.
