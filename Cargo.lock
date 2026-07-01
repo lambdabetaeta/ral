@@ -1679,9 +1679,8 @@ dependencies = [
 
 [[package]]
 name = "genai"
-version = "0.7.0-beta.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "602ed18d581bb77be2cf5ff8f3e718a6b5160bd096adf856b475145eecb8261f"
+version = "0.7.0-beta.9-WIP"
+source = "git+https://github.com/lambdabetaeta/rust-genai?branch=fix-anthropic-sonnet-5-thinking#9f509c2f288f82332ea63b4cf753b592abcd9578"
 dependencies = [
  "base64",
  "bytes",
