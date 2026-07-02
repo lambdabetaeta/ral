@@ -278,6 +278,7 @@ and keeps the result addressable (e.g. the witness `edit` needs).  \
             "title": title,
             "status": "started",
             "log_dir": log_dir_str,
+            "note": "If you have nothing to do before the agent returns, please yield to the user.",
         });
         SessionToolResult {
             id,

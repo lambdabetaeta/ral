@@ -116,6 +116,19 @@ impl AgentRegistry {
         self.lock().entries.is_empty()
     }
 
+    /// Whether `parent` has any live direct child still registered.  The park
+    /// signal for a headless root (or any node) that launched async agents and
+    /// must stay alive to receive their results: a child delivers only to its
+    /// own parent's inbox, so a live direct child is exactly what keeps this
+    /// agent's mailbox from being permanently empty.  Cheap — a scan, no
+    /// allocation, unlike [`Self::list`].
+    pub fn has_children(&self, parent: AgentId) -> bool {
+        self.lock()
+            .entries
+            .values()
+            .any(|e| e.parent == Some(parent))
+    }
+
     /// Register an agent under its `parent` (`None` for the trunk).  A child
     /// (`parent` set) arms a ceiling on the reaper that cancels its whole
     /// subtree when it elapses; the trunk gets none.  Returns the birth

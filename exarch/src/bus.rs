@@ -50,6 +50,15 @@ pub enum ParkMode {
     /// agent.  Park *and ignore cancellation*: an Esc cancels the current
     /// *turn*, not the agent, which keeps waiting for the next human line.
     Held,
+    /// No human, but this agent has live children still running (async
+    /// `agent`s it launched).  Each will deliver its result up this agent's
+    /// own inbox when it settles, so park — a headless root waiting on its
+    /// fleet has a legal "keep still" move rather than being killed at
+    /// quiescence.  Like [`Self::UntilCancelled`], a cancellation
+    /// (`agent_cancel`, the ceiling) terminates at once, and the wait ends on
+    /// its own the moment the last child settles (the next re-evaluation sees
+    /// no children and falls through to [`Self::Quiesce`]).
+    HeldByChildren,
     /// No human, but a self-schedule is armed and may fire a wakeup.  Park,
     /// but a cancellation (`agent_cancel`, the ceiling) terminates at once —
     /// stop now rather than wait for the schedule.
@@ -547,6 +556,10 @@ impl Inbox {
     /// - [`ParkMode::Held`] — a human is attached (the conversing trunk or the
     ///   focused agent).  Parks, ignoring cancellation: an Esc cancels the
     ///   current *turn*, not the agent.
+    /// - [`ParkMode::HeldByChildren`] — live children may still deliver a
+    ///   result up this inbox.  Parks like [`ParkMode::UntilCancelled`]; a
+    ///   cancellation terminates at once, and it falls through to `Quiesce`
+    ///   once the last child settles.
     /// - [`ParkMode::UntilCancelled`] — a self-schedule may fire.  Parks, but a
     ///   cancellation terminates at once.
     /// - [`ParkMode::Quiesce`] — nothing will feed this agent again: returns

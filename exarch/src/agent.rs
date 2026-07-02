@@ -690,8 +690,14 @@ impl Agent {
                 // Every returning agent (a sub-agent or a headless trunk) hands
                 // its value back through `reply`; an un-replied finish is
                 // re-nudged within budget, then fails.  Only the interactive
-                // trunk, which converses and never returns, is exempt.
-                must_reply: self.returns(),
+                // trunk, which converses and never returns, is exempt — and so,
+                // transiently, is any agent with live children: an un-replied
+                // finish there is not a dropped return but a legitimate wait on
+                // its fleet, and `park_mode` holds it (`HeldByChildren`) until a
+                // child's result wakes it.  Nagging it toward `reply` now would
+                // push it to return before its agents land; once they have all
+                // settled the nudge resumes and insists on `reply` as before.
+                must_reply: self.returns() && !self.has_live_children(),
                 pinned: self.pinned_digest(),
             };
             if let Some(msg) = self.nudges.react(&outcome, ctx, emit, &mut self.log) {
@@ -1086,17 +1092,30 @@ impl Agent {
     /// The `should_park` predicate ([`ParkMode`]), recomputed on every wake.  A
     /// present human holds this agent parked — the *conversing* trunk (`parent
     /// = None ∧ interactive`) or the agent the human has `TAB`bed to (`focus =
-    /// id`); a live self-schedule holds it until cancelled; otherwise it
-    /// terminates at quiescence.
+    /// id`); live children it launched hold it until they settle
+    /// ([`ParkMode::HeldByChildren`]) so a headless root waiting on its fleet
+    /// stays alive to receive their results; a live self-schedule holds it
+    /// until cancelled; otherwise it terminates at quiescence.
     fn park_mode(&self) -> ParkMode {
         let conversing = self.parent.is_none() && self.interactive;
         if conversing || self.focus.load(Ordering::Relaxed) == self.id {
             ParkMode::Held
+        } else if self.has_live_children() {
+            ParkMode::HeldByChildren
         } else if self.schedules.armed() {
             ParkMode::UntilCancelled
         } else {
             ParkMode::Quiesce
         }
+    }
+
+    /// Whether this agent has a live child still running — an async `agent` it
+    /// launched that has not yet settled its result up this inbox.  Read by
+    /// [`Self::park_mode`] (so a root waiting on its fleet parks rather than
+    /// quiescing) and by [`Self::drive`] (so the `reply` nudge is not raised
+    /// against a finish that is a legitimate wait, not a dropped return).
+    fn has_live_children(&self) -> bool {
+        self.agents.has_children(self.id)
     }
 
     fn stage(
