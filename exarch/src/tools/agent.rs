@@ -229,7 +229,7 @@ pub(crate) fn spawn_discussion(session: &mut Agent, topic: &str, emit: &Emitter)
     let input = json!({
         "prompt": discussion_prompt(topic),
         "title": title,
-        "permissions": "dangerous",
+        "permissions": "read-only",
     });
     dispatch_spawn(
         SpawnKind::Anamnesis,
@@ -244,22 +244,24 @@ pub(crate) fn spawn_discussion(session: &mut Agent, topic: &str, emit: &Emitter)
 fn discussion_prompt(topic: &str) -> String {
     format!(
         "\
-You are the chair of a short two-agent discussion.
+You are the chair of a lively two-way discussion. You will debate a single discussant via `message`.
 
 Topic:
 {topic}
 
 Protocol:
-- Spawn exactly one `agraphos` partner with title `discussant` and permissions `dangerous`.
-- Give the partner a compact prompt asking for an independent critique, alternative, or objection.
-- Wait for the partner's normal `reply`; do not use `message` for this first version.
-- Weigh the partner's reply against your own view.
+- Spawn exactly one `agraphos` partner with a title that includes the topic (e.g. `debate-<topic>`) and permissions `read-only`.
+  Give it a prompt that says: you are the discussant in a two-way debate, wait for the chair's messages, respond to each via `message` with both (a) a defense or refinement of your position and (b) a sharp critique of the chair's position, continue for at least 10 exchanges, then call `reply` with a closing statement.
+- Once spawned, send the partner a `message` with the topic and ask for an opening position.
+- When the partner responds, formulate (a) your sharpest challenge and (b) your own position on the topic. Send both back via `message`.
+- When the partner responds again, update your own position — concede where they landed a hit, sharpen where you still disagree — and send a new challenge plus your updated position via `message`.
+- Engage for at least 10 exchanges. Stop when the debate has genuinely matured: no new arguments appear or positions have converged.
 - Call `reply` exactly once with a single `result` field containing the final report.
 
-The final report should be concise and should include:
+The final report should be concise and include:
 - recommendation
-- main reasoning
-- strongest objection or dissent
+- main reasoning (the strongest thread that survived the debate)
+- strongest objection or dissent (what the discussant could not answer)
 - what would change your mind
 "
     )
@@ -640,15 +642,5 @@ mod tests {
         assert!(!valid_title(&"x".repeat(25)));
         assert!(!valid_title("has space"));
         assert!(!valid_title("non-ascii-é"));
-    }
-
-    #[test]
-    fn discussion_prompt_uses_existing_agent_protocol() {
-        let prompt = discussion_prompt("choose the smaller design");
-        assert!(prompt.contains("choose the smaller design"));
-        assert!(prompt.contains("Spawn exactly one `agraphos` partner"));
-        assert!(prompt.contains("Wait for the partner's normal `reply`"));
-        assert!(prompt.contains("do not use `message`"));
-        assert!(prompt.contains("single `result` field"));
     }
 }

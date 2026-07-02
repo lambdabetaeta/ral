@@ -13,18 +13,16 @@ agent kind and not a new inbox delivery mode.
 - The command spawns an `anamnesis` chair: it imports the focused
   model-visible context, receives the user's topic as its fresh final prompt,
   and holds the usual returning-agent `reply { result }` tool.
-- The chair is instructed to spawn exactly one `agraphos` partner, ask it for an
-  independent critique, wait for the partner's normal `reply`, then call its own
-  `reply` with one `result` field.
-- The first version deliberately does **not** use `message`, and does not make
-  peer traffic look like human input. The discussion is a bounded two-agent
-  fork/join: chair → partner → chair → parent.
-- Authority is inherited verbatim for both discussion edges by using the
-  existing `dangerous` base, which is the spawn lattice top: it narrows nothing
-  but still cannot exceed the parent.
-
-This keeps the interactive trunk out of the debate, preserves
-[[design/agents|agents]]' uniform-node model, and avoids a special "discussion"
-transport. If richer back-and-forth becomes necessary, it should be a new typed
-protocol decision, not an accidental reinterpretation of marked `message`
-turns.
+- The chair spawns exactly one `agraphos` discussant (titled after the topic) with
+  `read-only` permissions, and gives it a prompt instructing it to engage via
+  `message`.
+- The chair sends the topic as a `message`; the discussant responds in kind.
+  Each round, the chair exposes both a sharp challenge and its own position;
+  the discussant must defend its view *and* critique the chair's.
+- They trade `message` calls for at least 10 exchanges. The chair updates its
+  position each round (conceding where hit, sharpening where it disagrees).
+  Both stop when the debate has genuinely matured.
+This keeps the interactive trunk out of the debate and preserves
+[[design/agents|agents]]' uniform-node model: the discussant is one ordinary
+returning agent, and the back-and-forth uses the existing `message` protocol
+rather than a special peer channel.
