@@ -181,6 +181,11 @@ pub enum SessionEvent {
     /// or a steering interjection drained after tool results and before the
     /// next assistant reply.
     UserPrompt { text: String },
+    /// A model-visible message inherited from a parent agent's context when an
+    /// anamnesis child is born.  It is replayed verbatim to the provider but
+    /// does not drive the local protocol state machine; the child's fresh
+    /// `UserPrompt` remains the turn it must answer.
+    ContextMessage { message: ChatMessage },
     /// Marks the start of one inner step of `Agent::apply`.  Several
     /// steps may share a single user prompt when the model issues tool
     /// calls.
@@ -239,6 +244,7 @@ impl SessionEvent {
     fn into_chat_messages(self) -> Vec<ChatMessage> {
         match self {
             SessionEvent::UserPrompt { text } => vec![ChatMessage::user(text)],
+            SessionEvent::ContextMessage { message } => vec![message],
             // Pass the assistant message back whole — reasoning included.
             // genai owns the per-adapter reasoning policy: Anthropic drops
             // it, the OpenAI Responses adapter ignores it, but the OpenAI
@@ -439,6 +445,54 @@ impl AgentLog {
     /// compaction to feed the summariser.
     pub fn history_messages(&self) -> Vec<ChatMessage> {
         self.model_messages()
+    }
+
+    /// The parent context an anamnesis child should inherit.  When called from
+    /// a tool dispatch, the parent may be waiting for the very tool result this
+    /// child is about to produce; drop that unfinished assistant frame so the
+    /// child starts from the request context, not a dangling tool protocol.
+    pub fn inherited_context_messages(&self) -> Vec<ChatMessage> {
+        let mut events = self.events.as_slice();
+        if matches!(self.state, State::AwaitingToolResults { .. })
+            && matches!(
+                events.last(),
+                Some(SessionEvent::AssistantMessage {
+                    pending_tool_ids,
+                    ..
+                }) if !pending_tool_ids.is_empty()
+            )
+        {
+            events = &events[..events.len() - 1];
+        }
+
+        let mut msgs = Vec::new();
+        if let Some(c) = &self.compaction {
+            msgs.push(ChatMessage::user(summary_prompt(&c.summary)));
+            events = &events[c.suffix_start..];
+        }
+        for e in events {
+            msgs.extend(e.clone().into_chat_messages());
+        }
+        msgs
+    }
+
+    /// Import a parent model context and append this child's chosen prompt as
+    /// the answerable turn.
+    pub fn import_context_then_prompt(
+        &mut self,
+        messages: Vec<ChatMessage>,
+        prompt: String,
+    ) -> Result<(), String> {
+        if !matches!(self.state, State::ReadyForUser) {
+            return Err(format!(
+                "cannot import context while session is in state {:?}",
+                self.state
+            ));
+        }
+        for message in messages {
+            self.record_or_string_err(SessionEvent::ContextMessage { message })?;
+        }
+        self.append_user(prompt)
     }
 
     // ── Protocol mutations ────────────────────────────────────────────────
@@ -917,6 +971,52 @@ mod tests {
             .unwrap();
         let err = s.apply_compaction("summary".into(), 0).unwrap_err();
         assert!(err.contains("cannot compact"));
+    }
+
+    #[test]
+    fn inherited_context_drops_the_unanswered_tool_call() {
+        let mut s = fresh_root("inherit-pending");
+        s.append_user("parent task".into()).unwrap();
+        s.append_assistant(assistant_with_tool("a"), vec!["a".into()], None)
+            .unwrap();
+
+        let inherited = s.inherited_context_messages();
+
+        assert_eq!(inherited.len(), 1);
+        assert_eq!(inherited[0].role, ChatRole::User);
+        let view = serde_json::to_string(&inherited).unwrap();
+        assert!(view.contains("parent task"));
+        assert!(!view.contains("ToolCall"));
+        assert!(
+            !view.contains("\"ral\""),
+            "the pending assistant tool-call frame must not be inherited: {view}"
+        );
+    }
+
+    #[test]
+    fn import_context_then_prompt_puts_fresh_prompt_last() {
+        let mut s = fresh_root("import-context");
+        s.import_context_then_prompt(
+            vec![
+                ChatMessage::user("old question"),
+                ChatMessage::assistant("old answer"),
+            ],
+            "fresh task".into(),
+        )
+        .unwrap();
+
+        let ms = s.render_messages().unwrap();
+        assert_eq!(
+            ms.iter().map(|m| m.role.clone()).collect::<Vec<_>>(),
+            vec![ChatRole::User, ChatRole::Assistant, ChatRole::User]
+        );
+        let view = serde_json::to_string(&ms).unwrap();
+        assert!(view.contains("old question"));
+        assert!(view.contains("old answer"));
+        assert!(
+            view.rfind("fresh task") > view.rfind("old answer"),
+            "the child prompt must be the final model-visible message: {view}"
+        );
     }
 
     #[test]

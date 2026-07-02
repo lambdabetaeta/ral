@@ -43,8 +43,8 @@ removes authority and the result is ≤ both operands, so a spawn can reduce a
 child's reach but never escalate it past the parent's: naming a base looser than
 the parent changes nothing (a network-off parent stays offline even under
 `minimal`, since `false ⊓ true = false`), and `dangerous` — the lattice top —
-leaves the parent's authority verbatim. The [[map/exarch/tools|`agent` tool]]
-calls it at the spawn site with a mandatory `permissions` base.
+leaves the parent's authority verbatim. The [[map/exarch/tools|spawn tools]]
+call it at the spawn site with a mandatory `permissions` base.
 
 `deny_paths` makes a restrict file's own bytes structurally unreachable: a
 restrict file shapes the agent's authority, so the agent must not be able to edit

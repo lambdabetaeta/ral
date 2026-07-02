@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 3e5ce15
-generated_at_date: 2026-06-24
-covers_paths: [exarch/src/agent.rs, exarch/src/fleet.rs, exarch/src/nudge.rs, exarch/src/digest.rs]
+generated_at_commit: fcd1756
+generated_at_date: 2026-07-02
+covers_paths: [exarch/src/agent.rs, exarch/src/event.rs, exarch/src/fleet.rs, exarch/src/nudge.rs, exarch/src/digest.rs]
 ---
 
 # Map: exarch / agent
@@ -88,14 +88,13 @@ Three nested loops, the same for trunk and child alike:
   interactive Esc — returning `TurnOutcome::Capped`. That outcome matches no
   nudge rule, so the driver treats it as terminal; re-driving would only spend
   the ceiling again.
-- `dispatch` — runs the turn's tool-call batch under one `thread::scope`. Each
-  call is staged first; a *sync* `agent` call returns `Staged::Spawned`, so
-  same-batch sub-agents can overlap before the join phase (an *async* `agent`
-  returns `Staged::Done` with a start receipt and runs detached). Once every
-  requested tool id has a result, dispatch drains this agent's
-  [[map/exarch/frontend|inbox]]'s tool-boundary steering. A non-slash steering
-  prompt is appended after the complete tool-result batch, and the next loop asks
-  the provider with the user's steering in context
+- `dispatch` — runs the turn's tool-call batch in order. Every tool returns a
+  `SessionToolResult` synchronously; the spawn tools return a start receipt after
+  launching their detached child. Once every requested tool id has a result,
+  dispatch drains this agent's [[map/exarch/frontend|inbox]]'s tool-boundary
+  steering. A non-slash steering prompt is appended after the complete
+  tool-result batch, and the next loop asks the provider with the user's steering
+  in context
   ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]]). A
   sub-agent has no human writer, so its inbox holds no steering and this is always
   empty.
@@ -171,7 +170,7 @@ autonomous and headless turns stay bounded without an interactive `/compact`. A
 turn-boundary Esc bails before the summarize request
 ([[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]).
 
-`fork` builds the child `Agent` for the [[design/agents|`agent` tool]] through
+`fork` builds the child `Agent` for [[design/agents|sub-agent spawning]] through
 `Shell::fork_session` ([[map/core/shell-state|the flow matrix]]) rather than
 hand-copying fields after a bare `Shell::new`. It takes the child's
 `Capabilities` **as an argument**, so the spawn site owns the authority decision
@@ -187,6 +186,14 @@ foreground agent and can never seize the controlling terminal the TUI owns).
 There is no flow-back: the child's `cd`, env, and new bindings die with it. The
 spawn tree is **unbounded in depth** — every agent may spawn — and mirrors on the
 bus as `Kind::Born` / `Kind::Died`.
+
+`fork_remembering` is the anamnesis variant: it uses the same shell/provider fork,
+then asks `AgentLog` to import the parent's model-visible context and append the
+tool call's prompt as the child's fresh final user prompt. `AgentLog` drops a
+pending unanswered assistant tool-call frame when the parent is mid-dispatch, so
+the child inherits a request context rather than a dangling provider protocol.
+The agraphos path uses plain `fork` and seeds only the launch prompt into the
+child's inbox.
 
 Routing the fork through core matters because the builtin table is the easiest
 thing to drop. The exarch host builtins — `window-hash`, `grep-files`, `edit`,
@@ -212,7 +219,7 @@ the full text live; caps only shape the model's view. `run_shell` here threads t
 [[design/agents|agents]] (the role model these nodes realise — one `parent`
 predicate, the conversing trunk vs returning agents),
 [[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]] (the Fleet/Agent
-split this page maps), [[map/exarch/tools|tools]] (the two `ToolSet`s the
-`returns` axis picks), [[map/exarch/frontend|frontend]] (the bus, the inbox, the
+split this page maps), [[map/exarch/tools|tools]] (the registry and gates the
+provider sees), [[map/exarch/frontend|frontend]] (the bus, the inbox, the
 registry, and the two frontends), [[map/exarch/provider|provider]],
 [[map/exarch/policy|policy]], [[map/exarch|exarch]].

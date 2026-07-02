@@ -38,15 +38,14 @@ becomes a `ParkMode` (`Held` / `UntilCancelled` / `Quiesce`) derived from
 
 Spawning is **universal** — every agent may spawn, so the spawn tree is unbounded
 in depth rather than capped at one level. The old `spawns()` tool-set axis is
-gone; the `agent` family is held by both tool sets
-([[map/exarch/tools|tools]]: `ToolSet::conversing()` and `ToolSet::returning()`,
-which differ only in `reply`). Depth-N already worked structurally — a child
-registers in the fleet's registry and `fork` snapshots the parent's shell by value
-at any depth; only the withheld tool capped it
-([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]], superseding the
+gone; the spawn family is held by every agent, and the tool view differs only in
+`reply` and optional self-scheduling ([[map/exarch/tools|tools]]). Depth-N already
+worked structurally — a child registers in the fleet's registry and `fork`
+snapshots the parent's shell by value at any depth; only the withheld tool capped
+it ([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]], superseding the
 depth-1 cap of [[decisions/260617_async-agent-tool|async-agent-tool]]).
 
-The `agent` tool is **launch-only and always asynchronous**
+The spawn tools are **launch-only and always asynchronous**
 ([[decisions/260617_async-agent-tool|async-agent-tool]]). One call:
 
 - **`fork`s a child `Agent`** through `Shell::fork_session`
@@ -66,6 +65,16 @@ The `agent` tool is **launch-only and always asynchronous**
 - **delivers the child's single reply later** as a marked `Turn` through the
   parent's [[map/exarch/frontend|inbox]] — the parent edge `parent` names —
   rendered to prose at the consuming edge.
+
+Two spawn tools choose the child's **model memory**, not its shell isolation:
+
+- **`agraphos`** is tabula rasa. The child starts with no conversation history;
+  only the shell value-snapshot and the chosen prompt cross the edge.
+- **`anamnesis`** remembers. The child imports the parent's model-visible context
+  and appends the tool call's `prompt` as a fresh final user prompt, while
+  reusing the parent's current provider selection so provider prompt caches can
+  hit. If the parent is mid-tool-call, the unanswered assistant tool-call frame is
+  not inherited; the child forks the request context, not a dangling protocol.
 
 ## Returning: the deliberate `reply`
 

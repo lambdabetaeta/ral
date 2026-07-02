@@ -3,7 +3,8 @@
 //! A [`Tool`] knows how to advertise itself to the provider (name,
 //! description, JSON schema) and how to dispatch one parsed JSON input
 //! against a live [`Agent`], returning a [`SessionToolResult`].  Every tool
-//! returns synchronously: a tool that forks a child session (`agent`) launches
+//! returns synchronously: a tool that forks a child session (`agraphos` or
+//! `anamnesis`) launches
 //! a detached peer and returns a start receipt, so dispatch never blocks and
 //! there is no join phase.
 //!
@@ -70,7 +71,7 @@ pub(crate) trait Tool: Send + Sync {
     }
 
     /// Read `input`, render the rail header, run the call, and return its
-    /// result.  A tool that forks a child session (`agent`) launches a
+    /// result.  A tool that forks a child session (`agraphos`/`anamnesis`) launches a
     /// detached worker and returns a start receipt here — it does not block.
     /// Malformed input is reported by the tool itself via [`invalid_input`]
     /// (or its own equivalent), so this method always produces a result.  A
@@ -92,7 +93,8 @@ fn registry() -> &'static [Box<dyn Tool>] {
     R.get_or_init(|| {
         vec![
             Box::new(ral::RalTool),
-            Box::new(agent::AgentTool),
+            Box::new(agent::SpawnTool::agraphos()),
+            Box::new(agent::SpawnTool::anamnesis()),
             Box::new(agent::AgentsTool),
             Box::new(agent::AgentCancelTool),
             Box::new(schedule::ScheduleTool),

@@ -3519,3 +3519,12 @@ cross by explicit handle list, and pipeline children enter their Job Object
 before resume. Re-verified [[internals/pipeline-execution|pipeline-execution]]
 and restamped [[map/core/runtime|runtime]] plus
 [[map/core/io-process|io-process]].
+
+
+## [2026-07-02] ingest | Subagent memory modes
+
+Split exarch spawning into `agraphos` (blank model context) and `anamnesis`
+(parent-context fork with a fresh final prompt), recorded in
+[[decisions/260702_subagent-memory-modes|subagent-memory-modes]]. Restamped
+[[map/exarch/agent|agent]] and [[map/exarch/tools|tools]], and updated
+[[design/agents|agents]] for the two memory contracts.

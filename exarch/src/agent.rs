@@ -498,6 +498,22 @@ impl Agent {
         })
     }
 
+    /// A child that inherits this agent's model-visible context, then answers
+    /// `prompt` as its own fresh task.  The shell/provider/capability fork is
+    /// identical to [`Self::fork`]; only the model log is seeded differently.
+    pub(crate) fn fork_remembering(
+        &self,
+        caps: ral_core::types::Capabilities,
+        prompt: String,
+    ) -> io::Result<Agent> {
+        let mut child = self.fork(caps)?;
+        child
+            .log
+            .import_context_then_prompt(self.log.inherited_context_messages(), prompt)
+            .map_err(io::Error::other)?;
+        Ok(child)
+    }
+
     pub(crate) fn log_dir(&self) -> &std::path::Path {
         self.log.dir()
     }
@@ -1051,8 +1067,8 @@ impl Agent {
 
     /// Dispatch a batch of tool calls in order, short-circuiting the rest to
     /// cancelled results the instant the token trips.  Every tool returns its
-    /// result synchronously now — the `agent` tool launches a detached peer
-    /// and returns a start receipt — so there is no join phase and no
+    /// result synchronously now — the spawn tools launch a detached peer and
+    /// return a start receipt — so there is no join phase and no
     /// `thread::scope`.
     fn dispatch(
         &mut self,
@@ -1109,7 +1125,7 @@ impl Agent {
         }
     }
 
-    /// Whether this agent has a live child still running — an async `agent` it
+    /// Whether this agent has a live child still running — an async child it
     /// launched that has not yet settled its result up this inbox.  Read by
     /// [`Self::park_mode`] (so a root waiting on its fleet parks rather than
     /// quiescing) and by [`Self::drive`] (so the `reply` nudge is not raised
@@ -1363,7 +1379,7 @@ fn agent_digest(
 
 /// Render a reply payload to the text a model parent reads: the shared
 /// value→text rule ([`shell_eval::json_to_text`]), clipped to the reply cap.
-/// The peer edge (the `agent` tool's settle site) and the `drive_peer` test
+/// The peer edge (the spawn tool settle site) and the `drive_peer` test
 /// helper share it; the headless edge instead writes the value faithfully.
 pub(crate) fn render_reply(v: &serde_json::Value) -> String {
     clip(
@@ -1632,6 +1648,34 @@ mod tests {
             child.provider.current().model(),
             "p-a",
             "a swap on the parent never disturbs an already-forked child"
+        );
+    }
+
+    #[test]
+    fn remembering_fork_inherits_context_and_appends_prompt() {
+        let dir = tmp("remembering-fork");
+        let mut parent = Agent::for_test(&dir, "system").unwrap();
+        parent.log.append_user("what did we learn?".into()).unwrap();
+        parent
+            .log
+            .append_assistant(
+                genai::chat::ChatMessage::assistant("the invariant matters"),
+                vec![],
+                None,
+            )
+            .unwrap();
+
+        let child = parent
+            .fork_remembering(parent.caps().clone(), "use that invariant".into())
+            .expect("fork remembering child");
+        let ms = child.log.render_messages().unwrap();
+        let view = serde_json::to_string(&ms).unwrap();
+
+        assert!(view.contains("what did we learn?"));
+        assert!(view.contains("the invariant matters"));
+        assert!(
+            view.rfind("use that invariant") > view.rfind("the invariant matters"),
+            "anamnesis must put the fresh prompt at the end: {view}"
         );
     }
 

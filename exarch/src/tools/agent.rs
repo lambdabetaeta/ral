@@ -1,4 +1,4 @@
-//! `agent` tool — fork a child session and launch a sub-agent.
+//! Sub-agent tools — fork a child session and launch a sub-agent.
 //!
 //! Launch-only and always asynchronous: every call forks a child, runs it on a
 //! detached thread through the same [`Agent::drive`] loop, and returns a
@@ -19,7 +19,102 @@ use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Instant;
 
-pub(super) struct AgentTool;
+pub(super) struct SpawnTool {
+    kind: SpawnKind,
+}
+
+impl SpawnTool {
+    pub(super) fn agraphos() -> Self {
+        Self {
+            kind: SpawnKind::Agraphos,
+        }
+    }
+
+    pub(super) fn anamnesis() -> Self {
+        Self {
+            kind: SpawnKind::Anamnesis,
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+enum SpawnKind {
+    /// Tabula rasa: fresh model context, inherited shell values only.
+    Agraphos,
+    /// Remembrance: inherited model context, fresh prompt at the end.
+    Anamnesis,
+}
+
+impl SpawnKind {
+    fn tool(self) -> &'static str {
+        match self {
+            Self::Agraphos => "agraphos",
+            Self::Anamnesis => "anamnesis",
+        }
+    }
+
+    fn desc(self) -> &'static str {
+        match self {
+            Self::Agraphos => {
+                "Spawn an agraphos sub-agent: tabula rasa.  This is launch-only \
+and always asynchronous: the call forks a child session and returns immediately \
+with a start receipt `{id, title, status, log_dir}`.  The child runs the same \
+agent loop off your critical path; its single reply is delivered to you LATER \
+as its own marked turn when it finishes.  To fan out independent work, spawn \
+several and combine their results when they land; poll live ones with `agents` \
+and stop one with `agent_cancel`.  A sub-agent may itself spawn sub-agents, so \
+deep delegation trees are possible — `agent_cancel` on one stops its whole \
+subtree.\n\n\
+This is expensive: the child is a fresh model session that re-pays the entire \
+system prompt and does not share your conversation — it sees a value-snapshot \
+of your shell (your `let` bindings, cwd, env) but none of your reasoning or \
+message history.  Its own shell mutations (cd, env, new bindings) do NOT \
+propagate back; you receive a string, not its bindings or intermediate \
+findings.  File edits it makes to the working tree are real and persist.  \
+Because each call costs a whole session boot plus a round-trip to relay the \
+result back as text, delegate only a substantial, self-contained unit of work: \
+a focused exploration whose intermediate detail you do not want to carry, or a \
+task whose execution would otherwise flood your own context.  NEVER delegate a \
+single grep/view/read/edit you can run inline — running it yourself is cheaper \
+and keeps the result addressable (e.g. the witness `edit` needs).  \
+`permissions` bounds the child to at most your own authority."
+            }
+            Self::Anamnesis => {
+                "Spawn an anamnesis sub-agent: remembrance.  This is launch-only \
+and always asynchronous: the call forks a child session and returns immediately \
+with a start receipt `{id, title, status, log_dir}`.  The child reuses your \
+current provider selection and inherits your model-visible context, with the \
+tool call's `prompt` appended as a fresh final user prompt.  That makes it a \
+good fit when the child needs the conversation you already built and the \
+provider can hit its prompt cache.  Its single reply is delivered to you LATER \
+as its own marked turn when it finishes.\n\n\
+The shell is still forked: the child sees a value-snapshot of your shell (your \
+`let` bindings, cwd, env), but its own shell mutations (cd, env, new bindings) \
+do NOT propagate back; you receive a string, not its bindings or intermediate \
+findings.  File edits it makes to the working tree are real and persist.  Use \
+anamnesis when context reuse matters; use `agraphos` when isolation and a blank \
+conversation are better.  `permissions` bounds the child to at most your own \
+authority."
+            }
+        }
+    }
+
+    fn fork(
+        self,
+        session: &Agent,
+        caps: ral_core::types::Capabilities,
+        prompt: &str,
+    ) -> std::io::Result<Agent> {
+        match self {
+            Self::Agraphos => session.fork(caps),
+            Self::Anamnesis => session.fork_remembering(caps, prompt.to_string()),
+        }
+    }
+
+    fn seed_inbox(self) -> bool {
+        matches!(self, Self::Agraphos)
+    }
+}
 
 /// Monotonic dispatch counter, used to mint `sub-{N}` fallback titles
 /// when the model omits one.  Lives as long as the process — the TUI
@@ -78,34 +173,13 @@ fn parse_args(input: &Value) -> Result<Args, String> {
     })
 }
 
-impl Tool for AgentTool {
+impl Tool for SpawnTool {
     fn name(&self) -> &'static str {
-        "agent"
+        self.kind.tool()
     }
 
     fn desc(&self) -> &'static str {
-        "Spawn a sub-agent to carry out `prompt`.  This is launch-only and \
-always asynchronous: the call forks a child session and returns immediately \
-with a start receipt `{id, title, status, log_dir}`.  The child runs the same \
-agent loop off your critical path; its single reply is delivered to you LATER \
-as its own marked turn when it finishes.  To fan out independent work, spawn \
-several and combine their results when they land; poll live ones with `agents` \
-and stop one with `agent_cancel`.  A sub-agent may itself spawn sub-agents, so \
-deep delegation trees are possible — `agent_cancel` on one stops its whole \
-subtree.\n\n\
-This is expensive: the child is a fresh session that re-pays the entire system \
-prompt and does not share your conversation — it sees a value-snapshot of your \
-shell (your `let` bindings, cwd, env) but none of your reasoning or message \
-history.  Its own shell mutations (cd, env, new bindings) do NOT propagate \
-back; you receive a string, not its bindings or intermediate findings.  File \
-edits it makes to the working tree are real and persist.  Because each call \
-costs a whole session boot plus a round-trip to relay the result back as text, \
-delegate only a substantial, self-contained unit of work: a focused \
-exploration whose intermediate detail you do not want to carry, or a task \
-whose execution would otherwise flood your own context.  NEVER delegate a \
-single grep/view/read/edit you can run inline — running it yourself is cheaper \
-and keeps the result addressable (e.g. the witness `edit` needs).  \
-`permissions` bounds the child to at most your own authority."
+        self.kind.desc()
     }
 
     fn schema(&self) -> &'static Value {
@@ -148,142 +222,153 @@ and keeps the result addressable (e.g. the witness `edit` needs).  \
         _provider: &Arc<Provider>,
         emit: &Emitter,
     ) -> SessionToolResult {
-        let Args {
-            prompt,
-            title,
-            permissions,
-        } = match parse_args(&input) {
-            Ok(a) => a,
-            Err(reason) => return invalid_input(id, "agent", INVALID_INPUT, &reason, emit),
-        };
-        // The child's authority is the parent's narrowed to the requested base
-        // (`parent ⊓ base`), frozen against the child's cwd.  Meet only ever
-        // removes authority, so a spawn never escalates.
-        let cwd = session.cwd();
-        let child_caps =
-            match crate::policy::narrow(session.caps(), &permissions, &cwd.to_string_lossy()) {
-                Ok(c) => c,
-                Err(reason) => return invalid_input(id, "agent", INVALID_INPUT, &reason, emit),
-            };
-        let mut child = match session.fork(child_caps) {
+        dispatch_spawn(self.kind, id, input, session, emit)
+    }
+}
+
+fn dispatch_spawn(
+    kind: SpawnKind,
+    id: String,
+    input: Value,
+    session: &mut Agent,
+    emit: &Emitter,
+) -> SessionToolResult {
+    let Args {
+        prompt,
+        title,
+        permissions,
+    } = match parse_args(&input) {
+        Ok(a) => a,
+        Err(reason) => return invalid_input(id, kind.tool(), INVALID_INPUT, &reason, emit),
+    };
+    // The child's authority is the parent's narrowed to the requested base
+    // (`parent ⊓ base`), frozen against the child's cwd.  Meet only ever
+    // removes authority, so a spawn never escalates.
+    let cwd = session.cwd();
+    let child_caps =
+        match crate::policy::narrow(session.caps(), &permissions, &cwd.to_string_lossy()) {
             Ok(c) => c,
-            Err(e) => {
-                let msg = format!("could not fork child session: {e}");
-                session.note_error(msg.clone(), emit);
-                return SessionToolResult { id, content: msg };
-            }
+            Err(reason) => return invalid_input(id, kind.tool(), INVALID_INPUT, &reason, emit),
         };
-        // Capture everything off the child before it moves into the worker
-        // thread: its identity, log directory, own cancellation token and
-        // provider handle, the registry entry's generation, and the parent's
-        // mailbox (the child's upward result edge).  The child is registered
-        // under *this* agent as its parent, so the subtree cascade reaches it.
-        let agent_id = child.id;
-        let log_dir = child.log_dir().to_path_buf();
-        let log_dir_str = log_dir.display().to_string();
-        let cancel = child.cancel_token().clone();
-        // The child's inbox sender, registered so the frontend can steer or
-        // wake this tab.  Cheap-clone, taken off `child` before it moves into
-        // the worker thread (alongside the one the streaming `child_emit`
-        // carries).
-        let child_mailbox = child.mailbox();
-        // The child's own provider handle (seeded at `fork` from this agent's
-        // current provider), registered so a `/model` on this tab swaps the
-        // child's provider alone.
-        let child_provider = child.provider_handle();
-        let generation = session.agents.register(
-            agent_id,
-            Some(session.id),
-            title.clone(),
-            log_dir.clone(),
-            cancel,
-            child_mailbox,
-            child_provider,
-        );
-        let parent_mailbox = session.mailbox();
-        let registry = session.agents.clone();
-        // A live tab whenever the bus outlives the turn (the TUI): a real
-        // emitter cloned off the session sender, stamped with the child's id
-        // and carrying the child's own mailbox.  Off a per-turn bus (headless)
-        // the child is muted *on the display* — an emitter whose receiver is
-        // already dropped — so it never streams; but either way it carries the
-        // child's own `Transcript`, so its operational trace is recorded
-        // regardless of whether anyone is watching.  Its model view returns
-        // through its forked `AgentLog`, its reply through the inbox.
-        let child_emit = if emit.is_session_lived() {
-            emit.child(agent_id, child.mailbox(), child.transcript())
-        } else {
-            emit.muted_child(agent_id, child.transcript())
-        };
-        let started = Instant::now();
-        let born_title = title.clone();
-        let born_parent = session.id;
-        let worker_title = title.clone();
-        // Seed the launch turn into the child's own inbox: the only downward
-        // edge is this one write.
-        child.seed(prompt.clone());
-        // The dispatch shows on the rail before the spawn, so the user can see
-        // exactly what the child was asked to do.
-        emit.emit(Kind::ToolCall {
-            tool: "agent",
-            cmd: prompt,
-            summary: Some(title.clone()),
-        });
-        thread::Builder::new()
-            .name(format!("exarch-agent-{agent_id}"))
-            .stack_size(8 * 1024 * 1024)
-            .spawn(move || {
-                // registered before the first token and ages out after the
-                // last; on a muted emitter both are no-ops.  The id routes
-                // every event to the child's own tab through the TUI's existing
-                // draw path.
-                child_emit.emit(Kind::Born {
-                    log_dir: log_dir.clone(),
-                    title: born_title,
-                    parent: born_parent,
-                });
-                let (outcome, payload) =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        // The child drives on its own provider handle, seeded at
-                        // `fork` from this agent's current provider, so a later
-                        // `/model` on either never disturbs the other.
-                        child.drive(&mut crate::agent::NoControl, &child_emit)
-                    }))
-                    .unwrap_or_else(|_| (AgentOutcome::Failed("sub-agent panicked".into()), None));
-                child_emit.emit(Kind::Died);
-                // A model parent reads the reply as prose in its context, so the
-                // peer edge renders the faithful payload to text here.
-                let text = payload
-                    .as_ref()
-                    .map(crate::agent::render_reply)
-                    .unwrap_or_default();
-                // Deliver only if still the live worker of the current
-                // generation; a result from before a `/clear` is dropped, not
-                // posted into a rebuilt context.
-                if registry.settle(agent_id, generation) {
-                    parent_mailbox.push(InboxMsg::AgentResult(AgentResult {
-                        id: agent_id,
-                        title: worker_title,
-                        outcome,
-                        text,
-                        log_dir,
-                        elapsed: started.elapsed(),
-                        generation,
-                    }));
-                }
-            })
-            .expect("spawn async agent worker");
-        let receipt = json!({
-            "id": agent_id,
-            "title": title,
-            "status": "started",
-            "log_dir": log_dir_str,
-            "note": "If you have nothing to do before the agent returns, please yield to the user.",
-        });
-        SessionToolResult {
-            id,
-            content: receipt.to_string(),
+    let mut child = match kind.fork(session, child_caps, &prompt) {
+        Ok(c) => c,
+        Err(e) => {
+            let msg = format!("could not fork child session: {e}");
+            session.note_error(msg.clone(), emit);
+            return SessionToolResult { id, content: msg };
         }
+    };
+    // Capture everything off the child before it moves into the worker
+    // thread: its identity, log directory, own cancellation token and
+    // provider handle, the registry entry's generation, and the parent's
+    // mailbox (the child's upward result edge).  The child is registered
+    // under *this* agent as its parent, so the subtree cascade reaches it.
+    let agent_id = child.id;
+    let log_dir = child.log_dir().to_path_buf();
+    let log_dir_str = log_dir.display().to_string();
+    let cancel = child.cancel_token().clone();
+    // The child's inbox sender, registered so the frontend can steer or
+    // wake this tab.  Cheap-clone, taken off `child` before it moves into
+    // the worker thread (alongside the one the streaming `child_emit`
+    // carries).
+    let child_mailbox = child.mailbox();
+    // The child's own provider handle (seeded at `fork` from this agent's
+    // current provider), registered so a `/model` on this tab swaps the
+    // child's provider alone.
+    let child_provider = child.provider_handle();
+    let generation = session.agents.register(
+        agent_id,
+        Some(session.id),
+        title.clone(),
+        log_dir.clone(),
+        cancel,
+        child_mailbox,
+        child_provider,
+    );
+    let parent_mailbox = session.mailbox();
+    let registry = session.agents.clone();
+    // A live tab whenever the bus outlives the turn (the TUI): a real
+    // emitter cloned off the session sender, stamped with the child's id
+    // and carrying the child's own mailbox.  Off a per-turn bus (headless)
+    // the child is muted *on the display* — an emitter whose receiver is
+    // already dropped — so it never streams; but either way it carries the
+    // child's own `Transcript`, so its operational trace is recorded
+    // regardless of whether anyone is watching.  Its model view returns
+    // through its forked `AgentLog`, its reply through the inbox.
+    let child_emit = if emit.is_session_lived() {
+        emit.child(agent_id, child.mailbox(), child.transcript())
+    } else {
+        emit.muted_child(agent_id, child.transcript())
+    };
+    let started = Instant::now();
+    let born_title = title.clone();
+    let born_parent = session.id;
+    let worker_title = title.clone();
+    // Seed the launch turn into the child's own inbox: the only downward
+    // edge is this one write.
+    if kind.seed_inbox() {
+        child.seed(prompt.clone());
+    }
+    // The dispatch shows on the rail before the spawn, so the user can see
+    // exactly what the child was asked to do.
+    emit.emit(Kind::ToolCall {
+        tool: kind.tool(),
+        cmd: prompt,
+        summary: Some(title.clone()),
+    });
+    thread::Builder::new()
+        .name(format!("exarch-agent-{agent_id}"))
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            // registered before the first token and ages out after the
+            // last; on a muted emitter both are no-ops.  The id routes
+            // every event to the child's own tab through the TUI's existing
+            // draw path.
+            child_emit.emit(Kind::Born {
+                log_dir: log_dir.clone(),
+                title: born_title,
+                parent: born_parent,
+            });
+            let (outcome, payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // The child drives on its own provider handle, seeded at
+                // `fork` from this agent's current provider, so a later
+                // `/model` on either never disturbs the other.
+                child.drive(&mut crate::agent::NoControl, &child_emit)
+            }))
+            .unwrap_or_else(|_| (AgentOutcome::Failed("sub-agent panicked".into()), None));
+            child_emit.emit(Kind::Died);
+            // A model parent reads the reply as prose in its context, so the
+            // peer edge renders the faithful payload to text here.
+            let text = payload
+                .as_ref()
+                .map(crate::agent::render_reply)
+                .unwrap_or_default();
+            // Deliver only if still the live worker of the current
+            // generation; a result from before a `/clear` is dropped, not
+            // posted into a rebuilt context.
+            if registry.settle(agent_id, generation) {
+                parent_mailbox.push(InboxMsg::AgentResult(AgentResult {
+                    id: agent_id,
+                    title: worker_title,
+                    outcome,
+                    text,
+                    log_dir,
+                    elapsed: started.elapsed(),
+                    generation,
+                }));
+            }
+        })
+        .expect("spawn async agent worker");
+    let receipt = json!({
+        "id": agent_id,
+        "title": title,
+        "status": "started",
+        "log_dir": log_dir_str,
+        "note": "If you have nothing to do before the agent returns, please yield to the user.",
+    });
+    SessionToolResult {
+        id,
+        content: receipt.to_string(),
     }
 }
 
