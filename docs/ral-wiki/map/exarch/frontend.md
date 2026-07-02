@@ -1,5 +1,5 @@
 ---
-generated_at_commit: fe9d819
+generated_at_commit: 9038cbb
 generated_at_date: 2026-07-02
 covers_paths: [exarch/src/bus.rs, exarch/src/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/host.rs]
 ---
@@ -133,10 +133,14 @@ Two `Sink` implementations:
  The `rule_line` carries a value-ramp `ctx%` bar and an elapsed-wait bar
  (elapsed wall-time on the live phase, resetting per round-trip); the live
  phase lives on `Viewport`, not `App`.
- Sub-agent sessions get tabs that linger after `Died`, each keeping its own
- scroll position; an async agent on the session-lived bus streams its tab the
+ Sub-agent sessions get matrix rows/tabs that linger for 90 seconds after
+ `Died`, each keeping its own scroll position; dead rows dim and keep their
+ final step cells without a countdown. The conversing trunk is label-only in
+ the matrix — no step cells, token readout, or size bar — so those columns
+ describe workers only. An async agent on the session-lived bus streams its tab
  the same way, and `/clear` retires every live sub-tab through the same linger
- window ([[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]]).
+ window
+ ([[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]]).
  `/clear` also cancels the in-flight model turn: `route_submit` raises
  `cancel::raise_interrupt` and cascades `agents.cancel(root)` *before* blanking
  the viewport, so the streaming `select!` in `provider::complete` unwinds within
@@ -201,5 +205,5 @@ user, git state) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui/banner.rs` — startup metadata: `SessionInfo`, `session_card`, `legend_panel`, ART/EAGLE constants
         - `tui/commands.rs` — slash command registry: `SlashCommand`, `lookup_command`, `route_submit`, handler functions
         - `tui/status.rs` — status line: `StatusReadout`, `rule_line`, `ctx_ramp`, `wait_bar`, `wait_step`
-        - `tui/matrix.rs` — agent matrix: `MatrixSort`, `matrix_bar`, `matrix_row`, `step_cells`
+        - `tui/matrix.rs` — agent matrix: `MatrixSort`, `matrix_bar`, justified row projection, `step_cells`
         - `tui/model_picker.rs` — model switching: `pick_model`, `drive_picker`, `apply_model_switch`

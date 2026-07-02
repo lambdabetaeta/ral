@@ -3546,3 +3546,11 @@ reaps any unfinished descendants before the node settles, without advancing the
 global `/clear` generation for unrelated siblings. Restamped
 [[map/exarch/agent|agent]] and updated [[map/exarch/tools|tools]] plus
 [[index|index]].
+
+
+## [2026-07-02] ingest | Agent matrix justified
+
+Adjusted the exarch TUI agent matrix: rows now measure their columns before
+rendering, keep the worker step-cell run, leave `main` label-only, drop the
+numeric step count, and let dead agents linger silently for 90 seconds. Restamped
+[[map/exarch/frontend|frontend]].

@@ -1,4 +1,3 @@
-use super::LINGER;
 use super::line::{self, AGENT_HUES, SLATE};
 use super::rail;
 use super::render::tab_bar;
@@ -29,7 +28,7 @@ pub(super) const MATRIX_LABEL_W: usize = 10;
 pub(super) const MATRIX_STEPS_W: usize = 8;
 
 /// The multi-agent matrix: one row per live session, columns
-/// `label  steps  tokens  sizebar  Nst`.  Rows = agents in `sort` order,
+/// `label  steps  tokens  sizebar`.  Rows = agents in `sort` order,
 /// coloured by each agent's rail hue so the matrix and the rail share one
 /// identity.  A *projection* of the existing `tabs`/`viewports` model —
 /// with a single session it collapses to [`tab_bar`]'s exact output, so
@@ -42,6 +41,7 @@ pub(super) fn matrix_bar(
     rows: &[(AgentId, &Viewport)],
     titles: &HashMap<AgentId, String>,
     focused: AgentId,
+    root: AgentId,
     dying: &HashMap<AgentId, Instant>,
     sort: MatrixSort,
 ) -> Vec<Line<'static>> {
@@ -71,100 +71,146 @@ pub(super) fn matrix_bar(
         })
         .max()
         .unwrap_or(0);
-    order
+    let mut display_rows: Vec<MatrixRow> = order
         .into_iter()
         .map(|i| {
-            let (id, vp) = rows[i];
-            matrix_row(id, vp, titles, focused, dying, max_tokens)
+            MatrixRow::new(
+                rows[i].0, rows[i].1, titles, focused, root, dying, max_tokens,
+            )
         })
+        .collect();
+    let widths = MatrixWidths::measure(&display_rows);
+    display_rows
+        .drain(..)
+        .map(|row| row.render(widths))
         .collect()
 }
 
-/// One matrix row: `label  steps  tokens  sizebar  Nst`, hued by the
-/// agent's rail slot.  Focused row bold; dying rows dim and carry the
-/// `LINGER` countdown in place of the size bar's right margin.
-pub(super) fn matrix_row(
-    id: AgentId,
-    vp: &Viewport,
-    titles: &HashMap<AgentId, String>,
-    focused: AgentId,
-    dying: &HashMap<AgentId, Instant>,
-    max_tokens: u64,
-) -> Line<'static> {
-    let hue = AGENT_HUES
-        .get(vp.agent().0 as usize)
-        .copied()
-        .unwrap_or(AGENT_HUES[0]);
-    let dim = dying.contains_key(&id);
+#[derive(Clone, Copy)]
+struct MatrixWidths {
+    label: usize,
+    steps: usize,
+    tokens: usize,
+    bar: usize,
+}
 
-    // Label: truncated/padded to a fixed column, focused in brackets.
-    let title = titles.get(&id).map(String::as_str).unwrap_or("?");
-    let truncated: String = title.chars().take(MATRIX_LABEL_W).collect();
-    let label = if id == focused {
-        format!("[{truncated}]")
-    } else {
-        format!(" {truncated} ")
-    };
-    let pad = (MATRIX_LABEL_W + 2).saturating_sub(label.chars().count());
-    let mut label_style = Style::default().fg(hue);
-    if id == focused {
-        label_style = label_style.add_modifier(Modifier::BOLD);
+impl MatrixWidths {
+    fn measure(rows: &[MatrixRow]) -> Self {
+        rows.iter().fold(
+            Self {
+                label: 0,
+                steps: 0,
+                tokens: 0,
+                bar: 0,
+            },
+            |w, row| Self {
+                label: w.label.max(width(&row.label)),
+                steps: w.steps.max(width(&row.steps)),
+                tokens: w.tokens.max(width(&row.tokens)),
+                bar: w.bar.max(width(&row.bar)),
+            },
+        )
     }
-    if dim {
-        label_style = label_style.add_modifier(Modifier::DIM);
+}
+
+struct MatrixRow {
+    label: String,
+    steps: String,
+    tokens: String,
+    bar: String,
+    label_style: Style,
+    hue: ratatui::style::Color,
+    token_style: Style,
+    dim: bool,
+}
+
+impl MatrixRow {
+    fn new(
+        id: AgentId,
+        vp: &Viewport,
+        titles: &HashMap<AgentId, String>,
+        focused: AgentId,
+        root: AgentId,
+        dying: &HashMap<AgentId, Instant>,
+        max_tokens: u64,
+    ) -> Self {
+        let hue = AGENT_HUES
+            .get(vp.agent().0 as usize)
+            .copied()
+            .unwrap_or(AGENT_HUES[0]);
+        let dim = dying.contains_key(&id);
+
+        let title = titles.get(&id).map(String::as_str).unwrap_or("?");
+        let truncated: String = title.chars().take(MATRIX_LABEL_W).collect();
+        let label = if id == focused {
+            format!("[{truncated}]")
+        } else {
+            format!(" {truncated} ")
+        };
+        let mut label_style = Style::default().fg(hue);
+        if id == focused {
+            label_style = label_style.add_modifier(Modifier::BOLD);
+        }
+        if dim {
+            label_style = label_style.add_modifier(Modifier::DIM);
+        }
+
+        let tokens = {
+            let u = vp.usage();
+            u.input + u.output
+        };
+        let value = relative_value_step(tokens, max_tokens);
+        let token_style = Style::default()
+            .fg(rail::lighten(hue, value))
+            .add_modifier(if dim {
+                Modifier::DIM
+            } else {
+                Modifier::empty()
+            });
+
+        Self {
+            label,
+            steps: if id == root {
+                String::new()
+            } else {
+                step_cells(vp, dim)
+            },
+            tokens: if id == root {
+                String::new()
+            } else {
+                provider::humanize_tokens(tokens)
+            },
+            bar: if id == root {
+                String::new()
+            } else {
+                line::size_bar_text(vp.lines_touched())
+            },
+            label_style,
+            hue,
+            token_style,
+            dim,
+        }
     }
-    let mut spans: Vec<Span<'static>> = vec![
-        Span::styled(label, label_style),
-        Span::raw(" ".repeat(pad + 1)),
-    ];
 
-    // Step cells: `●` step-with-tool-call, `○` without; the most-recent
-    // window so a long run never overruns the row.  A done/dying session
-    // leads with `√`, an errored one with `╳`.
-    spans.push(Span::styled(step_cells(vp, dim), Style::default().fg(hue)));
-
-    // Token readout: cumulative spend, lightened toward white in
-    // proportion to the heaviest spender this frame.
-    let tokens = {
-        let u = vp.usage();
-        u.input + u.output
-    };
-    let value = relative_value_step(tokens, max_tokens);
-    let token_style = Style::default()
-        .fg(rail::lighten(hue, value))
-        .add_modifier(if dim {
+    fn render(self, widths: MatrixWidths) -> Line<'static> {
+        let slate = Style::default().fg(SLATE).add_modifier(if self.dim {
             Modifier::DIM
         } else {
             Modifier::empty()
         });
-    spans.push(Span::raw("  "));
-    spans.push(Span::styled(
-        format!("{:>6}", provider::humanize_tokens(tokens)),
-        token_style,
-    ));
-
-    // Size readout: a `▓`-bar over lines touched (Phase 3's size-bar
-    // idiom), then the step count as `Nst`.
-    let touched = vp.lines_touched();
-    spans.push(Span::raw("  "));
-    spans.push(line::size_bar(touched));
-    spans.push(Span::styled(
-        format!("  {}st", vp.steps().len()),
-        Style::default().fg(SLATE).add_modifier(if dim {
-            Modifier::DIM
-        } else {
-            Modifier::empty()
-        }),
-    ));
-
-    if dim && let Some(t) = dying.get(&id) {
-        let left = LINGER.saturating_sub(t.elapsed()).as_secs();
-        spans.push(Span::styled(
-            format!(" ({left}s)"),
-            Style::default().fg(SLATE).add_modifier(Modifier::DIM),
-        ));
+        Line::from(vec![
+            Span::styled(pad_right(self.label, widths.label), self.label_style),
+            Span::raw("  "),
+            Span::styled(
+                pad_right(self.steps, widths.steps),
+                Style::default().fg(self.hue),
+            ),
+            Span::raw("  "),
+            Span::styled(pad_left(self.tokens, widths.tokens), self.token_style),
+            Span::raw("  "),
+            Span::styled(pad_right(self.bar, widths.bar), slate),
+        ])
     }
-    Line::from(spans)
 }
 
 /// The matrix row's step glyphs: `done` leads the cell run with `√`
@@ -194,4 +240,17 @@ pub(super) fn relative_value_step(tokens: u64, max_tokens: u64) -> u8 {
         return 0;
     }
     (tokens * 3).div_ceil(max_tokens).min(3) as u8
+}
+
+fn width(s: &str) -> usize {
+    s.chars().count()
+}
+
+fn pad_left(s: String, cols: usize) -> String {
+    format!("{}{}", " ".repeat(cols.saturating_sub(width(&s))), s)
+}
+
+fn pad_right(s: String, cols: usize) -> String {
+    let pad = cols.saturating_sub(width(&s));
+    format!("{s}{}", " ".repeat(pad))
 }

@@ -31,7 +31,7 @@ use super::matrix::matrix_bar;
 use super::select::highlight_range;
 use super::status::{StatusReadout, rule_line};
 use super::terminal::Term;
-use super::{LEFT_MARGIN, LINGER, PROMPT_PAD_H, REGISTER_GAP, REGISTER_W, SPINNER};
+use super::{LEFT_MARGIN, PROMPT_PAD_H, REGISTER_GAP, REGISTER_W, SPINNER};
 
 /// Where the content area sat in the last drawn frame.
 #[derive(Clone, Copy)]
@@ -62,9 +62,8 @@ pub(super) fn tab_bar(
         let title = titles.get(&id).map(String::as_str).unwrap_or("?");
         let label: String = if id == focused {
             format!("[{title}]")
-        } else if let Some(t) = dying.get(&id) {
-            let left = LINGER.saturating_sub(t.elapsed()).as_secs();
-            format!(" {title} ({left}s) ")
+        } else if dying.contains_key(&id) {
+            format!(" {title} ")
         } else {
             format!(" {title} ")
         };
@@ -215,6 +214,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
             &rows,
             app.tabs.titles(),
             focused,
+            app.tabs.root(),
             app.tabs.dying_map(),
             app.matrix_sort,
         )

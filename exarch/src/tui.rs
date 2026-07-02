@@ -65,7 +65,7 @@ pub(super) const REGISTER_GAP: u16 = 4;
 /// How long a subagent tab stays in the rotation after the session
 /// dies — long enough for the user to tab over and inspect the final
 /// frame of its scrollback, short enough not to clutter the tab bar.
-pub(super) const LINGER: Duration = Duration::from_secs(60);
+pub(super) const LINGER: Duration = Duration::from_secs(90);
 /// Display label for the root session in the tab bar.
 pub(super) const ROOT_TITLE: &str = "main";
 

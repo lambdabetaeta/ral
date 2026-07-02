@@ -183,13 +183,16 @@ fn size_cells(magnitude: u32) -> usize {
 /// decorative ink beside the path / summary rather than content.  A zero
 /// magnitude renders an all-empty bar.
 pub(super) fn size_bar(magnitude: u32) -> Span<'static> {
+    Span::styled(size_bar_text(magnitude), Style::default().fg(SLATE))
+}
+
+pub(super) fn size_bar_text(magnitude: u32) -> String {
     let filled = size_cells(magnitude);
-    let bar: String = "█"
+    "█"
         .repeat(filled)
         .chars()
         .chain("░".repeat(SIZE_BAR_W - filled).chars())
-        .collect();
-    Span::styled(bar, Style::default().fg(SLATE))
+        .collect()
 }
 
 /// The eight partial-height block glyphs of a vertical sparkline, lowest
