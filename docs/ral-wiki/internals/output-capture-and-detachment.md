@@ -90,16 +90,24 @@ The escape is detachment — the *handle* is its evidence
 ## Reading a spawned server's output (the exarch caveat)
 
 - A server never settles, so `await $h` would block to the wall and unwind —
-  sparing the root-parented worker, via the cancel-aware `wait_first_settled` — and
-  `poll $h` reports `` `pending `` without draining the buffer. A handle's bytes are
-  observable only once it settles, i.e. after the server exits or is cancelled.
-- `watch` — the one primitive that streams a *running* worker's output live — is
-  REPL-only: exarch's per-call capture sinks cannot host a root-surviving writer
-  ([[decisions/260617_watch-repl-builtin|watch-repl-builtin]]).
-- So under exarch a server is *fire-and-`cancel`*: `spawn` it, talk to it on later
-  turns, `cancel $h` when done. To keep its logs, redirect inside the block to a
-  file — `spawn { python3 -m http.server > srv.log 2>&1 }` — and read the file on
-  later turns.
+  sparing the root-parented worker, via the cancel-aware `wait_first_settled`. But
+  `poll $h` is a pull-based read of a *running* worker: its `` `pending `` arm
+  carries a `{stdout, stderr}` snapshot of the bytes buffered so far, cloned
+  non-destructively (`peek_buffer`, not the completion `take_buffer`), so the buffer
+  is left intact and a later `await`/`` `settled `` `poll` still sees everything
+  ([[decisions/260702_partial-poll-pending-output|partial-poll-pending-output]]).
+  The snapshot is cumulative — each poll of a live worker reports monotonically more
+  — and it is capped by `SINK_BUFFER_CAP` like every capture buffer.
+- `watch` — the one primitive that *streams* a running worker's output live — is
+  still REPL-only: exarch's per-call capture sinks cannot host a root-surviving
+  writer ([[decisions/260617_watch-repl-builtin|watch-repl-builtin]]). Partial `poll`
+  is the headless substitute: not a live stream, but a poll-driven read exarch can
+  drive from its own turns.
+- So under exarch a server is *fire-and-`poll`-and-`cancel`*: `spawn` it, read its
+  accumulated output with `poll $h` on later turns, `cancel $h` when done. To keep a
+  full, unbounded log past the 16 MiB cap, still redirect inside the block to a file
+  — `spawn { python3 -m http.server > srv.log 2>&1 }` — and read the file on later
+  turns.
 
 See also
 [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]

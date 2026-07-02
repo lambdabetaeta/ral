@@ -560,13 +560,18 @@ once it finishes, and it never re-raises:
                 `err: { |e| echo "scan failed, exit $e[status]" }
             ]
         },
-        `pending: { |_| echo 'still scanning' }
+        `pending: { |s| echo "still scanning: $s[stdout]" }
     ]
 
 `` `settled `` carries `[stdout, stderr, outcome]`, where `outcome` is
 `` `ok `` with the block's value or `` `err `` with the caught-error record
 (the same shape `try` gives) — so a failed block's status lives in
-`outcome.err.status`, never on `await`'s record.  `is-done $h` is the
+`outcome.err.status`, never on `await`'s record.  `` `pending `` carries
+`[stdout, stderr]` too — the bytes the block has written *so far* — so you
+can read a running job's progress without waiting for it (the headless
+counterpart to `watch`).  It is a cumulative, non-destructive snapshot: the
+bytes stay buffered, so a later `await` still returns them in full, and each
+poll of a running job simply reports a little more.  `is-done $h` is the
 boolean shortcut: `true` once settled, `false` while pending.
 
 Because bindings are immutable, there is no shared mutable state across
@@ -918,7 +923,7 @@ bundled coreutils (`cp`, `mv`, `rm`, `mkdir`, `ln`, …).  Queries:
 | `&` (trailing) | | background a pipeline, yield a handle |
 | `spawn` | `body` | run a block concurrently |
 | `await` | `handle` | join: `[value, stdout, stderr]` (re-raises on failure) |
-| `poll` | `handle` | non-blocking: `<pending \| settled: [stdout, stderr, outcome]>` |
+| `poll` | `handle` | non-blocking: `<pending: [stdout, stderr] \| settled: [stdout, stderr, outcome]>` |
 | `is-done` | `handle` | `Bool`: has it settled yet? (non-blocking) |
 | `race` | `handles` | first to finish wins |
 | `cancel` | `handle` | cancel a running block |

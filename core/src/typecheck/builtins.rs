@@ -523,18 +523,27 @@ fn settle_record(value_ty: Ty) -> Ty {
     ])
 }
 
+/// The `{stdout, stderr}` record `poll` carries in its `` `pending `` arm:
+/// the bytes a still-running block has written *so far*, sampled
+/// non-destructively (a cumulative snapshot).  Distinct from
+/// [`settle_record`] — a pending poll has no outcome to report yet, only the
+/// partial output accumulated to this point.
+fn pending_record() -> Ty {
+    closed_record(&[("stdout", Ty::Bytes), ("stderr", Ty::Bytes)])
+}
+
 /// The variant returned by `poll`, total over a finished block:
 /// `` `settled `` carries the `Settle α` record ([`settle_record`]) for a
 /// block that finished — returning, raising, or panicking — and
-/// `` `pending `` carries no payload (typed `Unit`, like every
-/// empty-payload arm such as the Step stream's `` `done ``).  `poll` is the
-/// non-blocking dual of `await`: rather than re-raising a failed block, it
-/// reports it inside the `` `settled `` outcome's `` `err `` arm.
+/// `` `pending `` carries the partial `{stdout, stderr}` record
+/// ([`pending_record`]) — the bytes written so far — while it runs.  `poll`
+/// is the non-blocking dual of `await`: rather than re-raising a failed
+/// block, it reports it inside the `` `settled `` outcome's `` `err `` arm.
 fn poll_variant(value_ty: Ty) -> Ty {
     use crate::syntax::tag::tag_row_label;
     Ty::Variant(Row::Extend(
         tag_row_label("pending"),
-        Box::new(Ty::Unit),
+        Box::new(pending_record()),
         Box::new(Row::Extend(
             tag_row_label("settled"),
             Box::new(settle_record(value_ty)),
@@ -914,7 +923,7 @@ pub mod scheme {
         )
     }
 
-    /// `poll :: ∀α. Handle α → F <pending: {} | settled: {stdout, stderr, outcome: <ok: α | err: ErrRecord>}>`
+    /// `poll :: ∀α. Handle α → F <pending: {stdout, stderr} | settled: {stdout, stderr, outcome: <ok: α | err: ErrRecord>}>`
     pub fn poll(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);

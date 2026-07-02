@@ -3429,3 +3429,19 @@ sketched, `Fleet` holds `Arc<Engine>`, `make_runtime()` now called only once at
 live `provider().current()`. The sketched `Engine::Scripted` test seam shipped as
 `Backend::Scripted` instead — same effect, no runtime built. Flipped proposed →
 active and added the missing [[index|index]] entry (absent since filing).
+
+
+## [2026-07-02] migrate | poll's `pending arm carries partial output
+
+Added [[decisions/260702_partial-poll-pending-output|partial-poll-pending-output]]:
+`poll $h` on a still-running handle now returns `` `pending `` `{stdout, stderr}` —
+the bytes written so far, cloned non-destructively from the live buffers via a new
+`peek_buffer` (`core/src/io/sink.rs`), the peer of `take_buffer`. `builtin_poll`'s
+pending arm and `poll_variant`'s type widen from `Unit` to the `{stdout, stderr}`
+record. Chosen cumulative (a growing prefix), not a drain-on-poll delta, so the
+drain-once invariant survives — the cost is that pending polls are non-idempotent,
+which re-scopes [[decisions/260615_poll-total-failed-arm|the settle decision]]'s
+consistency guarantee to *settled* observations only. Gives exarch a headless,
+pull-based read of a running worker — the counterpart to REPL-only `watch`. Updated
+SPEC §13.3, TUTORIAL, `ral/tests/poll.rs`, and
+[[internals/output-capture-and-detachment|output-capture-and-detachment]].

@@ -1583,7 +1583,7 @@ case $p [
             `err: { |e| recover $e[status] }     # raised — the caught-error record
         ]
     },
-    `pending: { |_| keep-working }               # still running
+    `pending: { |s| echo $s[stdout] }            # still running — bytes so far
 ]
 ```
 
@@ -1593,14 +1593,24 @@ case $p [
   value and `` `err `` holds the same `ErrorRec` (§10) `try` hands its
   handler — its `status` is the block's exit code.  The bytes drain once on
   completion, so `await` and a later `poll` observe the same buffers.
-- `` `pending `` (no payload) while the block is still running.
+- `` `pending `` carries `{ stdout, stderr }` — the bytes the block has
+  written *so far*.  These are a cumulative, non-destructive snapshot: the
+  buffers are left intact, so a partial `poll` never consumes bytes a later
+  `await` or `` `settled `` `poll` must still see, and the total-output
+  invariant (bytes leave a buffer exactly once, on completion) holds.  A
+  watched handle streams live and buffers nothing, so a pending `poll` on one
+  reports empty.  Because the snapshot grows as the worker writes, repeated
+  pending polls are *not* idempotent — they report monotonically more output;
+  only settled observations are stable across repeats.
 
 Where `await` *blocks* and *re-raises* a failed block, `poll` neither
 waits nor raises: it reports the terminal outcome — value or error — as
-data, never as a failure of `poll` itself.  It still fails on a cancelled
-or forgotten handle, exactly as `await` does — a detached handle has no
-outcome to sample.  The prelude predicate `is-done h` reduces `poll` to a
-`Bool`: `true` once `` `settled ``, `false` while `` `pending ``.
+data, never as a failure of `poll` itself.  A pending `poll` is a pull-based
+read of a running worker's output — the headless counterpart to `watch`
+(§13.5), which streams it live.  `poll` still fails on a cancelled or
+forgotten handle, exactly as `await` does — a detached handle has no outcome
+to sample.  The prelude predicate `is-done h` reduces `poll` to a `Bool`:
+`true` once `` `settled ``, `false` while `` `pending ``.
 
 ### 13.4  Child lifetime
 

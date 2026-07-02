@@ -26,10 +26,14 @@ The settled surface:
   ErrRecord> }`, where `ErrRecord` is the record `try` already hands a handler
   (`{status, cmd, message, line, col}`, reused — not re-invented). `status` lives
   inside `err`; there is no redundant top-level copy.
-- **`poll h → F <pending: {} | settled: Settle α>`** — non-blocking, *total*. Never
-  re-raises a finished, failed, or panicked block; reports it as `` `settled `` data.
-  A successful `poll` does not propagate the block's failure as its own. Still
-  errors on a cancelled/forgotten handle (`ensure_live`) — detached is not finished.
+- **`poll h → F <pending: {stdout, stderr} | settled: Settle α>`** — non-blocking,
+  *total*. Never re-raises a finished, failed, or panicked block; reports it as
+  `` `settled `` data. A successful `poll` does not propagate the block's failure as
+  its own. Still errors on a cancelled/forgotten handle (`ensure_live`) — detached is
+  not finished. The `` `pending `` arm's `{stdout, stderr}` is the *partial* output
+  written so far, added later in
+  [[decisions/260702_partial-poll-pending-output|partial-poll-pending-output]]; see
+  the note below on how that re-scopes this decision's consistency guarantee.
 - **`await h → F {value: α, stdout, stderr}`** — blocks, unwraps `ok` to the value
   (re-raising `err`), so the happy path stays `let r = await $h; use $r[value]` and
   failure propagates by default. The dead `status` field is gone; a failed block's
@@ -40,8 +44,14 @@ The settled surface:
 Why this is also a cleaner mechanism: the buffers are drained **once** at
 completion into a cached `CompletedHandle { stdout, stderr, outcome }`, and
 `await`/`race`/`poll` all project that one value. This removes the earlier
-peek-vs-drain split — there is exactly one place bytes leave the buffers, and
-repeated observations are consistent by construction. A panicked worker (a
+peek-vs-drain split — there is exactly one place bytes *leave* the buffers, and
+repeated observations of a *settled* handle are consistent by construction.
+[[decisions/260702_partial-poll-pending-output|Partial poll]] later re-scoped this:
+the `` `pending `` arm *clones* the still-growing buffers (`peek_buffer`) rather than
+draining them, so the drain-once invariant still holds (bytes leave exactly once, on
+completion) but pending observations are no longer idempotent — they report
+monotonically more output. The "repeated observations are consistent" guarantee is
+therefore now precisely a guarantee about *settled* observations. A panicked worker (a
 `Disconnected` result channel) settles as an `err` outcome carrying the same panic
 error `await`'s blocking path reports, so `poll` reports it and `race` stops
 spinning. `poll`'s `` `err `` payload is built through the shared

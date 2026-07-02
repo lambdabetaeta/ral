@@ -3,10 +3,11 @@
 // `poll h` is the total, non-blocking dual of `await`: it yields
 // `` `settled `` with `{stdout, stderr, outcome}` once the block has
 // finished — `outcome` is `` `ok `` with its value or `` `err `` with the
-// error record (never re-raising) — and `` `pending `` while the block is
-// still running.  It errors only on a cancelled/forgotten handle.
-// `is-done` is total over a finished handle (true on `` `settled ``, false
-// on `` `pending ``) and still propagates the detached error.
+// error record (never re-raising) — and `` `pending `` with `{stdout,
+// stderr}` (the bytes written so far, a cumulative non-destructive snapshot)
+// while the block is still running.  It errors only on a cancelled/forgotten
+// handle.  `is-done` is total over a finished handle (true on `` `settled ``,
+// false on `` `pending ``) and still propagates the detached error.
 #![cfg(unix)]
 
 mod common;
@@ -60,6 +61,64 @@ fn poll_pending_while_running() {
     );
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     assert!(out.stdout.contains("pending"), "stdout: {:?}", out.stdout);
+}
+
+// A running block's already-written output is observable in the `` `pending ``
+// arm's partial `{stdout, stderr}` snapshot: `poll` does not wait for the
+// block to finish, yet reads back what it has emitted so far.  The block keeps
+// running (a long `sleep`) so the poll lands on `` `pending ``, not
+// `` `settled ``.
+#[test]
+fn poll_pending_carries_partial_stdout() {
+    let out = run_poll(
+        r#"
+        let h = spawn { echo partial-line; sleep 2; return 1 }
+        sleep 0.3
+        let polled = poll $h
+        case $polled [
+            `settled: { |_| echo unexpected-settled },
+            `pending: { |s| echo !{to-bytes $s[stdout] | from-string} }
+        ]
+        cancel $h
+        "#,
+    );
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(
+        out.stdout.contains("partial-line"),
+        "pending poll must carry the bytes written so far; stdout: {:?}",
+        out.stdout
+    );
+}
+
+// The partial snapshot is non-destructive: bytes read from a `` `pending ``
+// poll are still delivered in full by a later `await`.  A pending poll clones
+// the buffer (`peek_buffer`) rather than draining it, so the completion drain
+// still sees everything — the total-output invariant holds across a partial
+// observation.
+#[test]
+fn pending_poll_does_not_consume_bytes_from_await() {
+    let out = run_poll(
+        r#"
+        let h = spawn { echo first-chunk; sleep 0.5; echo second-chunk; return 7 }
+        sleep 0.2
+        let _ = poll $h
+        let r = await $h
+        echo "value=$r[value]"
+        echo !{to-bytes $r[stdout] | from-string}
+        "#,
+    );
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(out.stdout.contains("value=7"), "stdout: {:?}", out.stdout);
+    assert!(
+        out.stdout.contains("first-chunk"),
+        "await must still see bytes a pending poll peeked; stdout: {:?}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("second-chunk"),
+        "stdout: {:?}",
+        out.stdout
+    );
 }
 
 // A block that raised polls as `` `settled `` with an `` `err `` outcome

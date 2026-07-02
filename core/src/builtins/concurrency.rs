@@ -25,7 +25,7 @@
 use crate::evaluator::absorb_tail;
 use crate::evaluator::comp::{eval_comp, with_scope};
 use crate::evaluator::scope::error_record;
-use crate::io::{Sink, new_buffer, take_buffer};
+use crate::io::{Sink, new_buffer, peek_buffer, take_buffer};
 use crate::types::*;
 use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex};
@@ -534,7 +534,15 @@ pub(super) fn builtin_await(args: &[Value], shell: &mut Shell) -> Settled<Value>
 /// - `` `settled `` carrying `{stdout, stderr, outcome}`, where `outcome`
 ///   is `` `ok `` with the block's value or `` `err `` with the error
 ///   record, when the block finished (returned, raised, or panicked).
-/// - `` `pending `` (Unit payload) while the block is still running.
+/// - `` `pending `` carrying `{stdout, stderr}` — the bytes the block has
+///   written *so far* — while it is still running.  These are a cumulative,
+///   non-destructive snapshot ([`peek_buffer`], not [`take_buffer`]): the
+///   buffers are left intact for the one-shot completion drain, so a partial
+///   poll never steals bytes a later `await`/`poll` must still see.  A watched
+///   handle's buffers stay empty (bytes flow live through `Sink::LineFramed`),
+///   so a pending `poll` on one reports empty.  Because the snapshot grows as
+///   the worker writes, repeated pending polls are non-idempotent — see
+///   `decisions/260702_partial-poll-pending-output`.
 ///
 /// Errors only on a cancelled handle (via [`ensure_live`]):
 /// a detached handle has no outcome to sample.  Unlike `await`/`race`, a
@@ -562,7 +570,16 @@ pub(super) fn builtin_poll(args: &[Value], shell: &mut Shell) -> Settled<Value> 
             ]);
             variant("settled", Some(Box::new(settled)))
         }
-        None => variant("pending", Some(Box::new(Value::Unit))),
+        None => {
+            // A cumulative, non-destructive snapshot of what the running
+            // worker has written so far: `peek_buffer` clones, leaving the
+            // buffers for `complete_handle`'s one-shot `take_buffer` drain.
+            let pending = Value::map(vec![
+                ("stdout".into(), Value::Bytes(peek_buffer(&handle.stdout_buf))),
+                ("stderr".into(), Value::Bytes(peek_buffer(&handle.stderr_buf))),
+            ]);
+            variant("pending", Some(Box::new(pending)))
+        }
     };
     // `poll` itself succeeded: the block's status (if any) is data inside
     // `outcome.err.status`, never a failure of `poll`.

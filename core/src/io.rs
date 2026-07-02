@@ -22,7 +22,8 @@ mod terminal;
 
 pub use sink::{ByteBuffer, ChildStdioPlan, ExternalWrite, SINK_BUFFER_CAP, Sink};
 pub(crate) use sink::{
-    new_buffer, str_strip_one_terminator, strip_trailing_newline, take_buffer, tee_with_buffer,
+    new_buffer, peek_buffer, str_strip_one_terminator, strip_trailing_newline, take_buffer,
+    tee_with_buffer,
 };
 pub use source::{Source, SourceReader};
 #[cfg(windows)]

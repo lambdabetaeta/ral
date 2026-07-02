@@ -6,8 +6,9 @@
 //! through.  [`ChildStdioPlan`] is its companion for child processes: the
 //! `Stdio` to hand `Command::stdout`/`stderr` plus an optional pump sink the
 //! caller drains after spawn.  The buffer primitives ([`new_buffer`],
-//! [`tee_with_buffer`], [`take_buffer`], [`strip_trailing_newline`]) are the
-//! sole owners of the `Arc<Mutex<Vec<u8>>>` idiom for captured bytes.
+//! [`tee_with_buffer`], [`take_buffer`], [`peek_buffer`],
+//! [`strip_trailing_newline`]) are the sole owners of the
+//! `Arc<Mutex<Vec<u8>>>` idiom for captured bytes.
 
 use std::io::{self, Read, Write};
 use std::sync::{Arc, Mutex};
@@ -287,6 +288,21 @@ pub(crate) fn take_buffer(buf: &ByteBuffer) -> Vec<u8> {
     buf.lock()
         .map(|mut g| std::mem::take(&mut *g))
         .unwrap_or_default()
+}
+
+/// Clone a [`ByteBuffer`]'s current contents without draining it — the
+/// non-destructive peer of [`take_buffer`].  Returns an empty vector on a
+/// poisoned lock, for the same reason `take_buffer` does.
+///
+/// Used by `poll`'s `` `pending `` arm to sample a *still-running* worker's
+/// accumulated stdout/stderr.  Because the bytes stay in the buffer, the
+/// one-shot completion drain (`take_buffer` in `complete_handle`) still
+/// observes the full output — "bytes leave the buffer exactly once" is
+/// preserved.  The flip side is that repeated peeks of a running worker
+/// grow monotonically and are not idempotent; see
+/// `decisions/260702_partial-poll-pending-output`.
+pub(crate) fn peek_buffer(buf: &ByteBuffer) -> Vec<u8> {
+    buf.lock().map(|g| g.clone()).unwrap_or_default()
 }
 
 /// Strip a single trailing line terminator from `buf`, mirroring POSIX

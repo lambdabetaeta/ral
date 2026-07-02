@@ -45,10 +45,13 @@ Bodies are grouped by concern, one submodule each:
   outcome to `{value, stdout, stderr}`, re-raising `` `err ``; `poll` is total,
   wrapping it as `` `settled `` `{stdout, stderr, outcome: `ok/`err}` (the `` `err ``
   payload built through the shared `evaluator::scope::error_record`, the record
-  `try` hands its handler) or `` `pending ``, and leaving `last_status` at 0 since
-  the block's status is data. `await` and `poll` gate first on `ensure_live`, the
-  cancelled pre-check
-  ([[decisions/260615_poll-total-failed-arm|the settle decision]]).
+  `try` hands its handler) or `` `pending `` `{stdout, stderr}` (a *cumulative,
+  non-destructive* `peek_buffer` snapshot of the running worker's output — the
+  buffers are left for the one-shot completion `take_buffer`, so a partial poll
+  never steals bytes), and leaving `last_status` at 0 since the block's status is
+  data. `await` and `poll` gate first on `ensure_live`, the cancelled pre-check
+  ([[decisions/260615_poll-total-failed-arm|the settle decision]],
+  [[decisions/260702_partial-poll-pending-output|partial-poll-pending-output]]).
   A detached worker hangs under the durable session root, not the turn's
   foreground scope, so a foreground cancel never reaps it; `await` shares
   `race`'s cancel-aware wait loop (`wait_first_settled`), so a deadline unwinds
