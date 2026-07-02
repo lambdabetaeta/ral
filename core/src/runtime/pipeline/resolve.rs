@@ -1,10 +1,9 @@
-//! Pipeline resolve phase: type-infer every stage, validate channel
-//! adjacency, classify dispatch (a pure external command spawned directly
-//! vs. a stage evaluated in a ral helper subprocess), and freeze the
-//! pipeline-level invariants.
+//! Pipeline resolve phase: validate channel adjacency, classify launch,
+//! and freeze the pipeline-level invariants.
 //!
-//! Pure of side effects on `shell` aside from argv evaluation for
-//! directly-spawned external stages; no process / pipe is created here.
+//! Resolve reads the checker's ground wires; it does not infer modes.
+//! It may evaluate argv for stages committed to direct external launch.
+//! It creates no process and opens no pipe.
 //! Everything this module produces is read by [`super::launch`].
 
 use super::super::command::CommandIdentity;
@@ -41,8 +40,9 @@ impl TerminalPlan {
 ///
 /// `PureValue` is a pipeline with no byte channel on any edge: it reduces
 /// to a data-last fold in the parent evaluator (`x | f = f !{x}`).
-/// `ProcessStaged` is a pipeline carrying at least one byte edge, launched
-/// as helper subprocesses in one process group.
+/// `ProcessStaged` is a pipeline carrying at least one byte edge.  It
+/// launches every stage as a child in one process group; a child is
+/// either a direct external command or a ral helper evaluating the stage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PipelineKind {
     PureValue,
@@ -354,17 +354,16 @@ fn specs_from_wires(
         .collect()
 }
 
-/// Resolve phase: type-check every stage, validate channel adjacency,
-/// classify dispatch (a pure external command spawned directly vs. a
-/// stage evaluated in a ral helper subprocess), and freeze the
-/// pipeline-level mode + last-output mode.  The byte-capturing audit
-/// decision is consulted live during launch classification rather than
-/// stored on the plan.
+/// Resolve phase: read each checked wire, validate channel adjacency,
+/// classify each stage's launch path, and freeze the pipeline-level kind
+/// plus final output mode.  The byte-capturing audit decision is
+/// consulted live during launch classification rather than stored on the
+/// plan.
 ///
 /// Each stage's channel signature is read off its ground wire — the
-/// checker annotates every evaluated pipeline.  Pure of side effects on
-/// `shell` aside from argv evaluation for directly-spawned external
-/// stages; no process / pipe is created here.
+/// checker annotates every evaluated pipeline.  The only shell effect
+/// here is argv evaluation for directly-spawned external stages; no
+/// process or pipe is created here.
 pub(super) fn resolve_pipeline(
     stages: &[Arc<Comp>],
     wires: &[crate::mode::Wire],

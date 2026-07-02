@@ -334,7 +334,11 @@ fn eval_bind(
     eval_comp(rest, shell, tail)
 }
 
-/// Pipeline — concurrent stages connected by Unix pipes.
+/// Pipeline: a typed dataflow edge selects the machine.
+///
+/// A pure value pipeline is a parent-side fold.  Any byte edge is a
+/// process-staged pipeline: stages run in child processes in one group,
+/// with byte pipes and/or typed value channels between neighbours.
 ///
 /// A single-stage pipeline reduces to its inner computation, inheriting
 /// the pipeline's tail position; the multi-stage case delegates to

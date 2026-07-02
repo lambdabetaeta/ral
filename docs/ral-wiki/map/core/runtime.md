@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1baac6d
-generated_at_date: 2026-06-22
+generated_at_commit: a007f72
+generated_at_date: 2026-07-02
 covers_paths: [core/src/runtime.rs, core/src/runtime/, core/src/child_eval.rs]
 ---
 
@@ -101,8 +101,10 @@ guards, and `transport::dispatch`
     `protocol/` (`common.rs`, `unix.rs` / `windows.rs`, `fallback.rs`) for the
     ral⇄ral stage frames — `HelperProtocol::wire` clears an absent
     value-channel env var with `env_remove`, so a spawned helper's protocol vars
-    describe exactly that spawn. Value edges are data-last application, the
-    producer forced once by `force_pipe_value`
+    describe exactly that spawn. On Windows the protocol still relies on
+    temporarily inheritable parent handles; a custom handle-list spawn path is
+    the missing atomic form. Value edges are data-last application, the producer
+    forced once by `force_pipe_value`
     ([[decisions/260609_pure-pipe-equation|pure-pipe-equation]]).
 - `transport.rs` — the local-run router for the boundary verbs. **A `grant` is a
   dynamic effect scope, not a process boundary, so the grant body always

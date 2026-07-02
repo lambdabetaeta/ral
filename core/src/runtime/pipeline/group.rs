@@ -39,9 +39,11 @@ use crate::types::{Settled, Shell};
 /// optional foreground guard.  On Windows the existing pgid abstraction
 /// still stands in for the group; the anchor is Unix-only.
 ///
-/// Foreground gating (the trampoline + frame-write protocol) is owned
-/// by [`super::launch`]; see its module-level `## Foreground gating`
-/// section.  This type stays focused on pgid lifecycle.
+/// Start gating is owned by [`super::launch`]: helper stages wait for
+/// their deferred job frames until every stage has spawned and any
+/// foreground handoff has completed.  Direct external stages are admitted
+/// only when that gate is unnecessary.  This type stays focused on pgid
+/// lifecycle.
 pub(super) struct PipelineGroup {
     terminal: TerminalPlan,
     leader: Option<Pgid>,

@@ -648,11 +648,11 @@ fn many_sequential_pipelines_no_leak() {
     // Run 50 external pipelines in sequence.  If file descriptors or process
     // groups leak, this will exhaust them and start failing.
     //
-    // All pipeline stages now run through ral helpers with a stable-pgid
-    // anchor, so each pipeline spawns its three stage helpers plus their
-    // nested externals plus the anchor — ~5 processes per iteration.
-    // The test validates no fd/pgid leak; 50 iterations is enough to
-    // surface leaks without timing out on the stage-helper path.
+    // This pipeline takes the direct-external path: no value edge, no
+    // redirects on the stages, no byte audit capture, and no foreground
+    // terminal handoff.  It still allocates byte pipes and process-group
+    // state each iteration, so the test catches fd/pgid leaks without
+    // exercising helper-evaluated stages.
     let script = r#"
 let _go = { |n|
     if $[$n <= 0] {} else {
@@ -1723,19 +1723,18 @@ fn race_repeats_deterministically() {
     }
 }
 
-// ── Exec trampoline foreground-handoff regressions ──────────────────────────
+// ── Foreground-handoff regressions ──────────────────────────────────────────
 //
-// The exec trampoline (`--ral-pipeline-exec-helper`) is the parent's
-// hook to keep external stages from racing past `tcsetpgrp`: each
-// external is spawned as a re-exec of ral, joins the pipeline pgid via
-// the canonical pre_exec, and blocks reading its `ExecJob` frame.  The
-// frame is only written after the parent has called `tcsetpgrp`.  The
-// tests below open a real pty so `tcgetpgrp` is meaningful.
+// A foreground pipeline that owns a tty cannot admit direct external
+// launch: `resolve::direct_spawnable` forces such stages through the ral
+// helper, and launch releases helper job frames only after `tcsetpgrp`
+// has handed the pty to the pipeline pgid.  The tests below open a real
+// pty so `tcgetpgrp` is meaningful.
 //
 // `--ral-test-pgid-check <tag>` writes both `pgid:<tag>` and (when
-// stdin is a tty) `tcpgrp:<tag>` to stderr.  The trampoline test asks:
-// after the trampoline has `execve`d into ral, did we land in a pgid
-// that owns the controlling terminal?
+// stdin is a tty) `tcpgrp:<tag>` to stderr.  These tests ask: when the
+// stage starts running user code, is it in the pgid that owns the
+// controlling terminal?
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod pty_helper {
@@ -1926,11 +1925,11 @@ fn parse_tagged_tcpgrp(stderr: &str, tag: &str) -> Option<i32> {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn pty_external_stage_runs_to_completion() {
-    // Sanity-check the exec trampoline under a real pty and REPL:
-    // foreground handoff is an interactive-only policy, so this drives
-    // ral through `-i --norc` rather than the batch script runner.  The
-    // hidden helper reports both its pgid and the pty foreground pgid;
-    // after trampoline release they must match.
+    // Sanity-check helper-gated foreground handoff under a real pty and
+    // REPL: foreground handoff is an interactive-only policy, so this
+    // drives ral through `-i --norc` rather than the batch script
+    // runner.  The helper reports both its pgid and the pty foreground
+    // pgid; after launch releases its job frame they must match.
     let ral = ral_bin();
     let script = format!("printf \"\" | {} --ral-test-pgid-check post", ral.display());
     let o = run_pty_repl_until(&script, Duration::from_secs(8), |text| {
@@ -1998,12 +1997,10 @@ echo done
 
 #[test]
 fn pipeline_path_literal_exec_failure_reports_127() {
-    // `/no/such/binary` cannot be `execve`d.  The exec trampoline
-    // writes an `ExecReport::ExecFailed{NotFound, ...}` and exits 127.
-    // The parent rebuilds a `CommandFailure::Spawn(NotFound)` against
-    // the real command name and surfaces a "no such file or
-    // directory" diagnostic — not the generic "helper exited 1" that
-    // a pre-Fix-1 build produced.
+    // `/no/such/binary` cannot be spawned.  Direct external launch
+    // rebuilds that as `CommandFailure::Spawn(NotFound)` against the
+    // real command name and surfaces a "no such file or directory"
+    // diagnostic, not a generic pipeline-stage failure.
     let o = run_with_timeout(
         &[],
         "/no/such/binary | /usr/bin/cat",

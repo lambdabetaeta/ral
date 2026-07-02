@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 1baac6d
-verified_at_date: 2026-06-22
+verified_at_commit: a007f72
+verified_at_date: 2026-07-02
 anchors: [run_pipeline, resolve_pipeline, StageLaunch, value_edge_in, force_pipe_value, run_child_eval, PipelineGroup, spawn_with_pgid, wait_handling_stop, Escape::Stopped, wait_foreground, ForegroundGuard, TerminalLease, terminal_lease, park_on_stop]
 ---
 
@@ -103,11 +103,20 @@ boundary (`wants_mobile` is `false` for a stage; only the last value-typed stage
 sets `wants_value`), which is what keeps job control coherent
 ([[design/pipelines|isolation]]).
 
-**Windows needs no foreground gating.** There is no `tcsetpgrp` to race; the
-terminal plan never selects `ForegroundExternalGroup`. The helper protocol still
-runs (gate / report / value edges) over anonymous OS pipe pairs
-(`pipeline/protocol/{unix,windows}.rs`); `TerminateJobObject` over a per-pipeline
-Job Object makes the abort path plain RAII.
+**Windows has no foreground handoff, but its spawn boundary is not atomic.**
+There is no `tcsetpgrp` to race; the terminal plan never selects
+`ForegroundExternalGroup`. The helper protocol still runs (gate / report / value
+edges) over anonymous OS pipe pairs (`pipeline/protocol/{unix,windows}.rs`), and
+assigned children are torn down through a per-pipeline Job Object. Two current
+limits belong to process creation, not collection: helper channel handles are
+temporarily marked inheritable in the parent before `Command::spawn`, so an
+unrelated concurrent inheriting spawn could keep a gate/report/value channel
+open; and direct external stages are assigned to the Job Object only after spawn,
+so a program that forks immediately can put descendants outside the job. Closing
+both holes means replacing the affected Windows launch paths with a custom
+`CreateProcessW` wrapper: an explicit handle list for helper protocol channels,
+and creation-time job placement (`CREATE_SUSPENDED` plus assign plus resume, or
+`PROC_THREAD_ATTRIBUTE_JOB_LIST`) for process-group placement.
 
 **Abort is gate-first.** A `PipelineBuild` accumulator owns every transient resource
 under one drop order: unreleased stage gates close first (a helper parked on its job

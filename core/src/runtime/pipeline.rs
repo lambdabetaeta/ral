@@ -8,8 +8,10 @@
 //!      byte-capturing audit decision is consulted live during launch
 //!      classification rather than stored on the plan.
 //!   2. **launch** ([`launch::launch_pipeline`]): walk stages once,
-//!      spawning every process-staged stage as a ral helper subprocess
-//!      in one process group.
+//!      placing every process-staged stage in one process group.  A
+//!      redirect-free, byte-only external stage may spawn directly;
+//!      every ral stage, value-carrying stage, redirected stage, and
+//!      byte-captured stage runs through the ral stage helper.
 //!   3. **collect** (`collect::RunningPipeline::collect` +
 //!      `PipelineCollector::finish`): wait for the processes in launch
 //!      order, surface the first error, and recover the final value when

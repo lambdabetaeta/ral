@@ -639,13 +639,16 @@ pub fn disown_pipeline_group(pgid: Pgid) {
 /// the stage forks in the gap between resume and assignment is not pulled
 /// into the job, so abort-path `TerminateJobObject` cannot reach it. The
 /// Unix arm has no such window: `setpgid` runs in `pre_exec`, before the
-/// child's own code. Closing it on Windows requires atomic creation-time
-/// job placement (`CREATE_SUSPENDED` plus `AssignProcessToJobObject` plus
-/// `ResumeThread`, or a `PROC_THREAD_ATTRIBUTE_JOB_LIST` attribute list),
-/// neither of which `std::process::Command` exposes; it needs the custom
-/// `CreateProcessW` wrapper the sandbox token path already carries.
-/// Pipeline stages are short-lived ral helpers that fork no grandchildren
-/// before the gate frame arrives, so the window is not currently reachable.
+/// child's own code.
+///
+/// Helper-evaluated stages are gated before user code, so they do not
+/// normally fork in this window.  Direct external stages are not gated:
+/// a hostile or very early-forking program can escape the Job Object
+/// before `new_leader` / `join` assigns it.  Closing that gap requires
+/// creation-time job placement: either spawn suspended, assign to the
+/// job, then resume, or use a `PROC_THREAD_ATTRIBUTE_JOB_LIST` attribute
+/// list.  That means replacing this `std::process::Command` path with a
+/// custom `CreateProcessW` wrapper.
 pub fn spawn_with_pgid(
     cmd: &mut std::process::Command,
     pgid: PgidPolicy,

@@ -3445,3 +3445,15 @@ consistency guarantee to *settled* observations only. Gives exarch a headless,
 pull-based read of a running worker — the counterpart to REPL-only `watch`. Updated
 SPEC §13.3, TUTORIAL, `ral/tests/poll.rs`, and
 [[internals/output-capture-and-detachment|output-capture-and-detachment]].
+
+
+## [2026-07-02] ingest | pipeline comments restated the live launch invariants
+
+Reworded pipeline/runtime comments around direct external stages, helper gates,
+foreground handoff, and the retired exec-helper flag so they state the live
+invariants rather than an older helper-only architecture. Re-verified
+[[design/pipelines|pipelines]] and
+[[internals/pipeline-execution|pipeline-execution]], then re-stamped
+[[map/core/runtime|runtime]] plus [[map/core/io-process|io-process]] to
+`@a007f72`; the Windows narrative now records the two remaining spawn-boundary
+limits: inheritable helper handles and post-spawn Job Object assignment.

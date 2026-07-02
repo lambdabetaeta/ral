@@ -53,12 +53,13 @@ pub(crate) const ANCHOR_FLAG: &str = "--ral-pipeline-anchor";
 /// status.  See `decisions/260616_bundled-tools-as-exec-images`.
 pub(crate) const BUNDLED_TOOL_FLAG: &str = "--ral-bundled-tool";
 
-/// Optional start-gate descriptor the pipeline launcher passes so the
-/// bundled-tool child blocks until all stages have joined the process
-/// group and the terminal handoff is settled.  Absent means run
-/// immediately.  Mirrors [`ANCHOR_FD_ENV`]: the child reads the
-/// descriptor to EOF and proceeds.  Only the bundled-tool entrypoint
-/// reads it, so the const tracks the same feature gate.
+/// Optional start-gate descriptor for a bundled-tool child.
+///
+/// No live launcher wires this today: direct bundled tools are admitted
+/// only on the same no-helper path as host externals, so they run
+/// immediately.  If a future direct bundled-tool gate is needed, the
+/// child side already has the same shape as the anchor gate: read this
+/// descriptor to EOF, then enter the tool.
 #[cfg(all(
     unix,
     any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
@@ -499,12 +500,12 @@ pub fn try_run_pipeline_stage_helper() -> Option<u8> {
     }
 }
 
-/// Block until the launcher releases the optional start gate.  The gate
-/// is one inheritable descriptor (fd / Win32 HANDLE) the parent holds
-/// open; reading it to EOF means the launcher has closed its end after
-/// the whole pipeline joined the process group and the terminal handoff
-/// settled.  Absent descriptor → run immediately (a standalone bundled
-/// child has no gate).  Mirrors [`serve_anchor_from_env_fd`].
+/// Block until an optional bundled-tool start gate reaches EOF.
+///
+/// No current launcher sets the env var, so bundled-tool children run
+/// immediately.  The reader remains the child half of the dormant gate
+/// protocol: if a parent later passes one inheritable descriptor, closing
+/// the parent end releases the tool.
 #[cfg(all(
     unix,
     any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")

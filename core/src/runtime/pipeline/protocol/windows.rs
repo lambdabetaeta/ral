@@ -8,11 +8,14 @@
 //! clears `HANDLE_FLAG_INHERIT` (the Windows analogue of
 //! `FD_CLOEXEC`) so the handle does not leak into nested children.
 //!
-//! `std::process::Command` on Windows sets `bInheritHandles=TRUE` only
-//! when at least one of stdin/stdout/stderr is `Stdio::piped()`.  Every
-//! helper this protocol drives has piped stdio installed by the
-//! launcher (byte channel wiring), so the inherit bit is always set;
-//! no custom `CreateProcessW` wrapper is required.
+//! The invariant is weaker than the Unix `pre_exec` path: the parent
+//! marks the exact child handles inheritable before `Command::spawn`,
+//! and the child clears them before it can create nested children.  While
+//! those handles are inheritable in the parent, an unrelated concurrent
+//! Windows spawn with `bInheritHandles=TRUE` could inherit them too and
+//! keep a report, value, or gate channel open.  Closing that race needs a
+//! custom Windows spawn path with an explicit handle list, or an
+//! equivalent non-global inheritance mechanism.
 
 use std::io::{Read, Write};
 use std::process::Command;
@@ -86,9 +89,13 @@ pub(crate) fn pair() -> Result<(Channel, Channel), Break> {
 }
 
 /// Mark `ch`'s underlying handle inheritable and stash its numeric
-/// value (as decimal text) in `env` on `cmd`.  The helper parses the
-/// integer, wraps the handle via `from_raw_handle`, and clears the
-/// inherit bit so it does not leak further.
+/// value (as decimal text) in `env` on `cmd`.
+///
+/// This is deliberately small, but not atomic with spawn.  The helper
+/// parses the integer, wraps the handle via `from_raw_handle`, and
+/// clears the inherit bit so nested children do not inherit it.  The
+/// parent-side inheritability window remains until Windows launch grows
+/// an explicit handle-list `CreateProcessW` path.
 pub(crate) fn pass(cmd: &mut Command, env: &str, ch: &Channel) -> Settled<()> {
     let handle = ch.raw_handle();
     set_inheritable(handle)?;

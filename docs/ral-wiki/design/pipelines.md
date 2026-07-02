@@ -34,10 +34,13 @@ process inside its own foreground pipeline cannot consistently both own the
 terminal and not own it. It is the same isolation a spawned block enjoys
 ([[design/cbpv|immutable bindings]]).
 
-The terminal-handoff machinery — the foreground exec trampoline on Unix, Job
-Objects on Windows — is transport detail, not semantics; it lives in the
-[[map/core/runtime|runtime]]'s `pipeline/` and [[map/core/io-process|process]]
-maps.
+The terminal-handoff and process-containment machinery is transport detail, not
+semantics. Unix uses process groups, a foreground guard, and helper job-frame
+gates where a tty handoff must settle before user code runs; Windows has no
+`tcsetpgrp` analogue, so it uses Job Objects after spawn and still needs a custom
+creation-time launch path to close its handle-inheritance and early-fork windows.
+The moving parts live in the [[map/core/runtime|runtime]]'s `pipeline/` and
+[[map/core/io-process|process]] maps.
 
 See also [[design/types|types]], [[design/cbpv|cbpv]],
 [[design/scoping|scoping]].

@@ -7,9 +7,9 @@
 //! collector, the unconsumed stage routes, and the deferred-frame
 //! backlog — so leak-prone wiring is structurally impossible.
 //!
-//! A pure external stage on a NoTerminal pipeline needs no helper
-//! subprocess and no value channel, so it is spawned directly
-//! (`ExternalExec`); every other stage runs in a ral helper.
+//! A direct external stage is allowed only when it needs no helper-owned
+//! work: no value edge, no redirect, no byte audit capture, and no
+//! foreground terminal handoff.  Every other stage runs in a ral helper.
 
 use super::super::command;
 use super::collect::RunningPipeline;
@@ -299,7 +299,7 @@ impl PipelineBuild {
     /// Tear down a partially-launched pipeline after a mid-launch error.
     ///
     /// Order is load-bearing.  SIGTERM the pgid first so already-spawned
-    /// helpers, trampolines, and externals that respect it exit promptly.
+    /// helpers and direct externals that respect it exit promptly.
     /// Then close the unreleased stage gates: a helper parked on its
     /// job read treats EOF as the parent's "stand down" message and
     /// exits, closing the inherited anchor fd on the way out.  The
@@ -342,7 +342,7 @@ impl PipelineBuild {
     }
 }
 
-/// Spawn a pure external stage directly — no stage helper, no
+/// Spawn a direct external stage: no stage helper, no
 /// serialisation.  Only used for NoTerminal pipelines where there
 /// is no foreground gating and no ral code to evaluate.
 fn launch_external_stage_direct(
