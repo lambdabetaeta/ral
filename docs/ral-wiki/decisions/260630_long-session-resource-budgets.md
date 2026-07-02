@@ -181,7 +181,7 @@ reclamation for agent shells),
 for computations that outlive ordinary `spawn`),
 [[decisions/260617_scheduled-wakeups|scheduled-wakeups]] (inbox delivery and
 timer pressure), [[decisions/260618_tui-transcript-as-graphic|tui-transcript-as-graphic]]
-(the TUI transcript model), [[decisions/260629_tui_modular|TUI modularisation]],
+(the TUI transcript model),
 [[map/exarch/frontend|frontend]], [[map/exarch/agent|agent]],
 [[map/core/shell-state|shell-state]], and
 [[internals/output-capture-and-detachment|output-capture-and-detachment]].

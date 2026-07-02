@@ -54,14 +54,12 @@ pub(crate) struct App {
     pub(super) tabs: Tabs,
     pub(super) prompt_state: PromptState,
     /// The session'\''s own inbox, bound here by [`Self::bind_inbox`] at REPL
-    /// start so the input editor, the pending strip, and the worker'\''s drive
-    /// loop all share one queue. A submitted prompt is pushed onto it (through a
-    /// `Mailbox`); the worker drains a non-slash prefix after a tool result to
-    /// steer the next assistant step ([`Agent::dispatch`]) and the remainder
-    /// at the next turn boundary ([`Inbox::next_or_idle`]). Until drained,
-    /// pending messages render in the strip above the input
-    /// ([`line::queued_prompt`]) and bare Up on an empty prompt pulls the
-    /// whole queued run back into the editor for revision.
+    /// start so the input editor and the worker's drive loop share one queue.
+    /// A submitted prompt is pushed onto it (through a `Mailbox`); the worker
+    /// drains a non-slash prefix after a tool result to steer the next assistant
+    /// step ([`Agent::dispatch`]) and the remainder at the next turn boundary
+    /// ([`Inbox::next_or_idle`]). Until drained, bare Up on an empty prompt
+    /// pulls the whole queued run back into the editor for revision.
     pub(super) inbox: Inbox,
     pub(super) total_usage: Usage,
     /// Last turn'\''s prompt size (genai'\''s `prompt_tokens`, which already
@@ -147,10 +145,10 @@ impl App {
         self.context_window = provider::caps_for(p.model()).context_window;
     }
 
-    /// Bind the App's inbox to the session's own queue, so the input editor,
-    /// the pending strip, and the worker's drive loop all read and write one
-    /// inbox.  Called once at REPL start; before it, the App holds the throwaway
-    /// inbox [`App::new`] seeded so `draw` has something to snapshot.
+    /// Bind the App's inbox to the session's own queue, so the input editor and
+    /// the worker's drive loop read and write one inbox.  Called once at REPL
+    /// start; before it, the App holds the throwaway inbox [`App::new`] seeded
+    /// for input editing.
     pub fn bind_inbox(&mut self, inbox: Inbox) {
         self.inbox = inbox;
     }

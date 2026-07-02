@@ -3554,3 +3554,17 @@ Adjusted the exarch TUI agent matrix: rows now measure their columns before
 rendering, keep the worker step-cell run, leave `main` label-only, drop the
 numeric step count, and let dead agents linger silently for 90 seconds. Restamped
 [[map/exarch/frontend|frontend]].
+
+
+## [2026-07-02] ingest | Pending strip removed
+
+Removed the exarch TUI pending inbox strip: queued prompts and async deliveries
+still live in the `Inbox`, but no longer consume frame rows or render as a
+washed band around the matrix/input chrome. Restamped
+[[map/exarch/frontend|frontend]].
+## [2026-07-02] ingest | remove 260629_tui_modular — reclassified as implementation plan, not architectural decision
+
+Removed [[decisions/260629_tui_modular|tui_modular]] from decisions/: it described
+a module extraction plan with outstanding TODOs, not a choice between
+alternatives.  Removed index entry; fixed cross-reference in
+[[decisions/260630_long-session-resource-budgets|long-session-resource-budgets]].

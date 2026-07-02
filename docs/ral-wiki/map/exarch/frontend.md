@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 9038cbb
+generated_at_commit: b68fc40
 generated_at_date: 2026-07-02
 covers_paths: [exarch/src/bus.rs, exarch/src/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/host.rs]
 ---
@@ -83,11 +83,10 @@ Two `Sink` implementations:
    intent, and script and output share one margin to read as a single region —
    and whose right edge still runs to the margin, so the wash reads as a stratum
    rather than a content-hugging swatch; model prose sits unwashed at
-   the base; the human's submitted prompt is the sole occupant of a *third*
-   register, a raised cool `PROMPT_BG`-banded block opened by a full-width
-   `PROMPT_INK` rule fence (`line::prompt_fence`), found at a glance by common
-   region rather than by reverse video, which stays reserved for an active
-   selection.
+   the base; the human's submitted prompt is opened by a full-width
+   `PROMPT_INK` rule fence (`line::prompt_fence`) and neutral prompt ink, found
+   at a glance by boundary and tone rather than by reverse video, which stays
+   reserved for an active selection.
  - **figure and ground, on the luminance axis.** Within the agent's
    foreground, *communication* and *work* split by value: the model's prose
    answer, a subagent's returned result, and the human's prompt stay at full
@@ -163,10 +162,8 @@ Two `Sink` implementations:
  `Command` turns and run in `ReplControl`. `/discuss` is the one command in
  that class that forks work instead of mutating the current context: it starts
  an `anamnesis` chair agent which conducts the bounded two-agent protocol
- recorded in [[decisions/260702_discuss-command|discuss-command]]. Until then
- the inbox renders as a `PROMPT_BG`
- strip above the input, and the idle wait selects over input, inbox, and the
- session bus
+ recorded in [[decisions/260702_discuss-command|discuss-command]]. The idle wait
+ selects over input, inbox, and the session bus
  ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]],
  [[decisions/260617_scheduled-wakeups|scheduled-wakeups]]).
 - `headless.rs` — one-shot pipe: assistant tokens to stdout, every other event

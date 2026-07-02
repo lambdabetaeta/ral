@@ -1,10 +1,9 @@
 //! Render loop: frame drawing and terminal output.
 //!
 //! The free function [`draw`] paints the whole frame — content area,
-//! tab bar / matrix, queued-prompt strip, prompt editor, status line,
-//! and footer — into a [`Term`].  The helper functions paint selection
-//! and hover highlights into the line buffer before it reaches the
-//! terminal.
+//! tab bar / matrix, prompt editor, status line, and footer — into a
+//! [`Term`].  The helper functions paint selection and hover highlights
+//! into the line buffer before it reaches the terminal.
 
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -78,8 +77,8 @@ pub(super) fn tab_bar(
     }
     Line::from(spans)
 }
-/// Paint the full frame: content area, tab bar / matrix,
-/// queued-prompt strip, prompt editor, status line, and footer.
+/// Paint the full frame: content area, tab bar / matrix, prompt editor,
+/// status line, and footer.
 pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     let (cols, rows) = size().unwrap_or((READ_W, 24));
     let area = Rect::new(0, 0, cols, rows);
@@ -93,19 +92,6 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     } else {
         0u16
     };
-    // The pending-prompt strip above the input: messages the user queued
-    // mid-turn, waiting for the next tool-result or turn boundary. Its
-    // width matches the content column (capped at READ_W like the
-    // transcript), and its height is capped at a third of the screen so a
-    // long queue can never crowd the transcript off-screen.
-    let queued = app.inbox.snapshot();
-    let queued_lines = if queued.is_empty() {
-        Vec::new()
-    } else {
-        let w = area.width.saturating_sub(LEFT_MARGIN).min(READ_W);
-        line::queued_prompt(&queued, w, (area.height / 3).max(1) as usize)
-    };
-    let queued_h = queued_lines.len() as u16;
     // The register's vertical budget is decided here, before the layout:
     // shown as the right-hand column when the focused session has pins and
     // the terminal is wide enough to spare the margin, else collapsed to a
@@ -122,15 +108,13 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         Constraint::Min(1),
         Constraint::Length(1), // breathing row between output and chrome
         Constraint::Length(tab_h),
-        Constraint::Length(queued_h),
         Constraint::Length(prompt_h),
         Constraint::Length(1), // rule_line: sits below prompt, above footer
         Constraint::Length(1),
     ])
     .split(area);
-    let (content, tab_row, queued_row, prompt_row, status_row, footer_row) = (
-        layout[0], layout[2], layout[3], layout[4], layout[5], layout[6],
-    );
+    let (content, tab_row, prompt_row, status_row, footer_row) =
+        (layout[0], layout[2], layout[3], layout[4], layout[5]);
     // Split the content row by hand into the rail's left gutter, the
     // transcript, and — on a wide enough terminal — the register glued to
     // the right edge.  No scrollbar: the right edge is the register's, and
@@ -151,14 +135,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
             content.height,
         )
     });
-    // Inset the queued-prompt strip and rule line to share the
-    // transcript's left gutter.
-    let queued_rect = Rect::new(
-        queued_row.x + LEFT_MARGIN,
-        queued_row.y,
-        queued_row.width.saturating_sub(LEFT_MARGIN),
-        queued_row.height,
-    );
+    // Inset the rule line to share the transcript's left gutter.
     let status_rect = Rect::new(
         status_row.x + LEFT_MARGIN,
         status_row.y,
@@ -244,9 +221,6 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         }
         if let Some(matrix) = matrix_lines {
             f.render_widget(Paragraph::new(matrix), tab_row);
-        }
-        if !queued_lines.is_empty() {
-            f.render_widget(Paragraph::new(queued_lines), queued_rect);
         }
         f.render_widget(
             Paragraph::new(rule_line(

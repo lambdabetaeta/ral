@@ -262,23 +262,6 @@ impl InboxMsg {
             pending.store(false, Ordering::Release);
         }
     }
-
-    /// The single-line label for the pending strip the TUI draws above the
-    /// prompt: user prompts show their text, the rest show a glyph + source.
-    /// `None` for a message with no strip presence — a settled `spawn`'s
-    /// `Surface` batch renders its cards on the rail and delivers its notice at
-    /// the turn boundary, so it earns no pending-strip row of its own.
-    fn strip_label(&self) -> Option<String> {
-        Some(match self {
-            InboxMsg::UserSteering(s) => s.clone(),
-            InboxMsg::ScheduledWakeup { label, .. } => format!("⏰ {label}"),
-            InboxMsg::AgentResult(r) => format!("● agent {}", r.title),
-            InboxMsg::AgentMessage(m) => format!("✉ agent {}", m.from_title),
-            InboxMsg::Nudge(_) => "· retry".into(),
-            InboxMsg::Command(s) => s.clone(),
-            InboxMsg::Surface { .. } => return None,
-        })
-    }
 }
 
 /// The model-facing notice [`Turn::Surface`] delivers when a detached `spawn`
@@ -503,19 +486,6 @@ impl Inbox {
         self.shared.waiting_for_input.load(Ordering::Acquire)
     }
 
-    /// One strip label per pending message that has one, oldest first, for the
-    /// TUI's pending-prompt strip.  Messages with no strip presence (a settled
-    /// `spawn`'s `Surface` batch) are skipped.
-    pub fn snapshot(&self) -> Vec<String> {
-        self.shared
-            .queue
-            .lock()
-            .expect("inbox lock poisoned")
-            .iter()
-            .filter_map(InboxMsg::strip_label)
-            .collect()
-    }
-
     /// Pull every pending user prompt back out for editing at once — all the
     /// `UserSteering` messages in the queue, wherever they sit, leaving any
     /// non-user deliveries (a wakeup, an agent result, a `spawn`'s surface) in
@@ -523,8 +493,7 @@ impl Inbox {
     /// still the user's draft and should come back with the rest; the wakeup is
     /// not the user's draft and stays queued.
     ///
-    /// Returns oldest-first (the order they appear in the pending-prompt strip),
-    /// or `None` if no user prompts are queued.
+    /// Returns oldest-first, or `None` if no user prompts are queued.
     pub fn pop_back_user_all(&self) -> Option<Vec<String>> {
         let mut q = self.shared.queue.lock().expect("inbox lock poisoned");
         let mut prompts: Vec<String> = Vec::new();

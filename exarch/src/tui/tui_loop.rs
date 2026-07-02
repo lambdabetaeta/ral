@@ -140,9 +140,9 @@ pub fn run(
     tui.app.update_live_model(&provider, &status_provider);
     // Bind the App's inbox and focus to the trunk's shared handles, then build
     // the fleet: a session-lived bus over the trunk's inbox, plus the shared
-    // registry and focus handle.  Input, the pending strip, async-agent
-    // results, and the worker's drive loop all read and write this one inbox;
-    // `TAB` and the focused agent's park predicate share one focus handle.
+    // registry and focus handle.  Input, async-agent results, and the worker's
+    // drive loop all read and write this one inbox; `TAB` and the focused
+    // agent's park predicate share one focus handle.
     tui.app.bind_inbox(session.inbox());
     tui.app.tabs.bind_focus(session.focus_handle());
     let fleet = Fleet::new(

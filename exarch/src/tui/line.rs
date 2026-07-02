@@ -42,12 +42,6 @@ pub(super) const SLATE: Color = Color::Rgb(140, 150, 170);
 /// hue of the row's unchanged remainder.
 pub(super) const LIME_HOT: Color = Color::Rgb(196, 240, 182);
 pub(super) const RED_HOT: Color = Color::Rgb(242, 142, 158);
-/// The pending-prompt band — the raised, faintly cool fill behind the
-/// queued-prompt strip in the input area ([`queued_prompt`]), a "your text,
-/// still queued" affordance.  The *committed* prompt echo in the transcript
-/// wears no band: it reads by its [`PROMPT_INK`] body tint and rule fence,
-/// leaving the background plane to the machine's recessed [`CODE_BG`] panel.
-pub(super) const PROMPT_BG: Color = Color::Rgb(72, 78, 94);
 /// The `/model` overlay's plane — the deep blue fill behind the floating,
 /// bezel-framed picker ([`super::picker`]). A Norton-Commander indigo, but
 /// pulled toward the app's muted set so the modal reads as a recessed panel
@@ -322,41 +316,6 @@ pub(super) fn prompt_fence(width: u16) -> Line<'static> {
         "─".repeat(width as usize),
         Style::default().fg(PROMPT_INK),
     ))
-}
-
-/// The pending-prompt strip shown above the input while a turn runs: each
-/// message the user submitted mid-turn, oldest first.  Pending prompts wear a
-/// raised [`PROMPT_BG`] band ([`wash`]) — a "your text, still queued"
-/// affordance in the input area, distinct from the rule fence the committed
-/// prompt gets in the transcript — and, like that echo, leaves reverse
-/// video to an active selection alone.  Flush-left at regular weight, wrapped
-/// to `width` columns.  Capped at `max_rows` total — a longer queue closes with
-/// a `⋯ (N more)` line so it can never crowd the transcript off-screen.
-pub(super) fn queued_prompt(
-    messages: &[String],
-    width: u16,
-    max_rows: usize,
-) -> Vec<Line<'static>> {
-    let w = width as usize;
-    let more = Style::default().fg(SLATE).add_modifier(Modifier::ITALIC);
-    let mut out: Vec<Line<'static>> = Vec::new();
-    for msg in messages {
-        for raw in msg.lines() {
-            push_wrapped(&mut out, raw, w, |chunk, _first| {
-                wash(Line::from(Span::raw(chunk)), PROMPT_BG, Some(w))
-            });
-        }
-    }
-    if out.len() > max_rows {
-        let hidden = out.len() - (max_rows - 1);
-        out.truncate(max_rows - 1);
-        out.push(wash(
-            Line::from(Span::styled(format!("⋯ ({hidden} more)"), more)),
-            PROMPT_BG,
-            Some(w),
-        ));
-    }
-    out
 }
 
 /// Tool-call header rows: the slate tool name then the white one-line
