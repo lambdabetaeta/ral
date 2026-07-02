@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1baac6d
-generated_at_date: 2026-06-22
+generated_at_commit: 25e66c1
+generated_at_date: 2026-07-03
 covers_paths: [exarch/src/provider.rs, exarch/src/pricing.rs]
 ---
 
@@ -61,20 +61,23 @@ is *not* `flat_rate`. `Live::metered` is false when either holds.
 
 ## The streaming and summary paths
 
-- `complete(system, messages, advertise_root_only, on_text, cancel)` — streams
-  one assistant reply, calling `on_text` per token, and projects the
-  `StreamEnd` into a `StepOut` (assistant message, tool calls, `Usage`,
-  `StopReason`). It preserves `reasoning_content` on the assistant message so
-  DeepSeek thinking mode round-trips. The stream-event match is exhaustive —
-  reasoning, thought-signature, and tool-call chunks are captured in the `End`
-  frame and replayed by `step_out_from_end`, so they are dropped by a *named*
-  arm, never a wildcard, and a new genai stream variant fails the build (X10).
-- A **per-event idle timeout** (`STREAM_IDLE_TIMEOUT`, 120s) is re-armed on the
-  initial select and on every loop iteration: it bounds connect +
-  time-to-first-event and the gap *between* chunks, not the total response, so
-  a connection that goes silent surfaces as a retryable transport error rather
-  than blocking `next()` indefinitely. The total idle budget stays bounded even
-  across the full transient retry budget.
+- `complete(system, messages, advertise_root_only, on_text, on_think, cancel)` —
+  streams one assistant reply, calling `on_text` for text and `on_think` for
+  reasoning, and projects the `StreamEnd` into a `StepOut` (assistant message,
+  tool calls, reasoning, `Usage`, `StopReason`). It preserves
+  `reasoning_content` on the assistant message so thinking mode round-trips.
+  The stream-event match is exhaustive — thought-signature and tool-call chunks
+  are captured in the `End` frame and replayed by `step_out_from_end`, so they
+  are dropped by a *named* arm, never a wildcard, and a new genai stream variant
+  fails the build (X10).
+- A **pre-stream idle timeout** bounds request open and time-to-response; once a
+  streaming response is open, exarch does **not** time out the gap between
+  decoded `ChatStreamEvent`s. Liveness is raw transport progress: reqwest's
+  per-read `STREAM_IDLE_TIMEOUT` (180s) turns true byte-level silence into a
+  retryable stream error, while provider heartbeats or SSE pings that genai
+  consumes below the semantic event layer can keep a long-thinking model alive.
+  This lands the first local slice of
+  [[decisions/260702_provider-heartbeats-and-retry-boundaries|provider-heartbeats-and-retry-boundaries]].
 - `summarize` — one non-streamed call producing a compaction summary; used by
   [[map/exarch/agent|`Agent::compact`]]. The same idle timeout bounds the
   whole `exec_chat` request (no incremental events to idle between). A summary
@@ -93,11 +96,12 @@ is *not* `flat_rate`. `Live::metered` is false when either holds.
 Both paths run on a tokio runtime through **one retry driver**,
 `retry_with_backoff` over an `Attempt<T>` (`Done` / `Failed`):
 
-- The streaming-specific rule rides on `Done`: once any token has flowed to
-  `on_text` the UI has committed to a partial render, so a re-issue that would
-  double tokens is *not* retried — `stalled_step_out` projects the streamed
-  prefix into a `CutShort::Stalled` `StepOut` returned as `Attempt::Done`, and
-  the session commits it. No third "don't retry" variant is needed.
+- The streaming-specific rule rides on `Done`: once text or reasoning has
+  flowed to `on_text`/`on_think` the UI has committed to a partial render, so a
+  re-issue that would double output is *not* retried — `stalled_step_out`
+  projects the streamed prefix and reasoning into a `CutShort::Stalled`
+  `StepOut` returned as `Attempt::Done`, and the session commits it. No third
+  "don't retry" variant is needed.
 - Rate limits get a larger budget and a higher backoff ceiling than transient
   failures (`retry_limits`), and an explicit `retry-after` is honoured.
 

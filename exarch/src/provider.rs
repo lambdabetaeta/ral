@@ -479,10 +479,11 @@ pub enum CutShort {
     /// was mid-text or about to emit a tool call.  The operator can raise
     /// the ceiling with `--max-tokens`.
     OutputCap,
-    /// The stream broke mid-response *after* partial text had rendered: an
-    /// idle stall, a transport error frame, or a close with no `End` frame.
-    /// Re-issuing would double-render the streamed prefix, so it is kept
-    /// and the turn continues.  Carries the underlying cause for the note.
+    /// The stream broke mid-response *after* partial text or reasoning had
+    /// rendered: an idle stall, a transport error frame, or a close with no
+    /// `End` frame.  Re-issuing would double-render the streamed prefix, so
+    /// it is kept and the turn continues.  Carries the underlying cause for
+    /// the note.
     Stalled(String),
 }
 
@@ -1422,10 +1423,10 @@ impl Provider {
     /// Stream one assistant response for an already-rendered message list.
     ///
     /// Retries with bounded exponential backoff on `Transient` and
-    /// `RateLimited` errors **only when zero tokens have streamed this
-    /// attempt** — once any token has flowed to `on_text` the UI has
-    /// committed to a partial render, and re-streaming the request
-    /// would double tokens.  See the design doc's option (A).
+    /// `RateLimited` errors **only when no text or reasoning has streamed
+    /// this attempt** — once anything has flowed to `on_text` or `on_think`
+    /// the UI has committed to a partial render, and re-streaming the
+    /// request would double output.
     /// Run one provider round-trip, streaming assistant text through
     /// `on_text`.  `cancel` is the *request-local* cancellation handle: the
     /// foreground turn passes its root token (linked to the signal slot, so
@@ -1645,10 +1646,15 @@ impl Engine {
             async |attempt| {
                 let mut req = req_template.clone();
                 req.tools = Some(tool_defs.clone());
-                let mut seen_any_token = false;
+                let mut seen_streamed_content = false;
                 // Mirrors what `on_text` rendered, so a committed stall can
                 // commit exactly the prefix the user already saw.
                 let mut streamed = String::new();
+                // Mirrors what `on_think` rendered, for the same reason: a
+                // stall deep into a thinking block must not discard
+                // reasoning the model already produced and the user already
+                // watched stream in.
+                let mut streamed_reasoning = String::new();
                 let attempt_result: Result<StreamEnd, ProviderError> = async {
                     let mut resp = tokio::select! {
                         biased;
@@ -1673,31 +1679,18 @@ impl Engine {
                         }
                     };
                     loop {
-                        // `tls::client`'s `read_timeout` bounds a stalled
-                        // *socket*, but a live socket fed by keepalive pings
-                        // whose bytes genai consumes without ever yielding a
-                        // decoded `ChatStreamEvent` stays "live" at that layer
-                        // forever — observed in production as a 900s hang
-                        // with zero events past `Start`.  This deadline
-                        // instead bounds time-between-*decoded-events*: it
-                        // resets every time `resp.stream.next()` resolves
-                        // (matching the connect-phase and `summarize` idle
-                        // pattern above), so ordinary keepalives and partial
-                        // frames that do eventually decode never trip it —
-                        // only a generation that goes fully silent at this
-                        // level for the whole budget does.  Retries get the
-                        // shorter bound — see [`idle_timeout`].
+                        // After the response opens, liveness belongs to the
+                        // transport, not to semantic output.  Anthropic may
+                        // keep a long-thinking stream alive with SSE pings
+                        // that genai consumes without yielding a decoded
+                        // `ChatStreamEvent`; timing out this `next()` would
+                        // punish a live model for being quiet.  Raw silence is
+                        // still bounded by `tls::client`'s per-read timeout,
+                        // which genai surfaces as a stream error below.
                         let event = tokio::select! {
                             biased;
                             _ = wait_for_cancel(cancel) => {
                                 return Err(ProviderError::Cancelled("mid-stream"));
-                            }
-                            _ = tokio::time::sleep(idle_timeout(attempt)) => {
-                                return Err(ProviderError::Transient {
-                                    cause: "stream idle: no event within timeout".into(),
-                                    attempts: 1,
-                                    body: None,
-                                });
                             }
                             ev = resp.stream.next() => match ev {
                                 Some(Ok(ev)) => ev,
@@ -1710,22 +1703,25 @@ impl Engine {
                         match event {
                             ChatStreamEvent::Start => {}
                             ChatStreamEvent::Chunk(c) => {
-                                seen_any_token |= !c.content.is_empty();
+                                seen_streamed_content |= !c.content.is_empty();
                                 streamed.push_str(&c.content);
                                 on_text(&c.content);
                             }
                             ChatStreamEvent::End(end) => return Ok(end),
-                            // The remaining variants are captured in the
-                            // `End` frame (`captured_reasoning_content`,
-                            // the thought signatures and tool calls on the
-                            // assistant message) and replayed from there by
-                            // `step_out_from_end`, so no live action is
-                            // needed here.  Matched explicitly rather than
-                            // with a wildcard so a new genai stream variant
-                            // fails the build instead of vanishing (X10).
                             ChatStreamEvent::ReasoningChunk(c) => {
+                                seen_streamed_content |= !c.content.is_empty();
+                                streamed_reasoning.push_str(&c.content);
                                 on_think(&c.content);
                             }
+                            // Thought signatures and tool calls are captured
+                            // whole in the `End` frame and replayed from
+                            // there by `step_out_from_end`; a stall before
+                            // `End` has no signature or tool call to salvage
+                            // — unlike text and reasoning, which stream
+                            // incrementally and are worth keeping.  Matched
+                            // explicitly rather than with a wildcard so a
+                            // new genai stream variant fails the build
+                            // instead of vanishing (X10).
                             ChatStreamEvent::ThoughtSignatureChunk(_)
                             | ChatStreamEvent::ToolCallChunk(_) => {}
                         }
@@ -1744,14 +1740,16 @@ impl Engine {
                     }
                     // A cancel is surfaced as-is regardless of streamed tokens.
                     Err(e @ ProviderError::Cancelled(_)) => Attempt::Failed(e),
-                    // Visible text already streamed, then the stream broke: a
-                    // re-issue would double-render, so commit the streamed
-                    // prefix as a cut-short turn and let the session continue
-                    // it (mirrors the output-cap truncation path) rather than
-                    // discarding the work and ending the run.
-                    Err(e) if seen_any_token => Attempt::Done(stalled_step_out(
+                    // Visible text or reasoning already streamed, then the
+                    // stream broke: a re-issue would double-render, so
+                    // commit the streamed prefix as a cut-short turn and let
+                    // the session continue it (mirrors the output-cap
+                    // truncation path) rather than discarding the work and
+                    // ending the run.
+                    Err(e) if seen_streamed_content => Attempt::Done(stalled_step_out(
                         model,
                         &streamed,
+                        &streamed_reasoning,
                         &e,
                         transport.metered(),
                         adapter,
@@ -1891,23 +1889,31 @@ fn step_out_from_end(model: &str, end: StreamEnd, metered: bool, adapter: Adapte
 }
 
 /// Project a committed mid-stream interruption into a [`StepOut`].  Some
-/// visible text streamed (and was already rendered) before the stream
-/// stalled, errored, or closed without an `End` frame, so re-issuing would
-/// double-render: the streamed prefix becomes a text-only assistant message
-/// marked [`CutShort::Stalled`], which the session commits and continues
-/// from.  No `End` frame arrived, so there is no usage to meter and no tool
+/// visible text or reasoning streamed (and was already rendered) before the
+/// stream stalled, errored, or closed without an `End` frame, so re-issuing
+/// would double-render: the streamed prefix becomes an assistant message
+/// carrying whatever text and reasoning arrived, marked
+/// [`CutShort::Stalled`], which the session commits and continues from.  A
+/// reasoning-only stall (no text yet) still surfaces its reasoning through
+/// [`StepOut::reasoning`] — read by the caller before `admit_assistant` may
+/// judge the message itself not substantive and stub it — so the trace is
+/// not silently lost even though it cannot stand alone as a renderable
+/// turn.  No `End` frame arrived, so there is no usage to meter and no tool
 /// call to capture.
 fn stalled_step_out(
     model: &str,
     streamed: &str,
+    streamed_reasoning: &str,
     cause: &ProviderError,
     metered: bool,
     adapter: AdapterKind,
 ) -> StepOut {
+    let reasoning = (!streamed_reasoning.is_empty()).then(|| streamed_reasoning.to_string());
     StepOut {
-        assistant_message: ChatMessage::assistant(streamed.to_string()),
+        assistant_message: ChatMessage::assistant(streamed.to_string())
+            .with_reasoning_content(reasoning.clone()),
         tool_calls: Vec::new(),
-        reasoning: None,
+        reasoning,
         usage: usage_from(model, &genai::chat::Usage::default(), metered, adapter),
         stop_reason: None,
         cut_short: Some(CutShort::Stalled(cause.brief())),
@@ -2737,9 +2743,9 @@ mod tests {
     /// Once visible text has streamed, a mid-stream stall is not retried:
     /// `complete` keeps the streamed prefix as a [`CutShort::Stalled`]
     /// [`StepOut`] so the session can commit it and continue the turn.
-    /// `stalled_step_out` is that projection — a text-only assistant
-    /// message, no tool calls, the stream cause carried for the note.  A
-    /// real byte-level stall is a `reqwest` read-timeout we cannot
+    /// `stalled_step_out` is that projection — an assistant message carrying
+    /// the streamed text, no tool calls, the stream cause carried for the
+    /// note.  A real byte-level stall is a `reqwest` read-timeout we cannot
     /// construct in a unit test; a streaming 5xx classifies `Transient`
     /// identically, so it stands in as the cause here.
     #[test]
@@ -2756,6 +2762,7 @@ mod tests {
         let step = stalled_step_out(
             "test-model",
             "partial answer so far",
+            "",
             &cause,
             false,
             AdapterKind::OpenAI,
@@ -2777,15 +2784,52 @@ mod tests {
                 .is_some_and(|t| t == "partial answer so far"),
             "the committed message is exactly the rendered prefix",
         );
+        assert!(
+            step.reasoning.is_none(),
+            "no reasoning streamed, so none is carried",
+        );
     }
 
-    /// The idle timeout is an idle (between-events) bound, not a total cap.
-    /// Even the worst case — the full transient retry budget, each attempt
-    /// idling for its whole per-attempt bound — leaves the total idle wait
-    /// bounded and modest, so a genuinely stalled stream surfaces as a failed
-    /// turn in minutes rather than appearing to hang.  This guards against a
-    /// future bump of `STREAM_IDLE_TIMEOUT`, `RETRY_IDLE_TIMEOUT`, or
-    /// `MAX_ATTEMPTS` that would let the budget grow into an effective hang.
+    /// A stall that hits while the model is still deep in a thinking block —
+    /// before any visible text — must not discard that reasoning.  This is
+    /// the case a bare `seen_any_token` gated on text chunks alone would
+    /// miss entirely: the whole attempt would surface as a clean `Failed`
+    /// with the reasoning gone, indistinguishable from a stall on the very
+    /// first byte.
+    #[test]
+    fn stalled_step_out_keeps_streamed_reasoning_even_without_text() {
+        let cause = ProviderError::from_genai(
+            &web_stream_http(StatusCode::SERVICE_UNAVAILABLE),
+            "test-model",
+        );
+        let step = stalled_step_out(
+            "test-model",
+            "",
+            "let me work through the cases",
+            &cause,
+            false,
+            AdapterKind::OpenAI,
+        );
+        assert_eq!(
+            step.reasoning.as_deref(),
+            Some("let me work through the cases"),
+            "reasoning streamed before the stall must survive it",
+        );
+        assert!(
+            step.assistant_message
+                .content
+                .iter()
+                .any(|p| matches!(p, ContentPart::ReasoningContent(r) if r == "let me work through the cases")),
+            "the reasoning also rides on the assistant message, mirroring step_out_from_end",
+        );
+    }
+
+    /// The explicit idle timeout now applies before a streaming response has
+    /// opened (and to non-streaming summary requests), not between decoded
+    /// stream events.  Even the worst case — the full transient retry budget,
+    /// each opening attempt idling for its whole per-attempt bound — leaves
+    /// that pre-stream wait bounded and modest, while an already-open stream
+    /// uses the transport's byte-level read timeout for raw silence.
     #[test]
     fn idle_timeout_budget_stays_bounded() {
         let worst_case: Duration = (1..=MAX_ATTEMPTS).map(idle_timeout).sum();

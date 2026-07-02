@@ -3568,3 +3568,21 @@ Removed [[decisions/260629_tui_modular|tui_modular]] from decisions/: it describ
 a module extraction plan with outstanding TODOs, not a choice between
 alternatives.  Removed index entry; fixed cross-reference in
 [[decisions/260630_long-session-resource-budgets|long-session-resource-budgets]].
+
+## [2026-07-02] query | Provider heartbeats and retry boundaries
+
+Recorded [[decisions/260702_provider-heartbeats-and-retry-boundaries|provider-heartbeats-and-retry-boundaries]]
+from the Anthropic stream-idle benchmark diagnosis. The proposed plan separates
+wire heartbeats, semantic model output, and explicit wall-clock budgets so
+long-returning models such as `claude-fable-5` and `claude-sonnet-5` do not fail
+merely for taking minutes to produce semantic events; provider retries also move
+below the transcript instead of becoming synthetic nudges.
+
+## [2026-07-03] ingest | Provider retries leave the transcript
+
+Implemented the first local slice of
+[[decisions/260702_provider-heartbeats-and-retry-boundaries|provider-heartbeats-and-retry-boundaries]]:
+streaming no longer times out between decoded events, and `nudge` no longer
+turns exhausted transport/rate-limit failures into synthetic model-visible
+turns. Re-stamped [[map/exarch/provider|provider]] and
+[[map/exarch/agent|agent]].

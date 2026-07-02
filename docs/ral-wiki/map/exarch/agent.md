@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fe9d819
-generated_at_date: 2026-07-02
+generated_at_commit: 25e66c1
+generated_at_date: 2026-07-03
 covers_paths: [exarch/src/agent.rs, exarch/src/agent_registry.rs, exarch/src/event.rs, exarch/src/fleet.rs, exarch/src/nudge.rs, exarch/src/digest.rs]
 ---
 
@@ -103,7 +103,10 @@ The headless-completion gate is gone with `expect_action`
 ([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]]): the one role flag
 that did not fit the `parent` collapse is dropped, not relocated. The nudges that
 remain — `must_reply` for a returning agent (`returns()`), `continue` on
-truncation, the periodic pin reminder — are driven off the same `react` rule.
+truncation, empty/early-stop repair, and the periodic pin reminder — are driven
+off the same `react` rule. Exhausted transport and rate-limit failures are
+provider facts, so they surface as `Kind::ProviderError` and do not post a
+model-visible self-nudge.
 
 ## The Fleet
 

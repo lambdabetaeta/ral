@@ -20,8 +20,8 @@ use crate::bus::{Emitter, Kind};
 use crate::event::AgentLog;
 use crate::provider::ProviderError;
 
-/// Outer-attempt budget per user turn.  Independent of, and stacked
-/// on top of, the provider's inner retry budget.
+/// Outer-attempt budget per user turn.  Independent of the provider's
+/// transport retry budget: this is only for model-visible recovery.
 const BUDGET: u32 = 3;
 /// How many times to nudge the model when it yields with pinned state
 /// before accepting the turn.  Resets whenever the pinned digest changes,
@@ -41,12 +41,7 @@ type Rule = fn(&Result<TurnOutcome, ProviderError>) -> Option<(String, &'static 
 /// The rule set the binary ships with.
 ///
 /// [`Agent::apply`]: crate::agent::Agent::apply
-const RULES: &[Rule] = &[
-    on_empty_turn,
-    on_early_stop,
-    on_truncated,
-    on_provider_recoverable,
-];
+const RULES: &[Rule] = &[on_empty_turn, on_early_stop, on_truncated];
 
 /// Per-attempt expectations that depend on the agent rather than the
 /// attempt outcome: whether this agent returns through `reply`
@@ -82,19 +77,6 @@ pub(crate) struct Registry {
     /// Open-tasks nudge counter: how many times the model has been nudged
     /// for yielding with pinned state.  Resets when the digest changes.
     open_tasks_nudges: u32,
-    /// One-shot latch for the transient-provider-error nudge.  A `Transient`
-    /// error is a transport-level failure the model cannot adapt to — the
-    /// nudge re-drives the *identical* request, so its only value is as one
-    /// extra pass through the provider's own retry loop after a fresh
-    /// backoff.  Granting it the full [`BUDGET`] multiplies the provider's
-    /// worst-case stall burn by four for no added information (observed in
-    /// production: a run spending ~37 minutes on back-to-back idle stalls
-    /// before exiting).  One re-drive, then give up and surface the error.
-    /// `RateLimited` deliberately keeps the full budget: re-driving a 429 is
-    /// cheap and the outer nudges are the only long-outage resilience a
-    /// headless run has.
-    transient_nudged: bool,
-
     /// Snapshot of the pinned digest at the last open-tasks nudge, to detect
     /// changes that reset the budget.
     last_pinned_digest: Option<String>,
@@ -108,7 +90,6 @@ impl Registry {
             pin_reminded: false,
             open_tasks_nudges: 0,
             last_pinned_digest: None,
-            transient_nudged: false,
         }
     }
 
@@ -123,7 +104,6 @@ impl Registry {
         self.used = 0;
         self.turns_since_pin_reminder += 1;
         self.pin_reminded = false;
-        self.transient_nudged = false;
     }
 
     /// The one decider.  Walks [`RULES`] against `attempt`, optionally
@@ -213,20 +193,6 @@ impl Registry {
             surface_provider_error(attempt, emit, log);
             return None;
         };
-        // A `Transient` error gets one re-drive, not the full budget — see
-        // [`Self::transient_nudged`].
-        if matches!(attempt, Err(ProviderError::Transient { .. })) {
-            if self.transient_nudged {
-                let msg = format!(
-                    "provider still failing after a recovery nudge (last cause: {cause}); giving up"
-                );
-                let _ = log.record_error(msg.clone());
-                emit.emit(Kind::Error(msg));
-                surface_provider_error(attempt, emit, log);
-                return None;
-            }
-            self.transient_nudged = true;
-        }
         if self.used >= BUDGET {
             let msg = format!("nudge budget exhausted ({BUDGET} attempts; last cause: {cause})");
             let _ = log.record_error(msg.clone());
@@ -310,19 +276,6 @@ fn on_truncated(r: &Result<TurnOutcome, ProviderError>) -> Option<(String, &'sta
     }
 }
 
-fn on_provider_recoverable(
-    r: &Result<TurnOutcome, ProviderError>,
-) -> Option<(String, &'static str)> {
-    match r {
-        Err(ProviderError::Transient { .. } | ProviderError::RateLimited { .. }) => Some((
-            "provider retry budget exhausted".into(),
-            "The previous provider request failed before producing output. \
-             Continue from the current workspace state.",
-        )),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
@@ -348,9 +301,10 @@ mod tests {
     }
 
     /// A surfaced rate-limit already exhausted the provider loop's backoff
-    /// budget; the outer nudge gives the model one fresh turn.
+    /// budget.  It is not a model turn, so the nudge layer reports it
+    /// directly instead of appending a synthetic user message.
     #[test]
-    fn rate_limit_nudges_after_provider_budget() {
+    fn rate_limit_surfaces_without_nudge() {
         let mut reg = Registry::new();
         let mut log = fresh_log("ratelimit");
         let attempt = Err(ProviderError::RateLimited {
@@ -358,8 +312,8 @@ mod tests {
             cause: "429".into(),
             body: None,
         });
-        let msg = reg
-            .react(
+        assert!(
+            reg.react(
                 &attempt,
                 NudgeCtx {
                     must_reply: false,
@@ -368,21 +322,22 @@ mod tests {
                 &emit(),
                 &mut log,
             )
-            .expect("rate limit should nudge after provider budget");
-        assert!(msg.contains("provider request failed"));
-        assert_eq!(reg.used, 1);
+            .is_none(),
+            "rate limits are provider failures, not nudgeable model behavior",
+        );
+        assert_eq!(reg.used, 0);
     }
 
-    /// A transient failure is re-driven exactly once per turn: the second
-    /// transient in the same turn surfaces the error and stops instead of
-    /// burning another full provider retry cycle on an identical request.
+    /// A transient failure exhausted the provider loop before the model
+    /// produced output.  Re-driving through a nudge would duplicate the same
+    /// invisible request as a fake user turn, so it stops immediately.
     #[test]
-    fn transient_nudge_is_one_shot_per_turn() {
+    fn transient_surfaces_without_nudge() {
         let mut reg = Registry::new();
-        let mut log = fresh_log("transient-oneshot");
+        let mut log = fresh_log("transient");
         let attempt = || {
             Err(ProviderError::Transient {
-                cause: "stream idle: no event within timeout".into(),
+                cause: "stream idle: no response within timeout".into(),
                 attempts: 3,
                 body: None,
             })
@@ -392,25 +347,17 @@ mod tests {
             pinned: None,
         };
         assert!(
-            reg.react(&attempt(), ctx(), &emit(), &mut log).is_some(),
-            "first transient gets one recovery nudge"
-        );
-        assert!(
             reg.react(&attempt(), ctx(), &emit(), &mut log).is_none(),
-            "second transient in the same turn gives up instead of re-driving"
+            "transient provider failures are surfaced directly"
         );
-        // A genuine turn boundary re-arms the latch.
-        reg.reset();
-        assert!(
-            reg.react(&attempt(), ctx(), &emit(), &mut log).is_some(),
-            "a fresh turn gets a fresh transient nudge"
-        );
+        assert_eq!(reg.used, 0);
     }
 
-    /// A rate limit keeps the full outer budget — re-driving a 429 is cheap
-    /// and is the only long-outage resilience a headless run has.
+    /// Repeated provider failures still do not spend nudge budget.  The
+    /// provider loop owns retry attempts; the nudge budget is only for
+    /// model-visible recovery.
     #[test]
-    fn rate_limit_keeps_full_budget() {
+    fn provider_failures_do_not_consume_budget() {
         let mut reg = Registry::new();
         let mut log = fresh_log("ratelimit-budget");
         let attempt = || {
@@ -424,41 +371,13 @@ mod tests {
             must_reply: false,
             pinned: None,
         };
-        for _ in 0..BUDGET {
+        for _ in 0..=BUDGET {
             assert!(
-                reg.react(&attempt(), ctx(), &emit(), &mut log).is_some(),
-                "rate limits nudge up to the full budget"
+                reg.react(&attempt(), ctx(), &emit(), &mut log).is_none(),
+                "provider failure should stop, not nudge"
             );
         }
-        assert!(
-            reg.react(&attempt(), ctx(), &emit(), &mut log).is_none(),
-            "then the budget stops them as before"
-        );
-    }
-
-    /// Same contract for a generic transient failure.
-    #[test]
-    fn transient_nudges_after_provider_budget() {
-        let mut reg = Registry::new();
-        let mut log = fresh_log("transient");
-        let attempt = Err(ProviderError::Transient {
-            cause: "web stream error".into(),
-            attempts: 3,
-            body: None,
-        });
-        let msg = reg
-            .react(
-                &attempt,
-                NudgeCtx {
-                    must_reply: false,
-                    pinned: None,
-                },
-                &emit(),
-                &mut log,
-            )
-            .expect("transient should nudge after provider budget");
-        assert!(msg.contains("provider request failed"));
-        assert_eq!(reg.used, 1);
+        assert_eq!(reg.used, 0);
     }
 
     /// A model-behaviour outcome still nudges and spends one unit of budget.
