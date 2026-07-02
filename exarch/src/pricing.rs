@@ -200,7 +200,11 @@ fn deepseek_price(model: &str) -> Option<ModelPricing> {
         cache_read: 0.00725,
     };
 
-    let peak = is_peak_hour(jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).hour());
+    let peak = is_peak_hour(
+        jiff::Timestamp::now()
+            .to_zoned(jiff::tz::TimeZone::UTC)
+            .hour(),
+    );
     let r = match model {
         "deepseek-chat" | "deepseek-reasoner" | "deepseek-v4-flash" => {
             if peak {

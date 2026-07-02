@@ -1231,7 +1231,12 @@ impl Agent {
         if m.is_empty() {
             return None;
         }
-        Some(m.values().map(crate::card::summary_line).collect::<Vec<_>>().join("; "))
+        Some(
+            m.values()
+                .map(crate::card::summary_line)
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
     }
 
     /// Stash a returning agent's deliberate return value — called from the

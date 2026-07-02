@@ -158,7 +158,9 @@ impl Registry {
                         self.used,
                         "no-reply finish (returning agent)".into(),
                     );
-                    return Some(format!("{EXARCH_REMINDER_OPEN}{REPLY_MESSAGE}{EXARCH_REMINDER_CLOSE}"));
+                    return Some(format!(
+                        "{EXARCH_REMINDER_OPEN}{REPLY_MESSAGE}{EXARCH_REMINDER_CLOSE}"
+                    ));
                 }
                 let msg = "agent finished without calling `reply` after the nudge budget; \
                            returning a failure"
@@ -180,7 +182,10 @@ impl Registry {
                 self.pin_reminded = true;
                 self.turns_since_pin_reminder = 0;
                 record_nudge(emit, log, self.used, "pinned-state reminder".into());
-                return Some(format!("{EXARCH_REMINDER_OPEN}There is pinned state: {}{EXARCH_REMINDER_CLOSE}", ctx.pinned.as_deref().unwrap_or("none")));
+                return Some(format!(
+                    "{EXARCH_REMINDER_OPEN}There is pinned state: {}{EXARCH_REMINDER_CLOSE}",
+                    ctx.pinned.as_deref().unwrap_or("none")
+                ));
             } else if matches!(attempt, Ok(TurnOutcome::Complete(_)))
                 && !self.pin_reminded
                 && self.turns_since_pin_reminder >= REMIND_EVERY
@@ -188,10 +193,10 @@ impl Registry {
                 self.pin_reminded = true;
                 self.turns_since_pin_reminder = 0;
                 record_nudge(emit, log, self.used, "no-pins reminder".into());
-                return Some(format!("{EXARCH_REMINDER_OPEN}Nothing is pinned — consider calling `set-goal` to remember what you are working on, or tracking some tasks with `add-task`.{EXARCH_REMINDER_CLOSE}"));
-            } else if ctx.pinned.is_some()
-                && matches!(attempt, Ok(TurnOutcome::Complete(_)))
-            {
+                return Some(format!(
+                    "{EXARCH_REMINDER_OPEN}Nothing is pinned — consider calling `set-goal` to remember what you are working on, or tracking some tasks with `add-task`.{EXARCH_REMINDER_CLOSE}"
+                ));
+            } else if ctx.pinned.is_some() && matches!(attempt, Ok(TurnOutcome::Complete(_))) {
                 if self.last_pinned_digest.as_deref() != ctx.pinned.as_deref() {
                     self.open_tasks_nudges = 0;
                     self.last_pinned_digest = ctx.pinned.clone();
@@ -199,7 +204,10 @@ impl Registry {
                 if self.open_tasks_nudges < OPEN_TASKS_BUDGET {
                     self.open_tasks_nudges += 1;
                     record_nudge(emit, log, self.used, "open-tasks nudge".into());
-                    return Some(format!("{EXARCH_REMINDER_OPEN}there is pinned state: {}{EXARCH_REMINDER_CLOSE}", ctx.pinned.as_deref().unwrap_or("none")));
+                    return Some(format!(
+                        "{EXARCH_REMINDER_OPEN}there is pinned state: {}{EXARCH_REMINDER_CLOSE}",
+                        ctx.pinned.as_deref().unwrap_or("none")
+                    ));
                 }
             }
             surface_provider_error(attempt, emit, log);
@@ -228,7 +236,9 @@ impl Registry {
         }
         self.used += 1;
         record_nudge(emit, log, self.used, cause);
-        Some(format!("{EXARCH_REMINDER_OPEN}{message}{EXARCH_REMINDER_CLOSE}"))
+        Some(format!(
+            "{EXARCH_REMINDER_OPEN}{message}{EXARCH_REMINDER_CLOSE}"
+        ))
     }
 }
 
@@ -621,7 +631,12 @@ mod tests {
         let mut fires = 0;
         for turn in 1..=(REMIND_EVERY + 3) {
             reg.reset();
-            if let Some(msg) = reg.react(&Ok(TurnOutcome::Complete("x".into())), ctx(), &emit(), &mut log) {
+            if let Some(msg) = reg.react(
+                &Ok(TurnOutcome::Complete("x".into())),
+                ctx(),
+                &emit(),
+                &mut log,
+            ) {
                 assert_eq!(
                     turn, REMIND_EVERY,
                     "no-pins reminder should only fire on the {REMIND_EVERY}th turn"
@@ -630,6 +645,9 @@ mod tests {
                 fires += 1;
             }
         }
-        assert_eq!(fires, 1, "no-pins reminder should fire exactly once in this window");
+        assert_eq!(
+            fires, 1,
+            "no-pins reminder should fire exactly once in this window"
+        );
     }
 }

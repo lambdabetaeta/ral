@@ -2793,7 +2793,11 @@ mod tests {
             worst_case < Duration::from_secs(600),
             "a stalled stream must fail in minutes, not appear hung; idle budget is {worst_case:?}"
         );
-        assert_eq!(idle_timeout(1), STREAM_IDLE_TIMEOUT, "first attempt gets the full bound");
+        assert_eq!(
+            idle_timeout(1),
+            STREAM_IDLE_TIMEOUT,
+            "first attempt gets the full bound"
+        );
         assert!(
             idle_timeout(2) < STREAM_IDLE_TIMEOUT,
             "retries fail faster than the first attempt"

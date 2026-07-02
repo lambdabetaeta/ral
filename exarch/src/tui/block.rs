@@ -699,7 +699,9 @@ impl Block {
     /// full; thinking grades from header to partial trace to full trace.
     fn body(&self, width: u16, level: Reveal) -> Vec<Line<'static>> {
         match &self.kind {
-            BlockKind::ToolCall { tool, .. } if *tool == "agent_cancel" || *tool == "agents" => Vec::new(),
+            BlockKind::ToolCall { tool, .. } if *tool == "agent_cancel" || *tool == "agents" => {
+                Vec::new()
+            }
             BlockKind::ToolCall { tool, summary, cmd } => match level {
                 Reveal::Full => line::tool_call_expanded(summary, tool, cmd, width),
                 Reveal::Context => line::tool_call_context(summary, tool, cmd, N, width),
@@ -767,7 +769,9 @@ impl Block {
             // matching a standalone tool call's header; an invisible
             // placeholder renders nothing.  On screen the flatten coalesces a
             // run of these into one `tool : …` line instead ([`super::viewport`]).
-            BlockKind::Query { tool, .. } if *tool == "agent_cancel" || *tool == "agents" => Vec::new(),
+            BlockKind::Query { tool, .. } if *tool == "agent_cancel" || *tool == "agents" => {
+                Vec::new()
+            }
             BlockKind::Query { tool, query } => match query {
                 Some(q) => line::tool_call_static(q, tool),
                 None => Vec::new(),

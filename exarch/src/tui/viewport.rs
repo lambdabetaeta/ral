@@ -845,7 +845,10 @@ impl Viewport {
         if !think.is_empty() {
             let think_lines = self.thinking.lines().count() as u32;
             if let Some(idx) = think.iter().position(|l| !is_blank(l)) {
-                think[idx].spans.insert(0, rail::span(RailKind::Thinking, self.agent, Some(think_lines)));
+                think[idx].spans.insert(
+                    0,
+                    rail::span(RailKind::Thinking, self.agent, Some(think_lines)),
+                );
             }
         }
         let seat = self.streaming_seat();
@@ -1402,10 +1405,7 @@ mod tests {
     #[test]
     fn committed_thinking_stays_visible_in_sticky_viewport() {
         let mut vp = viewport();
-        vp.push_chrome(
-            RailShape::Prompt,
-            vec![Line::from("hello cutie")],
-        );
+        vp.push_chrome(RailShape::Prompt, vec![Line::from("hello cutie")]);
         // Fill enough chrome to overflow a small window.
         for i in 0..8 {
             vp.push_chrome(
@@ -1431,7 +1431,12 @@ mod tests {
         vp.commit_thinking("considering the shape\n".into(), vp.current_answer_chars());
         vp.close_boundary(0);
         let committed = vp.render_window(READ_W, 8);
-        let committed_text = committed.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
+        let committed_text = committed
+            .lines
+            .iter()
+            .map(plain)
+            .collect::<Vec<_>>()
+            .join("\n");
         let committed_thinking = rail_rows(&committed.lines, "∴ ");
         assert!(
             !committed_thinking.is_empty(),
