@@ -30,6 +30,17 @@ pub struct Cli {
     pub prompt: Option<String>,
     #[arg(long)]
     pub file: Option<std::path::PathBuf>,
+    /// Compatibility hatch for simple harnesses: any trailing words after
+    /// `--` are joined into the seed prompt.  Prefer `--prompt` or `--file`;
+    /// this exists so markdown bullets like `- item` remain data, not flags.
+    #[arg(
+        value_name = "PROMPT",
+        num_args = 0..,
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        conflicts_with_all = ["prompt", "file"]
+    )]
+    pub trailing_prompt: Vec<String>,
     #[arg(long = "system", value_name = "FILE")]
     pub system_files: Vec<std::path::PathBuf>,
     /// Agent ceiling — one of the built-in bases:
@@ -138,13 +149,46 @@ pub enum Command {
 pub fn load_seed(
     prompt: Option<String>,
     file: Option<std::path::PathBuf>,
+    trailing_prompt: Vec<String>,
 ) -> Result<Option<String>, String> {
-    let seed = match (prompt, file) {
-        (Some(p), _) => Some(p),
-        (_, Some(path)) => {
+    let seed = match (prompt, file, trailing_prompt) {
+        (Some(p), _, _) => Some(p),
+        (_, Some(path), _) => {
             Some(std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?)
         }
+        (_, _, words) if !words.is_empty() => Some(words.join("\n")),
         _ => None,
     };
     Ok(seed.filter(|s| !s.trim().is_empty()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn trailing_prompt_after_double_dash_accepts_markdown_bullets() {
+        let cli = Cli::try_parse_from([
+            "exarch",
+            "--headless",
+            "--",
+            "Recover the model",
+            "- keep weights unchanged",
+        ])
+        .expect("markdown bullet is prompt text, not a flag");
+
+        let seed = load_seed(cli.prompt, cli.file, cli.trailing_prompt)
+            .expect("seed loads")
+            .expect("seed is present");
+
+        assert_eq!(seed, "Recover the model\n- keep weights unchanged");
+    }
+
+    #[test]
+    fn explicit_prompt_still_wins() {
+        let seed = load_seed(Some("from flag".into()), None, Vec::new()).expect("seed loads");
+
+        assert_eq!(seed.as_deref(), Some("from flag"));
+    }
 }

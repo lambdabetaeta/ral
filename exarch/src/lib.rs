@@ -132,7 +132,7 @@ pub fn run() -> Result<(), String> {
     if c.output_format == headless::OutputFormat::Json && !c.headless {
         return Err("--output-format is only meaningful with --headless".into());
     }
-    let seed = cli::load_seed(c.prompt, c.file)?;
+    let seed = cli::load_seed(c.prompt, c.file, c.trailing_prompt)?;
 
     // Load the unusual-provider config (custom endpoints) from the trusted
     // XDG config home, evaluated under a no-authority grant. Absent → none.
