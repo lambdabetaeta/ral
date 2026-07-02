@@ -322,17 +322,19 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         }
     });
     execute!(io::stdout(), EndSynchronizedUpdate)?;
-    emit_tab_title(app, phase.is_some());
+    emit_tab_title(app);
     drawn?;
     Ok(())
 }
 
-/// Emit the terminal tab title: a spinner when working, a block when idle.
-fn emit_tab_title(app: &App, working: bool) {
+/// Emit the terminal tab title: a spinner until the root has yielded to the
+/// human input boundary, a block while the prompt is genuinely idle.
+fn emit_tab_title(app: &App) {
     let cwd = std::env::current_dir()
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "?".into());
+    let working = !app.inbox.waiting_for_input();
     let glyph = if working {
         SPINNER[(app.tabs.title_frame() / 4) as usize % SPINNER.len()]
     } else {

@@ -345,6 +345,11 @@ impl Turn {
 struct Shared {
     queue: Mutex<VecDeque<InboxMsg>>,
     signal: Condvar,
+    /// True while the consumer is parked in [`ParkMode::Held`] on an empty
+    /// queue: the human-facing yield point.  A producer clears it before
+    /// waking the consumer, so frontends can distinguish "prompt is editable"
+    /// from "the root is still working" without minting a presentation event.
+    waiting_for_input: AtomicBool,
 }
 
 impl Shared {
@@ -352,6 +357,7 @@ impl Shared {
         Arc::new(Self {
             queue: Mutex::new(VecDeque::new()),
             signal: Condvar::new(),
+            waiting_for_input: AtomicBool::new(true),
         })
     }
 }
@@ -381,6 +387,9 @@ impl Mailbox {
     /// Post any message (cron wakeup, agent result, self-nudge, …) and wake a
     /// parked consumer.
     pub fn push(&self, msg: InboxMsg) {
+        self.shared
+            .waiting_for_input
+            .store(false, Ordering::Release);
         self.shared
             .queue
             .lock()
@@ -440,6 +449,9 @@ impl Inbox {
     /// to `self.mailbox().push(msg)`.
     pub fn push(&self, msg: InboxMsg) {
         self.shared
+            .waiting_for_input
+            .store(false, Ordering::Release);
+        self.shared
             .queue
             .lock()
             .expect("inbox lock poisoned")
@@ -458,6 +470,13 @@ impl Inbox {
             .lock()
             .expect("inbox lock poisoned")
             .is_empty()
+    }
+
+    /// Whether the consumer is parked at a human-input boundary.  The TUI uses
+    /// the root inbox's bit to drive the terminal tab title: spinner while the
+    /// root has not yielded, idle block once it is genuinely waiting for input.
+    pub fn waiting_for_input(&self) -> bool {
+        self.shared.waiting_for_input.load(Ordering::Acquire)
     }
 
     /// One strip label per pending message that has one, oldest first, for the
@@ -587,11 +606,20 @@ impl Inbox {
                 return None;
             }
             if let Some(turn) = pop_turn(&mut q) {
+                self.shared
+                    .waiting_for_input
+                    .store(false, Ordering::Release);
                 return Some(turn);
             }
             if mode == ParkMode::Quiesce {
+                self.shared
+                    .waiting_for_input
+                    .store(false, Ordering::Release);
                 return None;
             }
+            self.shared
+                .waiting_for_input
+                .store(mode == ParkMode::Held, Ordering::Release);
             let (guard, _timeout) = self
                 .shared
                 .signal
@@ -1269,9 +1297,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        Boundary, Emitter, Event, FleetBus, Inbox, InboxMsg, Kind, Pass, Sink, Transcript, Turn,
-        drain_pass, pump,
+        Boundary, Emitter, Event, FleetBus, Inbox, InboxMsg, Kind, ParkMode, Pass, Sink,
+        Transcript, Turn, drain_pass, pump,
     };
+    use crate::cancel;
     use crate::provider::Tuning;
     use std::sync::Arc;
 
@@ -1285,10 +1314,106 @@ mod tests {
             pending: Arc::new(AtomicBool::new(true)),
         }
     }
+
+    fn eventually(timeout: Duration, pred: impl Fn() -> bool) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if pred() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::channel;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn inbox_waiting_for_input_tracks_human_park() {
+        let inbox = Inbox::new();
+        assert!(
+            inbox.waiting_for_input(),
+            "a fresh interactive inbox starts at the human boundary"
+        );
+
+        inbox.push_user("work".into());
+        assert!(
+            !inbox.waiting_for_input(),
+            "posting input wakes the consumer out of the yielded state"
+        );
+        assert!(matches!(inbox.drain_turn(), Some(Turn::Human(s)) if s == "work"));
+        assert!(
+            !inbox.waiting_for_input(),
+            "draining a turn means work has started; yield resumes only at park"
+        );
+
+        let worker_inbox = inbox.clone();
+        let token = cancel::Token::new();
+        let worker_token = token.clone();
+        let handle =
+            std::thread::spawn(move || worker_inbox.next_or_idle(|| ParkMode::Held, &worker_token));
+
+        assert!(
+            eventually(Duration::from_secs(1), || inbox.waiting_for_input()),
+            "a Held empty-inbox park is the human-input yield point"
+        );
+
+        inbox.mailbox().push_user("next".into());
+        assert!(
+            !inbox.waiting_for_input(),
+            "a submitted prompt clears the yielded bit before waking the worker"
+        );
+        assert!(
+            matches!(handle.join().expect("parked worker joins"), Some(Turn::Human(s)) if s == "next"),
+            "the wakeup delivered the submitted prompt"
+        );
+        assert!(
+            !inbox.waiting_for_input(),
+            "taking the turn leaves the root working until it parks again"
+        );
+    }
+
+    #[test]
+    fn inbox_waiting_for_input_ignores_non_human_parks() {
+        let inbox = Inbox::new();
+        inbox.push_user("work".into());
+        assert!(matches!(inbox.drain_turn(), Some(Turn::Human(_))));
+        assert!(!inbox.waiting_for_input());
+
+        let observed = Arc::new(AtomicBool::new(false));
+        let worker_observed = observed.clone();
+        let worker_inbox = inbox.clone();
+        let token = cancel::Token::new();
+        let worker_token = token.clone();
+        let handle = std::thread::spawn(move || {
+            worker_inbox.next_or_idle(
+                || {
+                    worker_observed.store(true, Ordering::Release);
+                    ParkMode::HeldByChildren
+                },
+                &worker_token,
+            )
+        });
+
+        assert!(
+            eventually(Duration::from_secs(1), || observed.load(Ordering::Acquire)),
+            "the worker reached the park predicate"
+        );
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            !inbox.waiting_for_input(),
+            "waiting on children is still work, not a human-input yield"
+        );
+
+        token.cancel();
+        assert!(
+            handle.join().expect("cancelled worker joins").is_none(),
+            "non-human parks terminate on cancellation"
+        );
+    }
 
     /// The headless default [`Sink::drive`] and the TUI's `drive_events` share
     /// one completion contract: [`drain_pass`]. It stops when the worker is
