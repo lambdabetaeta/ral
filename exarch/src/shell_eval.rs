@@ -302,10 +302,12 @@ pub fn run_shell(
                     ral_core::transport::BreakMirror::Error(msg) => {
                         let e = if timed_out {
                             let msg = format!(
-                                "ral tool: timed out after {timeout_secs}s — work this long must not run inline. \
-                                 Spawn it (`let h = spawn {{ … }}`) and let the turn return: the host notifies you \
-                                 at the next turn boundary when it settles and renders its output on the rail. \
-                                 `await $h` when you want its value record — you need not poll."
+                                "ral tool: timed out after {timeout_secs}s. If the command is simply slow \
+                                 and there is nothing to overlap it with, retry with a higher `timeout_secs`. \
+                                 If other work can run alongside it, defer it instead (`let h = defer {{ … }}`) \
+                                 and let the turn return: the host notifies you at the next turn boundary when \
+                                 it settles and renders its output on the rail, and `await $h` gives you its \
+                                 value record — you need not poll."
                             );
                             ral_core::types::Error::new(msg, 124)
                         } else {
@@ -1188,6 +1190,38 @@ keep-bottom
         assert!(
             !alive,
             "the forked grandchild (pid {gc_pid}) outlived the timeout"
+        );
+    }
+
+    /// The timeout message names both its budget and the knob to raise.
+    /// Mirrors `timeout_kills_external_subprocess_tree`'s fixture — a 2 s
+    /// budget over a `sleep 30` — but asserts on the surfaced message rather
+    /// than the process tree: exit 124, and a stderr that reports the elapsed
+    /// budget ("timed out after 2s") and names `timeout_secs`, the knob the
+    /// model raises to give a slow command more room. Those substrings are
+    /// load-bearing for steering, so keep them stable.
+    #[cfg(unix)]
+    #[test]
+    fn timeout_message_names_budget_and_knob() {
+        let mut shell = fresh_shell();
+        let (emit, _rx) = dummy_emitter();
+        let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
+        let r = match run_shell_direct(&mut shell, &Capabilities::root(), cmd, 2, &emit) {
+            Outcome::Ran(r) => r,
+            Outcome::Static(s) => panic!("static failure: {s}"),
+        };
+        assert_eq!(
+            r.exit, 124,
+            "a timed-out call reports the timeout exit code"
+        );
+        let stderr = String::from_utf8_lossy(&r.stderr);
+        assert!(
+            stderr.contains("timed out after 2s"),
+            "the timeout message names the elapsed budget; stderr was: {stderr}"
+        );
+        assert!(
+            stderr.contains("timeout_secs"),
+            "the timeout message names the `timeout_secs` knob; stderr was: {stderr}"
         );
     }
 
