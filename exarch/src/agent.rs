@@ -224,8 +224,9 @@ pub enum ControlFlow {
 /// command ([`Turn::Command`]) drained at the turn boundary — the drive thread
 /// owns the session the command mutates, so it cannot run on the UI thread.
 /// Only the non-interactive session commands route here (`/clear`, `/compact`,
-/// `/quit`); `/model` swaps the [`ProviderHandle`] directly on the UI thread,
-/// and view-only commands (`/help`, `/copy`, …) are handled frontend-side.
+/// `/discuss`, `/quit`); `/model` swaps the [`ProviderHandle`] directly on the
+/// UI thread, and view-only commands (`/help`, `/copy`, …) are handled
+/// frontend-side.
 /// Off the TUI there are no such commands, so [`NoControl`] handles none.
 pub trait Control {
     /// Run `raw` (a slash-command line) against the session the drive loop
@@ -498,18 +499,19 @@ impl Agent {
         })
     }
 
-    /// A child that inherits this agent's model-visible context, then answers
-    /// `prompt` as its own fresh task.  The shell/provider/capability fork is
-    /// identical to [`Self::fork`]; only the model log is seeded differently.
+    /// A child that inherits this agent's model-visible context.  The launch
+    /// prompt is seeded through the child's inbox by the spawn site, so it
+    /// enters the log through the same turn path as any other user prompt.
+    /// The shell/provider/capability fork is identical to [`Self::fork`];
+    /// only the model log is seeded differently.
     pub(crate) fn fork_remembering(
         &self,
         caps: ral_core::types::Capabilities,
-        prompt: String,
     ) -> io::Result<Agent> {
         let mut child = self.fork(caps)?;
         child
             .log
-            .import_context_then_prompt(self.log.inherited_context_messages(), prompt)
+            .import_context(self.log.inherited_context_messages())
             .map_err(io::Error::other)?;
         Ok(child)
     }
@@ -1655,7 +1657,7 @@ mod tests {
     }
 
     #[test]
-    fn remembering_fork_inherits_context_and_appends_prompt() {
+    fn remembering_fork_imports_context_before_seeded_prompt() {
         let dir = tmp("remembering-fork");
         let mut parent = Agent::for_test(&dir, "system").unwrap();
         parent.log.append_user("what did we learn?".into()).unwrap();
@@ -1668,9 +1670,10 @@ mod tests {
             )
             .unwrap();
 
-        let child = parent
-            .fork_remembering(parent.caps().clone(), "use that invariant".into())
+        let mut child = parent
+            .fork_remembering(parent.caps().clone())
             .expect("fork remembering child");
+        child.log.append_user("use that invariant".into()).unwrap();
         let ms = child.log.render_messages().unwrap();
         let view = serde_json::to_string(&ms).unwrap();
 

@@ -68,19 +68,33 @@ impl Tui {
 /// The agent-affecting slash command hook the worker's [`Agent::drive`]
 /// calls at the turn boundary, where the drive thread owns the agent the
 /// command mutates.  `/clear` rebuilds the agent's context (its viewport was
-/// already cleared UI-side), `/compact` summarizes the history, `/quit` ends
-/// the drive loop — which sets `done`, so the UI loop's next drain returns
-/// `Stop` and exits.  Every other command is handled UI-side and never reaches
-/// here.  Only the trunk drives with this `Control` (a sub-agent uses
-/// [`NoControl`](crate::agent::NoControl)), so a slash command always targets
-/// the trunk's own context and provider.
+/// already cleared UI-side), `/compact` summarizes the history, `/discuss`
+/// forks a returning chair agent, and `/quit` ends the drive loop — which sets
+/// `done`, so the UI loop's next drain returns `Stop` and exits.  Every other
+/// command is handled UI-side and never reaches here.  Only the trunk drives
+/// with this `Control` (a sub-agent uses [`NoControl`](crate::agent::NoControl)),
+/// so a slash command always targets the trunk's own context and provider.
 pub struct ReplControl<'a> {
     scratch: &'a Scratch,
 }
 
 impl Control for ReplControl<'_> {
     fn command(&mut self, raw: &str, session: &mut Agent, emit: &Emitter) -> ControlFlow {
-        match raw.trim() {
+        let trimmed = raw.trim();
+        let (head, rest) = trimmed
+            .split_once(char::is_whitespace)
+            .map_or((trimmed, ""), |(h, r)| (h, r.trim()));
+        if head == "/discuss" {
+            let topic = rest;
+            if topic.is_empty() {
+                session.note_error("usage: /discuss <prompt>".into(), emit);
+            } else {
+                let receipt = crate::tools::spawn_discussion(session, topic, emit);
+                session.note(format!("discussion started: {receipt}"), emit);
+            }
+            return ControlFlow::Continue;
+        }
+        match trimmed {
             "/clear" => {
                 let _ = session.clear(self.scratch);
                 ControlFlow::Continue

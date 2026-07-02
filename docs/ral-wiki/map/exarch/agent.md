@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 0deda19
+generated_at_commit: fe9d819
 generated_at_date: 2026-07-02
 covers_paths: [exarch/src/agent.rs, exarch/src/agent_registry.rs, exarch/src/event.rs, exarch/src/fleet.rs, exarch/src/nudge.rs, exarch/src/digest.rs]
 ---
@@ -191,13 +191,14 @@ There is no flow-back: the child's `cd`, env, and new bindings die with it. The
 spawn tree is **unbounded in depth** — every agent may spawn — and mirrors on the
 bus as `Kind::Born` / `Kind::Died`.
 
-`fork_remembering` is the anamnesis variant: it uses the same shell/provider fork,
-then asks `AgentLog` to import the parent's model-visible context and append the
-tool call's prompt as the child's fresh final user prompt. `AgentLog` drops a
-pending unanswered assistant tool-call frame when the parent is mid-dispatch, so
-the child inherits a request context rather than a dangling provider protocol.
-The agraphos path uses plain `fork` and seeds only the launch prompt into the
-child's inbox.
+`fork_remembering` is the anamnesis variant: it uses the same shell/provider fork
+and asks `AgentLog` to import the parent's model-visible context. The spawn site
+still seeds the tool call's prompt through the child's inbox, so the prompt
+enters through the same turn path as agraphos. `AgentLog` drops a pending
+unanswered assistant tool-call frame when the parent is mid-dispatch, so the
+child inherits a request context rather than a dangling provider protocol. The
+agraphos path uses plain `fork`; both spawn modes seed the launch prompt into
+the child's inbox.
 
 Routing the fork through core matters because the builtin table is the easiest
 thing to drop. The exarch host builtins — `window-hash`, `grep-files`, `edit`,

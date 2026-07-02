@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 431fff08509d0cf29d57a337c76b7e85d6198114
-generated_at_date: 2026-06-29
+generated_at_commit: fe9d819
+generated_at_date: 2026-07-02
 covers_paths: [exarch/src/bus.rs, exarch/src/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/host.rs]
 ---
 
@@ -153,7 +153,14 @@ Two `Sink` implementations:
  marked turn. A committed human turn echoes on the `RailShape::Prompt` band;
  a wakeup stays dim, ambient chrome with no rail glyph (`RailShape::Plain`).
  Slash-prefixed prompts
- stay on the REPL command path. Until then the inbox renders as a `PROMPT_BG`
+ stay on the REPL command path. View commands (`/help`, `/legend`, `/copy`,
+ `/export`, `/model`) run on the UI thread; session commands (`/clear`,
+ `/compact`, `/discuss`, `/quit`) enter the focused agent's inbox as
+ `Command` turns and run in `ReplControl`. `/discuss` is the one command in
+ that class that forks work instead of mutating the current context: it starts
+ an `anamnesis` chair agent which conducts the bounded two-agent protocol
+ recorded in [[decisions/260702_discuss-command|discuss-command]]. Until then
+ the inbox renders as a `PROMPT_BG`
  strip above the input, and the idle wait selects over input, inbox, and the
  session bus
  ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]],

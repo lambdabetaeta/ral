@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 012fcb2
+generated_at_commit: fe9d819
 generated_at_date: 2026-07-02
 covers_paths: [exarch/src/tools.rs, exarch/src/tools/]
 ---
@@ -54,6 +54,11 @@ The tools that ship:
   subtree. A child may itself spawn, so the tree is unbounded in depth. The whole
   sub-agent model — the `parent` predicate, spawning, marked peer messages,
   returning, narrowing, and memory mode — is [[design/agents|agents]].
+- `spawn_discussion` (`tools.rs` → `tools/agent.rs`) — the host-only helper
+  behind `/discuss`, not a model-advertised tool. It spawns an `anamnesis`
+  returning chair with the focused context and instructs that chair to spawn one
+  `agraphos` partner, consume the partner's ordinary `reply`, and return one
+  `result` to its parent ([[decisions/260702_discuss-command|discuss-command]]).
 - `reply` (`tools/reply.rs`), gated by `replies()` — a returning agent's
   deliberate return value ([[decisions/260622_agent-reply-tool|agent-reply-tool]],
   extended to the headless trunk by

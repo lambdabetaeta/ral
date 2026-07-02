@@ -3528,3 +3528,21 @@ Split exarch spawning into `agraphos` (blank model context) and `anamnesis`
 [[decisions/260702_subagent-memory-modes|subagent-memory-modes]]. Restamped
 [[map/exarch/agent|agent]] and [[map/exarch/tools|tools]], and updated
 [[design/agents|agents]] for the two memory contracts.
+
+
+## [2026-07-02] ingest | Discuss command
+
+Added [[decisions/260702_discuss-command|discuss-command]] for `/discuss
+<prompt>`: a host slash command that spawns an `anamnesis` chair, asks it to
+spawn one `agraphos` partner, and returns one ordinary `reply.result` without a
+new peer transport. Restamped [[map/exarch/tools|tools]] and
+[[map/exarch/frontend|frontend]], and updated [[index|index]].
+
+
+## [2026-07-02] ingest | Reply cancels descendants
+
+Tightened [[design/agents|agents]] so a returning agent's `reply` cancels and
+reaps any unfinished descendants before the node settles, without advancing the
+global `/clear` generation for unrelated siblings. Restamped
+[[map/exarch/agent|agent]] and updated [[map/exarch/tools|tools]] plus
+[[index|index]].

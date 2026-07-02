@@ -66,6 +66,12 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         help: "Switch the model or provider.",
     },
     SlashCommand {
+        name: "/discuss",
+        aliases: &[],
+        arg: Some("<prompt>"),
+        help: "Start a two-agent discussion and report back.",
+    },
+    SlashCommand {
         name: "/compact",
         aliases: &[],
         arg: None,
@@ -208,9 +214,10 @@ pub(super) fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
 /// Route a submitted prompt line.  A view command (`/help`, `/legend`, `/copy`,
 /// `/export`, `/model`) touches only the App, clipboard, file, or picker, so it
 /// runs here on the UI thread.  A session command (`/clear`, `/compact`,
-/// `/quit`) and a plain prompt go onto the session inbox, where the worker's
-/// drive loop drains them — `/clear` *also* clears the viewport UI-side so the
-/// screen blanks immediately, before the worker rebuilds the session.
+/// `/discuss`, `/quit`) and a plain prompt go onto the session inbox, where
+/// the worker's drive loop drains them — `/clear` *also* clears the viewport
+/// UI-side so the screen blanks immediately, before the worker rebuilds the
+/// session.
 pub(super) fn route_submit(
     text: String,
     tui: &mut Tui,
@@ -262,6 +269,14 @@ pub(super) fn route_submit(
                 }
                 mailbox.push(InboxMsg::Command("/clear".into()));
             }
+            "/discuss" => {
+                if arg.is_empty() {
+                    tui.app
+                        .push_error(tui.app.tabs.root(), "usage: /discuss <prompt>".into());
+                    return Ok(());
+                }
+                mailbox.push(InboxMsg::Command(text.clone()));
+            }
             // The worker's `ReplControl` compacts the history / returns Quit.
             _ => mailbox.push(InboxMsg::Command(text.clone())),
         },
@@ -305,6 +320,15 @@ mod tests {
         // A bare /export still matches, with the empty argument its handler
         // turns into the usage hint.
         assert_eq!(dispatch("/export"), Some(("/export", String::new())));
+    }
+
+    #[test]
+    fn discuss_consumes_its_prompt_argument() {
+        assert_eq!(
+            dispatch("/discuss should we add a new channel?"),
+            Some(("/discuss", "should we add a new channel?".to_string()))
+        );
+        assert_eq!(dispatch("/discuss"), Some(("/discuss", String::new())));
     }
 
     #[test]

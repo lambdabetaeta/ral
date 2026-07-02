@@ -476,13 +476,12 @@ impl AgentLog {
         msgs
     }
 
-    /// Import a parent model context and append this child's chosen prompt as
-    /// the answerable turn.
-    pub fn import_context_then_prompt(
-        &mut self,
-        messages: Vec<ChatMessage>,
-        prompt: String,
-    ) -> Result<(), String> {
+    /// Import parent context messages without appending a prompt.
+    ///
+    /// An `anamnesis` child receives its launch prompt through its inbox, so
+    /// the drive loop commits it through [`append_user`] at apply time: the
+    /// same path every other turn takes.
+    pub fn import_context(&mut self, messages: Vec<ChatMessage>) -> Result<(), String> {
         if !matches!(self.state, State::ReadyForUser) {
             return Err(format!(
                 "cannot import context while session is in state {:?}",
@@ -492,7 +491,7 @@ impl AgentLog {
         for message in messages {
             self.record_or_string_err(SessionEvent::ContextMessage { message })?;
         }
-        self.append_user(prompt)
+        Ok(())
     }
 
     // ── Protocol mutations ────────────────────────────────────────────────
@@ -994,16 +993,15 @@ mod tests {
     }
 
     #[test]
-    fn import_context_then_prompt_puts_fresh_prompt_last() {
+    fn import_context_keeps_the_child_ready_for_a_seeded_prompt() {
         let mut s = fresh_root("import-context");
-        s.import_context_then_prompt(
-            vec![
-                ChatMessage::user("old question"),
-                ChatMessage::assistant("old answer"),
-            ],
-            "fresh task".into(),
-        )
+        s.import_context(vec![
+            ChatMessage::user("old question"),
+            ChatMessage::assistant("old answer"),
+        ])
         .unwrap();
+        assert!(s.is_ready());
+        s.append_user("fresh task".into()).unwrap();
 
         let ms = s.render_messages().unwrap();
         assert_eq!(

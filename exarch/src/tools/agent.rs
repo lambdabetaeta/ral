@@ -100,20 +100,11 @@ authority."
         }
     }
 
-    fn fork(
-        self,
-        session: &Agent,
-        caps: ral_core::types::Capabilities,
-        prompt: &str,
-    ) -> std::io::Result<Agent> {
+    fn fork(self, session: &Agent, caps: ral_core::types::Capabilities) -> std::io::Result<Agent> {
         match self {
             Self::Agraphos => session.fork(caps),
-            Self::Anamnesis => session.fork_remembering(caps, prompt.to_string()),
+            Self::Anamnesis => session.fork_remembering(caps),
         }
-    }
-
-    fn seed_inbox(self) -> bool {
-        matches!(self, Self::Agraphos)
     }
 }
 
@@ -227,6 +218,53 @@ impl Tool for SpawnTool {
     }
 }
 
+/// Start a bounded two-agent discussion from a host slash command.
+///
+/// This deliberately reuses the ordinary spawn API: the discussion chair is an
+/// `anamnesis` child, so it remembers the focused conversation; the chair is
+/// instructed to spawn one `agraphos` partner and consume that partner's normal
+/// `reply`.  There is no special peer channel and no pretend-human delivery.
+pub(crate) fn spawn_discussion(session: &mut Agent, topic: &str, emit: &Emitter) -> String {
+    let title = format!("discuss-{}", DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed));
+    let input = json!({
+        "prompt": discussion_prompt(topic),
+        "title": title,
+        "permissions": "dangerous",
+    });
+    dispatch_spawn(
+        SpawnKind::Anamnesis,
+        "/discuss".to_string(),
+        input,
+        session,
+        emit,
+    )
+    .content
+}
+
+fn discussion_prompt(topic: &str) -> String {
+    format!(
+        "\
+You are the chair of a short two-agent discussion.
+
+Topic:
+{topic}
+
+Protocol:
+- Spawn exactly one `agraphos` partner with title `discussant` and permissions `dangerous`.
+- Give the partner a compact prompt asking for an independent critique, alternative, or objection.
+- Wait for the partner's normal `reply`; do not use `message` for this first version.
+- Weigh the partner's reply against your own view.
+- Call `reply` exactly once with a single `result` field containing the final report.
+
+The final report should be concise and should include:
+- recommendation
+- main reasoning
+- strongest objection or dissent
+- what would change your mind
+"
+    )
+}
+
 fn dispatch_spawn(
     kind: SpawnKind,
     id: String,
@@ -251,7 +289,7 @@ fn dispatch_spawn(
             Ok(c) => c,
             Err(reason) => return invalid_input(id, kind.tool(), INVALID_INPUT, &reason, emit),
         };
-    let mut child = match kind.fork(session, child_caps, &prompt) {
+    let mut child = match kind.fork(session, child_caps) {
         Ok(c) => c,
         Err(e) => {
             let msg = format!("could not fork child session: {e}");
@@ -307,9 +345,7 @@ fn dispatch_spawn(
     let worker_title = title.clone();
     // Seed the launch turn into the child's own inbox: the only downward
     // edge is this one write.
-    if kind.seed_inbox() {
-        child.seed(prompt.clone());
-    }
+    child.seed(prompt.clone());
     // The dispatch shows on the rail before the spawn, so the user can see
     // exactly what the child was asked to do.
     emit.emit(Kind::ToolCall {
@@ -604,5 +640,15 @@ mod tests {
         assert!(!valid_title(&"x".repeat(25)));
         assert!(!valid_title("has space"));
         assert!(!valid_title("non-ascii-é"));
+    }
+
+    #[test]
+    fn discussion_prompt_uses_existing_agent_protocol() {
+        let prompt = discussion_prompt("choose the smaller design");
+        assert!(prompt.contains("choose the smaller design"));
+        assert!(prompt.contains("Spawn exactly one `agraphos` partner"));
+        assert!(prompt.contains("Wait for the partner's normal `reply`"));
+        assert!(prompt.contains("do not use `message`"));
+        assert!(prompt.contains("single `result` field"));
     }
 }
