@@ -3457,3 +3457,55 @@ invariants rather than an older helper-only architecture. Re-verified
 [[map/core/runtime|runtime]] plus [[map/core/io-process|io-process]] to
 `@a007f72`; the Windows narrative now records the two remaining spawn-boundary
 limits: inheritable helper handles and post-spawn Job Object assignment.
+
+
+## [2026-07-02] ingest | Windows spawn boundary ADR filed
+
+Added [[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]] as the
+proposed real fix for the two Windows pipeline launch holes named by
+[[internals/pipeline-execution|pipeline-execution]]: helper protocol handles must
+cross through an explicit `CreateProcessW` handle list, and direct/helper pipeline
+children must enter their Job Object before user code can run. The ADR deliberately
+records the invariant-restoring spawn layer only, not a helper-forcing or launch-lock
+mitigation.
+
+
+## [2026-07-02] query | Windows spawn boundary plan expanded
+
+Expanded [[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]] into
+an implementation plan. The review surfaced the key carrier constraint: custom
+`CreateProcessW` cannot sensibly return `std::process::Child`, so the work starts
+by making ral's launch record and `ChildHandle` own the cross-platform process
+boundary before moving helper handle admission and Job Object placement to
+creation time.
+
+
+## [2026-07-02] query | Windows spawn boundary review tightened
+
+Tightened [[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]]
+after review: explicit handle lists still need a launch mutex around the
+temporary inheritable-bit window; raw Windows launch must treat `.bat`/`.cmd`
+quoting as a security surface; stdio handles must be included in the handle-list
+allow-list; restrictive host Job Objects become a deliberate hard failure; and
+`CREATE_NEW_PROCESS_GROUP` remains load-bearing for Ctrl-Break fan-out.
+
+
+## [2026-07-02] query | Windows spawn boundary full plan
+
+Expanded the end of
+[[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]] into a full
+implementation plan. It names the intended crates (`windows-sys`, `os_pipe`,
+`tempfile`) and the non-dependency (`shlex`, wrong syntax for `CreateProcessW`),
+then parcels the work through one `Launch` value, a ral-owned `ChildHandle`, a
+Windows launch mutex, std-derived argument quoting, pre-start Job Object
+placement, call-site migration, and invariant tests.
+
+
+## [2026-07-02] query | Windows spawn crate search recorded
+
+Searched crates.io for Windows launch, Job Object, and command-line quoting
+crates, then recorded the result in
+[[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]]. `process-wrap`
+and `rappct` are useful prior art but do not own ral's explicit handle-list
+pipeline boundary; `winsplit` parses rather than quotes; `tokio-process-tools`
+solves async orchestration rather than creation-time authority.
