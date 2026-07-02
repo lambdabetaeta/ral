@@ -79,15 +79,14 @@ pub(super) fn route_stdin(
 /// boundary routes through the shell's stdout child plan; a `Null` stage
 /// (value-out, no bytes) discards to `/dev/null`.
 pub(super) fn wire_stage_stdout(
-    cmd: &mut std::process::Command,
+    cmd: &mut crate::process::Launch,
     stdout: ByteOut,
     group: &PipelineGroup,
     shell: &mut Shell,
 ) -> Settled<Option<Sink>> {
-    use std::process::Stdio;
     match stdout {
         ByteOut::Downstream(writer) => {
-            cmd.stdout(Stdio::from(writer));
+            cmd.stdout(crate::process::StdioSpec::from_pipe_writer(writer));
             Ok(None)
         }
         ByteOut::Parent => {
@@ -106,7 +105,7 @@ pub(super) fn wire_stage_stdout(
             Ok(plan.pump)
         }
         ByteOut::Null => {
-            cmd.stdout(Stdio::null());
+            cmd.stdout(crate::process::StdioSpec::null());
             Ok(None)
         }
     }
@@ -118,7 +117,7 @@ pub(super) fn wire_stage_stdout(
 /// and ral stages so the post-spawn boilerplate cannot drift.
 pub(super) fn spawn_into_group(
     group: &mut PipelineGroup,
-    cmd: &mut std::process::Command,
+    cmd: &mut crate::process::Launch,
     name: String,
     plumbing: command::ExternalPlumbing,
     shell: &Shell,
@@ -352,8 +351,6 @@ fn launch_external_stage_direct(
     group: &mut PipelineGroup,
     park_on_stop: bool,
 ) -> Result<command::RunningChild, Break> {
-    use std::process::Stdio;
-
     // `resolve::direct_spawnable` routes any value-carrying stage
     // through the helper, so a direct-spawn route holds byte ends only.
     debug_assert!(route.value_in.is_none() && route.value_out.is_none());
@@ -370,9 +367,9 @@ fn launch_external_stage_direct(
 
     let stderr_piped = !matches!(shell.turn.io.stderr, Sink::Stderr);
     cmd.stderr(if stderr_piped {
-        Stdio::piped()
+        crate::process::StdioSpec::piped()
     } else {
-        Stdio::inherit()
+        crate::process::StdioSpec::inherit()
     });
 
     let stderr_pump = if stderr_piped {

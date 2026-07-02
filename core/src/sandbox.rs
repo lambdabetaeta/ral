@@ -175,7 +175,7 @@ pub fn dump_profile_if_requested(policy: &crate::types::SandboxProjection) {
 /// make_command; this function is a no-op there.  On Windows, where
 /// pre_exec does not exist, a Job Object is attached post-spawn to cap
 /// the process tree at 512 processes (preventing fork bombs).
-pub fn apply_child_limits(_child: &std::process::Child) {
+pub fn apply_child_limits(_child: &crate::process::ChildHandle) {
     #[cfg(windows)]
     windows::apply_job_limits(_child);
 }
@@ -183,7 +183,7 @@ pub fn apply_child_limits(_child: &std::process::Child) {
 /// Same as [`apply_child_limits`] but for a child that is already a
 /// member of a pipeline Job Object.
 pub fn apply_child_limits_in_pipeline(
-    _child: &std::process::Child,
+    _child: &crate::process::ChildHandle,
     _leader: Option<crate::process::Pgid>,
 ) {
     #[cfg(windows)]

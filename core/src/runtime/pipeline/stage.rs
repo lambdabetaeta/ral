@@ -143,7 +143,7 @@ impl HelperStageHandle {
 /// which therefore never emit bytes.  Stderr always goes through the
 /// standard child-stderr plan.
 fn wire_ral_stdio(
-    cmd: &mut std::process::Command,
+    cmd: &mut crate::process::Launch,
     stdin: ByteIn,
     stdout: ByteOut,
     shell: &mut Shell,

@@ -146,7 +146,7 @@ impl RunningChild {
     /// release.  Children with no group at all (Unix `Inherit`,
     /// builtins-via-spawn) pass `None`.
     pub(crate) fn assemble_with_owner(
-        child: std::process::Child,
+        child: crate::process::ChildHandle,
         pgid: Option<crate::process::Pgid>,
         name: String,
         plumbing: ExternalPlumbing,
@@ -154,7 +154,7 @@ impl RunningChild {
         group_owner: GroupOwner,
         cancel: crate::process::CancelScope,
     ) -> Self {
-        let mut child = crate::process::ChildHandle::from_std(child);
+        let mut child = child;
         let ExternalPlumbing {
             stdout_pump,
             stderr_pump,
@@ -675,7 +675,7 @@ mod tests {
 
         let scope = CancelScope::root();
         let running = RunningChild::assemble_with_owner(
-            child,
+            crate::process::ChildHandle::from_std(child),
             pgid,
             "sh".to_string(),
             ExternalPlumbing {

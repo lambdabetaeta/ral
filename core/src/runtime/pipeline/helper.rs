@@ -16,7 +16,6 @@ use crate::serial::{InternCtx, ScopeTable, SerialValue, build_arcs};
 use crate::subprocess_codec::{read_frame, write_frame};
 use crate::types::{Break, Error, Settled, Value};
 use serde::{Deserialize, Serialize};
-use std::process::Command;
 
 /// Hidden multicall sentinel for one pipeline-stage helper subprocess.
 pub(crate) const HELPER_FLAG: &str = "--ral-pipeline-stage-helper";
@@ -370,10 +369,10 @@ fn serve_anchor_from_env_fd() -> u8 {
 
 /// Build a helper command that re-execs the current ral binary.
 #[cfg(unix)]
-pub(crate) fn self_reexec(flag: &str) -> std::io::Result<Command> {
+pub(crate) fn self_reexec(flag: &str) -> std::io::Result<crate::process::Launch> {
     let mut cmd = crate::sandbox::self_command()?;
     cmd.arg(flag);
-    Ok(cmd)
+    Ok(crate::process::Launch::from_command(cmd))
 }
 
 /// Build a helper command that re-execs the current ral binary.
@@ -388,9 +387,9 @@ pub(crate) fn self_reexec(flag: &str) -> std::io::Result<Command> {
     clippy::disallowed_methods,
     reason = "[io-door:silent:self-reexec-windows] Builds the ral-re-exec Command for Windows pipeline-helper / bundled-tool multicall subprocesses. Infrastructure spawn, not a model exec image — the model's exec surfaces at command::run, not here."
 )]
-pub(crate) fn self_reexec(flag: &str) -> std::io::Result<Command> {
+pub(crate) fn self_reexec(flag: &str) -> std::io::Result<crate::process::Launch> {
     let exe = std::env::current_exe()?;
-    let mut cmd = Command::new(exe);
+    let mut cmd = crate::process::Launch::new(exe);
     cmd.arg(flag);
     Ok(cmd)
 }

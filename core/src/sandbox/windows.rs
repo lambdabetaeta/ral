@@ -10,11 +10,10 @@
 //! This module owns only the Job Object plumbing.
 
 #[cfg(windows)]
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::Foundation::CloseHandle;
 
 #[cfg(windows)]
-pub(super) fn apply_job_limits(child: &std::process::Child) {
-    use std::os::windows::io::AsRawHandle;
+pub(super) fn apply_job_limits(child: &crate::process::ChildHandle) {
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
         JOBOBJECT_BASIC_LIMIT_INFORMATION, JobObjectBasicLimitInformation, SetInformationJobObject,
@@ -37,7 +36,7 @@ pub(super) fn apply_job_limits(child: &std::process::Child) {
             CloseHandle(job);
             return;
         }
-        let proc_handle = child.as_raw_handle() as HANDLE;
+        let proc_handle = child.raw_process_handle();
         if AssignProcessToJobObject(job, proc_handle) == 0 {
             // The 512-process cap silently does not apply — commonly
             // when ral itself runs inside a job that disallows nesting.

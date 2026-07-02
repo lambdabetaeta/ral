@@ -5,7 +5,6 @@
 
 use crate::syntax::ast::RedirectMode;
 use crate::types::*;
-use std::process::{Command, Stdio};
 
 #[cfg(windows)]
 use super::process::pipe_err;
@@ -74,12 +73,12 @@ pub enum StdinRoute {
 }
 
 impl StdinRoute {
-    pub fn into_stdio(self) -> Stdio {
+    pub fn into_stdio(self) -> crate::process::StdioSpec {
         match self {
-            StdinRoute::Inherit(_) => Stdio::inherit(),
-            StdinRoute::Pipe(r) => Stdio::from(r),
-            StdinRoute::File(f) => Stdio::from(f),
-            StdinRoute::Null => Stdio::null(),
+            StdinRoute::Inherit(_) => crate::process::StdioSpec::inherit(),
+            StdinRoute::Pipe(r) => crate::process::StdioSpec::from_pipe_reader(r),
+            StdinRoute::File(f) => crate::process::StdioSpec::from_file(f),
+            StdinRoute::Null => crate::process::StdioSpec::null(),
         }
     }
 }
@@ -191,23 +190,25 @@ pub(super) fn wire_stdin(shell: &mut Shell) -> StdinRoute {
 /// Windows when the redirect plan has `2>&1`, since Windows lacks `pre_exec`
 /// and the dup must be wired pre-spawn from a clone of the same handle.
 pub(super) fn wire_stdout_file(
-    command: &mut Command,
+    command: &mut crate::process::Launch,
     plan: &RedirectPlan,
     shell: &mut Shell,
-) -> Settled<(Option<AtomicCommit>, Option<Stdio>)> {
+) -> Settled<(Option<AtomicCommit>, Option<crate::process::StdioSpec>)> {
     let Some((path, mode)) = &plan.stdout_file else {
         return Ok((None, None));
     };
     let (file, commit) = open_file(path, mode, shell)?;
     #[cfg(windows)]
     let stderr_dup = if plan.stderr_to_stdout {
-        Some(Stdio::from(file.try_clone().map_err(pipe_err)?))
+        Some(crate::process::StdioSpec::from_file(
+            file.try_clone().map_err(pipe_err)?,
+        ))
     } else {
         None
     };
     #[cfg(not(windows))]
     let stderr_dup = None;
-    command.stdout(Stdio::from(file));
+    command.stdout(crate::process::StdioSpec::from_file(file));
     Ok((commit, stderr_dup))
 }
 
@@ -236,25 +237,17 @@ pub(super) fn wire_stdout_file(
 /// captures at dispatch level via `with_audit_capture`, and pipeline
 /// stages route stderr inline in `pipeline::stages` without coming here.
 pub(super) fn wire_stderr(
-    command: &mut Command,
+    command: &mut crate::process::Launch,
     plan: &RedirectPlan,
     inherit_tty: bool,
-    stdout_file_dup: Option<Stdio>,
+    stdout_file_dup: Option<crate::process::StdioSpec>,
     shell: &mut Shell,
 ) -> Settled<bool> {
     if plan.stderr_to_stdout {
         #[cfg(unix)]
         {
             let _ = (inherit_tty, stdout_file_dup);
-            use std::os::unix::process::CommandExt;
-            unsafe {
-                command.pre_exec(|| {
-                    if libc::dup2(libc::STDOUT_FILENO, libc::STDERR_FILENO) == -1 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
+            command.dup_stdout_to_stderr();
         }
         #[cfg(windows)]
         {
@@ -273,15 +266,17 @@ pub(super) fn wire_stderr(
                     .as_handle()
                     .try_clone_to_owned()
                     .map_err(pipe_err)?;
-                Stdio::from(owned)
+                crate::process::StdioSpec::from_owned_handle(owned)
             } else {
                 match &shell.turn.io.stdout {
-                    crate::io::Sink::Pipe(w) => Stdio::from(w.try_clone().map_err(pipe_err)?),
+                    crate::io::Sink::Pipe(w) => crate::process::StdioSpec::from_pipe_writer(
+                        w.try_clone().map_err(pipe_err)?,
+                    ),
                     // Buffer / Tee / LineFramed sinks pump child.stdout via an
                     // anonymous pipe allocated by `Stdio::piped()`; we cannot
                     // reach into that pipe pre-spawn to share it with stderr.
                     // Fall back to inherit so diagnostics still surface.
-                    _ => Stdio::inherit(),
+                    _ => crate::process::StdioSpec::inherit(),
                 }
             };
             command.stderr(stdio);
@@ -289,18 +284,18 @@ pub(super) fn wire_stderr(
         #[cfg(not(any(unix, windows)))]
         {
             let _ = (inherit_tty, stdout_file_dup);
-            command.stderr(Stdio::inherit());
+            command.stderr(crate::process::StdioSpec::inherit());
         }
         Ok(false)
     } else if let Some((path, mode)) = &plan.stderr_file {
         let (file, _) = open_file(path, &stderr_mode(mode), shell)?;
-        command.stderr(Stdio::from(file));
+        command.stderr(crate::process::StdioSpec::from_file(file));
         Ok(false)
     } else if !matches!(shell.turn.io.stderr, crate::io::Sink::Stderr) {
         // Non-default stderr sink: dispatch-level audit Tee, §13.3 replay
         // buffer, watch line-framer, etc.  Pipe the child's stderr; the
         // caller pumps it into the sink.
-        command.stderr(Stdio::piped());
+        command.stderr(crate::process::StdioSpec::piped());
         Ok(true)
     } else {
         Ok(false)

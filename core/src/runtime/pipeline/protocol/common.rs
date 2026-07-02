@@ -15,7 +15,6 @@
 
 use std::io::BufReader;
 use std::marker::PhantomData;
-use std::process::Command;
 use std::thread;
 
 use super::super::helper::{HELPER_FLAG, self_reexec};
@@ -79,7 +78,7 @@ impl<T: serde::Serialize + Send + 'static> FrameGate<T> {
     /// inheritable, and stash its identity in `env` on `cmd`.  The
     /// parent keeps the writer end; the child end is held until
     /// [`FrameGate::settle`].
-    pub(crate) fn wire(cmd: &mut Command, env: &str) -> Settled<Self> {
+    pub(crate) fn wire(cmd: &mut crate::process::Launch, env: &str) -> Settled<Self> {
         let (child_end, writer) = platform::pair()?;
         platform::pass(cmd, env, &child_end)?;
         Ok(Self {
@@ -92,7 +91,7 @@ impl<T: serde::Serialize + Send + 'static> FrameGate<T> {
     /// Drop the inheritable child-end channel and capture `payload`
     /// for a later release.  Call once the spawn has returned: until
     /// then the child's reader fd / handle must remain open in the
-    /// parent so `Command::spawn` can dup it into the child.
+    /// parent so the platform launch backend can admit it into the child.
     pub(crate) fn settle(mut self, payload: T) -> PendingFrame<T> {
         let _ = self.child_end.take();
         PendingFrame {
@@ -149,19 +148,19 @@ pub(crate) struct HelperProtocol {
 }
 
 impl HelperProtocol {
-    /// Build the helper `Command` (re-exec ral with `HELPER_FLAG`)
+    /// Build the helper launch (re-exec ral with `HELPER_FLAG`)
     /// and wire job + report + optional value-channel envs.
     pub(crate) fn build_command(
         incoming_value: Option<platform::Channel>,
         outgoing_value: Option<platform::Channel>,
-    ) -> Result<(Command, Self), Break> {
+    ) -> Result<(crate::process::Launch, Self), Break> {
         let mut cmd = self_reexec(HELPER_FLAG).map_err(pipe_error)?;
         let proto = Self::wire(&mut cmd, incoming_value, outgoing_value)?;
         Ok((cmd, proto))
     }
 
     fn wire(
-        cmd: &mut Command,
+        cmd: &mut crate::process::Launch,
         incoming_value: Option<platform::Channel>,
         outgoing_value: Option<platform::Channel>,
     ) -> Settled<Self> {

@@ -5,7 +5,6 @@
 //! top before spawn.
 
 use crate::types::*;
-use std::process::Command;
 
 use super::vet::{ExecImage, SpawnPlan};
 
@@ -20,7 +19,7 @@ use super::vet::{ExecImage, SpawnPlan};
 /// self-exec helper, so building it is fallible (the self-path lookup
 /// can fail); the resulting child inherits cwd/env/PWD through
 /// `apply_env` exactly like a host external.
-pub(crate) fn build_command(plan: &SpawnPlan, shell: &Shell) -> Settled<Command> {
+pub(crate) fn build_command(plan: &SpawnPlan, shell: &Shell) -> Settled<crate::process::Launch> {
     // Per-command OS confinement: when a projection is active, confine the
     // child per-command under the effective projection.  The grant body
     // itself evaluates locally; this launcher is the sole OS-sandbox locus.
@@ -35,24 +34,35 @@ pub(crate) fn build_command(plan: &SpawnPlan, shell: &Shell) -> Settled<Command>
             ExecImage::Host(program) => crate::sandbox::LaunchTarget::Host { program },
             ExecImage::BundledTool { tool } => crate::sandbox::LaunchTarget::BundledTool { tool },
         };
-        let mut cmd = crate::sandbox::sandboxed_command(&projection, target, &plan.args, shell)?;
+        let cmd = crate::sandbox::sandboxed_command(&projection, target, &plan.args, shell)?;
+        let mut cmd = crate::process::Launch::from_command(cmd);
         apply_env(&mut cmd, shell);
+        #[cfg(unix)]
         if shell.has_active_capabilities() {
-            crate::sandbox::apply_resource_limits(&mut cmd);
+            cmd.apply_unix_resource_limits();
         }
         return Ok(cmd);
     }
 
     let mut cmd = match &plan.image {
-        ExecImage::Host(path) => crate::sandbox::make_command(path, &plan.args, shell),
+        ExecImage::Host(path) => {
+            let mut cmd = crate::process::Launch::new(path);
+            cmd.args(&plan.args);
+            #[cfg(unix)]
+            if shell.has_active_capabilities() {
+                cmd.apply_unix_resource_limits();
+            }
+            cmd
+        }
         ExecImage::BundledTool { tool } => {
             use crate::runtime::pipeline::helper::{BUNDLED_TOOL_FLAG, self_reexec};
             let mut cmd = self_reexec(BUNDLED_TOOL_FLAG)
                 .map_err(|e| Break::Error(Error::new(format!("bundled tool '{tool}': {e}"), 1)))?;
             cmd.arg(tool);
             cmd.args(&plan.args);
+            #[cfg(unix)]
             if shell.has_active_capabilities() {
-                crate::sandbox::apply_resource_limits(&mut cmd);
+                cmd.apply_unix_resource_limits();
             }
             cmd
         }
@@ -73,11 +83,11 @@ pub(crate) fn build_command(plan: &SpawnPlan, shell: &Shell) -> Settled<Command>
 /// Returns the child plus its leader pgid: `Some` when `pgid` is
 /// `NewLeader`, `NewSession`, or `Join`, `None` for `Inherit`.
 pub(crate) fn spawn(
-    cmd: &mut Command,
+    cmd: &mut crate::process::Launch,
     pgid: crate::process::PgidPolicy,
     shell: &Shell,
-) -> std::io::Result<(std::process::Child, Option<crate::process::Pgid>)> {
-    let (child, leader) = crate::process::spawn_with_pgid(cmd, pgid)?;
+) -> std::io::Result<(crate::process::ChildHandle, Option<crate::process::Pgid>)> {
+    let (child, leader) = cmd.spawn(pgid)?;
     if shell.has_active_capabilities() {
         crate::sandbox::apply_child_limits(&child);
     }
@@ -139,7 +149,7 @@ pub(super) fn io_error(ctx: &str, e: std::io::Error) -> Break {
 /// of `getcwd(3)`.  `PWD` / `OLDPWD` ride along the same way: they
 /// live in shell state and are threaded into each spawn, not
 /// installed via `std::env::set_var`.
-pub fn apply_env(cmd: &mut Command, shell: &Shell) {
+pub fn apply_env(cmd: &mut crate::process::Launch, shell: &Shell) {
     for (k, v) in shell.mobile.context.env_overrides() {
         cmd.env(k, v);
     }

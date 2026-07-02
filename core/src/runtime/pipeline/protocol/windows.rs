@@ -1,26 +1,15 @@
 //! Windows backend for the pipeline gate / report protocol.
 //!
-//! Channels are anonymous OS pipe pairs (`os_pipe::pipe()`) wrapped in
-//! a Reader / Writer enum so the channel type is uniform with the Unix
-//! socketpair backend.  Inheritance is `SetHandleInformation(handle,
-//! HANDLE_FLAG_INHERIT)` plus a numeric handle value stashed in the
-//! helper's env; the helper wraps that value via `from_raw_handle` and
-//! clears `HANDLE_FLAG_INHERIT` (the Windows analogue of
-//! `FD_CLOEXEC`) so the handle does not leak into nested children.
-//!
-//! The invariant is weaker than the Unix `pre_exec` path: the parent
-//! marks the exact child handles inheritable before `Command::spawn`,
-//! and the child clears them before it can create nested children.  While
-//! those handles are inheritable in the parent, an unrelated concurrent
-//! Windows spawn with `bInheritHandles=TRUE` could inherit them too and
-//! keep a report, value, or gate channel open.  Closing that race needs a
-//! custom Windows spawn path with an explicit handle list, or an
-//! equivalent non-global inheritance mechanism.
-
-use std::io::{Read, Write};
-use std::process::Command;
+//! Channels are anonymous OS pipe pairs (`os_pipe::pipe()`) wrapped in a
+//! Reader / Writer enum so the channel type is uniform with the Unix
+//! socketpair backend.  A helper handle crosses only when `pass` writes its
+//! numeric value into the helper environment and admits the raw handle to the
+//! launch value.  The Windows launch backend supplies that allow-list to
+//! `CreateProcessW` via `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` under the process
+//! launch mutex.
 
 use os_pipe::{PipeReader, PipeWriter};
+use std::io::{Read, Write};
 
 use super::super::helper::{
     JOB_HANDLE_ENV, REPORT_HANDLE_ENV, VALUE_IN_HANDLE_ENV, VALUE_OUT_HANDLE_ENV,
@@ -88,18 +77,12 @@ pub(crate) fn pair() -> Result<(Channel, Channel), Break> {
     Ok((Channel::Reader(r), Channel::Writer(w)))
 }
 
-/// Mark `ch`'s underlying handle inheritable and stash its numeric
-/// value (as decimal text) in `env` on `cmd`.
-///
-/// This is deliberately small, but not atomic with spawn.  The helper
-/// parses the integer, wraps the handle via `from_raw_handle`, and
-/// clears the inherit bit so nested children do not inherit it.  The
-/// parent-side inheritability window remains until Windows launch grows
-/// an explicit handle-list `CreateProcessW` path.
-pub(crate) fn pass(cmd: &mut Command, env: &str, ch: &Channel) -> Settled<()> {
+/// Stash `ch`'s numeric handle value in `env` and admit that handle to this
+/// one launch. The parent does not flip the inheritable bit here.
+pub(crate) fn pass(cmd: &mut crate::process::Launch, env: &str, ch: &Channel) -> Settled<()> {
     let handle = ch.raw_handle();
-    set_inheritable(handle)?;
     cmd.env(env, format!("{}", handle as usize));
+    cmd.admit_handle(handle);
     Ok(())
 }
 
@@ -111,17 +94,6 @@ where
     T: serde::de::DeserializeOwned + Send + 'static,
 {
     FrameReader::spawn(ch, panic_msg)
-}
-
-fn set_inheritable(handle: std::os::windows::io::RawHandle) -> Settled<()> {
-    use windows_sys::Win32::Foundation::HANDLE_FLAG_INHERIT;
-    use windows_sys::Win32::Foundation::{HANDLE, SetHandleInformation};
-    let ok =
-        unsafe { SetHandleInformation(handle as HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
-    if ok == 0 {
-        return Err(pipe_error(std::io::Error::last_os_error()));
-    }
-    Ok(())
 }
 
 /// Env-var names this backend uses to pass channel handles to the helper.

@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: fixed
 ---
 
 # Windows pipeline spawn is a creation-time boundary

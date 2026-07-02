@@ -575,8 +575,14 @@ pub(super) fn builtin_poll(args: &[Value], shell: &mut Shell) -> Settled<Value> 
             // worker has written so far: `peek_buffer` clones, leaving the
             // buffers for `complete_handle`'s one-shot `take_buffer` drain.
             let pending = Value::map(vec![
-                ("stdout".into(), Value::Bytes(peek_buffer(&handle.stdout_buf))),
-                ("stderr".into(), Value::Bytes(peek_buffer(&handle.stderr_buf))),
+                (
+                    "stdout".into(),
+                    Value::Bytes(peek_buffer(&handle.stdout_buf)),
+                ),
+                (
+                    "stderr".into(),
+                    Value::Bytes(peek_buffer(&handle.stderr_buf)),
+                ),
             ]);
             variant("pending", Some(Box::new(pending)))
         }

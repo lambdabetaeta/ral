@@ -88,6 +88,10 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("core/src/path/which.rs", "io-door:silent:which-readdir"),
     ("core/src/path/which.rs", "io-door:silent:which-stat"),
     (
+        "core/src/process/launch.rs",
+        "io-door:surface:process-launch",
+    ),
+    (
         "core/src/runtime/command/redirect.rs",
         "io-door:surface:atomic-commit",
     ),

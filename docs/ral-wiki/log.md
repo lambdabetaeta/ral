@@ -3509,3 +3509,13 @@ crates, then recorded the result in
 and `rappct` are useful prior art but do not own ral's explicit handle-list
 pipeline boundary; `winsplit` parses rather than quotes; `tokio-process-tools`
 solves async orchestration rather than creation-time authority.
+
+
+## [2026-07-02] ingest | Windows spawn boundary fixed
+
+Implemented [[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]]:
+`process::Launch` now owns the Windows `CreateProcessW` boundary, helper handles
+cross by explicit handle list, and pipeline children enter their Job Object
+before resume. Re-verified [[internals/pipeline-execution|pipeline-execution]]
+and restamped [[map/core/runtime|runtime]] plus
+[[map/core/io-process|io-process]].

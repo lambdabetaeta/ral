@@ -28,6 +28,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
+#[cfg(unix)]
 use crate::process::ChildHandle;
 use crate::serial::SerialValue;
 use crate::types::Boundary;

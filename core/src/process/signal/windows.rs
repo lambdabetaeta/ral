@@ -48,6 +48,7 @@
 use std::sync::atomic::Ordering;
 
 use super::{Pgid, PgidPolicy, SIGNAL_COUNT};
+use windows_sys::Win32::Foundation::HANDLE;
 
 // ── Signal handler installation ────────────────────────────────────────────
 
@@ -94,7 +95,7 @@ pub fn reset_child_signals() {}
 // that lock contention is irrelevant.
 
 mod win_groups {
-    use std::os::windows::io::AsRawHandle;
+    use crate::process::ChildHandle;
     use std::sync::Mutex;
     use windows_sys::Win32::Foundation::{
         CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, FALSE, HANDLE, WAIT_OBJECT_0,
@@ -173,10 +174,6 @@ mod win_groups {
         dup
     }
 
-    fn duplicate_child_handle(child: &std::process::Child) -> HANDLE {
-        duplicate_process_handle(child.as_raw_handle() as HANDLE)
-    }
-
     fn install_kill_on_close(job: HANDLE) {
         unsafe {
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
@@ -218,10 +215,145 @@ mod win_groups {
         }
     }
 
-    /// Create a fresh Job Object, assign `leader`, and register the group
-    /// keyed by the leader's pid.  Returns the leader pid as i32 (== Pgid
-    /// value).
+    pub(crate) enum PreparedGroup {
+        None,
+        NewLeader {
+            job: HANDLE,
+            completion_port: HANDLE,
+        },
+        Join {
+            leader: i32,
+            job: HANDLE,
+        },
+    }
+
+    // SAFETY: `PreparedGroup` is held across launch in one thread and owns or
+    // borrows raw Win32 handles; the handles themselves are kernel objects.
+    unsafe impl Send for PreparedGroup {}
+
+    pub(super) fn prepare(policy: super::PgidPolicy) -> std::io::Result<PreparedGroup> {
+        match policy {
+            super::PgidPolicy::Inherit => Ok(PreparedGroup::None),
+            super::PgidPolicy::NewLeader | super::PgidPolicy::NewSession => {
+                let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null_mut()) };
+                if job.is_null() {
+                    return Err(std::io::Error::last_os_error());
+                }
+                install_kill_on_close(job);
+                let completion_port = associate_completion_port(job);
+                if completion_port.is_null() {
+                    unsafe {
+                        CloseHandle(job);
+                    }
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(PreparedGroup::NewLeader {
+                    job,
+                    completion_port,
+                })
+            }
+            super::PgidPolicy::Join(super::Pgid(leader)) => {
+                let groups = GROUPS.lock().unwrap();
+                let Some((_, state)) = groups.iter().find(|(p, _)| *p == leader) else {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("pipeline group {leader} is no longer live"),
+                    ));
+                };
+                if state.job.is_null() {
+                    return Err(std::io::Error::other(format!(
+                        "pipeline group {leader} has no Job Object"
+                    )));
+                }
+                let job = duplicate_process_handle(state.job);
+                if job.is_null() {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(PreparedGroup::Join { leader, job })
+            }
+        }
+    }
+
+    pub(super) fn prepared_job(prepared: &PreparedGroup) -> Option<HANDLE> {
+        match prepared {
+            PreparedGroup::None => None,
+            PreparedGroup::NewLeader { job, .. } | PreparedGroup::Join { job, .. } => Some(*job),
+        }
+    }
+
+    pub(super) fn close_prepared(prepared: PreparedGroup) {
+        unsafe {
+            match prepared {
+                PreparedGroup::None => {}
+                PreparedGroup::NewLeader {
+                    job,
+                    completion_port,
+                } => {
+                    if !completion_port.is_null() {
+                        CloseHandle(completion_port);
+                    }
+                    if !job.is_null() {
+                        CloseHandle(job);
+                    }
+                }
+                PreparedGroup::Join { job, .. } => {
+                    if !job.is_null() {
+                        CloseHandle(job);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Register a child that has already been placed in its Job Object before
+    /// user code was allowed to run. Returns the leader pid as i32.
+    pub(super) fn register(prepared: PreparedGroup, child: &ChildHandle) -> Option<i32> {
+        let child_pid = child.id();
+        let child_handle = child.raw_process_handle();
+        match prepared {
+            PreparedGroup::None => None,
+            PreparedGroup::NewLeader {
+                job,
+                completion_port,
+            } => {
+                let leader_pid = child_pid as i32;
+                let leader_handle = duplicate_process_handle(child_handle);
+                let mut groups = GROUPS.lock().unwrap();
+                groups.push((
+                    leader_pid,
+                    GroupState {
+                        job,
+                        completion_port,
+                        leader_handle,
+                        member_handles: Vec::new(),
+                        members: vec![child_pid],
+                        all_done: false,
+                    },
+                ));
+                Some(leader_pid)
+            }
+            PreparedGroup::Join { leader, job } => {
+                let mut groups = GROUPS.lock().unwrap();
+                if let Some((_, state)) = groups.iter_mut().find(|(p, _)| *p == leader) {
+                    let dup = duplicate_process_handle(child_handle);
+                    if !dup.is_null() {
+                        state.member_handles.push(dup);
+                    }
+                    state.members.push(child_pid);
+                }
+                unsafe {
+                    CloseHandle(job);
+                }
+                Some(leader)
+            }
+        }
+    }
+
+    /// Legacy std-spawn path for non-pipeline callers until they migrate to
+    /// `process::launch`. It keeps standalone Windows groups working, but the
+    /// pipeline code no longer uses it.
     pub(super) fn new_leader(leader: &std::process::Child) -> i32 {
+        use std::os::windows::io::AsRawHandle;
         let leader_pid = leader.id() as i32;
         let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null_mut()) };
         let completion_port = if !job.is_null() {
@@ -243,7 +375,7 @@ mod win_groups {
         } else {
             std::ptr::null_mut()
         };
-        let leader_handle = duplicate_child_handle(leader);
+        let leader_handle = duplicate_process_handle(leader.as_raw_handle() as HANDLE);
         let mut groups = GROUPS.lock().unwrap();
         groups.push((
             leader_pid,
@@ -262,6 +394,7 @@ mod win_groups {
     /// Add `member` to the group identified by `leader`, if any.  No-op
     /// when the group has already been released (race against drop).
     pub(super) fn join(leader: i32, member: &std::process::Child) {
+        use std::os::windows::io::AsRawHandle;
         let mut groups = GROUPS.lock().unwrap();
         if let Some((_, state)) = groups.iter_mut().find(|(p, _)| *p == leader) {
             if !state.job.is_null() {
@@ -279,7 +412,7 @@ mod win_groups {
                     ));
                 }
             }
-            let dup = duplicate_child_handle(member);
+            let dup = duplicate_process_handle(member.as_raw_handle() as HANDLE);
             if !dup.is_null() {
                 state.member_handles.push(dup);
             }
@@ -571,6 +704,128 @@ pub fn apply_group_active_process_limit(leader: i32, limit: u32) -> bool {
 pub fn is_known_group(leader: i32) -> bool {
     let groups = win_groups::GROUPS.lock().unwrap();
     groups.iter().any(|(p, _)| *p == leader)
+}
+
+pub(crate) type PreparedGroup = win_groups::PreparedGroup;
+
+pub(crate) fn prepare_group(policy: PgidPolicy) -> std::io::Result<PreparedGroup> {
+    win_groups::prepare(policy)
+}
+
+pub(crate) fn prepared_job(prepared: &PreparedGroup) -> Option<HANDLE> {
+    win_groups::prepared_job(prepared)
+}
+
+pub(crate) fn close_prepared_group(prepared: PreparedGroup) {
+    win_groups::close_prepared(prepared);
+}
+
+pub(crate) fn register_prepared_group(
+    prepared: PreparedGroup,
+    child: &crate::process::ChildHandle,
+) -> Option<Pgid> {
+    win_groups::register(prepared, child).map(Pgid)
+}
+
+// ── Raw CreateProcessW child ───────────────────────────────────────────────
+
+pub(crate) struct RawChild {
+    process: std::os::windows::io::OwnedHandle,
+    pid: u32,
+    stdout: Option<std::fs::File>,
+    stderr: Option<std::fs::File>,
+}
+
+impl RawChild {
+    pub(crate) fn new(
+        process: std::os::windows::io::OwnedHandle,
+        pid: u32,
+        stdout: Option<std::fs::File>,
+        stderr: Option<std::fs::File>,
+    ) -> Self {
+        Self {
+            process,
+            pid,
+            stdout,
+            stderr,
+        }
+    }
+
+    pub(crate) fn id(&self) -> u32 {
+        self.pid
+    }
+
+    pub(crate) fn raw_process_handle(&self) -> HANDLE {
+        use std::os::windows::io::AsRawHandle;
+        self.process.as_raw_handle() as HANDLE
+    }
+
+    pub(crate) fn kill(&mut self) -> std::io::Result<()> {
+        let ok = unsafe {
+            windows_sys::Win32::System::Threading::TerminateProcess(self.raw_process_handle(), 1)
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        self.stdout
+            .take()
+            .map(|stdout| Box::new(stdout) as Box<dyn std::io::Read + Send>)
+    }
+
+    pub(crate) fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        self.stderr
+            .take()
+            .map(|stderr| Box::new(stderr) as Box<dyn std::io::Read + Send>)
+    }
+
+    pub(crate) fn wait_handling_stop(&mut self) -> std::io::Result<crate::process::WaitOutcome> {
+        use windows_sys::Win32::System::Threading::{INFINITE, WaitForSingleObject};
+        let r = unsafe { WaitForSingleObject(self.raw_process_handle(), INFINITE) };
+        if r != windows_sys::Win32::Foundation::WAIT_OBJECT_0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        self.exit_status()
+            .map(crate::process::WaitOutcome::from_exit_status)
+    }
+
+    pub(crate) fn try_wait_handling_stop(
+        &mut self,
+    ) -> std::io::Result<Option<crate::process::WaitOutcome>> {
+        use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
+        match unsafe { WaitForSingleObject(self.raw_process_handle(), 0) } {
+            WAIT_OBJECT_0 => self
+                .exit_status()
+                .map(crate::process::WaitOutcome::from_exit_status)
+                .map(Some),
+            WAIT_TIMEOUT => Ok(None),
+            _ => Err(std::io::Error::last_os_error()),
+        }
+    }
+
+    pub(crate) fn reap(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        use windows_sys::Win32::System::Threading::{INFINITE, WaitForSingleObject};
+        let r = unsafe { WaitForSingleObject(self.raw_process_handle(), INFINITE) };
+        if r != windows_sys::Win32::Foundation::WAIT_OBJECT_0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        self.exit_status()
+    }
+
+    fn exit_status(&self) -> std::io::Result<std::process::ExitStatus> {
+        use std::os::windows::process::ExitStatusExt;
+        use windows_sys::Win32::System::Threading::GetExitCodeProcess;
+        let mut code = 0;
+        let ok = unsafe { GetExitCodeProcess(self.raw_process_handle(), &raw mut code) };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(std::process::ExitStatus::from_raw(code))
+    }
 }
 
 // ── Job-table primitives ───────────────────────────────────────────────────

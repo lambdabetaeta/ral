@@ -109,13 +109,13 @@ impl PipelineGroup {
 
     pub(super) fn spawn(
         &mut self,
-        cmd: &mut std::process::Command,
-    ) -> std::io::Result<std::process::Child> {
+        cmd: &mut crate::process::Launch,
+    ) -> std::io::Result<crate::process::ChildHandle> {
         let policy = match self.leader {
             Some(leader) => PgidPolicy::Join(leader),
             None => PgidPolicy::NewLeader,
         };
-        let (child, leader) = crate::process::spawn_with_pgid(cmd, policy)?;
+        let (child, leader) = cmd.spawn(policy)?;
         if self.leader.is_none() {
             self.leader = leader;
         }
@@ -161,7 +161,7 @@ impl Drop for PipelineGroup {
 
 #[cfg(unix)]
 struct AnchorProcess {
-    child: Option<std::process::Child>,
+    child: Option<crate::process::ChildHandle>,
     release: Option<std::os::unix::net::UnixStream>,
 }
 
@@ -170,16 +170,15 @@ impl AnchorProcess {
     fn spawn(shell: &Shell) -> Settled<Self> {
         let (parent, child_end) = super::protocol::create_value_pair()?;
         let mut cmd = super::helper::self_reexec(super::helper::ANCHOR_FLAG).map_err(pipe_error)?;
-        cmd.stdin(std::process::Stdio::null());
-        cmd.stdout(std::process::Stdio::null());
-        cmd.stderr(std::process::Stdio::null());
+        cmd.stdin(crate::process::StdioSpec::null());
+        cmd.stdout(crate::process::StdioSpec::null());
+        cmd.stderr(crate::process::StdioSpec::null());
         // Mark the child end inheritable + stash its fd in env, the
         // same primitive the protocol's gate setup uses.
         super::protocol::pass(&mut cmd, super::helper::ANCHOR_FD_ENV, &child_end)?;
-        let (mut child, leader) = crate::process::spawn_with_pgid(&mut cmd, PgidPolicy::NewLeader)
-            .map_err(|e| {
-                Break::Error(crate::types::Error::new(format!("pipeline anchor: {e}"), 1))
-            })?;
+        let (mut child, leader) = cmd.spawn(PgidPolicy::NewLeader).map_err(|e| {
+            Break::Error(crate::types::Error::new(format!("pipeline anchor: {e}"), 1))
+        })?;
         if shell.has_active_capabilities() {
             crate::sandbox::apply_child_limits(&child);
         }
@@ -190,8 +189,7 @@ impl AnchorProcess {
             // no pgid yet, so it cannot be SIGSTOP'd — a plain blocking
             // `wait` after SIGKILL reaps it without the WUNTRACED dance.
             let _ = child.kill();
-            #[allow(clippy::disallowed_methods)]
-            let _ = child.wait();
+            let _ = child.reap();
             return Err(Break::Error(crate::types::Error::new(
                 "pipeline anchor failed to establish a process group",
                 1,
@@ -229,8 +227,7 @@ impl AnchorProcess {
             // Anchor was already SIGCONT'd above, so it's running again
             // (not stopped); a plain blocking wait suffices and the
             // WUNTRACED dance of ChildHandle would never observe a stop.
-            #[allow(clippy::disallowed_methods)]
-            let _ = child.wait();
+            let _ = child.reap();
         }
     }
 }

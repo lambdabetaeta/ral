@@ -45,6 +45,11 @@ pub use windows::{
     disown_pipeline_group, install_handlers, is_known_group, kill_pipeline_group,
     release_win_group, reset_child_signals, spawn_with_pgid, try_reap_leader, wait_leader_blocking,
 };
+#[cfg(windows)]
+pub(crate) use windows::{
+    PreparedGroup, RawChild, close_prepared_group, prepare_group, prepared_job,
+    register_prepared_group,
+};
 
 // ── Child handle ───────────────────────────────────────────────────────────
 //
@@ -57,34 +62,78 @@ pub use windows::{
 // `clippy::disallowed_methods` (see `clippy.toml`); the few legitimate
 // exceptions are tagged with `#[allow]` at the call site.
 
-/// Newtype wrapper around [`std::process::Child`] that hides the raw
-/// `wait` / `try_wait` and only exposes [`Self::wait_handling_stop`] /
+/// Wrapper around a spawned child that hides the raw `wait` / `try_wait`
+/// and only exposes [`Self::wait_handling_stop`] /
 /// [`Self::try_wait_handling_stop`] — the WUNTRACED-aware peers that
 /// can't misclassify a stopped child as "still running".
-pub struct ChildHandle(std::process::Child);
+pub struct ChildHandle(ChildRepr);
+
+enum ChildRepr {
+    Std(std::process::Child),
+    #[cfg(windows)]
+    RawWindows(windows::RawChild),
+}
 
 impl ChildHandle {
     /// Wrap a freshly-spawned child.  After this point the std handle
     /// is no longer reachable by name; the only paths to wait are the
     /// `*_handling_stop` methods.
     pub fn from_std(child: std::process::Child) -> Self {
-        Self(child)
+        Self(ChildRepr::Std(child))
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn from_windows_raw(child: windows::RawChild) -> Self {
+        Self(ChildRepr::RawWindows(child))
     }
 
     pub fn id(&self) -> u32 {
-        self.0.id()
+        match &self.0 {
+            ChildRepr::Std(child) => child.id(),
+            #[cfg(windows)]
+            ChildRepr::RawWindows(child) => child.id(),
+        }
     }
 
     pub fn kill(&mut self) -> std::io::Result<()> {
-        self.0.kill()
+        match &mut self.0 {
+            ChildRepr::Std(child) => child.kill(),
+            #[cfg(windows)]
+            ChildRepr::RawWindows(child) => child.kill(),
+        }
     }
 
-    pub fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
-        self.0.stdout.take()
+    pub fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        match &mut self.0 {
+            ChildRepr::Std(child) => child
+                .stdout
+                .take()
+                .map(|stdout| Box::new(stdout) as Box<dyn std::io::Read + Send>),
+            #[cfg(windows)]
+            ChildRepr::RawWindows(child) => child.take_stdout(),
+        }
     }
 
-    pub fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
-        self.0.stderr.take()
+    pub fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        match &mut self.0 {
+            ChildRepr::Std(child) => child
+                .stderr
+                .take()
+                .map(|stderr| Box::new(stderr) as Box<dyn std::io::Read + Send>),
+            #[cfg(windows)]
+            ChildRepr::RawWindows(child) => child.take_stderr(),
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn raw_process_handle(&self) -> windows_sys::Win32::Foundation::HANDLE {
+        match &self.0 {
+            ChildRepr::Std(child) => {
+                use std::os::windows::io::AsRawHandle;
+                child.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE
+            }
+            ChildRepr::RawWindows(child) => child.raw_process_handle(),
+        }
     }
 
     /// Blocking wait that observes `WIFSTOPPED` on Unix.  See the
@@ -97,11 +146,15 @@ impl ChildHandle {
     ) -> std::io::Result<WaitOutcome> {
         #[cfg(unix)]
         {
-            unix::wait_handling_stop(&mut self.0, pgid, park_on_stop)
+            let ChildRepr::Std(child) = &mut self.0;
+            unix::wait_handling_stop(child, pgid, park_on_stop)
         }
         #[cfg(windows)]
         {
-            windows::wait_handling_stop(&mut self.0, pgid, park_on_stop)
+            match &mut self.0 {
+                ChildRepr::Std(child) => windows::wait_handling_stop(child, pgid, park_on_stop),
+                ChildRepr::RawWindows(child) => child.wait_handling_stop(),
+            }
         }
     }
 
@@ -116,11 +169,15 @@ impl ChildHandle {
     ) -> std::io::Result<Option<WaitOutcome>> {
         #[cfg(unix)]
         {
-            unix::try_wait_handling_stop(&mut self.0, pgid, park_on_stop)
+            let ChildRepr::Std(child) = &mut self.0;
+            unix::try_wait_handling_stop(child, pgid, park_on_stop)
         }
         #[cfg(windows)]
         {
-            windows::try_wait_handling_stop(&mut self.0, pgid, park_on_stop)
+            match &mut self.0 {
+                ChildRepr::Std(child) => windows::try_wait_handling_stop(child, pgid, park_on_stop),
+                ChildRepr::RawWindows(child) => child.try_wait_handling_stop(),
+            }
         }
     }
 
@@ -131,7 +188,11 @@ impl ChildHandle {
     /// the raw `Child::wait`.
     #[allow(clippy::disallowed_methods)]
     pub fn reap(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        self.0.wait()
+        match &mut self.0 {
+            ChildRepr::Std(child) => child.wait(),
+            #[cfg(windows)]
+            ChildRepr::RawWindows(child) => child.reap(),
+        }
     }
 }
 

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: a007f72
+generated_at_commit: 110771c
 generated_at_date: 2026-07-02
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs, core/src/stream.rs]
 ---
@@ -96,12 +96,15 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   `interrupt_foreground_child` re-sends raw-mode Esc/Ctrl-C to a foreground
   external group, `relay_handler` fans SIGINT to active external pgids, and
   `quit_handler` is the Ctrl-`\` root abort. Platform handlers live in
-  `signal/unix.rs` and `signal/windows.rs`. Windows maps the pipeline pgid
-  abstraction onto `CREATE_NEW_PROCESS_GROUP` plus a Job Object; descendants are
-  covered once the child is assigned to the job, but a direct external that forks
-  before post-spawn assignment can escape until launch moves to creation-time job
-  placement. The whole stop-work flow — the `Interrupt < Explicit < Deadline <
-  RootAbort` order — is narrated in
+  `signal/unix.rs` and `signal/windows.rs`.
+- `launch.rs` — the owned launch value and its platform interpreters. Unix
+  lowers to `std::process::Command` and keeps the `pre_exec` pgid/fd discipline;
+  Windows owns the raw `CreateProcessW` boundary, including command-line/env
+  rendering, explicit helper-handle allow lists, the launch mutex, suspended
+  create → Job Object assignment → resume, and the widened `ChildHandle` raw
+  process wrapper ([[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]]).
+  The whole stop-work flow — the `Interrupt < Explicit < Deadline < RootAbort`
+  order — is narrated in
   [[internals/cancellation|cancellation]].
 
 Spawning an external command is capability-gated; that gate lives in

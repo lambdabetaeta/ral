@@ -20,8 +20,6 @@
 //! never-arriving EOF.
 
 use std::os::fd::AsRawFd;
-use std::os::unix::process::CommandExt;
-use std::process::Command;
 
 use super::super::helper::{JOB_FD_ENV, REPORT_FD_ENV, VALUE_IN_FD_ENV, VALUE_OUT_FD_ENV};
 use super::common::{EnvNames, FrameReader, pipe_error};
@@ -49,25 +47,10 @@ pub(crate) fn pair() -> Result<(Channel, Channel), Break> {
 /// Registering the CLOEXEC clear as a `pre_exec` hook — rather than an
 /// `fcntl` on the parent's fd — confines the inherit window to this one
 /// child (see the module comment).
-pub(crate) fn pass(cmd: &mut Command, env: &str, ch: &Channel) -> Settled<()> {
+pub(crate) fn pass(cmd: &mut crate::process::Launch, env: &str, ch: &Channel) -> Settled<()> {
     let fd = ch.as_raw_fd();
     cmd.env(env, fd.to_string());
-    // SAFETY: the closure runs post-`fork`, pre-`execve`, and performs
-    // only an async-signal-safe `fcntl` on an already-open inherited fd
-    // — the same discipline `spawn_with_pgid_after` documents for its
-    // own `pre_exec` hook.
-    unsafe {
-        cmd.pre_exec(move || {
-            let flags = libc::fcntl(fd, libc::F_GETFD);
-            if flags < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
+    cmd.clear_cloexec_on_spawn(fd);
     Ok(())
 }
 

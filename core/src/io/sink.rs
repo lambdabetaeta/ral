@@ -57,7 +57,7 @@ pub type ByteBuffer = Arc<Mutex<Vec<u8>>>;
 /// invariant is centralised — no caller computes "inherit, pipe, pump,
 /// tee" by hand.
 pub struct ChildStdioPlan {
-    pub stdio: std::process::Stdio,
+    pub stdio: crate::process::StdioSpec,
     pub pump: Option<Sink>,
 }
 
@@ -65,7 +65,7 @@ impl ChildStdioPlan {
     /// The child reads/writes the parent's matching fd directly.
     pub fn inherit() -> Self {
         Self {
-            stdio: std::process::Stdio::inherit(),
+            stdio: crate::process::StdioSpec::inherit(),
             pump: None,
         }
     }
@@ -76,11 +76,11 @@ impl ChildStdioPlan {
     fn for_sink(sink: &Sink) -> io::Result<Self> {
         match sink {
             Sink::Pipe(w) => Ok(Self {
-                stdio: std::process::Stdio::from(w.try_clone()?),
+                stdio: crate::process::StdioSpec::from_pipe_writer(w.try_clone()?),
                 pump: None,
             }),
             other => Ok(Self {
-                stdio: std::process::Stdio::piped(),
+                stdio: crate::process::StdioSpec::piped(),
                 pump: Some(other.try_clone()?),
             }),
         }

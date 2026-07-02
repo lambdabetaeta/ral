@@ -5,11 +5,9 @@
 //! the `cfg(not(any(unix, windows)))` stubs in [`crate::process::signal`].
 //! Every operation that would touch a channel errors; none is reachable.
 
-use std::io::{Read, Write};
-use std::process::Command;
-
 use super::common::{EnvNames, FrameReader, pipe_error};
 use crate::types::{Break, Settled};
+use std::io::{Read, Write};
 
 /// Stub channel: no transport exists, so both `Read` and `Write` error.
 pub(crate) struct Channel;
@@ -39,7 +37,7 @@ pub(crate) fn pair() -> Result<(Channel, Channel), Break> {
     ))
 }
 
-pub(crate) fn pass(_cmd: &mut Command, _env: &str, _ch: &Channel) -> Settled<()> {
+pub(crate) fn pass(_cmd: &mut crate::process::Launch, _env: &str, _ch: &Channel) -> Settled<()> {
     Err(pipe_error(
         "process-staged pipelines are unavailable on this target",
     ))
