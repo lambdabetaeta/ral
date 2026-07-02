@@ -10,6 +10,7 @@
 
 use super::{INVALID_INPUT, Tool, invalid_input, u64_field};
 use crate::agent::Agent;
+use crate::agent_registry::MessageError;
 use crate::bus::{AgentOutcome, AgentResult, Emitter, InboxMsg, Kind};
 use crate::event::ToolResult as SessionToolResult;
 use crate::provider::Provider;
@@ -429,6 +430,97 @@ as marked turns."
                 .collect::<Vec<_>>()
                 .join("\n")
         };
+        SessionToolResult { id, content }
+    }
+}
+
+/// `message` — send a marked model-visible note to another live agent.
+pub(super) struct MessageTool;
+
+impl Tool for MessageTool {
+    fn name(&self) -> &'static str {
+        "message"
+    }
+
+    fn desc(&self) -> &'static str {
+        "Send a short message to another live agent by id.  The recipient sees \
+it as a marked turn, not as human input, at its next tool boundary.  Use ids \
+from `agents`, spawn receipts, or ids you deliberately included in a child's \
+prompt.  This is for coordination only: it does not return the recipient's \
+answer; use `reply` for a returning agent's final result."
+    }
+
+    fn schema(&self) -> &'static Value {
+        static S: OnceLock<Value> = OnceLock::new();
+        S.get_or_init(|| {
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "integer",
+                        "description": "The id of the live agent to receive the message.",
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "The message to deliver to that agent.",
+                    },
+                },
+                "required": ["id", "message"],
+            })
+        })
+    }
+
+    fn dispatch(
+        &self,
+        id: String,
+        input: Value,
+        session: &mut Agent,
+        _provider: &Arc<Provider>,
+        emit: &Emitter,
+    ) -> SessionToolResult {
+        let recipient_id = match u64_field(&input, "id") {
+            Some(n) => n,
+            None => {
+                return invalid_input(
+                    id,
+                    "message",
+                    INVALID_INPUT,
+                    "missing required integer field `id`",
+                    emit,
+                );
+            }
+        };
+        let Some(message) = input
+            .as_object()
+            .and_then(|o| o.get("message"))
+            .and_then(Value::as_str)
+        else {
+            return invalid_input(
+                id,
+                "message",
+                INVALID_INPUT,
+                "missing required string field `message`",
+                emit,
+            );
+        };
+        emit.emit(Kind::ToolCall {
+            tool: "message",
+            cmd: recipient_id.to_string(),
+            summary: None,
+        });
+        let content = match session
+            .agents
+            .message(session.id, recipient_id, message.to_string())
+        {
+            Ok(()) => format!("sent message to agent {recipient_id}"),
+            Err(MessageError::UnknownRecipient(n)) => {
+                format!("no live agent with id {n}; did it finish already?")
+            }
+            Err(MessageError::UnknownSender(n)) => {
+                format!("cannot send from agent {n}: it is no longer live")
+            }
+        };
+        emit.emit(Kind::ToolResult(content.clone()));
         SessionToolResult { id, content }
     }
 }

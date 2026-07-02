@@ -1318,6 +1318,7 @@ struct Dispatch {
 fn announce(turn: &Turn, emit: &Emitter) {
     match turn {
         Turn::Human(s) | Turn::Wakeup(s) => emit.emit(Kind::UserPromptEcho(s.clone())),
+        Turn::Message(_) => emit.emit(Kind::UserPromptEcho(turn.text())),
         Turn::Agent(r) => emit.emit(Kind::SubagentDone {
             title: r.title.clone(),
             outcome: r.outcome.clone(),

@@ -96,6 +96,7 @@ fn registry() -> &'static [Box<dyn Tool>] {
             Box::new(agent::SpawnTool::agraphos()),
             Box::new(agent::SpawnTool::anamnesis()),
             Box::new(agent::AgentsTool),
+            Box::new(agent::MessageTool),
             Box::new(agent::AgentCancelTool),
             Box::new(schedule::ScheduleTool),
             Box::new(schedule::SchedulesTool),

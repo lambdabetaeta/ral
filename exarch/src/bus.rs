@@ -150,6 +150,25 @@ impl AgentResult {
     }
 }
 
+/// A live agent sent a peer message to another live agent.
+#[derive(Clone, Debug)]
+pub struct AgentMessage {
+    pub from: AgentId,
+    pub from_title: String,
+    pub text: String,
+}
+
+impl AgentMessage {
+    /// The marked synthetic-turn text the recipient model sees when this
+    /// message drains.
+    fn render(&self) -> String {
+        format!(
+            "[EXARCH AGENT {} MESSAGE: {}]\n{}\n[/EXARCH]",
+            self.from, self.from_title, self.text
+        )
+    }
+}
+
 /// One typed message waiting in a session's [`Inbox`].
 ///
 /// This is the inbound twin of the outbound [`Kind`] event stream: where
@@ -187,6 +206,9 @@ pub enum InboxMsg {
     /// subagent block, so its result reaches the model as soon as the current
     /// tool batch settles.
     AgentResult(AgentResult),
+    /// A live peer agent sent a message.  Drains at the tool boundary as a
+    /// marked injection, never as human text.
+    AgentMessage(AgentMessage),
     /// A synthetic continuation the agent posted to *itself* after an attempt
     /// the nudge registry decided to retry (an empty turn, an early stop, a
     /// budget-free completion gate).  Carries the synthetic user message; it
@@ -251,6 +273,7 @@ impl InboxMsg {
             InboxMsg::UserSteering(s) => s.clone(),
             InboxMsg::ScheduledWakeup { label, .. } => format!("⏰ {label}"),
             InboxMsg::AgentResult(r) => format!("● agent {}", r.title),
+            InboxMsg::AgentMessage(m) => format!("✉ agent {}", m.from_title),
             InboxMsg::Nudge(_) => "· retry".into(),
             InboxMsg::Command(s) => s.clone(),
             InboxMsg::Surface { .. } => return None,
@@ -299,6 +322,8 @@ pub enum Turn {
     Wakeup(String),
     /// An async agent settled — rendered as a dialable `↘` subagent block.
     Agent(AgentResult),
+    /// A peer agent sent this agent a marked message.
+    Message(AgentMessage),
     /// A synthetic nudge continuation the agent posted to itself.  Renders
     /// with no human chrome and, crucially, does **not** reset the turn
     /// latches — it is the same turn continuing.
@@ -326,6 +351,7 @@ impl Turn {
         match self {
             Turn::Human(s) | Turn::Wakeup(s) | Turn::Nudge(s) | Turn::Command(s) => s.clone(),
             Turn::Agent(r) => r.render(),
+            Turn::Message(m) => m.render(),
             Turn::Surface { values, .. } => surface_notice(values),
         }
     }
@@ -374,10 +400,8 @@ const PARK_POLL: Duration = Duration::from_millis(100);
 /// parent's `Mailbox` ([`Agent::outbox`](crate::agent::Agent)), a
 /// `spawn` worker flushes its surface batch through the owning session's
 /// `Mailbox`.  The registry holds each peer's `Mailbox` so the frontend can
-/// steer a focused tab, but only the frontend (and root) ever obtains the
-/// registry — no API hands one agent a sibling's sender, so the "no
-/// inter-agent talking" invariant rests on who holds the registry, not on a
-/// runtime check.
+/// steer a focused tab and the `message` tool can deliver a marked note
+/// between live agents without exposing raw senders to model code.
 #[derive(Clone)]
 pub struct Mailbox {
     shared: Arc<Shared>,
@@ -700,6 +724,7 @@ fn to_turn(msg: InboxMsg) -> Option<Turn> {
             ..
         } => Turn::Wakeup(format!("[scheduled '{label}' · {trigger}] {prompt}")),
         InboxMsg::AgentResult(r) => Turn::Agent(r),
+        InboxMsg::AgentMessage(m) => Turn::Message(m),
         InboxMsg::Nudge(s) => Turn::Nudge(s),
         InboxMsg::Command(s) => Turn::Command(s),
         InboxMsg::Surface { id, values, joined } => {
@@ -1297,8 +1322,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        Boundary, Emitter, Event, FleetBus, Inbox, InboxMsg, Kind, ParkMode, Pass, Sink,
-        Transcript, Turn, drain_pass, pump,
+        AgentMessage, Boundary, Emitter, Event, FleetBus, Inbox, InboxMsg, Kind, ParkMode, Pass,
+        Sink, Transcript, Turn, drain_pass, pump,
     };
     use crate::cancel;
     use crate::provider::Tuning;
@@ -1653,6 +1678,27 @@ mod tests {
             ),
             "the async wakeup and the coalesced steering both drain, in order",
         );
+        assert!(inbox.is_empty());
+    }
+
+    #[test]
+    fn inbox_agent_message_drains_marked_at_tool_boundary() {
+        let inbox = Inbox::new();
+        inbox.push(InboxMsg::AgentMessage(AgentMessage {
+            from: 7,
+            from_title: "review".into(),
+            text: "please inspect the parser branch".into(),
+        }));
+
+        assert!(matches!(
+            inbox.drain_tool().as_slice(),
+            [Turn::Message(m)]
+                if m.from == 7
+                    && m.from_title == "review"
+                    && m.text == "please inspect the parser branch"
+                    && m.render()
+                        == "[EXARCH AGENT 7 MESSAGE: review]\nplease inspect the parser branch\n[/EXARCH]"
+        ));
         assert!(inbox.is_empty());
     }
 

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: fcd1756
+generated_at_commit: 012fcb2
 generated_at_date: 2026-07-02
 covers_paths: [exarch/src/agent.rs, exarch/src/event.rs, exarch/src/fleet.rs, exarch/src/nudge.rs, exarch/src/digest.rs]
 ---
@@ -110,7 +110,8 @@ truncation, the periodic pin reminder — are driven off the same `react` rule.
 `fleet.rs` is the thin run-as-a-whole: `{ agents: AgentRegistry, bus: FleetBus,
 focus: Arc<AtomicU64>, interactive: bool }`. It owns no turn logic — the trunk
 and each child drive themselves; the fleet is only where the frontend reads "all
-live agents", "which one the human is attached to", and "the bus to drain". The
+live agents", "which one the human is attached to", "which inbox receives a
+marked `message`", and "the bus to drain". The
 frontend ([[map/exarch/frontend|`tui::run`]] / `headless::run`) builds it from
 handles the trunk already minted at construction, so fleet and nodes never
 disagree about what is shared.

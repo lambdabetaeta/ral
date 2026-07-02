@@ -1,5 +1,5 @@
 ---
-generated_at_commit: fcd1756
+generated_at_commit: 012fcb2
 generated_at_date: 2026-07-02
 covers_paths: [exarch/src/tools.rs, exarch/src/tools/]
 ---
@@ -30,7 +30,8 @@ The tools that ship:
   the [[map/exarch/frontend|rail]]; the full `cmd` opens in the collapsible
   tool-call block). A fixed 30s call timeout bounds inline work; anything longer
   belongs in a `spawn` that outlives the turn.
-- the **spawn family** — `agraphos` / `anamnesis` / `agents` / `agent_cancel`
+- the **spawn family** — `agraphos` / `anamnesis` / `agents` / `message` /
+  `agent_cancel`
   (`tools/agent.rs`), held by *every* agent (spawning is universal). `agraphos`
   and `anamnesis` are launch-only and always asynchronous
   ([[decisions/260617_async-agent-tool|async-agent-tool]]): each forks a child
@@ -48,10 +49,11 @@ The tools that ship:
   below the parent, never escalate it past the parent's authority — naming a base
   looser than the parent simply changes nothing, and `dangerous` is the lattice
   top, meaning *inherit the parent's authority verbatim*. `agents` lists live
-  workers (id, title, elapsed, log dir); `agent_cancel` stops one by id and
-  cascades to its subtree. A child may itself spawn, so the tree is unbounded in
-  depth. The whole sub-agent model — the `parent` predicate, spawning, returning,
-  narrowing, and memory mode — is [[design/agents|agents]].
+  workers (id, title, elapsed, log dir); `message` posts a marked note to a live
+  agent id through its inbox; `agent_cancel` stops one by id and cascades to its
+  subtree. A child may itself spawn, so the tree is unbounded in depth. The whole
+  sub-agent model — the `parent` predicate, spawning, marked peer messages,
+  returning, narrowing, and memory mode — is [[design/agents|agents]].
 - `reply` (`tools/reply.rs`), gated by `replies()` — a returning agent's
   deliberate return value ([[decisions/260622_agent-reply-tool|agent-reply-tool]],
   extended to the headless trunk by

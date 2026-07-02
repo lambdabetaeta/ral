@@ -25,7 +25,7 @@
 //! pushed to its parent's inbox rather than collected by id.
 
 use crate::agent::ProviderHandle;
-use crate::bus::{AgentId, Mailbox};
+use crate::bus::{AgentId, AgentMessage, InboxMsg, Mailbox};
 use crate::cancel::Token;
 use ral_core::process::{self, Deadline};
 use std::collections::HashMap;
@@ -74,11 +74,8 @@ struct Entry {
     started: Instant,
     cancel: Token,
     /// The agent's inbox sender, so the frontend can route a focused tab's
-    /// typed line into that agent's queue and `wake` it on a focus change.
-    /// The registry hands out *senders*, but only the frontend (and the
-    /// trunk) ever obtains the registry, so agents still can't reach each
-    /// other: the "no inter-agent talking" policy is preserved by who holds
-    /// the registry, not by withholding the field.
+    /// typed line into that agent's queue, `wake` it on a focus change, and
+    /// the `message` tool can deliver a marked peer note by id.
     mailbox: Mailbox,
     /// The agent's hot-swappable provider handle, so a `/model` on the focused
     /// agent swaps *its* provider without disturbing any other.
@@ -177,6 +174,34 @@ impl AgentRegistry {
         g.entries.get(&id).map(|e| e.mailbox.clone())
     }
 
+    /// Send a marked model-visible message from one live agent to another.
+    /// The mailbox is cloned under the registry lock, then posted after the
+    /// lock drops; inbox delivery never runs while the registry is held.
+    pub fn message(&self, from: AgentId, to: AgentId, text: String) -> Result<(), MessageError> {
+        let (mailbox, from_title) = {
+            let g = self.lock();
+            let from_title = g
+                .entries
+                .get(&from)
+                .ok_or(MessageError::UnknownSender(from))?
+                .title
+                .clone();
+            let mailbox = g
+                .entries
+                .get(&to)
+                .ok_or(MessageError::UnknownRecipient(to))?
+                .mailbox
+                .clone();
+            (mailbox, from_title)
+        };
+        mailbox.push(InboxMsg::AgentMessage(AgentMessage {
+            from,
+            from_title,
+            text,
+        }));
+        Ok(())
+    }
+
     /// The live agent's provider handle, for a `/model` swap on the focused
     /// agent.  `None` once it has settled.
     pub fn provider(&self, id: AgentId) -> Option<ProviderHandle> {
@@ -262,6 +287,12 @@ impl AgentRegistry {
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MessageError {
+    UnknownSender(AgentId),
+    UnknownRecipient(AgentId),
 }
 
 /// The ids in `ancestor`'s subtree, walking the `parent` edges breadth-first.
@@ -424,6 +455,45 @@ mod tests {
         assert!(reg.mailbox(99).is_none(), "an unknown id has no sender");
         assert!(reg.settle(1, g));
         assert!(reg.mailbox(1).is_none(), "a settled entry hands out none");
+    }
+
+    #[test]
+    fn message_posts_a_marked_note_to_a_live_agent() {
+        let reg = AgentRegistry::new();
+        entry(&reg, 1, None);
+        let inbox = crate::bus::Inbox::new();
+        reg.register(
+            2,
+            Some(1),
+            "worker".into(),
+            PathBuf::from("/tmp/worker"),
+            Token::new(),
+            inbox.mailbox(),
+            provider(),
+        );
+
+        reg.message(1, 2, "check the lexer".into())
+            .expect("message to a live agent succeeds");
+        let Some(crate::bus::Turn::Message(msg)) = inbox.drain_turn() else {
+            panic!("expected a peer message");
+        };
+        assert_eq!(msg.from, 1);
+        assert_eq!(msg.from_title, "a1");
+        assert_eq!(msg.text, "check the lexer");
+    }
+
+    #[test]
+    fn message_reports_unknown_sender_or_recipient() {
+        let reg = AgentRegistry::new();
+        entry(&reg, 1, None);
+        assert_eq!(
+            reg.message(1, 99, "hello".into()),
+            Err(MessageError::UnknownRecipient(99))
+        );
+        assert_eq!(
+            reg.message(99, 1, "hello".into()),
+            Err(MessageError::UnknownSender(99))
+        );
     }
 
     fn mb() -> Mailbox {

@@ -101,6 +101,16 @@ if it lingers). Conversing with a sub-agent is real but ephemeral: once it goes
 idle and you `TAB` away it reaps, and once it `reply`s it is gone — its tab is a
 readable transcript, not a resumable conversation.
 
+## Peer messages: marked notes, not shared memory
+
+Live agents may send one another a **marked message** by `AgentId` through the
+`message` tool. The registry resolves the recipient's inbox and posts an
+`AgentMessage`; the recipient sees it at the next tool boundary as
+`[EXARCH AGENT id MESSAGE: title] body [/EXARCH]`, not as human input. This is
+coordination, not a return edge: it does not share shell state, does not grant
+authority, and does not wait for an answer. The durable result path remains
+`reply`; the durable cancellation path remains `agent_cancel`.
+
 ## Cancellation cascades the subtree
 
 `Esc` and `agent_cancel` cancel the focused agent **and its whole subtree** through
