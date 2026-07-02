@@ -60,10 +60,11 @@ The tools that ship:
   [[decisions/260623_reply-terminates-returning-agents]]). Its `result` argument
   is stashed on the agent as the *faithful* value the model passed and lifted
   into a `Replied` terminal once the tool-call batch drains — it hard-terminates
-  the agent regardless of focus. Each consumer renders it at its own edge by the
-  shared value→text rule ([[map/exarch/shell-eval|shell-eval]]'s `json_to_text`: a
-  string passes through raw, an object/array is pretty-printed), except the
-  headless harness, which writes the structure faithfully to its json `result`.
+  the agent regardless of focus and cancels any live descendants before the node
+  settles. Each consumer renders it at its own edge by the shared value→text rule
+  ([[map/exarch/shell-eval|shell-eval]]'s `json_to_text`: a string passes through
+  raw, an object/array is pretty-printed), except the headless harness, which
+  writes the structure faithfully to its json `result`.
   `reply` is the *sole* return path — there is no prose scrape — so a returning
   agent that never calls it returns nothing and fails (re-nudged within the
   [[map/exarch/agent|nudge]] budget first). Withheld only from the conversing

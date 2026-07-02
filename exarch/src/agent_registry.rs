@@ -126,6 +126,16 @@ impl AgentRegistry {
             .any(|e| e.parent == Some(parent))
     }
 
+    /// Cancel and reap `root`'s proper descendants, leaving `root` live.
+    /// A settling parent (`reply`) uses this to abandon live children without
+    /// declaring a new context generation for unrelated agents. Late results
+    /// from the removed descendants are rejected because their entries are
+    /// gone.
+    pub fn cancel_descendants(&self, root: AgentId) {
+        let mut g = self.lock();
+        remove_descendants(&mut g, root);
+    }
+
     /// Register an agent under its `parent` (`None` for the trunk).  A child
     /// (`parent` set) arms a ceiling on the reaper that cancels its whole
     /// subtree when it elapses; the trunk gets none.  Returns the birth
@@ -268,19 +278,12 @@ impl AgentRegistry {
 
     /// `/clear` on `root`: cancel and reap `root`'s proper descendants — the
     /// subtree the rebuilt context no longer owns — and bump the generation so
-    /// any of their late results are rejected.  `root` itself stays registered
-    /// (it is the agent being rebuilt, not torn down).
+    /// any late result or deferred surface batch from the old context is
+    /// rejected. `root` itself stays registered (it is the agent being rebuilt,
+    /// not torn down).
     pub fn clear_subtree(&self, root: AgentId) {
         let mut g = self.lock();
-        let desc = descendants(&g.entries, root, false);
-        for d in &desc {
-            if let Some(e) = g.entries.get(d) {
-                e.cancel.cancel();
-            }
-        }
-        for d in desc {
-            g.entries.remove(&d);
-        }
+        remove_descendants(&mut g, root);
         g.generation += 1;
     }
 
@@ -319,6 +322,18 @@ fn descendants(
         }
     }
     out
+}
+
+fn remove_descendants(g: &mut Inner, root: AgentId) {
+    let desc = descendants(&g.entries, root, false);
+    for d in &desc {
+        if let Some(e) = g.entries.get(d) {
+            e.cancel.cancel();
+        }
+    }
+    for d in desc {
+        g.entries.remove(&d);
+    }
 }
 
 #[cfg(test)]

@@ -90,6 +90,10 @@ and focus falls back to its parent. The payload is the faithful
 shared value→text rule ([[map/exarch/shell-eval|shell-eval]]) — prose for a model
 parent, the structure itself for the headless harness
 ([[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]]).
+Before the returning node disappears, `reply` cancels and reaps its proper
+descendants: a parent may choose to abandon unfinished children, but it cannot
+leave live agents registered beneath a settled node. This is not a `/clear`;
+unrelated siblings keep their generation and may still settle normally.
 
 ## Focus: the dynamic human attachment
 
@@ -116,9 +120,10 @@ authority, and does not wait for an answer. The durable result path remains
 `Esc` and `agent_cancel` cancel the focused agent **and its whole subtree** through
 one registry cascade — the same cascade the per-agent ceiling reaper uses. The
 registry is the spawn *tree* (`AgentRegistry::Entry` carries the `parent` link),
-so cancelling a mid-tree agent reaps everything below it; `/clear` cascades cancel
-to the focused agent's subtree and bumps the generation, dropping a late result
-from a cleared generation. This generalises
+so cancelling a mid-tree agent reaps everything below it. A settling `reply`
+cancels only the returning node's proper descendants, while `/clear` cascades
+cancel to the focused agent's subtree and bumps the generation, dropping a late
+result or deferred surface batch from a cleared generation. This generalises
 [[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]] from one root-turn
 token to a per-focus token over a subtree.
 

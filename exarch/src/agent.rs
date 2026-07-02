@@ -1266,9 +1266,11 @@ impl Agent {
     /// Reached when the batch carried a `reply`: wind the session back to
     /// `ReadyForUser` with the dedicated breadcrumb (the last round-trip
     /// dispatched the reply but never asked for a final assistant message, so
-    /// the protocol sits in `AwaitingAssistantAfterToolResults`), and return
-    /// the payload.  `drive` then breaks the loop — `reply` hard-terminates.
+    /// the protocol sits in `AwaitingAssistantAfterToolResults`), cancel any
+    /// live descendants, and return the payload.  `drive` then breaks the loop
+    /// — `reply` hard-terminates.
     fn replied(&mut self, payload: serde_json::Value) -> Result<TurnOutcome, ProviderError> {
+        self.agents.cancel_descendants(self.id);
         self.log.quiesce(QuiesceReason::Replied);
         Ok(TurnOutcome::Replied(payload))
     }
@@ -1730,6 +1732,80 @@ mod tests {
         assert!(
             child.is_ready(),
             "a replied turn must leave the session ReadyForUser"
+        );
+    }
+
+    /// `reply` is a settling edge for the whole owned subtree: if a parent
+    /// returns before children finish, those children are cancelled and reaped
+    /// rather than left registered under a dead parent.
+    #[test]
+    fn reply_cancels_live_descendants() {
+        let dir = tmp("reply-cancels-children");
+        let parent = Agent::for_test(&dir, "system").unwrap();
+        let mut child = parent.fork(parent.caps().clone()).expect("fork child");
+        child.seed("return early".into());
+
+        let direct = fresh_id();
+        let grandchild = fresh_id();
+        let sibling = fresh_id();
+        let direct_token = cancel::Token::new();
+        let grandchild_token = cancel::Token::new();
+        let sibling_token = cancel::Token::new();
+        child.agents.register(
+            direct,
+            Some(child.id),
+            "direct".into(),
+            dir.join("direct"),
+            direct_token.clone(),
+            Inbox::new().mailbox(),
+            child.provider.clone(),
+        );
+        child.agents.register(
+            grandchild,
+            Some(direct),
+            "grandchild".into(),
+            dir.join("grandchild"),
+            grandchild_token.clone(),
+            Inbox::new().mailbox(),
+            child.provider.clone(),
+        );
+        let sibling_generation = child.agents.register(
+            sibling,
+            Some(parent.id),
+            "sibling".into(),
+            dir.join("sibling"),
+            sibling_token.clone(),
+            Inbox::new().mailbox(),
+            child.provider.clone(),
+        );
+
+        let provider = scripted(
+            "test-model",
+            Script::new().then(Reply::tool_calls(vec![reply_call(
+                "r1",
+                serde_json::json!("done"),
+            )])),
+        );
+        let (outcome, text) = drive_peer(&mut child, provider);
+
+        assert!(matches!(outcome, AgentOutcome::Complete));
+        assert_eq!(text, "done");
+        assert!(direct_token.is_cancelled(), "direct child is cancelled");
+        assert!(
+            grandchild_token.is_cancelled(),
+            "grandchild is cancelled recursively"
+        );
+        assert!(
+            child.agents.list(child.id).is_empty(),
+            "reply reaps the abandoned subtree"
+        );
+        assert!(
+            !sibling_token.is_cancelled(),
+            "a sibling outside the replying subtree is untouched"
+        );
+        assert!(
+            child.agents.settle(sibling, sibling_generation),
+            "reply must not bump the global generation and poison siblings"
         );
     }
 

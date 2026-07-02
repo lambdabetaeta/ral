@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 012fcb2
+generated_at_commit: 0deda19
 generated_at_date: 2026-07-02
-covers_paths: [exarch/src/agent.rs, exarch/src/event.rs, exarch/src/fleet.rs, exarch/src/nudge.rs, exarch/src/digest.rs]
+covers_paths: [exarch/src/agent.rs, exarch/src/agent_registry.rs, exarch/src/event.rs, exarch/src/fleet.rs, exarch/src/nudge.rs, exarch/src/digest.rs]
 ---
 
 # Map: exarch / agent
@@ -128,16 +128,19 @@ disagree about what is shared.
   (the TUI), notifying the previous and new focused inboxes; the focused agent
   receives the human's typed lines as fresh turns and owns `Esc`. A de-focused
   idle agent wakes, finds `park_mode` now `Quiesce`, and reaps. A returning
-  agent's `reply` ends it even mid-conversation; the TUI then **falls focus back
-  to its parent**, recursing to the trunk.
+  agent's `reply` cancels its proper descendants, ends it even
+  mid-conversation, and the TUI then **falls focus back to its parent**,
+  recursing to the trunk.
 
 ## Cancellation cascades the subtree
 
 The single cascade serves three callers — `agent_cancel`, the per-agent ceiling,
 and `Esc`. `AgentRegistry::Entry` carries a `parent` link, so the registry is the
 spawn *tree*: `AgentRegistry::cancel(id)` walks descendants and cancels the whole
-subtree, and `clear_subtree(root)` reaps a subtree and bumps the generation, so a
-late result from a cleared generation is still dropped. `Esc` targets
+subtree, `cancel_descendants(root)` abandons a returning agent's children without
+advancing the global generation, and `clear_subtree(root)` reaps a subtree and
+bumps the generation, so a late result or deferred surface batch from a cleared
+generation is still dropped. `Esc` targets
 `fleet.focus`'s turn and its subtree (not "the root") — the focused agent's
 published token is cleared each turn boundary (`Token::reset`) and the cascade
 carries the cancel down. This generalises
