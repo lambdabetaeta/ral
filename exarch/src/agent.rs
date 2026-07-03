@@ -1351,27 +1351,41 @@ impl Agent {
     /// what the parent should do to the pin register
     /// ([`spawn_async`](crate::tools::agent::spawn_async)), decided on the
     /// worker thread that drove it since only that thread ever holds the raw
-    /// reply.  This applies the tag here, on the parent's own thread, at
-    /// drain — first the state (`set`/`unset`), then, only on success,
-    /// projecting the same change to the viewport.  An untagged settle
-    /// (every ordinary `amnemon`/`mnemon`) is a no-op.
+    /// reply.  This applies the tag on the parent's own thread, at drain, then
+    /// forwards whatever [`Self::apply_commitment_settle`] (the pinning half)
+    /// says actually changed to the viewport (the rendering half).
     fn settle_commitment(&mut self, turn: &Turn, emit: &Emitter) {
         let Turn::Agent(r) = turn else { return };
-        match &r.commitment_settle {
+        if let Some(kind) = self.apply_commitment_settle(&r.commitment_settle) {
+            emit.emit(kind);
+        }
+    }
+
+    /// Pinning, in isolation: apply a settled `commit`/`verify_commitment`
+    /// child's tag to the pin register — `set`/`unset` — and report which
+    /// [`Kind`] (if any) that change is to the caller. Pure state plus a
+    /// description of it; it never touches an [`Emitter`], so it needs no bus
+    /// to test. An untagged settle (every ordinary `amnemon`/`mnemon`) and a
+    /// clear of a key that was not actually live both report `None`.
+    fn apply_commitment_settle(
+        &mut self,
+        settle: &Option<shell_eval::CommitmentSettle>,
+    ) -> Option<Kind> {
+        match settle {
             Some(shell_eval::CommitmentSettle::Open { key, card }) => {
-                if self.set_commitment_pin(key, card.clone()).is_ok() {
-                    emit.emit(Kind::Pin {
-                        key: key.clone(),
-                        card: card.clone(),
-                    });
-                }
+                self.set_commitment_pin(key, card.clone()).ok()?;
+                Some(Kind::Pin {
+                    key: key.clone(),
+                    card: card.clone(),
+                })
             }
-            Some(shell_eval::CommitmentSettle::Clear(key))
-                if self.unset_commitment_pin(key).unwrap_or(false) =>
-            {
-                emit.emit(Kind::Unpin { key: key.clone() });
+            Some(shell_eval::CommitmentSettle::Clear(key)) => {
+                self.unset_commitment_pin(key)
+                    .ok()
+                    .filter(|&cleared| cleared)?;
+                Some(Kind::Unpin { key: key.clone() })
             }
-            Some(shell_eval::CommitmentSettle::Clear(_)) | None => {}
+            None => None,
         }
     }
 
@@ -2209,6 +2223,57 @@ mod tests {
         assert!(
             session.commitment_card(key).is_ok(),
             "an untagged settle must leave any live commitment pin alone"
+        );
+    }
+
+    /// [`Agent::apply_commitment_settle`] is the pinning half on its own —
+    /// exercised directly, with no [`Emitter`] in sight, to pin that it needs
+    /// none: an open reports the pin event only once the register actually
+    /// takes it, and a clear of a key that was never live reports nothing.
+    #[test]
+    fn apply_commitment_settle_reports_only_a_real_change() {
+        let dir = tmp("apply-commitment-settle");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let key = "commitment:abc".to_string();
+        let card = crate::card::Card(vec![crate::card::Mark::Text {
+            spans: vec![crate::card::Span {
+                role: None,
+                text: "tests pass".into(),
+            }],
+        }]);
+
+        match session.apply_commitment_settle(&Some(shell_eval::CommitmentSettle::Open {
+            key: key.clone(),
+            card: card.clone(),
+        })) {
+            Some(Kind::Pin { key: k, .. }) => assert_eq!(k, key),
+            Some(_) => panic!("expected a Pin event for a fresh open, got some other Kind"),
+            None => panic!("expected a Pin event for a fresh open, got none"),
+        }
+        assert!(
+            session.commitment_card(&key).is_ok(),
+            "the register must hold the opened pin"
+        );
+
+        assert!(
+            session
+                .apply_commitment_settle(&Some(shell_eval::CommitmentSettle::Clear(
+                    "commitment:never-opened".into()
+                )))
+                .is_none(),
+            "clearing a key that was never live changes nothing, so nothing to report"
+        );
+
+        match session.apply_commitment_settle(&Some(shell_eval::CommitmentSettle::Clear(
+            key.clone(),
+        ))) {
+            Some(Kind::Unpin { key: k }) => assert_eq!(k, key),
+            Some(_) => panic!("expected an Unpin event for a live clear, got some other Kind"),
+            None => panic!("expected an Unpin event for a live clear, got none"),
+        }
+        assert!(
+            session.commitment_card(&key).is_err(),
+            "the register must have dropped the cleared pin"
         );
     }
 }
