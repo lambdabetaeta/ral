@@ -103,6 +103,7 @@ fn registry() -> &'static [Box<dyn Tool>] {
     R.get_or_init(|| {
         vec![
             Box::new(ral::RalTool),
+            Box::new(commitment::CommitTool),
             Box::new(commitment::VerifyCommitmentTool),
             Box::new(agent::SpawnTool::amnemon()),
             Box::new(agent::SpawnTool::mnemon()),
@@ -197,7 +198,7 @@ mod tests {
         for f in ["schedule", "schedules", "unschedule"] {
             assert!(granted.contains(&f), "a scheduling view holds `{f}`");
         }
-        for f in ["amnemon", "mnemon", "verify_commitment"] {
+        for f in ["amnemon", "mnemon", "commit", "verify_commitment"] {
             assert!(granted.contains(&f), "a fueled view holds `{f}`");
         }
         assert!(granted.contains(&"ral"), "the always-tools are present");
@@ -213,7 +214,7 @@ mod tests {
                 "an ungranted view withholds the wakeup tool `{f}`"
             );
         }
-        for f in ["amnemon", "mnemon", "verify_commitment"] {
+        for f in ["amnemon", "mnemon", "commit", "verify_commitment"] {
             assert!(
                 !withheld.contains(&f),
                 "an out-of-fuel view withholds the spawn tool `{f}`"

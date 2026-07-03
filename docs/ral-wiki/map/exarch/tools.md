@@ -1,5 +1,5 @@
 ---
-generated_at_commit: ad14511
+generated_at_commit: 5d9f588
 generated_at_date: 2026-07-03
 covers_paths: [exarch/src/tools.rs, exarch/src/tools/]
 ---
@@ -35,22 +35,31 @@ The tools that ship:
   the [[map/exarch/frontend|rail]]; the full `cmd` opens in the collapsible
   tool-call block). A fixed 30s call timeout bounds inline work; anything longer
   belongs in a `spawn` that outlives the turn.
-- `verify_commitment` (`tools/commitment.rs`) — a host-prompted check for one
-  live protected `commitment:*` pin
+- `commit` / `verify_commitment` (`tools/commitment.rs`) — the write and check
+  halves of a protected `commitment:*` pin
   ([[decisions/260703_protected-commitment-pins|protected-commitment-pins]]).
-  The model supplies only `key`; the tool reads the saved pin card from the
-  agent mirror, builds the verifier prompt itself, and — like `amnemon`/
-  `mnemon` — launches the check through the shared `spawn_async` (`tools/
-  agent.rs`): launch-only and always asynchronous, forking a read-only-narrowed
-  `amnemon` child and returning a start receipt immediately rather than
-  blocking the turn. The worker thread that drives the child tags its settled
-  result once it holds the raw reply; the pin clears on the *parent's* own
-  thread, at drain (`Agent::settle_commitment`), only when that tag names a
-  structured `commitment_verdict` whose `commitment_key` matches and whose
-  verdict is `pass`. A fail, unknown, malformed reply, or child failure leaves
-  the pin untagged and live, so the ordinary nudge path keeps the actor
-  restless. Shares the same `Gate::Spawns` fuel ceiling as `amnemon`/`mnemon`,
-  since it forks a child the same way.
+  Both are launch-only and always asynchronous, like `amnemon`/`mnemon`,
+  through the shared `spawn_async` (`tools/agent.rs`): each forks a
+  read-only-narrowed `amnemon` child and returns a start receipt immediately
+  rather than blocking the turn, and shares the same `Gate::Spawns` fuel
+  ceiling since each forks a child the same way. The worker thread that drives
+  the child tags its settled result once it holds the raw reply; the parent
+  applies that tag to the pin register on its *own* thread, at drain
+  (`Agent::settle_commitment`) — first the state, then, only on success,
+  projecting the same change to the viewport.
+  - `commit` — the model supplies `{key, description}`: it chooses the key and
+    describes intent in its own words, but not the criteria. The host builds a
+    writer prompt from the description and opens the pin only when the
+    settled reply is a structured `commitment_card` whose `commitment_key`
+    matches and which carries at least one criterion; refused up front,
+    without ever forking, if that key is already a live commitment.
+  - `verify_commitment` — the model supplies only `key`. The host reads the
+    saved pin card, builds the verifier prompt itself, and clears the pin only
+    when the settled reply is a structured `commitment_verdict` whose
+    `commitment_key` matches and whose verdict is `pass`.
+  A fail, mismatch, missing criteria, or child failure leaves the pin
+  untagged — live for `commit`'s target key, unchanged for
+  `verify_commitment`'s — so the ordinary nudge path keeps the actor restless.
 - the **spawn family** — `amnemon` / `mnemon` / `agents` / `message` /
   `agent_cancel`
   (`tools/agent.rs`). Spawning is universal, but `amnemon`/`mnemon` are

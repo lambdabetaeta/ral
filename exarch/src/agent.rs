@@ -1296,11 +1296,13 @@ impl Agent {
         }
     }
 
-    /// Host projection for a verifier pass: clear the protected pin in the
-    /// session mirror and on the viewport.  The model cannot reach this path;
-    /// ordinary `surface` unpins for the same prefix are rejected in
-    /// `shell_eval`.
-    pub(crate) fn clear_commitment_pin(&mut self, key: &str, emit: &Emitter) -> Result<(), String> {
+    /// Host projection for a writer's formalized commitment: set the
+    /// protected pin in the session mirror.  Pure state — projecting it to
+    /// the viewport is the caller's separate step
+    /// ([`Self::settle_commitment`]).  Refused if the key is already live: a
+    /// commitment, once open, can only be closed by a verifier, never
+    /// silently replaced.
+    fn set_commitment_pin(&mut self, key: &str, card: crate::card::Card) -> Result<(), String> {
         if !shell_eval::is_commitment_pin(key) {
             return Err(format!(
                 "`{key}` is not a protected commitment pin; expected `{}<id>`",
@@ -1311,25 +1313,65 @@ impl Agent {
             .pins
             .lock()
             .map_err(|_| "commitment pin register is unavailable".to_string())?;
-        if m.remove(key).is_some() {
-            emit.emit(Kind::Unpin {
-                key: key.to_string(),
-            });
+        if m.contains_key(key) {
+            return Err(format!(
+                "`{key}` is already a live commitment; verify or clear it before opening a new one"
+            ));
         }
+        m.insert(
+            key.to_string(),
+            shell_eval::PinDigest {
+                kind: shell_eval::PinKind::Commitment,
+                card,
+            },
+        );
         Ok(())
     }
 
-    /// A settled `verify_commitment` child that returned a passing verdict
-    /// clears its protected pin here, on the parent's own thread — the
-    /// worker thread that drove the child never holds `&mut Agent` on the
-    /// parent, only the mailbox it posted through
-    /// ([`spawn_async`](crate::tools::agent::spawn_async)).  Every other
-    /// drained turn is untagged and this is a no-op.
+    /// Host projection for a verifier pass: clear the protected pin in the
+    /// session mirror.  Pure state — projecting the clear to the viewport is
+    /// the caller's separate step ([`Self::settle_commitment`]).  The model
+    /// cannot reach this path; ordinary `surface` unpins for the same prefix
+    /// are rejected in `shell_eval`.
+    fn unset_commitment_pin(&mut self, key: &str) -> Result<bool, String> {
+        if !shell_eval::is_commitment_pin(key) {
+            return Err(format!(
+                "`{key}` is not a protected commitment pin; expected `{}<id>`",
+                shell_eval::COMMITMENT_PIN_PREFIX
+            ));
+        }
+        let mut m = self
+            .pins
+            .lock()
+            .map_err(|_| "commitment pin register is unavailable".to_string())?;
+        Ok(m.remove(key).is_some())
+    }
+
+    /// A settled `commit`/`verify_commitment` child tags its result with
+    /// what the parent should do to the pin register
+    /// ([`spawn_async`](crate::tools::agent::spawn_async)), decided on the
+    /// worker thread that drove it since only that thread ever holds the raw
+    /// reply.  This applies the tag here, on the parent's own thread, at
+    /// drain — first the state (`set`/`unset`), then, only on success,
+    /// projecting the same change to the viewport.  An untagged settle
+    /// (every ordinary `amnemon`/`mnemon`) is a no-op.
     fn settle_commitment(&mut self, turn: &Turn, emit: &Emitter) {
-        if let Turn::Agent(r) = turn
-            && let Some(key) = r.commitment_pass.as_deref()
-        {
-            let _ = self.clear_commitment_pin(key, emit);
+        let Turn::Agent(r) = turn else { return };
+        match &r.commitment_settle {
+            Some(shell_eval::CommitmentSettle::Open { key, card }) => {
+                if self.set_commitment_pin(key, card.clone()).is_ok() {
+                    emit.emit(Kind::Pin {
+                        key: key.clone(),
+                        card: card.clone(),
+                    });
+                }
+            }
+            Some(shell_eval::CommitmentSettle::Clear(key))
+                if self.unset_commitment_pin(key).unwrap_or(false) =>
+            {
+                emit.emit(Kind::Unpin { key: key.clone() });
+            }
+            Some(shell_eval::CommitmentSettle::Clear(_)) | None => {}
         }
     }
 
@@ -2068,8 +2110,8 @@ mod tests {
     /// of the async settle, exercised directly rather than through a real
     /// spawned thread and provider round-trip.
     #[test]
-    fn settle_commitment_pass_clears_the_pin() {
-        let dir = tmp("settle-commitment-pass");
+    fn settle_commitment_clear_removes_the_pin() {
+        let dir = tmp("settle-commitment-clear");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         let key = "commitment:abc";
         session.insert_commitment_pin_for_test(
@@ -2091,12 +2133,47 @@ mod tests {
             log_dir: dir,
             elapsed: std::time::Duration::from_secs(0),
             generation: 0,
-            commitment_pass: Some(key.to_string()),
+            commitment_settle: Some(shell_eval::CommitmentSettle::Clear(key.to_string())),
         });
         session.settle_commitment(&turn, &emit);
         assert!(
             session.commitment_card(key).is_err(),
-            "a tagged pass must clear the pin"
+            "a tagged clear must remove the pin"
+        );
+    }
+
+    /// A settled `commit` child tagged with a formalized card opens the
+    /// protected pin when its result drains.
+    #[test]
+    fn settle_commitment_open_sets_the_pin() {
+        let dir = tmp("settle-commitment-open");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let key = "commitment:abc";
+        let card = crate::card::Card(vec![crate::card::Mark::Text {
+            spans: vec![crate::card::Span {
+                role: None,
+                text: "tests pass".into(),
+            }],
+        }]);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let emit = Emitter::new(tx, session.id);
+        let turn = Turn::Agent(crate::bus::AgentResult {
+            id: fresh_id(),
+            title: "commit-abc".into(),
+            outcome: AgentOutcome::Complete,
+            text: "writer formalized the commitment".into(),
+            log_dir: dir,
+            elapsed: std::time::Duration::from_secs(0),
+            generation: 0,
+            commitment_settle: Some(shell_eval::CommitmentSettle::Open {
+                key: key.to_string(),
+                card,
+            }),
+        });
+        session.settle_commitment(&turn, &emit);
+        assert!(
+            session.commitment_card(key).is_ok(),
+            "a tagged open must set the pin"
         );
     }
 
@@ -2126,7 +2203,7 @@ mod tests {
             log_dir: dir,
             elapsed: std::time::Duration::from_secs(0),
             generation: 0,
-            commitment_pass: None,
+            commitment_settle: None,
         });
         session.settle_commitment(&turn, &emit);
         assert!(

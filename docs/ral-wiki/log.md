@@ -3628,3 +3628,20 @@ verdict returned as a JSON-encoded string, since `reply`'s schema does not
 require a native object. `SPAWN_FUEL` lowered to 3. Re-stamped
 [[design/pins|pins]], [[map/exarch/agent|agent]], and
 [[map/exarch/tools|tools]].
+
+## [2026-07-03] ingest | commit: the missing writer half of commitment pins
+
+Added `commit` (`tools/commitment.rs`), the write-side counterpart
+`verify_commitment` never had: the actor supplies `{key, description}`, the
+host builds a writer prompt from the description and launches an `amnemon`
+child through the same `spawn_async` `verify_commitment` uses, and opens the
+pin — on the parent's own thread, at drain — only when the settled reply is a
+structured `commitment_card` for the same key carrying at least one
+criterion. Refused up front, before ever forking, if the key is already a
+live commitment. `CommitmentSettle` (`shell_eval.rs`) generalizes the settle
+tag from a bare clear-key string to `Open{key, card} | Clear(key)`, and
+`Agent::settle_commitment` now sets/unsets the pin as pure state before
+separately projecting the same change to the viewport
+(`Kind::Pin`/`Kind::Unpin`). Without this, no live commitment pin could ever
+exist outside a test helper. Re-stamped [[design/pins|pins]],
+[[map/exarch/agent|agent]], and [[map/exarch/tools|tools]].

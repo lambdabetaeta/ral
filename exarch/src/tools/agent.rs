@@ -314,37 +314,47 @@ fn dispatch_spawn(
             tool: kind.tool(),
             title,
             prompt,
-            commitment_key: None,
+            commitment: None,
         },
         emit,
     )
 }
 
+/// Which commitment-register operation, if any, a settled spawn's structured
+/// reply should be checked against — computed by
+/// [`commitment::commitment_settle`](super::commitment::commitment_settle) on
+/// the worker thread while it still holds the raw payload.
+pub(super) enum CommitmentIntent {
+    /// A `commit` writer: on a matching, well-formed card, open this key.
+    Write(String),
+    /// A `verify_commitment` verifier: on a matching pass, clear this key.
+    Verify(String),
+}
+
 /// The tool-specific half of an async spawn: everything that varies between
-/// `amnemon`/`mnemon` and `verify_commitment`, as opposed to the fork-detach-
-/// register mechanics every one of them shares ([`spawn_async`]).
+/// `amnemon`/`mnemon` and `commit`/`verify_commitment`, as opposed to the
+/// fork-detach-register mechanics every one of them shares ([`spawn_async`]).
 pub(super) struct AsyncSpawn {
     pub tool: &'static str,
     pub title: String,
     pub prompt: String,
-    /// Set only for a `verify_commitment` spawn: the protected pin key whose
-    /// live status this settle should decide.  `None` for every ordinary
-    /// spawn, which can never tag a result for clearing.
-    pub commitment_key: Option<String>,
+    /// Set only for a `commit`/`verify_commitment` spawn. `None` for every
+    /// ordinary spawn, which can never tag a result for the pin register.
+    pub commitment: Option<CommitmentIntent>,
 }
 
 /// Fork-then-detach: hand an already-forked, already-capped `child` to a
 /// worker thread that drives it to completion off the parent's critical
 /// path, and return the immediate "started" receipt every spawn tool
 /// answers its dispatch with.  This is the one launch-only, always-
-/// asynchronous shape `amnemon`, `mnemon`, and `verify_commitment` share;
-/// each caller differs only in how it built `child` and `spec`.
+/// asynchronous shape `amnemon`, `mnemon`, `commit`, and `verify_commitment`
+/// share; each caller differs only in how it built `child` and `spec`.
 ///
-/// `spec.commitment_key`, when `Some`, marks this spawn as a
+/// `spec.commitment`, when `Some`, marks this spawn as a `commit`/
 /// `verify_commitment` check: the worker computes — while it still holds the
-/// child's raw reply, before that detail is discarded — whether the
-/// structured verdict passed, and tags the settled [`AgentResult`] so the
-/// parent clears the protected pin when the result drains
+/// child's raw reply, before that detail is discarded — what the structured
+/// reply decides, and tags the settled [`AgentResult`] so the parent applies
+/// it to the protected pin register when the result drains
 /// ([`Agent::drive`](crate::agent::Agent::drive)).
 pub(super) fn spawn_async(
     session: &mut Agent,
@@ -357,7 +367,7 @@ pub(super) fn spawn_async(
         tool,
         title,
         prompt,
-        commitment_key,
+        commitment,
     } = spec;
     // Capture everything off the child before it moves into the worker
     // thread: its identity, log directory, own cancellation token and
@@ -442,11 +452,11 @@ pub(super) fn spawn_async(
                 .as_ref()
                 .map(crate::agent::render_reply)
                 .unwrap_or_default();
-            // A commitment verifier's structured reply decides here, on the
-            // worker thread, while the raw payload is still in hand — the
-            // parent only ever sees the tag, never the payload itself.
-            let commitment_pass =
-                super::commitment::commitment_settle(commitment_key, &outcome, &payload);
+            // A commitment writer/verifier's structured reply decides here,
+            // on the worker thread, while the raw payload is still in hand —
+            // the parent only ever sees the tag, never the payload itself.
+            let commitment_settle =
+                commitment.and_then(|i| super::commitment::commitment_settle(i, &outcome, &payload));
             // Deliver only if still the live worker of the current
             // generation; a result from before a `/clear` is dropped, not
             // posted into a rebuilt context.
@@ -459,7 +469,7 @@ pub(super) fn spawn_async(
                     log_dir,
                     elapsed: started.elapsed(),
                     generation,
-                    commitment_pass,
+                    commitment_settle,
                 }));
             }
         })

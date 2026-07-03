@@ -1,5 +1,5 @@
 ---
-generated_at_commit: ad14511
+generated_at_commit: 5d9f588
 generated_at_date: 2026-07-03
 covers_paths: [exarch/src/agent.rs, exarch/src/agent_registry.rs, exarch/src/event.rs, exarch/src/fleet.rs, exarch/src/nudge.rs, exarch/src/digest.rs]
 ---
@@ -113,12 +113,12 @@ while it still holds a live commitment is nudged for both. Exhausted transport
 and rate-limit failures are provider facts, so they surface as
 `Kind::ProviderError` and do not post a model-visible self-nudge.
 
-The same agent owns the protected pin mirror read/clear helpers used by
-`verify_commitment`: a settled verifier's passing result is tagged for
-clearing by the worker thread that drove it, and `Agent::settle_commitment`
-projects that tag into a clear (`Kind::Unpin`) on the parent's own thread as
-the result drains — ordinary model-authored `surface` cannot reach that clear
-path.
+The same agent owns the protected pin mirror read/set/clear helpers used by
+`commit`/`verify_commitment`: a settled writer's formalized card, or a settled
+verifier's passing result, is tagged by the worker thread that drove it, and
+`Agent::settle_commitment` projects that tag — an open (`Kind::Pin`) or a
+clear (`Kind::Unpin`) — on the parent's own thread as the result drains.
+Ordinary model-authored `surface` cannot reach either path.
 
 ## The Fleet
 

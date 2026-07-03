@@ -141,12 +141,12 @@ pub struct AgentResult {
     /// after a `/clear`) is rejected at drain rather than delivered into a
     /// rebuilt context.
     pub generation: u64,
-    /// Set only when this child was a host-orchestrated `verify_commitment`
-    /// verifier that returned a passing structured verdict: the protected
-    /// pin key the parent clears when this result drains.  The worker thread
-    /// computes this — not the parent — since only it still holds the raw
-    /// reply payload the verdict check needs.
-    pub commitment_pass: Option<String>,
+    /// Set only when this child was a host-orchestrated `commit`/
+    /// `verify_commitment` spawn: what the parent should do to the protected
+    /// pin register when this result drains.  The worker thread computes
+    /// this — not the parent — since only it still holds the raw reply
+    /// payload the decision needs.
+    pub commitment_settle: Option<crate::shell_eval::CommitmentSettle>,
 }
 
 impl AgentResult {

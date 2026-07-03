@@ -79,12 +79,18 @@ slot the user watches is reminded to keep it true, and the host never lets a
 protected obligation go quiet just because the agent holding it happens to be
 a sub-agent rather than the trunk.
 
-The actor can request a check on a live commitment through
-`verify_commitment`, whose input is only the protected key; the host reads the
-saved card, builds the verifier prompt itself, and launches an `amnemon`
-verifier the same launch-only, always-asynchronous way `amnemon`/`mnemon`
-launch any other child. The pin clears — on the host's own thread, as the
-verifier's settled result drains — only on a matching structured pass
+The actor opens a commitment through `commit`, whose input is `{key,
+description}` — it chooses the key and describes intent in its own words, but
+not the criteria that make it falsifiable. The host builds a writer prompt
+from the description and launches an `amnemon` writer the same launch-only,
+always-asynchronous way `amnemon`/`mnemon` launch any other child; the pin
+opens — on the host's own thread, as the writer's settled result drains —
+only when that reply is a structured, matching card carrying at least one
+criterion, refused up front if the key is already live. The actor can then
+request a check through `verify_commitment`, whose input is only the
+protected key; the host reads the saved card, builds the verifier prompt
+itself, and launches an `amnemon` verifier the same way. The pin clears —
+again on the host's own thread, at drain — only on a matching structured pass
 verdict; nothing else, and no one but a verifier, ever clears one.
 
 ## Why this shape
