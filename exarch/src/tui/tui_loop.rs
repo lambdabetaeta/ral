@@ -88,6 +88,16 @@ impl Control for ReplControl<'_> {
             let topic = rest;
             if topic.is_empty() {
                 session.note_error("usage: /discuss <prompt>".into(), emit);
+            } else if session.fuel() < 2 {
+                // The chair needs one unit to be born and a second to spawn
+                // its partner; below that the chair would seat with no
+                // `agraphos` in its view and the debate could never start.
+                session.note_error(
+                    "discuss needs a chair and a partner — this agent's spawn \
+budget is too low to seat both"
+                        .into(),
+                    emit,
+                );
             } else {
                 let receipt = crate::tools::spawn_discussion(session, topic, emit);
                 session.note(format!("discussion started: {receipt}"), emit);

@@ -35,19 +35,27 @@ mod schedule;
 /// advertised to the provider nor dispatchable, so there is no separate
 /// permission predicate to keep in sync.
 pub(crate) enum Gate {
-    /// Unconditionally present: `ral`, the spawn family, `fff`.
+    /// Unconditionally present: `ral`, `agents`/`message`/`agent_cancel`, `fff`.
     Always,
     /// Present only on a **returning** agent — `reply`, the way an agent hands
     /// a value back.  Withheld from the interactive trunk, which converses with
     /// the user across turns and never returns, so returning is meaningless
-    /// there.  Spawning is universal ([[decisions/260624_uniform-agent-nodes]]),
-    /// so this is the only axis separating the trunk from its sub-agents.
+    /// there.  Spawning is uniform across every agent
+    /// ([[decisions/260624_uniform-agent-nodes]]) but not unconditional — see
+    /// [`Spawns`](Self::Spawns) — so this and `Spawns` are the two axes
+    /// separating the trunk from its sub-agents.
     Returns,
     /// Present only under the `--allow-schedule` grant — the self-wakeup family
     /// (`schedule`, `schedules`, `unschedule`).  An agent that can wake itself
     /// indefinitely holds real authority, so the grant is off by default and
     /// inherited by a fork from its parent.
     Schedules,
+    /// Present only while the agent's spawn fuel is nonzero — `agraphos` /
+    /// `anamnesis`.  Every agent may spawn, but each fork spends one unit of
+    /// the parent's fuel on the child, so a delegation chain's tools vanish a
+    /// fixed number of generations down rather than recursing forever
+    /// ([[decisions/260703_spawn-fuel-ceiling]]).
+    Spawns,
 }
 
 /// One registered tool.  The registry stores `Box<dyn Tool>` and
@@ -65,7 +73,8 @@ pub(crate) trait Tool: Send + Sync {
 
     /// Which axis gates this tool out of an agent's view ([`tools_for`]);
     /// [`Gate::Always`] for the unconditional majority.  Overridden by `reply`
-    /// ([`Gate::Returns`]) and the self-wakeup family ([`Gate::Schedules`]).
+    /// ([`Gate::Returns`]), the self-wakeup family ([`Gate::Schedules`]), and
+    /// the spawn family ([`Gate::Spawns`]).
     fn gate(&self) -> Gate {
         Gate::Always
     }
@@ -107,11 +116,12 @@ fn registry() -> &'static [Box<dyn Tool>] {
 }
 
 /// The tools an agent may call — a per-agent view into the static [`registry`],
-/// shaped by the two gate axes.  `returns` admits `reply`; `schedules` admits
-/// the self-wakeup family.  The result is the agent's single source of truth:
-/// it is both advertised to the provider and searched on dispatch, so a tool
-/// absent here is invisible and uncallable, with no separate predicate.
-pub(crate) fn tools_for(returns: bool, schedules: bool) -> Vec<&'static dyn Tool> {
+/// shaped by the three gate axes.  `returns` admits `reply`; `schedules` admits
+/// the self-wakeup family; `can_spawn` admits `agraphos`/`anamnesis`.  The
+/// result is the agent's single source of truth: it is both advertised to the
+/// provider and searched on dispatch, so a tool absent here is invisible and
+/// uncallable, with no separate predicate.
+pub(crate) fn tools_for(returns: bool, schedules: bool, can_spawn: bool) -> Vec<&'static dyn Tool> {
     registry()
         .iter()
         .map(|b| b.as_ref())
@@ -119,6 +129,7 @@ pub(crate) fn tools_for(returns: bool, schedules: bool) -> Vec<&'static dyn Tool
             Gate::Always => true,
             Gate::Returns => returns,
             Gate::Schedules => schedules,
+            Gate::Spawns => can_spawn,
         })
         .collect()
 }
@@ -167,25 +178,29 @@ pub(super) fn u64_field(input: &Value, field: &str) -> Option<u64> {
 mod tests {
     use super::*;
 
-    /// The two gate axes select tools independently: `reply` rides `returns`,
-    /// the self-wakeup family rides `schedules`, and the rest are unconditional.
+    /// The three gate axes select tools independently: `reply` rides
+    /// `returns`, the self-wakeup family rides `schedules`, the spawn family
+    /// rides `can_spawn`, and the rest are unconditional.
     #[test]
-    fn tools_for_gates_reply_and_the_wakeup_family() {
-        let names = |returns, schedules| {
-            tools_for(returns, schedules)
+    fn tools_for_gates_reply_wakeup_and_spawn_families() {
+        let names = |returns, schedules, can_spawn| {
+            tools_for(returns, schedules, can_spawn)
                 .iter()
                 .map(|t| t.name())
                 .collect::<Vec<_>>()
         };
 
-        let granted = names(true, true);
+        let granted = names(true, true, true);
         assert!(granted.contains(&"reply"), "a returning view holds `reply`");
         for f in ["schedule", "schedules", "unschedule"] {
             assert!(granted.contains(&f), "a scheduling view holds `{f}`");
         }
+        for f in ["agraphos", "anamnesis"] {
+            assert!(granted.contains(&f), "a fueled view holds `{f}`");
+        }
         assert!(granted.contains(&"ral"), "the always-tools are present");
 
-        let withheld = names(false, false);
+        let withheld = names(false, false, false);
         assert!(
             !withheld.contains(&"reply"),
             "the conversing view withholds `reply`"
@@ -196,9 +211,19 @@ mod tests {
                 "an ungranted view withholds the wakeup tool `{f}`"
             );
         }
+        for f in ["agraphos", "anamnesis"] {
+            assert!(
+                !withheld.contains(&f),
+                "an out-of-fuel view withholds the spawn tool `{f}`"
+            );
+        }
         assert!(
             withheld.contains(&"ral"),
-            "the always-tools survive both axes off"
+            "the always-tools survive every axis off"
+        );
+        assert!(
+            withheld.contains(&"agents"),
+            "the spawn-management tools stay unconditional even out of fuel"
         );
     }
 }

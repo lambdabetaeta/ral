@@ -63,9 +63,11 @@ with a start receipt `{id, title, status, log_dir}`.  The child runs the same \
 agent loop off your critical path; its single reply is delivered to you LATER \
 as its own marked turn when it finishes.  To fan out independent work, spawn \
 several and combine their results when they land; poll live ones with `agents` \
-and stop one with `agent_cancel`.  A sub-agent may itself spawn sub-agents, so \
-deep delegation trees are possible — `agent_cancel` on one stops its whole \
-subtree.\n\n\
+and stop one with `agent_cancel`.  A sub-agent may itself spawn sub-agents, but \
+delegation depth is finite: each spawn spends one unit of your own spawn budget \
+on the child, and once a descendant's budget reaches zero this tool disappears \
+from its view, so a chain cannot recurse forever — `agent_cancel` on any node \
+stops its whole live subtree regardless of depth.\n\n\
 This is expensive: the child is a fresh model session that re-pays the entire \
 system prompt and does not share your conversation — it sees a value-snapshot \
 of your shell (your `let` bindings, cwd, env) but none of your reasoning or \
@@ -95,7 +97,8 @@ do NOT propagate back; you receive a string, not its bindings or intermediate \
 findings.  File edits it makes to the working tree are real and persist.  Use \
 anamnesis when context reuse matters; use `agraphos` when isolation and a blank \
 conversation are better.  `permissions` bounds the child to at most your own \
-authority."
+authority; delegation depth is likewise finite — each spawn spends one unit of \
+your own spawn budget on the child, so a chain cannot recurse forever."
             }
         }
     }
@@ -172,6 +175,10 @@ impl Tool for SpawnTool {
 
     fn desc(&self) -> &'static str {
         self.kind.desc()
+    }
+
+    fn gate(&self) -> super::Gate {
+        super::Gate::Spawns
     }
 
     fn schema(&self) -> &'static Value {

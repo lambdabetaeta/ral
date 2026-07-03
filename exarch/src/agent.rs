@@ -60,6 +60,12 @@ pub struct Agent {
     /// indefinitely); every asymmetry is read from this field plus
     /// `interactive`/`focus`, never an `is_root` branch.
     parent: Option<AgentId>,
+    /// Remaining spawn budget, decremented by one at each [`Self::fork`].
+    /// Zero clears [`Gate::Spawns`](crate::tools::Gate::Spawns) from this
+    /// agent's [`tools_for`](crate::tools::tools_for) view, so a delegation
+    /// chain terminates by tool absence rather than recursing forever. The
+    /// trunk starts at [`SPAWN_FUEL`]; a fork hands its child one less.
+    fuel: u32,
     /// This agent's own hot-swappable provider.  A `/model` on the focused
     /// agent swaps *its* handle alone; a `fork` seeds the child's own handle
     /// from this one's current provider, so neither disturbs the other.  The
@@ -179,6 +185,15 @@ pub enum TurnOutcome {
 /// reaches it.
 const MAX_STEPS: u32 = 250;
 
+/// Spawn budget the trunk starts with; each [`Agent::fork`] hands its child
+/// one less, and a `fuel == 0` agent loses the spawn tools from its view
+/// ([`tools_for`](crate::tools::tools_for)). Generous enough that no
+/// legitimate delegation tree — `/discuss`'s chair and partner, a human's
+/// multi-hop refactor fan-out — ever runs dry; bounds a runaway spawn-calling
+/// loop to a fixed number of generations instead of the process exhausting
+/// threads.
+const SPAWN_FUEL: u32 = 8;
+
 pub(crate) fn fresh_id() -> AgentId {
     static N: AtomicU64 = AtomicU64::new(0);
     N.fetch_add(1, Ordering::Relaxed)
@@ -258,6 +273,7 @@ struct Build {
     shell: Shell,
     log: AgentLog,
     parent: Option<AgentId>,
+    fuel: u32,
     provider: ProviderHandle,
     focus: Arc<AtomicU64>,
     interactive: bool,
@@ -275,6 +291,7 @@ impl Agent {
             mut shell,
             log,
             parent,
+            fuel,
             provider,
             focus,
             interactive,
@@ -318,6 +335,7 @@ impl Agent {
             wire,
             caps,
             parent,
+            fuel,
             provider,
             focus,
             interactive,
@@ -391,6 +409,7 @@ impl Agent {
             shell,
             log,
             parent: None,
+            fuel: SPAWN_FUEL,
             provider: ProviderHandle::new(provider),
             // The focus handle is fleet-shared; off the TUI it never moves, so
             // it starts at the no-focus sentinel.  The conversing trunk parks
@@ -401,7 +420,7 @@ impl Agent {
             // The interactive trunk converses and never returns, so it withholds
             // `reply`; a headless trunk is a returning agent.  Either way the
             // session's self-wakeup grant shapes the view.
-            tools: crate::tools::tools_for(!interactive, allow_schedule),
+            tools: crate::tools::tools_for(!interactive, allow_schedule, SPAWN_FUEL > 0),
             agents: crate::agent_registry::AgentRegistry::new(),
         })?;
         agent.register_self();
@@ -474,6 +493,9 @@ impl Agent {
         let shell = self.transport.shell_mut().shell.fork_session();
         let child_id = fresh_id();
         let log = self.log.fork(child_id, self.system.len())?;
+        // One less than the parent's — the child's ceiling on how many more
+        // generations it may itself spawn before the tools disappear.
+        let fuel = self.fuel.saturating_sub(1);
         Self::assemble(Build {
             system: self.system.clone(),
             caps,
@@ -482,6 +504,7 @@ impl Agent {
             // The spawning agent is the child's parent — the tree edge that
             // makes the child a node at this depth and carries the cascade.
             parent: Some(self.id),
+            fuel,
             // The child seeds its own handle from the parent's current provider,
             // so a later `/model` on either never disturbs the other.
             provider: ProviderHandle::new(self.provider.current()),
@@ -489,10 +512,11 @@ impl Agent {
             // a child becomes parkable the instant the human `TAB`s to it.
             focus: self.focus.clone(),
             interactive: self.interactive,
-            // Every agent spawns now; a sub-agent returns through `reply`.
-            // Self-scheduling authority is inherited: a `--allow-schedule` trunk
-            // grants its descendants the same right to wake themselves.
-            tools: crate::tools::tools_for(true, self.grants_schedule()),
+            // Every agent spawns while its fuel lasts; a sub-agent returns
+            // through `reply`.  Self-scheduling authority is inherited: a
+            // `--allow-schedule` trunk grants its descendants the same right
+            // to wake themselves.
+            tools: crate::tools::tools_for(true, self.grants_schedule(), fuel > 0),
             // One shared fleet registry: the child registers into the same map,
             // so the tree is whole at any depth.
             agents: self.agents.clone(),
@@ -581,10 +605,11 @@ impl Agent {
             shell,
             log,
             parent: None,
+            fuel: SPAWN_FUEL,
             provider,
             focus: Arc::new(AtomicU64::new(NO_FOCUS)),
             interactive: false,
-            tools: crate::tools::tools_for(true, false),
+            tools: crate::tools::tools_for(true, false, SPAWN_FUEL > 0),
             agents: crate::agent_registry::AgentRegistry::new(),
         })?;
         agent.register_self();
@@ -1175,6 +1200,12 @@ impl Agent {
         &self.caps
     }
 
+    /// This agent's remaining spawn budget — read by `/discuss` to refuse
+    /// seating a chair that could not itself spawn a partner.
+    pub(crate) fn fuel(&self) -> u32 {
+        self.fuel
+    }
+
     /// Whether this agent holds the self-wakeup family — read by [`Self::fork`]
     /// so a child inherits the parent's `--allow-schedule` grant.  Derived from
     /// the tool view itself, keeping it the one source of truth.
@@ -1595,8 +1626,8 @@ mod tests {
     }
 
     /// A forked child inherits the parent's installed builtin surface, not
-    /// just the core set a bare `Shell::new` seeds, and may itself spawn — the
-    /// tree is unbounded in depth.
+    /// just the core set a bare `Shell::new` seeds, and records its parent for
+    /// the subtree cascade.
     #[test]
     fn fork_inherits_host_builtins_and_can_spawn() {
         let dir = tmp("fork-builtins");
@@ -1630,6 +1661,29 @@ mod tests {
             Some(session.id),
             "a fork records its parent for the subtree cascade"
         );
+    }
+
+    /// Each fork spends one unit of the parent's spawn budget, and a `fuel ==
+    /// 0` agent loses the spawn tools from its view — the chain terminates by
+    /// tool absence rather than recursing forever.
+    #[test]
+    fn fork_chain_runs_out_of_spawn_fuel() {
+        let dir = tmp("spawn-fuel");
+        let mut agent = Agent::for_test(&dir, "system").unwrap();
+        assert_eq!(agent.fuel, SPAWN_FUEL);
+        for expected in (0..SPAWN_FUEL).rev() {
+            agent = agent.fork(agent.caps().clone()).expect("fork child");
+            assert_eq!(agent.fuel, expected);
+            assert_eq!(
+                agent.fuel > 0,
+                agent
+                    .tools
+                    .iter()
+                    .any(|t| matches!(t.gate(), crate::tools::Gate::Spawns)),
+                "the spawn tools track this agent's remaining fuel exactly"
+            );
+        }
+        assert_eq!(agent.fuel, 0, "the chain must bottom out at zero, not wrap");
     }
 
     /// The provider is per-agent: a `fork` seeds its own handle from the

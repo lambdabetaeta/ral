@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fe9d819
-generated_at_date: 2026-07-02
+generated_at_commit: 1631d78
+generated_at_date: 2026-07-03
 covers_paths: [exarch/src/tools.rs, exarch/src/tools/]
 ---
 
@@ -14,11 +14,16 @@ join phase. Each tool owns its own input parsing and invalid-input UX; nothing
 in `provider.rs` or `agent.rs` knows a tool's shape. Adding a tool is a
 sibling module under `tools/` listed in `registry()`.
 
-**Tool membership is the gate.** `tools_for(returns, schedules)` filters the
-static registry by a small `Gate`: `Always`, `Returns`, or `Schedules`. Spawning
-is universal — every agent may spawn, so the tree is unbounded in depth
+**Tool membership is the gate.** `tools_for(returns, schedules, can_spawn)`
+filters the static registry by a small `Gate`: `Always`, `Returns`,
+`Schedules`, or `Spawns`. Spawning is universal — every agent may spawn,
+so the tree is not capped at one level
 ([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]], superseding the
-depth-1 `spawns()` axis). `reply` is present only for returning agents
+depth-1 `spawns()` axis) — but each `fork` spends one unit of the parent's
+`fuel` on the child, and `Gate::Spawns` withholds `agraphos`/`anamnesis` once
+an agent's `fuel` reaches zero, so a delegation chain bottoms out rather than
+recursing forever ([[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]]).
+`reply` is present only for returning agents
 ([[decisions/260623_reply-terminates-returning-agents]]); self-wakeup tools are
 present only under schedule authority.
 
@@ -32,8 +37,13 @@ The tools that ship:
   belongs in a `spawn` that outlives the turn.
 - the **spawn family** — `agraphos` / `anamnesis` / `agents` / `message` /
   `agent_cancel`
-  (`tools/agent.rs`), held by *every* agent (spawning is universal). `agraphos`
-  and `anamnesis` are launch-only and always asynchronous
+  (`tools/agent.rs`). Spawning is universal, but `agraphos`/`anamnesis` are
+  gated by `Gate::Spawns` on the agent's own `fuel` (nonzero for every fresh
+  fork down to a fixed depth,
+  [[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]]); `agents` /
+  `message` / `agent_cancel` stay `Gate::Always` since they manage already-live
+  agents rather than mint new ones. `agraphos` and `anamnesis` are launch-only
+  and always asynchronous
   ([[decisions/260617_async-agent-tool|async-agent-tool]]): each forks a child
   [[map/exarch/agent|agent]] from a value-snapshot of the parent shell, runs it on
   a detached thread through the same `Agent::drive` loop, and returns a start
@@ -51,14 +61,20 @@ The tools that ship:
   top, meaning *inherit the parent's authority verbatim*. `agents` lists live
   workers (id, title, elapsed, log dir); `message` posts a marked note to a live
   agent id through its inbox; `agent_cancel` stops one by id and cascades to its
-  subtree. A child may itself spawn, so the tree is unbounded in depth. The whole
-  sub-agent model — the `parent` predicate, spawning, marked peer messages,
-  returning, narrowing, and memory mode — is [[design/agents|agents]].
+  subtree. A child may itself spawn, each fork spending one unit of the
+  parent's `fuel` on it. The whole sub-agent model — the `parent` predicate,
+  spawning, marked peer messages, returning, narrowing, and memory mode — is
+  [[design/agents|agents]].
 - `spawn_discussion` (`tools.rs` → `tools/agent.rs`) — the host-only helper
   behind `/discuss`, not a model-advertised tool. It spawns an `anamnesis`
   returning chair with the focused context and instructs that chair to spawn one
   `agraphos` partner, consume the partner's ordinary `reply`, and return one
   `result` to its parent ([[decisions/260702_discuss-command|discuss-command]]).
+  It calls the fork primitive directly, bypassing `Gate::Spawns`, so the
+  `/discuss` command in `tui_loop.rs` separately refuses to seat a chair when
+  the focused agent's `fuel` is below 2 — the chair needs a unit to be born and
+  a second to spawn its own partner
+  ([[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]]).
 - `reply` (`tools/reply.rs`), gated by `replies()` — a returning agent's
   deliberate return value ([[decisions/260622_agent-reply-tool|agent-reply-tool]],
   extended to the headless trunk by

@@ -34,16 +34,22 @@ park. Parking is **computed, not stored** — the deleted `park_when_idle` flag
 becomes a `ParkMode` (`Held` / `UntilCancelled` / `Quiesce`) derived from
 `parent`/`interactive`/`focus`/`schedules` on every wake.
 
-## Uniform spawning: the tree is unbounded in depth
+## Uniform spawning: bounded by spawn fuel
 
-Spawning is **universal** — every agent may spawn, so the spawn tree is unbounded
-in depth rather than capped at one level. The old `spawns()` tool-set axis is
-gone; the spawn family is held by every agent, and the tool view differs only in
-`reply` and optional self-scheduling ([[map/exarch/tools|tools]]). Depth-N already
-worked structurally — a child registers in the fleet's registry and `fork`
-snapshots the parent's shell by value at any depth; only the withheld tool capped
-it ([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]], superseding the
-depth-1 cap of [[decisions/260617_async-agent-tool|async-agent-tool]]).
+Spawning is **universal** — every agent may spawn, so the spawn tree is not
+capped at one level. The old `spawns()` tool-set axis is gone; the spawn
+family is held by every agent whose `fuel` is nonzero, and the tool view
+otherwise differs only in `reply` and optional self-scheduling
+([[map/exarch/tools|tools]]). Depth-N works structurally — a child registers
+in the fleet's registry and `fork` snapshots the parent's shell by value at
+any depth — but each `fork` spends one unit of the parent's `fuel` on the
+child, and a `fuel == 0` agent loses the spawn tools from its view: a
+delegation chain terminates by tool absence a fixed number of generations
+down rather than recursing forever
+([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]], superseding the
+depth-1 cap of [[decisions/260617_async-agent-tool|async-agent-tool]];
+[[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]], bounding the depth
+that decision left open).
 
 The spawn tools are **launch-only and always asynchronous**
 ([[decisions/260617_async-agent-tool|async-agent-tool]]). One call:
@@ -176,4 +182,5 @@ over one shell tool), [[decisions/260624_uniform-agent-nodes|uniform-agent-nodes
 [[map/exarch/policy|policy]],
 [[decisions/260617_async-agent-tool|async-agent-tool]],
 [[decisions/260622_agent-reply-tool|agent-reply-tool]],
-[[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]].
+[[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]],
+[[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]].

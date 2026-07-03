@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 25e66c1
+generated_at_commit: 1631d78
 generated_at_date: 2026-07-03
 covers_paths: [exarch/src/agent.rs, exarch/src/agent_registry.rs, exarch/src/event.rs, exarch/src/fleet.rs, exarch/src/nudge.rs, exarch/src/digest.rs]
 ---
@@ -190,9 +190,13 @@ installed builtin table, and starts fresh in everything else — fresh control
 counters and a freshly-defaulted `SessionState`, so it holds **no terminal
 authority** (`TerminalAccess::Denied`, no lease — a sub-agent is not the
 foreground agent and can never seize the controlling terminal the TUI owns).
-There is no flow-back: the child's `cd`, env, and new bindings die with it. The
-spawn tree is **unbounded in depth** — every agent may spawn — and mirrors on the
-bus as `Kind::Born` / `Kind::Died`.
+There is no flow-back: the child's `cd`, env, and new bindings die with it. Every
+agent may spawn, but `fork` also computes the child's `fuel` as
+`self.fuel.saturating_sub(1)` (`SPAWN_FUEL = 8` at the trunk); a `fuel == 0`
+agent's `tools_for` view drops `agraphos`/`anamnesis`
+([[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]]), so a delegation
+chain bottoms out a fixed number of generations down. The fork mirrors on the
+bus as `Kind::Born` / `Kind::Died` regardless of remaining fuel.
 
 `fork_remembering` is the anamnesis variant: it uses the same shell/provider fork
 and asks `AgentLog` to import the parent's model-visible context. The spawn site

@@ -3586,3 +3586,15 @@ streaming no longer times out between decoded events, and `nudge` no longer
 turns exhausted transport/rate-limit failures into synthetic model-visible
 turns. Re-stamped [[map/exarch/provider|provider]] and
 [[map/exarch/agent|agent]].
+
+## [2026-07-03] ingest | Spawn fuel bounds delegation depth
+
+Landed [[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]]: `Agent`
+gains `fuel: u32` (trunk starts at `SPAWN_FUEL = 8`), `fork` spends one unit
+per child, and a new `Gate::Spawns` axis withholds `agraphos`/`anamnesis` once
+`fuel` reaches zero — a runaway delegation chain now terminates by tool
+absence rather than recursing forever. `/discuss` forks its chair outside the
+gate, so `tui_loop.rs` separately refuses to seat one below `fuel < 2`.
+Refines [[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]]'s
+unbounded-depth claim. Re-stamped [[design/agents|agents]],
+[[map/exarch/agent|agent]], [[map/exarch/tools|tools]].
