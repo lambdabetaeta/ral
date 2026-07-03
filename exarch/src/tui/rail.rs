@@ -52,7 +52,7 @@ pub(super) enum RailKind {
     Step,
     Error,
     /// The human turn's fence — a `❖` in the human's [`PROMPT_INK`], beside
-    /// the raised band, so the rail thumbnail still shows where each turn
+    /// the full-width rule, so the rail thumbnail still shows where each turn
     /// opens. The sole wearer of `❖`, so the glyph reads as "the human".
     Prompt,
 }

@@ -1426,7 +1426,6 @@ impl Agent {
         )
     }
 
-
     /// Stash a returning agent's deliberate return value — called from the
     /// `reply` tool's dispatch with the faithful [`serde_json::Value`] the
     /// model passed.  [`Self::apply`] lifts it into a [`TurnOutcome::Replied`]
@@ -2264,9 +2263,9 @@ mod tests {
             "clearing a key that was never live changes nothing, so nothing to report"
         );
 
-        match session.apply_commitment_settle(&Some(shell_eval::CommitmentSettle::Clear(
-            key.clone(),
-        ))) {
+        match session
+            .apply_commitment_settle(&Some(shell_eval::CommitmentSettle::Clear(key.clone())))
+        {
             Some(Kind::Unpin { key: k }) => assert_eq!(k, key),
             Some(_) => panic!("expected an Unpin event for a live clear, got some other Kind"),
             None => panic!("expected an Unpin event for a live clear, got none"),

@@ -455,8 +455,8 @@ pub(super) fn spawn_async(
             // A commitment writer/verifier's structured reply decides here,
             // on the worker thread, while the raw payload is still in hand —
             // the parent only ever sees the tag, never the payload itself.
-            let commitment_settle =
-                commitment.and_then(|i| super::commitment::commitment_settle(i, &outcome, &payload));
+            let commitment_settle = commitment
+                .and_then(|i| super::commitment::commitment_settle(i, &outcome, &payload));
             // Deliver only if still the live worker of the current
             // generation; a result from before a `/clear` is dropped, not
             // posted into a rebuilt context.

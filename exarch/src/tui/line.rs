@@ -42,6 +42,10 @@ pub(super) const SLATE: Color = Color::Rgb(140, 150, 170);
 /// hue of the row's unchanged remainder.
 pub(super) const LIME_HOT: Color = Color::Rgb(196, 240, 182);
 pub(super) const RED_HOT: Color = Color::Rgb(242, 142, 158);
+/// A faint raised plane for queued user prompts.  The prompt itself still
+/// renders through the normal rail/fence/body path; this wash only says "not
+/// yet delivered".
+pub(super) const QUEUED_PROMPT_BG: Color = Color::Rgb(72, 78, 94);
 /// The `/model` overlay's plane — the deep blue fill behind the floating,
 /// bezel-framed picker ([`super::picker`]). A Norton-Commander indigo, but
 /// pulled toward the app's muted set so the modal reads as a recessed panel
@@ -424,7 +428,7 @@ fn tool_call_body(
 
 /// Wash `row` with the background `bg`, preserving every span's foreground
 /// and modifiers — the single place a background stratum is painted: the
-/// recessed code panel, the pending-prompt band, and the `/legend` swatches.
+/// recessed code panel, queued-prompt plane, and `/legend` swatches.
 /// `fill_to` pads the row to that display width so the wash reads edge-to-edge
 /// (a panel); `None` lets it hug the spans (a swatch).
 pub(super) fn wash(row: Line<'static>, bg: Color, fill_to: Option<usize>) -> Line<'static> {

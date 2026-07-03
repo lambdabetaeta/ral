@@ -492,6 +492,22 @@ impl Inbox {
         self.shared.waiting_for_input.load(Ordering::Acquire)
     }
 
+    /// Pending user-authored steering prompts, oldest first, for the TUI's
+    /// queue strip.  Non-human deliveries and slash-command control turns stay
+    /// invisible here: they are work for the drive loop, not queued user text.
+    pub fn queued_user_messages(&self) -> Vec<String> {
+        self.shared
+            .queue
+            .lock()
+            .expect("inbox lock poisoned")
+            .iter()
+            .filter_map(|msg| match msg {
+                InboxMsg::UserSteering(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Pull every pending user prompt back out for editing at once — all the
     /// `UserSteering` messages in the queue, wherever they sit, leaving any
     /// non-user deliveries (a wakeup, an agent result, a `spawn`'s surface) in
@@ -1699,6 +1715,27 @@ mod tests {
         assert!(matches!(inbox.drain_turn(), Some(Turn::Command(s)) if s == "/model"));
         assert!(matches!(inbox.drain_turn(), Some(Turn::Human(s)) if s == "after model"));
         assert!(inbox.is_empty());
+    }
+
+    /// The TUI queue strip is a user-text projection, not a generic inbox
+    /// debugger: wakeups and control turns stay out, while user steering keeps
+    /// its queue order even when interleaved with them.
+    #[test]
+    fn inbox_queued_user_messages_shows_only_user_steering() {
+        let inbox = Inbox::new();
+        inbox.push(wakeup("morning", "@daily", "check"));
+        inbox.push_user("first".into());
+        inbox.push(InboxMsg::Command("/model".into()));
+        inbox.push_user("second".into());
+
+        assert_eq!(
+            inbox.queued_user_messages(),
+            vec!["first".to_string(), "second".to_string()]
+        );
+        assert!(matches!(inbox.drain_turn(), Some(Turn::Wakeup(_))));
+        assert!(matches!(inbox.drain_turn(), Some(Turn::Human(s)) if s == "first"));
+        assert!(matches!(inbox.drain_turn(), Some(Turn::Command(s)) if s == "/model"));
+        assert!(matches!(inbox.drain_turn(), Some(Turn::Human(s)) if s == "second"));
     }
 
     /// A queue with no user prompts yields `None`: a sole wakeup is not the

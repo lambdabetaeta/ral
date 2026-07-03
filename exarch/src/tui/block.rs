@@ -20,7 +20,7 @@ use super::md::{self, MD_INDENT};
 use super::rail::{self, RailKind};
 use crate::bus::Hunk;
 use crate::card::{Card, Mark, ObservationKind};
-use ratatui::style::Style;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::time::Duration;
 use unicode_width::UnicodeWidthChar;
@@ -161,6 +161,89 @@ pub(super) enum Reveal {
     Context,
     /// L3: the full source.
     Full,
+}
+
+/// Render pending user prompts through the same prompt chrome path committed
+/// prompts use in the viewport: [`line::user_prompt`] builds the body,
+/// [`Block::render_with`] seats the `❖` rail glyph, and
+/// [`append_visual_rows`] adds the prompt fence, terminal wrapping, and the
+/// queued-only wash.  The returned rows are capped for the frame's queue
+/// budget; any cap marker is chrome, not another prompt.
+pub(super) fn queued_prompt_rows(
+    messages: &[String],
+    width: u16,
+    max_rows: usize,
+) -> Vec<Line<'static>> {
+    if width == 0 || max_rows == 0 {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    for message in messages {
+        let mut prompt = Block::chrome(RailShape::Prompt, line::user_prompt(message));
+        let rows = prompt.lines(width, AgentSlot::default(), true);
+        let first = if out.is_empty() || out.last().is_some_and(line::is_blank) {
+            rows.iter().take_while(|row| line::is_blank(row)).count()
+        } else {
+            0
+        };
+        append_visual_rows(
+            &mut out,
+            &rows[first..],
+            width,
+            true,
+            Some(line::QUEUED_PROMPT_BG),
+        );
+    }
+
+    if out.len() > max_rows {
+        let hidden = out.len() - (max_rows - 1);
+        out.truncate(max_rows - 1);
+        out.push(line::wash(
+            Line::from(Span::styled(
+                format!("⋯ ({hidden} more)"),
+                Style::default()
+                    .fg(line::SLATE)
+                    .add_modifier(Modifier::ITALIC),
+            )),
+            line::QUEUED_PROMPT_BG,
+            Some(width as usize),
+        ));
+    }
+    out
+}
+
+/// Append block-rendered logical lines as visual rows.  This is the shared
+/// final step for transcript flattening and the queued-prompt projection:
+/// fold rows through [`wrap_line`], and when `prompt` is set, insert the same
+/// full-width prompt fence immediately before the first visible prompt row.
+/// `wash` preserves the same rows while tinting queued prompts as pending.
+pub(super) fn append_visual_rows(
+    out: &mut Vec<Line<'static>>,
+    lines: &[Line<'static>],
+    width: u16,
+    prompt: bool,
+    wash: Option<Color>,
+) -> usize {
+    let before = out.len();
+    let mut fenced = false;
+    for line in lines {
+        for vrow in wrap_line(line, width as usize) {
+            if prompt && !fenced && !line::is_blank(&vrow) {
+                out.push(wash_row(line::prompt_fence(width), width, wash));
+                fenced = true;
+            }
+            out.push(wash_row(vrow, width, wash));
+        }
+    }
+    out.len() - before
+}
+
+fn wash_row(row: Line<'static>, width: u16, wash: Option<Color>) -> Line<'static> {
+    match wash {
+        Some(bg) => line::wash(row, bg, Some(width as usize)),
+        None => row,
+    }
 }
 
 impl Reveal {

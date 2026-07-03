@@ -1,9 +1,9 @@
 //! Render loop: frame drawing and terminal output.
 //!
 //! The free function [`draw`] paints the whole frame — content area,
-//! tab bar / matrix, prompt editor, status line, and footer — into a
-//! [`Term`].  The helper functions paint selection and hover highlights
-//! into the line buffer before it reaches the terminal.
+//! queued-user strip, tab bar / matrix, prompt editor, status line, and
+//! footer — into a [`Term`].  The helper functions paint selection and hover
+//! highlights into the line buffer before it reaches the terminal.
 
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -25,6 +25,7 @@ use ratatui::{
 use crate::bus::AgentId;
 
 use super::App;
+use super::block::queued_prompt_rows;
 use super::line::{self, AGENT_HUES, CYAN, LIME_HOT, PINK, READ_W, SLATE};
 use super::matrix::matrix_bar;
 use super::select::highlight_range;
@@ -77,8 +78,8 @@ pub(super) fn tab_bar(
     }
     Line::from(spans)
 }
-/// Paint the full frame: content area, tab bar / matrix, prompt editor,
-/// status line, and footer.
+/// Paint the full frame: content area, queued-user strip, tab bar / matrix,
+/// prompt editor, status line, and footer.
 pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     let (cols, rows) = size().unwrap_or((READ_W, 24));
     let area = Rect::new(0, 0, cols, rows);
@@ -92,6 +93,18 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     } else {
         0u16
     };
+    // The queued-user rows sit above the matrix/tab row: prompts the human
+    // submitted mid-turn, waiting for a tool or turn boundary. They read only
+    // `UserSteering` from the typed inbox, then render through the same prompt
+    // chrome path as committed prompt echoes.
+    let queued = app.inbox.queued_user_messages();
+    let queued_lines = if queued.is_empty() {
+        Vec::new()
+    } else {
+        let w = area.width.saturating_sub(LEFT_MARGIN).min(READ_W);
+        queued_prompt_rows(&queued, w, (area.height / 3).max(1) as usize)
+    };
+    let queued_h = queued_lines.len() as u16;
     // The register's vertical budget is decided here, before the layout:
     // shown as the right-hand column when the focused session has pins and
     // the terminal is wide enough to spare the margin.  `content.width ==
@@ -107,14 +120,16 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     let layout = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(1), // breathing row between output and chrome
+        Constraint::Length(queued_h),
         Constraint::Length(tab_h),
         Constraint::Length(prompt_h),
         Constraint::Length(1), // rule_line: sits below prompt, above footer
         Constraint::Length(1),
     ])
     .split(area);
-    let (content, tab_row, prompt_row, status_row, footer_row) =
-        (layout[0], layout[2], layout[3], layout[4], layout[5]);
+    let (content, queued_row, tab_row, prompt_row, status_row, footer_row) = (
+        layout[0], layout[2], layout[3], layout[4], layout[5], layout[6],
+    );
     // Split the content row by hand into the rail's left gutter, the
     // transcript, and — on a wide enough terminal — the register covering all
     // remaining columns to the right.  No scrollbar: the right side is the
@@ -135,7 +150,14 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
             content.height,
         )
     });
-    // Inset the rule line to share the transcript's left gutter.
+    // Inset the queued-user strip and rule line to share the transcript's
+    // left gutter.
+    let queued_rect = Rect::new(
+        queued_row.x + LEFT_MARGIN,
+        queued_row.y,
+        queued_row.width.saturating_sub(LEFT_MARGIN),
+        queued_row.height,
+    );
     let status_rect = Rect::new(
         status_row.x + LEFT_MARGIN,
         status_row.y,
@@ -218,6 +240,9 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         // shown only when wide enough, painted on the right edge.
         if let Some(reg) = register_rect {
             f.render_widget(Paragraph::new(register_lines), reg);
+        }
+        if !queued_lines.is_empty() {
+            f.render_widget(Paragraph::new(queued_lines), queued_rect);
         }
         if let Some(matrix) = matrix_lines {
             f.render_widget(Paragraph::new(matrix), tab_row);

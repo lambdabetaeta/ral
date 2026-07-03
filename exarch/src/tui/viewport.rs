@@ -14,12 +14,10 @@
 //! `user.log` — a tool call in full, script included — so the on-disk
 //! file is the durable counterpart to `events.json`.
 
-use super::block::{AgentSlot, Block, RailShape, Reveal, wrap_line};
+use super::block::{AgentSlot, Block, RailShape, Reveal, append_visual_rows};
 use super::fidelity::{self, Fidelity};
 use super::group;
-use super::line::{
-    READ_W, coalesced_queries, deliberation_grain, is_blank, plain, prompt_fence, size_bar,
-};
+use super::line::{READ_W, coalesced_queries, deliberation_grain, is_blank, plain, size_bar};
 use super::rail::{self, RailKind};
 use super::select::plain_slice;
 use crate::bus::Hunk;
@@ -970,19 +968,9 @@ impl Viewport {
                     first += 1;
                 }
             }
-            // A prompt opens with its fence: a full-width rule just above its
-            // first text row (the `❖` rides the rail on that row).
-            let mut fenced = false;
-            for line in &lines[first..] {
-                for vrow in wrap_line(line, content_w as usize) {
-                    if prompt && !fenced && !is_blank(&vrow) {
-                        rows.push(prompt_fence(content_w));
-                        row_block.push(anchor);
-                        fenced = true;
-                    }
-                    rows.push(vrow);
-                    row_block.push(anchor);
-                }
+            let added = append_visual_rows(&mut rows, &lines[first..], content_w, prompt, None);
+            for _ in 0..added {
+                row_block.push(anchor);
             }
         }
         self.flat = Flat {
