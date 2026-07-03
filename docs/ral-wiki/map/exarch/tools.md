@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 1631d78
+generated_at_commit: f55191c
 generated_at_date: 2026-07-03
 covers_paths: [exarch/src/tools.rs, exarch/src/tools/]
 ---
@@ -35,6 +35,15 @@ The tools that ship:
   the [[map/exarch/frontend|rail]]; the full `cmd` opens in the collapsible
   tool-call block). A fixed 30s call timeout bounds inline work; anything longer
   belongs in a `spawn` that outlives the turn.
+- `verify_commitment` (`tools/commitment.rs`) — a host-prompted check for one
+  live protected `commitment:*` pin
+  ([[decisions/260703_protected-commitment-pins|protected-commitment-pins]]).
+  The model supplies only `key`; the tool reads the saved pin card from the
+  agent mirror, builds the verifier prompt itself, runs an `amnemon` child with
+  narrowed read-only authority, and clears the protected pin only when the child
+  returns a structured `commitment_verdict` whose `commitment_key` matches and
+  whose verdict is `pass`. A fail, unknown, malformed reply, or child failure
+  leaves the pin live, so the ordinary nudge path keeps the actor restless.
 - the **spawn family** — `amnemon` / `mnemon` / `agents` / `message` /
   `agent_cancel`
   (`tools/agent.rs`). Spawning is universal, but `amnemon`/`mnemon` are

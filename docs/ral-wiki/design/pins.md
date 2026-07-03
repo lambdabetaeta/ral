@@ -19,9 +19,14 @@ only **placement**, the card vocabulary and its decoder reused verbatim:
 
 - `` `pin [key, body] `` — write `body` to register slot `key`, **overwriting in
   place** on re-pin. The `key` is model-chosen and *is the datum's identity* —
-  the thing the host cannot guess.
+  the thing the host cannot guess, except for the reserved `commitment:*`
+  prefix below.
 - `` `unpin [key] `` — drop the slot (a finished plan clears its gauge). An
   **absent body** is the same as `` `unpin ``.
+- `commitment:*` — protected commitment state
+  ([[decisions/260703_protected-commitment-pins|protected-commitment-pins]]).
+  Ordinary `surface` calls cannot write or clear these slots; writer/verifier
+  results are projected by the host into the same register.
 
 So a kit holding evolving state pins one rollup and overwrites it, rather than
 marching `tasks 0/3`, `tasks 1/3`, … down the scrollback — the streaming the rail
@@ -59,11 +64,19 @@ card is already safe:
 Because pinned state is something the *user is watching* on the rail, the
 [[map/exarch/agent|nudge]] facility periodically reminds the model of it. The
 agent keeps a small `key → one-line summary` mirror of the pins as they flow
-past — the session is otherwise pin-blind, the events going straight to the
-frontend — and when anything is pinned, a **budget-free** reminder fires every so
-many turns, naming the pinned state. With nothing pinned it never fires. This is
-the discipline pinning earns: a kit that publishes state to a slot the user
-watches is reminded to keep it true.
+past — typed by pin kind, while the session is otherwise pin-blind and the
+events go straight to the frontend — and when anything is pinned, a
+**budget-free** reminder fires every so many turns, naming the pinned state.
+With nothing pinned it never fires. This is the discipline pinning earns: a kit
+that publishes state to a slot the user watches is reminded to keep it true.
+
+A live `commitment:*` pin is stronger than the ordinary reminder: any clean
+completion while it remains pinned produces an unresolved-commitment nudge. The
+host is not judging the work; it is refusing to sit still while protected
+obligation state is live. The actor can request a check through
+`verify_commitment`, whose input is only the protected key; the host reads the
+saved card, builds the verifier prompt itself, runs an `amnemon` verifier, and
+clears the pin only on a matching structured pass verdict.
 
 ## Why this shape
 
@@ -93,5 +106,6 @@ this is the model-authored dual of, and the encode-don't-stream doctrine),
 [[map/exarch/cards|cards]] (the render document the body decodes through),
 [[map/exarch/frontend|frontend]] (the viewport register and the draw layout),
 [[map/exarch/shell-eval|shell-eval]] (the host sink and the pin-first decode),
-[[map/exarch/agent|agent]] (the nudge that reminds the model of its pins), and
+[[map/exarch/agent|agent]] (the nudge that reminds the model of its pins),
+[[decisions/260703_protected-commitment-pins|protected-commitment-pins]], and
 `exarch/data/agent.ral` (the tasks section — the first client).

@@ -26,7 +26,11 @@ let mk-task = { |id desc|
   [ id: $id, desc: $desc, status: `open, tags: [], notes: "" ]
 }
 
-let empty-tasks = drop 1 [ !{mk-task 0 ""} ]
+let empty-tasks = {
+  let ts = drop 1 [ !{mk-task 0 ""} ]
+  surface-progress $ts
+  $ts
+}
 let valid-statuses = [`open, `doing, `blocked, `done]
 
 # --- per-field setters ---

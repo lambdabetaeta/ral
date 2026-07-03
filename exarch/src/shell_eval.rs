@@ -44,14 +44,52 @@ pub enum Outcome {
     Static(String),
 }
 
-/// A shared, session-owned register of current pinned-state digests
-/// (`key → one-line summary`), written by the live surface sink as
-/// `` `pin ``/`` `unpin `` flow by and read by the nudge facility to describe
-/// what the model has pinned.  The session clones a handle into each turn's
-/// turn surface sink; `None` (tests, any path with no nudge layer) disables the
-/// mirror.  The session is otherwise pin-blind — pins flow past it to the
-/// frontend — so this small mirror is how the boundary nudge can name them.
-pub type PinDigests = Arc<Mutex<std::collections::BTreeMap<String, crate::card::Card>>>;
+/// The class of a pinned register slot in the session mirror.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PinKind {
+    Ordinary,
+    Commitment,
+}
+
+/// One mirrored pin: the card the user sees plus the key-derived class the
+/// nudge layer reads.  The bus and viewport still carry plain `Kind::Pin`;
+/// this struct exists only inside the agent's session mirror.
+#[derive(Clone, Debug)]
+pub struct PinDigest {
+    pub(crate) kind: PinKind,
+    pub(crate) card: crate::card::Card,
+}
+
+impl PinDigest {
+    fn new(key: &str, card: crate::card::Card) -> Self {
+        Self {
+            kind: if is_commitment_pin(key) {
+                PinKind::Commitment
+            } else {
+                PinKind::Ordinary
+            },
+            card,
+        }
+    }
+}
+
+/// A shared, session-owned register of current pinned-state digests, written
+/// by the live surface sink as `` `pin ``/`` `unpin `` flow by and read by the
+/// nudge facility to describe what the model has pinned.  The session clones a
+/// handle into each turn's turn surface sink; `None` (tests, any path with no
+/// nudge layer) disables the mirror.  The session is otherwise pin-blind — pins
+/// flow past it to the frontend — so this small mirror is how the boundary
+/// nudge can name them.
+pub type PinDigests = Arc<Mutex<std::collections::BTreeMap<String, PinDigest>>>;
+
+/// Reserved register keyspace for host-projected commitment state.  A model
+/// may observe these pins, but ordinary `surface` calls cannot write or clear
+/// them; writer/verifier replies must be projected by host code instead.
+pub(crate) const COMMITMENT_PIN_PREFIX: &str = "commitment:";
+
+pub(crate) fn is_commitment_pin(key: &str) -> bool {
+    key.starts_with(COMMITMENT_PIN_PREFIX)
+}
 
 /// Decode one surfaced `Value` into the [`Kind`] it renders as — the single
 /// decoder both delivery regimes share.  The live foreground sink
@@ -95,6 +133,17 @@ pub fn decode_surface(ev: &RalValue) -> Option<Kind> {
     } else {
         value_to_done(ev).map(|outcome| Kind::Card(done_card(&outcome)))
     }
+}
+
+fn reject_protected_pin(kind: &Kind, emit: &Emitter) -> bool {
+    let key = match kind {
+        Kind::Pin { key, .. } | Kind::Unpin { key } if is_commitment_pin(key) => key,
+        _ => return false,
+    };
+    emit.emit(Kind::Error(format!(
+        "`{key}` is a protected commitment pin; ordinary `surface` calls cannot write or clear it; call `verify_commitment` to check a live commitment"
+    )));
+    true
 }
 
 /// The deferred half of `surface`: the session-lived [`BoundarySink`] a
@@ -224,12 +273,15 @@ pub fn run_shell(
                     if let Ok(live_val) = val.into_ground()
                         && let Some(kind) = decode_surface(&live_val)
                     {
+                        if reject_protected_pin(&kind, emit) {
+                            continue;
+                        }
                         if let Some(pins) = &pins
                             && let Ok(mut m) = pins.lock()
                         {
                             match &kind {
                                 Kind::Pin { key, card } => {
-                                    m.insert(key.clone(), card.clone());
+                                    m.insert(key.clone(), PinDigest::new(key, card.clone()));
                                 }
                                 Kind::Unpin { key } => {
                                     m.remove(key);
@@ -245,6 +297,9 @@ pub fn run_shell(
                         if let Ok(live_val) = val.into_ground()
                             && let Some(kind) = decode_surface(&live_val)
                         {
+                            if reject_protected_pin(&kind, emit) {
+                                continue;
+                            }
                             emit.emit(kind);
                         }
                     }
@@ -1075,6 +1130,27 @@ keep-bottom
         ));
         // A value that is none of these → None.
         assert!(decode_surface(&RalValue::String("nope".into())).is_none());
+    }
+
+    #[test]
+    fn model_surface_cannot_write_commitment_pins() {
+        let (emit, rx) = dummy_emitter();
+        let protected = Kind::Pin {
+            key: "commitment:abc".into(),
+            card: crate::card::Card(Vec::new()),
+        };
+        assert!(reject_protected_pin(&protected, &emit));
+        let event = rx.try_recv().expect("rejection should emit an error");
+        assert!(
+            matches!(event.kind, Kind::Error(msg) if msg.contains("protected commitment pin")),
+            "expected protected-pin diagnostic"
+        );
+
+        let (emit, _rx) = dummy_emitter();
+        let ordinary = Kind::Unpin {
+            key: "tasks".into(),
+        };
+        assert!(!reject_protected_pin(&ordinary, &emit));
     }
 
     /// The `InboxBoundary` posts a detached worker's batch as an

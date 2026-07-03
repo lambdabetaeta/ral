@@ -3598,3 +3598,15 @@ gate, so `tui_loop.rs` separately refuses to seat one below `fuel < 2`.
 Refines [[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]]'s
 unbounded-depth claim. Re-stamped [[design/agents|agents]],
 [[map/exarch/agent|agent]], [[map/exarch/tools|tools]].
+
+## [2026-07-03] ingest | Protected commitment pins
+
+Recorded [[decisions/260703_protected-commitment-pins|protected-commitment-pins]]:
+`commitment:*` pins are reserved for host-projected writer/verifier state, so
+ordinary `surface` attempts to write or clear them are rejected, and a live
+commitment pin makes clean completion nudge again through the existing
+[[map/exarch/agent|agent]] nudge path. Added `verify_commitment`, which accepts
+only a protected key, host-prompts an `amnemon` verifier, and clears the pin only
+on a matching structured pass. Updated [[design/pins|pins]] and re-stamped
+[[map/exarch/shell-eval|shell-eval]], [[map/exarch/agent|agent]], and
+[[map/exarch/tools|tools]].

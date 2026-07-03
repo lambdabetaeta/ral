@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1baac6d
-generated_at_date: 2026-06-22
+generated_at_commit: f55191c
+generated_at_date: 2026-07-03
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/agent_builtins.rs, exarch/data/agent.ral]
 ---
 
@@ -81,6 +81,13 @@ entirely in ral — to the core `surface` builtin
 [[map/exarch/frontend|bus]] through a clone of the call's `Emitter`. It is a
 two-decoder sink, io-first:
 
+- a `` `pin ``/`` `unpin `` wrapper normally decodes to `Kind::Pin` /
+  `Kind::Unpin`, but `commitment:*` is protected
+  ([[decisions/260703_protected-commitment-pins|protected-commitment-pins]]):
+  ordinary `surface` writes or clears to that prefix are rejected with a
+  diagnostic before they reach the pin mirror or viewport; accepted pins are
+  mirrored as `PinDigest { kind, card }` so the agent can distinguish ordinary
+  state from commitment state without parsing rendered text;
 - an `io`-keyed `Map` core emits at a redirect / exec door decodes through
   `value_to_io` / `io_card` into a `Kind::Io { event, card }`, carrying the raw
   effect record beside its rendering ([[map/exarch/io-surface|io-surface]]);

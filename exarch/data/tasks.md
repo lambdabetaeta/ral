@@ -1,6 +1,6 @@
 A task management kit is always loaded; use it to remember what to do next. Store tasks in `$exarch-tasks`, and update them across turns:
 
-  let exarch-tasks = $empty-tasks
+  let exarch-tasks = empty-tasks
   let exarch-tasks = add-task $exarch-tasks "do one thing"
   let exarch-tasks = add-task $exarch-tasks "do second thing"
 
@@ -19,7 +19,7 @@ If at this point task 2 is no longer necessary, run
 
 Definitions - remember to use immutably:
 
-  $empty-tasks                            — empty task list
+  empty-tasks                            — empty task list; also clears the pinned gauge
   add-task $exarch-tasks <desc>           — add a task with a fresh id
   transition $exarch-tasks <id> <status>  — change status
   remove-task $exarch-tasks <id>          — drop a task

@@ -23,12 +23,10 @@ use crate::provider::ProviderError;
 /// Outer-attempt budget per user turn.  Independent of the provider's
 /// transport retry budget: this is only for model-visible recovery.
 const BUDGET: u32 = 3;
-/// How many times to nudge the model when it yields with pinned state
-/// before accepting the turn.  Resets whenever the pinned digest changes,
-/// so progress (a task completed, a goal updated) restores the budget.
-const OPEN_TASKS_BUDGET: u32 = 5;
-/// How many genuine turns elapse between pinned-state reminders.  A gentle
-/// cadence: often enough that a stale gauge is caught, rare enough not to nag.
+/// How many genuine turns elapse between "nothing is pinned" reminders.  A
+/// gentle cadence, since there is no outstanding obligation to be restless
+/// about.  The pinned-state reminder itself is budget-free and fires on
+/// every clean completion instead — see [`Registry::react`].
 const REMIND_EVERY: u32 = 12;
 /// A shared bracket for every synthetic nudge message, so the model can
 /// distinguish a system reminder from genuine user input.  The opening
@@ -54,10 +52,14 @@ pub(crate) struct NudgeCtx {
     /// agent (a peer or a headless root), false for the interactive root.  A
     /// returning agent that finishes a tool-call-free step without having
     /// replied is re-nudged to call `reply` within the [`BUDGET`], then fails.
+    /// Independent of, and additive with, the pinned-state nudge below: a
+    /// returning agent owes both a reply and a clean pin register.
     pub must_reply: bool,
     /// The model's current pinned state as a one-line description, or `None`
-    /// when nothing is pinned.  Drives the periodic pinned-state reminder so a
-    /// long-lived rail gauge does not drift out of the model's attention.
+    /// when nothing is pinned — the one register covering every pin kind
+    /// (tasks, goals, protected `commitment:*` state alike; see
+    /// [`Agent::pinned_digest`](crate::agent::Agent)).  Drives the pinned-state
+    /// reminder, uniformly for every agent regardless of role.
     pub pinned: Option<String>,
 }
 
@@ -66,44 +68,37 @@ pub(crate) struct NudgeCtx {
 /// [`Self::react`] is the only post-attempt entry point.
 pub(crate) struct Registry {
     used: u32,
-    /// Genuine turns since the last pinned-state reminder, bumped once per
-    /// turn-boundary message by [`Self::reset`].  Unlike the latch it
+    /// Genuine turns since the last "nothing is pinned" reminder, bumped once
+    /// per turn-boundary message by [`Self::reset`].  Unlike a latch it
     /// accumulates *across* turns; the reminder fires once it reaches
-    /// [`REMIND_EVERY`], then it returns to zero.
-    turns_since_pin_reminder: u32,
-    /// One-shot latch for the pinned-state reminder: at most once per turn,
-    /// budget-free.
-    pin_reminded: bool,
-    /// Open-tasks nudge counter: how many times the model has been nudged
-    /// for yielding with pinned state.  Resets when the digest changes.
-    open_tasks_nudges: u32,
-    /// Snapshot of the pinned digest at the last open-tasks nudge, to detect
-    /// changes that reset the budget.
-    last_pinned_digest: Option<String>,
+    /// [`REMIND_EVERY`], then it returns to zero.  Unused while anything is
+    /// pinned — that case is budget-free, see [`Self::react`].
+    turns_since_no_pins_reminder: u32,
+    /// One-shot latch for the "nothing is pinned" reminder: at most once per
+    /// turn.
+    no_pins_reminded: bool,
 }
 
 impl Registry {
     pub fn new() -> Self {
         Self {
             used: 0,
-            turns_since_pin_reminder: 0,
-            pin_reminded: false,
-            open_tasks_nudges: 0,
-            last_pinned_digest: None,
+            turns_since_no_pins_reminder: 0,
+            no_pins_reminded: false,
         }
     }
 
     /// Reset the per-turn state — the retry budget and the one-shot latch —
-    /// and count this turn toward the periodic pinned-state reminder.  Called
-    /// by [`Agent::drive`] on a genuine turn-boundary message, never on a
-    /// self-nudge (which is the same turn continuing), so the turn counter
+    /// and count this turn toward the periodic "nothing is pinned" reminder.
+    /// Called by [`Agent::drive`] on a genuine turn-boundary message, never on
+    /// a self-nudge (which is the same turn continuing), so the turn counter
     /// advances once per real turn.
     ///
     /// [`Agent::drive`]: crate::agent::Agent::drive
     pub fn reset(&mut self) {
         self.used = 0;
-        self.turns_since_pin_reminder += 1;
-        self.pin_reminded = false;
+        self.turns_since_no_pins_reminder += 1;
+        self.no_pins_reminded = false;
     }
 
     /// The one decider.  Walks [`RULES`] against `attempt`, optionally
@@ -120,16 +115,21 @@ impl Registry {
         log: &mut AgentLog,
     ) -> Option<String> {
         let Some((cause, message)) = RULES.iter().find_map(|&r| r(attempt)) else {
-            // (No RULE matched.)
-            //
-            // A returning agent reached a tool-call-free `Complete` without
-            // calling `reply` — its sole return path, no scrape — so insist on
-            // it.  Re-nudge within the per-turn budget, then give up honestly:
-            // once the budget is spent the un-replied `Complete` is accepted
-            // here and `agent_digest` maps it to `Failed`.  A `Replied`
-            // outcome never lands here, so an agent that already replied is not
-            // re-nudged.
-            if ctx.must_reply && matches!(attempt, Ok(TurnOutcome::Complete(_))) {
+            // (No RULE matched.)  Only a clean completion reaches the two
+            // nudges below; every other outcome here (a provider error the
+            // rules didn't classify, a `Replied`/`Cancelled`/`Capped`
+            // termination) is reported and accepted as-is.
+            if !matches!(attempt, Ok(TurnOutcome::Complete(_))) {
+                surface_provider_error(attempt, emit, log);
+                return None;
+            }
+            // Two independent obligations, neither suppressing the other: a
+            // returning agent owes a `reply` regardless of its pins, and any
+            // agent — trunk or sub-agent alike — owes a clean pin register
+            // regardless of whether it also returns.  Compose whichever
+            // apply into one reminder.
+            let mut parts = Vec::new();
+            if ctx.must_reply {
                 if self.used < BUDGET {
                     self.used += 1;
                     record_nudge(
@@ -138,60 +138,45 @@ impl Registry {
                         self.used,
                         "no-reply finish (returning agent)".into(),
                     );
-                    return Some(format!(
-                        "{EXARCH_REMINDER_OPEN}{REPLY_MESSAGE}{EXARCH_REMINDER_CLOSE}"
-                    ));
+                    parts.push(REPLY_MESSAGE.to_string());
+                } else {
+                    // A hard give-up: an agent that cannot even call `reply`
+                    // after the full budget is failed outright, regardless
+                    // of any pinned state.
+                    let msg = "agent finished without calling `reply` after the nudge budget; \
+                               returning a failure"
+                        .to_string();
+                    let _ = log.record_error(msg.clone());
+                    emit.emit(Kind::Error(msg));
+                    return None;
                 }
-                let msg = "agent finished without calling `reply` after the nudge budget; \
-                           returning a failure"
-                    .to_string();
-                let _ = log.record_error(msg.clone());
-                emit.emit(Kind::Error(msg));
+            }
+            // The one pinned-state nudge: whatever is pinned (a task, a
+            // goal, a protected `commitment:*` pin — [`NudgeCtx::pinned`]
+            // covers every kind uniformly) keeps the agent restless,
+            // budget-free, on every clean completion.  Only the empty
+            // register gets a gentler, throttled suggestion instead.
+            if let Some(pinned) = ctx.pinned.as_deref() {
+                record_nudge(emit, log, self.used, "pinned-state reminder".into());
+                parts.push(format!("There is pinned state: {pinned}"));
+            } else if !self.no_pins_reminded && self.turns_since_no_pins_reminder >= REMIND_EVERY {
+                self.no_pins_reminded = true;
+                self.turns_since_no_pins_reminder = 0;
+                record_nudge(emit, log, self.used, "no-pins reminder".into());
+                parts.push(
+                    "Nothing is pinned — consider calling `set-goal` to remember what you are \
+                     working on, or tracking some tasks with `add-task`."
+                        .to_string(),
+                );
+            }
+            if parts.is_empty() {
+                surface_provider_error(attempt, emit, log);
                 return None;
             }
-            // Periodic, budget-free reminders on the pin register —
-            // at most once per turn, only on a clean completion, every
-            // `REMIND_EVERY` turns.  When something is pinned the model is
-            // reminded what; when nothing is pinned it is nudged to set a
-            // goal or track tasks.
-            if ctx.pinned.is_some()
-                && matches!(attempt, Ok(TurnOutcome::Complete(_)))
-                && !self.pin_reminded
-                && self.turns_since_pin_reminder >= REMIND_EVERY
-            {
-                self.pin_reminded = true;
-                self.turns_since_pin_reminder = 0;
-                record_nudge(emit, log, self.used, "pinned-state reminder".into());
-                return Some(format!(
-                    "{EXARCH_REMINDER_OPEN}There is pinned state: {}{EXARCH_REMINDER_CLOSE}",
-                    ctx.pinned.as_deref().unwrap_or("none")
-                ));
-            } else if matches!(attempt, Ok(TurnOutcome::Complete(_)))
-                && !self.pin_reminded
-                && self.turns_since_pin_reminder >= REMIND_EVERY
-            {
-                self.pin_reminded = true;
-                self.turns_since_pin_reminder = 0;
-                record_nudge(emit, log, self.used, "no-pins reminder".into());
-                return Some(format!(
-                    "{EXARCH_REMINDER_OPEN}Nothing is pinned — consider calling `set-goal` to remember what you are working on, or tracking some tasks with `add-task`.{EXARCH_REMINDER_CLOSE}"
-                ));
-            } else if ctx.pinned.is_some() && matches!(attempt, Ok(TurnOutcome::Complete(_))) {
-                if self.last_pinned_digest.as_deref() != ctx.pinned.as_deref() {
-                    self.open_tasks_nudges = 0;
-                    self.last_pinned_digest = ctx.pinned.clone();
-                }
-                if self.open_tasks_nudges < OPEN_TASKS_BUDGET {
-                    self.open_tasks_nudges += 1;
-                    record_nudge(emit, log, self.used, "open-tasks nudge".into());
-                    return Some(format!(
-                        "{EXARCH_REMINDER_OPEN}there is pinned state: {}{EXARCH_REMINDER_CLOSE}",
-                        ctx.pinned.as_deref().unwrap_or("none")
-                    ));
-                }
-            }
-            surface_provider_error(attempt, emit, log);
-            return None;
+            return Some(format!(
+                "{EXARCH_REMINDER_OPEN}{}{EXARCH_REMINDER_CLOSE}",
+                parts.join(" ")
+            ));
         };
         if self.used >= BUDGET {
             let msg = format!("nudge budget exhausted ({BUDGET} attempts; last cause: {cause})");
@@ -516,6 +501,67 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    /// A protected `commitment:*` pin is not a special case: it rides the
+    /// same pinned-state digest as a task or a goal, so it keeps the agent
+    /// restless via the one pinned-state nudge, budget-free, until a
+    /// verifier clears it (out of this module's scope — [`nudge`] only
+    /// reports pinned state, it never clears it).
+    ///
+    /// [`nudge`]: crate::nudge
+    #[test]
+    fn pinned_commitment_state_keeps_completion_restless() {
+        let mut reg = Registry::new();
+        let mut log = fresh_log("commitment-pin");
+        let ctx = || NudgeCtx {
+            must_reply: false,
+            pinned: Some("commitment:abc: criteria 0/1".into()),
+        };
+        for _ in 0..3 {
+            let msg = reg
+                .react(
+                    &Ok(TurnOutcome::Complete("done".into())),
+                    ctx(),
+                    &emit(),
+                    &mut log,
+                )
+                .expect("pinned state should nudge");
+            assert!(msg.contains("There is pinned state: commitment:abc: criteria 0/1"));
+        }
+        assert_eq!(reg.used, 0, "pinned-state nudges are budget-free");
+    }
+
+    /// A returning agent owes both obligations at once: it hasn't called
+    /// `reply`, and it still holds pinned state.  Neither nudge suppresses
+    /// the other — both compose into one reminder, and each still draws on
+    /// its own accounting (the reply nudge spends budget; the pinned-state
+    /// nudge does not).
+    #[test]
+    fn returning_agent_gets_both_reply_and_pinned_nudges() {
+        let mut reg = Registry::new();
+        let mut log = fresh_log("returning-agent-both");
+        let ctx = || NudgeCtx {
+            must_reply: true,
+            pinned: Some("commitment:abc: criteria 0/1".into()),
+        };
+        let msg = reg
+            .react(
+                &Ok(TurnOutcome::Complete("prose, no reply".into())),
+                ctx(),
+                &emit(),
+                &mut log,
+            )
+            .expect("a returning agent with pinned state should nudge");
+        assert!(
+            msg.contains("`reply`"),
+            "must still be reminded to reply: {msg}"
+        );
+        assert!(
+            msg.contains("There is pinned state: commitment:abc: criteria 0/1"),
+            "must also be reminded of its pinned state: {msg}"
+        );
+        assert_eq!(reg.used, 1, "only the reply half spends budget");
     }
 
     /// [`Registry::reset`] clears the per-turn budget, so a fresh

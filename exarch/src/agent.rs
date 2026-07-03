@@ -1271,6 +1271,66 @@ impl Agent {
         SessionToolResult { id, content }
     }
 
+    /// Read a protected commitment pin for host-owned verification.  Model
+    /// code cannot write this prefix through `surface`; verifier orchestration
+    /// reads the saved card here and treats it as data.
+    pub(crate) fn commitment_card(&self, key: &str) -> Result<crate::card::Card, String> {
+        if !shell_eval::is_commitment_pin(key) {
+            return Err(format!(
+                "`{key}` is not a protected commitment pin; expected `{}<id>`",
+                shell_eval::COMMITMENT_PIN_PREFIX
+            ));
+        }
+        let m = self
+            .pins
+            .lock()
+            .map_err(|_| "commitment pin register is unavailable".to_string())?;
+        match m.get(key) {
+            Some(pin) if pin.kind == shell_eval::PinKind::Commitment => Ok(pin.card.clone()),
+            Some(_) => Err(format!(
+                "`{key}` is pinned, but not as protected commitment state"
+            )),
+            None => Err(format!(
+                "no live commitment pin named `{key}`; did the verifier already pass, or was the session cleared?"
+            )),
+        }
+    }
+
+    /// Host projection for a verifier pass: clear the protected pin in the
+    /// session mirror and on the viewport.  The model cannot reach this path;
+    /// ordinary `surface` unpins for the same prefix are rejected in
+    /// `shell_eval`.
+    pub(crate) fn clear_commitment_pin(&mut self, key: &str, emit: &Emitter) -> Result<(), String> {
+        if !shell_eval::is_commitment_pin(key) {
+            return Err(format!(
+                "`{key}` is not a protected commitment pin; expected `{}<id>`",
+                shell_eval::COMMITMENT_PIN_PREFIX
+            ));
+        }
+        let mut m = self
+            .pins
+            .lock()
+            .map_err(|_| "commitment pin register is unavailable".to_string())?;
+        if m.remove(key).is_some() {
+            emit.emit(Kind::Unpin {
+                key: key.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_commitment_pin_for_test(&mut self, key: &str, card: crate::card::Card) {
+        assert!(shell_eval::is_commitment_pin(key));
+        self.pins.lock().expect("pin register poisoned").insert(
+            key.to_string(),
+            shell_eval::PinDigest {
+                kind: shell_eval::PinKind::Commitment,
+                card,
+            },
+        );
+    }
+
     /// The current pinned state as a one-line description for the periodic
     /// nudge reminder, or `None` when nothing is pinned.  Joins each slot's
     /// digest (`tasks 3/8`) — the model's labels already name them — so the
@@ -1282,11 +1342,12 @@ impl Agent {
         }
         Some(
             m.values()
-                .map(crate::card::summary_line)
+                .map(|pin| crate::card::summary_line(&pin.card))
                 .collect::<Vec<_>>()
                 .join("; "),
         )
     }
+
 
     /// Stash a returning agent's deliberate return value — called from the
     /// `reply` tool's dispatch with the faithful [`serde_json::Value`] the

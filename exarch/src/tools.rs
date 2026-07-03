@@ -23,6 +23,7 @@ use serde_json::Value;
 use std::sync::{Arc, OnceLock};
 
 mod agent;
+mod commitment;
 mod ral;
 mod reply;
 mod schedule;
@@ -102,6 +103,7 @@ fn registry() -> &'static [Box<dyn Tool>] {
     R.get_or_init(|| {
         vec![
             Box::new(ral::RalTool),
+            Box::new(commitment::VerifyCommitmentTool),
             Box::new(agent::SpawnTool::amnemon()),
             Box::new(agent::SpawnTool::mnemon()),
             Box::new(agent::AgentsTool),
