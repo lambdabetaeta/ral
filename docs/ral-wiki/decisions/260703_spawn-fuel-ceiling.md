@@ -20,7 +20,7 @@ only by tree position — because fuel *is* a pure function of position
 [[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]] deliberately
 deleted a depth-1 spawn cap: "every agent may spawn, so the spawn tree is
 unbounded in depth rather than capped at one level." Nothing since has bounded
-the other axis — a chain of `agraphos`/`anamnesis` calls, each one a genuine
+the other axis — a chain of `amnemon`/`mnemon` calls, each one a genuine
 sub-agent forking a genuine sub-agent, can recurse for as long as a model keeps
 choosing to delegate. The only guidance against this is prose in the tool
 description ("NEVER delegate a single grep/view/read/edit you can run
@@ -34,7 +34,7 @@ different axes and do not compose into a depth limit.
 - **`Agent` carries `fuel: u32`.** The trunk is born with `SPAWN_FUEL = 8`
   (`agent.rs`); `Agent::fork` computes the child's fuel as
   `self.fuel.saturating_sub(1)` and never lets it wrap below zero.
-- **A new `Gate::Spawns` axis** (`tools.rs`) admits `agraphos`/`anamnesis` only
+- **A new `Gate::Spawns` axis** (`tools.rs`) admits `amnemon`/`mnemon` only
   while `fuel > 0`, alongside the existing `Returns` and `Schedules` axes.
   `tools_for` gains a third parameter, `can_spawn`, threaded from each fork's
   freshly computed fuel.
@@ -51,9 +51,9 @@ different axes and do not compose into a depth limit.
   from a host slash command, not through the model-facing dispatch path — so
   `tui_loop.rs` separately refuses to seat a chair when `session.fuel() < 2`:
   the chair needs one unit to be born and a second to spawn its debate
-  partner, and seating one with less would strand it with no `agraphos` in its
+  partner, and seating one with less would strand it with no `amnemon` in its
   own view.
-- **Tool descriptions say depth is finite.** `agraphos`/`anamnesis` now state
+- **Tool descriptions say depth is finite.** `amnemon`/`mnemon` now state
   that each spawn spends one unit of the caller's own budget on the child, so
   a chain cannot recurse forever.
 
@@ -87,7 +87,7 @@ different axes and do not compose into a depth limit.
   failure mode this decision responds to. An orthogonal cap remains available
   later if fan-out itself proves hazardous.
 - **A runtime refusal inside `dispatch_spawn`** (an `invalid_input`-style
-  error returned to a model that calls `agraphos` anyway). Rejected: it
+  error returned to a model that calls `amnemon` anyway). Rejected: it
   reintroduces exactly the "separate permission predicate to keep in sync"
   that tool-membership gating exists to avoid, and it teaches a well-behaved
   model a call it must fail and recover from instead of one it never sees.

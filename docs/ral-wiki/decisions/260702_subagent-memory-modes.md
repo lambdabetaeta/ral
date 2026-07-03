@@ -5,7 +5,7 @@ status: active
 # Subagent memory modes
 
 **Sub-agent spawning has two names because it has two different model-memory
-contracts: `agraphos` is tabula rasa; `anamnesis` remembers the parent context
+contracts: `amnemon` is tabula rasa; `mnemon` remembers the parent context
 and appends a fresh prompt at the end.**
 
 Both tools keep the same operational skeleton:
@@ -18,15 +18,15 @@ Both tools keep the same operational skeleton:
 
 The distinction is only the child's provider transcript:
 
-- **`agraphos`** starts with no parent conversation. It receives only the launch
+- **`amnemon`** starts with no parent conversation. It receives only the launch
   prompt as its first user turn. Use it when blank context is a feature.
-- **`anamnesis`** imports the parent's model-visible context, reuses the parent's
+- **`mnemon`** imports the parent's model-visible context, reuses the parent's
   current provider selection, and appends the tool call's `prompt` as the fresh
   final user prompt. Use it when the child should stand inside the current
   conversation and hit provider prompt caches.
 
 Because a tool call is dispatched while the parent may be waiting for that very
-tool result, `anamnesis` must not inherit a dangling assistant tool-call frame.
+tool result, `mnemon` must not inherit a dangling assistant tool-call frame.
 `AgentLog::inherited_context_messages` drops the unanswered assistant tool-call
 event when the parent is in `AwaitingToolResults`, so the child forks the request
 context rather than an invalid protocol prefix.

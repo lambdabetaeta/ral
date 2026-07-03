@@ -193,18 +193,18 @@ foreground agent and can never seize the controlling terminal the TUI owns).
 There is no flow-back: the child's `cd`, env, and new bindings die with it. Every
 agent may spawn, but `fork` also computes the child's `fuel` as
 `self.fuel.saturating_sub(1)` (`SPAWN_FUEL = 8` at the trunk); a `fuel == 0`
-agent's `tools_for` view drops `agraphos`/`anamnesis`
+agent's `tools_for` view drops `amnemon`/`mnemon`
 ([[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]]), so a delegation
 chain bottoms out a fixed number of generations down. The fork mirrors on the
 bus as `Kind::Born` / `Kind::Died` regardless of remaining fuel.
 
-`fork_remembering` is the anamnesis variant: it uses the same shell/provider fork
+`fork_remembering` is the mnemon variant: it uses the same shell/provider fork
 and asks `AgentLog` to import the parent's model-visible context. The spawn site
 still seeds the tool call's prompt through the child's inbox, so the prompt
-enters through the same turn path as agraphos. `AgentLog` drops a pending
+enters through the same turn path as amnemon. `AgentLog` drops a pending
 unanswered assistant tool-call frame when the parent is mid-dispatch, so the
 child inherits a request context rather than a dangling provider protocol. The
-agraphos path uses plain `fork`; both spawn modes seed the launch prompt into
+amnemon path uses plain `fork`; both spawn modes seed the launch prompt into
 the child's inbox.
 
 Routing the fork through core matters because the builtin table is the easiest

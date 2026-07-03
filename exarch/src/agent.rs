@@ -1735,7 +1735,7 @@ mod tests {
         assert!(view.contains("the invariant matters"));
         assert!(
             view.rfind("use that invariant") > view.rfind("the invariant matters"),
-            "anamnesis must put the fresh prompt at the end: {view}"
+            "mnemon must put the fresh prompt at the end: {view}"
         );
     }
 

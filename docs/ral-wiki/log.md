@@ -3523,7 +3523,7 @@ and restamped [[map/core/runtime|runtime]] plus
 
 ## [2026-07-02] ingest | Subagent memory modes
 
-Split exarch spawning into `agraphos` (blank model context) and `anamnesis`
+Split exarch spawning into `amnemon` (blank model context) and `mnemon`
 (parent-context fork with a fresh final prompt), recorded in
 [[decisions/260702_subagent-memory-modes|subagent-memory-modes]]. Restamped
 [[map/exarch/agent|agent]] and [[map/exarch/tools|tools]], and updated
@@ -3533,8 +3533,8 @@ Split exarch spawning into `agraphos` (blank model context) and `anamnesis`
 ## [2026-07-02] ingest | Discuss command
 
 Added [[decisions/260702_discuss-command|discuss-command]] for `/discuss
-<prompt>`: a host slash command that spawns an `anamnesis` chair, asks it to
-spawn one `agraphos` partner, and returns one ordinary `reply.result` without a
+<prompt>`: a host slash command that spawns a `mnemon` chair, asks it to
+spawn one `amnemon` partner, and returns one ordinary `reply.result` without a
 new peer transport. Restamped [[map/exarch/tools|tools]] and
 [[map/exarch/frontend|frontend]], and updated [[index|index]].
 
@@ -3591,7 +3591,7 @@ turns. Re-stamped [[map/exarch/provider|provider]] and
 
 Landed [[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]]: `Agent`
 gains `fuel: u32` (trunk starts at `SPAWN_FUEL = 8`), `fork` spends one unit
-per child, and a new `Gate::Spawns` axis withholds `agraphos`/`anamnesis` once
+per child, and a new `Gate::Spawns` axis withholds `amnemon`/`mnemon` once
 `fuel` reaches zero — a runaway delegation chain now terminates by tool
 absence rather than recursing forever. `/discuss` forks its chair outside the
 gate, so `tui_loop.rs` separately refuses to seat one below `fuel < 2`.

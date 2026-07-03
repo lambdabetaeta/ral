@@ -10,10 +10,10 @@ agent kind and not a new inbox delivery mode.
 
 - The focused agent handles `/discuss` at the normal `Control` boundary, where
   the drive thread owns the shell and may fork safely.
-- The command spawns an `anamnesis` chair: it imports the focused
+- The command spawns a `mnemon` chair: it imports the focused
   model-visible context, receives the user's topic as its fresh final prompt,
   and holds the usual returning-agent `reply { result }` tool.
-- The chair spawns exactly one `agraphos` discussant (titled after the topic) with
+- The chair spawns exactly one `amnemon` discussant (titled after the topic) with
   `read-only` permissions, and gives it a prompt instructing it to engage via
   `message`.
 - The chair sends the topic as a `message`; the discussant responds in kind.

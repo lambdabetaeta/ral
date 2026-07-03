@@ -161,7 +161,7 @@ Two `Sink` implementations:
  `/compact`, `/discuss`, `/quit`) enter the focused agent's inbox as
  `Command` turns and run in `ReplControl`. `/discuss` is the one command in
  that class that forks work instead of mutating the current context: it starts
- an `anamnesis` chair agent which conducts the bounded two-agent protocol
+ a `mnemon` chair agent which conducts the bounded two-agent protocol
  recorded in [[decisions/260702_discuss-command|discuss-command]]. The idle wait
  selects over input, inbox, and the session bus
  ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]],

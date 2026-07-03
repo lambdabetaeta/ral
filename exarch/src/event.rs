@@ -181,8 +181,8 @@ pub enum SessionEvent {
     /// or a steering interjection drained after tool results and before the
     /// next assistant reply.
     UserPrompt { text: String },
-    /// A model-visible message inherited from a parent agent's context when an
-    /// anamnesis child is born.  It is replayed verbatim to the provider but
+    /// A model-visible message inherited from a parent agent's context when a
+    /// mnemon child is born.  It is replayed verbatim to the provider but
     /// does not drive the local protocol state machine; the child's fresh
     /// `UserPrompt` remains the turn it must answer.
     ContextMessage { message: ChatMessage },
@@ -447,7 +447,7 @@ impl AgentLog {
         self.model_messages()
     }
 
-    /// The parent context an anamnesis child should inherit.  When called from
+    /// The parent context a mnemon child should inherit.  When called from
     /// a tool dispatch, the parent may be waiting for the very tool result this
     /// child is about to produce; drop that unfinished assistant frame so the
     /// child starts from the request context, not a dangling tool protocol.
@@ -478,7 +478,7 @@ impl AgentLog {
 
     /// Import parent context messages without appending a prompt.
     ///
-    /// An `anamnesis` child receives its launch prompt through its inbox, so
+    /// A `mnemon` child receives its launch prompt through its inbox, so
     /// the drive loop commits it through [`append_user`] at apply time: the
     /// same path every other turn takes.
     pub fn import_context(&mut self, messages: Vec<ChatMessage>) -> Result<(), String> {

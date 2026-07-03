@@ -20,7 +20,7 @@ filters the static registry by a small `Gate`: `Always`, `Returns`,
 so the tree is not capped at one level
 ([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]], superseding the
 depth-1 `spawns()` axis) — but each `fork` spends one unit of the parent's
-`fuel` on the child, and `Gate::Spawns` withholds `agraphos`/`anamnesis` once
+`fuel` on the child, and `Gate::Spawns` withholds `amnemon`/`mnemon` once
 an agent's `fuel` reaches zero, so a delegation chain bottoms out rather than
 recursing forever ([[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]]).
 `reply` is present only for returning agents
@@ -35,21 +35,21 @@ The tools that ship:
   the [[map/exarch/frontend|rail]]; the full `cmd` opens in the collapsible
   tool-call block). A fixed 30s call timeout bounds inline work; anything longer
   belongs in a `spawn` that outlives the turn.
-- the **spawn family** — `agraphos` / `anamnesis` / `agents` / `message` /
+- the **spawn family** — `amnemon` / `mnemon` / `agents` / `message` /
   `agent_cancel`
-  (`tools/agent.rs`). Spawning is universal, but `agraphos`/`anamnesis` are
+  (`tools/agent.rs`). Spawning is universal, but `amnemon`/`mnemon` are
   gated by `Gate::Spawns` on the agent's own `fuel` (nonzero for every fresh
   fork down to a fixed depth,
   [[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]]); `agents` /
   `message` / `agent_cancel` stay `Gate::Always` since they manage already-live
-  agents rather than mint new ones. `agraphos` and `anamnesis` are launch-only
+  agents rather than mint new ones. `amnemon` and `mnemon` are launch-only
   and always asynchronous
   ([[decisions/260617_async-agent-tool|async-agent-tool]]): each forks a child
   [[map/exarch/agent|agent]] from a value-snapshot of the parent shell, runs it on
   a detached thread through the same `Agent::drive` loop, and returns a start
   receipt at once; the child's single reply is delivered later as a marked
   `Turn` through the parent's [[map/exarch/frontend|inbox]]. They differ only in
-  model memory: `agraphos` is tabula rasa, while `anamnesis` imports the parent's
+  model memory: `amnemon` is tabula rasa, while `mnemon` imports the parent's
   model-visible context and appends the tool call's prompt as the child's fresh
   final prompt. Both take a **mandatory `permissions`** parameter — one of the
   five [[map/exarch/policy|base]] names (`confined`, `minimal`, `read-only`,
@@ -66,9 +66,9 @@ The tools that ship:
   spawning, marked peer messages, returning, narrowing, and memory mode — is
   [[design/agents|agents]].
 - `spawn_discussion` (`tools.rs` → `tools/agent.rs`) — the host-only helper
-  behind `/discuss`, not a model-advertised tool. It spawns an `anamnesis`
+  behind `/discuss`, not a model-advertised tool. It spawns a `mnemon`
   returning chair with the focused context and instructs that chair to spawn one
-  `agraphos` partner, consume the partner's ordinary `reply`, and return one
+  `amnemon` partner, consume the partner's ordinary `reply`, and return one
   `result` to its parent ([[decisions/260702_discuss-command|discuss-command]]).
   It calls the fork primitive directly, bypassing `Gate::Spawns`, so the
   `/discuss` command in `tui_loop.rs` separately refuses to seat a chair when

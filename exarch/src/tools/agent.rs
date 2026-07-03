@@ -25,15 +25,15 @@ pub(super) struct SpawnTool {
 }
 
 impl SpawnTool {
-    pub(super) fn agraphos() -> Self {
+    pub(super) fn amnemon() -> Self {
         Self {
-            kind: SpawnKind::Agraphos,
+            kind: SpawnKind::Amnemon,
         }
     }
 
-    pub(super) fn anamnesis() -> Self {
+    pub(super) fn mnemon() -> Self {
         Self {
-            kind: SpawnKind::Anamnesis,
+            kind: SpawnKind::Mnemon,
         }
     }
 }
@@ -41,23 +41,23 @@ impl SpawnTool {
 #[derive(Copy, Clone)]
 enum SpawnKind {
     /// Tabula rasa: fresh model context, inherited shell values only.
-    Agraphos,
+    Amnemon,
     /// Remembrance: inherited model context, fresh prompt at the end.
-    Anamnesis,
+    Mnemon,
 }
 
 impl SpawnKind {
     fn tool(self) -> &'static str {
         match self {
-            Self::Agraphos => "agraphos",
-            Self::Anamnesis => "anamnesis",
+            Self::Amnemon => "amnemon",
+            Self::Mnemon => "mnemon",
         }
     }
 
     fn desc(self) -> &'static str {
         match self {
-            Self::Agraphos => {
-                "Spawn an agraphos sub-agent: tabula rasa.  This is launch-only \
+            Self::Amnemon => {
+                "Spawn an amnemon sub-agent: tabula rasa.  This is launch-only \
 and always asynchronous: the call forks a child session and returns immediately \
 with a start receipt `{id, title, status, log_dir}`.  The child runs the same \
 agent loop off your critical path; its single reply is delivered to you LATER \
@@ -82,8 +82,8 @@ single grep/view/read/edit you can run inline — running it yourself is cheaper
 and keeps the result addressable (e.g. the witness `edit` needs).  \
 `permissions` bounds the child to at most your own authority."
             }
-            Self::Anamnesis => {
-                "Spawn an anamnesis sub-agent: remembrance.  This is launch-only \
+            Self::Mnemon => {
+                "Spawn a mnemon sub-agent: remembrance.  This is launch-only \
 and always asynchronous: the call forks a child session and returns immediately \
 with a start receipt `{id, title, status, log_dir}`.  The child reuses your \
 current provider selection and inherits your model-visible context, with the \
@@ -95,7 +95,7 @@ The shell is still forked: the child sees a value-snapshot of your shell (your \
 `let` bindings, cwd, env), but its own shell mutations (cd, env, new bindings) \
 do NOT propagate back; you receive a string, not its bindings or intermediate \
 findings.  File edits it makes to the working tree are real and persist.  Use \
-anamnesis when context reuse matters; use `agraphos` when isolation and a blank \
+mnemon when context reuse matters; use `amnemon` when isolation and a blank \
 conversation are better.  `permissions` bounds the child to at most your own \
 authority; delegation depth is likewise finite — each spawn spends one unit of \
 your own spawn budget on the child, so a chain cannot recurse forever."
@@ -105,8 +105,8 @@ your own spawn budget on the child, so a chain cannot recurse forever."
 
     fn fork(self, session: &Agent, caps: ral_core::types::Capabilities) -> std::io::Result<Agent> {
         match self {
-            Self::Agraphos => session.fork(caps),
-            Self::Anamnesis => session.fork_remembering(caps),
+            Self::Amnemon => session.fork(caps),
+            Self::Mnemon => session.fork_remembering(caps),
         }
     }
 }
@@ -228,8 +228,8 @@ impl Tool for SpawnTool {
 /// Start a bounded two-agent discussion from a host slash command.
 ///
 /// This deliberately reuses the ordinary spawn API: the discussion chair is an
-/// `anamnesis` child, so it remembers the focused conversation; the chair is
-/// instructed to spawn one `agraphos` partner and consume that partner's normal
+/// `mnemon` child, so it remembers the focused conversation; the chair is
+/// instructed to spawn one `amnemon` partner and consume that partner's normal
 /// `reply`.  There is no special peer channel and no pretend-human delivery.
 pub(crate) fn spawn_discussion(session: &mut Agent, topic: &str, emit: &Emitter) -> String {
     let title = format!("discuss-{}", DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed));
@@ -239,7 +239,7 @@ pub(crate) fn spawn_discussion(session: &mut Agent, topic: &str, emit: &Emitter)
         "permissions": "read-only",
     });
     dispatch_spawn(
-        SpawnKind::Anamnesis,
+        SpawnKind::Mnemon,
         "/discuss".to_string(),
         input,
         session,
@@ -257,7 +257,7 @@ Topic:
 {topic}
 
 Protocol:
-- Spawn exactly one `agraphos` partner with a title that includes the topic (e.g. `debate-<topic>`) and permissions `read-only`.
+- Spawn exactly one `amnemon` partner with a title that includes the topic (e.g. `debate-<topic>`) and permissions `read-only`.
   Give it a prompt that says: you are the discussant in a two-way debate, wait for the chair's messages, respond to each via `message` with both (a) a defense or refinement of your position and (b) a sharp critique of the chair's position, continue for at least 10 exchanges, then call `reply` with a closing statement.
 - Once spawned, send the partner a `message` with the topic and ask for an opening position.
 - When the partner responds, formulate (a) your sharpest challenge and (b) your own position on the topic. Send both back via `message`.

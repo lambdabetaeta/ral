@@ -3,8 +3,8 @@
 //! A [`Tool`] knows how to advertise itself to the provider (name,
 //! description, JSON schema) and how to dispatch one parsed JSON input
 //! against a live [`Agent`], returning a [`SessionToolResult`].  Every tool
-//! returns synchronously: a tool that forks a child session (`agraphos` or
-//! `anamnesis`) launches
+//! returns synchronously: a tool that forks a child session (`amnemon` or
+//! `mnemon`) launches
 //! a detached peer and returns a start receipt, so dispatch never blocks and
 //! there is no join phase.
 //!
@@ -50,8 +50,8 @@ pub(crate) enum Gate {
     /// indefinitely holds real authority, so the grant is off by default and
     /// inherited by a fork from its parent.
     Schedules,
-    /// Present only while the agent's spawn fuel is nonzero — `agraphos` /
-    /// `anamnesis`.  Every agent may spawn, but each fork spends one unit of
+    /// Present only while the agent's spawn fuel is nonzero — `amnemon` /
+    /// `mnemon`.  Every agent may spawn, but each fork spends one unit of
     /// the parent's fuel on the child, so a delegation chain's tools vanish a
     /// fixed number of generations down rather than recursing forever
     /// ([[decisions/260703_spawn-fuel-ceiling]]).
@@ -80,7 +80,7 @@ pub(crate) trait Tool: Send + Sync {
     }
 
     /// Read `input`, render the rail header, run the call, and return its
-    /// result.  A tool that forks a child session (`agraphos`/`anamnesis`) launches a
+    /// result.  A tool that forks a child session (`amnemon`/`mnemon`) launches a
     /// detached worker and returns a start receipt here — it does not block.
     /// Malformed input is reported by the tool itself via [`invalid_input`]
     /// (or its own equivalent), so this method always produces a result.  A
@@ -102,8 +102,8 @@ fn registry() -> &'static [Box<dyn Tool>] {
     R.get_or_init(|| {
         vec![
             Box::new(ral::RalTool),
-            Box::new(agent::SpawnTool::agraphos()),
-            Box::new(agent::SpawnTool::anamnesis()),
+            Box::new(agent::SpawnTool::amnemon()),
+            Box::new(agent::SpawnTool::mnemon()),
             Box::new(agent::AgentsTool),
             Box::new(agent::MessageTool),
             Box::new(agent::AgentCancelTool),
@@ -117,7 +117,7 @@ fn registry() -> &'static [Box<dyn Tool>] {
 
 /// The tools an agent may call — a per-agent view into the static [`registry`],
 /// shaped by the three gate axes.  `returns` admits `reply`; `schedules` admits
-/// the self-wakeup family; `can_spawn` admits `agraphos`/`anamnesis`.  The
+/// the self-wakeup family; `can_spawn` admits `amnemon`/`mnemon`.  The
 /// result is the agent's single source of truth: it is both advertised to the
 /// provider and searched on dispatch, so a tool absent here is invisible and
 /// uncallable, with no separate predicate.
@@ -195,7 +195,7 @@ mod tests {
         for f in ["schedule", "schedules", "unschedule"] {
             assert!(granted.contains(&f), "a scheduling view holds `{f}`");
         }
-        for f in ["agraphos", "anamnesis"] {
+        for f in ["amnemon", "mnemon"] {
             assert!(granted.contains(&f), "a fueled view holds `{f}`");
         }
         assert!(granted.contains(&"ral"), "the always-tools are present");
@@ -211,7 +211,7 @@ mod tests {
                 "an ungranted view withholds the wakeup tool `{f}`"
             );
         }
-        for f in ["agraphos", "anamnesis"] {
+        for f in ["amnemon", "mnemon"] {
             assert!(
                 !withheld.contains(&f),
                 "an out-of-fuel view withholds the spawn tool `{f}`"

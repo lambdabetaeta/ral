@@ -74,9 +74,9 @@ The spawn tools are **launch-only and always asynchronous**
 
 Two spawn tools choose the child's **model memory**, not its shell isolation:
 
-- **`agraphos`** is tabula rasa. The child starts with no conversation history;
+- **`amnemon`** is tabula rasa. The child starts with no conversation history;
   only the shell value-snapshot and the chosen prompt cross the edge.
-- **`anamnesis`** remembers. The child imports the parent's model-visible context
+- **`mnemon`** remembers. The child imports the parent's model-visible context
   and appends the tool call's `prompt` as a fresh final user prompt, while
   reusing the parent's current provider selection so provider prompt caches can
   hit. If the parent is mid-tool-call, the unanswered assistant tool-call frame is
