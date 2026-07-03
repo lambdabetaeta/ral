@@ -830,23 +830,40 @@ pub(super) fn render_card_framed(card: &Card, width: u16) -> Vec<Line<'static>> 
         CARD_INDENT,
         Style::default().fg(SLATE),
         width.min(READ_W),
+        false,
     )
 }
 
-/// Render a pinned register card: framed in its producing agent's `hue`, flush
-/// to the register column (no transcript indent), bounded by the column
-/// `width`.  The hue is the register's only departure from a surfaced card —
-/// identity that the transcript reads from the matrix, a side column must carry
-/// itself.
+/// Register-card side margin, in columns.  The register owns the whole area
+/// right of the transcript; the card itself breathes inside it.
+const REGISTER_CARD_MARGIN: usize = 2;
+
+/// Render a pinned register card: framed in its producing agent's `hue`, inset
+/// inside the register column and filling that inset width.
+/// The hue is the register's only departure from a surfaced card — identity
+/// that the transcript reads from the matrix, a side column must carry itself.
 pub(super) fn render_pin(card: &Card, width: u16, hue: Color) -> Vec<Line<'static>> {
-    render_framed(card, 0, Style::default().fg(hue), width)
+    let draw_w = width.saturating_sub(REGISTER_CARD_MARGIN as u16);
+    render_framed(
+        card,
+        REGISTER_CARD_MARGIN,
+        Style::default().fg(hue),
+        draw_w,
+        true,
+    )
 }
 
 /// Core framed-card renderer shared by the transcript's surfaced cards and the
 /// register's pins: a bordered box `indent_w` columns in, drawn in `border`
 /// ink, content wrapped to a budget derived from `width` (the caller caps it —
 /// the transcript at [`READ_W`], the register at its column width).
-fn render_framed(card: &Card, indent_w: usize, border: Style, width: u16) -> Vec<Line<'static>> {
+fn render_framed(
+    card: &Card,
+    indent_w: usize,
+    border: Style,
+    width: u16,
+    fill: bool,
+) -> Vec<Line<'static>> {
     let indent = " ".repeat(indent_w);
     // Inner content budget: the content column less the indent and the four
     // frame columns (`│ ` … ` │`).
@@ -886,13 +903,14 @@ fn render_framed(card: &Card, indent_w: usize, border: Style, width: u16) -> Vec
     // the top rule's `╭─ title ─╮` always closes.  Capped at the budget.
     let title_w = title.as_deref().map_or(0, span_run_width);
     let title_min = if title.is_some() { title_w + 1 } else { 0 };
-    let inner_w = wrapped
+    let natural_inner = wrapped
         .iter()
         .map(|l| span_run_width(&l.spans))
         .max()
         .unwrap_or(0)
         .max(title_min)
         .clamp(1, max_inner);
+    let inner_w = if fill { max_inner } else { natural_inner };
     let interior = inner_w + 2; // one padding column each side
 
     let mut out: Vec<Line<'static>> = vec![Line::default()];

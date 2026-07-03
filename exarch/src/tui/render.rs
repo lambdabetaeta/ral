@@ -30,7 +30,7 @@ use super::matrix::matrix_bar;
 use super::select::highlight_range;
 use super::status::{StatusReadout, rule_line};
 use super::terminal::Term;
-use super::{LEFT_MARGIN, PROMPT_PAD_H, REGISTER_GAP, REGISTER_W, SPINNER};
+use super::{LEFT_MARGIN, PROMPT_PAD_H, REGISTER_MIN_W, SPINNER};
 
 /// Where the content area sat in the last drawn frame.
 #[derive(Clone, Copy)]
@@ -94,16 +94,16 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     };
     // The register's vertical budget is decided here, before the layout:
     // shown as the right-hand column when the focused session has pins and
-    // the terminal is wide enough to spare the margin, else collapsed to a
-    // one-row pin band beside the matrix.  `content.width == area.width`
-    // (the vertical split keeps full width), so the threshold reads off
-    // `area.width` directly.
+    // the terminal is wide enough to spare the margin.  `content.width ==
+    // area.width` (the vertical split keeps full width), so the threshold
+    // reads off `area.width` directly.
     let focused = app.tabs.focused();
     let has_pins = app
         .tabs
         .viewport(focused)
         .is_some_and(|vp| !vp.pins().is_empty());
-    let show_register = has_pins && area.width >= LEFT_MARGIN + READ_W + REGISTER_GAP + REGISTER_W;
+    let register_w = area.width.saturating_sub(LEFT_MARGIN + READ_W);
+    let show_register = has_pins && register_w >= REGISTER_MIN_W;
     let layout = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(1), // breathing row between output and chrome
@@ -116,11 +116,11 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     let (content, tab_row, prompt_row, status_row, footer_row) =
         (layout[0], layout[2], layout[3], layout[4], layout[5]);
     // Split the content row by hand into the rail's left gutter, the
-    // transcript, and — on a wide enough terminal — the register glued to
-    // the right edge.  No scrollbar: the right edge is the register's, and
-    // scroll position reads as a magnitude in the rule line.  Capping the
-    // transcript at READ_W (rather than letting it expand) is what keeps
-    // the register from ever narrowing prose: it claims only dead margin.
+    // transcript, and — on a wide enough terminal — the register covering all
+    // remaining columns to the right.  No scrollbar: the right side is the
+    // register's, and scroll position reads as a magnitude in the rule line.
+    // Capping the transcript at READ_W (rather than letting it expand) is what
+    // keeps the register from ever narrowing prose: it claims only dead margin.
     let text_w = if show_register {
         READ_W
     } else {
@@ -129,9 +129,9 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     let text_rect = Rect::new(content.x + LEFT_MARGIN, content.y, text_w, content.height);
     let register_rect = show_register.then(|| {
         Rect::new(
-            content.x + content.width - REGISTER_W,
+            content.x + LEFT_MARGIN + READ_W,
             content.y,
-            REGISTER_W,
+            register_w,
             content.height,
         )
     });
@@ -151,7 +151,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
                 .get(vp.agent().0 as usize)
                 .copied()
                 .unwrap_or(AGENT_HUES[0]);
-            line::render_register(vp.pins(), REGISTER_W, hue)
+            line::render_register(vp.pins(), register_w, hue)
         }
         _ => Vec::new(),
     };

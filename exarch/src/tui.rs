@@ -54,14 +54,10 @@ pub(super) const PROMPT_PAD_H: u16 = 1;
 /// Gives the marginal rail breathing room from the terminal edge so it
 /// reads as a Bertin data column rather than frame chrome.
 pub(super) const LEFT_MARGIN: u16 = 2;
-/// Width of the pinned-state register column, in columns — a framed gauge
-/// (`│ tasks ▓▓░ 3/8 │`) plus its borders and a padding column each side.
-pub(super) const REGISTER_W: u16 = 35;
-/// Minimum reading gap between the `READ_W`-capped transcript and the register
-/// column.  The register is reserved only when the content area is at least
-/// `LEFT_MARGIN + READ_W + REGISTER_GAP + REGISTER_W` wide — wide enough that
-/// reclaiming the dead right margin costs the transcript nothing; below that it
-pub(super) const REGISTER_GAP: u16 = 4;
+/// Minimum useful width of the pinned-state register column, in columns.  Once
+/// the content area has this much space to the right of the `READ_W`-capped
+/// transcript, the register takes all of it.
+pub(super) const REGISTER_MIN_W: u16 = 35;
 /// How long a subagent tab stays in the rotation after the session
 /// dies — long enough for the user to tab over and inspect the final
 /// frame of its scrollback, short enough not to clutter the tab bar.
