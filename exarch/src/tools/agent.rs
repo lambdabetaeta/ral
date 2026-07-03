@@ -298,7 +298,7 @@ fn dispatch_spawn(
             Ok(c) => c,
             Err(reason) => return invalid_input(id, kind.tool(), INVALID_INPUT, &reason, emit),
         };
-    let mut child = match kind.fork(session, child_caps) {
+    let child = match kind.fork(session, child_caps) {
         Ok(c) => c,
         Err(e) => {
             let msg = format!("could not fork child session: {e}");
@@ -306,6 +306,59 @@ fn dispatch_spawn(
             return SessionToolResult { id, content: msg };
         }
     };
+    spawn_async(
+        session,
+        id,
+        child,
+        AsyncSpawn {
+            tool: kind.tool(),
+            title,
+            prompt,
+            commitment_key: None,
+        },
+        emit,
+    )
+}
+
+/// The tool-specific half of an async spawn: everything that varies between
+/// `amnemon`/`mnemon` and `verify_commitment`, as opposed to the fork-detach-
+/// register mechanics every one of them shares ([`spawn_async`]).
+pub(super) struct AsyncSpawn {
+    pub tool: &'static str,
+    pub title: String,
+    pub prompt: String,
+    /// Set only for a `verify_commitment` spawn: the protected pin key whose
+    /// live status this settle should decide.  `None` for every ordinary
+    /// spawn, which can never tag a result for clearing.
+    pub commitment_key: Option<String>,
+}
+
+/// Fork-then-detach: hand an already-forked, already-capped `child` to a
+/// worker thread that drives it to completion off the parent's critical
+/// path, and return the immediate "started" receipt every spawn tool
+/// answers its dispatch with.  This is the one launch-only, always-
+/// asynchronous shape `amnemon`, `mnemon`, and `verify_commitment` share;
+/// each caller differs only in how it built `child` and `spec`.
+///
+/// `spec.commitment_key`, when `Some`, marks this spawn as a
+/// `verify_commitment` check: the worker computes — while it still holds the
+/// child's raw reply, before that detail is discarded — whether the
+/// structured verdict passed, and tags the settled [`AgentResult`] so the
+/// parent clears the protected pin when the result drains
+/// ([`Agent::drive`](crate::agent::Agent::drive)).
+pub(super) fn spawn_async(
+    session: &mut Agent,
+    id: String,
+    mut child: Agent,
+    spec: AsyncSpawn,
+    emit: &Emitter,
+) -> SessionToolResult {
+    let AsyncSpawn {
+        tool,
+        title,
+        prompt,
+        commitment_key,
+    } = spec;
     // Capture everything off the child before it moves into the worker
     // thread: its identity, log directory, own cancellation token and
     // provider handle, the registry entry's generation, and the parent's
@@ -358,7 +411,7 @@ fn dispatch_spawn(
     // The dispatch shows on the rail before the spawn, so the user can see
     // exactly what the child was asked to do.
     emit.emit(Kind::ToolCall {
-        tool: kind.tool(),
+        tool,
         cmd: prompt,
         summary: Some(title.clone()),
     });
@@ -389,6 +442,11 @@ fn dispatch_spawn(
                 .as_ref()
                 .map(crate::agent::render_reply)
                 .unwrap_or_default();
+            // A commitment verifier's structured reply decides here, on the
+            // worker thread, while the raw payload is still in hand — the
+            // parent only ever sees the tag, never the payload itself.
+            let commitment_pass =
+                super::commitment::commitment_settle(commitment_key, &outcome, &payload);
             // Deliver only if still the live worker of the current
             // generation; a result from before a `/clear` is dropped, not
             // posted into a rebuilt context.
@@ -401,6 +459,7 @@ fn dispatch_spawn(
                     log_dir,
                     elapsed: started.elapsed(),
                     generation,
+                    commitment_pass,
                 }));
             }
         })

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f55191c
+generated_at_commit: ad14511
 generated_at_date: 2026-07-03
 covers_paths: [exarch/src/agent.rs, exarch/src/agent_registry.rs, exarch/src/event.rs, exarch/src/fleet.rs, exarch/src/nudge.rs, exarch/src/digest.rs]
 ---
@@ -103,17 +103,22 @@ The headless-completion gate is gone with `expect_action`
 ([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]]): the one role flag
 that did not fit the `parent` collapse is dropped, not relocated. The nudges that
 remain — `must_reply` for a returning agent (`returns()`), `continue` on
-truncation, empty/early-stop repair, the periodic pin reminder, and the
-budget-free unresolved-commitment reminder for live `commitment:*` pins
-([[decisions/260703_protected-commitment-pins|protected-commitment-pins]]) — are
-driven off the same `react` rule. Exhausted transport and rate-limit failures
-are provider facts, so they surface as `Kind::ProviderError` and do not post a
-model-visible self-nudge.
+truncation, empty/early-stop repair, and the one pinned-state reminder — are
+driven off the same `react` rule. The pinned-state reminder is uniform for
+every pin kind (tasks, goals, protected `commitment:*` pins alike
+([[decisions/260703_protected-commitment-pins|protected-commitment-pins]])) and
+every agent role: budget-free while anything is pinned, independent of and
+additive with `must_reply` — a returning agent that finishes without replying
+while it still holds a live commitment is nudged for both. Exhausted transport
+and rate-limit failures are provider facts, so they surface as
+`Kind::ProviderError` and do not post a model-visible self-nudge.
 
 The same agent owns the protected pin mirror read/clear helpers used by
-`verify_commitment`: the verifier tool may read the saved card and project a
-pass as `Kind::Unpin`, while ordinary model-authored `surface` cannot reach that
-clear path.
+`verify_commitment`: a settled verifier's passing result is tagged for
+clearing by the worker thread that drove it, and `Agent::settle_commitment`
+projects that tag into a clear (`Kind::Unpin`) on the parent's own thread as
+the result drains — ordinary model-authored `surface` cannot reach that clear
+path.
 
 ## The Fleet
 

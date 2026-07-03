@@ -187,12 +187,11 @@ const MAX_STEPS: u32 = 250;
 
 /// Spawn budget the trunk starts with; each [`Agent::fork`] hands its child
 /// one less, and a `fuel == 0` agent loses the spawn tools from its view
-/// ([`tools_for`](crate::tools::tools_for)). Generous enough that no
-/// legitimate delegation tree — `/discuss`'s chair and partner, a human's
-/// multi-hop refactor fan-out — ever runs dry; bounds a runaway spawn-calling
-/// loop to a fixed number of generations instead of the process exhausting
-/// threads.
-const SPAWN_FUEL: u32 = 8;
+/// ([`tools_for`](crate::tools::tools_for)). Covers a short legitimate
+/// delegation chain — `/discuss`'s chair and partner, a couple of hops of
+/// sub-agent fan-out — while bounding a runaway spawn-calling loop to a fixed
+/// number of generations instead of the process exhausting threads.
+const SPAWN_FUEL: u32 = 3;
 
 pub(crate) fn fresh_id() -> AgentId {
     static N: AtomicU64 = AtomicU64::new(0);
@@ -686,6 +685,7 @@ impl Agent {
                     ControlFlow::Continue => continue,
                 }
             }
+            self.settle_commitment(&turn, emit);
             announce(&turn, emit);
             // Read the provider in force for this turn; a `/model` swap on this
             // agent lands here next turn, never mid-turn.
@@ -1317,6 +1317,28 @@ impl Agent {
             });
         }
         Ok(())
+    }
+
+    /// A settled `verify_commitment` child that returned a passing verdict
+    /// clears its protected pin here, on the parent's own thread — the
+    /// worker thread that drove the child never holds `&mut Agent` on the
+    /// parent, only the mailbox it posted through
+    /// ([`spawn_async`](crate::tools::agent::spawn_async)).  Every other
+    /// drained turn is untagged and this is a no-op.
+    fn settle_commitment(&mut self, turn: &Turn, emit: &Emitter) {
+        if let Turn::Agent(r) = turn
+            && let Some(key) = r.commitment_pass.as_deref()
+        {
+            let _ = self.clear_commitment_pin(key, emit);
+        }
+    }
+
+    /// Non-blocking pop of the next deliverable inbox message, for a test
+    /// polling for an async spawn's settle without driving a full turn (and
+    /// its provider round-trip) on the parent session.
+    #[cfg(test)]
+    pub(crate) fn drain_turn_for_test(&self) -> Option<Turn> {
+        self.inbox.drain_turn()
     }
 
     #[cfg(test)]
@@ -2039,5 +2061,77 @@ mod tests {
             }
             other => panic!("expected Failed from no-reply nudges, got {other:?}"),
         }
+    }
+
+    /// A settled `verify_commitment` child tagged with a passing verdict
+    /// clears the protected pin when its result drains — the host-side half
+    /// of the async settle, exercised directly rather than through a real
+    /// spawned thread and provider round-trip.
+    #[test]
+    fn settle_commitment_pass_clears_the_pin() {
+        let dir = tmp("settle-commitment-pass");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let key = "commitment:abc";
+        session.insert_commitment_pin_for_test(
+            key,
+            crate::card::Card(vec![crate::card::Mark::Text {
+                spans: vec![crate::card::Span {
+                    role: None,
+                    text: "criteria 0/1".into(),
+                }],
+            }]),
+        );
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let emit = Emitter::new(tx, session.id);
+        let turn = Turn::Agent(crate::bus::AgentResult {
+            id: fresh_id(),
+            title: "verify-abc".into(),
+            outcome: AgentOutcome::Complete,
+            text: "verifier passed".into(),
+            log_dir: dir,
+            elapsed: std::time::Duration::from_secs(0),
+            generation: 0,
+            commitment_pass: Some(key.to_string()),
+        });
+        session.settle_commitment(&turn, &emit);
+        assert!(
+            session.commitment_card(key).is_err(),
+            "a tagged pass must clear the pin"
+        );
+    }
+
+    /// An ordinary settled agent — no commitment tag — never touches the pin
+    /// register, whether or not one happens to be live.
+    #[test]
+    fn settle_commitment_no_tag_is_a_no_op() {
+        let dir = tmp("settle-commitment-no-tag");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let key = "commitment:abc";
+        session.insert_commitment_pin_for_test(
+            key,
+            crate::card::Card(vec![crate::card::Mark::Text {
+                spans: vec![crate::card::Span {
+                    role: None,
+                    text: "criteria 0/1".into(),
+                }],
+            }]),
+        );
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let emit = Emitter::new(tx, session.id);
+        let turn = Turn::Agent(crate::bus::AgentResult {
+            id: fresh_id(),
+            title: "sub-1".into(),
+            outcome: AgentOutcome::Complete,
+            text: "an ordinary sub-agent's reply".into(),
+            log_dir: dir,
+            elapsed: std::time::Duration::from_secs(0),
+            generation: 0,
+            commitment_pass: None,
+        });
+        session.settle_commitment(&turn, &emit);
+        assert!(
+            session.commitment_card(key).is_ok(),
+            "an untagged settle must leave any live commitment pin alone"
+        );
     }
 }

@@ -197,7 +197,7 @@ mod tests {
         for f in ["schedule", "schedules", "unschedule"] {
             assert!(granted.contains(&f), "a scheduling view holds `{f}`");
         }
-        for f in ["amnemon", "mnemon"] {
+        for f in ["amnemon", "mnemon", "verify_commitment"] {
             assert!(granted.contains(&f), "a fueled view holds `{f}`");
         }
         assert!(granted.contains(&"ral"), "the always-tools are present");
@@ -213,7 +213,7 @@ mod tests {
                 "an ungranted view withholds the wakeup tool `{f}`"
             );
         }
-        for f in ["amnemon", "mnemon"] {
+        for f in ["amnemon", "mnemon", "verify_commitment"] {
             assert!(
                 !withheld.contains(&f),
                 "an out-of-fuel view withholds the spawn tool `{f}`"

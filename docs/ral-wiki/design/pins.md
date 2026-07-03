@@ -62,21 +62,30 @@ card is already safe:
 ## The model watches its own pins
 
 Because pinned state is something the *user is watching* on the rail, the
-[[map/exarch/agent|nudge]] facility periodically reminds the model of it. The
+[[map/exarch/agent|nudge]] facility keeps the model restless about it. The
 agent keeps a small `key → one-line summary` mirror of the pins as they flow
 past — typed by pin kind, while the session is otherwise pin-blind and the
-events go straight to the frontend — and when anything is pinned, a
-**budget-free** reminder fires every so many turns, naming the pinned state.
-With nothing pinned it never fires. This is the discipline pinning earns: a kit
-that publishes state to a slot the user watches is reminded to keep it true.
+events go straight to the frontend. There is **one** pinned-state nudge,
+uniform for every pin kind (a task, a goal, a protected `commitment:*` pin
+alike) and every agent role (the interactive trunk and a returning sub-agent
+alike): while anything is pinned, a **budget-free** reminder fires on every
+clean completion, naming the pinned state; with nothing pinned, a gentler,
+throttled reminder suggests `set-goal`/`add-task` instead. This nudge is
+independent of, and additive with, a *returning* agent's separate obligation
+to call `reply` — neither suppresses the other, so a sub-agent that finishes
+without replying while it still holds a live commitment is reminded of both at
+once. This is the discipline pinning earns: a kit that publishes state to a
+slot the user watches is reminded to keep it true, and the host never lets a
+protected obligation go quiet just because the agent holding it happens to be
+a sub-agent rather than the trunk.
 
-A live `commitment:*` pin is stronger than the ordinary reminder: any clean
-completion while it remains pinned produces an unresolved-commitment nudge. The
-host is not judging the work; it is refusing to sit still while protected
-obligation state is live. The actor can request a check through
+The actor can request a check on a live commitment through
 `verify_commitment`, whose input is only the protected key; the host reads the
-saved card, builds the verifier prompt itself, runs an `amnemon` verifier, and
-clears the pin only on a matching structured pass verdict.
+saved card, builds the verifier prompt itself, and launches an `amnemon`
+verifier the same launch-only, always-asynchronous way `amnemon`/`mnemon`
+launch any other child. The pin clears — on the host's own thread, as the
+verifier's settled result drains — only on a matching structured pass
+verdict; nothing else, and no one but a verifier, ever clears one.
 
 ## Why this shape
 

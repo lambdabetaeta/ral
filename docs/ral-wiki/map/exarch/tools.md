@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f55191c
+generated_at_commit: ad14511
 generated_at_date: 2026-07-03
 covers_paths: [exarch/src/tools.rs, exarch/src/tools/]
 ---
@@ -39,11 +39,18 @@ The tools that ship:
   live protected `commitment:*` pin
   ([[decisions/260703_protected-commitment-pins|protected-commitment-pins]]).
   The model supplies only `key`; the tool reads the saved pin card from the
-  agent mirror, builds the verifier prompt itself, runs an `amnemon` child with
-  narrowed read-only authority, and clears the protected pin only when the child
-  returns a structured `commitment_verdict` whose `commitment_key` matches and
-  whose verdict is `pass`. A fail, unknown, malformed reply, or child failure
-  leaves the pin live, so the ordinary nudge path keeps the actor restless.
+  agent mirror, builds the verifier prompt itself, and — like `amnemon`/
+  `mnemon` — launches the check through the shared `spawn_async` (`tools/
+  agent.rs`): launch-only and always asynchronous, forking a read-only-narrowed
+  `amnemon` child and returning a start receipt immediately rather than
+  blocking the turn. The worker thread that drives the child tags its settled
+  result once it holds the raw reply; the pin clears on the *parent's* own
+  thread, at drain (`Agent::settle_commitment`), only when that tag names a
+  structured `commitment_verdict` whose `commitment_key` matches and whose
+  verdict is `pass`. A fail, unknown, malformed reply, or child failure leaves
+  the pin untagged and live, so the ordinary nudge path keeps the actor
+  restless. Shares the same `Gate::Spawns` fuel ceiling as `amnemon`/`mnemon`,
+  since it forks a child the same way.
 - the **spawn family** — `amnemon` / `mnemon` / `agents` / `message` /
   `agent_cancel`
   (`tools/agent.rs`). Spawning is universal, but `amnemon`/`mnemon` are

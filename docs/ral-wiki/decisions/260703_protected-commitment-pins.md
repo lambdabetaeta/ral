@@ -16,13 +16,19 @@ not infer obligations from rendered text:
 
 - model-authored `surface `` `pin ``/`` `unpin `` to `commitment:*` is rejected
   at the exarch surface sink with a diagnostic;
-- live `commitment:*` pins are mirrored as commitment pins, so a clean completion
-  triggers a budget-free unresolved-commitment nudge;
+- live `commitment:*` pins ride the same one pinned-state nudge every other
+  pin kind does — uniformly, budget-free, for every agent regardless of
+  role — rather than a separate commitment-only mechanism: pinned state is
+  pinned state, and a returning sub-agent's independent obligation to call
+  `reply` never suppresses it;
 - `verify_commitment` is the actor's check request: its schema admits only the
   protected pin key, the host builds the verifier prompt from the saved pin
-  card, runs an `amnemon` child, and accepts only a structured
-  `commitment_verdict` for the same key;
-- passing a commitment is represented by clearing the protected pin through
+  card, and launches an `amnemon` child the same launch-only,
+  always-asynchronous way `amnemon`/`mnemon` launch any other child (sharing
+  their `Gate::Spawns` fuel ceiling, since it forks a child the same way),
+  accepting only a structured `commitment_verdict` for the same key;
+- passing a commitment is represented by clearing the protected pin — on the
+  host's own thread, as the verifier's settled result drains — through
   host-projected verifier output, not by the actor unpinning it;
 - `/clear` remains a session reset and clears commitments with the rest of the
   pin register.

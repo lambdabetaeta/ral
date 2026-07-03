@@ -3610,3 +3610,21 @@ only a protected key, host-prompts an `amnemon` verifier, and clears the pin onl
 on a matching structured pass. Updated [[design/pins|pins]] and re-stamped
 [[map/exarch/shell-eval|shell-eval]], [[map/exarch/agent|agent]], and
 [[map/exarch/tools|tools]].
+
+## [2026-07-03] ingest | One uniform pinned-state nudge; async verify_commitment
+
+Collapsed the separate budget-free commitment nudge into the one pinned-state
+reminder every pin kind already shared: `NudgeCtx` drops its `commitment`
+field, `Agent::commitment_digest` is gone, and `nudge::Registry::react`
+composes the pinned-state reminder with a returning agent's `reply`
+obligation instead of letting `must_reply` suppress it — both fire, uniformly,
+for the trunk or any sub-agent. `verify_commitment` no longer drives its
+verifier child synchronously inline: it now shares `amnemon`/`mnemon`'s
+`spawn_async` (extracted from `tools/agent.rs`'s `dispatch_spawn`) and their
+`Gate::Spawns` fuel gate, returning a start receipt immediately; the worker
+thread tags a passing settle for `Agent::settle_commitment` to clear on the
+parent's own thread as the result drains. `verifier_passed` also parses a
+verdict returned as a JSON-encoded string, since `reply`'s schema does not
+require a native object. `SPAWN_FUEL` lowered to 3. Re-stamped
+[[design/pins|pins]], [[map/exarch/agent|agent]], and
+[[map/exarch/tools|tools]].

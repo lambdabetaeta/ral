@@ -31,7 +31,7 @@ different axes and do not compose into a depth limit.
 
 ## Decision
 
-- **`Agent` carries `fuel: u32`.** The trunk is born with `SPAWN_FUEL = 8`
+- **`Agent` carries `fuel: u32`.** The trunk is born with `SPAWN_FUEL = 3`
   (`agent.rs`); `Agent::fork` computes the child's fuel as
   `self.fuel.saturating_sub(1)` and never lets it wrap below zero.
 - **A new `Gate::Spawns` axis** (`tools.rs`) admits `amnemon`/`mnemon` only
