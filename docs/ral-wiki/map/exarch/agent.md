@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 5d9f588
+generated_at_commit: cae7c3c
 generated_at_date: 2026-07-03
 covers_paths: [exarch/src/agent.rs, exarch/src/agent_registry.rs, exarch/src/event.rs, exarch/src/fleet.rs, exarch/src/nudge.rs, exarch/src/digest.rs]
 ---
@@ -27,19 +27,22 @@ position, never an `is_root` branch:
 ```
   returns(a)    ⟺  ¬(a.parent = None ∧ fleet.interactive)   // everyone but the conversing trunk
   park_mode(a)  =  Held           if conversing(a) ∨ fleet.focus = a.id
+                   HeldByChildren if a has live descendants
                    UntilCancelled if a.schedules.armed()
                    Quiesce        otherwise
 ```
 
-`returns` (`agent.rs:998`) is the inverse of `parent = None ∧ interactive` — the
+`returns` (`agent.rs:1133`) is the inverse of `parent = None ∧ interactive` — the
 old `is_root && interactive` reply gate
 ([[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]]),
-re-read through tree position. `park_mode` (`agent.rs:1007`, returning a
-`ParkMode` of `Held` / `UntilCancelled` / `Quiesce`, `bus.rs:45`) replaces the
+re-read through tree position. `park_mode` (`agent.rs:1144`, returning a
+`ParkMode` of `Held` / `HeldByChildren` / `UntilCancelled` / `Quiesce`,
+`bus.rs:48`) replaces the
 deleted `park_when_idle` flag: a present human (the conversing trunk, or the
-agent the human `TAB`bed to) holds the node parked; a live self-schedule holds it
-until cancelled; otherwise it terminates at quiescence — the one-shot contract a
-headless trunk and a settled sub-agent both satisfy.
+agent the human `TAB`bed to) holds the node parked; live descendants hold it
+until their results drain; a live self-schedule holds it until cancelled;
+otherwise it terminates at quiescence — the one-shot contract a headless trunk
+and a settled sub-agent both satisfy.
 
 ## The drive loop
 
@@ -104,14 +107,18 @@ The headless-completion gate is gone with `expect_action`
 that did not fit the `parent` collapse is dropped, not relocated. The nudges that
 remain — `must_reply` for a returning agent (`returns()`), `continue` on
 truncation, empty/early-stop repair, and the one pinned-state reminder — are
-driven off the same `react` rule. The pinned-state reminder is uniform for
-every pin kind (tasks, goals, protected `commitment:*` pins alike
+driven off the same `react` rule. Live descendants make the agent wait:
+`must_reply` is suspended, and pin/no-pin reminders wait too, since the agent has
+already delegated the next actionable fact. Once the descendants settle, the
+rules resume against the still-live pin register. The pinned-state reminder is
+uniform for every pin kind (tasks, goals, protected `commitment:*` pins alike
 ([[decisions/260703_protected-commitment-pins|protected-commitment-pins]])) and
-every agent role: budget-free while anything is pinned, independent of and
-additive with `must_reply` — a returning agent that finishes without replying
-while it still holds a live commitment is nudged for both. Exhausted transport
-and rate-limit failures are provider facts, so they surface as
-`Kind::ProviderError` and do not post a model-visible self-nudge.
+every actionable agent role: budget-free while anything is pinned, independent
+of and additive with `must_reply` — a returning agent that finishes without
+replying while it still holds a live commitment is nudged for both after its
+children have landed. Exhausted transport and rate-limit failures are provider
+facts, so they surface as `Kind::ProviderError` and do not post a model-visible
+self-nudge.
 
 The same agent owns the protected pin mirror read/set/clear helpers used by
 `commit`/`verify_commitment`: a settled writer's formalized card, or a settled
@@ -204,7 +211,7 @@ authority** (`TerminalAccess::Denied`, no lease — a sub-agent is not the
 foreground agent and can never seize the controlling terminal the TUI owns).
 There is no flow-back: the child's `cd`, env, and new bindings die with it. Every
 agent may spawn, but `fork` also computes the child's `fuel` as
-`self.fuel.saturating_sub(1)` (`SPAWN_FUEL = 8` at the trunk); a `fuel == 0`
+`self.fuel.saturating_sub(1)` (`SPAWN_FUEL = 3` at the trunk); a `fuel == 0`
 agent's `tools_for` view drops `amnemon`/`mnemon`
 ([[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]]), so a delegation
 chain bottoms out a fixed number of generations down. The fork mirrors on the

@@ -18,9 +18,10 @@ not infer obligations from rendered text:
   at the exarch surface sink with a diagnostic;
 - live `commitment:*` pins ride the same one pinned-state nudge every other
   pin kind does — uniformly, budget-free, for every agent regardless of
-  role — rather than a separate commitment-only mechanism: pinned state is
-  pinned state, and a returning sub-agent's independent obligation to call
-  `reply` never suppresses it;
+  role once that agent is actionable — rather than a separate commitment-only
+  mechanism: pinned state is pinned state, a live verifier child makes the
+  parent wait instead of nagging it mid-delegation, and a returning sub-agent's
+  independent obligation to call `reply` never suppresses it;
 - `commit` is the actor's open request: its schema admits a key and a free-text
   `description`, never the criteria. The host builds a writer prompt from the
   description and launches an `amnemon` child the same launch-only,

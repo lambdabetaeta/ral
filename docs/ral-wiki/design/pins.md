@@ -70,14 +70,17 @@ uniform for every pin kind (a task, a goal, a protected `commitment:*` pin
 alike) and every agent role (the interactive trunk and a returning sub-agent
 alike): while anything is pinned, a **budget-free** reminder fires on every
 clean completion, naming the pinned state; with nothing pinned, a gentler,
-throttled reminder suggests `set-goal`/`add-task` instead. This nudge is
-independent of, and additive with, a *returning* agent's separate obligation
-to call `reply` — neither suppresses the other, so a sub-agent that finishes
-without replying while it still holds a live commitment is reminded of both at
-once. This is the discipline pinning earns: a kit that publishes state to a
-slot the user watches is reminded to keep it true, and the host never lets a
-protected obligation go quiet just because the agent holding it happens to be
-a sub-agent rather than the trunk.
+throttled reminder suggests `set-goal`/`add-task` instead. The exception is
+*actionability*: while the agent has live descendants, the pin/no-pin reminder
+waits for their results, because the agent has already delegated the next
+move. This nudge is independent of, and additive with, a *returning* agent's
+separate obligation to call `reply` — neither suppresses the other, so a
+sub-agent that finishes without replying while it still holds a live
+commitment is reminded of both once it is not waiting on children. This is the
+discipline pinning earns: a kit that publishes state to a slot the user watches
+is reminded to keep it true, and the host never lets a protected obligation go
+quiet just because the agent holding it happens to be a sub-agent rather than
+the trunk.
 
 The actor opens a commitment through `commit`, whose input is `{key,
 description}` — it chooses the key and describes intent in its own words, but

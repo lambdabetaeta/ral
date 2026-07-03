@@ -3645,3 +3645,13 @@ separately projecting the same change to the viewport
 (`Kind::Pin`/`Kind::Unpin`). Without this, no live commitment pin could ever
 exist outside a test helper. Re-stamped [[design/pins|pins]],
 [[map/exarch/agent|agent]], and [[map/exarch/tools|tools]].
+
+## [2026-07-03] ingest | Pin nudges wait on live children
+
+Threaded `waiting_on_children` through `NudgeCtx` so pin/no-pin reminders wait
+while an agent has live descendants, matching the existing `reply` gate and
+letting an async commitment verifier run without re-driving its parent. The pin
+register stays live; if the child fails to clear it, the next actionable clean
+completion nudges again. Piggybacked the decision note on
+[[decisions/260703_protected-commitment-pins|protected-commitment-pins]] and
+updated [[design/pins|pins]]; re-stamped [[map/exarch/agent|agent]].

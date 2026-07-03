@@ -59,8 +59,12 @@ pub(crate) struct NudgeCtx {
     /// when nothing is pinned — the one register covering every pin kind
     /// (tasks, goals, protected `commitment:*` state alike; see
     /// [`Agent::pinned_digest`](crate::agent::Agent)).  Drives the pinned-state
-    /// reminder, uniformly for every agent regardless of role.
+    /// reminder for any actionable agent, regardless of role.
     pub pinned: Option<String>,
+    /// True while this agent has live descendants that may still deliver the
+    /// next actionable fact.  In that state the pin register stays live, but
+    /// pin/no-pin reminders wait until the descendants settle.
+    pub waiting_on_children: bool,
 }
 
 /// Per-session nudge state.  Lives on the [`Agent`](crate::agent::Agent)
@@ -155,19 +159,25 @@ impl Registry {
             // goal, a protected `commitment:*` pin — [`NudgeCtx::pinned`]
             // covers every kind uniformly) keeps the agent restless,
             // budget-free, on every clean completion.  Only the empty
-            // register gets a gentler, throttled suggestion instead.
-            if let Some(pinned) = ctx.pinned.as_deref() {
-                record_nudge(emit, log, self.used, "pinned-state reminder".into());
-                parts.push(format!("There is pinned state: {pinned}"));
-            } else if !self.no_pins_reminded && self.turns_since_no_pins_reminder >= REMIND_EVERY {
-                self.no_pins_reminded = true;
-                self.turns_since_no_pins_reminder = 0;
-                record_nudge(emit, log, self.used, "no-pins reminder".into());
-                parts.push(
-                    "Nothing is pinned — consider calling `set-goal` to remember what you are \
-                     working on, or tracking some tasks with `add-task`."
-                        .to_string(),
-                );
+            // register gets a gentler, throttled suggestion instead.  If a
+            // child is still running, the agent has already taken the next
+            // action; wait for that result before asking again.
+            if !ctx.waiting_on_children {
+                if let Some(pinned) = ctx.pinned.as_deref() {
+                    record_nudge(emit, log, self.used, "pinned-state reminder".into());
+                    parts.push(format!("There is pinned state: {pinned}"));
+                } else if !self.no_pins_reminded
+                    && self.turns_since_no_pins_reminder >= REMIND_EVERY
+                {
+                    self.no_pins_reminded = true;
+                    self.turns_since_no_pins_reminder = 0;
+                    record_nudge(emit, log, self.used, "no-pins reminder".into());
+                    parts.push(
+                        "Nothing is pinned — consider calling `set-goal` to remember what you are \
+                         working on, or tracking some tasks with `add-task`."
+                            .to_string(),
+                    );
+                }
             }
             if parts.is_empty() {
                 surface_provider_error(attempt, emit, log);
@@ -303,6 +313,7 @@ mod tests {
                 NudgeCtx {
                     must_reply: false,
                     pinned: None,
+                    waiting_on_children: false,
                 },
                 &emit(),
                 &mut log,
@@ -330,6 +341,7 @@ mod tests {
         let ctx = || NudgeCtx {
             must_reply: false,
             pinned: None,
+            waiting_on_children: false,
         };
         assert!(
             reg.react(&attempt(), ctx(), &emit(), &mut log).is_none(),
@@ -355,6 +367,7 @@ mod tests {
         let ctx = || NudgeCtx {
             must_reply: false,
             pinned: None,
+            waiting_on_children: false,
         };
         for _ in 0..=BUDGET {
             assert!(
@@ -375,6 +388,7 @@ mod tests {
             NudgeCtx {
                 must_reply: false,
                 pinned: None,
+                waiting_on_children: false,
             },
             &emit(),
             &mut log,
@@ -397,6 +411,7 @@ mod tests {
                     NudgeCtx {
                         must_reply: false,
                         pinned: None,
+                        waiting_on_children: false,
                     },
                     &emit(),
                     &mut log,
@@ -410,6 +425,7 @@ mod tests {
                 NudgeCtx {
                     must_reply: false,
                     pinned: None,
+                    waiting_on_children: false,
                 },
                 &emit(),
                 &mut log,
@@ -429,6 +445,7 @@ mod tests {
                 NudgeCtx {
                     must_reply: false,
                     pinned: None,
+                    waiting_on_children: false,
                 },
                 &emit(),
                 &mut log,
@@ -449,6 +466,7 @@ mod tests {
         let ctx = || NudgeCtx {
             must_reply: true,
             pinned: None,
+            waiting_on_children: false,
         };
         // Each un-replied finish re-nudges and spends one unit of budget.
         for _ in 0..BUDGET {
@@ -495,6 +513,7 @@ mod tests {
                 NudgeCtx {
                     must_reply: false,
                     pinned: None,
+                    waiting_on_children: false,
                 },
                 &emit(),
                 &mut log,
@@ -517,6 +536,7 @@ mod tests {
         let ctx = || NudgeCtx {
             must_reply: false,
             pinned: Some("commitment:abc: criteria 0/1".into()),
+            waiting_on_children: false,
         };
         for _ in 0..3 {
             let msg = reg
@@ -532,6 +552,30 @@ mod tests {
         assert_eq!(reg.used, 0, "pinned-state nudges are budget-free");
     }
 
+    /// A parent that has already launched the next action is allowed to wait:
+    /// the commitment remains live, but the pinned-state nudge resumes only
+    /// after the child settles.
+    #[test]
+    fn pinned_state_waits_while_children_live() {
+        let mut reg = Registry::new();
+        let mut log = fresh_log("commitment-pin-waiting");
+        assert!(
+            reg.react(
+                &Ok(TurnOutcome::Complete("waiting on verifier".into())),
+                NudgeCtx {
+                    must_reply: false,
+                    pinned: Some("commitment:abc: criteria 0/1".into()),
+                    waiting_on_children: true,
+                },
+                &emit(),
+                &mut log,
+            )
+            .is_none(),
+            "a live verifier is the next action, so the pin reminder should wait"
+        );
+        assert_eq!(reg.used, 0, "waiting must not spend nudge budget");
+    }
+
     /// A returning agent owes both obligations at once: it hasn't called
     /// `reply`, and it still holds pinned state.  Neither nudge suppresses
     /// the other — both compose into one reminder, and each still draws on
@@ -544,6 +588,7 @@ mod tests {
         let ctx = || NudgeCtx {
             must_reply: true,
             pinned: Some("commitment:abc: criteria 0/1".into()),
+            waiting_on_children: false,
         };
         let msg = reg
             .react(
@@ -573,6 +618,7 @@ mod tests {
         let ctx = || NudgeCtx {
             must_reply: false,
             pinned: None,
+            waiting_on_children: false,
         };
         // Spend a unit of budget.
         let _ = reg.react(&Ok(TurnOutcome::Empty), ctx(), &emit(), &mut log);
@@ -592,6 +638,7 @@ mod tests {
         let ctx = || NudgeCtx {
             must_reply: false,
             pinned: None,
+            waiting_on_children: false,
         };
         let mut fires = 0;
         for turn in 1..=(REMIND_EVERY + 3) {

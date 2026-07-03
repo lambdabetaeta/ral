@@ -729,6 +729,7 @@ impl Agent {
                 self.log.quiesce(QuiesceReason::Aborted);
             }
             digest = agent_digest(&outcome);
+            let waiting_on_children = self.has_live_children();
             let ctx = nudge::NudgeCtx {
                 // Every returning agent (a sub-agent or a headless trunk) hands
                 // its value back through `reply`; an un-replied finish is
@@ -740,8 +741,9 @@ impl Agent {
                 // child's result wakes it.  Nagging it toward `reply` now would
                 // push it to return before its agents land; once they have all
                 // settled the nudge resumes and insists on `reply` as before.
-                must_reply: self.returns() && !self.has_live_children(),
+                must_reply: self.returns() && !waiting_on_children,
                 pinned: self.pinned_digest(),
+                waiting_on_children,
             };
             if let Some(msg) = self.nudges.react(&outcome, ctx, emit, &mut self.log) {
                 self.inbox.push(InboxMsg::Nudge(msg));
