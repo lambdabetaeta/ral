@@ -246,7 +246,7 @@ The result is a list of `[line, hash, text]` records, where `<hash>` is a unique
 
 `edit PATH EDITS` applies a batch of `EDITS`, a list of records `[hash: HASH, line: NEWTEXT]`. Each edit replaces ONLY the line identified by `HASH` verbatim with `NEWTEXT`. It is atomic: every hash is resolved against lines before editing; and a batch either applies whole or fails whole. Use raw strings `#'…'#` for `NEWTEXT` without any escapes.
 
-There are three ways to use `edit`. To delete a line pass the empty string `#''#` as `NEWTEXT`. To replace a line pass a new line as `NEWTEXT`. To replace a line with multiple
+There are three ways to use `edit`. To delete a line pass the empty string `#''#` as `NEWTEXT`. To replace a line pass a new line as `NEWTEXT`; the newline will be preserved. To replace a line with multiple
 new lines put several newline characters (not escapes) in `NEWTEXT`. The
 replacement must already have the exact indentation needed at the insertion point; write it directly with a raw string at the target indentation, or use `!{indent N !{dedent #'...'#}}` to author at natural indentation then shift. Example:
 
@@ -260,7 +260,7 @@ replacement must already have the exact indentation needed at the insertion poin
       [hash: h7a8b9, line: #''#],                # delete a line
     ]
 
-Edits do not spill over; you **must** mention the hash of every line you wish to change.
+Edits with newlines do not replace the following lines; you **must** mention the hash of every line you wish to change.
 
 `edit` composes with search: map `view-text-around` over `grep-files` hits to see each place with its witness, then read the witnesses off into one batched `edit`:
 
