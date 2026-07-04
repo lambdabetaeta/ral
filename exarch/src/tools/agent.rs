@@ -423,7 +423,7 @@ pub(super) fn spawn_async(
     emit.emit(Kind::ToolCall {
         tool,
         cmd: prompt,
-        summary: Some(title.clone()),
+        summary: Some(format!("Agent {title} spawned ({tool}).")),
     });
     thread::Builder::new()
         .name(format!("exarch-agent-{agent_id}"))
@@ -617,16 +617,23 @@ answer; use `reply` for a returning agent's final result."
                 emit,
             );
         };
+        let recipient_title = session.agents.title_for(recipient_id);
         emit.emit(Kind::ToolCall {
             tool: "message",
-            cmd: recipient_id.to_string(),
-            summary: None,
+            cmd: message.to_string(),
+            summary: Some(match &recipient_title {
+                Some(t) => format!("Messaged agent {t}."),
+                None => format!("Messaged agent {recipient_id}."),
+            }),
         });
         let content = match session
             .agents
             .message(session.id, recipient_id, message.to_string())
         {
-            Ok(()) => format!("sent message to agent {recipient_id}"),
+            Ok(()) => match &recipient_title {
+                Some(t) => format!("sent message to agent {recipient_id} ({t})"),
+                None => format!("sent message to agent {recipient_id}"),
+            },
             Err(MessageError::UnknownRecipient(n)) => {
                 format!("no live agent with id {n}; did it finish already?")
             }
@@ -689,13 +696,20 @@ A no-op if no live agent has that id."
                 );
             }
         };
+        let agent_title = session.agents.title_for(agent_id);
         emit.emit(Kind::ToolCall {
             tool: "agent_cancel",
-            cmd: agent_id.to_string(),
-            summary: None,
+            cmd: format!("cancelling agent {agent_id}"),
+            summary: Some(match &agent_title {
+                Some(t) => format!("Agent {t} cancelled."),
+                None => format!("Agent {agent_id} cancelled."),
+            }),
         });
         let content = if session.agents.cancel(agent_id) {
-            format!("cancelling agent {agent_id}")
+            match &agent_title {
+                Some(t) => format!("cancelling agent {agent_id} ({t})"),
+                None => format!("cancelling agent {agent_id}"),
+            }
         } else {
             format!("no live agent with id {agent_id}")
         };

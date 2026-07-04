@@ -276,6 +276,11 @@ impl AgentRegistry {
         v
     }
 
+    /// Look up one agent'\''s title by id, if it is live.
+    pub fn title_for(&self, id: AgentId) -> Option<String> {
+        let g = self.lock();
+        g.entries.get(&id).map(|e| e.title.clone())
+    }
     /// `/clear` on `root`: cancel and reap `root`'s proper descendants — the
     /// subtree the rebuilt context no longer owns — and bump the generation so
     /// any late result or deferred surface batch from the old context is

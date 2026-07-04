@@ -89,7 +89,7 @@ without calling `reply`, your parent receives nothing."
             } else {
                 display
             },
-            summary: None,
+            summary: Some("Replied to parent.".to_string()),
         });
         // Stash the faithful value for `apply` to lift into a `Replied`
         // terminal once the batch drains.  The tool result itself is never seen

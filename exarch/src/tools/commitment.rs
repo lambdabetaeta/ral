@@ -137,8 +137,8 @@ fn commit(id: String, input: Value, session: &mut Agent, emit: &Emitter) -> Sess
         );
         emit.emit(Kind::ToolCall {
             tool: "commit",
-            cmd: key.clone(),
-            summary: None,
+            cmd: format!("key: {key}"),
+            summary: Some(format!("Commit {key}: already live.")),
         });
         emit.emit(Kind::ToolResult(msg.clone()));
         return SessionToolResult { id, content: msg };
@@ -162,7 +162,7 @@ fn commit(id: String, input: Value, session: &mut Agent, emit: &Emitter) -> Sess
     };
 
     let prompt = writer_prompt(&key, &description);
-    let title = writer_title(&key);
+    let title = writer_title(&key, &description);
     super::agent::spawn_async(
         session,
         id,
@@ -194,8 +194,8 @@ fn verify_commitment(
         Err(reason) => {
             emit.emit(Kind::ToolCall {
                 tool: "verify_commitment",
-                cmd: key.clone(),
-                summary: None,
+                cmd: format!("key: {key}"),
+                summary: Some(format!("Verify {key}: {reason}.")),
             });
             emit.emit(Kind::ToolResult(reason.clone()));
             return SessionToolResult {
@@ -227,7 +227,7 @@ fn verify_commitment(
     // clears the pin when it drains (`Agent::drive`) — the tool call itself
     // never blocks on the verifier's run.
     let prompt = verifier_prompt(&key, &card);
-    let title = verifier_title(&key);
+    let title = verifier_title(&key, &card);
     super::agent::spawn_async(
         session,
         id,
@@ -241,7 +241,6 @@ fn verify_commitment(
         emit,
     )
 }
-
 fn parse_key(input: &Value) -> Result<String, String> {
     let obj = input
         .as_object()
@@ -281,24 +280,23 @@ fn valid_commitment_key(key: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
-fn verifier_title(key: &str) -> String {
-    let id = key
-        .strip_prefix(COMMITMENT_PIN_PREFIX)
-        .unwrap_or(key)
-        .chars()
-        .take(12)
-        .collect::<String>();
-    format!("verify-{id}")
+fn verifier_title(_key: &str, card: &Card) -> String {
+    let summary = crate::card::summary_line(card);
+    let short = summary.lines().next().unwrap_or(&summary);
+    let short = if short.len() > 48 {
+        format!("{}…", &short[..47])
+    } else {
+        short.to_string()
+    };
+    short
 }
-
-fn writer_title(key: &str) -> String {
-    let id = key
-        .strip_prefix(COMMITMENT_PIN_PREFIX)
-        .unwrap_or(key)
-        .chars()
-        .take(12)
-        .collect::<String>();
-    format!("commit-{id}")
+fn writer_title(_key: &str, description: &str) -> String {
+    let short = if description.len() > 48 {
+        format!("{}…", &description[..47])
+    } else {
+        description.to_string()
+    };
+    short
 }
 
 fn writer_prompt(key: &str, description: &str) -> String {

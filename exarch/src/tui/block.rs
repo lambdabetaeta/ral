@@ -85,25 +85,22 @@ pub(super) struct Thinking {
 /// data, the target width, and the block's disclosure [`level`].
 pub(super) enum BlockKind {
     /// A tool call worth revealing: `summary` is the one-line label
-    /// shown reduced, `cmd` the full ral source shown revealed.
-    /// Summary-less calls (the `fff` query, an invalid-input placeholder) have
-    /// nothing to reveal and arrive as [`BlockKind::Query`] instead.
-    ToolCall {
+    /// shown reduced, `details` the full ral source shown revealed.
+    /// Summary-less calls have nothing to reveal and arrive as
+    /// [`BlockKind::PlainTool`] instead.
+    DiallableTool {
         tool: &'static str,
         summary: String,
-        cmd: String,
+        details: String,
     },
-    /// A summary-less tool call — the `fff` query that coalesces with its
-    /// neighbours into one `fff : q1, q2, …` line ([`super::group`]'s flat
-    /// cousin, projected in [`super::viewport`]).  `query` is the text to show,
-    /// or `None` for a parse-failure placeholder ([`crate::tools::INVALID_INPUT`]):
-    /// such a call renders nothing, present only as the boundary a stray
-    /// [`Block::set_result_size`] stops at so it cannot reach back to an earlier
-    /// call.  Inert (nothing to dial); on the per-block log tee it renders alone
-    /// as `tool  query`, wearing the shut tool-call triangle `▸`.
-    Query {
+    /// A summary-less tool call, shown standalone as `▸ tool  details`.
+    /// `details` is the text to show, or `None` for a parse-failure
+    /// placeholder ([`crate::tools::INVALID_INPUT`]): such a call renders
+    /// nothing, present only as the boundary a stray result stops at.
+    /// Inert (nothing to dial); wears the shut tool-call triangle `▸`.
+    PlainTool {
         tool: &'static str,
-        query: Option<String>,
+        details: Option<String>,
     },
     /// Streamed assistant prose; re-wrapped from source at every width.
     /// Prose is product — always full, inert to the dial, wearing `·`.
@@ -283,7 +280,7 @@ pub(super) struct Block {
     /// [`crate::bus::Event::ToolResult`], attached after the fact by
     /// [`super::viewport::Viewport::set_result_size`].  Feeds the
     /// collapsed header's size-bar; `None` until the result lands (and
-    /// always, on non-`ToolCall` blocks).
+    /// always, on non-`DiallableTool` blocks).
     result_size: Option<u32>,
     /// Lines for the current state at [`Self::cache_w`], or `None` when
     /// stale — never rendered, toggled open/shut, or asked at a new
@@ -294,12 +291,12 @@ pub(super) struct Block {
 
 impl Block {
     /// Build a block at its kind's default level — conservative so
-    /// nothing changes visually until the user dials: `ToolCall` and
+    /// nothing changes visually until the user dials: `DiallableTool` and
     /// `Subagent` at L1 (their collapsed headers), every other kind at L3
     /// (today's full render).
     fn new(kind: BlockKind, fidelity: Fidelity) -> Self {
         let level = match kind {
-            BlockKind::ToolCall { .. } | BlockKind::Subagent { .. } | BlockKind::Thinking(_) => {
+            BlockKind::DiallableTool { .. } | BlockKind::Subagent { .. } | BlockKind::Thinking(_) => {
                 Reveal::Summary
             }
             _ => Reveal::Full,
@@ -318,9 +315,9 @@ impl Block {
     /// its coalesced intent line drains its saturation under context
     /// pressure exactly as committed prose does (Move 7); echo does not
     /// apply — an intent is the model's stated purpose, not committed prose.
-    pub(super) fn tool_call(tool: &'static str, summary: String, cmd: String, context: u8) -> Self {
+    pub(super) fn tool_call(tool: &'static str, summary: String, details: String, context: u8) -> Self {
         Self::new(
-            BlockKind::ToolCall { tool, summary, cmd },
+            BlockKind::DiallableTool { tool, summary, details },
             Fidelity { context, echo: 0 },
         )
     }
@@ -385,11 +382,10 @@ impl Block {
     pub(super) fn chrome(shape: RailShape, lines: Vec<Line<'static>>) -> Self {
         Self::new(BlockKind::Chrome { shape, lines }, Fidelity::default())
     }
-    /// A summary-less query call.  `query` is the text to coalesce into the
-    /// `tool : …` line, or `None` for an invalid-input placeholder (an invisible
-    /// call boundary).
-    pub(super) fn query(tool: &'static str, query: Option<String>) -> Self {
-        Self::new(BlockKind::Query { tool, query }, Fidelity::default())
+    /// A summary-less tool call.  `details` is the text to show standalone,
+    /// or `None` for an invalid-input placeholder (an invisible call boundary).
+    pub(super) fn plain_call(tool: &'static str, details: Option<String>) -> Self {
+        Self::new(BlockKind::PlainTool { tool, details }, Fidelity::default())
     }
 
     /// The block's current disclosure rung.
@@ -432,11 +428,11 @@ impl Block {
     /// card is chrome-level, and chrome is inert.
     pub(super) fn dialable(&self) -> bool {
         match &self.kind {
-            BlockKind::ToolCall { .. } | BlockKind::Subagent { .. } | BlockKind::Thinking(_) => {
+            BlockKind::DiallableTool { .. } | BlockKind::Subagent { .. } | BlockKind::Thinking(_) => {
                 true
             }
             BlockKind::Card { card, .. } => card.has_diff(),
-            BlockKind::Markdown { .. } | BlockKind::Query { .. } | BlockKind::Chrome { .. } => {
+            BlockKind::Markdown { .. } | BlockKind::PlainTool { .. } | BlockKind::Chrome { .. } => {
                 false
             }
         }
@@ -445,41 +441,21 @@ impl Block {
     /// True for a tool call — the one block kind a result magnitude
     /// attaches to via [`Self::set_result_size`].
     pub(super) fn is_tool_call(&self) -> bool {
-        matches!(self.kind, BlockKind::ToolCall { .. })
+        matches!(self.kind, BlockKind::DiallableTool { .. })
     }
 
-    /// True for a summary-less query call — the flatten enters its coalescing
-    /// branch here ([`super::viewport::Viewport::reflow`]).
-    pub(super) fn is_query(&self) -> bool {
-        matches!(self.kind, BlockKind::Query { .. })
+    /// True for a summary-less plain tool call.
+    pub(super) fn is_plain_call(&self) -> bool {
+        matches!(self.kind, BlockKind::PlainTool { .. })
     }
 
-    /// True for a *call-bearing* block — a dialable tool call or a summary-less
-    /// query.  [`Self::set_result_size`] walks back to the first of these so a
-    /// query's result halts here rather than reaching past it to clobber an
-    /// earlier dialable call's size bar.
+    /// True for a *call-bearing* block — a dialable tool call or a plain
+    /// one.  [`Self::set_result_size`] walks back to the first of these so a
+    /// plain call's result halts here rather than reaching past it.
     pub(super) fn is_call(&self) -> bool {
-        self.is_tool_call() || self.is_query()
+        self.is_tool_call() || self.is_plain_call()
     }
 
-    /// A query call's tool, the key a coalesced run groups by; `None` on any
-    /// non-query block.  Set for both a shown query and an invisible
-    /// placeholder, so the run scan bridges either.
-    pub(super) fn query_tool(&self) -> Option<&'static str> {
-        match self.kind {
-            BlockKind::Query { tool, .. } => Some(tool),
-            _ => None,
-        }
-    }
-
-    /// The query text to render in a coalesced `tool : …` line — `None` for a
-    /// parse-failure placeholder (rendered invisibly) or any non-query block.
-    pub(super) fn query_text(&self) -> Option<&str> {
-        match &self.kind {
-            BlockKind::Query { query, .. } => query.as_deref(),
-            _ => None,
-        }
-    }
 
     /// True for a block the coalescing projection folds into a ral block —
     /// a tool call, or a read / grep / exec effect.  Everything else (a
@@ -492,7 +468,7 @@ impl Block {
     pub(super) fn observation(&self) -> bool {
         matches!(
             self.kind,
-            BlockKind::ToolCall { .. }
+            BlockKind::DiallableTool { .. }
                 | BlockKind::Card {
                     origin: CardOrigin::Observation { .. },
                     ..
@@ -514,15 +490,15 @@ impl Block {
     }
 
     /// This call's projected view for the coalesced ral block: its intent
-    /// (`summary`), tool, script (`cmd`), result magnitude, and the turn's
+    /// (`summary`), tool, script (`details`), result magnitude, and the turn's
     /// context floor (distress on the intent line).  `None` on any block
     /// that is not a tool call, so only a call opens a slot in the group.
     pub(super) fn call_view(&self) -> Option<group::CallParts<'_>> {
         match &self.kind {
-            BlockKind::ToolCall { tool, summary, cmd } => Some(group::CallParts {
+            BlockKind::DiallableTool { tool, summary, details } => Some(group::CallParts {
                 intent: summary,
                 tool,
-                cmd,
+                cmd: details,
                 magnitude: self.result_size,
                 context: self.fidelity.context,
             }),
@@ -549,7 +525,7 @@ impl Block {
     /// just-run script can register as an echo.
     pub(super) fn ral_cmd(&self) -> Option<&str> {
         match &self.kind {
-            BlockKind::ToolCall { tool, cmd, .. } if *tool == "ral" => Some(cmd),
+            BlockKind::DiallableTool { tool, details, .. } if *tool == "ral" => Some(details),
             _ => None,
         }
     }
@@ -641,7 +617,7 @@ impl Block {
     /// since a census of a lone diff or subagent is meaningless.
     fn floor(&self) -> Reveal {
         match self.kind {
-            BlockKind::ToolCall { .. } => Reveal::Census,
+            BlockKind::DiallableTool { .. } => Reveal::Census,
             _ => Reveal::Summary,
         }
     }
@@ -782,12 +758,12 @@ impl Block {
     /// full; thinking grades from header to partial trace to full trace.
     fn body(&self, width: u16, level: Reveal) -> Vec<Line<'static>> {
         match &self.kind {
-            BlockKind::ToolCall { tool, .. } if *tool == "agent_cancel" || *tool == "agents" => {
+            BlockKind::DiallableTool { tool, .. } if *tool == "agents" => {
                 Vec::new()
             }
-            BlockKind::ToolCall { tool, summary, cmd } => match level {
-                Reveal::Full => line::tool_call_expanded(summary, tool, cmd, width),
-                Reveal::Context => line::tool_call_context(summary, tool, cmd, N, width),
+            BlockKind::DiallableTool { tool, summary, details } => match level {
+                Reveal::Full => line::tool_call_expanded(summary, tool, details, width),
+                Reveal::Context => line::tool_call_context(summary, tool, details, N, width),
                 // A standalone tool call never renders below its summary: the
                 // log tee forces full, and on screen a call is the head of a
                 // coalesced run, whose Census is rendered by `group`, not here.
@@ -852,36 +828,35 @@ impl Block {
             // matching a standalone tool call's header; an invisible
             // placeholder renders nothing.  On screen the flatten coalesces a
             // run of these into one `tool : …` line instead ([`super::viewport`]).
-            BlockKind::Query { tool, .. } if *tool == "agent_cancel" || *tool == "agents" => {
+            BlockKind::PlainTool { tool, .. } if *tool == "agents" => {
                 Vec::new()
             }
-            BlockKind::Query { tool, query } => match query {
+            BlockKind::PlainTool { tool, details } => match details {
                 Some(q) => line::tool_call_static(q, tool),
                 None => Vec::new(),
             },
             BlockKind::Chrome { lines, .. } => lines.clone(),
         }
+            // A block that renders no row at all — an invisible plain call
     }
-
     /// The rail shape this block wears.  Chrome lifts its [`RailShape`]
-    /// discriminant; patches, tool calls, and markdown derive theirs from
     /// the variant.  Plain chrome is ambient frame text and carries no
     /// rail.  A tool call's disclosure triangle tracks the level: `▽` once
     /// it reveals context (L2+), `▸` while reduced.
     fn rail_kind(&self, level: Reveal) -> Option<RailKind> {
         match &self.kind {
-            BlockKind::ToolCall { tool, .. } if *tool != "agent_cancel" && *tool != "agents" => {
+            BlockKind::DiallableTool { tool, .. } if *tool != "agents" => {
                 Some(RailKind::ToolCall(level >= Reveal::Context))
             }
-            BlockKind::ToolCall { .. } => None,
+            BlockKind::DiallableTool { .. } => None,
             // A summary-less query is a tool call still — the shut triangle
             // `▸`, inert (nothing to dial open).  Only the per-block log tee
             // renders a query alone and reaches this; on screen the coalesced
             // run prepends its own rail.
-            BlockKind::Query { tool, .. } if *tool != "agent_cancel" && *tool != "agents" => {
+            BlockKind::PlainTool { tool, .. } if *tool != "agents" => {
                 Some(RailKind::ToolCall(false))
             }
-            BlockKind::Query { .. } => None,
+            BlockKind::PlainTool { .. } => None,
             BlockKind::Markdown { .. } => Some(RailKind::Markdown),
             BlockKind::Thinking(_) => Some(RailKind::Thinking),
             // The `↘` keeps the delegated-result identity even on error; the

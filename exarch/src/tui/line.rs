@@ -332,8 +332,8 @@ pub(super) fn prompt_fence(width: u16) -> Line<'static> {
 /// rendered as a [`size_bar`] trailing the label's first row — the
 /// collapsed header *is* the call's summary, so the bar is its readout.
 /// `None` (no result yet, or the expanded / static headers) omits it.
-fn tool_call_header(label: &str, tool: &str, size: Option<u32>, width: u16) -> Vec<Line<'static>> {
-    let prefix_w = RAIL_W + UnicodeWidthStr::width(tool) + UnicodeWidthStr::width("  ");
+fn tool_call_header(label: &str, _tool: &str, size: Option<u32>, width: u16) -> Vec<Line<'static>> {
+    let prefix_w = RAIL_W;
     // Reserve the size-bar's gutter (`  ` gap + the bar) so the label wraps
     // *before* it. The bar is the row's one quantitative readout (length =
     // magnitude); pinning it to a fixed right column is what makes magnitudes
@@ -348,8 +348,6 @@ fn tool_call_header(label: &str, tool: &str, size: Option<u32>, width: u16) -> V
     push_wrapped(&mut out, label, body_w, |chunk, first| {
         if first {
             let mut spans = vec![
-                Span::styled(tool.to_string(), Style::default().fg(SLATE)),
-                Span::raw("  "),
                 Span::styled(chunk, Style::default().fg(SLATE)),
             ];
             if let Some(magnitude) = size {
@@ -466,11 +464,10 @@ fn push_code_row(ls: &mut Vec<Line<'static>>, line: Line<'static>, width: u16) {
     }
 }
 
-/// A summary-less query call rendered alone — the per-block `user.log` tee of
-/// a [`super::block::BlockKind::Query`], where there is no run to coalesce.
-/// `cmd`'s first line is the `tool  query` label, any remainder follows
-/// 2-space indented; the block wears the shut triangle `▸`.  On screen the
-/// flatten coalesces a run of these into [`coalesced_queries`] instead.
+/// A summary-less tool call rendered standalone — the per-block `user.log` tee
+/// of a [`super::block::BlockKind::PlainTool`].
+/// `cmd`'s first line is the `tool  label`, any remainder follows
+/// 2-space indented; the block wears the shut triangle `▸`.
 pub(super) fn tool_call_static(cmd: &str, tool: &str) -> Vec<Line<'static>> {
     let mut ls = vec![Line::default()];
     ls.extend(tool_call_header(
@@ -488,36 +485,6 @@ pub(super) fn tool_call_static(cmd: &str, tool: &str) -> Vec<Line<'static>> {
     ls
 }
 
-/// A coalesced run of summary-less query calls as one line: the `tool` label
-/// in [`SLATE`], a ` : ` separator, then the `queries` joined by `, ` in
-/// [`CYAN`] — the query text reads as the figure, the tool as ground.  The
-/// caller ([`super::viewport`]) prepends the shut `▸` rail to the head row, so
-/// the prefix reserves [`RAIL_W`]; wrapped continuations hang under the first
-/// query column.  Leads with the one blank every block opens with.  `queries`
-/// is never empty — an all-placeholder run renders nothing and never reaches
-/// here.
-pub(super) fn coalesced_queries(tool: &str, queries: &[&str], width: u16) -> Vec<Line<'static>> {
-    const SEP: &str = " : ";
-    let prefix_w = RAIL_W + UnicodeWidthStr::width(tool) + UnicodeWidthStr::width(SEP);
-    let body_w = (width as usize).saturating_sub(prefix_w).max(8);
-    let joined = queries.join(", ");
-    let mut out = vec![Line::default()];
-    push_wrapped(&mut out, &joined, body_w, |chunk, first| {
-        if first {
-            Line::from(vec![
-                Span::styled(tool.to_string(), Style::default().fg(SLATE)),
-                Span::styled(SEP, Style::default().fg(SLATE)),
-                Span::styled(chunk, Style::default().fg(CYAN)),
-            ])
-        } else {
-            Line::from(vec![
-                Span::raw(" ".repeat(prefix_w)),
-                Span::styled(chunk, Style::default().fg(CYAN)),
-            ])
-        }
-    });
-    out
-}
 
 /// The one-line header for an async subagent's landed result: a leading
 /// blank (like [`tool_call_collapsed`]), then the bold `title` (LIME, or
