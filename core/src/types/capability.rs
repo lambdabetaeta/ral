@@ -221,16 +221,26 @@ impl FsProjection {
 /// the OS profile leaves `process-exec` wide open and the in-ral
 /// gate is the only check.  `Restricted` carries the closed set the
 /// OS profile may admit (`allow_paths` resolved literals and
-/// `allow_dirs` subpath roots) plus explicit `deny_paths` and
-/// `deny_dirs` carved out of those admits.  Anything
-/// outside admits is denied at the OS layer too, closing the
+/// `allow_dirs` subpath roots) plus the carve-outs of those admits.
+/// Anything outside admits is denied at the OS layer too, closing the
 /// `sh -c "PATH=…; cmd"` route by which a sandboxed child re-execs
 /// binaries the in-ral gate never sees.
 ///
-/// Empty `Restricted { allow_paths: [], allow_dirs: [], deny_paths: [], deny_dirs: [] }`
-/// means a layer opted in to exec restriction and admitted nothing —
-/// the OS profile emits no `(allow process-exec …)` rule and the
-/// deny-default kills any spawn from inside the grant.
+/// The three carve dimensions mirror the three shapes the in-ral exec
+/// veto takes, so the OS profile denies exactly what the gate would:
+///
+///   * `deny_paths` — absolute `Deny` literals, path-scoped.
+///   * `deny_dirs` — `Deny` subpath roots, whole-subtree scoped.
+///   * `deny_basenames` — bare-name `Deny` literals, which veto a
+///     command by name wherever it resolves; rendered as a final-path-
+///     component match so the deny is not lost when the name lives at a
+///     different path than PATH would resolve, and cannot be dodged by
+///     invoking the denied name through an admitted dir.
+///
+/// Empty `Restricted { allow_paths: [], allow_dirs: [], .. }` means a
+/// layer opted in to exec restriction and admitted nothing — the OS
+/// profile emits no `(allow process-exec …)` rule and the deny-default
+/// kills any spawn from inside the grant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExecProjection {
@@ -243,6 +253,8 @@ pub enum ExecProjection {
         deny_paths: Vec<String>,
         #[serde(default)]
         deny_dirs: Vec<String>,
+        #[serde(default)]
+        deny_basenames: Vec<String>,
     },
 }
 
@@ -774,10 +786,7 @@ fn partition_exec_dirs(
 /// Per-name meet over the `literals` half of an exec map.  Allow-sided
 /// keys must appear on both sides (uses `ExecPolicy::meet`); `Deny`
 /// propagates from either side even when absent on the other.
-///
-/// Exposed crate-wide so projection-time reduction (which folds the
-/// `literals` map directly) doesn't have to re-implement it.
-pub(crate) fn meet_literal_exec(
+fn meet_literal_exec(
     a: BTreeMap<String, ExecPolicy>,
     b: BTreeMap<String, ExecPolicy>,
 ) -> BTreeMap<String, ExecPolicy> {

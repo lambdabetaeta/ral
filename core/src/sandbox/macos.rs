@@ -184,9 +184,11 @@ fn emit_fs_restricted(lines: &mut Vec<String>, fs: &crate::types::FsPolicy) -> V
 /// OS layer admits e.g. `/usr/bin/cargo` even when `[exec]` doesn't
 /// list it.  This is intentional: the OS layer's job here is to close
 /// the *interpreter-bypass* class (sh -c, env CMD, xargs CMD, find
-/// -exec) by denying paths *outside* the granted dirs/literals.
-/// Per-name `Deny` entries inside an admitted dir are handled by the
-/// in-ral gate, which still runs first.
+/// -exec) by denying paths *outside* the granted dirs/literals.  A
+/// per-name `Deny` *inside* an admitted dir is enforced here too, via
+/// the `deny_basenames` final-component match, so a denied command name
+/// cannot be re-execed through the covering subpath by an interpreter
+/// the in-ral gate never sees.
 ///
 /// The combined rule is emitted only when at least one filter clause
 /// was collected; an admit set that folds to no operand leaves
@@ -205,6 +207,7 @@ fn emit_exec_rules(lines: &mut Vec<String>, exec: &ExecProjection) {
             allow_dirs,
             deny_paths,
             deny_dirs,
+            deny_basenames,
         } => {
             // Combined rule covers user policy admits *and* the
             // platform exec base (Apple toolchain dirs).  Folding the
@@ -269,6 +272,16 @@ fn emit_exec_rules(lines: &mut Vec<String>, exec: &ExecProjection) {
                 let escaped = escape_path(dir);
                 lines.push(format!("(deny file-read* (subpath \"{escaped}\"))"));
                 lines.push(format!("(deny process-exec (subpath \"{escaped}\"))"));
+            }
+            // Bare-name denies veto a command by its final path component
+            // wherever it resolves, so they render as a `/name$` regex
+            // rather than one resolved literal.  Only `process-exec` is
+            // denied: that alone blocks the spawn, and denying reads of
+            // every same-named file would over-reach past the exec veto
+            // the gate actually carries.
+            for name in deny_basenames {
+                let pattern = format!("/{}$", escape_regex(name));
+                lines.push(format!("(deny process-exec (regex #\"{pattern}\"))"));
             }
         }
     }
@@ -388,6 +401,22 @@ fn escape_path(path: &str) -> String {
     path.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// Escape a literal command name for embedding in an SBPL `(regex …)`
+/// pattern: backslash-escape every metacharacter so a name like `c++`
+/// or `python3.11` matches itself, then escape the `"` the pattern
+/// string is quoted with.  The name is a bare exec key (no slash — see
+/// the decoder), so path separators need no handling.
+fn escape_regex(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if r".^$*+?()[]{}|\/".contains(ch) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.replace('"', "\\\"")
+}
+
 unsafe extern "C" {
     fn sandbox_init_with_parameters(
         profile: *const c_char,
@@ -419,6 +448,7 @@ mod tests {
                 allow_dirs: vec!["/usr/bin".into(), "/opt/homebrew/bin".into()],
                 deny_paths: Vec::new(),
                 deny_dirs: Vec::new(),
+                deny_basenames: Vec::new(),
             },
             ..SandboxProjection::default()
         };
@@ -459,6 +489,7 @@ mod tests {
                 allow_dirs: vec!["/usr/bin".into()],
                 deny_paths: Vec::new(),
                 deny_dirs: Vec::new(),
+                deny_basenames: Vec::new(),
             },
             ..SandboxProjection::default()
         };
@@ -487,6 +518,7 @@ mod tests {
                 allow_dirs: Vec::new(),
                 deny_paths: Vec::new(),
                 deny_dirs: Vec::new(),
+                deny_basenames: Vec::new(),
             },
             ..SandboxProjection::default()
         };
@@ -510,6 +542,7 @@ mod tests {
                 allow_dirs: vec!["/usr/bin".into()],
                 deny_paths: vec!["/usr/bin/git".into()],
                 deny_dirs: vec!["/usr/bin/sensitive".into()],
+                deny_basenames: Vec::new(),
             },
             ..SandboxProjection::default()
         };
@@ -530,6 +563,44 @@ mod tests {
         assert!(allow_idx < deny_read_idx, "deny read must follow allow");
         assert!(allow_idx < deny_exec_idx, "deny exec must follow allow");
         assert!(allow_idx < deny_git_idx, "literal deny must follow allow");
+    }
+
+    /// A bare-name deny renders as a `/name$` final-component regex after
+    /// the broad allow, so the name is exec-denied wherever it resolves
+    /// under an admitted dir — a metacharacter-bearing name (`c++`) is
+    /// escaped so it matches itself, not a pattern.
+    #[test]
+    fn mac_profile_emits_basename_deny_as_final_component_regex() {
+        let policy = SandboxProjection {
+            exec: ExecProjection::Restricted {
+                allow_paths: Vec::new(),
+                allow_dirs: vec!["/usr/bin".into()],
+                deny_paths: Vec::new(),
+                deny_dirs: Vec::new(),
+                deny_basenames: vec!["git".into(), "c++".into()],
+            },
+            ..SandboxProjection::default()
+        };
+        let profile = build_profile(&policy);
+        let allow_idx = profile
+            .find("(allow file-read* process-exec")
+            .expect("missing broad allow");
+        let deny_git_idx = profile
+            .find(r#"(deny process-exec (regex #"/git$"))"#)
+            .expect("missing basename deny for git");
+        assert!(
+            profile.contains(r#"(deny process-exec (regex #"/c\+\+$"))"#),
+            "metacharacters in a denied name must be escaped:\n{profile}"
+        );
+        assert!(
+            allow_idx < deny_git_idx,
+            "basename deny must follow the broad allow so last-match-wins"
+        );
+        // Exec-scoped only: the gate's basename veto never denies reads.
+        assert!(
+            !profile.contains(r#"(deny file-read* (regex #"/git$"))"#),
+            "basename deny must not carve reads:\n{profile}"
+        );
     }
 
     #[test]

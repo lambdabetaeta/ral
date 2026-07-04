@@ -9,12 +9,12 @@
 //! this authority model — and the audit trail the exec/fs ones carry —
 //! live in the sibling [`super::enforce`].
 
+use super::exec::{ExecNames, ExecVerdict, evaluate_exec};
 use crate::path::{NormalizedPrefix, PrefixSet};
 use crate::types::{
     Context, ExecDir, ExecPolicy, ExecProjection, FsPolicy, FsProjection, Meet, SandboxProjection,
-    meet_literal_exec,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 /// Meet-fold the stack's fs, net, and exec dimensions into the
 /// OS-renderable projection.  Returns `None` when no layer imposes fs
@@ -84,24 +84,43 @@ pub(crate) fn sandbox_projection(ctx: &Context) -> Option<SandboxProjection> {
 ///
 /// `Unrestricted` means no layer attenuated exec; the OS profile
 /// leaves `process-exec` open and the in-ral gate is the only check.
-/// `Restricted` carries three meet-folded sets:
+/// `Restricted` carries four sets:
 ///
-///   * `allow_paths` — literal exec keys (Allow / Subcommands)
-///     resolved to absolute paths via PATH.  The OS profile renders
-///     them as `(literal …)`.
+///   * `allow_paths` — the literal exec keys named anywhere in the
+///     stack, resolved to absolute paths and kept where the full-stack
+///     live verdict admits them (see [`admitted_literal_paths`]).  The
+///     OS profile renders them as `(literal …)`.
 ///   * `allow_dirs` — subpath keys carrying `Allow`, intersected by
 ///     prefix across opining layers.  Rendered as `(subpath …)`.
-///   * `deny_paths` — literal exec keys carrying `Deny`, resolved to
-///     absolute paths via PATH and unioned across layers.
+///   * `deny_paths` — absolute exec keys carrying `Deny`, unioned across
+///     layers (a `Deny` is sticky).  Rendered as `(deny process-exec
+///     (literal …))` after the broad allow so SBPL's last-match-wins
+///     carves them out of a covering `allow_dirs` region.
 ///   * `deny_dirs` — subpath keys carrying `Deny`, *unioned* across
 ///     layers (denies are sticky).  Rendered as `(deny process-exec
 ///     (subpath …))` after the broad allow so SBPL's last-match-wins
 ///     gives them precedence.
+///   * `deny_basenames` — bare-name exec keys carrying `Deny`, unioned
+///     across layers.  A bare name vetoes a command wherever it lands,
+///     so it renders as a final-path-component match, not a single
+///     resolved path: this keeps the deny sound when the name lives
+///     somewhere other than PATH resolves it, and closes the
+///     interpreter-bypass route (`sh -c git`) by which a denied name
+///     could otherwise slip in through an admitted dir.
+///
+/// `allow_paths` draws its candidates from the raw union of every
+/// layer's literal keys and resolves each to a path before deciding: a
+/// literal and a covering allow-dir interact only once the name is
+/// resolved (`git` under a sibling layer's `/usr/bin/`), so the allow
+/// decision defers to [`evaluate_exec`] (see [`admitted_literal_paths`])
+/// over the resolved identity rather than intersecting names and dirs as
+/// separate maps.
 fn reduce_exec(ctx: &Context) -> ExecProjection {
     let resolver = ctx.resolver();
     let mut subpath_allow: Option<PrefixSet> = None;
     let mut subpath_deny = PrefixSet::default();
-    let mut literal_map: Option<BTreeMap<String, ExecPolicy>> = None;
+    let mut literal_names: BTreeSet<String> = BTreeSet::new();
+    let mut denied_names: BTreeSet<String> = BTreeSet::new();
     let mut saw = false;
     for map in ctx.grants.exec() {
         saw = true;
@@ -115,10 +134,12 @@ fn reduce_exec(ctx: &Context) -> ExecProjection {
         }
         subpath_allow = subpath_allow.meet(Some(PrefixSet::resolve(&resolver, &allow_dirs)));
         subpath_deny = subpath_deny.union(PrefixSet::resolve(&resolver, &deny_dirs));
-        literal_map = Some(match literal_map {
-            Some(prev) => meet_literal_exec(prev, map.literals.clone()),
-            None => map.literals.clone(),
-        });
+        for (name, policy) in &map.literals {
+            literal_names.insert(name.clone());
+            if matches!(policy, ExecPolicy::Deny) {
+                denied_names.insert(name.clone());
+            }
+        }
     }
     if !saw {
         return ExecProjection::Unrestricted;
@@ -129,52 +150,88 @@ fn reduce_exec(ctx: &Context) -> ExecProjection {
             .map(NormalizedPrefix::into_string)
             .collect()
     };
-    let allow_dirs = surface_strings(subpath_allow.unwrap_or_default());
-    let deny_dirs = surface_strings(subpath_deny);
-    let lit = literal_map.unwrap_or_default();
-    let deny_paths = resolve_exec_names(ctx, &lit, |p| matches!(p, ExecPolicy::Deny), false);
-    let allow_paths = resolve_exec_names(ctx, &lit, |p| !matches!(p, ExecPolicy::Deny), true);
-    ExecProjection::Restricted {
-        allow_paths,
-        allow_dirs,
-        deny_paths,
-        deny_dirs,
-    }
-}
-
-/// Resolve the literal exec keys matching `keep` to absolute paths for
-/// the OS projection.  Bare names resolve through the grant's PATH
-/// override only — no host fallback, so an unresolvable name fails
-/// closed (see reduced-authority-witness B6); absolute keys pass through
-/// as written.  `trace_miss` logs a debug trace when an admitted name
-/// cannot be pinned (allow side); deny resolution is silent.
-fn resolve_exec_names(
-    ctx: &Context,
-    map: &BTreeMap<String, ExecPolicy>,
-    keep: impl Fn(&ExecPolicy) -> bool,
-    trace_miss: bool,
-) -> Vec<String> {
     let path_env = ctx
         .env_overrides()
         .get("PATH")
         .map(String::as_str)
         .unwrap_or("");
-    let mut out = std::collections::BTreeSet::new();
-    for (name, policy) in map {
-        if !keep(policy) {
-            continue;
-        }
+    let mut deny_paths = Vec::new();
+    let mut deny_basenames = Vec::new();
+    for name in &denied_names {
         if crate::path::is_absolute(name) {
-            out.insert(name.clone());
-        } else if let Some(resolved) = crate::path::which::resolve_in_path(name, path_env) {
-            out.insert(resolved);
-        } else if trace_miss {
+            deny_paths.push(name.clone());
+        } else {
+            deny_basenames.push(name.clone());
+        }
+    }
+    ExecProjection::Restricted {
+        allow_paths: admitted_literal_paths(ctx, &literal_names, path_env),
+        allow_dirs: surface_strings(subpath_allow.unwrap_or_default()),
+        deny_paths,
+        deny_dirs: surface_strings(subpath_deny),
+        deny_basenames,
+    }
+}
+
+/// Resolve one literal exec key to the absolute path the OS gate names.
+/// Absolute keys pass through as written; bare names resolve through the
+/// grant's PATH override only — no host fallback, so an unresolvable
+/// name fails closed (see reduced-authority-witness B6).
+fn resolve_literal(name: &str, path_env: &str) -> Option<String> {
+    if crate::path::is_absolute(name) {
+        Some(name.to_string())
+    } else {
+        crate::path::resolve_in_path(name, path_env)
+    }
+}
+
+/// Resolve every literal exec key named in the stack and keep the paths
+/// whose natural invocation the full-stack live verdict admits — the
+/// same [`evaluate_exec`] the in-ral gate runs.
+///
+/// A literal admitted by one layer can be covered only by a *sibling*
+/// layer's allow-dir — `git: Allow` in one layer, `/usr/bin/` in
+/// another.  The two dimensions meet only once the name is resolved to a
+/// path, so the allow decision runs through [`evaluate_exec`] over the
+/// resolved identity rather than combining names and dirs separately.
+/// The OS profile then admits a path only where the live gate does.
+///
+/// The verdict query mirrors [`ExecNames`] for a real invocation:
+/// allow-narrow is the key and its resolved path; deny-broad adds the
+/// resolved basename, so a sibling `git: Deny` still vetoes a
+/// `/usr/bin/git` literal exactly as it would at runtime.  An
+/// unresolvable admitted name fails closed, with a trace it can no longer
+/// be pinned.
+fn admitted_literal_paths(ctx: &Context, names: &BTreeSet<String>, path_env: &str) -> Vec<String> {
+    let mut allowed = BTreeSet::new();
+    for name in names {
+        let Some(resolved) = resolve_literal(name, path_env) else {
             crate::dbg_trace!(
                 "sandbox-exec",
                 "exec '{}' not on PATH at projection time; OS gate cannot pin it",
                 name
             );
+            continue;
+        };
+        let allow: Vec<&str> = [name.as_str(), resolved.as_str()]
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let deny: Vec<&str> = [name.as_str(), resolved.as_str(), crate::path::basename(&resolved)]
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if let ExecVerdict::Allowed(_) = evaluate_exec(
+            ctx,
+            ExecNames {
+                deny: &deny,
+                allow: &allow,
+            },
+        ) {
+            allowed.insert(resolved);
         }
     }
-    out.into_iter().collect()
+    allowed.into_iter().collect()
 }

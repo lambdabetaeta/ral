@@ -7,8 +7,11 @@
 //! No internals are reached into — the policies and their meet/join
 //! semantics are the contract.
 
-use ral_core::types::{Capabilities, ExecDir, ExecMap, ExecPolicy, FsPolicy, Shell};
+use ral_core::types::{
+    Capabilities, ExecDir, ExecMap, ExecPolicy, ExecProjection, FsPolicy, Shell,
+};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 #[test]
 fn explicit_grant_denies_omitted_exec() {
@@ -404,4 +407,186 @@ fn bare_admit_and_subcommand_gating_unregressed() {
         denied.is_err(),
         "git push must be denied under Subcommands([status])"
     );
+}
+
+/// A broad fs grant, so `sandbox_projection()` returns `Some` on every
+/// platform (it short-circuits to `None` for an exec-only restriction
+/// off macOS) and the exec dimension under test is observable.
+fn projection_fs() -> FsPolicy {
+    FsPolicy {
+        read_prefixes: vec!["/".into()],
+        write_prefixes: Vec::new(),
+        deny_paths: Vec::new(),
+    }
+}
+
+/// Model the SBPL last-match-wins shape the macOS renderer emits: a
+/// resolved path is admitted when an allow rule (literal or subpath)
+/// covers it and no later deny rule (literal or subpath) does.
+fn projection_admits(exec: &ExecProjection, resolved: &str) -> bool {
+    match exec {
+        ExecProjection::Unrestricted => true,
+        ExecProjection::Restricted {
+            allow_paths,
+            allow_dirs,
+            deny_paths,
+            deny_dirs,
+            deny_basenames,
+        } => {
+            let under = |dirs: &[String]| {
+                dirs.iter()
+                    .any(|d| resolved == d || resolved.starts_with(&format!("{d}/")))
+            };
+            let base = Path::new(resolved).file_name().and_then(|n| n.to_str());
+            let allowed = allow_paths.iter().any(|p| p == resolved) || under(allow_dirs);
+            let denied = deny_paths.iter().any(|p| p == resolved)
+                || under(deny_dirs)
+                || base.is_some_and(|b| deny_basenames.iter().any(|n| n == b));
+            allowed && !denied
+        }
+    }
+}
+
+/// A literal exec key admitted by one layer and covered only by a
+/// *sibling* layer's allow-dir must reach the OS projection's
+/// `allow_paths`.  The in-ral gate admits `/usr/bin/git` here — inner
+/// names it, outer's `/usr/bin/` dir covers its resolved path — so the
+/// OS profile, which runs the same verdict over the resolved identity,
+/// must list it; otherwise Seatbelt would kill a command the gate ran.
+#[cfg(unix)]
+#[test]
+fn sandbox_projection_admits_literal_covered_by_sibling_dir() {
+    let outer = Capabilities {
+        exec: Some(ExecMap {
+            literals: BTreeMap::new(),
+            dirs: BTreeMap::from([("/usr/bin".into(), ExecDir::Allow)]),
+        }),
+        fs: Some(projection_fs()),
+        ..Capabilities::root()
+    };
+    let inner = Capabilities {
+        exec: Some(ExecMap {
+            literals: BTreeMap::from([("/usr/bin/git".into(), ExecPolicy::Allow)]),
+            dirs: BTreeMap::new(),
+        }),
+        fs: Some(projection_fs()),
+        ..Capabilities::root()
+    };
+
+    let mut shell = Shell::default();
+    let projection = shell.with_capabilities(outer.clone(), |sh| {
+        sh.with_capabilities(inner.clone(), |sh| sh.sandbox_projection().unwrap())
+    });
+    let ExecProjection::Restricted { allow_paths, .. } = &projection.exec else {
+        panic!("exec should be restricted, got {:?}", projection.exec);
+    };
+    assert!(
+        allow_paths.iter().any(|p| p == "/usr/bin/git"),
+        "the literal covered by the sibling allow-dir must reach allow_paths, got {allow_paths:?}"
+    );
+
+    // The in-ral gate admits it too — the two surfaces now agree.
+    let mut shell = Shell::default();
+    shell
+        .with_capabilities(outer, |sh| {
+            sh.with_capabilities(inner, |sh| {
+                sh.check_exec_call("/usr/bin/git", &["/usr/bin/git", "git"], &["/usr/bin/git"], &[])
+            })
+        })
+        .expect("live gate must admit /usr/bin/git");
+}
+
+/// Conservatism invariant (safety direction): the OS projection must
+/// never admit a command the in-ral gate would deny — the two gates may
+/// drift only in the safe (over-strict) direction.  Checked
+/// differentially over adversarial two-layer stacks, each probed with a
+/// spread of resolved paths.  Absolute deny literals keep the check
+/// hermetic (no PATH resolution needed).
+#[cfg(unix)]
+#[test]
+fn sandbox_projection_never_out_permits_live_gate() {
+    let allow_dir = |d: &str| ExecMap {
+        literals: BTreeMap::new(),
+        dirs: BTreeMap::from([(d.into(), ExecDir::Allow)]),
+    };
+    let cases: Vec<(ExecMap, ExecMap, Vec<&str>)> = vec![
+        // Literal admitted by inner, covered only by outer's allow-dir.
+        (
+            allow_dir("/usr/bin"),
+            ExecMap {
+                literals: BTreeMap::from([("/usr/bin/git".into(), ExecPolicy::Allow)]),
+                dirs: BTreeMap::new(),
+            },
+            vec!["/usr/bin/git", "/usr/bin/ls", "/tmp/evil"],
+        ),
+        // Explicit deny literal carves a hole in a shared allow-dir.
+        (
+            allow_dir("/usr/bin"),
+            ExecMap {
+                literals: BTreeMap::from([("/usr/bin/sudo".into(), ExecPolicy::Deny)]),
+                dirs: BTreeMap::from([("/usr/bin".into(), ExecDir::Allow)]),
+            },
+            vec!["/usr/bin/ls", "/usr/bin/sudo"],
+        ),
+        // Absolute deny literal must veto a path both dirs would admit.
+        (
+            allow_dir("/bin"),
+            ExecMap {
+                literals: BTreeMap::from([("/bin/bash".into(), ExecPolicy::Deny)]),
+                dirs: BTreeMap::from([("/bin".into(), ExecDir::Allow)]),
+            },
+            vec!["/bin/ls", "/bin/bash"],
+        ),
+        // Bare-name deny is basename-scoped: the gate vetoes `bash`
+        // wherever it lands under the allow-dir, so the projection must
+        // carve it regardless of where PATH would resolve it.
+        (
+            allow_dir("/bin"),
+            ExecMap {
+                literals: BTreeMap::from([("bash".into(), ExecPolicy::Deny)]),
+                dirs: BTreeMap::from([("/bin".into(), ExecDir::Allow)]),
+            },
+            vec!["/bin/ls", "/bin/bash", "/bin/nested/bash"],
+        ),
+        // Disjoint allow-dirs intersect to nothing.
+        (
+            allow_dir("/usr/bin"),
+            allow_dir("/opt/bin"),
+            vec!["/usr/bin/ls", "/opt/bin/tool"],
+        ),
+    ];
+
+    for (outer_exec, inner_exec, probes) in cases {
+        let outer = Capabilities {
+            exec: Some(outer_exec),
+            fs: Some(projection_fs()),
+            ..Capabilities::root()
+        };
+        let inner = Capabilities {
+            exec: Some(inner_exec),
+            fs: Some(projection_fs()),
+            ..Capabilities::root()
+        };
+        let mut shell = Shell::default();
+        let projection = shell.with_capabilities(outer.clone(), |sh| {
+            sh.with_capabilities(inner.clone(), |sh| sh.sandbox_projection().unwrap())
+        });
+        for resolved in probes {
+            let base = Path::new(resolved).file_name().unwrap().to_str().unwrap();
+            let mut shell = Shell::default();
+            let gate_ok = shell
+                .with_capabilities(outer.clone(), |sh| {
+                    sh.with_capabilities(inner.clone(), |sh| {
+                        sh.check_exec_call(resolved, &[resolved, base], &[resolved], &[])
+                    })
+                })
+                .is_ok();
+            if projection_admits(&projection.exec, resolved) {
+                assert!(
+                    gate_ok,
+                    "OS projection admits {resolved} but the live gate denies it (unsound)"
+                );
+            }
+        }
+    }
 }

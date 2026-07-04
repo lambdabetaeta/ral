@@ -18,7 +18,6 @@ pub use shell::repl::ReplScratch;
 // SandboxProjection/BindSpec/CheckSpec, Capabilities + meet.  See
 // types/capability.rs.
 mod capability;
-pub(crate) use capability::meet_literal_exec;
 pub use capability::{
     Capabilities, EditorPolicy, ExecDir, ExecMap, ExecPolicy, ExecProjection, FsPolicy,
     FsProjection, GrantStack, Join, Meet, SandboxBindSpec, SandboxProjection, ShellPolicy,
