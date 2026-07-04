@@ -259,7 +259,7 @@ replacement must already have the exact indentation needed at the insertion poin
       [hash: h4e5f6, line: #'    let m = 0'#],         # replace a line, keeping the newline at the end
       [hash: h7a8b9, line: #''#],                      # delete a line
     ]
-    edit #'src/pointer.rs'# [ [hash : h3af4d, #''# ]   # batch edits on multiple files edits in the same ral script
+    edit #'src/pointer.rs'# [ [hash : h3af4d, #''# ]   # you can edit multiple files in the same ral script
 
 Edits with newlines DO NOT replace the lines that follow; you MUST mention the hash of every line you wish to change.
 
