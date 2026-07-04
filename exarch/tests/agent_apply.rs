@@ -250,7 +250,7 @@ fn stalled_stream_commits_partial_and_truncates() {
     assert!(
         kinds
             .iter()
-            .any(|k| matches!(k, Kind::SystemNote(t) if t.contains("stream stalled"))),
+            .any(|k| matches!(k, Kind::SystemNote(t) if t.contains("Stream stalled"))),
         "the stall recovery must surface as a SystemNote",
     );
     assert!(

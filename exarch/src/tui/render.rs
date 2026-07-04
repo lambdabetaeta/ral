@@ -45,7 +45,7 @@ pub(super) fn contains(rect: Rect, col: u16, row: u16) -> bool {
     col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
 }
 /// One-row tab bar.  Focused tab in bold + cyan, live subagents in
-/// slate, dying subagents in slate dim with a countdown.  Shown only
+/// slate, dying subagents in slate dim until they age out.  Shown only
 /// when there is more than one tab — root-only sessions skip the row
 /// entirely.
 pub(super) fn tab_bar(
@@ -62,8 +62,6 @@ pub(super) fn tab_bar(
         let title = titles.get(&id).map(String::as_str).unwrap_or("?");
         let label: String = if id == focused {
             format!("[{title}]")
-        } else if dying.contains_key(&id) {
-            format!(" {title} ")
         } else {
             format!(" {title} ")
         };

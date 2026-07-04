@@ -162,7 +162,7 @@ fn commit(id: String, input: Value, session: &mut Agent, emit: &Emitter) -> Sess
     };
 
     let prompt = writer_prompt(&key, &description);
-    let title = writer_title(&key, &description);
+    let title = shorten(&description);
     super::agent::spawn_async(
         session,
         id,
@@ -227,7 +227,8 @@ fn verify_commitment(
     // clears the pin when it drains (`Agent::drive`) — the tool call itself
     // never blocks on the verifier's run.
     let prompt = verifier_prompt(&key, &card);
-    let title = verifier_title(&key, &card);
+    let summary = crate::card::summary_line(&card);
+    let title = shorten(summary.lines().next().unwrap_or(&summary));
     super::agent::spawn_async(
         session,
         id,
@@ -280,23 +281,15 @@ fn valid_commitment_key(key: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
-fn verifier_title(_key: &str, card: &Card) -> String {
-    let summary = crate::card::summary_line(card);
-    let short = summary.lines().next().unwrap_or(&summary);
-    let short = if short.len() > 48 {
-        format!("{}…", &short[..47])
+/// Truncate a spawn title to 48 characters with an ellipsis, on char
+/// boundaries.
+fn shorten(s: &str) -> String {
+    if s.chars().count() > 48 {
+        let head: String = s.chars().take(47).collect();
+        format!("{head}…")
     } else {
-        short.to_string()
-    };
-    short
-}
-fn writer_title(_key: &str, description: &str) -> String {
-    let short = if description.len() > 48 {
-        format!("{}…", &description[..47])
-    } else {
-        description.to_string()
-    };
-    short
+        s.to_string()
+    }
 }
 
 fn writer_prompt(key: &str, description: &str) -> String {
@@ -472,6 +465,10 @@ pub(super) fn commitment_settle(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:test] test fs/process scaffolding"
+)]
 mod tests {
     use super::*;
     use crate::bus::Emitter;
