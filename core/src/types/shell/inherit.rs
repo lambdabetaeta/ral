@@ -275,15 +275,19 @@ impl Shell {
     /// continuation of the caller's call stack) and a freshly-defaulted
     /// [`SessionState`](super::SessionState), so it holds no terminal
     /// authority (`TerminalAccess::Denied`, no lease — it is not the
-    /// foreground session). There is no flow-back: the child's `cd`, env, and
-    /// new bindings die with it.
+    /// foreground session) and never publishes the process-global signal
+    /// slots (it is not the signal-facing session either — its host cancels
+    /// it through [`Shell::cancel_handle`]). There is no flow-back: the
+    /// child's `cd`, env, and new bindings die with it.
     ///
     /// Routing a host fork through here keeps the "what flows into a child"
     /// decision in the flow matrix rather than at the call site, so a host
     /// cannot silently sever an inheritable datum — the builtin table among
     /// them — by hand-copying only the fields it happened to remember.
     pub fn fork_session(&self) -> Self {
-        Self::child_from(&self.mobile.scope, self)
+        let mut child = Self::child_from(&self.mobile.scope, self);
+        child.session.publishes_signal_slots = false;
+        child
     }
 
     /// Spawn `f` on a fresh OS thread with a cloned child shell.  The

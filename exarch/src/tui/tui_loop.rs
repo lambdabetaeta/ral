@@ -354,9 +354,11 @@ fn ui_loop(
                         // subtree.  On the trunk that is the published-slot path
                         // (the token and the ral foreground); the cascade then
                         // reaps any descendants.  On a focused sub-agent only the
-                        // registry cascade fires — its eval is detached, not the
-                        // foreground, so the slot/foreground path would target
-                        // the trunk by mistake.
+                        // registry cascade fires — a sub-agent never publishes
+                        // the slots, so the slot/foreground path would target
+                        // the trunk by mistake.  The cascade reaches each
+                        // agent's own session root alongside its token, so an
+                        // eval already in flight unwinds at ral's poll points.
                         KeyAction::Cancel => {
                             if focused == tui.app.tabs.root() {
                                 cancel::raise_interrupt();

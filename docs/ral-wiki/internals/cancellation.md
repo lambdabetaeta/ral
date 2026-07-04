@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 7950be9
-verified_at_date: 2026-06-18
-anchors: [SIGNAL_COUNT, CancelScope, CancelCause, DurableRoot, ForegroundScope, request_foreground_cancel, request_root_cancel, sigint_relay, sigquit_handler, process::check, RunningChild::wait]
+verified_at_commit: bbca4f4
+verified_at_date: 2026-07-04
+anchors: [SIGNAL_COUNT, CancelScope, CancelCause, DurableRoot, ForegroundScope, request_foreground_cancel, request_root_cancel, publishes_signal_slots, Shell::cancel_handle, sigint_relay, sigquit_handler, process::check, RunningChild::wait]
 ---
 
 # Cancellation
@@ -100,6 +100,14 @@ live scope's flag for the async edge to set.
   `eval_turn` swaps a `TurnState` in. Publication is a *swap*, not a store, so a
   re-entrant turn nests its scope above the outer one and reveals it again on drop
   ([[decisions/260617_turn-local-state|turn-local-state]]).
+- **At most one session per process publishes** — the *signal-facing* one, marked
+  by `SessionState::publishes_signal_slots`. The swap/restore discipline is LIFO
+  on a single thread, which concurrent sessions would violate; and a signal must
+  target the primary session's turn, never whichever session dispatched last. A
+  forked session (`Shell::fork_session` — exarch's sub-agents) never publishes;
+  its host cancels it through a clonable handle on its durable root
+  (`Shell::cancel_handle`)
+  ([[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]]).
 - **`request_foreground_cancel(cause)`** / **`request_root_cancel(cause)`** load
   the slot and `fetch_max` the cause onto the borrowed flag — the *exact* store
   `scope.cancel(cause)` performs, and itself async-signal-safe. A null slot
@@ -190,12 +198,22 @@ fix the interactive dispositions:
 exarch layers a *per-root-turn* cancellation `Token` over ral's machinery
 ([[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]]).
 
-- **`Token`** is an `Arc<AtomicBool>`; a sub-agent shares a *clone*, so one
-  active-turn Ctrl-C or Esc halts the whole call tree (provider streaming,
-  staged tools, child sessions).
-  The current root token's flag is published into exarch's own `CURRENT` slot —
-  the same lock-free pattern as ral's — read by the provider's mid-stream cancel
-  race, which holds no token.
+- **`Token`** is an `Arc<AtomicBool>`, one sticky token per agent for its whole
+  life; the drive loop threads clones through `apply`/dispatch/tools, so
+  cancelling any share halts that agent's turn (provider streaming, staged
+  tools). The trunk's token flag is published into exarch's own `CURRENT` slot —
+  the same lock-free pattern as ral's — and a genuine turn boundary
+  `Token::reset`s the flag, so a prior turn's Esc never bleeds into the next.
+- **The registry cascade is two-layer.** `AgentRegistry::cancel` (behind
+  `agent_cancel`, the per-agent ceiling, Esc on a focused subtree, and the
+  `/clear`/`reply` reaps) cancels each descendant's `Token` *and* its own
+  session's `DurableRoot` (`Shell::cancel_handle`, held per registry entry). The
+  token stops the drive loop between steps; the root cancel unwinds a `ral` eval
+  already in flight at the evaluator's poll points — without it, a cancelled
+  agent would grind to its tool's `timeout_secs` wall before noticing. The trunk
+  carries no eval-root handle: its session outlives any cancel, and Esc reaches
+  its turn through the published foreground slot instead
+  ([[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]]).
 - **`install`** chains ral's `term_handler`: the exarch handler `raise`s the token
   then forwards into ral's disposition, so SIGNAL_COUNT semantics survive. Install
   order matters — ral's handler first, then exarch's chain — and
@@ -205,9 +223,7 @@ exarch layers a *per-root-turn* cancellation `Token` over ral's machinery
   Ctrl-C/Ctrl-D quit, overlays close, and only active-turn Ctrl-C/Esc route to
   `raise_interrupt`. `deliver_interrupt` re-creates the SIGINT the kernel would
   have sent a foreground *external* child via `interrupt_foreground_child`
-  (Windows re-injects `CTRL_C_EVENT`). **Minting a fresh token is the reset** —
-  there is no clear-at-every-`apply`, so a just-pressed interrupt is never erased
-  before a sub-agent observes it.
+  (Windows re-injects `CTRL_C_EVENT`).
 
 ## Why interactive Ctrl-C cannot force-exit
 

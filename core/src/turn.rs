@@ -75,6 +75,15 @@ fn eval_status(result: &Settled<Value>, shell: &Shell) -> i32 {
 /// already-cancelled foreground scope, and (had the turn captured IO) the
 /// prior turn's buffers and a foreign surface sink.
 ///
+/// Only the signal-facing session publishes
+/// (`SessionState::publishes_signal_slots`): the slots' save/restore
+/// discipline is LIFO on one thread, which concurrent sessions — a host's
+/// forked sub-agents dispatching turns on their own threads — would
+/// violate; and a signal must target the primary session's turn, never
+/// whichever session dispatched last.  A non-publishing session's turns
+/// are cancelled through its scope handles instead
+/// ([`Shell::cancel_handle`](crate::types::Shell::cancel_handle)).
+///
 /// The slot publications point at raw flags inside the installed frame's
 /// cancel scope. `Drop::drop` swaps that frame into `saved`, whose scope is
 /// freed when `saved` itself drops; the slots must un-publish before that
@@ -86,8 +95,8 @@ struct TurnGuard<'s> {
     // Dropped (after `Drop::drop` runs the swap) in declaration order:
     // the slots un-publish before `saved` frees the displaced frame's
     // cancel scope, so a signal slot never points at a freed flag.
-    _fg: ForegroundCancelSlot,
-    _root: RootCancelSlot,
+    _fg: Option<ForegroundCancelSlot>,
+    _root: Option<RootCancelSlot>,
     shell: &'s mut Shell,
     saved: TurnState,
 }
@@ -95,12 +104,15 @@ struct TurnGuard<'s> {
 impl<'s> TurnGuard<'s> {
     /// Swap `next` into `shell.turn`, publish the installed frame's
     /// foreground scope and the session's durable root into the
-    /// signal-reachable slots, and hold the displaced frame for restoration
-    /// on `Drop`.
+    /// signal-reachable slots (signal-facing session only), and hold the
+    /// displaced frame for restoration on `Drop`.
     fn install(shell: &'s mut Shell, next: TurnState) -> Self {
         let saved = std::mem::replace(&mut shell.turn, next);
-        let _fg = crate::process::publish_foreground(shell.turn.cancel.as_scope());
-        let _root = crate::process::publish_durable_root(shell.session.root.as_scope());
+        let publish = shell.session.publishes_signal_slots;
+        let _fg =
+            publish.then(|| crate::process::publish_foreground(shell.turn.cancel.as_scope()));
+        let _root =
+            publish.then(|| crate::process::publish_durable_root(shell.session.root.as_scope()));
         Self {
             _fg,
             _root,
@@ -470,6 +482,73 @@ mod tests {
                 assert!(
                     matches!(result, Err(Break::Error(_))),
                     "the cancel must unwind into a Break::Error, got {result:?}"
+                );
+            }
+            TurnReport::Static { .. } => panic!("valid source must reach evaluation"),
+        }
+    }
+
+    /// A forked session ([`Shell::fork_session`]) is not the signal-facing
+    /// session, so its turn doors leave the signal slots untouched: a
+    /// foreground-cancel request fired mid-turn (the role a signal handler
+    /// plays) finds no published slot and the eval completes undisturbed.
+    /// Its host stops it through [`Shell::cancel_handle`] instead — the
+    /// companion assertion below cancels the handle and sees the same
+    /// unwind a published slot would have produced.
+    #[test]
+    fn forked_session_turn_does_not_publish_signal_slots() {
+        let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
+        struct CancelInPreExec;
+        impl TurnLifecycle for CancelInPreExec {
+            fn pre_exec(&mut self, _shell: &mut Shell, _src: &str) {
+                crate::process::request_foreground_cancel(crate::process::CancelCause::Interrupt);
+            }
+        }
+
+        let trunk = Shell::new(Default::default());
+        let mut forked = trunk.fork_session();
+        match forked.run_source_turn(
+            "let x = 42\nreturn $x",
+            TurnRequest {
+                lifecycle: Box::new(CancelInPreExec),
+                ..capture_req()
+            },
+        ) {
+            TurnReport::Ran { result, status, .. } => {
+                assert_eq!(
+                    status, 0,
+                    "a foreground-cancel request must not reach a forked session's turn"
+                );
+                assert!(
+                    result.is_ok(),
+                    "the forked session's eval completes undisturbed, got {result:?}"
+                );
+            }
+            TurnReport::Static { .. } => panic!("valid source must reach evaluation"),
+        }
+
+        // The host-side path: cancelling the forked session's handle unwinds
+        // its next turn at the evaluator's poll, exactly as a published slot
+        // would have for the signal-facing session.
+        struct CancelHandleInPreExec(crate::process::DurableRoot);
+        impl TurnLifecycle for CancelHandleInPreExec {
+            fn pre_exec(&mut self, _shell: &mut Shell, _src: &str) {
+                self.0.cancel(crate::process::CancelCause::Explicit);
+            }
+        }
+        let handle = forked.cancel_handle();
+        match forked.run_source_turn(
+            "let x = 42\nreturn $x",
+            TurnRequest {
+                lifecycle: Box::new(CancelHandleInPreExec(handle)),
+                ..capture_req()
+            },
+        ) {
+            TurnReport::Ran { result, status, .. } => {
+                assert_eq!(status, 130, "a cancelled handle unwinds the turn");
+                assert!(
+                    matches!(result, Err(Break::Error(_))),
+                    "the handle cancel must unwind into a Break::Error, got {result:?}"
                 );
             }
             TurnReport::Static { .. } => panic!("valid source must reach evaluation"),

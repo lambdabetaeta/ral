@@ -12,7 +12,11 @@
 //!     (`agent_cancel`);
 //!   * the **subtree cascade**: [`AgentRegistry::cancel`] cancels an agent
 //!     *and every descendant*, the single primitive behind `agent_cancel`,
-//!     the per-agent ceiling, and an `Esc` on the focused subtree;
+//!     the per-agent ceiling, and an `Esc` on the focused subtree.  Each
+//!     node is cancelled across both layers — the cooperative [`Token`] its
+//!     drive loop polls, and its own session's durable root, so an
+//!     in-flight `ral` eval unwinds at ral's poll points instead of
+//!     grinding to its timeout wall;
 //!   * a **ceiling** (children only), armed on the shared `process::reaper` as
 //!     a `Run` deadline that cancels the worker's subtree, so an abandoned
 //!     detached worker is reaped rather than running forever — the trunk,
@@ -27,7 +31,7 @@
 use crate::agent::ProviderHandle;
 use crate::bus::{AgentId, AgentMessage, InboxMsg, Mailbox};
 use crate::cancel::Token;
-use ral_core::process::{self, Deadline};
+use ral_core::process::{self, CancelCause, Deadline, DurableRoot};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -73,6 +77,15 @@ struct Entry {
     log_dir: PathBuf,
     started: Instant,
     cancel: Token,
+    /// The eval-layer cancel handle — the durable root of the agent's own
+    /// `Shell`.  A tripped [`Token`] alone cannot stop an in-flight `ral`
+    /// tool call (the drive loop reads it only between steps, and
+    /// `run_shell` blocks until the engine reports), so the cascade also
+    /// cancels the agent's session root: the eval unwinds at the
+    /// evaluator's own poll points.  `None` for the trunk, whose session
+    /// outlives any cancel — an Esc cancels its *turn*, delivered through
+    /// the published foreground slot, never its root.
+    eval_root: Option<DurableRoot>,
     /// The agent's inbox sender, so the frontend can route a focused tab's
     /// typed line into that agent's queue, `wake` it on a focus change, and
     /// the `message` tool can deliver a marked peer note by id.
@@ -138,7 +151,8 @@ impl AgentRegistry {
 
     /// Register an agent under its `parent` (`None` for the trunk).  A child
     /// (`parent` set) arms a ceiling on the reaper that cancels its whole
-    /// subtree when it elapses; the trunk gets none.  Returns the birth
+    /// subtree when it elapses, and carries its `eval_root` so the cascade
+    /// reaches its running eval; the trunk gets neither.  Returns the birth
     /// generation the worker carries into its result.
     #[allow(clippy::too_many_arguments)] // an agent's registration record, threaded once at birth
     pub fn register(
@@ -148,6 +162,7 @@ impl AgentRegistry {
         title: String,
         log_dir: PathBuf,
         cancel: Token,
+        eval_root: Option<DurableRoot>,
         mailbox: Mailbox,
         provider: ProviderHandle,
     ) -> u64 {
@@ -166,6 +181,7 @@ impl AgentRegistry {
                 log_dir,
                 started: Instant::now(),
                 cancel,
+                eval_root,
                 mailbox,
                 provider,
                 _ceiling: ceiling,
@@ -249,7 +265,7 @@ impl AgentRegistry {
         let existed = g.entries.contains_key(&id);
         for d in descendants(&g.entries, id, true) {
             if let Some(e) = g.entries.get(&d) {
-                e.cancel.cancel();
+                cancel_entry(e);
             }
         }
         existed
@@ -333,11 +349,22 @@ fn remove_descendants(g: &mut Inner, root: AgentId) {
     let desc = descendants(&g.entries, root, false);
     for d in &desc {
         if let Some(e) = g.entries.get(d) {
-            e.cancel.cancel();
+            cancel_entry(e);
         }
     }
     for d in desc {
         g.entries.remove(&d);
+    }
+}
+
+/// Cancel one entry across both layers: the cooperative [`Token`] the drive
+/// loop polls between steps, and — for a parented agent — its session's
+/// durable root, so an in-flight eval unwinds at the evaluator's poll points
+/// rather than running to its timeout wall.
+fn cancel_entry(e: &Entry) {
+    e.cancel.cancel();
+    if let Some(root) = &e.eval_root {
+        root.cancel(CancelCause::Explicit);
     }
 }
 
@@ -361,6 +388,7 @@ mod tests {
             format!("a{id}"),
             PathBuf::from("/tmp"),
             Token::new(),
+            parent.map(|_| DurableRoot::default()),
             crate::bus::Inbox::new().mailbox(),
             provider(),
         )
@@ -389,17 +417,47 @@ mod tests {
         assert_ne!(g, reg.generation(), "the generation advanced on clear");
     }
 
+    /// `/clear` and a settling `reply` reap descendants through
+    /// `remove_descendants`: each reaped worker is cancelled across both
+    /// layers, so an in-flight eval unwinds instead of grinding on as an
+    /// orphan whose result nobody will collect.
+    #[test]
+    fn clear_subtree_cancels_descendant_eval_roots() {
+        let reg = AgentRegistry::new();
+        entry(&reg, 0, None); // the trunk
+        let token = Token::new();
+        let eval_root = DurableRoot::default();
+        reg.register(
+            1,
+            Some(0),
+            "worker".into(),
+            PathBuf::from("/tmp/worker"),
+            token.clone(),
+            Some(eval_root.clone()),
+            mb(),
+            provider(),
+        );
+        reg.clear_subtree(0);
+        assert!(token.is_cancelled(), "the reaped worker's token is set");
+        assert!(
+            eval_root.as_scope().is_cancelled(),
+            "the reap cancels the worker's eval layer, not just its token"
+        );
+    }
+
     #[test]
     fn cancel_sets_the_token_and_list_reports_the_subtree() {
         let reg = AgentRegistry::new();
         entry(&reg, 0, None); // the trunk
         let token = Token::new();
+        let eval_root = DurableRoot::default();
         reg.register(
             7,
             Some(0),
             "lint".into(),
             PathBuf::from("/log/7"),
             token.clone(),
+            Some(eval_root.clone()),
             crate::bus::Inbox::new().mailbox(),
             provider(),
         );
@@ -407,6 +465,10 @@ mod tests {
         assert_eq!(reg.list(0)[0].title, "lint");
         assert!(reg.cancel(7), "an existing agent is cancellable");
         assert!(token.is_cancelled(), "cancel sets the worker's token");
+        assert!(
+            eval_root.as_scope().is_cancelled(),
+            "cancel reaches the worker's eval layer through its session root"
+        );
         assert!(!reg.cancel(99), "an unknown id is not cancellable");
     }
 
@@ -425,6 +487,7 @@ mod tests {
             "r".into(),
             "/l".into(),
             r.clone(),
+            None,
             mb(),
             provider(),
         );
@@ -434,6 +497,7 @@ mod tests {
             "c".into(),
             "/l".into(),
             c.clone(),
+            Some(DurableRoot::default()),
             mb(),
             provider(),
         );
@@ -443,6 +507,7 @@ mod tests {
             "g".into(),
             "/l".into(),
             g.clone(),
+            Some(DurableRoot::default()),
             mb(),
             provider(),
         );
@@ -452,6 +517,7 @@ mod tests {
             "s".into(),
             "/l".into(),
             sibling.clone(),
+            Some(DurableRoot::default()),
             mb(),
             provider(),
         );
@@ -488,6 +554,7 @@ mod tests {
             "worker".into(),
             PathBuf::from("/tmp/worker"),
             Token::new(),
+            Some(DurableRoot::default()),
             inbox.mailbox(),
             provider(),
         );

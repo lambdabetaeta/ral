@@ -44,6 +44,17 @@ impl Shell {
         &self.session.root
     }
 
+    /// A clonable cancel handle on this session's durable root.  A host
+    /// that runs several sessions in one process (exarch's agent fleet)
+    /// keeps one per session, so its own cancel cascade can reach the eval
+    /// layer: cancelling the handle unwinds the session's in-flight turn at
+    /// the evaluator's poll points and stops its detached workers.  For a
+    /// forked session — which never publishes the process-global signal
+    /// slots — this handle is the *only* way to stop a running eval.
+    pub fn cancel_handle(&self) -> DurableRoot {
+        self.session.root.clone()
+    }
+
     /// The current turn's foreground scope.  A host clones a deadline child
     /// of it, or cancels it to interrupt the foreground work.
     pub fn foreground(&self) -> &ForegroundScope {

@@ -1374,6 +1374,78 @@ keep-bottom
         );
     }
 
+    /// The eval-layer half of the registry cascade: cancelling a forked
+    /// session's durable root ([`Shell::cancel_handle`] — the handle
+    /// `AgentRegistry` holds per agent) unwinds an in-flight `run_shell`
+    /// promptly, long before its `timeout_secs` wall, and tears down the
+    /// spawned process tree.  The fixture is the timeout tests' pipe-holding
+    /// `sleep` tree under a generous 30 s budget, so only the root cancel
+    /// can explain a fast return.  The shell is a `fork_session` child — the
+    /// sub-agent shape — which never publishes the process signal slots:
+    /// this handle is the only way to stop it, and it must suffice.
+    #[cfg(unix)]
+    #[test]
+    fn root_cancel_unwinds_inflight_run_shell() {
+        let mut shell = fresh_shell().fork_session();
+        let handle = shell.cancel_handle();
+        let (emit, _rx) = dummy_emitter();
+        let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
+        let t0 = std::time::Instant::now();
+        let r = std::thread::scope(|s| {
+            let worker = s.spawn(|| {
+                match run_shell_direct(&mut shell, &Capabilities::root(), cmd, 30, &emit) {
+                    Outcome::Ran(r) => r,
+                    Outcome::Static(msg) => panic!("static failure: {msg}"),
+                }
+            });
+            // Let the eval reach the blocking external wait, then cancel the
+            // root from outside — the registry cascade's move.
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            handle.cancel(ral_core::process::CancelCause::Explicit);
+            worker.join().expect("run_shell worker")
+        });
+        let elapsed = t0.elapsed();
+
+        assert!(
+            elapsed.as_secs() < 10,
+            "a root cancel must unwind the eval promptly: returned after \
+             {elapsed:?} (sleep was 30s, budget 30s)"
+        );
+        // What surfaces depends on where the eval was when the cancel
+        // landed: blocked in the child wait, the teardown SIGTERMs the group
+        // and the command's signal death is the statement error; between
+        // statements, `check` raises the Explicit cause as "cancelled".
+        // Either shape is the unwind under test.
+        assert_ne!(r.exit, 0, "a cancelled turn must not report success");
+        let stderr = String::from_utf8_lossy(&r.stderr);
+        assert!(
+            stderr.contains("cancelled") || stderr.contains("SIGTERM"),
+            "the unwind surfaces the cancel or the torn-down child; stderr was: {stderr}"
+        );
+
+        // The compute actually stops: the forked grandchild is reaped, not
+        // left grinding as an orphan.
+        let gc_pid: i32 = String::from_utf8_lossy(&r.stdout)
+            .lines()
+            .next()
+            .and_then(|l| l.trim().parse().ok())
+            .expect("the grandchild printed its pid on stdout");
+        let mut alive = true;
+        for _ in 0..50 {
+            // SAFETY: signal 0 performs error checking without delivering
+            // a signal; it never touches an unrelated process.
+            if unsafe { libc::kill(gc_pid as libc::pid_t, 0) } != 0 {
+                alive = false;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            !alive,
+            "the forked grandchild (pid {gc_pid}) outlived the root cancel"
+        );
+    }
+
     /// A `Bytes` field in a structured result renders to the model as
     /// lossy-UTF-8 text, not the decimal integer array `to-json` uses for
     /// data round-trips.  Captured diagnostics — a job's or `audit` node's

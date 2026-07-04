@@ -53,6 +53,7 @@ impl Shell {
             },
             session: SessionState {
                 root,
+                publishes_signal_slots: true,
                 sources: crate::diagnostic::SourceDb::default(),
                 exit_hints: crate::exit_hints::ExitHints::default(),
                 builtins: crate::types::BuiltinTable::default(),

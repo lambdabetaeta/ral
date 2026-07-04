@@ -362,6 +362,7 @@ impl Agent {
             TRUNK_TITLE.to_string(),
             self.log.dir().to_path_buf(),
             self.cancel.clone(),
+            self.parent.map(|_| self.eval_root()),
             self.inbox.mailbox(),
             self.provider.clone(),
         );
@@ -568,6 +569,14 @@ impl Agent {
     /// a peer's sticky token in the parent's [`Self::agents`]).
     pub(crate) fn cancel_token(&self) -> &cancel::Token {
         &self.cancel
+    }
+
+    /// The eval-layer cancel handle on this agent's own `Shell` — registered
+    /// alongside the [`Token`](cancel::Token) so the subtree cascade can
+    /// unwind an in-flight `ral` eval, not merely flag a drive loop that
+    /// only reads its token between steps.
+    pub(crate) fn eval_root(&self) -> ral_core::process::DurableRoot {
+        self.transport.shell_mut().shell.cancel_handle()
     }
 
     /// Seed this session's inbox with its launch prompt — the spawn site calls
@@ -1947,12 +1956,14 @@ mod tests {
         let direct_token = cancel::Token::new();
         let grandchild_token = cancel::Token::new();
         let sibling_token = cancel::Token::new();
+        let direct_root = ral_core::process::DurableRoot::default();
         child.agents.register(
             direct,
             Some(child.id),
             "direct".into(),
             dir.join("direct"),
             direct_token.clone(),
+            Some(direct_root.clone()),
             Inbox::new().mailbox(),
             child.provider.clone(),
         );
@@ -1962,6 +1973,7 @@ mod tests {
             "grandchild".into(),
             dir.join("grandchild"),
             grandchild_token.clone(),
+            Some(ral_core::process::DurableRoot::default()),
             Inbox::new().mailbox(),
             child.provider.clone(),
         );
@@ -1971,6 +1983,7 @@ mod tests {
             "sibling".into(),
             dir.join("sibling"),
             sibling_token.clone(),
+            Some(ral_core::process::DurableRoot::default()),
             Inbox::new().mailbox(),
             child.provider.clone(),
         );
@@ -1987,6 +2000,10 @@ mod tests {
         assert!(matches!(outcome, AgentOutcome::Complete));
         assert_eq!(text, "done");
         assert!(direct_token.is_cancelled(), "direct child is cancelled");
+        assert!(
+            direct_root.as_scope().is_cancelled(),
+            "the reap cancels the abandoned child's eval layer too"
+        );
         assert!(
             grandchild_token.is_cancelled(),
             "grandchild is cancelled recursively"

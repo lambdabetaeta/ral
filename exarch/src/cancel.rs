@@ -17,9 +17,12 @@
 //! foreground scope with [`CancelCause::Interrupt`](ral_core::process::CancelCause):
 //! the foreground evaluation unwinds at its next poll, while detached
 //! workers — parented at the durable root, not the foreground — are
-//! cancelled instead through the registry's subtree cascade.  No global
-//! counter is ticked on the Esc path, so there is nothing to escalate
-//! toward a force-exit.
+//! cancelled instead through the registry's subtree cascade, which cancels
+//! each agent's token *and* its own session's durable root (only the
+//! trunk's session publishes the process signal slots; a sub-agent's eval
+//! is reached through that per-session handle).  No global counter is
+//! ticked on the Esc path, so there is nothing to escalate toward a
+//! force-exit.
 //!
 //! The signal handler cannot hold a token by value, so the trunk
 //! [`publish`]es its token's flag into a process-global *slot* (an

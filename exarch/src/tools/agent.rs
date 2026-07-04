@@ -378,6 +378,9 @@ pub(super) fn spawn_async(
     let log_dir = child.log_dir().to_path_buf();
     let log_dir_str = log_dir.display().to_string();
     let cancel = child.cancel_token().clone();
+    // The child's eval-layer cancel handle, registered so the cascade can
+    // unwind a `ral` eval already in flight when the cancel lands.
+    let eval_root = child.eval_root();
     // The child's inbox sender, registered so the frontend can steer or
     // wake this tab.  Cheap-clone, taken off `child` before it moves into
     // the worker thread (alongside the one the streaming `child_emit`
@@ -393,6 +396,7 @@ pub(super) fn spawn_async(
         title.clone(),
         log_dir.clone(),
         cancel,
+        Some(eval_root),
         child_mailbox,
         child_provider,
     );

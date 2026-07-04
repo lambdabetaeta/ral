@@ -307,6 +307,15 @@ pub struct SessionState {
     /// them.  Only a [`RootAbort`](crate::process::CancelCause::RootAbort) on
     /// the root, or a cancel on the worker's own scope, stops such a worker.
     pub(crate) root: DurableRoot,
+    /// Whether this session's turn doors publish its scopes into the
+    /// process-global signal slots — the reach-in path for OS signals and a
+    /// front-end's cancel key.  The slots' save/restore-previous discipline
+    /// is sound only for LIFO publication on a single thread, so at most one
+    /// session per process may publish: the signal-facing one.  `true` at
+    /// construction; a forked child session ([`Shell::fork_session`]) never
+    /// publishes — its host stops it through a cancel handle on
+    /// [`Self::root`] ([`Shell::cancel_handle`]), not through signals.
+    pub(crate) publishes_signal_slots: bool,
     /// Durable source registry, keyed by [`FileId`](crate::source::FileId).
     /// A turn resets and seeds it at turn start, module loads append to it,
     /// and hosts read it after the turn returns to render runtime errors.

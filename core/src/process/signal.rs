@@ -504,6 +504,12 @@ pub struct ForegroundCancelSlot {
 /// guard's lifetime. The prior publication is saved and restored on drop —
 /// a swap, not a clear — so a re-entrant turn nests its scope above the
 /// outer turn's and reveals it again when the inner guard drops.
+///
+/// That save/restore discipline (and the safety of [`request_foreground_cancel`]
+/// reading the slot) requires publications to nest LIFO on a single thread:
+/// at most one session per process publishes here — the signal-facing one,
+/// marked by `SessionState::publishes_signal_slots`.  A forked session's
+/// turns never publish; hosts cancel them through their own scope handles.
 pub fn publish_foreground(scope: &CancelScope) -> ForegroundCancelSlot {
     let prev = FOREGROUND_SCOPE.swap(scope.flag_ptr() as *mut AtomicU8, Ordering::Release);
     ForegroundCancelSlot { prev }

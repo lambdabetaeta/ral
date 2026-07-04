@@ -1,6 +1,6 @@
 ---
-generated_at_commit: cae7c3c
-generated_at_date: 2026-07-03
+generated_at_commit: bbca4f4
+generated_at_date: 2026-07-04
 covers_paths: [exarch/src/agent.rs, exarch/src/agent_registry.rs, exarch/src/event.rs, exarch/src/fleet.rs, exarch/src/nudge.rs, exarch/src/digest.rs]
 ---
 
@@ -154,7 +154,7 @@ disagree about what is shared.
   mid-conversation, and the TUI then **falls focus back to its parent**,
   recursing to the trunk.
 
-## Cancellation cascades the subtree
+## Cancellation cascades the subtree, across both layers
 
 The single cascade serves three callers — `agent_cancel`, the per-agent ceiling,
 and `Esc`. `AgentRegistry::Entry` carries a `parent` link, so the registry is the
@@ -162,7 +162,16 @@ spawn *tree*: `AgentRegistry::cancel(id)` walks descendants and cancels the whol
 subtree, `cancel_descendants(root)` abandons a returning agent's children without
 advancing the global generation, and `clear_subtree(root)` reaps a subtree and
 bumps the generation, so a late result or deferred surface batch from a cleared
-generation is still dropped. `Esc` targets
+generation is still dropped. Each cancelled node is stopped **across both
+layers**: its cooperative `Token` (read by the drive loop between steps and
+raced by the provider's mid-stream cancel) *and* its own session's durable root
+(`eval_root: Option<DurableRoot>` on the entry, minted from
+`Shell::cancel_handle` at registration), so a `ral` eval already in flight
+unwinds at the evaluator's poll points instead of grinding to its
+`timeout_secs` wall. The trunk registers no eval-root — its session outlives
+any cancel; Esc reaches its turn through the published foreground slot
+([[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]],
+[[internals/cancellation|cancellation]]). `Esc` targets
 `fleet.focus`'s turn and its subtree (not "the root") — the focused agent's
 published token is cleared each turn boundary (`Token::reset`) and the cascade
 carries the cancel down. This generalises

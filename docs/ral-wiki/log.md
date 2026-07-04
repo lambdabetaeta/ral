@@ -3655,3 +3655,14 @@ register stays live; if the child fails to clear it, the next actionable clean
 completion nudges again. Piggybacked the decision note on
 [[decisions/260703_protected-commitment-pins|protected-commitment-pins]] and
 updated [[design/pins|pins]]; re-stamped [[map/exarch/agent|agent]].
+
+## [2026-07-04] ingest | Cancellation reaches the eval layer
+
+Two-layer cancel cascade: only the signal-facing session publishes ral's
+signal slots (`fork_session` clears `publishes_signal_slots`), and each
+parented registry entry carries its session's `DurableRoot`
+(`Shell::cancel_handle`) so `cancel`/`remove_descendants` unwind an in-flight
+eval instead of waiting out `timeout_secs`. Added
+[[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]]; updated
+[[internals/cancellation|cancellation]] (slots, sticky-token reset) and
+re-stamped [[map/exarch/agent|agent]].
