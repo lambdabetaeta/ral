@@ -25,7 +25,7 @@
 //! boundary.  Produced by `capability::sandbox_projection`, which folds
 //! the whole stack; consumed only by sandbox backends.
 
-use crate::path::NormalizedPrefix;
+use crate::path::{NormalizedPrefix, PrefixSet};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -511,8 +511,12 @@ impl Capabilities {
     /// fs prefixes), AND (net, editor, shell), and union
     /// (`fs.deny_paths` — more denies = less authority).
     /// `audit` is not part of the lattice: it propagates upward
-    /// (logical OR).  Both bundles are already resolved, so the
-    /// prefix intersections compare concrete paths.
+    /// (logical OR).  The fs/exec-dir prefix intersections build a
+    /// [`PrefixSet`] and judge overlap on the symlink-resolved form
+    /// (via [`PrefixSet::from_frozen`]) — the same fidelity the
+    /// point-of-use gate and the sandbox projection use — so a symlinked
+    /// deeper prefix cannot survive the meet as authority reaching
+    /// outside a shallower ceiling.
     pub fn meet(self, other: Self) -> Self {
         // Per-field meets via the lattice trait (Option<T>: Meet does
         // the None-as-identity lift; ExecMap, bool, FsPolicy,
@@ -612,8 +616,12 @@ impl Join for ExecPolicy {
 impl Meet for FsPolicy {
     fn meet(self, other: Self) -> Self {
         Self {
-            read_prefixes: intersect_prefixes(&self.read_prefixes, &other.read_prefixes),
-            write_prefixes: intersect_prefixes(&self.write_prefixes, &other.write_prefixes),
+            read_prefixes: PrefixSet::from_frozen(&self.read_prefixes)
+                .meet(PrefixSet::from_frozen(&other.read_prefixes))
+                .surface(),
+            write_prefixes: PrefixSet::from_frozen(&self.write_prefixes)
+                .meet(PrefixSet::from_frozen(&other.write_prefixes))
+                .surface(),
             deny_paths: self
                 .deny_paths
                 .into_iter()
@@ -677,8 +685,10 @@ impl Join for ShellPolicy {
 
 /// Meet two exec maps.  Both halves split each verdict by sign and
 /// recombine per the [`ExecDir`] lattice.  In `dirs`: allow-regions
-/// intersect (a prefix survives only where BOTH sides admit it, the
-/// deeper one winning), deny-regions union (a `Deny` is sticky, so it
+/// intersect through a [`PrefixSet`] on the resolved form (a prefix
+/// survives only where BOTH sides admit it, the deeper one winning, and
+/// a symlinked prefix cannot escape), deny-regions union (a `Deny` is
+/// sticky, so it
 /// propagates from either side), and on an exact-key clash the deny
 /// lands last so meet's bottom — `Deny` — wins.  The `literals` half
 /// mirrors this through [`meet_literal_exec`].
@@ -687,7 +697,12 @@ impl Meet for ExecMap {
         let (a_allow, a_deny) = partition_exec_dirs(&self.dirs);
         let (b_allow, b_deny) = partition_exec_dirs(&other.dirs);
         let mut dirs = BTreeMap::new();
-        for path in intersect_prefix_strings(&a_allow, &b_allow) {
+        for path in PrefixSet::from_frozen(&a_allow)
+            .meet(PrefixSet::from_frozen(&b_allow))
+            .surface()
+            .into_iter()
+            .map(NormalizedPrefix::into_string)
+        {
             dirs.insert(path, ExecDir::Allow);
         }
         for path in union_prefix_strings(a_deny, b_deny) {
@@ -803,35 +818,9 @@ fn join_literal_exec(
     out
 }
 
-/// Prefix-set intersection: keep the deeper prefix from each
-/// overlapping pair.  Delegates to the shared
-/// `crate::path::meet_prefix_sets_by` combinator, judging overlap on
-/// the resolved strings (lexical, no symlink resolution); the runtime
-/// fold in `crate::path::PrefixSet`'s `Meet` impl uses the same
-/// combinator with canonical-form overlap when reducing the dynamic
-/// stack at sandbox-render time.
-fn intersect_prefix_strings(a: &[String], b: &[String]) -> Vec<String> {
-    crate::path::meet_prefix_sets_by(a, b, |s| s.as_str())
-        .into_iter()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
-
 fn union_prefix_strings(a: Vec<String>, b: Vec<String>) -> Vec<String> {
     a.into_iter()
         .chain(b)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
-
-/// [`NormalizedPrefix`] counterpart of [`intersect_prefix_strings`]:
-/// keep the deeper prefix of each overlapping pair, overlap judged on
-/// the frozen string via the same alias-aware combinator.
-fn intersect_prefixes(a: &[NormalizedPrefix], b: &[NormalizedPrefix]) -> Vec<NormalizedPrefix> {
-    crate::path::meet_prefix_sets_by(a, b, |p| p.as_str())
-        .into_iter()
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()

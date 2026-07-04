@@ -8,14 +8,20 @@
 //! profile whose matcher works lexically — emits the spelling the
 //! sandboxed body itself will use.
 //!
-//! This is the runtime, [`Resolver`]-backed counterpart to the purely
-//! lexical `intersect_prefix_strings` used by `Capabilities::meet`,
-//! which has no resolver and therefore cannot follow symlinks.
+//! Both prefix-intersecting composition surfaces build a `PrefixSet` and
+//! meet on the resolved form: the sandbox-projection fold via
+//! [`resolve`](PrefixSet::resolve) (it holds a [`Resolver`]), and the
+//! `Capabilities` composition meets via
+//! [`from_frozen`](PrefixSet::from_frozen) (their prefixes are already
+//! frozen, so only canonicalisation is left).  Judging containment on the
+//! resolved form — not the surface string — is what stops a symlinked
+//! deeper prefix from surviving as authority outside a shallower ceiling.
 
 use super::lex::meet_prefix_sets_by;
 use super::resolved::NormalizedPrefix;
 use super::resolver::Resolver;
 use crate::types::Meet;
+use std::path::PathBuf;
 
 /// One prefix held in both forms; see the module note for why the
 /// duality is load-bearing rather than redundant.
@@ -46,6 +52,29 @@ impl PrefixSet {
                     resolved: rp.canonicalise_lenient().to_string_lossy().into_owned(),
                     surface: rp.as_path().to_string_lossy().into_owned(),
                 }
+            })
+            .collect();
+        normalise(&mut set);
+        Self(set)
+    }
+
+    /// Build a set from already-frozen prefixes, following each one's
+    /// symlinks.  A frozen [`NormalizedPrefix`] (and the frozen exec-dir
+    /// strings) is absolute and `.`/`..`-collapsed with every sigil
+    /// expanded — exactly the work [`resolve`](Self::resolve) needs a
+    /// [`Resolver`] for — so only [`canonicalise_lenient`](super::canon)
+    /// remains.  The resolver-free door the `Capabilities` composition
+    /// meets use, which hold no `Resolver`: it lets them judge prefix
+    /// overlap on the same resolved form the gate and the projection do.
+    pub fn from_frozen<S: AsRef<str>>(prefixes: &[S]) -> Self {
+        let mut set: Vec<Prefix> = prefixes
+            .iter()
+            .map(|prefix| {
+                let surface = prefix.as_ref().to_string();
+                let resolved = super::canon::canonicalise_lenient(&PathBuf::from(&surface))
+                    .to_string_lossy()
+                    .into_owned();
+                Prefix { resolved, surface }
             })
             .collect();
         normalise(&mut set);

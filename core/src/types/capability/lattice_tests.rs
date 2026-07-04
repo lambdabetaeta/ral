@@ -482,6 +482,53 @@ fn meet_fs_nested_grants_narrow_to_intersection() {
     );
 }
 
+/// Security regression at the composition layer.  A restrict grant whose
+/// deeper prefix *lexically* nests under the base ceiling but resolves —
+/// through a symlink — outside it must not survive the meet.  Before the
+/// meet judged overlap on the resolved form, the escaping prefix survived
+/// (dropping the shallower ceiling) and the point-of-use gate then
+/// canonicalised it to its out-of-ceiling target and granted access.
+/// Judging containment on the resolved form collapses it to the
+/// fail-closed empty meet instead — the same guarantee
+/// `PrefixSet::symlinked_grant_cannot_escape_a_shallower_ceiling` pins one
+/// layer down, here proved end-to-end through `Capabilities::meet`.
+#[cfg(unix)]
+#[test]
+fn meet_fs_symlinked_prefix_cannot_escape_ceiling() {
+    use std::os::unix::fs::symlink;
+
+    let root = std::env::temp_dir().join(format!("ral-meet-escape-{}", std::process::id()));
+    std::fs::remove_dir_all(&root).ok(); // clear any leftover from a crashed run
+    let ceiling = root.join("base");
+    let outside = root.join("outside");
+    let escape = ceiling.join("link");
+    std::fs::create_dir_all(&ceiling).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    symlink(&outside, &escape).unwrap();
+
+    let read_grant = |p: &std::path::Path| Capabilities {
+        fs: Some(FsPolicy {
+            read_prefixes: vec![crate::path::NormalizedPrefix::from_surface(
+                p.to_string_lossy().into_owned(),
+            )],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let met = read_grant(&ceiling)
+        .meet(read_grant(&escape))
+        .fs
+        .expect("fs retained");
+    assert!(
+        met.read_prefixes.is_empty(),
+        "a symlinked deeper prefix resolving outside the ceiling must collapse \
+         to the fail-closed empty meet, got {:?}",
+        met.read_prefixes
+    );
+    std::fs::remove_dir_all(&root).ok();
+}
+
 #[test]
 fn join_commutative() {
     let a = witness_a();
