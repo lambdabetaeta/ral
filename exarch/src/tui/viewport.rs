@@ -17,7 +17,7 @@
 use super::block::{AgentSlot, Block, RailShape, Reveal, append_visual_rows};
 use super::fidelity::{self, Fidelity};
 use super::group;
-use super::line::{READ_W, coalesced_queries, deliberation_grain, is_blank, plain, size_bar};
+use super::line::{READ_W, deliberation_grain, is_blank, plain, size_bar};
 use super::rail::{self, RailKind};
 use super::select::plain_slice;
 use crate::bus::Hunk;
@@ -404,21 +404,20 @@ impl Viewport {
         self.push_block(Block::chrome(shape, lines));
     }
 
-    /// Append a summary-less query call.  Adjacent same-tool queries coalesce
-    /// on screen into one `tool : q1, q2, …` line ([`Self::render_query_run`]);
-    /// `query` is `None` for an invisible parse-failure boundary.
-    pub(super) fn push_query(&mut self, tool: &'static str, query: Option<String>) {
-        self.push_block(Block::query(tool, query));
+    /// Append a summary-less tool call, shown standalone as a `▸` rail block.
+    /// `detail` is `None` for an invisible parse-failure boundary.
+    pub(super) fn push_plain_call(&mut self, tool: &'static str, detail: Option<String>) {
+        self.push_block(Block::plain_call(tool, detail));
     }
 
     /// Attach a tool result's magnitude — `text.lines().count()` — to the
     /// call it belongs to: the most-recent call-bearing block, searched
     /// backward from the tail since `Patch` / `Wrote` side effects may land
     /// between a call and its result.  The search halts at the first
-    /// [`Block::is_call`] — a dialable tool call *or* a summary-less query —
-    /// so a query's result stops there and never reaches past it to clobber an
+    /// [`Block::is_call`] — a dialable tool call *or* a plain tool call —
+    /// so a plain call's result stops there and never reaches past it to clobber an
     /// earlier dialable call's size bar.  Only a dialable call carries a size
-    /// bar, so landing on a query (which has none) is a no-op that still halts.
+    /// bar, so landing on a plain call (which has none) is a no-op that still halts.
     /// Marks the flatten stale so the collapsed header re-renders.
     pub(super) fn set_result_size(&mut self, text: &str) {
         let n = text.lines().count() as u32;
@@ -941,15 +940,6 @@ impl Viewport {
                 let segment = (anchor, self.render_group(i, end, anchor, content_w), false);
                 i = end;
                 segment
-            } else if self.blocks[i].is_query() {
-                // A run of adjacent same-tool query calls coalesces into one
-                // `tool : …` line.  It anchors on its first block — inert, since
-                // a query never dials — and bridges interior step boundaries.
-                let tool = self.blocks[i].query_tool();
-                let end = self.run_end(i, |b| b.query_tool() == tool);
-                let segment = (i, self.render_query_run(i, end, content_w), false);
-                i = end;
-                segment
             } else {
                 let prompt = self.blocks[i].is_prompt();
                 let lead =
@@ -1087,32 +1077,6 @@ impl Viewport {
         calls
     }
 
-    /// Render a coalesced query run `start..end` as one `tool : q1, q2, …` line
-    /// ([`coalesced_queries`]), seating the shut `▸` rail on its head row
-    /// exactly as [`Self::render_group`] does.  Placeholder queries
-    /// ([`Block::query_text`] `None`) drop out; an all-placeholder run renders
-    /// nothing — the invisible boundary.  The run's blocks share a tool by
-    /// construction ([`Self::run_end`]'s predicate), so any member names the head.
-    fn render_query_run(&self, start: usize, end: usize, width: u16) -> Vec<Line<'static>> {
-        let queries: Vec<&str> = self.blocks[start..end]
-            .iter()
-            .filter_map(Block::query_text)
-            .collect();
-        if queries.is_empty() {
-            return Vec::new();
-        }
-        let tool = self.blocks[start..end]
-            .iter()
-            .find_map(Block::query_tool)
-            .unwrap_or_default();
-        let mut lines = coalesced_queries(tool, &queries, width);
-        let rail = rail::span(RailKind::ToolCall(false), self.agent, None);
-        let idx = lines.iter().position(|l| !is_blank(l)).unwrap_or(0);
-        if let Some(line) = lines.get_mut(idx) {
-            line.spans.insert(0, rail);
-        }
-        lines
-    }
 }
 
 #[cfg(test)]

@@ -312,13 +312,12 @@ impl App {
                     // A summary marks a call worth revealing: the label
                     // shows shut, the script on a click.
                     Some(s) => vp.push_tool_call(tool, s, cmd, floor),
-                    // A summary-less call is a query — coalesced on screen into
-                    // one `tool : q1, q2, …` line.  Its cmd being the
-                    // parse-failure sentinel makes it an invisible boundary
-                    // (`None`): present only so its result attaches there, never
-                    // reaching back to clobber an earlier call's size bar.
+                    // A summary-less call is a plain tool call, shown standalone.
+                    // Its cmd being the parse-failure sentinel makes it an invisible
+                    // boundary (`None`): present only so its result attaches there,
+                    // never reaching back to clobber an earlier call's size bar.
                     None => {
-                        vp.push_query(tool, (cmd != crate::tools::INVALID_INPUT).then_some(cmd))
+                        vp.push_plain_call(tool, (cmd != crate::tools::INVALID_INPUT).then_some(cmd))
                     }
                 });
             }

@@ -163,7 +163,7 @@ Prelude functions cover common cases:
 
 ## Audit
 
-`audit { … }` evaluates its body and returns the execution tree as a ral value: each external command's argv, stdout, stderr, exit code, and timing. `audit` does not raise errors: it turns them into record data. It also keeps stdout/stderr apart, so you need not `2>&1` to capture stderr. This is how you read a tool whose exit code is *data* (e.g. `grep` exit 1 meaning no match), deliberate signal like `valgrind --error-exitcode=77`. Wrapping such a tool in `audit` captures the output and lets you branch on the code:
+`audit { … }` evaluates its body and returns an execution tree: a ral record with various fields about the running of the block, including `args` (which arguments it ran with), `children` (any further calls it made), exit `status`, its `stdout` and `stder`, and a ral `value` that it returned. `audit` turns any errors into record data, so it never fails. It also keeps stdout/stderr apart, so you need not `2>&1` to capture stderr. This is how you read a tool whose exit code is *data* (e.g. `grep` exit 1 meaning no match), or deliberate signal like `valgrind --error-exitcode=77`:
 
     let r      = audit { valgrind --error-exitcode=77 --leak-check=full ./a.out }
     $r
@@ -171,23 +171,24 @@ Prelude functions cover common cases:
 
 ## Concurrency
 
-`defer { … }` wraps its body in `audit` and runs it on a worker, returning a handle at once; use it for long-running calls.  The audit wrapping means the deferred block never fails — errors become data in the audit tree:
+`defer { … }` runs its block on new thread, returning a handle at once. As a general rule you should `defer` all long work:
 
     let b = { make } 
     let h = defer $b        # keep the handle!
     #'build started'#
 
-`await` returns a record with `value`, `stdout`, and `stderr` fields.  Because `defer` wraps in `audit`, `$r[value]` is the **audit tree** — a record with `cmd`, `status`, `children`, and a `value` field holding the block's own result.  `$r[stdout]`/`$r[stderr]` are the worker process output (usually empty); per-command stdout/stderr are inside `$r[value][children]`:
+If you truly have nothing else to do, `await` the handle with a long timeout.
+
+`await` returns an `audit` tree in its `value` field, which you can examine to find what ran in the thread..
 
     let r = await $h
-    # outer .value is the await record field; inner .value is the audit tree's result
-    let ok         = $[$r[value][status] == 0]              # did the block succeed?
+    let ok         = $[$r[value][status] == 0]                       # did the block succeed?
     let cmd_stdout = bytes-to-string $r[value][children][0][stdout]  # stdout of first command
-    let result     = $r[value][value]                        # the block's own return value
+    let result     = $r[value][value]                                # the block's own return value
 
-Since a deferred block never fails (errors are data in the audit tree), you can await the same handle across turns.
+Like `audit`, deferred blocks turn errors into data. They are idempotent, so you can await the same handle across turns.
 
-Use `cancel $h` to stop a handle thread that is no longer needed. There is also a bounded parallel `map` and a `race`: use `help` to find out more about them. 
+Use `cancel $h` to stop a thread thread that is no longer required.
 
 ## Within
 
@@ -236,11 +237,11 @@ For dot/ignored files you also have `rg` bundled.
 
 ## Reading and editing files
 
-`view-text PATH START END` shows the half-open line range `[START, END)`:
+`view-text PATH START END` shows the half-open line range `[START, END)`. The result is a list of `[line, hash, text]` records, where `<hash>` is a unique freshness witness for that line, which depends on neighbouring lines. Bind and collect in some record to read multiple locations at once:
 
-    [tui-start: !{view-text #'src/tui.rs'# 100 150}, tui-end: !{view-text #'src/tui.rs'# 300 350}]
-
-The result is a list of `[line, hash, text]` records, where `<hash>` is a unique freshness witness for that line, which depends on neighbouring lines. 
+    let tui-start  = view-text #'src/tui.rs'# 100 150
+    let tui-end    = view-text #'src/tui.rs'# 300 350
+    [ #'src/tui.rs-100-150'# : $tui-start, #'src/tui.rs-300-350'# : $tui-end ]
 
 `view-text-around PATH LINE PEEK` shows the `2*PEEK + 1` lines centred on `LINE`, tagged the same way.
 
@@ -250,24 +251,17 @@ There are three ways to use `edit`. To delete a line pass the empty string `#''#
 new lines put several newline characters (not escapes) in `NEWTEXT`. The
 replacement must already have the exact indentation needed at the insertion point; write it directly with a raw string at the target indentation, or use `!{indent N !{dedent #'...'#}}` to author at natural indentation then shift. Example:
 
-    view-text #'src/lib.rs'# 80 120   # read the hashes
     edit #'src/lib.rs'# [
       [hash: h1b2c3, line: #'        let m = f {
             let scaled = n * 2;
             g 42
         }'#],
-      [hash: h4e5f6, line: #'    let m = 0'#],   # replace a line
-      [hash: h7a8b9, line: #''#],                # delete a line
+      [hash: h4e5f6, line: #'    let m = 0'#],         # replace a line, keeping the newline at the end
+      [hash: h7a8b9, line: #''#],                      # delete a line
     ]
+    edit #'src/pointer.rs'# [ [hash : h3af4d, #''# ]   # batch edits on multiple files edits in the same ral script
 
-Edits with newlines do not replace the following lines; you **must** mention the hash of every line you wish to change.
-
-`edit` composes with search: map `view-text-around` over `grep-files` hits to see each place with its witness, then read the witnesses off into one batched `edit`:
-
-    let mine = filter { |h| equal $h[file] #'src/lib.rs'# } !{grep-files #'old_name'#}  # locations of `old_name`
-    each { |h| view-text-around $h[file] $h[line] 3 } $mine                          # show each place + its witness
-    edit #'src/lib.rs'# [ [hash: h1b2c3, line: #'new_name'#], [hash: h4e5f6, line: #'new_name'#] ]
-
+Edits with newlines DO NOT replace the lines that follow; you MUST mention the hash of every line you wish to change.
 
 ## Help
 
