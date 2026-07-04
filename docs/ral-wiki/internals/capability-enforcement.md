@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 1baac6d
-verified_at_date: 2026-06-22
-anchors: [check_exec_args, check_fs_op, sandbox_projection, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox]
+verified_at_commit: 9ec942d
+verified_at_date: 2026-07-04
+anchors: [check_exec_args, check_fs_op, sandbox_projection, evaluate_exec, admitted_literal_paths, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox]
 ---
 
 # Capability enforcement: one chokepoint, two enforcers
@@ -56,7 +56,11 @@ spawned process does on its own.**
   renders a `process-exec` allow-list, catching re-execs the in-process check
   never sees (`sh -c`, `find -exec`); bwrap on Linux has no path-exec filter, so
   there the in-process gate stands alone
-  ([[decisions/260530_linux-exec-confinement|linux-exec-confinement]]).
+  ([[decisions/260530_linux-exec-confinement|linux-exec-confinement]]). That
+  allow-list derives its admits from the same `evaluate_exec` verdict, per
+  nameable command, so it never denies a command the in-process gate admits nor
+  admits one it denies — a CI-enforced conservatism invariant
+  ([[decisions/260704_exec-projection-defers-to-gate|exec-projection-defers-to-gate]]).
 - *Filesystem* — gated in-process too (`check_fs_op`, read and write), and
   backed by an OS sandbox that confines a spawned child's own reads and writes:
   Seatbelt on macOS, bwrap on Linux. Windows is fail-closed: per-command

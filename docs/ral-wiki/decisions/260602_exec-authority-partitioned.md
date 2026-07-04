@@ -85,6 +85,13 @@ one that would fail the enforcement-preservation guard. The `Reduced` witness
 already gives the defensible unification: one type-enforced *entry point* both
 consumers derive from.
 
+The projection fold was later found to *re-derive* admission on its own — an
+`ExecMap`-shaped silo intersection — rather than query the check fold, and that
+derivation lost admission crossing the literal/dir shapes, so the two surfaces
+disagreed. The folds still stay two, but the projection's admit decision now
+defers to `evaluate_exec` per nameable command, and bare-name denies project by
+basename — [[decisions/260704_exec-projection-defers-to-gate|exec-projection-defers-to-gate]].
+
 ## Directory meet/join follow the `ExecDir` lattice
 
 Composition over `dirs` is by sign, mirroring the literal half:
