@@ -335,7 +335,7 @@ impl App {
                 self.push_chrome(id, RailShape::Plain, line::stop_reason(&raw))
             }
             Kind::Error(msg) => self.push_chrome(id, RailShape::Error, line::error(&msg)),
-            Kind::SystemNote(text) => self.push_chrome(id, RailShape::Plain, line::dim(&text)),
+            Kind::SystemNote(text) => self.push_chrome(id, RailShape::Plain, line::note(&text)),
             // Quiet on the rail; recorded in the trace at the emit seam.
             Kind::Nudge { .. } => {}
             Kind::ProviderError(error) => {
@@ -454,7 +454,7 @@ impl App {
     /// so it is *drawn, not recorded*: it never becomes an event, the way the
     /// rendered `Kind::SystemNote` does at the emit seam.
     pub(super) fn push_note(&mut self, id: AgentId, text: String) {
-        self.push_chrome(id, RailShape::Plain, line::dim(&text));
+        self.push_chrome(id, RailShape::Plain, line::note(&text));
     }
 
     /// Draw an error line straight to the viewport — the UI-thread twin of

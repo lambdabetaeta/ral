@@ -1108,19 +1108,19 @@ fn render_listing(bytes: &[u8], more: bool) -> Vec<Line<'static>> {
     ls
 }
 
-/// Dim slate text — used for informational messages.
-pub(super) fn dim(s: &str) -> Vec<Line<'static>> {
+/// Slate text for system notes — operational metadata (model switches, stream stalls, compaction).
+pub(super) fn note(s: &str) -> Vec<Line<'static>> {
     vec![Line::from(Span::styled(
         s.to_string(),
-        Style::default().fg(SLATE).add_modifier(Modifier::DIM),
+        Style::default().fg(SLATE),
     ))]
 }
 
-/// Bracketed stop-reason notice (e.g. `[stop: content_filter]`).  The
+/// Bracketed stop-reason notice (e.g. `[stop: content_filter]`).  Uses [`note`] styling.
 /// model's normalised raw reason goes inside; render is the same
-/// styling as [`dim`].
+/// styling as [`note`].
 pub(super) fn stop_reason(raw: &str) -> Vec<Line<'static>> {
-    dim(&format!("[stop: {raw}]"))
+    note(&format!("[stop: {raw}]"))
 }
 
 /// Spans for the permanent usage status bar

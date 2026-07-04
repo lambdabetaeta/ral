@@ -278,7 +278,7 @@ fn apply_model_switch(
             .push_error(id, format!("could not persist selection: {e}"));
     }
     emit.emit(Kind::SystemNote(format!(
-        "[switched to {label} {model}{}]",
+        "[Switched to {label} {model}{}]",
         tuning_suffix(&tuning, route.as_deref())
     )));
 }

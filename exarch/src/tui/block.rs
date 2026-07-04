@@ -41,9 +41,9 @@ pub(super) enum RailShape {
     Step,
     /// An error — renders `╳`.
     Error,
-    /// Ambient chrome outside the transcript proper — no marginal rail. The
-    /// default: a meta-notice (a model/mode switch, an export, a stop reason)
-    /// is an annotation, not a navigable block, so it earns no shape.
+    /// Ambient chrome outside the transcript proper — wears the `▪` square. The
+    /// default: a meta-notice (a model switch, an export, a stop reason, a stream
+    /// stall) is an annotation, not a navigable block, so it earns a subtle glyph.
     #[default]
     Plain,
     /// The human's submitted prompt — marked by its [`super::line::PROMPT_INK`]
@@ -879,7 +879,7 @@ impl Block {
             BlockKind::Chrome { shape, .. } => match shape {
                 RailShape::Step => Some(RailKind::Step),
                 RailShape::Error => Some(RailKind::Error),
-                RailShape::Plain => None,
+                RailShape::Plain => Some(RailKind::Note),
                 // The PROMPT_INK body tint is the prompt's body mark; the `❖`
                 // fence is its margin mark — a rare landmark, on both axes.
                 RailShape::Prompt => Some(RailKind::Prompt),

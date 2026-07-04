@@ -100,7 +100,7 @@ pub(super) fn render_reasoning(text: &str, w: u16, indent: u16) -> Vec<Line<'sta
 ///   toward its own luma-grey (~45% / ~70% / ~90% at levels 1–3) at held
 ///   luminance, so the prose loses its hue — "drained of confidence" — yet
 ///   stays as legible as the sound answer beside it.  No `DIM`: that is the
-///   app's idiom for minor chrome ([`super::line::dim`]), and a suspect
+///   app's idiom for minor chrome ([`super::line::note`]), and a suspect
 ///   answer is important, not ignorable.
 /// - **echo similarity → background wash.** A flat [`ECHO_WASH`] field sits
 ///   behind every span, deepening one step per echo level, so an echoed

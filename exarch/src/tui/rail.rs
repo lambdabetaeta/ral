@@ -55,8 +55,9 @@ pub(super) enum RailKind {
     /// the full-width rule, so the rail thumbnail still shows where each turn
     /// opens. The sole wearer of `❖`, so the glyph reads as "the human".
     Prompt,
+    /// A system note — operational metadata (model switch, stream stall, compaction). The `▪` square.
+    Note,
 }
-
 impl RailKind {
     /// The single-cell shape glyph. Every glyph is one display column so
     /// the rail stays a fixed 2-col width (glyph + space) across kinds.
@@ -71,6 +72,7 @@ impl RailKind {
             RailKind::Step => "━",
             RailKind::Error => "╳",
             RailKind::Prompt => "❖",
+            RailKind::Note => "▪",
         }
     }
 }
@@ -90,6 +92,7 @@ pub(super) const RAIL_SHAPES: &[(RailKind, &str)] = &[
     (RailKind::Step, "step boundary"),
     (RailKind::Error, "error"),
     (RailKind::Prompt, "your prompt — the fence"),
+    (RailKind::Note, "system note"),
 ];
 
 /// Bucket a magnitude into a `0..=3` lightness step: `None` and tiny

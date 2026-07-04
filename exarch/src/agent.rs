@@ -949,8 +949,8 @@ impl Agent {
                         // a misconfiguration: an operational note, not an error.
                         self.note(
                             format!(
-                                "[stream stalled mid-reply ({cause}); committed the partial \
-                                 output and continuing the turn]"
+                                "[Stream stalled: {}]",
+                                cause.replace('\n', " | ")
                             ),
                             emit,
                         );
@@ -972,8 +972,7 @@ impl Agent {
             }
             if truncated {
                 self.note(
-                    "[turn truncated by the output cap mid-tool-call; dispatching the \
-                     captured calls and continuing]"
+                    "[Truncated mid-tool-call; continuing]"
                         .into(),
                     emit,
                 );
@@ -1067,7 +1066,7 @@ impl Agent {
             // and the worker has no honest way to draw view-only chrome.
             return;
         };
-        self.note(format!("[compacting history: {detail} → summary]"), emit);
+        self.note(format!("[Compacting history: {detail} → summary]"), emit);
         emit.emit(Kind::Phase("compacting".into()));
         match provider.summarize(&self.system, plan.prefix_messages, summary_cap, token) {
             Ok(summary) => {
@@ -1084,7 +1083,7 @@ impl Agent {
                     return;
                 }
                 self.note(
-                    format!("[compacted: now {} KB]", self.log.history_bytes() / 1024),
+                    format!("[Compacted: now {} KB]", self.log.history_bytes() / 1024),
                     emit,
                 );
             }
