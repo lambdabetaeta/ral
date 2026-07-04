@@ -66,11 +66,11 @@ impl PrefixSet {
     /// remains.  The resolver-free door the `Capabilities` composition
     /// meets use, which hold no `Resolver`: it lets them judge prefix
     /// overlap on the same resolved form the gate and the projection do.
-    pub fn from_frozen<S: AsRef<str>>(prefixes: &[S]) -> Self {
+    pub fn from_frozen(prefixes: &[NormalizedPrefix]) -> Self {
         let mut set: Vec<Prefix> = prefixes
             .iter()
             .map(|prefix| {
-                let surface = prefix.as_ref().to_string();
+                let surface = prefix.as_str().to_string();
                 let resolved = super::canon::canonicalise_lenient(&PathBuf::from(&surface))
                     .to_string_lossy()
                     .into_owned();

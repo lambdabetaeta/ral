@@ -705,7 +705,10 @@ impl Meet for ExecMap {
         {
             dirs.insert(path, ExecDir::Allow);
         }
-        for path in union_prefix_strings(a_deny, b_deny) {
+        for path in union_prefixes(a_deny, b_deny)
+            .into_iter()
+            .map(NormalizedPrefix::into_string)
+        {
             dirs.insert(path, ExecDir::Deny);
         }
         Self {
@@ -728,10 +731,16 @@ impl Join for ExecMap {
         let (a_allow, a_deny) = partition_exec_dirs(&self.dirs);
         let (b_allow, b_deny) = partition_exec_dirs(&other.dirs);
         let mut dirs = BTreeMap::new();
-        for path in union_prefix_strings(a_allow, b_allow) {
+        for path in union_prefixes(a_allow, b_allow)
+            .into_iter()
+            .map(NormalizedPrefix::into_string)
+        {
             dirs.insert(path, ExecDir::Allow);
         }
-        for path in union_prefix_strings(a_deny, b_deny) {
+        for path in union_prefixes(a_deny, b_deny)
+            .into_iter()
+            .map(NormalizedPrefix::into_string)
+        {
             dirs.insert(path, ExecDir::Deny);
         }
         Self {
@@ -744,14 +753,19 @@ impl Join for ExecMap {
 /// Split a dir map's keys by verdict into the allow-key list and the
 /// deny-key list, so the two signs can be combined under their own
 /// lattice operation (allows intersect under meet, denies union; dual
-/// under join).
-fn partition_exec_dirs(dirs: &BTreeMap<String, ExecDir>) -> (Vec<String>, Vec<String>) {
+/// under join).  Keys are minted as [`NormalizedPrefix`]es — the frozen
+/// form both [`PrefixSet::from_frozen`] (allow intersection) and
+/// [`union_prefixes`] (deny union) consume — and flattened back to the
+/// dir map's string keys at insertion.
+fn partition_exec_dirs(
+    dirs: &BTreeMap<String, ExecDir>,
+) -> (Vec<NormalizedPrefix>, Vec<NormalizedPrefix>) {
     let mut allow = Vec::new();
     let mut deny = Vec::new();
     for (path, verdict) in dirs {
         match verdict {
-            ExecDir::Allow => allow.push(path.clone()),
-            ExecDir::Deny => deny.push(path.clone()),
+            ExecDir::Allow => allow.push(NormalizedPrefix::from_surface(path)),
+            ExecDir::Deny => deny.push(NormalizedPrefix::from_surface(path)),
         }
     }
     (allow, deny)
@@ -816,14 +830,6 @@ fn join_literal_exec(
         }
     }
     out
-}
-
-fn union_prefix_strings(a: Vec<String>, b: Vec<String>) -> Vec<String> {
-    a.into_iter()
-        .chain(b)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
 }
 
 fn union_prefixes(a: Vec<NormalizedPrefix>, b: Vec<NormalizedPrefix>) -> Vec<NormalizedPrefix> {
