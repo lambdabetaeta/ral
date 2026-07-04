@@ -246,7 +246,7 @@ fn stalled_stream_commits_partial_and_truncates() {
         "the streamed prefix must be committed, got {committed:?}",
     );
     // A recovered stall is operational, not a misconfiguration: it surfaces
-    // as a dim note, never the red error chrome.
+    // as a slate note, never the red error chrome.
     assert!(
         kinds
             .iter()
