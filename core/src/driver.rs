@@ -321,6 +321,13 @@ impl Shell {
     /// forever; it changes nothing, because nothing waits on that sink to
     /// decide the turn is over.
     pub fn run_source_turn(&mut self, src: &str, req: TurnRequest<'_>) -> TurnReport {
+        // The binding-lease ledger's committed-turn clock: one tick per
+        // source-door dispatch, whether or not it goes on to compile —
+        // a failed turn ages the ledger's scratch without renewing it
+        // (`decisions/260629_agent-binding-reaping`). A no-op when unarmed,
+        // so the REPL/batch pay one branch and nothing else.
+        self.local.bindings.tick();
+
         // Mint the turn's foreground scope and arm its wall *before* compiling,
         // so the limit bounds the whole turn — compile and typecheck included,
         // not only evaluation. `compile_turn`'s `process::clear` touches only
@@ -336,6 +343,16 @@ impl Shell {
             Ok(parts) => parts,
             Err(diagnostics) => return TurnReport::Static { diagnostics },
         };
+
+        // "Committed" = reached evaluation: harvest the compiled program's
+        // referenced names and renew every one that is already leased.
+        // Gated on `armed()` so an unarmed host (REPL, batch) never pays for
+        // the walk.
+        if self.local.bindings.armed() {
+            self.local
+                .bindings
+                .renew(crate::ir::referenced_names(&comp));
+        }
 
         self.run_built(req, foreground, wall, single_command, src, |s| {
             crate::evaluator::eval_top_level(&comp, s)

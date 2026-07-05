@@ -157,12 +157,27 @@ pub fn evaluate_source(shell: &mut Shell, source: &str, virtual_path: &str) -> S
 /// the compiled program's spans carry the module's real file identity —
 /// nothing else registers a source into the session between the peek and
 /// that registration.
-fn check_source(source: &str, shell: &Shell) -> Settled<std::sync::Arc<Comp>> {
+///
+/// Also the shared harvest seam for the binding-lease ledger
+/// (`decisions/260629_agent-binding-reaping`): every runtime-compiled load —
+/// `source`, `use`, capability files, plugin loads — funnels through here,
+/// so renewing the compiled program's referenced names once, right here,
+/// covers all of them. The load is executing inside an already-committed
+/// turn, so its references are real uses, unlike the turn-boundary tick
+/// which this door does not touch.
+fn check_source(source: &str, shell: &mut Shell) -> Settled<std::sync::Arc<Comp>> {
     let file = shell.session.sources.next_id();
-    crate::compile_and_typecheck(source, shell.session_schemes(), file)
+    let comp = crate::compile_and_typecheck(source, shell.session_schemes(), file)
         .into_comp_or_message()
         .map(std::sync::Arc::new)
-        .map_err(sig)
+        .map_err(sig)?;
+    if shell.local.bindings.armed() {
+        shell
+            .local
+            .bindings
+            .renew(crate::ir::referenced_names(&comp));
+    }
+    Ok(comp)
 }
 
 /// Read `resolved` from disk and normalise its line endings, the byte

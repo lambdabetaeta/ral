@@ -234,6 +234,216 @@ pub fn is_single_command(comp: &Comp) -> bool {
     }
 }
 
+/// Every name `comp` can reference: [`Val::Variable`] occurrences and
+/// `Exec`/`^` command-head names, collected by an exhaustive walk over
+/// `CompKind` / `Val` / `IrPattern` map-defaults / redirect targets
+/// (`decisions/260629_agent-binding-reaping`, the binding-lease ledger's
+/// renewal harvest). No wildcard arm anywhere in the walk: a new `CompKind`
+/// or `Val` variant is a compile error here rather than a silently
+/// unharvested reference. Over-approximate by design — a name in an
+/// untaken branch (the other arm of an `if`, an unmatched `case` table
+/// entry) still renews, which only ever lengthens a lease, never shortens
+/// one.
+pub(crate) fn referenced_names(comp: &Comp) -> Vec<&str> {
+    let mut out = Vec::new();
+    walk_comp(comp, &mut out);
+    out
+}
+
+fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
+    match &comp.item {
+        CompKind::Force(v) => walk_val(v, out),
+        CompKind::Lam { param, body } => {
+            walk_pattern_defaults(param, out);
+            walk_comp(body, out);
+        }
+        CompKind::Return(v) => walk_val(v, out),
+        CompKind::Bind {
+            comp,
+            pattern,
+            rest,
+            scheme: _,
+            rhs_output: _,
+        } => {
+            walk_comp(comp, out);
+            walk_pattern_defaults(pattern, out);
+            walk_comp(rest, out);
+        }
+        CompKind::App { head, args } => {
+            walk_comp(head, out);
+            walk_args(args, out);
+        }
+        CompKind::Exec(exec) => {
+            walk_command_word(&exec.head, out);
+            walk_args(&exec.args, out);
+            walk_redirects(&exec.redirects, out);
+        }
+        CompKind::Pipeline {
+            stages,
+            wires: _,
+            stage_types: _,
+        } => {
+            for stage in stages {
+                walk_comp(stage, out);
+            }
+        }
+        CompKind::Binary(_op, a, b) => {
+            walk_val(a, out);
+            walk_val(b, out);
+        }
+        CompKind::Not(v) => walk_val(v, out),
+        CompKind::Index { target, keys } => {
+            walk_val(target, out);
+            for key in keys {
+                walk_val(&key.item, out);
+            }
+        }
+        CompKind::Chain(comps) => {
+            for c in comps {
+                walk_comp(c, out);
+            }
+        }
+        CompKind::Interpolation(vals) => {
+            for v in vals {
+                walk_val(v, out);
+            }
+        }
+        CompKind::Seq(comps) => {
+            for c in comps {
+                walk_comp(c, out);
+            }
+        }
+        CompKind::LetRec { slot: _, bindings } => {
+            for (_name, rhs) in bindings.iter() {
+                walk_val(rhs, out);
+            }
+        }
+        CompKind::If { cond, then, else_ } => {
+            walk_val(&cond.item, out);
+            walk_comp(then, out);
+            walk_comp(else_, out);
+        }
+        CompKind::Case { scrutinee, table } => {
+            walk_val(&scrutinee.item, out);
+            walk_val(&table.item, out);
+        }
+        CompKind::Scope(op) => walk_scope_op(op, out),
+    }
+}
+
+fn walk_val<'a>(val: &'a Val, out: &mut Vec<&'a str>) {
+    match val {
+        Val::Unit
+        | Val::String(_)
+        | Val::Int(_)
+        | Val::Float(_)
+        | Val::Bool(_)
+        | Val::TildePath(_) => {}
+        Val::Variable(name) => out.push(name),
+        Val::Thunk(comp) => walk_comp(comp, out),
+        Val::List(elems) => {
+            for elem in elems {
+                match elem {
+                    ValListElem::Single(v) | ValListElem::Spread(v) => walk_val(v, out),
+                }
+            }
+        }
+        Val::Map(entries) => {
+            for entry in entries {
+                match entry {
+                    ValMapEntry::Entry(k, v) => {
+                        walk_val(k, out);
+                        walk_val(v, out);
+                    }
+                    ValMapEntry::Spread(v) => walk_val(v, out),
+                }
+            }
+        }
+        Val::Variant { label: _, payload } => {
+            if let Some(p) = payload {
+                walk_val(p, out);
+            }
+        }
+    }
+}
+
+fn walk_args<'a>(args: &'a Args, out: &mut Vec<&'a str>) {
+    for spanned in args {
+        match &spanned.item {
+            ValListElem::Single(v) | ValListElem::Spread(v) => walk_val(v, out),
+        }
+    }
+}
+
+/// The head name of both dispatch forms — `Name` (binding → handler → PATH)
+/// and `^name` (handler → PATH, skipping binding) — collected regardless of
+/// dispatch shape: over-approximating a name a `^`-bypassed head could never
+/// actually renew from is harmless, the same safe direction as an untaken
+/// branch.
+fn walk_command_word<'a>(word: &'a CommandWord, out: &mut Vec<&'a str>) {
+    if let CommandName::Bare(name) = word.name() {
+        out.push(name);
+    }
+}
+
+fn walk_redirects<'a>(redirects: &'a [RedirectV], out: &mut Vec<&'a str>) {
+    for redirect in redirects {
+        match &redirect.target {
+            ValRedirectTarget::File(v) => walk_val(v, out),
+            ValRedirectTarget::Fd(_) => {}
+        }
+    }
+}
+
+/// Map-pattern defaults are the only sub-position of an [`IrPattern`] that
+/// can reference a name — the pattern's own names are bound, not
+/// referenced. Recurses through `List` elements so a nested destructuring
+/// pattern's defaults are found too.
+fn walk_pattern_defaults<'a>(pattern: &'a IrPattern, out: &mut Vec<&'a str>) {
+    match pattern {
+        IrPattern::Wildcard | IrPattern::Name(_) => {}
+        IrPattern::List { elems, rest: _ } => {
+            for elem in elems {
+                walk_pattern_defaults(elem, out);
+            }
+        }
+        IrPattern::Map(entries) => {
+            for entry in entries {
+                walk_pattern_defaults(&entry.pattern, out);
+                if let Some(default) = &entry.default {
+                    walk_comp(default, out);
+                }
+            }
+        }
+    }
+}
+
+fn walk_scope_op<'a>(op: &'a ScopeOp, out: &mut Vec<&'a str>) {
+    match op {
+        ScopeOp::Try { body, handler } => {
+            walk_val(body, out);
+            walk_val(handler, out);
+        }
+        ScopeOp::Guard { body, cleanup } => {
+            walk_val(body, out);
+            walk_val(cleanup, out);
+        }
+        ScopeOp::Within { opts, body } => {
+            walk_val(opts, out);
+            walk_val(body, out);
+        }
+        ScopeOp::Grant { caps, body } => {
+            walk_val(caps, out);
+            walk_val(body, out);
+        }
+        ScopeOp::Audit { body } => walk_val(body, out),
+        ScopeOp::Redirect { body, redirects } => {
+            walk_comp(body, out);
+            walk_redirects(redirects, out);
+        }
+    }
+}
+
 /// The computation proper — the CBPV computation category.
 ///
 /// Each variant corresponds to a distinct form of effectful term.
@@ -475,7 +685,11 @@ pub enum ScopeOp {
 
 #[cfg(test)]
 mod tests {
-    use super::Val;
+    use super::*;
+    use crate::mode::Wire;
+    use crate::path::tilde::TildePath;
+    use crate::syntax::ast::{BinaryOp, RedirectMode};
+    use crate::typecheck::Ty;
 
     /// A numeric-looking bare word classifies to its `Int`/`Float`
     /// reading; `true`/`unit` to `Bool`/`Unit`; anything else to `String`.
@@ -488,5 +702,296 @@ mod tests {
         assert_eq!(Val::from_word("true"), Val::Bool(true));
         assert_eq!(Val::from_word("unit"), Val::Unit);
         assert_eq!(Val::from_word("hello"), Val::String("hello".into()));
+    }
+
+    // ── referenced_names: exhaustive walker coverage ─────────────────────
+
+    fn var(name: &str) -> Val {
+        Val::Variable(name.to_string())
+    }
+
+    fn ret(name: &str) -> Arc<Comp> {
+        Arc::new(Spanned::synthetic(CompKind::Return(var(name))))
+    }
+
+    /// One synthetic `Comp` exercising every `CompKind`, every `Val`, and
+    /// every `ScopeOp` variant, each tagging the names it references with a
+    /// distinct `r_*` label and the names it merely *binds* (pattern names,
+    /// a `LetRec` group's own names) with a `bound_*`/`*_bound` label that
+    /// must never appear in the harvest. Asserts the walker finds exactly
+    /// the referenced set — not a subset (a wildcard-arm regression would
+    /// silently drop one), not a superset (a bound name leaking in would
+    /// over-renew in a way this test, not just the type system, must catch).
+    #[test]
+    fn referenced_names_walks_every_variant() {
+        let lam_param = IrPattern::Map(vec![crate::syntax::ast::MapPatternEntry {
+            key: crate::syntax::ast::MapKey::Bare("p".into()),
+            pattern: IrPattern::Name("lam_param_bound".into()),
+            default: Some(Arc::new(Spanned::synthetic(CompKind::Return(var(
+                "r_lam_default",
+            ))))),
+        }]);
+        let lam = Spanned::synthetic(CompKind::Lam {
+            param: lam_param,
+            body: ret("r_lam_body"),
+        });
+
+        let bind_pattern = IrPattern::List {
+            elems: vec![IrPattern::Map(vec![crate::syntax::ast::MapPatternEntry {
+                key: crate::syntax::ast::MapKey::Bare("k".into()),
+                pattern: IrPattern::Name("bind_map_bound".into()),
+                default: Some(Arc::new(Spanned::synthetic(CompKind::Return(var(
+                    "r_bind_pattern_default",
+                ))))),
+            }])],
+            rest: Some("bind_rest_bound".into()),
+        };
+        let bind = Spanned::synthetic(CompKind::Bind {
+            comp: ret("r_bind_comp"),
+            pattern: bind_pattern,
+            rest: ret("r_bind_rest"),
+            scheme: None,
+            rhs_output: crate::mode::ByteMode::Empty,
+        });
+
+        let app = Spanned::synthetic(CompKind::App {
+            head: Arc::new(Spanned::synthetic(CompKind::Force(var("r_app_head")))),
+            args: vec![
+                Spanned::synthetic(ValListElem::Single(var("r_app_arg_single"))),
+                Spanned::synthetic(ValListElem::Spread(var("r_app_arg_spread"))),
+            ],
+        });
+
+        let exec_name = Spanned::synthetic(CompKind::Exec(Exec {
+            head: CommandWord::Name(CommandName::Bare("r_exec_name_head".into())),
+            args: vec![Spanned::synthetic(ValListElem::Single(var("r_exec_arg")))],
+            redirects: vec![RedirectV {
+                fd: 1,
+                mode: RedirectMode::Write,
+                target: ValRedirectTarget::File(var("r_exec_redirect_target")),
+            }],
+        }));
+        let exec_external = Spanned::synthetic(CompKind::Exec(Exec {
+            head: CommandWord::External(CommandName::Bare("r_exec_external_head".into())),
+            args: vec![],
+            redirects: vec![RedirectV {
+                fd: 0,
+                mode: RedirectMode::Read,
+                // A non-File target contributes no reference — proves the
+                // walker doesn't over-collect from an `Fd` redirect.
+                target: ValRedirectTarget::Fd(9),
+            }],
+        }));
+
+        let pipeline = Spanned::synthetic(CompKind::Pipeline {
+            stages: vec![
+                Arc::new(Spanned::synthetic(CompKind::Force(var(
+                    "r_pipeline_stage1",
+                )))),
+                Arc::new(Spanned::synthetic(CompKind::Force(var(
+                    "r_pipeline_stage2",
+                )))),
+            ],
+            wires: vec![Wire::EMPTY, Wire::EMPTY],
+            stage_types: vec![Ty::Unit, Ty::Unit],
+        });
+
+        let binary = Spanned::synthetic(CompKind::Binary(
+            BinaryOp::Add,
+            var("r_binary_a"),
+            var("r_binary_b"),
+        ));
+        let not = Spanned::synthetic(CompKind::Not(var("r_not")));
+        let index = Spanned::synthetic(CompKind::Index {
+            target: var("r_index_target"),
+            keys: vec![Spanned::synthetic(var("r_index_key"))],
+        });
+        let chain = Spanned::synthetic(CompKind::Chain(vec![ret("r_chain_a"), ret("r_chain_b")]));
+        let interpolation = Spanned::synthetic(CompKind::Interpolation(vec![
+            var("r_interp_a"),
+            var("r_interp_b"),
+        ]));
+        let seq_inner = Spanned::synthetic(CompKind::Seq(vec![ret("r_seq_inner")]));
+        let letrec = Spanned::synthetic(CompKind::LetRec {
+            slot: None,
+            bindings: Arc::new(vec![("letrec_name_bound".to_string(), var("r_letrec_rhs"))]),
+        });
+        let if_ = Spanned::synthetic(CompKind::If {
+            cond: Spanned::synthetic(var("r_if_cond")),
+            then: ret("r_if_then"),
+            else_: ret("r_if_else"),
+        });
+        let case = Spanned::synthetic(CompKind::Case {
+            scrutinee: Spanned::synthetic(var("r_case_scrutinee")),
+            table: Spanned::synthetic(var("r_case_table")),
+        });
+
+        let scope_try = Spanned::synthetic(CompKind::Scope(ScopeOp::Try {
+            body: var("r_try_body"),
+            handler: var("r_try_handler"),
+        }));
+        let scope_guard = Spanned::synthetic(CompKind::Scope(ScopeOp::Guard {
+            body: var("r_guard_body"),
+            cleanup: var("r_guard_cleanup"),
+        }));
+        let scope_within = Spanned::synthetic(CompKind::Scope(ScopeOp::Within {
+            opts: var("r_within_opts"),
+            body: var("r_within_body"),
+        }));
+        let scope_grant = Spanned::synthetic(CompKind::Scope(ScopeOp::Grant {
+            caps: var("r_grant_caps"),
+            body: var("r_grant_body"),
+        }));
+        let scope_audit = Spanned::synthetic(CompKind::Scope(ScopeOp::Audit {
+            body: var("r_audit_body"),
+        }));
+        let scope_redirect = Spanned::synthetic(CompKind::Scope(ScopeOp::Redirect {
+            body: ret("r_scope_redirect_body"),
+            redirects: vec![RedirectV {
+                fd: 2,
+                mode: RedirectMode::Append,
+                target: ValRedirectTarget::File(var("r_scope_redirect_target")),
+            }],
+        }));
+
+        let val_list = Spanned::synthetic(CompKind::Return(Val::List(vec![
+            ValListElem::Single(Val::Unit),
+            ValListElem::Single(Val::String("s".into())),
+            ValListElem::Single(Val::Int(1)),
+            ValListElem::Single(Val::Float(1.0)),
+            ValListElem::Single(Val::Bool(true)),
+            ValListElem::Single(Val::TildePath(TildePath {
+                user: None,
+                suffix: None,
+            })),
+            ValListElem::Single(var("r_list_single")),
+            ValListElem::Spread(var("r_list_spread")),
+        ])));
+        let val_map = Spanned::synthetic(CompKind::Return(Val::Map(vec![
+            ValMapEntry::Entry(var("r_map_key"), var("r_map_value")),
+            ValMapEntry::Spread(var("r_map_spread")),
+        ])));
+        let val_variant = Spanned::synthetic(CompKind::Return(Val::Variant {
+            label: "lbl".into(),
+            payload: Some(Box::new(var("r_variant_payload"))),
+        }));
+        let val_variant_empty = Spanned::synthetic(CompKind::Return(Val::Variant {
+            label: "lbl_empty".into(),
+            payload: None,
+        }));
+        let val_thunk = Spanned::synthetic(CompKind::Return(Val::Thunk(Arc::new(
+            Spanned::synthetic(CompKind::Return(var("r_thunk_body"))),
+        ))));
+
+        let whole = Spanned::synthetic(CompKind::Seq(vec![
+            Arc::new(Spanned::synthetic(CompKind::Force(var("r_force")))),
+            Arc::new(Spanned::synthetic(CompKind::Return(var("r_return")))),
+            Arc::new(lam),
+            Arc::new(bind),
+            Arc::new(app),
+            Arc::new(exec_name),
+            Arc::new(exec_external),
+            Arc::new(pipeline),
+            Arc::new(binary),
+            Arc::new(not),
+            Arc::new(index),
+            Arc::new(chain),
+            Arc::new(interpolation),
+            Arc::new(seq_inner),
+            Arc::new(letrec),
+            Arc::new(if_),
+            Arc::new(case),
+            Arc::new(scope_try),
+            Arc::new(scope_guard),
+            Arc::new(scope_within),
+            Arc::new(scope_grant),
+            Arc::new(scope_audit),
+            Arc::new(scope_redirect),
+            Arc::new(val_list),
+            Arc::new(val_map),
+            Arc::new(val_variant),
+            Arc::new(val_variant_empty),
+            Arc::new(val_thunk),
+        ]));
+
+        let found: std::collections::HashSet<&str> = referenced_names(&whole).into_iter().collect();
+
+        let expected = [
+            "r_force",
+            "r_return",
+            "r_lam_default",
+            "r_lam_body",
+            "r_bind_pattern_default",
+            "r_bind_comp",
+            "r_bind_rest",
+            "r_app_head",
+            "r_app_arg_single",
+            "r_app_arg_spread",
+            "r_exec_name_head",
+            "r_exec_arg",
+            "r_exec_redirect_target",
+            "r_exec_external_head",
+            "r_pipeline_stage1",
+            "r_pipeline_stage2",
+            "r_binary_a",
+            "r_binary_b",
+            "r_not",
+            "r_index_target",
+            "r_index_key",
+            "r_chain_a",
+            "r_chain_b",
+            "r_interp_a",
+            "r_interp_b",
+            "r_seq_inner",
+            "r_letrec_rhs",
+            "r_if_cond",
+            "r_if_then",
+            "r_if_else",
+            "r_case_scrutinee",
+            "r_case_table",
+            "r_try_body",
+            "r_try_handler",
+            "r_guard_body",
+            "r_guard_cleanup",
+            "r_within_opts",
+            "r_within_body",
+            "r_grant_caps",
+            "r_grant_body",
+            "r_audit_body",
+            "r_scope_redirect_body",
+            "r_scope_redirect_target",
+            "r_list_single",
+            "r_list_spread",
+            "r_map_key",
+            "r_map_value",
+            "r_map_spread",
+            "r_variant_payload",
+            "r_thunk_body",
+        ];
+
+        for name in expected {
+            assert!(found.contains(name), "missing reference: {name}");
+        }
+        assert_eq!(
+            found.len(),
+            expected.len(),
+            "unexpected extra name in {found:?}; every bound-not-referenced \
+             name (lam_param_bound, bind_map_bound, bind_rest_bound, \
+             letrec_name_bound) must be absent"
+        );
+
+        // Bound names — pattern targets and the LetRec group's own names —
+        // must never be treated as references.
+        for bound in [
+            "lam_param_bound",
+            "bind_map_bound",
+            "bind_rest_bound",
+            "letrec_name_bound",
+        ] {
+            assert!(
+                !found.contains(bound),
+                "a bound (not referenced) name leaked into the harvest: {bound}"
+            );
+        }
     }
 }

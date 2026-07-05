@@ -250,12 +250,16 @@ mod tests {
     }
 }
 
-/// Turn-level tests for the install chokepoint
-/// (`decisions/260629_agent-binding-reaping` parcel 2): every persistent
-/// top-level install routes through [`Shell::install_scope_binding`] and
-/// gets leased, while every deeper-scope write is recorded nowhere. Driven
-/// through the public `run_source_turn` door, no exarch involved — the same
-/// harness shape as `core/tests/top_level_vs_block.rs`.
+/// Turn-level tests for the install chokepoint and the use-observation
+/// harvest (`decisions/260629_agent-binding-reaping` parcels 2 and 3): every
+/// persistent top-level install routes through
+/// [`Shell::install_scope_binding`] and gets leased, while every
+/// deeper-scope write is recorded nowhere; a committed turn's referenced
+/// names renew already-leased entries at the three harvest seams
+/// (`run_source_turn`'s own compiled program, `check_source`'s
+/// runtime-compiled loads, `classify_command`'s `Resolution::Env` dispatch
+/// touch). Driven through the public `run_source_turn` door, no exarch
+/// involved — the same harness shape as `core/tests/top_level_vs_block.rs`.
 #[cfg(test)]
 mod chokepoint_tests {
     use crate::driver::BakedPrelude;
@@ -323,6 +327,26 @@ mod chokepoint_tests {
             .0
             .as_ref()
             .is_some_and(|armed| armed.baseline.contains(name))
+    }
+
+    /// The ledger's committed-turn clock, for asserting the tick.
+    fn epoch(shell: &Shell) -> u64 {
+        shell.local.bindings.0.as_ref().expect("armed").epoch
+    }
+
+    /// `name`'s last-used epoch, for asserting renewal (or its absence).
+    fn last_used_of(shell: &Shell, name: &str) -> u64 {
+        shell.local.bindings.0.as_ref().expect("armed").last_used[name]
+    }
+
+    /// Idle out `name`'s lease relative to the current epoch by running
+    /// `n` unrelated turns, so a later renewal is observable against a
+    /// genuinely stale timestamp rather than one that happens to already
+    /// equal the current epoch.
+    fn idle_spin(shell: &mut Shell, n: u32) {
+        for i in 0..n {
+            top_level(shell, &format!("let _idle_spin_{i} = 0")).expect("idle spin");
+        }
     }
 
     #[test]
@@ -408,5 +432,210 @@ mod chokepoint_tests {
         assert!(is_baseline(&shell, "host_seed"));
         assert!(!is_leased(&shell, &prelude_name));
         assert!(!is_leased(&shell, "host_seed"));
+    }
+
+    // ── use observation (parcel 3) ────────────────────────────────────────
+
+    /// An ordinary expression referencing a stale name renews it to the
+    /// turn's own epoch — the turn's-own-program harvest seam.
+    #[test]
+    fn turn_reference_renews_lease() {
+        let mut shell = armed_shell(64);
+        top_level(&mut shell, "let turn_ref_x = 1").expect("define");
+        idle_spin(&mut shell, 3);
+        let stale = last_used_of(&shell, "turn_ref_x");
+        assert!(stale < epoch(&shell), "must be stale before the reference");
+        top_level(&mut shell, "return $[$turn_ref_x + 1]").expect("reference");
+        assert_eq!(
+            last_used_of(&shell, "turn_ref_x"),
+            epoch(&shell),
+            "a referencing turn must renew to its own epoch"
+        );
+    }
+
+    /// A turn that fails to typecheck ticks the clock (aging every leased
+    /// name) but harvests nothing — `compile_turn` never returns a `Comp` to
+    /// walk, so a stale name stays exactly as stale as it was.
+    #[test]
+    fn static_failure_ticks_but_renews_nothing() {
+        let mut shell = armed_shell(64);
+        top_level(&mut shell, "let static_x = 1").expect("define");
+        idle_spin(&mut shell, 3);
+        let epoch_before = epoch(&shell);
+        let stale = last_used_of(&shell, "static_x");
+
+        match shell.run_source_turn(
+            "$[1 + true]",
+            TurnRequest {
+                script_name: "<test>",
+                caps: Capabilities::root(),
+                turn_limit: None,
+                detached_lease: None,
+                worker_cap: None,
+                io: TurnIo::Inherit,
+                terminal: RequestedTerminalAccess::Leased,
+                stdin: TurnStdin::Inherit,
+                surface: None,
+                boundary: None,
+                lifecycle: Box::new(()),
+            },
+        ) {
+            TurnReport::Static { .. } => {}
+            TurnReport::Ran { .. } => panic!("ill-typed source must not run"),
+        }
+
+        assert_eq!(
+            epoch(&shell),
+            epoch_before + 1,
+            "a failed turn still ticks the clock"
+        );
+        assert_eq!(
+            last_used_of(&shell, "static_x"),
+            stale,
+            "a failed turn must renew nothing"
+        );
+    }
+
+    /// A registered hook run through `run_hook` is not a tool call: it ticks
+    /// no epoch and renews nothing, even though its body reads a name the
+    /// turn's own harvest would otherwise have caught.
+    #[test]
+    fn hook_door_neither_ticks_nor_renews() {
+        let mut shell = armed_shell(64);
+        top_level(&mut shell, "let hook_x = 1").expect("define");
+        top_level(&mut shell, "let hook_thunk = { $hook_x }").expect("define the hook body");
+        idle_spin(&mut shell, 3);
+        let epoch_before = epoch(&shell);
+        let stale = last_used_of(&shell, "hook_x");
+
+        let thunk = shell
+            .scope_lookup("hook_thunk")
+            .cloned()
+            .expect("hook_thunk must be bound");
+        shell
+            .register_hook(
+                crate::types::HookName::session("test_prompt"),
+                thunk,
+                crate::types::HookSig::Prompt,
+                crate::types::DefaultPolicy::denied(),
+                crate::source::Span {
+                    start: 0,
+                    end: 0,
+                    file: crate::source::FileId::DUMMY,
+                },
+            )
+            .expect("register the hook");
+
+        let report = shell.run_hook(
+            &crate::types::HookName::session("test_prompt"),
+            vec![],
+            TurnRequest {
+                script_name: "<test>",
+                caps: Capabilities::root(),
+                turn_limit: None,
+                detached_lease: None,
+                worker_cap: None,
+                io: TurnIo::Inherit,
+                terminal: RequestedTerminalAccess::Leased,
+                stdin: TurnStdin::Inherit,
+                surface: None,
+                boundary: None,
+                lifecycle: Box::new(()),
+            },
+        );
+        match report {
+            TurnReport::Ran { result, .. } => {
+                result.expect("the hook body must run");
+            }
+            TurnReport::Static { .. } => panic!("the registered hook must run"),
+        }
+
+        assert_eq!(
+            epoch(&shell),
+            epoch_before,
+            "a hook must not tick the clock"
+        );
+        assert_eq!(
+            last_used_of(&shell, "hook_x"),
+            stale,
+            "a hook must renew nothing, even a name its body reads"
+        );
+    }
+
+    /// A `source`d file referencing a name that exists only in the caller's
+    /// scope — never mentioned anywhere in the outer turn's own compiled
+    /// program — is still renewed: the `check_source` harvest seam, not the
+    /// turn's-own-program seam, is what catches it here.
+    #[test]
+    fn sourced_module_reference_renews() {
+        let mut shell = armed_shell(64);
+        top_level(&mut shell, "let sourced_ref_x = 1").expect("define");
+        idle_spin(&mut shell, 3);
+        let stale = last_used_of(&shell, "sourced_ref_x");
+        assert!(stale < epoch(&shell), "must be stale before the source");
+
+        let path = std::env::temp_dir().join(format!(
+            "ral_binding_lease_source_test_{}.ral",
+            std::process::id()
+        ));
+        std::fs::write(&path, "let sourced_helper = $sourced_ref_x\n").expect("write temp module");
+        let p = path.to_string_lossy().into_owned();
+        let result = top_level(&mut shell, &format!("source '{p}'"));
+        std::fs::remove_file(&path).ok();
+        result.expect("source");
+
+        assert_eq!(
+            last_used_of(&shell, "sourced_ref_x"),
+            epoch(&shell),
+            "a sourced file's own reference must renew via check_source"
+        );
+    }
+
+    /// A name installed by a runtime mechanism the elaborator could not
+    /// see — here, `source` — compiles its later bare-word reference as an
+    /// ordinary `Exec` rather than `App`; `classify_command`'s
+    /// `Resolution::Env` arm still renews it at dispatch time.
+    #[test]
+    fn env_resolved_command_head_renews() {
+        let mut shell = armed_shell(64);
+        let path = std::env::temp_dir().join(format!(
+            "ral_binding_lease_env_resolved_test_{}.ral",
+            std::process::id()
+        ));
+        std::fs::write(&path, "let env_resolved_fn = { |x| $[$x + 1] }\n")
+            .expect("write temp module");
+        let p = path.to_string_lossy().into_owned();
+        top_level(&mut shell, &format!("source '{p}'")).expect("source");
+        idle_spin(&mut shell, 3);
+        let stale = last_used_of(&shell, "env_resolved_fn");
+        assert!(stale < epoch(&shell), "must be stale before the call");
+
+        let result = top_level(&mut shell, "env_resolved_fn 41");
+        std::fs::remove_file(&path).ok();
+        result.expect("call the sourced function by bare command head");
+
+        assert_eq!(
+            last_used_of(&shell, "env_resolved_fn"),
+            epoch(&shell),
+            "the Resolution::Env dispatch touch must renew the resolved name"
+        );
+    }
+
+    /// A name mentioned only inside a double-quoted interpolated string
+    /// renews — exercising the walker's `CompKind::Interpolation` arm
+    /// end-to-end through a real turn.
+    #[test]
+    fn interpolated_reference_renews() {
+        let mut shell = armed_shell(64);
+        top_level(&mut shell, "let interp_x = 1").expect("define");
+        idle_spin(&mut shell, 3);
+        let stale = last_used_of(&shell, "interp_x");
+        assert!(stale < epoch(&shell), "must be stale before the reference");
+        top_level(&mut shell, "return \"value is $interp_x\"").expect("interpolate");
+        assert_eq!(
+            last_used_of(&shell, "interp_x"),
+            epoch(&shell),
+            "an interpolated reference must renew"
+        );
     }
 }

@@ -84,8 +84,21 @@ fn resolve_handler_then_external(name: &str, shell: &Shell) -> Resolution {
 /// "denied" verdict — the head is refused before any arguments
 /// evaluate.  Env, Builtin, and Handler arms pass through
 /// unconditionally; grant admission is an external-command property.
+///
+/// The `Resolution::Env` arm additionally renews the binding-lease ledger
+/// (`decisions/260629_agent-binding-reaping`) for the resolved name — a
+/// dispatch-time touch, not a lookup-time one: command dispatch is already
+/// heavyweight (grant resolution, audit), so this costs nothing on the
+/// pure-lookup path `Env::get` stays on. This is the defensive seam for a
+/// name a runtime mechanism installed (e.g. `source`) that the elaborator
+/// could not see and so compiled as a bare `Exec` rather than `App`.
 pub(crate) fn classify_command(head: &CommandWord, shell: &mut Shell) -> Settled<Resolution> {
     let r = resolve_command_word(head, shell);
+    if let Resolution::Env(_) = &r
+        && let Some(name) = head.name().bare()
+    {
+        shell.local.bindings.renew_one(name);
+    }
     if let Resolution::External(id) = &r
         && !crate::capability::admits_head(&shell.mobile.context, id)
     {
