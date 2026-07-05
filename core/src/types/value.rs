@@ -277,6 +277,33 @@ impl Value {
     }
 }
 
+/// Whether `v` structurally reaches a handle whose state is
+/// [`HandleState::Running`] — the binding-lease reaper's pin check
+/// (`decisions/260629_agent-binding-reaping`): a name whose value still
+/// reaches a running worker is never pruned. Recurses through `List`,
+/// `Map`, and `Variant` payloads; a `Lambda` or `Block`'s captured
+/// `Arc<Env>` is deliberately **never** descended — the same graph chase a
+/// shallow structural size estimate must refuse, and a handle reachable
+/// only through a closure capture is not "the name of live work": the
+/// worker registry retains the handle itself regardless of whether any
+/// top-level name still reaches it, so nothing can be stranded either way.
+pub(crate) fn pins_running_work(v: &Value) -> bool {
+    match v {
+        Value::Handle(h) => *h.state.lock().unwrap() == HandleState::Running,
+        Value::List(items) => items.iter().any(pins_running_work),
+        Value::Map(pairs) => pairs.iter().any(|(_, v)| pins_running_work(v)),
+        Value::Variant { payload, .. } => payload.as_deref().is_some_and(pins_running_work),
+        Value::Unit
+        | Value::Bool(_)
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::String(_)
+        | Value::Bytes(_)
+        | Value::Lambda { .. }
+        | Value::Block { .. } => false,
+    }
+}
+
 /// Shared handle to a spawned computation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandleState {

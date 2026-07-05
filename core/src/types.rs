@@ -26,6 +26,7 @@ pub use capability::{
 // Runtime values: Value, Handle*, HandlerFrame, fmt_lambda.  See
 // types/value.rs.
 mod value;
+pub(crate) use value::pins_running_work;
 pub use value::{
     BuiltinBody, BuiltinEntry, BuiltinTable, CompletedHandle, FrameHandle, HandleInner,
     HandleState, HandlerArity, HandlerEntry, HandlerFrame, HandlerRole, HandlerStack,

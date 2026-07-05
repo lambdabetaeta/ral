@@ -8,9 +8,10 @@
 //! REPL and exarch actually need — while [`Shell::mobile`](super::Shell) stays
 //! the public embedding seam.
 
+use super::MobileSnapshot;
 use super::Shell;
 use super::TerminalAccess;
-use super::bindings::BindingLease;
+use super::bindings::{BindingLease, BindingPruneNotice};
 use super::repl::ReplScratch;
 use crate::diagnostic::SourceDb;
 use crate::exit_hints::ExitHints;
@@ -198,6 +199,65 @@ impl Shell {
             .into_iter()
             .map(|(name, _)| name);
         self.local.bindings.arm(lease, baseline);
+    }
+
+    /// Prune every leased name idle past the armed lease's bound.
+    ///
+    /// Returns `None` when the ledger is unarmed, when the shell is not at
+    /// session scope (a mid-frame caller — e.g. a lifecycle hook — is
+    /// refused rather than allowed to unset from a transient frame), or
+    /// when nothing was pruned. Otherwise returns the notices **and a
+    /// [`MobileSnapshot`] taken after the prune**: any durable checkpoint
+    /// the host holds is now stale, and the returned one replaces it — the
+    /// signature makes forgetting to refresh it a type error rather than a
+    /// reviewer's job (`decisions/260629_agent-binding-reaping`).
+    ///
+    /// One pass, in deterministic (sorted) name order, over every expired
+    /// candidate: a name absent from scope (its install was rolled back by
+    /// a panic restore) drops its orphaned entry silently, with no notice;
+    /// a name whose value still structurally reaches a running handle is
+    /// skipped — pinned, not pruned, re-examined at the next boundary; every
+    /// other name is unset (removing its scheme in the same act, since a
+    /// `Binding` couples both), its entry dropped, and a notice recorded.
+    /// Afterward, an adoption sweep gives any untracked, non-baseline name
+    /// still in the session's top scope a fresh lease starting now — this
+    /// runs even on a pass that prunes nothing, self-healing a missed
+    /// install path into "leased late" rather than "immortal".
+    pub fn prune_idle_bindings(&mut self) -> Option<(Vec<BindingPruneNotice>, MobileSnapshot)> {
+        if !self.local.bindings.armed() || !self.mobile.scope.at_session_scope() {
+            return None;
+        }
+        let mut notices = Vec::new();
+        for (name, idle_calls) in self.local.bindings.expired() {
+            match self.mobile.scope.get(&name) {
+                None => {
+                    // Orphaned by a panic rollback: nothing to prune.
+                    self.local.bindings.drop_entry(&name);
+                }
+                Some(value) if crate::types::pins_running_work(value) => {
+                    // Pinned: leave the entry exactly as it is.
+                }
+                Some(value) => {
+                    let kind = value.type_name();
+                    self.mobile.scope.unset(&name);
+                    self.local.bindings.drop_entry(&name);
+                    notices.push(BindingPruneNotice {
+                        name,
+                        idle_calls,
+                        kind,
+                    });
+                }
+            }
+        }
+        let top_scope_names: Vec<String> = self.mobile.scope.top_scope().keys().cloned().collect();
+        for name in top_scope_names {
+            self.local.bindings.adopt(&name);
+        }
+        if notices.is_empty() {
+            None
+        } else {
+            Some((notices, self.mobile_snapshot()))
+        }
     }
 
     /// The terminal-foreground handoff borrow: `Some(&TerminalLease)` iff the

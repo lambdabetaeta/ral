@@ -141,6 +141,50 @@ impl BindingLedger {
             *last = armed.epoch;
         }
     }
+
+    /// Names idle past the armed lease's bound, paired with the epochs
+    /// elapsed since each was last used, in deterministic (sorted) name
+    /// order — the prune verb's candidate list. Empty when unarmed.
+    pub(crate) fn expired(&self) -> Vec<(String, u64)> {
+        let Some(armed) = &self.0 else {
+            return Vec::new();
+        };
+        let mut out: Vec<(String, u64)> = armed
+            .last_used
+            .iter()
+            .filter_map(|(name, last)| {
+                let idle = armed.epoch.saturating_sub(*last);
+                (idle >= armed.lease.idle_calls).then(|| (name.clone(), idle))
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// Drop `name`'s ledger entry without recording anything — the
+    /// orphan-drop path (an install a panic rollback undid, leaving the
+    /// entry behind on `LocalState`, untouched by the rollback) and the
+    /// prune verb's own post-prune cleanup. A no-op when unarmed or when
+    /// `name` carries no entry.
+    pub(crate) fn drop_entry(&mut self, name: &str) {
+        if let Some(armed) = &mut self.0 {
+            armed.last_used.remove(name);
+        }
+    }
+
+    /// Self-healing adoption: if `name` is neither baseline nor already
+    /// tracked, start a fresh lease for it at the current epoch. Converts a
+    /// name a future missed install path left untracked from "immortal
+    /// zombie" into "leased from first sighting" — the conservative
+    /// direction. A no-op when unarmed, when `name` is baseline, or when it
+    /// already carries an entry (never resets an existing lease).
+    pub(crate) fn adopt(&mut self, name: &str) {
+        let Some(armed) = &mut self.0 else { return };
+        if armed.baseline.contains(name) || armed.last_used.contains_key(name) {
+            return;
+        }
+        armed.last_used.insert(name.to_string(), armed.epoch);
+    }
 }
 
 #[cfg(test)]
@@ -263,9 +307,10 @@ mod tests {
 #[cfg(test)]
 mod chokepoint_tests {
     use crate::driver::BakedPrelude;
-    use crate::types::{Capabilities, Settled, Shell, Value};
+    use crate::types::{Capabilities, HandleState, Settled, Shell, Value};
     use crate::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
     use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
 
     use super::BindingLease;
 
@@ -346,6 +391,15 @@ mod chokepoint_tests {
     fn idle_spin(shell: &mut Shell, n: u32) {
         for i in 0..n {
             top_level(shell, &format!("let _idle_spin_{i} = 0")).expect("idle spin");
+        }
+    }
+
+    /// The `HandleState` of the handle bound to `name`. Panics if `name`
+    /// isn't a `Value::Handle`.
+    fn handle_state(shell: &Shell, name: &str) -> HandleState {
+        match shell.scope_lookup(name) {
+            Some(Value::Handle(h)) => *h.state.lock().unwrap(),
+            other => panic!("{name} is not a handle: {other:?}"),
         }
     }
 
@@ -636,6 +690,232 @@ mod chokepoint_tests {
             last_used_of(&shell, "interp_x"),
             epoch(&shell),
             "an interpolated reference must renew"
+        );
+    }
+
+    // ── the prune verb (parcel 4) ──────────────────────────────────────────
+
+    /// A pruned name is gone from scope *and* from the next turn's type
+    /// seed: `unset` drops the `Binding` (value and scheme together) in one
+    /// act, so a later reference reads as an ordinary undefined variable —
+    /// core's unmodified runtime diagnostic (`eval_val`'s `Val::Variable`
+    /// arm), not a stale-scheme surprise. An unbound name is not a static
+    /// type error in this language (the checker admits any reference,
+    /// scheme or not; only evaluation resolves it), so the pruned-name
+    /// symptom is this `Ran` error, not a `Static` diagnostic.
+    #[test]
+    fn prune_removes_name_and_type_seed() {
+        let mut shell = armed_shell(2);
+        top_level(&mut shell, "let prune_x = 1").expect("define");
+        idle_spin(&mut shell, 2);
+
+        let (notices, _snapshot) = shell
+            .prune_idle_bindings()
+            .expect("prune_x must be idle enough to prune");
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].name, "prune_x");
+        assert_eq!(notices[0].kind, "Int");
+        assert!(shell.scope_lookup("prune_x").is_none());
+
+        match shell.run_source_turn(
+            "return $prune_x",
+            TurnRequest {
+                script_name: "<test>",
+                caps: Capabilities::root(),
+                turn_limit: None,
+                detached_lease: None,
+                worker_cap: None,
+                io: TurnIo::Inherit,
+                terminal: RequestedTerminalAccess::Leased,
+                stdin: TurnStdin::Inherit,
+                surface: None,
+                boundary: None,
+                lifecycle: Box::new(()),
+            },
+        ) {
+            TurnReport::Ran { result, .. } => {
+                let err = result.expect_err("a pruned name must read as undefined");
+                let msg = match err {
+                    crate::types::Break::Error(e) => e.message,
+                    other => panic!("expected an Error break, got {other:?}"),
+                };
+                assert!(
+                    msg.contains("undefined variable: $prune_x"),
+                    "expected an undefined-variable diagnostic, got: {msg}"
+                );
+            }
+            TurnReport::Static { .. } => {
+                panic!("an unbound variable reference is a runtime error, not a static one")
+            }
+        }
+    }
+
+    /// A running worker pins its name: the first prune, while `sleep`
+    /// still runs, yields no notice at all and leaves the entry untouched.
+    /// Cancelling settles the handle; idling it out again, the second
+    /// prune now removes it like any ordinary scratch value.
+    #[test]
+    fn running_handle_pins_name_then_settles_then_prunes() {
+        let mut shell = armed_shell(2);
+        top_level(&mut shell, "let h_pin = !{spawn { sleep 10 }}").expect("spawn");
+        idle_spin(&mut shell, 2);
+        assert_eq!(handle_state(&shell, "h_pin"), HandleState::Running);
+
+        assert!(
+            shell.prune_idle_bindings().is_none(),
+            "a running handle must not be pruned"
+        );
+        assert!(shell.scope_lookup("h_pin").is_some());
+
+        top_level(&mut shell, "cancel $h_pin").expect("cancel");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while handle_state(&shell, "h_pin") == HandleState::Running {
+            assert!(
+                Instant::now() < deadline,
+                "the cancelled worker must settle within the budget"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // The `cancel $h_pin` turn itself referenced (and so renewed)
+        // h_pin; idle it back out before pruning again.
+        idle_spin(&mut shell, 2);
+
+        let (notices, _snapshot) = shell
+            .prune_idle_bindings()
+            .expect("a settled handle must now prune");
+        assert_eq!(notices[0].name, "h_pin");
+    }
+
+    /// A handle that settles on its own (never pinned at all) is ordinary
+    /// scratch once idle — no special casing beyond the pin check.
+    #[test]
+    fn settled_handle_is_ordinary_scratch() {
+        let mut shell = armed_shell(2);
+        top_level(&mut shell, "let h_settled = !{spawn { return 1 }}").expect("spawn");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while handle_state(&shell, "h_settled") == HandleState::Running {
+            assert!(
+                Instant::now() < deadline,
+                "the instant worker must settle within the budget"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        idle_spin(&mut shell, 2);
+
+        let (notices, _snapshot) = shell
+            .prune_idle_bindings()
+            .expect("a settled handle prunes like any scratch");
+        assert_eq!(notices[0].name, "h_settled");
+        assert_eq!(notices[0].kind, "Handle");
+    }
+
+    /// A ledger entry whose install a panic rollback undid — simulated here
+    /// with the same public checkpoint/restore pair exarch's panic recovery
+    /// uses — is dropped silently at the next prune: no notice, no error.
+    #[test]
+    fn orphan_entry_dropped_silently() {
+        let mut shell = armed_shell(2);
+        let pre = shell.mobile_snapshot();
+        top_level(&mut shell, "let orphan_x = 1").expect("define");
+        assert!(is_leased(&shell, "orphan_x"));
+
+        shell.restore_mobile(pre);
+        assert!(
+            shell.scope_lookup("orphan_x").is_none(),
+            "the rollback must remove it from scope"
+        );
+        assert!(
+            is_leased(&shell, "orphan_x"),
+            "the ledger entry is not part of the rolled-back Mobile — it orphans"
+        );
+
+        idle_spin(&mut shell, 2);
+        let result = shell.prune_idle_bindings();
+        assert!(
+            result.is_none(),
+            "an orphan-only sweep drops the entry silently and yields no notice"
+        );
+        assert!(!is_leased(&shell, "orphan_x"), "the orphan must be gone");
+    }
+
+    /// A name a host verb wrote directly (bypassing the install chokepoint,
+    /// as every host verb call does) is neither baseline nor tracked. The
+    /// adoption sweep — which runs on every prune pass, even one that
+    /// prunes nothing — leases it from this sighting forward rather than
+    /// leaving it an immortal untracked name.
+    #[test]
+    fn stray_untracked_name_is_adopted_not_pruned() {
+        let mut shell = armed_shell(2);
+        shell.set_var("stray_y".into(), Value::Int(1));
+        assert!(!is_leased(&shell, "stray_y"));
+        assert!(!is_baseline(&shell, "stray_y"));
+
+        idle_spin(&mut shell, 1);
+        let epoch_at_sweep = epoch(&shell);
+        let _ = shell.prune_idle_bindings();
+
+        assert!(
+            shell.scope_lookup("stray_y").is_some(),
+            "adoption must never prune — only start tracking"
+        );
+        assert_eq!(
+            last_used_of(&shell, "stray_y"),
+            epoch_at_sweep,
+            "adopted at the sweep's own epoch, a fresh lease starting now"
+        );
+    }
+
+    /// A caller not at session scope — a mid-frame lifecycle-hook-shaped
+    /// caller — is refused outright: `None`, not a partial or unsafe prune.
+    #[test]
+    fn prune_refused_mid_frame() {
+        let mut shell = armed_shell(2);
+        top_level(&mut shell, "let midframe_x = 1").expect("define");
+        idle_spin(&mut shell, 2);
+
+        shell.mobile.scope.push_scope();
+        assert!(
+            shell.prune_idle_bindings().is_none(),
+            "a mid-frame caller must be refused, not partially served"
+        );
+        shell.mobile.scope.pop_scope();
+
+        assert!(
+            shell.prune_idle_bindings().is_some(),
+            "back at session scope, the same idle name prunes normally"
+        );
+    }
+
+    /// The snapshot the prune verb returns is post-prune: restoring it
+    /// later — even after further turns run — must not resurrect the
+    /// pruned name. This is the structural half of panic-recovery safety:
+    /// a caller cannot obtain the notices without the checkpoint that
+    /// makes them permanent.
+    #[test]
+    fn checkpoint_restores_post_prune_state() {
+        let mut shell = armed_shell(2);
+        top_level(&mut shell, "let checkpoint_x = 1").expect("define");
+        idle_spin(&mut shell, 2);
+
+        let (_notices, post_prune) = shell.prune_idle_bindings().expect("must prune");
+        assert!(shell.scope_lookup("checkpoint_x").is_none());
+
+        top_level(&mut shell, "let after_prune_y = 2").expect("further turns run");
+        shell.restore_mobile(post_prune);
+        assert!(
+            shell.scope_lookup("checkpoint_x").is_none(),
+            "the returned checkpoint is post-prune — restoring it cannot resurrect the name"
+        );
+    }
+
+    /// Nothing idle enough yet: the verb is a clean no-op.
+    #[test]
+    fn nothing_expired_returns_none() {
+        let mut shell = armed_shell(64);
+        top_level(&mut shell, "let fresh_z = 1").expect("define");
+        assert!(
+            shell.prune_idle_bindings().is_none(),
+            "nothing is idle enough to prune yet"
         );
     }
 }
