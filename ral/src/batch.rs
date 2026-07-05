@@ -212,7 +212,7 @@ pub(crate) fn run_batch(
             script_name: name,
             caps: ral_core::types::Capabilities::root(),
             turn_limit: None,
-            detached_limit: None,
+            detached_lease: None,
             io: TurnIo::Inherit,
             terminal: terminal_access,
             stdin: TurnStdin::Inherit,

@@ -124,7 +124,7 @@ pub(super) fn execute_input(
         script_name: "<stdin>".to_string(),
         caps: ral_core::types::Capabilities::root(),
         turn_limit: None,
-        detached_limit: None,
+        detached_lease: None,
         io: TurnIo::Inherit,
         terminal: RequestedTerminalAccess::Leased,
         stdin: TurnStdin::Inherit,

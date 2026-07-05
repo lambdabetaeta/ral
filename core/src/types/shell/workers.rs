@@ -4,15 +4,28 @@
 //! `spawn_child` mints a [`WorkerEntry`] the instant a worker's
 //! [`HandleInner`] is constructed and files it here — every spawn
 //! registers, REPL included, and no policy attaches here: the registry is
-//! pure bookkeeping, the directory the lease policies of
-//! `decisions/260705_leases-and-budgets` (reaping, retention, caps) read
-//! rather than a policy of its own. An entry
+//! pure bookkeeping, the directory the lease policies read rather than a
+//! policy of its own. An entry
 //! is removed the moment the worker is *observed* settled — `await`,
 //! `race`'s winner and its cancelled losers, `poll`'s settled arm — or is
 //! explicitly `cancel`led; a pending `poll` and plain listing never mutate
 //! the registry. Removal always targets the *observing* shell's own
 //! registry: if the handle was minted by (and registered in) a different
 //! shell, the removal is a no-op and the entry lingers where it lives.
+//!
+//! The one policy that also *writes* here is the idle-observation lease
+//! (`builtins::concurrency`'s lease chain, per
+//! `decisions/260705_leases-and-budgets`): under a frame that supplies a
+//! [`WorkerLease`], a still-running worker unobserved for `idle` — or older
+//! than `backstop` regardless of observation — is reaped, and the reap is
+//! recorded as a [`ReapNotice`] beside the entries. [`WorkerRegistry::reap`]
+//! is one locked operation — remove the entry, and only if it was present,
+//! push the notice — so the reap-vs-observation race is benign: an entry an
+//! eliminator observed away first yields no notice. The host drains the
+//! notices at its ready boundaries
+//! ([`Shell::take_worker_reap_notices`](super::Shell::take_worker_reap_notices))
+//! to emit transcript events, so the model's later "where did my job go?"
+//! always has an answer in the log.
 //!
 //! **Flow rule.** The registry is `Arc`-shared into a spawned worker's own
 //! `Shell` by [`Shell::spawn_thread`](super::Shell::spawn_thread), alongside
@@ -26,9 +39,10 @@
 //! [`LocalState`](super::LocalState).
 
 use crate::types::HandleInner;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 /// Stable identifier for a registered worker, unique across every `Shell`
 /// in this process. Minted from a process-global counter rather than a
@@ -47,15 +61,57 @@ impl WorkerId {
     }
 }
 
+/// The lifetime a frame grants the workers its turns detach: an idle bound
+/// on the observation clock under an absolute backstop. A lease, not a
+/// death-clock — the worker is reaped when *unobserved* for `idle`, not
+/// when `idle` old, and each eliminator naming the handle (`poll`, a
+/// blocked `await`/`race` sweep) renews it. The two travel as one value so
+/// no ceiling-without-backstop state exists: a frame either grants the
+/// whole lease or (`None` on the turn axis — the interactive REPL) never
+/// reaps at all.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerLease {
+    /// The idle bound: reap once the handle has gone this long without an
+    /// eliminator naming it.
+    pub idle: Duration,
+    /// The absolute bound, measured from spawn: no amount of observation
+    /// extends a worker past this age — ritual polling cannot manufacture
+    /// immortality.
+    pub backstop: Duration,
+}
+
 /// Which reaping policy governs a [`WorkerEntry`]. Only the ordinary,
-/// unreaped class exists today; `decisions/260705_leases-and-budgets` adds
-/// a durable class (no idle lease — legibility is the only bound) together
-/// with the lease policy that reads this field. Until then the class is
-/// recorded but consulted by nothing — the registry is pure bookkeeping.
+/// leased class exists today; `decisions/260705_leases-and-budgets` adds a
+/// durable class (no idle lease — legibility is the only bound) that the
+/// lease chain will exempt.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum LeaseClass {
-    /// An ordinary `spawn`/`watch` worker.
+    /// An ordinary `spawn`/`watch` worker, governed by the frame's
+    /// [`WorkerLease`] when one is supplied.
     Worker,
+}
+
+/// Why the lease chain reaped a worker: its idle bound elapsed unrenewed,
+/// or its absolute backstop came due regardless of observation.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ReapCause {
+    /// Unobserved for the lease's `idle` bound.
+    Idle,
+    /// Older than the lease's `backstop`, observation notwithstanding.
+    Backstop,
+}
+
+/// The compact record a reap leaves behind — the facts a transcript event
+/// needs (which worker, spelled how, of what class, reaped why) without the
+/// handle, which the reap deliberately does not keep alive. Recorded only
+/// for an entry that was actually present at reap time: an entry an
+/// eliminator observed away first was never reaped, so it leaves no notice.
+#[derive(Clone, Debug)]
+pub struct ReapNotice {
+    pub id: WorkerId,
+    pub cmd: String,
+    pub class: LeaseClass,
+    pub cause: ReapCause,
 }
 
 /// One registered worker: the [`WorkerRegistry`]'s record of a `spawn`/
@@ -77,24 +133,35 @@ pub struct WorkerEntry {
     pub handle: HandleInner,
 }
 
+/// The two ledgers behind [`WorkerRegistry`]'s one lock: the live entries,
+/// and the reap notices awaiting the host's next drain. One lock for both
+/// so a reap is atomic — the entry leaves and its notice lands in the same
+/// critical section, never one without the other.
+#[derive(Default)]
+struct RegistryInner {
+    entries: Vec<WorkerEntry>,
+    reap_notices: Vec<ReapNotice>,
+}
+
 /// Cheap-clonable, per-[`Shell`](super::Shell) directory of every worker
-/// spawned from it.
+/// spawned from it, plus the reap notices the lease chain leaves behind.
 ///
-/// A newtype over `Arc<Mutex<Vec<WorkerEntry>>>`: cloning shares the same
-/// underlying vector, which is how the flow rule above lets a nested
+/// A newtype over `Arc<Mutex<RegistryInner>>`: cloning shares the same
+/// underlying store, which is how the flow rule above lets a nested
 /// `spawn` register into its owning shell's registry rather than a private
-/// copy. Lock discipline is trivial by construction: every operation locks,
-/// acts on the `Vec` directly, and unlocks — none ever calls out while
-/// holding the lock.
+/// copy — and how the lease chain, firing on the reaper daemon thread,
+/// reaps into the same store the shell reads. Lock discipline is trivial by
+/// construction: every operation locks, acts on the inner ledgers directly,
+/// and unlocks — none ever calls out while holding the lock.
 #[derive(Clone, Default)]
-pub(crate) struct WorkerRegistry(Arc<Mutex<Vec<WorkerEntry>>>);
+pub(crate) struct WorkerRegistry(Arc<Mutex<RegistryInner>>);
 
 impl WorkerRegistry {
     /// File a freshly-spawned worker. `spawn_child` calls this exactly
     /// once per spawn, unconditionally — every spawn registers, and no
     /// policy attaches here.
     pub(crate) fn register(&self, entry: WorkerEntry) {
-        self.0.lock().unwrap().push(entry);
+        self.0.lock().unwrap().entries.push(entry);
     }
 
     /// Remove the entry carrying `handle`, matched by [`HandleInner`]'s own
@@ -105,16 +172,43 @@ impl WorkerRegistry {
         self.0
             .lock()
             .unwrap()
+            .entries
             .retain(|entry| entry.handle != *handle);
     }
 
-    /// Clone out every entry for listing. Never mutates.
+    /// Reap the entry carrying `id`: remove it and, only when it was
+    /// actually present, record a [`ReapNotice`] built from its facts.
+    /// One locked operation, which is what makes the reap-vs-observation
+    /// race benign — an entry an eliminator observed away first is simply
+    /// absent here, so the reap collapses to a silent no-op rather than a
+    /// notice for a worker whose result was in fact claimed.
+    pub(crate) fn reap(&self, id: WorkerId, cause: ReapCause) {
+        let mut inner = self.0.lock().unwrap();
+        let Some(at) = inner.entries.iter().position(|entry| entry.id == id) else {
+            return;
+        };
+        let entry = inner.entries.remove(at);
+        inner.reap_notices.push(ReapNotice {
+            id: entry.id,
+            cmd: entry.cmd,
+            class: entry.class,
+            cause,
+        });
+    }
+
+    /// Drain every accumulated [`ReapNotice`], leaving the ledger empty.
+    pub(crate) fn take_reap_notices(&self) -> Vec<ReapNotice> {
+        std::mem::take(&mut self.0.lock().unwrap().reap_notices)
+    }
+
+    /// Clone out every entry for listing. Never mutates — enumeration is
+    /// not observation, so it renews no lease.
     pub(crate) fn snapshot(&self) -> Vec<WorkerEntry> {
-        self.0.lock().unwrap().clone()
+        self.0.lock().unwrap().entries.clone()
     }
 
     /// Number of registered entries.
     pub(crate) fn count(&self) -> usize {
-        self.0.lock().unwrap().len()
+        self.0.lock().unwrap().entries.len()
     }
 }

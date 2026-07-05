@@ -716,6 +716,7 @@ mod tests {
             stderr_buf: Arc::new(Mutex::new(Vec::new())),
             surface_buf: Arc::new(Mutex::new(Vec::new())),
             joined: Arc::new(Mutex::new(false)),
+            last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
             cmd: "dummy".into(),
             cancel: crate::process::CancelScope::default(),
         });

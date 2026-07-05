@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 923e911
+generated_at_commit: a28d34c
 generated_at_date: 2026-07-05
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
@@ -56,7 +56,8 @@ field name *is* the invariant** — joined by `Shell`
 - **`TurnState`** — the dynamic frame a top-level turn installs and restores on
   teardown: the pipeline-stage `Io`, the `surface` sink, the foreground
   `cancel` scope, the source-position `loc` cursor, the detached-worker
-  lifetime ceiling, and the turn's `TerminalAccess`.
+  `WorkerLease` (`detached_lease` — the idle bound and absolute backstop
+  travel as one value; `None` never reaps), and the turn's `TerminalAccess`.
 - **`SessionState`** — what survives every turn's teardown: the durable cancel
   `root` that detached workers parent under, the `sources` registry rendered
   against after a turn returns, the `exit_hints` table, the host-installed
@@ -67,7 +68,11 @@ field name *is* the invariant** — joined by `Shell`
   per-`Shell` directory of every `spawn`/`watch`ed `HandleInner`, one per
   agent; `Shell::spawn_thread` shares it by `Arc` into a spawned worker's own
   shell (so a nested `spawn` registers alongside its parent), but a
-  sub-agent fork or pipeline stage starts with a fresh, empty one
+  sub-agent fork or pipeline stage starts with a fresh, empty one. Beside
+  the entries it keeps the `ReapNotice` ledger the lease chain writes —
+  one compact record per entry removed by policy, atomic with the removal
+  under the registry's one lock — drained by the host through
+  `Shell::take_worker_reap_notices`
   ([[decisions/260705_leases-and-budgets|leases-and-budgets]]).
 
 `turn` / `session` / `local` are `pub(crate)`: the fields that encode turn

@@ -19,11 +19,17 @@ use ral_core::types::{Boundary, BoundarySink};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Lifetime ceiling armed on every detached `spawn` worker: an
-/// abandoned worker is reaped one hour after it is spawned, well past
-/// the 30 s foreground wall but bounded so a long-running agent cannot
-/// accumulate immortal zombies.
+/// Idle bound of the lease armed on every detached `spawn` worker: a
+/// still-running worker is reaped one hour after the last eliminator
+/// named its handle — well past the 30 s foreground wall, renewed by any
+/// `poll`/`await`/`race` — so an abandoned worker cannot become an
+/// immortal zombie while a babysat one stays alive.
 const DETACHED_WORKER_CEILING: Duration = Duration::from_secs(60 * 60);
+
+/// Absolute backstop of the same lease, measured from spawn: no amount
+/// of ritual polling extends a worker past a day.  Observation renews
+/// idleness, never age.
+const DETACHED_WORKER_BACKSTOP: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The prelude baked into this binary at build time by `build.rs`.
 pub static PRELUDE: ral_core::driver::BakedPrelude = ral_core::baked_prelude!();
@@ -265,7 +271,10 @@ pub fn run_shell(
         script_name: name.to_string(),
         caps: caps.clone(),
         turn_limit: Some(Duration::from_secs(timeout_secs)),
-        detached_limit: Some(DETACHED_WORKER_CEILING),
+        detached_lease: Some(ral_core::types::WorkerLease {
+            idle: DETACHED_WORKER_CEILING,
+            backstop: DETACHED_WORKER_BACKSTOP,
+        }),
         io: TurnIo::Capture,
         terminal: RequestedTerminalAccess::Denied,
         stdin: TurnStdin::Empty,

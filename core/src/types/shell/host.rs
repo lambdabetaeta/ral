@@ -15,7 +15,7 @@ use crate::diagnostic::SourceDb;
 use crate::exit_hints::ExitHints;
 use crate::io::{Sink, TerminalState};
 use crate::process::{DurableRoot, ForegroundScope, TerminalLease};
-use crate::types::{AuditFragment, WorkerEntry};
+use crate::types::{AuditFragment, ReapNotice, WorkerEntry};
 
 /// An in-flight terminal loan, returned by [`Shell::begin_terminal_loan`] and
 /// surrendered to [`Shell::end_terminal_loan`].
@@ -140,6 +140,16 @@ impl Shell {
     /// Number of workers currently registered on this shell.
     pub fn worker_count(&self) -> usize {
         self.local.workers.count()
+    }
+
+    /// Drain the reap notices the worker lease chain has recorded since the
+    /// last drain — one compact record per entry removed by policy (the
+    /// idle bound or the backstop), never one for an entry an eliminator
+    /// observed away first. A host drains these at its ready boundaries to
+    /// emit transcript events, so a removal by policy always has an answer
+    /// in the log.
+    pub fn take_worker_reap_notices(&mut self) -> Vec<ReapNotice> {
+        self.local.workers.take_reap_notices()
     }
 
     /// The terminal-foreground handoff borrow: `Some(&TerminalLease)` iff the

@@ -157,6 +157,9 @@ impl Drop for FlushGuard {
 /// spawn registers, unconditionally and with no policy attached (see
 /// `types::shell::workers`).  `await`, `race`, and a settled `poll` remove
 /// the entry on the shell that observes it; an explicit `cancel` does too.
+/// Under a frame that supplies a [`WorkerLease`], registration is followed
+/// by arming the idle-observation lease chain ([`lease_fire`]) on the
+/// fresh entry's id.
 pub(super) fn spawn_child<F>(
     snap: Arc<Env>,
     shell: &mut Shell,
@@ -217,6 +220,12 @@ where
     let cmd = cmd.to_string();
     let worker_cmd = cmd.clone();
 
+    // Minted before the thread so the worker can hold a clone: at exit it
+    // marks itself `Completed`, the fact the lease chain reads to end
+    // silently on a finished worker instead of reaping it.
+    let state = Arc::new(Mutex::new(HandleState::Running));
+    let worker_state = state.clone();
+
     let (_join, cancel) = shell.spawn_thread(snap, move |child_env| {
         child_env.turn.io.capture_outer = None;
         child_env.turn.io.stdout = stdout;
@@ -269,42 +278,122 @@ where
         };
         guard.settle(outcome);
         let _ = tx.send(result);
+        // The worker's own settle mark, strictly *after* the send so
+        // `Completed` always implies an observable outcome in the channel
+        // — an eliminator that reads the state mid-transition can still
+        // settle.  Guarded: an eliminator's `complete_handle` may have won
+        // the transition already, and a `cancel`'s `Cancelled` must never
+        // be overwritten.  A panicking body never reaches here; its state
+        // stays `Running` until an observer settles the disconnect as a
+        // panic, or the lease chain reaps the dead thread's scope.
+        let mut settled_state = worker_state.lock().unwrap();
+        if *settled_state == HandleState::Running {
+            *settled_state = HandleState::Completed;
+        }
     });
-
-    // Under a frame that arms a detached-worker lifetime ceiling (exarch),
-    // hand the worker's scope to the shared reaper so an abandoned worker
-    // is force-cancelled once the ceiling elapses.  The death-clock is
-    // fire-and-forget: the worker outlives this `spawn` call, so the
-    // deadline is `keep()`-ed to fire at its ceiling regardless — a late
-    // cancel of an already-finished worker is harmless.  The interactive
-    // frame (the REPL) arms none, leaving the worker to `cancel`, root
-    // abort, or session exit.
-    if let Some(ceiling) = shell.turn.detached_ceiling {
-        crate::process::arm_lifetime(cancel.clone(), ceiling).keep();
-    }
 
     let handle = HandleInner {
         result: Arc::new(Mutex::new(Some(rx))),
         cached: Arc::new(Mutex::new(None)),
-        state: Arc::new(Mutex::new(HandleState::Running)),
+        state,
         stdout_buf,
         stderr_buf,
         surface_buf,
         joined,
+        last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
         cmd: cmd.clone(),
         cancel,
     };
     // Every spawn registers, unconditionally — the mechanism is universal
     // and attaches no policy; affordances (listing, reaping, caps) are the
     // host's and the lease layer's concern, not this door's.
+    let id = WorkerId::mint();
     shell.local.workers.register(WorkerEntry {
-        id: WorkerId::mint(),
+        id,
         cmd,
         started: std::time::SystemTime::now(),
         class: LeaseClass::Worker,
         handle: handle.clone(),
     });
+
+    // Under a frame that grants a worker lease (exarch), arm the
+    // idle-observation chain on the freshly registered entry.  The chain
+    // is fire-and-forget (`keep()`-ed): the worker outlives this `spawn`
+    // call, and every firing either ends the chain or re-arms exactly one
+    // successor.  Registered-then-armed, so the id the chain reaps always
+    // names an entry that existed.  The interactive frame (the REPL)
+    // supplies no lease and never reaps.
+    if let Some(lease) = shell.turn.detached_lease {
+        let chain = LeaseChain {
+            scope: handle.cancel.clone(),
+            state: handle.state.clone(),
+            last_observed: handle.last_observed.clone(),
+            started: std::time::Instant::now(),
+            lease,
+            registry: shell.local.workers.clone(),
+            id,
+        };
+        crate::process::arm_callback(lease.idle, move || lease_fire(chain)).keep();
+    }
     Ok(handle)
+}
+
+/// Everything one firing of the idle-observation lease chain needs, cloned
+/// forward into each re-arm.  Deliberately a bundle of shared cells and
+/// `Copy` facts — never a `Shell` — so the chain stays cheap to clone and
+/// cheap to run on the reaper daemon thread.
+#[derive(Clone)]
+struct LeaseChain {
+    /// The worker's own cancel scope: what a reap fires.
+    scope: crate::process::CancelScope,
+    /// The handle's lifecycle cell: a non-`Running` worker ends the chain.
+    state: Arc<Mutex<HandleState>>,
+    /// The shared last-observation cell the eliminators renew.
+    last_observed: Arc<Mutex<std::time::Instant>>,
+    /// The worker's spawn instant — the backstop's clock.  The registry
+    /// entry's `SystemTime` field stays display-only.
+    started: std::time::Instant,
+    lease: WorkerLease,
+    /// The owning shell's registry, for the reap bookkeeping.
+    registry: WorkerRegistry,
+    id: WorkerId,
+}
+
+/// One firing of a worker's lease chain, on the reaper daemon thread.
+///
+/// A worker no longer `Running` ends the chain silently — a settled entry
+/// lingers in the registry as an unclaimed result, a cancelled one is
+/// already gone; no cancel, no notice, no re-arm.  A running worker is
+/// reaped at the backstop (age from spawn) first, then at the idle bound
+/// (time since an eliminator last named the handle); otherwise the chain
+/// re-arms itself for exactly the sooner of the two remaining margins.
+///
+/// A reap does the registry bookkeeping *before* firing the scope — the
+/// cancel of an already-settled scope is a harmless monotone `fetch_max`,
+/// so ordering the ledger first keeps the entry-and-notice state ahead of
+/// any observable cancellation.  It deliberately does not detach the
+/// handle: the body unwinds with status 130 and settles as an error, so a
+/// later `poll`/`await` still observes the partial output and the failure
+/// — only the registry entry (plus its notice) records the reap.  Cheap
+/// and non-blocking per the reaper's contract: it takes only the handle
+/// cells and, briefly, the registry lock.
+fn lease_fire(chain: LeaseChain) {
+    if *chain.state.lock().unwrap() != HandleState::Running {
+        return;
+    }
+    let age = chain.started.elapsed();
+    let idle = chain.last_observed.lock().unwrap().elapsed();
+    if age >= chain.lease.backstop {
+        chain.registry.reap(chain.id, ReapCause::Backstop);
+        chain.scope.cancel(crate::process::CancelCause::Deadline);
+    } else if idle >= chain.lease.idle {
+        chain.registry.reap(chain.id, ReapCause::Idle);
+        chain.scope.cancel(crate::process::CancelCause::Deadline);
+    } else {
+        let next = std::cmp::min(chain.lease.idle - idle, chain.lease.backstop - age);
+        let rearm = chain.clone();
+        crate::process::arm_callback(next, move || lease_fire(rearm)).keep();
+    }
 }
 
 // ── spawn ────────────────────────────────────────────────────────────────
@@ -509,6 +598,10 @@ fn wait_first_settled<'a>(
     loop {
         let mut saw_running = false;
         for &handle in handles {
+            // A blocked `await`/`race` is continuous observation: each
+            // sweep renews every named handle's idle lease, so a worker
+            // being waited on is never idle-reaped mid-wait.
+            *handle.last_observed.lock().unwrap() = std::time::Instant::now();
             match *handle.state.lock().unwrap() {
                 HandleState::Cancelled => continue,
                 HandleState::Running => saw_running = true,
@@ -571,6 +664,10 @@ pub(super) fn builtin_poll(args: &[Value], shell: &mut Shell) -> Settled<Value> 
     check_arity(args, 1, "poll")?;
     let handle = expect_handle(&args[0], "poll")?;
     ensure_live(handle, shell)?;
+    // Both samples are observations — a pending poll and a settled one
+    // each name the handle — so the touch lands once at entry, before the
+    // settle attempt decides which arm it is.
+    *handle.last_observed.lock().unwrap() = std::time::Instant::now();
     let variant = |label: &str, payload| Value::Variant {
         label: label.into(),
         payload,
@@ -749,6 +846,7 @@ mod tests {
             stderr_buf,
             surface_buf: Arc::new(Mutex::new(Vec::new())),
             joined: Arc::new(Mutex::new(false)),
+            last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
             cmd: "<test>".into(),
             cancel: crate::process::CancelScope::default(),
         }
@@ -941,6 +1039,7 @@ mod tests {
             stderr_buf,
             surface_buf: Arc::new(Mutex::new(Vec::new())),
             joined: Arc::new(Mutex::new(false)),
+            last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
             cmd: "<test>".into(),
             cancel: worker_scope.clone(),
         };
@@ -960,23 +1059,44 @@ mod tests {
         );
     }
 
-    /// A `spawn` under an agent ceiling arms the worker's lifetime with the
-    /// shared reaper: the worker's own scope is force-cancelled with
-    /// `Deadline` once the (tiny, here) ceiling elapses, even after the
-    /// worker itself has finished.
+    /// A millisecond-scale [`WorkerLease`] for the timing tests.
+    fn lease_ms(idle: u64, backstop: u64) -> WorkerLease {
+        WorkerLease {
+            idle: std::time::Duration::from_millis(idle),
+            backstop: std::time::Duration::from_millis(backstop),
+        }
+    }
+
+    /// A worker body that stays `Running` until cancelled: it polls
+    /// `process::check` so a lease reap genuinely unwinds the thread (with
+    /// the cancel's 130), not merely flags a scope nobody reads.
+    fn check_loop(child: &mut Shell) -> Raw<Value> {
+        loop {
+            crate::process::check(child)?;
+            std::thread::yield_now();
+        }
+    }
+
+    /// A `spawn` under an agent frame's lease is reaped once *unobserved*
+    /// for the idle bound: the blocked, never-polled worker's own scope is
+    /// force-cancelled with `Deadline`, its registry entry is removed, and
+    /// exactly one `Idle` notice — carrying the entry's id, cmd, and class
+    /// — awaits the host's drain, which empties the ledger.  The body is a
+    /// `process::check` loop, so the reap actually unwinds the thread.
     #[test]
-    fn spawn_under_agent_frame_arms_the_ceiling() {
+    fn unobserved_worker_is_reaped_at_its_idle_lease() {
         let mut shell = Shell::new(Default::default());
-        shell.turn.detached_ceiling = Some(std::time::Duration::from_millis(20));
+        shell.turn.detached_lease = Some(lease_ms(40, 10_000));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
             &mut shell,
             ChildIoMode::Buffered,
-            "<test>",
-            |_child| Ok(Value::Unit),
+            "<abandoned>",
+            |c| check_loop(c),
         )
         .expect("spawn must succeed");
+        let entry = shell.local.workers.snapshot().pop().expect("registered");
         let scope = handle.cancel.clone();
 
         let mut fired = false;
@@ -989,15 +1109,28 @@ mod tests {
         }
         assert!(
             fired,
-            "an agent frame must arm the worker's lifetime ceiling"
+            "an unobserved worker must be reaped at its idle bound"
         );
         assert_eq!(scope.cause(), Some(crate::process::CancelCause::Deadline));
+        assert_eq!(shell.local.workers.count(), 0, "the reap removed the entry");
+
+        let notices = shell.take_worker_reap_notices();
+        assert_eq!(notices.len(), 1, "exactly one notice per reap");
+        assert_eq!(notices[0].id, entry.id);
+        assert_eq!(notices[0].cmd, entry.cmd);
+        assert_eq!(notices[0].class, entry.class);
+        assert_eq!(notices[0].cause, ReapCause::Idle);
+        assert!(
+            shell.take_worker_reap_notices().is_empty(),
+            "the drain empties the ledger"
+        );
     }
 
-    /// A `spawn` under the interactive frame arms no ceiling: the worker's
-    /// scope is never reaped on a timer.
+    /// A `spawn` under the interactive frame arms no lease: the worker's
+    /// scope is never reaped on a timer, and its registry entry stays
+    /// listed — the REPL never reaps.
     #[test]
-    fn spawn_under_interactive_frame_arms_no_ceiling() {
+    fn spawn_under_interactive_frame_arms_no_lease() {
         let mut shell = Shell::new(Default::default());
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
@@ -1013,7 +1146,161 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(60));
         assert!(
             !scope.is_cancelled(),
-            "the interactive frame must arm no lifetime ceiling"
+            "the interactive frame must arm no lease"
+        );
+        assert_eq!(
+            shell.local.workers.count(),
+            1,
+            "the entry stays listed: the REPL never reaps"
+        );
+    }
+
+    /// Observation renews the idle lease: a worker polled every ~20 ms
+    /// under a 200 ms idle bound survives to ~3× that bound — each `poll`
+    /// touches `last_observed`, so the chain keeps re-arming instead of
+    /// reaping — and is then gated to completion and awaited normally.
+    #[test]
+    fn polled_worker_survives_past_its_idle_lease() {
+        let mut shell = Shell::new(Default::default());
+        shell.turn.detached_lease = Some(lease_ms(200, 10_000));
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let snap = Arc::new(shell.mobile().scope);
+        let handle = spawn_child(
+            snap,
+            &mut shell,
+            ChildIoMode::Buffered,
+            "<babysat>",
+            move |_c| {
+                gate_rx.recv().unwrap();
+                Ok(Value::Unit)
+            },
+        )
+        .expect("spawn must succeed");
+        let scope = handle.cancel.clone();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(600);
+        while std::time::Instant::now() < deadline {
+            builtin_poll(&[Value::Handle(handle.clone())], &mut shell).expect("poll a live handle");
+            assert!(
+                !scope.is_cancelled(),
+                "a polled worker must never be idle-reaped"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(shell.local.workers.count(), 1, "the babysat entry stays");
+
+        gate_tx.send(()).unwrap();
+        await_handle(&handle, &mut shell).expect("await after the gate opens");
+        assert!(!scope.is_cancelled(), "the worker finished by itself");
+    }
+
+    /// The backstop is absolute: ritual polling renews the idle bound but
+    /// cannot extend a worker past `backstop`, so a worker polled every
+    /// ~20 ms under idle 150 ms / backstop 400 ms is reaped anyway — with
+    /// the `Backstop` cause — once its age crosses the line.
+    #[test]
+    fn backstop_reaps_a_ritually_polled_worker() {
+        let mut shell = Shell::new(Default::default());
+        shell.turn.detached_lease = Some(lease_ms(150, 400));
+        let snap = Arc::new(shell.mobile().scope);
+        let handle = spawn_child(snap, &mut shell, ChildIoMode::Buffered, "<immortal>", |c| {
+            check_loop(c)
+        })
+        .expect("spawn must succeed");
+        let scope = handle.cancel.clone();
+
+        let budget = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !scope.is_cancelled() {
+            assert!(
+                std::time::Instant::now() < budget,
+                "the backstop must fire within the budget"
+            );
+            // A poll may race the reap and observe the cancelled body
+            // settling as an error; the sample's outcome is irrelevant
+            // here — only the touch is the point.
+            let _ = builtin_poll(&[Value::Handle(handle.clone())], &mut shell);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(scope.cause(), Some(crate::process::CancelCause::Deadline));
+        assert_eq!(shell.local.workers.count(), 0);
+        let notices = shell.take_worker_reap_notices();
+        assert_eq!(notices.len(), 1, "one notice for the backstop reap");
+        assert_eq!(notices[0].cause, ReapCause::Backstop);
+    }
+
+    /// A worker that completed but was never observed is not reaped: its
+    /// exit mark ends the chain at the state check, so its scope is never
+    /// cancelled, its entry lingers in the registry as an unclaimed
+    /// result, and no notice is recorded.
+    #[test]
+    fn completed_unobserved_worker_is_not_reaped() {
+        let mut shell = Shell::new(Default::default());
+        shell.turn.detached_lease = Some(lease_ms(100, 10_000));
+        let snap = Arc::new(shell.mobile().scope);
+        let handle = spawn_child(
+            snap,
+            &mut shell,
+            ChildIoMode::Buffered,
+            "<done>",
+            |_child| Ok(Value::Unit),
+        )
+        .expect("spawn must succeed");
+        let scope = handle.cancel.clone();
+
+        // The instantly-returning body marks itself `Completed` at exit;
+        // wait for that mark (it rides the worker thread), then let ~3
+        // idle bounds elapse so the chain has demonstrably fired and ended.
+        let mut completed = false;
+        for _ in 0..200 {
+            if *handle.state.lock().unwrap() == HandleState::Completed {
+                completed = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(completed, "the worker marks itself Completed at exit");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        assert!(
+            !scope.is_cancelled(),
+            "a settled worker is never lease-cancelled"
+        );
+        assert_eq!(shell.local.workers.count(), 1, "the settled entry lingers");
+        assert!(
+            shell.take_worker_reap_notices().is_empty(),
+            "no notice: nothing was reaped"
+        );
+    }
+
+    /// Enumeration is not observation: a worker listed every ~10 ms under
+    /// a 40 ms idle bound is reaped anyway — `workers()` / `worker_count()`
+    /// touch nothing — so the lease is renewed only by the eliminators.
+    #[test]
+    fn listing_does_not_renew_the_lease() {
+        let mut shell = Shell::new(Default::default());
+        shell.turn.detached_lease = Some(lease_ms(40, 10_000));
+        let snap = Arc::new(shell.mobile().scope);
+        let handle = spawn_child(snap, &mut shell, ChildIoMode::Buffered, "<listed>", |c| {
+            check_loop(c)
+        })
+        .expect("spawn must succeed");
+        let scope = handle.cancel.clone();
+
+        let budget = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !scope.is_cancelled() {
+            assert!(
+                std::time::Instant::now() < budget,
+                "listing must not keep the worker alive"
+            );
+            let _ = shell.workers();
+            let _ = shell.worker_count();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(scope.cause(), Some(crate::process::CancelCause::Deadline));
+        assert_eq!(
+            shell.take_worker_reap_notices().len(),
+            1,
+            "reaped despite the listing ritual"
         );
     }
 
@@ -1053,6 +1340,7 @@ mod tests {
             stderr_buf,
             surface_buf,
             joined: Arc::new(Mutex::new(false)),
+            last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
             cmd: "<test>".into(),
             cancel: crate::process::CancelScope::default(),
         };
@@ -1354,15 +1642,15 @@ mod tests {
     }
 
     /// The mechanism attaches no policy and is host-independent: a bare
-    /// `Shell::new(Default::default())` with no `detached_ceiling` armed (the
-    /// REPL/interactive shape) registers exactly as the agent-framed case
-    /// above does.
+    /// `Shell::new(Default::default())` with no `detached_lease` granted
+    /// (the REPL/interactive shape) registers exactly as the agent-framed
+    /// case above does.
     #[test]
-    fn spawn_child_registers_with_no_detached_ceiling_armed() {
+    fn spawn_child_registers_with_no_detached_lease_granted() {
         let mut shell = Shell::new(Default::default());
         assert!(
-            shell.turn.detached_ceiling.is_none(),
-            "precondition: no ceiling armed"
+            shell.turn.detached_lease.is_none(),
+            "precondition: no lease granted"
         );
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(

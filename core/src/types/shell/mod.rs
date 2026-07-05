@@ -51,7 +51,7 @@ use self::control::ControlState;
 use self::cwd::Cwd;
 use self::modules::Modules;
 use self::repl::ReplScratch;
-use self::workers::WorkerRegistry;
+use self::workers::{WorkerLease, WorkerRegistry};
 use super::audit::{Audit, LocationCursor};
 use super::capability::GrantStack;
 use super::env::Env;
@@ -259,13 +259,15 @@ pub struct TurnState {
     /// Read when building a [`SourceLoc`](crate::diagnostic::SourceLoc);
     /// resolved at render time against [`SessionState::sources`].
     pub(crate) loc: LocationCursor,
-    /// Lifetime ceiling for workers this turn detaches at the durable
-    /// root.  `None` (an interactive host) leaves a worker until `cancel`,
-    /// root abort, or session exit; `Some(d)` (an agent host) reaps an
-    /// abandoned worker `d` after it is spawned.  Supplied by the frame and
-    /// flowed into same-thread bodies and spawned workers so a `spawn`
-    /// nested in a thunk sees the same ceiling.
-    pub(crate) detached_ceiling: Option<std::time::Duration>,
+    /// The lease governing workers this turn detaches at the durable root.
+    /// `None` (an interactive host) leaves a worker until `cancel`, root
+    /// abort, or session exit; `Some(lease)` (an agent host) reaps a
+    /// still-running worker once it has gone `lease.idle` unobserved —
+    /// every `poll` and `await`/`race` sweep renews it — under the
+    /// `lease.backstop` absolute ceiling no observation extends.  Supplied
+    /// by the frame and flowed into same-thread bodies and spawned workers
+    /// so a `spawn` nested in a thunk sees the same lease.
+    pub(crate) detached_lease: Option<WorkerLease>,
     /// This turn's terminal-foreground authority. Gates whether a
     /// child/job foreground handoff can borrow the session's
     /// [`TerminalLease`](crate::process::TerminalLease); see
@@ -286,7 +288,7 @@ impl TurnState {
         self.boundary = parent.boundary.clone();
         self.cancel = parent.cancel.clone();
         self.loc = parent.loc.clone();
-        self.detached_ceiling = parent.detached_ceiling;
+        self.detached_lease = parent.detached_lease;
         // Terminal access flows in so a pipeline launched inside an `_ed-tui`
         // loan (or any same-thread body of a Leased turn) sees the parent's
         // authority. It does not flow back in `return_to`: the parent retains

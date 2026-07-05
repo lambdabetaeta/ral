@@ -34,7 +34,7 @@ fn turn(shell: &mut Shell, src: &str) -> Settled<Value> {
             script_name: "<test>",
             caps: Capabilities::root(),
             turn_limit: None,
-            detached_limit: None,
+            detached_lease: None,
             io: TurnIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
             stdin: TurnStdin::Inherit,

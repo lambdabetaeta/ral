@@ -344,6 +344,12 @@ pub struct HandleInner {
     /// batch never renders twice and a never-awaited worker still delivers
     /// exactly once at the boundary.
     pub joined: Arc<Mutex<bool>>,
+    /// The moment an eliminator last named this handle: written at
+    /// construction and renewed by `poll` and by each `await`/`race` wait
+    /// sweep, read by the idle-observation lease chain
+    /// (`builtins::concurrency`).  `cancel` and listing never touch it —
+    /// only an observation renews the lease.
+    pub last_observed: Arc<Mutex<std::time::Instant>>,
     pub cmd: std::string::String,
     /// The worker's cancel scope, a child of the spawning shell's scope.
     /// `cancel` and `race`-of-losers fire it so the worker stops at its

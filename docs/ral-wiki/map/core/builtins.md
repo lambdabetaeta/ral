@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 923e911
+generated_at_commit: a28d34c
 generated_at_date: 2026-07-05
 covers_paths: [core/src/builtins/, core/src/builtins.rs]
 ---
@@ -55,9 +55,19 @@ Bodies are grouped by concern, one submodule each:
   A detached worker hangs under the durable session root, not the turn's
   foreground scope, so a foreground cancel never reaps it; `await` shares
   `race`'s cancel-aware wait loop (`wait_first_settled`), so a deadline unwinds
-  the wait while the root-scoped worker survives, and under a frame lifetime
-  ceiling `spawn` arms the worker's scope with the shared `process::reaper`
+  the wait while the root-scoped worker survives
   ([[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]).
+  Under a frame that grants a `WorkerLease`, `spawn` arms a self-re-arming
+  `process::reaper` callback — the idle-observation lease chain: a
+  still-running worker unobserved for `idle` is reaped, where every `poll`
+  and every `await`/`race` sweep renews the handle's `last_observed` cell,
+  under an absolute `backstop` no polling extends; a worker that finished
+  ends the chain silently, its entry lingering as an unclaimed result. A
+  reap removes the registry entry, records a `ReapNotice` the host drains
+  (`Shell::take_worker_reap_notices`), and cancels the worker's scope with
+  `Deadline` — never detaching the handle, so a later `poll`/`await` still
+  observes the partial output and failure
+  ([[decisions/260705_leases-and-budgets|leases-and-budgets]]).
   A worker runs its thunk on a fresh
   `std::thread` via `Shell::spawn_thread` ([[map/core/shell-state|shell-state]]),
   which inherits a snapshot of the parent's mobile state; the body is evaluated

@@ -61,7 +61,7 @@ fn top_level_under_request(shell: &mut Shell, caps: Capabilities, source: &str) 
             script_name: "<test>",
             caps,
             turn_limit: None,
-            detached_limit: None,
+            detached_lease: None,
             io: TurnIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
             stdin: TurnStdin::Inherit,

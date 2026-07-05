@@ -324,7 +324,7 @@ impl Shell {
         R: Send + 'static,
     {
         let context = self.mobile.context.clone();
-        let detached_ceiling = self.turn.detached_ceiling;
+        let detached_lease = self.turn.detached_lease;
         let root = self.session.root.clone();
         let builtins = self.session.builtins.clone();
         let workers = self.local.workers.clone();
@@ -333,7 +333,7 @@ impl Shell {
         let handle = std::thread::spawn(move || {
             let mut child = Self::from_captured(&scopes);
             child.mobile.context = context;
-            child.turn.detached_ceiling = detached_ceiling;
+            child.turn.detached_lease = detached_lease;
             child.turn.cancel = cancel;
             child.session.root = root;
             child.session.builtins = builtins;

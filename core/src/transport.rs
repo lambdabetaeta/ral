@@ -149,8 +149,8 @@ pub struct ReqMirror {
     pub caps: crate::types::Capabilities,
     /// Foreground wall duration.
     pub turn_limit: Option<std::time::Duration>,
-    /// Lifetime ceiling for detached workers.
-    pub detached_limit: Option<std::time::Duration>,
+    /// The idle-observation lease for detached workers.
+    pub detached_lease: Option<crate::types::WorkerLease>,
     /// Byte IO regime.
     pub io: crate::driver::TurnIo,
     /// Whether the turn may hand the controlling terminal to a child.
@@ -501,7 +501,7 @@ impl Transport for IdentityTransport {
             script_name: &script_name,
             caps: req.caps.clone(),
             turn_limit: req.turn_limit,
-            detached_limit: req.detached_limit,
+            detached_lease: req.detached_lease,
             io: req.io,
             terminal: req.terminal,
             stdin: req.stdin,

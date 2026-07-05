@@ -82,6 +82,7 @@ pub use shell::{
 };
 pub(crate) use shell::{TerminalAccess, ThunkBody};
 
-// Per-shell worker registry: id, lease class, entry.  See
-// types/shell/workers.rs.
-pub use shell::workers::{LeaseClass, WorkerEntry, WorkerId};
+// Per-shell worker registry: id, lease class, entry, the frame lease, and
+// the reap-notice record.  See types/shell/workers.rs.
+pub(crate) use shell::workers::WorkerRegistry;
+pub use shell::workers::{LeaseClass, ReapCause, ReapNotice, WorkerEntry, WorkerId, WorkerLease};

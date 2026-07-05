@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 110771c
-generated_at_date: 2026-07-02
+generated_at_commit: a28d34c
+generated_at_date: 2026-07-05
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs, core/src/stream.rs]
 ---
 
@@ -68,13 +68,17 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   *Deadlines are data*, not a thread per worker: `arm_lifetime` /
   `arm_callback` push an entry and return a `#[must_use]` `Deadline` guard —
   dropped, the entry disarms; `keep`-consumed, it fires regardless (the
-  fire-and-forget death-clock of a detached worker that outlives its `spawn`).
+  fire-and-forget mode a detached worker's lease needs, since the worker
+  outlives the `spawn` that armed it).
   The fired action is `Cancel(scope) | Run(closure)`: `Cancel` cancels a
-  `CancelScope` with `CancelCause::Deadline` (the death-clock and foreground
-  wall); `Run` invokes an opaque host closure once, the shape a scheduled
+  `CancelScope` with `CancelCause::Deadline` (the foreground wall); `Run`
+  invokes an opaque host closure once, the shape a scheduled
   wakeup rides — exarch arms a `Run` that posts a prompt and wakes its idle
-  loop, and a detached agent worker arms a `Run` that cancels its own token at
-  its ceiling. The reaper stays ignorant of prompts, cron, and sessions;
+  loop, a detached agent worker arms a `Run` that cancels its own token at
+  its ceiling, and a detached `spawn` worker's idle-observation lease chain
+  ([[map/core/builtins|builtins]]) is a `keep`-ed `Run` that re-arms itself
+  until it reaps or the worker settles. The reaper stays ignorant of
+  prompts, cron, and sessions;
   recurrence is not a reaper concept — a recurring producer re-arms from inside
   its own `Run`, fired outside the heap lock so it cannot deadlock
   ([[decisions/260617_scheduled-wakeups|scheduled-wakeups]],

@@ -109,7 +109,7 @@ fn top_level_under(shell: &mut Shell, caps: Capabilities, src: &str) -> Settled<
             script_name: "<test>",
             caps,
             turn_limit: None,
-            detached_limit: None,
+            detached_lease: None,
             io: TurnIo::Inherit,
             terminal: RequestedTerminalAccess::Denied,
             stdin: TurnStdin::Empty,

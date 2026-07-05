@@ -244,11 +244,13 @@ pub struct TurnRequest<'a> {
     /// turn's foreground scope `d` after it starts (exarch's per-tool wall);
     /// `None` leaves the turn uncapped (the REPL).
     pub turn_limit: Option<Duration>,
-    /// Lifetime ceiling for workers the turn detaches at the durable root.
-    /// `None` (the interactive ral host) leaves a worker until `cancel`, root
-    /// abort, or session exit; `Some(d)` (an agent host) reaps an abandoned
-    /// worker `d` after it is spawned.
-    pub detached_limit: Option<Duration>,
+    /// The lease for workers the turn detaches at the durable root. `None`
+    /// (the interactive ral host) leaves a worker until `cancel`, root
+    /// abort, or session exit; `Some(lease)` (an agent host) reaps a
+    /// still-running worker once unobserved for `lease.idle` — renewed by
+    /// every `poll`/`await`/`race` naming its handle — under the
+    /// `lease.backstop` absolute ceiling.
+    pub detached_lease: Option<crate::types::WorkerLease>,
     /// The byte IO regime; see [`TurnIo`].
     pub io: TurnIo,
     /// Whether this turn may hand the controlling terminal to a child; see
@@ -487,7 +489,7 @@ impl Shell {
             boundary: req.boundary,
             lifecycle: req.lifecycle,
             turn_limit: hook.policy.budget.or(req.turn_limit),
-            detached_limit: req.detached_limit,
+            detached_lease: req.detached_lease,
         };
 
         self.run_built(merged_req, foreground, wall, false, "", |s| {
@@ -542,7 +544,7 @@ impl Shell {
             stdin,
             terminal_access,
             foreground.clone(),
-            req.detached_limit,
+            req.detached_lease,
             req.surface,
             req.boundary,
         );

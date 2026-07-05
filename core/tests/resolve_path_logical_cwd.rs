@@ -30,7 +30,7 @@ fn top_level(shell: &mut Shell, source: &str) -> Value {
             script_name: "<test>",
             caps: Capabilities::root(),
             turn_limit: None,
-            detached_limit: None,
+            detached_lease: None,
             io: TurnIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
             stdin: TurnStdin::Inherit,

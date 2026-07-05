@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f55191c
-generated_at_date: 2026-07-03
+generated_at_commit: a28d34c
+generated_at_date: 2026-07-05
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/agent_builtins.rs, exarch/data/agent.ral]
 ---
 
@@ -53,9 +53,12 @@ and `run_shell` owns only the request it builds and the outcome it formats:
   while Esc stays an interrupt. A grant body evaluates locally — no sandbox-IPC
   round trip to interrupt — so cancellation reaches any spawned child through the
   ordinary process-group / cancel-scope path;
-- **`detached_limit`** — `DETACHED_WORKER_CEILING` (1 h), the lifetime ceiling
-  for workers the turn detaches at the durable root; a backstop, not load-bearing
-  for turn exit;
+- **`detached_lease`** — the idle-observation lease for workers the turn
+  detaches at the durable root: `DETACHED_WORKER_CEILING` (1 h) as the idle
+  bound — a worker is reaped once unobserved that long, renewed by any
+  `poll`/`await`/`race` naming its handle — under `DETACHED_WORKER_BACKSTOP`
+  (24 h), the absolute age no polling extends. Not load-bearing for turn
+  exit;
 - **`surface`** — the `AgentSink` (below);
 - **`lifecycle: Box::new(())`** — a tool turn installs no per-turn hooks.
 
