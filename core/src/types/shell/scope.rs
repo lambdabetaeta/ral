@@ -171,10 +171,26 @@ impl Shell {
     /// call site. Host verbs ([`Self::bind_value`], [`Self::set_var`]) stay
     /// on the raw `Env` primitive: every host call to them precedes arming,
     /// so the boot baseline covers them without a special case.
+    ///
+    /// When armed and at session scope, also runs the large-binding check:
+    /// if `binding.value`'s [`Value::shallow_size`] meets
+    /// [`large_binding_bytes`](super::bindings::BindingLease::large_binding_bytes),
+    /// queues a `LargeBindingNotice` — a residency nudge independent of
+    /// baseline status and of the idle-lease check above, since a
+    /// boot-seeded name can be just as large as a model-scratch one. A
+    /// rebind that still meets the threshold queues another notice.
     pub(crate) fn install_scope_binding(&mut self, name: String, binding: Binding) {
         let session = self.mobile.scope.at_session_scope();
         if session {
             self.local.bindings.note_install(&name);
+            if let Some(lease) = self.local.bindings.lease() {
+                let bytes = binding.value.shallow_size() as u64;
+                if bytes >= lease.large_binding_bytes {
+                    self.local
+                        .bindings
+                        .queue_large_binding_notice(name.clone(), bytes);
+                }
+            }
         }
         self.mobile.scope.set_binding(name, binding);
     }

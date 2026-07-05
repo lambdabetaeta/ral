@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: active
 ---
 
 # Exarch leases agent scratch bindings; ral bindings do not expire

@@ -316,6 +316,7 @@ impl Agent {
         // stay one visible sequence (`decisions/260629_agent-binding-reaping`).
         shell.arm_binding_lease(ral_core::types::BindingLease {
             idle_calls: shell_eval::BINDING_IDLE_CALLS,
+            large_binding_bytes: shell_eval::LARGE_BINDING_BYTES,
         });
         let durable = shell.mobile_snapshot();
         #[cfg(unix)]
@@ -397,6 +398,7 @@ impl Agent {
         // with the old `Shell`; this one starts fresh.
         shell.arm_binding_lease(ral_core::types::BindingLease {
             idle_calls: shell_eval::BINDING_IDLE_CALLS,
+            large_binding_bytes: shell_eval::LARGE_BINDING_BYTES,
         });
         self.durable = shell.mobile_snapshot();
         self.transport = ral_core::transport::IdentityTransport::new(shell);
@@ -707,16 +709,36 @@ impl Agent {
         }
     }
 
-    /// Prune this shell's idle top-level bindings and emit one compact
-    /// transcript/TUI event naming what fell, then adopt the prune's own
-    /// post-prune snapshot as the durable checkpoint — the pairing the
-    /// verb's signature enforces, so a later panic rollback can never
-    /// resurrect a pruned name (`decisions/260629_agent-binding-reaping`).
-    /// Never model-facing: no `events.json` twin, no inbox message. Called
-    /// once per pass through the ready boundary in [`Self::drive`], beside
-    /// [`Self::drain_worker_reaps`] — the same ready-boundary site, the
-    /// sibling lease chain.
+    /// Prune this shell's idle top-level bindings and drain its queued
+    /// large-binding notices — the binding-lease ledger's one boundary
+    /// drain site, beside [`Self::drain_worker_reaps`]
+    /// (`decisions/260629_agent-binding-reaping`). Both halves are
+    /// transcript/TUI only: no `events.json` twin, no inbox message, never
+    /// model-facing.
+    ///
+    /// The prune half emits one compact `Kind::BindingsPruned` naming what
+    /// fell, then adopts the verb's own post-prune snapshot as the durable
+    /// checkpoint in the same statement — the pairing the verb's signature
+    /// enforces, so a later panic rollback can never resurrect a pruned
+    /// name. The large-binding half emits one `Kind::LargeBinding` per
+    /// notice queued since the last drain, regardless of whether this pass
+    /// pruned anything — the two halves are independent axes (lifetime vs
+    /// residency) and neither gates the other.
     fn reap_bindings(&mut self, emit: &Emitter) {
+        for notice in self
+            .transport
+            .shell_mut()
+            .shell
+            .take_large_binding_notices()
+        {
+            let card = crate::card::large_binding_card(&notice.name, notice.bytes);
+            emit.emit(Kind::LargeBinding {
+                name: notice.name,
+                bytes: notice.bytes,
+                card,
+            });
+        }
+
         let Some((notices, checkpoint)) = self.transport.shell_mut().shell.prune_idle_bindings()
         else {
             return;
@@ -857,7 +879,33 @@ impl Agent {
             self.transport.shell_mut().shell.binding_count() as u64,
             None,
             "reap",
-            Some("lease lands with the binding reaper".to_string()),
+            Some("baseline (prelude, agent library, host seeds) never expires".to_string()),
+        ));
+        rows.push(ProbeRow::new(
+            "bindings.leased",
+            self.transport.shell_mut().shell.leased_binding_count() as u64,
+            None,
+            "reap",
+            Some(format!(
+                "idle {} calls prunes",
+                shell_eval::BINDING_IDLE_CALLS
+            )),
+        ));
+        let largest_binding_bytes = self
+            .transport
+            .shell_mut()
+            .shell
+            .bindings()
+            .into_iter()
+            .map(|(_, v)| v.shallow_size() as u64)
+            .max()
+            .unwrap_or(0);
+        rows.push(ProbeRow::new(
+            "bindings.largest_bytes",
+            largest_binding_bytes,
+            Some(shell_eval::LARGE_BINDING_BYTES),
+            "warn",
+            Some("shallow estimate; a closure's captures are never chased".to_string()),
         ));
 
         // ── disk, walked at invocation ───────────────────────────────────
@@ -2884,7 +2932,10 @@ mod tests {
             .transport
             .shell_mut()
             .shell
-            .arm_binding_lease(ral_core::types::BindingLease { idle_calls: 2 });
+            .arm_binding_lease(ral_core::types::BindingLease {
+                idle_calls: 2,
+                large_binding_bytes: u64::MAX,
+            });
         session.durable = session.transport.shell_mut().shell.mobile_snapshot();
 
         let (warmup_tx, _warmup_rx) = std::sync::mpsc::channel();
@@ -2920,6 +2971,60 @@ mod tests {
         );
     }
 
+    /// A session-scope install that meets the large-binding threshold
+    /// queues a notice at the chokepoint; the same boundary drain that
+    /// prunes idle bindings also emits one `Kind::LargeBinding` for it, and
+    /// a second drain — nothing newly queued — emits nothing. The two axes
+    /// are independent: nothing here is idle enough to prune, so this is
+    /// exactly what isolates the large-binding half of the drain.
+    #[test]
+    fn reap_bindings_emits_large_binding_notice_once_then_nothing() {
+        let dir = tmp("reap-large-binding");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        session
+            .transport
+            .shell_mut()
+            .shell
+            .arm_binding_lease(ral_core::types::BindingLease {
+                idle_calls: 1_000_000,
+                large_binding_bytes: 8,
+            });
+        session.durable = session.transport.shell_mut().shell.mobile_snapshot();
+
+        let (warmup_tx, _warmup_rx) = std::sync::mpsc::channel();
+        let warmup_emit = Emitter::new(warmup_tx, session.id);
+        session.run_shell(
+            "c0".into(),
+            "let large_binding_x = 'well over eight bytes long'",
+            5,
+            &warmup_emit,
+        );
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        session.reap_bindings(&emit);
+        let event = rx
+            .try_recv()
+            .expect("the drain must emit exactly one large-binding event");
+        match event.kind {
+            Kind::LargeBinding { name, bytes, .. } => {
+                assert_eq!(name, "large_binding_x");
+                assert_eq!(bytes, "well over eight bytes long".len() as u64);
+            }
+            _ => panic!("expected Kind::LargeBinding"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "the drain must emit exactly one event per offending install"
+        );
+
+        session.reap_bindings(&emit);
+        assert!(
+            rx.try_recv().is_err(),
+            "a second drain with nothing newly queued must emit nothing"
+        );
+    }
+
     /// A prune that fires between two turns refreshes `Agent::durable` to
     /// its post-prune state; a later call's panic then rolls back to that
     /// same post-prune snapshot, so the pruned name cannot resurrect even
@@ -2940,7 +3045,10 @@ mod tests {
             .transport
             .shell_mut()
             .shell
-            .arm_binding_lease(ral_core::types::BindingLease { idle_calls: 2 });
+            .arm_binding_lease(ral_core::types::BindingLease {
+                idle_calls: 2,
+                large_binding_bytes: u64::MAX,
+            });
         session.durable = session.transport.shell_mut().shell.mobile_snapshot();
 
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -3070,7 +3178,10 @@ mod tests {
             .transport
             .shell_mut()
             .shell
-            .arm_binding_lease(ral_core::types::BindingLease { idle_calls: 1 });
+            .arm_binding_lease(ral_core::types::BindingLease {
+                idle_calls: 1,
+                large_binding_bytes: u64::MAX,
+            });
         let (child_tx, _child_rx) = std::sync::mpsc::channel();
         let child_emit = Emitter::new(child_tx, child.id);
         for i in 0..3 {
@@ -3142,7 +3253,10 @@ mod tests {
             .transport
             .shell_mut()
             .shell
-            .arm_binding_lease(ral_core::types::BindingLease { idle_calls: 1 });
+            .arm_binding_lease(ral_core::types::BindingLease {
+                idle_calls: 1,
+                large_binding_bytes: u64::MAX,
+            });
         session.durable = session.transport.shell_mut().shell.mobile_snapshot();
 
         let (tx, _rx) = std::sync::mpsc::channel();

@@ -268,16 +268,18 @@ impl Sink for Headless {
             Kind::ProviderError(error) => eprintln!("provider error: {error:?}"),
             // A surfaced render document, a structural I/O event paired with
             // the card composed from it, a lease-chain reap's one-liner, the
-            // `/resources` fold, or a binding-lease prune's one-liner.  In
-            // headless we condense the card's marks to stderr lines
-            // generically; for an io event, a reap, the probe rows, or a
-            // prune, the raw structural fact is kept in `transcript.jsonl`
-            // (the card is a rendering and is not).
+            // `/resources` fold, a binding-lease prune's one-liner, or a
+            // large-binding warning.  In headless we condense the card's
+            // marks to stderr lines generically; for an io event, a reap,
+            // the probe rows, a prune, or a large-binding notice, the raw
+            // structural fact is kept in `transcript.jsonl` (the card is a
+            // rendering and is not).
             Kind::Card(card)
             | Kind::Io { card, .. }
             | Kind::WorkerReaped { card, .. }
             | Kind::Resources { card, .. }
-            | Kind::BindingsPruned { card, .. } => {
+            | Kind::BindingsPruned { card, .. }
+            | Kind::LargeBinding { card, .. } => {
                 for line in card_stderr(&card) {
                     eprintln!("{line}");
                 }

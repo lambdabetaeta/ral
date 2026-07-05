@@ -714,6 +714,26 @@ pub fn bindings_pruned_card(notices: &[ral_core::types::BindingPruneNotice]) -> 
     Card(vec![Mark::Text { spans }])
 }
 
+// ── `large binding`: the install chokepoint's residency nudge ────────────
+
+/// Compose one large-binding notice into a [`Card`] — a dim one-liner
+/// naming the binding, its shallow-size estimate, and the file-path
+/// recommendation: writing a large result to disk and binding the path
+/// keeps residency shallow, since the binding itself is otherwise
+/// completely untouched (`decisions/260629_agent-binding-reaping`,
+/// `decisions/260705_leases-and-budgets` §"Shell residency is lexical
+/// state plus host leases").
+pub fn large_binding_card(name: &str, bytes: u64) -> Card {
+    let spans = vec![span(
+        Role::Warn,
+        &format!(
+            "large binding: `{name}` — ~{bytes} bytes; consider writing it to a file \
+             and binding the path instead of the captured bytes"
+        ),
+    )];
+    Card(vec![Mark::Text { spans }])
+}
+
 /// A [`Card`] as a compact one-line summary — the session-layer digest the
 /// nudge facility shows when reminding the model of its pinned state, where the
 /// TUI's framed rendering is out of reach.  Text marks concatenate their span

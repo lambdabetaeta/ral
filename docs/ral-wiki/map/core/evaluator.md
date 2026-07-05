@@ -1,5 +1,5 @@
 ---
-generated_at_commit: acd1d8e
+generated_at_commit: d744648
 generated_at_date: 2026-07-05
 covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 ---

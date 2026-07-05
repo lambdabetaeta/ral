@@ -421,6 +421,11 @@ impl App {
             Kind::BindingsPruned { card, .. } => {
                 self.with_viewport(id, |vp| vp.push_card(card));
             }
+            // The install chokepoint's large-binding residency nudge: same
+            // one-line-card-as-scrollback-block treatment.
+            Kind::LargeBinding { card, .. } => {
+                self.with_viewport(id, |vp| vp.push_card(card));
+            }
             // The `/resources` fold: the agent's card arrives carrying its
             // own rows; the frontend appends the rows for the accumulators
             // *it* owns — the probed agent's viewport figures, the fleet's

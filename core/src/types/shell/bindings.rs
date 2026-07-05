@@ -40,10 +40,16 @@ use std::collections::{HashMap, HashSet};
 /// Host-stated per-agent policy: a leased name expires once it has gone
 /// `idle_calls` epochs without use. The epoch is the shell's committed-turn
 /// clock ([`Shell::run_source_turn`](super::Shell::run_source_turn)'s tick),
-/// never wall time.
+/// never wall time. `large_binding_bytes` is a separate, orthogonal axis —
+/// residency, not lifetime — read only by the install chokepoint's
+/// large-binding check: an install whose
+/// [`Value::shallow_size`](crate::types::Value::shallow_size) estimate
+/// meets this threshold queues a [`LargeBindingNotice`], regardless of how
+/// idle or fresh the name is.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct BindingLease {
     pub idle_calls: u64,
+    pub large_binding_bytes: u64,
 }
 
 /// The transcript facts of one pruned name.
@@ -55,6 +61,17 @@ pub struct BindingPruneNotice {
     /// The pruned value's [`Value::type_name`](crate::types::Value::type_name),
     /// for the card.
     pub kind: &'static str,
+}
+
+/// The transcript facts of one session-scope install whose shallow-size
+/// estimate met [`BindingLease::large_binding_bytes`] at the moment it was
+/// written — a residency nudge, not a lease event: the binding itself is
+/// completely untouched, and a rebind that still exceeds the threshold
+/// queues another notice (`decisions/260629_agent-binding-reaping`).
+#[derive(Clone, Debug)]
+pub struct LargeBindingNotice {
+    pub name: String,
+    pub bytes: u64,
 }
 
 /// The armed half of a [`BindingLedger`]: present only once a host has
@@ -75,6 +92,11 @@ struct Armed {
     /// (enforced by the install chokepoint and self-healed by the prune
     /// verb's adoption sweep).
     last_used: HashMap<String, u64>,
+    /// Large-binding notices queued since the last drain — a plain `Vec`,
+    /// not a registry: unlike the worker registry's `ReapNotice` ledger,
+    /// there is no cross-thread producer here either, so the queue is just
+    /// scratch, drained wholesale by the host's boundary reap.
+    large_bindings: Vec<LargeBindingNotice>,
 }
 
 /// Per-`Shell` binding-lease ledger. `Default` is the inert state: a host
@@ -92,6 +114,7 @@ impl BindingLedger {
             epoch: 0,
             baseline: baseline.into_iter().collect(),
             last_used: HashMap::new(),
+            large_bindings: Vec::new(),
         });
     }
 
@@ -185,6 +208,39 @@ impl BindingLedger {
         }
         armed.last_used.insert(name.to_string(), armed.epoch);
     }
+
+    /// The armed lease, if any — read by the install chokepoint's
+    /// large-binding check for `large_binding_bytes`. `None` when unarmed.
+    pub(crate) fn lease(&self) -> Option<BindingLease> {
+        self.0.as_ref().map(|armed| armed.lease)
+    }
+
+    /// Queue a large-binding notice. Unconditional (no de-duplication): a
+    /// rebind that still meets the threshold queues another notice, since
+    /// each offending install is its own fact. A no-op when unarmed.
+    pub(crate) fn queue_large_binding_notice(&mut self, name: String, bytes: u64) {
+        if let Some(armed) = &mut self.0 {
+            armed
+                .large_bindings
+                .push(LargeBindingNotice { name, bytes });
+        }
+    }
+
+    /// Drain every queued large-binding notice, leaving the queue empty.
+    pub(crate) fn take_large_binding_notices(&mut self) -> Vec<LargeBindingNotice> {
+        match &mut self.0 {
+            Some(armed) => std::mem::take(&mut armed.large_bindings),
+            None => Vec::new(),
+        }
+    }
+
+    /// Number of names currently leased (tracked, non-baseline) — the
+    /// `/resources` probe figure. Read-only: counting renews nothing, the
+    /// same rule enumeration obeys everywhere else in this ledger. `0` when
+    /// unarmed.
+    pub(crate) fn leased_count(&self) -> usize {
+        self.0.as_ref().map_or(0, |armed| armed.last_used.len())
+    }
 }
 
 #[cfg(test)]
@@ -192,7 +248,10 @@ mod tests {
     use super::*;
 
     fn lease(idle_calls: u64) -> BindingLease {
-        BindingLease { idle_calls }
+        BindingLease {
+            idle_calls,
+            large_binding_bytes: u64::MAX,
+        }
     }
 
     #[test]
@@ -321,12 +380,21 @@ mod chokepoint_tests {
         P.get_or_init(BakedPrelude::bake_runtime)
     }
 
-    /// A shell booted with the real prelude and armed with `idle_calls`,
-    /// sealing whatever is visible right after boot as baseline — the same
-    /// seed-then-arm sequence exarch's `Agent::assemble` follows.
+    /// A shell booted with the real prelude and armed with `idle_calls` and
+    /// an effectively-infinite large-binding threshold (never fires), the
+    /// same seed-then-arm sequence exarch's `Agent::assemble` follows.
     fn armed_shell(idle_calls: u64) -> Shell {
+        armed_shell_with(idle_calls, u64::MAX)
+    }
+
+    /// [`armed_shell`], with an explicit `large_binding_bytes` threshold for
+    /// the large-binding tests below.
+    fn armed_shell_with(idle_calls: u64, large_binding_bytes: u64) -> Shell {
         let mut shell = crate::driver::boot_shell(Default::default(), prelude());
-        shell.arm_binding_lease(BindingLease { idle_calls });
+        shell.arm_binding_lease(BindingLease {
+            idle_calls,
+            large_binding_bytes,
+        });
         shell
     }
 
@@ -481,7 +549,10 @@ mod chokepoint_tests {
             .next()
             .expect("the prelude seeds at least one binding");
         shell.set_var("host_seed".into(), Value::Int(1));
-        shell.arm_binding_lease(BindingLease { idle_calls: 64 });
+        shell.arm_binding_lease(BindingLease {
+            idle_calls: 64,
+            large_binding_bytes: u64::MAX,
+        });
         assert!(is_baseline(&shell, &prelude_name));
         assert!(is_baseline(&shell, "host_seed"));
         assert!(!is_leased(&shell, &prelude_name));
@@ -916,6 +987,51 @@ mod chokepoint_tests {
         assert!(
             shell.prune_idle_bindings().is_none(),
             "nothing is idle enough to prune yet"
+        );
+    }
+
+    // ── the large-binding warning (parcel 6) ────────────────────────────────
+
+    /// A session-scope install meeting the threshold queues exactly one
+    /// notice naming the binding and its estimate; draining leaves the
+    /// queue empty until the next offending install. A rebind that still
+    /// meets the threshold queues another notice — no de-duplication.
+    #[test]
+    fn large_binding_threshold_queues_one_notice() {
+        let mut shell = armed_shell_with(64, 8);
+        let text = "this string is definitely over eight bytes long";
+        top_level(&mut shell, &format!("let large_x = '{text}'")).expect("define");
+
+        let notices = shell.take_large_binding_notices();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].name, "large_x");
+        assert_eq!(notices[0].bytes, text.len() as u64);
+
+        assert!(
+            shell.take_large_binding_notices().is_empty(),
+            "the drain must emit exactly one notice per offending install"
+        );
+
+        let text2 = "a different string that also clears eight bytes";
+        top_level(&mut shell, &format!("let large_x = '{text2}'")).expect("rebind");
+        let notices2 = shell.take_large_binding_notices();
+        assert_eq!(
+            notices2.len(),
+            1,
+            "a rebind that still exceeds the threshold must warn again"
+        );
+        assert_eq!(notices2[0].name, "large_x");
+    }
+
+    /// An install whose estimate falls short of the threshold queues
+    /// nothing at all.
+    #[test]
+    fn sub_threshold_install_queues_nothing() {
+        let mut shell = armed_shell_with(64, 1_000_000);
+        top_level(&mut shell, "let small_x = 1").expect("define");
+        assert!(
+            shell.take_large_binding_notices().is_empty(),
+            "an install under the threshold must queue no notice"
         );
     }
 }

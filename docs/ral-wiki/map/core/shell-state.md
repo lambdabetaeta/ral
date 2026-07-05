@@ -1,5 +1,5 @@
 ---
-generated_at_commit: acd1d8e
+generated_at_commit: d744648
 generated_at_date: 2026-07-05
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
@@ -102,7 +102,17 @@ field name *is* the invariant** — joined by `Shell`
   site — the evaluator's four writers (`assign_pattern`'s `Name`/`...rest`
   arms, `eval_letrec`'s two installs) all route here. Host verbs
   (`bind_value`, `set_var`) stay on the raw `Env` primitive, since every host
-  call to them precedes arming.
+  call to them precedes arming. The same chokepoint runs a second, orthogonal
+  check: `BindingLease` also carries `large_binding_bytes`, and an install
+  whose value's `Value::shallow_size` (a structural estimate — `String`/
+  `Bytes` byte lengths, `List`/`Map`/`Variant` recursing into elements,
+  `Lambda`/`Block`/`Handle` a small fixed constant, never descended) meets it
+  queues a `LargeBindingNotice` regardless of baseline status or idle age —
+  residency and lifetime are independent axes
+  ([[decisions/260705_leases-and-budgets|leases-and-budgets]] §"Shell
+  residency is lexical state plus host leases"). `Shell::leased_binding_count`
+  and `Shell::take_large_binding_notices` round out the accessor surface, the
+  first a probe figure, the second a boundary drain.
 
 `turn` / `session` / `local` are `pub(crate)`: the fields that encode turn
 safety are not a public API. Hosts drive a session through the narrow accessors

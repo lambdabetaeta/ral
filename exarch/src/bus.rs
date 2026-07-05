@@ -986,6 +986,19 @@ pub enum Kind {
         idle_calls: u64,
         card: Card,
     },
+    /// A session-scope binding install met the large-binding soft threshold
+    /// (`decisions/260629_agent-binding-reaping`,
+    /// `decisions/260705_leases-and-budgets` §"Shell residency is lexical
+    /// state plus host leases"): a residency nudge, never an eviction — the
+    /// binding itself is completely untouched. `name` and `bytes` ride
+    /// beside the rendered `card`, same pattern as `Kind::WorkerReaped` and
+    /// `Kind::BindingsPruned`. Transcript + TUI only: no `events.json`
+    /// twin, no inbox message — never model-facing.
+    LargeBinding {
+        name: String,
+        bytes: u64,
+        card: Card,
+    },
 }
 
 /// One grouped hunk of a whole-file diff, carried by a

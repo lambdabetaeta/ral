@@ -165,6 +165,12 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
             "bindings_pruned",
             json!({ "names": names, "idle_calls": idle_calls }),
         ),
+        // The install chokepoint's raw large-binding fact — which name, how
+        // large its shallow estimate ran — kept beside the rendered `card`
+        // on the same pattern.
+        Kind::LargeBinding { name, bytes, .. } => {
+            ("large_binding", json!({ "name": name, "bytes": bytes }))
+        }
         // The `/resources` fold's raw rows — the agent's accumulator
         // figures at the instant the operator asked — kept beside the
         // rendered `card` on the same raw-fact/rendering pattern.  The

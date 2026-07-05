@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e2598d8
+generated_at_commit: d744648
 generated_at_date: 2026-07-05
 covers_paths: [exarch/src/agent.rs, exarch/src/agent_registry.rs, exarch/src/event.rs, exarch/src/fleet.rs, exarch/src/nudge.rs, exarch/src/digest.rs]
 ---
@@ -130,10 +130,13 @@ plumbing of their own: they ride the same drain above.
 first durable `MobileSnapshot` — `Agent::assemble` (the trunk, every fork,
 and `for_test`) and `Agent::replace_shell` (`/clear`) — each calling
 `Shell::arm_binding_lease` with [[map/exarch/shell-eval|shell-eval]]'s
-`BINDING_IDLE_CALLS` (256) right after `seed_session_dir` and right before
-`shell.mobile_snapshot()`, so seeding, arming, and checkpointing stay one
-visible sequence. `Agent::reap_bindings`, called at the drive loop's top
-beside `drain_worker_reaps`, prunes idle top-level names and emits one
+`BINDING_IDLE_CALLS` (256) and `LARGE_BINDING_BYTES` (1 MiB) right after
+`seed_session_dir` and right before `shell.mobile_snapshot()`, so seeding,
+arming, and checkpointing stay one visible sequence. `Agent::reap_bindings`,
+called at the drive loop's top beside `drain_worker_reaps`, drains both
+axes: it emits one `Kind::LargeBinding` per notice queued at the install
+chokepoint since the last drain (a residency nudge, independent of whether
+anything prunes this pass), then prunes idle top-level names and emits one
 `Kind::BindingsPruned` per boundary — transcript and TUI only, the same
 posture as `Kind::WorkerReaped` — and, in the same statement, adopts the
 prune verb's returned post-prune `MobileSnapshot` as `Agent::durable`: the
@@ -147,14 +150,15 @@ the TUI's `Control` against the agent the drive loop owns —
 `Agent::resource_rows` surveys what this thread may legally read (the worker
 registry's running/settled split with the nearest time-to-reap, inbox depth
 per source, the event log's mirror length and history bytes, the shell's
-binding count, log-dir and scratch disk walked at invocation, and the
-sub-agent ceiling as a lease row), and `emit_resources` posts one
-`Kind::Resources` carrying the raw rows beside their rendered card — the
-`Kind::Io` pairing, so `transcript.jsonl` records the figures. The frontend
-appends the rows for the accumulators *it* owns (viewports, views, the bus)
-at render time; neither half reaches across a thread. Probing never mutates
-and never renews a lease — enumeration is not observation — and the fold is
-never model-facing.
+binding count alongside its leased count and largest binding's shallow-size
+estimate, log-dir and scratch disk walked at invocation, and the sub-agent
+ceiling as a lease row), and `emit_resources` posts one `Kind::Resources`
+carrying the raw rows beside their rendered card — the `Kind::Io` pairing,
+so `transcript.jsonl` records the figures. The frontend appends the rows
+for the accumulators *it* owns (viewports, views, the bus) at render time;
+neither half reaches across a thread. Probing never mutates and never
+renews a lease — enumeration is not observation — and the fold is never
+model-facing.
 
 The headless-completion gate is gone with `expect_action`
 ([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]]): the one role flag

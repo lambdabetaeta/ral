@@ -11,7 +11,7 @@
 use super::MobileSnapshot;
 use super::Shell;
 use super::TerminalAccess;
-use super::bindings::{BindingLease, BindingPruneNotice};
+use super::bindings::{BindingLease, BindingPruneNotice, LargeBindingNotice};
 use super::repl::ReplScratch;
 use crate::diagnostic::SourceDb;
 use crate::exit_hints::ExitHints;
@@ -182,6 +182,25 @@ impl Shell {
     /// nothing, exactly as listing workers renews no lease.
     pub fn binding_count(&self) -> usize {
         self.bindings().len()
+    }
+
+    /// Number of names currently leased (tracked, non-baseline) by the
+    /// binding-lease ledger — the `/resources` probe's leased-count figure,
+    /// a narrower read than [`Self::binding_count`] (which counts every
+    /// visible binding, baseline included). `0` when unarmed. Read-only:
+    /// counting renews nothing.
+    pub fn leased_binding_count(&self) -> usize {
+        self.local.bindings.leased_count()
+    }
+
+    /// Drain every large-binding notice queued since the last drain — one
+    /// per session-scope install whose value's shallow-size estimate met
+    /// the armed lease's threshold (`decisions/260629_agent-binding-reaping`).
+    /// A host drains these at its ready boundaries, beside the prune
+    /// notices, to emit a transcript/TUI-only warning; the binding itself
+    /// is never touched by this call.
+    pub fn take_large_binding_notices(&mut self) -> Vec<LargeBindingNotice> {
+        self.local.bindings.take_large_binding_notices()
     }
 
     /// Arm this shell's binding-lease ledger and seal the boot baseline:

@@ -54,6 +54,14 @@ pub(crate) const SETTLED_WORKER_RETENTION: u64 = 256;
 /// both ledgers for their own idle policy.
 pub(crate) const BINDING_IDLE_CALLS: u64 = 256;
 
+/// Soft byte threshold on a session-scope install's shallow-size estimate
+/// (`Value::shallow_size`): meeting or exceeding this queues a
+/// `LargeBindingNotice` — a residency nudge, never an eviction, recommending
+/// a file path over captured bytes
+/// (`decisions/260705_leases-and-budgets` §"Shell residency is lexical
+/// state plus host leases").
+pub(crate) const LARGE_BINDING_BYTES: u64 = 1024 * 1024;
+
 /// The prelude baked into this binary at build time by `build.rs`.
 pub static PRELUDE: ral_core::driver::BakedPrelude = ral_core::baked_prelude!();
 

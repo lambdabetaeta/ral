@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e2598d8
+generated_at_commit: d744648
 generated_at_date: 2026-07-05
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/agent_builtins.rs, exarch/data/agent.ral]
 ---
@@ -76,7 +76,12 @@ and `Agent::replace_shell` call `Shell::arm_binding_lease` with it at the
 two places an agent's shell is installed
 ([[map/exarch/agent|agent]]; [[decisions/260629_agent-binding-reaping|agent-binding-reaping]]).
 Reusing the settled-worker-retention figure is deliberate: one ral-call
-clock, read by both ledgers for their own idle policy.
+clock, read by both ledgers for their own idle policy. `LARGE_BINDING_BYTES`
+(1 MiB) rides the same `BindingLease` on the same two arm calls — a
+residency threshold, not a lifetime one, so the install chokepoint checks it
+independently of idle age or baseline status
+([[decisions/260705_leases-and-budgets|leases-and-budgets]] §"Shell
+residency is lexical state plus host leases").
 
 Completion is `run_source_turn` returning. A detached `spawn`ed worker — a
 server, a watch — holds bounded deferred surface storage in core, never a clone

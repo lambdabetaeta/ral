@@ -275,6 +275,40 @@ impl Value {
             Value::Lambda { .. } | Value::Block { .. } | Value::Handle(_) => false,
         }
     }
+
+    /// A structural *shallow* size estimate, in bytes — the binding-lease
+    /// ledger's large-binding warning
+    /// (`decisions/260629_agent-binding-reaping`,
+    /// `decisions/260705_leases-and-budgets` §"Shell residency is lexical
+    /// state plus host leases"). Exact for `String`/`Bytes` (their byte
+    /// length); recurses into the *elements* of `List`/`Map`/`Variant`, so a
+    /// large collection of small values is counted honestly. `Lambda`,
+    /// `Block`, and `Handle` count as one small fixed constant and are
+    /// **never** descended: chasing a closure's captured `Arc<Env>` or a
+    /// handle's buffered output is the retained-size graph walk this design
+    /// refuses throughout — [`pins_running_work`] makes the identical
+    /// refusal for the same reason. The estimate is a residency nudge, not
+    /// an accounting promise: two values sharing structure under `Arc`
+    /// count twice, and captured state is invisible by construction.
+    pub fn shallow_size(&self) -> usize {
+        /// Stand-in cost for a `Lambda`/`Block`/`Handle` — small and fixed
+        /// rather than zero, so a binding full of closures still nudges the
+        /// estimate without pretending to measure what they capture.
+        const OPAQUE_CONSTANT: usize = 32;
+        match self {
+            Value::Unit => 0,
+            Value::Bool(_) => 1,
+            Value::Int(_) | Value::Float(_) => 8,
+            Value::String(s) => s.len(),
+            Value::Bytes(b) => b.len(),
+            Value::List(items) => items.iter().map(Self::shallow_size).sum(),
+            Value::Map(pairs) => pairs.iter().map(|(k, v)| k.len() + v.shallow_size()).sum(),
+            Value::Variant { label, payload } => {
+                label.len() + payload.as_deref().map_or(0, Self::shallow_size)
+            }
+            Value::Lambda { .. } | Value::Block { .. } | Value::Handle(_) => OPAQUE_CONSTANT,
+        }
+    }
 }
 
 /// Whether `v` structurally reaches a handle whose state is
@@ -282,11 +316,11 @@ impl Value {
 /// (`decisions/260629_agent-binding-reaping`): a name whose value still
 /// reaches a running worker is never pruned. Recurses through `List`,
 /// `Map`, and `Variant` payloads; a `Lambda` or `Block`'s captured
-/// `Arc<Env>` is deliberately **never** descended — the same graph chase a
-/// shallow structural size estimate must refuse, and a handle reachable
-/// only through a closure capture is not "the name of live work": the
-/// worker registry retains the handle itself regardless of whether any
-/// top-level name still reaches it, so nothing can be stranded either way.
+/// `Arc<Env>` is deliberately **never** descended — the same graph chase
+/// [`Value::shallow_size`] refuses, and a handle reachable only through a
+/// closure capture is not "the name of live work": the worker registry
+/// retains the handle itself regardless of whether any top-level name
+/// still reaches it, so nothing can be stranded either way.
 pub(crate) fn pins_running_work(v: &Value) -> bool {
     match v {
         Value::Handle(h) => *h.state.lock().unwrap() == HandleState::Running,
@@ -929,5 +963,98 @@ impl From<Vec<HandlerFrame>> for HandlerStack {
 impl From<HandlerStack> for Vec<HandlerFrame> {
     fn from(s: HandlerStack) -> Self {
         s.frames
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// String/Bytes byte lengths are exact; a nested `List`/`Map` sums its
+    /// elements' own estimates recursively, so a large collection of small
+    /// values is counted honestly rather than treated as one opaque blob.
+    #[test]
+    fn shallow_size_counts_nested_lists_and_maps() {
+        assert_eq!(Value::Unit.shallow_size(), 0);
+        assert_eq!(Value::String("hello".into()).shallow_size(), 5);
+        assert_eq!(Value::Bytes(vec![0u8; 10]).shallow_size(), 10);
+
+        let flat = Value::list(vec![
+            Value::String("ab".into()),
+            Value::String("cde".into()),
+        ]);
+        assert_eq!(flat.shallow_size(), 2 + 3);
+
+        // A list of lists sums all the way down.
+        let nested = Value::list(vec![flat.clone(), flat.clone()]);
+        assert_eq!(nested.shallow_size(), 2 * (2 + 3));
+
+        // A map counts its keys' bytes alongside its values' estimates.
+        let map = Value::map(vec![
+            ("k1".to_string(), Value::String("v1".into())),
+            ("k22".to_string(), Value::String("v2345".into())),
+        ]);
+        assert_eq!(
+            map.shallow_size(),
+            ("k1".len() + "v1".len()) + ("k22".len() + "v2345".len())
+        );
+
+        // A map of lists recurses through both layers.
+        let map_of_lists = Value::map(vec![("k".to_string(), nested.clone())]);
+        assert_eq!(
+            map_of_lists.shallow_size(),
+            "k".len() + nested.shallow_size()
+        );
+
+        // A variant counts its label plus its payload's estimate; a
+        // payload-less variant is just its label.
+        let variant = Value::Variant {
+            label: "tag".into(),
+            payload: Some(Box::new(Value::String("payload".into()))),
+        };
+        assert_eq!(variant.shallow_size(), "tag".len() + "payload".len());
+        let bare_variant = Value::Variant {
+            label: "bare".into(),
+            payload: None,
+        };
+        assert_eq!(bare_variant.shallow_size(), "bare".len());
+    }
+
+    /// `Lambda`/`Block`/`Handle` count as one small fixed constant — their
+    /// captures are never chased, so a closure over an enormous captured
+    /// scope reads the same as one over an empty scope. A closure nested
+    /// inside a list contributes only that constant, not its capture's size.
+    #[test]
+    fn shallow_size_never_descends_into_closure_captures() {
+        let empty_capture = std::sync::Arc::new(crate::types::Env::new());
+        let block = Value::Block {
+            body: std::sync::Arc::new(crate::source::Spanned::synthetic(
+                crate::ir::CompKind::Return(crate::ir::Val::Unit),
+            )),
+            captured: empty_capture.clone(),
+        };
+        let block_size = block.shallow_size();
+        assert!(block_size > 0, "a closure is a small nonzero constant");
+
+        // Build a second, larger capture and confirm the estimate is
+        // identical — captures are invisible to the estimate by
+        // construction, not merely "usually small".
+        let mut heavy_env = crate::types::Env::new();
+        heavy_env.set("heavy".into(), Value::String("x".repeat(10_000)));
+        let heavy_block = Value::Block {
+            body: std::sync::Arc::new(crate::source::Spanned::synthetic(
+                crate::ir::CompKind::Return(crate::ir::Val::Unit),
+            )),
+            captured: std::sync::Arc::new(heavy_env),
+        };
+        assert_eq!(
+            heavy_block.shallow_size(),
+            block_size,
+            "a closure's captured scope must never affect the estimate"
+        );
+
+        // Nested inside a list, a closure contributes only the constant.
+        let list_of_one_closure = Value::list(vec![block.clone()]);
+        assert_eq!(list_of_one_closure.shallow_size(), block_size);
     }
 }
