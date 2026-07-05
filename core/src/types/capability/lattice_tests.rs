@@ -5,7 +5,10 @@
 //! `Meet`/`Join`, `meet_literal_exec`) that an integration test in
 //! `core/tests/` cannot see.
 
-#![allow(clippy::disallowed_methods)]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:test] test fs/process scaffolding"
+)]
 
 use super::*;
 use crate::capability::decode_capability_map;

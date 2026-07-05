@@ -14,6 +14,8 @@
 //! (see [`super::register_host_surface`]).
 
 use ral_core::builtins::util::{arg0_str, as_list, check_arity};
+use ral_core::source::Span as ByteSpan;
+use ral_core::syntax::lexer::{Token, lex};
 use ral_core::typecheck::builtins::{
     BuiltinTypeRule, closed_record, fun, mk_scheme as scheme, pure, thunk,
 };
@@ -23,7 +25,7 @@ use ral_core::{Shell, Value};
 use std::borrow::Cow;
 
 use super::complete::style_ansi;
-use super::plugin_editor::{HighlightSpan, PluginContext, Span};
+use super::plugin_editor::{HighlightSpan, PluginContext, Span, byte_to_char, char_to_byte};
 
 fn ctx(shell: &Shell) -> Settled<&PluginContext> {
     shell
@@ -304,6 +306,37 @@ pub fn builtin_ed_history(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     Ok(Value::list(results))
 }
 
+/// True for token kinds that carry word-like content (command names,
+/// arguments, variable references) as opposed to pure syntax (pipes,
+/// braces, separators) that only delimit them.
+fn is_word_token(tok: &Token) -> bool {
+    matches!(
+        tok,
+        Token::Word(_)
+            | Token::SingleQuoted(_)
+            | Token::DoubleQuoted(_)
+            | Token::Tag(_)
+            | Token::Deref(_)
+            | Token::Expr(_)
+    )
+}
+
+/// The text of a word-bearing token.  Single-quoted bodies come straight
+/// from the token (already unescaped, hash-bumping and all); every other
+/// kind is read back out of `text` via the token's own byte span, stripping
+/// the surrounding quotes for double-quoted strings.
+fn word_text(text: &str, tok: &Token, span: ByteSpan) -> String {
+    if let Token::SingleQuoted(s) = tok {
+        return s.clone();
+    }
+    let start = span.start as usize;
+    let end = span.end as usize;
+    match tok {
+        Token::DoubleQuoted(_) => text[start + 1..end.saturating_sub(1).max(start + 1)].to_string(),
+        _ => text[start..end].to_string(),
+    }
+}
+
 /// `_ed-parse` → `[words: [Str], current: Int, offset: Int]` — tokenize buffer at cursor.
 pub fn builtin_ed_parse(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 0, "_ed-parse")?;
@@ -313,77 +346,37 @@ pub fn builtin_ed_parse(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let text = &pc.editor_state.text;
     let cursor = pc.editor_state.cursor;
 
-    if text.is_empty() {
-        return Ok(Value::map(vec![
+    let empty = || {
+        Value::map(vec![
             ("words".into(), Value::list(vec![])),
             ("current".into(), Value::Int(0)),
             ("offset".into(), Value::Int(0)),
-        ]));
+        ])
+    };
+
+    if text.is_empty() {
+        return Ok(empty());
     }
 
-    // Simple whitespace tokenizer.  A full parser integration would use
-    // ral_core::parse, but for now a word-split with cursor tracking
-    // covers the common completion cases.
-    let mut words: Vec<(usize, String)> = Vec::new(); // (byte_offset, word)
-    let mut i = 0;
-    let bytes = text.as_bytes();
-    while i < bytes.len() {
-        if bytes[i].is_ascii_whitespace() {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        // Handle single-quoted strings (no hash-bump support — completion
-        // tokenizer is intentionally minimal).
-        if bytes[i] == b'\'' {
-            i += 1;
-            let content = i;
-            while i < bytes.len() && bytes[i] != b'\'' {
-                i += 1;
-            }
-            let word = text[content..i].to_string();
-            if i < bytes.len() {
-                i += 1; // closing '
-            }
-            words.push((start, word));
-        } else if bytes[i] == b'"' {
-            // Double-quoted: just strip quotes for tokenization
-            i += 1;
-            let mut word = String::new();
-            while i < bytes.len() && bytes[i] != b'"' {
-                if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                    i += 1;
-                }
-                let ch = text[i..]
-                    .chars()
-                    .next()
-                    .expect("byte index on char boundary");
-                word.push(ch);
-                i += ch.len_utf8();
-            }
-            if i < bytes.len() {
-                i += 1;
-            } // skip closing "
-            words.push((start, word));
-        } else {
-            // Unquoted token: split on whitespace and shell metacharacters
-            while i < bytes.len()
-                && !bytes[i].is_ascii_whitespace()
-                && !matches!(bytes[i], b'|' | b';' | b'{' | b'}')
-            {
-                i += 1;
-            }
-            words.push((start, text[start..i].to_string()));
-        }
+    // A buffer that doesn't lex is mid-typing (an open quote, an open
+    // brace, …) rather than a well-formed command line; there is nothing
+    // sound to tokenize yet, so report no words rather than guessing.
+    let Ok(tokens) = lex(text) else {
+        return Ok(empty());
+    };
+
+    let words: Vec<(usize, String)> = tokens
+        .iter()
+        .filter(|(tok, _)| is_word_token(tok))
+        .map(|(tok, span)| (span.start as usize, word_text(text, tok, *span)))
+        .collect();
+
+    if words.is_empty() {
+        return Ok(empty());
     }
 
     // Determine which word the cursor is in/after.
-    // Convert cursor from char index to byte offset for comparison.
-    let cursor_byte = text
-        .char_indices()
-        .nth(cursor)
-        .map(|(i, _)| i)
-        .unwrap_or(text.len());
+    let cursor_byte = char_to_byte(text, cursor);
 
     let mut current = 0usize;
     let mut offset = 0usize;
@@ -394,13 +387,9 @@ pub fn builtin_ed_parse(args: &[Value], shell: &mut Shell) -> Settled<Value> {
         }
     }
 
-    // Convert offset back to char index
-    let offset_chars = text[..offset].chars().count();
+    let offset_chars = byte_to_char(text, offset);
 
-    let word_values: Vec<Value> = words
-        .iter()
-        .map(|(_, w)| Value::String(w.clone()))
-        .collect();
+    let word_values: Vec<Value> = words.into_iter().map(|(_, w)| Value::String(w)).collect();
 
     Ok(Value::map(vec![
         ("words".into(), Value::list(word_values)),

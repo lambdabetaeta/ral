@@ -6,7 +6,7 @@
 //!   tool call, a REPL turn, or a script line settles through.  Hosts do
 //!   not call it directly; they enter through the framed
 //!   [`Shell::run_source_turn`](crate::Shell::run_source_turn) door, which drives it.
-//!   The post-run [`Mobile`] is *installed* on the parent shell on
+//!   The post-run [`crate::types::Mobile`] is *installed* on the parent shell on
 //!   every outcome (Ok / Error / Exit); a top-level turn is a resume
 //!   point, so every persistable state change must survive.
 //! - [`evaluate`] — bare tail-absorbed run with no mobile contract.
@@ -19,7 +19,7 @@
 //! contract through it: the trampoline pattern-matches `Value::Thunk`
 //! and delegates to the internal [`eval_block`].  It is reached from
 //! outside the evaluator only through the host turn doors
-//! ([`crate::Shell::run_value_turn`]) and the in-frame builtin wrapper
+//! ([`crate::Shell::run_hook`]) and the in-frame builtin wrapper
 //! [`crate::builtins::apply`], so a host cannot start an unframed
 //! reduction; the in-crate callers ([`crate::runtime`]) already hold a
 //! turn frame.
@@ -27,7 +27,7 @@
 //! [`eval_block`] (`pub(crate)`) is the block contract: scope-isolated
 //! body, mobile discarded on exit, local scratch reset, audit fragment
 //! merged into the parent trail.  Invoked by the trampoline's
-//! `Value::Thunk` arm, by [`comp::step_force`], and by the pipeline's
+//! `Value::Thunk` arm, by [`comp::step_force`](crate::evaluator::comp::step_force), and by the pipeline's
 //! stream-iteration tail dispatch.  `spawn` / `watch` workers bypass
 //! it — the worker thread's lifecycle satisfies block discipline on
 //! its own.

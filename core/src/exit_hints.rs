@@ -2,7 +2,7 @@
 //!
 //! `ExitHints` is a pure lookup table mapping (command, exit-status) pairs to
 //! short human-readable explanations.  File loading is the caller's concern;
-//! populate the table via [`ExitHints::from_text`] and install it into [`Shell`].
+//! populate the table via [`ExitHints::from_text`] and install it into [`crate::Shell`].
 //!
 //! # Table format
 //!

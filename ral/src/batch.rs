@@ -238,17 +238,12 @@ pub(crate) fn run_batch(
         Ok(_) => shell.last_status().clamp(0, 255),
         Err(Break::Escape(Escape::Exit(code))) => (*code).clamp(0, 255),
         Err(Break::Error(e)) => {
-            if !audit {
-                eprint!(
-                    "{}",
-                    diagnostic::format_runtime_error_auto(
-                        shell.sources(),
-                        e,
-                        ral_core::ir::is_single_command(&comp),
-                    )
-                );
+            let single_command = ral_core::ir::is_single_command(&comp);
+            if audit {
+                diagnostic::report_runtime_error(&mut std::io::sink(), shell.sources(), e, single_command)
+            } else {
+                diagnostic::report_runtime_error(&mut std::io::stderr(), shell.sources(), e, single_command)
             }
-            e.exit_code().clamp(0, 255)
         }
         #[cfg(unix)]
         Err(Break::Escape(Escape::Stopped { .. })) => 1,

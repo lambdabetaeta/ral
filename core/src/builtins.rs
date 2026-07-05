@@ -2,7 +2,7 @@
 //!
 //! Builtins are commands implemented in Rust that run inside the shell
 //! process.  Each builtin is registered in a single
-//! [`builtin_registry!`] entry that names the builtin, its computation-
+//! `builtin_registry!` entry that names the builtin, its computation-
 //! type hint, its fixed arity (if first-class-callable), its one-line
 //! doc, and its runtime body — so adding a new builtin can update only
 //! one place and the six facets cannot drift apart.  The macro emits a
@@ -614,7 +614,7 @@ pub fn builtin_names() -> Vec<&'static str> {
 /// user-written closure.  Returns `None` for builtins without a
 /// first-class value form.
 ///
-/// The body uses [`CommandWord::Name`] rather than calling the
+/// The body uses [`crate::ir::CommandWord::Name`] rather than calling the
 /// entry's thunk directly — that way a future `within [handlers:
 /// …]` frame still intercepts the reified primitive when the
 /// synthesised lambda is later applied.
@@ -732,7 +732,7 @@ pub use misc::pretty_print;
 /// Apply a thunk (`Block` or `Lambda`) `val` to `args` while a turn frame is
 /// already installed.  Any other `Value` produces a descriptive error.  Used
 /// by builtins that accept function arguments and by the value turn door
-/// ([`crate::Shell::run_value_turn`]), which establishes the frame first.
+/// ([`crate::Shell::run_hook`]), which establishes the frame first.
 pub fn apply(val: &Value, args: &[Value], shell: &mut Shell) -> Settled<Value> {
     match val {
         Value::Lambda { .. } | Value::Block { .. } => {

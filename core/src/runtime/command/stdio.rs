@@ -20,6 +20,16 @@ pub(crate) enum EvalRedirect {
     Fd(u32),
 }
 
+/// One evaluated redirect: the runtime counterpart of the IR's
+/// [`crate::ir::RedirectV`], with `target` already resolved to a
+/// concrete file path or fd.
+#[derive(Clone, Debug)]
+pub(crate) struct EvalRedirectV {
+    pub(crate) fd: u32,
+    pub(crate) mode: RedirectMode,
+    pub(crate) target: EvalRedirect,
+}
+
 /// Capability witness that fd 0 of the parent process is safe to inherit
 /// into a spawned child's stdin in the current context.
 ///
@@ -128,13 +138,13 @@ pub(crate) fn stderr_mode(mode: &RedirectMode) -> RedirectMode {
     }
 }
 
-pub(crate) fn classify_redirects(redirects: &[(u32, RedirectMode, EvalRedirect)]) -> RedirectPlan {
+pub(crate) fn classify_redirects(redirects: &[EvalRedirectV]) -> RedirectPlan {
     let mut plan = RedirectPlan {
         stdout_file: None,
         stderr_file: None,
         stderr_to_stdout: false,
     };
-    for (fd, mode, target) in redirects {
+    for EvalRedirectV { fd, mode, target } in redirects {
         match target {
             EvalRedirect::Fd(target_fd) => {
                 if *fd == 2 && *target_fd == 1 {

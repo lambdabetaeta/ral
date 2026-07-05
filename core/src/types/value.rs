@@ -536,6 +536,89 @@ impl HandlerEntry {
             scheme: None,
         }
     }
+
+    /// Vet `thunk` as the handler body for `name` and build the entry to
+    /// install — the single gate shared by `alias` and `within [handlers:
+    /// …]` so the name-conflict check, the shape check, and the
+    /// mode-preservation check are each written once regardless of which
+    /// install path is calling.
+    ///
+    /// Checked in order: `name` must be free of both a lexical binding
+    /// and a builtin (a handler needs a head of its own to dispatch on);
+    /// `thunk` must be a unary lambda `{ |args| … }`, enforced by
+    /// [`validate_handler_arity`]; its body must preserve the head's
+    /// pipeline mode, enforced by [`crate::typecheck::alias_arm_scheme`].
+    /// `role` names the diagnostic and picks whether the inferred scheme
+    /// is persisted on the entry — an alias frame outlives its
+    /// installing turn and needs it seeded for the next turn's check; a
+    /// `within [handlers: …]` frame is popped before the turn ends and
+    /// needs none.
+    pub fn vet(
+        name: String,
+        thunk: Value,
+        session_schemes: crate::typecheck::SessionSchemes,
+        role: HandlerRole,
+    ) -> Settled<Self> {
+        let label = role.label();
+        if session_schemes.bindings.iter().any(|(n, _)| n == &name) {
+            return Err(super::coerce::sig(format!(
+                "{label}: `{name}` is a lexical binding in this scope; handler names must \
+                 be free of lexical bindings and builtins"
+            )));
+        }
+        if crate::builtins::is_builtin(&name) {
+            return Err(super::coerce::sig(format!(
+                "{label}: `{name}` is a builtin; handler names must be free of lexical \
+                 bindings and builtins"
+            )));
+        }
+        validate_handler_arity(&thunk, 1, &format!("{label}: `{name}`"))?;
+        let Value::Lambda { param, body, .. } = &thunk else {
+            unreachable!("validate_handler_arity guarantees a unary lambda");
+        };
+        let scheme = crate::typecheck::alias_arm_scheme(&name, param, body, session_schemes)
+            .map_err(|m| {
+                use crate::typecheck::fmt_mode;
+                super::coerce::sig(format!(
+                    "{label}: `{name}`'s body changes the head's pipeline mode ({} vs {}); \
+                     a handler reinterprets a head and must preserve its modes — match the \
+                     existing head's modes or add a codec",
+                    fmt_mode(&m.left),
+                    fmt_mode(&m.right),
+                ))
+            })?;
+        let mut entry = Self::ral_per_name(name, thunk);
+        if role.persists_scheme() {
+            entry.scheme = Some(scheme);
+        }
+        Ok(entry)
+    }
+}
+
+/// Which install path is vetting a handler entry through
+/// [`HandlerEntry::vet`] — picks the diagnostic's label and whether the
+/// arm's inferred scheme is persisted on the entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandlerRole {
+    /// `alias NAME { |args| … }` — the frame outlives its installing
+    /// turn, so its scheme is persisted for the next turn's check.
+    Alias,
+    /// `within [handlers: …]` — the frame is popped before the turn
+    /// ends, so no scheme needs to survive it.
+    Scoped,
+}
+
+impl HandlerRole {
+    fn label(self) -> &'static str {
+        match self {
+            HandlerRole::Alias => "alias",
+            HandlerRole::Scoped => "within handlers",
+        }
+    }
+
+    fn persists_scheme(self) -> bool {
+        matches!(self, HandlerRole::Alias)
+    }
 }
 
 /// Validate that a handler thunk's surface form matches the required

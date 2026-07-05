@@ -97,7 +97,11 @@ impl Worksheet {
         // The effect verdict comes from the checker's annotated IR: walk the
         // compiled comp's top-level `Bind` nodes once into a name→effectful
         // map.  A compile failure means no binding landed — record nothing.
-        let effects = match ral_core::compile_and_typecheck(input, shell.session_schemes()) {
+        let effects = match ral_core::compile_and_typecheck(
+            input,
+            shell.session_schemes(),
+            ral_core::source::FileId::DUMMY,
+        ) {
             ral_core::CompileOutcome::Compiled(comp) => bind_effects(&comp),
             _ => return,
         };

@@ -7,7 +7,7 @@
 //! transport status. The hosts that drive this — the interactive REPL,
 //! exarch's tool evaluator, batch — go through one of two doors,
 //! [`Shell::run_source_turn`](crate::Shell::run_source_turn) and
-//! [`Shell::run_value_turn`](crate::Shell::run_value_turn), and diverge only
+//! [`Shell::run_hook`](crate::Shell::run_hook), and diverge only
 //! on the policy carried in the [`TurnRequest`](crate::TurnRequest): where the
 //! byte streams go, whether a capability frame is pushed, the wall and
 //! detached limits, and which lifecycle hooks fire.
@@ -186,11 +186,20 @@ pub(crate) fn build_turn(
 /// parse or type failure (the turn never reaches evaluation). The
 /// `single_command` flag is harvested here because the host needs it to render
 /// runtime errors after `comp` is consumed.
+///
+/// Resets the session's source registry and peeks the [`FileId`] the next
+/// registration will mint *before* compiling, so the compiled program's
+/// spans carry this turn's real file identity. [`Shell::install_root_context`]
+/// performs the actual reset-then-register once the turn frame exists to
+/// install it into ([`run_framed`]); nothing between here and there touches
+/// the registry, so the id it mints always agrees with the one peeked here.
 pub(crate) fn compile_turn(
     shell: &mut Shell,
     src: &str,
 ) -> Result<(Arc<crate::ir::Comp>, bool), StaticDiagnostics> {
     crate::process::clear();
+    shell.session.sources.reset();
+    let file = shell.session.sources.next_id();
 
     #[cfg(debug_assertions)]
     let t_seed = std::time::Instant::now();
@@ -205,7 +214,7 @@ pub(crate) fn compile_turn(
 
     #[cfg(debug_assertions)]
     let t_tc = std::time::Instant::now();
-    let outcome = compile_and_typecheck(src, schemes);
+    let outcome = compile_and_typecheck(src, schemes, file);
     crate::dbg_trace!(
         "shell",
         "compile_and_typecheck: {n_bindings} bindings, {} src bytes in {:?}",

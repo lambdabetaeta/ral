@@ -15,7 +15,7 @@
 //!
 //! - [`eval_call_parts`] — evaluates the arguments and trailing
 //!   redirects of an `Exec` together. Shared with the pipeline
-//!   External case in [`super::pipeline::analysis`].
+//!   External case in [`crate::runtime::pipeline::resolve`].
 //!
 //! Internals: [`eval_app`] is the eliminator for CBPV application —
 //! a Lambda or Block handed [`Tail::Yes`] emits [`TailCall`] for the
@@ -26,14 +26,13 @@
 //! carries the enclosing computation's tail-ness.
 
 use crate::ir::{Args, Comp, CompKind, RedirectV, ScopeOp, ValListElem};
-use crate::syntax::ast::RedirectMode;
 use crate::types::*;
 use std::sync::Arc;
 
 use super::comp::eval_comp;
 use super::val::{eval_val, spread_type_err};
 use super::{apply, redirect};
-use crate::runtime::command::EvalRedirect;
+use crate::runtime::command::EvalRedirectV;
 use crate::runtime::command_call;
 
 pub(crate) fn invoke(
@@ -111,16 +110,15 @@ fn eval_app(name: Value, args: Vec<Value>, tail: Tail, shell: &mut Shell) -> Raw
 
 /// Evaluates the arguments and trailing redirects of an `Exec`
 /// together. Shared between [`invoke`]'s `Exec` arm and the pipeline
-/// External case in [`super::pipeline::analysis`].
+/// External case in [`crate::runtime::pipeline::resolve`].
 ///
 /// Upstream values from pipeline stages are appended later, in
 /// `pipeline::invoke`, not here.
-#[allow(clippy::type_complexity)]
 pub(crate) fn eval_call_parts(
     args: &Args,
     redirects: &[RedirectV],
     shell: &mut Shell,
-) -> Result<(Vec<Value>, Vec<(u32, RedirectMode, EvalRedirect)>), Error> {
+) -> Result<(Vec<Value>, Vec<EvalRedirectV>), Error> {
     let redir_eval = redirect::eval_redirects(redirects, shell)?;
     let arg_vals = eval_call_args(args, shell)?;
     Ok((arg_vals, redir_eval))

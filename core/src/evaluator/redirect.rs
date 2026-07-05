@@ -15,7 +15,7 @@ use super::val::eval_val;
 use crate::io::Sink;
 use crate::ir::{RedirectV, ValRedirectTarget};
 use crate::runtime::command::io_event::{self, WriteOutcome};
-use crate::runtime::command::{self, EvalRedirect};
+use crate::runtime::command::{self, EvalRedirect, EvalRedirectV};
 use crate::syntax::ast::RedirectMode;
 use crate::types::*;
 
@@ -27,20 +27,20 @@ use crate::types::*;
 pub(crate) fn eval_redirects(
     redirects: &[RedirectV],
     shell: &mut Shell,
-) -> Result<Vec<(u32, RedirectMode, EvalRedirect)>, Error> {
+) -> Result<Vec<EvalRedirectV>, Error> {
     redirects
         .iter()
         .map(|r| {
-            Ok((
-                r.fd,
-                r.mode,
-                match &r.target {
+            Ok(EvalRedirectV {
+                fd: r.fd,
+                mode: r.mode,
+                target: match &r.target {
                     ValRedirectTarget::File(v) => {
                         EvalRedirect::File(eval_val(v, shell)?.to_string())
                     }
                     ValRedirectTarget::Fd(n) => EvalRedirect::Fd(*n),
                 },
-            ))
+            })
         })
         .collect()
 }
@@ -104,7 +104,7 @@ struct RedirectFrame<'a> {
 }
 
 struct SinkRedirects {
-    unhandled: Vec<(u32, RedirectMode, EvalRedirect)>,
+    unhandled: Vec<EvalRedirectV>,
     prev_stdout: Option<Sink>,
     prev_stderr: Option<Sink>,
 }
@@ -136,7 +136,7 @@ fn open_redirect_sink(
 }
 
 fn install_sink_redirects(
-    redirects: &[(u32, RedirectMode, EvalRedirect)],
+    redirects: &[EvalRedirectV],
     shell: &mut Shell,
     intents: &mut Vec<WriteIntent>,
 ) -> Raw<SinkRedirects> {
@@ -146,7 +146,7 @@ fn install_sink_redirects(
     let mut stderr_changed = false;
     let mut unhandled = Vec::new();
 
-    for (fd, mode, target) in redirects {
+    for EvalRedirectV { fd, mode, target } in redirects {
         match (*fd, target) {
             (0, EvalRedirect::File(_)) if matches!(mode, RedirectMode::Read) => {}
             (1, EvalRedirect::File(path)) => {
@@ -184,7 +184,11 @@ fn install_sink_redirects(
                 ))
                 .into());
             }
-            _ => unhandled.push((*fd, *mode, target.clone())),
+            _ => unhandled.push(EvalRedirectV {
+                fd: *fd,
+                mode: *mode,
+                target: target.clone(),
+            }),
         }
     }
 
@@ -213,7 +217,7 @@ fn emit_writes_failed(shell: &Shell, intents: Vec<WriteIntent>) {
 }
 
 impl<'a> RedirectFrame<'a> {
-    fn enter(redirects: &[(u32, RedirectMode, EvalRedirect)], shell: &'a mut Shell) -> Raw<Self> {
+    fn enter(redirects: &[EvalRedirectV], shell: &'a mut Shell) -> Raw<Self> {
         // `install_stdin_redirect` owns its own RAII unwind through
         // the explicit `restore` API; we hold its guard alongside
         // the rest.
@@ -368,7 +372,7 @@ impl Drop for RedirectFrame<'_> {
 /// honest: it is consulted only when `shell.turn.io.stdin` is
 /// `Terminal`, which truly means "fall through to the inherited fd 0".
 pub(crate) fn with_redirects<F>(
-    redirects: &[(u32, RedirectMode, EvalRedirect)],
+    redirects: &[EvalRedirectV],
     shell: &mut Shell,
     body: F,
 ) -> Raw<Value>

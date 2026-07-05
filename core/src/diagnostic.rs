@@ -130,6 +130,15 @@ impl SourceDb {
     pub fn get(&self, id: FileId) -> Option<&Source> {
         self.sources.get(id.0 as usize)
     }
+
+    /// Peek the [`FileId`] the next [`register`](Self::register) call will
+    /// mint, without registering anything. Lets a caller stamp the id onto
+    /// a program's spans *before* the source it names is itself registered
+    /// — sound exactly when nothing else registers a source into this
+    /// registry between the peek and that later registration.
+    pub fn next_id(&self) -> FileId {
+        FileId(self.sources.len() as u32)
+    }
 }
 
 /// Convert a byte offset within `source` into a 1-indexed (line, col) pair.
@@ -605,6 +614,22 @@ pub fn format_runtime_error_auto(
     } else {
         format_runtime_error_ariadne(db, err.loc.as_ref(), &err.message, err.hint.as_deref())
     }
+}
+
+/// Turn-result epilogue shared by every host that runs a top-level turn:
+/// render the caught runtime error via [`format_runtime_error_auto`] into
+/// `out`, then hand back the process-exit-code-clamped status. A host that
+/// wants to suppress the rendering (e.g. under an audit trace that reports
+/// the error itself) passes [`std::io::sink`] and still gets the exit code.
+pub fn report_runtime_error(
+    out: &mut dyn std::io::Write,
+    db: &SourceDb,
+    err: &crate::types::Error,
+    single_command: bool,
+) -> i32 {
+    let rendered = format_runtime_error_auto(db, err, single_command);
+    let _ = out.write_all(rendered.as_bytes());
+    err.exit_code().clamp(0, 255)
 }
 
 // ── Ad-hoc error helpers ──────────────────────────────────────────────────

@@ -69,11 +69,11 @@ pub struct Cli {
     #[arg(long = "restrict", value_name = "FILE")]
     pub restrict: Vec<std::path::PathBuf>,
     /// Per-request visible-output ceiling (`max_tokens` in the API
-    /// call).  Unset = use the per-model default (32k for Opus, 16k
-    /// for Sonnet, 8k for Haiku and unknown models).  The old hard
-    /// 4k constant truncated Opus turns mid-stream and reported them
-    /// as silent stops; raise this when emitting large files or
-    /// running deep reasoning.
+    /// call).  Unset = use the per-model default, shown as the
+    /// `max-tokens` row in the startup banner once a model is
+    /// selected.  The old hard 4k constant truncated Opus turns
+    /// mid-stream and reported them as silent stops; raise this when
+    /// emitting large files or running deep reasoning.
     #[arg(long = "max-tokens", value_name = "N")]
     pub max_tokens: Option<u32>,
     /// Reasoning effort: `none`, `low`, `medium`, `high`, `xhigh`, or

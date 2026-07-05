@@ -14,8 +14,12 @@
 //! same primitive used by `_plugin 'load'`.
 //!
 //! `evaluate_source` is also the single pipeline used by the
-//! capability-file loader (`crate::capability::load`).  No second sequence
-//! exists in the tree.
+//! capability-file loader (`crate::capability::load`) and the REPL plugin
+//! loader.  Callers that need to typecheck with their own error surface
+//! ahead of evaluation — the REPL's rc-config loader, which renders type
+//! errors through ariadne — call [`evaluate_checked`] directly with their
+//! own already-checked `Comp`, still sharing the guarded evaluate step.
+//! No second evaluate sequence exists in the tree.
 
 use std::path::Path;
 
@@ -79,18 +83,23 @@ impl Drop for ScriptContextGuard<'_> {
     }
 }
 
-/// Parse + elaborate + evaluate `source` under a `ScriptContextGuard`
-/// keyed on `virtual_path`.  The path is virtual in the sense that the
-/// caller is responsible for any filesystem read; this function only
-/// uses it to label `shell.turn.loc.script` (so error messages and
-/// nested `source`/`use` resolutions point back to the right file) and
-/// to participate in the cycle-detection stack.
+/// Run an already-checked `comp` under a `ScriptContextGuard` keyed on
+/// `virtual_path`, sharing the cycle-detection stack and recursion-depth
+/// guard with [`evaluate_source`].  Split out for callers that need their
+/// own compile/typecheck error surface ahead of evaluation — the REPL's
+/// rc-config loader reports type errors through ariadne before ever
+/// reaching this point — but still want the guarded evaluate every other
+/// source-evaluation path shares.
 ///
-/// Errors are returned raw — callers add their own surface prefix
-/// (`source:`, `use:`, `capability file <path>:`) so the same machinery
-/// can serve every loader without baking one caller's identity into
-/// the others.
-pub fn evaluate_source(shell: &mut Shell, source: &str, virtual_path: &str) -> Settled<Value> {
+/// Errors are returned raw — callers add their own surface prefix so the
+/// same machinery can serve every loader without baking one caller's
+/// identity into the others.
+pub fn evaluate_checked(
+    shell: &mut Shell,
+    comp: &std::sync::Arc<Comp>,
+    source: &str,
+    virtual_path: &str,
+) -> Settled<Value> {
     let key = virtual_path.to_string();
     if shell.mobile.context.modules.stack.contains(&key) {
         let cycle: Vec<&str> = shell
@@ -111,14 +120,29 @@ pub fn evaluate_source(shell: &mut Shell, source: &str, virtual_path: &str) -> S
             "recursion depth limit ({MAX_SOURCE_DEPTH}) exceeded"
         )));
     }
-    let comp = check_source(source, shell)?;
     let mut ctx = ScriptContextGuard::enter(shell, virtual_path, source);
     ctx.shell_mut().mobile.context.modules.stack.push(key);
     ctx.shell_mut().mobile.context.modules.depth += 1;
-    let result = crate::evaluate(&comp, ctx.shell_mut());
+    let result = crate::evaluate(comp, ctx.shell_mut());
     ctx.shell_mut().mobile.context.modules.depth -= 1;
     ctx.shell_mut().mobile.context.modules.stack.pop();
     result
+}
+
+/// Parse + elaborate + evaluate `source` under a `ScriptContextGuard`
+/// keyed on `virtual_path`.  The path is virtual in the sense that the
+/// caller is responsible for any filesystem read; this function only
+/// uses it to label `shell.turn.loc.script` (so error messages and
+/// nested `source`/`use` resolutions point back to the right file) and
+/// to participate in the cycle-detection stack.
+///
+/// Errors are returned raw — callers add their own surface prefix
+/// (`source:`, `use:`, `capability file <path>:`) so the same machinery
+/// can serve every loader without baking one caller's identity into
+/// the others.
+pub fn evaluate_source(shell: &mut Shell, source: &str, virtual_path: &str) -> Settled<Value> {
+    let comp = check_source(source, shell)?;
+    evaluate_checked(shell, &comp, source, virtual_path)
 }
 
 /// Parse, elaborate, and check `source` against the live session before
@@ -127,8 +151,15 @@ pub fn evaluate_source(shell: &mut Shell, source: &str, virtual_path: &str) -> S
 /// turn does.  A type error is fatal, surfaced as a `Break::Error` so the
 /// file is reported and not run.  The schemes seed the check from the
 /// caller's scope, so a `source`d file sees the names already installed.
+///
+/// Peeks the [`FileId`] the module's own registration
+/// ([`ScriptContextGuard::enter`], right after this returns) will mint, so
+/// the compiled program's spans carry the module's real file identity —
+/// nothing else registers a source into the session between the peek and
+/// that registration.
 fn check_source(source: &str, shell: &Shell) -> Settled<std::sync::Arc<Comp>> {
-    crate::compile_and_typecheck(source, shell.session_schemes())
+    let file = shell.session.sources.next_id();
+    crate::compile_and_typecheck(source, shell.session_schemes(), file)
         .into_comp_or_message()
         .map(std::sync::Arc::new)
         .map_err(sig)

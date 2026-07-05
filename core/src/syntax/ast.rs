@@ -83,8 +83,8 @@ pub enum Ast {
     /// Command-position invocation: a head applied to arguments, with
     /// an optional run of trailing I/O redirects.  At the surface
     /// level this is a single form — the elaborator decides whether
-    /// it becomes a name-dispatched [`CompKind::Exec`] (system call)
-    /// or a [`CompKind::App`] (CBPV elimination, when the head
+    /// it becomes a name-dispatched [`crate::ir::CompKind::Exec`] (system call)
+    /// or a [`crate::ir::CompKind::App`] (CBPV elimination, when the head
     /// resolves to a bound value).
     ///
     /// Each argument is a [`Spanned<Ast>`] so the typechecker can
@@ -157,9 +157,9 @@ pub enum Ast {
         scrutinee: Spanned<Box<Ast>>,
         table: Spanned<Box<Ast>>,
     },
-    /// Expression block: $[expr]
+    /// Expression block: `$[expr]`
     Expr(Box<Expr>),
-    /// Indexing: $name[k1][k2]
+    /// Indexing: `$name[k1][k2]`
     ///
     /// `target` carries its own `Spanned` span so a diagnostic that
     /// fires on the target (block-target indexing, etc.) underlines

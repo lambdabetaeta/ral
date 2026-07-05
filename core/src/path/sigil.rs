@@ -88,7 +88,7 @@ pub fn expand_path_prefix(input: &str, home: &str) -> String {
 /// Per-call inputs for the freeze pass.  `home` and `cwd` are
 /// supplied by the caller; `tempdir` is read from the process env
 /// (`std::env::temp_dir`) the same way XDG sigils read
-/// `XDG_*_HOME`; `gitdir:` resolves via [`discover_git_dir`]
+/// `XDG_*_HOME`; `gitdir:` resolves via [`crate::path::discover_git_dir`]
 /// (which walks the filesystem).  Bundled rather than passed
 /// positionally so new sigils can grow this struct without
 /// rippling through callers.

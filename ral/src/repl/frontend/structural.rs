@@ -648,7 +648,11 @@ fn build_spine(src: &str, shell: &Shell) -> Spine {
     if src.trim().is_empty() {
         return Spine::Empty;
     }
-    match ral_core::compile_and_typecheck(src, shell.session_schemes()) {
+    match ral_core::compile_and_typecheck(
+        src,
+        shell.session_schemes(),
+        ral_core::source::FileId::DUMMY,
+    ) {
         CompileOutcome::Compiled(comp) => match pipeline_stage_rows(&comp, src) {
             Some(rows) => Spine::Stages(rows),
             None => Spine::Empty,
@@ -1543,6 +1547,7 @@ mod tests {
         let outcome = ral_core::compile_and_typecheck(
             "/bin/echo hi | /bin/cat",
             ral_core::typecheck::SessionSchemes::default(),
+            ral_core::source::FileId::DUMMY,
         );
         let CompileOutcome::Compiled(comp) = outcome else {
             panic!("pipeline should compile");
@@ -1563,6 +1568,7 @@ mod tests {
         let outcome = ral_core::compile_and_typecheck(
             "/bin/echo hi",
             ral_core::typecheck::SessionSchemes::default(),
+            ral_core::source::FileId::DUMMY,
         );
         let CompileOutcome::Compiled(comp) = outcome else {
             panic!("should compile");

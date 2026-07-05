@@ -193,6 +193,7 @@ fn spawn_stage(
                 Some(&captured),
                 cx.shell.local.audit.active_policy(),
                 wants_value,
+                &cx.shell.turn.loc,
             )?
         }
     };

@@ -20,7 +20,7 @@
 //! - `load`      — load a `.ral` capability profile into a `Capabilities`.
 //!
 //! The `Meet` and `Join` traits live alongside the types they operate
-//! on, in [`crate::types::capability`].
+//! on, in `crate::types::capability`.
 
 mod decode;
 mod enforce;

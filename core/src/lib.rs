@@ -19,6 +19,8 @@
 //! added to the IR or scheme vocabulary silently invalidates an old bake
 //! — is contained in one file rather than spread across each host.
 
+#![deny(rustdoc::broken_intra_doc_links)]
+
 pub mod ansi;
 pub mod builtins;
 pub mod capability;
@@ -87,7 +89,7 @@ pub use types::{
 pub(crate) use elaborator::elaborate;
 pub(crate) use evaluator::evaluate;
 pub(crate) use ir::Comp;
-pub(crate) use syntax::parser::{ParseError, parse};
+pub(crate) use syntax::parser::{ParseError, parse, parse_with};
 
 /// The two ahead-of-time phases — parse and elaborate — that every entry
 /// point (script, `-c`, REPL line, rc file, plugin module) performs before
@@ -142,8 +144,19 @@ impl CompileOutcome {
 /// that takes source text and turns it into something the evaluator can
 /// run.  Signal-clearing, location bookkeeping, and post-eval rendering
 /// are caller concerns and stay at each call site.
-pub fn compile_and_typecheck(source: &str, schemes: SessionSchemes) -> CompileOutcome {
-    let ast = match parse(source) {
+///
+/// `file` is the [`FileId`](source::FileId) every span in the compiled
+/// program is stamped with. A production caller passes the id its source
+/// will be (or already is) registered under in the session's `SourceDb`,
+/// so the program's spans carry the turn's real file identity rather than
+/// the [`FileId::DUMMY`](source::FileId::DUMMY) placeholder [`parse`] falls
+/// back to.
+pub fn compile_and_typecheck(
+    source: &str,
+    schemes: SessionSchemes,
+    file: source::FileId,
+) -> CompileOutcome {
+    let ast = match parse_with(source, file) {
         Ok(a) => a,
         Err(e) => return CompileOutcome::Parse(e),
     };

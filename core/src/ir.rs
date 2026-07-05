@@ -6,7 +6,7 @@
 //! [`Comp`] is effectful and sequenced.  This split guarantees that
 //! effects are always explicit — a value can never diverge or perform I/O.
 //!
-//! Every [`Comp`] node carries an optional [`Span`] for error reporting
+//! Every [`Comp`] node carries an optional [`crate::source::Span`] for error reporting
 //! (synthetic nodes — builtins, prelude, generated code — have `span: None`).
 //! Sub-`Val` positions inside a `Comp` that the typechecker narrows onto
 //! (`If.cond`, `Case.scrutinee`/`table`, per-arg in `Args`, per-key in
@@ -213,7 +213,7 @@ pub struct RedirectV {
 /// A computation node — effectful, sequenced — with an optional source span.
 ///
 /// This is the primary IR type that the evaluator interprets.  Every node
-/// carries its own [`Span`] (via the wrapping `Spanned`), set once during
+/// carries its own [`crate::source::Span`] (via the wrapping `Spanned`), set once during
 /// elaboration, so error messages can point back to the originating source
 /// text.  Synthetic nodes (builtins, prelude, generated code) carry
 /// `span: None`.
@@ -326,7 +326,7 @@ pub enum CompKind {
     /// one operand"; the evaluator and typechecker dispatch on
     /// variant rather than a runtime arity guard.
     Not(Val),
-    /// Indexing: V[k1][k2] — eliminate a collection value by a sequence
+    /// Indexing: `V[k1][k2]` — eliminate a collection value by a sequence
     /// of key values.  Computation-typed only because it can fail
     /// (key not found, out of bounds); target and keys are pure values.
     ///

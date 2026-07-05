@@ -1,7 +1,8 @@
 //! Primitive operators and value indexing.
 //!
-//! [`eval_primop`] evaluates `PrimOp` nodes (arithmetic, comparison, boolean
-//! negation) produced by the elaborator's expression desugaring.
+//! [`eval_not`] and [`eval_binary`] evaluate the primitive operator nodes
+//! (arithmetic, comparison, boolean negation) produced by the elaborator's
+//! expression desugaring.
 //! [`index_value`] implements `Comp::Index` — subscripting into lists by
 //! integer position and into maps by string key.
 

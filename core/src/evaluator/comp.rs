@@ -179,38 +179,40 @@ fn eval_letrec(
         }
     }
     let snap = shell.snapshot();
-    shell.mobile.scope.push_scope();
     // Fixpoint encoding: install each binding as a self-referential
     // thunk.
-    for (i, (name, _rhs)) in bindings.iter().enumerate() {
-        shell.mobile.scope.set(
-            name.clone(),
-            Value::Block {
-                body: Arc::new(Spanned::synthetic(CompKind::LetRec {
-                    slot: Some(i),
-                    bindings: bindings.clone(),
-                })),
-                captured: snap.clone(),
-            },
-        );
-    }
+    let install = |shell: &mut Shell| {
+        for (i, (name, _rhs)) in bindings.iter().enumerate() {
+            shell.mobile.scope.set(
+                name.clone(),
+                Value::Block {
+                    body: Arc::new(Spanned::synthetic(CompKind::LetRec {
+                        slot: Some(i),
+                        bindings: bindings.clone(),
+                    })),
+                    captured: snap.clone(),
+                },
+            );
+        }
+    };
     match slot {
         None => {
-            let lambdas = bindings
-                .iter()
-                .map(|(_, lam)| eval_val(lam, shell))
-                .collect::<Result<Vec<_>, _>>()?;
-            shell.mobile.scope.pop_scope();
+            let lambdas = with_scope(shell, |shell| {
+                install(shell);
+                bindings
+                    .iter()
+                    .map(|(_, lam)| eval_val(lam, shell))
+                    .collect::<Result<Vec<_>, _>>()
+            })?;
             for ((name, _), lambda) in bindings.iter().zip(lambdas) {
                 shell.mobile.scope.set(name.clone(), lambda);
             }
             Ok(Value::Unit)
         }
-        Some(i) => {
-            let lambda = eval_val(&bindings[i].1, shell)?;
-            shell.mobile.scope.pop_scope();
-            Ok(lambda)
-        }
+        Some(i) => with_scope(shell, |shell| -> Raw<Value> {
+            install(shell);
+            Ok(eval_val(&bindings[i].1, shell)?)
+        }),
     }
 }
 
@@ -220,7 +222,7 @@ fn eval_letrec(
 /// [`Value::Lambda`] is itself a value (the function), so it is
 /// returned unchanged — the trampoline applies it when the call site
 /// supplies arguments. Other runtime types are a type error.
-fn step_force(val: &Val, shell: &mut Shell) -> Raw<Value> {
+pub(crate) fn step_force(val: &Val, shell: &mut Shell) -> Raw<Value> {
     let v = eval_val(val, shell)?;
     let result = match v {
         // `!{ … }` eliminates a thunk to its value, which the caller

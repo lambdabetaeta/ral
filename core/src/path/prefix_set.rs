@@ -40,7 +40,7 @@ impl PrefixSet {
     /// Resolve each prefix through `resolver` into both forms:
     /// [`Resolver::resolve`] applies sigil/`~` expansion and `.`/`..`
     /// normalisation (already done for a [`NormalizedPrefix`], idempotent
-    /// here), then [`ResolvedPath::canonicalise_lenient`] follows symlinks
+    /// here), then [`crate::path::ResolvedPath::canonicalise_lenient`] follows symlinks
     /// across whatever prefix of the path exists.  Accepts either the
     /// grant-side [`NormalizedPrefix`]es or the bare exec-dir strings.
     pub fn resolve<S: AsRef<str>>(resolver: &Resolver, prefixes: &[S]) -> Self {

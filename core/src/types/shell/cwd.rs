@@ -131,7 +131,7 @@ impl Shell {
     }
 
     /// Resolve `path` against the shell's effective cwd
-    /// ([`Self::cwd`]), minting a [`ResolvedPath`].  Forwards through
+    /// ([`Self::cwd`]), minting a [`crate::path::ResolvedPath`].  Forwards through
     /// [`Context::resolver`](super::Context::resolver), so a
     /// `within [dir: …]` override is honoured first and a prior `cd`
     /// is honoured otherwise.  The fs gates consume this directly; a

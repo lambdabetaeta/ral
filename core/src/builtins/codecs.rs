@@ -105,6 +105,15 @@ fn stream_cons(head: String, tail: Value) -> Value {
     }
 }
 
+/// Decode the channel into a `` `more``/`` `done`` Stream of lines.
+///
+/// The Stream *shape* matches the prelude's demand-driven protocol so it
+/// composes with `stream-map` / `stream-take` / etc., but the shape is
+/// the only part that's lazy: the whole channel is read to EOF up front
+/// and every node is built before this call returns, so forcing a tail
+/// is a lookup into an already-built value, not a read.  An unbounded or
+/// very large source is read in full regardless of how few elements a
+/// downstream `stream-take` asks for.
 pub(super) fn builtin_from_lines(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let bytes = input_bytes(args, "from-lines", shell)?;
     let text = String::from_utf8_lossy(&bytes).into_owned();

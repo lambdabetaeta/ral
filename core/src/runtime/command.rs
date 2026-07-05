@@ -28,14 +28,13 @@
 //! the same `build_command` / `spawn` primitives directly through
 //! [`super::pipeline::run_pipeline`].
 
-use crate::syntax::ast::RedirectMode;
 use crate::types::*;
 
 mod child;
 mod foreground;
 mod identity;
 pub(crate) mod io_event;
-mod process;
+pub(crate) mod process;
 mod redirect;
 mod stdio;
 mod uutils;
@@ -49,7 +48,7 @@ pub(crate) use redirect::{
     install_stdin_redirect, open_file, restore_redirects,
 };
 use stdio::classify_redirects;
-pub(crate) use stdio::{EvalRedirect, StdinRoute, TtyInputPermit, stderr_mode};
+pub(crate) use stdio::{EvalRedirect, EvalRedirectV, StdinRoute, TtyInputPermit, stderr_mode};
 use vet::ExecImage;
 pub(crate) use vet::vet;
 
@@ -68,7 +67,7 @@ use stdio::{announce_command_title, inherit_tty, wire_stderr, wire_stdin, wire_s
 pub(crate) fn run(
     id: CommandIdentity,
     args: &[Value],
-    redirects: &[(u32, RedirectMode, EvalRedirect)],
+    redirects: &[EvalRedirectV],
     shell: &mut Shell,
 ) -> Raw<Value> {
     let rc = vet(&id, args, shell)?;

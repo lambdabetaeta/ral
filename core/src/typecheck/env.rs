@@ -293,7 +293,7 @@ pub struct InferCtx {
     pub unifier: Unifier,
     pub errors: Vec<TypeError>,
     /// Current source position for newly emitted [`TypeError`]s.
-    /// Narrowed scopewise by [`Inferencer::with_span`] (in
+    /// Narrowed scopewise by [`Inferencer::with_span`](crate::source::WithSpan::with_span) (in
     /// `typecheck/infer.rs`), the single per-position narrowing
     /// primitive the inferencer uses.
     pub pos: Option<Span>,
@@ -305,7 +305,7 @@ pub struct InferCtx {
     /// The `F[input, output]` spec inferred for each pipeline stage,
     /// keyed by the stage `Comp`'s address.  Written at the end of
     /// `infer_pipeline` after every adjacency is unified; read by the
-    /// annotation pass, which grounds each spec into a [`Wire`].  The
+    /// annotation pass, which grounds each spec into a [`crate::mode::Wire`].  The
     /// recorded modes may still be variables — they resolve at
     /// annotation time, after the whole walk.
     pub stage_specs: HashMap<usize, PipeSpec>,

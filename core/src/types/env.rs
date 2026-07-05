@@ -33,7 +33,7 @@ pub struct Binding {
 /// Lexical environment: a stack of name→[`Binding`] scopes, innermost
 /// last.
 ///
-/// Scope[0] is the prelude, populated by `builtins::register`.  Locals
+/// `Scope[0]` is the prelude, populated by `builtins::register`.  Locals
 /// are pushed/popped above it.
 ///
 /// The chain is an `imbl::Vector` rather than a `Vec` so that cloning

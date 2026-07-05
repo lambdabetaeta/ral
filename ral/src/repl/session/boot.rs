@@ -316,9 +316,13 @@ fn source_config_inner(path: &str, ctx: &mut RcCtx<'_>) -> Result<(), String> {
             return Err(format!("{path}: skipped due to type errors"));
         }
     };
-    // Top-level eval: `evaluate` absorbs tail calls and returns
-    // `Settled<Value>`.  Match directly on `Break`.
-    let config = match evaluate(&comp, ctx.shell) {
+    // Evaluate under the same guarded pipeline `source`/`use`/plugin
+    // loading share: `evaluate_checked` swaps `location.script`/
+    // `location.source` to this file for the duration of the call, so a
+    // runtime error inside the rc file is located against it rather than
+    // whatever script context boot inherited.
+    let config = match ral_core::builtins::modules::evaluate_checked(ctx.shell, &comp, &src, path)
+    {
         Ok(v) => v,
         Err(Break::Error(e)) => return Err(format!("{path}: {}", e.message)),
         // `exit` in rc: stop sourcing, boot continues.

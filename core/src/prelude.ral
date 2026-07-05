@@ -305,12 +305,7 @@ let first = { |pred items|
 ## Zip items with their indices: enumerate $xs → [[index: 0, item: x0], ...].
 let enumerate = { |items|
     let n = !{length $items}
-    let _go = { |i acc|
-        if $[$i < 0] { return $acc } else {
-            _go $[$i - 1] [$i, ...$acc]
-        }
-    }
-    map { |i| return [index: $i, item: $items[$i]] } !{_go $[$n - 1] []}
+    map { |i| return [index: $i, item: $items[$i]] } !{range 0 $n}
 }
 
 ## Flatten a list of lists one level (tail-recursive).
@@ -406,8 +401,9 @@ let stream-each = { |f s|
 # above, and on Stream helpers here.
 
 ## Read a file as a materialised list of lines.
-## Refuses files larger than 10 MiB; for large files use
-## `from-lines` with stream operations instead.
+## Refuses files larger than 10 MiB — `from-lines` reads the whole
+## channel eagerly too (it is not a bounded-memory alternative), so
+## this limit exists to fail predictably rather than silently.
 let from-lines-list = { |p|
     let info = file-info $p
     if $[$info[size] > 10485760] {
@@ -421,12 +417,16 @@ let from-lines-list = { |p|
 # JSON Lines — one JSON value per line, over the serde-backed `from-json`
 # / `to-json` codecs.  `from-jsonl` keeps `from-lines` at the head of its
 # body pipeline so the block advertises the `Bytes` input channel, and so
-# composes both as `from-jsonl < $p` and `… | from-jsonl`; the result is a
-# lazy `Stream` of decoded values.  Each line is routed back onto the
-# channel with `to-string` before `from-json` reads it, since decoders are
-# 0-arity.  `to-json` emits compact (single-line) JSON, so one record per
-# line falls out for free.
-## Decode JSON Lines from stdin into a lazy stream of values.
+# composes both as `from-jsonl < $p` and `… | from-jsonl`.  Each line is
+# routed back onto the channel with `to-string` before `from-json` reads
+# it, since decoders are 0-arity.  `to-json` emits compact (single-line)
+# JSON, so one record per line falls out for free.  The result is a Stream
+# value shaped for `stream-*` consumption; only the decode step is lazy
+# (`stream-map` decodes a line only when demanded) — the underlying
+# `from-lines` read is not, so `from-jsonl` gives no bounded-memory
+# guarantee over an unbounded or very large source.
+## Decode JSON Lines from stdin into a Stream of values, decoded lazily
+## but read from an eagerly-materialised `from-lines` source.
 let from-jsonl = { from-lines | stream-map { |line| to-string $line | from-json } }
 ## Encode a list of values as JSON Lines, one compact record per line.
 let to-jsonl = { |items| each { |x| to-json $x; echo "" } $items }

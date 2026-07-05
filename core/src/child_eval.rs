@@ -19,12 +19,44 @@ use crate::evaluator::call;
 use crate::io::TerminalState;
 use crate::ir::Comp;
 use crate::serial::{InternCtx, ScopeTable, SerialEnvSnapshot, SerialValue, build_arcs};
+use crate::source::FileId;
 use crate::subprocess::{WireExecNode, WireMobile, reexec_child_shell};
 use crate::types::{
-    Break, CapturePolicy, Env, Error, Escape, ExecNode, Mobile, Settled, Shell, Status, Tail, Value,
+    Break, CapturePolicy, Env, Error, Escape, ExecNode, LocationCursor, Mobile, Settled, Shell,
+    Status, Tail, Value,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+/// The parent's active script identity at the moment a pipeline stage's
+/// body crossed the wire: the [`FileId`] the parent's `SourceDb` already
+/// resolves it under, plus the name and text needed to rebuild the
+/// position cache locally.  Installed into the child's [`LocationCursor`]
+/// verbatim, never re-registered, so a `SourceLoc` the child raises
+/// carries the exact id the parent's registry resolves — and the child
+/// computes real line/col from real text instead of `comp.rs`'s no-source
+/// byte-offset fallback.  Carried on the eval-request envelope rather than
+/// [`WireMobile`], mirroring `audit_policy`: it names the parent's turn
+/// state, not a property of the mobile snapshot itself.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct WireScriptContext {
+    pub file: FileId,
+    pub name: String,
+    pub text: String,
+}
+
+impl WireScriptContext {
+    /// Capture `loc`'s script identity for the wire, or `None` when `loc`
+    /// has no script context installed yet (a bare, unstarted shell).
+    pub(crate) fn capture(loc: &LocationCursor) -> Option<Self> {
+        let source = loc.source.as_ref()?;
+        Some(Self {
+            file: loc.current,
+            name: loc.script.clone(),
+            text: source.as_str().to_string(),
+        })
+    }
+}
 
 /// Serialized one-body evaluation request.
 ///
@@ -51,6 +83,10 @@ pub(crate) struct ChildEvalRequest {
     /// success.  Pipeline: only the final value-typed stage
     /// (`FinalValue::Report`).
     pub wants_value: bool,
+    /// The parent's script identity, so the child resolves its spans
+    /// against the parent's real source instead of `comp.rs`'s no-source
+    /// fallback.  See [`WireScriptContext`].
+    pub script: Option<WireScriptContext>,
 }
 
 /// Structured body outcome returned by the child.
@@ -143,13 +179,16 @@ pub(crate) fn transfer_error(err: Error) -> Error {
 
 /// Reify a [`Mobile`] and a body into a wire-ready [`ChildEvalRequest`].
 /// Inverse of [`decode_response`].  `captured` carries the pipeline stage
-/// closure env.
+/// closure env; `loc` is the launching turn's source cursor, captured as a
+/// [`WireScriptContext`] so the child resolves its spans against the same
+/// source.
 pub(crate) fn pack_request(
     body: Arc<Comp>,
     mobile: &Mobile,
     captured: Option<&Env>,
     audit_policy: Option<CapturePolicy>,
     wants_value: bool,
+    loc: &LocationCursor,
 ) -> Settled<ChildEvalRequest> {
     let mut ctx = InternCtx::new();
     let captured = match captured {
@@ -164,6 +203,7 @@ pub(crate) fn pack_request(
         captured,
         audit_policy,
         wants_value,
+        script: WireScriptContext::capture(loc),
     })
 }
 
@@ -195,12 +235,16 @@ fn eval_request(
         mobile,
         captured,
         audit_policy,
+        script,
         ..
     } = request;
 
     let arcs = build_arcs(&scope_table)?;
     let mut shell = reexec_child_shell(mobile, &arcs)?;
     shell.local.audit.install_active_policy(audit_policy);
+    if let Some(ctx) = script {
+        shell.install_remote_context(ctx.name, ctx.file, &ctx.text);
+    }
     // The stage child has no surface sink to replay to, but the body may
     // still call `surface`; the no-op `()` sink discards those calls.
     shell.turn.surface = Some(Arc::new(()));
@@ -468,6 +512,7 @@ mod tests {
             Some(&captured),
             shell.local.audit.active_policy(),
             wants_value,
+            &shell.turn.loc,
         )
         .expect("pack")
     }
@@ -567,6 +612,7 @@ mod tests {
             captured: None,
             audit_policy: None,
             wants_value: false,
+            script: None,
         };
 
         // Cross the actual codec: serialize the request and read it back.

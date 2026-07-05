@@ -158,38 +158,12 @@ impl WithinScope {
                     entries = map
                         .into_iter()
                         .map(|(cmd, thunk_val)| {
-                            validate_handler_arity(
-                                &thunk_val,
-                                1,
-                                &format!("within handlers: `{cmd}`"),
-                            )?;
-                            let Value::Lambda { param, body, .. } = &thunk_val else {
-                                unreachable!("validate_handler_arity guarantees a unary lambda");
-                            };
-                            if shell.mobile.scope.get(&cmd).is_some()
-                                || crate::builtins::is_builtin(&cmd)
-                            {
-                                return Err(sig(format!(
-                                    "within handlers: cannot install handler for binding `{cmd}`"
-                                )));
-                            }
-                            crate::typecheck::alias_arm_scheme(
-                                &cmd,
-                                param,
-                                body,
+                            HandlerEntry::vet(
+                                cmd,
+                                thunk_val,
                                 shell.session_schemes(),
+                                HandlerRole::Scoped,
                             )
-                            .map_err(|m| {
-                                use crate::typecheck::fmt_mode;
-                                sig(format!(
-                                    "within handlers: `{cmd}`'s body changes the head's \
-                                     pipeline mode ({} vs {}); a handler reinterprets a head \
-                                     and must preserve its modes — use a byte-output body or a codec",
-                                    fmt_mode(&m.left),
-                                    fmt_mode(&m.right)
-                                ))
-                            })?;
-                            Ok(HandlerEntry::ral_per_name(cmd, thunk_val))
                         })
                         .collect::<Settled<Vec<HandlerEntry>>>()?;
                     saw_handlers = true;

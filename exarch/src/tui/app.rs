@@ -288,7 +288,12 @@ impl App {
                 // adding them again double-counts the prompt — ~2x on a
                 // cache-heavy session, on the one gauge that tells the user
                 // when to `/compact` (X4).  Take the prompt total as-is.
-                self.last_input = u.input;
+                // Only the root's own prompt size belongs on that gauge; a
+                // concurrently-running sub-agent's small fresh-context usage
+                // would otherwise clobber it until the root's next round-trip.
+                if id == self.tabs.root() {
+                    self.last_input = u.input;
+                }
                 self.total_usage += u;
                 if let Some(vp) = self.tabs.viewport_mut(id) {
                     vp.add_usage(u);

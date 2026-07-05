@@ -540,7 +540,8 @@ const REACHABLE: &[Reachable] = &[
     // pin the three shapes that used to truncate silently (review F4,
     // F5): an expression block with extra atoms, index keys with a
     // second word, and a stray top-level `}` (which previously served
-    // as a stop condition and dropped the rest of the program).
+    // as a stop condition and dropped the rest of the program, and is
+    // now named as an unmatched brace rather than generic trailing input).
     r(
         "parse_trailing_expr_block",
         "echo $[1 2 3]",
@@ -554,7 +555,7 @@ const REACHABLE: &[Reachable] = &[
     r(
         "parse_trailing_stray_rbrace",
         "echo a\n}\necho b",
-        "trailing input",
+        "unmatched `}`",
     ),
     // ─── Resource caps (depth limits) ────────────────────────────────
     // These two are the friendly outcome when adversarial input

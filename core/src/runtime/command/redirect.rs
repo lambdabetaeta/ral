@@ -9,7 +9,7 @@ use crate::types::*;
 
 use super::io_event;
 use super::process::io_error;
-use super::stdio::EvalRedirect;
+use super::stdio::{EvalRedirect, EvalRedirectV};
 #[cfg(any(unix, windows))]
 use super::stdio::stderr_mode;
 
@@ -397,8 +397,15 @@ impl Drop for RedirectGuard {
 /// to leave them alone.  This predicate is the single point where that rule
 /// is named.
 #[cfg(any(unix, windows))]
-fn is_stdin_file_redirect(r: &(u32, RedirectMode, EvalRedirect)) -> bool {
-    matches!(r, (0, RedirectMode::Read, EvalRedirect::File(_)))
+fn is_stdin_file_redirect(r: &EvalRedirectV) -> bool {
+    matches!(
+        r,
+        EvalRedirectV {
+            fd: 0,
+            mode: RedirectMode::Read,
+            target: EvalRedirect::File(_)
+        }
+    )
 }
 
 /// Map a redirect fd to the matching Win32 `STD_*_HANDLE` slot id.
@@ -429,7 +436,7 @@ fn fd_to_std_handle(fd: u32) -> Settled<u32> {
 /// [`install_stdin_redirect`], not by the dup2 path.
 #[cfg(unix)]
 pub(crate) fn apply_redirects(
-    redirects: &[(u32, RedirectMode, EvalRedirect)],
+    redirects: &[EvalRedirectV],
     shell: &mut Shell,
 ) -> Settled<RedirectGuard> {
     let mut guard = RedirectGuard {
@@ -440,7 +447,7 @@ pub(crate) fn apply_redirects(
         if is_stdin_file_redirect(r) {
             continue;
         }
-        let (fd, mode, target) = r;
+        let EvalRedirectV { fd, mode, target } = r;
         match target {
             EvalRedirect::File(path) => {
                 let effective_mode = if *fd == 2 { stderr_mode(mode) } else { *mode };
@@ -516,7 +523,7 @@ fn install_dup2(src_fd: i32, dst_fd: u32, guard: &mut RedirectGuard) -> Settled<
 /// taking ownership.
 #[cfg(windows)]
 pub(crate) fn apply_redirects(
-    redirects: &[(u32, RedirectMode, EvalRedirect)],
+    redirects: &[EvalRedirectV],
     shell: &mut Shell,
 ) -> Settled<RedirectGuard> {
     let mut guard = RedirectGuard {
@@ -527,7 +534,7 @@ pub(crate) fn apply_redirects(
         if is_stdin_file_redirect(r) {
             continue;
         }
-        let (fd, mode, target) = r;
+        let EvalRedirectV { fd, mode, target } = r;
         let dst_slot = fd_to_std_handle(*fd)?;
         match target {
             EvalRedirect::File(path) => {
@@ -580,7 +587,7 @@ pub(crate) fn apply_redirects(
 /// unrelated targets.
 #[cfg(not(any(unix, windows)))]
 pub(crate) fn apply_redirects(
-    _redirects: &[(u32, RedirectMode, EvalRedirect)],
+    _redirects: &[EvalRedirectV],
     _shell: &mut Shell,
 ) -> Settled<RedirectGuard> {
     Ok(RedirectGuard { commits: vec![] })
@@ -622,11 +629,15 @@ pub(crate) fn commit_atomics(commits: Vec<AtomicCommit>) -> Settled<()> {
     reason = "[io-door:surface:stdin-redirect] The `< file` read door on fd 0: opens the model's stdin redirect and emits the read card eagerly (so the read precedes the body/exec it feeds, e.g. `cat < a`). The open IS the surfaced read."
 )]
 pub(crate) fn install_stdin_redirect(
-    redirects: &[(u32, RedirectMode, EvalRedirect)],
+    redirects: &[EvalRedirectV],
     shell: &mut Shell,
 ) -> Settled<StdinRedirectGuard> {
     let Some(path) = redirects.iter().rev().find_map(|r| match r {
-        (0, RedirectMode::Read, EvalRedirect::File(p)) => Some(p),
+        EvalRedirectV {
+            fd: 0,
+            mode: RedirectMode::Read,
+            target: EvalRedirect::File(p),
+        } => Some(p),
         _ => None,
     }) else {
         return Ok(StdinRedirectGuard::Untouched);
@@ -704,7 +715,11 @@ mod tests {
         let mut shell = Shell::default();
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("x").to_string_lossy().into_owned();
-        let redirects = [(fd, RedirectMode::Write, EvalRedirect::File(target))];
+        let redirects = [EvalRedirectV {
+            fd,
+            mode: RedirectMode::Write,
+            target: EvalRedirect::File(target),
+        }];
 
         let result = apply_redirects(&redirects, &mut shell);
 
@@ -722,7 +737,11 @@ mod tests {
         let _serial = FD_TABLE.lock().unwrap_or_else(|e| e.into_inner());
         let (fd, _barrier) = pinned_unopened_fd();
         let mut shell = Shell::default();
-        let redirects = [(fd, RedirectMode::Write, EvalRedirect::Fd(1))];
+        let redirects = [EvalRedirectV {
+            fd,
+            mode: RedirectMode::Write,
+            target: EvalRedirect::Fd(1),
+        }];
 
         let result = apply_redirects(&redirects, &mut shell);
 

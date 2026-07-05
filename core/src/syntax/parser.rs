@@ -23,7 +23,7 @@
 //! ([`Parser::parse_expr_prec`]) over the token stream the *outer*
 //! lexer produced for the expression block: no re-lex hop, no raw
 //! substring round-trip.  The lexer also fuses `&&` / `||` for us
-//! (see [`lexer::Lexer::scan_expr_block`]) so Pratt sees the same
+//! (see `lexer::Lexer::scan_expr_block`) so Pratt sees the same
 //! bare-word logical operators it would outside any nesting.
 
 use crate::source::{Span, Spanned};
@@ -170,7 +170,10 @@ impl Parser {
     /// — `parse_program` halting at a stray `RBrace`, `parse_word`
     /// returning after one word, the Pratt parser settling on one
     /// expression — must not silently drop the remainder.  The first
-    /// leftover token is reported as trailing input, spanning that token.
+    /// leftover token is reported as trailing input, spanning that token —
+    /// except a leftover `RBrace`, which is named as an unmatched `}`
+    /// rather than folded into the generic message, since neither "trailing"
+    /// nor "after the parse completed" holds when the brace sits mid-program.
     ///
     /// It is the only constructor reachable from the sub-stream sites
     /// (`parse_force_body`, `parse_expr_block`, `parse_index_keys`) and
@@ -183,6 +186,9 @@ impl Parser {
         let mut parser = Parser::new(tokens);
         let value = body(&mut parser)?;
         if parser.peek() != &Token::Eof {
+            if parser.peek() == &Token::RBrace {
+                return Err(parser.error("unmatched `}` — no enclosing block is open"));
+            }
             let found = parser.peek().clone();
             return Err(parser.error(format!(
                 "trailing input: unexpected {found} after the parse completed"
@@ -2179,13 +2185,30 @@ mod tests {
     }
 
     /// F5: a stray top-level `}` must be a parse error rather than a
-    /// silent stop condition that truncates the program.
+    /// silent stop condition that truncates the program, and must be
+    /// named as an unmatched brace rather than folded into the generic
+    /// trailing-input message (neither "trailing" nor "after the parse
+    /// completed" is true when statements follow the brace).
     #[test]
     fn top_level_stray_rbrace_rejected() {
         let err = parse("echo a\n}\necho b").unwrap_err();
         assert!(
-            err.message.contains("trailing input"),
-            "expected trailing-input error, got: {}",
+            err.message.contains("unmatched `}`"),
+            "expected an unmatched-brace error, got: {}",
+            err.message
+        );
+    }
+
+    /// The same shape after a well-formed block, with more statements
+    /// following the stray brace — the "trailing input" wording would be
+    /// doubly wrong here since the brace isn't trailing and the parse
+    /// hasn't completed.
+    #[test]
+    fn mid_program_stray_rbrace_names_unmatched_brace() {
+        let err = parse("{ let x = 1 } } let y = 2").unwrap_err();
+        assert!(
+            err.message.contains("unmatched `}`"),
+            "expected an unmatched-brace error, got: {}",
             err.message
         );
     }

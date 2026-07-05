@@ -24,7 +24,7 @@ mod group;
 pub(crate) mod helper;
 mod launch;
 mod protocol;
-mod resolve;
+pub(crate) mod resolve;
 mod route;
 mod stage;
 

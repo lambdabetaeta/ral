@@ -69,8 +69,18 @@ impl Ast {
                 scopes.pop();
             }
             Ast::Block(stmts) => {
+                let mut pushed = 0;
                 for stmt in stmts {
                     stmt.item.collect_free_refs(candidates, scopes, out);
+                    if let Ast::Let { pattern, .. } = &stmt.item {
+                        let mut names = HashSet::new();
+                        pattern.item.collect_names(&mut names);
+                        scopes.push(names);
+                        pushed += 1;
+                    }
+                }
+                for _ in 0..pushed {
+                    scopes.pop();
                 }
             }
             Ast::Let { pattern, value } => {

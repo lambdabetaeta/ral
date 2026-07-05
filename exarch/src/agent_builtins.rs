@@ -917,7 +917,15 @@ fn builtin_fff(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let cwd = checked_read_path(shell, ".")?;
     let idx = index_for(&cwd).map_err(sig)?;
     let paths = search_paths(idx, &query, DEFAULT_LIMIT).map_err(sig)?;
-    Ok(Value::list(paths.into_iter().map(Value::String).collect()))
+    let allowed = paths
+        .into_iter()
+        .filter(|rel| {
+            let rp = shell.resolve(rel);
+            shell.check_fs_read(&rp).is_ok()
+        })
+        .map(Value::String)
+        .collect();
+    Ok(Value::list(allowed))
 }
 
 fn scheme_explore_dir(_u: &mut Unifier) -> Scheme {

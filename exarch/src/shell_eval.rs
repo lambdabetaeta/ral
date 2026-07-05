@@ -396,12 +396,12 @@ pub fn run_shell(
                             .downcast_ref::<ral_core::transport::IdentityTransport>()
                             .map(|t| t.shell_mut().shell.sources().clone())
                             .unwrap_or_default();
-                        let rendered = ral_core::diagnostic::format_runtime_error_auto(
+                        let exit = ral_core::diagnostic::report_runtime_error(
+                            &mut stderr_bytes,
                             &sources,
                             &e,
                             _single_command,
                         );
-                        stderr_bytes.extend_from_slice(rendered.as_bytes());
 
                         // Add recovery tip for command exits
                         let is_cmd_exit = matches!(
@@ -427,7 +427,7 @@ pub fn run_shell(
                             tip.push('\n');
                             stderr_bytes.extend_from_slice(tip.as_bytes());
                         }
-                        (e.exit_code().clamp(0, 255), None)
+                        (exit, None)
                     }
                     ral_core::transport::BreakMirror::Exit(code) => ((*code).clamp(0, 255), None),
                     #[cfg(unix)]

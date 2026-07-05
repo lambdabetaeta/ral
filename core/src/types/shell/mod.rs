@@ -59,6 +59,7 @@ use super::value::{BuiltinTable, HandlerStack, Value};
 use crate::diagnostic::{Source, SourceDb};
 use crate::io::Io;
 use crate::process::{DurableRoot, ForegroundScope};
+use crate::source::FileId;
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -178,7 +179,7 @@ impl EventSink for () {
 /// Shared handle to the turn-local structured-event sink.  Turn-scoped, not a
 /// persistent `Shell` capability: installed only by a turn door
 /// ([`Shell::run_source_turn`](crate::Shell::run_source_turn) /
-/// [`Shell::run_value_turn`](crate::Shell::run_value_turn)), it has no liveness
+/// [`Shell::run_hook`](crate::Shell::run_hook)), it has no liveness
 /// role, so a clone can never decide that a turn is over.
 pub type SurfaceSink = Arc<dyn EventSink>;
 
@@ -437,10 +438,24 @@ impl Shell {
         self.install_script_context(name, text);
     }
 
+    /// Install a script context using an already-minted [`FileId`] and its
+    /// source text, without registering into the session registry — the
+    /// seam a re-exec'd pipeline-stage child uses to resolve its spans
+    /// against the exact source and file identity its parent already
+    /// registered, rather than minting a second, differently-numbered copy
+    /// in its own (empty) session registry.
+    pub(crate) fn install_remote_context(&mut self, name: String, file: FileId, text: &str) {
+        let source = Source::from_text(&name, text);
+        self.turn.loc.current = file;
+        self.turn.loc.script = name.clone();
+        self.turn.loc.call_site.script = name;
+        self.turn.loc.source = Some(source);
+    }
+
     /// Resolve the seven pseudo-variables (`$env`, `$args`,
     /// `$script`, `$nproc`, `$CWD`, `$STATUS`, `$USER`).  These are
     /// rather than stored in scope, so they sit between the env
-    /// check and the handler-stack walk in [`Self::resolve_value`].
+    /// check and the handler-stack walk in [`Self::lookup_value_name`].
     /// Any other name returns `None`.
     pub fn pseudo_var(&self, name: &str) -> Option<Value> {
         match name {
@@ -505,7 +520,7 @@ impl Shell {
     }
 
     /// Resolve `name` at value position (`$name` and other
-    /// [`Val::Variable`] uses). Value lookup is binding-only:
+    /// [`crate::ir::Val::Variable`] uses). Value lookup is binding-only:
     /// lexical scope, pseudo variables, and explicitly reified
     /// host/builtin bindings. User aliases and `within` handlers are
     /// operation handlers, not first-class values.

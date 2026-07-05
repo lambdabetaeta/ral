@@ -6,11 +6,11 @@
 //!
 //! The two sorts:
 //!
-//!   Value ::= Unit | Bool | Int | Float | String | [Value] | [String:Value]
-//!          | {l₁:V₁, …, lₙ:Vₙ | row}   -- record (row-polymorphic)
-//!          | {Comp} | Handle | TypeVar
-//!   Comp ::= F[I,O] Value | Value → Comp | CompVar
-//!   I,O ::= ∅ | Bytes | IOVar
+//!   `Value ::= Unit | Bool | Int | Float | String | [Value] | [String:Value]`
+//!   `       | {l₁:V₁, …, lₙ:Vₙ | row}`   -- record (row-polymorphic)
+//!   `       | {Comp} | Handle | TypeVar`
+//!   `Comp ::= F[I,O] Value | Value → Comp | CompVar`
+//!   `I,O ::= ∅ | Bytes | IOVar`
 //!
 //! Generalisation happens at Bind (let) nodes.  Recursive bindings (LetRec,
 //! Rec) are given monomorphic types to prevent unsound generalisation.

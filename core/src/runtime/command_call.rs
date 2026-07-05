@@ -6,10 +6,9 @@
 //! the `^name` form skips env and builtins; path heads skip all three.
 
 use crate::ir::*;
-use crate::syntax::ast::RedirectMode;
 use crate::types::*;
 
-use super::command::{self, CommandIdentity, EvalRedirect};
+use super::command::{self, CommandIdentity, EvalRedirectV};
 use crate::evaluator::audit;
 use crate::evaluator::redirect::with_redirects;
 
@@ -137,7 +136,7 @@ fn refuse_head(id: &CommandIdentity, shell: &mut Shell) -> Break {
 pub(crate) fn run_call(
     head: &CommandWord,
     args: &[Value],
-    redirects: &[(u32, RedirectMode, EvalRedirect)],
+    redirects: &[EvalRedirectV],
     shell: &mut Shell,
 ) -> Raw<Value> {
     if !matches!(head.name().bare(), Some(name) if name.starts_with('_')) {
@@ -160,7 +159,7 @@ pub(crate) fn run_call(
 fn run_builtin(
     entry: BuiltinEntry,
     args: &[Value],
-    redirects: &[(u32, RedirectMode, EvalRedirect)],
+    redirects: &[EvalRedirectV],
     shell: &mut Shell,
 ) -> Raw<Value> {
     let body = entry.body.clone();
@@ -222,7 +221,7 @@ fn run_handler(entry: HandlerEntry, depth: usize, args: &[Value], shell: &mut Sh
 fn run_host_thunk(
     name: &str,
     args: &[Value],
-    redirects: &[(u32, RedirectMode, EvalRedirect)],
+    redirects: &[EvalRedirectV],
     shell: &mut Shell,
     f: impl FnOnce(&[Value], &mut Shell) -> Settled<Value>,
 ) -> Raw<Value> {
@@ -235,7 +234,7 @@ fn run_host_thunk(
 fn run_external(
     id: CommandIdentity,
     args: &[Value],
-    redirects: &[(u32, RedirectMode, EvalRedirect)],
+    redirects: &[EvalRedirectV],
     shell: &mut Shell,
 ) -> Raw<Value> {
     let stdin_guard = command::install_stdin_redirect(redirects, shell)?;

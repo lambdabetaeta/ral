@@ -8,7 +8,7 @@
 //! output mode to *equal* the consumer's input mode; a value cannot
 //! silently cross a byte edge (`docs/SPEC.md` §4.2.1, §20.4).
 //!
-//! The static Hindley–Milner checker in [`crate::typecheck`] is the sole
+//! The static Hindley–Milner checker in [`mod@crate::typecheck`] is the sole
 //! engine over these modes: it validates a whole program ahead of time and
 //! grounds each stage's variable into a [`Wire`], the two-valued image the
 //! evaluator reads off the IR.  The equality rule itself lives on the
@@ -16,7 +16,7 @@
 //!
 //! `PipeMode`, `ModeVar`, and `PipeSpec` are serialized: they ride inside
 //! a [`crate::typecheck::Scheme`] and are baked into the prelude as a
-//! postcard blob (see the schema-evolution note atop [`crate::lib`]).
+//! postcard blob (see the schema-evolution note atop [`crate`]).
 //! Their serde derives are load-bearing.
 
 /// Unification variable for pipeline modes.

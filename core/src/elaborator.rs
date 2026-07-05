@@ -37,8 +37,9 @@
 //!
 //! # Entry point
 //!
-//! [`elaborate`] is the only public function.  It calls the [`group`] pre-pass
-//! to detect mutually recursive binding groups, then elaborates each group.
+//! [`elaborate`] is the only public function.  It calls the [`group_stmts`]
+//! pre-pass to detect mutually recursive binding groups, then elaborates
+//! each group.
 
 use crate::ir::*;
 use crate::prelude_manifest;

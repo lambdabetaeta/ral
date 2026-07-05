@@ -53,8 +53,9 @@ pub const UNDERLINE_RED: &str = "\x1b[4;31m";
 //   * `osc8_link`     — ST  (specified in iTerm2's hyperlink note and
 //                            preferred by xterm; lets payload text
 //                            contain a literal BEL).
-//   * `osc52_copy`    — BEL (matches tmux's accepted form and the
-//                            common-case examples in terminal docs).
+//   * `osc52_copy`    — BEL (the terminator tmux's own `Ms` capability
+//                            emits, and the one most consistently
+//                            recognised by terminals that support OSC 52).
 
 /// Build an OSC 0 sequence to set the terminal window/icon title.
 ///
@@ -87,7 +88,15 @@ pub fn osc8_link(uri: &str, text: &str) -> String {
 /// `ESC ] 52 ; c ; <base64> BEL` — `c` selects the system clipboard;
 /// the payload must already be base64-encoded by the caller.  Pushing
 /// the encoder up to the call site keeps `core` dependency-free
-/// (`ral` has the `base64` crate available).
+/// (`ral` and `exarch` both have the `base64` crate available).
+///
+/// BEL, not ST: tmux's own OSC parser accepts either terminator (its
+/// `input.c` notes OSC "may be terminated by \007 as well as ST"), but
+/// tmux's `Ms` capability — what it uses to relay a copy to the outer
+/// terminal — itself emits BEL, and some terminals that implement OSC
+/// 52 do not recognise the ST form at all.  BEL is therefore the
+/// terminator most likely to be understood end to end; this is the one
+/// builder every yank call site (REPL and exarch alike) should use.
 ///
 /// Reads (`ESC ] 52 ; c ; ? ST`) are intentionally not provided: the
 /// permission-prompt landscape across terminals is too uneven, and

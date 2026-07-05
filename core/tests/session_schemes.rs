@@ -9,6 +9,7 @@
 
 mod common;
 
+use ral_core::source::FileId;
 use ral_core::types::{Capabilities, Settled};
 use ral_core::{
     CompileOutcome, RequestedTerminalAccess, Shell, TurnIo, TurnReport, TurnRequest, TurnStdin,
@@ -50,7 +51,7 @@ fn turn(shell: &mut Shell, src: &str) -> Settled<Value> {
 /// Check `src` against the live session without evaluating it — the
 /// errors a turn would surface before running.
 fn check_errors(shell: &Shell, src: &str) -> Vec<TypeError> {
-    match compile_and_typecheck(src, shell.session_schemes()) {
+    match compile_and_typecheck(src, shell.session_schemes(), FileId::DUMMY) {
         CompileOutcome::Compiled(_) => Vec::new(),
         CompileOutcome::Parse(e) => panic!("parse: {src:?}: {e}"),
         CompileOutcome::Types(errs) => errs,

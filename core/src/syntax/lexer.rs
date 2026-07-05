@@ -143,7 +143,7 @@ pub enum Token {
     /// Construction (`` `ok 5 ``), tag-keyed record keys (`[`ok: 5]`), and case
     /// handler tables share this token.
     Tag(String),
-    /// Deref resolved by lexer: $name, $(name), $name[key].
+    /// Deref resolved by lexer: `$name`, `$(name)`, `$name[key]`.
     Deref(StringPart),
     /// Expression block `$[…]` outside of strings.  Carries the
     /// expression-block token stream (already with `&&`/`||` fused —

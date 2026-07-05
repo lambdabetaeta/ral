@@ -405,11 +405,10 @@ pub fn run(
     }
     eprintln!("Agent log: {}", session.log_dir().display());
     eprintln!(
-        "[done] {} turns · {:.1}s · {} · ${:.4}",
+        "[done] {} turns · {:.1}s · {}",
         headless.turns,
         elapsed.as_secs_f64(),
-        headless.usage,
-        headless.usage.dollars
+        headless.usage
     );
     r
 }

@@ -53,7 +53,7 @@ pub struct LocationCursor {
     pub source: Option<Source>,
     /// Identity of the active source — the [`FileId`] registered in the
     /// session registry for the text in `source`.  Stamped onto every
-    /// [`SourceLoc`] this cursor builds so the renderer resolves the right
+    /// [`crate::diagnostic::SourceLoc`] this cursor builds so the renderer resolves the right
     /// source at render time.  [`FileId::DUMMY`] before any script context is
     /// installed.
     pub current: FileId,

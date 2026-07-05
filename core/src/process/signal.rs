@@ -18,7 +18,7 @@
 //!     `pre_exec` before `execve` by the platform-specific
 //!     [`spawn_with_pgid`].
 //!
-//! Platform-specific machinery lives in [`unix`] and [`windows`]; this
+//! Platform-specific machinery lives in [`unix`] and `windows`; this
 //! file re-exports the items each platform provides and keeps the
 //! portable data types and the unwind-poll path here.
 

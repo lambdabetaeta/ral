@@ -66,7 +66,7 @@ pub(super) fn builtin_unalias(args: &[Value], shell: &mut Shell) -> Settled<Valu
 /// frame restricts shell access without enabling `chdir`.  An empty or
 /// missing path means `$HOME`.
 ///
-/// The process cwd is changed synchronously.  Because the `chpwd` lifecycle
+/// Only the shell-owned `Cwd` is updated, synchronously; the OS process cwd is left untouched.  Because the `chpwd` lifecycle
 /// hook must be fired by the REPL (which owns the plugin runtime), the
 /// `(old, new)` pair is stored on `shell.local.repl.pending_chpwd`; the REPL drains it
 /// after the evaluator returns.

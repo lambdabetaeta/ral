@@ -424,7 +424,7 @@ impl CommandFailure {
                 ),
             ),
             Self::StoppedByJobControl { .. } => Some(
-                "ral has no job control yet. Stopping a command inside a pipeline tears the pipeline down."
+                "ral's job control doesn't reach inside a pipeline; stopping one stage still tears the whole pipeline down."
                     .to_string(),
             ),
             Self::Spawn(_) => None,

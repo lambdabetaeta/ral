@@ -295,8 +295,9 @@ pub(super) const YANK_CAP: usize = 6000;
 
 /// Emit `text` to the host terminal's system clipboard via OSC 52.
 ///
-/// Uses the ST (`\e\\`) terminator rather than BEL because modern tmux
-/// in passthrough mode forwards ST more reliably.  Terminals impose
+/// Builds the sequence with `ral_core::ansi::osc52_copy` (see its doc
+/// for the BEL-vs-ST terminator rationale); this function only owns
+/// the base64 encoding and the write to stdout.  Terminals impose
 /// per-sequence size limits (kitty defaults to 8 KiB; iTerm2 silently
 /// drops oversized payloads); callers should bound the slice they pass
 /// to something screen-sized.
@@ -308,8 +309,9 @@ pub(super) fn osc52_copy(text: &str) -> io::Result<()> {
     use base64::{Engine, engine::general_purpose::STANDARD};
     use std::io::Write;
     let payload = STANDARD.encode(text);
+    let sequence = ral_core::ansi::osc52_copy(&payload);
     let mut out = io::stdout().lock();
-    write!(out, "\x1b]52;c;{payload}\x1b\\")?;
+    out.write_all(sequence.as_bytes())?;
     out.flush()
 }
 

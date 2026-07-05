@@ -25,8 +25,7 @@
 
 use super::Shell;
 use crate::types::{
-    AuditFragment, Binding, BuiltinEntry, Capabilities, HandlerEntry, Settled, Value, sig,
-    validate_handler_arity,
+    AuditFragment, Binding, BuiltinEntry, Capabilities, HandlerEntry, HandlerRole, Settled, Value,
 };
 
 impl Shell {
@@ -91,7 +90,7 @@ impl Shell {
 
     /// Run `f` with a handler frame pushed onto the handler stack for
     /// its dynamic extent.  Pair of the `within [handlers: …, handler:
-    /// …]` keywords.  Allocates a [`FrameHandle`] internally and uses it
+    /// …]` keywords.  Allocates a [`crate::types::FrameHandle`] internally and uses it
     /// for the paired remove — callers do not need to track handles.
     pub fn with_handlers<R>(
         &mut self,
@@ -118,34 +117,8 @@ impl Shell {
     /// install paths uniformly (the `alias` statement, rc `aliases:`
     /// maps, plugin loads).
     pub fn install_alias(&mut self, name: String, thunk: Value) -> Settled<()> {
-        if self.mobile.scope.get(&name).is_some() {
-            return Err(sig(format!(
-                "alias: `{name}` is a lexical binding in this scope; aliases install handler entries"
-            )));
-        }
-        if crate::builtins::is_builtin(&name) {
-            return Err(sig(format!(
-                "alias: cannot alias builtin `{name}`; lexical and builtin names are not handler names"
-            )));
-        }
-        validate_handler_arity(&thunk, 1, &format!("alias: `{name}`"))?;
-        let Value::Lambda { param, body, .. } = &thunk else {
-            unreachable!("validate_handler_arity guarantees a unary lambda");
-        };
-        let scheme = crate::typecheck::alias_arm_scheme(&name, param, body, self.session_schemes())
-            .map_err(|m| {
-                use crate::typecheck::fmt_mode;
-                sig(format!(
-                    "alias: `{name}`'s body changes the head's pipeline mode \
-                     ({} vs {}); an alias reinterprets a head and must preserve its \
-                     modes — match the existing head's modes or add a codec",
-                    fmt_mode(&m.left),
-                    fmt_mode(&m.right)
-                ))
-            })?;
-        self.mobile.context.handlers.remove_alias(&name);
-        let mut entry = HandlerEntry::ral_per_name(name, thunk);
-        entry.scheme = Some(scheme);
+        let entry = HandlerEntry::vet(name, thunk, self.session_schemes(), HandlerRole::Alias)?;
+        self.mobile.context.handlers.remove_alias(&entry.name);
         self.mobile.context.handlers.push_alias(vec![entry]);
         Ok(())
     }
