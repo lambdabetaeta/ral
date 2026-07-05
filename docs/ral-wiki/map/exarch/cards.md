@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1baac6d
-generated_at_date: 2026-06-22
+generated_at_commit: 568aa23
+generated_at_date: 2026-07-05
 covers_paths: [exarch/src/card.rs, exarch/src/tui/line.rs, exarch/src/tui/block.rs, exarch/src/tui/viewport.rs, exarch/data/agent.ral]
 ---
 
@@ -63,6 +63,27 @@ a missing `hunks` lifts to empty so a bare diff still renders.
 ([[map/exarch/io-surface|io-surface]]), otherwise `value_to_card` runs and emits one
 `Kind::Card` on the [[map/exarch/frontend|bus]]; detached workers buffer their
 `surface` calls and replay them on `await`, so a card replays for free.
+
+## Host-composed one-liners — `done`, `reaped`
+
+Two cards are composed in Rust, never decoded from a kit-authored `` `card ``.
+`done_card` renders a detached worker's completion outcome — the `` `done ``
+event core appends to every deferred surface batch — as one line: an outcome
+span roled by how it settled (`ok`/`bad`), plus a plain gloss naming it a
+background block. `reap_card` is its sibling for the lease chain's compact
+one-liner: a worker the registry removed by policy, unobserved rather than
+settled, renders as a `warn` span plus the worker's `cmd` and which lease
+fired ("idle 1h unobserved" / "24h backstop")
+([[decisions/260705_leases-and-budgets|leases-and-budgets]]). Both are
+fixed-position value marks, never an animation — the worker has already
+settled, or been removed, by the time either renders — and both stay inside
+the existing `text` mark vocabulary, so neither widens the closed mark set
+above.
+
+`reap_card`'s raw facts (`cmd`, `cause`) ride beside its rendered card on the
+bus's `Kind::WorkerReaped`, the same pairing `Kind::Io` uses for a structural
+I/O event: the raw fact reaches `transcript.jsonl`, the card is a rendering
+and does not ([[map/exarch/agent|agent]]).
 
 ## Render — one interpreter, one binding table
 

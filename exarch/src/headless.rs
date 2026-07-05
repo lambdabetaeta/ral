@@ -266,12 +266,13 @@ impl Sink for Headless {
             } if id == self.root_id => eprintln!("[nudge {used}/{max}: {cause}]"),
             Kind::Nudge { .. } => {}
             Kind::ProviderError(error) => eprintln!("provider error: {error:?}"),
-            // A surfaced render document, or a structural I/O event paired
-            // with the card composed from it.  In headless we condense the
-            // card's marks to stderr lines generically; for an io event its
-            // raw structural form is kept in `transcript.jsonl` (the card is a
-            // rendering and is not).
-            Kind::Card(card) | Kind::Io { card, .. } => {
+            // A surfaced render document, a structural I/O event paired with
+            // the card composed from it, or a lease-chain reap's one-liner.
+            // In headless we condense the card's marks to stderr lines
+            // generically; for an io event or a reap, the raw structural
+            // fact is kept in `transcript.jsonl` (the card is a rendering
+            // and is not).
+            Kind::Card(card) | Kind::Io { card, .. } | Kind::WorkerReaped { card, .. } => {
                 for line in card_stderr(&card) {
                     eprintln!("{line}");
                 }

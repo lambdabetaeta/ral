@@ -145,6 +145,16 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
         // the read/write/exec/grep shape. The card composed from it is a
         // rendering and lives in the TUI's `user.log`, never here.
         Kind::Io { event, .. } => ("io", json!({ "event": event })),
+        // The lease chain's raw reap fact — which worker, spelled how, and
+        // which lease fired — kept beside the one-liner `card` the same way
+        // `Kind::Io` keeps its structural `event` beside its rendering.
+        Kind::WorkerReaped { cmd, cause, .. } => {
+            let cause = match cause {
+                ral_core::types::ReapCause::Idle => "idle",
+                ral_core::types::ReapCause::Backstop => "backstop",
+            };
+            ("worker_reaped", json!({ "cmd": cmd, "cause": cause }))
+        }
         // Rendering- and presentation-only: a composed card, a progress phase,
         // the assistant token stream, the interactive-only live lines, and the
         // pin register (state that *is*, not a thing that happened).

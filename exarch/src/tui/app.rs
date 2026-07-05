@@ -408,6 +408,13 @@ impl App {
                     Err(card) => self.with_viewport(id, |vp| vp.push_card(card)),
                 }
             }
+            // The lease chain reaped a worker at the ready boundary: its
+            // one-line card lands as its own scrollback block, same as any
+            // other surfaced card — but never through the diff-detection
+            // path above, since a reap's card is always plain text.
+            Kind::WorkerReaped { card, .. } => {
+                self.with_viewport(id, |vp| vp.push_card(card));
+            }
             // A write surfaced: a barrier that ends the ral block, landed
             // standalone as its own card — the `write <path> <outcome>` heading
             // plus a preview of what it wrote (composed at the emit seam in

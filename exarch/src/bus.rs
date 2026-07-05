@@ -905,6 +905,21 @@ pub enum Kind {
     Unpin {
         key: String,
     },
+    /// The worker-lease chain reaped a still-running `spawn`/`watch` worker —
+    /// unobserved past its idle bound, or past its absolute backstop
+    /// regardless of observation — drained from
+    /// [`Shell::take_worker_reap_notices`](ral_core::Shell::take_worker_reap_notices)
+    /// at the drive loop's ready boundary. Transcript + TUI only: unlike
+    /// [`Kind::Card`], `cmd` and `cause` ride alongside the rendered `card`
+    /// (the [`Kind::Io`] pattern) so `transcript.jsonl` keeps the structural
+    /// fact the one-liner erases. Never model-facing — no `events.json`
+    /// twin, no inbox message; model-visible reap delivery is deferred
+    /// (`decisions/260705_leases-and-budgets`).
+    WorkerReaped {
+        cmd: String,
+        cause: ral_core::types::ReapCause,
+        card: Card,
+    },
 }
 
 /// One grouped hunk of a whole-file diff, carried by a

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1baac6d
-generated_at_date: 2026-06-22
+generated_at_commit: 568aa23
+generated_at_date: 2026-07-05
 covers_paths: [exarch/src/agent_builtins.rs, exarch/data/agent.ral]
 ---
 
@@ -64,6 +64,27 @@ read or write io card ([[map/exarch/io-surface|io-surface]]).
 Reads resolve through `checked_read_path` / `check_fs_read`; the `edit` write
 goes through `check_fs_write` under the turn's pushed [[design/grant|grant]]
 frame ([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]]).
+
+## The worker registry — `workers`
+
+`workers` → `[{id, cmd, started, class, state, handle}]`. Lists this agent's
+detached workers (`spawn`), settled or still running — the exact parallel of
+the `agents` tool's fleet listing ([[map/exarch/tools|tools]]), and the
+affordance that retires "detached workers are unmanaged by design": `class`
+reads `worker` for an ordinary
+`spawn` (`service`'s durable class is not built yet), `state` reads
+`running`/`settled`/`cancelled` off the handle's own lifecycle. There is no
+by-id control plane — `handle` is the worker's own `Handle`, retaken directly,
+so rediscovery after a compaction erases the binding name is: list, take the
+handle back, and resume `poll`/`await`/`race`/`cancel` as usual. Listing never
+renews a worker's idle-observation lease; only an eliminator naming the handle
+does — polling a handle retaken from a listing renews it exactly like polling
+any other handle
+([[decisions/260705_leases-and-budgets|leases-and-budgets]]).
+
+Registered only by `agent_builtins::install_on`, alongside the search/edit
+atoms above: a bare REPL shell, which never installs `EXARCH_BUILTINS`, has no
+`workers` at all — its own job control is [[map/repl/jobs|repl/jobs]].
 
 ## ral helpers — `agent.ral`
 

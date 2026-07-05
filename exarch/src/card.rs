@@ -665,6 +665,26 @@ pub fn done_card(outcome: &DoneOutcome) -> Card {
     Card(vec![Mark::Text { spans }])
 }
 
+// ── `reaped`: a lease-chain removal at the ready boundary ────────────────
+
+/// Compose one lease-chain reap into its one-line [`Card`] — the reap's
+/// analogue of [`done_card`]: a worker the registry removed by policy,
+/// unobserved rather than settled, so its `cmd` and the lease that fired
+/// render as a fixed one-liner. Unlike `done`, the `cmd` is worth keeping —
+/// this is the model's (or operator's) only record of *which* worker is
+/// gone, since nothing else names it once removed.
+pub fn reap_card(cmd: &str, cause: ral_core::types::ReapCause) -> Card {
+    let phrase = match cause {
+        ral_core::types::ReapCause::Idle => "idle 1h unobserved",
+        ral_core::types::ReapCause::Backstop => "24h backstop",
+    };
+    let spans = vec![
+        span(Role::Warn, "reaped"),
+        span_plain(&format!("  {cmd} — {phrase}")),
+    ];
+    Card(vec![Mark::Text { spans }])
+}
+
 /// A [`Card`] as a compact one-line summary — the session-layer digest the
 /// nudge facility shows when reminding the model of its pinned state, where the
 /// TUI's framed rendering is out of reach.  Text marks concatenate their span

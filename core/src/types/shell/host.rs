@@ -152,6 +152,16 @@ impl Shell {
         self.local.workers.take_reap_notices()
     }
 
+    /// Cancel every worker registered on this shell and reset the registry
+    /// wholesale, entries and pending reap notices alike. This is the
+    /// host's `/clear` arm: explicit destruction outranks every lease, the
+    /// durable class included, so a cleared shell starts with neither
+    /// stray running workers nor stale reap events. Returns how many
+    /// entries were cancelled.
+    pub fn cancel_workers(&mut self) -> usize {
+        self.local.workers.cancel_all()
+    }
+
     /// The terminal-foreground handoff borrow: `Some(&TerminalLease)` iff the
     /// installed turn's [`TerminalAccess`] permits it (`Leased` or
     /// `ExplicitLoan`) *and* the session actually owns a lease. The single

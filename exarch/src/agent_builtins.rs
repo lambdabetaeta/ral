@@ -1024,6 +1024,69 @@ fn builtin_skill_list(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
     Settled::Ok(Value::String(out))
 }
 
+/// `workers :: ∀α. F [{id: Int, cmd: String, started: Int, class: String,
+/// state: String, handle: Handle α}]` — one α for the whole listing, the
+/// same soundness compromise `race :: [Handle α] → …` already makes: a
+/// caller that retakes two different-typed handles from one listing picks
+/// its own `α` at each use site, same as unpacking two elements of a
+/// heterogeneous `race` list.
+fn scheme_workers(u: &mut Unifier) -> Scheme {
+    let av = u.fresh_tyvar();
+    let a = Ty::Var(av);
+    scheme(
+        &[av],
+        &[],
+        &[],
+        thunk(pure(Ty::List(Box::new(closed_record(&[
+            ("id", Ty::Int),
+            ("cmd", Ty::String),
+            ("started", Ty::Int),
+            ("class", Ty::String),
+            ("state", Ty::String),
+            ("handle", Ty::Handle(Box::new(a))),
+        ]))))),
+    )
+}
+
+/// `workers` — list this shell's registered workers (`spawn`, `watch`),
+/// settled or still running, each a record `{id, cmd, started, class,
+/// state, handle}`. `handle` is the worker's own `Handle`, retaken
+/// directly: `poll h`, `await h`, `cancel h` resume the ordinary eliminator
+/// idiom, which is the whole rediscovery story after a compaction erases
+/// the binding that named it. Polling a handle taken from a listing
+/// renews its lease same as polling any other handle; the listing itself
+/// never does — enumeration is not observation.
+fn builtin_workers(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    let records = shell
+        .workers()
+        .into_iter()
+        .map(|entry| {
+            let started = entry
+                .started
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            let class = match entry.class {
+                ral_core::types::LeaseClass::Worker => "worker",
+            };
+            let state = match *entry.handle.state.lock().unwrap() {
+                ral_core::types::HandleState::Running => "running",
+                ral_core::types::HandleState::Completed => "settled",
+                ral_core::types::HandleState::Cancelled => "cancelled",
+            };
+            Value::map(vec![
+                ("id".into(), Value::Int(entry.id.0 as i64)),
+                ("cmd".into(), Value::String(entry.cmd)),
+                ("started".into(), Value::Int(started)),
+                ("class".into(), Value::String(class.into())),
+                ("state".into(), Value::String(state.into())),
+                ("handle".into(), Value::Handle(entry.handle)),
+            ])
+        })
+        .collect();
+    Settled::Ok(Value::list(records))
+}
+
 pub static EXARCH_BUILTINS: &[BuiltinEntry] = &[
     BuiltinEntry {
         name: Cow::Borrowed("view-text"),
@@ -1066,6 +1129,12 @@ pub static EXARCH_BUILTINS: &[BuiltinEntry] = &[
         type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_fff),
         doc: "fff <query>  — fuzzy file-name search (frecency-ranked) over the working tree, returning [String].",
         body: BuiltinBody::Static(builtin_fff),
+    },
+    BuiltinEntry {
+        name: Cow::Borrowed("workers"),
+        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_workers),
+        doc: "workers  — list this agent's detached workers (spawn/watch), settled or still running: [{id, cmd, started, class, state, handle}]. `handle` is retaken directly — `poll h` / `await h` / `cancel h` resume the ordinary idiom, the whole rediscovery story once a binding name is gone. Polling a retaken handle renews its lease; listing alone does not.",
+        body: BuiltinBody::Static(builtin_workers),
     },
 ];
 
@@ -1219,5 +1288,186 @@ mod tests {
         let err = builtin_explore_dir(&[Value::Int(3)], &mut shell)
             .expect_err("a cancelled scope must abort the directory walk");
         assert_eq!(status(err), 130);
+    }
+
+    // ── `workers` builtin ────────────────────────────────────────────────
+
+    /// A worker body that blocks until cancelled: it polls
+    /// `process::check` so the spawned thread genuinely stays `Running`
+    /// (rather than completing instantly), letting a test list it and
+    /// retake its handle before ending it. Named distinctly from
+    /// `agent.rs`'s own test-only blocker (`test-clear-block-forever`) so
+    /// registering both in the same test binary never collides on name.
+    fn builtin_test_block_forever(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
+        loop {
+            ral_core::process::check(shell)?;
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    fn scheme_test_block_forever(_u: &mut Unifier) -> Scheme {
+        scheme(&[], &[], &[], thunk(pure(Ty::Unit)))
+    }
+
+    static WORKER_TEST_BUILTINS: &[BuiltinEntry] = &[BuiltinEntry {
+        name: Cow::Borrowed("test-block-forever"),
+        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_test_block_forever),
+        doc: "test-only: block until cancelled.",
+        body: BuiltinBody::Static(builtin_test_block_forever),
+    }];
+
+    /// Run `src` as one top-level turn with no detached lease (so nothing
+    /// races a reap during the test) and no boundary (the tests below
+    /// never care where a deferred surface batch would land). Panics on a
+    /// static (parse/type) failure or a runtime error — every source this
+    /// helper runs is expected to compile and complete cleanly.
+    fn run_top_level(shell: &mut Shell, src: &str) {
+        use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
+        let req = TurnRequest {
+            script_name: "<test>",
+            caps: ral_core::types::Capabilities::root(),
+            turn_limit: None,
+            detached_lease: None,
+            io: TurnIo::Capture,
+            terminal: RequestedTerminalAccess::Denied,
+            stdin: TurnStdin::Empty,
+            surface: None,
+            boundary: None,
+            lifecycle: Box::new(()),
+        };
+        match shell.run_source_turn(src, req) {
+            TurnReport::Ran { result, .. } => {
+                result.expect("worker-registry fixture source must run cleanly");
+            }
+            TurnReport::Static { .. } => panic!("well-formed source must run: {src:?}"),
+        }
+    }
+
+    /// The whole rediscovery idiom `decisions/260705_leases-and-budgets`
+    /// promises: spawn a worker without keeping its binding, list it back
+    /// through the `workers` builtin, retake the handle from the listing
+    /// record, and `poll` it — the touch that renews the idle-observation
+    /// lease. Mirrors core's own
+    /// `polled_worker_survives_past_its_idle_lease`, but through the
+    /// host-facing builtin rather than `Shell::workers` directly, so the
+    /// record shape and the retaken handle's liveness are both pinned.
+    #[test]
+    fn workers_lists_and_rediscovers_via_poll() {
+        let mut shell = Shell::new(Default::default());
+        ral_core::builtins::register_builtins(WORKER_TEST_BUILTINS);
+        shell.install_builtins(WORKER_TEST_BUILTINS);
+
+        // Spawn without keeping the binding: `workers` is the only way back.
+        run_top_level(&mut shell, "spawn { test-block-forever }");
+
+        let listed = builtin_workers(&[], &mut shell).expect("workers must list a live entry");
+        let Value::List(entries) = listed else {
+            panic!("workers must return a list, got {listed:?}");
+        };
+        assert_eq!(entries.len(), 1, "exactly one registered worker");
+        let Value::Map(record) = entries.get(0).cloned().expect("one entry") else {
+            panic!("each entry must be a record");
+        };
+        assert_eq!(
+            record.get("class"),
+            Some(&Value::String("worker".into())),
+            "class must read `worker` for an ordinary spawn"
+        );
+        assert_eq!(
+            record.get("state"),
+            Some(&Value::String("running".into())),
+            "state must read `running` for a still-blocked worker"
+        );
+        // `spawn { ... }` always registers under the generic `"<block>"`
+        // spelling (`concurrency::builtin_spawn`) — the record names the
+        // worker's *kind*, not its source text.
+        assert_eq!(
+            record.get("cmd"),
+            Some(&Value::String("<block>".into())),
+            "cmd must read the spawn body's generic spelling"
+        );
+        let handle = match record.get("handle") {
+            Some(Value::Handle(h)) => h.clone(),
+            other => panic!("handle field must carry a Handle, got {other:?}"),
+        };
+
+        let before = *handle.last_observed.lock().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let poll = shell
+            .lookup_builtin("poll")
+            .expect("core must register `poll`");
+        poll.body
+            .call(&[Value::Handle(handle.clone())], &mut shell)
+            .expect("poll on a still-running handle must not error");
+        let after = *handle.last_observed.lock().unwrap();
+        assert!(
+            after > before,
+            "poll on the retaken handle must renew the idle-observation lease"
+        );
+
+        // Clean up: cancel the still-running worker so this test doesn't
+        // leak a live background thread past its own return.
+        handle
+            .cancel
+            .cancel(ral_core::process::CancelCause::Explicit);
+    }
+
+    /// Enumeration is not observation: listing through the `workers`
+    /// builtin must never renew the idle-observation lease itself — only
+    /// an eliminator naming the handle does.
+    #[test]
+    fn workers_listing_does_not_renew_the_lease() {
+        let mut shell = Shell::new(Default::default());
+        ral_core::builtins::register_builtins(WORKER_TEST_BUILTINS);
+        shell.install_builtins(WORKER_TEST_BUILTINS);
+        run_top_level(&mut shell, "spawn { test-block-forever }");
+
+        let handle = {
+            let listed = builtin_workers(&[], &mut shell).expect("workers must list a live entry");
+            let Value::List(entries) = listed else {
+                panic!("workers must return a list");
+            };
+            let Value::Map(record) = entries.get(0).cloned().expect("one entry") else {
+                panic!("entry must be a record");
+            };
+            match record.get("handle") {
+                Some(Value::Handle(h)) => h.clone(),
+                other => panic!("handle field must carry a Handle, got {other:?}"),
+            }
+        };
+
+        let before = *handle.last_observed.lock().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let _ = builtin_workers(&[], &mut shell).expect("second listing must also succeed");
+        let after = *handle.last_observed.lock().unwrap();
+        assert_eq!(
+            after, before,
+            "listing must never renew the idle-observation lease"
+        );
+
+        handle
+            .cancel
+            .cancel(ral_core::process::CancelCause::Explicit);
+    }
+
+    /// Builtin-table hygiene: `workers` is exarch's own affordance, never
+    /// core's. The REPL installs `CORE_BUILTINS` alone and never
+    /// `EXARCH_BUILTINS`, so a bare ral host has no `workers` at all —
+    /// this pins the half of that story that doesn't require booting a
+    /// REPL to check: the name simply isn't in the core table.
+    #[test]
+    fn workers_is_exarch_only_never_a_core_builtin() {
+        assert!(
+            EXARCH_BUILTINS.iter().any(|e| e.name.as_ref() == "workers"),
+            "workers must be registered in EXARCH_BUILTINS"
+        );
+        assert!(
+            !ral_core::builtins::CORE_BUILTINS
+                .iter()
+                .any(|e| e.name.as_ref() == "workers"),
+            "workers must never be a core builtin: a bare ral host (the REPL) \
+             never installs EXARCH_BUILTINS, so it must have no `workers` name \
+             to fall back on"
+        );
     }
 }

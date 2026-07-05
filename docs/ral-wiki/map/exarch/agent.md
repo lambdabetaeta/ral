@@ -1,6 +1,6 @@
 ---
-generated_at_commit: bbca4f4
-generated_at_date: 2026-07-04
+generated_at_commit: 568aa23
+generated_at_date: 2026-07-05
 covers_paths: [exarch/src/agent.rs, exarch/src/agent_registry.rs, exarch/src/event.rs, exarch/src/fleet.rs, exarch/src/nudge.rs, exarch/src/digest.rs]
 ---
 
@@ -102,6 +102,16 @@ Three nested loops, the same for trunk and child alike:
   sub-agent has no human writer, so its inbox holds no steering and this is always
   empty.
 
+Every pass through `drive`'s top — its own ready boundary, both freshly entered
+and after a settled iteration — also drains this shell's lease-chain reap
+notices (`Shell::take_worker_reap_notices`) and emits one `Kind::WorkerReaped`
+per entry: a `spawn`/`watch` worker the lease chain removed by policy, idle or
+past its backstop, rather than one an eliminator observed away. Transcript and
+TUI only — the rendered one-liner is [[map/exarch/cards|cards]]'s `reap_card`,
+the completion card's sibling — never model-facing, since delivery of a reap to
+the model itself is deferred
+([[decisions/260705_leases-and-budgets|leases-and-budgets]]).
+
 The headless-completion gate is gone with `expect_action`
 ([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]]): the one role flag
 that did not fit the `parent` collapse is dropped, not relocated. The nudges that
@@ -193,8 +203,17 @@ so the child inherits the model in force at spawn and may diverge afterward.
 it obtains a fresh shell from `boot_root_shell` (the scratch-seeding wrapper
 around `bootstrap::boot_shell`, where stale-interrupt discard and cancel
 re-chaining live), truncates and restarts the event log, clears the schedule
-registry, and cascades cancel to its subtree. It is the focused agent's, not a
-fleet-wide reset.
+registry, and cascades cancel to its subtree. Before the outgoing shell is
+replaced, `clear` cancels every worker still registered on it
+(`Shell::cancel_workers`) — explicit destruction outranks every lease, the
+durable class included — reaching it through the transport while it is still
+unambiguously *this* shell, since there is no way back to it once the
+transport is swapped. A worker settling after the cancel still tries to flush
+its deferred `done` batch through the boundary it captured before the clear;
+the same generation guard (`InboxBoundary`,
+[[map/exarch/shell-eval|shell-eval]]) that already drops a stale agent result
+drops that flush too, so no pre-clear worker output survives into the rebuilt
+context. It is the focused agent's, not a fleet-wide reset.
 
 `compact` runs `provider.summarize` over the history when it crosses
 `COMPACT_THRESHOLD` (`digest.rs`, 500 KiB) and `AgentLog::can_compact` holds (no

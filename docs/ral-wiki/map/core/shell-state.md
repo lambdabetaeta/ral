@@ -1,5 +1,5 @@
 ---
-generated_at_commit: a28d34c
+generated_at_commit: 568aa23
 generated_at_date: 2026-07-05
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
@@ -72,7 +72,11 @@ field name *is* the invariant** — joined by `Shell`
   the entries it keeps the `ReapNotice` ledger the lease chain writes —
   one compact record per entry removed by policy, atomic with the removal
   under the registry's one lock — drained by the host through
-  `Shell::take_worker_reap_notices`
+  `Shell::take_worker_reap_notices`. `Shell::cancel_workers` is the other
+  worker operation on `host.rs`'s surface: the host's `/clear` arm, it fires
+  every entry's cancel scope and resets both ledgers wholesale — entries and
+  pending notices alike — since explicit destruction outranks every lease,
+  the durable class included
   ([[decisions/260705_leases-and-budgets|leases-and-budgets]]).
 
 `turn` / `session` / `local` are `pub(crate)`: the fields that encode turn

@@ -211,4 +211,25 @@ impl WorkerRegistry {
     pub(crate) fn count(&self) -> usize {
         self.0.lock().unwrap().entries.len()
     }
+
+    /// Cancel every registered entry's scope and reset the registry
+    /// wholesale — entries and any pending reap notices both dropped, so a
+    /// rebuilt context carries neither stale workers nor stale reap events.
+    /// This is `/clear`'s arm: explicit destruction outranks every lease,
+    /// the durable class included, so nothing here consults `LeaseClass`.
+    /// Returns the number of entries cancelled.
+    ///
+    /// One locked operation takes the whole inner ledger, replacing it with
+    /// an empty one; the cancels fire only after the guard drops, per the
+    /// module's lock discipline — never calling out while holding the lock.
+    pub(crate) fn cancel_all(&self) -> usize {
+        let taken = std::mem::take(&mut *self.0.lock().unwrap());
+        for entry in &taken.entries {
+            entry
+                .handle
+                .cancel
+                .cancel(crate::process::CancelCause::Explicit);
+        }
+        taken.entries.len()
+    }
 }

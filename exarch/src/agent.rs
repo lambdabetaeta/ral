@@ -457,6 +457,12 @@ impl Agent {
         // cancel chain is restored over ral's freshly installed handlers.
         let shell = boot_root_shell(scratch);
         self.log.clear(self.system.len())?;
+        // Cancel the outgoing shell's registered workers before it is
+        // replaced — `/clear` outranks every lease, the durable class
+        // included — while it is still unambiguously *this* shell reachable
+        // through the transport; once `replace_shell` swaps the transport
+        // below, there is no way back to it.
+        self.transport.shell_mut().shell.cancel_workers();
         self.replace_shell(shell);
         // A rebuilt context starts empty: drop the stale pressure reading so
         // the next turn's usage sets it afresh.
@@ -466,9 +472,13 @@ impl Agent {
         // mid-clear either lands its result before the sweep (and is swept
         // with the rest) or posts after the bump (and is dropped by
         // generation admission); no interleaving lets a pre-clear result
-        // survive into the rebuilt context.  This agent itself stays
-        // registered — `/clear` rebuilds its context, it does not tear it
-        // down.
+        // survive into the rebuilt context.  The workers themselves are
+        // already cancelled above, on the shell being retired; what the
+        // generation bump guards against is a straggler's late boundary
+        // flush (`InboxBoundary`, shell_eval.rs) reaching the rebuilt
+        // context before it notices the cancellation.  This agent itself
+        // stays registered — `/clear` rebuilds its context, it does not
+        // tear it down.
         self.agents.clear_subtree(self.id);
         // Schedules are producers too: disarm them before the sweep, for the
         // same reason.  A rebuilt agent carries no pending wakeups.
@@ -649,6 +659,27 @@ impl Agent {
         self.log.history_bytes()
     }
 
+    /// Drain the shell's lease-chain reap notices and emit one compact
+    /// transcript/TUI event per entry — a worker the lease chain removed by
+    /// policy (unobserved past its idle bound, or past its absolute
+    /// backstop) rather than one an eliminator observed away. Transcript +
+    /// TUI only: never model-facing, so this posts nothing to the inbox and
+    /// writes no `events.json` line — model-visible reap delivery is
+    /// deferred (`decisions/260705_leases-and-budgets`). Called once per
+    /// pass through the ready boundary in [`Self::drive`], the one site
+    /// both the TUI and headless drives share.
+    fn drain_worker_reaps(&mut self, emit: &Emitter) {
+        let notices = self.transport.shell_mut().shell.take_worker_reap_notices();
+        for notice in notices {
+            let card = crate::card::reap_card(&notice.cmd, notice.cause);
+            emit.emit(Kind::WorkerReaped {
+                cmd: notice.cmd,
+                cause: notice.cause,
+                card,
+            });
+        }
+    }
+
     /// The one shared turn loop — every node alike.  Pull a turn-boundary
     /// deliverable from the inbox, run one [`Self::apply`], let the nudge
     /// registry post any retry as a self-[`InboxMsg::Nudge`], and repeat.  An
@@ -678,6 +709,12 @@ impl Agent {
         let _slot = self.parent.is_none().then(|| cancel::publish(&self.cancel));
         let mut digest = (AgentOutcome::Empty, None);
         loop {
+            // Every pass back to the loop top is a settled ready boundary
+            // (the per-iteration quiesce below, or the invariant `drive` is
+            // entered under); drain the lease chain's reap notices here so a
+            // worker abandoned between turns still leaves a paper trail
+            // before the loop parks or picks up the next deliverable.
+            self.drain_worker_reaps(emit);
             // The park verdict ([`Self::park_mode`]) is recomputed on every wake
             // inside `next_or_idle`, so a `TAB` that de-focuses this agent (and
             // wakes its inbox) flips it from `Held` to `Quiesce` and it reaps.
@@ -2391,5 +2428,191 @@ mod tests {
             "a live-generation result must be delivered; got {outcome:?}"
         );
         assert_eq!(payload, Some(serde_json::json!("done")));
+    }
+
+    // ── worker registry: `/clear` cascade, lease-reap drain ───────────────
+
+    /// A worker body that blocks until cancelled, so a test can catch it
+    /// mid-flight. Named distinctly from `agent_builtins.rs`'s own
+    /// test-only blocker (`test-block-forever`) so registering both in the
+    /// same test binary never collides on name.
+    fn builtin_test_clear_block_forever(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
+        loop {
+            ral_core::process::check(shell)?;
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    fn scheme_test_clear_block_forever(_u: &mut Unifier) -> Scheme {
+        mk_scheme(&[], &[], &[], thunk(pure(Ty::Unit)))
+    }
+
+    static WORKER_REGISTRY_TEST_BUILTINS: &[BuiltinEntry] = &[BuiltinEntry {
+        name: Cow::Borrowed("test-clear-block-forever"),
+        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_test_clear_block_forever),
+        doc: "test-only: block until cancelled.",
+        body: BuiltinBody::Static(builtin_test_clear_block_forever),
+    }];
+
+    /// `/clear` cancels every worker registered on the outgoing shell before
+    /// replacing it, and the rebuilt shell starts with an empty registry.
+    /// The cancelled worker settling afterward still tries to flush its
+    /// deferred `done` batch through the boundary it captured before the
+    /// clear — the same `InboxBoundary` generation guard that already
+    /// protects a stale agent result drops it, so no late
+    /// `InboxMsg::Surface` reaches the rebuilt context.
+    #[test]
+    fn clear_cancels_registered_workers_and_drops_their_late_surface() {
+        let dir = tmp("clear-cancels-workers");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        ral_core::builtins::register_builtins(WORKER_REGISTRY_TEST_BUILTINS);
+        session
+            .transport
+            .shell_mut()
+            .shell
+            .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
+
+        // `run_shell` wires the real boundary sink — captured with `emit`'s
+        // mailbox, which must be this session's own inbox for the late-surface
+        // assertion below to mean anything.
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        let _ = session.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
+
+        let entry = session
+            .transport
+            .shell_mut()
+            .shell
+            .workers()
+            .pop()
+            .expect("the spawn must register exactly one worker");
+        let scope = entry.handle.cancel.clone();
+        assert!(
+            !scope.is_cancelled(),
+            "freshly spawned, not yet touched by /clear"
+        );
+
+        let scratch = Scratch::new().expect("scratch dir");
+        session.clear(&scratch).expect("clear must succeed");
+
+        assert!(
+            scope.is_cancelled(),
+            "/clear must cancel the outgoing shell's registered workers"
+        );
+        assert_eq!(
+            session.transport.shell_mut().shell.worker_count(),
+            0,
+            "the rebuilt shell's registry must start empty"
+        );
+
+        // Let the cancelled worker actually settle: its `process::check` loop
+        // observes the cancellation at its next poll, then flushes its
+        // deferred batch through the boundary captured before the clear.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if *entry.handle.state.lock().unwrap() != ral_core::types::HandleState::Running {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the cancelled worker must settle within the budget"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            session.inbox.is_empty(),
+            "a worker settling after /clear must not post its late surface batch"
+        );
+    }
+
+    /// Run `cmd` as one dispatched turn under a millisecond-scale
+    /// `detached_lease`, bypassing `shell_eval::run_shell`'s hardcoded 1 h/24 h
+    /// constants so a reap test doesn't need to wait out the real policy.
+    /// No boundary: a lease reap never tries to deliver anything to the
+    /// inbox, so the tests using this only care about the registry side
+    /// effect.
+    fn dispatch_with_lease(session: &Agent, cmd: &str, lease: ral_core::types::WorkerLease) {
+        use ral_core::transport::{DispatchId, ReqMirror, Turn};
+        use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
+        let req = ReqMirror {
+            script_name: "<test>".to_string(),
+            caps: ral_core::types::Capabilities::root(),
+            turn_limit: Some(std::time::Duration::from_secs(5)),
+            detached_lease: Some(lease),
+            io: TurnIo::Capture,
+            terminal: RequestedTerminalAccess::Denied,
+            stdin: TurnStdin::Empty,
+        };
+        session.transport.dispatch(
+            DispatchId(0),
+            Turn::Source {
+                src: cmd.to_string(),
+                req,
+            },
+        );
+    }
+
+    /// Seed one lease-chain reap (an unpolled worker under a millisecond
+    /// idle bound), then drive the drain site directly: one
+    /// `Kind::WorkerReaped` event carries the cmd and cause, and a second
+    /// drain — the notices ledger now empty — emits nothing.
+    #[test]
+    fn drain_worker_reaps_emits_once_then_nothing() {
+        let dir = tmp("drain-worker-reaps");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        ral_core::builtins::register_builtins(WORKER_REGISTRY_TEST_BUILTINS);
+        session
+            .transport
+            .shell_mut()
+            .shell
+            .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
+
+        dispatch_with_lease(
+            &session,
+            "spawn { test-clear-block-forever }",
+            ral_core::types::WorkerLease {
+                idle: std::time::Duration::from_millis(40),
+                backstop: std::time::Duration::from_secs(10),
+            },
+        );
+
+        // Past the idle bound, unpolled: the lease chain reaps it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while session.transport.shell_mut().shell.worker_count() > 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the unpolled worker must be reaped within the budget"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+
+        session.drain_worker_reaps(&emit);
+        let event = rx
+            .try_recv()
+            .expect("the drain must emit exactly one reap event");
+        match event.kind {
+            Kind::WorkerReaped { cmd, cause, .. } => {
+                assert_eq!(cmd, "<block>", "the reap must name the spawned body");
+                assert_eq!(
+                    cause,
+                    ral_core::types::ReapCause::Idle,
+                    "an unpolled worker past its idle bound reaps as Idle"
+                );
+            }
+            _ => panic!("expected Kind::WorkerReaped"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "the drain must emit exactly one event per reap"
+        );
+
+        session.drain_worker_reaps(&emit);
+        assert!(
+            rx.try_recv().is_err(),
+            "a second drain with no new notices must emit nothing"
+        );
     }
 }
