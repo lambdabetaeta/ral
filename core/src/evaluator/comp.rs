@@ -183,14 +183,17 @@ fn eval_letrec(
     // thunk.
     let install = |shell: &mut Shell| {
         for (i, (name, _rhs)) in bindings.iter().enumerate() {
-            shell.mobile.scope.set(
+            shell.install_scope_binding(
                 name.clone(),
-                Value::Block {
-                    body: Arc::new(Spanned::synthetic(CompKind::LetRec {
-                        slot: Some(i),
-                        bindings: bindings.clone(),
-                    })),
-                    captured: snap.clone(),
+                Binding {
+                    value: Value::Block {
+                        body: Arc::new(Spanned::synthetic(CompKind::LetRec {
+                            slot: Some(i),
+                            bindings: bindings.clone(),
+                        })),
+                        captured: snap.clone(),
+                    },
+                    scheme: None,
                 },
             );
         }
@@ -205,7 +208,13 @@ fn eval_letrec(
                     .collect::<Result<Vec<_>, _>>()
             })?;
             for ((name, _), lambda) in bindings.iter().zip(lambdas) {
-                shell.mobile.scope.set(name.clone(), lambda);
+                shell.install_scope_binding(
+                    name.clone(),
+                    Binding {
+                        value: lambda,
+                        scheme: None,
+                    },
+                );
             }
             Ok(Value::Unit)
         }

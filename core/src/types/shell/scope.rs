@@ -157,6 +157,28 @@ impl Shell {
         self.mobile.scope.set(name, value);
     }
 
+    /// The evaluator's single install point for a scope entry
+    /// (`decisions/260629_agent-binding-reaping`). A session-scope install
+    /// (`Env::at_session_scope`) additionally stamps this shell's
+    /// binding-lease ledger: a fresh non-baseline name starts its lease, a
+    /// rebind renews it — writing a name is itself interest in it. Deeper
+    /// installs (block/lambda/letrec frames, a `use` body) are recorded
+    /// nowhere: the predicate is the classifier, not a caller obligation, so
+    /// a pushed fixpoint frame needs no special case here. Every persistent
+    /// top-level write routes through this verb — `assign_pattern`'s `Name`
+    /// and `...rest` arms, and `eval_letrec`'s two installs — so "write a
+    /// scope entry" and "stamp the ledger" can never be pulled apart at a
+    /// call site. Host verbs ([`Self::bind_value`], [`Self::set_var`]) stay
+    /// on the raw `Env` primitive: every host call to them precedes arming,
+    /// so the boot baseline covers them without a special case.
+    pub(crate) fn install_scope_binding(&mut self, name: String, binding: Binding) {
+        let session = self.mobile.scope.at_session_scope();
+        if session {
+            self.local.bindings.note_install(&name);
+        }
+        self.mobile.scope.set_binding(name, binding);
+    }
+
     /// Look `name` up in the lexical scope chain alone — *not* the
     /// pseudo-variable or builtin namespaces that [`Self::lookup_value_name`]
     /// also consults.  The read dual of [`Self::set_var`] /

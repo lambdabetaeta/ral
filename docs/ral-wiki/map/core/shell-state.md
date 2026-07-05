@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f1b705c
+generated_at_commit: acd1d8e
 generated_at_date: 2026-07-05
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
@@ -66,15 +66,15 @@ field name *is* the invariant** — joined by `Shell`
   against after a turn returns, the `exit_hints` table, the host-installed
   `builtins`, and the session's `terminal_lease`.
 - **`LocalState`** — host-local scratch carrying its own flow rules (audit
-  trail, REPL scratch, the `workers` registry); the residue once turn and
-  session state are named. The worker registry (`shell/workers.rs`) is a
-  per-`Shell` directory of every `spawn`/`watch`ed `HandleInner`, one per
-  agent; `Shell::spawn_thread` shares it by `Arc` into a spawned worker's own
-  shell (so a nested `spawn` registers alongside its parent), but a
-  sub-agent fork or pipeline stage starts with a fresh, empty one. Beside
-  the entries it keeps the `ReapNotice` ledger the reap policies write —
-  one compact record per entry removed by policy, atomic with the removal
-  under the registry's one lock — drained by the host through
+  trail, REPL scratch, the `workers` registry, the `bindings` ledger); the
+  residue once turn and session state are named. The worker registry
+  (`shell/workers.rs`) is a per-`Shell` directory of every `spawn`/`watch`ed
+  `HandleInner`, one per agent; `Shell::spawn_thread` shares it by `Arc` into
+  a spawned worker's own shell (so a nested `spawn` registers alongside its
+  parent), but a sub-agent fork or pipeline stage starts with a fresh, empty
+  one. Beside the entries it keeps the `ReapNotice` ledger the reap policies
+  write — one compact record per entry removed by policy, atomic with the
+  removal under the registry's one lock — drained by the host through
   `Shell::take_worker_reap_notices`. A settled entry carries a
   `settled_epoch` stamp: `Shell::advance_worker_epoch`, the host's per-call
   sweep, stamps it at the first advance that observes the entry settled and
@@ -86,6 +86,23 @@ field name *is* the invariant** — joined by `Shell`
   pending notices alike — since explicit destruction outranks every lease,
   the durable class included
   ([[decisions/260705_leases-and-budgets|leases-and-budgets]]).
+
+  The binding-lease ledger (`shell/bindings.rs`,
+  [[decisions/260629_agent-binding-reaping|agent-binding-reaping]]) sits
+  beside the worker registry but needs no lock: it has exactly one writer,
+  the thread that owns `&mut Shell` for every turn, install, and prune
+  (verified in the module's own doc comment). Inert (`BindingLedger::
+  default()`) until `Shell::arm_binding_lease` seals every name then visible
+  in the scope chain as permanently-exempt baseline and starts the
+  committed-turn clock. Every persistent top-level scope write funnels
+  through one fused chokepoint, `Shell::install_scope_binding` (`scope.rs`,
+  beside `bind_value`/`set_var`): it classifies the write by
+  `Env::at_session_scope()` and stamps the ledger only when true, so "write a
+  scope entry" and "stamp the ledger" can never be pulled apart at a call
+  site — the evaluator's four writers (`assign_pattern`'s `Name`/`...rest`
+  arms, `eval_letrec`'s two installs) all route here. Host verbs
+  (`bind_value`, `set_var`) stay on the raw `Env` primitive, since every host
+  call to them precedes arming.
 
 `turn` / `session` / `local` are `pub(crate)`: the fields that encode turn
 safety are not a public API. Hosts drive a session through the narrow accessors

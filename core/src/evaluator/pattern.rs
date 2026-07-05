@@ -77,7 +77,7 @@ pub(crate) fn assign_pattern(
                     .err(format!("cannot assign to literal '{name}'"), 1)
                     .into());
             }
-            shell.mobile.scope.set_binding(
+            shell.install_scope_binding(
                 name.clone(),
                 Binding {
                     value: value.clone(),
@@ -134,7 +134,13 @@ pub(crate) fn assign_pattern(
                 // with the source — O(log n), no element clones.
                 let mut whole = items.clone();
                 let tail = whole.split_off(elems.len());
-                shell.mobile.scope.set(name.clone(), Value::List(tail));
+                shell.install_scope_binding(
+                    name.clone(),
+                    Binding {
+                        value: Value::List(tail),
+                        scheme: None,
+                    },
+                );
             }
             Ok(())
         }

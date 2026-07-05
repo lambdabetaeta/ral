@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1baac6d
-generated_at_date: 2026-06-22
+generated_at_commit: acd1d8e
+generated_at_date: 2026-07-05
 covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 ---
 
@@ -67,7 +67,15 @@ Internals:
   Without a `...rest` tail a list pattern must cover the value exactly — a longer
   list errors rather than silently dropping its extra elements. A mismatch is a
   located runtime error with an `expected … got …` message and a shape hint,
-  propagating like any other failure and so catchable by `try`.
+  propagating like any other failure and so catchable by `try`. Its `Name` and
+  `...rest` arms — and `comp.rs`'s `eval_letrec` group reinstall and its own
+  pushed fixpoint pre-install — route every scope write through
+  `Shell::install_scope_binding` (`types/shell/scope.rs`), the single fused
+  chokepoint that also stamps the [[map/core/shell-state|binding-lease
+  ledger]] when the write lands at session scope
+  ([[decisions/260629_agent-binding-reaping|agent-binding-reaping]]); a
+  pushed fixpoint or block frame makes the predicate false with no special
+  case needed at either call site.
 - `capture.rs` — `with_capture` for output capture; `redirect.rs` —
   the RAII redirect-frame install/unwind (`within_redirect_frame`) that wraps an
   `Exec` or scope carrying `> file` syntax, distinct from the external-command

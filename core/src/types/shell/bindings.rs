@@ -249,3 +249,164 @@ mod tests {
         assert_eq!(idle, armed.lease.idle_calls, "exactly at the bound expires");
     }
 }
+
+/// Turn-level tests for the install chokepoint
+/// (`decisions/260629_agent-binding-reaping` parcel 2): every persistent
+/// top-level install routes through [`Shell::install_scope_binding`] and
+/// gets leased, while every deeper-scope write is recorded nowhere. Driven
+/// through the public `run_source_turn` door, no exarch involved — the same
+/// harness shape as `core/tests/top_level_vs_block.rs`.
+#[cfg(test)]
+mod chokepoint_tests {
+    use crate::driver::BakedPrelude;
+    use crate::types::{Capabilities, Settled, Shell, Value};
+    use crate::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
+    use std::sync::OnceLock;
+
+    use super::BindingLease;
+
+    /// The prelude baked once per test binary (no build-time blob inside
+    /// core's own unit tests).
+    fn prelude() -> &'static BakedPrelude {
+        static P: OnceLock<BakedPrelude> = OnceLock::new();
+        P.get_or_init(BakedPrelude::bake_runtime)
+    }
+
+    /// A shell booted with the real prelude and armed with `idle_calls`,
+    /// sealing whatever is visible right after boot as baseline — the same
+    /// seed-then-arm sequence exarch's `Agent::assemble` follows.
+    fn armed_shell(idle_calls: u64) -> Shell {
+        let mut shell = crate::driver::boot_shell(Default::default(), prelude());
+        shell.arm_binding_lease(BindingLease { idle_calls });
+        shell
+    }
+
+    /// Run one top-level turn through the public door. Every source below
+    /// is expected to compile; a `Static` report is a test bug.
+    fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
+        match shell.run_source_turn(
+            source,
+            TurnRequest {
+                script_name: "<test>",
+                caps: Capabilities::root(),
+                turn_limit: None,
+                detached_lease: None,
+                worker_cap: None,
+                io: TurnIo::Inherit,
+                terminal: RequestedTerminalAccess::Leased,
+                stdin: TurnStdin::Inherit,
+                surface: None,
+                boundary: None,
+                lifecycle: Box::new(()),
+            },
+        ) {
+            TurnReport::Ran { result, .. } => result,
+            TurnReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
+        }
+    }
+
+    /// Whether `name` carries a ledger entry — a leased candidate.
+    fn is_leased(shell: &Shell, name: &str) -> bool {
+        shell
+            .local
+            .bindings
+            .0
+            .as_ref()
+            .is_some_and(|armed| armed.last_used.contains_key(name))
+    }
+
+    /// Whether `name` is sealed as a permanently-exempt baseline name.
+    fn is_baseline(shell: &Shell, name: &str) -> bool {
+        shell
+            .local
+            .bindings
+            .0
+            .as_ref()
+            .is_some_and(|armed| armed.baseline.contains(name))
+    }
+
+    #[test]
+    fn top_level_let_is_leased() {
+        let mut shell = armed_shell(64);
+        top_level(&mut shell, "let top_scratch = 1").expect("top-level let");
+        assert!(is_leased(&shell, "top_scratch"));
+        assert!(!is_baseline(&shell, "top_scratch"));
+    }
+
+    #[test]
+    fn destructured_components_are_leased() {
+        let mut shell = armed_shell(64);
+        top_level(
+            &mut shell,
+            "let [dpat_a, dpat_b, ...dpat_rest] = [1, 2, 3, 4]",
+        )
+        .expect("destructure");
+        assert!(is_leased(&shell, "dpat_a"));
+        assert!(is_leased(&shell, "dpat_b"));
+        assert!(is_leased(&shell, "dpat_rest"));
+    }
+
+    #[test]
+    fn block_local_let_is_not_leased() {
+        let mut shell = armed_shell(64);
+        top_level(&mut shell, "grant [exec: [:]] { let block_local = 1 }").expect("grant body");
+        assert!(shell.scope_lookup("block_local").is_none());
+        assert!(!is_leased(&shell, "block_local"));
+        assert!(!is_baseline(&shell, "block_local"));
+    }
+
+    /// Two mutually-recursive top-level `let`s form one `LetRec` group
+    /// (`syntax::group`'s SCC pre-pass); both names must be leased.
+    #[test]
+    fn letrec_group_is_leased() {
+        let mut shell = armed_shell(64);
+        top_level(
+            &mut shell,
+            concat!(
+                "let even-lr = { |n acc| if $[$n > 10] { return $acc } else { odd-lr $[$n + 1] $[$acc + $n] } }\n",
+                "let odd-lr  = { |n acc| if $[$n > 10] { return $acc } else { even-lr $[$n + 1] $acc } }\n",
+            ),
+        )
+        .expect("mutually recursive definitions");
+        assert!(is_leased(&shell, "even-lr"));
+        assert!(is_leased(&shell, "odd-lr"));
+    }
+
+    /// `use`'s enclosing `let` is leased; the used file's own internal
+    /// binding, installed at the pushed module scope, is recorded nowhere.
+    #[test]
+    fn use_module_internals_are_not_leased() {
+        let mut shell = armed_shell(64);
+        let path = std::env::temp_dir().join(format!(
+            "ral_binding_lease_use_test_{}.ral",
+            std::process::id()
+        ));
+        std::fs::write(&path, "let use_internal = 99\n").expect("write temp module");
+        let p = path.to_string_lossy().into_owned();
+        let result = top_level(&mut shell, &format!("let use_proj = use '{p}'"));
+        std::fs::remove_file(&path).ok();
+        result.expect("use");
+        assert!(is_leased(&shell, "use_proj"));
+        assert!(!is_leased(&shell, "use_internal"));
+        assert!(!is_baseline(&shell, "use_internal"));
+    }
+
+    /// A prelude name and a host-seeded name (a host verb call preceding
+    /// arming, mirroring `seed_session_dir`/rc `bindings:`) are both baseline
+    /// — visible at arm time, so never lease candidates.
+    #[test]
+    fn prelude_and_host_seeds_are_baseline() {
+        let mut shell = crate::driver::boot_shell(Default::default(), prelude());
+        let (prelude_name, _) = shell
+            .bindings()
+            .into_iter()
+            .next()
+            .expect("the prelude seeds at least one binding");
+        shell.set_var("host_seed".into(), Value::Int(1));
+        shell.arm_binding_lease(BindingLease { idle_calls: 64 });
+        assert!(is_baseline(&shell, &prelude_name));
+        assert!(is_baseline(&shell, "host_seed"));
+        assert!(!is_leased(&shell, &prelude_name));
+        assert!(!is_leased(&shell, "host_seed"));
+    }
+}
