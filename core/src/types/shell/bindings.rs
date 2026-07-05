@@ -364,6 +364,10 @@ mod tests {
 /// touch). Driven through the public `run_source_turn` door, no exarch
 /// involved — the same harness shape as `core/tests/top_level_vs_block.rs`.
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:test] test fs/process scaffolding"
+)]
 mod chokepoint_tests {
     use crate::driver::BakedPrelude;
     use crate::types::{Capabilities, HandleState, Settled, Shell, Value};
