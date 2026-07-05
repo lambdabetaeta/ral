@@ -113,6 +113,20 @@ pub(super) fn is_slash_command(text: &str) -> bool {
     lookup_command(text.trim()).is_some()
 }
 
+/// The head token of `trimmed`, when it names no [`SLASH_COMMANDS`] entry at
+/// all — a typo like `/bogus`, as opposed to a real command misused (`/copy
+/// this`, an argless command with trailing text), which [`lookup_command`]
+/// also declines but which stays a deliberate fall-through to the model.  A
+/// bare word with no leading `/` is never a command attempt, so it returns
+/// `None` and proceeds to the model as it always has.
+pub(super) fn unrecognized_command(trimmed: &str) -> Option<&str> {
+    let head = trimmed.split_whitespace().next()?;
+    let known = SLASH_COMMANDS
+        .iter()
+        .any(|c| c.name == head || c.aliases.contains(&head));
+    (head.starts_with('/') && !known).then_some(head)
+}
+
 /// Resolve a user-typed `/export` path: expand a leading `~`/`xdg:` sigil
 /// against the home dir, then anchor a still-relative path at `cwd` (where
 /// exarch was launched) so `/export notes.md` lands there rather than in
@@ -217,7 +231,8 @@ pub(super) fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
 /// `/discuss`, `/quit`) and a plain prompt go onto the session inbox, where
 /// the worker's drive loop drains them — `/clear` *also* clears the viewport
 /// UI-side so the screen blanks immediately, before the worker rebuilds the
-/// session.
+/// session.  A slash token naming no registered command ([`unrecognized_command`])
+/// prints an error instead of mailing the typo to the model as a prompt.
 pub(super) fn route_submit(
     text: String,
     tui: &mut Tui,
@@ -226,6 +241,7 @@ pub(super) fn route_submit(
 ) -> io::Result<()> {
     let info = ctx.info;
     let trimmed = text.trim();
+    let unrecognized = unrecognized_command(trimmed);
     match lookup_command(trimmed) {
         Some((cmd, arg)) => match cmd.name {
             "/help" => cmd_help(&mut tui.app),
@@ -280,6 +296,15 @@ pub(super) fn route_submit(
             // The worker's `ReplControl` compacts the history / returns Quit.
             _ => mailbox.push(InboxMsg::Command(text.clone())),
         },
+        // A bare typo like `/bogus` is not a prompt in disguise — say so
+        // rather than silently mailing it to the model as one.
+        None if unrecognized.is_some() => {
+            let head = unrecognized.expect("checked Some above");
+            tui.app.push_error(
+                tui.app.tabs.root(),
+                format!("unknown command: {head} (see /help)"),
+            );
+        }
         // A plain prompt: onto the session inbox for the worker to drain.
         None => mailbox.push_user(text),
     }
@@ -288,7 +313,7 @@ pub(super) fn route_submit(
 
 #[cfg(test)]
 mod tests {
-    use super::{lookup_command, resolve_export_path};
+    use super::{lookup_command, resolve_export_path, unrecognized_command};
 
     /// The matched command's canonical name plus the argument
     /// `lookup_command` peeled off — `None` when nothing matched.
@@ -335,6 +360,21 @@ mod tests {
     fn unknown_token_is_not_a_command() {
         assert_eq!(dispatch("/bogus"), None);
         assert_eq!(dispatch("just a prompt"), None);
+    }
+
+    #[test]
+    fn unrecognized_command_flags_only_a_slash_typo() {
+        // A slash token naming no registered command is a typo to report...
+        assert_eq!(unrecognized_command("/bogus"), Some("/bogus"));
+        assert_eq!(
+            unrecognized_command("/bad_command here are the argv"),
+            Some("/bad_command")
+        );
+        // ...but a real command misused with trailing text is a deliberate
+        // fall-through to the model, not a typo.
+        assert_eq!(unrecognized_command("/copy this"), None);
+        // A plain prompt never looks like a command attempt.
+        assert_eq!(unrecognized_command("just a prompt"), None);
     }
 
     #[test]
