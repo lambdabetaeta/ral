@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 0a9ba7d
+generated_at_commit: 5bdb65a
 generated_at_date: 2026-07-05
 covers_paths: [core/src/builtins/, core/src/builtins.rs]
 ---
@@ -80,6 +80,17 @@ Bodies are grouped by concern, one submodule each:
   policy, whose only bounds are the handle's own `cancel`, the host's
   `/clear`, and process exit
   ([[decisions/260705_leases-and-budgets|leases-and-budgets]]).
+  The spawn door also enforces the frame's admission cap
+  (`TurnState::worker_cap`): a birth of any class is refused — before any
+  thread or registry entry exists — while `cap` registered workers are
+  still running, with an error naming `await`/`cancel`/`workers` as the
+  remedies; settled entries lingering under retention hold no seat. A
+  settled entry's own lease is retention: the host's per-call epoch sweep
+  (`Shell::advance_worker_epoch`) stamps an entry at the first sweep that
+  observes it settled and expires it — a `Retention`-cause `ReapNotice` on
+  the same drain — once its unclaimed result has sat a full retention of
+  ral calls; the eliminators still remove entries the moment a result is
+  claimed, so the sweep only catches what nobody claimed.
   A worker runs its thunk on a fresh
   `std::thread` via `Shell::spawn_thread` ([[map/core/shell-state|shell-state]]),
   which inherits a snapshot of the parent's mobile state; the body is evaluated

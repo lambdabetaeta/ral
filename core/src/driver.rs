@@ -251,6 +251,12 @@ pub struct TurnRequest<'a> {
     /// every `poll`/`await`/`race` naming its handle — under the
     /// `lease.backstop` absolute ceiling.
     pub detached_lease: Option<crate::types::WorkerLease>,
+    /// Admission cap on concurrently running workers, enforced at the spawn
+    /// door: with `Some(cap)` a spawn is refused while `cap` workers of any
+    /// class are still running — settled entries lingering under retention
+    /// never block admission. `None` (the interactive ral host) admits
+    /// freely.
+    pub worker_cap: Option<usize>,
     /// The byte IO regime; see [`TurnIo`].
     pub io: TurnIo,
     /// Whether this turn may hand the controlling terminal to a child; see
@@ -490,6 +496,7 @@ impl Shell {
             lifecycle: req.lifecycle,
             turn_limit: hook.policy.budget.or(req.turn_limit),
             detached_lease: req.detached_lease,
+            worker_cap: req.worker_cap,
         };
 
         self.run_built(merged_req, foreground, wall, false, "", |s| {
@@ -545,6 +552,7 @@ impl Shell {
             terminal_access,
             foreground.clone(),
             req.detached_lease,
+            req.worker_cap,
             req.surface,
             req.boundary,
         );

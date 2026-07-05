@@ -52,6 +52,7 @@ fn run(shell: &mut Shell, source: &str) -> (Settled<Value>, Vec<Value>) {
             caps: Capabilities::root(),
             turn_limit: None,
             detached_lease: None,
+            worker_cap: None,
             io: TurnIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
             stdin: TurnStdin::Inherit,

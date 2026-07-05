@@ -152,6 +152,7 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
             let cause = match cause {
                 ral_core::types::ReapCause::Idle => "idle",
                 ral_core::types::ReapCause::Backstop => "backstop",
+                ral_core::types::ReapCause::Retention => "retention",
             };
             ("worker_reaped", json!({ "cmd": cmd, "cause": cause }))
         }

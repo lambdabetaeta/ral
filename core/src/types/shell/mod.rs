@@ -268,6 +268,14 @@ pub struct TurnState {
     /// by the frame and flowed into same-thread bodies and spawned workers
     /// so a `spawn` nested in a thunk sees the same lease.
     pub(crate) detached_lease: Option<WorkerLease>,
+    /// Admission cap on concurrently *running* workers, enforced at the
+    /// spawn door: with `Some(cap)`, a birth is refused while `cap` entries
+    /// of any class are still `Running` — settled entries lingering under
+    /// retention never block admission.  `None` (an interactive host)
+    /// admits freely.  Flows exactly as `detached_lease` does — into
+    /// same-thread bodies and spawned workers — so a nested `spawn` cannot
+    /// evade the cap its frame set.
+    pub(crate) worker_cap: Option<usize>,
     /// This turn's terminal-foreground authority. Gates whether a
     /// child/job foreground handoff can borrow the session's
     /// [`TerminalLease`](crate::process::TerminalLease); see
@@ -289,6 +297,7 @@ impl TurnState {
         self.cancel = parent.cancel.clone();
         self.loc = parent.loc.clone();
         self.detached_lease = parent.detached_lease;
+        self.worker_cap = parent.worker_cap;
         // Terminal access flows in so a pipeline launched inside an `_ed-tui`
         // loan (or any same-thread body of a Leased turn) sees the parent's
         // authority. It does not flow back in `return_to`: the parent retains

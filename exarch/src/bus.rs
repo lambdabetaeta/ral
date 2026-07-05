@@ -905,9 +905,10 @@ pub enum Kind {
     Unpin {
         key: String,
     },
-    /// The worker-lease chain reaped a still-running `spawn`/`watch` worker —
-    /// unobserved past its idle bound, or past its absolute backstop
-    /// regardless of observation — drained from
+    /// A worker's registry entry was removed by policy — the lease chain
+    /// reaped a still-running worker (unobserved past its idle bound, or
+    /// past its absolute backstop), or the retention sweep expired a
+    /// settled entry's unclaimed result — drained from
     /// [`Shell::take_worker_reap_notices`](ral_core::Shell::take_worker_reap_notices)
     /// at the drive loop's ready boundary. Transcript + TUI only: unlike
     /// [`Kind::Card`], `cmd` and `cause` ride alongside the rendered `card`

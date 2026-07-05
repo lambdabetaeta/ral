@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 568aa23
+generated_at_commit: 5bdb65a
 generated_at_date: 2026-07-05
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
@@ -57,7 +57,10 @@ field name *is* the invariant** — joined by `Shell`
   teardown: the pipeline-stage `Io`, the `surface` sink, the foreground
   `cancel` scope, the source-position `loc` cursor, the detached-worker
   `WorkerLease` (`detached_lease` — the idle bound and absolute backstop
-  travel as one value; `None` never reaps), and the turn's `TerminalAccess`.
+  travel as one value; `None` never reaps), the `worker_cap` admission bound
+  (`Some(cap)` refuses a spawn of any class while `cap` workers still run;
+  `None` admits freely, and both flow into same-thread bodies and spawned
+  workers alike), and the turn's `TerminalAccess`.
 - **`SessionState`** — what survives every turn's teardown: the durable cancel
   `root` that detached workers parent under, the `sources` registry rendered
   against after a turn returns, the `exit_hints` table, the host-installed
@@ -69,10 +72,15 @@ field name *is* the invariant** — joined by `Shell`
   agent; `Shell::spawn_thread` shares it by `Arc` into a spawned worker's own
   shell (so a nested `spawn` registers alongside its parent), but a
   sub-agent fork or pipeline stage starts with a fresh, empty one. Beside
-  the entries it keeps the `ReapNotice` ledger the lease chain writes —
+  the entries it keeps the `ReapNotice` ledger the reap policies write —
   one compact record per entry removed by policy, atomic with the removal
   under the registry's one lock — drained by the host through
-  `Shell::take_worker_reap_notices`. `Shell::cancel_workers` is the other
+  `Shell::take_worker_reap_notices`. A settled entry carries a
+  `settled_epoch` stamp: `Shell::advance_worker_epoch`, the host's per-call
+  sweep, stamps it at the first advance that observes the entry settled and
+  expires it (a `Retention` notice) once its unclaimed result has sat a
+  full retention of ral calls — a host that never sweeps (the REPL) retains
+  settled entries indefinitely. `Shell::cancel_workers` is the other
   worker operation on `host.rs`'s surface: the host's `/clear` arm, it fires
   every entry's cancel scope and resets both ledgers wholesale — entries and
   pending notices alike — since explicit destruction outranks every lease,

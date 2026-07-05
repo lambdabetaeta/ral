@@ -667,16 +667,19 @@ pub fn done_card(outcome: &DoneOutcome) -> Card {
 
 // ── `reaped`: a lease-chain removal at the ready boundary ────────────────
 
-/// Compose one lease-chain reap into its one-line [`Card`] — the reap's
-/// analogue of [`done_card`]: a worker the registry removed by policy,
-/// unobserved rather than settled, so its `cmd` and the lease that fired
-/// render as a fixed one-liner. Unlike `done`, the `cmd` is worth keeping —
-/// this is the model's (or operator's) only record of *which* worker is
-/// gone, since nothing else names it once removed.
+/// Compose one policy removal into its one-line [`Card`] — the reap's
+/// analogue of [`done_card`]: a worker the registry removed by policy
+/// (the lease chain's two bounds on a running worker, or the retention
+/// sweep expiring a settled entry's unclaimed result), so its `cmd` and
+/// the bound that fired render as a fixed one-liner. Unlike `done`, the
+/// `cmd` is worth keeping — this is the model's (or operator's) only
+/// record of *which* worker is gone, since nothing else names it once
+/// removed.
 pub fn reap_card(cmd: &str, cause: ral_core::types::ReapCause) -> Card {
     let phrase = match cause {
         ral_core::types::ReapCause::Idle => "idle 1h unobserved",
         ral_core::types::ReapCause::Backstop => "24h backstop",
+        ral_core::types::ReapCause::Retention => "finished, result unclaimed",
     };
     let spans = vec![
         span(Role::Warn, "reaped"),

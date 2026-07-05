@@ -142,14 +142,26 @@ impl Shell {
         self.local.workers.count()
     }
 
-    /// Drain the reap notices the worker lease chain has recorded since the
-    /// last drain — one compact record per entry removed by policy (the
-    /// idle bound or the backstop), never one for an entry an eliminator
-    /// observed away first. A host drains these at its ready boundaries to
-    /// emit transcript events, so a removal by policy always has an answer
-    /// in the log.
+    /// Drain the reap notices recorded since the last drain — one compact
+    /// record per entry removed by policy (the lease chain's idle bound or
+    /// backstop, the retention sweep's expiry), never one for an entry an
+    /// eliminator observed away first. A host drains these at its ready
+    /// boundaries to emit transcript events, so a removal by policy always
+    /// has an answer in the log.
     pub fn take_worker_reap_notices(&mut self) -> Vec<ReapNotice> {
         self.local.workers.take_reap_notices()
+    }
+
+    /// Advance this shell's worker registry to the host's ral-call `epoch`,
+    /// sweeping settled entries against `retention` — stamp an entry first
+    /// observed settled, expire one whose unclaimed result has sat stamped
+    /// for `retention` or more calls (a
+    /// [`Retention`](crate::types::ReapCause::Retention) notice rides the
+    /// same drain as the lease chain's). The host calls
+    /// this once per ral call, after the evaluation returns; a host that
+    /// never calls it (the REPL) retains settled entries indefinitely.
+    pub fn advance_worker_epoch(&mut self, epoch: u64, retention: u64) {
+        self.local.workers.advance_epoch(epoch, retention);
     }
 
     /// Cancel every worker registered on this shell and reset the registry

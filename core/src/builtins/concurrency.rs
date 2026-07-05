@@ -164,6 +164,11 @@ impl Drop for FlushGuard {
 /// lease chain ([`lease_fire`]) on the fresh entry's id; a
 /// [`LeaseClass::Durable`] birth registers and arms nothing — the absent
 /// chain *is* the durable policy, not an exemption the chain checks.
+///
+/// Under a frame that supplies a `worker_cap`, admission is checked first:
+/// a birth of any class is refused while `cap` registered workers are
+/// still running, with an error naming the remedies (`await`, `cancel`,
+/// `workers`).
 pub(super) fn spawn_child<F>(
     snap: Arc<Env>,
     shell: &mut Shell,
@@ -175,6 +180,20 @@ pub(super) fn spawn_child<F>(
 where
     F: FnOnce(&mut Shell) -> Raw<Value> + Send + 'static,
 {
+    // Admission: under a frame that caps live workers, the birth is refused
+    // at the door — before any thread exists or any entry registers, so a
+    // rejected spawn leaves no trace.  Only still-running entries count,
+    // durable services included (live work is live work); settled entries
+    // lingering under retention never block admission.
+    if let Some(cap) = shell.turn.worker_cap
+        && shell.local.workers.running_count() >= cap
+    {
+        return Err(sig(format!(
+            "spawn: {cap} workers already live on this agent; \
+             await or cancel one, or list them with workers"
+        )));
+    }
+
     let (tx, rx) = std::sync::mpsc::channel();
 
     // Allocate buffers and build the child's sinks.  Buffered mode writes
@@ -318,6 +337,7 @@ where
         cmd,
         started: std::time::SystemTime::now(),
         class,
+        settled_epoch: None,
         handle: handle.clone(),
     });
 
@@ -1120,6 +1140,19 @@ mod tests {
         }
     }
 
+    /// Block until `handle`'s worker has marked itself `Completed` at exit
+    /// — the precondition a retention test needs before an epoch sweep can
+    /// observe the entry settled.
+    fn wait_settled(handle: &HandleInner) {
+        for _ in 0..500 {
+            if *handle.state.lock().unwrap() == HandleState::Completed {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        panic!("worker never marked itself Completed");
+    }
+
     /// A `spawn` under an agent frame's lease is reaped once *unobserved*
     /// for the idle bound: the blocked, never-polled worker's own scope is
     /// force-cancelled with `Deadline`, its registry entry is removed, and
@@ -1170,9 +1203,10 @@ mod tests {
         );
     }
 
-    /// A `spawn` under the interactive frame arms no lease: the worker's
-    /// scope is never reaped on a timer, and its registry entry stays
-    /// listed — the REPL never reaps.
+    /// A `spawn` under the interactive frame arms no lease and admits
+    /// freely: the worker's scope is never reaped on a timer, its settled
+    /// registry entry lingers unstamped (the REPL never calls the epoch
+    /// sweep), and no notice of any cause is ever recorded.
     #[test]
     fn spawn_under_interactive_frame_arms_no_lease() {
         let mut shell = Shell::new(Default::default());
@@ -1193,10 +1227,19 @@ mod tests {
             !scope.is_cancelled(),
             "the interactive frame must arm no lease"
         );
+        let snapshot = shell.local.workers.snapshot();
         assert_eq!(
-            shell.local.workers.count(),
+            snapshot.len(),
             1,
             "the entry stays listed: the REPL never reaps"
+        );
+        assert_eq!(
+            snapshot[0].settled_epoch, None,
+            "no epoch sweep ever runs on a policy-free host"
+        );
+        assert!(
+            shell.take_worker_reap_notices().is_empty(),
+            "no policy, no notices"
         );
     }
 
@@ -2060,5 +2103,273 @@ mod tests {
             2,
             "the parent's registry observes the nested spawn's entry too — same registry, not a copy"
         );
+    }
+
+    // ── settled retention (the epoch sweep) ──────────────────────────────
+
+    /// The retention ledger in integers: a settled, unclaimed entry is
+    /// stamped at the first sweep that observes it settled, kept while
+    /// `epoch − stamp < retention`, and expired — one `Retention` notice
+    /// carrying its facts — at the call the bound is met.
+    #[test]
+    fn retention_stamps_then_expires_an_unclaimed_settled_entry() {
+        let mut shell = Shell::new(Default::default());
+        let handle = spawn_child(
+            Arc::new(shell.mobile().scope),
+            &mut shell,
+            ChildIoMode::Buffered,
+            LeaseClass::Worker,
+            "<done>",
+            |_child| Ok(Value::Unit),
+        )
+        .expect("spawn must succeed");
+        wait_settled(&handle);
+
+        shell.advance_worker_epoch(5, 256);
+        let stamped = shell.local.workers.snapshot();
+        assert_eq!(stamped.len(), 1, "a swept settled entry lingers");
+        assert_eq!(
+            stamped[0].settled_epoch,
+            Some(5),
+            "stamped at the first sweep that observes it settled"
+        );
+
+        shell.advance_worker_epoch(260, 256);
+        assert_eq!(shell.local.workers.count(), 1, "260 − 5 < 256: retained");
+        assert_eq!(
+            shell.local.workers.snapshot()[0].settled_epoch,
+            Some(5),
+            "the stamp is first-observed-settled, never re-stamped"
+        );
+
+        shell.advance_worker_epoch(261, 256);
+        assert_eq!(shell.local.workers.count(), 0, "261 − 5 ≥ 256: expired");
+        let notices = shell.take_worker_reap_notices();
+        assert_eq!(notices.len(), 1, "one notice per retention expiry");
+        assert_eq!(notices[0].id, stamped[0].id);
+        assert_eq!(notices[0].cmd, stamped[0].cmd);
+        assert_eq!(notices[0].class, stamped[0].class);
+        assert_eq!(notices[0].cause, ReapCause::Retention);
+    }
+
+    /// Observation beats retention: an entry the sweep has stamped is
+    /// removed the moment a settled `poll` claims it, so a later sweep past
+    /// the bound finds nothing to expire and records no notice.
+    #[test]
+    fn observation_beats_retention() {
+        let mut shell = Shell::new(Default::default());
+        let handle = spawn_child(
+            Arc::new(shell.mobile().scope),
+            &mut shell,
+            ChildIoMode::Buffered,
+            LeaseClass::Worker,
+            "<claimed>",
+            |_child| Ok(Value::Unit),
+        )
+        .expect("spawn must succeed");
+        wait_settled(&handle);
+
+        shell.advance_worker_epoch(1, 256);
+        assert_eq!(shell.local.workers.snapshot()[0].settled_epoch, Some(1));
+
+        builtin_poll(&[Value::Handle(handle.clone())], &mut shell).expect("poll ok");
+        assert_eq!(
+            shell.local.workers.count(),
+            0,
+            "a settled poll claims the entry"
+        );
+
+        shell.advance_worker_epoch(400, 256);
+        assert!(
+            shell.take_worker_reap_notices().is_empty(),
+            "a claimed result leaves no retention notice"
+        );
+    }
+
+    /// A still-running entry is never stamped or expired: the sweep leaves
+    /// live work alone even at retention 0 and any epoch distance —
+    /// retention is a settled entry's lease, not a second bound on running
+    /// workers.
+    #[test]
+    fn running_entries_are_never_stamped_or_expired() {
+        let mut shell = Shell::new(Default::default());
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let handle = spawn_child(
+            Arc::new(shell.mobile().scope),
+            &mut shell,
+            ChildIoMode::Buffered,
+            LeaseClass::Worker,
+            "<live>",
+            move |_c| {
+                gate_rx.recv().unwrap();
+                Ok(Value::Unit)
+            },
+        )
+        .expect("spawn must succeed");
+
+        shell.advance_worker_epoch(5, 0);
+        shell.advance_worker_epoch(1_000_000, 0);
+        let snapshot = shell.local.workers.snapshot();
+        assert_eq!(snapshot.len(), 1, "live work is never expired");
+        assert_eq!(
+            snapshot[0].settled_epoch, None,
+            "live work is never stamped"
+        );
+        assert!(shell.take_worker_reap_notices().is_empty());
+
+        gate_tx.send(()).unwrap();
+        await_handle(&handle, &mut shell).expect("await after the gate opens");
+    }
+
+    // ── the admission cap ────────────────────────────────────────────────
+
+    /// The cap refuses the (cap+1)th birth at the door: with two gated
+    /// workers running under `worker_cap: Some(2)`, a third spawn errors —
+    /// naming `await`, `cancel`, and `workers` as the remedies — and
+    /// registers nothing; cancelling one frees a seat, and the next birth
+    /// is admitted.
+    #[test]
+    fn worker_cap_rejects_at_the_door_and_frees_on_cancel() {
+        let mut shell = Shell::new(Default::default());
+        shell.turn.worker_cap = Some(2);
+
+        let mut gates = Vec::new();
+        let mut handles = Vec::new();
+        for cmd in ["<one>", "<two>"] {
+            let (gate_tx, gate_rx) = mpsc::channel::<()>();
+            let handle = spawn_child(
+                Arc::new(shell.mobile().scope),
+                &mut shell,
+                ChildIoMode::Buffered,
+                LeaseClass::Worker,
+                cmd,
+                move |_c| {
+                    gate_rx.recv().unwrap();
+                    Ok(Value::Unit)
+                },
+            )
+            .expect("a birth under the cap must be admitted");
+            gates.push(gate_tx);
+            handles.push(handle);
+        }
+        assert_eq!(shell.local.workers.count(), 2);
+
+        let refused = spawn_child(
+            Arc::new(shell.mobile().scope),
+            &mut shell,
+            ChildIoMode::Buffered,
+            LeaseClass::Worker,
+            "<three>",
+            |_c| Ok(Value::Unit),
+        );
+        let err = match refused {
+            Err(Break::Error(e)) => e,
+            other => panic!("the capped birth must be refused, got {other:?}"),
+        };
+        for remedy in ["await", "cancel", "workers"] {
+            assert!(
+                err.message.contains(remedy),
+                "the refusal must name `{remedy}`: {}",
+                err.message
+            );
+        }
+        assert_eq!(
+            shell.local.workers.count(),
+            2,
+            "a refused birth registers nothing"
+        );
+
+        builtin_cancel(&[Value::Handle(handles[0].clone())], &mut shell).expect("cancel ok");
+        spawn_child(
+            Arc::new(shell.mobile().scope),
+            &mut shell,
+            ChildIoMode::Buffered,
+            LeaseClass::Worker,
+            "<after>",
+            |_c| Ok(Value::Unit),
+        )
+        .expect("cancelling one frees a seat");
+
+        // Unblock the parked workers so no thread outlives the test.
+        for gate in gates {
+            let _ = gate.send(());
+        }
+    }
+
+    /// A durable service is live work too: one `Durable` and one `Worker`
+    /// running under cap 2 refuse a third birth — the cap counts running
+    /// entries of every class.
+    #[test]
+    fn durable_birth_counts_toward_the_cap() {
+        let mut shell = Shell::new(Default::default());
+        shell.turn.worker_cap = Some(2);
+
+        let mut gates = Vec::new();
+        for (class, cmd) in [
+            (LeaseClass::Durable, "<service>"),
+            (LeaseClass::Worker, "<block>"),
+        ] {
+            let (gate_tx, gate_rx) = mpsc::channel::<()>();
+            spawn_child(
+                Arc::new(shell.mobile().scope),
+                &mut shell,
+                ChildIoMode::Buffered,
+                class,
+                cmd,
+                move |_c| {
+                    gate_rx.recv().unwrap();
+                    Ok(Value::Unit)
+                },
+            )
+            .expect("a birth under the cap must be admitted");
+            gates.push(gate_tx);
+        }
+
+        let refused = spawn_child(
+            Arc::new(shell.mobile().scope),
+            &mut shell,
+            ChildIoMode::Buffered,
+            LeaseClass::Worker,
+            "<three>",
+            |_c| Ok(Value::Unit),
+        );
+        assert!(
+            matches!(refused, Err(Break::Error(_))),
+            "a durable service holds a seat like any live worker"
+        );
+
+        for gate in gates {
+            let _ = gate.send(());
+        }
+    }
+
+    /// A settled entry lingering under retention holds no seat: with cap 1
+    /// and one finished-but-unclaimed worker still listed, the next birth
+    /// is admitted — the cap counts running workers, not registry entries.
+    #[test]
+    fn settled_entries_do_not_block_admission() {
+        let mut shell = Shell::new(Default::default());
+        shell.turn.worker_cap = Some(1);
+        let first = spawn_child(
+            Arc::new(shell.mobile().scope),
+            &mut shell,
+            ChildIoMode::Buffered,
+            LeaseClass::Worker,
+            "<done>",
+            |_c| Ok(Value::Unit),
+        )
+        .expect("the first birth is admitted");
+        wait_settled(&first);
+        assert_eq!(shell.local.workers.count(), 1, "the settled entry lingers");
+
+        spawn_child(
+            Arc::new(shell.mobile().scope),
+            &mut shell,
+            ChildIoMode::Buffered,
+            LeaseClass::Worker,
+            "<next>",
+            |_c| Ok(Value::Unit),
+        )
+        .expect("a lingering settled entry must not hold a seat");
     }
 }

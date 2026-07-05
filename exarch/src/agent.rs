@@ -148,6 +148,17 @@ pub struct Agent {
     /// the periodic [`nudge`] reminder describe what the model has pinned.
     /// Cleared on `/clear` like the rest of the session's generation state.
     pins: shell_eval::PinDigests,
+    /// The agent's ral-call epoch: incremented once at the top of every
+    /// [`Self::run_shell`] call — success or error alike, a failed eval is
+    /// still a call.  The integer clock every per-call ledger reads: the
+    /// settled-worker retention sweep today
+    /// ([`advance_worker_epoch`](ral_core::Shell::advance_worker_epoch)),
+    /// the binding leases of `decisions/260629_agent-binding-reaping` next,
+    /// on this same counter.  Starts at 0, and a fork's child starts its
+    /// own at 0; deliberately NOT reset by `/clear` — the registry is
+    /// emptied there anyway, and a monotone counter is simpler to reason
+    /// about than one that rewinds.
+    ral_epoch: u64,
 }
 
 /// Outcome of one [`Agent::apply`].  Degenerate cases (`Empty`,
@@ -348,6 +359,7 @@ impl Agent {
             schedules: crate::schedule::ScheduleRegistry::new(),
             last_input: 0,
             pins: Default::default(),
+            ral_epoch: 0,
         })
     }
 
@@ -1317,6 +1329,9 @@ impl Agent {
         timeout_secs: u64,
         emit: &Emitter,
     ) -> SessionToolResult {
+        // One ral call, one epoch tick — counted at entry so a call that
+        // fails to evaluate still advances the retention clock.
+        self.ral_epoch += 1;
         // Refresh the durable snapshot at this clean boundary: the
         // dynamic context here reflects every prior tool call that
         // returned, and none that this one is about to mutate.  If the
@@ -1347,6 +1362,15 @@ impl Agent {
             shell_eval::Outcome::Ran(r) => render(&r),
             shell_eval::Outcome::Static(s) => clip(&s, OPAQUE_CAP),
         };
+        // Advance the settled-retention sweep to this call's epoch: stamp
+        // entries first observed settled, expire those whose unclaimed
+        // result has sat a full retention of calls.  Expiry notices ride
+        // the existing `drain_worker_reaps` at the next ready boundary —
+        // no plumbing of their own.
+        self.transport
+            .shell_mut()
+            .shell
+            .advance_worker_epoch(self.ral_epoch, shell_eval::SETTLED_WORKER_RETENTION);
         emit.emit(Kind::ToolResult(content.clone()));
         SessionToolResult { id, content }
     }
@@ -2552,6 +2576,7 @@ mod tests {
             caps: ral_core::types::Capabilities::root(),
             turn_limit: Some(std::time::Duration::from_secs(5)),
             detached_lease: Some(lease),
+            worker_cap: None,
             io: TurnIo::Capture,
             terminal: RequestedTerminalAccess::Denied,
             stdin: TurnStdin::Empty,
@@ -2626,6 +2651,89 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "a second drain with no new notices must emit nothing"
+        );
+    }
+
+    /// The per-agent ral-call epoch: each `run_shell` bumps it once, the
+    /// post-eval sweep stamps a settled-but-unclaimed worker's entry with
+    /// it, and — the sweep fast-forwarded past the retention bound through
+    /// the same host door `run_shell` uses — the expiry renders through the
+    /// existing drain as a `Retention`-cause `Kind::WorkerReaped`.
+    #[test]
+    fn run_shell_epoch_stamps_and_retention_renders_through_the_drain() {
+        let dir = tmp("ral-epoch-retention");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+
+        // Call 1: spawn an instant worker.  The call's own sweep races the
+        // worker's settling, so the stamp is asserted only after call 2,
+        // by which time settling is certain.
+        session.run_shell("t1".into(), "spawn { return 1 }", 5, &emit);
+        assert_eq!(session.ral_epoch, 1, "one call, one tick");
+
+        let entry = session
+            .transport
+            .shell_mut()
+            .shell
+            .workers()
+            .pop()
+            .expect("the spawn registered its worker");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while *entry.handle.state.lock().unwrap() != ral_core::types::HandleState::Completed {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the instant worker must settle within the budget"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        // Call 2: a trivial eval; its sweep certainly observes the settled
+        // entry, so the stamp is whichever call's sweep saw it first.
+        session.run_shell("t2".into(), "let _x = 1", 5, &emit);
+        assert_eq!(session.ral_epoch, 2, "two calls, two ticks");
+        let stamped = session
+            .transport
+            .shell_mut()
+            .shell
+            .workers()
+            .pop()
+            .expect("the unclaimed entry lingers");
+        let s = stamped
+            .settled_epoch
+            .expect("the per-call sweep stamped the settled entry");
+        assert!(s == 1 || s == 2, "stamped by call 1's or call 2's sweep");
+
+        // Fast-forward the sweep past the retention bound, expiring the
+        // unclaimed entry...
+        session.transport.shell_mut().shell.advance_worker_epoch(
+            s + shell_eval::SETTLED_WORKER_RETENTION,
+            shell_eval::SETTLED_WORKER_RETENTION,
+        );
+        assert_eq!(session.transport.shell_mut().shell.worker_count(), 0);
+
+        // ...and the expiry renders through the existing drain, on a fresh
+        // channel so the run_shell chatter above stays out of the assert.
+        let (tx2, rx2) = std::sync::mpsc::channel();
+        let emit2 = Emitter::with_mailbox(tx2, session.id, session.inbox.mailbox());
+        session.drain_worker_reaps(&emit2);
+        let event = rx2
+            .try_recv()
+            .expect("the drain must emit the retention reap");
+        match event.kind {
+            Kind::WorkerReaped { cmd, cause, .. } => {
+                assert_eq!(cmd, "<block>", "the reap names the spawned body");
+                assert_eq!(
+                    cause,
+                    ral_core::types::ReapCause::Retention,
+                    "an unclaimed settled entry expires as Retention"
+                );
+            }
+            _ => panic!("expected Kind::WorkerReaped"),
+        }
+        assert!(
+            rx2.try_recv().is_err(),
+            "exactly one event per retention expiry"
         );
     }
 }

@@ -35,6 +35,7 @@ fn eval(shell: &mut Shell, source: &str) -> Settled<Value> {
             caps: Capabilities::root(),
             turn_limit: None,
             detached_lease: None,
+            worker_cap: None,
             io: TurnIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
             stdin: TurnStdin::Inherit,

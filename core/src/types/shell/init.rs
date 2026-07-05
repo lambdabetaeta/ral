@@ -46,6 +46,7 @@ impl Shell {
                 cancel: root.child(),
                 loc: LocationCursor::default(),
                 detached_lease: None,
+                worker_cap: None,
                 // The boot frame holds no terminal authority; a host states it
                 // per turn via `TurnRequest::terminal`. `Denied` is the safe
                 // default so a frame with no stated policy never foregrounds.

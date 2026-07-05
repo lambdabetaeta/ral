@@ -325,6 +325,7 @@ impl Shell {
     {
         let context = self.mobile.context.clone();
         let detached_lease = self.turn.detached_lease;
+        let worker_cap = self.turn.worker_cap;
         let root = self.session.root.clone();
         let builtins = self.session.builtins.clone();
         let workers = self.local.workers.clone();
@@ -334,6 +335,7 @@ impl Shell {
             let mut child = Self::from_captured(&scopes);
             child.mobile.context = context;
             child.turn.detached_lease = detached_lease;
+            child.turn.worker_cap = worker_cap;
             child.turn.cancel = cancel;
             child.session.root = root;
             child.session.builtins = builtins;

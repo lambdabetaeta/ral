@@ -99,6 +99,7 @@ fn top_level_under(shell: &mut Shell, caps: Capabilities, src: &str) -> Settled<
             caps,
             turn_limit: None,
             detached_lease: None,
+            worker_cap: None,
             io: TurnIo::Inherit,
             terminal: RequestedTerminalAccess::Denied,
             stdin: TurnStdin::Empty,

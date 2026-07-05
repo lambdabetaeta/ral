@@ -31,6 +31,21 @@ const DETACHED_WORKER_CEILING: Duration = Duration::from_secs(60 * 60);
 /// idleness, never age.
 const DETACHED_WORKER_BACKSTOP: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// Admission cap on concurrently *running* workers per agent, enforced by
+/// core at the spawn door: the 65th spawn is refused with an error naming
+/// `await`/`cancel`/`workers` while 64 still run.  Durable services count
+/// (live work is live work); settled entries lingering under retention
+/// never block admission.
+const LIVE_WORKER_CAP: usize = 64;
+
+/// Retention bound, in ral calls, on a settled worker's unclaimed result:
+/// the entry is swept this many calls after
+/// [`Agent::run_shell`](crate::agent::Agent)'s per-call epoch sweep first
+/// observes it settled.  256 matches the binding lease's scratch expiry
+/// (`decisions/260629_agent-binding-reaping`) — the two ledgers read the
+/// same ral-call clock.
+pub(crate) const SETTLED_WORKER_RETENTION: u64 = 256;
+
 /// The prelude baked into this binary at build time by `build.rs`.
 pub static PRELUDE: ral_core::driver::BakedPrelude = ral_core::baked_prelude!();
 
@@ -275,6 +290,7 @@ pub fn run_shell(
             idle: DETACHED_WORKER_CEILING,
             backstop: DETACHED_WORKER_BACKSTOP,
         }),
+        worker_cap: Some(LIVE_WORKER_CAP),
         io: TurnIo::Capture,
         terminal: RequestedTerminalAccess::Denied,
         stdin: TurnStdin::Empty,

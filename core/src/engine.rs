@@ -103,6 +103,7 @@ pub fn run_engine() -> ! {
                 caps: req.caps.clone(),
                 turn_limit: req.turn_limit,
                 detached_lease: req.detached_lease,
+                worker_cap: req.worker_cap,
                 io: req.io,
                 terminal: req.terminal,
                 stdin: req.stdin,

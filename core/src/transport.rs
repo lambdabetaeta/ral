@@ -151,6 +151,8 @@ pub struct ReqMirror {
     pub turn_limit: Option<std::time::Duration>,
     /// The idle-observation lease for detached workers.
     pub detached_lease: Option<crate::types::WorkerLease>,
+    /// Admission cap on concurrently running workers.
+    pub worker_cap: Option<usize>,
     /// Byte IO regime.
     pub io: crate::driver::TurnIo,
     /// Whether the turn may hand the controlling terminal to a child.
@@ -502,6 +504,7 @@ impl Transport for IdentityTransport {
             caps: req.caps.clone(),
             turn_limit: req.turn_limit,
             detached_lease: req.detached_lease,
+            worker_cap: req.worker_cap,
             io: req.io,
             terminal: req.terminal,
             stdin: req.stdin,

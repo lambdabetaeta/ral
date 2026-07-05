@@ -13,15 +13,19 @@
 //! registry: if the handle was minted by (and registered in) a different
 //! shell, the removal is a no-op and the entry lingers where it lives.
 //!
-//! The one policy that also *writes* here is the idle-observation lease
-//! (`builtins::concurrency`'s lease chain, per
-//! `decisions/260705_leases-and-budgets`): under a frame that supplies a
+//! Two policies also *write* here, per `decisions/260705_leases-and-budgets`.
+//! The idle-observation lease (`builtins::concurrency`'s lease chain): under
+//! a frame that supplies a
 //! [`WorkerLease`], a still-running worker unobserved for `idle` — or older
 //! than `backstop` regardless of observation — is reaped, and the reap is
 //! recorded as a [`ReapNotice`] beside the entries. [`WorkerRegistry::reap`]
 //! is one locked operation — remove the entry, and only if it was present,
 //! push the notice — so the reap-vs-observation race is benign: an entry an
-//! eliminator observed away first yields no notice. The host drains the
+//! eliminator observed away first yields no notice. And the retention sweep
+//! ([`WorkerRegistry::advance_epoch`], driven by the host's ral-call
+//! epoch): a settled entry is where an unclaimed result waits, and one
+//! nobody claims within the retention bound is removed with a
+//! [`ReapCause::Retention`] notice. The host drains the
 //! notices at its ready boundaries
 //! ([`Shell::take_worker_reap_notices`](super::Shell::take_worker_reap_notices))
 //! to emit transcript events, so the model's later "where did my job go?"
@@ -38,7 +42,7 @@
 //! matching the per-agent binding-lease ledger this module sits beside on
 //! [`LocalState`](super::LocalState).
 
-use crate::types::HandleInner;
+use crate::types::{HandleInner, HandleState};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -94,14 +98,19 @@ pub enum LeaseClass {
     Durable,
 }
 
-/// Why the lease chain reaped a worker: its idle bound elapsed unrenewed,
-/// or its absolute backstop came due regardless of observation.
+/// Why a worker's registry entry was removed by policy: the lease chain's
+/// two bounds on a still-running worker, or the retention sweep expiring a
+/// settled entry's unclaimed result.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ReapCause {
     /// Unobserved for the lease's `idle` bound.
     Idle,
     /// Older than the lease's `backstop`, observation notwithstanding.
     Backstop,
+    /// A settled entry whose unclaimed result outlived the retention bound
+    /// — swept by [`WorkerRegistry::advance_epoch`], counted in ral calls
+    /// since the sweep first observed the entry settled.
+    Retention,
 }
 
 /// The compact record a reap leaves behind — the facts a transcript event
@@ -133,6 +142,12 @@ pub struct WorkerEntry {
     /// display-only.
     pub started: SystemTime,
     pub class: LeaseClass,
+    /// The host's ral-call epoch at which [`WorkerRegistry::advance_epoch`]
+    /// first observed this entry settled — `None` while it runs. The
+    /// retention clock is ral-calls-since-first-observed-settled, so a
+    /// worker that settles mid-quiet-period starts its retention at the
+    /// next call, never retroactively.
+    pub settled_epoch: Option<u64>,
     pub handle: HandleInner,
 }
 
@@ -197,6 +212,70 @@ impl WorkerRegistry {
             class: entry.class,
             cause,
         });
+    }
+
+    /// Advance the registry to the host's ral-call `epoch`, sweeping
+    /// settled entries against `retention` — the settled entry's own lease,
+    /// where the lease chain governs running workers. Per entry, under one
+    /// registry lock:
+    ///
+    /// - still `Running`: untouched — retention never applies to live work.
+    /// - settled and unstamped: stamp `settled_epoch = Some(epoch)`. The
+    ///   retention clock is ral-calls-since-first-observed-settled, so a
+    ///   worker that settles mid-quiet-period starts its retention at the
+    ///   next call, never retroactively.
+    /// - stamped `Some(s)` with `epoch − s >= retention` (saturating — a
+    ///   host-supplied epoch must never panic core): remove the entry and
+    ///   push a [`ReapCause::Retention`] notice, atomic with the removal
+    ///   like every reap here.
+    ///
+    /// The eliminators already remove an entry the moment its result is
+    /// observed; this sweep only catches what nobody claimed.
+    ///
+    /// Lock order: the registry lock may take an entry's `state` lock (the
+    /// brief read here and in [`Self::running_count`]), never the reverse —
+    /// no code path acquires the registry lock while holding a `state`
+    /// lock. Verified at the three state-lock sites outside this module:
+    /// `lease_fire`'s if-condition temporary, `builtin_cancel`'s copied-out
+    /// read, and the worker exit mark each drop their guard before any
+    /// registry call.
+    pub(crate) fn advance_epoch(&self, epoch: u64, retention: u64) {
+        let mut inner = self.0.lock().unwrap();
+        let mut i = 0;
+        while i < inner.entries.len() {
+            let running = *inner.entries[i].handle.state.lock().unwrap() == HandleState::Running;
+            match (running, inner.entries[i].settled_epoch) {
+                (false, None) => {
+                    inner.entries[i].settled_epoch = Some(epoch);
+                    i += 1;
+                }
+                (false, Some(s)) if epoch.saturating_sub(s) >= retention => {
+                    let entry = inner.entries.remove(i);
+                    inner.reap_notices.push(ReapNotice {
+                        id: entry.id,
+                        cmd: entry.cmd,
+                        class: entry.class,
+                        cause: ReapCause::Retention,
+                    });
+                }
+                _ => i += 1,
+            }
+        }
+    }
+
+    /// Number of entries whose worker is still `Running` — the admission
+    /// cap's measure. Settled entries lingering under retention never block
+    /// a new birth, while a durable service counts like any other live
+    /// work. Takes each entry's `state` lock briefly under the registry
+    /// lock; see [`Self::advance_epoch`] for the lock order this relies on.
+    pub(crate) fn running_count(&self) -> usize {
+        self.0
+            .lock()
+            .unwrap()
+            .entries
+            .iter()
+            .filter(|entry| *entry.handle.state.lock().unwrap() == HandleState::Running)
+            .count()
     }
 
     /// Drain every accumulated [`ReapNotice`], leaving the ledger empty.

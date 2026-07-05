@@ -465,6 +465,7 @@ pub(super) fn framed_turn_request(
         caps: Capabilities::root(),
         turn_limit: None,
         detached_lease: None,
+        worker_cap: None,
         io: TurnIo::Inherit,
         terminal,
         stdin: TurnStdin::Inherit,

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 568aa23
+generated_at_commit: 5bdb65a
 generated_at_date: 2026-07-05
 covers_paths: [exarch/src/agent.rs, exarch/src/agent_registry.rs, exarch/src/event.rs, exarch/src/fleet.rs, exarch/src/nudge.rs, exarch/src/digest.rs]
 ---
@@ -103,14 +103,27 @@ Three nested loops, the same for trunk and child alike:
   empty.
 
 Every pass through `drive`'s top — its own ready boundary, both freshly entered
-and after a settled iteration — also drains this shell's lease-chain reap
+and after a settled iteration — also drains this shell's reap
 notices (`Shell::take_worker_reap_notices`) and emits one `Kind::WorkerReaped`
-per entry: a `spawn`/`watch` worker the lease chain removed by policy, idle or
-past its backstop, rather than one an eliminator observed away. Transcript and
+per entry: a worker removed by policy — the lease chain's idle or backstop
+bound on a running worker, or the retention sweep expiring a settled entry's
+unclaimed result — rather than one an eliminator observed away. Transcript and
 TUI only — the rendered one-liner is [[map/exarch/cards|cards]]'s `reap_card`,
 the completion card's sibling — never model-facing, since delivery of a reap to
 the model itself is deferred
 ([[decisions/260705_leases-and-budgets|leases-and-budgets]]).
+
+The retention clock is the agent's **ral-call epoch** (`Agent::ral_epoch`):
+incremented once at the top of every `run_shell` call — a failed eval is
+still a call — and swept into the registry right after the evaluation
+returns (`Shell::advance_worker_epoch` with
+[[map/exarch/shell-eval|shell-eval]]'s `SETTLED_WORKER_RETENTION`), which
+stamps entries first observed settled and expires the unclaimed. The counter
+starts at 0, a fork's child starts its own at 0, and `/clear` does not
+rewind it — the cleared registry is empty anyway, and a monotone counter is
+the one the coming binding leases (`decisions/260629_agent-binding-reaping`)
+will share. Retention notices need no plumbing of their own: they ride the
+same drain above.
 
 The headless-completion gate is gone with `expect_action`
 ([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]]): the one role flag

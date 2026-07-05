@@ -1338,6 +1338,7 @@ mod tests {
             caps: ral_core::types::Capabilities::root(),
             turn_limit: None,
             detached_lease: None,
+            worker_cap: None,
             io: TurnIo::Capture,
             terminal: RequestedTerminalAccess::Denied,
             stdin: TurnStdin::Empty,

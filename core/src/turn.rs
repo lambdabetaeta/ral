@@ -156,6 +156,7 @@ pub(crate) fn build_turn(
     terminal_access: crate::types::TerminalAccess,
     foreground: ForegroundScope,
     detached_lease: Option<crate::types::WorkerLease>,
+    worker_cap: Option<usize>,
     surface: Option<SurfaceSink>,
     boundary: Option<Boundary>,
 ) -> TurnState {
@@ -177,6 +178,7 @@ pub(crate) fn build_turn(
         cancel: foreground,
         loc: LocationCursor::default(),
         detached_lease,
+        worker_cap,
         terminal_access,
     }
 }
@@ -286,6 +288,7 @@ mod tests {
             caps: Capabilities::root(),
             turn_limit: None,
             detached_lease: None,
+            worker_cap: None,
             io: TurnIo::Capture,
             terminal: RequestedTerminalAccess::Denied,
             stdin: TurnStdin::Empty,
