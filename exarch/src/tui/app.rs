@@ -454,10 +454,19 @@ impl App {
                     live_views,
                     bus.depth() as u64,
                     bus.bytes() as u64,
+                    super::viewport::VIEWPORT_MAX_BLOCKS as u64,
+                    super::viewport::VIEWPORT_MAX_ROWS as u64,
                 );
                 card.0.push(crate::resources::section_mark("frontend"));
                 card.0.push(crate::resources::rows_mark(&frontend));
                 self.with_viewport(id, |vp| vp.push_card(card));
+                // One dim line per tombstoned view, right beside the fold —
+                // the `views.dead` row is a count; this is where each one's
+                // (id, status, log path) is actually named.
+                let tombstones = self.tabs.tombstone_lines();
+                if !tombstones.is_empty() {
+                    self.push_chrome(id, RailShape::Plain, tombstones);
+                }
             }
             // A write surfaced: a barrier that ends the ral block, landed
             // standalone as its own card — the `write <path> <outcome>` heading

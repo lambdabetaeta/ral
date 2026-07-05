@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 9941521
+generated_at_commit: 412c140
 generated_at_date: 2026-07-05
 covers_paths: [exarch/src/bus.rs, exarch/src/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/host.rs]
 ---
@@ -144,14 +144,22 @@ Two `Sink` implementations:
  The `rule_line` carries a value-ramp `ctx%` bar and an elapsed-wait bar
  (elapsed wall-time on the live phase, resetting per round-trip); the live
  phase lives on `Viewport`, not `App`.
- Sub-agent sessions get matrix rows/tabs that linger for 90 seconds after
- `Died`, each keeping its own scroll position; dead rows dim and keep their
- final step cells without a countdown. The conversing trunk is label-only in
- the matrix — no step cells, token readout, or size bar — so those columns
- describe workers only. An async agent on the session-lived bus streams its tab
- the same way, and `/clear` retires every live sub-tab through the same linger
- window
+ Sub-agent sessions get matrix rows/tabs that linger for 90 seconds
+ (`LINGER`, `tui.rs`) after `Died`, each keeping its own scroll position; dead
+ rows dim and keep their final step cells without a countdown. The conversing
+ trunk is label-only in the matrix — no step cells, token readout, or size bar
+ — so those columns describe workers only. An async agent on the
+ session-lived bus streams its tab the same way, and `/clear` retires every
+ live sub-tab through the same linger window
  ([[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]]).
+ Once `LINGER` elapses, `Tabs::tick` evicts the dead view into a `Tombstone`
+ (`Viewport::evict_to_tombstone`) — exactly agent id, final status, and log
+ path, everything else (blocks, the flatten, streaming buffers, pins)
+ dropped; no reload-from-`user.log` machinery is built. Every live viewport
+ also caps its own retained window — `VIEWPORT_MAX_BLOCKS` blocks and
+ `VIEWPORT_MAX_ROWS` rendered rows, oldest evicted first — since older
+ blocks are already durable in `user.log`/`events.json`
+ ([[decisions/260705_leases-and-budgets|leases-and-budgets]]).
  `/clear` also cancels the in-flight model turn: `route_submit` raises
  `cancel::raise_interrupt` and cascades `agents.cancel(root)` *before* blanking
  the viewport, so the streaming `select!` in `provider::complete` unwinds within
@@ -206,7 +214,8 @@ user, git state) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui.rs` — thin façade (~840 lines): module declarations, re-exports, App struct with orchestration methods delegating to components
         - `tui/tui_loop.rs` — REPL/ui loop: `run`, `Tui`, `CommandCtx`, `ReplControl`, `ui_loop`, `KeyMode`, `KeyAction`, `key_action`, `ctrl_key`
         - `tui/terminal.rs` — terminal lifetime: `TerminalGuard`, raw mode, alt screen, panic hook, stderr redirect, editor hatch, `compose_in_editor`
-        - `tui/tabs.rs` — session/view lifecycle: `Tabs`, viewports, dispatch order, tabs, titles, dying linger, parent chain, focus management
+        - `tui/tabs.rs` — session/view lifecycle: `Tabs`, viewports, dispatch order, tabs, titles, dying linger, parent chain, focus management, `tick`'s tombstone eviction past `LINGER`
+        - `tui/viewport.rs` — per-session scrollback: `Viewport`, block push/flatten/render, the `VIEWPORT_MAX_BLOCKS`/`VIEWPORT_MAX_ROWS` window caps (oldest evicted first), `Tombstone`/`TombstoneStatus`
         - `tui/surface.rs` — event coalescing: `SurfaceBuffer`, `PatchBuf`, `ObservationBuf`, absorb/flush operations
         - `tui/prompt.rs` — prompt editor state: `PromptState`, history, draft, editor request, key input
         - `tui/gesture.rs` — mouse/selection: `GestureState`, `Press`, frame geometry, selection, copy toast, hover, scroll

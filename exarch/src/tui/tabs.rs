@@ -10,6 +10,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use ratatui::text::Line;
+
 use crate::bus::AgentId;
 use crate::fleet::NO_FOCUS;
 
@@ -115,6 +117,12 @@ impl Tabs {
     /// Expire `dying` entries that have outlived [`LINGER`].  Called
     /// once per frame from the event loop.  When the focused tab
     /// expires, focus falls back to its parent (recursing toward the trunk).
+    /// Each expired view is evicted into a tombstone
+    /// ([`Viewport::evict_to_tombstone`]) rather than dropped from
+    /// [`Self::viewports`] outright: the map entry survives (so
+    /// [`Self::viewports`]'s length — the `/resources` dead-view count, and
+    /// [`Self::viewport_mut`]'s lookup for `flush_logs`'s final log-path
+    /// listing) stays correct, while the heavy scrollback state is freed.
     /// Returns whether a tab actually aged out — the caller's signal that
     /// the tab bar and focus must repaint even absent any other change.
     pub fn tick(&mut self) -> bool {
@@ -136,6 +144,9 @@ impl Tabs {
                 self.focused_steerable = fallback == self.root;
             }
             self.parents.remove(&id);
+            if let Some(vp) = self.viewports.get_mut(&id) {
+                vp.evict_to_tombstone(id);
+            }
         }
         self.title_frame += 1;
         changed
@@ -264,6 +275,18 @@ impl Tabs {
         self.viewports.keys().copied().collect()
     }
 
+    /// One rendered line per tombstoned view — every dead sub-agent whose
+    /// linger window has elapsed, evicted down to (agent id, final status,
+    /// log path). Insertion order is arbitrary (a `HashMap` walk); callers
+    /// wanting a stable order sort by whatever the line carries.
+    pub(super) fn tombstone_lines(&self) -> Vec<Line<'static>> {
+        self.viewports
+            .values()
+            .filter_map(|vp| vp.tombstone())
+            .map(super::viewport::Tombstone::line)
+            .collect()
+    }
+
     /// Whether the focused tab is steerable.
     pub(super) fn is_steerable(&self) -> bool {
         self.focused_steerable
@@ -282,8 +305,10 @@ impl Tabs {
 
 #[cfg(test)]
 mod tests {
+    use super::super::block::RailShape;
     use super::*;
-    use std::time::Instant;
+    use ratatui::text::Line;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn parent_focus_skips_dying_ancestor() {
@@ -299,5 +324,55 @@ mod tests {
         tabs.tabs.push(grandchild);
         // Focus should skip dying parent and go to root
         assert_eq!(tabs.parent_focus(grandchild), root);
+    }
+
+    /// Tombstoning a dead view past `LINGER` never touches a different,
+    /// live sibling's viewport — the lifecycle eviction (`tick`) and the
+    /// per-viewport window cap are independent mechanisms, so killing one
+    /// agent is never paid for out of another's retained scrollback.
+    #[test]
+    fn tick_tombstones_only_the_expired_view_leaving_a_live_sibling_untouched() {
+        let root = 1;
+        let child = 2;
+        let mut tabs = Tabs::new(root, std::path::Path::new("/tmp/test-root"));
+        tabs.born(
+            child,
+            std::path::Path::new("/tmp/test-child"),
+            "child".into(),
+            root,
+            AgentSlot(1),
+        );
+        if let Some(vp) = tabs.viewport_mut(child) {
+            vp.push_chrome(RailShape::Plain, vec![Line::from("child says hi")]);
+        }
+        if let Some(vp) = tabs.viewport_mut(root) {
+            vp.push_chrome(RailShape::Plain, vec![Line::from("root says hi")]);
+        }
+        tabs.died(child);
+        // Force the linger window to have already elapsed rather than
+        // waiting LINGER (90s) out in a test.
+        tabs.dying
+            .insert(child, Instant::now() - LINGER - Duration::from_secs(1));
+
+        tabs.tick();
+
+        assert!(
+            tabs.viewport(child).unwrap().tombstone().is_some(),
+            "the dead child is tombstoned once past LINGER"
+        );
+        assert_eq!(
+            tabs.viewport(child).unwrap().probe_figures().0,
+            0,
+            "the tombstoned child's scrollback is gone"
+        );
+        assert!(
+            tabs.viewport(root).unwrap().tombstone().is_none(),
+            "root is never tombstoned"
+        );
+        assert_eq!(
+            tabs.viewport(root).unwrap().probe_figures().0,
+            1,
+            "the live root's own block survives the sibling's tombstoning untouched"
+        );
     }
 }

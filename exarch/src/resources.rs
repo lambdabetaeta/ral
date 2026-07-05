@@ -155,18 +155,31 @@ pub fn frontend_rows(
     live_agents: u64,
     bus_depth: u64,
     bus_bytes: u64,
+    viewport_blocks_cap: u64,
+    viewport_rows_cap: u64,
 ) -> Vec<ProbeRow> {
-    let windowed = || Some("window lands with enforcement".to_string());
     vec![
         ProbeRow::new(
             "viewport.blocks",
             viewport_blocks,
+            Some(viewport_blocks_cap),
+            "evict",
+            Some("oldest evicted first; already durable in user.log".to_string()),
+        ),
+        ProbeRow::new(
+            "viewport.rows",
+            viewport_rows,
+            Some(viewport_rows_cap),
+            "evict",
+            Some("oldest evicted first; already durable in user.log".to_string()),
+        ),
+        ProbeRow::new(
+            "viewport.bytes",
+            viewport_bytes,
             None,
             "evict",
-            windowed(),
+            Some("no byte cap of its own; bounded indirectly by the blocks/rows caps".to_string()),
         ),
-        ProbeRow::new("viewport.rows", viewport_rows, None, "evict", windowed()),
-        ProbeRow::new("viewport.bytes", viewport_bytes, None, "evict", windowed()),
         ProbeRow::new(
             "views.live",
             live_views,
@@ -179,7 +192,7 @@ pub fn frontend_rows(
             dead_views,
             None,
             "evict",
-            Some("tombstone eviction lands with enforcement".to_string()),
+            Some("tombstoned (id, status, log path) once past LINGER".to_string()),
         ),
         ProbeRow::new(
             "bus.depth",
@@ -259,12 +272,14 @@ pub fn dir_size(root: &Path) -> u64 {
 mod tests {
     use super::*;
 
-    /// The frontend half of the fold: every row wears its decided policy,
-    /// and the not-yet-enforced accumulators say so instead of faking a
-    /// cap — the inspector precedes the enforcer honestly.
+    /// The frontend half of the fold: every row wears its decided policy;
+    /// the viewport window's two enforced caps (blocks, rows) show up as
+    /// real `cap`s now that the window has landed, while the accumulators
+    /// with no enforced number of their own (bytes, views, the bus) still
+    /// say so honestly rather than faking one.
     #[test]
-    fn frontend_rows_state_decided_policies_without_fake_caps() {
-        let rows = frontend_rows(3, 120, 4096, 2, 1, 2, 5, 777);
+    fn frontend_rows_state_decided_policies_and_the_viewport_window_caps() {
+        let rows = frontend_rows(3, 120, 4096, 2, 1, 2, 5, 777, 500, 20_000);
         let by_name = |n: &str| {
             rows.iter()
                 .find(|r| r.name == n)
@@ -278,11 +293,27 @@ mod tests {
         assert_eq!(by_name("fleet.agents").current, 2);
         assert_eq!(by_name("bus.depth").current, 5);
         assert_eq!(by_name("bus.bytes").current, 777);
-        for row in &rows {
+        assert_eq!(
+            by_name("viewport.blocks").cap,
+            Some(500),
+            "the block-count window cap is now enforced and shown"
+        );
+        assert_eq!(
+            by_name("viewport.rows").cap,
+            Some(20_000),
+            "the row window cap is now enforced and shown"
+        );
+        for name in [
+            "viewport.bytes",
+            "views.live",
+            "views.dead",
+            "bus.depth",
+            "bus.bytes",
+            "fleet.agents",
+        ] {
             assert!(
-                row.cap.is_none(),
-                "no frontend cap is enforced yet, so no row may claim one ({})",
-                row.name
+                by_name(name).cap.is_none(),
+                "no cap of its own is enforced for this row ({name})"
             );
         }
         assert_eq!(by_name("viewport.blocks").policy, "evict");

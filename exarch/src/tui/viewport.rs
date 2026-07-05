@@ -20,7 +20,7 @@ use super::group;
 use super::line::{READ_W, deliberation_grain, is_blank, plain, size_bar};
 use super::rail::{self, RailKind};
 use super::select::plain_slice;
-use crate::bus::Hunk;
+use crate::bus::{AgentId, Hunk};
 use crate::card::{Card, ObservationKind};
 use crate::provider::Usage;
 use ratatui::text::Line;
@@ -31,9 +31,68 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+/// Max scrollback blocks retained in heap per viewport; older blocks are
+/// already durable in `user.log`/`events.json` and are evicted oldest-first
+/// once the window is exceeded
+/// (`decisions/260705_leases-and-budgets`, "Viewport: cap by blocks and
+/// rendered rows; evict old blocks before retaining old dead-agent views").
+pub(super) const VIEWPORT_MAX_BLOCKS: usize = 500;
+/// Max rendered rows retained — an eviction trigger alongside
+/// [`VIEWPORT_MAX_BLOCKS`], for the rarer oversized block (a huge diff, a
+/// long tool result) that would blow the row budget well before the block
+/// count does.
+pub(super) const VIEWPORT_MAX_ROWS: usize = 20_000;
+
+/// The three facts kept for a dead sub-agent view once its linger window
+/// elapses ([`super::LINGER`]): everything else — blocks, the flatten, the
+/// streaming buffers, the pinned register — is dropped. No reload-from-log
+/// machinery is built; the log stays readable outside the TUI
+/// (`decisions/260705_leases-and-budgets`, "Viewport eviction: a tombstone
+/// with the log path is enough").
+pub(super) struct Tombstone {
+    pub(super) id: AgentId,
+    pub(super) status: TombstoneStatus,
+    pub(super) log_path: PathBuf,
+}
+
+impl Tombstone {
+    /// The tombstone's one-line rendering: dim chrome naming the agent, its
+    /// final status, and where its full transcript still lives.
+    pub(super) fn line(&self) -> Line<'static> {
+        let status = match self.status {
+            TombstoneStatus::Done => "done",
+            TombstoneStatus::Error => "error",
+        };
+        Line::from(format!(
+            "· agent {} {status} — {}",
+            self.id,
+            self.log_path.display()
+        ))
+    }
+}
+
+/// A dead view's coarse final status, read off its last block before the
+/// full scrollback is dropped — the same signal [`Viewport::last_is_error`]
+/// already exposes for the matrix's leading glyph.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum TombstoneStatus {
+    Done,
+    Error,
+}
+
 pub(super) struct Viewport {
     /// The session's scrollback, oldest block first.
     blocks: Vec<Block>,
+    /// Rendered-row estimate per entry of [`Self::blocks`], same order and
+    /// length — each block's `log_lines` count, captured where it is already
+    /// computed ([`Self::log_block`], [`Self::rewrite_log`]). The running sum
+    /// is the [`VIEWPORT_MAX_ROWS`] eviction trigger; cheap because it is
+    /// never recomputed from scratch on the hot push path.
+    block_rows: Vec<usize>,
+    /// Set once this view has been evicted into a tombstone
+    /// ([`Self::evict_to_tombstone`]); `blocks`/`block_rows` are empty from
+    /// that point on. `None` for a live (or still-lingering) view.
+    tombstone: Option<Tombstone>,
     /// This session's agent palette slot, stamped onto every block at
     /// push. Root is `0`; subagents take the next slot at birth.
     agent: AgentSlot,
@@ -205,6 +264,8 @@ impl Viewport {
     pub(super) fn new(log_path: PathBuf, agent: AgentSlot) -> Self {
         Self {
             blocks: Vec::new(),
+            block_rows: Vec::new(),
+            tombstone: None,
             agent,
             usage: Usage::default(),
             open: String::new(),
@@ -315,6 +376,7 @@ impl Viewport {
     /// the `user.log` by reopening it.  Used by `/clear` on the root.
     pub(super) fn reset(&mut self) {
         self.blocks.clear();
+        self.block_rows.clear();
         self.usage = Usage::default();
         self.open.clear();
         self.thinking.clear();
@@ -325,6 +387,42 @@ impl Viewport {
         self.log_prev_blank = true;
         self.phase = None;
         self.pins.clear();
+    }
+
+    /// Evict this view's heap state into a [`Tombstone`] carrying exactly the
+    /// agent id, its final status (read off the last block before it is
+    /// dropped, the same signal [`Self::last_is_error`] exposes), and the log
+    /// path — the scrollback, flatten, streaming buffers, and pinned register
+    /// are already durable in `user.log` and are dropped, never re-read
+    /// (`decisions/260705_leases-and-budgets`). A no-op once already a
+    /// tombstone.
+    pub(super) fn evict_to_tombstone(&mut self, id: AgentId) {
+        if self.tombstone.is_some() {
+            return;
+        }
+        let status = if self.last_is_error() {
+            TombstoneStatus::Error
+        } else {
+            TombstoneStatus::Done
+        };
+        self.tombstone = Some(Tombstone {
+            id,
+            status,
+            log_path: self.log_path.clone(),
+        });
+        self.blocks = Vec::new();
+        self.block_rows = Vec::new();
+        self.open = String::new();
+        self.thinking = String::new();
+        self.flat = Flat::default();
+        self.pins = Vec::new();
+        self.log = io::BufWriter::new(Box::new(io::sink()));
+    }
+
+    /// The tombstone, once evicted — `None` for a live (or still-lingering)
+    /// view.  `.tombstone().is_some()` is the "was this view evicted?" query.
+    pub(super) fn tombstone(&self) -> Option<&Tombstone> {
+        self.tombstone.as_ref()
     }
 
     /// Final flush of the `user.log` at session end; lines are already
@@ -546,12 +644,34 @@ impl Viewport {
         }
     }
 
-    /// Append `block`, tee its log projection, and mark the flatten
-    /// stale so the next render rebuilds it.
+    /// Append `block`, tee its log projection, mark the flatten stale so the
+    /// next render rebuilds it, and enforce the window caps.
     fn push_block(&mut self, block: Block) {
-        self.log_block(&block);
+        let rows = self.log_block(&block);
         self.blocks.push(block);
+        self.block_rows.push(rows);
         self.flat.dirty = true;
+        self.enforce_window_caps();
+    }
+
+    /// Evict oldest-first once either window cap is crossed — the dropped
+    /// blocks are already durable in `user.log`/`events.json` and are never
+    /// re-read from heap (`decisions/260705_leases-and-budgets`).
+    fn enforce_window_caps(&mut self) {
+        let mut evicted = false;
+        while self.blocks.len() > VIEWPORT_MAX_BLOCKS
+            || self.block_rows.iter().sum::<usize>() > VIEWPORT_MAX_ROWS
+        {
+            if self.blocks.is_empty() {
+                break;
+            }
+            self.blocks.remove(0);
+            self.block_rows.remove(0);
+            evicted = true;
+        }
+        if evicted {
+            self.flat.dirty = true;
+        }
     }
 
     fn current_answer_chars(&self) -> u32 {
@@ -602,13 +722,23 @@ impl Viewport {
 
     /// Tee a block's full content to `user.log`, collapsing redundant
     /// blank separators against the previous line exactly as the screen
-    /// flatten does.
-    fn log_block(&mut self, block: &Block) {
+    /// flatten does. Returns its line count — the row-cap estimate
+    /// ([`Self::push_block`]) reuses this rather than paying for a second
+    /// pass over the block.
+    fn log_block(&mut self, block: &Block) -> usize {
         let lead = opens_rail_run(self.blocks.last(), block);
         let lines = block.log_lines(self.agent, lead);
+        let n = lines.len();
         self.write_log_lines(lines);
+        n
     }
 
+    /// Rebuild the whole log from `self.blocks` — used when an existing
+    /// block was mutated or a new one inserted mid-vector (a thinking-block
+    /// append or insert), rather than appended. Also rebuilds
+    /// [`Self::block_rows`] from the same pass (no second walk) and
+    /// re-enforces the window caps, since an in-place append can grow a
+    /// block past the row budget without changing [`Self::blocks`]'s length.
     fn rewrite_log(&mut self) {
         let entries = self
             .blocks
@@ -619,11 +749,13 @@ impl Viewport {
                 block.log_lines(self.agent, lead)
             })
             .collect::<Vec<_>>();
+        self.block_rows = entries.iter().map(Vec::len).collect();
         self.log = open_log(&self.log_path);
         self.log_prev_blank = true;
         for lines in entries {
             self.write_log_lines(lines);
         }
+        self.enforce_window_caps();
     }
 
     fn write_log_lines(&mut self, lines: Vec<Line<'static>>) {
@@ -1412,6 +1544,145 @@ mod tests {
         assert!(
             !committed_thinking.is_empty(),
             "committed thinking stays visible in sticky viewport: {committed_text:?}"
+        );
+    }
+
+    // ── viewport window caps and tombstones (7b) ───────────────────────────
+
+    /// Each pushed block's log rendering, joined into one string — lets a
+    /// test read back which marker survived without hard-coding the render
+    /// shape.
+    fn block_text(b: &Block) -> String {
+        b.log_lines(AgentSlot(0), true)
+            .iter()
+            .map(plain)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Pushing past `VIEWPORT_MAX_BLOCKS` evicts the oldest blocks first: the
+    /// count never exceeds the cap, and the newest survives.
+    #[test]
+    fn window_evicts_oldest_blocks_first_past_the_block_cap() {
+        let mut vp = viewport();
+        for i in 0..(VIEWPORT_MAX_BLOCKS + 50) {
+            vp.push_chrome(RailShape::Plain, vec![Line::from(format!("marker {i}"))]);
+        }
+        assert_eq!(
+            vp.blocks.len(),
+            VIEWPORT_MAX_BLOCKS,
+            "capped at the block limit"
+        );
+        assert_eq!(
+            vp.block_rows.len(),
+            VIEWPORT_MAX_BLOCKS,
+            "the row-estimate ledger tracks blocks 1:1"
+        );
+        assert!(
+            block_text(&vp.blocks[0]).contains("marker 50"),
+            "oldest-first eviction: the 51st pushed block is now the oldest survivor: {}",
+            block_text(&vp.blocks[0])
+        );
+        assert!(
+            block_text(vp.blocks.last().unwrap())
+                .contains(&format!("marker {}", VIEWPORT_MAX_BLOCKS + 49)),
+            "the newest block always survives"
+        );
+    }
+
+    /// A run of oversized blocks blows the row budget well before the block
+    /// count does; the row cap evicts oldest-first on its own, independent of
+    /// the block-count cap.
+    #[test]
+    fn window_evicts_oldest_blocks_first_past_the_row_cap() {
+        let mut vp = viewport();
+        // Five ~6,000-line blocks: 30,000 raw lines against a 20,000-row cap,
+        // with only 5 blocks pushed — nowhere near `VIEWPORT_MAX_BLOCKS`.
+        for block in 0..5 {
+            let lines = (0..6000)
+                .map(|i| Line::from(format!("b{block} line {i}")))
+                .collect();
+            vp.push_chrome(RailShape::Plain, lines);
+        }
+        assert!(
+            vp.blocks.len() < 5,
+            "the row cap evicts at least the oldest block on its own: {} remain",
+            vp.blocks.len()
+        );
+        assert!(
+            vp.block_rows.iter().sum::<usize>() <= VIEWPORT_MAX_ROWS,
+            "resident rows stay under the cap"
+        );
+        assert!(
+            !block_text(&vp.blocks[0]).contains("b0 line"),
+            "the oldest block (b0) was evicted, not a newer one"
+        );
+        assert!(
+            block_text(vp.blocks.last().unwrap()).contains("b4 line"),
+            "the newest block (b4) survives"
+        );
+    }
+
+    /// Eviction into a tombstone carries exactly the agent id, the final
+    /// status, and the log path — everything else (blocks, the row ledger,
+    /// pins) is dropped.
+    #[test]
+    fn evict_to_tombstone_keeps_exactly_the_three_facts() {
+        let mut vp = viewport();
+        vp.push_chrome(RailShape::Plain, vec![Line::from("hello")]);
+        vp.set_pin("k".into(), Card(Vec::new()));
+        assert!(vp.tombstone().is_none());
+
+        let log_path = vp.log_path.clone();
+        vp.evict_to_tombstone(42);
+
+        assert!(vp.tombstone().is_some());
+        let t = vp.tombstone().expect("tombstoned");
+        assert_eq!(t.id, 42);
+        assert_eq!(t.status, TombstoneStatus::Done);
+        assert_eq!(t.log_path, log_path);
+        assert!(vp.blocks.is_empty(), "the scrollback is dropped");
+        assert!(vp.block_rows.is_empty(), "the row ledger is dropped");
+        assert!(vp.pins().is_empty(), "the pinned register is dropped");
+
+        // Its one-line rendering names the agent, the status, and the path.
+        let rendered = plain(&t.line());
+        assert!(rendered.contains("42"), "{rendered:?}");
+        assert!(rendered.contains("done"), "{rendered:?}");
+        assert!(
+            rendered.contains(&log_path.display().to_string()),
+            "{rendered:?}"
+        );
+    }
+
+    /// The tombstone's status is read off the view's last block before it is
+    /// dropped: an error-terminated session tombstones as `Error`.
+    #[test]
+    fn evict_to_tombstone_reads_error_status_off_the_last_block() {
+        let mut vp = viewport();
+        vp.push_chrome(RailShape::Error, vec![Line::from("boom")]);
+        assert!(vp.last_is_error());
+        vp.evict_to_tombstone(7);
+        assert_eq!(vp.tombstone().unwrap().status, TombstoneStatus::Error);
+    }
+
+    /// Re-evicting an already-tombstoned view is a no-op — the first
+    /// tombstone's facts (and its status) are not overwritten by whatever
+    /// state (or lack of it) exists at the second call.
+    #[test]
+    fn evict_to_tombstone_is_idempotent() {
+        let mut vp = viewport();
+        vp.push_chrome(RailShape::Error, vec![Line::from("boom")]);
+        vp.evict_to_tombstone(1);
+        assert_eq!(vp.tombstone().unwrap().status, TombstoneStatus::Error);
+        // A second call (e.g. a defensive re-tick) must not reset the id or
+        // status even though the view is now clean (no error block).
+        vp.evict_to_tombstone(999);
+        assert_eq!(vp.tombstone().unwrap().id, 1, "the id is not overwritten");
+        assert_eq!(
+            vp.tombstone().unwrap().status,
+            TombstoneStatus::Error,
+            "the status is not overwritten"
         );
     }
 }
