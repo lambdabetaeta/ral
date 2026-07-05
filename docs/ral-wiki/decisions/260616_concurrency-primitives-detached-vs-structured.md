@@ -4,6 +4,16 @@ status: active
 
 # A handle is the evidence of detachment
 
+> Amended by [[decisions/260705_leases-and-budgets|leases-and-budgets]]: the
+> death-clock's creation-age ceiling becomes an idle-observation lease over a
+> universal worker registry, and "detached workers are unmanaged by design" is
+> retired in favour of *unmanaged by default*. The root/foreground split, the
+> handle model, `await`/`race` unification, `forget`'s deletion, and the shared
+> reaper all stand. [[decisions/260705_session-ledger|session-ledger]] further
+> restates the `&`/job-table separation at the listing layer: REPL `jobs`
+> folds over stopped groups and detached handles alike, while `fg`/`bg` stay
+> pgid-typed and the mechanisms remain distinct.
+
 **Given a turn evaluator with a durable *root* cancel scope distinct from the
 swappable *foreground* scope, a worker's parent follows the primitive that
 creates the worker, and a handle is the public evidence that the worker is

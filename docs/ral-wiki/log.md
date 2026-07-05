@@ -3666,3 +3666,44 @@ eval instead of waiting out `timeout_secs`. Added
 [[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]]; updated
 [[internals/cancellation|cancellation]] (slots, sticky-token reset) and
 re-stamped [[map/exarch/agent|agent]].
+
+## [2026-07-05] ingest | Lifetime is a lease, residency is a budget
+
+Merged the long-running-work and resource-budgets designs into one page:
+a universal per-shell worker registry that stores handles (listing returns
+them; no by-id control plane), the death-clock re-derived as an
+idle-observation lease with a 24 h backstop, born-durable work as the
+`service` lease class, and budgets as registered probes folded by
+`/resources`. Added [[decisions/260705_leases-and-budgets|leases-and-budgets]];
+superseded [[decisions/260617_long-running-work|long-running-work]] and
+[[decisions/260630_long-session-resource-budgets|long-session-resource-budgets]];
+amendment notes on
+[[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]
+and [[decisions/260629_agent-binding-reaping|agent-binding-reaping]].
+
+## [2026-07-05] ingest | A session is a ledger of residents
+
+The unifying frame over the morning's merge: residents with four facets
+(identity, typed capability, lease, probe), one ledger in five chapters
+(workers, agents, stopped jobs, schedules, bindings), management surfaces as
+folds written once, and a graded residency order whose two traversals are the
+REPL's discovery-style job control and exarch's declared birth classes. Job
+control splices in at the listing layer only; deep fusion is refused. Added
+[[decisions/260705_session-ledger|session-ledger]]; cross-linked
+[[decisions/260705_leases-and-budgets|leases-and-budgets]] (first chapter) and
+extended the amendment note on
+[[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]
+(the `&`/job-table separation restated at the listing layer).
+
+## [2026-07-05] ingest | Open questions resolved before implementation
+
+Settled the 260705 pair's open questions ahead of parcel 1: lease numbers
+confirmed (1 h idle / 24 h backstop / 256-call retention / 64-worker cap),
+viewport eviction is tombstone-only, disk is report-and-warn-only, REPL
+`jobs` shows settled-unclaimed handle jobs POSIX-`Done` style; the rest
+recorded as explicit deferrals with defaults. Also dissolved
+[[decisions/260617_scheduled-wakeups|scheduled-wakeups]]' `ScheduleId`
+binding pin (amendment note added; same logic as the durable-job pins).
+Updated [[decisions/260705_leases-and-budgets|leases-and-budgets]],
+[[decisions/260705_session-ledger|session-ledger]], and
+`dev/docs/260705_leases_ledger_plan.md`.

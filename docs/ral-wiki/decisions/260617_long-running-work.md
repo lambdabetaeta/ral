@@ -1,8 +1,15 @@
 ---
-status: open
+status: superseded
+superseded_by: decisions/260705_leases-and-budgets
 ---
 
 # Long-running work is born, not promoted
+
+> Superseded by [[decisions/260705_leases-and-budgets|leases-and-budgets]]: the
+> open regime question is answered as Regime 1, delivered as the durable lease
+> class of a universal worker registry; the verb is spelled `service`; the
+> cancel-by-id and binding-pinning questions dissolve because the registry
+> retains the handle itself and listing returns it.
 
 **Work that must outlive the one-hour detached-worker death-clock is *born*
 durable — launched as its own construct with its own lifetime — not started as

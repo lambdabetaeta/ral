@@ -1,8 +1,15 @@
 ---
-status: proposed
+status: superseded
+superseded_by: decisions/260705_leases-and-budgets
 ---
 
 # Long exarch sessions need explicit resource budgets
+
+> Superseded by [[decisions/260705_leases-and-budgets|leases-and-budgets]],
+> which carries every per-accumulator decision here forward and adds the probe
+> convention (`/resources` as a fold over registered budget probes), the
+> worker registry as the accounting spine and completion-payload home, and a
+> per-agent admission cap on live workers.
 
 **A days-long exarch run is not bounded by model compaction; it is bounded by
 ordinary heap, queues, shell values, and log files.** The provider context may be

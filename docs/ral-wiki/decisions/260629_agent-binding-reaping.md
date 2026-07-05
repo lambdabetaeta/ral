@@ -4,6 +4,11 @@ status: proposed
 
 # Exarch leases agent scratch bindings; ral bindings do not expire
 
+> [[decisions/260705_leases-and-budgets|leases-and-budgets]] answers the
+> host-pins open question: durable jobs need no pins at all — the worker
+> registry retains the handle itself, so pruning a top-level name never
+> strands a job. This page's design is otherwise unchanged.
+
 **A ral binding is lexical state; a lease is agent-host state.** A binding lives
 until ral removes or shadows it. Exarch may lease an agent's top-level scratch
 names and prune stale ones at ready boundaries. Reaping is a context and memory

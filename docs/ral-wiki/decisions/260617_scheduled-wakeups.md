@@ -4,6 +4,15 @@ status: proposed
 
 # A wakeup schedules the agent, not a worker
 
+> [[decisions/260705_leases-and-budgets|leases-and-budgets]] and
+> [[decisions/260705_session-ledger|session-ledger]] dissolve this page's
+> `ScheduleId` pin against the binding reaper, and the open
+> compaction-interaction question with it: the schedules registry is the
+> authority and `schedules` re-lists after compaction, so no binding pin is
+> needed — the same dissolution as the durable-job pins. In ledger terms a
+> schedule is a resident of the schedules chapter, `service`'s timer twin.
+> Everything else on this page stands.
+
 **A scheduled wakeup is a timer that posts a synthetic user turn into the
 agent's *inbox*, re-engaging the agent loop without a human present.** It
 schedules the *agent* — the reasoning loop — not a *worker*. This is the line that keeps it
