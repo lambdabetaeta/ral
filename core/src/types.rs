@@ -86,3 +86,7 @@ pub(crate) use shell::{TerminalAccess, ThunkBody};
 // the reap-notice record.  See types/shell/workers.rs.
 pub(crate) use shell::workers::WorkerRegistry;
 pub use shell::workers::{LeaseClass, ReapCause, ReapNotice, WorkerEntry, WorkerId, WorkerLease};
+
+// Per-shell binding-lease ledger: the idle-call policy and its prune
+// notices.  See types/shell/bindings.rs.
+pub use shell::bindings::{BindingLease, BindingPruneNotice};

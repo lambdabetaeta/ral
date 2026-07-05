@@ -10,6 +10,7 @@
 
 use super::Shell;
 use super::TerminalAccess;
+use super::bindings::BindingLease;
 use super::repl::ReplScratch;
 use crate::diagnostic::SourceDb;
 use crate::exit_hints::ExitHints;
@@ -180,6 +181,23 @@ impl Shell {
     /// nothing, exactly as listing workers renews no lease.
     pub fn binding_count(&self) -> usize {
         self.bindings().len()
+    }
+
+    /// Arm this shell's binding-lease ledger and seal the boot baseline:
+    /// every name currently visible anywhere in the scope chain — prelude,
+    /// agent library, rc bindings, host seed vars — becomes permanently
+    /// exempt from expiry. Idempotent by replacement: a re-arm discards any
+    /// prior ledger state and reseals from the scope as it stands now. A
+    /// host that never calls this observes no expiry
+    /// (`decisions/260629_agent-binding-reaping`).
+    pub fn arm_binding_lease(&mut self, lease: BindingLease) {
+        let baseline = self
+            .mobile
+            .scope
+            .all_bindings()
+            .into_iter()
+            .map(|(name, _)| name);
+        self.local.bindings.arm(lease, baseline);
     }
 
     /// The terminal-foreground handoff borrow: `Some(&TerminalLease)` iff the

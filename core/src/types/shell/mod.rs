@@ -30,6 +30,7 @@
 //! resolution, closure-capture snapshot — live directly on this
 //! module.
 
+pub(crate) mod bindings;
 mod checks;
 mod context;
 pub(crate) mod control;
@@ -47,6 +48,7 @@ pub use host::TerminalLoan;
 pub use inherit::MobileSnapshot;
 pub(crate) use inherit::ThunkBody;
 
+use self::bindings::BindingLedger;
 use self::control::ControlState;
 use self::cwd::Cwd;
 use self::modules::Modules;
@@ -374,6 +376,16 @@ pub struct LocalState {
     /// shell (so a nested `spawn` registers alongside its parent), but a
     /// sub-agent fork starts with a fresh one.
     pub(crate) workers: WorkerRegistry,
+    /// The binding-lease ledger (`types/shell/bindings.rs`,
+    /// `decisions/260629_agent-binding-reaping`): inert until a host arms
+    /// it, then tracks the idle-call age of every non-baseline top-level
+    /// name so an agent host can prune scratch that has gone unused for too
+    /// long. Unlike [`Self::workers`] this needs no lock — it has exactly
+    /// one writer, the thread that owns `&mut Shell` for every turn, install,
+    /// and prune (verified in `bindings.rs`'s module doc). One ledger per
+    /// `Shell`, i.e. one per agent; a sub-agent fork or spawned worker starts
+    /// with a fresh, inert one — nothing shares it, nothing flows back.
+    pub(crate) bindings: BindingLedger,
 }
 
 /// The runtime, partitioned by lifetime.  A field either moves as a turn
