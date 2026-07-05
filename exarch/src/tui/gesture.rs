@@ -12,7 +12,10 @@ use super::viewport::Viewport;
 use crate::bus::AgentId;
 use ratatui::crossterm::event::MouseEvent;
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// How long the copy-confirmation toast stays on screen once shown.
+pub(super) const COPY_TOAST_TTL: Duration = Duration::from_secs(2);
 
 /// A left-button press in progress.
 pub(super) struct Press {
@@ -208,5 +211,15 @@ impl GestureState {
     /// The copy-confirmation toast, if still live: (char_count, born_at).
     pub(super) fn copy_toast(&self) -> Option<&(usize, Instant)> {
         self.copy_toast.as_ref()
+    }
+
+    /// Whether the toast is still inside its display window plus `margin`.
+    /// The margin must cover at least one frame interval: the toast has no
+    /// event of its own to announce its expiry, so the periodic redraw that
+    /// finally omits it has to land *after* [`COPY_TOAST_TTL`] elapses, and
+    /// polling every `margin` guarantees that redraw is not skipped.
+    pub(super) fn toast_live(&self, margin: Duration) -> bool {
+        self.copy_toast
+            .is_some_and(|(_, ts)| ts.elapsed() < COPY_TOAST_TTL + margin)
     }
 }

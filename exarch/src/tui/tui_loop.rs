@@ -291,6 +291,15 @@ fn ui_loop(
     // per interval instead of a full-screen rewrite per 64-event batch (the
     // jitter that churn caused).
     let mut last_draw = Instant::now() - frame;
+    // Whether the next due frame must actually repaint. Set below by
+    // anything the frame can show that isn't already covered by `animating`:
+    // a drained bus event, a consumed keystroke, a focus change, or a probe
+    // flip. Seeded true so the first frame always paints.
+    let mut dirty = true;
+    // Sampled once per iteration: flips when the trunk's drive loop parks or
+    // unparks, which repaints the tab title and the prompt chrome but raises
+    // no bus event of its own to report the change.
+    let mut waiting_for_input = tui.app.inbox.waiting_for_input();
     loop {
         // Focus as of the start of this iteration; compared at the end so a
         // `TAB`, or a focused agent ending mid-drain, wakes the agents whose
@@ -303,30 +312,53 @@ fn ui_loop(
         // loop early. The batch cap bounds how long a token flood can starve the
         // input poll below; `More` means events are still queued, so the frame
         // does not wait for one.
-        let more = match drain_pass(rx, done, Some(BATCH), |ev| tui.app.handle(ev)) {
+        let mut handled_any = false;
+        let more = match drain_pass(rx, done, Some(BATCH), |ev| {
+            handled_any = true;
+            tui.app.handle(ev)
+        }) {
             Pass::Stop => {
+                // The capped pass can report `Stop` with events still buffered
+                // (the batch cap binds even a `done` drain); there is no
+                // drainer after this loop returns, so empty the channel with
+                // one uncapped pass before painting the frame the user sees
+                // last — it must include everything the worker emitted.
+                // `done` is already latched, so this pass drains to empty and
+                // reports `Stop` again; its verdict is not needed.
+                drain_pass(rx, done, None, |ev| tui.app.handle(ev));
                 tui.app.busy_off();
                 let focused = tui.app.tabs.focused();
                 let steerable =
                     focused == tui.app.tabs.root() || ctx.agents.mailbox(focused).is_some();
                 tui.app.tabs.set_steerable(steerable);
                 draw(&mut tui.app, tui.guard.term())?;
-                draw(&mut tui.app, tui.guard.term())?;
                 return Ok(());
             }
             Pass::More => true,
             Pass::Idle => false,
         };
+        dirty |= handled_any;
+        let now_waiting = tui.app.inbox.waiting_for_input();
+        dirty |= now_waiting != waiting_for_input;
+        waiting_for_input = now_waiting;
         // Paint only when a frame is due, so a multi-batch backlog still drains
-        // at full throughput but redraws at most once per interval.  Idle frames
-        // are still due each interval, so the animated wait bar keeps ticking.
+        // at full throughput but redraws at most once per interval.  `tick`
+        // always runs on the due frame, painted or not: it ages dying tabs out
+        // on its own clock, independent of anything that gates the redraw.
         if last_draw.elapsed() >= frame {
-            tui.app.tabs.tick();
-            let focused = tui.app.tabs.focused();
-            let steerable = focused == tui.app.tabs.root() || ctx.agents.mailbox(focused).is_some();
-            tui.app.tabs.set_steerable(steerable);
-            draw(&mut tui.app, tui.guard.term())?;
-            draw(&mut tui.app, tui.guard.term())?;
+            let ticked = tui.app.tabs.tick();
+            let animating = tui.app.animating(frame);
+            if dirty || ticked || animating {
+                let focused = tui.app.tabs.focused();
+                let steerable =
+                    focused == tui.app.tabs.root() || ctx.agents.mailbox(focused).is_some();
+                tui.app.tabs.set_steerable(steerable);
+                draw(&mut tui.app, tui.guard.term())?;
+                dirty = false;
+            }
+            // A skipped frame still advances the clock: the poll timeout below
+            // is `frame - last_draw.elapsed()`, so a stale `last_draw` would
+            // floor that at zero and spin the input poll on every iteration.
             last_draw = Instant::now();
         }
         // Poll for input every iteration, even with events still queued: a
@@ -342,6 +374,7 @@ fn ui_loop(
         if ct_poll(timeout)? {
             match ct_read()? {
                 CtEvent::Key(k) if k.kind == KeyEventKind::Press => {
+                    dirty = true;
                     // A tab is steerable when it is root (slash commands and
                     // prompts) or a live peer with a registered inbox; on a
                     // steerable tab Enter submits and text entry is allowed.
@@ -386,8 +419,14 @@ fn ui_loop(
                         }
                     }
                 }
-                CtEvent::Paste(s) => tui.app.prompt_state.paste(&s),
-                CtEvent::Mouse(m) => tui.app.mouse(m),
+                CtEvent::Paste(s) => {
+                    dirty = true;
+                    tui.app.prompt_state.paste(&s);
+                }
+                CtEvent::Mouse(m) => {
+                    dirty = true;
+                    tui.app.mouse(m);
+                }
                 _ => {}
             }
         }
@@ -397,6 +436,7 @@ fn ui_loop(
         // flips to `Quiesce` and reaps; the newly-focused one stays `Held`.
         let now_focus = tui.app.tabs.focused();
         if now_focus != prev_focus {
+            dirty = true;
             if let Some(mb) = ctx.agents.mailbox(prev_focus) {
                 mb.wake();
             }

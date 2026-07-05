@@ -115,7 +115,9 @@ impl Tabs {
     /// Expire `dying` entries that have outlived [`LINGER`].  Called
     /// once per frame from the event loop.  When the focused tab
     /// expires, focus falls back to its parent (recursing toward the trunk).
-    pub fn tick(&mut self) {
+    /// Returns whether a tab actually aged out — the caller's signal that
+    /// the tab bar and focus must repaint even absent any other change.
+    pub fn tick(&mut self) -> bool {
         let now = Instant::now();
         let expired: Vec<AgentId> = self
             .dying
@@ -123,6 +125,7 @@ impl Tabs {
             .filter(|&(_, &t)| now.duration_since(t) >= LINGER)
             .map(|(&id, _)| id)
             .collect();
+        let changed = !expired.is_empty();
         for id in expired {
             self.dying.remove(&id);
             self.tabs.retain(|&t| t != id);
@@ -135,6 +138,7 @@ impl Tabs {
             self.parents.remove(&id);
         }
         self.title_frame += 1;
+        changed
     }
 
     /// Bind the Tabs's focus to the fleet's shared handle (the trunk's), so a

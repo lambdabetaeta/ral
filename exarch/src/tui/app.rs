@@ -30,6 +30,7 @@ use ratatui::{
 use std::{
     io::{self},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 // ---------------------------------------------------------------------------
@@ -166,6 +167,21 @@ impl App {
         if let Some(vp) = self.tabs.viewport_mut(focused) {
             vp.clear_phase();
         }
+    }
+
+    /// True while a time-driven visual is live and must keep repainting on
+    /// its own — the UI loop redraws on this even when no bus or input event
+    /// arrived. Covers the focused tab's elapsed-wait bar (ticks with wall
+    /// time while a phase is in flight), a live copy toast (needs one more
+    /// draw right after its own expiry to erase itself, hence `margin`), and
+    /// the terminal tab-title spinner (rotates only while the trunk is
+    /// working, and has no bus event of its own to announce a tick).
+    pub(super) fn animating(&self, margin: Duration) -> bool {
+        let phase_live = self
+            .tabs
+            .viewport(self.tabs.focused())
+            .is_some_and(|vp| vp.phase_label().is_some());
+        phase_live || self.gesture.toast_live(margin) || !self.inbox.waiting_for_input()
     }
 
     /// Age out sub-session tabs, reset root scrollback, zero cost, redraw the

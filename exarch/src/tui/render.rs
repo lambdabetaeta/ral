@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::str;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crossterm::{
     execute,
@@ -26,6 +26,7 @@ use crate::bus::AgentId;
 
 use super::App;
 use super::block::queued_prompt_rows;
+use super::gesture::COPY_TOAST_TTL;
 use super::line::{self, AGENT_HUES, CYAN, LIME_HOT, PINK, READ_W, SLATE};
 use super::matrix::matrix_bar;
 use super::select::highlight_range;
@@ -301,7 +302,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         f.render_widget(Paragraph::new(footer_hint()), footer_row);
         // Toast: short-lived copy confirmation, bottom-right.
         if let Some((n, ts)) = app.gesture.copy_toast()
-            && ts.elapsed() < Duration::from_secs(2)
+            && ts.elapsed() < COPY_TOAST_TTL
         {
             let msg = format!("[{} characters copied]", n);
             let w = (msg.len() as u16).min(footer_row.width);
