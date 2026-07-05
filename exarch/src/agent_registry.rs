@@ -202,7 +202,10 @@ impl AgentRegistry {
 
     /// Send a marked model-visible message from one live agent to another.
     /// The mailbox is cloned under the registry lock, then posted after the
-    /// lock drops; inbox delivery never runs while the registry is held.
+    /// lock drops; inbox delivery never runs while the registry is held —
+    /// the process-wide lock order is inbox → registry (see `bus`'s
+    /// module docs), because a park verdict reads this registry under the
+    /// consumer's inbox mutex.
     pub fn message(&self, from: AgentId, to: AgentId, text: String) -> Result<(), MessageError> {
         let (mailbox, from_title) = {
             let g = self.lock();
@@ -235,11 +238,12 @@ impl AgentRegistry {
         g.entries.get(&id).map(|e| e.provider.clone())
     }
 
-    /// Settle a worker born under `generation`.  If it is still the live
-    /// entry of that generation, remove it — disarming its ceiling — and
-    /// return `true` so its result is delivered.  A worker from an older
-    /// generation (its context was `/clear`ed) returns `false`: its result
-    /// is dropped rather than posted into a rebuilt context.
+    /// Settle a worker born under `generation`: if it is still the live
+    /// entry of that generation, remove it, disarming its ceiling.  Returns
+    /// whether it was.  Delivery is not gated here — the worker posts its
+    /// result *before* calling this (deliver-then-retire, so a parent that
+    /// observes the entry gone always finds the result already queued), and
+    /// a stale result is dropped by the drive loop's generation admission.
     pub fn settle(&self, id: AgentId, generation: u64) -> bool {
         let mut g = self.lock();
         if g.generation != generation {

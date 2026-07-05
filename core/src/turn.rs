@@ -109,8 +109,7 @@ impl<'s> TurnGuard<'s> {
     fn install(shell: &'s mut Shell, next: TurnState) -> Self {
         let saved = std::mem::replace(&mut shell.turn, next);
         let publish = shell.session.publishes_signal_slots;
-        let _fg =
-            publish.then(|| crate::process::publish_foreground(shell.turn.cancel.as_scope()));
+        let _fg = publish.then(|| crate::process::publish_foreground(shell.turn.cancel.as_scope()));
         let _root =
             publish.then(|| crate::process::publish_durable_root(shell.session.root.as_scope()));
         Self {

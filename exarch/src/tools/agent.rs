@@ -461,21 +461,26 @@ pub(super) fn spawn_async(
             // the parent only ever sees the tag, never the payload itself.
             let commitment_settle = commitment
                 .and_then(|i| super::commitment::commitment_settle(i, &outcome, &payload));
-            // Deliver only if still the live worker of the current
-            // generation; a result from before a `/clear` is dropped, not
-            // posted into a rebuilt context.
-            if registry.settle(agent_id, generation) {
-                parent_mailbox.push(InboxMsg::AgentResult(AgentResult {
-                    id: agent_id,
-                    title: worker_title,
-                    outcome,
-                    text,
-                    log_dir,
-                    elapsed: started.elapsed(),
-                    generation,
-                    commitment_settle,
-                }));
-            }
+            // Deliver, then retire.  The parent's park verdict reads child
+            // liveness (the registry) and delivery (its inbox) under two
+            // different locks, and pops its queue only after the verdict —
+            // so the push must come first: a parent that observes this
+            // entry gone is then guaranteed to find the result already
+            // queued, and cannot quiesce between the two facts and drop it.
+            // Staleness (this worker settling across a `/clear`) is decided
+            // at the consuming edge instead: the drive loop's generation
+            // admission reads the birth `generation` stamped here.
+            parent_mailbox.push(InboxMsg::AgentResult(AgentResult {
+                id: agent_id,
+                title: worker_title,
+                outcome,
+                text,
+                log_dir,
+                elapsed: started.elapsed(),
+                generation,
+                commitment_settle,
+            }));
+            registry.settle(agent_id, generation);
         })
         .expect("spawn async agent worker");
     let receipt = json!({

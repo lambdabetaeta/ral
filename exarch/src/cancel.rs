@@ -28,12 +28,17 @@
 //! [`publish`]es its token's flag into a process-global *slot* (an
 //! `AtomicPtr`, the lock-free ArcSwap analogue — a signal handler must
 //! not lock) for the handler to set.  The slot points into the trunk's
-//! own sticky [`Token`]'s `Arc<AtomicBool>`, so a signal-driven cancellation
-//! is observed through the threaded [`Token`] every cancel check already
-//! holds (`is_set` reads the slot directly, but only in tests).  The slot is
-//! published by [`publish`]'s RAII guard and cleared on its drop; only the
-//! trunk publishes (a sub-agent's token is reached through the fleet
-//! registry, never the slot).
+//! own sticky [`Token`]'s `Arc<AtomicBool>`; [`publish`] leaks one strong
+//! share of that `Arc` so the pointee outlives every guard and every other
+//! share, making the published pointer safe for a handler to dereference
+//! at any time, including one that loaded it just before the slot was
+//! nulled.  A signal-driven cancellation is observed through the threaded
+//! [`Token`] every cancel check already holds (`is_set` reads the slot
+//! directly, but only in tests).  The slot is published by [`publish`]'s
+//! RAII guard and cleared on its drop, which only stops the slot from
+//! tracking a retired trunk's token; only the trunk publishes (a
+//! sub-agent's token is reached through the fleet registry, never the
+//! slot).
 //!
 //! Install order matters: ral's handlers must be set first; then `install`
 //! replaces the disposition with a handler that sets the current root token
@@ -85,8 +90,9 @@ impl Token {
 }
 
 /// The trunk's token flag, published for the signal handler.  Null when no
-/// trunk is publishing.  Holds a pointer into the [`Token`]'s `Arc`, kept
-/// alive for the slot's tenure by [`SlotGuard`].
+/// trunk is publishing.  Holds a pointer into the [`Token`]'s `Arc`, made
+/// immortal by [`publish`]'s deliberate leak so the pointee outlives every
+/// guard.
 static CURRENT: AtomicPtr<AtomicBool> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Publish an existing token to the signal slot for as long as the returned
@@ -94,23 +100,27 @@ static CURRENT: AtomicPtr<AtomicBool> = AtomicPtr::new(std::ptr::null_mut());
 /// guard for its whole drive, so a SIGINT/SIGTERM/Ctrl-C cancels the trunk's
 /// current turn through the token it already threads — without the
 /// per-turn-mint dance, because the boundary [`reset`](Token::reset)s the same
-/// sticky token instead of swapping it.  The guard holds an `Arc` share of the
-/// token, so the published pointer stays valid until the guard's drop nulls
-/// the slot.
+/// sticky token instead of swapping it.  A signal handler that has already
+/// loaded the slot's pointer may dereference it at any later instant,
+/// including after the guard has dropped and nulled the slot, so the
+/// published allocation must outlive the guard rather than merely the
+/// publishing interval: this leaks one strong share of the token's `Arc`,
+/// making the pointee live for the rest of the process.  That leak is
+/// bounded and deliberate — production calls this once per process, with
+/// the trunk holding the guard for its whole drive, plus a handful of calls
+/// from tests.
 pub fn publish(token: &Token) -> SlotGuard {
+    std::mem::forget(token.0.clone());
     let flag: *const AtomicBool = Arc::as_ptr(&token.0);
     CURRENT.store(flag as *mut AtomicBool, Ordering::Release);
-    SlotGuard {
-        _token: token.clone(),
-    }
+    SlotGuard
 }
 
-/// RAII owner of the published slot: holds an `Arc` share of the trunk's
-/// token alive while its flag pointer is published in [`CURRENT`], and nulls
-/// the slot on drop.
-pub struct SlotGuard {
-    _token: Token,
-}
+/// RAII handle for the published slot: nulls [`CURRENT`] on drop so the slot
+/// stops tracking a retired trunk's token.  The pointee is immortal (leaked
+/// by [`publish`]), so the guard bounds only *when* the slot fires, not how
+/// long the allocation behind it lives.
+pub struct SlotGuard;
 
 impl Drop for SlotGuard {
     fn drop(&mut self) {
@@ -125,9 +135,10 @@ impl Drop for SlotGuard {
 #[cfg(test)]
 pub(crate) fn is_set() -> bool {
     let p = CURRENT.load(Ordering::Acquire);
-    // SAFETY: a non-null slot points into the `Arc<AtomicBool>` the live
-    // `SlotGuard` holds; the guard nulls the slot on drop before the
-    // `Arc` can be freed, so a non-null read is always live.
+    // SAFETY: a non-null slot points into the allocation `publish`
+    // deliberately leaked, so the pointee is live for the rest of the
+    // process — the guard's null-on-drop only bounds when the slot fires,
+    // not the pointee's lifetime.
     !p.is_null() && unsafe { (*p).load(Ordering::Relaxed) }
 }
 
@@ -136,9 +147,10 @@ pub(crate) fn is_set() -> bool {
 fn raise() {
     let p = CURRENT.load(Ordering::Acquire);
     if !p.is_null() {
-        // SAFETY: a non-null slot points into the `Arc<AtomicBool>` the live
-        // `SlotGuard` holds; the guard nulls the slot on drop before the
-        // `Arc` can be freed, so a non-null read is always live.
+        // SAFETY: a non-null slot points into the allocation `publish`
+        // deliberately leaked, so the pointee is live for the rest of the
+        // process — the guard's null-on-drop only bounds when the slot fires,
+        // not the pointee's lifetime.
         unsafe { (*p).store(true, Ordering::Relaxed) };
     }
 }

@@ -461,16 +461,21 @@ impl Agent {
         // A rebuilt context starts empty: drop the stale pressure reading so
         // the next turn's usage sets it afresh.
         self.last_input = 0;
+        // Retire the subtree, then empty the queue — in that order.  The
+        // generation bump must precede the inbox sweep so a worker settling
+        // mid-clear either lands its result before the sweep (and is swept
+        // with the rest) or posts after the bump (and is dropped by
+        // generation admission); no interleaving lets a pre-clear result
+        // survive into the rebuilt context.  This agent itself stays
+        // registered — `/clear` rebuilds its context, it does not tear it
+        // down.
+        self.agents.clear_subtree(self.id);
+        // Schedules are producers too: disarm them before the sweep, for the
+        // same reason.  A rebuilt agent carries no pending wakeups.
+        self.schedules.clear();
         // Drop every queued message: a rebuilt context carries neither stale
         // user steering nor non-human deliveries across the clear.
         self.inbox.clear();
-        // Cancel and reap this agent's subtree and advance the generation, so
-        // any worker that settles after this clear drops its result rather than
-        // delivering it into the rebuilt context.  This agent itself stays
-        // registered — `/clear` rebuilds its context, it does not tear it down.
-        self.agents.clear_subtree(self.id);
-        // Drop every schedule too: a rebuilt agent carries no pending wakeups.
-        self.schedules.clear();
         // A rebuilt context wears no pinned state: the frontend wipes its
         // register on `/clear`, so the session's mirror must follow.
         if let Ok(mut m) = self.pins.lock() {
@@ -679,6 +684,12 @@ impl Agent {
             let Some(turn) = self.inbox.next_or_idle(|| self.park_mode(), &self.cancel) else {
                 break;
             };
+            // Generation admission: a worker delivers before it retires, so a
+            // result that settled across a `/clear` can reach this queue; it
+            // is dropped here, before it can reset latches or enter the log.
+            if !self.admits(&turn) {
+                continue;
+            }
             // A genuine turn boundary resets the nudge latches and clears the
             // sticky cancel token, so a prior turn's Esc cannot carry into this
             // one.  A self-nudge is the same turn continuing and resets neither.
@@ -1124,13 +1135,35 @@ impl Agent {
             }
             results.push(self.stage(provider, call, emit));
         }
-        Dispatch {
-            results,
-            // The tool-boundary drain: every message that arrived during the
-            // batch — barged-in user steering, a settled subagent's result, a
-            // fired wakeup, a `spawn`'s surface — tagged with its source. A
-            // slash command is the lone exception, held for the turn boundary.
-            injected: self.inbox.drain_tool(),
+        // The tool-boundary drain: every message that arrived during the
+        // batch — barged-in user steering, a settled subagent's result, a
+        // fired wakeup, a `spawn`'s surface — tagged with its source. A
+        // slash command is the lone exception, held for the turn boundary.
+        // Generation admission applies here as at the turn boundary: a
+        // result that settled across a `/clear` is dropped, not injected.
+        let injected = self
+            .inbox
+            .drain_tool()
+            .into_iter()
+            .filter(|t| self.admits(t))
+            .collect();
+        Dispatch { results, injected }
+    }
+
+    /// Generation admission for a drained deliverable.  An
+    /// [`AgentResult`](crate::bus::AgentResult) is stamped with its worker's
+    /// birth generation, and the worker posts it *before* retiring its
+    /// registry entry (deliver-then-retire, so a parked parent can never
+    /// observe "no live child" without the result already queued) — which
+    /// means the worker cannot check staleness itself.  The consuming edge
+    /// decides instead: a result whose generation predates the live registry
+    /// generation settled across a `/clear` and belongs to a context that no
+    /// longer exists.  Every other turn source is generation-free and
+    /// admitted.
+    fn admits(&self, turn: &Turn) -> bool {
+        match turn {
+            Turn::Agent(r) => r.generation == self.agents.generation(),
+            _ => true,
         }
     }
 
@@ -2292,5 +2325,71 @@ mod tests {
             session.commitment_card(&key).is_err(),
             "the register must have dropped the cleared pin"
         );
+    }
+
+    /// Generation admission: a worker delivers before it retires, so a
+    /// result that settled across a `/clear` can reach the inbox — the drive
+    /// loop must drop it before it becomes a model turn.  The script is
+    /// empty, so any admitted turn would consult the provider and fail the
+    /// run; a clean `Empty` quiescence proves the result never got that far.
+    #[test]
+    fn stale_agent_result_is_dropped_by_generation_admission() {
+        let dir = tmp("generation-admission-stale");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let stale = session.agents.generation();
+        session.agents.clear_subtree(session.id);
+        session.inbox.push(InboxMsg::AgentResult(crate::bus::AgentResult {
+            id: fresh_id(),
+            title: "late".into(),
+            outcome: AgentOutcome::Complete,
+            text: "settled across the clear".into(),
+            log_dir: dir,
+            elapsed: std::time::Duration::ZERO,
+            generation: stale,
+            commitment_settle: None,
+        }));
+        session.provider = ProviderHandle::new(scripted("test-model", Script::new()));
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let emit = Emitter::new(tx, session.id);
+        let (outcome, payload) = session.drive(&mut NoControl, &emit);
+        assert!(
+            matches!(outcome, AgentOutcome::Empty),
+            "a stale result must be dropped, not driven; got {outcome:?}"
+        );
+        assert!(payload.is_none());
+        assert!(session.is_ready());
+    }
+
+    /// The admission control's positive half: a result stamped with the live
+    /// generation is delivered as a turn and drives the provider.
+    #[test]
+    fn current_generation_agent_result_is_delivered() {
+        let dir = tmp("generation-admission-live");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        session.inbox.push(InboxMsg::AgentResult(crate::bus::AgentResult {
+            id: fresh_id(),
+            title: "worker".into(),
+            outcome: AgentOutcome::Complete,
+            text: "found it".into(),
+            log_dir: dir,
+            elapsed: std::time::Duration::ZERO,
+            generation: session.agents.generation(),
+            commitment_settle: None,
+        }));
+        session.provider = ProviderHandle::new(scripted(
+            "test-model",
+            Script::new().then(Reply::tool_calls(vec![reply_call(
+                "r1",
+                serde_json::json!("done"),
+            )])),
+        ));
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let emit = Emitter::new(tx, session.id);
+        let (outcome, payload) = session.drive(&mut NoControl, &emit);
+        assert!(
+            matches!(outcome, AgentOutcome::Complete),
+            "a live-generation result must be delivered; got {outcome:?}"
+        );
+        assert_eq!(payload, Some(serde_json::json!("done")));
     }
 }

@@ -466,7 +466,10 @@ impl ScheduleRegistry {
     /// previous one is still pending — the overlap-skip), then re-arms the
     /// next occurrence (cron) or removes the schedule (one-shot `after`).
     /// Runs on the reaper thread, outside its heap lock, so re-arming here
-    /// is safe.
+    /// is safe.  The wakeup is posted only after this registry's guard
+    /// drops: a park verdict reads `armed()` under the consumer's inbox
+    /// mutex, so the process-wide lock order is inbox → registry (see
+    /// `bus`'s module docs) and a push must never run under this lock.
     fn fire(&self, id: ScheduleId, mailbox: Mailbox) {
         let mut g = self.lock();
         let Some(entry) = g.entries.get_mut(&id) else {

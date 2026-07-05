@@ -1,5 +1,25 @@
 //! Agent / frontend boundary.  Workers stamp [`Kind`]s with their
 //! [`AgentId`] through an [`Emitter`]; consumers implement [`Sink`].
+//!
+//! # Lock order: inbox before registries
+//!
+//! A drive loop evaluates its park verdict *while holding its inbox queue
+//! mutex* — [`Inbox::next_or_idle`] recomputes it under the lock on every
+//! wake — and the verdict reads the fleet's `AgentRegistry` and the
+//! session's `ScheduleRegistry`.  The process-wide lock order is therefore
+//! **inbox → registry**, and the converse is forbidden: never post to or
+//! wake a [`Mailbox`] while holding a registry lock.  Clone the mailbox out,
+//! drop the guard, then push — `AgentRegistry::message` and
+//! `ScheduleRegistry::fire` are the pattern.
+//!
+//! The two locks also shape how a producer must *sequence* its effects.
+//! Each `next_or_idle` iteration computes the verdict first and pops the
+//! queue second, so a producer whose settling both changes a verdict input
+//! and delivers a message — a child retiring its registry entry and posting
+//! its result — must deliver first (deliver-then-retire,
+//! `tools::agent::spawn_async`): whichever side of the retirement the
+//! verdict reads, the consumer either still parks for the child or finds
+//! the result already queued, and can never quiesce between the two facts.
 
 use crate::cancel;
 use crate::card::{Card, IoEvent};
@@ -399,6 +419,10 @@ pub struct Mailbox {
 impl Mailbox {
     /// Post any message (cron wakeup, agent result, self-nudge, …) and wake a
     /// parked consumer.
+    ///
+    /// Takes the inbox queue mutex — callers must not hold a registry lock
+    /// (the module's [lock order](self)): clone the mailbox out and push
+    /// after the guard drops.
     pub fn push(&self, msg: InboxMsg) {
         self.shared
             .waiting_for_input
@@ -605,6 +629,15 @@ impl Inbox {
     /// `Quiesce` and the agent terminates.  A push wakes the park at once
     /// through the condvar; a cancellation does not notify, so a non-`Held`
     /// park re-checks `cancel` every [`PARK_POLL`].
+    ///
+    /// Two orderings carry the loop's correctness.  The verdict runs *under
+    /// the queue mutex*, so a push can never interleave between the verdict
+    /// and the wait (the condvar releases the lock atomically) — a lost
+    /// wakeup is impossible.  And the verdict is computed *before* the pop,
+    /// so a producer that both changes a verdict input and delivers a
+    /// message need only deliver first (deliver-then-retire, the module's
+    /// [lock order](self)): a `Quiesce` verdict can then never win a race
+    /// against a delivery it was supposed to wait for.
     pub fn next_or_idle(
         &self,
         park: impl Fn() -> ParkMode,
@@ -1182,8 +1215,9 @@ pub(crate) enum Pass {
 /// full — it does not wait for a momentarily-empty channel, which under a
 /// background flood would never come. On `done` it drains the buffered batch up
 /// to `max` (so the caller can render a final frame including the worker's last
-/// events) and returns [`Pass::Stop`]; any further in-flight background events
-/// are left for the idle drainer. `None` `max` drains every buffered event
+/// events) and returns [`Pass::Stop`]; any events still buffered past `max` are
+/// left for the caller's next pass — the TUI's exit path runs one final
+/// uncapped pass for exactly this reason. `None` `max` drains every buffered event
 /// (headless, which has nothing to render between them); `Some(n)` caps one
 /// pass so a flood cannot starve the TUI's input poll between passes, reporting
 /// [`Pass::More`] so the caller drains again. Disconnect also stops.
@@ -1518,9 +1552,9 @@ mod tests {
     /// producers (a live async `agent`) keep it full and the old
     /// "stop only on a momentarily-empty channel" rule would never fire. On
     /// `done`, `drain_pass` drains the buffered batch (up to the cap) and
-    /// returns `Stop`; the remainder is left for the idle drainer. Without the
-    /// fix the foreground turn would hang exactly when a background agent is
-    /// flooding the bus.
+    /// returns `Stop`; anything still buffered past the cap is left for the
+    /// caller's next pass. Without the fix the foreground turn would hang
+    /// exactly when a background agent is flooding the bus.
     #[test]
     fn drain_pass_stops_on_done_even_while_a_background_producer_floods() {
         let (tx, rx) = channel::<Event>();
