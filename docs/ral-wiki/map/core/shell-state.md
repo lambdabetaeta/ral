@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 5bdb65a
+generated_at_commit: f1b705c
 generated_at_date: 2026-07-05
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
@@ -90,7 +90,10 @@ field name *is* the invariant** — joined by `Shell`
 `turn` / `session` / `local` are `pub(crate)`: the fields that encode turn
 safety are not a public API. Hosts drive a session through the narrow accessors
 gathered in `host.rs`, which a host crate reaches while only `mobile` stays the
-public embedding seam.
+public embedding seam. `Shell::binding_count` sits there too — the lexical
+scope's probe figure for a host's `/resources` fold
+([[invariants/probe-convention|probe-convention]]): a count, never the
+values, and enumeration renews nothing.
 
 ### Surface
 

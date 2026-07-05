@@ -267,6 +267,25 @@ impl Viewport {
     pub(super) fn last_is_error(&self) -> bool {
         self.blocks.last().is_some_and(Block::is_error)
     }
+
+    /// The viewport's probe figures for the `/resources` fold:
+    /// `(blocks, rows, bytes)` — scrollback blocks, the memoised flatten's
+    /// visual rows, and those rows' summed text bytes.  Reads only what the
+    /// renderer already keeps (the flatten is as of the last paint), so the
+    /// probe is a read of display state, never a re-render.
+    pub(super) fn probe_figures(&self) -> (u64, u64, u64) {
+        let bytes: usize = self
+            .flat
+            .rows
+            .iter()
+            .map(|line| line.spans.iter().map(|s| s.content.len()).sum::<usize>())
+            .sum();
+        (
+            self.blocks.len() as u64,
+            self.flat.rows.len() as u64,
+            bytes as u64,
+        )
+    }
     /// Begin a new phase, restarting the elapsed-wait clock from now.  A
     /// superseding phase simply replaces the live slot — phases never
     /// overlap, each restarts the bar.

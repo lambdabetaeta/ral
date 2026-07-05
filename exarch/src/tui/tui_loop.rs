@@ -68,8 +68,9 @@ impl Tui {
 /// The agent-affecting slash command hook the worker's [`Agent::drive`]
 /// calls at the turn boundary, where the drive thread owns the agent the
 /// command mutates.  `/clear` rebuilds the agent's context (its viewport was
-/// already cleared UI-side), `/compact` summarizes the history, `/discuss`
-/// forks a returning chair agent, and `/quit` ends the drive loop — which sets
+/// already cleared UI-side), `/compact` summarizes the history, `/resources`
+/// surveys the agent's accumulators into one probe card, `/discuss` forks a
+/// returning chair agent, and `/quit` ends the drive loop — which sets
 /// `done`, so the UI loop's next drain returns `Stop` and exits.  Every other
 /// command is handled UI-side and never reaches here.  Only the trunk drives
 /// with this `Control` (a sub-agent uses [`NoControl`](crate::agent::NoControl)),
@@ -113,6 +114,14 @@ budget is too low to seat both"
                 let p = session.current_provider();
                 let token = session.cancel_token().clone();
                 session.compact(&p, emit, true, &token);
+                ControlFlow::Continue
+            }
+            // The probe fold: assembled here, on the drive thread that owns
+            // the shell the rows survey, and emitted as one bus event the
+            // frontend renders (appending its own rows) — never a model
+            // turn.
+            "/resources" => {
+                session.emit_resources(emit);
                 ControlFlow::Continue
             }
             "/quit" | "/exit" => ControlFlow::Quit,
@@ -504,5 +513,65 @@ pub fn key_action(mode: KeyMode, k: &KeyEvent, enter_submits: bool) -> KeyAction
         KeyAction::Submit
     } else {
         KeyAction::Edit
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:test] test fs/process scaffolding"
+)]
+mod tests {
+    use super::*;
+    use crate::bus::Kind;
+
+    /// `/resources` routes exactly as `/clear` does: posted to the inbox as
+    /// an `InboxMsg::Command`, drained at the turn boundary, and handled by
+    /// [`ReplControl`] against the agent the drive loop owns — which
+    /// assembles its probe rows and emits exactly one [`Kind::Resources`],
+    /// recorded by the transcript as a `resources` line, with no
+    /// model-facing side effect (the drive quiesces without a provider
+    /// round-trip).
+    #[test]
+    fn resources_command_routes_through_drive_and_emits_once() {
+        let dir =
+            std::env::temp_dir().join(format!("exarch-resources-route-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        session
+            .mailbox()
+            .push(InboxMsg::Command("/resources".into()));
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let emit = Emitter::with_mailbox(tx, session.id, session.mailbox());
+        let scratch = Scratch::for_test("resources-route").expect("scratch dir");
+        let mut control = ReplControl { scratch: &scratch };
+        let _ = session.drive(&mut control, &emit);
+
+        let event = rx
+            .try_recv()
+            .expect("the /resources command must emit its fold");
+        match &event.kind {
+            Kind::Resources { rows, card } => {
+                assert!(!rows.is_empty(), "the agent half of the fold has rows");
+                assert!(
+                    rows.iter().any(|r| r.name == "workers.running"),
+                    "the registry chapter is surveyed"
+                );
+                assert_eq!(card.marks().len(), 2, "a heading and one matrix");
+                // The transcript records the rows as a `resources` line —
+                // the raw-fact half of the raw/rendering pairing.
+                let rec = crate::transcript::event_record(0, session.id, &event.kind)
+                    .expect("a resources event must reach the transcript");
+                assert_eq!(rec["kind"], "resources");
+                assert!(rec["rows"].is_array());
+            }
+            _ => panic!("expected Kind::Resources"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "one /resources command, exactly one event"
+        );
     }
 }

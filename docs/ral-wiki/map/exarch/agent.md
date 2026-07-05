@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 5bdb65a
+generated_at_commit: f1b705c
 generated_at_date: 2026-07-05
 covers_paths: [exarch/src/agent.rs, exarch/src/agent_registry.rs, exarch/src/event.rs, exarch/src/fleet.rs, exarch/src/nudge.rs, exarch/src/digest.rs]
 ---
@@ -124,6 +124,22 @@ rewind it — the cleared registry is empty anyway, and a monotone counter is
 the one the coming binding leases (`decisions/260629_agent-binding-reaping`)
 will share. Retention notices need no plumbing of their own: they ride the
 same drain above.
+
+`/resources` is the probe fold over the same accumulators
+([[invariants/probe-convention|probe-convention]]): routed exactly as
+`/clear` — an `InboxMsg::Command` drained at the turn boundary, handled by
+the TUI's `Control` against the agent the drive loop owns —
+`Agent::resource_rows` surveys what this thread may legally read (the worker
+registry's running/settled split with the nearest time-to-reap, inbox depth
+per source, the event log's mirror length and history bytes, the shell's
+binding count, log-dir and scratch disk walked at invocation, and the
+sub-agent ceiling as a lease row), and `emit_resources` posts one
+`Kind::Resources` carrying the raw rows beside their rendered card — the
+`Kind::Io` pairing, so `transcript.jsonl` records the figures. The frontend
+appends the rows for the accumulators *it* owns (viewports, views, the bus)
+at render time; neither half reaches across a thread. Probing never mutates
+and never renews a lease — enumeration is not observation — and the fold is
+never model-facing.
 
 The headless-completion gate is gone with `expect_action`
 ([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]]): the one role flag

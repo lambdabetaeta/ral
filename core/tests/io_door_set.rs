@@ -191,6 +191,7 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("exarch/src/state.rs", "io-door:silent:state-read"),
     ("exarch/src/state.rs", "io-door:silent:state-write"),
     ("exarch/src/agent_builtins.rs", "io-door:silent:fff-db-dir"),
+    ("exarch/src/resources.rs", "io-door:silent:resources-disk-probe"),
     ("exarch/src/transcript.rs", "io-door:silent:transcript-file"),
     (
         "exarch/src/tui/terminal.rs",

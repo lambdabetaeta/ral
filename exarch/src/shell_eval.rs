@@ -23,20 +23,21 @@ use std::time::Duration;
 /// still-running worker is reaped one hour after the last eliminator
 /// named its handle — well past the 30 s foreground wall, renewed by any
 /// `poll`/`await`/`race` — so an abandoned worker cannot become an
-/// immortal zombie while a babysat one stays alive.
-const DETACHED_WORKER_CEILING: Duration = Duration::from_secs(60 * 60);
+/// immortal zombie while a babysat one stays alive.  `pub(crate)` so the
+/// `/resources` fold reads the same constant its lease rows describe.
+pub(crate) const DETACHED_WORKER_CEILING: Duration = Duration::from_secs(60 * 60);
 
 /// Absolute backstop of the same lease, measured from spawn: no amount
 /// of ritual polling extends a worker past a day.  Observation renews
 /// idleness, never age.
-const DETACHED_WORKER_BACKSTOP: Duration = Duration::from_secs(24 * 60 * 60);
+pub(crate) const DETACHED_WORKER_BACKSTOP: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Admission cap on concurrently *running* workers per agent, enforced by
 /// core at the spawn door: the 65th spawn is refused with an error naming
 /// `await`/`cancel`/`workers` while 64 still run.  Durable services count
 /// (live work is live work); settled entries lingering under retention
 /// never block admission.
-const LIVE_WORKER_CAP: usize = 64;
+pub(crate) const LIVE_WORKER_CAP: usize = 64;
 
 /// Retention bound, in ral calls, on a settled worker's unclaimed result:
 /// the entry is swept this many calls after

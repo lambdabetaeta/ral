@@ -174,6 +174,14 @@ impl Shell {
         self.local.workers.cancel_all()
     }
 
+    /// Number of lexical bindings in the session scope, innermost shadowing
+    /// counted once — the binding chapter's probe figure for a host's
+    /// resource fold. A count, never the values: enumeration renews
+    /// nothing, exactly as listing workers renews no lease.
+    pub fn binding_count(&self) -> usize {
+        self.bindings().len()
+    }
+
     /// The terminal-foreground handoff borrow: `Some(&TerminalLease)` iff the
     /// installed turn's [`TerminalAccess`] permits it (`Leased` or
     /// `ExplicitLoan`) *and* the session actually owns a lease. The single

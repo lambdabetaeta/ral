@@ -516,6 +516,42 @@ impl Inbox {
         self.shared.waiting_for_input.load(Ordering::Acquire)
     }
 
+    /// Queue depth per message source — the inbox's probe figures for the
+    /// `/resources` fold, one `(source, count)` pair per [`InboxMsg`]
+    /// variant, zeros included so the row set is stable.  Counts only,
+    /// taken in one pass under the queue lock: nothing is drained,
+    /// reordered, or woken — enumeration is not observation.
+    pub fn source_depths(&self) -> Vec<(&'static str, u64)> {
+        let q = self.shared.queue.lock().expect("inbox lock poisoned");
+        let mut user = 0;
+        let mut schedule = 0;
+        let mut agent = 0;
+        let mut message = 0;
+        let mut nudge = 0;
+        let mut command = 0;
+        let mut surface = 0;
+        for msg in q.iter() {
+            match msg {
+                InboxMsg::UserSteering(_) => user += 1,
+                InboxMsg::ScheduledWakeup { .. } => schedule += 1,
+                InboxMsg::AgentResult(_) => agent += 1,
+                InboxMsg::AgentMessage(_) => message += 1,
+                InboxMsg::Nudge(_) => nudge += 1,
+                InboxMsg::Command(_) => command += 1,
+                InboxMsg::Surface { .. } => surface += 1,
+            }
+        }
+        vec![
+            ("user", user),
+            ("schedule", schedule),
+            ("agent", agent),
+            ("message", message),
+            ("nudge", nudge),
+            ("command", command),
+            ("surface", surface),
+        ]
+    }
+
     /// Pending user-authored steering prompts, oldest first, for the TUI's
     /// queue strip.  Non-human deliveries and slash-command control turns stay
     /// invisible here: they are work for the drive loop, not queued user text.
@@ -919,6 +955,20 @@ pub enum Kind {
     WorkerReaped {
         cmd: String,
         cause: ral_core::types::ReapCause,
+        card: Card,
+    },
+    /// The `/resources` probe fold: the agent's own accumulator rows,
+    /// assembled on its drive thread at the turn boundary the command
+    /// drains at, beside the card rendering them — the raw-fact/rendering
+    /// pairing of [`Kind::Io`] and [`Kind::WorkerReaped`], so
+    /// `transcript.jsonl` records the rows while the card stays a
+    /// presentation.  The TUI appends the rows for the accumulators *it*
+    /// owns (viewports, views, the bus) to the card at render time; those
+    /// stay frontend-side.  Never model-facing: no `events.json` twin, no
+    /// inbox reply — probing is for the operator, and it mutates and
+    /// renews nothing (`decisions/260705_leases-and-budgets`).
+    Resources {
+        rows: Vec<crate::resources::ProbeRow>,
         card: Card,
     },
 }

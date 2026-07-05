@@ -415,6 +415,30 @@ impl App {
             Kind::WorkerReaped { card, .. } => {
                 self.with_viewport(id, |vp| vp.push_card(card));
             }
+            // The `/resources` fold: the agent's card arrives carrying its
+            // own rows; the frontend appends the rows for the accumulators
+            // *it* owns — the probed agent's viewport figures, the fleet's
+            // view counts, and the bus — before the card lands.  Appended
+            // here, at the render seam, because only this thread may read
+            // the tabs/viewport structures; the agent's transcript keeps
+            // the agent rows, and these stay presentation.
+            Kind::Resources { card, .. } => {
+                let mut card = card;
+                let (blocks, rows, bytes) = self
+                    .tabs
+                    .viewport(id)
+                    .map(|vp| vp.probe_figures())
+                    .unwrap_or((0, 0, 0));
+                let lingering = self.tabs.dying_map().len() as u64;
+                let live_views = (self.tabs.len() as u64).saturating_sub(lingering);
+                let dead_views = (self.tabs.viewports().len() as u64).saturating_sub(live_views);
+                let frontend = crate::resources::frontend_rows(
+                    blocks, rows, bytes, live_views, dead_views, live_views,
+                );
+                card.0.push(crate::resources::section_mark("frontend"));
+                card.0.push(crate::resources::rows_mark(&frontend));
+                self.with_viewport(id, |vp| vp.push_card(card));
+            }
             // A write surfaced: a barrier that ends the ral block, landed
             // standalone as its own card — the `write <path> <outcome>` heading
             // plus a preview of what it wrote (composed at the emit seam in

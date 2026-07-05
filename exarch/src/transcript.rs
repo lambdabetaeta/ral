@@ -156,6 +156,12 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
             };
             ("worker_reaped", json!({ "cmd": cmd, "cause": cause }))
         }
+        // The `/resources` fold's raw rows — the agent's accumulator
+        // figures at the instant the operator asked — kept beside the
+        // rendered `card` on the same raw-fact/rendering pattern.  The
+        // frontend's own rows are appended at render time and stay
+        // presentation, so they are deliberately absent here.
+        Kind::Resources { rows, .. } => ("resources", json!({ "rows": rows })),
         // Rendering- and presentation-only: a composed card, a progress phase,
         // the assistant token stream, the interactive-only live lines, and the
         // pin register (state that *is*, not a thing that happened).

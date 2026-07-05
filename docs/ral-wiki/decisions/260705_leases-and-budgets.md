@@ -504,7 +504,8 @@ host affordance), [[decisions/260629_agent-binding-reaping|agent-binding-reaping
 [[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]] (the depth budget;
 its per-branch cap argument), [[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]],
 [[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-leak-into-exarch]],
-[[map/exarch/agent|agent]], [[map/exarch/frontend|frontend]],
+[[invariants/probe-convention|probe-convention]] (the probe bullet as a
+checkable rule), [[map/exarch/agent|agent]], [[map/exarch/frontend|frontend]],
 [[map/core/shell-state|shell-state]], [[map/core/builtins|map: builtins]],
 [[map/repl/jobs|repl/jobs]],
 [[internals/output-capture-and-detachment|output-capture-and-detachment]], and

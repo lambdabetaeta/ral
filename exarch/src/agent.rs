@@ -692,6 +692,176 @@ impl Agent {
         }
     }
 
+    /// Assemble this agent's half of the `/resources` probe fold — one
+    /// [`ProbeRow`](crate::resources::ProbeRow) per session-lived
+    /// accumulator this drive thread may legally read: the shell's worker
+    /// registry (running and settled counts by class, with the nearest
+    /// time-to-reap), the inbox's depth per source, the event log's mirror
+    /// length and history bytes, the shell's binding count, the log-dir
+    /// and scratch disk footprint (walked at invocation, never
+    /// periodically), and the sub-agent ceiling's lease row.  A pure
+    /// survey: nothing is mutated and no lease is renewed — enumeration is
+    /// not observation — so `/resources` can never immortalise the zombies
+    /// it exists to reveal.  The frontend appends the rows for the
+    /// accumulators *it* owns (viewports, views, the bus) at render time;
+    /// neither half reaches across a thread for the other's figures.
+    fn resource_rows(&self) -> Vec<crate::resources::ProbeRow> {
+        use crate::resources::{ProbeRow, terse_duration};
+        use ral_core::types::{HandleState, LeaseClass};
+
+        let mut rows = Vec::new();
+
+        // ── the worker registry: running and settled, by class ──────────
+        let entries = self.transport.shell_mut().shell.workers();
+        let mut running_worker = 0u64;
+        let mut running_durable = 0u64;
+        let mut settled = 0u64;
+        let mut nearest_reap: Option<std::time::Duration> = None;
+        let mut nearest_expiry: Option<u64> = None;
+        for entry in &entries {
+            let running = *entry.handle.state.lock().unwrap() == HandleState::Running;
+            if running {
+                match entry.class {
+                    LeaseClass::Worker => {
+                        running_worker += 1;
+                        // The nearer of the entry's two lease margins: idle
+                        // remaining off the shared last-observed cell, and
+                        // backstop remaining off its (display-only, close
+                        // enough for a probe) wall-clock start.
+                        let idle_left = shell_eval::DETACHED_WORKER_CEILING
+                            .saturating_sub(entry.handle.last_observed.lock().unwrap().elapsed());
+                        let age = entry.started.elapsed().unwrap_or_default();
+                        let backstop_left =
+                            shell_eval::DETACHED_WORKER_BACKSTOP.saturating_sub(age);
+                        let left = idle_left.min(backstop_left);
+                        nearest_reap = Some(nearest_reap.map_or(left, |m| m.min(left)));
+                    }
+                    LeaseClass::Durable => running_durable += 1,
+                }
+            } else {
+                settled += 1;
+                // Retention remaining in ral calls; an unstamped entry has
+                // its whole retention ahead — the sweep stamps it next call.
+                let left = match entry.settled_epoch {
+                    Some(s) => shell_eval::SETTLED_WORKER_RETENTION
+                        .saturating_sub(self.ral_epoch.saturating_sub(s)),
+                    None => shell_eval::SETTLED_WORKER_RETENTION,
+                };
+                nearest_expiry = Some(nearest_expiry.map_or(left, |m| m.min(left)));
+            }
+        }
+        rows.push(ProbeRow::new(
+            "workers.running",
+            running_worker + running_durable,
+            Some(shell_eval::LIVE_WORKER_CAP as u64),
+            "reject",
+            None,
+        ));
+        rows.push(ProbeRow::new(
+            "workers.running[worker]",
+            running_worker,
+            None,
+            "reap",
+            nearest_reap.map(|d| format!("nearest reap in {}", terse_duration(d))),
+        ));
+        rows.push(ProbeRow::new(
+            "workers.running[durable]",
+            running_durable,
+            None,
+            "none (unbounded)",
+            Some("durable — dies by cancel, /clear, or process exit".to_string()),
+        ));
+        rows.push(ProbeRow::new(
+            "workers.settled",
+            settled,
+            None,
+            "reap",
+            nearest_expiry.map(|n| format!("nearest expiry in {n} ral calls")),
+        ));
+
+        // ── the inbox, one row per source ────────────────────────────────
+        for (source, depth) in self.inbox.source_depths() {
+            // The ADR's split: idempotent sources coalesce, non-idempotent
+            // facts are accepted or rejected — never silently dropped.
+            let policy = match source {
+                "user" | "schedule" | "nudge" => "coalesce",
+                _ => "reject",
+            };
+            rows.push(ProbeRow::new(
+                format!("inbox[{source}]"),
+                depth,
+                None,
+                policy,
+                Some("cap lands with enforcement".to_string()),
+            ));
+        }
+
+        // ── the event log ────────────────────────────────────────────────
+        rows.push(ProbeRow::new(
+            "log.events",
+            self.log.event_count() as u64,
+            None,
+            "evict",
+            Some("prefix drops with compaction".to_string()),
+        ));
+        rows.push(ProbeRow::new(
+            "log.bytes",
+            self.log.history_bytes() as u64,
+            Some(COMPACT_THRESHOLD as u64),
+            "evict",
+            Some("auto-compaction threshold".to_string()),
+        ));
+
+        // ── the lexical scope ────────────────────────────────────────────
+        rows.push(ProbeRow::new(
+            "bindings.count",
+            self.transport.shell_mut().shell.binding_count() as u64,
+            None,
+            "reap",
+            Some("lease lands with the binding reaper".to_string()),
+        ));
+
+        // ── disk, walked at invocation ───────────────────────────────────
+        let log_dir = self.log.dir().to_path_buf();
+        rows.push(ProbeRow::new(
+            "disk.log_dir",
+            crate::resources::dir_size(&log_dir),
+            None,
+            "warn",
+            Some(log_dir.display().to_string()),
+        ));
+        if let Some(scratch) = self.transport.shell_mut().shell.env_var("EXARCH_SCRATCH") {
+            rows.push(ProbeRow::new(
+                "disk.scratch",
+                crate::resources::dir_size(&std::path::PathBuf::from(&scratch)),
+                None,
+                "warn",
+                Some(scratch),
+            ));
+        }
+
+        // ── the sub-agent ceiling, as a lease row ────────────────────────
+        rows.push(ProbeRow::new(
+            "agents.ceiling",
+            crate::agent_registry::AGENT_CEILING.as_secs(),
+            None,
+            "reap",
+            Some("1 h fixed by design — push-delivery children renew nothing".to_string()),
+        ));
+
+        rows
+    }
+
+    /// Emit the `/resources` fold as one [`Kind::Resources`] bus event: the
+    /// agent rows beside the card rendering them.  Called from the TUI's
+    /// `Control` at the turn boundary the command drains at, exactly where
+    /// `/clear` runs; transcript and TUI only, never model-facing.
+    pub(crate) fn emit_resources(&self, emit: &Emitter) {
+        let rows = self.resource_rows();
+        let card = crate::resources::resources_card(&rows);
+        emit.emit(Kind::Resources { rows, card });
+    }
+
     /// The one shared turn loop — every node alike.  Pull a turn-boundary
     /// deliverable from the inbox, run one [`Self::apply`], let the nudge
     /// registry post any retry as a self-[`InboxMsg::Nudge`], and repeat.  An
@@ -2735,5 +2905,182 @@ mod tests {
             rx2.try_recv().is_err(),
             "exactly one event per retention expiry"
         );
+    }
+
+    // ── `/resources`: the probe fold's agent half ─────────────────────────
+
+    /// The row for `name`, or a panic naming what is missing.
+    fn row<'a>(
+        rows: &'a [crate::resources::ProbeRow],
+        name: &str,
+    ) -> &'a crate::resources::ProbeRow {
+        rows.iter()
+            .find(|r| r.name == name)
+            .unwrap_or_else(|| panic!("the fold must emit a `{name}` row"))
+    }
+
+    /// The agent half of the probe fold surveys what this thread owns: the
+    /// worker registry's running/settled split with time-to-reap notes, the
+    /// binding count (which a `let` increments by exactly one), the inbox's
+    /// per-source depths (counted, never drained), the log figures, the
+    /// disk footprint, and the sub-agent ceiling's lease row.
+    #[test]
+    fn resource_rows_survey_the_agents_accumulators() {
+        let dir = tmp("resource-rows");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        ral_core::builtins::register_builtins(WORKER_REGISTRY_TEST_BUILTINS);
+        session
+            .transport
+            .shell_mut()
+            .shell
+            .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+
+        // One running worker, one settled-unclaimed worker.
+        session.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
+        session.run_shell("c2".into(), "spawn { return 7 }", 30, &emit);
+        let settled_entry = session
+            .transport
+            .shell_mut()
+            .shell
+            .workers()
+            .into_iter()
+            .find(|e| e.cmd == "<block>" && e.class == ral_core::types::LeaseClass::Worker)
+            .expect("both spawns registered");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let any_settled = session
+                .transport
+                .shell_mut()
+                .shell
+                .workers()
+                .iter()
+                .any(|e| {
+                    *e.handle.state.lock().unwrap() == ral_core::types::HandleState::Completed
+                });
+            if any_settled {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the instant worker must settle within the budget"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let _ = settled_entry;
+
+        // A binding is one more row in the count — measured across a `let`.
+        let before = row(&session.resource_rows(), "bindings.count").current;
+        session.run_shell("c3".into(), "let probe_marker = 1", 30, &emit);
+        let rows = session.resource_rows();
+        assert_eq!(
+            row(&rows, "bindings.count").current,
+            before + 1,
+            "a `let` adds exactly one binding to the probe figure"
+        );
+
+        // The registry chapter: one running worker under the admission cap,
+        // with the nearest-reap note; one settled entry under retention.
+        let running = row(&rows, "workers.running");
+        assert_eq!(running.current, 1);
+        assert_eq!(running.cap, Some(64), "the admission cap is armed");
+        assert_eq!(running.policy, "reject");
+        let running_worker = row(&rows, "workers.running[worker]");
+        assert_eq!(running_worker.current, 1);
+        assert!(
+            running_worker
+                .note
+                .as_deref()
+                .is_some_and(|n| n.starts_with("nearest reap in ")),
+            "a running worker carries its time-to-reap"
+        );
+        let settled = row(&rows, "workers.settled");
+        assert_eq!(settled.current, 1);
+        assert!(
+            settled
+                .note
+                .as_deref()
+                .is_some_and(|n| n.contains("ral calls")),
+            "a settled entry carries its retention remaining in ral calls"
+        );
+
+        // The log, disk, and ceiling chapters.
+        assert!(row(&rows, "log.events").current > 0);
+        assert_eq!(row(&rows, "log.bytes").cap, Some(COMPACT_THRESHOLD as u64));
+        assert!(
+            row(&rows, "disk.log_dir").current > 0,
+            "a session dir with a written events.json probes nonzero"
+        );
+        assert_eq!(row(&rows, "agents.ceiling").current, 3600);
+
+        // The inbox chapter counts without draining: two queued messages
+        // are visible in the rows, and the whole queue reads identically
+        // after the probe.  (The settled spawn's deferred `Surface` batch
+        // may also sit queued — a legitimate arrival, not the probe's
+        // doing — so the stability check compares snapshots rather than
+        // pinning the full vector.)
+        session.inbox.push(InboxMsg::UserSteering("hold".into()));
+        session.inbox.push(InboxMsg::Nudge("go on".into()));
+        let depths_before = session.inbox.source_depths();
+        let rows = session.resource_rows();
+        assert_eq!(row(&rows, "inbox[user]").current, 1);
+        assert_eq!(row(&rows, "inbox[user]").policy, "coalesce");
+        assert_eq!(row(&rows, "inbox[nudge]").current, 1);
+        assert_eq!(
+            row(&rows, "inbox[agent]").current,
+            0,
+            "an idle source still emits its zero row — the row set is stable"
+        );
+        assert_eq!(
+            session.inbox.source_depths(),
+            depths_before,
+            "probing drained nothing"
+        );
+
+        // End the blocked worker so the test does not leak a live thread.
+        for entry in session.transport.shell_mut().shell.workers() {
+            entry
+                .handle
+                .cancel
+                .cancel(ral_core::process::CancelCause::Explicit);
+        }
+    }
+
+    /// Probing renews nothing: assembling the rows reads a running
+    /// worker's `last_observed` cell without touching it — enumeration is
+    /// not observation, so `/resources` cannot immortalise the zombies it
+    /// reveals.
+    #[test]
+    fn resource_rows_renew_no_lease() {
+        let dir = tmp("resource-rows-no-renew");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        ral_core::builtins::register_builtins(WORKER_REGISTRY_TEST_BUILTINS);
+        session
+            .transport
+            .shell_mut()
+            .shell
+            .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        session.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
+
+        let entry = session
+            .transport
+            .shell_mut()
+            .shell
+            .workers()
+            .pop()
+            .expect("the spawn registered its worker");
+        let before = *entry.handle.last_observed.lock().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let _ = session.resource_rows();
+        let after = *entry.handle.last_observed.lock().unwrap();
+        assert_eq!(after, before, "the probe must not renew the lease");
+
+        entry
+            .handle
+            .cancel
+            .cancel(ral_core::process::CancelCause::Explicit);
     }
 }

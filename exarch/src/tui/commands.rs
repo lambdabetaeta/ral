@@ -78,6 +78,12 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         help: "Summarize the conversation to reclaim context.",
     },
     SlashCommand {
+        name: "/resources",
+        aliases: &[],
+        arg: None,
+        help: "Show the agent's resource probes: workers, inbox, log, disk.",
+    },
+    SlashCommand {
         name: "/quit",
         aliases: &["/exit"],
         arg: None,
@@ -228,7 +234,7 @@ pub(super) fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
 /// Route a submitted prompt line.  A view command (`/help`, `/legend`, `/copy`,
 /// `/export`, `/model`) touches only the App, clipboard, file, or picker, so it
 /// runs here on the UI thread.  A session command (`/clear`, `/compact`,
-/// `/discuss`, `/quit`) and a plain prompt go onto the session inbox, where
+/// `/resources`, `/discuss`, `/quit`) and a plain prompt go onto the session inbox, where
 /// the worker's drive loop drains them — `/clear` *also* clears the viewport
 /// UI-side so the screen blanks immediately, before the worker rebuilds the
 /// session.  A slash token naming no registered command ([`unrecognized_command`])
@@ -329,6 +335,8 @@ mod tests {
         assert_eq!(dispatch("/copy this"), None);
         // An alias resolves to its canonical entry.
         assert_eq!(dispatch("/exit"), Some(("/quit", String::new())));
+        // The probe fold is a registered, argument-less session command.
+        assert_eq!(dispatch("/resources"), Some(("/resources", String::new())));
     }
 
     #[test]

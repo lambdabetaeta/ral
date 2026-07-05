@@ -413,6 +413,13 @@ impl AgentLog {
         self.is_ready()
     }
 
+    /// Length of the in-memory event mirror — the event-vector probe
+    /// figure for the host's resource fold. Truncated by `/compact` and
+    /// `/clear` like the mirror itself; a count, never the events.
+    pub fn event_count(&self) -> usize {
+        self.events.len()
+    }
+
     /// Approximate context size as serialised model-view message bytes.
     /// The fallback compaction trigger in
     /// [`crate::agent::Agent::compact`], used when the model's context

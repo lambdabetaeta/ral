@@ -110,6 +110,25 @@ impl Scratch {
         &self.dir
     }
 
+    /// A uniquely-named scratch for in-crate tests: [`Self::new`]'s dir is
+    /// keyed by pid alone, so two tests constructing scratches concurrently
+    /// would contend on one path — the `tag` keeps each test's dir its own.
+    /// Compiled only under test; a live run always owns the pid-keyed dir.
+    #[cfg(test)]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:test] test fs scaffolding — a per-test scratch dir"
+    )]
+    pub(crate) fn for_test(tag: &str) -> io::Result<Self> {
+        let dir =
+            std::env::temp_dir().join(format!("exarch-scratch-test-{}-{tag}", std::process::id()));
+        if dir.exists() {
+            fs::remove_dir_all(&dir)?;
+        }
+        fs::create_dir_all(&dir)?;
+        Ok(Self { dir })
+    }
+
     /// Seed `$EXARCH_SCRATCH` and the legacy-tool env vars into
     /// `shell` — both the env-var map (so child processes inherit
     /// them) and the ral-side bindings (so the same names resolve

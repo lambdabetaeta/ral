@@ -32,6 +32,7 @@ pub mod policy;
 pub mod pricing;
 pub mod prompt;
 pub mod provider;
+pub mod resources;
 pub mod schedule;
 pub mod shell_eval;
 pub mod skill;
