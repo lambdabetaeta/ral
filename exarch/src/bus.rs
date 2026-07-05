@@ -971,6 +971,21 @@ pub enum Kind {
         rows: Vec<crate::resources::ProbeRow>,
         card: Card,
     },
+    /// The binding-lease chain pruned idle top-level names at a ready
+    /// boundary — each unused for `idle_calls` committed ral calls
+    /// (`decisions/260629_agent-binding-reaping`). One event per boundary,
+    /// however many names fell. Following [`Kind::WorkerReaped`]'s pattern:
+    /// `names` and `idle_calls` ride beside the rendered `card` so
+    /// `transcript.jsonl` keeps the structural fact the one-liner erases.
+    /// Transcript + TUI only: no `events.json` twin, no inbox message —
+    /// never model-facing. The model's later "where did `x` go?" reads only
+    /// the ordinary undefined-variable diagnostic, unmodified, should it
+    /// name a pruned binding again.
+    BindingsPruned {
+        names: Vec<String>,
+        idle_calls: u64,
+        card: Card,
+    },
 }
 
 /// One grouped hunk of a whole-file diff, carried by a

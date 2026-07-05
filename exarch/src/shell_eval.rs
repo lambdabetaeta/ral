@@ -47,6 +47,13 @@ pub(crate) const LIVE_WORKER_CAP: usize = 64;
 /// same ral-call clock.
 pub(crate) const SETTLED_WORKER_RETENTION: u64 = 256;
 
+/// Idle bound, in committed ral calls, on the binding-lease ledger armed on
+/// every agent shell: a top-level name unused for this many calls is
+/// pruned at the next ready boundary (`decisions/260629_agent-binding-reaping`).
+/// Reuses the settled-worker retention figure — one ral-call clock, read by
+/// both ledgers for their own idle policy.
+pub(crate) const BINDING_IDLE_CALLS: u64 = 256;
+
 /// The prelude baked into this binary at build time by `build.rs`.
 pub static PRELUDE: ral_core::driver::BakedPrelude = ral_core::baked_prelude!();
 

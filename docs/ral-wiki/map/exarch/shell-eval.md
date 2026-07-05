@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 5bdb65a
+generated_at_commit: e2598d8
 generated_at_date: 2026-07-05
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/agent_builtins.rs, exarch/data/agent.ral]
 ---
@@ -68,6 +68,15 @@ and `run_shell` owns only the request it builds and the outcome it formats:
   the [[map/exarch/agent|agent]]'s per-call `advance_worker_epoch` sweep;
 - **`surface`** — the `AgentSink` (below);
 - **`lifecycle: Box::new(())`** — a tool turn installs no per-turn hooks.
+
+`BINDING_IDLE_CALLS` (256, beside `DETACHED_WORKER_CEILING`) is the other
+lease constant this module owns but does not put on the request: it is not
+per-turn policy, it is per-*shell* policy, armed once — `Agent::assemble`
+and `Agent::replace_shell` call `Shell::arm_binding_lease` with it at the
+two places an agent's shell is installed
+([[map/exarch/agent|agent]]; [[decisions/260629_agent-binding-reaping|agent-binding-reaping]]).
+Reusing the settled-worker-retention figure is deliberate: one ral-call
+clock, read by both ledgers for their own idle policy.
 
 Completion is `run_source_turn` returning. A detached `spawn`ed worker — a
 server, a watch — holds bounded deferred surface storage in core, never a clone

@@ -415,6 +415,12 @@ impl App {
             Kind::WorkerReaped { card, .. } => {
                 self.with_viewport(id, |vp| vp.push_card(card));
             }
+            // The binding-lease chain pruned idle top-level names at the
+            // ready boundary: same one-line-card-as-scrollback-block
+            // treatment as a worker reap, its sibling lease.
+            Kind::BindingsPruned { card, .. } => {
+                self.with_viewport(id, |vp| vp.push_card(card));
+            }
             // The `/resources` fold: the agent's card arrives carrying its
             // own rows; the frontend appends the rows for the accumulators
             // *it* owns — the probed agent's viewport figures, the fleet's

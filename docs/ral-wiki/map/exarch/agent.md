@@ -1,5 +1,5 @@
 ---
-generated_at_commit: f1b705c
+generated_at_commit: e2598d8
 generated_at_date: 2026-07-05
 covers_paths: [exarch/src/agent.rs, exarch/src/agent_registry.rs, exarch/src/event.rs, exarch/src/fleet.rs, exarch/src/nudge.rs, exarch/src/digest.rs]
 ---
@@ -121,9 +121,24 @@ returns (`Shell::advance_worker_epoch` with
 stamps entries first observed settled and expires the unclaimed. The counter
 starts at 0, a fork's child starts its own at 0, and `/clear` does not
 rewind it — the cleared registry is empty anyway, and a monotone counter is
-the one the coming binding leases (`decisions/260629_agent-binding-reaping`)
-will share. Retention notices need no plumbing of their own: they ride the
-same drain above.
+the one the binding-lease ledger's own committed-turn clock coincides with
+one-to-one (`decisions/260629_agent-binding-reaping`) — two ticks of the
+same drum, read by two different ledgers. Retention notices need no
+plumbing of their own: they ride the same drain above.
+
+**The binding-lease ledger** is armed at the same two places that mint the
+first durable `MobileSnapshot` — `Agent::assemble` (the trunk, every fork,
+and `for_test`) and `Agent::replace_shell` (`/clear`) — each calling
+`Shell::arm_binding_lease` with [[map/exarch/shell-eval|shell-eval]]'s
+`BINDING_IDLE_CALLS` (256) right after `seed_session_dir` and right before
+`shell.mobile_snapshot()`, so seeding, arming, and checkpointing stay one
+visible sequence. `Agent::reap_bindings`, called at the drive loop's top
+beside `drain_worker_reaps`, prunes idle top-level names and emits one
+`Kind::BindingsPruned` per boundary — transcript and TUI only, the same
+posture as `Kind::WorkerReaped` — and, in the same statement, adopts the
+prune verb's returned post-prune `MobileSnapshot` as `Agent::durable`: the
+verb's signature pairs the notices with the checkpoint, so a later panic
+rollback can never resurrect a name this pass just pruned.
 
 `/resources` is the probe fold over the same accumulators
 ([[invariants/probe-convention|probe-convention]]): routed exactly as

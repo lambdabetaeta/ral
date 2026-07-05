@@ -156,6 +156,15 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
             };
             ("worker_reaped", json!({ "cmd": cmd, "cause": cause }))
         }
+        // The binding-lease chain's raw prune fact — which names fell and
+        // the idle bound they met — kept beside the rendered `card` on the
+        // same pattern as `Kind::WorkerReaped`'s `cmd`/`cause`.
+        Kind::BindingsPruned {
+            names, idle_calls, ..
+        } => (
+            "bindings_pruned",
+            json!({ "names": names, "idle_calls": idle_calls }),
+        ),
         // The `/resources` fold's raw rows — the agent's accumulator
         // figures at the instant the operator asked — kept beside the
         // rendered `card` on the same raw-fact/rendering pattern.  The

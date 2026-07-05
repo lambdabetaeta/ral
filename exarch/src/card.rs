@@ -688,6 +688,32 @@ pub fn reap_card(cmd: &str, cause: ral_core::types::ReapCause) -> Card {
     Card(vec![Mark::Text { spans }])
 }
 
+// ── `bindings pruned`: the binding-lease chain's ready-boundary removal ──
+
+/// Compose one prune pass's notices into a [`Card`] — `reap_card`'s
+/// binding-lease sibling: a dim one-liner naming every pruned name and the
+/// idle bound each met, e.g. `pruned 3 idle bindings: rows, tmp, out
+/// (unused >= 256 calls)`. The displayed count is the *minimum* idle-call
+/// age across the notices — every pruned name was idle at least that long,
+/// so the figure is truthful even when a multi-name prune's individual ages
+/// differ (`decisions/260629_agent-binding-reaping`).
+pub fn bindings_pruned_card(notices: &[ral_core::types::BindingPruneNotice]) -> Card {
+    let names: Vec<&str> = notices.iter().map(|n| n.name.as_str()).collect();
+    let min_idle = notices
+        .iter()
+        .map(|n| n.idle_calls)
+        .min()
+        .unwrap_or_default();
+    let phrase = format!(
+        "pruned {} idle binding{}: {} (unused >= {min_idle} calls)",
+        notices.len(),
+        if notices.len() == 1 { "" } else { "s" },
+        names.join(", "),
+    );
+    let spans = vec![span(Role::Muted, &phrase)];
+    Card(vec![Mark::Text { spans }])
+}
+
 /// A [`Card`] as a compact one-line summary — the session-layer digest the
 /// nudge facility shows when reminding the model of its pinned state, where the
 /// TUI's framed rendering is out of reach.  Text marks concatenate their span

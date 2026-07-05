@@ -309,6 +309,14 @@ impl Agent {
             agents,
         } = b;
         seed_session_dir(&mut shell, &log);
+        // Arm the binding-lease ledger last, sealing everything just seeded
+        // (prelude, agent library, host vars, and — on a fork — the whole
+        // inherited scope) as permanently-exempt baseline, before the first
+        // durable snapshot is minted: seeding, arming, and checkpointing
+        // stay one visible sequence (`decisions/260629_agent-binding-reaping`).
+        shell.arm_binding_lease(ral_core::types::BindingLease {
+            idle_calls: shell_eval::BINDING_IDLE_CALLS,
+        });
         let durable = shell.mobile_snapshot();
         #[cfg(unix)]
         let wire = if std::env::var("RAL_WIRE").is_ok() {
@@ -383,6 +391,13 @@ impl Agent {
     fn replace_shell(&mut self, shell: Shell) {
         let mut shell = shell;
         seed_session_dir(&mut shell, &self.log);
+        // Re-arm and re-seal the rebuilt shell's binding-lease ledger — the
+        // `/clear` half of "arming happens where the shell is installed"
+        // (`decisions/260629_agent-binding-reaping`). The old ledger died
+        // with the old `Shell`; this one starts fresh.
+        shell.arm_binding_lease(ral_core::types::BindingLease {
+            idle_calls: shell_eval::BINDING_IDLE_CALLS,
+        });
         self.durable = shell.mobile_snapshot();
         self.transport = ral_core::transport::IdentityTransport::new(shell);
         #[cfg(unix)]
@@ -692,6 +707,30 @@ impl Agent {
         }
     }
 
+    /// Prune this shell's idle top-level bindings and emit one compact
+    /// transcript/TUI event naming what fell, then adopt the prune's own
+    /// post-prune snapshot as the durable checkpoint — the pairing the
+    /// verb's signature enforces, so a later panic rollback can never
+    /// resurrect a pruned name (`decisions/260629_agent-binding-reaping`).
+    /// Never model-facing: no `events.json` twin, no inbox message. Called
+    /// once per pass through the ready boundary in [`Self::drive`], beside
+    /// [`Self::drain_worker_reaps`] — the same ready-boundary site, the
+    /// sibling lease chain.
+    fn reap_bindings(&mut self, emit: &Emitter) {
+        let Some((notices, checkpoint)) = self.transport.shell_mut().shell.prune_idle_bindings()
+        else {
+            return;
+        };
+        self.durable = checkpoint;
+        let names: Vec<String> = notices.iter().map(|n| n.name.clone()).collect();
+        let card = crate::card::bindings_pruned_card(&notices);
+        emit.emit(Kind::BindingsPruned {
+            names,
+            idle_calls: shell_eval::BINDING_IDLE_CALLS,
+            card,
+        });
+    }
+
     /// Assemble this agent's half of the `/resources` probe fold — one
     /// [`ProbeRow`](crate::resources::ProbeRow) per session-lived
     /// accumulator this drive thread may legally read: the shell's worker
@@ -897,6 +936,12 @@ impl Agent {
             // worker abandoned between turns still leaves a paper trail
             // before the loop parks or picks up the next deliverable.
             self.drain_worker_reaps(emit);
+            // The binding-lease ledger's sibling boundary drain: a turn
+            // never begins over a scope about to be pruned, and the next
+            // `run_shell` refreshes `self.durable` again at its own entry,
+            // preserving "durable = last clean boundary" with the prune
+            // folded in.
+            self.reap_bindings(emit);
             // The park verdict ([`Self::park_mode`]) is recomputed on every wake
             // inside `next_or_idle`, so a `TAB` that de-focuses this agent (and
             // wakes its inbox) flips it from `Held` to `Quiesce` and it reaps.
@@ -2821,6 +2866,296 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "a second drain with no new notices must emit nothing"
+        );
+    }
+
+    // ── binding-lease ledger: arming, reap, /clear, fork, panic recovery ──
+
+    /// Seed one idle binding (a tiny re-armed bound, for speed — every
+    /// `Agent` is already armed with the production `BINDING_IDLE_CALLS` by
+    /// `assemble`), then drive the drain site directly: one
+    /// `Kind::BindingsPruned` event names it, and a second drain — nothing
+    /// left idle — emits nothing.
+    #[test]
+    fn reap_bindings_emits_once_then_nothing() {
+        let dir = tmp("reap-bindings");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        session
+            .transport
+            .shell_mut()
+            .shell
+            .arm_binding_lease(ral_core::types::BindingLease { idle_calls: 2 });
+        session.durable = session.transport.shell_mut().shell.mobile_snapshot();
+
+        let (warmup_tx, _warmup_rx) = std::sync::mpsc::channel();
+        let warmup_emit = Emitter::new(warmup_tx, session.id);
+        session.run_shell("c0".into(), "let reap_me = 1", 5, &warmup_emit);
+        session.run_shell("c1".into(), "let _spin1 = 0", 5, &warmup_emit);
+        session.run_shell("c2".into(), "let _spin2 = 0", 5, &warmup_emit);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        session.reap_bindings(&emit);
+        let event = rx
+            .try_recv()
+            .expect("the drain must emit exactly one prune event");
+        match event.kind {
+            Kind::BindingsPruned {
+                names, idle_calls, ..
+            } => {
+                assert_eq!(names, vec!["reap_me".to_string()]);
+                assert_eq!(idle_calls, shell_eval::BINDING_IDLE_CALLS);
+            }
+            _ => panic!("expected Kind::BindingsPruned"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "the drain must emit exactly one event per prune pass"
+        );
+
+        session.reap_bindings(&emit);
+        assert!(
+            rx.try_recv().is_err(),
+            "a second drain with nothing pruned must emit nothing"
+        );
+    }
+
+    /// A prune that fires between two turns refreshes `Agent::durable` to
+    /// its post-prune state; a later call's panic then rolls back to that
+    /// same post-prune snapshot, so the pruned name cannot resurrect even
+    /// though the panic-recovery rollback runs after it. A completed call's
+    /// own binding, made after the prune, survives the panic exactly as
+    /// `worker_panic_preserves_completed_bindings_and_clean_context` pins.
+    #[test]
+    fn panic_after_prune_does_not_resurrect_binding() {
+        ral_core::builtins::register_builtins(PANIC_BUILTINS);
+        let dir = tmp("panic-after-prune");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        session
+            .transport
+            .shell_mut()
+            .shell
+            .install_builtins(PANIC_BUILTINS);
+        session
+            .transport
+            .shell_mut()
+            .shell
+            .arm_binding_lease(ral_core::types::BindingLease { idle_calls: 2 });
+        session.durable = session.transport.shell_mut().shell.mobile_snapshot();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let emit = Emitter::new(tx, session.id);
+        session.run_shell("c0".into(), "let panic_prune_x = 1", 5, &emit);
+        session.run_shell("c1".into(), "let _spin1 = 0", 5, &emit);
+        session.run_shell("c2".into(), "let _spin2 = 0", 5, &emit);
+
+        // The prune fires here, before any panic — and refreshes `durable`
+        // to this post-prune state in the same call.
+        session.reap_bindings(&emit);
+        assert!(
+            session
+                .transport
+                .shell_mut()
+                .shell
+                .scope_lookup("panic_prune_x")
+                .is_none(),
+            "panic_prune_x must already be pruned before the panicking call"
+        );
+
+        let provider = scripted(
+            "test-model",
+            Script::new()
+                .then(Reply::tool_calls(vec![ral_call(
+                    "c3",
+                    "let survives_y = 9",
+                )]))
+                .then(Reply::tool_calls(vec![ral_call("c4", "a4-panic-now")])),
+        );
+        session.provider = ProviderHandle::new(provider);
+        session.seed("compute then crash".into());
+        let _ = session.drive(&mut NoControl, &emit);
+
+        assert!(
+            session
+                .transport
+                .shell_mut()
+                .shell
+                .scope_lookup("panic_prune_x")
+                .is_none(),
+            "the pruned name must not resurrect across the panic's mobile rollback"
+        );
+        assert!(
+            session
+                .transport
+                .shell_mut()
+                .shell
+                .scope_lookup("survives_y")
+                .is_some(),
+            "a completed call's binding must survive a later call's panic"
+        );
+    }
+
+    /// `/clear` rebuilds the shell and re-arms with the production
+    /// constant, sealing everything the fresh boot seeded as baseline — the
+    /// pre-clear binding is gone (the whole `Shell`, ledger included, died
+    /// with the old one), and the rebuilt shell has nothing spuriously idle
+    /// even after a few calls, proving the reseal is genuine and not merely
+    /// an artifact of the scope reset.
+    #[test]
+    fn clear_reseals_baseline_and_forgets_ledger() {
+        let dir = tmp("clear-reseals-baseline");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let emit = Emitter::new(tx, session.id);
+        session.run_shell("c0".into(), "let pre_clear_x = 1", 5, &emit);
+
+        let scratch = Scratch::new().expect("scratch dir");
+        session.clear(&scratch).expect("clear must succeed");
+
+        assert!(
+            session
+                .transport
+                .shell_mut()
+                .shell
+                .scope_lookup("pre_clear_x")
+                .is_none(),
+            "the pre-clear binding must not survive the rebuild"
+        );
+
+        for i in 0..5 {
+            session.run_shell(format!("post{i}"), "let _post_spin = 0", 5, &emit);
+        }
+        assert!(
+            session
+                .transport
+                .shell_mut()
+                .shell
+                .prune_idle_bindings()
+                .is_none(),
+            "a freshly re-armed, re-sealed shell has nothing idle to prune yet"
+        );
+    }
+
+    /// `fork_session` snapshots the parent's whole scope into the child;
+    /// `assemble` then arms the child, sealing *everything inherited* —
+    /// parent scratch included — as the child's own baseline. A name the
+    /// parent leased is therefore never a lease candidate in the child, no
+    /// matter how many idle calls the child runs.
+    #[test]
+    fn fork_child_inherited_scratch_is_baseline() {
+        let dir = tmp("fork-inherited-baseline");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let emit = Emitter::new(tx, session.id);
+        session.run_shell("c0".into(), "let parent_scratch = 1", 5, &emit);
+
+        let mut child = session
+            .fork(ral_core::types::Capabilities::default())
+            .expect("fork");
+        assert!(
+            child
+                .transport
+                .shell_mut()
+                .shell
+                .scope_lookup("parent_scratch")
+                .is_some(),
+            "fork_session snapshots the parent's whole scope"
+        );
+
+        // Re-arm with a tiny bound (assemble already armed the child once,
+        // with the production constant, over this same inherited scope;
+        // re-arming reseals identically, just faster to idle out for the
+        // test) and idle it hard.
+        child
+            .transport
+            .shell_mut()
+            .shell
+            .arm_binding_lease(ral_core::types::BindingLease { idle_calls: 1 });
+        let (child_tx, _child_rx) = std::sync::mpsc::channel();
+        let child_emit = Emitter::new(child_tx, child.id);
+        for i in 0..3 {
+            child.run_shell(format!("child{i}"), "let _child_spin = 0", 5, &child_emit);
+        }
+        assert!(
+            child
+                .transport
+                .shell_mut()
+                .shell
+                .prune_idle_bindings()
+                .is_none(),
+            "inherited parent scratch is baseline in the child, never a lease candidate"
+        );
+        assert!(
+            child
+                .transport
+                .shell_mut()
+                .shell
+                .scope_lookup("parent_scratch")
+                .is_some(),
+            "baseline names are never pruned"
+        );
+    }
+
+    /// End-to-end against the real production constant, not a re-armed
+    /// test bound: a boot-seeded (baseline) name survives past
+    /// `BINDING_IDLE_CALLS` real `run_shell` calls.
+    #[test]
+    fn boot_names_survive_past_the_idle_bound() {
+        let dir = tmp("boot-names-survive");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let emit = Emitter::new(tx, session.id);
+
+        let (boot_name, _) = session
+            .transport
+            .shell_mut()
+            .shell
+            .bindings()
+            .into_iter()
+            .next()
+            .expect("the boot sequence seeds at least one binding");
+
+        for i in 0..(shell_eval::BINDING_IDLE_CALLS + 5) {
+            session.run_shell(format!("spin{i}"), "let _boot_spin = 0", 5, &emit);
+        }
+        session.reap_bindings(&emit);
+
+        assert!(
+            session
+                .transport
+                .shell_mut()
+                .shell
+                .scope_lookup(&boot_name)
+                .is_some(),
+            "a boot-seeded (baseline) name must survive past the idle bound"
+        );
+    }
+
+    /// A binding prune is transcript/TUI-only: it must never grow the
+    /// model-view `events.json` the same drive loop pass writes tool
+    /// results into.
+    #[test]
+    fn prune_event_is_absent_from_events_json() {
+        let dir = tmp("prune-events-json");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        session
+            .transport
+            .shell_mut()
+            .shell
+            .arm_binding_lease(ral_core::types::BindingLease { idle_calls: 1 });
+        session.durable = session.transport.shell_mut().shell.mobile_snapshot();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let emit = Emitter::new(tx, session.id);
+        session.run_shell("c0".into(), "let events_json_x = 1", 5, &emit);
+        session.run_shell("c1".into(), "let _spin = 0", 5, &emit);
+
+        let before = session.log.event_count();
+        session.reap_bindings(&emit);
+        assert_eq!(
+            session.log.event_count(),
+            before,
+            "a binding prune must never write a model-view events.json entry"
         );
     }
 
