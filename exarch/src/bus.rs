@@ -25,6 +25,7 @@ use crate::cancel;
 use crate::card::{Card, IoEvent};
 use crate::event::ProviderErrorRecord;
 use crate::provider::{Tuning, Usage};
+use crate::schedule::ScheduleId;
 use crate::transcript::Transcript;
 use ral_core::Value;
 use serde::Serialize;
@@ -214,6 +215,14 @@ pub enum InboxMsg {
     /// as a *marked* injection, so it reaches the model as soon as the current
     /// tool batch settles.
     ScheduledWakeup {
+        /// The firing schedule's id — the inbox's dedupe key: a newer
+        /// wakeup for the same schedule replaces a still-queued older one
+        /// rather than growing the queue (`decisions/260705_leases-and-budgets`,
+        /// "Inboxes get quotas without silent loss"). In practice the
+        /// schedule's own overlap-skip (`pending`, below) already keeps at
+        /// most one in flight per schedule; this is the inbox's own,
+        /// independent guarantee of the same invariant.
+        id: ScheduleId,
         /// The human label the schedule was given (or its id).
         label: String,
         /// The trigger as text — a cron expression or `after <dur>` — for
@@ -274,7 +283,7 @@ impl InboxMsg {
     pub fn boundary(&self) -> Boundary {
         match self {
             InboxMsg::Command(_) => Boundary::Turn,
-            InboxMsg::UserSteering(s) if s.trim_start().starts_with('/') => Boundary::Turn,
+            InboxMsg::UserSteering(s) if is_slash(s) => Boundary::Turn,
             _ => Boundary::Tool,
         }
     }
@@ -286,6 +295,70 @@ impl InboxMsg {
     fn on_drain(&self) {
         if let InboxMsg::ScheduledWakeup { pending, .. } = self {
             pending.store(false, Ordering::Release);
+        }
+    }
+}
+
+/// Whether `s` is a slash command line — trimmed leading whitespace, then a
+/// `/`. Shared by [`InboxMsg::boundary`] (a slash steering waits for the
+/// turn boundary) and the inbox's steering-merge rule ([`Shared::try_push`]):
+/// a slash line is never folded into an adjacent plain-text run, so its
+/// turn-boundary classification always survives the merge intact.
+fn is_slash(s: &str) -> bool {
+    s.trim_start().starts_with('/')
+}
+
+/// The probe/quota source name for one message — the seven-way split
+/// [`Inbox::source_depths`] and the quota check ([`Shared::try_push`]) both
+/// key on.
+fn source_name(msg: &InboxMsg) -> &'static str {
+    match msg {
+        InboxMsg::UserSteering(_) => "user",
+        InboxMsg::ScheduledWakeup { .. } => "schedule",
+        InboxMsg::AgentResult(_) => "agent",
+        InboxMsg::AgentMessage(_) => "message",
+        InboxMsg::Nudge(_) => "nudge",
+        InboxMsg::Command(_) => "command",
+        InboxMsg::Surface { .. } => "surface",
+    }
+}
+
+/// Per-agent, per-source cap on a *non-idempotent* inbox message
+/// (`AgentResult`, `AgentMessage`, `Command`, `Surface`) — generous, so an
+/// ordinary burst never rejects, but a runaway producer cannot grow one
+/// source without bound. The idempotent sources (`user`, `schedule`,
+/// `nudge`) coalesce instead of counting toward this and never reject
+/// (`decisions/260705_leases-and-budgets`, "Inboxes get quotas without
+/// silent loss").
+pub const INBOX_SOURCE_CAP: usize = 64;
+/// Per-agent total cap across every source, alongside [`INBOX_SOURCE_CAP`]:
+/// several sources sitting near their own cap at once must not add up past
+/// one shared ceiling.
+pub const INBOX_TOTAL_CAP: usize = 256;
+
+/// Why a non-idempotent [`InboxMsg`] push was rejected. The idempotent
+/// sources (`user`, `schedule`, `nudge`) never produce this — they coalesce
+/// instead of counting toward a cap. Every producer surfaces this to its
+/// own caller as a user-facing error; a push is never silently dropped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InboxReject {
+    /// This source alone is already at [`INBOX_SOURCE_CAP`].
+    SourceFull { source: &'static str, cap: usize },
+    /// The whole inbox is already at [`INBOX_TOTAL_CAP`].
+    TotalFull { cap: usize },
+}
+
+impl std::fmt::Display for InboxReject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InboxReject::SourceFull { source, cap } => write!(
+                f,
+                "inbox[{source}] is full ({cap} queued) — drain before sending more"
+            ),
+            InboxReject::TotalFull { cap } => write!(
+                f,
+                "inbox is full ({cap} messages queued) — drain before sending more"
+            ),
         }
     }
 }
@@ -395,6 +468,78 @@ impl Shared {
             waiting_for_input: AtomicBool::new(true),
         })
     }
+
+    /// Apply the inbox's push rule for one message, waking a parked consumer
+    /// on success. The three idempotent sources always succeed, coalescing
+    /// into an existing entry rather than growing the queue:
+    ///
+    /// - `ScheduledWakeup` replaces a still-queued wakeup for the *same
+    ///   schedule id* (newest wins) rather than adding a second.
+    /// - `UserSteering` joins onto a still-queued, non-slash tail entry with
+    ///   a blank line, preserving arrival order; a slash line is never
+    ///   merged either direction, so its turn-boundary classification
+    ///   ([`InboxMsg::boundary`]) always survives intact.
+    /// - `Nudge` is dropped as a no-op when an identical one is already
+    ///   queued.
+    ///
+    /// Every other source (`AgentResult`, `AgentMessage`, `Command`,
+    /// `Surface`) is quota-checked: rejected, never silently dropped, once
+    /// its own [`INBOX_SOURCE_CAP`] or the shared [`INBOX_TOTAL_CAP`] is
+    /// reached.
+    fn try_push(&self, msg: InboxMsg) -> Result<(), InboxReject> {
+        let mut q = self.queue.lock().expect("inbox lock poisoned");
+        match msg {
+            InboxMsg::ScheduledWakeup { id, .. } => {
+                let existing = q.iter().position(
+                    |m| matches!(m, InboxMsg::ScheduledWakeup { id: eid, .. } if *eid == id),
+                );
+                match existing {
+                    Some(pos) => q[pos] = msg,
+                    None => q.push_back(msg),
+                }
+            }
+            InboxMsg::UserSteering(text) => {
+                let merge = !is_slash(&text)
+                    && matches!(q.back(), Some(InboxMsg::UserSteering(s)) if !is_slash(s));
+                if merge {
+                    if let Some(InboxMsg::UserSteering(s)) = q.back_mut() {
+                        s.push_str("\n\n");
+                        s.push_str(&text);
+                    }
+                } else {
+                    q.push_back(InboxMsg::UserSteering(text));
+                }
+            }
+            InboxMsg::Nudge(text) => {
+                let dup = q
+                    .iter()
+                    .any(|m| matches!(m, InboxMsg::Nudge(t) if *t == text));
+                if !dup {
+                    q.push_back(InboxMsg::Nudge(text));
+                }
+            }
+            other => {
+                let source = source_name(&other);
+                let source_count = q.iter().filter(|m| source_name(m) == source).count();
+                if source_count >= INBOX_SOURCE_CAP {
+                    return Err(InboxReject::SourceFull {
+                        source,
+                        cap: INBOX_SOURCE_CAP,
+                    });
+                }
+                if q.len() >= INBOX_TOTAL_CAP {
+                    return Err(InboxReject::TotalFull {
+                        cap: INBOX_TOTAL_CAP,
+                    });
+                }
+                q.push_back(other);
+            }
+        }
+        drop(q);
+        self.waiting_for_input.store(false, Ordering::Release);
+        self.signal.notify_all();
+        Ok(())
+    }
 }
 
 /// How long a parked [`Inbox::next_or_idle`] sleeps between condvar wakes
@@ -417,27 +562,25 @@ pub struct Mailbox {
 }
 
 impl Mailbox {
-    /// Post any message (cron wakeup, agent result, self-nudge, …) and wake a
-    /// parked consumer.
+    /// Post any message (cron wakeup, agent result, self-nudge, …), applying
+    /// the inbox's coalesce/quota rule ([`Shared::try_push`]) and waking a
+    /// parked consumer on success. `Err` means a non-idempotent source was
+    /// at quota — the caller must surface it to its own caller as a
+    /// user-facing error, never drop it silently.
     ///
     /// Takes the inbox queue mutex — callers must not hold a registry lock
     /// (the module's [lock order](self)): clone the mailbox out and push
     /// after the guard drops.
-    pub fn push(&self, msg: InboxMsg) {
-        self.shared
-            .waiting_for_input
-            .store(false, Ordering::Release);
-        self.shared
-            .queue
-            .lock()
-            .expect("inbox lock poisoned")
-            .push_back(msg);
-        self.shared.signal.notify_all();
+    pub fn push(&self, msg: InboxMsg) -> Result<(), InboxReject> {
+        self.shared.try_push(msg)
     }
 
     /// Post a user-typed steering prompt — the TUI `Enter`-while-busy path.
+    /// Infallible: `UserSteering` is idempotent (it merges rather than
+    /// growing the queue) and never rejects.
     pub fn push_user(&self, prompt: String) {
-        self.push(InboxMsg::UserSteering(prompt));
+        self.push(InboxMsg::UserSteering(prompt))
+            .expect("UserSteering is idempotent and never rejects");
     }
 
     /// Wake a parked consumer without enqueuing a message, so it re-evaluates
@@ -483,22 +626,17 @@ impl Inbox {
 
     /// Post directly through the consumer handle — the self-push path (a
     /// nudge, a self-armed wakeup landing in the agent's own box).  Equivalent
-    /// to `self.mailbox().push(msg)`.
-    pub fn push(&self, msg: InboxMsg) {
-        self.shared
-            .waiting_for_input
-            .store(false, Ordering::Release);
-        self.shared
-            .queue
-            .lock()
-            .expect("inbox lock poisoned")
-            .push_back(msg);
-        self.shared.signal.notify_all();
+    /// to `self.mailbox().push(msg)`; see [`Mailbox::push`] for the
+    /// coalesce/quota rule and the rejection contract.
+    pub fn push(&self, msg: InboxMsg) -> Result<(), InboxReject> {
+        self.shared.try_push(msg)
     }
 
     /// Post a user-typed steering prompt through the consumer handle.
+    /// Infallible — see [`Mailbox::push_user`].
     pub fn push_user(&self, prompt: String) {
-        self.push(InboxMsg::UserSteering(prompt));
+        self.push(InboxMsg::UserSteering(prompt))
+            .expect("UserSteering is idempotent and never rejects");
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1522,6 +1660,17 @@ impl Emitter {
     pub fn is_session_lived(&self) -> bool {
         self.session_lived
     }
+
+    /// This emitter's owning session's [`Transcript`] — for a deferred
+    /// callback (a spawn worker's boundary sink) that must outlive the turn
+    /// and so cannot hold a clone of this emitter itself: a `Transcript` is
+    /// a durable file handle, not a bus channel end, so holding one long
+    /// past this turn never keeps a `pump`/`drive` completion waiting on a
+    /// sender that will not drop (the daemon-task-hang class of bug this
+    /// module's [`drain_pass`] doc already guards against).
+    pub fn transcript(&self) -> Transcript {
+        self.transcript.clone()
+    }
 }
 
 /// The event channel and its inbox, owned for as long as the host wants a
@@ -1775,8 +1924,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentMessage, Boundary, Emitter, Event, FleetBus, Inbox, InboxMsg, Kind, MERGE_TEXT_CAP,
-        ParkMode, Pass, Sink, Transcript, Turn, channel, drain_pass, pump,
+        AgentMessage, Boundary, Emitter, Event, FleetBus, INBOX_SOURCE_CAP, Inbox, InboxMsg,
+        InboxReject, Kind, MERGE_TEXT_CAP, ParkMode, Pass, Sink, Transcript, Turn, channel,
+        drain_pass, pump,
     };
     use crate::cancel;
     use crate::provider::Tuning;
@@ -1785,9 +1935,11 @@ mod tests {
     use std::sync::mpsc::TryRecvError;
 
     /// A scheduled-wakeup message with a fresh pending flag, for the inbox
-    /// drain tests.
-    fn wakeup(label: &str, trigger: &str, prompt: &str) -> InboxMsg {
+    /// drain tests. `id` matters only to the dedupe tests below; the
+    /// drain-order tests all use the same arbitrary id.
+    fn wakeup(id: u64, label: &str, trigger: &str, prompt: &str) -> InboxMsg {
         InboxMsg::ScheduledWakeup {
+            id,
             label: label.into(),
             trigger: trigger.into(),
             prompt: prompt.into(),
@@ -2102,7 +2254,9 @@ mod tests {
     fn inbox_wakeup_drains_at_tool_boundary_marked() {
         let inbox = Inbox::new();
         inbox.push_user("steer".into());
-        inbox.push(wakeup("nightly", "0 3 * * *", "run the tests"));
+        inbox
+            .push(wakeup(1, "nightly", "0 3 * * *", "run the tests"))
+            .unwrap();
 
         assert!(
             matches!(
@@ -2124,7 +2278,7 @@ mod tests {
     fn inbox_tool_drain_takes_async_deliveries() {
         let inbox = Inbox::new();
         // A wakeup that fired, then a barging human, in arrival order.
-        inbox.push(wakeup("nightly", "@", "go"));
+        inbox.push(wakeup(1, "nightly", "@", "go")).unwrap();
         inbox.push_user("redirect now".into());
         inbox.push_user("and also this".into());
 
@@ -2141,11 +2295,13 @@ mod tests {
     #[test]
     fn inbox_agent_message_drains_marked_at_tool_boundary() {
         let inbox = Inbox::new();
-        inbox.push(InboxMsg::AgentMessage(AgentMessage {
-            from: 7,
-            from_title: "review".into(),
-            text: "please inspect the parser branch".into(),
-        }));
+        inbox
+            .push(InboxMsg::AgentMessage(AgentMessage {
+                from: 7,
+                from_title: "review".into(),
+                text: "please inspect the parser branch".into(),
+            }))
+            .unwrap();
 
         assert!(matches!(
             inbox.drain_tool().as_slice(),
@@ -2167,8 +2323,8 @@ mod tests {
     fn inbox_tool_drain_stops_at_command_barrier() {
         let inbox = Inbox::new();
         inbox.push_user("before".into());
-        inbox.push(wakeup("x", "@", "p"));
-        inbox.push(InboxMsg::Command("/model".into()));
+        inbox.push(wakeup(1, "x", "@", "p")).unwrap();
+        inbox.push(InboxMsg::Command("/model".into())).unwrap();
         inbox.push_user("after model".into());
 
         // "before" and the wakeup drain; the /model command stops the run, so
@@ -2189,9 +2345,9 @@ mod tests {
     #[test]
     fn inbox_queued_user_messages_shows_only_user_steering() {
         let inbox = Inbox::new();
-        inbox.push(wakeup("morning", "@daily", "check"));
+        inbox.push(wakeup(1, "morning", "@daily", "check")).unwrap();
         inbox.push_user("first".into());
-        inbox.push(InboxMsg::Command("/model".into()));
+        inbox.push(InboxMsg::Command("/model".into())).unwrap();
         inbox.push_user("second".into());
 
         assert_eq!(
@@ -2209,29 +2365,32 @@ mod tests {
     #[test]
     fn inbox_pop_back_user_all_no_user_prompts() {
         let inbox = Inbox::new();
-        inbox.push(wakeup("x", "@", "p"));
+        inbox.push(wakeup(1, "x", "@", "p")).unwrap();
         assert_eq!(inbox.pop_back_user_all(), None, "no user prompts to recall",);
         assert!(matches!(inbox.drain_turn(), Some(Turn::Wakeup(_))));
     }
 
-    /// `pop_back_user_all` extracts every user prompt from the queue — even
-    /// ones sandwiched between non-user deliveries — and leaves the non-user
-    /// messages in their original order for the turn boundary.
+    /// `pop_back_user_all` extracts every user prompt entry from the queue —
+    /// even ones sandwiched between non-user deliveries — and leaves the
+    /// non-user messages in their original order for the turn boundary.
+    /// "second" and "third" arrive back-to-back with nothing between them,
+    /// so the push-time merge rule already folded them into one entry; the
+    /// wakeup and the command each still separate a run and force a fresh
+    /// entry.
     #[test]
     fn inbox_pop_back_user_all_extracts_all_leaving_non_user_in_order() {
         let inbox = Inbox::new();
         inbox.push_user("first".into());
-        inbox.push(wakeup("x", "@", "p"));
+        inbox.push(wakeup(1, "x", "@", "p")).unwrap();
         inbox.push_user("second".into());
         inbox.push_user("third".into());
-        inbox.push(InboxMsg::Command("/model".into()));
+        inbox.push(InboxMsg::Command("/model".into())).unwrap();
         inbox.push_user("fourth".into());
         assert_eq!(
             inbox.pop_back_user_all(),
             Some(vec![
                 "first".to_string(),
-                "second".to_string(),
-                "third".to_string(),
+                "second\n\nthird".to_string(),
                 "fourth".to_string(),
             ]),
             "all user prompts come back oldest-first, past interspersed deliveries",
@@ -2277,8 +2436,8 @@ mod tests {
         // queued behind it still surfaces on the same drain.
         let joined = Arc::new(Mutex::new(true));
         let inbox = Inbox::new();
-        inbox.push(surface(&joined));
-        inbox.push(wakeup("nightly", "@", "go"));
+        inbox.push(surface(&joined)).unwrap();
+        inbox.push(wakeup(1, "nightly", "@", "go")).unwrap();
         assert!(
             matches!(inbox.drain_turn(), Some(Turn::Wakeup(_))),
             "a suppressed Surface does not short-circuit the next deliverable"
@@ -2288,7 +2447,7 @@ mod tests {
         // An un-joined `Surface` surfaces and sets its latch.
         let joined = Arc::new(Mutex::new(false));
         let inbox = Inbox::new();
-        inbox.push(surface(&joined));
+        inbox.push(surface(&joined)).unwrap();
         assert!(
             matches!(inbox.drain_turn(), Some(Turn::Surface { id, .. }) if id == 0),
             "an un-joined Surface yields a Turn::Surface in the root viewport"
@@ -2308,7 +2467,7 @@ mod tests {
         let inbox = Inbox::new();
         assert_eq!(surface(&joined).boundary(), Boundary::Tool);
 
-        inbox.push(surface(&joined));
+        inbox.push(surface(&joined)).unwrap();
         inbox.clear();
         assert!(
             inbox.drain_tool().is_empty(),
@@ -2317,7 +2476,7 @@ mod tests {
 
         // A fresh, un-cleared batch surfaces mid-turn.
         let joined = Arc::new(Mutex::new(false));
-        inbox.push(surface(&joined));
+        inbox.push(surface(&joined)).unwrap();
         assert!(matches!(
             inbox.drain_tool().as_slice(),
             [Turn::Surface { id, .. }] if *id == 0
@@ -2370,12 +2529,15 @@ mod tests {
     fn inbox_wakeup_clears_its_pending_flag_on_drain() {
         let pending = Arc::new(AtomicBool::new(true));
         let inbox = Inbox::new();
-        inbox.push(InboxMsg::ScheduledWakeup {
-            label: "n".into(),
-            trigger: "* * * * *".into(),
-            prompt: "go".into(),
-            pending: pending.clone(),
-        });
+        inbox
+            .push(InboxMsg::ScheduledWakeup {
+                id: 1,
+                label: "n".into(),
+                trigger: "* * * * *".into(),
+                prompt: "go".into(),
+                pending: pending.clone(),
+            })
+            .unwrap();
         assert!(pending.load(std::sync::atomic::Ordering::Acquire));
         let _ = inbox.drain_turn();
         assert!(
@@ -2625,5 +2787,164 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(err.0.kind, Kind::Token(ref s) if s == "x"));
+    }
+
+    // ── inbox quotas without silent loss (7c) ──────────────────────────────
+
+    /// The source name a `source_depths` row carries, for these tests'
+    /// convenience.
+    fn depth_of(inbox: &Inbox, source: &str) -> u64 {
+        inbox
+            .source_depths()
+            .into_iter()
+            .find(|(s, _)| *s == source)
+            .map(|(_, n)| n)
+            .unwrap_or(0)
+    }
+
+    /// A newer wakeup for the same schedule id replaces a still-queued older
+    /// one in place — one entry, not two — while a different schedule's
+    /// wakeup is untouched and keeps its own arrival order.
+    #[test]
+    fn inbox_scheduled_wakeup_dedupes_by_schedule_id_newest_wins() {
+        let inbox = Inbox::new();
+        inbox.push(wakeup(1, "nightly", "@daily", "first")).unwrap();
+        inbox
+            .push(wakeup(1, "nightly", "@daily", "second"))
+            .unwrap();
+        inbox
+            .push(wakeup(2, "morning", "@daily", "other schedule"))
+            .unwrap();
+        assert_eq!(
+            depth_of(&inbox, "schedule"),
+            2,
+            "schedule 1 replaced in place; schedule 2 is its own entry"
+        );
+        match inbox.drain_turn() {
+            Some(Turn::Wakeup(text)) => assert!(
+                text.contains("second") && !text.contains("first"),
+                "the newest wakeup for schedule 1 wins: {text}"
+            ),
+            _ => panic!("expected schedule 1's (replaced) wakeup first"),
+        }
+        match inbox.drain_turn() {
+            Some(Turn::Wakeup(text)) => assert!(text.contains("other schedule")),
+            _ => panic!("expected schedule 2's wakeup, arrival order preserved"),
+        }
+    }
+
+    /// Consecutive `UserSteering` pushes merge into one queue entry —
+    /// newline-joined, order kept — rather than growing the queue one per
+    /// keystroke of a fast typist.
+    #[test]
+    fn inbox_user_steering_merges_pre_boundary_preserving_order() {
+        let inbox = Inbox::new();
+        inbox.push_user("first line".into());
+        inbox.push_user("second line".into());
+        assert_eq!(
+            depth_of(&inbox, "user"),
+            1,
+            "consecutive steering merges into one entry at push time"
+        );
+        match inbox.drain_turn() {
+            Some(Turn::Human(text)) => {
+                assert_eq!(
+                    text, "first line\n\nsecond line",
+                    "both texts survive in order"
+                )
+            }
+            _ => panic!("expected a merged Human turn"),
+        }
+    }
+
+    /// A slash line is never merged into an adjacent plain-text entry, in
+    /// either direction — merging it away would silently change its
+    /// turn-boundary classification ([`InboxMsg::boundary`]).
+    #[test]
+    fn inbox_user_steering_never_merges_across_a_slash_command() {
+        let inbox = Inbox::new();
+        inbox.push_user("plain text".into());
+        inbox.push_user("/clear".into());
+        assert_eq!(
+            depth_of(&inbox, "user"),
+            2,
+            "a slash line is never folded into a preceding plain-text entry"
+        );
+        inbox.push_user("after clear".into());
+        assert_eq!(
+            depth_of(&inbox, "user"),
+            3,
+            "a plain line is never folded into a preceding slash entry either"
+        );
+    }
+
+    /// An identical `Nudge` already queued is a no-op; a differently-worded
+    /// one is not deduped away.
+    #[test]
+    fn inbox_nudge_dedupes_identical_text_only() {
+        let inbox = Inbox::new();
+        inbox.push(InboxMsg::Nudge("retry".into())).unwrap();
+        inbox.push(InboxMsg::Nudge("retry".into())).unwrap();
+        inbox.push(InboxMsg::Nudge("different".into())).unwrap();
+        assert_eq!(
+            depth_of(&inbox, "nudge"),
+            2,
+            "the identical duplicate deduped; the differently-worded one did not"
+        );
+    }
+
+    /// A non-idempotent source (`Command`, here) rejects once it reaches its
+    /// own per-source cap — the producer observes the rejection directly as
+    /// an `Err`, never a silent drop.
+    #[test]
+    fn inbox_non_idempotent_source_rejects_at_quota() {
+        let inbox = Inbox::new();
+        for _ in 0..INBOX_SOURCE_CAP {
+            inbox
+                .push(InboxMsg::Command("/noop".into()))
+                .expect("under quota");
+        }
+        let err = inbox
+            .push(InboxMsg::Command("/noop".into()))
+            .expect_err("the cap-th push is rejected");
+        assert_eq!(
+            err,
+            InboxReject::SourceFull {
+                source: "command",
+                cap: INBOX_SOURCE_CAP,
+            }
+        );
+    }
+
+    /// Draining one queued message frees exactly one slot of quota for its
+    /// source.
+    #[test]
+    fn inbox_drain_frees_quota_for_a_rejected_source() {
+        let inbox = Inbox::new();
+        for _ in 0..INBOX_SOURCE_CAP {
+            inbox.push(InboxMsg::Command("/noop".into())).unwrap();
+        }
+        assert!(inbox.push(InboxMsg::Command("/noop".into())).is_err());
+        assert!(matches!(inbox.drain_turn(), Some(Turn::Command(_))));
+        inbox
+            .push(InboxMsg::Command("/noop".into()))
+            .expect("draining freed one slot of quota");
+    }
+
+    /// The idempotent sources (`user`, `schedule`, `nudge`) never reject,
+    /// however far past `INBOX_SOURCE_CAP` they are pushed — they coalesce
+    /// instead of counting toward a cap.
+    #[test]
+    fn inbox_idempotent_sources_never_reject_past_the_source_cap() {
+        let inbox = Inbox::new();
+        for i in 0..(INBOX_SOURCE_CAP * 3) {
+            inbox
+                .push(InboxMsg::Nudge(format!("n{i}")))
+                .expect("nudge never rejects");
+            inbox
+                .push(wakeup(i as u64, "s", "@", "p"))
+                .expect("wakeup never rejects");
+            inbox.push_user(format!("line {i}"));
+        }
     }
 }

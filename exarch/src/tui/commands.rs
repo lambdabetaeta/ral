@@ -231,6 +231,18 @@ pub(super) fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
     }
 }
 
+/// Post a session command to the worker's inbox, surfacing a rejection (the
+/// inbox at quota — vanishingly rare, since `Command` is user-paced, never a
+/// flood) to the UI rather than dropping it silently
+/// (`decisions/260705_leases-and-budgets`, "Inboxes get quotas without
+/// silent loss").
+fn push_command(tui: &mut Tui, mailbox: &Mailbox, cmd: String) {
+    if let Err(reject) = mailbox.push(InboxMsg::Command(cmd)) {
+        tui.app
+            .push_error(tui.app.tabs.root(), format!("command dropped: {reject}"));
+    }
+}
+
 /// Route a submitted prompt line.  A view command (`/help`, `/legend`, `/copy`,
 /// `/export`, `/model`) touches only the App, clipboard, file, or picker, so it
 /// runs here on the UI thread.  A session command (`/clear`, `/compact`,
@@ -289,7 +301,7 @@ pub(super) fn route_submit(
                         Provider::scripted("unknown", ProviderKind::Openai, Script::new());
                     tui.app.clear(info, &fallback, tui.guard.term())?;
                 }
-                mailbox.push(InboxMsg::Command("/clear".into()));
+                push_command(tui, mailbox, "/clear".into());
             }
             "/discuss" => {
                 if arg.is_empty() {
@@ -297,10 +309,10 @@ pub(super) fn route_submit(
                         .push_error(tui.app.tabs.root(), "usage: /discuss <prompt>".into());
                     return Ok(());
                 }
-                mailbox.push(InboxMsg::Command(text.clone()));
+                push_command(tui, mailbox, text.clone());
             }
             // The worker's `ReplControl` compacts the history / returns Quit.
-            _ => mailbox.push(InboxMsg::Command(text.clone())),
+            _ => push_command(tui, mailbox, text.clone()),
         },
         // A bare typo like `/bogus` is not a prompt in disguise — say so
         // rather than silently mailing it to the model as one.

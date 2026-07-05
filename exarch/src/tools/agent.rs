@@ -470,7 +470,7 @@ pub(super) fn spawn_async(
             // Staleness (this worker settling across a `/clear`) is decided
             // at the consuming edge instead: the drive loop's generation
             // admission reads the birth `generation` stamped here.
-            parent_mailbox.push(InboxMsg::AgentResult(AgentResult {
+            let rejected = parent_mailbox.push(InboxMsg::AgentResult(AgentResult {
                 id: agent_id,
                 title: worker_title,
                 outcome,
@@ -480,6 +480,16 @@ pub(super) fn spawn_async(
                 generation,
                 commitment_settle,
             }));
+            // No synchronous caller to return this to — the spawn's own
+            // tool_result already returned the "started" receipt — so the
+            // drop is reported through the child's own error vocabulary
+            // instead of silently vanishing
+            // (`decisions/260705_leases-and-budgets`).
+            if let Err(reject) = rejected {
+                child_emit.emit(Kind::Error(format!(
+                    "the parent's inbox rejected this result: {reject}"
+                )));
+            }
             registry.settle(agent_id, generation);
         })
         .expect("spawn async agent worker");
@@ -648,6 +658,9 @@ answer; use `reply` for a returning agent's final result."
             }
             Err(MessageError::UnknownSender(n)) => {
                 format!("cannot send from agent {n}: it is no longer live")
+            }
+            Err(MessageError::RecipientInboxFull(n, reject)) => {
+                format!("agent {n} did not receive the message: {reject}")
             }
         };
         emit.emit(Kind::ToolResult(content.clone()));

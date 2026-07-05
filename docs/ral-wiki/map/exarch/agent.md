@@ -1,5 +1,5 @@
 ---
-generated_at_commit: d744648
+generated_at_commit: 49755d2
 generated_at_date: 2026-07-05
 covers_paths: [exarch/src/agent.rs, exarch/src/agent_registry.rs, exarch/src/event.rs, exarch/src/fleet.rs, exarch/src/nudge.rs, exarch/src/digest.rs]
 ---
@@ -159,6 +159,27 @@ for the accumulators *it* owns (viewports, views, the bus) at render time;
 neither half reaches across a thread. Probing never mutates and never
 renews a lease — enumeration is not observation — and the fold is never
 model-facing.
+
+The inbox's per-source depth is a real quota now, not just a probe figure
+([[decisions/260705_leases-and-budgets|leases-and-budgets]], "Inboxes get
+quotas without silent loss"). `Mailbox`/`Inbox::push` return
+`Result<(), InboxReject>` from one shared rule (`Shared::try_push`), split
+by source: the three idempotent sources (`user`, `schedule`, `nudge`)
+always succeed, coalescing instead of growing the queue — a
+`ScheduledWakeup` replaces a still-queued wakeup for the same schedule id
+(newest wins), consecutive `UserSteering` pushes merge with a blank line
+(never across a slash line, which would silently change its
+turn-boundary classification), and an exact-duplicate `Nudge` is a no-op.
+The other four (`AgentResult`, `AgentMessage`, `Command`, `Surface`) are
+quota-checked against `INBOX_SOURCE_CAP` (64) and the shared
+`INBOX_TOTAL_CAP` (256) and *rejected*, never dropped, once full — every
+producer surfaces the rejection to its own caller: `AgentRegistry::message`
+returns `MessageError::RecipientInboxFull` (the `message` tool reports it),
+a rejected slash command reports through the UI's error line, and a
+rejected `spawn` completion or surfaced batch — which has no synchronous
+caller left to return to — records straight to the durable
+`transcript.jsonl` instead of the live bus, so holding the rejection report
+never extends a bus sender's lifetime past the turn that queued it.
 
 The headless-completion gate is gone with `expect_action`
 ([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]]): the one role flag

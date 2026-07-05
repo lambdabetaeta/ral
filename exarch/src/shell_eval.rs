@@ -14,6 +14,7 @@
 use crate::agent_registry::AgentRegistry;
 use crate::bus::{AgentId, Emitter, InboxMsg, Kind, Mailbox};
 use crate::card::{done_card, io_card, value_to_card, value_to_done, value_to_io, value_to_pin};
+use crate::transcript::Transcript;
 use ral_core::Value as RalValue;
 use ral_core::types::{Boundary, BoundarySink};
 use std::sync::{Arc, Mutex};
@@ -233,6 +234,18 @@ struct InboxBoundary {
     /// The registry generation captured at construction; a batch flushed after
     /// a `/clear` advanced it is dropped.
     generation: u64,
+    /// Reports a rejected batch through the existing error vocabulary
+    /// (`Kind::Error`, recorded straight to the durable trace) — `deliver`
+    /// has no caller to return a `Result` to (it runs on the spawn worker's
+    /// own completion, not a synchronous tool call), so this is how the drop
+    /// stays visible rather than silent
+    /// (`decisions/260705_leases-and-budgets`). A `Transcript`, deliberately
+    /// not a whole `Emitter`: this sink outlives the turn (installed once,
+    /// flushed whenever the worker settles), and an `Emitter` carries a live
+    /// bus sender whose lifetime would then wrongly extend with it — the
+    /// exact daemon-task-hang shape `drain_pass`'s own doc warns against. A
+    /// `Transcript` is just a durable file handle, safe to hold that long.
+    transcript: Transcript,
 }
 
 impl BoundarySink for InboxBoundary {
@@ -244,11 +257,18 @@ impl BoundarySink for InboxBoundary {
         if self.registry.generation() != self.generation {
             return;
         }
-        self.mailbox.push(InboxMsg::Surface {
+        if let Err(reject) = self.mailbox.push(InboxMsg::Surface {
             id: self.root,
             values: batch,
             joined,
-        });
+        }) {
+            self.transcript.record(
+                self.root,
+                &Kind::Error(format!(
+                    "a spawn worker's surfaced batch was dropped: {reject}"
+                )),
+            );
+        }
     }
 }
 
@@ -262,6 +282,7 @@ pub fn boundary_sink(emit: &Emitter, root: AgentId, registry: &AgentRegistry) ->
         root,
         registry: registry.clone(),
         generation: registry.generation(),
+        transcript: emit.transcript(),
     })
 }
 

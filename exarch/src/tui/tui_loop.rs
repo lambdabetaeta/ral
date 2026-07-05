@@ -227,7 +227,12 @@ pub fn run(
 
         let r = ui_loop(&mut tui, &fleet.bus, done_ref, &mut cmd_ctx);
         if r.is_err() {
-            quit_mailbox.push(InboxMsg::Command("/quit".into()));
+            // Best-effort unstick on the UI loop's own fatal error: the
+            // process is already unwinding to report `r`'s error, so a
+            // rejected `/quit` here (the inbox somehow at quota) has nowhere
+            // more specific left to report to than the fatal error already
+            // in flight; worst case the join below waits on a parked worker.
+            let _ = quit_mailbox.push(InboxMsg::Command("/quit".into()));
         }
         let _ = worker.join();
         r.map_err(|e| e.to_string())
@@ -541,7 +546,8 @@ mod tests {
         let mut session = Agent::for_test(&dir, "system").unwrap();
         session
             .mailbox()
-            .push(InboxMsg::Command("/resources".into()));
+            .push(InboxMsg::Command("/resources".into()))
+            .unwrap();
 
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.mailbox());

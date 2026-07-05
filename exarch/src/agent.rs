@@ -842,18 +842,31 @@ impl Agent {
 
         // ── the inbox, one row per source ────────────────────────────────
         for (source, depth) in self.inbox.source_depths() {
-            // The ADR's split: idempotent sources coalesce, non-idempotent
-            // facts are accepted or rejected — never silently dropped.
-            let policy = match source {
-                "user" | "schedule" | "nudge" => "coalesce",
-                _ => "reject",
+            // The ADR's split: idempotent sources coalesce (merge/dedupe)
+            // and never reject, so no cap is enforced against their depth;
+            // non-idempotent sources are accepted or rejected at
+            // `INBOX_SOURCE_CAP` — never silently dropped.
+            let (policy, cap, note) = match source {
+                "user" | "schedule" | "nudge" => (
+                    "coalesce",
+                    None,
+                    "merges/dedupes; never rejects".to_string(),
+                ),
+                _ => (
+                    "reject",
+                    Some(crate::bus::INBOX_SOURCE_CAP as u64),
+                    format!(
+                        "rejected at quota; {} total across every source",
+                        crate::bus::INBOX_TOTAL_CAP
+                    ),
+                ),
             };
             rows.push(ProbeRow::new(
                 format!("inbox[{source}]"),
                 depth,
-                None,
+                cap,
                 policy,
-                Some("cap lands with enforcement".to_string()),
+                Some(note),
             ));
         }
 
@@ -1078,7 +1091,9 @@ impl Agent {
                 waiting_on_children,
             };
             if let Some(msg) = self.nudges.react(&outcome, ctx, emit, &mut self.log) {
-                self.inbox.push(InboxMsg::Nudge(msg));
+                self.inbox
+                    .push(InboxMsg::Nudge(msg))
+                    .expect("Nudge is idempotent and never rejects");
             }
             // `reply` hard-terminates: end the drive loop regardless of focus or
             // a self-armed schedule — the agent returns its value and is gone.
@@ -2662,16 +2677,19 @@ mod tests {
         let mut session = Agent::for_test(&dir, "system").unwrap();
         let stale = session.agents.generation();
         session.agents.clear_subtree(session.id);
-        session.inbox.push(InboxMsg::AgentResult(crate::bus::AgentResult {
-            id: fresh_id(),
-            title: "late".into(),
-            outcome: AgentOutcome::Complete,
-            text: "settled across the clear".into(),
-            log_dir: dir,
-            elapsed: std::time::Duration::ZERO,
-            generation: stale,
-            commitment_settle: None,
-        }));
+        session
+            .inbox
+            .push(InboxMsg::AgentResult(crate::bus::AgentResult {
+                id: fresh_id(),
+                title: "late".into(),
+                outcome: AgentOutcome::Complete,
+                text: "settled across the clear".into(),
+                log_dir: dir,
+                elapsed: std::time::Duration::ZERO,
+                generation: stale,
+                commitment_settle: None,
+            }))
+            .unwrap();
         session.provider = ProviderHandle::new(scripted("test-model", Script::new()));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
@@ -2690,16 +2708,19 @@ mod tests {
     fn current_generation_agent_result_is_delivered() {
         let dir = tmp("generation-admission-live");
         let mut session = Agent::for_test(&dir, "system").unwrap();
-        session.inbox.push(InboxMsg::AgentResult(crate::bus::AgentResult {
-            id: fresh_id(),
-            title: "worker".into(),
-            outcome: AgentOutcome::Complete,
-            text: "found it".into(),
-            log_dir: dir,
-            elapsed: std::time::Duration::ZERO,
-            generation: session.agents.generation(),
-            commitment_settle: None,
-        }));
+        session
+            .inbox
+            .push(InboxMsg::AgentResult(crate::bus::AgentResult {
+                id: fresh_id(),
+                title: "worker".into(),
+                outcome: AgentOutcome::Complete,
+                text: "found it".into(),
+                log_dir: dir,
+                elapsed: std::time::Duration::ZERO,
+                generation: session.agents.generation(),
+                commitment_settle: None,
+            }))
+            .unwrap();
         session.provider = ProviderHandle::new(scripted(
             "test-model",
             Script::new().then(Reply::tool_calls(vec![reply_call(
@@ -3469,8 +3490,11 @@ mod tests {
         // may also sit queued — a legitimate arrival, not the probe's
         // doing — so the stability check compares snapshots rather than
         // pinning the full vector.)
-        session.inbox.push(InboxMsg::UserSteering("hold".into()));
-        session.inbox.push(InboxMsg::Nudge("go on".into()));
+        session
+            .inbox
+            .push(InboxMsg::UserSteering("hold".into()))
+            .unwrap();
+        session.inbox.push(InboxMsg::Nudge("go on".into())).unwrap();
         let depths_before = session.inbox.source_depths();
         let rows = session.resource_rows();
         assert_eq!(row(&rows, "inbox[user]").current, 1);

@@ -482,6 +482,7 @@ impl ScheduleRegistry {
         } else {
             entry.fires += 1;
             Some(InboxMsg::ScheduledWakeup {
+                id,
                 label: entry.label.clone(),
                 trigger: entry.trigger.describe(),
                 prompt: entry.prompt.clone(),
@@ -502,7 +503,9 @@ impl ScheduleRegistry {
         }
         drop(g);
         if let Some(msg) = msg {
-            mailbox.push(msg);
+            mailbox
+                .push(msg)
+                .expect("ScheduledWakeup is idempotent and never rejects");
         }
     }
 

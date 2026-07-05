@@ -29,7 +29,7 @@
 //! pushed to its parent's inbox rather than collected by id.
 
 use crate::agent::ProviderHandle;
-use crate::bus::{AgentId, AgentMessage, InboxMsg, Mailbox};
+use crate::bus::{AgentId, AgentMessage, InboxMsg, InboxReject, Mailbox};
 use crate::cancel::Token;
 use ral_core::process::{self, CancelCause, Deadline, DurableRoot};
 use std::collections::HashMap;
@@ -223,12 +223,13 @@ impl AgentRegistry {
                 .clone();
             (mailbox, from_title)
         };
-        mailbox.push(InboxMsg::AgentMessage(AgentMessage {
-            from,
-            from_title,
-            text,
-        }));
-        Ok(())
+        mailbox
+            .push(InboxMsg::AgentMessage(AgentMessage {
+                from,
+                from_title,
+                text,
+            }))
+            .map_err(|reject| MessageError::RecipientInboxFull(to, reject))
     }
 
     /// The live agent's provider handle, for a `/model` swap on the focused
@@ -321,6 +322,10 @@ impl AgentRegistry {
 pub enum MessageError {
     UnknownSender(AgentId),
     UnknownRecipient(AgentId),
+    /// The recipient's inbox rejected the message at quota — surfaced to
+    /// the `message` tool's caller as a user-facing error, never dropped
+    /// silently (`decisions/260705_leases-and-budgets`).
+    RecipientInboxFull(AgentId, InboxReject),
 }
 
 /// The ids in `ancestor`'s subtree, walking the `parent` edges breadth-first.
