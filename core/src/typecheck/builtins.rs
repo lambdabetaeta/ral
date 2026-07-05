@@ -911,6 +911,21 @@ pub mod scheme {
         )
     }
 
+    /// `service :: ∀α μ₀ μ₁. U(F[μ₀,μ₁] α) → F (Handle α)` — `spawn`'s
+    /// scheme exactly; the durable class is a runtime registration fact,
+    /// invisible to the types.
+    pub fn service(u: &mut Unifier) -> Scheme {
+        let av = u.fresh_tyvar();
+        let a = Ty::Var(av);
+        let (m0, m1, body) = fm(u, a.clone());
+        mk_scheme(
+            &[av],
+            &[m0, m1],
+            &[],
+            thunk(fun(thunk(body), pure(Ty::Handle(Box::new(a))))),
+        )
+    }
+
     /// `await :: ∀α. Handle α → F {value, stdout, stderr}`
     pub fn await_op(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();

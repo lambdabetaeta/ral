@@ -1,5 +1,5 @@
 ---
-generated_at_commit: a28d34c
+generated_at_commit: 0a9ba7d
 generated_at_date: 2026-07-05
 covers_paths: [core/src/builtins/, core/src/builtins.rs]
 ---
@@ -18,11 +18,17 @@ registers as an ordinary `Scheme` whose factory bakes the reducer boundary
 directly ([[map/core/typecheck|reducer_spec]]); there is no separate reducer
 arm. Fixed arity is the registry's job ([[invariants/fixed-arity|fixed-arity]]).
 `is_builtin` / `builtin_names` gate seeding; `register` clones the prelude
-bindings into each fresh environment. One builtin sits *outside* the macro: the
-public `WATCH_BUILTIN` (`&[BuiltinEntry]`) wraps the still-private
-`concurrency::builtin_watch` / `scheme::watch` so a host with a durable stdout
-sink installs it while an agent host omits it
-([[decisions/260617_watch-repl-builtin|watch-repl-builtin]]).
+bindings into each fresh environment. Two builtins sit *outside* the macro, a
+host-registered pair with the hosts swapped: the public `WATCH_BUILTIN`
+(`&[BuiltinEntry]`) wraps the still-private `concurrency::builtin_watch` /
+`scheme::watch` so a host with a durable stdout sink (the interactive and
+batch ral hosts) installs it while an agent host omits it
+([[decisions/260617_watch-repl-builtin|watch-repl-builtin]]); its mirror
+`SERVICE_BUILTIN` wraps `concurrency::builtin_service` / `scheme::service` so
+the agent host (exarch), whose lease frame reaps ordinary workers, installs
+the durable-birth verb while the ral hosts — which grant no lease, so every
+spawn of theirs already lives until cancel or exit — omit it
+([[decisions/260705_leases-and-budgets|leases-and-budgets]]).
 
 Bodies are grouped by concern, one submodule each:
 
@@ -31,11 +37,12 @@ Bodies are grouped by concern, one submodule each:
   common margin is stripped, while content-line whitespace is preserved;
 - `collections.rs`, `predicates.rs`, `fs.rs`, `codecs.rs`;
 - `shell.rs` — `cd`, `alias` / `unalias`;
-- `concurrency.rs` — `spawn` / `watch` and the handle verbs `await` / `poll` /
-  `race` / `cancel` (builtins under their bare names; `par` and the `is-done`
-  predicate are prelude code over them, not builtins). All but `watch` seed
-  through `CORE_BUILTINS`; `watch`'s implementation lives here too but is
-  installed by the host via `WATCH_BUILTIN`, not core. On completion a
+- `concurrency.rs` — `spawn` / `watch` / `service` and the handle verbs
+  `await` / `poll` / `race` / `cancel` (builtins under their bare names; `par`
+  and the `is-done` predicate are prelude code over them, not builtins). All
+  but `watch` and `service` seed through `CORE_BUILTINS`; those two live here
+  too but are installed by their hosts via `WATCH_BUILTIN` /
+  `SERVICE_BUILTIN`, not core. On completion a
   block's buffers drain *once* into a cached `CompletedHandle { stdout, stderr,
   outcome }` ([[map/core/shell-state|types/value.rs]]); the eliminators project that
   one settle. `try_settle` is the shared non-blocking sample (cached outcome, else a
@@ -66,7 +73,12 @@ Bodies are grouped by concern, one submodule each:
   reap removes the registry entry, records a `ReapNotice` the host drains
   (`Shell::take_worker_reap_notices`), and cancels the worker's scope with
   `Deadline` — never detaching the handle, so a later `poll`/`await` still
-  observes the partial output and failure
+  observes the partial output and failure. The class decides the chain at
+  the spawn door: `spawn_child` takes a `LeaseClass`, and only a `Worker`
+  birth arms it — `service` registers `Durable` and arms nothing, so no
+  reaper entry ever exists for it; the absent chain *is* the durable
+  policy, whose only bounds are the handle's own `cancel`, the host's
+  `/clear`, and process exit
   ([[decisions/260705_leases-and-budgets|leases-and-budgets]]).
   A worker runs its thunk on a fresh
   `std::thread` via `Shell::spawn_thread` ([[map/core/shell-state|shell-state]]),

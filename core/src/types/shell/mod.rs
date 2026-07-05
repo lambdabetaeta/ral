@@ -358,8 +358,8 @@ pub struct LocalState {
     /// notification).  Doesn't flow across threads or IPC; moved on
     /// same-thread thunk boundary.  See `types/repl.rs`.
     pub(crate) repl: ReplScratch,
-    /// Directory of every worker (`spawn`, `watch`) detached from this
-    /// shell, keyed by nothing but the handle it registered with — see
+    /// Directory of every worker (`spawn`, `watch`, `service`) detached
+    /// from this shell, keyed by nothing but the handle it registered with — see
     /// `types/shell/workers.rs`.  One registry per `Shell`, i.e. one per
     /// agent; `Shell::spawn_thread` shares it into a spawned worker's own
     /// shell (so a nested `spawn` registers alongside its parent), but a

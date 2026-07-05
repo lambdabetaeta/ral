@@ -2455,11 +2455,12 @@ mod tests {
     }];
 
     /// `/clear` cancels every worker registered on the outgoing shell before
-    /// replacing it, and the rebuilt shell starts with an empty registry.
-    /// The cancelled worker settling afterward still tries to flush its
-    /// deferred `done` batch through the boundary it captured before the
-    /// clear — the same `InboxBoundary` generation guard that already
-    /// protects a stale agent result drops it, so no late
+    /// replacing it — the durable class included: explicit destruction
+    /// outranks every lease — and the rebuilt shell starts with an empty
+    /// registry.  A cancelled worker settling afterward still tries to
+    /// flush its deferred `done` batch through the boundary it captured
+    /// before the clear — the same `InboxBoundary` generation guard that
+    /// already protects a stale agent result drops it, so no late
     /// `InboxMsg::Surface` reaches the rebuilt context.
     #[test]
     fn clear_cancels_registered_workers_and_drops_their_late_surface() {
@@ -2478,46 +2479,58 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
         let _ = session.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
-
-        let entry = session
-            .transport
-            .shell_mut()
-            .shell
-            .workers()
-            .pop()
-            .expect("the spawn must register exactly one worker");
-        let scope = entry.handle.cancel.clone();
-        assert!(
-            !scope.is_cancelled(),
-            "freshly spawned, not yet touched by /clear"
+        let _ = session.run_shell(
+            "c2".into(),
+            "service { test-clear-block-forever }",
+            30,
+            &emit,
         );
+
+        let entries = session.transport.shell_mut().shell.workers();
+        assert_eq!(entries.len(), 2, "one ordinary worker, one service");
+        let durable = entries
+            .iter()
+            .find(|e| e.class == ral_core::types::LeaseClass::Durable)
+            .expect("the service must register under the durable class");
+        assert_eq!(durable.cmd, "<service>");
+        for entry in &entries {
+            assert!(
+                !entry.handle.cancel.is_cancelled(),
+                "freshly spawned, not yet touched by /clear"
+            );
+        }
 
         let scratch = Scratch::new().expect("scratch dir");
         session.clear(&scratch).expect("clear must succeed");
 
-        assert!(
-            scope.is_cancelled(),
-            "/clear must cancel the outgoing shell's registered workers"
-        );
+        for entry in &entries {
+            assert!(
+                entry.handle.cancel.is_cancelled(),
+                "/clear must cancel every registered worker, the durable class included ({})",
+                entry.cmd
+            );
+        }
         assert_eq!(
             session.transport.shell_mut().shell.worker_count(),
             0,
             "the rebuilt shell's registry must start empty"
         );
 
-        // Let the cancelled worker actually settle: its `process::check` loop
-        // observes the cancellation at its next poll, then flushes its
+        // Let the cancelled workers actually settle: each `process::check`
+        // loop observes the cancellation at its next poll, then flushes its
         // deferred batch through the boundary captured before the clear.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            if *entry.handle.state.lock().unwrap() != ral_core::types::HandleState::Running {
-                break;
+        for entry in &entries {
+            loop {
+                if *entry.handle.state.lock().unwrap() != ral_core::types::HandleState::Running {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the cancelled worker must settle within the budget"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the cancelled worker must settle within the budget"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(
             session.inbox.is_empty(),

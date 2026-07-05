@@ -128,11 +128,11 @@ impl Shell {
         &mut self.local.repl
     }
 
-    /// Every worker (`spawn`, `watch`) registered on this shell, settled or
-    /// still running. There is no by-id control plane: a listing hands back
-    /// the handle itself, so rediscovering a worker is list, take the handle
-    /// back, and resume `poll`/`await`/`race`/`cancel` as usual. Never
-    /// mutates the registry.
+    /// Every worker (`spawn`, `watch`, `service`) registered on this shell,
+    /// settled or still running. There is no by-id control plane: a listing
+    /// hands back the handle itself, so rediscovering a worker is list, take
+    /// the handle back, and resume `poll`/`await`/`race`/`cancel` as usual.
+    /// Never mutates the registry.
     pub fn workers(&self) -> Vec<WorkerEntry> {
         self.local.workers.snapshot()
     }

@@ -1,7 +1,9 @@
-//! Concurrency primitives: `spawn`, `watch`, `await`, `race`, `cancel`.
+//! Concurrency primitives: `spawn`, `watch`, `service`, `await`, `race`,
+//! `cancel`.
 //!
-//! The handle is the evidence of detachment.  `spawn` (and REPL-only
-//! `watch`) reify a [`Value::Handle`] and park their worker under the
+//! The handle is the evidence of detachment.  `spawn` (with its
+//! host-installed siblings — the REPL's `watch`, the agent host's durable
+//! `service`) reifies a [`Value::Handle`] and parks its worker under the
 //! durable session root, so it outlives the turn that launched it; a
 //! foreground cancel — a turn deadline or interrupt — cannot reach a
 //! worker that is not a child of the foreground scope.  `await`, `race`,
@@ -157,13 +159,16 @@ impl Drop for FlushGuard {
 /// spawn registers, unconditionally and with no policy attached (see
 /// `types::shell::workers`).  `await`, `race`, and a settled `poll` remove
 /// the entry on the shell that observes it; an explicit `cancel` does too.
-/// Under a frame that supplies a [`WorkerLease`], registration is followed
-/// by arming the idle-observation lease chain ([`lease_fire`]) on the
-/// fresh entry's id.
+/// For a [`LeaseClass::Worker`] birth under a frame that supplies a
+/// [`WorkerLease`], registration is followed by arming the idle-observation
+/// lease chain ([`lease_fire`]) on the fresh entry's id; a
+/// [`LeaseClass::Durable`] birth registers and arms nothing — the absent
+/// chain *is* the durable policy, not an exemption the chain checks.
 pub(super) fn spawn_child<F>(
     snap: Arc<Env>,
     shell: &mut Shell,
     io_mode: ChildIoMode,
+    class: LeaseClass,
     cmd: &str,
     work: F,
 ) -> Settled<HandleInner>
@@ -312,18 +317,22 @@ where
         id,
         cmd,
         started: std::time::SystemTime::now(),
-        class: LeaseClass::Worker,
+        class,
         handle: handle.clone(),
     });
 
-    // Under a frame that grants a worker lease (exarch), arm the
-    // idle-observation chain on the freshly registered entry.  The chain
-    // is fire-and-forget (`keep()`-ed): the worker outlives this `spawn`
-    // call, and every firing either ends the chain or re-arms exactly one
-    // successor.  Registered-then-armed, so the id the chain reaps always
-    // names an entry that existed.  The interactive frame (the REPL)
-    // supplies no lease and never reaps.
-    if let Some(lease) = shell.turn.detached_lease {
+    // For an ordinary worker under a frame that grants a lease (exarch),
+    // arm the idle-observation chain on the freshly registered entry.  The
+    // chain is fire-and-forget (`keep()`-ed): the worker outlives this
+    // `spawn` call, and every firing either ends the chain or re-arms
+    // exactly one successor.  Registered-then-armed, so the id the chain
+    // reaps always names an entry that existed.  The interactive frame
+    // (the REPL) supplies no lease and never reaps; a durable birth arms
+    // no chain at all — no reaper entry ever exists for it, which is the
+    // whole durable policy.
+    if class == LeaseClass::Worker
+        && let Some(lease) = shell.turn.detached_lease
+    {
         let chain = LeaseChain {
             scope: handle.cancel.clone(),
             state: handle.state.clone(),
@@ -427,6 +436,7 @@ fn spawn_buffered(
         captured,
         shell,
         ChildIoMode::Buffered,
+        LeaseClass::Worker,
         "<block>",
         // The worker body is the sole computation of a fresh thread,
         // under the trivial continuation the thread's join provides;
@@ -483,7 +493,40 @@ fn spawn_labelled(
         captured,
         shell,
         ChildIoMode::Watch { label },
+        LeaseClass::Worker,
         "<watch>",
+        // The worker body is the sole computation of a fresh thread,
+        // under the trivial continuation the thread's join provides;
+        // `spawn_child` absorbs any terminal tail call on that thread.
+        move |child_env| with_scope(child_env, |s| eval_comp(&body, s, Tail::Yes)),
+    )?))
+}
+
+// ── service ──────────────────────────────────────────────────────────────
+
+/// `service <thunk>` -- birth a durable worker: an ordinary buffered
+/// spawn in every respect except its [`LeaseClass::Durable`] registration,
+/// which arms no lease chain — no idle reap, no backstop.  Its bound is
+/// legibility: listed by the host's `workers` affordance, cancellable
+/// through its handle, dead with `/clear` or the process.  Length is
+/// declared at birth, never promoted into after the fact
+/// (`decisions/260705_leases-and-budgets`).
+///
+/// Availability is the host's, the mirror image of `watch`: an agent host
+/// (exarch), whose lease frame would otherwise reap long work, installs it
+/// via [`crate::builtins::SERVICE_BUILTIN`]; the interactive/batch ral
+/// hosts leave it uninstalled — they grant no lease, so every one of their
+/// spawns already lives until cancel or exit and a durable class would
+/// distinguish nothing.
+pub(super) fn builtin_service(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 1, "service")?;
+    let (body, captured) = expect_thunk(&args[0], "service")?;
+    Ok(Value::Handle(spawn_child(
+        captured,
+        shell,
+        ChildIoMode::Buffered,
+        LeaseClass::Durable,
+        "<service>",
         // The worker body is the sole computation of a fresh thread,
         // under the trivial continuation the thread's join provides;
         // `spawn_child` absorbs any terminal tail call on that thread.
@@ -1092,6 +1135,7 @@ mod tests {
             snap,
             &mut shell,
             ChildIoMode::Buffered,
+            LeaseClass::Worker,
             "<abandoned>",
             |c| check_loop(c),
         )
@@ -1137,6 +1181,7 @@ mod tests {
             snap,
             &mut shell,
             ChildIoMode::Buffered,
+            LeaseClass::Worker,
             "<test>",
             |_child| Ok(Value::Unit),
         )
@@ -1169,6 +1214,7 @@ mod tests {
             snap,
             &mut shell,
             ChildIoMode::Buffered,
+            LeaseClass::Worker,
             "<babysat>",
             move |_c| {
                 gate_rx.recv().unwrap();
@@ -1203,9 +1249,14 @@ mod tests {
         let mut shell = Shell::new(Default::default());
         shell.turn.detached_lease = Some(lease_ms(150, 400));
         let snap = Arc::new(shell.mobile().scope);
-        let handle = spawn_child(snap, &mut shell, ChildIoMode::Buffered, "<immortal>", |c| {
-            check_loop(c)
-        })
+        let handle = spawn_child(
+            snap,
+            &mut shell,
+            ChildIoMode::Buffered,
+            LeaseClass::Worker,
+            "<immortal>",
+            |c| check_loop(c),
+        )
         .expect("spawn must succeed");
         let scope = handle.cancel.clone();
 
@@ -1241,6 +1292,7 @@ mod tests {
             snap,
             &mut shell,
             ChildIoMode::Buffered,
+            LeaseClass::Worker,
             "<done>",
             |_child| Ok(Value::Unit),
         )
@@ -1280,9 +1332,14 @@ mod tests {
         let mut shell = Shell::new(Default::default());
         shell.turn.detached_lease = Some(lease_ms(40, 10_000));
         let snap = Arc::new(shell.mobile().scope);
-        let handle = spawn_child(snap, &mut shell, ChildIoMode::Buffered, "<listed>", |c| {
-            check_loop(c)
-        })
+        let handle = spawn_child(
+            snap,
+            &mut shell,
+            ChildIoMode::Buffered,
+            LeaseClass::Worker,
+            "<listed>",
+            |c| check_loop(c),
+        )
         .expect("spawn must succeed");
         let scope = handle.cancel.clone();
 
@@ -1301,6 +1358,111 @@ mod tests {
             shell.take_worker_reap_notices().len(),
             1,
             "reaped despite the listing ritual"
+        );
+    }
+
+    /// The durable class is the whole difference: under one
+    /// millisecond-scale lease frame, a `Durable` birth arms no chain and
+    /// outlives both bounds — unpolled past the idle bound, older than the
+    /// backstop — while its ordinary-class sibling, spawned under the very
+    /// same frame, is reaped.  Exactly one notice results, and it names the
+    /// sibling, never the durable worker.
+    #[test]
+    fn durable_worker_outlives_both_lease_bounds_while_its_sibling_reaps() {
+        let mut shell = Shell::new(Default::default());
+        shell.turn.detached_lease = Some(lease_ms(40, 150));
+
+        let snap = Arc::new(shell.mobile().scope);
+        let durable = spawn_child(
+            snap,
+            &mut shell,
+            ChildIoMode::Buffered,
+            LeaseClass::Durable,
+            "<service>",
+            |c| check_loop(c),
+        )
+        .expect("durable spawn must succeed");
+        let born = std::time::Instant::now();
+        let snap = Arc::new(shell.mobile().scope);
+        let sibling = spawn_child(
+            snap,
+            &mut shell,
+            ChildIoMode::Buffered,
+            LeaseClass::Worker,
+            "<sibling>",
+            |c| check_loop(c),
+        )
+        .expect("ordinary spawn must succeed");
+
+        // The ordinary sibling proves the frame's lease is genuinely armed.
+        let budget = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !sibling.cancel.is_cancelled() {
+            assert!(
+                std::time::Instant::now() < budget,
+                "the ordinary sibling must be reaped under this frame"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // Let the durable worker age well past both bounds, unobserved.
+        let past_both = born + std::time::Duration::from_millis(400);
+        while std::time::Instant::now() < past_both {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert!(
+            !durable.cancel.is_cancelled(),
+            "a durable worker is never lease-cancelled: no idle bound, no backstop"
+        );
+        let entries = shell.workers();
+        assert_eq!(entries.len(), 1, "only the durable entry remains listed");
+        assert_eq!(entries[0].class, LeaseClass::Durable);
+        assert_eq!(entries[0].cmd, "<service>");
+        let notices = shell.take_worker_reap_notices();
+        assert_eq!(notices.len(), 1, "one notice: the sibling's reap alone");
+        assert_eq!(notices[0].cmd, "<sibling>");
+
+        // End the blocked worker so the test does not leak a live thread.
+        durable.cancel.cancel(crate::process::CancelCause::Explicit);
+    }
+
+    /// Explicit destruction still reaches a durable worker: `cancel`
+    /// through the handle fires its scope and removes its registry entry,
+    /// exactly as for an ordinary worker — durability exempts the lease
+    /// chain, never the eliminators.
+    #[test]
+    fn cancel_through_the_handle_ends_a_durable_worker() {
+        let mut shell = Shell::new(Default::default());
+        shell.turn.detached_lease = Some(lease_ms(10_000, 20_000));
+        let snap = Arc::new(shell.mobile().scope);
+        let handle = spawn_child(
+            snap,
+            &mut shell,
+            ChildIoMode::Buffered,
+            LeaseClass::Durable,
+            "<service>",
+            |c| check_loop(c),
+        )
+        .expect("durable spawn must succeed");
+
+        builtin_cancel(&[Value::Handle(handle.clone())], &mut shell)
+            .expect("cancel must succeed on a durable worker");
+
+        assert!(
+            handle.cancel.is_cancelled(),
+            "cancel fires the durable worker's scope"
+        );
+        assert_eq!(
+            handle.cancel.cause(),
+            Some(crate::process::CancelCause::Explicit)
+        );
+        assert_eq!(
+            shell.local.workers.count(),
+            0,
+            "cancel removes the durable entry"
+        );
+        assert!(
+            shell.take_worker_reap_notices().is_empty(),
+            "an explicit cancel is not a reap: no notice"
         );
     }
 
@@ -1428,8 +1590,15 @@ mod tests {
             // Hold the handle (and its receiver) so the channel stays connected
             // until the worker has flushed; never observed, so no eliminator
             // competes for the `joined` latch.
-            let _handle =
-                spawn_child(snap, &mut shell, ChildIoMode::Buffered, "<block>", work).unwrap();
+            let _handle = spawn_child(
+                snap,
+                &mut shell,
+                ChildIoMode::Buffered,
+                LeaseClass::Worker,
+                "<block>",
+                work,
+            )
+            .unwrap();
             let mut got = wait_for_batch(&batches);
             assert_eq!(got.len(), 1, "one batch per completed worker");
             got.pop().unwrap()
@@ -1472,6 +1641,7 @@ mod tests {
             snap,
             &mut shell,
             ChildIoMode::Buffered,
+            LeaseClass::Worker,
             "<block>",
             |child| {
                 if let Some(sink) = child.turn.surface.as_ref() {
@@ -1521,6 +1691,7 @@ mod tests {
             snap,
             &mut shell,
             ChildIoMode::Buffered,
+            LeaseClass::Worker,
             "<block>",
             |child| {
                 if let Some(sink) = child.turn.surface.as_ref() {
@@ -1572,6 +1743,7 @@ mod tests {
             snap,
             &mut shell,
             ChildIoMode::Buffered,
+            LeaseClass::Worker,
             "<block>",
             |child| {
                 if let Some(sink) = child.turn.surface.as_ref() {
@@ -1621,6 +1793,7 @@ mod tests {
             snap,
             &mut shell,
             ChildIoMode::Buffered,
+            LeaseClass::Worker,
             "<test-cmd>",
             |_child| Ok(Value::Unit),
         )
@@ -1657,6 +1830,7 @@ mod tests {
             snap,
             &mut shell,
             ChildIoMode::Buffered,
+            LeaseClass::Worker,
             "<repl>",
             |_child| Ok(Value::Unit),
         )
@@ -1676,18 +1850,28 @@ mod tests {
 
         // `await` removes.
         let snap = Arc::new(shell.mobile().scope);
-        let h1 = spawn_child(snap, &mut shell, ChildIoMode::Buffered, "<a>", |_c| {
-            Ok(Value::Unit)
-        })
+        let h1 = spawn_child(
+            snap,
+            &mut shell,
+            ChildIoMode::Buffered,
+            LeaseClass::Worker,
+            "<a>",
+            |_c| Ok(Value::Unit),
+        )
         .unwrap();
         await_handle(&h1, &mut shell).expect("await ok");
         assert_eq!(shell.local.workers.count(), 0, "await removes its entry");
 
         // `cancel` removes.
         let snap = Arc::new(shell.mobile().scope);
-        let h2 = spawn_child(snap, &mut shell, ChildIoMode::Buffered, "<b>", |_c| {
-            Ok(Value::Unit)
-        })
+        let h2 = spawn_child(
+            snap,
+            &mut shell,
+            ChildIoMode::Buffered,
+            LeaseClass::Worker,
+            "<b>",
+            |_c| Ok(Value::Unit),
+        )
         .unwrap();
         assert_eq!(shell.local.workers.count(), 1);
         builtin_cancel(&[Value::Handle(h2)], &mut shell).expect("cancel ok");
@@ -1695,9 +1879,14 @@ mod tests {
 
         // A settled `poll` removes.
         let snap = Arc::new(shell.mobile().scope);
-        let h3 = spawn_child(snap, &mut shell, ChildIoMode::Buffered, "<c>", |_c| {
-            Ok(Value::Unit)
-        })
+        let h3 = spawn_child(
+            snap,
+            &mut shell,
+            ChildIoMode::Buffered,
+            LeaseClass::Worker,
+            "<c>",
+            |_c| Ok(Value::Unit),
+        )
         .unwrap();
         loop {
             let polled = builtin_poll(&[Value::Handle(h3.clone())], &mut shell).unwrap();
@@ -1717,10 +1906,17 @@ mod tests {
         // no timing guess needed.
         let (unblock_tx, unblock_rx) = mpsc::channel::<()>();
         let snap = Arc::new(shell.mobile().scope);
-        let h4 = spawn_child(snap, &mut shell, ChildIoMode::Buffered, "<d>", move |_c| {
-            unblock_rx.recv().unwrap();
-            Ok(Value::Unit)
-        })
+        let h4 = spawn_child(
+            snap,
+            &mut shell,
+            ChildIoMode::Buffered,
+            LeaseClass::Worker,
+            "<d>",
+            move |_c| {
+                unblock_rx.recv().unwrap();
+                Ok(Value::Unit)
+            },
+        )
         .unwrap();
         assert_eq!(shell.local.workers.count(), 1);
         let pending = builtin_poll(&[Value::Handle(h4.clone())], &mut shell).unwrap();
@@ -1745,9 +1941,14 @@ mod tests {
     fn race_removes_winner_and_cancelled_losers() {
         let mut shell = Shell::new(Default::default());
         let snap = Arc::new(shell.mobile().scope);
-        let winner = spawn_child(snap, &mut shell, ChildIoMode::Buffered, "<winner>", |_c| {
-            Ok(Value::Unit)
-        })
+        let winner = spawn_child(
+            snap,
+            &mut shell,
+            ChildIoMode::Buffered,
+            LeaseClass::Worker,
+            "<winner>",
+            |_c| Ok(Value::Unit),
+        )
         .unwrap();
 
         // The losers block on their own channels, so `race` always finds
@@ -1758,6 +1959,7 @@ mod tests {
             snap,
             &mut shell,
             ChildIoMode::Buffered,
+            LeaseClass::Worker,
             "<loser1>",
             move |_c| {
                 let _ = l1_rx.recv();
@@ -1771,6 +1973,7 @@ mod tests {
             snap,
             &mut shell,
             ChildIoMode::Buffered,
+            LeaseClass::Worker,
             "<loser2>",
             move |_c| {
                 let _ = l2_rx.recv();
@@ -1821,6 +2024,7 @@ mod tests {
             snap,
             &mut shell,
             ChildIoMode::Buffered,
+            LeaseClass::Worker,
             "<outer>",
             move |child_shell| {
                 go_rx.recv().unwrap();
@@ -1829,6 +2033,7 @@ mod tests {
                     child_snap,
                     child_shell,
                     ChildIoMode::Buffered,
+                    LeaseClass::Worker,
                     "<inner>",
                     |_c| Ok(Value::Unit),
                 )

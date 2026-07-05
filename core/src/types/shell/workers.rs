@@ -1,5 +1,5 @@
 //! The worker registry: a per-[`Shell`](super::Shell) directory of every
-//! detached worker (`spawn`, `watch`) spawned from it.
+//! detached worker (`spawn`, `watch`, `service`) spawned from it.
 //!
 //! `spawn_child` mints a [`WorkerEntry`] the instant a worker's
 //! [`HandleInner`] is constructed and files it here — every spawn
@@ -80,15 +80,18 @@ pub struct WorkerLease {
     pub backstop: Duration,
 }
 
-/// Which reaping policy governs a [`WorkerEntry`]. Only the ordinary,
-/// leased class exists today; `decisions/260705_leases-and-budgets` adds a
-/// durable class (no idle lease — legibility is the only bound) that the
-/// lease chain will exempt.
+/// Which reaping policy governs a [`WorkerEntry`], declared at birth by
+/// the spawning door (`decisions/260705_leases-and-budgets`).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum LeaseClass {
     /// An ordinary `spawn`/`watch` worker, governed by the frame's
     /// [`WorkerLease`] when one is supplied.
     Worker,
+    /// A `service`-born worker: no idle lease, no backstop — legibility is
+    /// the bound. It is listed like any entry and cancellable through its
+    /// handle, and it dies with `/clear` or the process; the lease chain
+    /// is simply never armed for it.
+    Durable,
 }
 
 /// Why the lease chain reaped a worker: its idle bound elapsed unrenewed,

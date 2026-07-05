@@ -35,9 +35,18 @@ const AGENT_SOURCE: &str = include_str!("../data/agent.ral");
 
 /// Register the exarch builtins process-wide and install them into `shell`.
 /// Idempotent.
+///
+/// `service` rides along here: core implements it but keeps it out of
+/// `CORE_BUILTINS` (the `watch` mechanism with the hosts swapped —
+/// [`ral_core::builtins::SERVICE_BUILTIN`]), and the agent host is the one
+/// that installs it, because only under exarch's worker lease does a
+/// durable birth distinguish anything. The REPL and batch hosts never call
+/// this, so they never gain `service`.
 pub fn install_on(shell: &mut ral_core::Shell) {
     ral_core::builtins::register_builtins(EXARCH_BUILTINS);
+    ral_core::builtins::register_builtins(ral_core::builtins::SERVICE_BUILTIN);
     shell.install_builtins(EXARCH_BUILTINS);
+    shell.install_builtins(ral_core::builtins::SERVICE_BUILTIN);
 }
 
 /// Source the embedded agent helper library into the live shell.
@@ -1048,7 +1057,7 @@ fn scheme_workers(u: &mut Unifier) -> Scheme {
     )
 }
 
-/// `workers` — list this shell's registered workers (`spawn`, `watch`),
+/// `workers` — list this shell's registered workers (`spawn`, `service`),
 /// settled or still running, each a record `{id, cmd, started, class,
 /// state, handle}`. `handle` is the worker's own `Handle`, retaken
 /// directly: `poll h`, `await h`, `cancel h` resume the ordinary eliminator
@@ -1068,6 +1077,7 @@ fn builtin_workers(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
                 .as_secs() as i64;
             let class = match entry.class {
                 ral_core::types::LeaseClass::Worker => "worker",
+                ral_core::types::LeaseClass::Durable => "durable",
             };
             let state = match *entry.handle.state.lock().unwrap() {
                 ral_core::types::HandleState::Running => "running",
@@ -1133,7 +1143,7 @@ pub static EXARCH_BUILTINS: &[BuiltinEntry] = &[
     BuiltinEntry {
         name: Cow::Borrowed("workers"),
         type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_workers),
-        doc: "workers  — list this agent's detached workers (spawn/watch), settled or still running: [{id, cmd, started, class, state, handle}]. `handle` is retaken directly — `poll h` / `await h` / `cancel h` resume the ordinary idiom, the whole rediscovery story once a binding name is gone. Polling a retaken handle renews its lease; listing alone does not.",
+        doc: "workers  — list this agent's detached workers (spawn/service), settled or still running: [{id, cmd, started, class, state, handle}]. `handle` is retaken directly — `poll h` / `await h` / `cancel h` resume the ordinary idiom, the whole rediscovery story once a binding name is gone. Polling a retaken handle renews its lease; listing alone does not.",
         body: BuiltinBody::Static(builtin_workers),
     },
 ];
@@ -1468,6 +1478,75 @@ mod tests {
             "workers must never be a core builtin: a bare ral host (the REPL) \
              never installs EXARCH_BUILTINS, so it must have no `workers` name \
              to fall back on"
+        );
+    }
+
+    /// A `service`-born worker lists through the `workers` builtin under
+    /// the durable class — `class: "durable"`, `state: "running"` — with
+    /// its handle retaken like any other entry's.
+    #[test]
+    fn workers_lists_a_service_as_durable() {
+        let mut shell = Shell::new(Default::default());
+        install_on(&mut shell);
+        ral_core::builtins::register_builtins(WORKER_TEST_BUILTINS);
+        shell.install_builtins(WORKER_TEST_BUILTINS);
+        run_top_level(&mut shell, "service { test-block-forever }");
+
+        let listed = builtin_workers(&[], &mut shell).expect("workers must list the service");
+        let Value::List(entries) = listed else {
+            panic!("workers must return a list");
+        };
+        assert_eq!(entries.len(), 1, "exactly one registered service");
+        let Value::Map(record) = entries.get(0).cloned().expect("one entry") else {
+            panic!("entry must be a record");
+        };
+        assert_eq!(record.get("class"), Some(&Value::String("durable".into())));
+        assert_eq!(record.get("state"), Some(&Value::String("running".into())));
+        assert_eq!(record.get("cmd"), Some(&Value::String("<service>".into())));
+        let handle = match record.get("handle") {
+            Some(Value::Handle(h)) => h.clone(),
+            other => panic!("handle field must carry a Handle, got {other:?}"),
+        };
+
+        handle
+            .cancel
+            .cancel(ral_core::process::CancelCause::Explicit);
+    }
+
+    /// `service`'s availability mirrors `watch`'s with the hosts swapped:
+    /// implemented in core but absent from `CORE_BUILTINS` (and from the
+    /// `WATCH_BUILTIN` set the REPL adds), it reaches a shell only through
+    /// exarch's `install_on` — so a bare ral host has no `service` name to
+    /// resolve, while an agent shell dispatches it.
+    #[test]
+    fn service_is_installed_by_exarch_and_absent_from_the_repl_sets() {
+        assert!(
+            ral_core::builtins::SERVICE_BUILTIN
+                .iter()
+                .any(|e| e.name.as_ref() == "service"),
+            "SERVICE_BUILTIN must carry the `service` entry"
+        );
+        assert!(
+            !ral_core::builtins::CORE_BUILTINS
+                .iter()
+                .any(|e| e.name.as_ref() == "service"),
+            "service must never be a core builtin"
+        );
+        assert!(
+            !ral_core::builtins::WATCH_BUILTIN
+                .iter()
+                .any(|e| e.name.as_ref() == "service"),
+            "the REPL's host surface (watch) must not smuggle service in"
+        );
+        let mut shell = Shell::new(Default::default());
+        assert!(
+            shell.lookup_builtin("service").is_none(),
+            "a bare shell (the REPL's baseline) must not dispatch service"
+        );
+        install_on(&mut shell);
+        assert!(
+            shell.lookup_builtin("service").is_some(),
+            "exarch's install_on must install service"
         );
     }
 }

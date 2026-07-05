@@ -426,13 +426,41 @@ builtin_registry! {
 ///
 /// Only this entry is public — the implementation (`builtin_watch`,
 /// `spawn_child`, `Sink::LineFramed`) and the type scheme (`scheme::watch`)
-/// stay private to core.  This is the one asymmetry the split introduces:
-/// the builtin is implemented in core but registered by the host.
+/// stay private to core.  Implemented in core but registered by the host —
+/// the shape [`SERVICE_BUILTIN`] mirrors with the hosts swapped.
 pub static WATCH_BUILTIN: &[BuiltinEntry] = &[BuiltinEntry {
     name: Cow::Borrowed("watch"),
     type_rule: BuiltinTypeRule::Scheme(Some(2), scheme::watch),
     doc: "watch <label> <thunk>  — spawn a concurrent block whose output streams live to the caller's stdout, line-framed with the given label.",
     body: BuiltinBody::Static(concurrency::builtin_watch),
+}];
+
+/// `service` — the durable-birth concurrency builtin, kept out of
+/// [`CORE_BUILTINS`] and exposed for a host to install on its own:
+/// [`WATCH_BUILTIN`]'s mechanism, its mirror image host-wise.
+///
+/// A `service`-born worker is an ordinary buffered spawn
+/// (`concurrency::builtin_service` over `spawn_child`) registered under
+/// the durable lease class: no idle reap, no absolute backstop — its
+/// bound is legibility (listed by the host's `workers` affordance,
+/// cancellable through its handle, dead with `/clear` or the process;
+/// `decisions/260705_leases-and-budgets`).  That distinction only exists
+/// where a lease frame does, so availability inverts `watch`'s: the agent
+/// host (exarch), whose frame reaps ordinary workers, installs it; the
+/// interactive and batch ral hosts — which install `watch` — leave
+/// `service` out, because they grant no lease and every spawn of theirs
+/// already lives until cancel or exit.  Naming `service` there is a
+/// compile-time unknown-name diagnostic, not a builtin that resolves and
+/// refuses at call time.
+///
+/// Only this entry is public — the implementation (`builtin_service`, the
+/// durable registration in `spawn_child`) and the type scheme
+/// (`scheme::service`) stay private to core, exactly as with `watch`.
+pub static SERVICE_BUILTIN: &[BuiltinEntry] = &[BuiltinEntry {
+    name: Cow::Borrowed("service"),
+    type_rule: BuiltinTypeRule::Scheme(Some(1), scheme::service),
+    doc: "service <thunk>  — birth a durable worker: like spawn, but never idle-reaped and exempt from the 24 h backstop. It dies only by `cancel` through its handle, /clear, or process exit; `workers` lists it with class \"durable\". For work meant to outlive the ordinary worker lease, declared at birth.",
+    body: BuiltinBody::Static(concurrency::builtin_service),
 }];
 
 // ─── Process-level builtin registry ────────────────────────────────────────
