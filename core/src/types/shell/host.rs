@@ -15,7 +15,7 @@ use crate::diagnostic::SourceDb;
 use crate::exit_hints::ExitHints;
 use crate::io::{Sink, TerminalState};
 use crate::process::{DurableRoot, ForegroundScope, TerminalLease};
-use crate::types::AuditFragment;
+use crate::types::{AuditFragment, WorkerEntry};
 
 /// An in-flight terminal loan, returned by [`Shell::begin_terminal_loan`] and
 /// surrendered to [`Shell::end_terminal_loan`].
@@ -126,6 +126,20 @@ impl Shell {
     /// state; exposing it to the host that owns it is the seam, not a leak.
     pub fn repl_mut(&mut self) -> &mut ReplScratch {
         &mut self.local.repl
+    }
+
+    /// Every worker (`spawn`, `watch`) registered on this shell, settled or
+    /// still running. There is no by-id control plane: a listing hands back
+    /// the handle itself, so rediscovering a worker is list, take the handle
+    /// back, and resume `poll`/`await`/`race`/`cancel` as usual. Never
+    /// mutates the registry.
+    pub fn workers(&self) -> Vec<WorkerEntry> {
+        self.local.workers.snapshot()
+    }
+
+    /// Number of workers currently registered on this shell.
+    pub fn worker_count(&self) -> usize {
+        self.local.workers.count()
     }
 
     /// The terminal-foreground handoff borrow: `Some(&TerminalLease)` iff the

@@ -41,6 +41,7 @@ mod init;
 pub(crate) mod modules;
 pub(crate) mod repl;
 mod scope;
+pub(crate) mod workers;
 
 pub use host::TerminalLoan;
 pub use inherit::MobileSnapshot;
@@ -50,6 +51,7 @@ use self::control::ControlState;
 use self::cwd::Cwd;
 use self::modules::Modules;
 use self::repl::ReplScratch;
+use self::workers::WorkerRegistry;
 use super::audit::{Audit, LocationCursor};
 use super::capability::GrantStack;
 use super::env::Env;
@@ -354,6 +356,13 @@ pub struct LocalState {
     /// notification).  Doesn't flow across threads or IPC; moved on
     /// same-thread thunk boundary.  See `types/repl.rs`.
     pub(crate) repl: ReplScratch,
+    /// Directory of every worker (`spawn`, `watch`) detached from this
+    /// shell, keyed by nothing but the handle it registered with — see
+    /// `types/shell/workers.rs`.  One registry per `Shell`, i.e. one per
+    /// agent; `Shell::spawn_thread` shares it into a spawned worker's own
+    /// shell (so a nested `spawn` registers alongside its parent), but a
+    /// sub-agent fork starts with a fresh one.
+    pub(crate) workers: WorkerRegistry,
 }
 
 /// The runtime, partitioned by lifetime.  A field either moves as a turn

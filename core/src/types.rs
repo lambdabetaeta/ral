@@ -81,3 +81,7 @@ pub use shell::{
     MobileSnapshot, SessionState, Shell, SurfaceSink, TerminalLoan, TurnState,
 };
 pub(crate) use shell::{TerminalAccess, ThunkBody};
+
+// Per-shell worker registry: id, lease class, entry.  See
+// types/shell/workers.rs.
+pub use shell::workers::{LeaseClass, WorkerEntry, WorkerId};

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1baac6d
-generated_at_date: 2026-06-22
+generated_at_commit: 923e911
+generated_at_date: 2026-07-05
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
 
@@ -62,7 +62,13 @@ field name *is* the invariant** — joined by `Shell`
   against after a turn returns, the `exit_hints` table, the host-installed
   `builtins`, and the session's `terminal_lease`.
 - **`LocalState`** — host-local scratch carrying its own flow rules (audit
-  trail, REPL scratch); the residue once turn and session state are named.
+  trail, REPL scratch, the `workers` registry); the residue once turn and
+  session state are named. The worker registry (`shell/workers.rs`) is a
+  per-`Shell` directory of every `spawn`/`watch`ed `HandleInner`, one per
+  agent; `Shell::spawn_thread` shares it by `Arc` into a spawned worker's own
+  shell (so a nested `spawn` registers alongside its parent), but a
+  sub-agent fork or pipeline stage starts with a fresh, empty one
+  ([[decisions/260705_leases-and-budgets|leases-and-budgets]]).
 
 `turn` / `session` / `local` are `pub(crate)`: the fields that encode turn
 safety are not a public API. Hosts drive a session through the narrow accessors

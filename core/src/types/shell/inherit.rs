@@ -18,7 +18,10 @@
 //! - **Spawned thread** (`spawn`, `par`, detached worker):
 //!   [`Shell::spawn_thread`] snapshots the parent's [`Context`](super::Context)
 //!   and ships it to a fresh OS thread that owns its own IO; nothing flows
-//!   back.
+//!   back. The worker registry (`local.workers`) is the one piece of
+//!   [`LocalState`](super::LocalState) that *does* flow in here — shared by
+//!   `Arc`, not cloned-and-forgotten — so a `spawn` nested inside a worker's
+//!   body registers into the same directory its parent did.
 //! - **Cross-process pipeline stage**: [`Shell::child_of`] builds a child
 //!   over a throwaway parent in the helper process (see
 //!   [`crate::child_eval`]) and folds its result back with
@@ -305,6 +308,12 @@ impl Shell {
     /// or a cancel on the worker's own returned scope (via `cancel` /
     /// `race`), stops it.  That returned child scope is stored on the
     /// handle so `cancel` / `race` can stop just this worker.
+    ///
+    /// `local.workers` — the worker registry — is shared into the new
+    /// thread's `Shell` by `Arc` clone, alongside `session.root` and
+    /// `session.builtins`: a `spawn` inside `f`'s body registers into the
+    /// same registry this shell's own workers do, rather than a private
+    /// one of its own.
     pub fn spawn_thread<F, R>(
         &self,
         scopes: Arc<Env>,
@@ -318,6 +327,7 @@ impl Shell {
         let detached_ceiling = self.turn.detached_ceiling;
         let root = self.session.root.clone();
         let builtins = self.session.builtins.clone();
+        let workers = self.local.workers.clone();
         let cancel = root.child();
         let worker_cancel = cancel.as_scope().clone();
         let handle = std::thread::spawn(move || {
@@ -327,6 +337,7 @@ impl Shell {
             child.turn.cancel = cancel;
             child.session.root = root;
             child.session.builtins = builtins;
+            child.local.workers = workers;
             f(&mut child)
         });
         (handle, worker_cancel)

@@ -152,6 +152,11 @@ impl Drop for FlushGuard {
 /// trampoline before the result enters the handle channel.  Settled
 /// is the wire shape for `HandleInner.result` — a tail call cannot
 /// cross between threads.
+///
+/// Before returning, the handle is filed on `shell.local.workers` — every
+/// spawn registers, unconditionally and with no policy attached (see
+/// `types::shell::workers`).  `await`, `race`, and a settled `poll` remove
+/// the entry on the shell that observes it; an explicit `cancel` does too.
 pub(super) fn spawn_child<F>(
     snap: Arc<Env>,
     shell: &mut Shell,
@@ -278,7 +283,7 @@ where
         crate::process::arm_lifetime(cancel.clone(), ceiling).keep();
     }
 
-    Ok(HandleInner {
+    let handle = HandleInner {
         result: Arc::new(Mutex::new(Some(rx))),
         cached: Arc::new(Mutex::new(None)),
         state: Arc::new(Mutex::new(HandleState::Running)),
@@ -286,9 +291,20 @@ where
         stderr_buf,
         surface_buf,
         joined,
-        cmd,
+        cmd: cmd.clone(),
         cancel,
-    })
+    };
+    // Every spawn registers, unconditionally — the mechanism is universal
+    // and attaches no policy; affordances (listing, reaping, caps) are the
+    // host's and the lease layer's concern, not this door's.
+    shell.local.workers.register(WorkerEntry {
+        id: WorkerId::mint(),
+        cmd,
+        started: std::time::SystemTime::now(),
+        class: LeaseClass::Worker,
+        handle: handle.clone(),
+    });
+    Ok(handle)
 }
 
 // ── spawn ────────────────────────────────────────────────────────────────
@@ -395,6 +411,7 @@ pub(super) fn builtin_cancel(args: &[Value], shell: &mut Shell) -> Settled<Value
         handle.cancel.cancel(crate::process::CancelCause::Explicit);
         detach_handle(handle);
     }
+    shell.local.workers.remove(handle);
     shell.mobile.control.last_status = 0;
     Ok(Value::Unit)
 }
@@ -517,6 +534,7 @@ fn wait_first_settled<'a>(
 pub(super) fn await_handle(handle: &HandleInner, shell: &mut Shell) -> Settled<Value> {
     ensure_live(handle, shell)?;
     let (_, completed) = wait_first_settled(&[handle], shell)?;
+    shell.local.workers.remove(handle);
     replay_deferred_surface(handle, &completed, shell);
     project_completed(completed)
 }
@@ -559,6 +577,9 @@ pub(super) fn builtin_poll(args: &[Value], shell: &mut Shell) -> Settled<Value> 
     };
     let result = match try_settle(handle, shell) {
         Some(completed) => {
+            // A settled poll is an observation like `await`'s, so it
+            // removes the entry too; a `pending` sample below must not.
+            shell.local.workers.remove(handle);
             let outcome = match completed.outcome {
                 Ok(value) => variant("ok", Some(Box::new(value))),
                 Err(e) => variant("err", Some(Box::new(break_record(&e)))),
@@ -609,10 +630,12 @@ pub(super) fn builtin_race(args: &[Value], shell: &mut Shell) -> Settled<Value> 
     }
 
     let (winner, completed) = wait_first_settled(&handles, shell)?;
+    shell.local.workers.remove(winner);
     for &h in &handles {
         if !Arc::ptr_eq(&h.result, &winner.result) {
             h.cancel.cancel(crate::process::CancelCause::Explicit);
             detach_handle(h);
+            shell.local.workers.remove(h);
         }
     }
     replay_deferred_surface(winner, &completed, shell);
@@ -1293,6 +1316,256 @@ mod tests {
             log.lock().unwrap().len(),
             0,
             "the boundary already delivered, so the replay is suppressed"
+        );
+    }
+
+    // ── worker registry (pure bookkeeping, no policy) ────────────────────
+
+    /// `spawn_child` files exactly one entry, carrying the spawn's own `cmd`
+    /// and the (only) `Worker` lease class, and the registered handle is
+    /// the same handle the call returns — `HandleInner`'s own `PartialEq`
+    /// (`Arc::ptr_eq` on `result`) proves it, not a field-by-field copy.
+    #[test]
+    fn spawn_child_registers_one_entry_with_matching_handle() {
+        let mut shell = Shell::new(Default::default());
+        let snap = Arc::new(shell.mobile().scope);
+        let handle = spawn_child(
+            snap,
+            &mut shell,
+            ChildIoMode::Buffered,
+            "<test-cmd>",
+            |_child| Ok(Value::Unit),
+        )
+        .expect("spawn must succeed");
+
+        assert_eq!(
+            shell.local.workers.count(),
+            1,
+            "spawn_child registers exactly one entry"
+        );
+        let snapshot = shell.local.workers.snapshot();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].cmd, "<test-cmd>");
+        assert_eq!(snapshot[0].class, LeaseClass::Worker);
+        assert_eq!(
+            snapshot[0].handle, handle,
+            "the registered handle is the returned handle"
+        );
+    }
+
+    /// The mechanism attaches no policy and is host-independent: a bare
+    /// `Shell::new(Default::default())` with no `detached_ceiling` armed (the
+    /// REPL/interactive shape) registers exactly as the agent-framed case
+    /// above does.
+    #[test]
+    fn spawn_child_registers_with_no_detached_ceiling_armed() {
+        let mut shell = Shell::new(Default::default());
+        assert!(
+            shell.turn.detached_ceiling.is_none(),
+            "precondition: no ceiling armed"
+        );
+        let snap = Arc::new(shell.mobile().scope);
+        let handle = spawn_child(
+            snap,
+            &mut shell,
+            ChildIoMode::Buffered,
+            "<repl>",
+            |_child| Ok(Value::Unit),
+        )
+        .expect("spawn must succeed");
+        assert_eq!(shell.local.workers.count(), 1);
+        assert_eq!(shell.local.workers.snapshot()[0].handle, handle);
+    }
+
+    /// Every foreground eliminator that observes a settled worker removes
+    /// its registry entry — `await`, `cancel`, and a `` `settled `` `poll` —
+    /// while a `` `pending `` `poll` leaves the entry alone: listing and
+    /// sampling must never mutate the registry, only an actual observation
+    /// of a finished (or explicitly cancelled) worker may.
+    #[test]
+    fn eliminators_remove_the_entry_except_a_pending_poll() {
+        let mut shell = Shell::new(Default::default());
+
+        // `await` removes.
+        let snap = Arc::new(shell.mobile().scope);
+        let h1 = spawn_child(snap, &mut shell, ChildIoMode::Buffered, "<a>", |_c| {
+            Ok(Value::Unit)
+        })
+        .unwrap();
+        await_handle(&h1, &mut shell).expect("await ok");
+        assert_eq!(shell.local.workers.count(), 0, "await removes its entry");
+
+        // `cancel` removes.
+        let snap = Arc::new(shell.mobile().scope);
+        let h2 = spawn_child(snap, &mut shell, ChildIoMode::Buffered, "<b>", |_c| {
+            Ok(Value::Unit)
+        })
+        .unwrap();
+        assert_eq!(shell.local.workers.count(), 1);
+        builtin_cancel(&[Value::Handle(h2)], &mut shell).expect("cancel ok");
+        assert_eq!(shell.local.workers.count(), 0, "cancel removes its entry");
+
+        // A settled `poll` removes.
+        let snap = Arc::new(shell.mobile().scope);
+        let h3 = spawn_child(snap, &mut shell, ChildIoMode::Buffered, "<c>", |_c| {
+            Ok(Value::Unit)
+        })
+        .unwrap();
+        loop {
+            let polled = builtin_poll(&[Value::Handle(h3.clone())], &mut shell).unwrap();
+            if matches!(&polled, Value::Variant { label, .. } if label == "settled") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(
+            shell.local.workers.count(),
+            0,
+            "a settled poll removes its entry"
+        );
+
+        // A pending `poll` does not touch the registry: block the worker on
+        // its own channel so the sample is deterministically `` `pending ``,
+        // no timing guess needed.
+        let (unblock_tx, unblock_rx) = mpsc::channel::<()>();
+        let snap = Arc::new(shell.mobile().scope);
+        let h4 = spawn_child(snap, &mut shell, ChildIoMode::Buffered, "<d>", move |_c| {
+            unblock_rx.recv().unwrap();
+            Ok(Value::Unit)
+        })
+        .unwrap();
+        assert_eq!(shell.local.workers.count(), 1);
+        let pending = builtin_poll(&[Value::Handle(h4.clone())], &mut shell).unwrap();
+        assert!(
+            matches!(&pending, Value::Variant { label, .. } if label == "pending"),
+            "the worker is blocked, so poll must observe it pending: got {pending:?}"
+        );
+        assert_eq!(
+            shell.local.workers.count(),
+            1,
+            "a pending poll must not touch the registry"
+        );
+        unblock_tx.send(()).unwrap();
+        await_handle(&h4, &mut shell).expect("await ok");
+    }
+
+    /// `race` removes both the winner (a settled observation) and every
+    /// cancelled loser (the same cancel-and-detach the loop already
+    /// performs for each) — nothing lingers in the registry once `race`
+    /// returns.
+    #[test]
+    fn race_removes_winner_and_cancelled_losers() {
+        let mut shell = Shell::new(Default::default());
+        let snap = Arc::new(shell.mobile().scope);
+        let winner = spawn_child(snap, &mut shell, ChildIoMode::Buffered, "<winner>", |_c| {
+            Ok(Value::Unit)
+        })
+        .unwrap();
+
+        // The losers block on their own channels, so `race` always finds
+        // the winner settled first and cancels these two.
+        let (l1_tx, l1_rx) = mpsc::channel::<()>();
+        let snap = Arc::new(shell.mobile().scope);
+        let loser1 = spawn_child(
+            snap,
+            &mut shell,
+            ChildIoMode::Buffered,
+            "<loser1>",
+            move |_c| {
+                let _ = l1_rx.recv();
+                Ok(Value::Unit)
+            },
+        )
+        .unwrap();
+        let (l2_tx, l2_rx) = mpsc::channel::<()>();
+        let snap = Arc::new(shell.mobile().scope);
+        let loser2 = spawn_child(
+            snap,
+            &mut shell,
+            ChildIoMode::Buffered,
+            "<loser2>",
+            move |_c| {
+                let _ = l2_rx.recv();
+                Ok(Value::Unit)
+            },
+        )
+        .unwrap();
+        assert_eq!(shell.local.workers.count(), 3);
+
+        let args = [Value::list(vec![
+            Value::Handle(winner),
+            Value::Handle(loser1),
+            Value::Handle(loser2),
+        ])];
+        builtin_race(&args, &mut shell).expect("race must succeed");
+        assert_eq!(
+            shell.local.workers.count(),
+            0,
+            "race removes the winner and both cancelled losers"
+        );
+
+        // Let the cancelled-but-still-blocked loser threads finish so the
+        // test doesn't leave them parked past its own end.
+        let _ = l1_tx.send(());
+        let _ = l2_tx.send(());
+    }
+
+    /// The flow rule: the registry `Arc` flows into a spawned worker's own
+    /// shell (`Shell::spawn_thread`), so a `spawn` nested inside a worker's
+    /// body registers into the *same* registry the outer, owning shell
+    /// reads — not a fresh, private one of its own.
+    ///
+    /// The worker gates on `go_rx` before doing anything: `spawn_child`
+    /// starts the thread *before* it files the outer entry on the spawning
+    /// shell, so an ungated body could sample the registry ahead of that
+    /// registration and observe one entry instead of two.  The parent
+    /// opens the gate only after its `spawn_child` call has returned —
+    /// the outer entry is then guaranteed filed — making the worker's
+    /// sample deterministic.  Production order needs no such promise:
+    /// parent and nested registrations are deliberately unordered.
+    #[test]
+    fn nested_spawn_registers_into_the_owning_shells_registry() {
+        let mut shell = Shell::new(Default::default());
+        let snap = Arc::new(shell.mobile().scope);
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let (ready_tx, ready_rx) = mpsc::channel::<usize>();
+        let _outer = spawn_child(
+            snap,
+            &mut shell,
+            ChildIoMode::Buffered,
+            "<outer>",
+            move |child_shell| {
+                go_rx.recv().unwrap();
+                let child_snap = Arc::new(child_shell.mobile().scope);
+                let _inner = spawn_child(
+                    child_snap,
+                    child_shell,
+                    ChildIoMode::Buffered,
+                    "<inner>",
+                    |_c| Ok(Value::Unit),
+                )
+                .unwrap();
+                // Sent right after the nested spawn registers, with the
+                // outer entry already filed (the gate above), so the count
+                // sampled on the worker's own (child) shell is exact.
+                ready_tx.send(child_shell.local.workers.count()).unwrap();
+                Ok(Value::Unit)
+            },
+        )
+        .unwrap();
+        // The outer `spawn_child` has returned, so its entry is filed;
+        // release the worker to spawn its nested child and sample.
+        go_tx.send(()).unwrap();
+
+        let observed_from_worker = ready_rx.recv().unwrap();
+        assert_eq!(
+            observed_from_worker, 2,
+            "the nested spawn's own shell sees both entries in the one shared registry"
+        );
+        assert_eq!(
+            shell.local.workers.count(),
+            2,
+            "the parent's registry observes the nested spawn's entry too — same registry, not a copy"
         );
     }
 }

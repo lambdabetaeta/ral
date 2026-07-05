@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1c2a010
-generated_at_date: 2026-06-29
+generated_at_commit: 923e911
+generated_at_date: 2026-07-05
 covers_paths: [core/src/builtins/, core/src/builtins.rs]
 ---
 
@@ -66,7 +66,14 @@ Bodies are grouped by concern, one submodule each:
   `Shell` is the only one its bindings touch and they die with the thread. The
   worker carries the parent's grant stack, so a forced block *inside* the worker
   still meets the standard boundary rule and any external child it spawns is
-  confined per-command — a `spawn` under a `grant` cannot escape it. A `Handle` is
+  confined per-command — a `spawn` under a `grant` cannot escape it. Every
+  `spawn_child` also files the freshly-minted handle on `shell.local.workers`
+  — a per-shell registry, host-independent and carrying no policy
+  ([[map/core/shell-state|shell-state]]); `await`, `race`'s winner and
+  its cancelled losers, and a settled `poll` remove the entry from whichever
+  shell observes it, an explicit `cancel` removes it too, and a pending
+  `poll` or a bare listing never touches the registry
+  ([[decisions/260705_leases-and-budgets|leases-and-budgets]]). A `Handle` is
   a resident, process-local reference: it cannot cross the pipeline-stage helper
   wire, so returning one from a helper-evaluated stage raises the wire diagnostic
   *"cannot return a handle from sandboxed evaluation"* (`core/src/serial.rs`)
