@@ -75,7 +75,7 @@ impl InteractiveOpts {
 #[derive(clap::Parser, Debug)]
 #[command(
     name = "ral",
-    version = concat!(env!("CARGO_PKG_VERSION"), "+", env!("RAL_GIT_HASH")),
+    version = concat!(env!("CARGO_PKG_VERSION"), env!("RAL_VERSION_SUFFIX")),
     about = "ral — a typed, structured shell",
     long_about = "\
 ral is a typed, structured shell. Programs pass values — records, lists, \

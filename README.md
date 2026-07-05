@@ -16,6 +16,51 @@ output is re-lexed, word-split, and glob-expanded. ral keeps values and commands
 apart and removes that whole class of bugs, without giving up first-class
 commands and pipes.
 
+## A taste
+
+Everyday use looks like a shell, because it is one; the difference is what
+cannot happen. `$file` is one argument whatever whitespace it holds — there is
+no word splitting to quote against.
+
+```
+let file = 'my report.txt'       # spaces and all
+let nlines = wc -l < $file       # capture binds stdout, trailing newline stripped
+echo "$file has $nlines lines"
+rm $file                         # exactly one argument
+
+curl $primary ? curl $fallback   # ? reacts to failure; | moves data
+```
+
+Pipelines are typed. External commands carry bytes; internal functions carry
+values; codecs bridge the two. A stage whose input does not match its
+predecessor's output is rejected before any process starts.
+
+```
+cat foo.txt | head -10                     # entirely external
+glob '*.rs' | map { |f| wc -l $f }         # entirely internal
+let cfg = curl -s $url | from-json         # decode at the boundary, capture the value
+
+par { |f| convert $f } !{glob '*.wav'} $nproc   # parallel map; nothing mutable is shared
+```
+
+Authority is scoped, and it can only shrink:
+
+```
+grant [
+    exec: [git: [], make: [], '/usr/bin/': 'allow'],
+    fs:   [read: ['/home/project'], write: ['/tmp/build']],
+    net:  false,
+] {
+    git clone $repo      # permitted
+    make build           # permitted
+    curl $url            # denied — not in exec, and net is off
+}
+```
+
+The [tutorial](docs/TUTORIAL.md) teaches the language from nothing.
+[examples/](examples) holds complete scripts, most set against the bash idiom
+they replace.
+
 ## Design, in brief
 
 **System calls are algebraic effects.** An external command is an *operation*
@@ -67,21 +112,33 @@ is the mechanism. There is no command-level `||`.
 **One expression language.** `$[...]` spans arithmetic, comparison, and logic
 with strict `Bool` — no `(( ))` versus `[[ ]]` partition.
 
-**Typed values.** `Bool`, `Int`, `Float`, `String`, `List`, `Map`, `Block`,
-`Lambda`, `Handle`. Maps are inferred as row-typed records using Leijen's scoped
-labels; spread and shadowing compose cleanly.
+**Typed values, checked before execution.** `Bool`, `Int`, `Float`, `String`,
+`List`, `Map`, `Block`, `Lambda`, `Handle`, all inferred. Maps are inferred as
+row-typed records using Leijen's scoped labels; spread and shadowing compose
+cleanly. Type errors surface before any process runs; `ral --check` runs the
+checker alone.
 
 **Not POSIX.** POSIX compatibility requires word splitting, glob expansion on
 unquoted variables, `$IFS`, and context-dependent quoting. ral eliminates
 exactly these.
 
 See [docs/RATIONALE.md](docs/RATIONALE.md) for the full rationale and
-[docs/SPEC.md](docs/SPEC.md) for the specification.
+[docs/SPEC.md](docs/SPEC.md) for the specification. Both are rendered, with the
+tutorial, at <https://lambdabetaeta.github.io/ral/>.
 
 ## Install
 
 ```sh
 curl -fsSL https://lambdabetaeta.github.io/ral/scripts/install.sh | sh
+```
+
+Via Homebrew — this repository is itself a tap; tap it once by URL, then
+install by short name:
+
+```sh
+brew tap lambdabetaeta/ral https://github.com/lambdabetaeta/ral
+brew install ral       # the shell, with ral-sh
+brew install exarch    # optional: the coding agent
 ```
 
 Or from source:
@@ -98,9 +155,41 @@ On first interactive run, ral creates a skeleton `rc` file and prints its path.
 ral                       # interactive
 ral script.ral arg1 arg2  # run a script; $args == [arg1, arg2]
 ral -c 'echo hello'       # inline
-ral --check script.ral    # syntax check
+ral --check script.ral    # parse and type-check; do not execute
+ral --audit script.ral    # run; emit the execution tree as JSON on stderr
 ral --dump-ast script.ral # dump the AST
 ```
+
+## As a login shell
+
+`ral-sh` is the login-shell shim: interactive sessions get ral, while
+non-interactive invocations are forwarded to `/bin/sh`, so POSIX-assuming
+tools — scp, rsync, git-over-ssh — never notice. Register it and switch:
+
+```sh
+sudo sh -c "echo $(command -v ral-sh) >> /etc/shells"
+chsh -s "$(command -v ral-sh)"
+```
+
+## Around the shell
+
+**exarch.** A small coding agent whose only tool is ral itself: every command
+the model emits is evaluated under a capability profile pushed onto the shell's
+own stack, so the agent's sandbox is `grant` — in-language, not a wrapper
+around a binary. Five profiles ship in the binary, from `dangerous` to
+`confined`. See [exarch/README.md](exarch/README.md).
+
+**Plugins.** The interactive shell is extended in ral itself:
+[plugins/](plugins) has autosuggestions, fzf-backed history, file, and
+directory pickers, and zoxide integration. [docs/PLUGINS.md](docs/PLUGINS.md)
+describes the interface.
+
+**Editors.** [editors/](editors) carries a tree-sitter grammar (nvim and other
+tree-sitter consumers) and portable syntax definitions for VS Code, Zed,
+Sublime Text, bat, and delta.
+
+**Design record.** [docs/ral-wiki](docs/ral-wiki) is the project wiki: design
+chapters, dated decision notes, and the invariants the implementation keeps.
 
 ## License
 
