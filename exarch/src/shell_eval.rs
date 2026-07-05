@@ -622,10 +622,9 @@ mod tests {
 
     use super::*;
     use crate::agent_builtins;
-    use crate::bus::{Emitter, Inbox};
+    use crate::bus::{BusReceiver, Emitter, Inbox, channel};
     use ral_core::Shell;
     use ral_core::types::Capabilities;
-    use std::sync::mpsc;
 
     /// Render a path without a trailing platform separator.  Some hosts
     /// return `"/tmp/"` from `std::env::temp_dir()`; `Shell::cwd()` never
@@ -656,8 +655,8 @@ mod tests {
     /// Make an `Emitter` whose receiver is held alive locally so sends
     /// don't fail.  Tests never assert on what was emitted — they only
     /// need `run_shell` not to error on the send path.
-    fn dummy_emitter() -> (Emitter, mpsc::Receiver<crate::bus::Event>) {
-        let (tx, rx) = mpsc::channel();
+    fn dummy_emitter() -> (Emitter, BusReceiver) {
+        let (tx, rx) = channel();
         (Emitter::new(tx, 0), rx)
     }
 
@@ -1222,7 +1221,7 @@ keep-bottom
     fn inbox_boundary_pushes_then_drops_after_clear() {
         let registry = AgentRegistry::new();
         let inbox = Inbox::new();
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = channel();
         let emit = Emitter::with_mailbox(tx, 7, inbox.mailbox());
         let boundary = boundary_sink(&emit, 7, &registry);
         let joined = Arc::new(Mutex::new(false));
@@ -1586,7 +1585,7 @@ return !{{length $hits}}"#
     /// the same wiring `edit_emits_kind_card` and friends use, hoisted so the
     /// coverage tests share it rather than re-threading the channel each time.
     fn run_capturing(shell: &mut Shell, cmd: &str) -> (ToolResult, Vec<crate::bus::Kind>) {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = channel();
         let emit = Emitter::new(tx, 0);
         let result = match run_shell_direct(shell, &Capabilities::root(), cmd, 30, &emit) {
             Outcome::Ran(r) => r,

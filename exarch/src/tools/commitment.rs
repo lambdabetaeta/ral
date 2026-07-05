@@ -471,12 +471,11 @@ pub(super) fn commitment_settle(
 )]
 mod tests {
     use super::*;
-    use crate::bus::Emitter;
+    use crate::bus::{Emitter, channel};
     use crate::card::{Card, Mark, Span};
     use crate::provider::scripted::{Reply, Script};
     use crate::provider::{ProviderKind, ToolCall};
     use std::sync::Arc;
-    use std::sync::mpsc::channel;
 
     fn tmp(tag: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!(

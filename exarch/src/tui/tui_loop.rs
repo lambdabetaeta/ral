@@ -324,7 +324,7 @@ fn ui_loop(
         let mut handled_any = false;
         let more = match drain_pass(rx, done, Some(BATCH), |ev| {
             handled_any = true;
-            tui.app.handle(ev)
+            tui.app.handle(ev, rx)
         }) {
             Pass::Stop => {
                 // The capped pass can report `Stop` with events still buffered
@@ -334,7 +334,7 @@ fn ui_loop(
                 // last — it must include everything the worker emitted.
                 // `done` is already latched, so this pass drains to empty and
                 // reports `Stop` again; its verdict is not needed.
-                drain_pass(rx, done, None, |ev| tui.app.handle(ev));
+                drain_pass(rx, done, None, |ev| tui.app.handle(ev, rx));
                 tui.app.busy_off();
                 let focused = tui.app.tabs.focused();
                 let steerable =
@@ -543,7 +543,7 @@ mod tests {
             .mailbox()
             .push(InboxMsg::Command("/resources".into()));
 
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.mailbox());
         let scratch = Scratch::for_test("resources-route").expect("scratch dir");
         let mut control = ReplControl { scratch: &scratch };

@@ -278,7 +278,7 @@ fn on_truncated(r: &Result<TurnOutcome, ProviderError>) -> Option<(String, &'sta
 )]
 mod tests {
     use super::*;
-    use std::sync::mpsc::channel;
+    use crate::bus::channel;
     use std::time::Duration;
 
     /// An emitter onto a dropped receiver — `react` records to the log and

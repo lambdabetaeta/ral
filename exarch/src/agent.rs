@@ -2090,7 +2090,7 @@ mod tests {
         );
         session.provider = ProviderHandle::new(provider);
         session.seed("compute then crash".into());
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
         let _ = session.drive(&mut NoControl, &emit);
 
@@ -2120,7 +2120,7 @@ mod tests {
         // The next turn is admissible and runs to completion on the
         // healed shell.
         let provider2 = scripted("test-model", Script::new().then(Reply::text("ok")));
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
         let token = cancel::Token::new();
         let _slot = cancel::publish(&token);
@@ -2258,7 +2258,7 @@ mod tests {
     /// `(outcome, text)` its parent's spawn site would deliver — it renders the
     /// faithful reply payload to text exactly as the peer edge does.
     fn drive_peer(child: &mut Agent, provider: Arc<Provider>) -> (AgentOutcome, String) {
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, child.id);
         child.provider = ProviderHandle::new(provider);
         let (outcome, payload) = child.drive(&mut NoControl, &emit);
@@ -2461,7 +2461,7 @@ mod tests {
         session.provider = ProviderHandle::new(provider);
         session.seed("first turn".into());
         session.seed("second turn after error".into());
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
         let (outcome, _) = session.drive(&mut NoControl, &emit);
         // The session is ready for the next prompt.
@@ -2511,7 +2511,7 @@ mod tests {
                 }],
             }]),
         );
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
         let turn = Turn::Agent(crate::bus::AgentResult {
             id: fresh_id(),
@@ -2543,7 +2543,7 @@ mod tests {
                 text: "tests pass".into(),
             }],
         }]);
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
         let turn = Turn::Agent(crate::bus::AgentResult {
             id: fresh_id(),
@@ -2581,7 +2581,7 @@ mod tests {
                 }],
             }]),
         );
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
         let turn = Turn::Agent(crate::bus::AgentResult {
             id: fresh_id(),
@@ -2673,7 +2673,7 @@ mod tests {
             commitment_settle: None,
         }));
         session.provider = ProviderHandle::new(scripted("test-model", Script::new()));
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
         let (outcome, payload) = session.drive(&mut NoControl, &emit);
         assert!(
@@ -2707,7 +2707,7 @@ mod tests {
                 serde_json::json!("done"),
             )])),
         ));
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
         let (outcome, payload) = session.drive(&mut NoControl, &emit);
         assert!(
@@ -2763,7 +2763,7 @@ mod tests {
         // `run_shell` wires the real boundary sink — captured with `emit`'s
         // mailbox, which must be this session's own inbox for the late-surface
         // assertion below to mean anything.
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
         let _ = session.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
         let _ = session.run_shell(
@@ -2887,7 +2887,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
 
         session.drain_worker_reaps(&emit);
@@ -2938,13 +2938,13 @@ mod tests {
             });
         session.durable = session.transport.shell_mut().shell.mobile_snapshot();
 
-        let (warmup_tx, _warmup_rx) = std::sync::mpsc::channel();
+        let (warmup_tx, _warmup_rx) = crate::bus::channel();
         let warmup_emit = Emitter::new(warmup_tx, session.id);
         session.run_shell("c0".into(), "let reap_me = 1", 5, &warmup_emit);
         session.run_shell("c1".into(), "let _spin1 = 0", 5, &warmup_emit);
         session.run_shell("c2".into(), "let _spin2 = 0", 5, &warmup_emit);
 
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
         session.reap_bindings(&emit);
         let event = rx
@@ -2991,7 +2991,7 @@ mod tests {
             });
         session.durable = session.transport.shell_mut().shell.mobile_snapshot();
 
-        let (warmup_tx, _warmup_rx) = std::sync::mpsc::channel();
+        let (warmup_tx, _warmup_rx) = crate::bus::channel();
         let warmup_emit = Emitter::new(warmup_tx, session.id);
         session.run_shell(
             "c0".into(),
@@ -3000,7 +3000,7 @@ mod tests {
             &warmup_emit,
         );
 
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
         session.reap_bindings(&emit);
         let event = rx
@@ -3051,7 +3051,7 @@ mod tests {
             });
         session.durable = session.transport.shell_mut().shell.mobile_snapshot();
 
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
         session.run_shell("c0".into(), "let panic_prune_x = 1", 5, &emit);
         session.run_shell("c1".into(), "let _spin1 = 0", 5, &emit);
@@ -3113,7 +3113,7 @@ mod tests {
     fn clear_reseals_baseline_and_forgets_ledger() {
         let dir = tmp("clear-reseals-baseline");
         let mut session = Agent::for_test(&dir, "system").unwrap();
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
         session.run_shell("c0".into(), "let pre_clear_x = 1", 5, &emit);
 
@@ -3153,7 +3153,7 @@ mod tests {
     fn fork_child_inherited_scratch_is_baseline() {
         let dir = tmp("fork-inherited-baseline");
         let mut session = Agent::for_test(&dir, "system").unwrap();
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
         session.run_shell("c0".into(), "let parent_scratch = 1", 5, &emit);
 
@@ -3182,7 +3182,7 @@ mod tests {
                 idle_calls: 1,
                 large_binding_bytes: u64::MAX,
             });
-        let (child_tx, _child_rx) = std::sync::mpsc::channel();
+        let (child_tx, _child_rx) = crate::bus::channel();
         let child_emit = Emitter::new(child_tx, child.id);
         for i in 0..3 {
             child.run_shell(format!("child{i}"), "let _child_spin = 0", 5, &child_emit);
@@ -3214,7 +3214,7 @@ mod tests {
     fn boot_names_survive_past_the_idle_bound() {
         let dir = tmp("boot-names-survive");
         let mut session = Agent::for_test(&dir, "system").unwrap();
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
 
         let (boot_name, _) = session
@@ -3259,7 +3259,7 @@ mod tests {
             });
         session.durable = session.transport.shell_mut().shell.mobile_snapshot();
 
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
         session.run_shell("c0".into(), "let events_json_x = 1", 5, &emit);
         session.run_shell("c1".into(), "let _spin = 0", 5, &emit);
@@ -3282,7 +3282,7 @@ mod tests {
     fn run_shell_epoch_stamps_and_retention_renders_through_the_drain() {
         let dir = tmp("ral-epoch-retention");
         let mut session = Agent::for_test(&dir, "system").unwrap();
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
 
         // Call 1: spawn an instant worker.  The call's own sweep races the
@@ -3333,7 +3333,7 @@ mod tests {
 
         // ...and the expiry renders through the existing drain, on a fresh
         // channel so the run_shell chatter above stays out of the assert.
-        let (tx2, rx2) = std::sync::mpsc::channel();
+        let (tx2, rx2) = crate::bus::channel();
         let emit2 = Emitter::with_mailbox(tx2, session.id, session.inbox.mailbox());
         session.drain_worker_reaps(&emit2);
         let event = rx2
@@ -3383,7 +3383,7 @@ mod tests {
             .shell_mut()
             .shell
             .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
 
         // One running worker, one settled-unclaimed worker.
@@ -3510,7 +3510,7 @@ mod tests {
             .shell_mut()
             .shell
             .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
         session.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
 

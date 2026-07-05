@@ -18,7 +18,7 @@ use super::surface::SurfaceBuffer;
 use super::tabs::Tabs;
 use super::terminal::Term;
 use super::viewport::Viewport;
-use crate::bus::{AgentId, Event, Inbox, Kind};
+use crate::bus::{AgentId, BusReceiver, Event, Inbox, Kind};
 use crate::card::IoEvent;
 use crate::provider::{self, Provider, Usage};
 use ratatui::{
@@ -226,8 +226,10 @@ impl App {
 
     /// Route one event to its viewport.  Born registers a pane; Died
     /// flushes; Usage accumulates globally; everything else renders to
-    /// one viewport via [`line`](mod@line).
-    pub fn handle(&mut self, Event { id, kind }: Event) {
+    /// one viewport via [`line`](mod@line). `bus` is read only for
+    /// `Kind::Resources`'s depth/byte figures — the bus is the UI thread's
+    /// own receiver, so this never contends with a producer's push.
+    pub fn handle(&mut self, Event { id, kind }: Event, bus: &BusReceiver) {
         // A tab in the linger window is frozen: its worker has emitted `Died`
         // (natural death) or been retired by `/clear` (a cancelled background
         // worker still winding down).  Either way no further event belongs in
@@ -444,7 +446,14 @@ impl App {
                 let live_views = (self.tabs.len() as u64).saturating_sub(lingering);
                 let dead_views = (self.tabs.viewports().len() as u64).saturating_sub(live_views);
                 let frontend = crate::resources::frontend_rows(
-                    blocks, rows, bytes, live_views, dead_views, live_views,
+                    blocks,
+                    rows,
+                    bytes,
+                    live_views,
+                    dead_views,
+                    live_views,
+                    bus.depth() as u64,
+                    bus.bytes() as u64,
                 );
                 card.0.push(crate::resources::section_mark("frontend"));
                 card.0.push(crate::resources::rows_mark(&frontend));

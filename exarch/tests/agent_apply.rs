@@ -14,12 +14,11 @@
 //! `ChatMessage` serialisation the live request uses.
 
 use exarch::agent::{Agent, TurnOutcome};
-use exarch::bus::{AgentId, Emitter, Kind};
+use exarch::bus::{AgentId, Emitter, Kind, channel};
 use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{Provider, ProviderError, ProviderKind};
 use genai::chat::{ChatRole, ContentPart, ToolCall};
 use std::sync::Arc;
-use std::sync::mpsc::channel;
 
 /// A scripted provider behind the `Arc` the turn driver threads — the same
 /// shape the live driver holds so an async `agent` worker could capture a

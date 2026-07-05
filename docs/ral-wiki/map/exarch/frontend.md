@@ -1,6 +1,6 @@
 ---
-generated_at_commit: b68fc40
-generated_at_date: 2026-07-02
+generated_at_commit: 9941521
+generated_at_date: 2026-07-05
 covers_paths: [exarch/src/bus.rs, exarch/src/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/cancel.rs, exarch/src/host.rs]
 ---
 
@@ -23,12 +23,24 @@ one inbound inbox**, defined by `bus.rs`:
   ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]],
   [[decisions/260617_scheduled-wakeups|scheduled-wakeups]],
   [[decisions/260617_async-agent-tool|async-agent-tool]]).
-- a `SessionBus` owns the event channel and the inbox; `pump` borrows it, runs
+- a `FleetBus` owns the event channel and the inbox; `pump` borrows it, runs
   the worker on a scoped thread, drains events into the sink, and reports a
   worker panic as a final `Kind::Error`. Completion is the per-turn `done` flag,
   latched by `drain_pass` so a turn ends even while a background producer keeps
   the channel non-empty — never the channel's state
   ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]).
+- the channel itself is bounded and coalescing, not a bare `mpsc` pair
+  (`BusSender`/`BusReceiver`, same `send`/`try_recv`/`recv_timeout` shape):
+  pushing `Token`/`Thinking` (concatenate) or `Phase` (replace) merges into the
+  queue's tail entry when it is the same class and the same agent id; every
+  other `Kind` — lifecycle, tool frames, cards, errors — is reserved and always
+  enqueued on its own, so a producer flood can only ever grow one coalescing
+  run, never bury or reorder a lifecycle event. A merged `Token`/`Thinking`
+  run's text is capped (`MERGE_TEXT_CAP`, 256 KiB); past it the front elides
+  and one `Kind::SystemNote` overflow marker rides the next drain, naming the
+  class and the elided count. `/resources` reads `BusReceiver::depth`/`bytes`
+  for its `bus.depth`/`bus.bytes` rows
+  ([[decisions/260705_leases-and-budgets|leases-and-budgets]]).
 
 The TUI mints one **session-lived** bus, so a detached async agent clones its
 sender and streams a live tab through the same id-routed draw path a sync child

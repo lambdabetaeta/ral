@@ -137,10 +137,15 @@ pub fn resources_card(rows: &[ProbeRow]) -> Card {
 /// the caller (the TUI's `Kind::Resources` arm) reads the figures off the
 /// tabs/viewport structures it holds.
 ///
-/// The bus row carries no figure: the session-lifetime channel is
-/// unbounded and exposes no depth, so the row states the decided policy
-/// and says the figure arrives with the bounded transport — the inspector
-/// does not grow counting machinery the enforcement replaces.
+/// The bus contributes two rows, not one: `bus.depth` (entries — a merged
+/// run and a reserved kind each count as one) and `bus.bytes` (resident
+/// merged `Token`/`Thinking`/`Phase` text). Neither carries a `cap`: the
+/// bounded transport's one enforced number is a *per-entry* text cap
+/// (`bus::MERGE_TEXT_CAP`), a different axis from either row's aggregate
+/// `current` figure, so cramming it into `cap` would read as a false
+/// ceiling on a count or a sum it does not bound — the cap is named in
+/// `bus.bytes`'s note instead, honest cap-less rows over a silently
+/// mismatched pair.
 pub fn frontend_rows(
     viewport_blocks: u64,
     viewport_rows: u64,
@@ -148,6 +153,8 @@ pub fn frontend_rows(
     live_views: u64,
     dead_views: u64,
     live_agents: u64,
+    bus_depth: u64,
+    bus_bytes: u64,
 ) -> Vec<ProbeRow> {
     let windowed = || Some("window lands with enforcement".to_string());
     vec![
@@ -176,13 +183,20 @@ pub fn frontend_rows(
         ),
         ProbeRow::new(
             "bus.depth",
-            0,
+            bus_depth,
             None,
             "coalesce",
-            Some(
-                "unbounded channel exposes no depth; the figure arrives with the bounded transport"
-                    .to_string(),
-            ),
+            Some("entries; a same-class run off one agent merges into its tail".to_string()),
+        ),
+        ProbeRow::new(
+            "bus.bytes",
+            bus_bytes,
+            None,
+            "evict",
+            Some(format!(
+                "resident merged token/thinking/phase text; each run elides past {} KiB",
+                crate::bus::MERGE_TEXT_CAP / 1024
+            )),
         ),
         ProbeRow::new(
             "fleet.agents",
@@ -250,7 +264,7 @@ mod tests {
     /// cap — the inspector precedes the enforcer honestly.
     #[test]
     fn frontend_rows_state_decided_policies_without_fake_caps() {
-        let rows = frontend_rows(3, 120, 4096, 2, 1, 2);
+        let rows = frontend_rows(3, 120, 4096, 2, 1, 2, 5, 777);
         let by_name = |n: &str| {
             rows.iter()
                 .find(|r| r.name == n)
@@ -262,6 +276,8 @@ mod tests {
         assert_eq!(by_name("views.live").current, 2);
         assert_eq!(by_name("views.dead").current, 1);
         assert_eq!(by_name("fleet.agents").current, 2);
+        assert_eq!(by_name("bus.depth").current, 5);
+        assert_eq!(by_name("bus.bytes").current, 777);
         for row in &rows {
             assert!(
                 row.cap.is_none(),
@@ -272,11 +288,11 @@ mod tests {
         assert_eq!(by_name("viewport.blocks").policy, "evict");
         assert_eq!(by_name("bus.depth").policy, "coalesce");
         assert!(
-            by_name("bus.depth")
+            by_name("bus.bytes")
                 .note
                 .as_deref()
-                .is_some_and(|n| n.contains("bounded transport")),
-            "the bus row must say where its figure arrives"
+                .is_some_and(|n| n.contains("KiB")),
+            "the bus bytes row must name the per-run elision cap"
         );
     }
 
