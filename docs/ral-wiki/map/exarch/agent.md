@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 49755d2
+generated_at_commit: 2f64c40
 generated_at_date: 2026-07-05
 covers_paths: [exarch/src/agent.rs, exarch/src/agent_registry.rs, exarch/src/event.rs, exarch/src/fleet.rs, exarch/src/nudge.rs, exarch/src/digest.rs]
 ---
@@ -292,6 +292,15 @@ actually holds — every provider round-trip passes through here, so long
 autonomous and headless turns stay bounded without an interactive `/compact`. A
 turn-boundary Esc bails before the summarize request
 ([[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]).
+A successful `AgentLog::apply_compaction` physically drains
+`events[..suffix_start]` from the in-memory mirror after the archival
+`Compacted` breadcrumb is durably recorded — `event_count`/`history_bytes`
+shrink to summary + suffix, heap reclamation rather than just a narrower
+read-time view. `events.json` is append-only and untouched either way: a
+failed compaction (tool results pending) drops nothing, and a successful
+one never rewrites what is already on disk
+([[decisions/260705_leases-and-budgets|leases-and-budgets]], "Compaction
+physically drops the model prefix in memory").
 
 `fork` builds the child `Agent` for [[design/agents|sub-agent spawning]] through
 `Shell::fork_session` ([[map/core/shell-state|the flow matrix]]) rather than

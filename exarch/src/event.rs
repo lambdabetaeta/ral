@@ -307,11 +307,12 @@ pub struct AgentLog {
     /// truncated by `/compact` and by `/clear`.
     events: Vec<SessionEvent>,
     state: State,
-    /// Active compaction, if any: the summary standing in for the dropped
-    /// prefix and the index in `events` where the kept verbatim suffix
-    /// begins.  In-memory only (logs are per-run); the on-disk `Compacted`
-    /// event is the archival breadcrumb.  The model view is the summary
-    /// followed by `events[suffix_start..]`.
+    /// Active compaction, if any: the summary standing in for the
+    /// physically-dropped prefix (`apply_compaction` truncates `events`
+    /// itself, so there is no cut index to keep here — see [`Compaction`]).
+    /// In-memory only (logs are per-run); the on-disk `Compacted` event is
+    /// the archival breadcrumb.  The model view is the summary followed by
+    /// `events` in full.
     compaction: Option<Compaction>,
     /// Model identifier this log records.  Stored so `clear` can
     /// re-emit `SessionStarted` with the same value, and `fork`
@@ -327,11 +328,13 @@ pub struct AgentLog {
 }
 
 /// The live state of an applied compaction: the summary standing in for
-/// the dropped prefix, and where in `events` the kept verbatim suffix
-/// begins.  The model view is the summary followed by `events[suffix_start..]`.
+/// the dropped prefix.  `AgentLog::apply_compaction` physically drops the
+/// summarised prefix from `events` (`decisions/260705_leases-and-budgets`,
+/// "Compaction physically drops the model prefix in memory"), so `events`
+/// *is* the kept verbatim suffix from that point on — no cut index to carry
+/// here.  The model view is the summary followed by `events` in full.
 struct Compaction {
     summary: String,
-    suffix_start: usize,
 }
 
 /// A planned compaction: the cut to apply (`suffix_start`) and the older
@@ -474,8 +477,9 @@ impl AgentLog {
 
         let mut msgs = Vec::new();
         if let Some(c) = &self.compaction {
+            // `events` already holds only the kept suffix — the summarised
+            // prefix was physically dropped from the Vec at compaction time.
             msgs.push(ChatMessage::user(summary_prompt(&c.summary)));
-            events = &events[c.suffix_start..];
         }
         for e in events {
             msgs.extend(e.clone().into_chat_messages());
@@ -638,15 +642,17 @@ impl AgentLog {
         }
     }
 
-    /// Indices in `events[from..]` of top-level user prompts — the turn
-    /// boundaries a compaction may cut at.  Replays the ready/in-turn
-    /// state so a mid-turn steering prompt (not a clean boundary) is
-    /// skipped, and a cut never splits an assistant message from its tool
-    /// results.
-    fn turn_start_indices(&self, from: usize) -> Vec<usize> {
+    /// Indices in `events` of top-level user prompts — the turn boundaries a
+    /// compaction may cut at.  Replays the ready/in-turn state so a mid-turn
+    /// steering prompt (not a clean boundary) is skipped, and a cut never
+    /// splits an assistant message from its tool results.  `events` already
+    /// starts at the live view (a prior compaction physically dropped its
+    /// summarised prefix), so there is no separate "visible from" index to
+    /// skip past — the whole vector is candidates.
+    fn turn_start_indices(&self) -> Vec<usize> {
         let mut ready = true;
         let mut starts = Vec::new();
-        for (i, e) in self.events.iter().enumerate().skip(from) {
+        for (i, e) in self.events.iter().enumerate() {
             match e {
                 SessionEvent::UserPrompt { .. } if ready => {
                     starts.push(i);
@@ -658,6 +664,10 @@ impl AgentLog {
                     ready = pending_tool_ids.is_empty();
                 }
                 SessionEvent::ToolResults { .. } => ready = false,
+                // A compaction only ever commits at a ready boundary, so
+                // whatever state the scan carried into this marker is
+                // superseded — true regardless of where a prior compaction's
+                // marker landed in the (now further-grown) vector.
                 SessionEvent::Compacted { .. } => ready = true,
                 _ => {}
             }
@@ -671,8 +681,7 @@ impl AgentLog {
     /// everything currently visible fits the budget — nothing older than
     /// the kept suffix to summarise.
     pub fn plan_compaction(&self, keep_budget_bytes: usize) -> Option<CompactionPlan> {
-        let visible_start = self.compaction.as_ref().map_or(0, |c| c.suffix_start);
-        let candidates = self.turn_start_indices(visible_start);
+        let candidates = self.turn_start_indices();
 
         // Walk turn starts newest-first, growing the kept suffix until it
         // would exceed the budget; the cut is the oldest start still
@@ -693,7 +702,7 @@ impl AgentLog {
                 break;
             }
         }
-        if cut <= visible_start {
+        if cut == 0 {
             return None;
         }
 
@@ -701,7 +710,7 @@ impl AgentLog {
         if let Some(c) = &self.compaction {
             prefix_messages.push(ChatMessage::user(summary_prompt(&c.summary)));
         }
-        for e in &self.events[visible_start..cut] {
+        for e in &self.events[..cut] {
             prefix_messages.extend(e.clone().into_chat_messages());
         }
         Some(CompactionPlan {
@@ -711,8 +720,13 @@ impl AgentLog {
     }
 
     /// Commit a planned compaction: record the archival `Compacted`
-    /// breadcrumb and switch the model view to the summary plus the kept
-    /// suffix (`events[suffix_start..]`).
+    /// breadcrumb, then physically drop the summarised prefix
+    /// (`events[..suffix_start]`) from the in-memory mirror — heap
+    /// reclamation, not just a narrower read-time view
+    /// (`decisions/260705_leases-and-budgets`, "Compaction physically drops
+    /// the model prefix in memory"). The durable `events.json` is untouched;
+    /// `events.len()` and `history_bytes()` both shrink to summary + suffix
+    /// on success, and nothing is dropped on the early-return failure path.
     pub fn apply_compaction(&mut self, summary: String, suffix_start: usize) -> Result<(), String> {
         if !self.can_compact() {
             return Err("cannot compact while tool results are pending".into());
@@ -726,10 +740,11 @@ impl AgentLog {
             after_bytes: 0,
             summary: summary.clone(),
         })?;
-        self.compaction = Some(Compaction {
-            summary,
-            suffix_start,
-        });
+        // The just-recorded `Compacted` marker landed at the tail (index
+        // `suffix_start` or later), so it survives this drain along with the
+        // rest of the kept suffix; only the summarised prefix is dropped.
+        self.events.drain(..suffix_start);
+        self.compaction = Some(Compaction { summary });
         self.state = State::ReadyForUser;
         let after = self.history_bytes();
         if let Some(SessionEvent::Compacted { after_bytes, .. }) = self.events.last_mut() {
@@ -841,19 +856,16 @@ impl AgentLog {
     }
 
     /// The `Vec<ChatMessage>` shape genai wants.  When a compaction is
-    /// active, the view is the summary (as a user message) followed by the
-    /// kept suffix `events[suffix_start..]`; otherwise it is every event.
-    /// Lifecycle / step / usage events drop out in projection.
+    /// active, the view is the summary (as a user message) followed by
+    /// `events` in full — the summarised prefix was physically dropped from
+    /// the Vec at compaction time, so there is no separate cut to slice at
+    /// here.  Lifecycle / step / usage events drop out in projection.
     fn model_messages(&self) -> Vec<ChatMessage> {
         let mut msgs = Vec::new();
-        let start = match &self.compaction {
-            Some(c) => {
-                msgs.push(ChatMessage::user(summary_prompt(&c.summary)));
-                c.suffix_start
-            }
-            None => 0,
-        };
-        for e in &self.events[start..] {
+        if let Some(c) = &self.compaction {
+            msgs.push(ChatMessage::user(summary_prompt(&c.summary)));
+        }
+        for e in &self.events {
             msgs.extend(e.clone().into_chat_messages());
         }
         msgs
@@ -1076,6 +1088,105 @@ mod tests {
         // …but still on disk.
         let disk = fs::read_to_string(s.dir().join("events.json")).unwrap();
         assert!(disk.contains("USER1") && disk.contains("ASST2"));
+    }
+
+    /// A successful compaction physically drops the summarised prefix from
+    /// the in-memory event mirror — `event_count`/`history_bytes` shrink to
+    /// summary + suffix, not just the read-time model view
+    /// (`decisions/260705_leases-and-budgets`, "Compaction physically drops
+    /// the model prefix in memory").
+    #[test]
+    fn apply_compaction_physically_drops_the_prefix_from_the_event_mirror() {
+        let mut s = fresh_root("compact-drops-prefix");
+        for (u, a) in [("USER1", "ASST1"), ("USER2", "ASST2"), ("USER3", "ASST3")] {
+            s.append_user(u.into()).unwrap();
+            s.append_assistant(ChatMessage::assistant(a), vec![], None)
+                .unwrap();
+        }
+        let count_before = s.event_count();
+        let bytes_before = s.history_bytes();
+
+        let last_turn = &s.events[s.events.len() - 2..];
+        let keep = last_turn.iter().map(event_message_bytes).sum::<usize>();
+        let plan = s.plan_compaction(keep).expect("a prefix to summarise");
+        let kept_len = s.events.len() - plan.suffix_start;
+        s.apply_compaction("PRIOR-WORK".into(), plan.suffix_start)
+            .unwrap();
+
+        // The mirror shrank to the kept suffix plus the Compacted marker
+        // just recorded — not the full pre-compaction history.
+        assert_eq!(
+            s.event_count(),
+            kept_len + 1,
+            "event_count drops to summary + suffix, not before-compaction size"
+        );
+        assert!(
+            s.event_count() < count_before,
+            "the mirror is strictly smaller than before compaction"
+        );
+        assert!(
+            s.history_bytes() < bytes_before,
+            "history_bytes drops along with the physically-dropped prefix"
+        );
+    }
+
+    /// The append-only durable files are untouched by compaction: everything
+    /// written before the compaction survives as an exact prefix of what is
+    /// on disk afterward — reclamation is for heap, never history
+    /// (`decisions/260705_leases-and-budgets`).
+    #[test]
+    fn apply_compaction_leaves_the_durable_events_file_byte_for_byte_intact() {
+        let mut s = fresh_root("compact-disk-untouched");
+        for (u, a) in [("USER1", "ASST1"), ("USER2", "ASST2"), ("USER3", "ASST3")] {
+            s.append_user(u.into()).unwrap();
+            s.append_assistant(ChatMessage::assistant(a), vec![], None)
+                .unwrap();
+        }
+        let before = fs::read_to_string(s.dir().join("events.json")).unwrap();
+
+        let last_turn = &s.events[s.events.len() - 2..];
+        let keep = last_turn.iter().map(event_message_bytes).sum::<usize>();
+        let plan = s.plan_compaction(keep).expect("a prefix to summarise");
+        s.apply_compaction("PRIOR-WORK".into(), plan.suffix_start)
+            .unwrap();
+
+        let after = fs::read_to_string(s.dir().join("events.json")).unwrap();
+        assert!(
+            after.starts_with(&before),
+            "the pre-compaction file contents survive untouched as a prefix; \
+             compaction only ever appends, never rewrites"
+        );
+        assert!(
+            after.len() > before.len(),
+            "the Compacted breadcrumb is appended, so the file grows"
+        );
+    }
+
+    /// A failed compaction (tool results still pending) drops nothing from
+    /// the in-memory mirror — the physical-drop path only ever runs after
+    /// the archival breadcrumb is durably recorded.
+    #[test]
+    fn apply_compaction_failure_drops_nothing() {
+        let mut s = fresh_root("compact-fails-drops-nothing");
+        s.append_user("p".into()).unwrap();
+        s.append_assistant(assistant_with_tool("a"), vec!["a".into()], None)
+            .unwrap();
+        let count_before = s.event_count();
+        let bytes_before = s.history_bytes();
+
+        let err = s.apply_compaction("summary".into(), 0).unwrap_err();
+        assert!(err.contains("cannot compact"));
+        assert_eq!(
+            s.event_count(),
+            count_before,
+            "a failed compaction drops nothing from the mirror"
+        );
+        assert_eq!(
+            s.history_bytes(),
+            bytes_before,
+            "a failed compaction leaves history_bytes unchanged"
+        );
+        assert!(s.compaction.is_none(), "no compaction state was installed");
     }
 
     #[test]
