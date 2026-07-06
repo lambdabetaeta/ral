@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 2f64c40
+generated_at_commit: cde158a
 generated_at_date: 2026-07-05
-covers_paths: [exarch/src/agent.rs, exarch/src/agent_registry.rs, exarch/src/event.rs, exarch/src/fleet.rs, exarch/src/nudge.rs, exarch/src/digest.rs]
+covers_paths: [exarch/src/agent.rs, exarch/src/agent_registry.rs, exarch/src/event.rs, exarch/src/fleet.rs, exarch/src/nudge.rs, exarch/src/digest.rs, exarch/src/config.rs]
 ---
 
 # Map: exarch / agent
@@ -301,6 +301,18 @@ failed compaction (tool results pending) drops nothing, and a successful
 one never rewrites what is already on disk
 ([[decisions/260705_leases-and-budgets|leases-and-budgets]], "Compaction
 physically drops the model prefix in memory").
+
+`Agent::check_disk_warn` is the disk half of the same ADR ("Disk: report
+and warn only") — report-and-warn only, never rotation or deletion.
+Unconfigured (`config::disk_warn_bytes` absent, the default) it is a no-op
+by construction: no walk, no cost, ever. Configured, it rides the same
+`ral_epoch` the settled-worker and binding-lease sweeps already read,
+amortized to once every `DISK_WARN_CHECK_INTERVAL` (32) calls, at the same
+ready boundary as `drain_worker_reaps`/`reap_bindings` in `drive`'s loop.
+Crossing the ceiling (session log dir + `EXARCH_SCRATCH`, summed via the
+existing `resources::dir_size`) emits one `Kind::SystemNote`, latched until
+a later check finds the total back under — one warning per excursion, not
+one per boundary.
 
 `fork` builds the child `Agent` for [[design/agents|sub-agent spawning]] through
 `Shell::fork_session` ([[map/core/shell-state|the flow matrix]]) rather than

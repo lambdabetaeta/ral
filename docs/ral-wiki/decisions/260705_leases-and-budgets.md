@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: active
 ---
 
 # Lifetime is a lease, residency is a budget

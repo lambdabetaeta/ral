@@ -151,14 +151,30 @@ pub struct Agent {
     /// The agent's ral-call epoch: incremented once at the top of every
     /// [`Self::run_shell`] call — success or error alike, a failed eval is
     /// still a call.  The integer clock every per-call ledger reads: the
-    /// settled-worker retention sweep today
-    /// ([`advance_worker_epoch`](ral_core::Shell::advance_worker_epoch)),
-    /// the binding leases of `decisions/260629_agent-binding-reaping` next,
-    /// on this same counter.  Starts at 0, and a fork's child starts its
-    /// own at 0; deliberately NOT reset by `/clear` — the registry is
-    /// emptied there anyway, and a monotone counter is simpler to reason
-    /// about than one that rewinds.
+    /// settled-worker retention sweep, the binding-lease ledger of
+    /// `decisions/260629_agent-binding-reaping`, and the disk-warn check's
+    /// amortization ([`Self::check_disk_warn`]) all read this same counter.
+    /// Starts at 0, and a fork's child starts its own at 0; deliberately NOT
+    /// reset by `/clear` — the registry is emptied there anyway, and a
+    /// monotone counter is simpler to reason about than one that rewinds.
     ral_epoch: u64,
+    /// The operator's disk-warn ceiling (`config::disk_warn_bytes`), shared
+    /// verbatim by every fork — a host setting, not a per-agent choice.
+    /// `None` means [`Self::check_disk_warn`] never walks the log/scratch
+    /// dirs at all: no configuration, no cost, ever
+    /// (`decisions/260705_leases-and-budgets`, "Disk: report and warn
+    /// only").
+    disk_warn_bytes: Option<u64>,
+    /// The [`Self::ral_epoch`] at which the next disk-warn check is due;
+    /// advances by [`DISK_WARN_CHECK_INTERVAL`] each time
+    /// [`Self::check_disk_warn`] actually walks, so the walk is amortized
+    /// regardless of how many ready boundaries pass with the epoch
+    /// unchanged.
+    disk_check_epoch: u64,
+    /// Whether the disk-warn ceiling is currently latched over: set on the
+    /// crossing, cleared once a later check finds the total back under, so
+    /// the warning fires once per excursion, never once per boundary.
+    disk_warn_latched: bool,
 }
 
 /// Outcome of one [`Agent::apply`].  Degenerate cases (`Empty`,
@@ -203,6 +219,13 @@ const MAX_STEPS: u32 = 250;
 /// sub-agent fan-out — while bounding a runaway spawn-calling loop to a fixed
 /// number of generations instead of the process exhausting threads.
 const SPAWN_FUEL: u32 = 3;
+
+/// How many ral calls elapse between disk-warn ceiling checks, once
+/// `disk_warn_bytes` is configured — the walk's cost is real (a full scan of
+/// the session log dir and scratch) but rare enough at this cadence to run
+/// at the ready boundary rather than off a timer
+/// (`decisions/260705_leases-and-budgets`).
+const DISK_WARN_CHECK_INTERVAL: u64 = 32;
 
 pub(crate) fn fresh_id() -> AgentId {
     static N: AtomicU64 = AtomicU64::new(0);
@@ -291,6 +314,10 @@ struct Build {
     /// The fleet's shared registry — fresh for the trunk, the parent's clone
     /// for a fork — so every node registers into one map.
     agents: crate::agent_registry::AgentRegistry,
+    /// The operator's disk-warn ceiling, threaded from `config::disk_warn_bytes`
+    /// at the trunk's construction and inherited verbatim by every fork — a
+    /// host setting, not a per-agent choice.
+    disk_warn_bytes: Option<u64>,
 }
 
 impl Agent {
@@ -307,6 +334,7 @@ impl Agent {
             interactive,
             tools,
             agents,
+            disk_warn_bytes,
         } = b;
         seed_session_dir(&mut shell, &log);
         // Arm the binding-lease ledger last, sealing everything just seeded
@@ -369,6 +397,9 @@ impl Agent {
             last_input: 0,
             pins: Default::default(),
             ral_epoch: 0,
+            disk_warn_bytes,
+            disk_check_epoch: 0,
+            disk_warn_latched: false,
         })
     }
 
@@ -427,6 +458,7 @@ impl Agent {
         allow_schedule: bool,
         interactive: bool,
         provider: Arc<Provider>,
+        disk_warn_bytes: Option<u64>,
     ) -> io::Result<Self> {
         let shell = boot_root_shell(scratch);
         let sessions_root = run_dir.join("sessions");
@@ -451,6 +483,7 @@ impl Agent {
             // session's self-wakeup grant shapes the view.
             tools: crate::tools::tools_for(!interactive, allow_schedule, SPAWN_FUEL > 0),
             agents: crate::agent_registry::AgentRegistry::new(),
+            disk_warn_bytes,
         })?;
         agent.register_self();
         Ok(agent)
@@ -564,6 +597,9 @@ impl Agent {
             // One shared fleet registry: the child registers into the same map,
             // so the tree is whole at any depth.
             agents: self.agents.clone(),
+            // A host setting, not a per-agent choice: every fork shares the
+            // trunk's ceiling verbatim.
+            disk_warn_bytes: self.disk_warn_bytes,
         })
     }
 
@@ -663,6 +699,9 @@ impl Agent {
             interactive: false,
             tools: crate::tools::tools_for(true, false, SPAWN_FUEL > 0),
             agents: crate::agent_registry::AgentRegistry::new(),
+            // Unconfigured by default: a test that wants to exercise the
+            // disk-warn check sets `session.disk_warn_bytes` directly.
+            disk_warn_bytes: None,
         })?;
         agent.register_self();
         Ok(agent)
@@ -751,6 +790,48 @@ impl Agent {
             idle_calls: shell_eval::BINDING_IDLE_CALLS,
             card,
         });
+    }
+
+    /// Warn once per excursion above the operator's disk-warn ceiling,
+    /// through the operational-note vocabulary (`Kind::SystemNote`) — never
+    /// rotates or deletes (`decisions/260705_leases-and-budgets`, "Disk:
+    /// report and warn only"). A no-op by construction when unconfigured: no
+    /// walk, no warning, ever. Amortized to once every
+    /// [`DISK_WARN_CHECK_INTERVAL`] ral calls (tracked on the same
+    /// [`Self::ral_epoch`] the settled-worker and binding-lease sweeps read)
+    /// so the walk's cost — a full scan of the session log dir and scratch —
+    /// is paid rarely, at the ready boundary both frontends share
+    /// ([`Self::drive`]), beside [`Self::drain_worker_reaps`] and
+    /// [`Self::reap_bindings`].
+    fn check_disk_warn(&mut self, emit: &Emitter) {
+        let Some(ceiling) = self.disk_warn_bytes else {
+            return;
+        };
+        if self.ral_epoch < self.disk_check_epoch {
+            return;
+        }
+        self.disk_check_epoch = self.ral_epoch + DISK_WARN_CHECK_INTERVAL;
+        let mut total = crate::resources::dir_size(self.log.dir());
+        if let Some(scratch) = self.transport.shell_mut().shell.env_var("EXARCH_SCRATCH") {
+            total += crate::resources::dir_size(&std::path::PathBuf::from(&scratch));
+        }
+        if total > ceiling {
+            if !self.disk_warn_latched {
+                self.disk_warn_latched = true;
+                self.note(
+                    format!(
+                        "disk: session log + scratch is {} KiB, over the {} KiB warn ceiling \
+                         — forensic records are never rotated or deleted automatically; \
+                         clean up by hand",
+                        total / 1024,
+                        ceiling / 1024
+                    ),
+                    emit,
+                );
+            }
+        } else {
+            self.disk_warn_latched = false;
+        }
     }
 
     /// Assemble this agent's half of the `/resources` probe fold — one
@@ -1003,6 +1084,9 @@ impl Agent {
             // preserving "durable = last clean boundary" with the prune
             // folded in.
             self.reap_bindings(emit);
+            // The disk-warn check's own sibling: amortized on the same ral
+            // epoch, a no-op walk-wise when unconfigured.
+            self.check_disk_warn(emit);
             // The park verdict ([`Self::park_mode`]) is recomputed on every wake
             // inside `next_or_idle`, so a `TAB` that de-focuses this agent (and
             // wakes its inbox) flips it from `Held` to `Quiesce` and it reaps.
@@ -3043,6 +3127,119 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "a second drain with nothing newly queued must emit nothing"
+        );
+    }
+
+    /// Unconfigured (`disk_warn_bytes: None`) is a no-op by construction:
+    /// the check returns before touching the epoch bookkeeping or walking
+    /// anything, so it never emits and never costs.
+    #[test]
+    fn check_disk_warn_unconfigured_never_walks_or_warns() {
+        let dir = tmp("disk-warn-unconfigured");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        assert!(session.disk_warn_bytes.is_none());
+
+        let (tx, rx) = crate::bus::channel();
+        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        session.check_disk_warn(&emit);
+
+        assert_eq!(
+            session.disk_check_epoch, 0,
+            "the early return never advances the check epoch"
+        );
+        assert!(rx.try_recv().is_err(), "unconfigured: never emits, ever");
+    }
+
+    /// Crossing the configured ceiling emits exactly one warn note, through
+    /// the operational-note vocabulary.
+    #[test]
+    fn check_disk_warn_crossing_emits_exactly_one_note() {
+        let dir = tmp("disk-warn-crossing");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        // The ceiling sits just above the session's own baseline footprint
+        // (its freshly-written `events.json`), so the big file alone decides
+        // whether the ceiling is crossed.
+        let baseline = crate::resources::dir_size(session.log_dir());
+        std::fs::write(session.log_dir().join("big.txt"), vec![0u8; 4096]).unwrap();
+        session.disk_warn_bytes = Some(baseline + 100);
+
+        let (tx, rx) = crate::bus::channel();
+        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        session.check_disk_warn(&emit);
+
+        let event = rx.try_recv().expect("crossing the ceiling emits a note");
+        match event.kind {
+            Kind::SystemNote(text) => assert!(text.contains("disk"), "{text}"),
+            _ => panic!("expected Kind::SystemNote"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "exactly one event for this crossing"
+        );
+    }
+
+    /// Still above the ceiling on a later (amortized) check does not repeat
+    /// the warning — the latch stays set until the figure falls back under.
+    #[test]
+    fn check_disk_warn_still_above_does_not_repeat() {
+        let dir = tmp("disk-warn-still-above");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let baseline = crate::resources::dir_size(session.log_dir());
+        std::fs::write(session.log_dir().join("big.txt"), vec![0u8; 4096]).unwrap();
+        session.disk_warn_bytes = Some(baseline + 100);
+
+        let (tx, rx) = crate::bus::channel();
+        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        session.check_disk_warn(&emit);
+        assert!(rx.try_recv().is_ok(), "the first crossing warns");
+
+        // Force the amortization window to have elapsed, as if
+        // `DISK_WARN_CHECK_INTERVAL` more ral calls had passed, without
+        // actually driving any.
+        session.disk_check_epoch = session.ral_epoch;
+        session.check_disk_warn(&emit);
+        assert!(
+            rx.try_recv().is_err(),
+            "still above the ceiling: the latch suppresses a repeat"
+        );
+    }
+
+    /// Falling back under the ceiling clears the latch, so a later
+    /// re-crossing warns again rather than staying suppressed forever.
+    #[test]
+    fn check_disk_warn_falling_below_rearms_the_latch() {
+        let dir = tmp("disk-warn-rearm");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        // The ceiling sits just above the session's own baseline footprint
+        // (its freshly-written `events.json`), so the big file alone decides
+        // whether the ceiling is crossed.
+        let baseline = crate::resources::dir_size(session.log_dir());
+        let big = session.log_dir().join("big.txt");
+        std::fs::write(&big, vec![0u8; 4096]).unwrap();
+        session.disk_warn_bytes = Some(baseline + 100);
+
+        let (tx, rx) = crate::bus::channel();
+        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        session.check_disk_warn(&emit);
+        assert!(rx.try_recv().is_ok(), "the first crossing warns");
+
+        // Fall back under the ceiling and force a re-check.
+        std::fs::remove_file(&big).unwrap();
+        session.disk_check_epoch = session.ral_epoch;
+        session.check_disk_warn(&emit);
+        assert!(
+            rx.try_recv().is_err(),
+            "back under the ceiling: no warning, just the latch clearing"
+        );
+        assert!(!session.disk_warn_latched, "the latch is cleared");
+
+        // Cross again: the latch must be re-armed, not stuck cleared forever.
+        std::fs::write(&big, vec![0u8; 4096]).unwrap();
+        session.disk_check_epoch = session.ral_epoch;
+        session.check_disk_warn(&emit);
+        assert!(
+            rx.try_recv().is_ok(),
+            "re-crossing after falling below warns again"
         );
     }
 

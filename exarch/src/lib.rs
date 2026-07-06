@@ -138,6 +138,8 @@ pub fn run() -> Result<(), String> {
     // Load the unusual-provider config (custom endpoints) from the trusted
     // XDG config home, evaluated under a no-authority grant. Absent → none.
     let custom = config::load()?;
+    // The operator's disk-warn ceiling, if set — threaded to the trunk below.
+    let disk_warn_bytes = config::disk_warn_bytes();
 
     // Auto-discover providers and resolve their keys into the in-memory
     // store, scrubbing every key var from the environment. The custom
@@ -232,6 +234,7 @@ pub fn run() -> Result<(), String> {
         // headless trunk terminates once its seeded work is idle.
         !c.headless,
         std::sync::Arc::clone(&provider),
+        disk_warn_bytes,
     )
     .map_err(|e| format!("session init: {e}"))?;
 

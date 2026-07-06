@@ -1,4 +1,8 @@
-//! Unusual-provider configuration: `$XDG_CONFIG_HOME/exarch/config.ral`.
+//! Operator-set exarch configuration: the unusual-provider file
+//! (`$XDG_CONFIG_HOME/exarch/config.ral`) and a handful of standalone
+//! environment-variable knobs the binary reads once at startup.
+//!
+//! ## Unusual providers
 //!
 //! Famous providers auto-populate from the environment and carry no config
 //! ([`crate::credential`]). A *custom* endpoint — self-hosted or non-famous —
@@ -13,7 +17,7 @@
 //! core every other `.ral` load uses — and its terminal value is decoded into
 //! [`CustomProvider`]s.
 //!
-//! ## Authority
+//! ### Authority
 //!
 //! A redirected `endpoint` points the agent's own traffic at an arbitrary
 //! server, so the config is an exfiltration channel if an attacker can write
@@ -25,6 +29,15 @@
 //!   — `exec`, `net`, and `fs` all denied), so the config can only compute a
 //!   value, never cause an effect. With `exec` denied there is no route to the
 //!   network, so the in-process gate suffices.
+//!
+//! ## Disk-warn ceiling
+//!
+//! [`disk_warn_bytes`] is a much smaller, unrelated knob: an optional
+//! operator-set byte ceiling for the session log dir + scratch, read from an
+//! environment variable rather than the `.ral` file (there is no value to
+//! *compute* here, just a number to read once at boot). Absent means no
+//! walks and no warnings, ever
+//! (`decisions/260705_leases-and-budgets`, "Disk: report and warn only").
 
 use crate::provider::CustomProvider;
 use genai::adapter::AdapterKind;
@@ -33,6 +46,18 @@ use ral_core::types::{Break, Capabilities, Value};
 
 /// The config file name under `$XDG_CONFIG_HOME/exarch/`.
 const CONFIG_FILE: &str = "config.ral";
+
+/// The operator-set disk-warn ceiling, in bytes, or `None` if unset or
+/// unparseable — absent means [`crate::agent::Agent::check_disk_warn`] never
+/// walks the log/scratch dirs at all, no cost paid ever
+/// (`decisions/260705_leases-and-budgets`, "Disk: report and warn only").
+/// Read once at startup, like every other launch setting; there is
+/// deliberately no live-reload.
+pub fn disk_warn_bytes() -> Option<u64> {
+    std::env::var("EXARCH_DISK_WARN_BYTES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+}
 
 /// Load the custom providers declared in `$XDG_CONFIG_HOME/exarch/config.ral`.
 ///
