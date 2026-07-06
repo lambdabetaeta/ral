@@ -29,9 +29,9 @@ other's figures, and the fold is never model-facing.
 Two laws bound what a probe may do:
 
 - **Probing never mutates and never renews.** Enumeration is not
-  observation — the same rule that keeps the `workers` listing from renewing
-  a lease. If probing renewed, the operator's own diagnostics would
-  immortalise every zombie they exist to reveal.
+  observation — the same rule that keeps the `services` pin's reconciliation
+  from renewing a service's own state. If probing renewed, the operator's own
+  diagnostics would immortalise every zombie they exist to reveal.
 - **Residents and accumulators are both probed; only residents are listed,
   cancelled, and leased.** The line is the capability
   ([[decisions/260705_session-ledger|session-ledger]]): a resident (a
@@ -48,5 +48,6 @@ probe convention's decision; the lease and budget vocabulary the rows
 speak), [[decisions/260705_session-ledger|session-ledger]] (the
 resident/accumulator line; the probe as one of a resident's four facets),
 [[map/exarch/agent|agent]] (the agent half of the fold),
-[[map/exarch/builtins|builtins]] (the `workers` listing, the same
-enumeration-is-not-observation law).
+[[map/exarch/builtins|builtins]] (the `services` pin, the same
+enumeration-is-not-observation law — `workers` itself was since retired as a
+model-facing listing, legibility now split by lease class).

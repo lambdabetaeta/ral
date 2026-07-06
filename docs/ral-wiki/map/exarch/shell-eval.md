@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d744648
-generated_at_date: 2026-07-05
+generated_at_commit: d501492
+generated_at_date: 2026-07-06
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/agent_builtins.rs, exarch/data/agent.ral]
 ---
 
@@ -61,8 +61,8 @@ and `run_shell` owns only the request it builds and the outcome it formats:
   exit;
 - **`worker_cap`** — `LIVE_WORKER_CAP` (64), the admission bound core
   enforces at the spawn door: the 65th spawn is refused (the error names
-  `await`/`cancel`/`workers`) while 64 workers of any class still run;
-  settled entries lingering under retention hold no seat. Its sibling
+  `await`/`cancel`) while 64 workers of any class still run; settled
+  entries lingering under retention hold no seat. Its sibling
   constant `SETTLED_WORKER_RETENTION` (256 ral calls, matching the binding
   lease's scratch expiry) is not on the request at all — it parameterises
   the [[map/exarch/agent|agent]]'s per-call `advance_worker_epoch` sweep;

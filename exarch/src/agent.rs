@@ -748,6 +748,54 @@ impl Agent {
         }
     }
 
+    /// Reconcile the host-owned `services` pin against the shell's live
+    /// worker registry, beside [`Self::drain_worker_reaps`] at the same
+    /// ready-boundary pass: one card lists every currently-running durable
+    /// service, re-pinned whenever at least one is alive; the pin drops the
+    /// moment none remain (cancelled, or settled and reaped). The model
+    /// cannot write or clear this pin itself — `shell_eval::
+    /// reject_protected_pin` refuses that key — so this is the one writer,
+    /// the same shape as [`Self::set_commitment_pin`]/[`Self::
+    /// unset_commitment_pin`] for `commitment:*`.
+    fn reconcile_service_pins(&mut self, emit: &Emitter) {
+        let live: Vec<ral_core::types::WorkerEntry> = self
+            .transport
+            .shell_mut()
+            .shell
+            .workers()
+            .into_iter()
+            .filter(|entry| entry.class == ral_core::types::LeaseClass::Durable)
+            .collect();
+
+        if live.is_empty() {
+            let had_one = self
+                .pins
+                .lock()
+                .expect("pin register poisoned")
+                .remove(shell_eval::SERVICES_PIN_KEY)
+                .is_some();
+            if had_one {
+                emit.emit(Kind::Unpin {
+                    key: shell_eval::SERVICES_PIN_KEY.to_string(),
+                });
+            }
+            return;
+        }
+
+        let card = crate::card::services_pin_card(&live);
+        self.pins.lock().expect("pin register poisoned").insert(
+            shell_eval::SERVICES_PIN_KEY.to_string(),
+            shell_eval::PinDigest {
+                kind: shell_eval::PinKind::Service,
+                card: card.clone(),
+            },
+        );
+        emit.emit(Kind::Pin {
+            key: shell_eval::SERVICES_PIN_KEY.to_string(),
+            card,
+        });
+    }
+
     /// Prune this shell's idle top-level bindings and drain its queued
     /// large-binding notices — the binding-lease ledger's one boundary
     /// drain site, beside [`Self::drain_worker_reaps`]
@@ -1078,6 +1126,9 @@ impl Agent {
             // worker abandoned between turns still leaves a paper trail
             // before the loop parks or picks up the next deliverable.
             self.drain_worker_reaps(emit);
+            // The service ledger's sibling boundary drain: the `services`
+            // pin is (re-)born or dies at the same pass a reap notice would.
+            self.reconcile_service_pins(emit);
             // The binding-lease ledger's sibling boundary drain: a turn
             // never begins over a scope about to be pruned, and the next
             // `run_shell` refreshes `self.durable` again at its own entry,
@@ -2891,7 +2942,7 @@ mod tests {
         let _ = session.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
         let _ = session.run_shell(
             "c2".into(),
-            "service { test-clear-block-forever }",
+            r#"service "clear-test" { test-clear-block-forever }"#,
             30,
             &emit,
         );
@@ -2902,7 +2953,7 @@ mod tests {
             .iter()
             .find(|e| e.class == ral_core::types::LeaseClass::Durable)
             .expect("the service must register under the durable class");
-        assert_eq!(durable.cmd, "<service>");
+        assert_eq!(durable.cmd, "clear-test");
         for entry in &entries {
             assert!(
                 !entry.handle.cancel.is_cancelled(),
@@ -3156,6 +3207,133 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "a second drain with no new notices must emit nothing"
+        );
+    }
+
+    // ── the `services` pin ledger ─────────────────────────────────────────
+
+    /// The `services` pin is the host's own write: born with the service's
+    /// description as soon as a durable birth is reconciled, and retired
+    /// the moment cancelling it leaves no durable service running — the
+    /// same boundary pass `drain_worker_reaps` runs at.
+    #[test]
+    fn reconcile_service_pins_births_and_retires_the_services_pin() {
+        let dir = tmp("reconcile-service-pins");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        ral_core::builtins::register_builtins(WORKER_REGISTRY_TEST_BUILTINS);
+        session
+            .transport
+            .shell_mut()
+            .shell
+            .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
+
+        let (tx, rx) = crate::bus::channel();
+        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        session.run_shell(
+            "c1".into(),
+            r#"service "watch the thing" { test-clear-block-forever }"#,
+            5,
+            &emit,
+        );
+
+        session.reconcile_service_pins(&emit);
+        {
+            let pins = session.pins.lock().unwrap();
+            let pin = pins
+                .get(shell_eval::SERVICES_PIN_KEY)
+                .expect("the services pin must be born");
+            assert_eq!(pin.kind, shell_eval::PinKind::Service);
+            let line = crate::card::summary_line(&pin.card);
+            assert!(
+                line.contains("watch the thing"),
+                "the description must render: {line}"
+            );
+        }
+        let mut saw_pin = false;
+        while let Ok(event) = rx.try_recv() {
+            if let Kind::Pin { key, .. } = event.kind {
+                assert_eq!(key, shell_eval::SERVICES_PIN_KEY);
+                saw_pin = true;
+            }
+        }
+        assert!(saw_pin, "the birth must emit a Pin event");
+
+        // Cancel the service through the ordinary `cancel` builtin — the
+        // same edge a model reaches — and reconcile again: the row leaves.
+        let entry = session
+            .transport
+            .shell_mut()
+            .shell
+            .workers()
+            .pop()
+            .expect("the service registered");
+        let cancel_fn = session
+            .transport
+            .shell_mut()
+            .shell
+            .lookup_builtin("cancel")
+            .expect("core registers cancel");
+        cancel_fn
+            .body
+            .call(
+                &[Value::Handle(entry.handle)],
+                &mut session.transport.shell_mut().shell,
+            )
+            .expect("cancel must succeed");
+
+        session.reconcile_service_pins(&emit);
+        assert!(
+            session
+                .pins
+                .lock()
+                .unwrap()
+                .get(shell_eval::SERVICES_PIN_KEY)
+                .is_none(),
+            "the services pin must be retired once no durable service remains"
+        );
+        let mut saw_unpin = false;
+        while let Ok(event) = rx.try_recv() {
+            if let Kind::Unpin { key } = event.kind {
+                assert_eq!(key, shell_eval::SERVICES_PIN_KEY);
+                saw_unpin = true;
+            }
+        }
+        assert!(saw_unpin, "retirement must emit an Unpin event");
+    }
+
+    /// A model's own `surface` call cannot forge or clear the host-owned
+    /// `services` pin: `run_shell` decodes it, `reject_protected_pin`
+    /// refuses it with a diagnostic, and the register is left untouched.
+    #[test]
+    fn program_cannot_write_the_services_pin() {
+        let dir = tmp("services-pin-protected");
+        let mut session = Agent::for_test(&dir, "system").unwrap();
+        let (tx, rx) = crate::bus::channel();
+        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+
+        session.run_shell(
+            "c1".into(),
+            r#"surface `unpin [key: "services"]"#,
+            5,
+            &emit,
+        );
+
+        let mut saw_error = false;
+        while let Ok(event) = rx.try_recv() {
+            if let Kind::Error(msg) = event.kind {
+                assert!(msg.contains("protected service-ledger pin"));
+                saw_error = true;
+            }
+        }
+        assert!(saw_error, "the forged pin must be rejected with a diagnostic");
+        assert!(
+            session
+                .pins
+                .lock()
+                .unwrap()
+                .get(shell_eval::SERVICES_PIN_KEY)
+                .is_none(),
+            "no forged content ever enters the register"
         );
     }
 

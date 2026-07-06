@@ -441,10 +441,11 @@ pub static WATCH_BUILTIN: &[BuiltinEntry] = &[BuiltinEntry {
 ///
 /// A `service`-born worker is an ordinary buffered spawn
 /// (`concurrency::builtin_service` over `spawn_child`) registered under
-/// the durable lease class: no idle reap, no absolute backstop — its
-/// bound is legibility (listed by the host's `workers` affordance,
-/// cancellable through its handle, dead with `/clear` or the process;
-/// `decisions/260705_leases-and-budgets`).  That distinction only exists
+/// the durable lease class: no idle reap, no absolute backstop — its bound
+/// is legibility, not time, and legibility is structural: the mandatory
+/// description a `service` birth carries is what a host tracks it by.
+/// Cancellable through its handle, dead with `/clear` or the process
+/// (`decisions/260705_leases-and-budgets`).  That distinction only exists
 /// where a lease frame does, so availability inverts `watch`'s: the agent
 /// host (exarch), whose frame reaps ordinary workers, installs it; the
 /// interactive and batch ral hosts — which install `watch` — leave
@@ -458,8 +459,8 @@ pub static WATCH_BUILTIN: &[BuiltinEntry] = &[BuiltinEntry {
 /// (`scheme::service`) stay private to core, exactly as with `watch`.
 pub static SERVICE_BUILTIN: &[BuiltinEntry] = &[BuiltinEntry {
     name: Cow::Borrowed("service"),
-    type_rule: BuiltinTypeRule::Scheme(Some(1), scheme::service),
-    doc: "service <thunk>  — birth a durable worker: like spawn, but never idle-reaped and exempt from the 24 h backstop. It dies only by `cancel` through its handle, /clear, or process exit; `workers` lists it with class \"durable\". For work meant to outlive the ordinary worker lease, declared at birth.",
+    type_rule: BuiltinTypeRule::Scheme(Some(2), scheme::service),
+    doc: "service <desc> <thunk>  — birth a durable worker: like spawn, but never idle-reaped and exempt from the 24 h backstop. <desc> is a required, single-line, non-empty description of what it's for — a durable service's only bound is legibility, so the host tracks it by this description rather than a lease. Dies only by `cancel` through its handle, /clear, or process exit.",
     body: BuiltinBody::Static(concurrency::builtin_service),
 }];
 

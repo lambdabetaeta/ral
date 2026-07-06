@@ -35,9 +35,9 @@ pub(crate) const DETACHED_WORKER_BACKSTOP: Duration = Duration::from_secs(24 * 6
 
 /// Admission cap on concurrently *running* workers per agent, enforced by
 /// core at the spawn door: the 65th spawn is refused with an error naming
-/// `await`/`cancel`/`workers` while 64 still run.  Durable services count
-/// (live work is live work); settled entries lingering under retention
-/// never block admission.
+/// `await`/`cancel` while 64 still run.  Durable services count (live work
+/// is live work); settled entries lingering under retention never block
+/// admission.
 pub(crate) const LIVE_WORKER_CAP: usize = 64;
 
 /// Retention bound, in ral calls, on a settled worker's unclaimed result:
@@ -87,6 +87,10 @@ pub enum Outcome {
 pub(crate) enum PinKind {
     Ordinary,
     Commitment,
+    /// The `services` ledger card: host-authored, like `Commitment`, but
+    /// listing every live durable service rather than one commitment's
+    /// verdict.
+    Service,
 }
 
 /// One mirrored pin: the card the user sees plus the key-derived class the
@@ -103,6 +107,8 @@ impl PinDigest {
         Self {
             kind: if is_commitment_pin(key) {
                 PinKind::Commitment
+            } else if is_service_pin(key) {
+                PinKind::Service
             } else {
                 PinKind::Ordinary
             },
@@ -146,6 +152,17 @@ pub(crate) const COMMITMENT_PIN_PREFIX: &str = "commitment:";
 
 pub(crate) fn is_commitment_pin(key: &str) -> bool {
     key.starts_with(COMMITMENT_PIN_PREFIX)
+}
+
+/// Reserved register key for the host-owned durable-service ledger
+/// (`Agent::reconcile_service_pins`): one card listing every live durable
+/// service.  A model may observe it, but ordinary `surface` calls cannot
+/// write or clear it — only the host, reconciling against the live worker
+/// registry, authors it.
+pub(crate) const SERVICES_PIN_KEY: &str = "services";
+
+pub(crate) fn is_service_pin(key: &str) -> bool {
+    key == SERVICES_PIN_KEY
 }
 
 /// Decode one surfaced `Value` into the [`Kind`] it renders as — the single
@@ -194,12 +211,23 @@ pub fn decode_surface(ev: &RalValue) -> Option<Kind> {
 
 fn reject_protected_pin(kind: &Kind, emit: &Emitter) -> bool {
     let key = match kind {
-        Kind::Pin { key, .. } | Kind::Unpin { key } if is_commitment_pin(key) => key,
+        Kind::Pin { key, .. } | Kind::Unpin { key }
+            if is_commitment_pin(key) || is_service_pin(key) =>
+        {
+            key
+        }
         _ => return false,
     };
-    emit.emit(Kind::Error(format!(
-        "`{key}` is a protected commitment pin; ordinary `surface` calls cannot write or clear it; call `verify_commitment` to check a live commitment"
-    )));
+    let msg = if is_commitment_pin(key) {
+        format!(
+            "`{key}` is a protected commitment pin; ordinary `surface` calls cannot write or clear it; call `verify_commitment` to check a live commitment"
+        )
+    } else {
+        format!(
+            "`{key}` is a protected service-ledger pin; ordinary `surface` calls cannot write or clear it — it is maintained by the host as services are born and settle"
+        )
+    };
+    emit.emit(Kind::Error(msg));
     true
 }
 
@@ -1231,6 +1259,24 @@ keep-bottom
             key: "tasks".into(),
         };
         assert!(!reject_protected_pin(&ordinary, &emit));
+    }
+
+    /// The `services` key is protected exactly like a commitment pin: a
+    /// model's own `surface` call cannot write or clear it — only the
+    /// host's reconciliation pass may.
+    #[test]
+    fn model_surface_cannot_write_service_pins() {
+        let (emit, rx) = dummy_emitter();
+        let protected = Kind::Pin {
+            key: SERVICES_PIN_KEY.to_string(),
+            card: crate::card::Card(Vec::new()),
+        };
+        assert!(reject_protected_pin(&protected, &emit));
+        let event = rx.try_recv().expect("rejection should emit an error");
+        assert!(
+            matches!(event.kind, Kind::Error(msg) if msg.contains("protected service-ledger pin")),
+            "expected protected-pin diagnostic"
+        );
     }
 
     /// The `InboxBoundary` posts a detached worker's batch as an

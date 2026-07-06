@@ -1033,68 +1033,54 @@ fn builtin_skill_list(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
     Settled::Ok(Value::String(out))
 }
 
-/// `workers :: ∀α. F [{id: Int, cmd: String, started: Int, class: String,
-/// state: String, handle: Handle α}]` — one α for the whole listing, the
-/// same soundness compromise `race :: [Handle α] → …` already makes: a
-/// caller that retakes two different-typed handles from one listing picks
-/// its own `α` at each use site, same as unpacking two elements of a
-/// heterogeneous `race` list.
-fn scheme_workers(u: &mut Unifier) -> Scheme {
+/// `service-handle :: ∀α. Int → F (Handle α)` — the same per-call-site α
+/// instantiation `race :: [Handle α] → …` already accepts.
+fn scheme_service_handle(u: &mut Unifier) -> Scheme {
     let av = u.fresh_tyvar();
     let a = Ty::Var(av);
     scheme(
         &[av],
         &[],
         &[],
-        thunk(pure(Ty::List(Box::new(closed_record(&[
-            ("id", Ty::Int),
-            ("cmd", Ty::String),
-            ("started", Ty::Int),
-            ("class", Ty::String),
-            ("state", Ty::String),
-            ("handle", Ty::Handle(Box::new(a))),
-        ]))))),
+        thunk(fun(Ty::Int, pure(Ty::Handle(Box::new(a))))),
     )
 }
 
-/// `workers` — list this shell's registered workers (`spawn`, `service`),
-/// settled or still running, each a record `{id, cmd, started, class,
-/// state, handle}`. `handle` is the worker's own `Handle`, retaken
-/// directly: `poll h`, `await h`, `cancel h` resume the ordinary eliminator
-/// idiom, which is the whole rediscovery story after a compaction erases
-/// the binding that named it. Polling a handle taken from a listing
-/// renews its lease same as polling any other handle; the listing itself
-/// never does — enumeration is not observation.
-fn builtin_workers(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let records = shell
-        .workers()
-        .into_iter()
-        .map(|entry| {
-            let started = entry
-                .started
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
-            let class = match entry.class {
-                ral_core::types::LeaseClass::Worker => "worker",
-                ral_core::types::LeaseClass::Durable => "durable",
-            };
-            let state = match *entry.handle.state.lock().unwrap() {
-                ral_core::types::HandleState::Running => "running",
-                ral_core::types::HandleState::Completed => "settled",
-                ral_core::types::HandleState::Cancelled => "cancelled",
-            };
-            Value::map(vec![
-                ("id".into(), Value::Int(entry.id.0 as i64)),
-                ("cmd".into(), Value::String(entry.cmd)),
-                ("started".into(), Value::Int(started)),
-                ("class".into(), Value::String(class.into())),
-                ("state".into(), Value::String(state.into())),
-                ("handle".into(), Value::Handle(entry.handle)),
-            ])
-        })
-        .collect();
-    Settled::Ok(Value::list(records))
+/// `service-handle <id>` — re-acquire a durable service's live `Handle` by
+/// id: looked up among this shell's `LeaseClass::Durable` entries only, and
+/// handed back bare so the ordinary eliminators resume — `await
+/// (service-handle 3)`, `cancel (service-handle 3)`.
+///
+/// An id naming an ephemeral `spawn`/`watch` worker is refused exactly
+/// like an unknown one: an ephemeral spawn is lease-bounded and
+/// rediscovered through its binding, not by id — `decisions/260705_leases-
+/// and-budgets` carves out by-id re-acquisition for services alone, not a
+/// general control plane over every worker.
+///
+/// A bare top-level `service-handle N` result cannot cross the host seam —
+/// a `Handle` is not ground — by design: it exists to be composed with an
+/// eliminator in the same turn.
+fn builtin_service_handle(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 1, "service-handle")?;
+    let id = match args[0].as_int() {
+        Some(n) if n >= 0 => ral_core::types::WorkerId(n as u64),
+        _ => {
+            return Err(sig(format!(
+                "service-handle: expected a non-negative Int id, got {}",
+                args[0].type_name()
+            )));
+        }
+    };
+    match shell.worker_by_id(id) {
+        Some(entry) if entry.class == ral_core::types::LeaseClass::Durable => {
+            Ok(Value::Handle(entry.handle))
+        }
+        _ => Err(sig(format!(
+            "service-handle: no durable service registered with id {} — an ephemeral \
+             spawn/watch worker is not reacquired by id, only by the binding that named it",
+            id.0
+        ))),
+    }
 }
 
 pub static EXARCH_BUILTINS: &[BuiltinEntry] = &[
@@ -1141,10 +1127,10 @@ pub static EXARCH_BUILTINS: &[BuiltinEntry] = &[
         body: BuiltinBody::Static(builtin_fff),
     },
     BuiltinEntry {
-        name: Cow::Borrowed("workers"),
-        type_rule: BuiltinTypeRule::Scheme(Some(0), scheme_workers),
-        doc: "workers  — list this agent's detached workers (spawn/service), settled or still running: [{id, cmd, started, class, state, handle}]. `handle` is retaken directly — `poll h` / `await h` / `cancel h` resume the ordinary idiom, the whole rediscovery story once a binding name is gone. Polling a retaken handle renews its lease; listing alone does not.",
-        body: BuiltinBody::Static(builtin_workers),
+        name: Cow::Borrowed("service-handle"),
+        type_rule: BuiltinTypeRule::Scheme(Some(1), scheme_service_handle),
+        doc: "service-handle <id>  — re-acquire a durable service's live Handle by id (durable services only; an ephemeral spawn/watch id is refused). Compose with an eliminator: `await (service-handle 3)`, `cancel (service-handle 3)`.",
+        body: BuiltinBody::Static(builtin_service_handle),
     },
 ];
 
@@ -1300,12 +1286,11 @@ mod tests {
         assert_eq!(status(err), 130);
     }
 
-    // ── `workers` builtin ────────────────────────────────────────────────
+    // ── `service-handle` builtin ─────────────────────────────────────────
 
     /// A worker body that blocks until cancelled: it polls
     /// `process::check` so the spawned thread genuinely stays `Running`
-    /// (rather than completing instantly), letting a test list it and
-    /// retake its handle before ending it. Named distinctly from
+    /// (rather than completing instantly). Named distinctly from
     /// `agent.rs`'s own test-only blocker (`test-clear-block-forever`) so
     /// registering both in the same test binary never collides on name.
     fn builtin_test_block_forever(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
@@ -1354,164 +1339,162 @@ mod tests {
         }
     }
 
-    /// The whole rediscovery idiom `decisions/260705_leases-and-budgets`
-    /// promises: spawn a worker without keeping its binding, list it back
-    /// through the `workers` builtin, retake the handle from the listing
-    /// record, and `poll` it — the touch that renews the idle-observation
-    /// lease. Mirrors core's own
-    /// `polled_worker_survives_past_its_idle_lease`, but through the
-    /// host-facing builtin rather than `Shell::workers` directly, so the
-    /// record shape and the retaken handle's liveness are both pinned.
+    /// A `service`-born worker registers under the durable class with its
+    /// birth description standing in for the old generic placeholder —
+    /// `class: Durable`, `cmd` the description verbatim.
     #[test]
-    fn workers_lists_and_rediscovers_via_poll() {
-        let mut shell = Shell::new(Default::default());
-        ral_core::builtins::register_builtins(WORKER_TEST_BUILTINS);
-        shell.install_builtins(WORKER_TEST_BUILTINS);
-
-        // Spawn without keeping the binding: `workers` is the only way back.
-        run_top_level(&mut shell, "spawn { test-block-forever }");
-
-        let listed = builtin_workers(&[], &mut shell).expect("workers must list a live entry");
-        let Value::List(entries) = listed else {
-            panic!("workers must return a list, got {listed:?}");
-        };
-        assert_eq!(entries.len(), 1, "exactly one registered worker");
-        let Value::Map(record) = entries.get(0).cloned().expect("one entry") else {
-            panic!("each entry must be a record");
-        };
-        assert_eq!(
-            record.get("class"),
-            Some(&Value::String("worker".into())),
-            "class must read `worker` for an ordinary spawn"
-        );
-        assert_eq!(
-            record.get("state"),
-            Some(&Value::String("running".into())),
-            "state must read `running` for a still-blocked worker"
-        );
-        // `spawn { ... }` always registers under the generic `"<block>"`
-        // spelling (`concurrency::builtin_spawn`) — the record names the
-        // worker's *kind*, not its source text.
-        assert_eq!(
-            record.get("cmd"),
-            Some(&Value::String("<block>".into())),
-            "cmd must read the spawn body's generic spelling"
-        );
-        let handle = match record.get("handle") {
-            Some(Value::Handle(h)) => h.clone(),
-            other => panic!("handle field must carry a Handle, got {other:?}"),
-        };
-
-        let before = *handle.last_observed.lock().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let poll = shell
-            .lookup_builtin("poll")
-            .expect("core must register `poll`");
-        poll.body
-            .call(&[Value::Handle(handle.clone())], &mut shell)
-            .expect("poll on a still-running handle must not error");
-        let after = *handle.last_observed.lock().unwrap();
-        assert!(
-            after > before,
-            "poll on the retaken handle must renew the idle-observation lease"
-        );
-
-        // Clean up: cancel the still-running worker so this test doesn't
-        // leak a live background thread past its own return.
-        handle
-            .cancel
-            .cancel(ral_core::process::CancelCause::Explicit);
-    }
-
-    /// Enumeration is not observation: listing through the `workers`
-    /// builtin must never renew the idle-observation lease itself — only
-    /// an eliminator naming the handle does.
-    #[test]
-    fn workers_listing_does_not_renew_the_lease() {
-        let mut shell = Shell::new(Default::default());
-        ral_core::builtins::register_builtins(WORKER_TEST_BUILTINS);
-        shell.install_builtins(WORKER_TEST_BUILTINS);
-        run_top_level(&mut shell, "spawn { test-block-forever }");
-
-        let handle = {
-            let listed = builtin_workers(&[], &mut shell).expect("workers must list a live entry");
-            let Value::List(entries) = listed else {
-                panic!("workers must return a list");
-            };
-            let Value::Map(record) = entries.get(0).cloned().expect("one entry") else {
-                panic!("entry must be a record");
-            };
-            match record.get("handle") {
-                Some(Value::Handle(h)) => h.clone(),
-                other => panic!("handle field must carry a Handle, got {other:?}"),
-            }
-        };
-
-        let before = *handle.last_observed.lock().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let _ = builtin_workers(&[], &mut shell).expect("second listing must also succeed");
-        let after = *handle.last_observed.lock().unwrap();
-        assert_eq!(
-            after, before,
-            "listing must never renew the idle-observation lease"
-        );
-
-        handle
-            .cancel
-            .cancel(ral_core::process::CancelCause::Explicit);
-    }
-
-    /// Builtin-table hygiene: `workers` is exarch's own affordance, never
-    /// core's. The REPL installs `CORE_BUILTINS` alone and never
-    /// `EXARCH_BUILTINS`, so a bare ral host has no `workers` at all —
-    /// this pins the half of that story that doesn't require booting a
-    /// REPL to check: the name simply isn't in the core table.
-    #[test]
-    fn workers_is_exarch_only_never_a_core_builtin() {
-        assert!(
-            EXARCH_BUILTINS.iter().any(|e| e.name.as_ref() == "workers"),
-            "workers must be registered in EXARCH_BUILTINS"
-        );
-        assert!(
-            !ral_core::builtins::CORE_BUILTINS
-                .iter()
-                .any(|e| e.name.as_ref() == "workers"),
-            "workers must never be a core builtin: a bare ral host (the REPL) \
-             never installs EXARCH_BUILTINS, so it must have no `workers` name \
-             to fall back on"
-        );
-    }
-
-    /// A `service`-born worker lists through the `workers` builtin under
-    /// the durable class — `class: "durable"`, `state: "running"` — with
-    /// its handle retaken like any other entry's.
-    #[test]
-    fn workers_lists_a_service_as_durable() {
+    fn service_registers_as_durable_with_its_description() {
         let mut shell = Shell::new(Default::default());
         install_on(&mut shell);
         ral_core::builtins::register_builtins(WORKER_TEST_BUILTINS);
         shell.install_builtins(WORKER_TEST_BUILTINS);
-        run_top_level(&mut shell, "service { test-block-forever }");
+        run_top_level(&mut shell, r#"service "watch the thing" { test-block-forever }"#);
 
-        let listed = builtin_workers(&[], &mut shell).expect("workers must list the service");
-        let Value::List(entries) = listed else {
-            panic!("workers must return a list");
-        };
+        let entries = shell.workers();
         assert_eq!(entries.len(), 1, "exactly one registered service");
-        let Value::Map(record) = entries.get(0).cloned().expect("one entry") else {
-            panic!("entry must be a record");
-        };
-        assert_eq!(record.get("class"), Some(&Value::String("durable".into())));
-        assert_eq!(record.get("state"), Some(&Value::String("running".into())));
-        assert_eq!(record.get("cmd"), Some(&Value::String("<service>".into())));
-        let handle = match record.get("handle") {
-            Some(Value::Handle(h)) => h.clone(),
-            other => panic!("handle field must carry a Handle, got {other:?}"),
-        };
+        assert_eq!(entries[0].class, ral_core::types::LeaseClass::Durable);
+        assert_eq!(entries[0].cmd, "watch the thing");
 
-        handle
+        entries[0]
+            .handle
             .cancel
             .cancel(ral_core::process::CancelCause::Explicit);
+    }
+
+    /// The whole rediscovery idiom: birth a service without keeping its
+    /// binding, learn its id, reacquire its handle with `service-handle`,
+    /// and `await` it — the round trip a compaction-erased binding leaves
+    /// as the only way back.
+    #[test]
+    fn service_handle_reacquires_a_durable_service_and_await_round_trips() {
+        let mut shell = Shell::new(Default::default());
+        install_on(&mut shell);
+        run_top_level(&mut shell, r#"service "answer" { 42 }"#);
+
+        let entry = shell.workers().pop().expect("the service registered");
+        assert_eq!(entry.class, ral_core::types::LeaseClass::Durable);
+
+        let handle = match builtin_service_handle(&[Value::Int(entry.id.0 as i64)], &mut shell) {
+            Ok(Value::Handle(h)) => h,
+            other => panic!("service-handle must return a Handle, got {other:?}"),
+        };
+        let await_fn = shell
+            .lookup_builtin("await")
+            .expect("core must register `await`");
+        let result = await_fn
+            .body
+            .call(&[Value::Handle(handle)], &mut shell)
+            .expect("await on the reacquired handle must succeed");
+        let Value::Map(record) = result else {
+            panic!("await must return a record");
+        };
+        assert_eq!(record.get("value"), Some(&Value::Int(42)));
+    }
+
+    /// A settled-but-unclaimed service — nothing has awaited, polled, or
+    /// cancelled it — still lingers in the registry (a durable birth arms
+    /// no retention-exempting lease of its own), so `service-handle`
+    /// resolves it exactly as it would a still-running one; `await` on the
+    /// reacquired handle then delivers the cached result, never blocking.
+    #[test]
+    fn service_handle_reacquires_a_settled_but_unclaimed_service() {
+        let mut shell = Shell::new(Default::default());
+        install_on(&mut shell);
+        run_top_level(&mut shell, r#"service "answer" { 42 }"#);
+
+        let entry = shell.workers().pop().expect("the service registered");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if *entry.handle.state.lock().unwrap() != ral_core::types::HandleState::Running {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the service must settle within the budget"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(
+            shell.worker_count(),
+            1,
+            "settled but unclaimed, the entry still lingers"
+        );
+
+        let handle = match builtin_service_handle(&[Value::Int(entry.id.0 as i64)], &mut shell) {
+            Ok(Value::Handle(h)) => h,
+            other => panic!("a settled-but-retained service must still resolve, got {other:?}"),
+        };
+        let await_fn = shell
+            .lookup_builtin("await")
+            .expect("core must register `await`");
+        let result = await_fn
+            .body
+            .call(&[Value::Handle(handle)], &mut shell)
+            .expect("await on a retaken, already-settled handle must deliver the cached result");
+        let Value::Map(record) = result else {
+            panic!("await must return a record");
+        };
+        assert_eq!(record.get("value"), Some(&Value::Int(42)));
+    }
+
+    /// An id naming no registered worker at all is refused.
+    #[test]
+    fn service_handle_errors_on_an_unknown_id() {
+        let mut shell = Shell::new(Default::default());
+        install_on(&mut shell);
+        let err = match builtin_service_handle(&[Value::Int(999_999)], &mut shell) {
+            Err(Break::Error(e)) => e,
+            other => panic!("an unknown id must error, got {other:?}"),
+        };
+        assert!(err.message.contains("no durable service"));
+    }
+
+    /// `service-handle`'s scope is durable services only: an ephemeral
+    /// `spawn`'s id is refused exactly like an unknown one, never handed
+    /// back — rediscovering an ordinary worker is the binding-lease
+    /// ledger's job, not this verb's.
+    #[test]
+    fn service_handle_refuses_an_ephemeral_worker_id() {
+        let mut shell = Shell::new(Default::default());
+        install_on(&mut shell);
+        ral_core::builtins::register_builtins(WORKER_TEST_BUILTINS);
+        shell.install_builtins(WORKER_TEST_BUILTINS);
+        run_top_level(&mut shell, "spawn { test-block-forever }");
+
+        let entry = shell.workers().pop().expect("the spawn registered");
+        assert_eq!(entry.class, ral_core::types::LeaseClass::Worker);
+
+        let err = match builtin_service_handle(&[Value::Int(entry.id.0 as i64)], &mut shell) {
+            Err(Break::Error(e)) => e,
+            other => panic!("an ephemeral worker's id must be refused, got {other:?}"),
+        };
+        assert!(err.message.contains("no durable service"));
+
+        entry
+            .handle
+            .cancel
+            .cancel(ral_core::process::CancelCause::Explicit);
+    }
+
+    /// Builtin-table hygiene: `service-handle` is exarch's own affordance,
+    /// never core's. The REPL installs `CORE_BUILTINS` alone and never
+    /// `EXARCH_BUILTINS`, so a bare ral host has no `service-handle` at
+    /// all — this pins the half of that story that doesn't require
+    /// booting a REPL to check: the name simply isn't in the core table.
+    #[test]
+    fn service_handle_is_exarch_only_never_a_core_builtin() {
+        assert!(
+            EXARCH_BUILTINS
+                .iter()
+                .any(|e| e.name.as_ref() == "service-handle"),
+            "service-handle must be registered in EXARCH_BUILTINS"
+        );
+        assert!(
+            !ral_core::builtins::CORE_BUILTINS
+                .iter()
+                .any(|e| e.name.as_ref() == "service-handle"),
+            "service-handle must never be a core builtin"
+        );
     }
 
     /// `service`'s availability mirrors `watch`'s with the hosts swapped:

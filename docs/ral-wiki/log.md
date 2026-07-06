@@ -3722,3 +3722,29 @@ cleared unconditionally in `Agent`'s `Drop`
 `Job`, with exarch's agent/schedule/binding chapters refusing per the ADR's
 own license — recorded as [[design/residency|residency]]. Flipped
 [[decisions/260705_session-ledger|session-ledger]] to `active`.
+
+## [2026-07-06] revise | leases-and-budgets: the `workers` listing verb retires, legibility splits by lease class
+
+Retired the `workers` builtin: returning the registry as a language value was
+itself mislayered against the registry's own doc comment ("affordances —
+listing, reaping, caps — are the host's and the lease layer's concern, not
+this door's"), and every defect followed — untransportable at the host seam
+(`SerialValue::from_ground` rejects the live `Value::Handle`s a listing
+carries), a soundness-compromised `∀α` scheme, a `cmd` field holding only one
+of three hardcoded placeholders. Legibility now splits by lease class: the
+worker class gets no model-facing listing at all, its idle-observation lease
+bounding a forgotten spawn's cost directly (at most an hour, one seat of the
+per-agent cap) — rail cards at birth and reap cards at death are the whole
+story; the durable class's bound, always legibility, becomes a host-owned
+pinned ledger row (id, description, age) rendered from the registry and
+re-injected across compaction like any pin, never a computed value, and
+`service` gains a mandatory `description`. The residual rediscovery gap — a
+service never bound to a name — gets a narrow `service-handle <id>` door
+reading the id off its ledger row; every other worker keeps its handle as the
+sole capability, via the binding lease's existing `pins_running_work`.
+Decided in discussion; not yet built. The sibling TOCTOU race in live-worker
+cap admission, found in the same review, landed separately in `3cf8b11`.
+Amended [[decisions/260705_leases-and-budgets|leases-and-budgets]] (primary),
+[[decisions/260705_session-ledger|session-ledger]] (the worker chapter's
+listing-fold entry), and the superseded-by note on
+[[decisions/260617_long-running-work|long-running-work]].

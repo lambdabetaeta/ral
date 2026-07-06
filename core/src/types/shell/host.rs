@@ -17,7 +17,7 @@ use crate::diagnostic::SourceDb;
 use crate::exit_hints::ExitHints;
 use crate::io::{Sink, TerminalState};
 use crate::process::{DurableRoot, ForegroundScope, TerminalLease};
-use crate::types::{AuditFragment, ReapNotice, WorkerEntry};
+use crate::types::{AuditFragment, ReapNotice, WorkerEntry, WorkerId};
 
 /// An in-flight terminal loan, returned by [`Shell::begin_terminal_loan`] and
 /// surrendered to [`Shell::end_terminal_loan`].
@@ -137,6 +137,14 @@ impl Shell {
     /// Never mutates the registry.
     pub fn workers(&self) -> Vec<WorkerEntry> {
         self.local.workers.snapshot()
+    }
+
+    /// Re-acquire one registered worker's entry by id, once a host has
+    /// learned it some other way (a ledger row it maintains).  A pure read
+    /// like [`Self::workers`]: renews no lease.  `None` names an id with no
+    /// live entry.
+    pub fn worker_by_id(&self, id: WorkerId) -> Option<WorkerEntry> {
+        self.local.workers.lookup(id)
     }
 
     /// Number of workers currently registered on this shell.

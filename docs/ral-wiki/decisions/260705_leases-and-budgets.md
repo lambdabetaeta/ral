@@ -8,6 +8,24 @@ status: active
 > and [[decisions/260630_long-session-resource-budgets|long-session-resource-budgets]];
 > amends the detached-worker lifetime policy and the no-introspection doctrine of
 > [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]].
+>
+> **Amended, 2026-07-06 — decided, not yet built:** the `workers` listing verb
+> below is retired. Returning the registry as a language value was itself
+> mislayered — the registry's own doc comment already assigned listing,
+> reaping, and caps to the host and the lease layer, never this door — and
+> every defect followed from that one mislayering: untransportable at the
+> host seam (`SerialValue::from_ground` rejects the live `Value::Handle`s a
+> listing carries), a soundness-compromised `∀α` scheme over a heterogeneous
+> handle list, and a `cmd` field that only ever held one of three hardcoded
+> placeholders. Legibility now splits by lease class, completing this page's
+> own "length is declared at birth" principle: the worker class gets no
+> model-facing listing at all, its idle-observation lease bounding the harm
+> of a forgotten spawn directly; the durable class's bound, already
+> legibility, becomes a host-owned pinned ledger row — never a computed
+> value — and `service` gains a mandatory `description`. `service-handle
+> <id>`, read off that row, is the narrow door back to a never-bound
+> service's handle. The sections below are revised in place; the retired
+> design moves to Alternatives considered.
 
 **A long-running exarch is threatened by two different kinds of growth: work
 that lives too long unseen, and state that accumulates unaccounted. This
@@ -149,23 +167,46 @@ already reused once for the agent tools).
   (`HandleInner`, `core/src/types/value.rs:317`); the registry mints a stable
   id and records it with the worker's spelling (`cmd`), start time, lease
   class, and — decisively — **the `Handle` itself**.
-- **The registry stores handles; listing returns them.** There is no by-id
-  control plane. `poll`, `await`, `race`, and `cancel` remain the only verbs
-  that touch a worker, and the handle remains the only capability — the
-  registry is a *directory of handles*, not a second authority. Rediscovery
-  after context compaction is: list, take the handle value back, resume the
-  ordinary idiom. This preserves the healthy half of the old doctrine — the
+- **The registry stores handles; there is still no general by-id control
+  plane over them.** `poll`, `await`, `race`, and `cancel` remain the only
+  verbs that touch a running worker, and the handle remains the only
+  capability. Rediscovery after a compaction erases a binding name no longer
+  runs through a listing — amended, 2026-07-06: the binding lease already
+  keeps any *named* handle of running work alive forever
+  ([[decisions/260629_agent-binding-reaping|agent-binding-reaping]]'s
+  `pins_running_work` — a binding whose value reaches a running worker is
+  never pruned, and bindings are shell state that survives compaction), so a
+  babysat worker's own name is the durable rediscovery path, not an
+  enumeration. The residual gap is a service that was never bound to a name
+  at all; **`service-handle <id>`**, reading the id off that service's host-pinned
+  ledger row, is the one narrow door back to its handle — built for the
+  durable class alone, because only it carries a legibility structure to
+  read an id off. This preserves the healthy half of the old doctrine — the
   concurrency page's own thesis was "the handle is the evidence of
-  detachment" — and dissolves the superseded page's open question about a
-  cancel-by-id surface: there is nothing to cancel by id, because listing
-  hands back the thing `cancel` already takes.
-- **Exarch registers the listing verb, `workers`**, the exact parallel of its
-  `agents` tool. The REPL keeps its POSIX job control
-  ([[map/repl/jobs|repl/jobs]]) untouched; the registry exists in every shell
-  regardless (it is cheap), so the survivor warning
-  [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]] deferred —
-  Ctrl-C leaving live workers prints their names and points at Ctrl-`\` —
-  becomes an ordinary registry consumer whenever the REPL wants it.
+  detachment" — without reopening the by-id control plane rejected below:
+  `service-handle` mints no second `poll`/`cancel`-by-id surface, it only
+  re-establishes the binding a name would ordinarily hold, after which the
+  ordinary eliminators apply.
+- **Legibility splits by lease class — amended, 2026-07-06.** Exarch does not
+  register a listing verb over the registry; the registry exists in every
+  shell regardless (it is cheap), but exposing it as a language value was the
+  mislayering this page's own worker-registry doc comment already warned
+  against. The worker class gets no model-facing listing at all: its
+  idle-observation lease already bounds the harm of a forgotten spawn to at
+  most an hour of one seat out of the per-agent cap, so a rail card at birth
+  and a reap card at death are the entire legibility story, carried by the
+  tool call's own mandatory `description` and the transcript reap event
+  below — no reap notice needs to ride a model-facing channel on top of
+  that. The durable class's bound was always legibility; it is now a
+  **host-owned pinned ledger row** per live service — id, description, age —
+  rendered from the registry and re-injected across compaction like any pin,
+  never computed by the program as a value. `service` gains a **mandatory
+  `description` argument** to fill that row (exarch-only, so no cross-host
+  signature question arises). The REPL keeps its POSIX job control
+  ([[map/repl/jobs|repl/jobs]]) untouched either way — it never had
+  `workers` — and the survivor warning
+  [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]] deferred
+  is served by the same reap-card mechanism, not a listing consumer.
 - **Entry lifecycle.** A `Running` entry is governed by its lease (below). On
   settle the entry remains as a *settled* record under a short retention
   lease: the registry is where an unclaimed result waits, out of band — the
@@ -180,10 +221,16 @@ already reused once for the agent tools).
   cap, and the per-handle sink caps. Every removal by policy
   emits a compact transcript event, symmetric with binding-prune events —
   the model's later "where did my job go?" always has an answer in the log.
-  Model-visible delivery of a reap, if any, waits for
-  [[decisions/260622_sync-surface-async-notify|sync-surface-async-notify]],
-  where a reap notice is simply a completion notice carrying its cause;
-  until then, transcript-only.
+  Model-visible delivery of a reap is settled, not deferred — amended,
+  2026-07-06: the worker class's whole legibility story is the rail card at
+  birth and the reap card at death, both host-facing, and the
+  idle-observation lease already bounds the cost of the model never being
+  told directly (at most an hour, one seat of the per-agent cap). No reap
+  notice needs to ride a model-facing channel on top of that, so
+  [[decisions/260622_sync-surface-async-notify|sync-surface-async-notify]]'s
+  general completion-notice design is left for other channels, not required
+  here; this page's reap events stay transcript/TUI-only, now by decision
+  rather than by default.
 - **`/clear` outranks every lease.** It already rebuilds the focused agent's
   shell and cascades cancellation through its subtree; it now also cancels
   that shell's registered workers, the durable class included. Explicit
@@ -217,10 +264,14 @@ its renewal signal is a guess. The existing lifetimes, restated:
   handle's own locks; one more touch is free. Because the cell lives with the
   handle, observation renews from anywhere the handle travels — a parent's
   binding, a child's forked scope, a closure capture.
-- **Enumeration is not observation.** Listing (`workers`, `/resources`, the
-  survivor warning) never renews a lease. Interest is *naming* a worker, not
-  scanning past it; if listing renewed, the operator's own diagnostics would
-  immortalise every zombie they exist to reveal.
+- **Enumeration is not observation.** `/resources` and the survivor warning
+  never renew a lease, and neither does rendering the durable class's pinned
+  ledger row — amended, 2026-07-06: none of these is a model-facing listing
+  to begin with, now that the worker class carries no listing at all.
+  Interest is *naming* a worker through an eliminator, or a `service-handle`
+  call, never scanning past it; if rendering a pin renewed anything, the
+  operator's own diagnostics would immortalise every zombie they exist to
+  reveal.
 - **The backstop stays.** An ordinary spawn also carries a 24-hour absolute
   ceiling the model cannot extend by ritual polling. The host keeps a hard
   bound on the construct that is *supposed* to be bounded; work that
@@ -237,13 +288,18 @@ its renewal signal is a guess. The existing lifetimes, restated:
   spelling question (`daemon` mis-suggests surviving process exit; `disown`
   and `job` are REPL job-control vocabulary) — births a worker whose registry
   entry carries the durable class: no idle bound, no backstop. Its bound is
-  *legibility*: listed by `workers`, visible in `/resources`, cancellable
-  through its handle, dead with the process. A backstop on the construct whose
-  purpose is outliving ceilings would re-import the problem it solves;
-  visibility replaces mortality. Everything else about the worker is ordinary
-  — a real `Handle`, the same eliminators, the same registry — which is what
-  the superseded page's Regime 1 wanted, delivered as one enum value instead
-  of a parallel subsystem.
+  *legibility*: amended, 2026-07-06, a **host-owned pinned ledger row** (id,
+  description, age) rendered from the registry and re-injected across
+  compaction like any pin — never a listing verb, never a value the program
+  computes — visible in `/resources`, cancellable through its handle, dead
+  with the process. `service` now takes a mandatory `description` alongside
+  its thunk, to fill that row. A backstop on the construct whose purpose is
+  outliving ceilings would re-import the problem it solves; visibility
+  replaces mortality, and visibility is now structural rather than queried.
+  Everything else about the worker is ordinary — a real `Handle`, the same
+  eliminators, the same registry — which is what the superseded page's
+  Regime 1 wanted, delivered as one enum value instead of a parallel
+  subsystem.
 - **Birth, not promotion — for intent, no longer for mechanism.** A server or
   a multi-hour run is known to be long at launch, so the durable class is
   declared at birth; that argument stands. The superseded page's *mechanical*
@@ -322,8 +378,8 @@ whole; they were right. Restated tightly, with what this page adds:
   will be debugged by restarting the process.
 - **New — the registry is an accumulator too.** Live workers per agent are
   capped, generously; at the cap, `spawn` *rejects* with a diagnostic naming
-  the remedies (await, cancel, list) rather than admitting work the host
-  cannot afford — the inbox rule applied to admission. This is per-agent, so
+  the remedies (await, cancel) rather than admitting work the host cannot
+  afford — the inbox rule applied to admission. This is per-agent, so
   it does not couple sibling branches' budgets, the ground on which
   [[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]] rejected a
   fleet-wide agent cap. Admission pressure is rejected; abandonment is
@@ -356,15 +412,24 @@ First-implementation numbers, all visible in `/resources`, none buried:
   `Cancelled` handle unpins its name into ordinary scratch; 256 idle calls
   later the binding lease prunes the name. The model's later
   `undefined variable` always has a paper trail.
-- **Compaction stops being lethal to long work.** Losing a binding name no
-  longer loses the worker: list, retake the handle, resume polling. The
-  registry, not the lexical scope, is the durable name space for running work.
-- **The old doctrine is retired with a precise replacement.** Not "detached
-  workers are unmanaged by design" but: *detached workers are unmanaged by
-  default — nothing requires management, everything permits it.* The language
-  gains no ambient authority: `workers` and `service` are host-registered
-  affordances like `watch`, and a bare ral host has a registry no verb
-  exposes.
+- **Compaction stops being lethal to long work — for named work, and for
+  services by a narrower door.** Losing a binding name never loses a worker
+  that was ever bound: the binding lease keeps a named handle of running work
+  alive regardless of compaction, so re-reading the name resumes polling.
+  Amended, 2026-07-06: a service that was never bound at all is the one case
+  compaction can strand, and it is not stranded either — `service-handle <id>`
+  off the durable class's pinned ledger row hands the handle back. The
+  registry,
+  not the lexical scope, is the durable home for a running worker's identity.
+- **The old doctrine is retired with a precise replacement, twice over.** Not
+  "detached workers are unmanaged by design" but: *detached workers are
+  unmanaged by default — nothing requires management, everything permits
+  it.* Amended, 2026-07-06: permission itself is now graded by class — the
+  worker class permits no management beyond its own eliminators, the lease
+  being the whole story; the durable class permits legibility structurally,
+  through a pin, never a queried value. The language gains no ambient
+  authority: `service` is a host-registered affordance like `watch`, and a
+  bare ral host has a registry no verb exposes at all.
 - **One vocabulary where there were four mechanisms.** The death-clock, the
   binding ledger, the agent ceiling, and the durable-job registry become rows
   of one lease table and entries of one registry pattern; the two independent
@@ -392,10 +457,15 @@ First-implementation numbers, all visible in `/resources`, none buried:
 - **[[decisions/260617_long-running-work|long-running-work]] — superseded.**
   Its headline question is answered: Regime 1, delivered as the durable lease
   class of the universal registry; Regime 2 deferred unchanged. Its settled
-  points survive inside this page: birth not promotion (intent argument),
-  a distinct exarch-registered verb (now spelled `service`), listability
-  (now universal). Its cancel-by-id question dissolves (listing returns
-  handles); its pinning requirement dissolves (the registry holds the handle).
+  points survive inside this page: birth not promotion (intent argument), a
+  distinct exarch-registered verb (now spelled `service`, now with a
+  mandatory `description`). Listability does not survive as a universal
+  listing verb — amended, 2026-07-06: the worker class carries none at all,
+  and the durable class's listability is a host-owned pinned ledger row, not
+  a queried value. Its cancel-by-id question is answered narrowly, not
+  dissolved: `service-handle <id>` re-acquires a never-bound service's handle
+  off that row; its pinning requirement dissolves as originally argued (the
+  registry holds the handle regardless).
 - **[[decisions/260630_long-session-resource-budgets|long-session-resource-budgets]]
   — superseded.** Every per-accumulator decision carries forward; this page
   adds the probe convention, the registry as the workers' accounting spine and
@@ -439,7 +509,11 @@ First-implementation numbers, all visible in `/resources`, none buried:
   diagnostics would keep alive everything they exist to expose.
 - **A by-id control plane** (`cancel <id>`, `poll <id>`). Rejected: it would
   mint a second authority over workers beside the handle and a second set of
-  verbs beside the eliminators. Listing returns handles; the capability story
+  verbs beside the eliminators. Amended, 2026-07-06: `service-handle <id>` is
+  a deliberately narrow exception, not a reopening of this rejection — it
+  re-acquires a never-bound service's handle off its host-pinned ledger row
+  and hands back the capability itself; every operation after that still
+  goes through the handle and the ordinary eliminators. The capability story
   stays single.
 - **Fuse `service` with survives-exit work.** Still rejected: different
   observability (handle versus pid and exit status), different lifetime,
@@ -454,6 +528,22 @@ First-implementation numbers, all visible in `/resources`, none buried:
   resource policy, process death loses live state that logs cannot resume,
   clearing changes semantics, and unbounded presentation can still kill the
   authoritative loop.
+- **Keep `workers` as a language-level listing builtin.** Rejected,
+  2026-07-06: its defects were not roughness to sand down but consequences of
+  one mislayering. The registry's own doc comment already assigned listing,
+  reaping, and caps to the host and the lease layer, never this door; a
+  returned listing is untransportable at the host seam
+  (`SerialValue::from_ground` rejects the live `Value::Handle`s every entry
+  carries); it forced a soundness-compromised `∀α` scheme over a
+  heterogeneous handle list; and its `cmd` field only ever held one of three
+  hardcoded placeholders (`"<block>"`, `"<watch>"`, `"<service>"`) — zero
+  identifying information. Retired rather than patched.
+- **Give the worker class the same host-pinned ledger row as the durable
+  class.** Rejected, 2026-07-06: the worker class's idle-observation lease
+  already bounds a forgotten spawn's cost to at most an hour of one seat out
+  of the per-agent cap; a structural affordance would buy legibility the
+  class does not need to pay for. The durable class earns its row precisely
+  because it arms no chain that would otherwise bound it.
 
 ## Open questions — resolved or deferred, 260705
 
@@ -479,9 +569,12 @@ Every open question on this page was settled before implementation began.
   appears. Ceiling-less branch children (`dev/docs/260705_branch_minimal.md`)
   already prove the lease-class move at the agent layer, so the shape is
   known when the need arrives.
-- **The REPL gets no `workers` verb**: the `jobs` fold and the survivor
-  warning ([[decisions/260705_session-ledger|session-ledger]]) are its whole
-  surface.
+- **No host gets a `workers` verb, as of 2026-07-06** — not the REPL, and no
+  longer exarch either: the `jobs` fold and the survivor warning
+  ([[decisions/260705_session-ledger|session-ledger]]) are the REPL's whole
+  surface; exarch's worker-class surface is a rail card at birth and a reap
+  card at death, and its durable-class surface is the pinned ledger row plus
+  `/resources`. No host lists the raw registry as a language value.
 
 ## See also
 

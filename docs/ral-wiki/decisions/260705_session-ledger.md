@@ -4,6 +4,15 @@ status: active
 
 # A session is a ledger of residents
 
+> Amended, 2026-07-06 — decided, not yet built: the worker chapter's
+> model-facing listing (`workers`) is retired, split by lease class instead —
+> see [[decisions/260705_leases-and-budgets|leases-and-budgets]] for the full
+> reasoning. The ledger's shape is unaffected: the worker chapter still
+> answers identity, capability, lease, and probe; only its *listing* fold
+> changes, from a queried value to nothing (worker class) or a host-pinned
+> row plus `service-handle <id>` (durable class). `agents` remains exarch's
+> per-chapter listing verb; the worker chapter now has none.
+
 **Everything that stays alive between turns — a detached worker, a stopped
 pipeline group, a sub-agent, a schedule, a top-level binding — is a
 *resident*, and a resident has exactly four facets: an identity in the
@@ -24,8 +33,9 @@ structs.**
 
 - **The worker registry**
   ([[decisions/260705_leases-and-budgets|leases-and-budgets]]): every detached
-  worker, registered at birth, holding the `Handle` itself; listed by
-  `workers`; governed by idle-observation leases.
+  worker, registered at birth, holding the `Handle` itself; legible by lease
+  class — no model-facing listing for the worker class, a host-pinned ledger
+  row for the durable class — governed by idle-observation leases.
 - **The agent registry** (`exarch/src/agent_registry.rs`): every live agent as
   a tree; listed by `agents`, cancelled by `agent_cancel` with a subtree
   cascade; a `/clear` generation; a fixed one-hour ceiling per child.
@@ -59,9 +69,12 @@ The split was decreed when it was true:
 ruled that the job table "is not a management layer over `&` or `spawn`" and
 that job control "gains no spawn-handle analogue" — correct while detached
 handles were unlisted by design. [[decisions/260705_leases-and-budgets|leases-and-budgets]]
-then built `workers`, which *is* the spawn-handle analogue of `jobs`. The
-separation doctrine needs restating before it hardens around a premise that no
-longer holds.
+then built a universal worker registry whose handles *are* listable — first
+through exarch's `workers` verb, since retired, and, since parcel 9, directly
+through the REPL's own `jobs` fold, which reads the registry rather than that
+verb. Either way the premise died: detached handles are no longer unlisted by
+design. The separation doctrine needs restating before it hardens around a
+premise that no longer holds.
 
 ## Decision
 
@@ -159,9 +172,14 @@ pre-stated: present the four facets, occupy grade 4, and answer the probe.
   handoff), `cancel` its kill. A settled-but-unclaimed handle job appears
   marked done until its result is observed, then leaves the listing — the
   analogue of POSIX printing `Done` at the next prompt — so an unclaimed
-  result is never invisible in a host with no retention epoch. `workers` and `agents` stay the per-chapter
-  projections in exarch; which chapters a host verb projects is host policy,
-  that every chapter is *in* the fold is not.
+  result is never invisible in a host with no retention epoch. `agents` stays
+  exarch's per-chapter projection for the fleet; the worker chapter gets
+  none, as of 2026-07-06 — the ephemeral class rides its lease bound instead
+  of a listing, the durable class rides a host-pinned ledger row instead of
+  one ([[decisions/260705_leases-and-budgets|leases-and-budgets]]). Which
+  chapters a host verb projects, and whether it projects one as a queried
+  listing or a rendered pin, is host policy; that every chapter is *in* the
+  fold is not.
 - **One exit story.** Shell exit is a warn-then-sweep fold over the ledger:
   undisowned groups swept as today, live workers named — the survivor warning
   [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]] deferred

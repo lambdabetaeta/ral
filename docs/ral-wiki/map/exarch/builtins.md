@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 0a9ba7d
-generated_at_date: 2026-07-05
+generated_at_commit: d501492
+generated_at_date: 2026-07-06
 covers_paths: [exarch/src/agent_builtins.rs, exarch/data/agent.ral]
 ---
 
@@ -65,36 +65,55 @@ Reads resolve through `checked_read_path` / `check_fs_read`; the `edit` write
 goes through `check_fs_write` under the turn's pushed [[design/grant|grant]]
 frame ([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]]).
 
-## The worker registry — `workers`, `service`
+## Legibility by lease class — `service`, `service-handle`
 
-`workers` → `[{id, cmd, started, class, state, handle}]`. Lists this agent's
-detached workers (`spawn`, `service`), settled or still running — the exact
-parallel of the `agents` tool's fleet listing ([[map/exarch/tools|tools]]),
-and the affordance that retires "detached workers are unmanaged by design":
-`class` reads `worker` for an ordinary `spawn` and `durable` for a
-`service`-born worker, `state` reads `running`/`settled`/`cancelled` off the
-handle's own lifecycle. There is no by-id control plane — `handle` is the
-worker's own `Handle`, retaken directly, so rediscovery after a compaction
-erases the binding name is: list, take the handle back, and resume
-`poll`/`await`/`race`/`cancel` as usual. Listing never renews a worker's
-idle-observation lease; only an eliminator naming the handle does — polling a
-handle retaken from a listing renews it exactly like polling any other handle
-([[decisions/260705_leases-and-budgets|leases-and-budgets]]).
+There is no model-facing listing over the worker registry at all —
+`workers` was retired: a listing carrying live `Value::Handle`s cannot cross
+the host seam (`SerialValue::from_ground` rejects them), and returning the
+registry as a language value was mislayered in the first place — enumeration,
+reaping, and caps belong to the host and the lease layer, never this door
+([[decisions/260705_leases-and-budgets|leases-and-budgets]]). Legibility now
+splits by class instead:
 
-`service <thunk>` is the durable-birth verb beside the listing: an ordinary
+- An ordinary `spawn`-born worker (`class: Worker`) gets no listing at all.
+  Its idle-observation lease already bounds a forgotten spawn's harm to at
+  most an hour of one seat out of the cap, so a rail card at birth and a
+  reap card at death are the whole story
+  ([[map/exarch/shell-eval|shell-eval]]).
+- A `service`-born worker (`class: Durable`) is bound only by legibility, so
+  that bound is structural: the host reconciles a protected `services` pin —
+  one row per live service, keyed by id and its birth description, born and
+  retired at the same boundary pass `drain_worker_reaps` runs at
+  (`Agent::reconcile_service_pins`, `card::services_pin_card`). The pin is
+  unwritable by the program, the same way a `commitment:*` pin is
+  ([[decisions/260703_protected-commitment-pins|protected-commitment-pins]]).
+
+`service <desc> <thunk>` → `Handle`. The durable-birth verb: an ordinary
 buffered spawn registered under the durable class, which arms no lease chain
-— no idle reap, no 24 h backstop. Its bound is legibility: listed by
-`workers` with `class: "durable"`, cancellable through its handle, dead with
-`/clear` or the process. Length is declared at birth, never promoted into
-after the fact. The atom itself lives in core (`SERVICE_BUILTIN`, the `watch`
-mechanism with the hosts swapped — [[map/core/builtins|map: core builtins]]);
-exarch is the host that installs it, because only under exarch's lease frame
-does a durable birth distinguish anything.
+— no idle reap, no 24 h backstop. `desc` is now a mandatory, non-empty,
+single-line `String` — the whole legibility bound a durable birth declares,
+so it cannot be absent — and lands verbatim (trimmed) as the registry
+entry's `cmd`, which is what the `services` pin renders. Cancellable through
+its handle, dead with `/clear` or the process. Length is declared at birth,
+never promoted into after the fact. The atom itself lives in core
+(`SERVICE_BUILTIN`, the `watch` mechanism with the hosts swapped —
+[[map/core/builtins|map: core builtins]]); exarch is the host that installs
+it, because only under exarch's lease frame does a durable birth distinguish
+anything.
+
+`service-handle <id>` → `Handle`. The one narrow door back to a never-bound
+service's handle: looked up among this shell's `LeaseClass::Durable` entries
+only, by the id shown on the `services` pin. An id naming an ephemeral
+`spawn`/`watch` worker is refused exactly like an unknown one — an ephemeral
+worker's rediscovery path is the binding lease, not enumeration by id. A bare
+top-level `service-handle N` result cannot cross the host seam (a `Handle` is
+not ground) — it exists to be composed with an eliminator in the same turn:
+`await (service-handle 3)`, `cancel (service-handle 3)`.
 
 Registered only by `agent_builtins::install_on`, alongside the search/edit
 atoms above: a bare REPL shell, which never installs `EXARCH_BUILTINS` (nor
-`SERVICE_BUILTIN`), has neither `workers` nor `service` — its own job control
-is [[map/repl/jobs|repl/jobs]].
+`SERVICE_BUILTIN`), has neither `service` nor `service-handle` — its own job
+control is [[map/repl/jobs|repl/jobs]].
 
 ## ral helpers — `agent.ral`
 

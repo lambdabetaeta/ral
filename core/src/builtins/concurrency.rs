@@ -168,7 +168,7 @@ impl Drop for FlushGuard {
 /// Under a frame that supplies a `worker_cap`, admission is reserved
 /// first: a birth of any class is refused while `cap` workers are already
 /// running or reserved, with an error naming the remedies (`await`,
-/// `cancel`, `workers`). The reservation is held across the thread spawn
+/// `cancel`). The reservation is held across the thread spawn
 /// and handle construction below and only released — into the registered
 /// entry it was reserved for — at the `register` call, so a sibling birth
 /// racing this one on another thread can never observe the seat this one
@@ -201,7 +201,7 @@ where
         Err(CapReached(cap)) => {
             return Err(sig(format!(
                 "spawn: {cap} workers already live on this agent; \
-                 await or cancel one, or list them with workers"
+                 await or cancel one"
             )));
         }
     };
@@ -541,13 +541,12 @@ fn spawn_labelled(
 
 // ── service ──────────────────────────────────────────────────────────────
 
-/// `service <thunk>` -- birth a durable worker: an ordinary buffered
-/// spawn in every respect except its [`LeaseClass::Durable`] registration,
-/// which arms no lease chain — no idle reap, no backstop.  Its bound is
-/// legibility: listed by the host's `workers` affordance, cancellable
-/// through its handle, dead with `/clear` or the process.  Length is
-/// declared at birth, never promoted into after the fact
-/// (`decisions/260705_leases-and-budgets`).
+/// `service <desc> <thunk>` -- birth a durable worker: an ordinary buffered
+/// spawn except for its [`LeaseClass::Durable`] registration — no idle reap,
+/// no backstop.  Its bound is legibility, not time: `desc` is mandatory,
+/// becomes the worker's `cmd` in the registry, and is what a host's own
+/// ledger shows for as long as the service lives.  Cancellable through its
+/// handle, dead with `/clear` or the process (`decisions/260705_leases-and-budgets`).
 ///
 /// Availability is the host's, the mirror image of `watch`: an agent host
 /// (exarch), whose lease frame would otherwise reap long work, installs it
@@ -556,14 +555,31 @@ fn spawn_labelled(
 /// spawns already lives until cancel or exit and a durable class would
 /// distinguish nothing.
 pub(super) fn builtin_service(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 1, "service")?;
-    let (body, captured) = expect_thunk(&args[0], "service")?;
+    check_arity(args, 2, "service")?;
+    let desc = match &args[0] {
+        Value::String(s) => s.trim().to_string(),
+        other => {
+            return Err(sig(format!(
+                "service: description must be a String, got {}",
+                other.type_name()
+            )));
+        }
+    };
+    if desc.is_empty() {
+        return Err(sig("service: description must be non-empty".to_string()));
+    }
+    if desc.contains('\n') {
+        return Err(sig(
+            "service: description must be a single line (no newlines)".to_string(),
+        ));
+    }
+    let (body, captured) = expect_thunk(&args[1], "service")?;
     Ok(Value::Handle(spawn_child(
         captured,
         shell,
         ChildIoMode::Buffered,
         LeaseClass::Durable,
-        "<service>",
+        &desc,
         // The worker body is the sole computation of a fresh thread,
         // under the trivial continuation the thread's join provides;
         // `spawn_child` absorbs any terminal tail call on that thread.
@@ -1526,6 +1542,79 @@ mod tests {
         );
     }
 
+    // ── `service`'s mandatory description ────────────────────────────────
+
+    /// Run `src` as one capturing top-level turn with `SERVICE_BUILTIN`
+    /// installed, returning the runtime result. Panics on a parse/type
+    /// failure — every source these tests run is expected to compile.
+    fn run_service_source(shell: &mut Shell, src: &str) -> Settled<Value> {
+        use crate::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
+        let req = TurnRequest {
+            script_name: "<test>",
+            caps: Capabilities::root(),
+            turn_limit: None,
+            detached_lease: None,
+            worker_cap: None,
+            io: TurnIo::Capture,
+            terminal: RequestedTerminalAccess::Denied,
+            stdin: TurnStdin::Empty,
+            surface: None,
+            boundary: None,
+            lifecycle: Box::new(()),
+        };
+        match shell.run_source_turn(src, req) {
+            TurnReport::Ran { result, .. } => result,
+            TurnReport::Static { .. } => {
+                panic!("well-formed source must run, not fail statically: {src:?}")
+            }
+        }
+    }
+
+    fn service_test_shell() -> Shell {
+        let mut shell = Shell::new(Default::default());
+        crate::builtins::register_builtins(crate::builtins::SERVICE_BUILTIN);
+        shell.install_builtins(crate::builtins::SERVICE_BUILTIN);
+        shell
+    }
+
+    /// An empty (or whitespace-only, after trim) description is refused:
+    /// it is the whole legibility bound a durable birth declares, so it
+    /// cannot be absent.
+    #[test]
+    fn service_rejects_an_empty_description() {
+        let mut shell = service_test_shell();
+        let err = run_service_source(&mut shell, r#"service "   " { 1 }"#)
+            .expect_err("an empty description must be refused");
+        assert_eq!(status(err), 1);
+    }
+
+    /// A multi-line description is refused: it is a one-line ledger label,
+    /// not a paragraph.
+    #[test]
+    fn service_rejects_a_multiline_description() {
+        let mut shell = service_test_shell();
+        let err = run_service_source(&mut shell, "service \"one\ntwo\" { 1 }")
+            .expect_err("a multiline description must be refused");
+        assert_eq!(status(err), 1);
+    }
+
+    /// A valid description lands verbatim (trimmed) as the registry
+    /// entry's `cmd` — what a host's own ledger shows for the service.
+    #[test]
+    fn service_description_lands_in_the_registry_entry() {
+        let mut shell = service_test_shell();
+        let handle = match run_service_source(&mut shell, r#"service "  watch the thing  " { 1 }"#)
+        {
+            Ok(Value::Handle(h)) => h,
+            other => panic!("service must return a Handle, got {other:?}"),
+        };
+        let entries = shell.workers();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].class, LeaseClass::Durable);
+        assert_eq!(entries[0].cmd, "watch the thing", "the description trims");
+        handle.cancel.cancel(crate::process::CancelCause::Explicit);
+    }
+
     /// A detached worker's `surface` events are buffered, not emitted live,
     /// and replay through the *awaiting* turn's surface exactly once: `poll`
     /// never replays, the first `await` replays, and a second `await` does
@@ -2242,9 +2331,9 @@ mod tests {
 
     /// The cap refuses the (cap+1)th birth at the door: with two gated
     /// workers running under `worker_cap: Some(2)`, a third spawn errors —
-    /// naming `await`, `cancel`, and `workers` as the remedies — and
-    /// registers nothing; cancelling one frees a seat, and the next birth
-    /// is admitted.
+    /// naming `await` and `cancel` as the remedies — and registers
+    /// nothing; cancelling one frees a seat, and the next birth is
+    /// admitted.
     #[test]
     fn worker_cap_rejects_at_the_door_and_frees_on_cancel() {
         let mut shell = Shell::new(Default::default());
@@ -2283,7 +2372,7 @@ mod tests {
             Err(Break::Error(e)) => e,
             other => panic!("the capped birth must be refused, got {other:?}"),
         };
-        for remedy in ["await", "cancel", "workers"] {
+        for remedy in ["await", "cancel"] {
             assert!(
                 err.message.contains(remedy),
                 "the refusal must name `{remedy}`: {}",

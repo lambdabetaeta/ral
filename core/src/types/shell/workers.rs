@@ -413,6 +413,18 @@ impl WorkerRegistry {
         self.0.lock().unwrap().entries.clone()
     }
 
+    /// Clone out the one entry named by `id`, or `None` if it names
+    /// nothing live.  A pure read like [`Self::snapshot`]: renews no lease.
+    pub(crate) fn lookup(&self, id: WorkerId) -> Option<WorkerEntry> {
+        self.0
+            .lock()
+            .unwrap()
+            .entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .cloned()
+    }
+
     /// Number of registered entries.
     pub(crate) fn count(&self) -> usize {
         self.0.lock().unwrap().entries.len()

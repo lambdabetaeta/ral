@@ -911,9 +911,10 @@ pub mod scheme {
         )
     }
 
-    /// `service :: ∀α μ₀ μ₁. U(F[μ₀,μ₁] α) → F (Handle α)` — `spawn`'s
-    /// scheme exactly; the durable class is a runtime registration fact,
-    /// invisible to the types.
+    /// `service :: ∀α μ₀ μ₁. String → U(F[μ₀,μ₁] α) → F (Handle α)` —
+    /// `watch`'s scheme, with the leading `String` now the mandatory birth
+    /// description. The durable lease class is a runtime fact, invisible
+    /// to the types.
     pub fn service(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
@@ -922,7 +923,10 @@ pub mod scheme {
             &[av],
             &[m0, m1],
             &[],
-            thunk(fun(thunk(body), pure(Ty::Handle(Box::new(a))))),
+            thunk(fun(
+                Ty::String,
+                fun(thunk(body), pure(Ty::Handle(Box::new(a)))),
+            )),
         )
     }
 

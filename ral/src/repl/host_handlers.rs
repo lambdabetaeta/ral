@@ -57,7 +57,7 @@ fn job_id_arg(args: &[Value], jobs: &crate::jobs::JobTable) -> Option<usize> {
 /// handle's own eliminators, never a bare "no such job" that leaves a user
 /// who tried a `[wN]` designator from `jobs` with no next step.
 const NOT_A_PGID_JOB: &str = "no such job — fg/bg/disown are pgid-only; a worker handle's own \
-     eliminators are its analogues: `await` is its fg, `cancel` its kill (see `jobs`, `workers`)";
+     eliminators are its analogues: `await` is its fg, `cancel` its kill (see `jobs`)";
 
 // ── jobs ─────────────────────────────────────────────────────────────────────
 
@@ -68,7 +68,7 @@ const NOT_A_PGID_JOB: &str = "no such job — fg/bg/disown are pgid-only; a work
 /// `[n]`. A worker renders `running (worker)` while its handle is live and
 /// `done (worker)` once settled but unclaimed — the POSIX-`Done` analogue —
 /// until an eliminator observes it away, at which point it is simply no
-/// longer in `workers` and this fold never sees it again: no separate
+/// longer in the registry and this fold never sees it again: no separate
 /// retention state lives here, and no lease is renewed by listing
 /// (`Shell::workers()` already guarantees both).
 fn render_jobs(jt: &crate::jobs::JobTable, workers: &[WorkerEntry]) -> Vec<String> {
@@ -186,7 +186,7 @@ fn build_bg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
         name: Cow::Borrowed("bg"),
         type_rule: BuiltinTypeRule::Sig(sig::OPTIONAL_INT_TO_UNIT),
         doc: "bg [id]  — resume pgid job [id] (default: most recent) in the background. \
-              pgid-only: a worker handle already runs detached — see `workers`.",
+              pgid-only: a worker handle already runs detached — see `jobs`.",
         body: BuiltinBody::Captured(Arc::new(move |args, _shell| {
             let mut jt = jobs.lock().unwrap();
             let Some(id) = job_id_arg(args, &jt) else {

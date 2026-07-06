@@ -1,6 +1,6 @@
 ---
-verified_at_commit: a87b548
-verified_at_date: 2026-07-05
+verified_at_commit: d501492
+verified_at_date: 2026-07-06
 anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild::drain, spawn_child, PgidPolicy::NewLeader, process::reaper, WorkerLease, WorkerRegistry, lease_fire]
 ---
 
@@ -82,9 +82,16 @@ The escape is detachment — the *handle* is its evidence
   its shell's `WorkerRegistry` the instant it starts (`core/src/types/shell/workers.rs`):
   a per-shell directory holding the handle itself, not a second by-id control
   plane. `poll`, `await`, `race`, and `cancel` stay the only verbs that touch a
-  worker, so "rediscover a worker" after context compaction erased its binding
-  name is just `workers` to list, then take the handle back and resume the
-  ordinary idiom (`workers` builtin, `exarch/src/agent_builtins.rs`).
+  worker, and there is no model-facing listing over the registry at all — the
+  `workers` builtin was retired, since a listing carrying live `Value::Handle`s
+  can never cross the host seam. Rediscovery instead splits by class: an
+  ordinary `spawn`/`watch` worker (`LeaseClass::Worker`) is rediscovered
+  through the binding lease, never by id; a `service`-born worker
+  (`LeaseClass::Durable`) is rediscovered through the host-owned `services`
+  pin, which shows each live service's id and birth description, and
+  `service-handle <id>` (`exarch/src/agent_builtins.rs`) takes the handle back
+  by that id to resume the ordinary eliminator idiom
+  ([[map/exarch/builtins|builtins]]).
 - An ordinary `spawn`/`watch` worker (`LeaseClass::Worker`) is governed by the
   frame's `WorkerLease`: an idle bound on the *observation* clock, under an
   absolute backstop. It is reaped once unobserved — no `poll`/`await`/`race`
@@ -103,11 +110,12 @@ The escape is detachment — the *handle* is its evidence
   unclaimed result under its own, separate retention lease (256 idle ral
   calls, `SETTLED_WORKER_RETENTION`), swept by `WorkerRegistry::advance_epoch`
   on the host's ral-call epoch.
-- `service { … }` births a worker whose registry entry carries the durable
-  class (`LeaseClass::Durable`): no idle bound, no backstop ever arms for it —
-  legibility (listed by `workers`, cancellable through its handle) is the
-  whole bound, and it dies only by `/clear`, an explicit `cancel`, or process
-  exit.
+- `service <desc> { … }` births a worker whose registry entry carries the
+  durable class (`LeaseClass::Durable`): no idle bound, no backstop ever arms
+  for it — legibility is the whole bound, structural now that `desc` is a
+  mandatory single-line description: the host's `services` pin lists it by
+  id and description, `service-handle <id>` retakes its handle, and it dies
+  only by `/clear`, an explicit `cancel`, or process exit.
 - Every reap — idle, backstop, or settled-retention — is atomic with a
   `ReapNotice` recording what fell and why, drained at the host's ready
   boundaries (`Shell::take_worker_reap_notices`, `Agent::drain_worker_reaps`,
@@ -136,7 +144,7 @@ The escape is detachment — the *handle* is its evidence
   accumulated output with `poll $h` on later turns, `cancel $h` when done. `poll`
   is also what keeps a plain `spawn`ed server alive past an hour of inattention
   — it renews the idle-observation lease. A server known at birth to go long
-  stretches unpolled wants `service { … }` instead: born with no idle bound and
+  stretches unpolled wants `service <desc> { … }` instead: born with no idle bound and
   no backstop, it never reaps for inattention, only by `/clear`, `cancel`, or
   process exit. To keep a full, unbounded log past the 16 MiB cap, still
   redirect inside the block to a file — `spawn { python3 -m http.server >

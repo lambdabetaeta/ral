@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 5bdb65a
-generated_at_date: 2026-07-05
+generated_at_commit: d501492
+generated_at_date: 2026-07-06
 covers_paths: [core/src/builtins/, core/src/builtins.rs]
 ---
 
@@ -83,8 +83,9 @@ Bodies are grouped by concern, one submodule each:
   The spawn door also enforces the frame's admission cap
   (`TurnState::worker_cap`): a birth of any class is refused — before any
   thread or registry entry exists — while `cap` registered workers are
-  still running, with an error naming `await`/`cancel`/`workers` as the
-  remedies; settled entries lingering under retention hold no seat. A
+  still running, with an error naming `await`/`cancel` as the remedies
+  (`workers` is retired — [[map/exarch/builtins|builtins]]); settled entries
+  lingering under retention hold no seat. A
   settled entry's own lease is retention: the host's per-call epoch sweep
   (`Shell::advance_worker_epoch`) stamps an entry at the first sweep that
   observes it settled and expires it — a `Retention`-cause `ReapNotice` on

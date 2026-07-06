@@ -734,6 +734,30 @@ pub fn large_binding_card(name: &str, bytes: u64) -> Card {
     Card(vec![Mark::Text { spans }])
 }
 
+// ── `services`: the host-owned durable-service ledger ────────────────────
+
+/// Compose every live durable service into one ledger card — one
+/// [`Mark::Fields`] row per service, labelled by the id `service-handle`
+/// takes and valued by its birth description and age.  Host-authored only
+/// (`Agent::reconcile_service_pins`): a durable service's whole bound is
+/// legibility, and this pin is what makes the live set legible.
+pub fn services_pin_card(services: &[ral_core::types::WorkerEntry]) -> Card {
+    let rows = services
+        .iter()
+        .map(|entry| {
+            let age = entry.started.elapsed().unwrap_or_default().as_secs();
+            Field {
+                label: format!("service {}", entry.id.0),
+                value: FieldVal::Inline(vec![span_plain(&format!(
+                    "{}  (up {age}s)",
+                    entry.cmd
+                ))]),
+            }
+        })
+        .collect();
+    Card(vec![Mark::Fields { rows }])
+}
+
 /// A [`Card`] as a compact one-line summary — the session-layer digest the
 /// nudge facility shows when reminding the model of its pinned state, where the
 /// TUI's framed rendering is out of reach.  Text marks concatenate their span

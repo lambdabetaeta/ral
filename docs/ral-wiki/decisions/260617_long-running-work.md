@@ -7,9 +7,13 @@ superseded_by: decisions/260705_leases-and-budgets
 
 > Superseded by [[decisions/260705_leases-and-budgets|leases-and-budgets]]: the
 > open regime question is answered as Regime 1, delivered as the durable lease
-> class of a universal worker registry; the verb is spelled `service`; the
-> cancel-by-id and binding-pinning questions dissolve because the registry
-> retains the handle itself and listing returns it.
+> class of a universal worker registry; the verb is spelled `service`, now
+> with a mandatory `description`. The binding-pinning question dissolves
+> because the registry retains the handle itself. The cancel-by-id question
+> is answered narrowly, not by a general listing: amended, 2026-07-06, the
+> registry grew a model-facing `workers` listing and then retired it again —
+> a never-bound durable job is instead re-acquired by `service-handle <id>`
+> off a host-owned pinned ledger row, never a queried value.
 
 **Work that must outlive the one-hour detached-worker death-clock is *born*
 durable — launched as its own construct with its own lifetime — not started as
