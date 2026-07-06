@@ -44,6 +44,12 @@ static CURRENT_CONTROL: OnceLock<ControlSender> = OnceLock::new();
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DispatchId(pub u64);
 
+/// Correlation token for one outstanding enquiry. Unused in Phase A (the
+/// identity transport is a direct call, no frames to correlate); minted now
+/// so Phase B's wire frames carry it without a retrofit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EnquiryId(pub u64);
+
 // ── Frame algebra ─────────────────────────────────────────────────────
 
 /// One frame that crosses the host seam in either direction.
@@ -401,6 +407,12 @@ pub struct IdentityTransport {
     control: ControlSender,
     /// Event receiver for the front-end.
     events_recv: EventReceiver,
+    /// Stamped with the dispatching thread's id for the duration of
+    /// `dispatch`, so a desk handler that reenters the session lock
+    /// (`dispatch`/`shell_mut`/`with_shell`) panics instead of deadlocking
+    /// (§3's reentrancy law). A separate short lock, never the session
+    /// lock — checking it must not touch `self.engine`.
+    dispatch_thread: std::sync::Mutex<Option<std::thread::ThreadId>>,
 }
 
 pub struct EngineInner {
@@ -412,10 +424,30 @@ pub struct EngineInner {
     surface_sink: Arc<PerDispatchSink>,
     /// The session-lived boundary sink for detached workers.
     boundary_sink: Option<Boundary>,
+    /// The installed enquiry desk, if any host has set one. `None` in
+    /// Phase A: no desk installed by any host, so `enquire` answers its
+    /// honest absence error.
+    desk: Option<crate::types::Desk>,
     /// The session terminal lease (set by Attach).
     terminal_lease: Option<crate::process::TerminalLease>,
     /// Shared dispatch id for boundary-sink correlation.
     current_dispatch: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// Clears the dispatch-thread stamp on drop, even on unwind — a turn that
+/// panics must not leave the stamp set, or the next legitimate
+/// `shell_mut`/`with_shell` call would false-trip the reentrancy panic.
+struct DispatchStampGuard<'a> {
+    slot: &'a std::sync::Mutex<Option<std::thread::ThreadId>>,
+}
+
+impl Drop for DispatchStampGuard<'_> {
+    fn drop(&mut self) {
+        *self
+            .slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
 }
 
 impl IdentityTransport {
@@ -436,6 +468,7 @@ impl IdentityTransport {
                 event_tx: boundary_tx,
                 current_dispatch: current_dispatch.clone(),
             })),
+            desk: None,
             terminal_lease: None,
             current_dispatch: current_dispatch.clone(),
         };
@@ -446,12 +479,20 @@ impl IdentityTransport {
             events_recv: EventReceiver {
                 rx: std::sync::Mutex::new(event_rx),
             },
+            dispatch_thread: std::sync::Mutex::new(None),
         }
     }
 
     /// Set the session boundary sink for deferred worker batches.
     pub fn set_boundary(&self, boundary: Boundary) {
         self.engine.lock().boundary_sink = Some(boundary);
+    }
+
+    /// Install the session's enquiry desk. Per-turn hosts (e.g. exarch, once
+    /// the migration lands) call this before each dispatch so whatever the
+    /// desk captures is fresh — the same reasoning `set_boundary` follows.
+    pub fn set_desk(&self, desk: crate::types::Desk) {
+        self.engine.lock().desk = Some(desk);
     }
 
     /// Consume the transport and recover the owned `Shell`.  The inverse of
@@ -461,11 +502,33 @@ impl IdentityTransport {
         self.engine.into_inner().shell
     }
 
+    /// Panic loudly if called from the thread currently running a dispatch —
+    /// the reentrancy law (§3): a desk handler that reaches back through
+    /// `dispatch`/`shell_mut`/`with_shell` would deadlock on the session lock
+    /// its own stack already holds. Checked *before* touching `self.engine`,
+    /// so a reentrant call panics instead of hanging.
+    fn check_not_reentrant(&self) {
+        let current = std::thread::current().id();
+        if *self
+            .dispatch_thread
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            == Some(current)
+        {
+            panic!(
+                "reentrant session access: a desk handler must not take the session lock \
+                 (dispatch/shell_mut/with_shell) — it runs inside the dispatch on the \
+                 dispatching thread and would deadlock under the identity transport"
+            );
+        }
+    }
+
     /// Access the underlying `Shell` through the mutex guard directly.
     /// This is needed when the caller must combine shell access with
     /// other borrows (e.g. the REPL session's frontend, jobs table).
     /// Prefer `with_shell` for simple operations.
     pub fn shell_mut(&self) -> std::sync::MutexGuard<'_, EngineInner> {
+        self.check_not_reentrant();
         self.engine.lock()
     }
 
@@ -474,13 +537,22 @@ impl IdentityTransport {
     where
         F: FnOnce(&mut crate::types::Shell) -> R,
     {
+        self.check_not_reentrant();
         f(&mut self.engine.lock().shell)
     }
 }
 
 impl Transport for IdentityTransport {
     fn dispatch(&self, id: DispatchId, turn: Turn) {
+        self.check_not_reentrant();
         let mut engine = self.engine.lock();
+        *self
+            .dispatch_thread
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(std::thread::current().id());
+        let _stamp_guard = DispatchStampGuard {
+            slot: &self.dispatch_thread,
+        };
 
         // Install the per-dispatch surface sink.
         engine.surface_sink.set_dispatch(id);
@@ -507,6 +579,7 @@ impl Transport for IdentityTransport {
             stdin: req.stdin,
             surface: Some(engine.surface_sink.clone() as SurfaceSink),
             boundary: engine.boundary_sink.clone(),
+            desk: engine.desk.clone(),
             lifecycle: Box::new(()),
         };
 
@@ -831,5 +904,192 @@ fn break_to_mirror(break_: crate::types::Break) -> BreakMirror {
                 signal_name: signal.name().unwrap_or("?").to_string(),
             },
         },
+    }
+}
+
+// ── Enquiry desk tests ────────────────────────────────────────────────
+//
+// Phase A installs no desk anywhere in production (§"the exarch installation
+// point" of the enquiry-channel ADR): the rail is exercised only here, by a
+// stub desk. There is no `enquire` builtin yet, so a turn's body (parsed ral
+// source) has no way to call `Shell::enquire` itself; the round-trip test
+// below drives it the same way `Shell::run_source_turn`'s own lifecycle
+// tests do — a `TurnLifecycle` given `&mut Shell` mid-turn, exactly the
+// shape the migration's first handler will run under.
+#[cfg(test)]
+mod enquiry_tests {
+    use super::*;
+    use crate::driver::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
+    use crate::turn::TurnLifecycle;
+    use crate::types::{Capabilities, Desk, EnquiryDesk, Error, Shell};
+    use std::sync::Mutex;
+
+    /// The minimal capturing request under the ⊤ capability ceiling, no
+    /// surface, no boundary, no desk — mirrors `turn.rs`'s own `capture_req`.
+    fn capture_req<'a>() -> TurnRequest<'a> {
+        TurnRequest {
+            script_name: "<test>",
+            caps: Capabilities::root(),
+            turn_limit: None,
+            detached_lease: None,
+            worker_cap: None,
+            io: TurnIo::Capture,
+            terminal: RequestedTerminalAccess::Denied,
+            stdin: TurnStdin::Empty,
+            surface: None,
+            boundary: None,
+            desk: None,
+            lifecycle: Box::new(()),
+        }
+    }
+
+    /// A `Shell` with no desk installed answers every enquiry with the
+    /// honest absence error, verbatim.
+    #[test]
+    fn absent_desk_answers_the_honest_error() {
+        let shell = Shell::new(Default::default());
+        let err = shell
+            .enquire(FOValue::Unit)
+            .expect_err("no desk is installed");
+        assert_eq!(err.message, "this host answers no enquiries");
+    }
+
+    /// A stub desk that maps `Int{n}` to `Int{n+1}`, otherwise echoes.
+    struct IncrementDesk;
+    impl EnquiryDesk for IncrementDesk {
+        fn enquire(&self, req: FOValue) -> Result<FOValue, Error> {
+            match req {
+                FOValue::Int { value } => Ok(FOValue::Int { value: value + 1 }),
+                other => Ok(other),
+            }
+        }
+    }
+
+    /// A `TurnLifecycle` that enquires mid-turn (`pre_exec`, which runs with
+    /// the turn frame — and its desk — installed) and records the answer.
+    #[derive(Clone)]
+    struct AskDuringTurn {
+        req: FOValue,
+        answer: std::sync::Arc<Mutex<Option<Result<FOValue, Error>>>>,
+    }
+    impl TurnLifecycle for AskDuringTurn {
+        fn pre_exec(&mut self, shell: &mut Shell, _src: &str) {
+            *self.answer.lock().unwrap() = Some(shell.enquire(self.req.clone()));
+        }
+    }
+
+    /// `Shell::enquire` round-trips through a stub desk installed on the
+    /// turn: the desk's transform (`Int{41} -> Int{42}`) is visible to the
+    /// caller of `enquire`, not just to the desk.
+    #[test]
+    fn enquire_round_trips_through_a_stub_desk() {
+        let mut shell = Shell::new(Default::default());
+        let answer = std::sync::Arc::new(Mutex::new(None));
+        let lifecycle = AskDuringTurn {
+            req: FOValue::Int { value: 41 },
+            answer: answer.clone(),
+        };
+
+        match shell.run_source_turn(
+            "$[1 + 1]",
+            TurnRequest {
+                desk: Some(std::sync::Arc::new(IncrementDesk) as Desk),
+                lifecycle: Box::new(lifecycle),
+                ..capture_req()
+            },
+        ) {
+            TurnReport::Ran { .. } => {}
+            TurnReport::Static { .. } => panic!("`$[1 + 1]` must reach evaluation"),
+        }
+
+        let answer = answer.lock().unwrap().take().expect("pre_exec must fire");
+        match answer {
+            Ok(v) => assert_eq!(
+                v,
+                FOValue::Int { value: 42 },
+                "enquire must return the desk's transformed answer"
+            ),
+            Err(e) => panic!("enquire must succeed through the stub desk, got {e:?}"),
+        }
+    }
+
+    /// A desk whose handler reaches back into `IdentityTransport::shell_mut`
+    /// — the reentrancy law (§3) forbids this: the handler runs on the
+    /// dispatching thread, inside `dispatch`'s session-lock hold, so a
+    /// second lock attempt would deadlock. The stamp `dispatch` sets for its
+    /// duration is simulated here (there is no `enquire` builtin yet to
+    /// drive a live encoded dispatch into calling the desk), exercising the
+    /// exact guard every real dispatch installs.
+    struct ReentrantShellMutDesk(std::sync::Arc<IdentityTransport>);
+    impl EnquiryDesk for ReentrantShellMutDesk {
+        fn enquire(&self, req: FOValue) -> Result<FOValue, Error> {
+            let _guard = self.0.shell_mut();
+            Ok(req)
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "reentrant session access")]
+    fn desk_reentering_shell_mut_panics_never_hangs() {
+        let transport = std::sync::Arc::new(IdentityTransport::new(Shell::new(Default::default())));
+        *transport.dispatch_thread.lock().unwrap() = Some(std::thread::current().id());
+        let mut shell = Shell::new(Default::default());
+        shell.turn.desk = Some(std::sync::Arc::new(ReentrantShellMutDesk(transport)) as Desk);
+        let _ = shell.enquire(FOValue::Unit);
+    }
+
+    /// The `dispatch` variant of the same law: a desk handler that reaches
+    /// back into `Transport::dispatch` must panic, never deadlock on the
+    /// session lock its own stack already holds.
+    struct ReentrantDispatchDesk(std::sync::Arc<IdentityTransport>);
+    impl EnquiryDesk for ReentrantDispatchDesk {
+        fn enquire(&self, req: FOValue) -> Result<FOValue, Error> {
+            self.0.dispatch(
+                DispatchId(0),
+                Turn::Source {
+                    src: String::new(),
+                    req: ReqMirror {
+                        script_name: "<test>".into(),
+                        caps: Capabilities::root(),
+                        turn_limit: None,
+                        detached_lease: None,
+                        worker_cap: None,
+                        io: TurnIo::Capture,
+                        terminal: RequestedTerminalAccess::Denied,
+                        stdin: TurnStdin::Empty,
+                    },
+                },
+            );
+            Ok(req)
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "reentrant session access")]
+    fn desk_reentering_dispatch_panics_never_hangs() {
+        let transport = std::sync::Arc::new(IdentityTransport::new(Shell::new(Default::default())));
+        *transport.dispatch_thread.lock().unwrap() = Some(std::thread::current().id());
+        let mut shell = Shell::new(Default::default());
+        shell.turn.desk = Some(std::sync::Arc::new(ReentrantDispatchDesk(transport)) as Desk);
+        let _ = shell.enquire(FOValue::Unit);
+    }
+
+    /// `IdentityTransport::set_desk` installs the desk that `dispatch` hands
+    /// onto the `TurnRequest` it builds: the same `Arc` reaches
+    /// `EngineInner.desk`.
+    #[test]
+    fn set_desk_installs_onto_engine_inner() {
+        let transport = IdentityTransport::new(Shell::new(Default::default()));
+        let desk: Desk = std::sync::Arc::new(IncrementDesk);
+        transport.set_desk(desk.clone());
+        let installed = transport
+            .shell_mut()
+            .desk
+            .clone()
+            .expect("set_desk must install a desk");
+        assert!(
+            std::sync::Arc::ptr_eq(&desk, &installed),
+            "the installed desk must be the same Arc set_desk was given"
+        );
     }
 }

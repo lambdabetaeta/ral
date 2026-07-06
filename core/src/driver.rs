@@ -28,7 +28,7 @@ use crate::process::CancelCause;
 use crate::source::Span;
 use crate::turn::{StaticDiagnostics, TurnLifecycle};
 use crate::typecheck::Scheme;
-use crate::types::{Boundary, Capabilities, Settled, Shell, SurfaceSink, Value};
+use crate::types::{Boundary, Capabilities, Desk, Settled, Shell, SurfaceSink, Value};
 use crate::types::{DefaultPolicy, Hook, HookName, HookSig, RegisterError, TerminalPolicy};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
@@ -277,6 +277,11 @@ pub struct TurnRequest<'a> {
     /// boundary. `None` outside an agent host (a bare REPL): then a detached
     /// worker's surface reaches a sink only via `await`/`race`.
     pub boundary: Option<Boundary>,
+    /// The turn-local enquiry desk, installed only for this turn. `None` is
+    /// the honest absence a host that answers no enquiries reports (a bare
+    /// REPL, and exarch until the migration installs its desk). Same-thread
+    /// children inherit it; detached workers never receive it.
+    pub desk: Option<Desk>,
     /// Per-turn lifecycle hooks; `Box::new(())` for a host with none.
     pub lifecycle: Box<dyn TurnLifecycle + 'a>,
 }
@@ -495,6 +500,7 @@ impl Shell {
             stdin: req.stdin,
             surface: req.surface,
             boundary: req.boundary,
+            desk: req.desk,
             lifecycle: req.lifecycle,
             turn_limit: hook.policy.budget.or(req.turn_limit),
             detached_lease: req.detached_lease,
@@ -557,6 +563,7 @@ impl Shell {
             req.worker_cap,
             req.surface,
             req.boundary,
+            req.desk,
         );
         let (result, status) = crate::turn::run_framed(
             self,

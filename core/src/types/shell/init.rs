@@ -43,6 +43,7 @@ impl Shell {
                 },
                 surface: None,
                 boundary: None,
+                desk: None,
                 cancel: root.child(),
                 loc: LocationCursor::default(),
                 detached_lease: None,

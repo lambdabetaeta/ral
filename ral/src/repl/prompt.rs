@@ -80,6 +80,7 @@ pub(super) fn eval_prompt(prompt: &Value, shell: &mut Shell) -> String {
         worker_cap: None,
         surface: None,
         boundary: None,
+        desk: None,
         lifecycle: Box::new(()),
     };
 
@@ -155,6 +156,7 @@ pub(super) fn render(shell: &mut Shell, runtime: &Arc<Mutex<PluginRuntime>>) -> 
         worker_cap: None,
         surface: None,
         boundary: None,
+        desk: None,
         lifecycle: Box::new(()),
     };
 

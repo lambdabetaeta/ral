@@ -61,6 +61,7 @@ fn run(shell: &mut Shell, source: &str, surface: Option<SurfaceSink>) -> Settled
             stdin: TurnStdin::Inherit,
             surface,
             boundary: None,
+            desk: None,
             lifecycle: Box::new(()),
         },
     ) {

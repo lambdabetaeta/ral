@@ -1329,6 +1329,7 @@ mod tests {
             stdin: TurnStdin::Empty,
             surface: None,
             boundary: None,
+            desk: None,
             lifecycle: Box::new(()),
         };
         match shell.run_source_turn(src, req) {

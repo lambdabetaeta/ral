@@ -68,6 +68,7 @@ fn top_level_under_request(shell: &mut Shell, caps: Capabilities, source: &str) 
             stdin: TurnStdin::Inherit,
             surface: None,
             boundary: None,
+            desk: None,
             lifecycle: Box::new(()),
         },
     ) {

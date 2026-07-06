@@ -41,6 +41,7 @@ fn turn(shell: &mut Shell, src: &str) -> Settled<Value> {
             stdin: TurnStdin::Inherit,
             surface: None,
             boundary: None,
+            desk: None,
             lifecycle: Box::new(()),
         },
     ) {

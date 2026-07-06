@@ -103,6 +103,7 @@ pub fn run_engine() -> ! {
                 stdin: req.stdin,
                 surface: Some(surface_sink),
                 boundary: boundary_sink,
+                desk: None,
                 lifecycle: Box::new(()),
             };
 

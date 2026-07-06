@@ -418,6 +418,7 @@ mod chokepoint_tests {
                 stdin: TurnStdin::Inherit,
                 surface: None,
                 boundary: None,
+                desk: None,
                 lifecycle: Box::new(()),
             },
         ) {
@@ -606,6 +607,7 @@ mod chokepoint_tests {
                 stdin: TurnStdin::Inherit,
                 surface: None,
                 boundary: None,
+                desk: None,
                 lifecycle: Box::new(()),
             },
         ) {
@@ -669,6 +671,7 @@ mod chokepoint_tests {
                 stdin: TurnStdin::Inherit,
                 surface: None,
                 boundary: None,
+                desk: None,
                 lifecycle: Box::new(()),
             },
         );
@@ -805,6 +808,7 @@ mod chokepoint_tests {
                 stdin: TurnStdin::Inherit,
                 surface: None,
                 boundary: None,
+                desk: None,
                 lifecycle: Box::new(()),
             },
         ) {

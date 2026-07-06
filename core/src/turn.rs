@@ -29,8 +29,8 @@ use crate::process::{ForegroundCancelSlot, ForegroundScope, RootCancelSlot};
 use crate::syntax::parser::ParseError;
 use crate::typecheck::TypeError;
 use crate::types::{
-    Boundary, Break, Capabilities, Escape, LocationCursor, Settled, Shell, SurfaceSink, TurnState,
-    Value,
+    Boundary, Break, Capabilities, Desk, Escape, LocationCursor, Settled, Shell, SurfaceSink,
+    TurnState, Value,
 };
 use crate::{CompileOutcome, compile_and_typecheck};
 use std::sync::Arc;
@@ -147,7 +147,8 @@ impl Drop for TurnGuard<'_> {
 /// `surface` is always the request's turn-local sink — it is no longer carried
 /// on the persistent session, so it has no liveness role.  `boundary` is the
 /// session-lived destination a detached worker flushes its deferred surface to
-/// at completion.
+/// at completion.  `desk` is the request's turn-local enquiry desk; `None`
+/// outside a host that answers enquiries.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_turn(
     shell: &Shell,
@@ -159,6 +160,7 @@ pub(crate) fn build_turn(
     worker_cap: Option<usize>,
     surface: Option<SurfaceSink>,
     boundary: Option<Boundary>,
+    desk: Option<Desk>,
 ) -> TurnState {
     let mut turn_io = shell.turn.io.try_clone().unwrap_or_else(|_| Io {
         terminal: shell.turn.io.terminal,
@@ -175,6 +177,7 @@ pub(crate) fn build_turn(
         io: turn_io,
         surface,
         boundary,
+        desk,
         cancel: foreground,
         loc: LocationCursor::default(),
         detached_lease,
@@ -294,6 +297,7 @@ mod tests {
             stdin: TurnStdin::Empty,
             surface: None,
             boundary: None,
+            desk: None,
             lifecycle: Box::new(()),
         }
     }
@@ -419,6 +423,40 @@ mod tests {
         assert!(
             pre.is_cancelled(),
             "foreground scope must be restored to the pre-turn scope"
+        );
+    }
+
+    /// A no-op desk, just enough to install a non-`None` value on the turn.
+    struct NoopDesk;
+    impl crate::types::EnquiryDesk for NoopDesk {
+        fn enquire(
+            &self,
+            req: crate::serial::FOValue,
+        ) -> Result<crate::serial::FOValue, crate::types::Error> {
+            Ok(req)
+        }
+    }
+
+    /// The desk twin of `frame_restores_state_on_return`: the turn-local
+    /// enquiry desk is torn down before `run_source_turn` returns, restored
+    /// to its pre-turn value (`None`) exactly as `surface` is.
+    #[test]
+    fn desk_is_restored_to_its_pre_turn_value() {
+        let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
+        let mut shell = Shell::new(Default::default());
+        assert!(shell.turn.desk.is_none(), "no desk before the turn");
+
+        let _ = shell.run_source_turn(
+            "$[1 + 1]",
+            TurnRequest {
+                desk: Some(Arc::new(NoopDesk)),
+                ..capture_req()
+            },
+        );
+
+        assert!(
+            shell.turn.desk.is_none(),
+            "turn-local desk must be restored to its pre-turn value"
         );
     }
 

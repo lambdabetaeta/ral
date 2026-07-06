@@ -60,6 +60,7 @@ fn run(shell: &mut Shell, source: &str) -> (Settled<Value>, Vec<Value>) {
             stdin: TurnStdin::Inherit,
             surface: Some(sink),
             boundary: None,
+            desk: None,
             lifecycle: Box::new(()),
         },
     ) {

@@ -484,6 +484,7 @@ pub(super) fn framed_turn_request(
         stdin: TurnStdin::Inherit,
         surface: None,
         boundary: None,
+        desk: None,
         lifecycle: Box::new(()),
     }
 }

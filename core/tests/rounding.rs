@@ -33,6 +33,7 @@ fn eval(shell: &mut Shell, source: &str) -> Settled<Value> {
             stdin: TurnStdin::Inherit,
             surface: None,
             boundary: None,
+            desk: None,
             lifecycle: Box::new(()),
         },
     ) {
@@ -97,6 +98,7 @@ fn expect_static_reject(source: &str) {
             stdin: TurnStdin::Inherit,
             surface: None,
             boundary: None,
+            desk: None,
             lifecycle: Box::new(()),
         },
     ) {

@@ -116,6 +116,7 @@ fn top_level_under(shell: &mut Shell, caps: Capabilities, src: &str) -> Settled<
             stdin: TurnStdin::Empty,
             surface: None,
             boundary: None,
+            desk: None,
             lifecycle: Box::new(()),
         },
     ) {

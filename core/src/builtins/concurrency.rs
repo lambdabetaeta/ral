@@ -1311,6 +1311,52 @@ mod tests {
         );
     }
 
+    /// A stub desk that always answers `Ok` with its request unchanged —
+    /// enough to prove a worker either reaches it or does not.
+    struct EchoDesk;
+    impl crate::types::EnquiryDesk for EchoDesk {
+        fn enquire(
+            &self,
+            req: crate::serial::FOValue,
+        ) -> Result<crate::serial::FOValue, crate::types::Error> {
+            Ok(req)
+        }
+    }
+
+    /// Containment (§3 of the enquiry-channel ADR): a detached worker never
+    /// receives the spawning turn's enquiry desk, even though one is
+    /// installed on the spawning turn. The worker's own `enquire` call must
+    /// answer the honest absence error, never reach `EchoDesk`, and never
+    /// park.
+    #[test]
+    fn spawned_worker_never_receives_the_enquiry_desk() {
+        let mut shell = Shell::new(Default::default());
+        shell.turn.desk = Some(Arc::new(EchoDesk) as crate::types::Desk);
+        let snap = Arc::new(shell.mobile().scope);
+        let (tx, rx) = mpsc::channel::<Result<crate::serial::FOValue, crate::types::Error>>();
+        let handle = spawn_child(
+            snap,
+            &mut shell,
+            ChildIoMode::Buffered,
+            LeaseClass::Worker,
+            "<test>",
+            move |child| {
+                let outcome = child.enquire(crate::serial::FOValue::Unit);
+                let _ = tx.send(outcome);
+                Ok(Value::Unit)
+            },
+        )
+        .expect("spawn must succeed");
+        wait_settled(&handle);
+        let outcome = rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("worker must send its enquire outcome before settling");
+        match outcome {
+            Err(e) => assert_eq!(e.message, "this host answers no enquiries"),
+            Ok(_) => panic!("a detached worker must never reach the spawning turn's desk"),
+        }
+    }
+
     /// Observation renews the idle lease: a worker polled every ~20 ms
     /// under a 200 ms idle bound survives to ~3× that bound — each `poll`
     /// touches `last_observed`, so the chain keeps re-arming instead of
@@ -1595,6 +1641,7 @@ mod tests {
             stdin: TurnStdin::Empty,
             surface: None,
             boundary: None,
+            desk: None,
             lifecycle: Box::new(()),
         };
         match shell.run_source_turn(src, req) {

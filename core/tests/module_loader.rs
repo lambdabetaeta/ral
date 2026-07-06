@@ -54,6 +54,7 @@ fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
             stdin: TurnStdin::Inherit,
             surface: None,
             boundary: None,
+            desk: None,
             lifecycle: Box::new(()),
         },
     ) {

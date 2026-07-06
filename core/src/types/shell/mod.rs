@@ -187,6 +187,20 @@ impl EventSink for () {
 /// role, so a clone can never decide that a turn is over.
 pub type SurfaceSink = Arc<dyn EventSink>;
 
+/// The host's answer desk for the engine→host answered channel. `enquire`
+/// is blocking and short by contract (§3): a start receipt, a ledger read,
+/// a confirmation, a verdict — never a long-running result.
+pub trait EnquiryDesk: Send + Sync {
+    fn enquire(
+        &self,
+        req: crate::serial::FOValue,
+    ) -> Result<crate::serial::FOValue, crate::types::Error>;
+}
+
+/// Shared handle to the turn-local enquiry desk. Turn-scoped like `SurfaceSink`,
+/// no liveness role. `None` outside a host that answers enquiries.
+pub type Desk = std::sync::Arc<dyn EnquiryDesk>;
+
 /// Host-installed destination for a *detached* worker's deferred surface
 /// batch, delivered at the worker's completion and rendered by the host at
 /// the next turn boundary. `None` outside an agent host: a bare REPL installs
@@ -252,6 +266,15 @@ pub struct TurnState {
     /// thunk bodies and spawned workers so a nested `spawn` flushes at its own
     /// completion; like `surface` it never folds back.
     pub(crate) boundary: Option<Boundary>,
+    /// Host-installed desk answering this turn's enquiries (§3 of the
+    /// enquiry-channel ADR).  Turn-local like `surface`: cloned into
+    /// same-thread bodies so a nested call enquires through the same desk,
+    /// `None` outside a host that answers enquiries (a bare REPL, or any
+    /// host before the migration installs its desk) and left `None` on a
+    /// detached worker — a worker outlives its turn's Report, so a worker
+    /// that could enquire would break the ordering law and the boundary
+    /// attenuation.  Never folds back, like `surface`.
+    pub(crate) desk: Option<Desk>,
     /// The turn's foreground work scope.  `signal::check` consults it between
     /// effectful steps; a foreground cancel (turn timeout, Ctrl-C) unwinds
     /// the same-thread work that shares it.  Always a descendant of
@@ -296,6 +319,7 @@ impl TurnState {
         self.io.inherit_from(&mut parent.io);
         self.surface = parent.surface.clone();
         self.boundary = parent.boundary.clone();
+        self.desk = parent.desk.clone();
         self.cancel = parent.cancel.clone();
         self.loc = parent.loc.clone();
         self.detached_lease = parent.detached_lease;
@@ -439,6 +463,19 @@ impl Shell {
             Err(_) => {
                 crate::dbg_trace!("surface", "dropping non-first-order surface value");
             }
+        }
+    }
+
+    /// Put one enquiry to this turn's host desk and block for the answer.
+    /// The absent-desk error is the honest answer of a host that answers none
+    /// (the bare REPL, and any host before the migration installs its desk).
+    pub fn enquire(
+        &self,
+        req: crate::serial::FOValue,
+    ) -> Result<crate::serial::FOValue, crate::types::Error> {
+        match self.turn.desk.as_ref() {
+            Some(desk) => desk.enquire(req),
+            None => Err(self.err("this host answers no enquiries", 1)),
         }
     }
 
