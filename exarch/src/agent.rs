@@ -1938,7 +1938,25 @@ impl Agent {
 }
 
 impl Drop for Agent {
+    /// The one place every teardown path funnels through, whatever got it
+    /// here — a normal `reply`/settle, the subtree cascade, or the trunk's
+    /// own `deregister` at end of `drive`. `/clear` never reaches this (it
+    /// rebuilds the shell in place through `replace_shell`), so it keeps its
+    /// own explicit `cancel_workers`/`schedules.clear` pair; every *other*
+    /// teardown has no such call site of its own, and a subtree cascade
+    /// (`AgentRegistry::cancel`/`clear_subtree`) only ever cancels an
+    /// agent's *eval root* — which reaches a still-running worker
+    /// cooperatively through the cancel-scope ancestor chain, but leaves
+    /// the registry entries and any armed self-schedule sitting there until
+    /// something drops them. This is that something: cancelling this
+    /// agent's own workers and clearing its own schedules unconditionally,
+    /// so a settled-but-never-cancelled agent (the ordinary `reply` case)
+    /// leaks neither — the ownership edge the session-ledger ADR calls for,
+    /// closed once here rather than at every call site that can end an
+    /// agent's life.
     fn drop(&mut self) {
+        self.transport.shell_mut().shell.cancel_workers();
+        self.schedules.clear();
         let _ = self.log.record_session_ended();
     }
 }
@@ -2927,6 +2945,125 @@ mod tests {
         assert!(
             session.inbox.is_empty(),
             "a worker settling after /clear must not post its late surface batch"
+        );
+    }
+
+    /// The generation-and-cascade audit's cascade edge: `AgentRegistry::cancel`
+    /// (the primitive behind `agent_cancel` and the subtree cascade) never
+    /// touches a shell's worker registry directly — it only cancels the
+    /// entry's `eval_root`. That is already enough: a worker's own cancel
+    /// scope is a child of that same root, and every
+    /// `CancelScope::is_cancelled` walks its ancestors, so cancelling a
+    /// sub-agent reaches its own still-running workers with no extra edge.
+    /// Pinned as a regression — this must keep holding with no wiring of
+    /// its own.
+    #[test]
+    fn cancel_cascade_reaches_a_cancelled_sub_agents_workers() {
+        let dir = tmp("cascade-cancels-sub-agent-workers");
+        let parent = Agent::for_test(&dir, "system").unwrap();
+        ral_core::builtins::register_builtins(WORKER_REGISTRY_TEST_BUILTINS);
+        let mut child = parent.fork(parent.caps().clone()).expect("fork child");
+        child
+            .transport
+            .shell_mut()
+            .shell
+            .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
+
+        parent.agents.register(
+            child.id,
+            Some(parent.id),
+            "child".into(),
+            child.log_dir().to_path_buf(),
+            child.cancel_token().clone(),
+            Some(child.eval_root()),
+            child.mailbox(),
+            child.provider_handle(),
+        );
+
+        let (tx, _rx) = crate::bus::channel();
+        let emit = Emitter::with_mailbox(tx, child.id, child.inbox.mailbox());
+        let _ = child.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
+
+        let entries = child.transport.shell_mut().shell.workers();
+        assert_eq!(entries.len(), 1, "the child's own spawn must register");
+        assert!(!entries[0].handle.cancel.is_cancelled(), "freshly spawned");
+
+        assert!(
+            parent.agents.cancel(child.id),
+            "the child must still be live"
+        );
+
+        assert!(
+            entries[0].handle.cancel.is_cancelled(),
+            "the subtree cascade must reach a cancelled sub-agent's own \
+             workers through its shell's durable root"
+        );
+    }
+
+    /// The generation-and-cascade audit's real gap: a sub-agent that ends
+    /// *without* ever being cancelled — the ordinary `reply`/settle path,
+    /// or the trunk's own end-of-`drive` `deregister` — has no cascade edge
+    /// pointed at it at all, so nothing upstream of `Agent`'s own `Drop`
+    /// ever touches its workers. Pins the fix: dropping an `Agent` cancels
+    /// every worker still registered on its own shell, regardless of why
+    /// its life ended.
+    #[test]
+    fn agent_drop_cancels_its_own_unclosed_workers() {
+        let dir = tmp("drop-cancels-own-workers");
+        let mut agent = Agent::for_test(&dir, "system").unwrap();
+        ral_core::builtins::register_builtins(WORKER_REGISTRY_TEST_BUILTINS);
+        agent
+            .transport
+            .shell_mut()
+            .shell
+            .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
+
+        let (tx, _rx) = crate::bus::channel();
+        let emit = Emitter::with_mailbox(tx, agent.id, agent.inbox.mailbox());
+        let _ = agent.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
+
+        let entries = agent.transport.shell_mut().shell.workers();
+        assert_eq!(entries.len(), 1, "the agent's own spawn must register");
+        assert!(!entries[0].handle.cancel.is_cancelled(), "freshly spawned");
+
+        drop(agent);
+
+        assert!(
+            entries[0].handle.cancel.is_cancelled(),
+            "dropping the agent (settle, cancel, or deregister — however its \
+             life ended) must cancel its own still-running workers"
+        );
+    }
+
+    /// The schedules half of the same gap: a self-armed cron/`after` wakeup
+    /// re-arms itself on the shared reaper for as long as its `Deadline`
+    /// guard lives, which — since `ScheduleRegistry` is `Arc`-shared with
+    /// the reaper's own closure — outlives a bare drop of the `Agent`
+    /// unless something disarms it. `Agent`'s `Drop` now clears its own
+    /// schedules unconditionally, the same law `/clear` already applies
+    /// explicitly; without it, a settled agent's cron would keep firing
+    /// into an inbox nobody drains, forever.
+    #[test]
+    fn agent_drop_clears_its_own_armed_schedules() {
+        let dir = tmp("drop-clears-own-schedules");
+        let agent = Agent::for_test(&dir, "system").unwrap();
+        let schedules = agent.schedules.clone();
+        schedules
+            .schedule(
+                crate::schedule::Trigger::After(std::time::Duration::from_secs(3600)),
+                "ping".into(),
+                None,
+                agent.inbox.mailbox(),
+            )
+            .expect("a one-hour `after` trigger must arm");
+        assert_eq!(schedules.list().len(), 1, "the schedule is armed");
+
+        drop(agent);
+
+        assert!(
+            schedules.list().is_empty(),
+            "dropping the agent must clear its own armed schedules, the same \
+             law /clear already applies explicitly"
         );
     }
 

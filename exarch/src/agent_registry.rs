@@ -16,13 +16,33 @@
 //!     node is cancelled across both layers — the cooperative [`Token`] its
 //!     drive loop polls, and its own session's durable root, so an
 //!     in-flight `ral` eval unwinds at ral's poll points instead of
-//!     grinding to its timeout wall;
+//!     grinding to its timeout wall.  Cancelling that root is already the
+//!     whole story for the node's own detached `ral` workers, too: a
+//!     worker's cancel scope is a child of its shell's durable root
+//!     (`decisions/260705_session-ledger`'s one cascade law, "cancelling a
+//!     resident cancels what it owns"), and every `CancelScope::is_cancelled`
+//!     walks its ancestors, so the cascade reaches them with no extra edge
+//!     of its own. A node that is never cancelled — the ordinary `reply`/
+//!     settle path, or the trunk's own end-of-`drive` `deregister` — takes
+//!     a different route to the same law: [`crate::agent::Agent`]'s `Drop`
+//!     cancels its own workers and clears its own schedules unconditionally,
+//!     so a settled agent leaks neither. `/clear` is the third route,
+//!     explicit and immediate on the outgoing shell (`Agent::clear`), since
+//!     it rebuilds the agent in place rather than ending it;
 //!   * a **ceiling** (children only), armed on the shared `process::reaper` as
 //!     a `Run` deadline that cancels the worker's subtree, so an abandoned
 //!     detached worker is reaped rather than running forever — the trunk,
 //!     which is never abandoned, gets none;
 //!   * a **generation**, bumped on `/clear`, so a worker that settles into a
-//!     rebuilt context has its result rejected instead of delivered.
+//!     rebuilt context has its result rejected instead of delivered. This is
+//!     the one counter every late-settle path in the fleet consults, not a
+//!     private counter of this registry's: an async agent's result admits
+//!     against it (`Agent::admits`), a detached worker's deferred surface
+//!     batch admits against it (`InboxBoundary`, `shell_eval.rs`), and a
+//!     schedule takes the stronger route of unconditional removal
+//!     (`ScheduleRegistry::clear`, ordered before the inbox sweep) rather
+//!     than carrying the generation at all — nothing settles across a
+//!     `/clear`, regardless of which edge a chapter uses to say so.
 //!
 //! It is *not* the durable-job registry of long-running-work: entries are
 //! ephemeral, live only while their agent runs, and a child's result is
