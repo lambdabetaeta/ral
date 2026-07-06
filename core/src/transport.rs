@@ -34,7 +34,7 @@ use crate::types::DeferredSink;
 use crate::types::SurfaceSink;
 use std::sync::OnceLock;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 static CURRENT_CONTROL: OnceLock<ControlSender> = OnceLock::new();
 
@@ -44,9 +44,10 @@ static CURRENT_CONTROL: OnceLock<ControlSender> = OnceLock::new();
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DispatchId(pub u64);
 
-/// Correlation token for one outstanding enquiry. Unused in Phase A (the
-/// identity transport is a direct call, no frames to correlate); minted now
-/// so Phase B's wire frames carry it without a retrofit.
+/// Correlation token for one outstanding enquiry. Unused under the identity
+/// transport (a direct call, no frames to correlate); minted per enquiry by
+/// the wire engine's desk and carried on both `Event::Enquiry` and its
+/// answering `Frame::Answer`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EnquiryId(pub u64);
 
@@ -79,6 +80,12 @@ pub enum Frame {
     /// Front-end → engine. Out-of-band: deliverable while a Dispatch is
     /// outstanding.
     Control(Control),
+    /// Front-end → engine, answering one enquiry a running dispatch raised.
+    /// The first answered frame in this direction — the dual of
+    /// `Event::Enquiry`, correlated by both the dispatch and the enquiry.
+    /// The error arm keeps message *and* status so a refused enquiry raises
+    /// the same error under both transports.
+    Answer(DispatchId, EnquiryId, Result<FOValue, EnquiryError>),
 }
 
 /// One whole turn: the program to run and the conditions it runs under.
@@ -139,8 +146,23 @@ pub enum Event {
     /// A deferred worker's surface batch, delivered when it settles and
     /// rendered by the host at the next turn boundary.
     DeferredSurface(Vec<FOValue>),
+    /// One enquiry the running dispatch raised on its host desk, nested
+    /// inside this dispatch and ordered before its Report. Answered by a
+    /// `Frame::Answer` carrying the same `EnquiryId`.
+    Enquiry(EnquiryId, FOValue),
     /// The dispatch's sole terminal frame.
     Report(Report),
+}
+
+/// What crosses the wire when an enquiry is refused or its handler fails.
+/// Kept as message *and* status (never collapsed into `crate::types::Error`,
+/// which also carries a `loc` core has no business shipping across the
+/// seam) so a refused enquiry raises the same error under both transports;
+/// its location is stamped engine-side, at the enquiring builtin.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnquiryError {
+    pub message: String,
+    pub status: i32,
 }
 
 /// Front-end → engine out-of-band control frame.
@@ -316,6 +338,13 @@ pub trait Transport: Send + Sync {
     /// Detach: cancel in-flight dispatch, reap foreground subtree,
     /// restore terminal state.
     fn detach(&self);
+
+    /// Answer one enquiry the engine raised on `Event::Enquiry`, correlated
+    /// by `id` and `eid`. A no-op under the identity transport: an identity
+    /// enquiry is a direct call through the installed `Desk`, never a frame,
+    /// so there is nothing here to write.
+    fn answer(&self, _id: DispatchId, _eid: EnquiryId, _answer: Result<FOValue, EnquiryError>) {}
+
     /// Returns `self` as an `&dyn Any` for downcast support.
     fn as_any(&self) -> &dyn std::any::Any;
 }
@@ -326,13 +355,21 @@ pub trait Transport: Send + Sync {
 /// stream to the turn's terminal [`Report`](Event::Report), handing each
 /// surface regime to its caller-supplied handler.
 ///
-/// The two regimes stay distinct on purpose: `on_surface` sees each live
-/// [`Event::Surface`] value in order, while `on_deferred` sees a deferred
-/// worker's [`Event::DeferredSurface`] batch delivered at its settlement. A
-/// host that tracks live pins (exarch) must update its mirror only from
-/// `on_surface` — the deferred batch does not touch the pin map — so
-/// flattening the two into one undistinguished stream would be a behaviour
-/// change, not a fold.
+/// The two surface regimes stay distinct on purpose: `on_surface` sees each
+/// live [`Event::Surface`] value in order, while `on_deferred` sees a
+/// deferred worker's [`Event::DeferredSurface`] batch delivered at its
+/// settlement. A host that tracks live pins (exarch) must update its mirror
+/// only from `on_surface` — the deferred batch does not touch the pin map —
+/// so flattening the two into one undistinguished stream would be a
+/// behaviour change, not a fold.
+///
+/// `on_enquiry` answers one [`Event::Enquiry`] this dispatch's turn raised on
+/// its host desk; the answer is written back through
+/// [`Transport::answer`]. Under the identity transport `Event::Enquiry` never
+/// arrives here at all — the installed `Desk` is a direct call the turn makes
+/// mid-evaluation (§3 of the enquiry-channel ADR), so `on_enquiry` is dead
+/// code on that transport and live only under the wire, where the loop is
+/// the front-end's side of the desk's rendezvous.
 ///
 /// Returns the [`Report`], or `None` if the stream closed without a
 /// Report (impossible under the identity transport, which sends the Report
@@ -343,6 +380,7 @@ pub fn dispatch_to_report(
     turn: Turn,
     mut on_surface: impl FnMut(FOValue),
     mut on_deferred: impl FnMut(Vec<FOValue>),
+    mut on_enquiry: impl FnMut(FOValue) -> Result<FOValue, EnquiryError>,
 ) -> Option<Report> {
     static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let id = DispatchId(NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
@@ -354,6 +392,10 @@ pub fn dispatch_to_report(
             Frame::Event(did, event) if did == id => match event {
                 Event::Surface(val) => on_surface(val),
                 Event::DeferredSurface(batch) => on_deferred(batch),
+                Event::Enquiry(eid, req) => {
+                    let answer = on_enquiry(req);
+                    transport.answer(id, eid, answer);
+                }
                 Event::Report(report) => return Some(report),
             },
             _ => {}
@@ -887,6 +929,11 @@ impl Transport for WireTransport {
     fn detach(&self) {
         self.write(&Frame::Detach);
     }
+
+    fn answer(&self, id: DispatchId, eid: EnquiryId, answer: Result<FOValue, EnquiryError>) {
+        self.write(&Frame::Answer(id, eid, answer));
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

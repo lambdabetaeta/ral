@@ -32,8 +32,9 @@ pub use reaper::{Deadline, arm_callback, arm_lifetime};
 
 pub use signal::{
     CancelCause, CancelScope, ChildHandle, DurableRoot, ForegroundCancelSlot, ForegroundScope,
-    Pgid, PgidPolicy, RootCancelSlot, check, clear, interrupt, is_interrupted,
-    publish_durable_root, publish_foreground, request_foreground_cancel, request_root_cancel,
+    Pgid, PgidPolicy, RootCancelSlot, check, clear, foreground_cancel_cause, interrupt,
+    is_interrupted, publish_durable_root, publish_foreground, request_foreground_cancel,
+    request_root_cancel,
 };
 
 #[cfg(unix)]

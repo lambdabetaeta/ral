@@ -557,6 +557,24 @@ pub fn request_foreground_cancel(cause: CancelCause) {
     }
 }
 
+/// Read [`FOREGROUND_SCOPE`] without a [`CancelScope`] in hand: the read-side
+/// dual of [`request_foreground_cancel`], for a context parked outside the
+/// evaluator's own `shell.turn.cancel` — the wire engine's enquiry desk,
+/// parked on a rendezvous, has no `&Shell` to poll [`check`] with, but runs
+/// on the same thread that published this turn's foreground scope, so the
+/// slot it reads is exactly that turn's. `None` between turns (null slot) or
+/// when the published scope isn't cancelled.
+pub fn foreground_cancel_cause() -> Option<CancelCause> {
+    let p = FOREGROUND_SCOPE.load(Ordering::Acquire);
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: as in `request_foreground_cancel` — a non-null slot points
+    // into the live foreground scope's flag for the reader's whole call.
+    let flag = unsafe { (*p).load(Ordering::Acquire) };
+    CancelCause::from_u8(flag)
+}
+
 /// Deliver `cause` to the session's durable root, reaching the foreground
 /// turn and every detached worker (all parented under it). Signal-safe: a
 /// lock-free slot load and an atomic `fetch_max`. A no-op when no root is

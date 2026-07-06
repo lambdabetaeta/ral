@@ -131,8 +131,14 @@ pub(super) fn execute_input(
 
     // Dispatch and drain to the terminal Report.  The REPL renders neither
     // live surface values nor deferred-worker surface batches today, so both
-    // regimes drop.
-    let report = transport::dispatch_to_report(transport, turn, |_val| {}, |_batch| {});
+    // regimes drop; it answers no enquiries — the honest absence error.
+    let report =
+        transport::dispatch_to_report(transport, turn, |_val| {}, |_batch| {}, |_req| {
+            Err(transport::EnquiryError {
+                message: "this host answers no enquiries".into(),
+                status: 1,
+            })
+        });
 
     let report = match report {
         Some(r) => r,

@@ -1,15 +1,17 @@
 //! Engine process: the session-lived child that holds the Shell
 //! and executes turns sent over a framed socket by the front-end.
 
+use std::collections::HashMap;
 use std::os::unix::io::FromRawFd;
 use std::os::unix::net::UnixStream;
 
 use crate::serial::FOValue;
-use crate::transport::{Control, DispatchId, Event, Frame, Turn};
-use crate::types::{DeferredSink, Shell, SurfaceSink};
+use crate::transport::{Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Turn};
+use crate::types::{DeferredSink, EnquiryDesk, Error, Shell, SurfaceSink};
 use crate::wire::WireChannel;
 
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 
 /// A surface sink that writes Event::Surface frames live to the wire
 /// as values are produced, rather than buffering.
@@ -44,6 +46,93 @@ impl crate::types::DeferredSink for ChannelDeferredSink {
     }
 }
 
+/// Cadence at which a parked enquiry re-checks the foreground cancel slot.
+/// `Control::Cancel` arrives on the reader thread and trips the published
+/// foreground scope, never this rendezvous — the park must poll, and this
+/// bounds how stale a cancel can go unnoticed.
+const ENQUIRY_CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(75);
+
+/// The wire engine's enquiry desk: the desk impl *is* the codec (§3 of the
+/// enquiry-channel ADR). `enquire` mints a fresh [`EnquiryId`], writes
+/// `Event::Enquiry` up the wire inside the in-flight dispatch, and parks on
+/// a rendezvous slot keyed by that id until the reader thread's
+/// `Frame::Answer` arm fills it — or the turn's foreground cancel fires,
+/// polled at the condvar wait's timeout.
+struct WireDesk {
+    writer: Arc<Mutex<WireChannel>>,
+    /// The in-flight dispatch id, stamped by the worker before each turn so
+    /// the enquiry frame correlates to the dispatch that raised it.
+    current_dispatch: Arc<AtomicU64>,
+    next_eid: AtomicU64,
+    /// Outstanding rendezvous slots: `None` = parked awaiting an answer,
+    /// `Some` = answered, to be taken by the parked thread. An answer for an
+    /// id absent from the map (a cancelled park removed it) is dropped by id.
+    slots: Mutex<HashMap<EnquiryId, Option<Result<FOValue, EnquiryError>>>>,
+    answered: Condvar,
+}
+
+impl WireDesk {
+    /// The reader thread's `Frame::Answer` arm: fill the slot and wake the
+    /// parked enquirer. A late answer for a dead id — the park already
+    /// returned cancelled and removed its slot — is dropped here by id.
+    fn fill(&self, eid: EnquiryId, answer: Result<FOValue, EnquiryError>) {
+        let mut slots = self.slots.lock().unwrap();
+        if let Some(slot) = slots.get_mut(&eid) {
+            *slot = Some(answer);
+            self.answered.notify_all();
+        }
+    }
+}
+
+impl EnquiryDesk for WireDesk {
+    fn enquire(&self, req: FOValue) -> Result<FOValue, Error> {
+        let id = DispatchId(self.current_dispatch.load(Ordering::Relaxed));
+        let eid = EnquiryId(self.next_eid.fetch_add(1, Ordering::Relaxed));
+        self.slots.lock().unwrap().insert(eid, None);
+
+        if self
+            .writer
+            .lock()
+            .unwrap()
+            .write_frame(&Frame::Event(id, Event::Enquiry(eid, req)))
+            .is_err()
+        {
+            self.slots.lock().unwrap().remove(&eid);
+            return Err(Error::new("enquiry lost: the host connection is down", 1));
+        }
+
+        // Park on the rendezvous. The enquiring thread is the worker running
+        // the turn — the thread that published this turn's foreground scope —
+        // so the global cancel slot polled here is exactly that scope, and a
+        // `Control::Cancel` (relayed by the reader thread) wakes the park at
+        // the next timeout tick. The cancellation message matches
+        // `process::check`'s cause vocabulary, so the enquiring builtin
+        // raises the same error every other cancelled poll point does.
+        let mut slots = self.slots.lock().unwrap();
+        loop {
+            if let Some(Some(_)) = slots.get(&eid) {
+                let answer = slots.remove(&eid).flatten().expect("slot just seen filled");
+                return answer.map_err(|e| Error::new(e.message, e.status));
+            }
+            if let Some(cause) = crate::process::foreground_cancel_cause() {
+                slots.remove(&eid);
+                let msg = match cause {
+                    crate::process::CancelCause::Interrupt => "interrupted",
+                    crate::process::CancelCause::Explicit => "cancelled",
+                    crate::process::CancelCause::Deadline => "timed out",
+                    crate::process::CancelCause::RootAbort => "aborted",
+                };
+                return Err(Error::new(msg, 130));
+            }
+            slots = self
+                .answered
+                .wait_timeout(slots, ENQUIRY_CANCEL_POLL)
+                .unwrap()
+                .0;
+        }
+    }
+}
+
 /// Run the engine loop on an inherited socket (fd 3).
 /// The front-end passes the socket as fd 3 before exec.
 /// Never returns.
@@ -61,14 +150,28 @@ pub fn run_engine() -> ! {
     // fails with Full → reply "engine busy".
     let (turn_tx, turn_rx) = mpsc::sync_channel::<(crate::transport::DispatchId, Turn)>(0);
 
+    // The engine's one desk, shared between the worker (which parks in it)
+    // and the reader loop (whose `Answer` arm fills it).
+    let desk = Arc::new(WireDesk {
+        writer: writer.clone(),
+        current_dispatch: Arc::new(AtomicU64::new(0)),
+        next_eid: AtomicU64::new(1),
+        slots: Mutex::new(HashMap::new()),
+        answered: Condvar::new(),
+    });
+
     // ── Worker thread: owns the Shell ──────────────────────────────
     let worker_writer = writer.clone();
+    let worker_desk = desk.clone();
     std::thread::spawn(move || {
         let mut shell = shell;
         while let Ok((id, turn)) = turn_rx.recv() {
+            // Stamp the in-flight dispatch so the desk's enquiry frames
+            // correlate to the turn that raised them.
+            worker_desk.current_dispatch.store(id.0, Ordering::Relaxed);
+
             // The live handles this turn runs under, joined with the protocol
-            // `Turn` in the request the engine door runs.  Phase A installs
-            // no desk on the wire engine.
+            // `Turn` in the request the engine door runs.
             let req = crate::driver::TurnRequest {
                 turn,
                 surface: Some(Arc::new(ChannelSurfaceSink {
@@ -79,10 +182,12 @@ pub fn run_engine() -> ! {
                     id,
                     writer: worker_writer.clone(),
                 }) as Arc<dyn DeferredSink>),
-                desk: None,
+                desk: Some(worker_desk.clone() as crate::types::Desk),
                 lifecycle: Box::new(()),
             };
             let report = shell.run_turn(req).into_report();
+
+            worker_desk.current_dispatch.store(0, Ordering::Relaxed);
 
             // Send the terminal Report frame.
             let _ = worker_writer
@@ -115,6 +220,12 @@ pub fn run_engine() -> ! {
                         break; // worker died
                     }
                 }
+            }
+            Ok(Some(Frame::Answer(_, eid, answer))) => {
+                // Correlated by EnquiryId alone: the dispatch id names the
+                // turn for the front-end's benefit, but the slot is the
+                // enquiry's. A late answer for a dead id drops in `fill`.
+                desk.fill(eid, answer);
             }
             Ok(Some(Frame::Control(Control::Cancel(_)))) => {
                 crate::process::request_foreground_cancel(crate::process::CancelCause::Explicit);
@@ -169,4 +280,145 @@ pub fn run_engine() -> ! {
         }
     }
     std::process::exit(0);
+}
+
+// ── Wire desk tests ───────────────────────────────────────────────────
+//
+// The desk's rendezvous is driven in-process: a peer `WireChannel` end plays
+// the front-end, and `WireDesk::fill` is called exactly as the reader loop's
+// `Frame::Answer` arm calls it. A full wire-child integration test is not
+// practical here — `WireTransport::new` re-execs the current binary with
+// `--engine`, a flag only the host binaries handle, and a core unit-test
+// binary would just re-run the test harness.
+//
+// Every test that parks an enquiry holds `SLOT_SERIAL`: the park polls the
+// process-global foreground cancel slot, which other tests publish.
+#[cfg(test)]
+mod wire_desk_tests {
+    use super::*;
+    use crate::process::signal::SLOT_SERIAL;
+    use crate::process::{CancelCause, publish_foreground};
+
+    /// The round-trip: `enquire` writes `Event::Enquiry` stamped with the
+    /// in-flight dispatch, parks, and returns the answer `fill` delivers —
+    /// the reader loop's `Answer` arm, driven by hand from the peer end.
+    #[test]
+    fn enquire_round_trips_through_the_rendezvous() {
+        let _g = SLOT_SERIAL.lock().unwrap();
+        let (ours, mut peer) = WireChannel::pair().expect("socketpair");
+        let desk = Arc::new(WireDesk {
+            writer: Arc::new(Mutex::new(ours)),
+            current_dispatch: Arc::new(AtomicU64::new(7)),
+            next_eid: AtomicU64::new(1),
+            slots: Mutex::new(HashMap::new()),
+            answered: Condvar::new(),
+        });
+
+        let filler = desk.clone();
+        let front_end = std::thread::spawn(move || {
+            let frame = peer.read_frame().expect("read").expect("open");
+            let Frame::Event(did, Event::Enquiry(eid, req)) = frame else {
+                panic!("expected Event::Enquiry, got {frame:?}");
+            };
+            assert_eq!(did, DispatchId(7), "stamped with the in-flight dispatch");
+            assert_eq!(req, FOValue::Int { value: 41 });
+            filler.fill(eid, Ok(FOValue::Int { value: 42 }));
+        });
+
+        let answer = desk.enquire(FOValue::Int { value: 41 });
+        front_end.join().expect("front-end thread");
+        assert_eq!(answer.expect("answered"), FOValue::Int { value: 42 });
+        assert!(
+            desk.slots.lock().unwrap().is_empty(),
+            "the answered slot is removed"
+        );
+    }
+
+    /// An `EnquiryError` answer raises engine-side with the same message and
+    /// status the front-end refused with — the both-transports error law.
+    #[test]
+    fn refused_enquiry_raises_message_and_status() {
+        let _g = SLOT_SERIAL.lock().unwrap();
+        let (ours, mut peer) = WireChannel::pair().expect("socketpair");
+        let desk = Arc::new(WireDesk {
+            writer: Arc::new(Mutex::new(ours)),
+            current_dispatch: Arc::new(AtomicU64::new(1)),
+            next_eid: AtomicU64::new(1),
+            slots: Mutex::new(HashMap::new()),
+            answered: Condvar::new(),
+        });
+
+        let filler = desk.clone();
+        let front_end = std::thread::spawn(move || {
+            let frame = peer.read_frame().expect("read").expect("open");
+            let Frame::Event(_, Event::Enquiry(eid, _)) = frame else {
+                panic!("expected Event::Enquiry, got {frame:?}");
+            };
+            filler.fill(
+                eid,
+                Err(EnquiryError {
+                    message: "this host answers no enquiries".into(),
+                    status: 1,
+                }),
+            );
+        });
+
+        let err = desk.enquire(FOValue::Unit).expect_err("refused");
+        front_end.join().expect("front-end thread");
+        assert_eq!(err.message, "this host answers no enquiries");
+        assert_eq!(err.status, crate::types::Status::Code(1));
+    }
+
+    /// A foreground cancel wakes a parked enquiry: the park returns the
+    /// cancellation error at its next poll tick, never hangs — and its dead
+    /// slot is removed, so the answer that never came has nowhere to land.
+    #[test]
+    fn cancel_wakes_a_parked_enquiry() {
+        let _g = SLOT_SERIAL.lock().unwrap();
+        let (ours, _peer) = WireChannel::pair().expect("socketpair");
+        let desk = WireDesk {
+            writer: Arc::new(Mutex::new(ours)),
+            current_dispatch: Arc::new(AtomicU64::new(1)),
+            next_eid: AtomicU64::new(1),
+            slots: Mutex::new(HashMap::new()),
+            answered: Condvar::new(),
+        };
+
+        // The turn's foreground scope, published as the turn doors publish
+        // it, cancelled as `Control::Cancel`'s reader arm cancels it.
+        let scope = crate::process::CancelScope::default();
+        let _slot = publish_foreground(&scope);
+        scope.cancel(CancelCause::Explicit);
+
+        let err = desk.enquire(FOValue::Unit).expect_err("cancelled");
+        assert_eq!(err.message, "cancelled");
+        assert!(
+            desk.slots.lock().unwrap().is_empty(),
+            "a cancelled park removes its slot"
+        );
+
+        // The late answer for the dead id (the first minted, EnquiryId(1))
+        // is dropped by id: the map stays empty, nothing wakes.
+        desk.fill(EnquiryId(1), Ok(FOValue::Unit));
+        assert!(desk.slots.lock().unwrap().is_empty());
+    }
+
+    /// A late `Answer` for an id that was never parked (or already died) is
+    /// dropped by id: `fill` inserts nothing.
+    #[test]
+    fn late_answer_for_a_dead_id_is_dropped() {
+        let (ours, _peer) = WireChannel::pair().expect("socketpair");
+        let desk = WireDesk {
+            writer: Arc::new(Mutex::new(ours)),
+            current_dispatch: Arc::new(AtomicU64::new(1)),
+            next_eid: AtomicU64::new(1),
+            slots: Mutex::new(HashMap::new()),
+            answered: Condvar::new(),
+        };
+        desk.fill(EnquiryId(99), Ok(FOValue::Unit));
+        assert!(
+            desk.slots.lock().unwrap().is_empty(),
+            "an unknown id must not mint a slot"
+        );
+    }
 }

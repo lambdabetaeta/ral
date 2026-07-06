@@ -406,6 +406,15 @@ pub fn run_shell(
                 }
             }
         },
+        // No desk until the migration ADR lands: a wire engine's enquiry gets
+        // the same honest absence the identity path's missing
+        // `TurnRequest.desk` answers with.
+        |_req| {
+            Err(ral_core::transport::EnquiryError {
+                message: "this host answers no enquiries".into(),
+                status: 1,
+            })
+        },
     );
 
     let report = match report {
