@@ -1039,6 +1039,18 @@ pub enum Kind {
     ///
     /// [`shell_eval`]: crate::shell_eval
     Card(Card),
+    /// A detached worker's `` `done `` completion event, decoded once by
+    /// [`shell_eval`] into its typed [`DoneOutcome`](crate::card::DoneOutcome)
+    /// and paired with the one-line [`Card`] composed from it — the
+    /// [`Kind::Io`] pattern, so `transcript.jsonl` records how the worker
+    /// settled (a clean return, a raised error, a panic) rather than only
+    /// the card's ink (`decisions/260706_enquiry-channel` §4.1).
+    ///
+    /// [`shell_eval`]: crate::shell_eval
+    Done {
+        outcome: crate::card::DoneOutcome,
+        card: Card,
+    },
     /// A structural I/O event core surfaced (a read, write, exec, or grep),
     /// decoded once by [`shell_eval`] into a typed [`IoEvent`] and paired with
     /// the [`Card`] composed from it.  The bus carries *both*: the rendered
@@ -1067,26 +1079,31 @@ pub enum Kind {
     Unpin {
         key: String,
     },
-    /// A worker's registry entry was removed by policy — the lease chain
-    /// reaped a still-running worker (unobserved past its idle bound, or
-    /// past its absolute backstop), or the retention sweep expired a
-    /// settled entry's unclaimed result — drained from
-    /// [`Shell::take_worker_reap_notices`](ral_core::Shell::take_worker_reap_notices)
-    /// at the drive loop's ready boundary. Transcript + TUI only: unlike
-    /// [`Kind::Card`], `cmd` and `cause` ride alongside the rendered `card`
-    /// (the [`Kind::Io`] pattern) so `transcript.jsonl` keeps the structural
-    /// fact the one-liner erases. Never model-facing — no `events.json`
-    /// twin, no inbox message; model-visible reap delivery is deferred
+    /// A ready-boundary housekeeping fact core's own engine pushed as a
+    /// `` `notice `` surface class — a worker the lease chain reaped
+    /// (unobserved past its idle bound, past its absolute backstop, or the
+    /// retention sweep expiring a settled entry's unclaimed result), a run
+    /// of idle top-level bindings the ledger pruned, or a session-scope
+    /// install past the large-binding threshold
+    /// (`decisions/260706_enquiry-channel` §4.2). Replaces the three
+    /// separately-*polled* `WorkerReaped`/`BindingsPruned`/`LargeBinding`
+    /// variants this used to be: core now emits the fact itself, at the
+    /// ready boundary, through the turn's surface sink, rather than a host
+    /// draining an accessor and composing the event from what it read.
+    /// Unlike [`Kind::Card`], the decoded [`Notice`](crate::card::Notice)
+    /// rides alongside the rendered `card` (the [`Kind::Io`] pattern) so
+    /// `transcript.jsonl` keeps the structural fact the one-liner erases.
+    /// Never model-facing — no `events.json` twin, no inbox message;
+    /// model-visible reap delivery is deferred
     /// (`decisions/260705_leases-and-budgets`).
-    WorkerReaped {
-        cmd: String,
-        cause: ral_core::types::ReapCause,
+    Notice {
+        notice: crate::card::Notice,
         card: Card,
     },
     /// The `/resources` probe fold: the agent's own accumulator rows,
     /// assembled on its drive thread at the turn boundary the command
     /// drains at, beside the card rendering them — the raw-fact/rendering
-    /// pairing of [`Kind::Io`] and [`Kind::WorkerReaped`], so
+    /// pairing of [`Kind::Io`] and [`Kind::Notice`], so
     /// `transcript.jsonl` records the rows while the card stays a
     /// presentation.  The TUI appends the rows for the accumulators *it*
     /// owns (viewports, views, the bus) to the card at render time; those
@@ -1095,34 +1112,6 @@ pub enum Kind {
     /// renews nothing (`decisions/260705_leases-and-budgets`).
     Resources {
         rows: Vec<crate::resources::ProbeRow>,
-        card: Card,
-    },
-    /// The binding-lease chain pruned idle top-level names at a ready
-    /// boundary — each unused for `idle_calls` committed ral calls
-    /// (`decisions/260629_agent-binding-reaping`). One event per boundary,
-    /// however many names fell. Following [`Kind::WorkerReaped`]'s pattern:
-    /// `names` and `idle_calls` ride beside the rendered `card` so
-    /// `transcript.jsonl` keeps the structural fact the one-liner erases.
-    /// Transcript + TUI only: no `events.json` twin, no inbox message —
-    /// never model-facing. The model's later "where did `x` go?" reads only
-    /// the ordinary undefined-variable diagnostic, unmodified, should it
-    /// name a pruned binding again.
-    BindingsPruned {
-        names: Vec<String>,
-        idle_calls: u64,
-        card: Card,
-    },
-    /// A session-scope binding install met the large-binding soft threshold
-    /// (`decisions/260629_agent-binding-reaping`,
-    /// `decisions/260705_leases-and-budgets` §"Shell residency is lexical
-    /// state plus host leases"): a residency nudge, never an eviction — the
-    /// binding itself is completely untouched. `name` and `bytes` ride
-    /// beside the rendered `card`, same pattern as `Kind::WorkerReaped` and
-    /// `Kind::BindingsPruned`. Transcript + TUI only: no `events.json`
-    /// twin, no inbox message — never model-facing.
-    LargeBinding {
-        name: String,
-        bytes: u64,
         card: Card,
     },
 }

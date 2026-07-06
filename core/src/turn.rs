@@ -268,6 +268,14 @@ pub(crate) fn run_framed<'a>(
 
     lifecycle.post_exec(shell, src, status);
 
+    // Push this turn's ready-boundary housekeeping — the lease chain's reap
+    // notices, the large-binding warning — as `` `notice `` surface classes
+    // while this turn's frame (and its surface sink) is still installed, so
+    // the notice rides this turn's own surface stream, ordered before its
+    // Report (`decisions/260706_enquiry-channel` §4.2). After `guard` drops
+    // below, `shell.turn` reverts and there is no sink left to push through.
+    shell.emit_ready_boundary_notices();
+
     drop(guard);
 
     (result, status)
@@ -456,6 +464,72 @@ mod tests {
         assert!(
             shell.turn.desk.is_none(),
             "turn-local desk must be restored to its pre-turn value"
+        );
+    }
+
+    /// A settling turn's ready-boundary housekeeping surfaces the expected
+    /// `` `notice `` class (`decisions/260706_enquiry-channel` §4.2): a
+    /// worker the lease chain reaps between turns has no live sink to push
+    /// through until the *next* turn runs one — installed here on that next
+    /// turn, it captures the reap as a `notice` variant, ordered before this
+    /// turn's own settling.
+    #[test]
+    fn ready_boundary_notice_surfaces_a_pending_worker_reap() {
+        let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
+        let mut shell = Shell::new(Default::default());
+
+        // Spawn a worker under a millisecond-scale idle lease and never
+        // poll it, so the background lease chain reaps it quickly.
+        let mut req = capture_req("spawn { sleep 10 }");
+        req.turn.deferred_lease = Some(crate::types::WorkerLease {
+            idle: std::time::Duration::from_millis(20),
+            backstop: std::time::Duration::from_secs(10),
+        });
+        let _ = shell.run_turn(req);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while shell.worker_count() > 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the unpolled worker must be reaped within the budget"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        // A live sink installed only on this *next* turn: the pending reap
+        // has nowhere to push through until now.
+        struct CapturingSink(Arc<Mutex<Vec<crate::serial::FOValue>>>);
+        impl crate::types::EventSink for CapturingSink {
+            fn emit(&self, ev: &crate::serial::FOValue) {
+                self.0.lock().unwrap().push(ev.clone());
+            }
+        }
+        let captured: Arc<Mutex<Vec<crate::serial::FOValue>>> = Arc::new(Mutex::new(Vec::new()));
+        let _ = shell.run_turn(TurnRequest {
+            surface: Some(Arc::new(CapturingSink(captured.clone()))),
+            ..capture_req("$[1 + 1]")
+        });
+
+        let events = captured.lock().unwrap();
+        let saw_reap_notice = events.iter().any(|ev| {
+            let crate::serial::FOValue::Variant { label, payload } = ev else {
+                return false;
+            };
+            if label != "notice" {
+                return false;
+            }
+            let Some(payload) = payload else { return false };
+            let crate::serial::FOValue::Map { entries } = payload.as_ref() else {
+                return false;
+            };
+            entries.iter().any(|(k, v)| {
+                k == "kind"
+                    && matches!(v, crate::serial::FOValue::Variant { label, .. } if label == "reap")
+            })
+        });
+        assert!(
+            saw_reap_notice,
+            "the settled turn must surface the pending reap as a `notice`, got {events:?}"
         );
     }
 

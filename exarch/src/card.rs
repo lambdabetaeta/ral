@@ -665,7 +665,85 @@ pub fn done_card(outcome: &DoneOutcome) -> Card {
     Card(vec![Mark::Text { spans }])
 }
 
-// ── `reaped`: a lease-chain removal at the ready boundary ────────────────
+// ── `notice`: core's own ready-boundary housekeeping, pushed ─────────────
+
+/// The decoded body of a `` `notice `` surface event core's own engine
+/// pushes at a turn's ready boundary
+/// (`decisions/260706_enquiry-channel` §4.2): a worker the lease chain
+/// reaped, a run of idle top-level bindings the ledger pruned, or a
+/// session-scope install past the large-binding threshold. Like
+/// [`DoneOutcome`], the raw record [`value_to_notice`] decodes once and
+/// [`notice_card`] composes the matching one-line card — core emits the
+/// fact, exarch renders it; the three variants used to be three separately
+/// *polled* accessors (`take_worker_reap_notices`, `prune_idle_bindings`'s
+/// notice half, `take_large_binding_notices`) that a host drained and
+/// composed into cards itself.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Notice {
+    /// A worker's registry entry was removed by policy — the lease chain's
+    /// idle bound or backstop, or the retention sweep expiring a settled
+    /// entry's unclaimed result.
+    Reap {
+        cmd: String,
+        cause: ral_core::types::ReapCause,
+    },
+    /// The binding-lease chain pruned idle top-level names at this
+    /// boundary — one notice per boundary, however many names fell.
+    /// `idle_calls` rides parallel to `names`, so the card can report the
+    /// truthful minimum age across a multi-name prune.
+    Prune { names: Vec<String>, idle_calls: Vec<u64> },
+    /// A session-scope binding install met the large-binding soft
+    /// threshold — a residency nudge, never an eviction.
+    LargeBinding { name: String, bytes: u64 },
+}
+
+/// Decode a `` `notice `` value into its [`Notice`]. The shape is
+/// `` `notice [kind: `reap|`prune|`large-binding, …fields] `` where `kind`
+/// selects the fields read below. Anything else — an unrecognised `kind`,
+/// a missing field, a value that is not this variant at all — returns
+/// `None`, the same graceful degradation as [`value_to_done`].
+pub fn value_to_notice(v: &RalValue) -> Option<Notice> {
+    let RalValue::Variant { label, payload } = v else {
+        return None;
+    };
+    if label != "notice" {
+        return None;
+    }
+    let m = map_of(payload.as_deref()?)?;
+    let RalValue::Variant { label: kind, .. } = m.get("kind")? else {
+        return None;
+    };
+    Some(match kind.as_str() {
+        "reap" => Notice::Reap {
+            cmd: str_field(m, "cmd")?,
+            cause: match str_field(m, "cause")?.as_str() {
+                "idle" => ral_core::types::ReapCause::Idle,
+                "backstop" => ral_core::types::ReapCause::Backstop,
+                "retention" => ral_core::types::ReapCause::Retention,
+                _ => return None,
+            },
+        },
+        "prune" => Notice::Prune {
+            names: strings_field(m, "names"),
+            idle_calls: ints_field(m, "idle_calls"),
+        },
+        "large-binding" => Notice::LargeBinding {
+            name: str_field(m, "name")?,
+            bytes: int_field(m, "bytes")?.max(0) as u64,
+        },
+        _ => return None,
+    })
+}
+
+/// Compose a decoded [`Notice`] into its one-line [`Card`] — dispatching to
+/// the variant's own composer, each a dim one-liner naming what happened.
+pub fn notice_card(notice: &Notice) -> Card {
+    match notice {
+        Notice::Reap { cmd, cause } => reap_card(cmd, *cause),
+        Notice::Prune { names, idle_calls } => bindings_pruned_card(names, idle_calls),
+        Notice::LargeBinding { name, bytes } => large_binding_card(name, *bytes),
+    }
+}
 
 /// Compose one policy removal into its one-line [`Card`] — the reap's
 /// analogue of [`done_card`]: a worker the registry removed by policy
@@ -675,7 +753,7 @@ pub fn done_card(outcome: &DoneOutcome) -> Card {
 /// `cmd` is worth keeping — this is the model's (or operator's) only
 /// record of *which* worker is gone, since nothing else names it once
 /// removed.
-pub fn reap_card(cmd: &str, cause: ral_core::types::ReapCause) -> Card {
+fn reap_card(cmd: &str, cause: ral_core::types::ReapCause) -> Card {
     let phrase = match cause {
         ral_core::types::ReapCause::Idle => "idle 1h unobserved",
         ral_core::types::ReapCause::Backstop => "24h backstop",
@@ -688,33 +766,24 @@ pub fn reap_card(cmd: &str, cause: ral_core::types::ReapCause) -> Card {
     Card(vec![Mark::Text { spans }])
 }
 
-// ── `bindings pruned`: the binding-lease chain's ready-boundary removal ──
-
-/// Compose one prune pass's notices into a [`Card`] — `reap_card`'s
+/// Compose one prune pass's notice into a [`Card`] — `reap_card`'s
 /// binding-lease sibling: a dim one-liner naming every pruned name and the
 /// idle bound each met, e.g. `pruned 3 idle bindings: rows, tmp, out
 /// (unused >= 256 calls)`. The displayed count is the *minimum* idle-call
-/// age across the notices — every pruned name was idle at least that long,
-/// so the figure is truthful even when a multi-name prune's individual ages
-/// differ (`decisions/260629_agent-binding-reaping`).
-pub fn bindings_pruned_card(notices: &[ral_core::types::BindingPruneNotice]) -> Card {
-    let names: Vec<&str> = notices.iter().map(|n| n.name.as_str()).collect();
-    let min_idle = notices
-        .iter()
-        .map(|n| n.idle_calls)
-        .min()
-        .unwrap_or_default();
+/// age across `idle_calls` — every pruned name was idle at least that
+/// long, so the figure is truthful even when a multi-name prune's
+/// individual ages differ (`decisions/260629_agent-binding-reaping`).
+fn bindings_pruned_card(names: &[String], idle_calls: &[u64]) -> Card {
+    let min_idle = idle_calls.iter().min().copied().unwrap_or_default();
     let phrase = format!(
         "pruned {} idle binding{}: {} (unused >= {min_idle} calls)",
-        notices.len(),
-        if notices.len() == 1 { "" } else { "s" },
+        names.len(),
+        if names.len() == 1 { "" } else { "s" },
         names.join(", "),
     );
     let spans = vec![span(Role::Muted, &phrase)];
     Card(vec![Mark::Text { spans }])
 }
-
-// ── `large binding`: the install chokepoint's residency nudge ────────────
 
 /// Compose one large-binding notice into a [`Card`] — a dim one-liner
 /// naming the binding, its shallow-size estimate, and the file-path
@@ -723,7 +792,7 @@ pub fn bindings_pruned_card(notices: &[ral_core::types::BindingPruneNotice]) -> 
 /// completely untouched (`decisions/260629_agent-binding-reaping`,
 /// `decisions/260705_leases-and-budgets` §"Shell residency is lexical
 /// state plus host leases").
-pub fn large_binding_card(name: &str, bytes: u64) -> Card {
+fn large_binding_card(name: &str, bytes: u64) -> Card {
     let spans = vec![span(
         Role::Warn,
         &format!(
@@ -1117,6 +1186,21 @@ fn int_field(m: &ral_core::types::Map, field: &str) -> Option<i64> {
 /// empty.
 fn strings_field(m: &ral_core::types::Map, field: &str) -> Vec<String> {
     lines_field(m, field)
+}
+
+/// A list-of-integers field, unclamped; a missing or non-list field, or a
+/// non-integer element, is dropped from the result rather than failing it.
+fn ints_field(m: &ral_core::types::Map, field: &str) -> Vec<u64> {
+    match m.get(field) {
+        Some(RalValue::List(items)) => items
+            .iter()
+            .filter_map(|v| match v {
+                RalValue::Int(n) => Some((*n).max(0) as u64),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// A list-of-strings field; non-string elements render as their display so

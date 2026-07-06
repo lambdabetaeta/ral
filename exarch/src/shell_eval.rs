@@ -169,27 +169,32 @@ pub(crate) fn is_service_pin(key: &str) -> bool {
 /// decoder both delivery regimes share.  The live foreground sink
 /// (the transport event loop) calls it to emit now; the deferred sink's
 /// `deliver` calls the *same* function to mint the identical events at the turn
-/// boundary.  Three shapes arrive on the one `surface` channel:
+/// boundary.  Four shapes arrive on the one `surface` channel:
 ///
 ///   * a structural I/O event core emits (a read, write, exec, or grep) — a
 ///     `Map` tagged by its `io` field, decoded into a typed [`IoEvent`] and
 ///     paired with the [`Card`] composed from it ([`Kind::Io`]);
+///   * a `` `notice `` core's own ready-boundary housekeeping pushes (a
+///     worker reap, an idle-binding prune, a large-binding warning),
+///     decoded into a [`Notice`](crate::card::Notice) and paired with its
+///     card ([`Kind::Notice`]);
 ///   * a render document a ral kit composed (a `` `card `` variant of Bertin
 ///     marks), decoded into a [`Card`] ([`Kind::Card`]); and
 ///   * the `` `done `` completion event a detached worker flushes at the end of
-///     its deferred batch, composed into its one-line outcome [`Card`].
+///     its deferred batch, decoded into its [`DoneOutcome`](crate::card::DoneOutcome)
+///     and paired with its one-line outcome [`Card`] ([`Kind::Done`]).
 ///
-/// A fourth shape rides the same channel as a render *disposition*, tried
+/// A fifth shape rides the same channel as a render *disposition*, tried
 /// first: a `` `pin ``/`` `unpin `` wrapper carrying *state* rather than an
 /// event ([`value_to_pin`]) — a render document keyed to a register slot,
 /// overwritten in place on re-pin ([`Kind::Pin`]/[`Kind::Unpin`]) rather than
 /// appended to scrollback.
 ///
-/// They cannot collide — io is a `Map`; a card, a `done`, and a pin are
-/// distinct `Variant` labels — and the order (pin, then io, then card, then
-/// done) is the tried-first sequence, so the raw effect record always reaches
-/// the bus beside its rendering.  A value that is none of these returns `None`
-/// and is dropped.
+/// They cannot collide — io is a `Map`; a notice, a card, a `done`, and a pin
+/// are distinct `Variant` labels — and the order (pin, then io, then notice,
+/// then card, then done) is the tried-first sequence, so the raw effect
+/// record always reaches the bus beside its rendering.  A value that is none
+/// of these returns `None` and is dropped.
 ///
 /// [`Card`]: crate::card::Card
 /// [`IoEvent`]: crate::card::IoEvent
@@ -202,10 +207,16 @@ pub fn decode_surface(ev: &RalValue) -> Option<Kind> {
     } else if let Some(event) = value_to_io(ev) {
         let card = io_card(&event);
         Some(Kind::Io { event, card })
+    } else if let Some(notice) = crate::card::value_to_notice(ev) {
+        let card = crate::card::notice_card(&notice);
+        Some(Kind::Notice { notice, card })
     } else if let Some(card) = value_to_card(ev) {
         Some(Kind::Card(card))
     } else {
-        value_to_done(ev).map(|outcome| Kind::Card(done_card(&outcome)))
+        value_to_done(ev).map(|outcome| {
+            let card = done_card(&outcome);
+            Kind::Done { outcome, card }
+        })
     }
 }
 
@@ -1142,12 +1153,13 @@ keep-bottom
     }
 
     /// The shared decoder both regimes use round-trips each surface class to
-    /// its `Kind` — an io `Map` to `Kind::Io`, a `` `card `` variant to
-    /// `Kind::Card`, the `` `done `` completion event to a `Kind::Card`, and a
-    /// `` `pin ``/`` `unpin `` disposition to `Kind::Pin`/`Kind::Unpin` — and
-    /// drops a junk value to `None`.  The foreground sink emits these now; the
-    /// deferred sink's `deliver` mints the identical ones at the turn
-    /// boundary.
+    /// its `Kind` — an io `Map` to `Kind::Io`, a `` `notice `` to
+    /// `Kind::Notice`, a `` `card `` variant to `Kind::Card`, the `` `done ``
+    /// completion event to `Kind::Done` (structured outcome kept, not just
+    /// its ink), and a `` `pin ``/`` `unpin `` disposition to
+    /// `Kind::Pin`/`Kind::Unpin` — and drops a junk value to `None`.  The
+    /// foreground sink emits these now; the deferred sink's `deliver` mints
+    /// the identical ones at the turn boundary.
     #[test]
     fn decode_surface_round_trips_each_class() {
         // An io map → Kind::Io.
@@ -1158,6 +1170,28 @@ keep-bottom
             ])),
             Some(Kind::Io { .. })
         ));
+        // A `notice` variant → Kind::Notice, its outcome structure kept
+        // beside the rendered card.
+        assert!(matches!(
+            decode_surface(&RalValue::Variant {
+                label: "notice".into(),
+                payload: Some(Box::new(RalValue::map(vec![
+                    (
+                        "kind".into(),
+                        RalValue::Variant {
+                            label: "reap".into(),
+                            payload: None,
+                        },
+                    ),
+                    ("cmd".into(), RalValue::String("sleep 10".into())),
+                    ("cause".into(), RalValue::String("idle".into())),
+                ]))),
+            }),
+            Some(Kind::Notice {
+                notice: crate::card::Notice::Reap { .. },
+                ..
+            })
+        ));
         // A `card` variant → Kind::Card.
         assert!(matches!(
             decode_surface(&RalValue::Variant {
@@ -1166,7 +1200,7 @@ keep-bottom
             }),
             Some(Kind::Card(_))
         ));
-        // A `done` event → Kind::Card (the done card).
+        // A `done` event → Kind::Done, its typed outcome kept beside the card.
         assert!(matches!(
             decode_surface(&RalValue::Variant {
                 label: "done".into(),
@@ -1181,7 +1215,10 @@ keep-bottom
                     ),
                 ]))),
             }),
-            Some(Kind::Card(_))
+            Some(Kind::Done {
+                outcome: crate::card::DoneOutcome::Ok,
+                ..
+            })
         ));
         // A `pin` wrapper with a non-empty body → Kind::Pin, decoded by value_to_card.
         assert!(matches!(

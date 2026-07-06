@@ -411,22 +411,18 @@ impl App {
                     Err(card) => self.with_viewport(id, |vp| vp.push_card(card)),
                 }
             }
-            // The lease chain reaped a worker at the ready boundary: its
-            // one-line card lands as its own scrollback block, same as any
-            // other surfaced card — but never through the diff-detection
-            // path above, since a reap's card is always plain text.
-            Kind::WorkerReaped { card, .. } => {
+            // A detached worker settled: its one-line outcome card lands as
+            // its own scrollback block, same as any other surfaced card —
+            // but never through the diff-detection path above, since a
+            // done card is always plain text.
+            Kind::Done { card, .. } => {
                 self.with_viewport(id, |vp| vp.push_card(card));
             }
-            // The binding-lease chain pruned idle top-level names at the
-            // ready boundary: same one-line-card-as-scrollback-block
-            // treatment as a worker reap, its sibling lease.
-            Kind::BindingsPruned { card, .. } => {
-                self.with_viewport(id, |vp| vp.push_card(card));
-            }
-            // The install chokepoint's large-binding residency nudge: same
+            // Core's own ready-boundary housekeeping pushed a notice — a
+            // worker the lease chain reaped, idle bindings the ledger
+            // pruned, or a large-binding residency nudge: same
             // one-line-card-as-scrollback-block treatment.
-            Kind::LargeBinding { card, .. } => {
+            Kind::Notice { card, .. } => {
                 self.with_viewport(id, |vp| vp.push_card(card));
             }
             // The `/resources` fold: the agent's card arrives carrying its

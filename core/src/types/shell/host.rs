@@ -13,11 +13,12 @@ use super::Shell;
 use super::TerminalAccess;
 use super::bindings::{BindingLease, BindingPruneNotice, LargeBindingNotice};
 use super::repl::ReplScratch;
+use super::workers::ReapCause;
 use crate::diagnostic::SourceDb;
 use crate::exit_hints::ExitHints;
 use crate::io::{Sink, TerminalState};
 use crate::process::{DurableRoot, ForegroundScope, TerminalLease};
-use crate::types::{AuditFragment, ReapNotice, WorkerEntry, WorkerId};
+use crate::types::{AuditFragment, ReapNotice, Value, WorkerEntry, WorkerId};
 
 /// An in-flight terminal loan, returned by [`Shell::begin_terminal_loan`] and
 /// surrendered to [`Shell::end_terminal_loan`].
@@ -155,10 +156,13 @@ impl Shell {
     /// Drain the reap notices recorded since the last drain — one compact
     /// record per entry removed by policy (the lease chain's idle bound or
     /// backstop, the retention sweep's expiry), never one for an entry an
-    /// eliminator observed away first. A host drains these at its ready
-    /// boundaries to emit transcript events, so a removal by policy always
-    /// has an answer in the log.
-    pub fn take_worker_reap_notices(&mut self) -> Vec<ReapNotice> {
+    /// eliminator observed away first. Crate-private: this used to be a host
+    /// accessor a frontend polled at its own ready boundary and composed into
+    /// a transcript event itself; [`Self::emit_ready_boundary_notices`] is now
+    /// the one caller, pushing the fact as a `` `notice `` surface class from
+    /// *inside* the turn that produced it instead
+    /// (`decisions/260706_enquiry-channel` §4.2).
+    pub(crate) fn take_worker_reap_notices(&mut self) -> Vec<ReapNotice> {
         self.local.workers.take_reap_notices()
     }
 
@@ -204,11 +208,46 @@ impl Shell {
     /// Drain every large-binding notice queued since the last drain — one
     /// per session-scope install whose value's shallow-size estimate met
     /// the armed lease's threshold (`decisions/260629_agent-binding-reaping`).
-    /// A host drains these at its ready boundaries, beside the prune
-    /// notices, to emit a transcript/TUI-only warning; the binding itself
-    /// is never touched by this call.
-    pub fn take_large_binding_notices(&mut self) -> Vec<LargeBindingNotice> {
+    /// Crate-private for the same reason as [`Self::take_worker_reap_notices`]:
+    /// [`Self::emit_ready_boundary_notices`] is now the one caller; the
+    /// binding itself is never touched by this call.
+    pub(crate) fn take_large_binding_notices(&mut self) -> Vec<LargeBindingNotice> {
         self.local.bindings.take_large_binding_notices()
+    }
+
+    /// Push this shell's ready-boundary housekeeping as `` `notice `` surface
+    /// events — a worker the lease chain reaped and a session-scope install
+    /// past the large-binding threshold — through the installed turn's own
+    /// surface sink, in the order the underlying ledgers accumulated them.
+    /// Called once per settled turn ([`crate::turn::run_framed`]), *before*
+    /// the turn's frame tears down, so the notice rides the same turn's
+    /// surface stream, ordered before its Report
+    /// (`decisions/260706_enquiry-channel` §4.2).
+    ///
+    /// A no-op — the ledgers are left untouched, not drained-and-dropped —
+    /// when no surface sink is installed (a bare REPL, or a host-embedding
+    /// test dispatching a raw `TurnRequest`): with nobody to push to, the
+    /// notices simply wait for a turn that does install one, exactly as
+    /// they did before this turn ran.
+    ///
+    /// The binding-lease ledger's *idle-prune* notice does not ride here: a
+    /// prune is a host-timed act, called between turns
+    /// ([`Self::prune_idle_bindings`] hands back the post-prune
+    /// [`MobileSnapshot`] a panic-recovery baseline needs, which cannot
+    /// itself cross the turn/surface/Report seam) — with no turn installed
+    /// at that call site, there is no live surface sink to push through
+    /// either. It stays the one notice a host still composes itself from
+    /// the polled return, an acknowledged residue of this migration.
+    pub(crate) fn emit_ready_boundary_notices(&mut self) {
+        if self.turn.surface.is_none() {
+            return;
+        }
+        for notice in self.take_worker_reap_notices() {
+            self.surface(reap_notice_value(&notice));
+        }
+        for notice in self.take_large_binding_notices() {
+            self.surface(large_binding_notice_value(&notice));
+        }
     }
 
     /// Arm this shell's binding-lease ledger and seal the boot baseline:
@@ -418,6 +457,53 @@ impl Shell {
     /// [`Shell::has_active_capabilities`](Shell::has_active_capabilities).
     pub fn grant_depth(&self) -> usize {
         self.mobile.context.grants.iter().count()
+    }
+}
+
+/// Encode one [`ReapNotice`] as `` `notice [kind: `reap, cmd, cause] `` — the
+/// wire shape [`Self::emit_ready_boundary_notices`] pushes and the exarch
+/// host decodes back (`decisions/260706_enquiry-channel` §4.2). `cause`
+/// travels as the same lowercase tag exarch's own transcript writer already
+/// used for it, so the wire word and the forensic-record word are one word.
+fn reap_notice_value(notice: &ReapNotice) -> Value {
+    let cause = match notice.cause {
+        ReapCause::Idle => "idle",
+        ReapCause::Backstop => "backstop",
+        ReapCause::Retention => "retention",
+    };
+    Value::Variant {
+        label: "notice".into(),
+        payload: Some(Box::new(Value::map(vec![
+            (
+                "kind".into(),
+                Value::Variant {
+                    label: "reap".into(),
+                    payload: None,
+                },
+            ),
+            ("cmd".into(), Value::String(notice.cmd.clone())),
+            ("cause".into(), Value::String(cause.into())),
+        ]))),
+    }
+}
+
+/// Encode one [`LargeBindingNotice`] as
+/// `` `notice [kind: `large-binding, name, bytes] ``, the large-binding
+/// sibling of [`reap_notice_value`].
+fn large_binding_notice_value(notice: &LargeBindingNotice) -> Value {
+    Value::Variant {
+        label: "notice".into(),
+        payload: Some(Box::new(Value::map(vec![
+            (
+                "kind".into(),
+                Value::Variant {
+                    label: "large-binding".into(),
+                    payload: None,
+                },
+            ),
+            ("name".into(), Value::String(notice.name.clone())),
+            ("bytes".into(), Value::Int(notice.bytes as i64)),
+        ]))),
     }
 }
 

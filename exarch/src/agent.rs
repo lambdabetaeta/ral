@@ -726,29 +726,8 @@ impl Agent {
         self.log.history_bytes()
     }
 
-    /// Drain the shell's lease-chain reap notices and emit one compact
-    /// transcript/TUI event per entry — a worker the lease chain removed by
-    /// policy (unobserved past its idle bound, or past its absolute
-    /// backstop) rather than one an eliminator observed away. Transcript +
-    /// TUI only: never model-facing, so this posts nothing to the inbox and
-    /// writes no `events.json` line — model-visible reap delivery is
-    /// deferred (`decisions/260705_leases-and-budgets`). Called once per
-    /// pass through the ready boundary in [`Self::drive`], the one site
-    /// both the TUI and headless drives share.
-    fn drain_worker_reaps(&mut self, emit: &Emitter) {
-        let notices = self.transport.shell_mut().shell.take_worker_reap_notices();
-        for notice in notices {
-            let card = crate::card::reap_card(&notice.cmd, notice.cause);
-            emit.emit(Kind::WorkerReaped {
-                cmd: notice.cmd,
-                cause: notice.cause,
-                card,
-            });
-        }
-    }
-
     /// Reconcile the host-owned `services` pin against the shell's live
-    /// worker registry, beside [`Self::drain_worker_reaps`] at the same
+    /// worker registry, beside the binding-lease reap at the same
     /// ready-boundary pass: one card lists every currently-running durable
     /// service, re-pinned whenever at least one is alive; the pin drops the
     /// moment none remain (cancelled, or settled and reaped). The model
@@ -792,48 +771,42 @@ impl Agent {
         });
     }
 
-    /// Prune this shell's idle top-level bindings and drain its queued
-    /// large-binding notices — the binding-lease ledger's one boundary
-    /// drain site, beside [`Self::drain_worker_reaps`]
-    /// (`decisions/260629_agent-binding-reaping`). Both halves are
-    /// transcript/TUI only: no `events.json` twin, no inbox message, never
-    /// model-facing.
+    /// Prune this shell's idle top-level bindings — the binding-lease
+    /// ledger's one boundary drain site
+    /// (`decisions/260629_agent-binding-reaping`). The worker-reap and
+    /// large-binding notices no longer poll through here: core's own
+    /// engine now pushes both as `` `notice `` surface classes at the
+    /// ready boundary of the turn that produced them
+    /// (`decisions/260706_enquiry-channel` §4.2), decoded by
+    /// `shell_eval::decode_surface` into `Kind::Notice` at the ordinary
+    /// emit seam — this call site retired along with the polled
+    /// `Shell::take_worker_reap_notices`/`take_large_binding_notices`
+    /// accessors, now crate-private to core.
     ///
-    /// The prune half emits one compact `Kind::BindingsPruned` naming what
-    /// fell, then adopts the verb's own post-prune snapshot as the durable
-    /// checkpoint in the same statement — the pairing the verb's signature
-    /// enforces, so a later panic rollback can never resurrect a pruned
-    /// name. The large-binding half emits one `Kind::LargeBinding` per
-    /// notice queued since the last drain, regardless of whether this pass
-    /// pruned anything — the two halves are independent axes (lifetime vs
-    /// residency) and neither gates the other.
+    /// The prune half stays host-called and host-composed: unlike the
+    /// other two, `prune_idle_bindings` hands back the post-prune
+    /// [`MobileSnapshot`](ral_core::types::MobileSnapshot) this agent's
+    /// panic-recovery baseline needs, and a snapshot cannot ride the
+    /// turn/surface/Report seam (`decisions/260706_enquiry-channel` §5
+    /// keeps durability off the wire) — so it cannot be folded into core's
+    /// automatic per-turn push the way the other two were. This is the one
+    /// acknowledged residue of the pushed-notice migration: the notice is
+    /// still built here, from the polled return, one compact `Kind::Notice`
+    /// naming what fell, adopting the verb's own post-prune snapshot as the
+    /// durable checkpoint in the same statement — the pairing the verb's
+    /// signature enforces, so a later panic rollback can never resurrect a
+    /// pruned name.
     fn reap_bindings(&mut self, emit: &Emitter) {
-        for notice in self
-            .transport
-            .shell_mut()
-            .shell
-            .take_large_binding_notices()
-        {
-            let card = crate::card::large_binding_card(&notice.name, notice.bytes);
-            emit.emit(Kind::LargeBinding {
-                name: notice.name,
-                bytes: notice.bytes,
-                card,
-            });
-        }
-
         let Some((notices, checkpoint)) = self.transport.shell_mut().shell.prune_idle_bindings()
         else {
             return;
         };
         self.durable = checkpoint;
         let names: Vec<String> = notices.iter().map(|n| n.name.clone()).collect();
-        let card = crate::card::bindings_pruned_card(&notices);
-        emit.emit(Kind::BindingsPruned {
-            names,
-            idle_calls: shell_eval::BINDING_IDLE_CALLS,
-            card,
-        });
+        let idle_calls: Vec<u64> = notices.iter().map(|n| n.idle_calls).collect();
+        let notice = crate::card::Notice::Prune { names, idle_calls };
+        let card = crate::card::notice_card(&notice);
+        emit.emit(Kind::Notice { notice, card });
     }
 
     /// Warn once per excursion above the operator's disk-warn ceiling,
@@ -845,8 +818,7 @@ impl Agent {
     /// [`Self::ral_epoch`] the settled-worker and binding-lease sweeps read)
     /// so the walk's cost — a full scan of the session log dir and scratch —
     /// is paid rarely, at the ready boundary both frontends share
-    /// ([`Self::drive`]), beside [`Self::drain_worker_reaps`] and
-    /// [`Self::reap_bindings`].
+    /// ([`Self::drive`]), beside [`Self::reap_bindings`].
     fn check_disk_warn(&mut self, emit: &Emitter) {
         let Some(ceiling) = self.disk_warn_bytes else {
             return;
@@ -1123,12 +1095,18 @@ impl Agent {
         loop {
             // Every pass back to the loop top is a settled ready boundary
             // (the per-iteration quiesce below, or the invariant `drive` is
-            // entered under); drain the lease chain's reap notices here so a
-            // worker abandoned between turns still leaves a paper trail
-            // before the loop parks or picks up the next deliverable.
-            self.drain_worker_reaps(emit);
+            // entered under). The lease chain's reap notices and the
+            // large-binding warning no longer need draining here: core's
+            // own engine pushes both as `` `notice `` surface classes at
+            // the ready boundary of the turn that produced them
+            // (`decisions/260706_enquiry-channel` §4.2) — visible at the
+            // next dispatched turn rather than on every idle pass through
+            // this loop, the one behavioural change the push migration
+            // costs (a worker reaped while this agent sits fully idle
+            // surfaces only once a turn next runs).
+            //
             // The service ledger's sibling boundary drain: the `services`
-            // pin is (re-)born or dies at the same pass a reap notice would.
+            // pin is (re-)born or dies at this pass.
             self.reconcile_service_pins(emit);
             // The binding-lease ledger's sibling boundary drain: a turn
             // never begins over a scope about to be pruned, and the next
@@ -1876,8 +1854,10 @@ impl Agent {
         // Advance the settled-retention sweep to this call's epoch: stamp
         // entries first observed settled, expire those whose unclaimed
         // result has sat a full retention of calls.  Expiry notices ride
-        // the existing `drain_worker_reaps` at the next ready boundary —
-        // no plumbing of their own.
+        // core's own per-turn `` `notice `` push at the *next* dispatched
+        // turn's ready boundary — this call runs after the current turn's
+        // surface stream already closed, so there is no live sink to push
+        // through until then; no plumbing of their own either way.
         self.transport
             .shell_mut()
             .shell
@@ -3242,11 +3222,15 @@ mod tests {
     }
 
     /// Seed one lease-chain reap (an unpolled worker under a millisecond
-    /// idle bound), then drive the drain site directly: one
-    /// `Kind::WorkerReaped` event carries the cmd and cause, and a second
-    /// drain — the notices ledger now empty — emits nothing.
+    /// idle bound) with no turn running to push it — core's engine only
+    /// pushes a `` `notice `` from *inside* a turn's own surface stream
+    /// (`decisions/260706_enquiry-channel` §4.2), so a reap the background
+    /// lease chain performs between turns sits queued until one runs. The
+    /// next dispatched turn surfaces it as `Kind::Notice`, ordered before
+    /// that turn's own `Kind::ToolResult`; a further turn with nothing new
+    /// queued surfaces no second notice.
     #[test]
-    fn drain_worker_reaps_emits_once_then_nothing() {
+    fn ready_boundary_reap_notice_surfaces_at_the_next_turn() {
         let dir = tmp("drain-worker-reaps");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         ral_core::builtins::register_builtins(WORKER_REGISTRY_TEST_BUILTINS);
@@ -3278,31 +3262,34 @@ mod tests {
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
 
-        session.drain_worker_reaps(&emit);
-        let event = rx
-            .try_recv()
-            .expect("the drain must emit exactly one reap event");
-        match event.kind {
-            Kind::WorkerReaped { cmd, cause, .. } => {
-                assert_eq!(cmd, "<block>", "the reap must name the spawned body");
-                assert_eq!(
-                    cause,
-                    ral_core::types::ReapCause::Idle,
-                    "an unpolled worker past its idle bound reaps as Idle"
-                );
-            }
-            _ => panic!("expected Kind::WorkerReaped"),
-        }
-        assert!(
-            rx.try_recv().is_err(),
-            "the drain must emit exactly one event per reap"
-        );
+        session.run_shell("c0".into(), "return 1", 5, &emit);
 
-        session.drain_worker_reaps(&emit);
-        assert!(
-            rx.try_recv().is_err(),
-            "a second drain with no new notices must emit nothing"
-        );
+        let mut notices = 0;
+        while let Ok(event) = rx.try_recv() {
+            let Kind::Notice {
+                notice: crate::card::Notice::Reap { cmd, cause },
+                ..
+            } = event.kind
+            else {
+                continue;
+            };
+            notices += 1;
+            assert_eq!(cmd, "<block>", "the reap must name the spawned body");
+            assert_eq!(
+                cause,
+                ral_core::types::ReapCause::Idle,
+                "an unpolled worker past its idle bound reaps as Idle"
+            );
+        }
+        assert_eq!(notices, 1, "the queued reap surfaces exactly once");
+
+        session.run_shell("c1".into(), "return 1", 5, &emit);
+        while let Ok(event) = rx.try_recv() {
+            assert!(
+                !matches!(event.kind, Kind::Notice { .. }),
+                "a further turn with nothing new queued must surface no second notice"
+            );
+        }
     }
 
     // ── the `services` pin ledger ─────────────────────────────────────────
@@ -3310,7 +3297,7 @@ mod tests {
     /// The `services` pin is the host's own write: born with the service's
     /// description as soon as a durable birth is reconciled, and retired
     /// the moment cancelling it leaves no durable service running — the
-    /// same boundary pass `drain_worker_reaps` runs at.
+    /// same ready-boundary pass in [`Agent::drive`].
     #[test]
     fn reconcile_service_pins_births_and_retires_the_services_pin() {
         let dir = tmp("reconcile-service-pins");
@@ -3436,9 +3423,9 @@ mod tests {
 
     /// Seed one idle binding (a tiny re-armed bound, for speed — every
     /// `Agent` is already armed with the production `BINDING_IDLE_CALLS` by
-    /// `assemble`), then drive the drain site directly: one
-    /// `Kind::BindingsPruned` event names it, and a second drain — nothing
-    /// left idle — emits nothing.
+    /// `assemble`), then drive the drain site directly: one `Kind::Notice`
+    /// carrying `Notice::Prune` names it, and a second drain — nothing left
+    /// idle — emits nothing.
     #[test]
     fn reap_bindings_emits_once_then_nothing() {
         let dir = tmp("reap-bindings");
@@ -3466,13 +3453,15 @@ mod tests {
             .try_recv()
             .expect("the drain must emit exactly one prune event");
         match event.kind {
-            Kind::BindingsPruned {
-                names, idle_calls, ..
+            Kind::Notice {
+                notice: crate::card::Notice::Prune { names, idle_calls },
+                ..
             } => {
                 assert_eq!(names, vec!["reap_me".to_string()]);
-                assert_eq!(idle_calls, shell_eval::BINDING_IDLE_CALLS);
+                assert_eq!(idle_calls.len(), 1);
+                assert!(idle_calls[0] >= 2, "idle at least the armed bound");
             }
-            _ => panic!("expected Kind::BindingsPruned"),
+            _ => panic!("expected Kind::Notice with Notice::Prune"),
         }
         assert!(
             rx.try_recv().is_err(),
@@ -3487,13 +3476,14 @@ mod tests {
     }
 
     /// A session-scope install that meets the large-binding threshold
-    /// queues a notice at the chokepoint; the same boundary drain that
-    /// prunes idle bindings also emits one `Kind::LargeBinding` for it, and
-    /// a second drain — nothing newly queued — emits nothing. The two axes
-    /// are independent: nothing here is idle enough to prune, so this is
-    /// exactly what isolates the large-binding half of the drain.
+    /// queues a notice at the chokepoint; core's engine now pushes it
+    /// itself, from inside the very turn that installed the binding
+    /// (`decisions/260706_enquiry-channel` §4.2) — unlike the idle-prune
+    /// notice, this one no longer waits on `Agent::reap_bindings` at all.
+    /// A further turn with nothing newly queued surfaces no second notice.
+    /// The two axes are independent: nothing here is idle enough to prune.
     #[test]
-    fn reap_bindings_emits_large_binding_notice_once_then_nothing() {
+    fn large_binding_install_surfaces_a_notice_from_its_own_turn() {
         let dir = tmp("reap-large-binding");
         let mut session = Agent::for_test(&dir, "system").unwrap();
         session
@@ -3506,38 +3496,41 @@ mod tests {
             });
         session.durable = session.transport.shell_mut().shell.mobile_snapshot();
 
-        let (warmup_tx, _warmup_rx) = crate::bus::channel();
-        let warmup_emit = Emitter::new(warmup_tx, session.id);
+        let (tx, rx) = crate::bus::channel();
+        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
         session.run_shell(
             "c0".into(),
             "let large_binding_x = 'well over eight bytes long'",
             5,
-            &warmup_emit,
+            &emit,
         );
 
-        let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
-        session.reap_bindings(&emit);
-        let event = rx
-            .try_recv()
-            .expect("the drain must emit exactly one large-binding event");
-        match event.kind {
-            Kind::LargeBinding { name, bytes, .. } => {
-                assert_eq!(name, "large_binding_x");
-                assert_eq!(bytes, "well over eight bytes long".len() as u64);
-            }
-            _ => panic!("expected Kind::LargeBinding"),
+        let mut notices = 0;
+        while let Ok(event) = rx.try_recv() {
+            let Kind::Notice {
+                notice: crate::card::Notice::LargeBinding { name, bytes },
+                ..
+            } = event.kind
+            else {
+                continue;
+            };
+            notices += 1;
+            assert_eq!(name, "large_binding_x");
+            assert_eq!(bytes, "well over eight bytes long".len() as u64);
         }
-        assert!(
-            rx.try_recv().is_err(),
-            "the drain must emit exactly one event per offending install"
-        );
+        assert_eq!(notices, 1, "exactly one notice per offending install");
 
-        session.reap_bindings(&emit);
-        assert!(
-            rx.try_recv().is_err(),
-            "a second drain with nothing newly queued must emit nothing"
-        );
+        // No new session-scope install this time (`return` binds nothing),
+        // so nothing meets the threshold again.
+        let (tx2, rx2) = crate::bus::channel();
+        let emit2 = Emitter::with_mailbox(tx2, session.id, session.inbox.mailbox());
+        session.run_shell("c1".into(), "return 1", 5, &emit2);
+        while let Ok(event) = rx2.try_recv() {
+            assert!(
+                !matches!(event.kind, Kind::Notice { .. }),
+                "nothing newly queued must surface no notice"
+            );
+        }
     }
 
     /// Unconfigured (`disk_warn_bytes: None`) is a no-op by construction:
@@ -3904,8 +3897,12 @@ mod tests {
     /// The per-agent ral-call epoch: each `run_shell` bumps it once, the
     /// post-eval sweep stamps a settled-but-unclaimed worker's entry with
     /// it, and — the sweep fast-forwarded past the retention bound through
-    /// the same host door `run_shell` uses — the expiry renders through the
-    /// existing drain as a `Retention`-cause `Kind::WorkerReaped`.
+    /// the same host door `run_shell` uses — the expiry surfaces at the
+    /// *next* dispatched turn as a `Retention`-cause `Kind::Notice`: the
+    /// sweep itself runs between turns (`advance_worker_epoch`, called
+    /// after the turn that owns `self.ral_epoch` returns), so there is no
+    /// live surface sink to push the notice through until a further turn
+    /// runs (`decisions/260706_enquiry-channel` §4.2).
     #[test]
     fn run_shell_epoch_stamps_and_retention_renders_through_the_drain() {
         let dir = tmp("ral-epoch-retention");
@@ -3959,29 +3956,30 @@ mod tests {
         );
         assert_eq!(session.transport.shell_mut().shell.worker_count(), 0);
 
-        // ...and the expiry renders through the existing drain, on a fresh
-        // channel so the run_shell chatter above stays out of the assert.
+        // ...and the expiry surfaces at the next dispatched turn, on a
+        // fresh channel so the run_shell chatter above stays out of the
+        // assert.
         let (tx2, rx2) = crate::bus::channel();
         let emit2 = Emitter::with_mailbox(tx2, session.id, session.inbox.mailbox());
-        session.drain_worker_reaps(&emit2);
-        let event = rx2
-            .try_recv()
-            .expect("the drain must emit the retention reap");
-        match event.kind {
-            Kind::WorkerReaped { cmd, cause, .. } => {
-                assert_eq!(cmd, "<block>", "the reap names the spawned body");
-                assert_eq!(
-                    cause,
-                    ral_core::types::ReapCause::Retention,
-                    "an unclaimed settled entry expires as Retention"
-                );
-            }
-            _ => panic!("expected Kind::WorkerReaped"),
+        session.run_shell("t3".into(), "return 1", 5, &emit2);
+        let mut notices = 0;
+        while let Ok(event) = rx2.try_recv() {
+            let Kind::Notice {
+                notice: crate::card::Notice::Reap { cmd, cause },
+                ..
+            } = event.kind
+            else {
+                continue;
+            };
+            notices += 1;
+            assert_eq!(cmd, "<block>", "the reap names the spawned body");
+            assert_eq!(
+                cause,
+                ral_core::types::ReapCause::Retention,
+                "an unclaimed settled entry expires as Retention"
+            );
         }
-        assert!(
-            rx2.try_recv().is_err(),
-            "exactly one event per retention expiry"
-        );
+        assert_eq!(notices, 1, "exactly one notice per retention expiry");
     }
 
     // ── `/resources`: the probe fold's agent half ─────────────────────────

@@ -145,31 +145,47 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
         // the read/write/exec/grep shape. The card composed from it is a
         // rendering and lives in the TUI's `user.log`, never here.
         Kind::Io { event, .. } => ("io", json!({ "event": event })),
-        // The lease chain's raw reap fact — which worker, spelled how, and
-        // which lease fired — kept beside the one-liner `card` the same way
-        // `Kind::Io` keeps its structural `event` beside its rendering.
-        Kind::WorkerReaped { cmd, cause, .. } => {
-            let cause = match cause {
-                ral_core::types::ReapCause::Idle => "idle",
-                ral_core::types::ReapCause::Backstop => "backstop",
-                ral_core::types::ReapCause::Retention => "retention",
-            };
-            ("worker_reaped", json!({ "cmd": cmd, "cause": cause }))
+        // A detached worker's raw settlement fact — a clean return, a raised
+        // error, or a panic — kept beside the rendered `card` on the
+        // `Kind::Io` pattern, so `transcript.jsonl` records how the worker
+        // settled, not just its one-line ink.
+        Kind::Done { outcome, .. } => {
+            use crate::card::DoneOutcome;
+            match outcome {
+                DoneOutcome::Ok => ("done", json!({ "outcome": "ok" })),
+                DoneOutcome::Err { message, status } => (
+                    "done",
+                    json!({ "outcome": "err", "message": message, "status": status }),
+                ),
+                DoneOutcome::Panic { message } => {
+                    ("done", json!({ "outcome": "panic", "message": message }))
+                }
+            }
         }
-        // The binding-lease chain's raw prune fact — which names fell and
-        // the idle bound they met — kept beside the rendered `card` on the
-        // same pattern as `Kind::WorkerReaped`'s `cmd`/`cause`.
-        Kind::BindingsPruned {
-            names, idle_calls, ..
-        } => (
-            "bindings_pruned",
-            json!({ "names": names, "idle_calls": idle_calls }),
-        ),
-        // The install chokepoint's raw large-binding fact — which name, how
-        // large its shallow estimate ran — kept beside the rendered `card`
-        // on the same pattern.
-        Kind::LargeBinding { name, bytes, .. } => {
-            ("large_binding", json!({ "name": name, "bytes": bytes }))
+        // Core's own ready-boundary housekeeping fact — which worker was
+        // reaped and why, which bindings a prune pass fell, or which
+        // install crossed the large-binding threshold — kept beside the
+        // rendered `card` the same way `Kind::Io` keeps its structural
+        // `event` beside its rendering.
+        Kind::Notice { notice, .. } => {
+            use crate::card::Notice;
+            match notice {
+                Notice::Reap { cmd, cause } => {
+                    let cause = match cause {
+                        ral_core::types::ReapCause::Idle => "idle",
+                        ral_core::types::ReapCause::Backstop => "backstop",
+                        ral_core::types::ReapCause::Retention => "retention",
+                    };
+                    ("worker_reaped", json!({ "cmd": cmd, "cause": cause }))
+                }
+                Notice::Prune { names, idle_calls } => (
+                    "bindings_pruned",
+                    json!({ "names": names, "idle_calls": idle_calls }),
+                ),
+                Notice::LargeBinding { name, bytes } => {
+                    ("large_binding", json!({ "name": name, "bytes": bytes }))
+                }
+            }
         }
         // The `/resources` fold's raw rows — the agent's accumulator
         // figures at the instant the operator asked — kept beside the
