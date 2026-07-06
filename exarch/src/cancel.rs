@@ -1,9 +1,10 @@
 //! Exarch's per-turn cancellation, layered on top of ral's SIGINT handling.
 //!
-//! ral's `signal::install_handlers` sets `SIGNAL_COUNT` so the
-//! evaluator unwinds between statements; that interrupts an in-flight
-//! tool call but leaves exarch's turn loop free to keep going.  Here we
-//! add a cancellation [`Token`]: every agent holds one sticky token for its
+//! ral's `signal::install_handlers` translates a delivered signal into a
+//! [`CancelCause`](ral_core::process::CancelCause) on the published
+//! cancel slots, so the evaluator unwinds at its next poll; that
+//! interrupts an in-flight tool call but leaves exarch's turn loop free
+//! to keep going.  Here we add a cancellation [`Token`]: every agent holds one sticky token for its
 //! life (registered in the fleet so the subtree cascade always reaches the
 //! live turn), and the drive loop [`reset`](Token::reset)s its flag at each
 //! genuine turn boundary so a prior turn's Esc never bleeds into the next.
@@ -48,7 +49,9 @@
 //! third signal `_exit`s: a SIGINT reaching the supervising TUI — from a
 //! stray child, another process, anything — must only cancel the current
 //! turn, never force-exit exarch.  SIGTERM/SIGHUP keep ral's `term_handler`,
-//! since those are deliberate termination requests.
+//! since those are deliberate termination requests: it cancels the durable
+//! root with `Terminate` — reaching the foreground turn and every detached
+//! worker — and force-exits on the third delivery.
 //! [`crate::bootstrap::boot_shell`] owns that ceremony for exarch session
 //! shells, including `/clear` rebuilds.
 
@@ -211,7 +214,7 @@ static RAL_SIGINT_HANDLER: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 
 /// ral's prior SIGTERM/SIGHUP disposition — the escalating [`term_handler`].
 /// These are deliberate termination requests, so ral's
-/// statement-unwind-then-force-exit ladder is the correct disposition.
+/// root-terminate-then-force-exit disposition is correct.
 #[cfg(unix)]
 static RAL_TERM_HANDLER: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 
@@ -295,7 +298,7 @@ mod tests {
     use crate::bootstrap::Scratch;
     use std::sync::Mutex;
 
-    /// Both tests touch process-global state (`SIGNAL_COUNT`, the
+    /// Both tests touch process-global state (the escalation ladder, the
     /// `CURRENT` slot, and the handler slots that `install` publishes), so
     /// they must not run concurrently.
     static SERIAL: Mutex<()> = Mutex::new(());
@@ -337,11 +340,11 @@ mod tests {
 
     /// Esc cancels the trunk's published token (and, via `deliver_interrupt`,
     /// the current turn's foreground scope — exercised by ral_core's own
-    /// slot tests), but no longer escalates ral's process-global interrupt
-    /// counter: detached workers are cancelled through the registry cascade,
-    /// not the foreground, so they survive an Esc that stops the trunk alone.
+    /// slot tests), but never ticks ral's escalation ladder: detached
+    /// workers are cancelled through the registry cascade, not the
+    /// foreground, so they survive an Esc that stops the trunk alone.
     #[test]
-    fn esc_cancels_token_without_ticking_global_counter() {
+    fn esc_cancels_token_without_ticking_escalation_ladder() {
         let _g = SERIAL.lock().unwrap();
         ral_core::process::clear();
         install();
@@ -351,8 +354,8 @@ mod tests {
         assert!(token.is_cancelled(), "the trunk token should be set");
         assert!(is_set(), "the published slot should report cancelled");
         assert!(
-            !ral_core::process::is_interrupted(),
-            "Esc cancels the trunk's token, not ral's global interrupt counter"
+            !ral_core::process::escalation_pending(),
+            "Esc cancels the trunk's token, never ral's escalation ladder"
         );
         ral_core::process::clear();
     }
@@ -360,8 +363,8 @@ mod tests {
     /// Esc routes through `raise_interrupt`; pressing it repeatedly must
     /// never escalate toward a force-exit.  The Esc path cancels the
     /// trunk's token and the foreground scope and never touches the
-    /// process-global counter, so non-escalation holds by construction —
-    /// the counter stays un-ticked no matter how many times Esc is pressed.
+    /// escalation ladder, so non-escalation holds by construction — the
+    /// ladder stays un-ticked no matter how many times Esc is pressed.
     #[test]
     fn repeated_interrupt_never_force_exits() {
         let _g = SERIAL.lock().unwrap();
@@ -374,8 +377,8 @@ mod tests {
         }
         assert!(is_set(), "the trunk token should be set");
         assert!(
-            !ral_core::process::is_interrupted(),
-            "the Esc path never ticks ral's global counter, so it cannot escalate"
+            !ral_core::process::escalation_pending(),
+            "the Esc path never ticks the escalation ladder, so it cannot force-exit"
         );
         ral_core::process::clear();
     }
@@ -431,11 +434,11 @@ mod tests {
     /// cancel handler before returning.  Without the re-install, the bare
     /// ral `term_handler` would run alone after any shell rebuild: `raise`
     /// (the token half of the chain) would never fire, and the delivered
-    /// SIGINT would `fetch_add` ral's escalating counter.  With the chain
-    /// in place a SIGINT sets the token and routes into the *non-escalating*
+    /// SIGINT would tick ral's escalation ladder.  With the chain in place
+    /// a SIGINT sets the token and routes into the *non-escalating*
     /// `relay_handler`, which cancels the foreground turn without ever
-    /// ticking the third-signal `_exit` counter — so the two observable
-    /// signatures (token set, counter un-ticked) together prove the chain
+    /// ticking the third-signal `_exit` ladder — so the two observable
+    /// signatures (token set, ladder un-ticked) together prove the chain
     /// is installed and a delivered SIGINT can only cancel, never force-exit.
     #[test]
     fn boot_shell_restores_the_chain_after_handler_clobber() {
@@ -454,20 +457,22 @@ mod tests {
             "boot_shell should return with exarch's cancel chain installed"
         );
         assert!(
-            !ral_core::process::is_interrupted(),
+            !ral_core::process::escalation_pending(),
             "the re-chained SIGINT routes into the non-escalating relay handler, \
-             not ral's force-exit counter"
+             never the force-exit ladder"
         );
         ral_core::process::clear();
     }
 
-    /// `/clear` can be the first action after Esc.  Esc leaves ral's
-    /// process interrupt flag set, and the shell rebuild evaluates the
-    /// embedded agent library before any ordinary tool-call cleanup runs;
-    /// the exarch shell constructor must therefore discard that stale
-    /// interrupt before loading the library.
+    /// `/clear` can be the first action after a delivered termination
+    /// signal.  The signal's cooperative delivery (a cause on the cancel
+    /// slots) dies with the turn that unwound on it, but its escalation
+    /// tick would otherwise outlive the turn — leaving the rebuilt
+    /// session one delivery closer to the third-signal `_exit`.  The
+    /// exarch shell constructor resets the ladder before loading the
+    /// library.
     #[test]
-    fn clear_discards_stale_ral_interrupt_before_reboot() {
+    fn clear_resets_the_escalation_ladder_on_reboot() {
         let _g = SERIAL.lock().unwrap();
         ral_core::process::clear();
 
@@ -477,18 +482,21 @@ mod tests {
         let scratch = Scratch::new().expect("scratch directory");
         let mut session = Agent::for_test(&dir, "system").expect("test session");
 
-        ral_core::process::interrupt();
+        // Seed the ladder exactly as a delivered SIGTERM would: through
+        // ral's own term handler.  No turn is running, so the published
+        // cancel slots are null and the delivery is the tick alone.
+        ral_core::process::term_handler()(libc::SIGTERM);
         assert!(
-            ral_core::process::is_interrupted(),
-            "the test must start with the stale interrupt `/clear` used to inherit"
+            ral_core::process::escalation_pending(),
+            "the test must start with the stale escalation tick `/clear` used to inherit"
         );
 
         session
             .clear(&scratch)
-            .expect("/clear should reboot despite a stale interrupt");
+            .expect("/clear should reboot despite a stale escalation tick");
         assert!(
-            !ral_core::process::is_interrupted(),
-            "/clear must leave the next prompt un-interrupted"
+            !ral_core::process::escalation_pending(),
+            "/clear must reset the escalation ladder"
         );
 
         let token = Token::new();

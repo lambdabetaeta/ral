@@ -137,13 +137,7 @@ impl EnquiryDesk for WireDesk {
             }
             if let Some(cause) = crate::process::foreground_cancel_cause() {
                 slots.remove(&eid);
-                let msg = match cause {
-                    crate::process::CancelCause::Interrupt => "interrupted",
-                    crate::process::CancelCause::Explicit => "cancelled",
-                    crate::process::CancelCause::Deadline => "timed out",
-                    crate::process::CancelCause::RootAbort => "aborted",
-                };
-                return Err(Error::new(msg, 130));
+                return Err(Error::new(cause.message(), cause.exit_code()));
             }
             slots = self
                 .answered

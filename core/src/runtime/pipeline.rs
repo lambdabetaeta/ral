@@ -55,8 +55,8 @@ pub(crate) fn run_pipeline(
 ) -> Raw<Value> {
     // A SIGINT delivered before the first signal-checked seam (a
     // top-level pipeline has no outer Bind/Chain/Seq) would otherwise
-    // be silently consumed: the handler increments SIGNAL_COUNT but
-    // RELAY_PGIDS is empty, so the pipeline launches anyway and
+    // be silently consumed: the handler cancels the foreground scope
+    // but RELAY_PGIDS is empty, so the pipeline launches anyway and
     // collect blocks on a long-running consumer that never received
     // the signal.  Bail here instead.
     crate::process::check(shell)?;
@@ -76,9 +76,9 @@ pub(crate) fn run_pipeline(
     // The pipeline group's SIGINT-forwarding relay slot is claimed
     // inside `PipelineGroup::spawn` once the first real child has
     // joined the pgid (see `group.rs`'s SIGINT/relay invariant).
-    // Earlier SIGINTs only increment `SIGNAL_COUNT`, which the per-
-    // stage `signal::check` inside `launch_pipeline` reads to abort
-    // promptly.
+    // Earlier SIGINTs only cancel the turn's foreground scope, which
+    // the per-stage `signal::check` inside `launch_pipeline` observes
+    // to abort promptly.
     let (_group, running) = launch_pipeline(stages, &plan, shell)?;
 
     // The last value-typed helper carries its own value back inside

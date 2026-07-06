@@ -21,10 +21,11 @@ pub fn probe_terminal() -> TerminalState {
 
 /// Build a shell ready for an exarch session.
 ///
-/// This is the one constructor that may boot a session shell: it discards
-/// stale ral interrupts before embedded library evaluation, installs ral's
-/// handlers, then immediately layers exarch's cancel chain over them.  Callers
-/// should seed per-session variables, not repeat signal ceremony.
+/// This is the one constructor that may boot a session shell: it resets
+/// ral's signal-escalation ladder before embedded library evaluation,
+/// installs ral's handlers, then immediately layers exarch's cancel chain
+/// over them.  Callers should seed per-session variables, not repeat
+/// signal ceremony.
 pub fn boot_shell() -> Shell {
     ral_core::process::clear();
     ral_core::process::install_handlers();

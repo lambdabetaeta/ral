@@ -1114,10 +1114,10 @@ mod tests {
     /// fire) stops the worker.  The proof is at the scope level: the
     /// worker's scope observes `is_cancelled()`, while an uncancelled
     /// sibling spawned from the same shell does not.  These are direct
-    /// `CancelScope` reads, immune to the process-global `SIGNAL_COUNT`
-    /// that `check` also folds into status 130 — so the test pins scope
-    /// propagation rather than passing on a transient signal another
-    /// test set.  The worker's reported 130 confirms it actually unwound.
+    /// `CancelScope` reads on scopes no other test can reach — so the
+    /// test pins scope propagation rather than passing on a cancellation
+    /// another test published.  The worker's reported 130 confirms it
+    /// actually unwound.
     #[test]
     fn worker_scope_cancel_stops_the_worker() {
         let mut shell = Shell::new(Default::default());

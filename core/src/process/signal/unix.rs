@@ -2,9 +2,10 @@
 //!
 //! Three concerns interlock here:
 //!
-//!   * **Termination signals** (SIGINT/SIGTERM/SIGHUP) increment a shared
-//!     counter that the evaluator polls between statements.  Third
-//!     occurrence forces `_exit(2)`.
+//!   * **Termination signals** (SIGINT/SIGTERM/SIGHUP) are translated
+//!     into a [`CancelCause`](super::CancelCause) on the published cancel
+//!     slots — the same delivery every other cancellation uses — and tick
+//!     the escalation ladder whose third delivery forces `_exit`.
 //!   * **Pipeline relays** keep the controlling tty with the shell while
 //!     mixed pipelines run, fanning Ctrl+C out to every external pgid.
 //!   * **Process-group placement** is the discipline applied at fork:
@@ -13,7 +14,7 @@
 
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
-use super::{Pgid, PgidPolicy, SIGNAL_COUNT};
+use super::{ESCALATION, Pgid, PgidPolicy};
 
 // ── Termination handler ────────────────────────────────────────────────────
 
@@ -31,10 +32,21 @@ pub fn install_handlers() {
 }
 
 extern "C" fn handler(_sig: libc::c_int) {
-    let prev = SIGNAL_COUNT.fetch_add(1, Ordering::Relaxed);
+    let prev = ESCALATION.fetch_add(1, Ordering::Relaxed);
     if prev >= 2 {
         // Third signal: force exit. Use _exit to avoid atexit deadlocks.
         unsafe { libc::_exit(128 + _sig) };
+    }
+    // Translate the signal into a cause on the published cancel slots —
+    // async-signal-safe (a slot load plus a `fetch_max`).  SIGINT is an
+    // interrupt of the current foreground turn; SIGTERM/SIGHUP are a
+    // shutdown request and land on the durable root, reaching detached
+    // workers too.  Every wait loop already polls its scope, so this is
+    // what preempts a blocked external child.
+    if _sig == libc::SIGINT {
+        super::request_foreground_cancel(super::CancelCause::Interrupt);
+    } else {
+        super::request_root_cancel(super::CancelCause::Terminate);
     }
     // Forward the same signal to any active pipeline groups so external
     // children die too.  The interactive shell rebinds SIGINT to the relay
@@ -714,6 +726,10 @@ fn active_relay_slots() -> usize {
     reason = "[io-door:test] test fs/process scaffolding"
 )]
 mod tests {
+    use super::super::{
+        CancelCause, CancelScope, SLOT_SERIAL, clear, escalation_pending, publish_durable_root,
+        publish_foreground,
+    };
     use super::*;
     use std::sync::{Arc, Barrier, Mutex};
 
@@ -828,6 +844,78 @@ mod tests {
         for h in handles {
             h.join().unwrap();
         }
+    }
+
+    // ── Signal translation ─────────────────────────────────────────────────
+
+    /// The batch/term handler translates SIGINT into a foreground
+    /// [`Interrupt`](super::super::CancelCause::Interrupt): the current
+    /// turn unwinds (and its blocked external wakes at the next scope
+    /// poll), while the durable root — and with it every detached
+    /// worker — is left untouched.  The delivery also ticks the
+    /// escalation ladder, which is what backs the third-signal `_exit`.
+    #[test]
+    fn handler_translates_sigint_into_foreground_interrupt() {
+        let _relay = RELAY_TEST_LOCK.lock().unwrap();
+        let _slots = SLOT_SERIAL.lock().unwrap();
+        clear();
+
+        let foreground = CancelScope::root();
+        let root = CancelScope::root();
+        let _fg = publish_foreground(&foreground);
+        let _rt = publish_durable_root(&root);
+
+        handler(libc::SIGINT);
+        assert_eq!(
+            foreground.cause(),
+            Some(CancelCause::Interrupt),
+            "SIGINT must interrupt the published foreground scope"
+        );
+        assert_eq!(root.cause(), None, "SIGINT must not reach the durable root");
+        assert!(
+            escalation_pending(),
+            "a delivered signal must tick the escalation ladder"
+        );
+        clear();
+    }
+
+    /// SIGTERM and SIGHUP are shutdown requests: the handler translates
+    /// them into a root [`Terminate`](super::super::CancelCause::Terminate),
+    /// reaching the foreground turn *and* every detached worker parented
+    /// under the durable root — the semantics a `timeout(1)`- or
+    /// systemd-style SIGTERM expects.  The foreground slot itself is not
+    /// written; the foreground observes the cause through its root
+    /// ancestry.
+    #[test]
+    fn handler_translates_sigterm_and_sighup_into_root_terminate() {
+        let _relay = RELAY_TEST_LOCK.lock().unwrap();
+        let _slots = SLOT_SERIAL.lock().unwrap();
+        clear();
+
+        let root = CancelScope::root();
+        let foreground = root.child();
+        let _fg = publish_foreground(&foreground);
+        let _rt = publish_durable_root(&root);
+
+        handler(libc::SIGTERM);
+        assert_eq!(
+            root.cause(),
+            Some(CancelCause::Terminate),
+            "SIGTERM must terminate the published durable root"
+        );
+        assert_eq!(
+            foreground.cause(),
+            Some(CancelCause::Terminate),
+            "the foreground observes the termination through its root ancestry"
+        );
+
+        handler(libc::SIGHUP);
+        assert_eq!(
+            root.cause(),
+            Some(CancelCause::Terminate),
+            "SIGHUP is the same shutdown request as SIGTERM"
+        );
+        clear();
     }
 
     // ── Signal forwarding ──────────────────────────────────────────────────

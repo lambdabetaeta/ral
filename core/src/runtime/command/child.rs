@@ -86,11 +86,11 @@ pub(crate) struct RunningChild {
     #[allow(dead_code)]
     pub group_owner: GroupOwner,
     /// Cooperative cancel handle.  Polled in `wait` so an upstream
-    /// scope cancel (e.g. exarch's tool-timeout watchdog) actually
-    /// preempts a blocked child: a blocking `wait_handling_stop` would
-    /// otherwise sit in `waitpid` / `WaitForSingleObject` until the
-    /// child exited on its own, no matter how long ago the flag was
-    /// set.
+    /// scope cancel — exarch's tool-timeout watchdog, or a signal the
+    /// platform handler translated into a cause — actually preempts a
+    /// blocked child: a blocking `wait_handling_stop` would otherwise
+    /// sit in `waitpid` / `WaitForSingleObject` until the child exited
+    /// on its own, no matter how long ago the flag was set.
     pub cancel: crate::process::CancelScope,
 }
 
@@ -213,9 +213,9 @@ impl RunningChild {
     /// signal it expects, then SIGKILL whatever is left.  Used when the
     /// cancel scope fires mid-wait (exarch's tool timeout, a Ctrl-C).
     /// An interrupt is delivered SIGINT-first to preserve job-control
-    /// semantics; an explicit cancel or a deadline is delivered
-    /// SIGTERM-first; a root abort gets an immediate group SIGKILL with
-    /// no foreground grace.  Killing the *group* (not just the leader
+    /// semantics; an explicit cancel, a deadline, or a termination
+    /// request is delivered SIGTERM-first; a root abort gets an
+    /// immediate group SIGKILL with no foreground grace.  Killing the *group* (not just the leader
     /// pid) takes out forked grandchildren too, closing the stdout pipe
     /// so the pump drain can complete instead of blocking until they
     /// exit on their own.
@@ -341,24 +341,24 @@ impl RunningChild {
             self.pump.is_some(),
             self.stderr_pump.is_some(),
         );
-        // Cancel-aware pre-wait poll.  `wait_handling_stop` blocks in a
-        // syscall that does not consult the cancel scope, so without
-        // this loop a watchdog-driven `cancel()` would not preempt a
-        // long-running child (e.g. `find` chewing through node_modules).
-        // Skipped when `park_on_stop` is true: that path is only used
-        // for interactive REPL foreground externals where no upstream
-        // cancel scope is in play.
+        // Cancel-aware wait poll.  `wait_handling_stop` blocks in a
+        // syscall that does not consult the cancel scope, so a blocking
+        // wait could not be preempted — not by a watchdog-driven
+        // `cancel()` (exarch's tool timeout on a `find` chewing through
+        // node_modules), not by a signal the platform handler translated
+        // into a cause (a batch SIGINT, a systemd-style SIGTERM).  Every
+        // external wait therefore goes through this one poll loop.
         //
         // Uses `try_wait_handling_stop` rather than `Child::try_wait`
-        // so a SIGSTOP'd child is observed (WUNTRACED), classified,
-        // and — with `park_on_stop = false` — killed and reaped inside
-        // the peek.  A plain `try_wait` returns `Ok(None)` on stop and
-        // the loop would spin forever.  When the peek returns
-        // `Some(outcome)` the child has already been fully consumed
-        // (reaped on the exit branch, killed-and-reaped on the stop
-        // branch), so we do not call `wait_handling_stop` again.
-        let mut early_outcome: Option<crate::process::WaitOutcome> = None;
-        if !self.park_on_stop {
+        // so a SIGSTOP'd child is observed (WUNTRACED) and classified:
+        // parked as a resumable job when `park_on_stop` (the interactive
+        // REPL's Ctrl-Z), killed and reaped inside the peek otherwise.
+        // A plain `try_wait` returns `Ok(None)` on stop and the loop
+        // would spin forever.  When the peek returns `Some(outcome)` the
+        // child has already been fully consumed (reaped on the exit
+        // branch, parked or killed-and-reaped on the stop branch), so we
+        // do not call `wait_handling_stop` again.
+        let early_outcome: Option<crate::process::WaitOutcome> = {
             // Exponential backoff: snappy for short-lived children,
             // gentle on CPU for long ones.
             let mut interval = std::time::Duration::from_millis(5);
@@ -377,8 +377,7 @@ impl RunningChild {
                             t_enter.elapsed(),
                             o,
                         );
-                        early_outcome = Some(o);
-                        break;
+                        break Some(o);
                     }
                     Ok(None) => {}
                     Err(e) => {
@@ -407,27 +406,27 @@ impl RunningChild {
                         t_enter.elapsed(),
                     );
                     // Teardown by cause: SIGINT-first for an interrupt,
-                    // SIGTERM-first for an explicit cancel or a deadline,
-                    // an immediate SIGKILL for a root abort — minus the
-                    // Windows group-release, which the post-wait
-                    // Standalone branch below still does once
-                    // `wait_handling_stop` returns.  If the leader was
-                    // reaped inside the grace peek, carry that outcome
-                    // out directly so we don't `wait` a dead pid.
-                    early_outcome = self.terminate_group(&mut child, cause);
-                    break;
+                    // SIGTERM-first for an explicit cancel, a deadline,
+                    // or a termination request, an immediate SIGKILL for
+                    // a root abort — minus the Windows group-release,
+                    // which the post-wait Standalone branch below still
+                    // does once `wait_handling_stop` returns.  If the
+                    // leader was reaped inside the grace peek, carry that
+                    // outcome out directly so we don't `wait` a dead pid.
+                    break self.terminate_group(&mut child, cause);
                 }
                 std::thread::sleep(interval);
                 interval = (interval * 2).min(cap);
             }
-        }
+        };
         let outcome = if let Some(o) = early_outcome {
             o
         } else {
-            // Fall through to blocking wait_handling_stop (reached when
-            // park_on_stop=true or the poll loop broke via cancel).
-            // Trace before/after the blocking call so a hang in
-            // waitpid / WaitForSingleObject is visible.
+            // Blocking fallthrough, reached only when the poll loop broke
+            // via cancel and `terminate_group` did not reap the leader
+            // inside its grace peek: the group kill is already in flight,
+            // so this reaps a dying child promptly.  Trace before/after
+            // so a hang in waitpid / WaitForSingleObject is visible.
             crate::dbg_trace!(
                 "wait",
                 "blocking-wait name={} pid={} park_on_stop={} elapsed={:?}",

@@ -183,8 +183,8 @@ pub(crate) fn run(
     // pgid as a stopped job when SIGTSTP / SIGSTOP arrives (Ctrl-Z on
     // vim, less, man, …) so the shell can later `fg` them. A child that
     // takes foreground from a non-interactive script (`ral run-claude.ral`)
-    // must NOT park: there is no job table to `fg` it, and parking would
-    // bypass `RunningChild::wait`'s cancel poll. The same holds for a
+    // must NOT park: there is no job table to `fg` it, so a stopped
+    // child is killed and reaped instead. The same holds for a
     // background external leading its own group for cancel tree-kill.
     let park_on_stop = fg.park_on_stop();
     // A `NewLeader` standalone external on Windows owns its Job

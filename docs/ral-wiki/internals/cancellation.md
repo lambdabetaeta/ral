@@ -1,53 +1,52 @@
 ---
 verified_at_commit: bbca4f4
 verified_at_date: 2026-07-04
-anchors: [SIGNAL_COUNT, CancelScope, CancelCause, DurableRoot, ForegroundScope, request_foreground_cancel, request_root_cancel, publishes_signal_slots, Shell::cancel_handle, sigint_relay, sigquit_handler, process::check, RunningChild::wait]
+anchors: [ESCALATION, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, request_foreground_cancel, request_root_cancel, publishes_signal_slots, Shell::cancel_handle, sigint_relay, sigquit_handler, process::check, RunningChild::wait, escalation_pending]
 ---
 
 # Cancellation
 
-**Stopping in-flight work is two mechanisms wearing one module name: an
-*escalating termination counter* that forces an exit when a user insists, and a
-*cooperative, cause-bearing scope tree* that asks the evaluator to unwind at its
-next poll point.** A signal handler or a TUI input thread holds neither a `Shell`
-nor a scope, so process-global *slots* bridge the async edge to the live tree
-with async-signal-safe atomics. Both live in `core/src/process/signal.rs` (see
-[[map/core/io-process|io-process]]); the gestures that drive them differ per
-host.
+**Stopping in-flight work is one delivery mechanism — a *cooperative,
+cause-bearing scope tree* that asks the evaluator to unwind at its next poll
+point — backed by an *escalation ladder* that forces an exit when a user
+insists.** A signal handler or a TUI input thread holds neither a `Shell` nor a
+scope, so process-global *slots* bridge the async edge to the live tree with
+async-signal-safe atomics; the platform handlers *translate* each delivered
+signal into a cause on those slots
+([[decisions/260706_signals-are-causes|signals-are-causes]]). Both live in
+`core/src/process/signal.rs` (see [[map/core/io-process|io-process]]); the
+gestures that drive them differ per host.
 
-The two mechanisms answer different questions:
+The two pieces answer different questions:
 
-- **The counter** (`SIGNAL_COUNT: AtomicU8`) answers *"is the user escalating
-  toward kill?"* — `0` normal, `1` interrupted, `2` again, `>= 3` force
-  `_exit(128 + sig)`. It is a blunt, host-agnostic floor.
 - **The scope tree** (`CancelScope`) answers *"which subtree should unwind, and
   why?"* — a structured-concurrency primitive that names a *cause* and reaches
-  exactly the workers that inherited the cancelled scope.
+  exactly the workers that inherited the cancelled scope. It is the only thing
+  `process::check(shell)` polls.
+- **The ladder** (`ESCALATION: AtomicU8`) answers *"is the user escalating
+  toward kill?"* — the third delivery forces `_exit(128 + sig)`. It is a blunt,
+  host-agnostic floor for a process whose cooperative delivery is wedged, never
+  a delivery mechanism itself.
 
-`process::check(shell)` consults *both* on every poll; either reason unwinds the
-same way, into a `Break::Error` carrying transport status **130**.
+## The escalation ladder
 
-## The escalating counter
+The platform handler `fetch_add`s the ladder on every delivered termination
+signal; the third hit calls `libc::_exit(128 + sig)` — bypassing `atexit` so a
+wedged process always dies. Nothing else reads it for control flow: `clear()`
+resets it at acknowledgment boundaries (a fresh prompt, a turn compile, a
+session reboot), and `escalation_pending()` exposes it for observability only.
 
-The platform handler `fetch_add`s the counter; `check` reads it; the third hit
-`_exit`s.
-
-- A real **SIGINT/SIGTERM/SIGHUP** reaching the bare `handler`
-  (`signal/unix.rs`) increments the counter. The *third* delivery calls
-  `libc::_exit(128 + sig)` — bypassing `atexit` so a wedged process always dies.
-- `check` treats any count `>= 1` as `"interrupted"` and unwinds. `clear()`
-  resets to `0`; `interrupt()` *stores* `1` (idempotent — it asks for an unwind
-  without ever feeding the third-signal escalation).
-- **This force-exit floor is reachable only in non-interactive paths.** The `ral`
-  batch launcher binds SIGINT to `handler` (`main.rs`, `install_handlers`); the
-  interactive REPL rebinds SIGINT to the *relay* (below), which never touches the
-  counter. So repeated Ctrl-C at an interactive prompt is cooperative, never a
-  hard kill — the escalation belongs to batch scripts and to exarch's async
-  signal forward.
+**The force-exit floor is reachable only in non-interactive paths.** The `ral`
+batch launcher binds SIGINT to `handler` (`main.rs`, `install_handlers`); the
+interactive REPL rebinds SIGINT to the *relay* (below), which never touches the
+ladder. So repeated Ctrl-C at an interactive prompt is cooperative, never a
+hard kill — the escalation belongs to batch scripts, to external SIGTERM/SIGHUP,
+and to exarch's async signal forward.
 
 This is the
 [[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]
-discipline: the user-facing interrupt writes a flag, it does not pump a counter.
+discipline taken to its end state: the user-facing interrupt writes a cause,
+and *only* a real delivered signal walks the ladder.
 
 ## The scope tree and its cause lattice
 
@@ -62,13 +61,17 @@ cancelled iff its own flag or any ancestor's flag is set.
 
   | cause | value | meaning | who raises it |
   |---|---|---|---|
-  | `Interrupt` | 1 | user asked the foreground to stop | Ctrl-C / Esc |
+  | `Interrupt` | 1 | user asked the foreground to stop | Ctrl-C / Esc / batch SIGINT |
   | `Explicit` | 2 | a targeted worker teardown | `cancel <handle>`, `race` loser |
   | `Deadline` | 3 | a wall-clock / lifetime ceiling expired | `process::reaper` |
-  | `RootAbort` | 4 | the session root is being reaped | Ctrl-`\` |
+  | `Terminate` | 4 | the process was asked to shut down | SIGTERM / SIGHUP |
+  | `RootAbort` | 5 | the session root is being reaped | Ctrl-`\` |
 
-`check` maps the strongest cause to a message — `"interrupted"`, `"cancelled"`,
-`"timed out"`, `"aborted"` — all at status 130.
+`check` maps the strongest cause to `CancelCause::message` and
+`CancelCause::exit_code` — the one vocabulary every poll point shares:
+`"interrupted"`, `"cancelled"`, `"timed out"`, `"aborted"` at status 130,
+`"terminated"` at status 143 (`128 + SIGTERM`, what a supervisor that
+SIGTERMed the process expects to read back).
 
 ### Two typed scopes name the one invariant
 
@@ -148,13 +151,17 @@ exponential backoff (5 ms → 100 ms cap). On each iteration it `try_wait`s
 
 - **`Interrupt`** → SIGINT-first, a 500 ms grace, then a group SIGKILL — a child
   that traps SIGINT still dies, and its grandchildren with it.
-- **`Explicit` / `Deadline`** → SIGTERM-first with the same grace then group
-  SIGKILL — decisive, without pretending to be a user keystroke.
+- **`Explicit` / `Deadline` / `Terminate`** → SIGTERM-first with the same grace
+  then group SIGKILL — decisive, without pretending to be a user keystroke; a
+  `Terminate` hands the tree the very signal the supervisor sent ral.
 - **`RootAbort`** → an immediate group SIGKILL, no grace.
 
-The interactive REPL foreground sets `park_on_stop = true` and *skips* this loop:
-there a foreground external owns the terminal and Ctrl-C is delivered to its
-process group by the kernel directly (see [[map/repl/jobs|jobs]]).
+Every external wait goes through this one loop — the interactive REPL
+foreground included (`park_on_stop = true` there makes a SIGSTOP *classify* as
+a parked job instead of a kill-and-reap; it no longer selects a different,
+blocking wait). A foreground external still gets its Ctrl-C from the kernel
+directly — it owns the terminal (see [[map/repl/jobs|jobs]]) — but a SIGTERM
+delivered to *ral* now preempts even that wait through the root cause.
 
 ## The gestures, per host
 
@@ -164,12 +171,14 @@ The same two mechanisms are driven by different keys on different surfaces.
 |---|---|---|---|
 | **Ctrl-C** | ral REPL, mid-eval | SIGINT → `sigint_relay` | `request_foreground_cancel(Interrupt)` + relay SIGINT to external pgids; **counter untouched** |
 | **Ctrl-C** | ral REPL, idle prompt | line editor reads it as a byte | abandons the partial buffer, `process::clear()`; no signal |
-| **Ctrl-`\`** | ral REPL | SIGQUIT → `sigquit_handler` | `request_root_cancel(RootAbort)` — reaps foreground *and* every detached worker |
-| **Ctrl-C** | ral batch / `-c` | SIGINT → `handler` | counter `+1`; third press `_exit`s |
+| **Ctrl-`\`** | ral REPL | SIGQUIT → `sigquit_handler` | `request_root_cancel(RootAbort)` — reaps foreground *and* every detached worker; the REPL loop observes the sticky root and exits |
+| **Ctrl-C** | ral batch / `-c` | SIGINT → `handler` | `request_foreground_cancel(Interrupt)` + ladder `+1`; third press `_exit`s |
+| **SIGTERM / SIGHUP** | any ral host | `handler` (term disposition) | `request_root_cancel(Terminate)` — foreground and detached workers unwind, externals torn down SIGTERM-first, exit 143; ladder `+1`, third delivery `_exit`s |
 | **Ctrl-C / Esc** | exarch TUI, active turn | `cancel::raise_interrupt` | cancels the per-turn `Token`, `interrupt_foreground_child`, `request_foreground_cancel(Interrupt)` |
 | **Ctrl-C / Ctrl-D** | exarch TUI, idle prompt | key table → quit | drops the TUI guard; no cancellation |
 | **Ctrl-C / Ctrl-D / Esc** | exarch TUI overlay | key table → close overlay | returns to the underlying prompt / turn; no root cancel |
-| **async SIGINT** | exarch | `chained` handler | cancels the `Token`, then forwards into ral's escalating `handler` |
+| **async SIGINT** | exarch | `chained` handler | cancels the `Token`, then forwards into ral's non-escalating `sigint_relay` |
+| **async SIGTERM / SIGHUP** | exarch | `chained` handler | cancels the `Token`, then forwards into ral's `handler` → root `Terminate` + ladder |
 
 ### ral interactive signal dispositions
 
@@ -189,7 +198,8 @@ fix the interactive dispositions:
   `SIG_IGN` immediately after `jobs::setup_signals` installed the handler, leaving
   Ctrl-`\` dead in the REPL against the ADR's shipped intent; the override is
   removed.)
-- **SIGTERM/SIGHUP → `handler`** (escalating, for batch-style external kills);
+- **SIGTERM/SIGHUP → `handler`** — translates to a root `Terminate` (the whole
+  session unwinds, the REPL loop exits 143) and walks the escalation ladder;
   **SIGTSTP/SIGTTOU/SIGTTIN/SIGPIPE → `SIG_IGN`** (the shell drives job control by
   `waitpid` and rewrites terminal state without being stopped).
 
@@ -215,9 +225,10 @@ exarch layers a *per-root-turn* cancellation `Token` over ral's machinery
   its turn through the published foreground slot instead
   ([[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]]).
 - **`install`** chains ral's `term_handler`: the exarch handler `raise`s the token
-  then forwards into ral's disposition, so SIGNAL_COUNT semantics survive. Install
-  order matters — ral's handler first, then exarch's chain — and
-  `bootstrap::boot_shell` re-establishes it after every `/clear` rebuild.
+  then forwards into ral's disposition, so the root-`Terminate` translation and
+  the escalation ladder survive. Install order matters — ral's handler first,
+  then exarch's chain — and `bootstrap::boot_shell` re-establishes it after
+  every `/clear` rebuild.
 - Raw mode disables `ISIG`, so a TUI keystroke is *not* a kernel signal. The TUI's
   key table (`exarch/src/tui.rs`) separates UI shape from cancellation: idle
   Ctrl-C/Ctrl-D quit, overlays close, and only active-turn Ctrl-C/Esc route to
@@ -229,15 +240,18 @@ exarch layers a *per-root-turn* cancellation `Token` over ral's machinery
 
 A deliberate asymmetry worth stating plainly: **the third-signal `_exit` floor is
 unreachable from an interactive prompt.** Interactive SIGINT goes to the relay,
-which never increments the counter; the TUI's active-turn Ctrl-C goes to
-`raise_interrupt`, which writes a flag and a cause but never the counter.
+which never ticks the ladder; the TUI's active-turn Ctrl-C goes to
+`raise_interrupt`, which writes a flag and a cause but never the ladder.
 Repeated presses re-write the same cause (`fetch_max`), never escalate. The hard
-floor exists for batch scripts (`handler`) and for an async signal exarch forwards
-into ral. Interactive cancellation is cooperative by construction; the root-reap
-gesture is REPL Ctrl-`\`, not a TUI key.
+floor exists for batch scripts (`handler`), for external SIGTERM/SIGHUP, and for
+an async signal exarch forwards into ral. Interactive cancellation is cooperative
+by construction; the root-reap gesture is REPL Ctrl-`\`, not a TUI key.
 
 ## See also
 
+- [[decisions/260706_signals-are-causes|signals-are-causes]] — the collapse of
+  signal delivery onto the scope tree: `Terminate`, the scope-only `check`, the
+  one wait loop.
 - [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]] — the
   root/foreground split, the `CancelCause` order, and the per-turn cancel slots.
 - [[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]] —

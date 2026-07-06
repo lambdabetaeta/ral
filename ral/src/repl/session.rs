@@ -186,15 +186,32 @@ impl Session {
     }
 
     /// Run one iteration: reap children, draw prompt, read, eval.
-    /// Returns `Break` when the frontend hits EOF or the evaluator
-    /// returns an exit code.
+    /// Returns `Break` when the frontend hits EOF, the evaluator
+    /// returns an exit code, or the session's durable root has been
+    /// cancelled.
     fn turn(&mut self) -> Flow {
         self.jobs.lock().unwrap().reap();
 
-        // A residual interrupt from the prior command must not poison
-        // prompt evaluation — by the time we're drawing a new prompt the
-        // unwind is done and the flag's only effect would be to make the
-        // user's RAL_PROMPT thunk return Break::Error("interrupted").
+        // A cancelled durable root ends the session.  Cancellation is
+        // one-way — the root can never be un-cancelled — so after a
+        // SIGTERM/SIGHUP (`Terminate`) or a Ctrl-\ (`RootAbort`) every
+        // future turn would fail with the same cause; exit with its
+        // code instead of dealing the user an unusable prompt.
+        if let Some(cause) = self
+            .transport
+            .shell_mut()
+            .shell
+            .cancel_handle()
+            .as_scope()
+            .cause()
+        {
+            self.exit_code = cause.exit_code().clamp(0, 255) as u8;
+            return Flow::Break;
+        }
+
+        // Acknowledge handled signals at the prompt boundary: the unwind
+        // is done, and a stale escalation tick would otherwise creep the
+        // next Ctrl-C toward the third-signal force-exit.
         ral_core::process::clear();
         write_terminal_title(&self.transport.shell_mut().shell);
         let prompt = render_prompt(&mut self.transport.shell_mut().shell, &self.runtime);

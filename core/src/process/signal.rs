@@ -2,10 +2,13 @@
 //!
 //! Three concerns sit behind the same module name:
 //!
-//!   * **Termination flag.**  SIGINT / SIGTERM / SIGHUP set a single
-//!     atomic counter that the evaluator polls between statements; the
-//!     first signal unwinds, a second is deferred until cleanup completes,
-//!     a third forces process exit.  Polled via [`check`].
+//!   * **Signal translation.**  SIGINT / SIGTERM / SIGHUP are translated
+//!     by the platform handlers into a [`CancelCause`] on the published
+//!     cancel slots — SIGINT interrupts the foreground turn, SIGTERM /
+//!     SIGHUP terminate the durable root.  A separate escalation ladder
+//!     counts deliveries and forces `_exit` on the third — the last
+//!     resort when cooperative delivery is wedged, never the delivery
+//!     mechanism itself.
 //!   * **Cooperative cancellation.**  [`CancelScope`] is the structured-
 //!     concurrency primitive: a tree of Arc-shared flags whose
 //!     `is_cancelled` walk lets a cancelled scope unwind every worker that
@@ -196,77 +199,56 @@ impl ChildHandle {
     }
 }
 
-// ── Termination flag ───────────────────────────────────────────────────────
+// ── Escalation ladder ──────────────────────────────────────────────────────
 
-/// 0 = normal, 1 = interrupted, 2 = second signal, >=3 = force exit.
+/// Count of termination signals delivered since the last [`clear`]
+/// boundary.  The third delivery forces `_exit` in the platform handler.
 ///
-/// The platform handlers (`unix::handler` and `windows::install_handlers`)
-/// fetch_add into this counter; [`check`] reads it.
-pub(crate) static SIGNAL_COUNT: AtomicU8 = AtomicU8::new(0);
+/// This is *not* a delivery mechanism: the handlers deliver by
+/// translating each signal into a [`CancelCause`] on the published
+/// cancel slots, and [`check`] reads only the scope tree.  The ladder is
+/// the last resort for a process whose cooperative delivery is wedged —
+/// it must stay independent of the thing it backstops.
+pub(crate) static ESCALATION: AtomicU8 = AtomicU8::new(0);
 
 /// Check whether the current evaluation should unwind.
 ///
-/// Two reasons can fire:
+/// Fires when the shell's [`CancelScope`] (or any of its ancestors) has
+/// been cancelled: a signal translated by the platform handler (SIGINT →
+/// foreground [`Interrupt`](CancelCause::Interrupt), SIGTERM / SIGHUP →
+/// root [`Terminate`](CancelCause::Terminate)), a turn deadline
+/// ([`reaper`](crate::process::reaper)), an explicit `cancel <handle>`,
+/// or a Ctrl-\ root abort.  The error carries the strongest cause's
+/// [`message`](CancelCause::message) and
+/// [`exit_code`](CancelCause::exit_code).
 ///
-///   * a process-level signal (SIGINT / SIGTERM / SIGHUP) — incremented
-///     by the platform handler;
-///   * a structured-concurrency cancel — the shell's [`CancelScope`] (or
-///     any of its ancestors) has been cancelled, e.g. by a turn deadline
-///     ([`reaper`](crate::process::reaper)), an explicit `cancel <handle>`,
-///     or a Ctrl-\ root abort.
-///
-/// Both unwind via the same `Break::Error` so callers don't need to
-/// distinguish them.  A pending signal reads "interrupted"; a cancelled
-/// scope derives its message from the strongest [`CancelCause`] in
-/// force: "interrupted" for an [`Interrupt`](CancelCause::Interrupt),
-/// "cancelled" for an [`Explicit`](CancelCause::Explicit), "timed out"
-/// for a [`Deadline`](CancelCause::Deadline), "aborted" for a
-/// [`RootAbort`](CancelCause::RootAbort).
-///
-/// Signals are interrupts: they surface as either a recoverable error
-/// (`Break::Error`) or a non-catchable escape (`Break::Escape`). They
-/// never carry a tail call, hence the `Break` return type rather than
-/// the richer `Control`.
+/// Cancellations are interrupts: they surface as either a recoverable
+/// error (`Break::Error`) or a non-catchable escape (`Break::Escape`).
+/// They never carry a tail call, hence the `Break` return type rather
+/// than the richer `Control`.
 pub fn check(shell: &crate::types::Shell) -> Result<(), crate::types::Break> {
-    if SIGNAL_COUNT.load(Ordering::Relaxed) >= 1 {
-        return Err(crate::types::Break::Error(
-            crate::types::Error::new("interrupted", 130).at_loc(shell.turn.loc.source_loc(0)),
-        ));
-    }
     if let Some(cause) = shell.turn.cancel.cause() {
-        let msg = match cause {
-            CancelCause::Interrupt => "interrupted",
-            CancelCause::Explicit => "cancelled",
-            CancelCause::Deadline => "timed out",
-            CancelCause::RootAbort => "aborted",
-        };
         return Err(crate::types::Break::Error(
-            crate::types::Error::new(msg, 130).at_loc(shell.turn.loc.source_loc(0)),
+            crate::types::Error::new(cause.message(), cause.exit_code())
+                .at_loc(shell.turn.loc.source_loc(0)),
         ));
     }
     Ok(())
 }
 
-/// Clear the signal flag (e.g., after handling in interactive mode).
+/// Reset the escalation ladder at an acknowledgment boundary — a fresh
+/// prompt, a turn compile, a session reboot — so signals already handled
+/// cooperatively don't creep toward the third-delivery force-exit.
 pub fn clear() {
-    SIGNAL_COUNT.store(0, Ordering::Relaxed);
+    ESCALATION.store(0, Ordering::Relaxed);
 }
 
-/// Request a cooperative unwind without escalating toward force-exit.
-///
-/// [`check`] treats any count `>= 1` as interrupted, so a single store
-/// unwinds at the next poll.  Unlike a real signal — which the platform
-/// handler `fetch_add`s, forcing `_exit` on the third — this is
-/// idempotent: a frontend that drives its own task-level cancel can ask
-/// the evaluator to unwind without ever feeding the shell's third-signal
-/// force-exit.
-pub fn interrupt() {
-    SIGNAL_COUNT.store(1, Ordering::Relaxed);
-}
-
-/// Returns true if a signal is pending.
-pub fn is_interrupted() -> bool {
-    SIGNAL_COUNT.load(Ordering::Relaxed) >= 1
+/// True once a termination signal has been delivered since the last
+/// [`clear`] — the escalation ladder has at least one tick.  Observability
+/// only: nothing gates delivery on this (hosts and tests use it to prove a
+/// cancel path did, or deliberately did not, engage the ladder).
+pub fn escalation_pending() -> bool {
+    ESCALATION.load(Ordering::Relaxed) >= 1
 }
 
 // ── Fallback platform stubs ────────────────────────────────────────────────
@@ -346,11 +328,12 @@ impl ForegroundGuard {
 /// Why a [`CancelScope`] was cancelled.
 ///
 /// The causes form an escalation order
-/// `Interrupt < Explicit < Deadline < RootAbort`.  A scope records the
-/// highest cause ever applied to it and never downgrades: a later,
-/// weaker cancellation cannot mask a stronger one already in force.  The
-/// numeric values double as the on-flag encoding read back by
-/// [`from_u8`](CancelCause::from_u8); `0` on the flag means uncancelled.
+/// `Interrupt < Explicit < Deadline < Terminate < RootAbort`.  A scope
+/// records the highest cause ever applied to it and never downgrades: a
+/// later, weaker cancellation cannot mask a stronger one already in
+/// force.  The numeric values double as the on-flag encoding read back
+/// by [`from_u8`](CancelCause::from_u8); `0` on the flag means
+/// uncancelled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CancelCause {
     /// The user asked the foreground to stop (Ctrl-C / Esc).
@@ -360,8 +343,13 @@ pub enum CancelCause {
     Explicit = 2,
     /// A wall-clock or lifetime ceiling expired.
     Deadline = 3,
+    /// The process was asked to shut down (SIGTERM / SIGHUP).  Lands on
+    /// the durable root — a termination request reaches detached workers,
+    /// not just the foreground turn — and tears externals down
+    /// SIGTERM-first, so a well-behaved tree gets the signal it expects.
+    Terminate = 4,
     /// The session root is being reaped (Ctrl-\).
-    RootAbort = 4,
+    RootAbort = 5,
 }
 
 impl CancelCause {
@@ -372,8 +360,34 @@ impl CancelCause {
             1 => Some(CancelCause::Interrupt),
             2 => Some(CancelCause::Explicit),
             3 => Some(CancelCause::Deadline),
-            4 => Some(CancelCause::RootAbort),
+            4 => Some(CancelCause::Terminate),
+            5 => Some(CancelCause::RootAbort),
             _ => None,
+        }
+    }
+
+    /// The user-facing word for an evaluation this cause unwound.  The
+    /// single vocabulary shared by every poll point that surfaces a
+    /// cancellation as an error — [`check`] and the hosts' own parked
+    /// waits — so the wording cannot drift between them.
+    pub fn message(self) -> &'static str {
+        match self {
+            CancelCause::Interrupt => "interrupted",
+            CancelCause::Explicit => "cancelled",
+            CancelCause::Deadline => "timed out",
+            CancelCause::Terminate => "terminated",
+            CancelCause::RootAbort => "aborted",
+        }
+    }
+
+    /// The exit status paired with [`message`](Self::message): 130
+    /// (`128 + SIGINT`) for every interactive-shaped cancellation, 143
+    /// (`128 + SIGTERM`) for a termination request — what a supervisor
+    /// that SIGTERMed the process expects to read back.
+    pub fn exit_code(self) -> i32 {
+        match self {
+            CancelCause::Terminate => 143,
+            _ => 130,
         }
     }
 }
@@ -766,22 +780,30 @@ pub(crate) static SLOT_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 mod tests {
     use super::*;
 
-    /// [`interrupt`] requests a cooperative unwind without escalating: no
-    /// matter how often it fires, the counter sits at exactly 1, so it can
-    /// never reach the handler's third-signal `_exit`.
+    /// The flag byte round-trips through [`CancelCause::from_u8`] for
+    /// every cause, and the escalation order is total: a stronger cause's
+    /// encoding always compares above a weaker one's, so `fetch_max` on
+    /// the flag byte implements "never downgrade" correctly.
     #[test]
-    fn interrupt_is_idempotent() {
-        clear();
-        for _ in 0..5 {
-            interrupt();
+    fn cause_encoding_roundtrips_and_orders() {
+        let causes = [
+            CancelCause::Interrupt,
+            CancelCause::Explicit,
+            CancelCause::Deadline,
+            CancelCause::Terminate,
+            CancelCause::RootAbort,
+        ];
+        for pair in causes.windows(2) {
+            assert!(pair[0] < pair[1], "{:?} must rank below {:?}", pair[0], pair[1]);
         }
-        assert!(is_interrupted(), "interrupt should mark the evaluator");
-        assert_eq!(
-            SIGNAL_COUNT.load(Ordering::Relaxed),
-            1,
-            "interrupt must never accumulate past 1"
-        );
-        clear();
+        for cause in causes {
+            assert_eq!(
+                CancelCause::from_u8(cause as u8),
+                Some(cause),
+                "{cause:?} must round-trip through its flag encoding"
+            );
+        }
+        assert_eq!(CancelCause::from_u8(0), None, "0 means uncancelled");
     }
 
     /// Cancelling a parent reaches a child: the child's `is_cancelled`

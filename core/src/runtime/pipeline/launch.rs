@@ -406,9 +406,9 @@ fn launch_external_stage_direct(
 /// pgid (see `group.rs`'s SIGINT/relay invariant), so SIGINTs arriving
 /// before that claim — between `prepare` and the first `spawn`, or
 /// between a stage spawn returning and the next stage starting — only
-/// increment the shell handler's `SIGNAL_COUNT`.  Reading that counter
-/// at the top of every iteration aborts launch promptly without
-/// leaving anchor-only or partially-spawned groups stranded.
+/// cancel the turn's foreground scope.  Polling that scope at the top
+/// of every iteration aborts launch promptly without leaving
+/// anchor-only or partially-spawned groups stranded.
 fn spawn_all_stages(
     build: &mut PipelineBuild,
     stages: &[Arc<crate::ir::Comp>],

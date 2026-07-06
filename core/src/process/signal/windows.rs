@@ -47,21 +47,24 @@
 
 use std::sync::atomic::Ordering;
 
-use super::{Pgid, PgidPolicy, SIGNAL_COUNT};
+use super::{ESCALATION, Pgid, PgidPolicy};
 use windows_sys::Win32::Foundation::HANDLE;
 
 // ── Signal handler installation ────────────────────────────────────────────
 
 pub fn install_handlers() {
-    // SetConsoleCtrlHandler via the ctrlc crate.  The handler increments
-    // the same SIGNAL_COUNT flag the evaluator polls between statements,
+    // SetConsoleCtrlHandler via the ctrlc crate.  The handler translates
+    // the delivery into an [`Interrupt`](super::CancelCause::Interrupt) on
+    // the published foreground cancel slot — the delivery every poll point
+    // (the evaluator's `check`, a blocked external's wait loop) observes —
     // returns TRUE so Windows does not terminate the process, and fans
-    // Ctrl-Break / TerminateJobObject out depending on how many signals
-    // have been seen.  The evaluator clears `SIGNAL_COUNT` between
-    // statements so the escalation ladder applies per active interrupt
-    // sequence, not for the lifetime of the shell.
+    // Ctrl-Break / TerminateJobObject out depending on how many deliveries
+    // the escalation ladder has seen.  The boundary `clear` resets the
+    // ladder per active interrupt sequence, not for the lifetime of the
+    // shell.
     let _ = ctrlc::set_handler(|| {
-        let prev = SIGNAL_COUNT.fetch_add(1, Ordering::Relaxed);
+        super::request_foreground_cancel(super::CancelCause::Interrupt);
+        let prev = ESCALATION.fetch_add(1, Ordering::Relaxed);
         match prev {
             // First delivery: cooperative cancel via Ctrl-Break.
             0 => win_groups::break_all(),

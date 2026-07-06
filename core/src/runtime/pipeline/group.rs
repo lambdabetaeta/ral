@@ -20,10 +20,9 @@
 //! first `spawn` that establishes a `leader`.
 //!
 //! Between `prepare` and the first `spawn`, no relay is active, so a
-//! SIGINT racing the launch sequence merely increments the shell
-//! handler's `SIGNAL_COUNT`.  The launch loop's per-stage
-//! `signal::check` reads that counter and aborts cleanly before any
-//! stage spawns.
+//! SIGINT racing the launch sequence merely cancels the turn's
+//! foreground scope.  The launch loop's per-stage `signal::check`
+//! observes the scope and aborts cleanly before any stage spawns.
 
 #[cfg(unix)]
 use super::protocol::pipe_error;

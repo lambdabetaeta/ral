@@ -25,7 +25,8 @@ use crate::jobs;
 ///
 /// Unix disposition summary:
 /// - SIGINT  → relay handler (no-op when idle; forwards to external pipeline groups)
-/// - SIGTERM/SIGHUP → term handler (sets SIGNAL_COUNT for graceful unwind)
+/// - SIGTERM/SIGHUP → term handler (cancels the durable root with `Terminate`;
+///   the third delivery force-exits via the escalation ladder)
 /// - SIGQUIT → quit handler (Ctrl+\ cancels the durable root — reaping the
 ///   foreground turn and every detached worker — instead of core-dumping;
 ///   installed by `jobs::setup_signals`, a no-op between turns)
