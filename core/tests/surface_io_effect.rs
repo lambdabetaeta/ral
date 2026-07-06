@@ -23,12 +23,14 @@ fn fresh_shell() -> Shell {
     shell
 }
 
-/// A sink that records every surfaced value.
+/// A sink that records every surfaced value, decoded back to `Value` — every
+/// structural I/O event is first-order data, so the door's `FOValue` encoding
+/// is transparent to these tests.
 struct Recorder(Arc<Mutex<Vec<Value>>>);
 
 impl EventSink for Recorder {
-    fn emit(&self, ev: &Value) {
-        self.0.lock().unwrap().push(ev.clone());
+    fn emit(&self, ev: &ral_core::serial::FOValue) {
+        self.0.lock().unwrap().push(Value::from(ev.clone()));
     }
 }
 

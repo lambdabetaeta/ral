@@ -550,8 +550,8 @@ pub(super) fn builtin_exit(args: &[Value], _env: &mut Shell) -> Settled<Value> {
 /// sink, if one is installed.  The host decides what the variant's tag means;
 /// with no sink (e.g. a bare REPL) this is the identity and returns Unit.
 pub(super) fn builtin_surface(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    if let (Some(sink), Some(event)) = (shell.turn.surface.as_ref(), args.first()) {
-        sink.emit(event);
+    if let Some(event) = args.first() {
+        shell.surface(event.clone());
     }
     Ok(Value::Unit)
 }

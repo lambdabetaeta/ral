@@ -241,8 +241,17 @@ fn instantiate(
                 return Err(Break::Error(load_err(format!("plugin '{name}': {}", e))));
             }
             let arg = options.cloned().unwrap_or(empty);
+            let fo_arg = match ral_core::serial::FOValue::try_from(&arg) {
+                Ok(fo) => fo,
+                Err(e) => {
+                    return Err(Break::Error(load_err(format!(
+                        "plugin '{name}' options are not first-order: {}",
+                        e.message
+                    ))));
+                }
+            };
             let req = framed_turn_request("<plugin>", RequestedTerminalAccess::Denied);
-            let report = shell.run_hook(&factory_name, vec![arg], req);
+            let report = shell.run_hook(&factory_name, vec![fo_arg], req);
             match report {
                 TurnReport::Ran { result, .. } => result,
                 TurnReport::Static { .. } => {

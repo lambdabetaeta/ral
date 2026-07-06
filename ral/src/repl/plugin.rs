@@ -406,7 +406,20 @@ pub(super) fn call_plugin_hook(
             let mut req = framed_turn_request(&label, terminal);
             req.caps = caps;
             req.turn_limit = budget;
-            let report = shell.run_hook(hook, args.to_vec(), req);
+            // Encode at this edge: a plugin hook call is not itself a
+            // transport door, so a non-first-order argument is this call
+            // site's bug to report, not `run_hook`'s.
+            let fo_args: Result<Vec<_>, _> =
+                args.iter().map(ral_core::serial::FOValue::try_from).collect();
+            let report = match fo_args {
+                Ok(fo_args) => shell.run_hook(hook, fo_args, req),
+                Err(e) => TurnReport::Static {
+                    diagnostics: StaticDiagnostics::Host(ral_core::types::Error::new(
+                        format!("hook '{hook}' argument is not first-order: {}", e.message),
+                        1,
+                    )),
+                },
+            };
             let (result, timed_out) = match report {
                 TurnReport::Ran {
                     result, timed_out, ..

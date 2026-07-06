@@ -1,15 +1,20 @@
 //! Serialisable mirror of `Value` and `Env`.
 //!
-//! [`SerialValue`] and [`SerialEnvSnapshot`] are serde-round-trippable
-//! representations of their runtime counterparts.  Shared scopes are
+//! [`FOValue`] is a serde-round-trippable *first-order* value: unit, bool,
+//! int, float, string, bytes, and lists/maps/variants thereof — data all
+//! the way down, first-order by construction rather than by a checked
+//! invariant.  It is generic over an extension slot `X` (default
+//! [`NoExt`], which is uninhabited) so a closure-carrying variant can be
+//! added without touching the shared data arms.
+//!
+//! [`SerialValue`] instantiates that slot with [`Closure`]: the
+//! child-eval / pipeline-stage helper IPC (`child_eval`, framed by
+//! `subprocess_codec`) needs to send a computation's captured closure
+//! across a process boundary as JSON, alongside [`SerialEnvSnapshot`] (a
+//! serde-round-trippable mirror of `Env`).  Shared scopes are
 //! deduplicated via an interning table ([`InternCtx`]) so the O(2^N)
 //! tree-unfolding hazard cannot occur regardless of the captured-env
 //! shape.
-//!
-//! Used by the child-eval / pipeline-stage helper IPC (`child_eval`,
-//! framed by `subprocess_codec`) to send a computation, its captured
-//! closure, and the relevant parent state across a process boundary as
-//! JSON.
 
 use crate::ir::Comp;
 use crate::types::{Binding, Env, Error, Value};
@@ -35,11 +40,13 @@ mod float_bits {
     }
 }
 
-/// Serde mirror of [`Value`].  `Handle` values cannot cross the wire and
-/// produce an error when encountered.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// A serialisable *first-order* ral value: unit, bool, int, float (by
+/// bits), string, bytes, and lists/maps/variants thereof — data all the
+/// way down.  `X` is the extension slot, uninhabited by default: a bare
+/// `FOValue` is first-order by construction, not by a checked invariant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum SerialValue {
+pub enum FOValue<X = NoExt> {
     Unit,
     Bool {
         value: bool,
@@ -58,18 +65,34 @@ pub enum SerialValue {
         value: Vec<u8>,
     },
     List {
-        items: Vec<SerialValue>,
+        items: Vec<FOValue<X>>,
     },
     Map {
-        entries: Vec<(std::string::String, SerialValue)>,
+        entries: Vec<(std::string::String, FOValue<X>)>,
     },
     Variant {
         label: std::string::String,
-        payload: Option<Box<SerialValue>>,
+        payload: Option<Box<FOValue<X>>>,
     },
+    Ext(X),
+}
+
+/// Uninhabited: no `Ext` arm can exist for a bare `FOValue`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum NoExt {}
+
+/// What the in-kernel helper IPC (child_eval / pipeline stages) adds to
+/// [`FOValue`]: closures with interned scopes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Closure {
     Lambda(SerialLambda),
     Block(SerialThunk),
 }
+
+/// Serde mirror of [`Value`] used by the child-eval / pipeline-stage
+/// helper IPC.  `Handle` values cannot cross the wire and produce an
+/// error when encountered.
+pub type SerialValue = FOValue<Closure>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SerialLambda {
@@ -279,12 +302,12 @@ pub fn build_arcs(scope_table: &ScopeTable) -> Result<ScopeArcs, Error> {
 /// dropped from the topological build in [`build_arcs`].
 fn collect_scope_deps(value: &SerialValue, out: &mut HashSet<u32>) {
     match value {
-        SerialValue::Lambda(l) => {
+        SerialValue::Ext(Closure::Lambda(l)) => {
             for id in &l.captured.scopes {
                 out.insert(*id);
             }
         }
-        SerialValue::Block(t) => {
+        SerialValue::Ext(Closure::Block(t)) => {
             for id in &t.captured.scopes {
                 out.insert(*id);
             }
@@ -316,7 +339,7 @@ fn collect_scope_deps(value: &SerialValue, out: &mut HashSet<u32>) {
 
 // ── Value conversions ─────────────────────────────────────────────────────
 
-impl SerialValue {
+impl FOValue<Closure> {
     pub fn from_runtime(value: &Value, ctx: &mut InternCtx) -> Result<Self, Error> {
         Ok(match value {
             Value::Unit => Self::Unit,
@@ -348,15 +371,15 @@ impl SerialValue {
                 param,
                 body,
                 captured,
-            } => Self::Lambda(SerialLambda {
+            } => Self::Ext(Closure::Lambda(SerialLambda {
                 param: param.clone(),
                 body: Arc::clone(body),
                 captured: SerialEnvSnapshot::from_runtime(captured, ctx)?,
-            }),
-            Value::Block { body, captured } => Self::Block(SerialThunk {
+            })),
+            Value::Block { body, captured } => Self::Ext(Closure::Block(SerialThunk {
                 body: Arc::clone(body),
                 captured: SerialEnvSnapshot::from_runtime(captured, ctx)?,
-            }),
+            })),
             Value::Handle(_) => {
                 // Handles are local, process-local references to a
                 // worker thread; the sandbox child cannot ship one
@@ -372,29 +395,6 @@ impl SerialValue {
                 );
             }
         })
-    }
-
-    /// Encode a *ground* value for the host seam: unit, bool, number,
-    /// string, bytes, and lists/maps/variants thereof — never a closure
-    /// or handle.  The seam carries no captured scopes, so no
-    /// [`InternCtx`] is threaded; a non-ground value is rejected outright,
-    /// which is the seam's ground-only discipline made loud rather than
-    /// left to fail silently at decode.
-    pub fn from_ground(value: &Value) -> Result<Self, Error> {
-        if !value.is_ground() {
-            return Err(Error::new(
-                "value is not ground: the host seam carries only data, not closures or handles",
-                1,
-            ));
-        }
-        Self::from_runtime(value, &mut InternCtx::new())
-    }
-
-    /// Decode a ground value off the host seam — the dual of
-    /// [`from_ground`](Self::from_ground).  The empty scope table is the
-    /// statement that no captured scope crosses here.
-    pub fn into_ground(self) -> Result<Value, Error> {
-        self.into_runtime(&Vec::new())
     }
 
     pub fn into_runtime(self, arcs: &ScopeArcs) -> Result<Value, Error> {
@@ -424,16 +424,117 @@ impl SerialValue {
                     None => None,
                 },
             },
-            Self::Lambda(lam) => Value::Lambda {
+            Self::Ext(Closure::Lambda(lam)) => Value::Lambda {
                 param: lam.param,
                 body: lam.body,
                 captured: Arc::new(lam.captured.into_runtime(arcs)?),
             },
-            Self::Block(thunk) => Value::Block {
+            Self::Ext(Closure::Block(thunk)) => Value::Block {
                 body: thunk.body,
                 captured: Arc::new(thunk.captured.into_runtime(arcs)?),
             },
         })
+    }
+}
+
+impl TryFrom<&Value> for FOValue {
+    type Error = Error;
+
+    /// The one first-order check for the host seam: recursion over the
+    /// nine data variants IS the predicate, rather than a separate check
+    /// followed by a hopeful re-encode.  `Lambda`, `Block`, and `Handle`
+    /// are rejected outright.
+    fn try_from(v: &Value) -> Result<Self, Error> {
+        Ok(match v {
+            Value::Unit => FOValue::Unit,
+            Value::Bool(v) => FOValue::Bool { value: *v },
+            Value::Int(v) => FOValue::Int { value: *v },
+            Value::Float(v) => FOValue::Float { value: *v },
+            Value::String(v) => FOValue::String { value: v.clone() },
+            Value::Bytes(v) => FOValue::Bytes { value: v.clone() },
+            Value::List(items) => FOValue::List {
+                items: items
+                    .iter()
+                    .map(FOValue::try_from)
+                    .collect::<Result<_, _>>()?,
+            },
+            Value::Map(items) => FOValue::Map {
+                entries: items
+                    .iter()
+                    .map(|(k, v)| Ok((k.clone(), FOValue::try_from(v)?)))
+                    .collect::<Result<_, Error>>()?,
+            },
+            Value::Variant { label, payload } => FOValue::Variant {
+                label: label.clone(),
+                payload: match payload {
+                    Some(p) => Some(Box::new(FOValue::try_from(p.as_ref())?)),
+                    None => None,
+                },
+            },
+            Value::Lambda { .. } | Value::Block { .. } | Value::Handle(_) => {
+                return Err(Error::new(
+                    "value is not first-order: the host seam carries only data, \
+                     not closures or handles",
+                    1,
+                ));
+            }
+        })
+    }
+}
+
+impl From<FOValue> for Value {
+    /// Total: first-order values are a subset of `Value`.  `Ext` is
+    /// unreachable for `X = NoExt` — `match x {}` discharges it without
+    /// a catch-all.
+    fn from(fo: FOValue) -> Value {
+        match fo {
+            FOValue::Unit => Value::Unit,
+            FOValue::Bool { value } => Value::Bool(value),
+            FOValue::Int { value } => Value::Int(value),
+            FOValue::Float { value } => Value::Float(value),
+            FOValue::String { value } => Value::String(value),
+            FOValue::Bytes { value } => Value::Bytes(value),
+            FOValue::List { items } => Value::list(items.into_iter().map(Value::from).collect()),
+            FOValue::Map { entries } => {
+                Value::Map(entries.into_iter().map(|(k, v)| (k, Value::from(v))).collect())
+            }
+            FOValue::Variant { label, payload } => Value::Variant {
+                label,
+                payload: payload.map(|p| Box::new(Value::from(*p))),
+            },
+            FOValue::Ext(x) => match x {},
+        }
+    }
+}
+
+impl FOValue {
+    /// Embed a first-order value into any richer extension slot.  Total —
+    /// `Ext` is unreachable for `X = NoExt`, discharged via `match x {}`.
+    /// Inherent rather than a `From` impl to avoid the reflexive-impl
+    /// collision (E0119) with `impl<X> From<FOValue<X>> for FOValue<X>`.
+    pub fn embed<X>(self) -> FOValue<X> {
+        match self {
+            FOValue::Unit => FOValue::Unit,
+            FOValue::Bool { value } => FOValue::Bool { value },
+            FOValue::Int { value } => FOValue::Int { value },
+            FOValue::Float { value } => FOValue::Float { value },
+            FOValue::String { value } => FOValue::String { value },
+            FOValue::Bytes { value } => FOValue::Bytes { value },
+            FOValue::List { items } => FOValue::List {
+                items: items.into_iter().map(FOValue::embed).collect(),
+            },
+            FOValue::Map { entries } => FOValue::Map {
+                entries: entries
+                    .into_iter()
+                    .map(|(k, v)| (k, v.embed()))
+                    .collect(),
+            },
+            FOValue::Variant { label, payload } => FOValue::Variant {
+                label,
+                payload: payload.map(|p| Box::new(p.embed())),
+            },
+            FOValue::Ext(x) => match x {},
+        }
     }
 }
 
@@ -471,13 +572,13 @@ mod tests {
     use crate::ir::{CompKind, IrPattern};
 
     /// The body the sandbox child runs is a thunk's [`Arc<Comp>`], carried
-    /// inside a [`SerialValue::Lambda`] / [`SerialValue::Block`] and framed
-    /// by the IPC codec as JSON (`subprocess_codec::write_frame`).  A
-    /// lambda whose body holds interior mode annotations — a [`Wire`] per
-    /// pipeline stage, a ground RHS output mode on each `Bind` — must keep
-    /// those verdicts across the wire, since the child reads modes off the
-    /// node rather than re-inferring (there is no thunk-root wire, so the
-    /// only annotations to preserve are these interior ones).
+    /// inside a [`SerialValue::Ext`] closure and framed by the IPC codec as
+    /// JSON (`subprocess_codec::write_frame`).  A lambda whose body holds
+    /// interior mode annotations — a [`Wire`] per pipeline stage, a ground
+    /// RHS output mode on each `Bind` — must keep those verdicts across the
+    /// wire, since the child reads modes off the node rather than
+    /// re-inferring (there is no thunk-root wire, so the only annotations
+    /// to preserve are these interior ones).
     ///
     /// This builds the annotated body through the checker, ships a lambda
     /// carrying it through the same `serde_json` codec the IPC frame uses,
@@ -558,18 +659,18 @@ mod tests {
         assert!(wires, "body's pipeline carries a Bytes wire annotation");
         assert!(rhs, "body's bind carries a Bytes rhs_output annotation");
 
-        let lambda = SerialValue::Lambda(SerialLambda {
+        let lambda = SerialValue::Ext(Closure::Lambda(SerialLambda {
             param: IrPattern::Name("x".to_string()),
             body: Arc::clone(&body),
             captured: SerialEnvSnapshot { scopes: Vec::new() },
-        });
+        }));
 
         // The codec the child-eval / pipeline-stage helper frame uses:
         // `serde_json` (`subprocess_codec::write_frame`).
         let json = serde_json::to_vec(&lambda).expect("serialise lambda");
         let back: SerialValue = serde_json::from_slice(&json).expect("deserialise lambda");
 
-        let SerialValue::Lambda(back) = back else {
+        let SerialValue::Ext(Closure::Lambda(back)) = back else {
             panic!("round-trip changed the value variant");
         };
         assert_eq!(
@@ -590,11 +691,11 @@ mod tests {
     fn out_of_range_scope_ref_is_not_reported_as_cyclic() {
         use crate::ir::Val;
         use crate::source::Spanned;
-        let lambda = SerialValue::Lambda(SerialLambda {
+        let lambda = SerialValue::Ext(Closure::Lambda(SerialLambda {
             param: IrPattern::Name("x".to_string()),
             body: Arc::new(Spanned::synthetic(CompKind::Return(Val::Unit))),
             captured: SerialEnvSnapshot { scopes: vec![5] },
-        });
+        }));
         let table: ScopeTable = vec![vec![(
             "f".to_string(),
             SerialBinding {

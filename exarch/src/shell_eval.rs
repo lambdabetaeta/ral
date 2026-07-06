@@ -277,7 +277,7 @@ struct InboxBoundary {
 }
 
 impl BoundarySink for InboxBoundary {
-    fn deliver(&self, batch: Vec<RalValue>, joined: Arc<Mutex<bool>>) {
+    fn deliver(&self, batch: Vec<ral_core::serial::FOValue>, joined: Arc<Mutex<bool>>) {
         // A `/clear` since this worker was spawned bumped the registry
         // generation; its batch belongs to a context that no longer exists, so
         // drop it rather than post it into the rebuilt session — the deferred
@@ -285,9 +285,12 @@ impl BoundarySink for InboxBoundary {
         if self.registry.generation() != self.generation {
             return;
         }
+        // Decode once, totally, at this door: the boundary carries
+        // first-order values, the inbox renders `Value`s.
+        let values = batch.into_iter().map(RalValue::from).collect();
         if let Err(reject) = self.mailbox.push(InboxMsg::Surface {
             id: self.root,
-            values: batch,
+            values,
             joined,
         }) {
             self.transcript.record(
@@ -379,9 +382,8 @@ pub fn run_shell(
         match frame {
             Frame::Event(did, event) if did == id => match event {
                 Event::Surface(val) => {
-                    if let Ok(live_val) = val.into_ground()
-                        && let Some(kind) = decode_surface(&live_val)
-                    {
+                    let live_val = RalValue::from(val);
+                    if let Some(kind) = decode_surface(&live_val) {
                         if reject_protected_pin(&kind, emit) {
                             continue;
                         }
@@ -403,9 +405,8 @@ pub fn run_shell(
                 }
                 Event::BoundarySurface(batch) => {
                     for val in batch {
-                        if let Ok(live_val) = val.into_ground()
-                            && let Some(kind) = decode_surface(&live_val)
-                        {
+                        let live_val = RalValue::from(val);
+                        if let Some(kind) = decode_surface(&live_val) {
                             if reject_protected_pin(&kind, emit) {
                                 continue;
                             }
@@ -458,8 +459,7 @@ pub fn run_shell(
 
             let (exit, value) = match &result {
                 ResultMirror::Ok(sv) => {
-                    // Decode the ground result off the seam.
-                    let v = sv.clone().into_ground().ok();
+                    let v = Some(RalValue::from(sv.clone()));
                     (0, v)
                 }
                 ResultMirror::Err(break_mirror) => match break_mirror {
@@ -1294,7 +1294,7 @@ keep-bottom
         let joined = Arc::new(Mutex::new(false));
 
         // A fresh batch reaches the inbox, stamped with the root id (7).
-        boundary.deliver(vec![RalValue::Unit], joined.clone());
+        boundary.deliver(vec![ral_core::serial::FOValue::Unit], joined.clone());
         match inbox.drain_turn() {
             Some(crate::bus::Turn::Surface { id, .. }) => {
                 assert_eq!(id, 7, "the batch is stamped with the root session id")
@@ -1305,7 +1305,7 @@ keep-bottom
         // A `/clear` bumps the registry generation; the boundary captured the
         // old one, so a later flush is dropped rather than posted.
         registry.clear_subtree(7);
-        boundary.deliver(vec![RalValue::Unit], Arc::new(Mutex::new(false)));
+        boundary.deliver(vec![ral_core::serial::FOValue::Unit], Arc::new(Mutex::new(false)));
         assert!(
             inbox.is_empty(),
             "a batch flushed after /clear advanced the generation is dropped"

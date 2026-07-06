@@ -12,9 +12,8 @@
 //! channel the front-end drains; control frames trip the thread-safe
 //! `CancelScope` directly.
 //!
-//! Phase 2 will encode these same frame types through `SerialValue` and
-//! `subprocess_codec` across a process boundary.  Every `Value` in the
-//! frame types below is annotated with `// Phase 2: SerialValue`.
+//! Phase 2 will encode these same frame types through `subprocess_codec`
+//! across a process boundary.
 //!
 //! See [[decisions/260628_host-seam-transport-parametric]].
 use serde::{Deserialize, Serialize};
@@ -30,10 +29,9 @@ use std::sync::mpsc;
 
 #[cfg(unix)]
 use crate::process::ChildHandle;
-use crate::serial::SerialValue;
+use crate::serial::FOValue;
 use crate::types::Boundary;
 use crate::types::SurfaceSink;
-use crate::types::Value;
 use std::sync::OnceLock;
 
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -67,8 +65,9 @@ pub enum Frame {
     /// Front-end drops: cancel in-flight dispatch, reap foreground
     /// subtree, restore terminal state.
     Detach,
-    /// One whole turn.
-    Dispatch(DispatchId, Turn),
+    /// One whole turn.  Boxed so every other `Frame` variant is not sized
+    /// to `Turn`'s stack footprint.
+    Dispatch(DispatchId, Box<Turn>),
     /// Engine → front-end. May arrive while a Dispatch is outstanding.
     Event(DispatchId, Event),
     /// Front-end → engine. Out-of-band: deliverable while a Dispatch is
@@ -83,10 +82,10 @@ pub enum Turn {
     /// live session.
     Source { src: String, req: ReqMirror },
     /// A hook invocation: a registered named entry point applied to
-    /// ground arguments.  // Phase 2: args becomes Vec<SerialValue>
+    /// first-order arguments.
     Hook {
         name: crate::types::HookName,
-        args: Vec<crate::serial::SerialValue>,
+        args: Vec<FOValue>,
         req: ReqMirror,
     },
 }
@@ -95,11 +94,9 @@ pub enum Turn {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Event {
     /// A live surface value, ordered before this dispatch Report.
-    /// Phase 2: becomes Surface(SerialValue)
-    Surface(crate::serial::SerialValue),
+    Surface(FOValue),
     /// A detached worker deferred batch, flushed at a turn boundary.
-    /// Phase 2: becomes BoundarySurface(Vec<SerialValue>)
-    BoundarySurface(Vec<crate::serial::SerialValue>),
+    BoundarySurface(Vec<FOValue>),
     /// The dispatch sole terminal frame.
     Report(ReportMirror),
 }
@@ -168,7 +165,7 @@ pub enum ReportMirror {
         diagnostics: DiagMirror,
     },
     Ran {
-        /// The turn's settled result, `SerialValue`-encoded for the wire.
+        /// The turn's settled result, `FOValue`-encoded for the wire.
         result: ResultMirror,
         status: i32,
         single_command: bool,
@@ -185,12 +182,12 @@ pub enum DiagMirror {
     Host(String),
 }
 
-/// Mirror of `Settled<Value>`.  `Ok` carries a `SerialValue` so a
+/// Mirror of `Settled<Value>`.  `Ok` carries a `FOValue` so a
 /// successful result crosses the wire; a non-transportable result
 /// (e.g. a live `Handle`) is reported as an error instead.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ResultMirror {
-    Ok(SerialValue),
+    Ok(FOValue),
     Err(BreakMirror),
 }
 
@@ -355,11 +352,11 @@ impl PerDispatchSink {
 }
 
 impl crate::types::EventSink for PerDispatchSink {
-    fn emit(&self, ev: &Value) {
-        if let Some(id) = *self.current.lock().unwrap()
-            && let Ok(sv) = SerialValue::from_ground(ev)
-        {
-            let _ = self.event_tx.send(Frame::Event(id, Event::Surface(sv)));
+    fn emit(&self, ev: &FOValue) {
+        if let Some(id) = *self.current.lock().unwrap() {
+            let _ = self
+                .event_tx
+                .send(Frame::Event(id, Event::Surface(ev.clone())));
         }
     }
 }
@@ -516,14 +513,7 @@ impl Transport for IdentityTransport {
         // Run the turn against the shell.
         let report = match turn {
             Turn::Source { src, .. } => engine.shell.run_source_turn(&src, turn_req),
-            Turn::Hook { name, args, .. } => {
-                // Decode the ground arguments off the seam.
-                let live_args: Vec<Value> = args
-                    .into_iter()
-                    .filter_map(|sv| sv.into_ground().ok())
-                    .collect();
-                engine.shell.run_hook(&name, live_args, turn_req)
-            }
+            Turn::Hook { name, args, .. } => engine.shell.run_hook(&name, args, turn_req),
         };
 
         // Convert TurnReport → ReportMirror.
@@ -704,7 +694,7 @@ impl Drop for WireTransport {
 #[cfg(unix)]
 impl Transport for WireTransport {
     fn dispatch(&self, id: DispatchId, turn: Turn) {
-        self.write(&Frame::Dispatch(id, turn));
+        self.write(&Frame::Dispatch(id, Box::new(turn)));
     }
 
     fn control(&self) -> &ControlSender {
@@ -757,7 +747,7 @@ struct TransportBoundarySink {
 }
 
 impl crate::types::BoundarySink for TransportBoundarySink {
-    fn deliver(&self, batch: Vec<Value>, joined: std::sync::Arc<std::sync::Mutex<bool>>) {
+    fn deliver(&self, batch: Vec<FOValue>, joined: std::sync::Arc<std::sync::Mutex<bool>>) {
         // Test-and-set: only the first deliverer forwards the batch.
         let already = {
             let mut guard = joined.lock().unwrap();
@@ -768,16 +758,12 @@ impl crate::types::BoundarySink for TransportBoundarySink {
         if already {
             return;
         }
-        let sv_batch: Vec<SerialValue> = batch
-            .into_iter()
-            .filter_map(|v| SerialValue::from_ground(&v).ok())
-            .collect();
         let _ = self.event_tx.send(Frame::Event(
             DispatchId(
                 self.current_dispatch
                     .load(std::sync::atomic::Ordering::Relaxed),
             ),
-            Event::BoundarySurface(sv_batch),
+            Event::BoundarySurface(batch),
         ));
     }
 }
@@ -811,8 +797,8 @@ pub(crate) fn report_to_mirror(report: crate::driver::TurnReport) -> ReportMirro
                     // non-transportable value (e.g. a live `Handle`) cannot
                     // cross; surface it as a diagnostic rather than dropping
                     // it silently.
-                    match SerialValue::from_ground(&v) {
-                        Ok(sv) => ResultMirror::Ok(sv),
+                    match FOValue::try_from(&v) {
+                        Ok(fo) => ResultMirror::Ok(fo),
                         Err(_) => ResultMirror::Err(BreakMirror::Error(
                             "turn result is not transportable across the host seam".into(),
                         )),

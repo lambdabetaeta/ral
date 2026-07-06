@@ -7,6 +7,7 @@
 
 mod common;
 
+use ral_core::serial::FOValue;
 use ral_core::types::{Capabilities, Settled, Shell, Value};
 use ral_core::{
     EventSink, RequestedTerminalAccess, SurfaceSink, TurnIo, TurnReport, TurnRequest, TurnStdin,
@@ -22,19 +23,25 @@ fn fresh_shell() -> Shell {
 }
 
 /// A sink that records every surfaced value.
-struct Recorder(Arc<Mutex<Vec<Value>>>);
+struct Recorder(Arc<Mutex<Vec<FOValue>>>);
 
 impl EventSink for Recorder {
-    fn emit(&self, ev: &Value) {
+    fn emit(&self, ev: &FOValue) {
         self.0.lock().unwrap().push(ev.clone());
     }
 }
 
 /// A fresh recording sink plus the shared buffer the test inspects.
-fn recording() -> (Arc<Mutex<Vec<Value>>>, SurfaceSink) {
-    let log: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+fn recording() -> (Arc<Mutex<Vec<FOValue>>>, SurfaceSink) {
+    let log: Arc<Mutex<Vec<FOValue>>> = Arc::new(Mutex::new(Vec::new()));
     let sink: SurfaceSink = Arc::new(Recorder(Arc::clone(&log)));
     (log, sink)
+}
+
+/// Look up a key in an [`FOValue::Map`]'s entries — the [`FOValue`] dual of
+/// `Map::get`, since the wire map is a plain assoc-vec, not `imbl::OrdMap`.
+fn fo_map_get<'a>(entries: &'a [(String, FOValue)], key: &str) -> Option<&'a FOValue> {
+    entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
 
 /// Run one turn of `source` with an optional surface sink, returning the
@@ -88,19 +95,24 @@ fn surface_forwards_the_event_to_the_sink() {
 
     let events = log.lock().unwrap();
     assert_eq!(events.len(), 1, "exactly one event surfaced");
-    let Value::Variant { label, payload } = &events[0] else {
+    let FOValue::Variant { label, payload } = &events[0] else {
         panic!("expected a variant, got {:?}", events[0]);
     };
     assert_eq!(label, "meter");
     let Some(payload) = payload.as_deref() else {
         panic!("expected a payload record");
     };
-    let Value::Map(rec) = payload else {
+    let FOValue::Map { entries } = payload else {
         panic!("expected a record payload, got {payload:?}");
     };
-    assert_eq!(rec.get("done"), Some(&Value::Int(1)));
-    assert_eq!(rec.get("total"), Some(&Value::Int(3)));
-    assert_eq!(rec.get("label"), Some(&Value::String("tasks".into())));
+    assert_eq!(fo_map_get(entries, "done"), Some(&FOValue::Int { value: 1 }));
+    assert_eq!(fo_map_get(entries, "total"), Some(&FOValue::Int { value: 3 }));
+    assert_eq!(
+        fo_map_get(entries, "label"),
+        Some(&FOValue::String {
+            value: "tasks".into()
+        })
+    );
 }
 
 /// The sink is inherited into thunk bodies, so an event surfaced from
@@ -119,7 +131,7 @@ emit "ship it""#,
 
     let events = log.lock().unwrap();
     assert_eq!(events.len(), 1, "the thunk's event reached the sink");
-    let Value::Variant { label, .. } = &events[0] else {
+    let FOValue::Variant { label, .. } = &events[0] else {
         panic!("expected a variant");
     };
     assert_eq!(label, "task");

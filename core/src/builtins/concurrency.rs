@@ -28,6 +28,7 @@ use crate::evaluator::absorb_tail;
 use crate::evaluator::comp::{eval_comp, with_scope};
 use crate::evaluator::scope::error_record;
 use crate::io::{Sink, new_buffer, peek_buffer, take_buffer};
+use crate::serial::FOValue;
 use crate::types::*;
 use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex};
@@ -59,12 +60,12 @@ struct DeferredSurface {
 }
 
 impl EventSink for DeferredSurface {
-    fn emit(&self, ev: &Value) {
+    fn emit(&self, ev: &FOValue) {
         let mut buf = self.buf.lock().unwrap();
         if buf.len() < DEFERRED_SURFACE_CAP {
             buf.push(ev.clone());
         } else if buf.len() == DEFERRED_SURFACE_CAP {
-            buf.push(Value::Variant {
+            buf.push(FOValue::Variant {
                 label: "surface-overflow".into(),
                 payload: None,
             });
@@ -78,13 +79,26 @@ impl EventSink for DeferredSurface {
 /// worker's `outcome` — `` `ok ``, `` `err `` (the [`break_record`]), or
 /// `` `panic `` (the message).  Core names the event; exarch names its
 /// appearance.  It carries no return value — the model `await`s for that.
-fn done_event(cmd: &str, outcome: Value) -> Value {
-    Value::Variant {
+fn done_event(cmd: &str, outcome: Value) -> FOValue {
+    // `outcome` is always one of the three statically-built variants below
+    // (`` `ok `` over `Unit`, `` `err `` over `break_record`'s all-scalar
+    // map, `` `panic `` over a `String`) — never the block's actual return
+    // value, so it is provably first-order.
+    let outcome = FOValue::try_from(&outcome)
+        .expect("spawn outcome tag is statically first-order");
+    FOValue::Variant {
         label: "done".into(),
-        payload: Some(Box::new(Value::map(vec![
-            ("cmd".into(), Value::String(cmd.into())),
-            ("outcome".into(), outcome),
-        ]))),
+        payload: Some(Box::new(FOValue::Map {
+            entries: vec![
+                (
+                    "cmd".into(),
+                    FOValue::String {
+                        value: cmd.into(),
+                    },
+                ),
+                ("outcome".into(), outcome),
+            ],
+        })),
     }
 }
 
@@ -967,6 +981,27 @@ mod tests {
         }
     }
 
+    /// Destructure an `` `label payload `` [`FOValue`] variant, asserting the
+    /// label — the [`FOValue`] dual of [`expect_variant`], for the boundary's
+    /// deferred-surface batches.
+    fn fo_expect_variant<'a>(v: &'a FOValue, label: &str) -> &'a FOValue {
+        match v {
+            FOValue::Variant {
+                label: l,
+                payload: Some(p),
+            } if l == label => p,
+            other => panic!("expected `{label} with payload, got {other:?}"),
+        }
+    }
+
+    /// Destructure an [`FOValue::Map`]'s entries and look one up by key.
+    fn fo_map_get<'a>(v: &'a FOValue, key: &str) -> Option<&'a FOValue> {
+        match v {
+            FOValue::Map { entries } => entries.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+            other => panic!("expected Map, got {other:?}"),
+        }
+    }
+
     /// A panicked worker drops its `Sender`, so the receiver reports
     /// `Disconnected`.  `try_settle` must report a settled (failed)
     /// outcome rather than `None` — otherwise `poll` reads `pending`
@@ -1621,9 +1656,9 @@ mod tests {
     /// not duplicate.  Models `spawn { surface … }` then observing the handle.
     #[test]
     fn deferred_surface_replays_once_on_await_not_poll() {
-        struct Rec(Arc<Mutex<Vec<Value>>>);
+        struct Rec(Arc<Mutex<Vec<FOValue>>>);
         impl EventSink for Rec {
-            fn emit(&self, ev: &Value) {
+            fn emit(&self, ev: &FOValue) {
                 self.0.lock().unwrap().push(ev.clone());
             }
         }
@@ -1639,7 +1674,7 @@ mod tests {
         tx.send(Ok(Value::Unit)).unwrap();
         let (_s, stdout_buf) = new_buffer();
         let (_s2, stderr_buf) = new_buffer();
-        let surface_buf: SurfaceBuffer = Arc::new(Mutex::new(vec![Value::Variant {
+        let surface_buf: SurfaceBuffer = Arc::new(Mutex::new(vec![FOValue::Variant {
             label: "patch".into(),
             payload: None,
         }]));
@@ -1682,10 +1717,10 @@ mod tests {
     /// delivered batch, but only the one that wins the shared `joined`
     /// test-and-set — exactly as the host renders only the batch that beats the
     /// eliminators' replay.
-    struct RecBoundary(Arc<Mutex<Vec<Vec<Value>>>>);
+    struct RecBoundary(Arc<Mutex<Vec<Vec<FOValue>>>>);
 
     impl BoundarySink for RecBoundary {
-        fn deliver(&self, batch: Vec<Value>, joined: Arc<Mutex<bool>>) {
+        fn deliver(&self, batch: Vec<FOValue>, joined: Arc<Mutex<bool>>) {
             let mut won = joined.lock().unwrap();
             if *won {
                 return;
@@ -1699,7 +1734,7 @@ mod tests {
     /// budget elapses, returning the recorded batches.  A `spawn_child` worker
     /// runs on its own thread, so its completion flush is observed by waiting on
     /// the destination rather than on the result channel.
-    fn wait_for_batch(batches: &Arc<Mutex<Vec<Vec<Value>>>>) -> Vec<Vec<Value>> {
+    fn wait_for_batch(batches: &Arc<Mutex<Vec<Vec<FOValue>>>>) -> Vec<Vec<FOValue>> {
         for _ in 0..500 {
             {
                 let got = batches.lock().unwrap();
@@ -1716,10 +1751,10 @@ mod tests {
     /// the structural shape the exarch decoder matches: `` `done `` carries a
     /// `{cmd, outcome}` map, and `outcome` is a closed `` `ok ``/`` `err ``/
     /// `` `panic `` variant.
-    fn done_outcome_label(done: &Value) -> String {
-        let fields = expect_map(expect_variant(done, "done"));
-        match fields.get("outcome").expect("outcome field") {
-            Value::Variant { label, .. } => label.to_string(),
+    fn done_outcome_label(done: &FOValue) -> String {
+        let done = fo_expect_variant(done, "done");
+        match fo_map_get(done, "outcome").expect("outcome field") {
+            FOValue::Variant { label, .. } => label.to_string(),
             other => panic!("outcome must be a variant, got {other:?}"),
         }
     }
@@ -1731,7 +1766,7 @@ mod tests {
     /// return, raised `Err`, panic — stamps the matching `done` label.
     #[test]
     fn detached_worker_flushes_done_to_boundary() {
-        fn run(work: impl FnOnce(&mut Shell) -> Raw<Value> + Send + 'static) -> Vec<Value> {
+        fn run(work: impl FnOnce(&mut Shell) -> Raw<Value> + Send + 'static) -> Vec<FOValue> {
             let mut shell = Shell::new(Default::default());
             let batches = Arc::new(Mutex::new(Vec::new()));
             shell.turn.boundary = Some(Arc::new(RecBoundary(batches.clone())));
@@ -1759,8 +1794,13 @@ mod tests {
         assert_eq!(ok.len(), 1, "an empty body's batch is just the `done event");
         let done = &ok[0];
         assert_eq!(done_outcome_label(done), "ok");
-        let fields = expect_map(expect_variant(done, "done"));
-        assert_eq!(fields.get("cmd"), Some(&Value::String("<block>".into())));
+        let fields = fo_expect_variant(done, "done");
+        assert_eq!(
+            fo_map_get(fields, "cmd"),
+            Some(&FOValue::String {
+                value: "<block>".into()
+            })
+        );
 
         // Raised `Err`: a `` `done `` whose outcome is `` `err ``.
         let err = run(|_child| Err(sig("boom").into()));
@@ -1794,7 +1834,7 @@ mod tests {
             "<block>",
             |child| {
                 if let Some(sink) = child.turn.surface.as_ref() {
-                    sink.emit(&Value::Variant {
+                    sink.emit(&FOValue::Variant {
                         label: "card".into(),
                         payload: None,
                     });
@@ -1808,7 +1848,7 @@ mod tests {
         assert_eq!(batch.len(), 2, "the body's card, then the `done event");
         assert_eq!(
             batch[0],
-            Value::Variant {
+            FOValue::Variant {
                 label: "card".into(),
                 payload: None,
             },
@@ -1844,7 +1884,7 @@ mod tests {
             "<block>",
             |child| {
                 if let Some(sink) = child.turn.surface.as_ref() {
-                    sink.emit(&Value::Variant {
+                    sink.emit(&FOValue::Variant {
                         label: "card".into(),
                         payload: None,
                     });
@@ -1859,9 +1899,9 @@ mod tests {
         // still surfaces the body's card through the awaiting turn — the existing
         // pull-forward path.
         let log = Arc::new(Mutex::new(Vec::new()));
-        struct Rec(Arc<Mutex<Vec<Value>>>);
+        struct Rec(Arc<Mutex<Vec<FOValue>>>);
         impl EventSink for Rec {
-            fn emit(&self, ev: &Value) {
+            fn emit(&self, ev: &FOValue) {
                 self.0.lock().unwrap().push(ev.clone());
             }
         }
@@ -1870,7 +1910,7 @@ mod tests {
         let replayed = log.lock().unwrap();
         assert_eq!(
             replayed.as_slice(),
-            &[Value::Variant {
+            &[FOValue::Variant {
                 label: "card".into(),
                 payload: None,
             }],
@@ -1896,7 +1936,7 @@ mod tests {
             "<block>",
             |child| {
                 if let Some(sink) = child.turn.surface.as_ref() {
-                    sink.emit(&Value::Variant {
+                    sink.emit(&FOValue::Variant {
                         label: "card".into(),
                         payload: None,
                     });
@@ -1913,9 +1953,9 @@ mod tests {
         // A later `await` reads the result but finds the latch set, so it
         // replays no card into the live turn.
         let log = Arc::new(Mutex::new(Vec::new()));
-        struct Rec(Arc<Mutex<Vec<Value>>>);
+        struct Rec(Arc<Mutex<Vec<FOValue>>>);
         impl EventSink for Rec {
-            fn emit(&self, ev: &Value) {
+            fn emit(&self, ev: &FOValue) {
                 self.0.lock().unwrap().push(ev.clone());
             }
         }

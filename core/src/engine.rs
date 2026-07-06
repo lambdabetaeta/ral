@@ -5,9 +5,9 @@ use std::os::unix::io::FromRawFd;
 use std::os::unix::net::UnixStream;
 
 use crate::driver::TurnRequest;
-use crate::serial::SerialValue;
+use crate::serial::FOValue;
 use crate::transport::{Control, DispatchId, Event, Frame, Turn, report_to_mirror};
-use crate::types::{Boundary, Shell, SurfaceSink, Value};
+use crate::types::{Boundary, Shell, SurfaceSink};
 use crate::wire::WireChannel;
 
 use std::sync::{Arc, Mutex, mpsc};
@@ -20,14 +20,12 @@ struct ChannelSurfaceSink {
 }
 
 impl crate::types::EventSink for ChannelSurfaceSink {
-    fn emit(&self, ev: &Value) {
-        if let Ok(sv) = SerialValue::from_ground(ev) {
-            let _ = self
-                .writer
-                .lock()
-                .unwrap()
-                .write_frame(&Frame::Event(self.id, Event::Surface(sv)));
-        }
+    fn emit(&self, ev: &FOValue) {
+        let _ = self
+            .writer
+            .lock()
+            .unwrap()
+            .write_frame(&Frame::Event(self.id, Event::Surface(ev.clone())));
     }
 }
 
@@ -38,7 +36,7 @@ struct ChannelBoundarySink {
 }
 
 impl crate::types::BoundarySink for ChannelBoundarySink {
-    fn deliver(&self, batch: Vec<Value>, joined: std::sync::Arc<std::sync::Mutex<bool>>) {
+    fn deliver(&self, batch: Vec<FOValue>, joined: std::sync::Arc<std::sync::Mutex<bool>>) {
         let already = {
             let mut guard = joined.lock().unwrap();
             let was = *guard;
@@ -48,15 +46,11 @@ impl crate::types::BoundarySink for ChannelBoundarySink {
         if already {
             return;
         }
-        let sv_batch: Vec<SerialValue> = batch
-            .into_iter()
-            .filter_map(|v| SerialValue::from_ground(&v).ok())
-            .collect();
         let _ = self
             .writer
             .lock()
             .unwrap()
-            .write_frame(&Frame::Event(self.id, Event::BoundarySurface(sv_batch)));
+            .write_frame(&Frame::Event(self.id, Event::BoundarySurface(batch)));
     }
 }
 
@@ -115,14 +109,7 @@ pub fn run_engine() -> ! {
             // Run the turn against the shell
             let report = match turn {
                 Turn::Source { src, .. } => shell.run_source_turn(&src, turn_req),
-                Turn::Hook { name, args, .. } => {
-                    // Decode the ground arguments off the seam.
-                    let live_args: Vec<Value> = args
-                        .into_iter()
-                        .filter_map(|sv| sv.into_ground().ok())
-                        .collect();
-                    shell.run_hook(&name, live_args, turn_req)
-                }
+                Turn::Hook { name, args, .. } => shell.run_hook(&name, args, turn_req),
             };
 
             // Convert and send the terminal Report frame.
@@ -139,7 +126,7 @@ pub fn run_engine() -> ! {
     loop {
         match reader_ch.read_frame() {
             Ok(Some(Frame::Dispatch(id, turn))) => {
-                match turn_tx.try_send((id, turn)) {
+                match turn_tx.try_send((id, *turn)) {
                     Ok(()) => { /* worker accepted the turn */ }
                     Err(mpsc::TrySendError::Full(_)) => {
                         // Worker is busy — reply with a static diagnostic.

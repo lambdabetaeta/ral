@@ -200,10 +200,7 @@ pub(super) fn execute_input(
         } => {
             let exit_code = match result {
                 ResultMirror::Ok(sv) => {
-                    // Decode the ground result off the seam.
-                    if let Ok(v) = sv.into_ground() {
-                        print_result(&v);
-                    }
+                    print_result(&Value::from(sv));
                     // The turn installed its bindings: record their dependency
                     // edges and effect verdict into the worksheet model.
                     #[cfg(feature = "structural")]

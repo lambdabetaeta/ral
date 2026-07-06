@@ -449,7 +449,7 @@ impl Shell {
     /// arguments, through the shared framed scaffold
     /// ([`Self::run_built`]).  Returns one flat [`TurnReport`].
     ///
-    /// Every `arg` must satisfy [`Value::is_ground`] — the host conveys
+    /// `args` are first-order by type ([`FOValue`]) — the host conveys
     /// data, not closures, across the dispatch boundary.
     ///
     /// `req` supplies the script label, capability ceiling, lifecycle
@@ -458,7 +458,7 @@ impl Shell {
     pub fn run_hook(
         &mut self,
         name: &HookName,
-        args: Vec<Value>,
+        args: Vec<crate::serial::FOValue>,
         req: TurnRequest<'_>,
     ) -> TurnReport {
         let Some(hook) = self.mobile.context.hooks.get(name).cloned() else {
@@ -470,22 +470,7 @@ impl Shell {
             };
         };
 
-        for (i, arg) in args.iter().enumerate() {
-            if !arg.is_ground() {
-                return TurnReport::Static {
-                    diagnostics: StaticDiagnostics::Host(crate::types::Error::new(
-                        format!(
-                            "argument {} to hook '{}' is not a ground value \
-                             (got {}); only plain data may cross the dispatch boundary",
-                            i + 1,
-                            name,
-                            arg.type_name()
-                        ),
-                        1,
-                    )),
-                };
-            }
-        }
+        let args: Vec<Value> = args.into_iter().map(Value::from).collect();
 
         let foreground = self.durable_root().child();
         let wall = hook

@@ -257,25 +257,6 @@ impl Value {
         Some(arity)
     }
 
-    /// True when this value carries only plain data — no closures,
-    /// thunks, or handles.  Ground values are the only kind the host
-    /// may pass as arguments across the dispatch boundary into a
-    /// [`run_hook`](crate::Shell::run_hook) call.
-    pub fn is_ground(&self) -> bool {
-        match self {
-            Value::Unit
-            | Value::Bool(_)
-            | Value::Int(_)
-            | Value::Float(_)
-            | Value::String(_)
-            | Value::Bytes(_) => true,
-            Value::List(vs) => vs.iter().all(Self::is_ground),
-            Value::Map(pairs) => pairs.iter().all(|(_, v)| Self::is_ground(v)),
-            Value::Variant { payload, .. } => payload.as_deref().is_none_or(Self::is_ground),
-            Value::Lambda { .. } | Value::Block { .. } | Value::Handle(_) => false,
-        }
-    }
-
     /// A structural *shallow* size estimate, in bytes — the binding-lease
     /// ledger's large-binding warning
     /// (`decisions/260629_agent-binding-reaping`,
@@ -360,7 +341,7 @@ pub struct CompletedHandle {
     /// Structured-event values a *detached* worker deferred, drained once
     /// from [`HandleInner::surface_buf`].  Replayed through the awaiting
     /// turn's surface by `await`/`race` (once), never by `poll`.
-    pub surface: Vec<Value>,
+    pub surface: Vec<crate::serial::FOValue>,
     pub outcome: super::flow::Settled<Value>,
 }
 
@@ -370,7 +351,7 @@ pub struct CompletedHandle {
 /// the awaiting turn's surface on the first `await`/`race`.  Bounded so a
 /// runaway detached emitter cannot grow it without limit (see
 /// `builtins::concurrency`'s `DeferredSurface`).
-pub type SurfaceBuffer = Arc<Mutex<Vec<Value>>>;
+pub type SurfaceBuffer = Arc<Mutex<Vec<crate::serial::FOValue>>>;
 
 /// Shared handle to a spawned computation.
 #[derive(Debug, Clone)]

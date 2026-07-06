@@ -171,13 +171,13 @@ pub struct Mobile {
 /// does not receive the live sink (it buffers into bounded deferred storage and
 /// replays on `await`) so a clone of it can never define turn completion.
 pub trait EventSink: Send + Sync {
-    fn emit(&self, ev: &Value);
+    fn emit(&self, ev: &crate::serial::FOValue);
 }
 
 /// The no-op surface: a host with no structured-event rail installs `()`,
 /// and an absent surface (`None`) behaves identically.
 impl EventSink for () {
-    fn emit(&self, _ev: &Value) {}
+    fn emit(&self, _ev: &crate::serial::FOValue) {}
 }
 
 /// Shared handle to the turn-local structured-event sink.  Turn-scoped, not a
@@ -198,7 +198,7 @@ pub trait BoundarySink: Send + Sync {
     /// eliminators (`await`/`race`): the host renders the batch only if it
     /// wins the test-and-set on this flag, so a replay that already rendered
     /// suppresses the batch and a rendered batch suppresses a later replay.
-    fn deliver(&self, batch: Vec<Value>, joined: std::sync::Arc<std::sync::Mutex<bool>>);
+    fn deliver(&self, batch: Vec<crate::serial::FOValue>, joined: std::sync::Arc<std::sync::Mutex<bool>>);
 }
 
 /// Shared handle to the session-lived boundary sink.  Carried on the turn
@@ -423,10 +423,22 @@ impl Shell {
     /// to surface their own events — a Rust exarch `edit` raising a diff card, a
     /// `grep-files` announcing its search — since `turn.surface` is `pub(crate)`
     /// and so unreachable from a host crate.  Core names no event shape here: the
-    /// caller hands a fully-formed `Value` the installed sink decodes.
+    /// caller hands a fully-formed `Value`, encoded once at this door into the
+    /// first-order [`FOValue`](crate::serial::FOValue) the sink actually
+    /// carries.  A value that is not first-order (a closure, a handle) cannot
+    /// cross the rail; core has no host vocabulary to report that in (an
+    /// exarch `Kind::SystemNote` would leak host concepts into core), so the
+    /// drop is a `dbg_trace`, not a silent no-op.
     pub fn surface(&self, ev: Value) {
-        if let Some(sink) = self.turn.surface.as_ref() {
-            sink.emit(&ev);
+        match crate::serial::FOValue::try_from(&ev) {
+            Ok(fo) => {
+                if let Some(sink) = self.turn.surface.as_ref() {
+                    sink.emit(&fo);
+                }
+            }
+            Err(_) => {
+                crate::dbg_trace!("surface", "dropping non-first-order surface value");
+            }
         }
     }
 
