@@ -258,9 +258,19 @@ impl Drop for Session {
     /// orderly `run` return and a panic unwinding through the owned
     /// `Session`, so a crash mid-turn neither orphans a stopped process
     /// group nor drops the session's history.
+    ///
+    /// The exit story is a warn-then-sweep fold over the session's ledger
+    /// (`decisions/260705_session-ledger`): a still-running worker handle
+    /// has no pgid to sweep — it dies with the process — so it is named
+    /// here, once, before the pgid groups are taken down exactly as
+    /// before. Naming never gates or delays the exit it announces.
     fn drop(&mut self) {
         self.transport.detach();
         self.frontend.save_history();
+        let workers = self.transport.shell_mut().shell.workers();
+        if let Some(warning) = super::host_handlers::survivor_warning(&workers) {
+            eprintln!("{warning}");
+        }
         // A panic that poisons the JobTable still leaves it structurally
         // valid for a best-effort SIGTERM/SIGKILL sweep; recover the guard
         // rather than re-panicking into a process abort during unwind.

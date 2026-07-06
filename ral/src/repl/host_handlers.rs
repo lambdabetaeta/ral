@@ -6,7 +6,7 @@
 
 use ral_core::diagnostic;
 use ral_core::typecheck::builtins::{BuiltinTypeRule, sig};
-use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Error};
+use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Error, HandleState, WorkerEntry};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
@@ -47,21 +47,90 @@ fn job_id_arg(args: &[Value], jobs: &crate::jobs::JobTable) -> Option<usize> {
     }
 }
 
+/// The shared "no such job" elaboration for `fg`/`bg`/`disown`: the three
+/// verbs are strictly pgid-typed (`decisions/260705_session-ledger`'s
+/// listing-fold correspondence) — a thread-backed worker handle has no
+/// SIGCONT, no controlling terminal, no kernel-stopped state to resume. An
+/// id that resolves no pgid job is met with the correspondence to a
+/// handle's own eliminators, never a bare "no such job" that leaves a user
+/// who tried a `[wN]` designator from `jobs` with no next step.
+const NOT_A_PGID_JOB: &str = "no such job — fg/bg/disown are pgid-only; a worker handle's own \
+     eliminators are its analogues: `await` is its fg, `cancel` its kill (see `jobs`, `workers`)";
+
 // ── jobs ─────────────────────────────────────────────────────────────────────
+
+/// Render the `jobs` listing as one fold over both populations the session
+/// backgrounds work into: `jt`'s pgid groups exactly as before, then this
+/// shell's registered worker handles (`spawn`/`watch`/`&`), marked `[wN]` —
+/// a designator namespace of its own so it can never collide with a pgid's
+/// `[n]`. A worker renders `running (worker)` while its handle is live and
+/// `done (worker)` once settled but unclaimed — the POSIX-`Done` analogue —
+/// until an eliminator observes it away, at which point it is simply no
+/// longer in `workers` and this fold never sees it again: no separate
+/// retention state lives here, and no lease is renewed by listing
+/// (`Shell::workers()` already guarantees both).
+fn render_jobs(jt: &crate::jobs::JobTable, workers: &[WorkerEntry]) -> Vec<String> {
+    let mut lines: Vec<String> = jt
+        .list()
+        .into_iter()
+        .map(|job| {
+            let state = match job.state {
+                crate::jobs::JobState::Running => "running",
+                crate::jobs::JobState::Stopped => "stopped",
+            };
+            format!("[{}] {} {}\t{}", job.id, state, job.pgid, job.cmd)
+        })
+        .collect();
+    lines.extend(workers.iter().map(|entry| {
+        let running = *entry.handle.state.lock().unwrap() == HandleState::Running;
+        let state = if running {
+            "running (worker)"
+        } else {
+            "done (worker)"
+        };
+        format!("[w{}] {}\t{}", entry.id.0, state, entry.cmd)
+    }));
+    lines
+}
+
+/// Compose the shell-exit survivor warning: one compact line naming every
+/// worker handle still `Running` when the REPL tears down, or `None` when
+/// none are — the deferred survivor warning
+/// (`decisions/260616_unify-turn-evaluation`) finally landing as a fold
+/// over the ledger, POSIX's "you have stopped jobs" register for the
+/// population that dies with the process rather than surviving an exit
+/// sweep. Called before [`crate::jobs::JobTable::cleanup`] so a worker is
+/// named first, swept (with the pgid groups) second; never gates or delays
+/// exit.
+pub(crate) fn survivor_warning(workers: &[WorkerEntry]) -> Option<String> {
+    let running: Vec<String> = workers
+        .iter()
+        .filter(|entry| *entry.handle.state.lock().unwrap() == HandleState::Running)
+        .map(|entry| format!("[w{}] {}", entry.id.0, entry.cmd))
+        .collect();
+    if running.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "ral: {} worker{} still running and will not survive this exit: {}",
+        running.len(),
+        if running.len() == 1 { "" } else { "s" },
+        running.join(", ")
+    ))
+}
 
 fn build_jobs(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
     BuiltinEntry {
         name: Cow::Borrowed("jobs"),
         type_rule: BuiltinTypeRule::Sig(sig::TERMINAL_CONTROL),
-        doc: "jobs  — list active background and stopped jobs.",
-        body: BuiltinBody::Captured(Arc::new(move |_args, _shell| {
+        doc: "jobs  — list active background and stopped jobs: pgid groups, and this shell's \
+              detached worker handles (spawn/watch/&) marked [wN], done once settled until \
+              observed.",
+        body: BuiltinBody::Captured(Arc::new(move |_args, shell| {
             let jt = jobs.lock().unwrap();
-            for job in jt.list() {
-                let state = match job.state {
-                    crate::jobs::JobState::Running => "running",
-                    crate::jobs::JobState::Stopped => "stopped",
-                };
-                eprintln!("[{}] {} {}\t{}", job.id, state, job.pgid, job.cmd);
+            let workers = shell.workers();
+            for line in render_jobs(&jt, &workers) {
+                eprintln!("{line}");
             }
             Ok(Value::Unit)
         })),
@@ -74,7 +143,8 @@ fn build_fg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
     BuiltinEntry {
         name: Cow::Borrowed("fg"),
         type_rule: BuiltinTypeRule::Sig(sig::OPTIONAL_INT_TO_UNIT),
-        doc: "fg [id]  — bring job [id] (default: most recent) to the foreground.",
+        doc: "fg [id]  — bring pgid job [id] (default: most recent) to the foreground. \
+              pgid-only: a worker handle has no foreground — `await` is its fg.",
         body: BuiltinBody::Captured(Arc::new(move |args, shell| {
             let (id, pgid) = {
                 let mut jt = jobs.lock().unwrap();
@@ -95,7 +165,7 @@ fn build_fg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
                         jt.remove(id);
                     }
                 }
-                None => diagnostic::cmd_error("fg", "no such job"),
+                None => diagnostic::cmd_error("fg", NOT_A_PGID_JOB),
             }
             Ok(Value::Unit)
         })),
@@ -108,7 +178,8 @@ fn build_bg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
     BuiltinEntry {
         name: Cow::Borrowed("bg"),
         type_rule: BuiltinTypeRule::Sig(sig::OPTIONAL_INT_TO_UNIT),
-        doc: "bg [id]  — resume job [id] (default: most recent) in the background.",
+        doc: "bg [id]  — resume pgid job [id] (default: most recent) in the background. \
+              pgid-only: a worker handle already runs detached — see `workers`.",
         body: BuiltinBody::Captured(Arc::new(move |args, _shell| {
             let mut jt = jobs.lock().unwrap();
             let Some(id) = job_id_arg(args, &jt) else {
@@ -116,7 +187,7 @@ fn build_bg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
                 return Ok(Value::Unit);
             };
             if jt.resume_in_background(id).is_none() {
-                diagnostic::cmd_error("bg", "no such job");
+                diagnostic::cmd_error("bg", NOT_A_PGID_JOB);
             }
             Ok(Value::Unit)
         })),
@@ -129,7 +200,8 @@ fn build_disown(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
     BuiltinEntry {
         name: Cow::Borrowed("disown"),
         type_rule: BuiltinTypeRule::Sig(sig::OPTIONAL_INT_TO_UNIT),
-        doc: "disown [id]  — detach job [id] (default: most recent) from the shell.",
+        doc: "disown [id]  — detach pgid job [id] (default: most recent) from the shell. \
+              pgid-only: a worker handle has no disown — `cancel` is its kill.",
         body: BuiltinBody::Captured(Arc::new(move |args, _shell| {
             let mut jt = jobs.lock().unwrap();
             let Some(id) = job_id_arg(args, &jt) else {
@@ -141,7 +213,7 @@ fn build_disown(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
                     #[cfg(windows)]
                     ral_core::process::disown_pipeline_group(ral_core::process::Pgid(_job.pgid));
                 }
-                None => diagnostic::cmd_error("disown", "no such job"),
+                None => diagnostic::cmd_error("disown", NOT_A_PGID_JOB),
             }
             Ok(Value::Unit)
         })),
@@ -214,5 +286,117 @@ mod tests {
 
         // Explicit id wins over the default.
         assert_eq!(job_id_arg(&[Value::Int(1)], &jt), Some(1));
+    }
+
+    /// A minimal registered-worker fixture, `running` toggling
+    /// [`HandleState::Running`] vs [`HandleState::Completed`] — enough to
+    /// exercise [`render_jobs`] and [`survivor_warning`] without a real
+    /// `spawn`.  Every `HandleInner` field is legitimately public
+    /// (`decisions/260615_no-core-repr-leak-into-exarch` draws that line at
+    /// exarch, not at a sibling crate reading core's own types), the same
+    /// construction core's own concurrency tests use.
+    fn fake_worker(id: u64, cmd: &str, running: bool) -> WorkerEntry {
+        let state = if running {
+            HandleState::Running
+        } else {
+            HandleState::Completed
+        };
+        WorkerEntry {
+            id: ral_core::types::WorkerId(id),
+            cmd: cmd.to_string(),
+            started: std::time::SystemTime::now(),
+            class: ral_core::types::LeaseClass::Worker,
+            settled_epoch: None,
+            handle: ral_core::types::HandleInner {
+                result: Arc::new(Mutex::new(None)),
+                cached: Arc::new(Mutex::new(None)),
+                state: Arc::new(Mutex::new(state)),
+                stdout_buf: Arc::new(Mutex::new(Vec::new())),
+                stderr_buf: Arc::new(Mutex::new(Vec::new())),
+                surface_buf: Arc::new(Mutex::new(Vec::new())),
+                joined: Arc::new(Mutex::new(false)),
+                last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
+                cmd: cmd.to_string(),
+                cancel: ral_core::process::CancelScope::default(),
+            },
+        }
+    }
+
+    /// The wart heals at the listing layer: the fold shows the pgid
+    /// `JobTable` entries exactly as before, then the shell's registered
+    /// worker handles, `[wN]`-marked so the two designator namespaces never
+    /// collide — a running worker reads `running (worker)`, a settled one
+    /// `done (worker)`.  A worker no longer in the slice (as `Shell::workers()`
+    /// hands back once an eliminator has observed it settled) simply does
+    /// not render again — the fold keeps no retention state of its own.
+    #[test]
+    fn render_jobs_folds_pgid_and_worker_populations() {
+        let mut jt = JobTable::new();
+        jt.add(1001, "vim".into(), JobState::Stopped);
+        let workers = vec![
+            fake_worker(3, "spawn { long_task }", true),
+            fake_worker(7, "watch { tail }", false),
+        ];
+
+        let lines = render_jobs(&jt, &workers);
+        assert_eq!(lines.len(), 3, "one pgid job plus two worker handles");
+        assert!(lines[0].starts_with("[1] stopped 1001\tvim"));
+        assert_eq!(lines[1], "[w3] running (worker)\tspawn { long_task }");
+        assert_eq!(lines[2], "[w7] done (worker)\twatch { tail }");
+
+        // Once observed away, a worker is simply absent from the next
+        // snapshot — no separate "done" bookkeeping survives it here.
+        let lines_after_observe = render_jobs(&jt, &[fake_worker(3, "spawn { long_task }", true)]);
+        assert!(
+            !lines_after_observe.iter().any(|l| l.contains("[w7]")),
+            "an observed-away worker never renders again"
+        );
+    }
+
+    /// The exit-time composer names every still-running worker in one
+    /// compact line and is `None` when the registry holds none — the
+    /// deferred survivor warning landing as a fold, never gating or
+    /// delaying exit itself.
+    #[test]
+    fn survivor_warning_names_running_workers_only() {
+        assert_eq!(
+            survivor_warning(&[]),
+            None,
+            "nothing running, nothing to warn"
+        );
+
+        let settled_only = vec![fake_worker(1, "spawn { done }", false)];
+        assert_eq!(
+            survivor_warning(&settled_only),
+            None,
+            "a settled-but-unclaimed worker is not a survivor"
+        );
+
+        let mixed = vec![
+            fake_worker(2, "spawn { still_going }", true),
+            fake_worker(9, "service { daemon }", true),
+            fake_worker(1, "spawn { done }", false),
+        ];
+        let warning = survivor_warning(&mixed).expect("two running workers must be named");
+        assert!(warning.contains("2 workers"), "got: {warning}");
+        assert!(
+            warning.contains("[w2] spawn { still_going }"),
+            "got: {warning}"
+        );
+        assert!(
+            warning.contains("[w9] service { daemon }"),
+            "got: {warning}"
+        );
+        assert!(!warning.contains("[w1]"), "the settled worker is not named");
+    }
+
+    /// `fg`/`bg`/`disown` are strictly pgid-typed: an id that resolves no
+    /// pgid job is met with the correspondence to a worker handle's own
+    /// eliminators, never a bare "no such job" that strands a `[wN]` user.
+    #[test]
+    fn not_a_pgid_job_names_the_handle_correspondence() {
+        assert!(NOT_A_PGID_JOB.contains("pgid-only"));
+        assert!(NOT_A_PGID_JOB.contains("`await`"), "fg's analogue");
+        assert!(NOT_A_PGID_JOB.contains("`cancel`"), "the kill analogue");
     }
 }
