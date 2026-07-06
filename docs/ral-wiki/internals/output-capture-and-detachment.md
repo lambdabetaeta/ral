@@ -1,7 +1,7 @@
 ---
-verified_at_commit: a590f4f
-verified_at_date: 2026-06-18
-anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild::drain, spawn_child, PgidPolicy::NewLeader, process::reaper, detached_ceiling]
+verified_at_commit: a87b548
+verified_at_date: 2026-07-05
+anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild::drain, spawn_child, PgidPolicy::NewLeader, process::reaper, WorkerLease, WorkerRegistry, lease_fire]
 ---
 
 # Output capture and detachment
@@ -9,10 +9,10 @@ anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild::drain, spawn_child, PgidPoli
 **A turn captures a child's output by draining its stdout/stderr pipe to
 end-of-file, so a process that never closes that pipe is foreground work the turn
 must wait on to its wall — and `spawn` is the construct that moves such work off
-the turn onto a root-parented, byte-bounded, time-bounded worker.** A long-running
+the turn onto a root-parented, byte-bounded, lease-bound worker.** A long-running
 server is the canonical instance: run inline it stalls the call to the deadline
 and is killed with its tree; spawned it returns instantly and survives, reaped
-only by its ceiling.
+only for neglect — or never, if born a `service`.
 
 ## Capture is a drain to EOF
 
@@ -76,16 +76,45 @@ The escape is detachment — the *handle* is its evidence
   worker's memory stays bounded at ~16 MiB. The detached path has no unbounded-growth
   failure mode, and no undrained-pipe stall.
 
-## Detachment is bounded in time too
+## Detachment decays by neglect, not by age
 
-- An abandoned exarch worker is reaped by the *death-clock*: the frame arms a
-  one-hour lifetime ceiling on each `spawn` worker's own scope as a kept entry on
-  the same `process::reaper`. At expiry the scope flips `Deadline` and the worker's
-  child-wait loop SIGKILLs the server's group exactly as the foreground wall does.
-  A spawned server is therefore never immortal — reaped at one hour, or sooner by
-  `cancel $h`.
-- The lifetime is a frame policy (`detached_ceiling: Option<Duration>`), not a
-  per-spawn knob: exarch arms one hour, the REPL arms none.
+- Every detached worker — `spawn`, `watch`, `service` — files a `WorkerEntry` in
+  its shell's `WorkerRegistry` the instant it starts (`core/src/types/shell/workers.rs`):
+  a per-shell directory holding the handle itself, not a second by-id control
+  plane. `poll`, `await`, `race`, and `cancel` stay the only verbs that touch a
+  worker, so "rediscover a worker" after context compaction erased its binding
+  name is just `workers` to list, then take the handle back and resume the
+  ordinary idiom (`workers` builtin, `exarch/src/agent_builtins.rs`).
+- An ordinary `spawn`/`watch` worker (`LeaseClass::Worker`) is governed by the
+  frame's `WorkerLease`: an idle bound on the *observation* clock, under an
+  absolute backstop. It is reaped once unobserved — no `poll`/`await`/`race`
+  has named its handle — for `idle`, or once older than `backstop` regardless
+  of observation. exarch grants one hour idle / 24 hour backstop
+  (`DETACHED_WORKER_CEILING`, `DETACHED_WORKER_BACKSTOP`,
+  `exarch/src/shell_eval.rs`); the REPL grants none, so its spawns never reap.
+  Age alone no longer kills a worker: a build babysat every turn via `poll`
+  renews indefinitely, up to the backstop.
+- The mechanism is the reaper's own re-arming `Run` deadline
+  (`process::arm_callback`, `lease_fire` in `core/src/builtins/concurrency.rs`):
+  each firing checks the backstop first, then the idle bound off the handle's
+  shared last-observed cell, and either reaps or re-arms itself for the sooner
+  of the two remaining margins. A worker that has already settled (not
+  `Running`) ends the chain silently — it lingers in the registry as an
+  unclaimed result under its own, separate retention lease (256 idle ral
+  calls, `SETTLED_WORKER_RETENTION`), swept by `WorkerRegistry::advance_epoch`
+  on the host's ral-call epoch.
+- `service { … }` births a worker whose registry entry carries the durable
+  class (`LeaseClass::Durable`): no idle bound, no backstop ever arms for it —
+  legibility (listed by `workers`, cancellable through its handle) is the
+  whole bound, and it dies only by `/clear`, an explicit `cancel`, or process
+  exit.
+- Every reap — idle, backstop, or settled-retention — is atomic with a
+  `ReapNotice` recording what fell and why, drained at the host's ready
+  boundaries (`Shell::take_worker_reap_notices`, `Agent::drain_worker_reaps`,
+  beside the binding-lease drain) into one `Kind::WorkerReaped` transcript/TUI
+  event per entry. The model's later "where did my job go?" always has an
+  answer in the log. Full decision record:
+  [[decisions/260705_leases-and-budgets|leases-and-budgets]].
 
 ## Reading a spawned server's output (the exarch caveat)
 
@@ -104,15 +133,22 @@ The escape is detachment — the *handle* is its evidence
   is the headless substitute: not a live stream, but a poll-driven read exarch can
   drive from its own turns.
 - So under exarch a server is *fire-and-`poll`-and-`cancel`*: `spawn` it, read its
-  accumulated output with `poll $h` on later turns, `cancel $h` when done. To keep a
-  full, unbounded log past the 16 MiB cap, still redirect inside the block to a file
-  — `spawn { python3 -m http.server > srv.log 2>&1 }` — and read the file on later
-  turns.
+  accumulated output with `poll $h` on later turns, `cancel $h` when done. `poll`
+  is also what keeps a plain `spawn`ed server alive past an hour of inattention
+  — it renews the idle-observation lease. A server known at birth to go long
+  stretches unpolled wants `service { … }` instead: born with no idle bound and
+  no backstop, it never reaps for inattention, only by `/clear`, `cancel`, or
+  process exit. To keep a full, unbounded log past the 16 MiB cap, still
+  redirect inside the block to a file — `spawn { python3 -m http.server >
+  srv.log 2>&1 }` — and read the file on later turns.
 
 See also
 [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]
-(why a handle marks detachment and where the death-clock lives),
+(why a handle marks detachment, and the doctrine
+[[decisions/260705_leases-and-budgets|leases-and-budgets]] retired: not
+"detached workers are unmanaged by design" but unmanaged by default),
 [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]] (the root/foreground
 split and the reaper), [[map/exarch/shell-eval|shell-eval]] (the frame that arms the
-wall and captures the bytes), [[map/core/io-process|io-process]], and
-`docs/SPEC.md` §13.3.
+wall and captures the bytes), [[internals/binding-leases|binding-leases]] (the
+lease idiom applied to scratch names, the same page's sibling story),
+[[map/core/io-process|io-process]], and `docs/SPEC.md` §13.3.
