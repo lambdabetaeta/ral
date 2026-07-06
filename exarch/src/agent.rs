@@ -52,7 +52,6 @@ pub struct Agent {
     /// what the agent did.
     transcript: Transcript,
     transport: ral_core::transport::IdentityTransport,
-    wire: Option<ral_core::transport::WireTransport>,
     caps: ral_core::types::Capabilities,
     /// This agent's parent, or `None` for the **trunk**.  The sole structural
     /// distinction: the trunk publishes its cancel token for the OS-signal path
@@ -347,17 +346,6 @@ impl Agent {
             large_binding_bytes: shell_eval::LARGE_BINDING_BYTES,
         });
         let durable = shell.mobile_snapshot();
-        #[cfg(unix)]
-        let wire = if std::env::var("RAL_WIRE").is_ok() {
-            Some(
-                ral_core::transport::WireTransport::new()
-                    .expect("RAL_WIRE: failed to create WireTransport"),
-            )
-        } else {
-            None
-        };
-        #[cfg(not(unix))]
-        let wire: Option<ral_core::transport::WireTransport> = None;
         let transport = ral_core::transport::IdentityTransport::new(shell);
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
@@ -379,7 +367,6 @@ impl Agent {
             log,
             transcript,
             transport,
-            wire,
             caps,
             parent,
             fuel,
@@ -433,13 +420,6 @@ impl Agent {
         });
         self.durable = shell.mobile_snapshot();
         self.transport = ral_core::transport::IdentityTransport::new(shell);
-        #[cfg(unix)]
-        if std::env::var("RAL_WIRE").is_ok() {
-            self.wire = Some(
-                ral_core::transport::WireTransport::new()
-                    .expect("RAL_WIRE: failed to create WireTransport"),
-            );
-        }
     }
 
     /// The trunk — the parent-less root of a fresh fleet.  Creates the fleet's
@@ -1758,13 +1738,6 @@ impl Agent {
         self.transport
             .set_boundary(shell_eval::boundary_sink(emit, self.id, &self.agents));
         let content = match shell_eval::run_shell(
-            #[cfg(unix)]
-            if let Some(ref wire) = self.wire {
-                wire as &dyn ral_core::transport::Transport
-            } else {
-                &self.transport
-            },
-            #[cfg(not(unix))]
             &self.transport,
             &self.caps,
             cmd,
