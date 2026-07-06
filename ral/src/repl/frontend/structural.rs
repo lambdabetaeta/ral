@@ -674,7 +674,7 @@ fn build_spine(src: &str, shell: &Shell) -> Spine {
                 code: err.kind.code().to_string(),
                 headline: err.kind.render_message(),
                 label: ral_core::diagnostic::label_message_for_kind(&err.kind),
-                hint: err.hint.clone(),
+                hint: err.hint(),
             },
             None => Spine::Empty,
         },

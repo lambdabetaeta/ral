@@ -12,7 +12,7 @@ use super::builtins::{
 use super::env::{InferCtx, TyEnv};
 use super::fmt::fmt_ty;
 use super::generalize::{generalize, instantiate};
-use super::scheme::{Scheme, TypeErrorKind};
+use super::scheme::{Reason, Scheme, TypeErrorKind};
 use super::ty::{CompTy, PipeMode, PipeSpec, Row, Ty};
 use crate::ir::{
     CommandName, CommandWord, Comp, CompKind, IrPattern, ScopeOp, Val, ValListElem, ValMapEntry,
@@ -208,12 +208,8 @@ impl Inferencer<'_> {
             }
             IrPattern::List { elems, rest } => {
                 let elem = self.ctx.unifier.fresh_ty();
-                self.ctx.unify_ty_hint(
-                    ty,
-                    &Ty::List(Box::new(elem.clone())),
-                    "the pattern `[a, b, ...]` only destructures a list — \
-                     the value being bound has to be a list of the same shape",
-                );
+                self.ctx
+                    .unify_ty(ty, &Ty::List(Box::new(elem.clone())), Reason::ListPattern);
                 for elem_pat in elems {
                     self.bind_pattern(elem_pat, &elem);
                 }
@@ -239,13 +235,8 @@ impl Inferencer<'_> {
                     }
                 }
                 field_tys.reverse();
-                self.ctx.unify_ty_hint(
-                    ty,
-                    &Ty::Record(row),
-                    "the pattern `[key: name, ...]` only destructures a \
-                     record — the value being bound has to be a record \
-                     with at least the named fields",
-                );
+                self.ctx
+                    .unify_ty(ty, &Ty::Record(row), Reason::RecordPattern);
                 for (entry, field_ty) in entries.iter().zip(field_tys.iter()) {
                     self.bind_pattern(&entry.pattern, field_ty);
                 }
@@ -261,7 +252,7 @@ impl Inferencer<'_> {
                 let input = self.ctx.unifier.fresh_mode();
                 let output = self.ctx.unifier.fresh_mode();
                 let expected = CompTy::Return(PipeSpec { input, output }, Box::new(ty.clone()));
-                self.ctx.unify_comp_ty(cty, &expected);
+                self.ctx.unify_comp_ty(cty, &expected, Reason::ReturnShape);
                 (ty, input, output)
             }
         }
@@ -375,11 +366,11 @@ impl Inferencer<'_> {
 
     /// Merge a conditional's branches into one computation type.  The
     /// return value type is shared — every branch must produce the same
-    /// value (`unify_ty_hint` reports a real disagreement) — but the
+    /// value (`unify_ty` reports a real disagreement) — but the
     /// pipeline I/O modes are *unioned* via [`Self::union_mode`], not
     /// equated, since only one branch runs.  A non-`Return` branch (a
     /// bare lambda arm) falls back to strict computation-type unification.
-    fn merge_branches(&mut self, branches: Vec<CompTy>, hint: &str) -> CompTy {
+    fn merge_branches(&mut self, branches: Vec<CompTy>, why: Reason) -> CompTy {
         let mut iter = branches.into_iter();
         let Some(mut acc) = iter.next() else {
             return CompTy::pure(self.ctx.unifier.fresh_ty());
@@ -390,7 +381,7 @@ impl Inferencer<'_> {
                 self.ctx.unifier.resolve_comp_ty(&branch),
             ) {
                 (CompTy::Return(sa, ta), CompTy::Return(sb, tb)) => {
-                    self.ctx.unify_ty_hint(&ta, &tb, hint);
+                    self.ctx.unify_ty(&ta, &tb, why.clone());
                     CompTy::Return(
                         PipeSpec {
                             input: self.union_mode(sa.input, sb.input),
@@ -400,7 +391,7 @@ impl Inferencer<'_> {
                     )
                 }
                 _ => {
-                    self.ctx.unify_comp_ty_hint(&acc, &branch, hint);
+                    self.ctx.unify_comp_ty(&acc, &branch, why.clone());
                     acc
                 }
             };
@@ -463,7 +454,11 @@ impl Inferencer<'_> {
                     // applied.
                     Ty::Var(_) => {
                         let inner = self.ctx.unifier.fresh_comp_ty();
-                        self.ctx.unify_ty(&ty, &Ty::Thunk(Box::new(inner.clone())));
+                        self.ctx.unify_ty(
+                            &ty,
+                            &Ty::Thunk(Box::new(inner.clone())),
+                            Reason::AutoderefHead,
+                        );
                         cty = inner;
                     }
                     _ => return cty,
@@ -495,13 +490,7 @@ impl Inferencer<'_> {
                 let arg_ty = this.infer_val(arg);
                 let result = this.ctx.unifier.fresh_comp_ty();
                 let expected = CompTy::Fun(Box::new(arg_ty), Box::new(result.clone()));
-                this.ctx.unify_comp_ty_hint(
-                    &cty,
-                    &expected,
-                    "the function's parameter type and the argument's type \
-                     must agree — check what the function expects and what \
-                     you're passing in",
-                );
+                this.ctx.unify_comp_ty(&cty, &expected, Reason::Argument);
                 result
             });
         }
@@ -533,21 +522,9 @@ impl Inferencer<'_> {
         // `Fun`/`Var` consumers here; a `Return` stage takes the channel
         // edge instead), so the produced value must fit its first
         // parameter.  A clash here is a genuine arg-shape error.
-        let mut hint = String::from(
-            "this stage produces a value that is piped into the next \
-             stage's function — the value's type and the function's \
-             parameter type must agree",
-        );
-        // A Step-shaped piped value (a variant carrying `more`/`done`) is
-        // a lazy stream the consumer receives whole; on a clash, point at
-        // the explicit eliminators.
-        if self.piped_ty_is_step_shaped(&piped_ty) {
-            hint.push_str(
-                "; this stage receives a lazy Step stream — consume it \
-                 explicitly with stream-each / stream-map / stream-to-list",
-            );
-        }
-        self.ctx.unify_comp_ty_hint(&cty, &expected, &hint);
+        let step_stream = self.piped_ty_is_step_shaped(&piped_ty);
+        self.ctx
+            .unify_comp_ty(&cty, &expected, Reason::PipedValue { step_stream });
         result
     }
 
@@ -591,8 +568,11 @@ impl Inferencer<'_> {
                 Box::new(Row::Empty),
             )),
         ));
-        self.ctx
-            .unify_comp_ty(&tail_comp, &CompTy::pure(step.clone()));
+        self.ctx.unify_comp_ty(
+            &tail_comp,
+            &CompTy::pure(step.clone()),
+            Reason::LinesStepSelf,
+        );
         step
     }
 
@@ -607,7 +587,7 @@ impl Inferencer<'_> {
     pub(super) fn check_map_entry_fields(
         &mut self,
         entries: &[ValMapEntry],
-        ctx: &str,
+        form: &'static str,
         schema: FieldSchema,
     ) {
         for entry in entries {
@@ -618,10 +598,13 @@ impl Inferencer<'_> {
             let expected = key.and_then(|k| schema(k, &mut self.ctx.unifier));
             let actual = self.infer_val(val);
             if let (Some(key), Some(expected)) = (key, expected) {
-                self.ctx.unify_ty_hint(
+                self.ctx.unify_ty(
                     &actual,
                     &expected,
-                    &format!("{ctx} {key}: wrong value type"),
+                    Reason::OptionField {
+                        form,
+                        key: key.to_string(),
+                    },
                 );
             }
         }
@@ -642,7 +625,8 @@ impl Inferencer<'_> {
                 ValListElem::Spread(v) => {
                     let spread_ty = self.infer_val(v);
                     let inner = self.ctx.unifier.fresh_ty();
-                    self.ctx.unify_ty(&spread_ty, &Ty::List(Box::new(inner)));
+                    self.ctx
+                        .unify_ty(&spread_ty, &Ty::List(Box::new(inner)), Reason::ListSpread);
                 }
             }
         }
@@ -675,15 +659,12 @@ impl Inferencer<'_> {
     pub(super) fn handler_comp_scheme(&mut self, name: &str, comp: &Comp) -> Scheme {
         let cty = self.infer_handler_comp(comp);
         if let Err(mismatch) = self.pin_arm_to_head(name, &cty) {
-            self.ctx.emit_kind(
+            self.ctx.report(
                 TypeErrorKind::ModeMismatch {
                     expected: mismatch.left,
                     actual: mismatch.right,
                 },
-                Some(
-                    "a handler or alias reinterprets a head — it preserves the head's \
-                     pipeline modes; match the existing head's modes or add a codec",
-                ),
+                Reason::HandlerModePin,
             );
         }
         let thunk_ty = Ty::Thunk(Box::new(cty));
@@ -768,26 +749,27 @@ impl Inferencer<'_> {
             return cty;
         };
         let elem = self.ctx.unifier.fresh_ty();
-        self.ctx.unify_ty(&param, &Ty::List(Box::new(elem.clone())));
+        self.ctx.unify_ty(
+            &param,
+            &Ty::List(Box::new(elem.clone())),
+            Reason::AliasParam,
+        );
         for entry in args {
             let span = entry.span;
             match &entry.item {
                 crate::ir::ValListElem::Single(arg) => {
                     self.with_span(span, |this| {
                         let arg_ty = this.infer_val(arg);
-                        this.ctx.unify_ty_hint(
-                            &arg_ty,
-                            &elem,
-                            "this argument is passed to an alias/handler arm — its \
-                             type must match what the arm's body does with the argv \
-                             elements",
-                        );
+                        this.ctx.unify_ty(&arg_ty, &elem, Reason::AliasArgv);
                     });
                 }
                 crate::ir::ValListElem::Spread(arg) => {
                     let spread_ty = self.infer_val(arg);
-                    self.ctx
-                        .unify_ty(&spread_ty, &Ty::List(Box::new(elem.clone())));
+                    self.ctx.unify_ty(
+                        &spread_ty,
+                        &Ty::List(Box::new(elem.clone())),
+                        Reason::ListSpread,
+                    );
                 }
             }
         }
@@ -847,21 +829,21 @@ impl Inferencer<'_> {
         self.env.lookup_binding(name).is_some() || crate::builtins::is_builtin(name)
     }
 
-    pub(super) fn reject_handler_for_binding(&mut self, name: &str, verb: &str) -> bool {
+    pub(super) fn reject_handler_for_binding(&mut self, name: &str, verb: &'static str) -> bool {
         if !self.binding_claims_name(name) {
             return false;
         }
-        let message = if crate::builtins::is_builtin(name) {
-            format!("cannot {verb} builtin `{name}`")
+        let kind = if crate::builtins::is_builtin(name) {
+            TypeErrorKind::CannotRedefineBuiltin {
+                name: name.to_string(),
+                verb,
+            }
         } else {
-            format!("handler `{name}` is hidden by a lexical binding in this scope")
+            TypeErrorKind::HandlerShadowedByBinding {
+                name: name.to_string(),
+            }
         };
-        let hint = if crate::builtins::is_builtin(name) {
-            "lexical and builtin names are not handler names; did you mean `let name = ...`?"
-        } else {
-            "bare command lookup resolves to the lexical value before handlers are considered"
-        };
-        self.ctx.error_hint(message, hint);
+        self.ctx.diagnose(kind);
         true
     }
 
@@ -899,16 +881,14 @@ impl Inferencer<'_> {
             ArgTemplate::Any => {}
             ArgTemplate::Ty(ty) => {
                 let expected = self.ty_from_template(ty);
-                self.ctx.unify_ty(actual, &expected);
+                self.ctx
+                    .unify_ty(actual, &expected, Reason::BuiltinTypedArg);
             }
             ArgTemplate::BlockOrLambda => {
                 let result = self.ctx.unifier.fresh_comp_ty();
                 let expected = Ty::Thunk(Box::new(result));
-                self.ctx.unify_ty_hint(
-                    actual,
-                    &expected,
-                    "this builtin expects a block value here",
-                );
+                self.ctx
+                    .unify_ty(actual, &expected, Reason::BuiltinBlockArg);
             }
             ArgTemplate::OneOf(options) => {
                 let resolved = self.ctx.unifier.apply_ty(actual);
@@ -922,19 +902,25 @@ impl Inferencer<'_> {
                             .iter()
                             .any(|o| matches!(o, ArgTemplate::Ty(TyTemplate::ListInt))) =>
                     {
-                        self.ctx.unify_ty(actual, &Ty::List(Box::new(Ty::Int)))
+                        self.ctx.unify_ty(
+                            actual,
+                            &Ty::List(Box::new(Ty::Int)),
+                            Reason::BuiltinTypedArg,
+                        )
                     }
                     Ty::Var(_)
                         if options
                             .iter()
                             .any(|o| matches!(o, ArgTemplate::Ty(TyTemplate::Bytes))) =>
                     {
-                        self.ctx.unify_ty(actual, &Ty::Bytes)
+                        self.ctx
+                            .unify_ty(actual, &Ty::Bytes, Reason::BuiltinTypedArg)
                     }
                     _ => {
                         if let Some(ArgTemplate::Ty(ty)) = options.first() {
                             let expected = self.ty_from_template(*ty);
-                            self.ctx.unify_ty(actual, &expected);
+                            self.ctx
+                                .unify_ty(actual, &expected, Reason::BuiltinTypedArg);
                         }
                     }
                 }
@@ -946,10 +932,7 @@ impl Inferencer<'_> {
         if sig.diagnostic == BuiltinDiagnostic::FailStatusNonzero
             && fail_status_is_zero_literal(args)
         {
-            self.ctx.error_hint(
-                "`fail [status: 0]` is not allowed — fail requires a nonzero status".into(),
-                "use `return` for a clean exit",
-            );
+            self.ctx.diagnose(TypeErrorKind::FailStatusZero);
         }
 
         let mut type_probe_arg = None;
@@ -959,14 +942,11 @@ impl Inferencer<'_> {
                     let missing_data_last = matches!(sig.args, ArgSig::DataLast(_))
                         && positional.len() + 1 == expected.len();
                     if positional.len() != expected.len() && !missing_data_last {
-                        self.ctx.error_hint(
-                            format!(
-                                "builtin expected {} argument(s), got {}",
-                                expected.len(),
-                                positional.len()
-                            ),
-                            "check the builtin's help entry for its command shape",
-                        );
+                        self.ctx.diagnose(TypeErrorKind::BuiltinArity {
+                            expected: expected.len(),
+                            got: positional.len(),
+                            at_most: false,
+                        });
                     }
                     for (arg, template) in positional.iter().zip(expected.iter()) {
                         let actual = self.infer_val(arg);
@@ -981,13 +961,11 @@ impl Inferencer<'_> {
                 }
                 ArgSig::Optional(template) => {
                     if positional.len() > 1 {
-                        self.ctx.error_hint(
-                            format!(
-                                "builtin expected at most 1 argument, got {}",
-                                positional.len()
-                            ),
-                            "remove the extra arguments or pass a single list value",
-                        );
+                        self.ctx.diagnose(TypeErrorKind::BuiltinArity {
+                            expected: 1,
+                            got: positional.len(),
+                            at_most: true,
+                        });
                     }
                     for arg in &positional {
                         let actual = self.infer_val(arg);
@@ -1007,7 +985,7 @@ impl Inferencer<'_> {
             // the result so the probe is transparent to downstream
             // inference, then print the resolved α.
             if let CompTy::Return(_, value_ty) = &result {
-                self.ctx.unify_ty(value_ty, &arg_ty);
+                self.ctx.unify_ty(value_ty, &arg_ty, Reason::TypeProbe);
             }
             let resolved = self.ctx.unifier.apply_ty(&arg_ty);
             let pos = self
@@ -1022,29 +1000,15 @@ impl Inferencer<'_> {
 
     fn infer_not(&mut self, val: &Val) -> Ty {
         let ty = self.infer_val(val);
-        self.ctx.unify_ty_hint(
-            &ty,
-            &Ty::Bool,
-            "`not` flips a Bool — its operand has to be a Bool (`true` / `false` or a comparison)",
-        );
+        self.ctx.unify_ty(&ty, &Ty::Bool, Reason::NotOperand);
         Ty::Bool
     }
 
     fn infer_binary(&mut self, op: BinaryOp, lhs: &Val, rhs: &Val) -> Ty {
         let lhs_ty = self.infer_val(lhs);
         let rhs_ty = self.infer_val(rhs);
-        let hint: &str = match op.kind() {
-            BinaryOpKind::Arith(_) => {
-                "the two sides of a `+` / `-` / `*` / `/` must have the same numeric type"
-            }
-            BinaryOpKind::Compare(_) => {
-                "you can only compare two values of the same type with `<` / `>` / `<=` / `>=`"
-            }
-            BinaryOpKind::Eq(_) => {
-                "you can only check equality between two values of the same type"
-            }
-        };
-        self.ctx.unify_ty_hint(&lhs_ty, &rhs_ty, hint);
+        self.ctx
+            .unify_ty(&lhs_ty, &rhs_ty, Reason::BinaryOperands(op.kind()));
         match op.kind() {
             BinaryOpKind::Eq(_) | BinaryOpKind::Compare(_) => Ty::Bool,
             BinaryOpKind::Arith(_) => lhs_ty,
@@ -1141,7 +1105,7 @@ impl Inferencer<'_> {
                 }
                 Err(msg) => {
                     self.ctx
-                        .error_hint("malformed alias definition".into(), msg);
+                        .diagnose(TypeErrorKind::MalformedAlias { detail: msg });
                 }
                 Ok(None) => {}
             }
@@ -1150,7 +1114,8 @@ impl Inferencer<'_> {
                     self.env.unbind_removable_handler(name);
                 }
                 Err(msg) => {
-                    self.ctx.error_hint("malformed unalias".into(), msg);
+                    self.ctx
+                        .diagnose(TypeErrorKind::MalformedUnalias { detail: msg });
                 }
                 Ok(None) => {}
             }
@@ -1268,8 +1233,11 @@ impl Inferencer<'_> {
                     ValMapEntry::Spread(value) => {
                         let spread_ty = self.infer_val(value);
                         let row_var = self.ctx.unifier.fresh_row_var();
-                        self.ctx
-                            .unify_ty(&spread_ty, &Ty::Record(Row::Var(row_var)));
+                        self.ctx.unify_ty(
+                            &spread_ty,
+                            &Ty::Record(Row::Var(row_var)),
+                            Reason::MapSpread,
+                        );
                         spread_rows.push(row_var);
                     }
                     ValMapEntry::Entry(_, _) => {
@@ -1318,18 +1286,17 @@ impl Inferencer<'_> {
                 match entry {
                     ValMapEntry::Entry(key, value) => {
                         let key_ty = self.infer_val(key);
-                        self.ctx.unify_ty_hint(
-                            &key_ty,
-                            &Ty::String,
-                            "map keys must be Strings — quote a bare token or convert with `str`",
-                        );
+                        self.ctx.unify_ty(&key_ty, &Ty::String, Reason::MapKey);
                         let value_ty = self.infer_val(value);
-                        self.ctx.unify_ty(&value_ty, &elem);
+                        self.ctx.unify_ty(&value_ty, &elem, Reason::MapElem);
                     }
                     ValMapEntry::Spread(value) => {
                         let spread_ty = self.infer_val(value);
-                        self.ctx
-                            .unify_ty(&spread_ty, &Ty::Map(Box::new(elem.clone())));
+                        self.ctx.unify_ty(
+                            &spread_ty,
+                            &Ty::Map(Box::new(elem.clone())),
+                            Reason::MapSpread,
+                        );
                     }
                 }
             }
@@ -1350,12 +1317,8 @@ impl Inferencer<'_> {
                     name.as_str(),
                     "within" | "try" | "guard" | "grant" | "audit"
                 ) {
-                    self.ctx.error_hint(
-                        format!(
-                            "'{name}' is a control operator, not a value; it can only appear in command position"
-                        ),
-                        &format!("did you mean to invoke `{name}` as a command (e.g. `{name} ...`)?"),
-                    );
+                    self.ctx
+                        .diagnose(TypeErrorKind::ControlOperatorAsValue { name: name.clone() });
                     self.ctx.unifier.fresh_ty()
                 } else {
                     match self.env.lookup_binding(name).cloned() {
@@ -1364,23 +1327,15 @@ impl Inferencer<'_> {
                             match super::builtins::builtin_scheme(name, &mut self.ctx.unifier) {
                                 Some(scheme) => instantiate(&mut self.ctx.unifier, &scheme),
                                 None if self.env.lookup_handler(name).is_some() => {
-                                    self.ctx.error_hint(
-                                        format!(
-                                            "`{name}` is a handler entry, not a first-class value"
-                                        ),
-                                        "aliases and `within` handlers are command handlers; use command position to invoke them",
-                                    );
+                                    self.ctx.diagnose(TypeErrorKind::HandlerNotFirstClass {
+                                        name: name.clone(),
+                                    });
                                     self.ctx.unifier.fresh_ty()
                                 }
                                 None if crate::builtins::is_builtin(name) => {
-                                    self.ctx.error_hint(
-                                        format!(
-                                            "`{name}` is a builtin command, not a first-class value"
-                                        ),
-                                        &format!(
-                                            "did you mean to invoke `{name} ...` in command position?"
-                                        ),
-                                    );
+                                    self.ctx.diagnose(TypeErrorKind::BuiltinNotFirstClass {
+                                        name: name.clone(),
+                                    });
                                     self.ctx.unifier.fresh_ty()
                                 }
                                 None => self.ctx.unifier.fresh_ty(),
@@ -1398,17 +1353,15 @@ impl Inferencer<'_> {
                         ValListElem::Spread(value) => {
                             let spread_ty = self.infer_val(value);
                             let inner = self.ctx.unifier.fresh_ty();
-                            self.ctx.unify_ty_hint(
+                            self.ctx.unify_ty(
                                 &spread_ty,
                                 &Ty::List(Box::new(inner.clone())),
-                                "a `...x` spread copies the elements of a \
-                                 list into this position, so the value \
-                                 after `...` must itself be a list",
+                                Reason::ListSpread,
                             );
                             inner
                         }
                     };
-                    self.ctx.unify_ty(&entry_ty, &elem);
+                    self.ctx.unify_ty(&entry_ty, &elem, Reason::ListElem);
                 }
                 Ty::List(Box::new(elem))
             }
@@ -1503,7 +1456,9 @@ impl Inferencer<'_> {
             }
 
             let inp = self.comp_input_mode(&stage_tys[i + 1]);
-            self.with_span(edge_span, |this| this.ctx.unify_mode(&out, &inp));
+            self.with_span(edge_span, |this| {
+                this.ctx.unify_mode(&out, &inp, Reason::PipelineEdge)
+            });
         }
 
         // Pipeline shape: input from the first stage, output mode and
@@ -1534,7 +1489,7 @@ impl Inferencer<'_> {
                 },
                 Box::new(ret_ty.clone()),
             );
-            self.ctx.unify_comp_ty(&last, &bound);
+            self.ctx.unify_comp_ty(&last, &bound, Reason::ReturnShape);
         }
 
         // Record each stage's byte channels and value type for the
@@ -1572,11 +1527,7 @@ impl Inferencer<'_> {
                 // List index: the key must be `Int`, so unifying it
                 // against `Ty::Int` rejects `xs["foo"]` on a `[_]`.
                 let key_ty = self.infer_val(key);
-                self.ctx.unify_ty_hint(
-                    &key_ty,
-                    &Ty::Int,
-                    "indexing into a list takes an Integer (the position)",
-                );
+                self.ctx.unify_ty(&key_ty, &Ty::Int, Reason::ListIndexKey);
                 *elem
             }
             Ty::Map(elem) => {
@@ -1584,19 +1535,11 @@ impl Inferencer<'_> {
                 // discarded-key-type unsoundness as the List case
                 // above.
                 let key_ty = self.infer_val(key);
-                self.ctx.unify_ty_hint(
-                    &key_ty,
-                    &Ty::String,
-                    "indexing into a map takes a String (the key)",
-                );
+                self.ctx.unify_ty(&key_ty, &Ty::String, Reason::MapIndexKey);
                 *elem
             }
             Ty::Thunk(_) => {
-                self.ctx.error_hint(
-                    "this is a block — you can't read a field from it directly".to_string(),
-                    "run the block first, then index its result: `!{!$t}[field]` \
-                     (`!$t[field]` reads `field` off `$t` and forces *that*)",
-                );
+                self.ctx.diagnose(TypeErrorKind::IndexIntoThunk);
                 let _ = self.infer_val(key);
                 self.ctx.unifier.fresh_ty()
             }
@@ -1626,16 +1569,14 @@ impl Inferencer<'_> {
                     let resolved = self.ctx.unifier.apply_ty(current_ty);
                     let concretely_non_record = !matches!(resolved, Ty::Record(_) | Ty::Var(_));
                     if concretely_non_record {
-                        self.ctx.error_hint(
-                            format!(
-                                "you tried to read the field `{label}` from a value of type {}, but only records have fields",
-                                fmt_ty(&resolved)
-                            ),
-                            "check that the value you're indexing is a record like `[a: 1, b: 2]`",
-                        );
+                        self.ctx.diagnose(TypeErrorKind::FieldOnNonRecord {
+                            label: label.clone(),
+                            ty: resolved,
+                        });
                         field_ty
                     } else {
-                        self.ctx.unify_ty(current_ty, &record_ty);
+                        self.ctx
+                            .unify_ty(current_ty, &record_ty, Reason::RecordFieldRead);
                         field_ty
                     }
                 } else {
@@ -1659,24 +1600,21 @@ impl Inferencer<'_> {
                     let resolved_target = self.ctx.unifier.apply_ty(current_ty);
                     match resolved_target {
                         Ty::Var(_) => match self.ctx.unifier.apply_ty(&key_ty) {
-                            Ty::Int => self
-                                .ctx
-                                .unify_ty(current_ty, &Ty::List(Box::new(elem.clone()))),
-                            Ty::String => self
-                                .ctx
-                                .unify_ty(current_ty, &Ty::Map(Box::new(elem.clone()))),
+                            Ty::Int => self.ctx.unify_ty(
+                                current_ty,
+                                &Ty::List(Box::new(elem.clone())),
+                                Reason::DynamicIndexTarget,
+                            ),
+                            Ty::String => self.ctx.unify_ty(
+                                current_ty,
+                                &Ty::Map(Box::new(elem.clone())),
+                                Reason::DynamicIndexTarget,
+                            ),
                             _ => {}
                         },
                         other => {
-                            self.ctx.error_hint(
-                                format!(
-                                    "can't index a value of type {} with a runtime key",
-                                    fmt_ty(&other)
-                                ),
-                                "only lists (key: Integer) and maps (key: String) \
-                                 accept a key computed at runtime — for a record \
-                                 field, use a static name like $r[fieldname]",
-                            );
+                            self.ctx
+                                .diagnose(TypeErrorKind::DynamicIndexOnScalar { ty: other });
                         }
                     }
                     elem
@@ -1702,14 +1640,11 @@ impl Inferencer<'_> {
         if self.ctx.unifier.unify_ty(handler_ty, &expected).is_err() {
             let expected_resolved = self.ctx.unifier.apply_ty(&expected);
             let found_resolved = self.ctx.unifier.apply_ty(handler_ty);
-            self.ctx.emit_kind(
-                crate::typecheck::scheme::TypeErrorKind::CaseLabelTypeMismatch {
-                    label: label.to_string(),
-                    expected: expected_resolved,
-                    found: found_resolved,
-                },
-                None,
-            );
+            self.ctx.diagnose(TypeErrorKind::CaseLabelTypeMismatch {
+                label: label.to_string(),
+                expected: expected_resolved,
+                found: found_resolved,
+            });
         }
         // If the scrutinee already has a known payload at this label
         // (e.g. the scrutinee was inferred from a literal `\`ok 5`),
@@ -1726,15 +1661,12 @@ impl Inferencer<'_> {
         {
             let expected_resolved = self.ctx.unifier.apply_ty(scrut_payload);
             let found_resolved = self.ctx.unifier.apply_ty(&payload_ty);
-            self.ctx.emit_kind(
-                crate::typecheck::scheme::TypeErrorKind::TyMismatch {
+            self.ctx.report(
+                TypeErrorKind::TyMismatch {
                     expected: expected_resolved,
                     actual: found_resolved,
                 },
-                Some(
-                    "the `case` arm's handler must accept the payload \
-                     type the scrutinee constructs at that tag",
-                ),
+                Reason::CaseArmPayload,
             );
             return self.ctx.unifier.fresh_ty();
         }
@@ -1772,23 +1704,24 @@ impl Inferencer<'_> {
         let scrut_row_var = self.ctx.unifier.fresh_row_var();
         self.with_span(scrutinee_span, |this| match scrut_resolved {
             Ty::Variant(_) | Ty::Var(_) => {
-                this.ctx
-                    .unify_ty(&scrut_ty, &Ty::Variant(Row::Var(scrut_row_var)));
+                this.ctx.unify_ty(
+                    &scrut_ty,
+                    &Ty::Variant(Row::Var(scrut_row_var)),
+                    Reason::CaseScrutinee,
+                );
             }
             other => {
-                this.ctx.error_hint(
-                    format!(
-                        "`case` needs a variant value (something built with a backtick, like `` `ok 1 `` or `` `err msg ``), but this is a value of type {}",
-                        super::fmt::fmt_ty(&other)
-                    ),
-                    "construct the value with a tag (`name payload) before scrutinising it",
-                );
+                this.ctx
+                    .diagnose(TypeErrorKind::CaseOnNonVariant { ty: other });
             }
         });
         let handler_row_var = self.ctx.unifier.fresh_row_var();
         self.with_span(table_span, |this| {
-            this.ctx
-                .unify_ty(&table_ty, &Ty::Record(Row::Var(handler_row_var)));
+            this.ctx.unify_ty(
+                &table_ty,
+                &Ty::Record(Row::Var(handler_row_var)),
+                Reason::CaseTable,
+            );
         });
 
         // Resolve the handler row.  Record literals always close to Empty,
@@ -1854,7 +1787,7 @@ impl Inferencer<'_> {
                 },
                 other => other,
             };
-            self.ctx.emit_kind(translated, None);
+            self.ctx.diagnose(translated);
         }
 
         result_cty
@@ -1881,8 +1814,11 @@ impl Inferencer<'_> {
         }
         for ((_, lam_val), beta) in bindings.iter().zip(betas.iter()) {
             let lam_ty = self.infer_val(lam_val);
-            self.ctx
-                .unify_ty(&lam_ty, &Ty::Thunk(Box::new(beta.clone())));
+            self.ctx.unify_ty(
+                &lam_ty,
+                &Ty::Thunk(Box::new(beta.clone())),
+                Reason::LetRecSelf,
+            );
         }
         betas
     }
@@ -2007,11 +1943,10 @@ impl Inferencer<'_> {
             CompKind::Force(value) => {
                 let val_ty = self.infer_val(value);
                 let cty = self.ctx.unifier.fresh_comp_ty();
-                self.ctx.unify_ty_hint(
+                self.ctx.unify_ty(
                     &val_ty,
                     &Ty::Thunk(Box::new(cty.clone())),
-                    "the `!` operator runs a block — its operand must be a \
-                     block value (something built with `{ ... }`), not data",
+                    Reason::ForceOperand,
                 );
                 cty
             }
@@ -2069,20 +2004,11 @@ impl Inferencer<'_> {
                 if !positional.is_empty()
                     && let Some(ty) = self.command_non_callable_ty(&head_ty)
                 {
-                    let hint = if looks_like_nested_quote_mistake(head, &positional) {
-                        "this looks like a single \"...\" string broken \
-                         apart by an unescaped inner \" — nested double \
-                         quotes close the outer string. Escape them as \
-                         \\\" inside the string, or drop the inner quoting"
-                    } else {
-                        "a command head must be a function or a thunk; \
-                         a value here is data, not a callable — pass it \
-                         as an argument or wrap a callable instead"
-                    };
-                    self.ctx.emit_kind(
-                        crate::typecheck::scheme::TypeErrorKind::CommandNotCallable { ty },
-                        Some(hint),
-                    );
+                    let split_string_suspect = looks_like_nested_quote_mistake(head, &positional);
+                    self.ctx.diagnose(TypeErrorKind::CommandNotCallable {
+                        ty,
+                        split_string_suspect,
+                    });
                     // Still type-check the args for cascading errors, then
                     // return a fresh result so the outer pipeline / chain
                     // type-checks against something coherent.
@@ -2141,20 +2067,11 @@ impl Inferencer<'_> {
                 // diagnostic underlines just the cond, not the whole
                 // `if … else …` form.
                 self.with_span(cond.span, |this| {
-                    this.ctx.unify_ty_hint(
-                        &cond_ty,
-                        &Ty::Bool,
-                        "the condition of an `if` must be a Bool — either `true`/`false` \
-                         or an expression that produces one (e.g. `$[$x == 1]`)",
-                    );
+                    this.ctx.unify_ty(&cond_ty, &Ty::Bool, Reason::IfCond);
                 });
                 let then_cty = self.infer_comp(then);
                 let else_cty = self.infer_comp(else_);
-                self.merge_branches(
-                    vec![then_cty, else_cty],
-                    "both branches of an `if` must produce the same type, \
-                     because the whole expression has one type",
-                )
+                self.merge_branches(vec![then_cty, else_cty], Reason::IfBranches)
             }
             CompKind::Case { scrutinee, table } => self.infer_case(scrutinee, table),
             CompKind::Scope(op) => match op {

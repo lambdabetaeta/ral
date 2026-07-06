@@ -8,9 +8,9 @@
 //! `TypeError` and `TypeErrorKind` represent the diagnostics produced by
 //! unification and inference failures.
 
-use super::fmt::{FmtCtx, fmt_mode_ctx, fmt_ty_ctx};
 use super::ty::{CompTy, CompTyVar, ModeVar, PipeMode, RowVar, Ty, TyVar};
 use crate::source::Span;
+use crate::syntax::ast::BinaryOpKind;
 use std::collections::BTreeSet;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -126,6 +126,90 @@ pub enum CompDiff {
     },
 }
 
+/// The provenance of a constraint — *why* the inferencer demanded that
+/// two types, computation types, or pipeline modes agree.
+///
+/// Carried on a constraint-failure [`TypeError`] (`reason: Some(..)`) and
+/// absent on a direct diagnosis, which is already its own complete story
+/// (`reason: None`).  `Reason` is data only — every sentence derived from
+/// it lives in `explain.rs`, which is what makes each hint unit-testable
+/// and reviewable in one place.
+#[derive(Debug, Clone)]
+pub enum Reason {
+    /// A `[a, b, ...]` pattern's scrutinee against the list shape it destructures.
+    ListPattern,
+    /// A `[key: name, ...]` pattern's scrutinee against the record shape it destructures.
+    RecordPattern,
+    /// An applied argument's type against the function's parameter type.
+    Argument,
+    /// A call argument's type against an alias/handler arm's argv element type.
+    AliasArgv,
+    /// An alias/handler arm's declared parameter against the argv list shape.
+    AliasParam,
+    /// A builtin argument against the block/lambda shape it expects.
+    BuiltinBlockArg,
+    /// A builtin argument's actual type against its declared per-position type template.
+    BuiltinTypedArg,
+    /// A pipeline stage's produced value against the next stage's function parameter.
+    PipedValue { step_stream: bool },
+    /// Two adjacent pipeline stages' byte-channel modes at the edge between them.
+    PipelineEdge,
+    /// An unresolved computation forced into `Return` shape to read its value type and modes.
+    ReturnShape,
+    /// An alias/handler arm's pipeline modes against the head it reinterprets.
+    HandlerModePin,
+    /// An `if` condition's type against `Bool`.
+    IfCond,
+    /// The two branches of an `if` against each other's value type.
+    IfBranches,
+    /// The two outcomes of a `try` against each other's observed value.
+    TryArms,
+    /// A `try` handler's type against the one-argument function shape it must have.
+    TryHandler,
+    /// A scope form's body against the thunk shape every control wrapper expects.
+    ScopeBody,
+    /// A `case` arm handler's payload type against the scrutinee's payload at that tag.
+    CaseArmPayload,
+    /// A `case` scrutinee's type against the variant shape `case` requires.
+    CaseScrutinee,
+    /// A `case` handler table's type against the record-of-thunks shape `case` requires.
+    CaseTable,
+    /// A list literal's element type against the list's shared element type.
+    ListElem,
+    /// A list spread's operand against the list shape it must itself have.
+    ListSpread,
+    /// A dynamic map key against `String`.
+    MapKey,
+    /// A dynamic map entry's value against the map's shared element type.
+    MapElem,
+    /// A map spread's operand against the map shape it must itself have.
+    MapSpread,
+    /// An options/capability map entry's value against its schema-declared field type.
+    OptionField { form: &'static str, key: String },
+    /// The `!` operator's operand against the block/thunk shape it forces.
+    ForceOperand,
+    /// `not`'s operand against `Bool`.
+    NotOperand,
+    /// The two operands of a binary operator against each other.
+    BinaryOperands(BinaryOpKind),
+    /// A list index key against `Int`.
+    ListIndexKey,
+    /// A map index key against `String`.
+    MapIndexKey,
+    /// An indexing target against the record shape carrying the field being read.
+    RecordFieldRead,
+    /// An indexing target pinned to `List` or `Map` by its runtime-computed key's type.
+    DynamicIndexTarget,
+    /// A command head still unknown enough to be a thunk, pinned to `Thunk` so application can unfold it.
+    AutoderefHead,
+    /// The `_type` probe's threaded result against the argument's own type.
+    TypeProbe,
+    /// A `letrec` binding's inferred type against its own self-referential placeholder.
+    LetRecSelf,
+    /// The `from-lines` Step shape's recursive tail placeholder against its own closing value.
+    LinesStepSelf,
+}
+
 /// The structural cause of a type error — raised by the unifier or inferencer,
 /// enriched by `InferCtx` with source spans and rendered at the diagnostic layer.
 #[derive(Debug, Clone)]
@@ -159,9 +243,12 @@ pub enum TypeErrorKind {
     /// Command head is a non-callable value (e.g. a literal `String` in
     /// command position with arguments).  Reported under the same code as
     /// `CompTyMismatch` (T0011) — it is the same condition, framed in
-    /// surface terms instead of as a `Cmd a vs a → b` mismatch.
+    /// surface terms instead of as a `Cmd a vs a → b` mismatch.  The flag
+    /// records that the head/args IR shape suggests a single
+    /// double-quoted string split by an unescaped inner quote.
     CommandNotCallable {
         ty: Ty,
+        split_string_suspect: bool,
     },
     /// `case` arms do not match the scrutinee row: either a label is
     /// missing (no handler for some variant constructor) or extraneous
@@ -179,9 +266,69 @@ pub enum TypeErrorKind {
         expected: Ty,
         found: Ty,
     },
-    /// Free-form message from the inferencer, not from the unifier.
-    AdHoc {
-        message: String,
+    /// `case` scrutinee is concretely not a variant — no tag to dispatch on.
+    CaseOnNonVariant {
+        ty: Ty,
+    },
+    /// A control operator (`within`, `try`, `guard`, `grant`, `audit`) named
+    /// in value position instead of command position.
+    ControlOperatorAsValue {
+        name: String,
+    },
+    /// An alias/`within`-handler name used as a first-class value; handlers
+    /// are only callable in command position.
+    HandlerNotFirstClass {
+        name: String,
+    },
+    /// A builtin command's name used as a first-class value; builtins are
+    /// only callable in command position.
+    BuiltinNotFirstClass {
+        name: String,
+    },
+    /// An `alias`/handler install attempted to name a builtin, which owns
+    /// its name outright.
+    CannotRedefineBuiltin {
+        name: String,
+        verb: &'static str,
+    },
+    /// An `alias`/handler install named a lexical binding already in
+    /// scope; bare lookup resolves to the binding first.
+    HandlerShadowedByBinding {
+        name: String,
+    },
+    /// A builtin call's argument count does not match its signature —
+    /// exactly `expected`, or at most `expected` when `at_most`.
+    BuiltinArity {
+        expected: usize,
+        got: usize,
+        at_most: bool,
+    },
+    /// `fail [status: 0]` — a nonzero status is required so `fail` cannot
+    /// masquerade as a clean exit.
+    FailStatusZero,
+    /// The elaborated IR for an `alias name { body }` statement does not
+    /// have the expected shape.
+    MalformedAlias {
+        detail: &'static str,
+    },
+    /// The elaborated IR for an `unalias name` statement does not have
+    /// the expected shape.
+    MalformedUnalias {
+        detail: &'static str,
+    },
+    /// Indexing directly into a block value (`Thunk`) instead of its
+    /// forced result.
+    IndexIntoThunk,
+    /// A record-field read (`$v[field]`) on a value that is concretely
+    /// not a record.
+    FieldOnNonRecord {
+        label: String,
+        ty: Ty,
+    },
+    /// A runtime-computed index (`$v[$k]`) on a value that accepts no
+    /// key at all.
+    DynamicIndexOnScalar {
+        ty: Ty,
     },
 }
 
@@ -199,80 +346,38 @@ impl TypeErrorKind {
             TypeErrorKind::RowMissingField { .. } => "T0021",
             TypeErrorKind::CaseNotExhaustive { .. } => "T0030",
             TypeErrorKind::CaseLabelTypeMismatch { .. } => "T0031",
-            TypeErrorKind::AdHoc { .. } => "T0000",
-        }
-    }
-
-    /// Render a single-line diagnostic message.
-    ///
-    /// Phrasing is intentionally symmetric where the surface mistake
-    /// admits no canonical "expected vs got" reading.  The orientation of
-    /// `expected`/`actual` inside the unifier depends on which call site
-    /// fires the constraint; for a beginner the more honest framing is
-    /// "these two types must agree but don't".  GHC uses the same shape:
-    /// `Couldn't match type ‘Int’ with ‘String’`.
-    pub fn render_message(&self) -> String {
-        match self {
-            TypeErrorKind::RecursiveRow => {
-                "infinite row — a record's field list would refer back to itself".into()
-            }
-            TypeErrorKind::TypeTooDeep => "type nesting exceeds the supported depth".into(),
-            TypeErrorKind::TyMismatch { expected, actual } => {
-                let ctx = FmtCtx::for_value_types(&[expected, actual]);
-                format!(
-                    "couldn't match type {} with type {}",
-                    fmt_ty_ctx(expected, &ctx),
-                    fmt_ty_ctx(actual, &ctx)
-                )
-            }
-            TypeErrorKind::CompTyMismatch { diffs, .. } => fmt_comp_mismatch(diffs),
-            TypeErrorKind::ModeMismatch { expected, actual } => {
-                let ctx = FmtCtx::default();
-                format!(
-                    "pipeline channels don't agree: one side is {}, the other is {}",
-                    fmt_mode_ctx(expected, &ctx),
-                    fmt_mode_ctx(actual, &ctx)
-                )
-            }
-            TypeErrorKind::RowExtraField { label } => {
-                format!("this record has no field named '{label}'")
-            }
-            TypeErrorKind::RowMissingField { label } => {
-                format!("this record is missing a field named '{label}'")
-            }
-            TypeErrorKind::CommandNotCallable { ty } => {
-                let ctx = FmtCtx::for_value_types(&[ty]);
-                format!(
-                    "value of type {} cannot be used as a command head",
-                    fmt_ty_ctx(ty, &ctx)
-                )
-            }
-            TypeErrorKind::CaseNotExhaustive { missing, extra } => {
-                fmt_case_exhaustiveness(missing, extra)
-            }
-            TypeErrorKind::CaseLabelTypeMismatch {
-                label,
-                expected,
-                found,
-            } => {
-                let ctx = FmtCtx::for_value_types(&[expected, found]);
-                format!(
-                    "the handler for {label} has the wrong shape — it should be a function taking {}, but it has type {}",
-                    fmt_ty_ctx(expected, &ctx),
-                    fmt_ty_ctx(found, &ctx)
-                )
-            }
-            TypeErrorKind::AdHoc { message } => message.clone(),
+            TypeErrorKind::CaseOnNonVariant { .. } => "T0032",
+            TypeErrorKind::ControlOperatorAsValue { .. } => "T0040",
+            TypeErrorKind::HandlerNotFirstClass { .. } => "T0041",
+            TypeErrorKind::BuiltinNotFirstClass { .. } => "T0042",
+            TypeErrorKind::CannotRedefineBuiltin { .. } => "T0043",
+            TypeErrorKind::HandlerShadowedByBinding { .. } => "T0044",
+            TypeErrorKind::BuiltinArity { .. } => "T0050",
+            TypeErrorKind::FailStatusZero => "T0051",
+            TypeErrorKind::MalformedAlias { .. } => "T0052",
+            TypeErrorKind::MalformedUnalias { .. } => "T0053",
+            TypeErrorKind::IndexIntoThunk => "T0060",
+            TypeErrorKind::FieldOnNonRecord { .. } => "T0061",
+            TypeErrorKind::DynamicIndexOnScalar { .. } => "T0062",
         }
     }
 }
 
-/// A located type error: source span, structural cause, and optional hint.
+/// A located type error: source span, structural cause, and optional
+/// constraint provenance.
 #[derive(Debug, Clone)]
 pub struct TypeError {
     pub pos: Option<Span>,
     pub kind: TypeErrorKind,
-    pub hint: Option<String>,
+    pub reason: Option<Reason>,
+}
+
+impl TypeError {
+    /// Render the optional guidance sentence from the error's kind and
+    /// provenance; all prose lives in `explain.rs`.
+    pub fn hint(&self) -> Option<String> {
+        super::explain::hint(&self.kind, self.reason.as_ref())
+    }
 }
 
 impl std::fmt::Display for TypeError {
@@ -283,95 +388,4 @@ impl std::fmt::Display for TypeError {
             None => write!(f, "{msg}"),
         }
     }
-}
-
-/// Format a `CompTyMismatch` in user-friendly prose, suppressing the
-/// internal `Cmd α → β` shape when the difference reduces to a return
-/// type or a single channel.  When `diffs` is empty the two head shapes
-/// (Return vs Fun, etc.) failed to unify without identifying a specific
-/// component, and this returns a generic note that one computation is a
-/// function and the other is not.
-fn fmt_comp_mismatch(diffs: &[CompDiff]) -> String {
-    use CompDiff::*;
-    if diffs.is_empty() {
-        return "two computations have incompatible shapes — one is a function, the other is not"
-            .into();
-    }
-    // Build one shared FmtCtx over every type/mode mentioned by any
-    // diff so the same variable prints with the same Greek letter on
-    // both sides of every line.
-    let ty_refs: Vec<&Ty> = diffs
-        .iter()
-        .flat_map(|d| match d {
-            ReturnType { expected, actual } => vec![expected, actual],
-            _ => Vec::new(),
-        })
-        .collect();
-    let mut ctx = FmtCtx::for_value_types(&ty_refs);
-    for d in diffs {
-        if let Stdin { expected, actual } | Stdout { expected, actual } = d {
-            ctx.absorb_mode(expected);
-            ctx.absorb_mode(actual);
-        }
-    }
-
-    let only_return_type = diffs.iter().all(|d| matches!(d, ReturnType { .. }));
-    if only_return_type {
-        let parts: Vec<String> = diffs
-            .iter()
-            .filter_map(|d| match d {
-                ReturnType { expected, actual } => Some(format!(
-                    "couldn't match type {} with type {}",
-                    fmt_ty_ctx(expected, &ctx),
-                    fmt_ty_ctx(actual, &ctx)
-                )),
-                _ => None,
-            })
-            .collect();
-        return parts.join("; ");
-    }
-    let mut lines: Vec<String> = Vec::with_capacity(diffs.len() + 1);
-    lines.push("these two computations don't line up:".into());
-    for d in diffs {
-        let line = match d {
-            Stdin { expected, actual } => format!(
-                "  stdin channel: one expects {}, the other {}",
-                fmt_mode_ctx(expected, &ctx),
-                fmt_mode_ctx(actual, &ctx)
-            ),
-            Stdout { expected, actual } => format!(
-                "  stdout channel: one expects {}, the other {}",
-                fmt_mode_ctx(expected, &ctx),
-                fmt_mode_ctx(actual, &ctx)
-            ),
-            ReturnType { expected, actual } => format!(
-                "  return type: couldn't match {} with {}",
-                fmt_ty_ctx(expected, &ctx),
-                fmt_ty_ctx(actual, &ctx)
-            ),
-        };
-        lines.push(line);
-    }
-    lines.join("\n")
-}
-
-/// Format a `CaseNotExhaustive` set of missing/extra labels.  Singletons
-/// and plurals get separate phrasings — "no handler for `err" reads
-/// better than "missing handlers for `err".
-fn fmt_case_exhaustiveness(missing: &[String], extra: &[String]) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    match missing {
-        [] => {}
-        [one] => parts.push(format!("no handler for {one}")),
-        many => parts.push(format!("no handlers for {}", many.join(", "))),
-    }
-    match extra {
-        [] => {}
-        [one] => parts.push(format!("handler for {one} but the value never produces it")),
-        many => parts.push(format!(
-            "handlers for {} but the value never produces them",
-            many.join(", ")
-        )),
-    }
-    format!("case is not exhaustive: {}", parts.join("; "))
 }

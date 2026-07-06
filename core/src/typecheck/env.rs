@@ -1,6 +1,6 @@
 //! Typing environment and inference context, plus free-variable collection.
 
-use super::scheme::{Scheme, TypeError, TypeErrorKind};
+use super::scheme::{Reason, Scheme, TypeError, TypeErrorKind};
 use super::ty::{CompTy, CompTyVar, ModeVar, PipeMode, PipeSpec, Row, RowVar, Ty, TyVar};
 use super::unify::{Unifier, Visited};
 use crate::mode::ByteMode;
@@ -359,52 +359,49 @@ impl InferCtx {
         }
     }
 
-    pub fn error_hint(&mut self, msg: String, hint: &str) {
-        self.emit_kind(TypeErrorKind::AdHoc { message: msg }, Some(hint));
-    }
-
-    /// Push a type error from the unifier or inferencer.
-    pub fn emit_kind(&mut self, kind: TypeErrorKind, hint: Option<&str>) {
+    /// Push a direct diagnosis — a structured kind that is its own story,
+    /// with no constraint provenance.
+    pub fn diagnose(&mut self, kind: TypeErrorKind) {
         self.errors.push(TypeError {
             pos: self.pos,
             kind,
-            hint: hint.map(|s| s.to_string()),
+            reason: None,
         });
     }
 
-    pub fn unify_ty(&mut self, a: &Ty, b: &Ty) {
+    /// Push a constraint failure with its provenance.
+    pub fn report(&mut self, kind: TypeErrorKind, why: Reason) {
+        self.errors.push(TypeError {
+            pos: self.pos,
+            kind,
+            reason: Some(why),
+        });
+    }
+
+    /// Unify two value types, reporting a constraint failure under `why` on mismatch.
+    pub fn unify_ty(&mut self, a: &Ty, b: &Ty, why: Reason) {
         if let Err(kind) = self.unifier.unify_ty(a, b) {
-            self.emit_kind(kind, None);
+            self.report(kind, why);
         }
     }
 
-    pub fn unify_comp_ty(&mut self, a: &CompTy, b: &CompTy) {
+    /// Unify two computation types, reporting a constraint failure under `why` on mismatch.
+    pub fn unify_comp_ty(&mut self, a: &CompTy, b: &CompTy, why: Reason) {
         if let Err(kind) = self.unifier.unify_comp_ty(a, b) {
-            self.emit_kind(kind, None);
+            self.report(kind, why);
         }
     }
 
-    pub fn unify_mode(&mut self, a: &PipeMode, b: &PipeMode) {
+    /// Unify two pipeline modes, reporting a `ModeMismatch` under `why` on mismatch.
+    pub fn unify_mode(&mut self, a: &PipeMode, b: &PipeMode, why: Reason) {
         if let Err(m) = self.unifier.unify_mode(a, b) {
-            self.emit_kind(
+            self.report(
                 TypeErrorKind::ModeMismatch {
                     expected: m.left,
                     actual: m.right,
                 },
-                None,
+                why,
             );
-        }
-    }
-
-    pub fn unify_ty_hint(&mut self, a: &Ty, b: &Ty, hint: &str) {
-        if let Err(kind) = self.unifier.unify_ty(a, b) {
-            self.emit_kind(kind, Some(hint));
-        }
-    }
-
-    pub fn unify_comp_ty_hint(&mut self, a: &CompTy, b: &CompTy, hint: &str) {
-        if let Err(kind) = self.unifier.unify_comp_ty(a, b) {
-            self.emit_kind(kind, Some(hint));
         }
     }
 }

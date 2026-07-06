@@ -167,7 +167,7 @@ fn map_int_variable_key_is_typecheck_error() {
     );
     let hint = errs
         .iter()
-        .find_map(|e| e.hint.as_deref())
+        .find_map(|e| e.hint())
         .expect("expected a hint on the map-key mismatch");
     assert!(
         hint.contains("map keys must be Strings"),
@@ -522,7 +522,7 @@ let m = "sh -c 'bat --pager="$(p)" --width=80'""#;
     let errs = raw_errors(src);
     let hint = errs
         .iter()
-        .find_map(|e| e.hint.as_deref())
+        .find_map(|e| e.hint())
         .expect("expected a hint on the head-not-callable diagnostic");
     assert!(
         hint.contains("nested double quotes"),
@@ -537,7 +537,7 @@ fn head_not_callable_bare_args_keeps_generic_hint() {
     let errs = raw_errors("'foo' bar baz");
     let hint = errs
         .iter()
-        .find_map(|e| e.hint.as_deref())
+        .find_map(|e| e.hint())
         .expect("expected a hint on the head-not-callable diagnostic");
     assert!(
         hint.contains("function or a thunk"),
@@ -555,7 +555,7 @@ fn index_on_thunk_hint_is_followable() {
     let errs = raw_errors("let f = { return [a: 1] }\necho !$f[a]");
     let hint = errs
         .iter()
-        .find_map(|e| e.hint.as_deref())
+        .find_map(|e| e.hint())
         .expect("expected a hint on the index-on-thunk diagnostic");
     assert!(
         hint.contains("!{!$t}[field]"),
@@ -713,10 +713,8 @@ fn stream_piped_whole_into_element_consumer_is_static_error() {
          $s | { |e| return $[$e + 1] } | { |y| return $[$y * 10] }",
     );
     assert!(
-        errs.iter().any(|e| e
-            .hint
-            .as_deref()
-            .is_some_and(|h| h.contains("lazy Step stream"))),
+        errs.iter()
+            .any(|e| e.hint().is_some_and(|h| h.contains("lazy Step stream"))),
         "expected a stream-eliminator hint, got: {:?}",
         errs
     );

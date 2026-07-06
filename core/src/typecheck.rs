@@ -20,6 +20,7 @@
 
 pub mod builtins;
 mod env;
+mod explain;
 mod fmt;
 mod generalize;
 pub(crate) mod infer;
@@ -33,7 +34,7 @@ mod unify;
 pub use self::builtins::{builtin_arity, builtin_type_hint};
 pub use self::env::{InferCtx, TyEnv};
 pub use self::fmt::{FmtCtx, fmt_mode, fmt_mode_ctx, fmt_scheme, fmt_ty, fmt_ty_ctx};
-pub use self::scheme::{CachedFreeVars, CompDiff, Scheme, TypeError, TypeErrorKind};
+pub use self::scheme::{CachedFreeVars, CompDiff, Reason, Scheme, TypeError, TypeErrorKind};
 pub use self::ty::{CompTy, CompTyVar, ModeVar, PipeMode, PipeSpec, Row, RowVar, Ty, TyVar};
 pub use self::unify::Unifier;
 

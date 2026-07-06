@@ -250,8 +250,8 @@ fn diagnostics_are_jargon_free() {
         for err in raw_errors(sc.src) {
             let msg = err.kind.render_message();
             assert_no_jargon(&msg, &sc);
-            if let Some(hint) = &err.hint {
-                assert_no_jargon(hint, &sc);
+            if let Some(hint) = err.hint() {
+                assert_no_jargon(&hint, &sc);
             }
         }
     }
@@ -450,7 +450,7 @@ fn common_paths_carry_a_hint() {
             !errs.is_empty(),
             "{tag}: no diagnostic produced for {src:?}"
         );
-        let any_hint = errs.iter().any(|e| e.hint.is_some());
+        let any_hint = errs.iter().any(|e| e.hint().is_some());
         assert!(
             any_hint,
             "{tag}: at least one diagnostic for {src:?} should carry a hint, \

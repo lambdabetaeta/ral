@@ -508,7 +508,7 @@ pub fn label_message_for_kind(kind: &crate::typecheck::TypeErrorKind) -> String 
             )
         }
         K::CompTyMismatch { .. } => "types disagree here".into(),
-        K::CommandNotCallable { ty } => {
+        K::CommandNotCallable { ty, .. } => {
             let ctx = FmtCtx::for_value_types(&[ty]);
             format!("{} is not callable", fmt_ty_ctx(ty, &ctx))
         }
@@ -528,7 +528,19 @@ pub fn label_message_for_kind(kind: &crate::typecheck::TypeErrorKind) -> String 
         K::CaseLabelTypeMismatch { label, .. } => {
             format!("the handler at {label} is the wrong shape")
         }
-        K::AdHoc { .. } => "here".into(),
+        K::CaseOnNonVariant { .. }
+        | K::ControlOperatorAsValue { .. }
+        | K::HandlerNotFirstClass { .. }
+        | K::BuiltinNotFirstClass { .. }
+        | K::CannotRedefineBuiltin { .. }
+        | K::HandlerShadowedByBinding { .. }
+        | K::BuiltinArity { .. }
+        | K::FailStatusZero
+        | K::MalformedAlias { .. }
+        | K::MalformedUnalias { .. }
+        | K::IndexIntoThunk
+        | K::FieldOnNonRecord { .. }
+        | K::DynamicIndexOnScalar { .. } => "here".into(),
     }
 }
 
@@ -538,8 +550,9 @@ pub fn label_message_for_kind(kind: &crate::typecheck::TypeErrorKind) -> String 
 pub fn format_type_error_ariadne(file: &str, source: &str, err: &TypeError) -> String {
     let message = err.kind.render_message();
     let code = err.kind.code();
+    let hint = err.hint();
     let Some(sp) = err.pos else {
-        return render_messageless(Some(code), &message, err.hint.as_deref());
+        return render_messageless(Some(code), &message, hint.as_deref());
     };
     let range = byte_span_to_char_range(source, sp);
     render_ariadne(
@@ -552,7 +565,7 @@ pub fn format_type_error_ariadne(file: &str, source: &str, err: &TypeError) -> S
             label: label_message_for_kind(&err.kind),
         },
         None,
-        err.hint.as_deref(),
+        hint.as_deref(),
     )
 }
 
@@ -843,7 +856,7 @@ mod tests {
                 expected: crate::typecheck::Ty::Int,
                 actual: crate::typecheck::Ty::String,
             },
-            hint: Some("all branches must produce the same type".into()),
+            reason: Some(crate::typecheck::Reason::IfCond),
         };
         let output = format_type_error_ariadne(
             "test.ral",
@@ -854,7 +867,10 @@ mod tests {
         assert!(output.contains("couldn't match"));
         assert!(output.contains("Integer"));
         assert!(output.contains("String"));
-        assert!(output.contains("all branches must produce the same type"));
+        assert!(output.contains(
+            "the condition of an `if` must be a Bool — either `true`/`false` \
+             or an expression that produces one (e.g. `$[$x == 1]`)"
+        ));
     }
 
     #[test]
@@ -862,7 +878,7 @@ mod tests {
         let err = TypeError {
             pos: None,
             kind: TypeErrorKind::RecursiveRow,
-            hint: None,
+            reason: None,
         };
         let output = format_type_error_ariadne("test.ral", "let x = 1", &err);
         assert!(output.contains("infinite row"));

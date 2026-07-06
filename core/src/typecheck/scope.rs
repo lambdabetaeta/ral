@@ -25,7 +25,7 @@ use super::builtins::{
     FieldSchema, audit_record, grant_field_ty, try_error_record, within_field_ty,
 };
 use super::infer::Inferencer;
-use super::scheme::Scheme;
+use super::scheme::{Reason, Scheme};
 use super::ty::{CompTy, PipeSpec, Ty};
 use crate::ir::{Val, ValMapEntry};
 
@@ -144,18 +144,17 @@ impl Inferencer<'_> {
             Box::new(handler_result.clone()),
         );
         let handler_ty = self.infer_val(handler);
-        self.ctx
-            .unify_ty(&handler_ty, &Ty::Thunk(Box::new(handler_inner.clone())));
+        self.ctx.unify_ty(
+            &handler_ty,
+            &Ty::Thunk(Box::new(handler_inner.clone())),
+            Reason::TryHandler,
+        );
 
         let (handler_raw, handler_in, handler_out) = self.extract_return(&handler_result);
         let handler_final_out = self.final_output_of_thunk_value(handler, &handler_result);
         let handler_value = self.observed_value_ty(handler_raw, handler_final_out);
-        self.ctx.unify_ty_hint(
-            &body_value,
-            &handler_value,
-            "both outcomes of a `try` must produce the same value when observed; \
-             if one arm only writes a line, that line counts as the value at the boundary",
-        );
+        self.ctx
+            .unify_ty(&body_value, &handler_value, Reason::TryArms);
 
         CompTy::Return(
             PipeSpec {
@@ -178,9 +177,9 @@ impl Inferencer<'_> {
         CompTy::pure(audit_record(alpha, beta))
     }
 
-    fn infer_scope_opts(&mut self, opts: &Val, ctx_name: &str, schema: FieldSchema) {
+    fn infer_scope_opts(&mut self, opts: &Val, form: &'static str, schema: FieldSchema) {
         match opts {
-            Val::Map(entries) => self.check_map_entry_fields(entries, ctx_name, schema),
+            Val::Map(entries) => self.check_map_entry_fields(entries, form, schema),
             _ => {
                 let _ = self.infer_val(opts);
             }
@@ -192,8 +191,11 @@ impl Inferencer<'_> {
         let body_cty = CompTy::Return(self.ctx.unifier.fresh_spec(), Box::new(alpha));
 
         let body_ty = self.infer_val(body);
-        self.ctx
-            .unify_ty(&body_ty, &Ty::Thunk(Box::new(body_cty.clone())));
+        self.ctx.unify_ty(
+            &body_ty,
+            &Ty::Thunk(Box::new(body_cty.clone())),
+            Reason::ScopeBody,
+        );
 
         body_cty
     }
