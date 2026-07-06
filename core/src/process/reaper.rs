@@ -172,7 +172,10 @@ fn arm(action: Action, after: Duration) -> Deadline {
     // A newly armed entry may be sooner than what the daemon is sleeping
     // toward; wake it to re-peek the heap top.
     reaper.wake.notify_one();
-    Deadline { armed }
+    Deadline {
+        armed,
+        keep: false,
+    }
 }
 
 /// A handle to an armed deadline.  Dropping it *disarms* the deadline,
@@ -184,19 +187,28 @@ fn arm(action: Action, after: Duration) -> Deadline {
 #[must_use]
 pub struct Deadline {
     armed: Arc<AtomicBool>,
+    /// Set by [`Self::keep`]: `Drop` leaves `armed` alone instead of
+    /// disarming it.  "Keep it armed" is a state this handle carries,
+    /// not a leaked `Arc` strong count — `keep` used to `mem::forget`
+    /// `self`, which permanently held one strong reference per kept
+    /// deadline for no reason a reader could see in the type.
+    keep: bool,
 }
 
 impl Deadline {
     /// Keep the deadline armed forever: it fires at its ceiling no
-    /// matter what.  Consumes the handle so its `Drop` cannot disarm.
-    pub fn keep(self) {
-        std::mem::forget(self);
+    /// matter what.  Consumes the handle; `Drop` still runs, but sees
+    /// `keep = true` and leaves `armed` alone.
+    pub fn keep(mut self) {
+        self.keep = true;
     }
 }
 
 impl Drop for Deadline {
     fn drop(&mut self) {
-        self.armed.store(false, Ordering::Release);
+        if !self.keep {
+            self.armed.store(false, Ordering::Release);
+        }
     }
 }
 

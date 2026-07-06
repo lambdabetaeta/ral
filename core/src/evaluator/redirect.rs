@@ -88,16 +88,17 @@ struct WriteIntent {
 }
 
 /// RAII frame holding the redirect state [`with_redirects`] installs:
-/// the stdin guard, any residual fd guard, pending atomic commits, the
-/// prior `stdout` / `stderr` sinks, and the fd-1/2 write intents whose
-/// outcome is surfaced at settle. Restoration runs through `tear_down`,
-/// which is also called by `Drop` on the panic path so a body that
-/// unwinds still leaves the shell clean.
+/// the stdin guard, any residual fd guard, the prior `stdout` /
+/// `stderr` sinks, and the fd-1/2 write intents whose outcome is
+/// surfaced at settle. Restoration runs through `tear_down`, which is
+/// also called by `Drop` on the panic path so a body that unwinds
+/// still leaves the shell clean; the pending atomic commits it returns
+/// are a local, collected fresh from `fd_guard`'s restore rather than
+/// accumulated on the frame.
 struct RedirectFrame<'a> {
     shell: &'a mut Shell,
     stdin_guard: Option<command::StdinRedirectGuard>,
     fd_guard: Option<command::RedirectGuard>,
-    commits: Vec<command::AtomicCommit>,
     prev_stdout: Option<Sink>,
     prev_stderr: Option<Sink>,
     write_intents: Vec<WriteIntent>,
@@ -255,7 +256,6 @@ impl<'a> RedirectFrame<'a> {
             shell,
             stdin_guard: Some(stdin_guard),
             fd_guard: Some(fd_guard),
-            commits: Vec::new(),
             prev_stdout: sink_redirects.prev_stdout,
             prev_stderr: sink_redirects.prev_stderr,
             write_intents,
@@ -328,13 +328,11 @@ impl<'a> RedirectFrame<'a> {
         if let Some(s) = self.prev_stderr.take() {
             self.shell.turn.io.stderr = s;
         }
-        let mut commits = std::mem::take(&mut self.commits);
-        commits.extend(
-            self.fd_guard
-                .take()
-                .map(command::restore_redirects)
-                .unwrap_or_default(),
-        );
+        let commits = self
+            .fd_guard
+            .take()
+            .map(command::restore_redirects)
+            .unwrap_or_default();
         if let Some(g) = self.stdin_guard.take() {
             g.restore(self.shell);
         }

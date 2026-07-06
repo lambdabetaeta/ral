@@ -156,16 +156,13 @@ fn emit_fs_restricted(lines: &mut Vec<String>, fs: &crate::types::FsPolicy) -> V
             .chain(write_prefixes.iter())
             .map(String::as_str),
     );
-    for prefix in &read_prefixes {
+    emit_read_subpaths(lines, read_prefixes.iter().map(String::as_str));
+    emit_read_subpaths(lines, write_prefixes.iter().map(String::as_str));
+    for prefix in &write_prefixes {
         lines.push(format!(
-            "(allow file-read* (subpath \"{}\"))",
+            "(allow file-write* (subpath \"{}\"))",
             escape_path(prefix)
         ));
-    }
-    for prefix in &write_prefixes {
-        let escaped = escape_path(prefix);
-        lines.push(format!("(allow file-read* (subpath \"{escaped}\"))"));
-        lines.push(format!("(allow file-write* (subpath \"{escaped}\"))"));
     }
     deny_paths
 }

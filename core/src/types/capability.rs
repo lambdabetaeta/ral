@@ -706,26 +706,13 @@ impl Join for ShellPolicy {
 /// mirrors this through [`meet_literal_exec`].
 impl Meet for ExecMap {
     fn meet(self, other: Self) -> Self {
-        let (a_allow, a_deny) = partition_exec_dirs(&self.dirs);
-        let (b_allow, b_deny) = partition_exec_dirs(&other.dirs);
-        let mut dirs = BTreeMap::new();
-        for path in PrefixSet::from_frozen(&a_allow)
-            .meet(PrefixSet::from_frozen(&b_allow))
-            .surface()
-            .into_iter()
-            .map(NormalizedPrefix::into_string)
-        {
-            dirs.insert(path, ExecDir::Allow);
-        }
-        for path in union_prefixes(a_deny, b_deny)
-            .into_iter()
-            .map(NormalizedPrefix::into_string)
-        {
-            dirs.insert(path, ExecDir::Deny);
-        }
         Self {
+            dirs: combine_exec_dirs(&self.dirs, &other.dirs, |a_allow, b_allow| {
+                PrefixSet::from_frozen(&a_allow)
+                    .meet(PrefixSet::from_frozen(&b_allow))
+                    .surface()
+            }),
             literals: meet_literal_exec(self.literals, other.literals),
-            dirs,
         }
     }
 }
@@ -740,26 +727,40 @@ impl Meet for ExecMap {
 /// [`join_literal_exec`].
 impl Join for ExecMap {
     fn join(self, other: Self) -> Self {
-        let (a_allow, a_deny) = partition_exec_dirs(&self.dirs);
-        let (b_allow, b_deny) = partition_exec_dirs(&other.dirs);
-        let mut dirs = BTreeMap::new();
-        for path in union_prefixes(a_allow, b_allow)
-            .into_iter()
-            .map(NormalizedPrefix::into_string)
-        {
-            dirs.insert(path, ExecDir::Allow);
-        }
-        for path in union_prefixes(a_deny, b_deny)
-            .into_iter()
-            .map(NormalizedPrefix::into_string)
-        {
-            dirs.insert(path, ExecDir::Deny);
-        }
         Self {
+            dirs: combine_exec_dirs(&self.dirs, &other.dirs, union_prefixes),
             literals: join_literal_exec(self.literals, other.literals),
-            dirs,
         }
     }
+}
+
+/// Shared `dirs`-half of [`ExecMap::meet`]/[`ExecMap::join`]: partition both
+/// sides into allow/deny prefixes, combine the allow side with
+/// `combine_allow` (intersect under meet, union under join), and always
+/// union the deny side — a `Deny` is sticky under both lattice operations.
+/// `literals` is combined separately by [`meet_literal_exec`]/
+/// [`join_literal_exec`], which are not near-identical enough to share.
+fn combine_exec_dirs(
+    a: &BTreeMap<String, ExecDir>,
+    b: &BTreeMap<String, ExecDir>,
+    combine_allow: impl FnOnce(Vec<NormalizedPrefix>, Vec<NormalizedPrefix>) -> Vec<NormalizedPrefix>,
+) -> BTreeMap<String, ExecDir> {
+    let (a_allow, a_deny) = partition_exec_dirs(a);
+    let (b_allow, b_deny) = partition_exec_dirs(b);
+    let mut dirs = BTreeMap::new();
+    for path in combine_allow(a_allow, b_allow)
+        .into_iter()
+        .map(NormalizedPrefix::into_string)
+    {
+        dirs.insert(path, ExecDir::Allow);
+    }
+    for path in union_prefixes(a_deny, b_deny)
+        .into_iter()
+        .map(NormalizedPrefix::into_string)
+    {
+        dirs.insert(path, ExecDir::Deny);
+    }
+    dirs
 }
 
 /// Split a dir map's keys by verdict into the allow-key list and the

@@ -71,6 +71,13 @@ pub fn parse_xdg_token(input: &str) -> Option<(XdgKind, Option<&str>)> {
 /// `home` is the directory used for tilde expansion and as the
 /// fallback root when an XDG env var is unset.  The XDG env vars
 /// themselves are read from the process environment.
+///
+/// This is the runtime (stage 1 `Resolver`) half of tilde/XDG
+/// expansion: unlike [`freeze_one`], it does not call [`require_home`]
+/// — an empty `home` (unset `$HOME`) silently expands `~/x` to `/x`
+/// rather than erroring.  Not a fail-open (an absolute-only grant still
+/// denies `/x`), but callers that want the freeze pass's "unset HOME is
+/// a configuration error" behaviour must use `freeze_one` instead.
 pub fn expand_path_prefix(input: &str, home: &str) -> String {
     if let Some((kind, sub)) = parse_xdg_token(input) {
         let base = resolve_xdg(kind, home);
@@ -131,9 +138,13 @@ pub fn freeze_path_list(
 /// against `home`; `xdg:NAME[/sub]` resolves via the XDG env vars (and
 /// is required to land under `home` *after folding*, closing the
 /// `xdg:config/../../etc` escape); `cwd:[/sub]` resolves to `ctx.cwd`;
-/// `tempdir:[/sub]` resolves to `std::env::temp_dir()`.  A sigil-free
-/// entry is folded and wrapped verbatim.  An unset HOME is a
-/// configuration error for the two home-relative sigils.
+/// `tempdir:[/sub]` resolves to `std::env::temp_dir()`, with no
+/// under-`home` guard — `$TMPDIR` legitimately lives outside `home`, so
+/// unlike `xdg:` this sigil trusts the environment variable as-is (it
+/// still can't escape past whatever fs prefix the grant itself lands
+/// under, so this is not fail-open).  A sigil-free entry is folded and
+/// wrapped verbatim.  An unset HOME is a configuration error for the two
+/// home-relative sigils (`~`, `xdg:`).
 #[allow(clippy::disallowed_methods)]
 pub fn freeze_one(entry: &str, ctx: &FreezeCtx<'_>) -> Result<NormalizedPrefix, String> {
     if looks_like_xdg(entry) {

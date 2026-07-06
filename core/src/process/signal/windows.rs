@@ -782,13 +782,22 @@ impl RawChild {
             .map(|stderr| Box::new(stderr) as Box<dyn std::io::Read + Send>)
     }
 
-    pub(crate) fn wait_handling_stop(&mut self) -> std::io::Result<crate::process::WaitOutcome> {
+    /// Block until the process exits and read its exit status — the
+    /// shared body of [`Self::wait_handling_stop`] and [`Self::reap`],
+    /// which differ only in how they map that status onward (a
+    /// [`crate::process::WaitOutcome`] vs. the raw [`std::process::ExitStatus`]
+    /// `ChildHandle::reap` needs cross-platform).
+    fn wait_and_exit_status(&self) -> std::io::Result<std::process::ExitStatus> {
         use windows_sys::Win32::System::Threading::{INFINITE, WaitForSingleObject};
         let r = unsafe { WaitForSingleObject(self.raw_process_handle(), INFINITE) };
         if r != windows_sys::Win32::Foundation::WAIT_OBJECT_0 {
             return Err(std::io::Error::last_os_error());
         }
         self.exit_status()
+    }
+
+    pub(crate) fn wait_handling_stop(&mut self) -> std::io::Result<crate::process::WaitOutcome> {
+        self.wait_and_exit_status()
             .map(crate::process::WaitOutcome::from_exit_status)
     }
 
@@ -808,12 +817,7 @@ impl RawChild {
     }
 
     pub(crate) fn reap(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        use windows_sys::Win32::System::Threading::{INFINITE, WaitForSingleObject};
-        let r = unsafe { WaitForSingleObject(self.raw_process_handle(), INFINITE) };
-        if r != windows_sys::Win32::Foundation::WAIT_OBJECT_0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        self.exit_status()
+        self.wait_and_exit_status()
     }
 
     fn exit_status(&self) -> std::io::Result<std::process::ExitStatus> {

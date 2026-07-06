@@ -1130,11 +1130,13 @@ impl Inferencer<'_> {
         let mut last = CompTy::pure(empty);
         let mut emits_bytes = false;
         for part in parts {
+            let mut alias_already_typed = false;
             match alias_statement_shape(part) {
                 Ok(Some((name, thunk))) => {
                     if !self.reject_handler_for_binding(name, "alias") {
                         let scheme = self.handler_comp_scheme(name, thunk);
                         self.env.bind_handler(name.to_string(), scheme, true);
+                        alias_already_typed = true;
                     }
                 }
                 Err(msg) => {
@@ -1152,7 +1154,19 @@ impl Inferencer<'_> {
                 }
                 Ok(None) => {}
             }
-            last = self.infer_comp(part);
+            // The alias body was already inferred above via
+            // `handler_comp_scheme`, which is the sole authority for its
+            // type and has already emitted any diagnostics. Falling
+            // through to `infer_comp` would dispatch the same
+            // `Exec("alias", …)` through `sig::ALIAS`, re-inferring the
+            // identical thunk body and duplicating every diagnostic
+            // inside it. The statement's own type is the `ALIAS` builtin's
+            // fixed pure-Unit result, so synthesize that instead.
+            last = if alias_already_typed {
+                super::builtins::pure(Ty::Unit)
+            } else {
+                self.infer_comp(part)
+            };
             let out = self.comp_output_mode(&last);
             emits_bytes |= self.ctx.unifier.resolve_mode(&out) == PipeMode::Bytes;
         }
@@ -1815,10 +1829,18 @@ impl Inferencer<'_> {
         // becomes CaseNotExhaustive: an extra label on the handler side means
         // the handler covers a constructor the scrutinee can never produce;
         // a missing label means the scrutinee has a constructor with no arm.
-        if let Err(kind) = self
-            .ctx
-            .unifier
-            .unify_row(&Row::Var(scrut_row_var), &closed_scrut)
+        //
+        // But when the handler row is still a bare variable — the table came
+        // from a lambda parameter or an unchecked name rather than a record
+        // literal — the handler set is *unknown*, not missing. Closing it to
+        // Empty and unifying would falsely report every scrutinee tag as
+        // uncovered. Defer to runtime, matching the checker's existing
+        // leniency for unbound names.
+        if !matches!(handler_resolved, Row::Var(_))
+            && let Err(kind) = self
+                .ctx
+                .unifier
+                .unify_row(&Row::Var(scrut_row_var), &closed_scrut)
         {
             use crate::typecheck::scheme::TypeErrorKind;
             let translated = match kind {

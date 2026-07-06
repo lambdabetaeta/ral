@@ -24,7 +24,7 @@ use std::sync::Arc;
 /// it.  Value and scheme are installed together by the statement-level
 /// rule (`eval_bind`): a rebind replaces both, a statement that never
 /// ran installs neither — there is nothing to keep in sync.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Binding {
     pub value: Value,
     pub scheme: Option<Scheme>,
@@ -42,7 +42,7 @@ pub struct Binding {
 /// O(scope-depth) Arc-bump-per-scope plus heap allocation.  Profile
 /// (samply, fold N=10000) showed this clone dominating runtime before
 /// the migration.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Env {
     scopes: imbl::Vector<Arc<HashMap<String, Binding>>>,
 }

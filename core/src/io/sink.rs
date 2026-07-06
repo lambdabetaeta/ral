@@ -225,6 +225,11 @@ impl Sink {
                 }
                 return Err(e);
             }
+            // `t` is a fresh clone about to be dropped; if `target` is
+            // `LineFramed`, its own pending tail must be flushed here — a
+            // clone starts with empty `pending`, so `Drop` alone would lose
+            // a non-`\n`-terminated tail forever.
+            t.flush_pending()?;
         }
         Ok(())
     }

@@ -82,6 +82,7 @@
 //! g = { |x| f x }    # same LetRec group as f
 //! ```
 
+use crate::source::Span;
 use crate::syntax::ast::{Ast, Pattern, Stmt};
 use std::collections::{HashMap, HashSet};
 
@@ -94,8 +95,10 @@ pub enum StmtGroup {
     Single(Stmt),
     /// A set of mutually recursive or forward-referencing lambda bindings to
     /// be emitted as `Comp::LetRec`.  All members are lambda or block
-    /// expressions.
-    LetRec(Vec<(String, Box<Ast>)>),
+    /// expressions.  Each member carries its own RHS span, so the
+    /// elaborator stamps every recursive binding's IR with its own source
+    /// position rather than falling back to the group's.
+    LetRec(Vec<(String, Box<Ast>, Option<Span>)>),
 }
 
 /// Partition `stmts` into [`StmtGroup`]s.  Strongly-connected groups of
@@ -104,8 +107,8 @@ pub enum StmtGroup {
 /// dependents regardless of source order.
 pub fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup> {
     // Collect all named lambda let-bindings with their statement indices.
-    // def_list[i] = (stmt_idx, name, value_ast)
-    let mut def_list: Vec<(usize, &str, &Ast)> = Vec::new();
+    // def_list[i] = (stmt_idx, name, value_ast, rhs_span)
+    let mut def_list: Vec<(usize, &str, &Ast, Option<Span>)> = Vec::new();
     // defs[name] = list of def_list indices in stmt_idx order
     let mut defs: HashMap<&str, Vec<usize>> = HashMap::new();
 
@@ -115,7 +118,7 @@ pub fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup> {
             && value.item.is_thunk_form()
         {
             let di = def_list.len();
-            def_list.push((stmt_idx, name.as_str(), value.item.as_ref()));
+            def_list.push((stmt_idx, name.as_str(), value.item.as_ref(), value.span));
             defs.entry(name.as_str()).or_default().push(di);
         }
     }
@@ -133,7 +136,7 @@ pub fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup> {
     // a self-recursive binding still belongs in the same SCC.
     let n = def_list.len();
     let mut adj: Vec<Vec<usize>> = vec![vec![]; n];
-    for (i, &(stmt_i, _, value)) in def_list.iter().enumerate() {
+    for (i, &(stmt_i, _, value, _)) in def_list.iter().enumerate() {
         for name_ref in value.free_refs(&candidate_names) {
             if let Some(def_indices) = defs.get(name_ref.as_str()) {
                 let j = resolve_ref(stmt_i, def_indices, &def_list);
@@ -276,7 +279,7 @@ fn emit_scc(
     cid: usize,
     scc_members: &[Vec<usize>],
     adj: &[Vec<usize>],
-    def_list: &[(usize, &str, &Ast)],
+    def_list: &[(usize, &str, &Ast, Option<Span>)],
     stmts: &[Stmt],
     out: &mut Vec<StmtGroup>,
 ) {
@@ -286,8 +289,8 @@ fn emit_scc(
         let bindings = members
             .iter()
             .map(|&di| {
-                let (_, name, value) = def_list[di];
-                (name.to_string(), Box::new(value.clone()))
+                let (_, name, value, span) = def_list[di];
+                (name.to_string(), Box::new(value.clone()), span)
             })
             .collect();
         out.push(StmtGroup::LetRec(bindings));
@@ -309,7 +312,7 @@ fn emit_scc(
 fn resolve_ref(
     use_stmt_idx: usize,
     def_indices: &[usize],
-    def_list: &[(usize, &str, &Ast)],
+    def_list: &[(usize, &str, &Ast, Option<Span>)],
 ) -> usize {
     // def_indices is in stmt_idx order (built by iterating stmts in order).
     let mut best = def_indices[0];
@@ -433,7 +436,8 @@ mod tests {
                     _ => "stmt".to_string(),
                 },
                 StmtGroup::LetRec(bindings) => {
-                    let mut names: Vec<&str> = bindings.iter().map(|(n, _)| n.as_str()).collect();
+                    let mut names: Vec<&str> =
+                        bindings.iter().map(|(n, _, _)| n.as_str()).collect();
                     names.sort_unstable();
                     format!("rec [{}]", names.join(", "))
                 }

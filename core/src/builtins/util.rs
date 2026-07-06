@@ -123,24 +123,37 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> Settled<bool> {
         (Value::String(x), Value::String(y)) => x == y,
         (Value::Bytes(x), Value::Bytes(y)) => x == y,
         (Value::List(xs), Value::List(ys)) => {
-            xs.len() == ys.len()
-                && xs
+            if xs.len() != ys.len() {
+                false
+            } else {
+                // Comparability is checked pairwise before equality is
+                // decided, so every pair's error surfaces regardless of
+                // what an earlier (unrelated) pair happened to compare to.
+                let pairwise = xs
                     .iter()
                     .zip(ys.iter())
-                    .try_fold(true, |acc, (a, b)| -> Settled<bool> {
-                        Ok(acc && values_equal(a, b)?)
-                    })?
+                    .map(|(a, b)| values_equal(a, b))
+                    .collect::<Settled<Vec<bool>>>()?;
+                pairwise.into_iter().all(|eq| eq)
+            }
         }
         (Value::Map(xs), Value::Map(ys)) => {
             // Both sides iterate sorted-by-key, so a single zip suffices:
             // either the key streams agree pointwise or the maps differ.
-            xs.len() == ys.len()
-                && xs.iter().zip(ys.iter()).try_fold(
-                    true,
-                    |acc, ((kx, vx), (ky, vy))| -> Settled<bool> {
-                        Ok(acc && kx == ky && values_equal(vx, vy)?)
-                    },
-                )?
+            // As with List, each pair's comparability is checked
+            // independently of the others before equality is decided.
+            if xs.len() != ys.len() {
+                false
+            } else {
+                let pairwise = xs
+                    .iter()
+                    .zip(ys.iter())
+                    .map(|((kx, vx), (ky, vy))| -> Settled<bool> {
+                        Ok(kx == ky && values_equal(vx, vy)?)
+                    })
+                    .collect::<Settled<Vec<bool>>>()?;
+                pairwise.into_iter().all(|eq| eq)
+            }
         }
         (
             Value::Variant {

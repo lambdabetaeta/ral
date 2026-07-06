@@ -29,11 +29,16 @@ impl WireChannel {
 
     /// Duplicate the underlying fd so one `WireChannel` can be read
     /// from while another writes to the same socket.
+    ///
+    /// Protocol descriptors are capabilities: `F_DUPFD_CLOEXEC` keeps the
+    /// duplicate close-on-exec, exactly as `std`'s own `UnixStream::pair`
+    /// and `try_clone` do — a raw `dup` would hand the duplicate to every
+    /// child a turn spawns.
     pub fn try_clone(&self) -> io::Result<Self> {
         use std::os::unix::io::AsRawFd;
         use std::os::unix::io::FromRawFd;
         let fd = self.stream.as_raw_fd();
-        let dup_fd = unsafe { libc::dup(fd) };
+        let dup_fd = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
         if dup_fd < 0 {
             return Err(io::Error::last_os_error());
         }

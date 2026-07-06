@@ -127,8 +127,13 @@ fn require_numeric(val: &Value, shell: &Shell) -> Result<Value, Error> {
 ///   integer-only.
 fn binop(l: &Value, op: BinaryOp, r: &Value, shell: &Shell) -> Settled<Value> {
     match op.kind() {
-        BinaryOpKind::Eq(EqOp::Eq) => Ok(Value::Bool(l == r)),
-        BinaryOpKind::Eq(EqOp::Ne) => Ok(Value::Bool(l != r)),
+        // Route through `values_equal` — the same definition `equal`
+        // uses — so `==`/`!=` and `equal` cannot disagree: a
+        // computation pair (closures, blocks, handles) raises the same
+        // "cannot compare" error on both surfaces instead of `==`
+        // silently answering `false` for a non-reflexive `f == f`.
+        BinaryOpKind::Eq(EqOp::Eq) => Ok(Value::Bool(crate::builtins::util::values_equal(l, r)?)),
+        BinaryOpKind::Eq(EqOp::Ne) => Ok(Value::Bool(!crate::builtins::util::values_equal(l, r)?)),
         BinaryOpKind::Compare(c) => compare(l, c, r),
         BinaryOpKind::Arith(a) => Ok(arithmetic(l, a, r, shell)?),
     }

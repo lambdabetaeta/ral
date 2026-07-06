@@ -488,10 +488,12 @@ fn reap_killed(
         });
     }
     if libc::WIFEXITED(status) {
-        return Ok(crate::process::WaitOutcome::StoppedThenKilled {
-            stopped_by,
-            killed_by: crate::process::Signal::new(libc::SIGKILL),
-        });
+        // The child raced the kill and exited on its own in the
+        // stop→kill window — report the real exit, not a kill signal the
+        // kernel never delivered.
+        return Ok(crate::process::WaitOutcome::Exited(libc::WEXITSTATUS(
+            status,
+        )));
     }
     Ok(crate::process::WaitOutcome::NativeCode(status))
 }

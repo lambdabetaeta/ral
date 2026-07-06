@@ -1180,7 +1180,7 @@ pub fn fail_status_is_zero_literal(args: &crate::ir::Args) -> bool {
         Some(crate::ir::Val::Map(entries)) if entries.iter().any(|e| matches!(
             e,
             crate::ir::ValMapEntry::Entry(
-                crate::ir::Val::String(k) | crate::ir::Val::Variable(k),
+                crate::ir::Val::String(k),
                 crate::ir::Val::Int(0),
             ) if k == "status"
         ))

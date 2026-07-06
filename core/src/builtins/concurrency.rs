@@ -610,15 +610,23 @@ pub(super) fn builtin_service(args: &[Value], shell: &mut Shell) -> Settled<Valu
     )?))
 }
 
+/// Stop a handle: the one policy shared by `cancel` and `race`'s loser
+/// cleanup. A still-running handle is cancelled and detached; a handle that
+/// already completed keeps its cached outcome untouched, so a finished
+/// worker's value is never destroyed by the loser side of a `race` or by a
+/// `cancel` that lost the toss against completion.
+fn stop_handle(handle: &HandleInner) {
+    if *handle.state.lock().unwrap() != HandleState::Completed {
+        handle.cancel.cancel(crate::process::CancelCause::Explicit);
+        detach_handle(handle);
+    }
+}
+
 /// `cancel <handle>` -- mark a running concurrent block as cancelled.
 pub(super) fn builtin_cancel(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 1, "cancel")?;
     let handle = expect_handle(&args[0], "cancel")?;
-    let state = *handle.state.lock().unwrap();
-    if state != HandleState::Completed {
-        handle.cancel.cancel(crate::process::CancelCause::Explicit);
-        detach_handle(handle);
-    }
+    stop_handle(handle);
     shell.local.workers.remove(handle);
     shell.mobile.control.last_status = 0;
     Ok(Value::Unit)
@@ -653,20 +661,24 @@ fn try_settle(handle: &HandleInner, shell: &mut Shell) -> Option<CompletedHandle
         set_status_from_outcome(&completed.outcome, shell);
         return Some(completed);
     }
-    let rx_guard = handle.result.lock().unwrap();
-    let rx = (*rx_guard).as_ref()?;
-    match rx.try_recv() {
-        Ok(result) => {
-            drop(rx_guard);
-            Some(complete_handle(handle, result, shell))
-        }
-        Err(TryRecvError::Disconnected) => {
-            drop(rx_guard);
-            let panicked = Err(sig("await: spawned thread panicked"));
-            Some(complete_handle(handle, panicked, shell))
-        }
-        Err(TryRecvError::Empty) => None,
+    // Settling is a once-only transition: hold `result` across the
+    // re-check, the receive, and the cache write, so a second awaiter
+    // racing in through this same lock either observes the first
+    // awaiter's cached outcome or blocks until it exists -- it can never
+    // see a bare `Disconnected` left behind by someone else's `recv`.
+    let mut rx_guard = handle.result.lock().unwrap();
+    if let Some(completed) = handle.cached.lock().unwrap().clone() {
+        set_status_from_outcome(&completed.outcome, shell);
+        return Some(completed);
     }
+    let rx = rx_guard.as_ref()?;
+    let result = match rx.try_recv() {
+        Ok(result) => result,
+        Err(TryRecvError::Disconnected) => Err(sig("await: spawned thread panicked")),
+        Err(TryRecvError::Empty) => return None,
+    };
+    rx_guard.take();
+    Some(complete_handle(handle, result, shell))
 }
 
 /// Replay a finished detached worker's deferred surface events through the
@@ -840,17 +852,14 @@ pub(super) fn builtin_race(args: &[Value], shell: &mut Shell) -> Settled<Value> 
     let values = as_list(&args[0], "race")?;
     let mut handles: Vec<&HandleInner> = Vec::new();
     for v in &values {
-        if let Value::Handle(h) = v {
-            handles.push(h);
-        }
+        handles.push(expect_handle(v, "race")?);
     }
 
     let (winner, completed) = wait_first_settled(&handles, shell)?;
     shell.local.workers.remove(winner);
     for &h in &handles {
         if !Arc::ptr_eq(&h.result, &winner.result) {
-            h.cancel.cancel(crate::process::CancelCause::Explicit);
-            detach_handle(h);
+            stop_handle(h);
             shell.local.workers.remove(h);
         }
     }
@@ -858,12 +867,25 @@ pub(super) fn builtin_race(args: &[Value], shell: &mut Shell) -> Settled<Value> 
     project_completed(completed)
 }
 
-/// The exit code carried by a settled error: the runtime error's own
-/// code for `Break::Error`, else 1.  The basis of `$status` propagation.
+/// The exit code carried by a settled error: the runtime error's own code
+/// for `Break::Error`, or the escape's own code for `Break::Escape` (an
+/// `exit 42` carries `42`, not a flattened `1`).  The one `Break` → status
+/// mapping shared by `$status` propagation ([`set_status_from_outcome`]) and
+/// `poll`'s error record ([`break_record`]), so the two never disagree.
 fn error_exit_code(e: &Break) -> i32 {
     match e {
         Break::Error(e) => e.exit_code(),
-        _ => 1,
+        Break::Escape(esc) => escape_exit_code(esc),
+    }
+}
+
+/// The exit code carried by an `Escape`: `exit code`'s own code, or 1 for a
+/// job-control stop.
+fn escape_exit_code(esc: &Escape) -> i32 {
+    match esc {
+        Escape::Exit(code) => *code,
+        #[cfg(unix)]
+        Escape::Stopped { .. } => 1,
     }
 }
 
@@ -879,12 +901,12 @@ fn break_record(e: &Break) -> Value {
             error_record("<runtime>", err.exit_code(), &err.message, line, col)
         }
         Break::Escape(esc) => {
-            let (status, message) = match esc {
-                Escape::Exit(code) => (*code, "block exited".to_string()),
+            let message = match esc {
+                Escape::Exit(_) => "block exited".to_string(),
                 #[cfg(unix)]
-                Escape::Stopped { .. } => (1, "block stopped".to_string()),
+                Escape::Stopped { .. } => "block stopped".to_string(),
             };
-            error_record("<runtime>", status, &message, 0, 0)
+            error_record("<runtime>", escape_exit_code(esc), &message, 0, 0)
         }
     }
 }

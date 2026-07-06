@@ -262,17 +262,6 @@ pub(crate) fn eval_try(body: &Val, handler: &Val, shell: &mut Shell) -> Raw<Valu
         apply(body_val, vec![], s)
     })?;
 
-    if cfg!(debug_assertions)
-        && let BodyResult::Error(e) = &record.body
-    {
-        let loc = e
-            .loc
-            .as_ref()
-            .map(|l| format!(" ({}:{})", l.line, l.col))
-            .unwrap_or_default();
-        eprintln!("ral: try caught error{loc}: {}", e.message);
-    }
-
     let outcome = classify(&record.body, &record.node.children, call_line, call_col);
 
     let err_record = error_record(

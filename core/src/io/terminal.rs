@@ -96,6 +96,10 @@ pub struct TerminalState {
     pub startup_foreground: bool,
     /// `true` when stdout is a tty *and* TERM/platform checks say ANSI works.
     pub supports_ansi: bool,
+    /// `true` when TERM/platform checks say stderr's terminal accepts ANSI.
+    /// The stderr analogue of `supports_ansi`, snapshotted the same way at
+    /// probe time — `stderr_ansi_ok` must never live-query the terminal.
+    pub stderr_ansi_capable: bool,
     /// `NO_COLOR` is set in the environment.
     pub no_color: bool,
     /// Running inside a tmux session.
@@ -149,6 +153,8 @@ impl TerminalState {
         let env = TerminalEnv::from_process();
 
         let supports_ansi = ansi_supported(mode, startup_stdout_tty);
+        let stderr_ansi_capable =
+            matches!(mode, InteractiveMode::Full) || anstyle_query::term_supports_ansi_color();
         let modern_osc = env.recognises_modern_osc();
 
         TerminalState {
@@ -157,6 +163,7 @@ impl TerminalState {
             startup_stderr_tty,
             startup_foreground,
             supports_ansi,
+            stderr_ansi_capable,
             no_color: anstyle_query::no_color(),
             is_tmux: std::env::var_os("TMUX").is_some(),
             is_asciinema: std::env::var_os("ASCIINEMA_REC").is_some(),
@@ -225,8 +232,7 @@ impl TerminalState {
         !self.mode.is_minimal()
             && !self.no_color
             && self.startup_stderr_tty
-            && (matches!(self.mode, InteractiveMode::Full)
-                || anstyle_query::term_supports_ansi_color())
+            && self.stderr_ansi_capable
     }
 
     /// Project the terminal snapshot into the user-visible `$TERMINAL`
@@ -482,6 +488,8 @@ mod tests {
             startup_stderr_tty: stdout_tty,
             startup_foreground: stdout_tty,
             supports_ansi,
+            stderr_ansi_capable: matches!(mode, InteractiveMode::Full)
+                || anstyle_query::term_supports_ansi_color(),
             no_color,
             is_tmux: false,
             is_asciinema: false,
@@ -653,6 +661,7 @@ mod tests {
             startup_stderr_tty: true,
             startup_foreground: true,
             supports_ansi: true,
+            stderr_ansi_capable: true,
             no_color: false,
             is_tmux: true,
             is_asciinema: false,

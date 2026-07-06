@@ -120,27 +120,42 @@ pub(super) fn prelude_all_docs() -> Vec<(String, String)> {
     v
 }
 
-pub(super) fn builtin_help(_args: &[Value], shell: &mut Shell) -> Value {
-    let color = ansi::use_ui_color();
-    let (bold, cyan, dim, reset) = if color {
+/// The ANSI color tuple `(bold, cyan, dim, reset)` used by `help`/`explain`
+/// output, collapsed to empty strings when color is disabled.
+fn ui_colors() -> (&'static str, &'static str, &'static str, &'static str) {
+    if ansi::use_ui_color() {
         (BOLD, CYAN, DIM, RESET)
     } else {
         ("", "", "", "")
-    };
+    }
+}
 
-    let _fmt_entry = |name: &str, doc: &str, type_hint: &str, source: Option<&str>| -> String {
-        let mut s = format!("  {cyan}{name}{reset}{dim}:{reset} {doc}\n");
-        s.push_str(&format!("  {dim}{type_hint}{reset}\n"));
-        if let Some(src) = source {
-            s.push_str(&format!("  {dim}{src}{reset}\n"));
-        }
-        s.push('\n');
-        s
-    };
+/// Format a full entry: name, one-line doc, type hint, and optional source
+/// location.  Shared by `help` and `explain`.
+fn fmt_entry(
+    name: &str,
+    doc: &str,
+    type_hint: &str,
+    source: Option<&str>,
+    (cyan, dim, reset): (&str, &str, &str),
+) -> String {
+    let mut s = format!("  {cyan}{name}{reset}{dim}:{reset} {doc}\n");
+    s.push_str(&format!("  {dim}{type_hint}{reset}\n"));
+    if let Some(src) = source {
+        s.push_str(&format!("  {dim}{src}{reset}\n"));
+    }
+    s.push('\n');
+    s
+}
 
-    let fmt_line = |name: &str, doc: &str| -> String {
-        format!("  {cyan}{name}{reset} {dim}—{reset} {doc}\n")
-    };
+/// Format a one-line `name — doc` entry.  Shared by `help` and `explain`.
+fn fmt_line(name: &str, doc: &str, (cyan, dim, reset): (&str, &str, &str)) -> String {
+    format!("  {cyan}{name}{reset} {dim}—{reset} {doc}\n")
+}
+
+pub(super) fn builtin_help(_args: &[Value], shell: &mut Shell) -> Value {
+    let (bold, cyan, dim, reset) = ui_colors();
+    let line_colors = (cyan, dim, reset);
 
     let out = {
         let mut s = format!("{bold}Builtins:{reset}\n", bold = bold, reset = reset);
@@ -152,7 +167,7 @@ pub(super) fn builtin_help(_args: &[Value], shell: &mut Shell) -> Value {
         builtin_names.sort_unstable();
         for name in builtin_names {
             if let Some(doc) = super::builtin_doc(name) {
-                s.push_str(&fmt_line(name, doc));
+                s.push_str(&fmt_line(name, doc, line_colors));
             }
         }
         s.push_str(&format!(
@@ -161,7 +176,7 @@ pub(super) fn builtin_help(_args: &[Value], shell: &mut Shell) -> Value {
             reset = reset
         ));
         for (name, doc) in prelude_all_docs() {
-            s.push_str(&fmt_line(&name, &doc));
+            s.push_str(&fmt_line(&name, &doc, line_colors));
         }
         let library = library_all_docs();
         if !library.is_empty() {
@@ -171,7 +186,7 @@ pub(super) fn builtin_help(_args: &[Value], shell: &mut Shell) -> Value {
                 reset = reset
             ));
             for (name, doc) in library {
-                s.push_str(&fmt_line(&name, &doc));
+                s.push_str(&fmt_line(&name, &doc, line_colors));
             }
         }
         s.push_str(&format!("{dim}──{reset}\n", dim = dim, reset = reset));
@@ -187,26 +202,8 @@ pub(super) fn builtin_help(_args: &[Value], shell: &mut Shell) -> Value {
     Value::Unit
 }
 pub(super) fn builtin_explain(args: &[Value], shell: &mut Shell) -> Value {
-    let color = ansi::use_ui_color();
-    let (_bold, cyan, dim, reset) = if color {
-        (BOLD, CYAN, DIM, RESET)
-    } else {
-        ("", "", "", "")
-    };
-
-    let fmt_entry = |name: &str, doc: &str, type_hint: &str, source: Option<&str>| -> String {
-        let mut s = format!("  {cyan}{name}{reset}{dim}:{reset} {doc}\n");
-        s.push_str(&format!("  {dim}{type_hint}{reset}\n"));
-        if let Some(src) = source {
-            s.push_str(&format!("  {dim}{src}{reset}\n"));
-        }
-        s.push('\n');
-        s
-    };
-
-    let fmt_line = |name: &str, doc: &str| -> String {
-        format!("  {cyan}{name}{reset} {dim}—{reset} {doc}\n")
-    };
+    let (_bold, cyan, dim, reset) = ui_colors();
+    let colors = (cyan, dim, reset);
 
     if args.is_empty() {
         let _ = shell.write_stdout(b"explain: expected a name, e.g. `explain map`\n");
@@ -219,12 +216,12 @@ pub(super) fn builtin_explain(args: &[Value], shell: &mut Shell) -> Value {
     let type_str = type_for(&name);
 
     let out = if let Some(doc) = super::builtin_doc(&name) {
-        fmt_entry(&name, doc, &type_str, source.as_deref())
+        fmt_entry(&name, doc, &type_str, source.as_deref(), colors)
     } else if let Some(doc) = prelude_doc(&name) {
         let pt = prelude_type_hint(&name).unwrap_or(type_str);
-        fmt_entry(&name, &doc, &pt, source.as_deref())
+        fmt_entry(&name, &doc, &pt, source.as_deref(), colors)
     } else if let Some(doc) = library_doc(&name) {
-        fmt_entry(&name, &doc, &type_str, source.as_deref())
+        fmt_entry(&name, &doc, &type_str, source.as_deref(), colors)
     } else if let Some(src) = source {
         format!("explain: {src}\n")
     } else {
@@ -251,7 +248,7 @@ pub(super) fn builtin_explain(args: &[Value], shell: &mut Shell) -> Value {
             format!("explain: {name}: not found\n")
         } else {
             hits.sort_by(|a, b| a.0.cmp(&b.0));
-            hits.iter().map(|(n, doc)| fmt_line(n, doc)).collect()
+            hits.iter().map(|(n, doc)| fmt_line(n, doc, colors)).collect()
         }
     };
     let _ = shell.write_stdout(out.as_bytes());
@@ -354,7 +351,7 @@ fn which_line(name: &str, shell: &Shell) -> Option<String> {
 pub fn pretty_print(val: &Value, indent: usize) -> String {
     match val {
         Value::String(s) => {
-            let body = if s.len() > 80 || s.contains('\n') {
+            let body = if s.chars().count() > 80 || s.contains('\n') {
                 let first_line = s.lines().next().unwrap_or("");
                 // Truncate by chars — slicing by byte offset can split a UTF-8
                 // multibyte sequence and panic.
@@ -455,7 +452,7 @@ fn is_simple(val: &Value) -> bool {
             | Value::Handle(_)
             | Value::Lambda { .. }
             | Value::Block { .. }
-    ) || matches!(val, Value::String(s) if s.len() < 60)
+    ) || matches!(val, Value::String(s) if s.chars().count() < 60)
 }
 const CLEAR_SEQ: &[u8] = b"\x1b[H\x1b[2J\x1b[3J";
 // touch stty modes the way ncurses `reset` does; `^reset` reaches the real
@@ -479,6 +476,20 @@ fn status_i32(who: &str, n: i64) -> Result<i32, Break> {
     i32::try_from(n).map_err(|_| sig(format!("{who}: status {n} is outside the exit-code range")))
 }
 
+/// Turn a `fail` status into an exit code, or the one rule every `fail` path
+/// must honour: the status must be nonzero.  Shared by the bare-int shorthand
+/// and the error-record path so a zero status is always named as "wrong
+/// rule", never mistaken for a shape complaint.
+fn fail_status_code(status: i64) -> Result<i32, Break> {
+    if status == 0 {
+        return Err(Break::Error(Error::new(
+            "fail requires a nonzero status (use `return` for clean exit)",
+            1,
+        )));
+    }
+    status_i32("fail", status)
+}
+
 pub(super) fn builtin_fail(args: &[Value]) -> Break {
     let m = match args.first() {
         Some(Value::Map(m)) => m,
@@ -492,9 +503,9 @@ pub(super) fn builtin_fail(args: &[Value]) -> Break {
         Some(Value::Bytes(b)) => {
             return Break::Error(Error::new(String::from_utf8_lossy(b).into_owned(), 1));
         }
-        // `fail $n` — a bare nonzero status with no message.
-        Some(Value::Int(n)) if *n != 0 => {
-            return match status_i32("fail", *n) {
+        // `fail $n` — a bare status with no message.
+        Some(Value::Int(n)) => {
+            return match fail_status_code(*n) {
                 Ok(code) => Break::Error(Error::new("explicit failure", code)),
                 Err(b) => b,
             };
@@ -513,13 +524,7 @@ pub(super) fn builtin_fail(args: &[Value]) -> Break {
             1,
         ));
     };
-    if status == 0 {
-        return Break::Error(Error::new(
-            "fail requires a nonzero status (use `return` for clean exit)",
-            1,
-        ));
-    }
-    let code = match status_i32("fail", status) {
+    let code = match fail_status_code(status) {
         Ok(code) => code,
         Err(b) => return b,
     };

@@ -3,9 +3,9 @@
 //! [`eval_comp`] dispatches on the `CompKind` of a computation;
 //! the per-rule helpers below implement each operational arm.
 //! [`with_scope`] brackets a body in a fresh lexical scope. Its
-//! callers are the selected `if`/`else` branch, the lambda call frame
-//! ([`apply_lambda_frame`](super::trampoline)), and the spawned/watch
-//! workers (`builtins::concurrency`).
+//! callers are the selected `if`/`else` branch, each `?`-chain arm,
+//! the lambda call frame ([`apply_lambda_frame`](super::trampoline)),
+//! and the spawned/watch workers (`builtins::concurrency`).
 //!
 //! Tail-call signals escape via [`Raw<Value>`]; the public surface in
 //! the module root absorbs them through the trampoline before they
@@ -52,7 +52,11 @@ pub(crate) fn eval_comp(comp: &Arc<Comp>, shell: &mut Shell, tail: Tail) -> Raw<
             shell.turn.loc.line = l;
             shell.turn.loc.col = c;
         } else {
-            shell.turn.loc.line = span.start as usize;
+            // No source text is attached, so there is no line/column to
+            // compute from the byte offset — use the established
+            // "unknown location" sentinel rather than passing the raw
+            // byte offset off as a line number.
+            shell.turn.loc.line = 0;
             shell.turn.loc.col = 0;
         }
     }
@@ -146,10 +150,20 @@ pub(crate) fn eval_comp(comp: &Arc<Comp>, shell: &mut Shell, tail: Tail) -> Raw<
 /// `x=42` or `echo hi` would in a shell.
 fn eval_return(val: &Val, shell: &mut Shell) -> Raw<Value> {
     let v = eval_val(val, shell)?;
-    if let Value::Bool(b) = v {
-        shell.set_status_from_bool(b);
-    }
+    set_status_from_value(&v, shell);
     Ok(v)
+}
+
+/// Update `last_status` from a Bool result (true → 0, false → 1),
+/// mirroring POSIX predicates like `test` that encode their result in
+/// the exit code. A non-Bool result leaves `last_status` untouched.
+/// Shared by [`eval_return`], [`step_force`], and [`eval_bind`] — the
+/// three sites where a computation's result becomes the visible
+/// status.
+fn set_status_from_value(v: &Value, shell: &mut Shell) {
+    if let Value::Bool(b) = v {
+        shell.set_status_from_bool(*b);
+    }
 }
 
 /// `letrec { x1 = λ…; …; xn = λ… } [in slot]` — simultaneous fixed
@@ -248,9 +262,7 @@ pub(crate) fn step_force(val: &Val, shell: &mut Shell) -> Raw<Value> {
                 .into());
         }
     };
-    if let Value::Bool(b) = &result {
-        shell.set_status_from_bool(*b);
-    }
+    set_status_from_value(&result, shell);
     Ok(result)
 }
 
@@ -298,6 +310,15 @@ fn eval_bind_rhs(
     }
     let (result, mut bytes) =
         super::capture::with_capture(shell, |shell| eval_comp(m, shell, Tail::No));
+    // The RHS errored partway through: flush whatever it already wrote
+    // before propagating, so a partial write (`echo HALF; exit 3`) stays
+    // visible instead of vanishing with the buffer — matching `eval_seq`,
+    // whose non-final elements show their output the same way on success.
+    if result.is_err() && !bytes.is_empty() {
+        shell
+            .write_stdout(&bytes)
+            .map_err(|e| shell.err(format!("bind flush: {e}"), 1))?;
+    }
     match result? {
         Value::Unit => {
             strip_trailing_newline(&mut bytes);
@@ -338,9 +359,7 @@ fn eval_bind(
     crate::process::check(shell)?;
     super::pattern::check_pattern_shadow(pattern, shell)?;
     let val = eval_bind_rhs(m, rhs_output, shell)?;
-    if let Value::Bool(b) = val {
-        shell.set_status_from_bool(b);
-    }
+    set_status_from_value(&val, shell);
     assign_pattern(pattern, &val, scheme, shell)?;
     eval_comp(rest, shell, tail)
 }
@@ -380,13 +399,17 @@ fn eval_pipeline(
 /// must still observe its failure to run the next fallback, so its
 /// tail call must remain a catchable application rather than a
 /// [`TailCall`] that escapes the chain.
+///
+/// Each arm runs under its own [`with_scope`] bracket — the same one
+/// `eval_if` uses for its branches — so a `let` inside an arm's block
+/// cannot leak into the enclosing scope.
 fn eval_chain(parts: &[Arc<Comp>], tail: Tail, shell: &mut Shell) -> Raw<Value> {
     let mut last_err: Option<Error> = None;
     let last = parts.len().saturating_sub(1);
     for (i, part) in parts.iter().enumerate() {
         crate::process::check(shell)?;
         let arm_tail = if i == last { tail } else { Tail::No };
-        match eval_comp(part, shell, arm_tail) {
+        match with_scope(shell, |shell| eval_comp(part, shell, arm_tail)) {
             Ok(result) => return Ok(result),
             Err(Control::Break(Break::Error(e))) => {
                 shell.mobile.control.last_status = e.exit_code();
@@ -461,8 +484,8 @@ fn eval_seq(comps: &[Arc<Comp>], tail: Tail, shell: &mut Shell) -> Raw<Value> {
 // ── Scope bracket ────────────────────────────────────────────────────────
 
 /// Runs `f` inside a fresh scope, popping it on return. Called by the
-/// selected `if`/`else` branch, the lambda call frame, and the
-/// spawned/watch workers.
+/// selected `if`/`else` branch, each `?`-chain arm, the lambda call
+/// frame, and the spawned/watch workers.
 pub(crate) fn with_scope<T>(shell: &mut Shell, f: impl FnOnce(&mut Shell) -> T) -> T {
     shell.mobile.scope.push_scope();
     let r = f(shell);

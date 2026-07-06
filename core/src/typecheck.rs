@@ -12,8 +12,11 @@
 //!   `Comp ::= F[I,O] Value | Value → Comp | CompVar`
 //!   `I,O ::= ∅ | Bytes | IOVar`
 //!
-//! Generalisation happens at Bind (let) nodes.  Recursive bindings (LetRec,
-//! Rec) are given monomorphic types to prevent unsound generalisation.
+//! Generalisation happens at Bind (let) nodes, and also at LetRec: each
+//! recursive binding is typed monomorphically against itself first
+//! (`infer_letrec_betas`), then generalised once the group's mono
+//! self-bindings are dropped from scope, so mutually recursive bindings
+//! still end up polymorphic at their use sites.
 
 pub mod builtins;
 mod env;

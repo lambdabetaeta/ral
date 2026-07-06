@@ -79,7 +79,7 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
         "core/src/builtins/predicates.rs",
         "io-door:silent:writable-stat-nonunix",
     ),
-    ("core/src/builtins/uutils.rs", "io-door:silent:cp-read"),
+    ("core/src/builtins/uutils.rs", "io-door:silent:diff-read"),
     ("core/build.rs", "io-door:silent:prelude-bake-build"),
     ("core/src/capability/load.rs", "io-door:silent:cap-load"),
     ("core/src/driver.rs", "io-door:silent:prelude-bake"),

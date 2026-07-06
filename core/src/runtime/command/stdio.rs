@@ -8,6 +8,8 @@ use crate::types::*;
 
 #[cfg(windows)]
 use super::process::pipe_err;
+use super::io_event;
+use super::io_event::WriteOutcome;
 use super::redirect::{AtomicCommit, open_file};
 
 /// A redirect whose target has been evaluated to a concrete file
@@ -94,9 +96,11 @@ impl StdinRoute {
 }
 
 /// Routing decisions for a child process's stdout / stderr, derived once
-/// from the call-site redirects.  `stderr_to_stdout` captures the `2>&1` fd
-/// dup; the file fields carry their `RedirectMode` so `open_file` can pick
-/// create-vs-append.
+/// from the call-site redirects.  `stderr_route` carries whichever stderr
+/// redirect (`2>file` or `2>&1`) appears *last* in source order — the two
+/// share fd 2, so later one wins, matching the in-process path and POSIX
+/// sh's left-to-right redirect application (`2>&1 2>/dev/null` silences,
+/// `2>/dev/null 2>&1` doesn't).
 ///
 /// Stdin is *not* on the plan: `<file` is opened upstream and parked in
 /// `shell.turn.io.stdin` by [`super::redirect::install_stdin_redirect`], so every
@@ -105,8 +109,15 @@ impl StdinRoute {
 /// class.
 pub(crate) struct RedirectPlan {
     pub(crate) stdout_file: Option<(String, RedirectMode)>,
-    pub(crate) stderr_file: Option<(String, RedirectMode)>,
-    pub(crate) stderr_to_stdout: bool,
+    pub(crate) stderr_route: Option<StderrRoute>,
+}
+
+/// The fd-2 redirect in force once every call-site redirect has been
+/// applied in source order — see [`RedirectPlan::stderr_route`].
+#[derive(Clone, Debug)]
+pub(crate) enum StderrRoute {
+    File(String, RedirectMode),
+    Stdout,
 }
 
 /// Should the child inherit ral's stdout fd directly so it can detect a
@@ -138,28 +149,47 @@ pub(crate) fn stderr_mode(mode: &RedirectMode) -> RedirectMode {
     }
 }
 
-pub(crate) fn classify_redirects(redirects: &[EvalRedirectV]) -> RedirectPlan {
+/// Classify the call-site redirects into a stdout/stderr routing plan for
+/// an external command.  Every redirect either lands a defined shape below
+/// or is a named error — no shape is silently dropped (the in-process path
+/// via [`super::redirect::apply_redirects`] honors fd ≥ 3 file targets and
+/// errors loudly on an unrestorable `dup2`; this path must not be the only
+/// one that lies about what it applied).
+pub(crate) fn classify_redirects(redirects: &[EvalRedirectV]) -> Settled<RedirectPlan> {
     let mut plan = RedirectPlan {
         stdout_file: None,
-        stderr_file: None,
-        stderr_to_stdout: false,
+        stderr_route: None,
     };
     for EvalRedirectV { fd, mode, target } in redirects {
         match target {
             EvalRedirect::Fd(target_fd) => {
                 if *fd == 2 && *target_fd == 1 {
-                    plan.stderr_to_stdout = true;
+                    plan.stderr_route = Some(StderrRoute::Stdout);
+                } else {
+                    return Err(unmodeled_redirect(*fd, format!("&{target_fd}")));
                 }
             }
             EvalRedirect::File(filename) => match fd {
                 // fd 0 is handled by install_stdin_redirect upstream.
+                0 => {}
                 1 => plan.stdout_file = Some((filename.clone(), *mode)),
-                2 => plan.stderr_file = Some((filename.clone(), *mode)),
-                _ => {}
+                2 => plan.stderr_route = Some(StderrRoute::File(filename.clone(), *mode)),
+                other => return Err(unmodeled_redirect(*other, filename.clone())),
             },
         }
     }
-    plan
+    Ok(plan)
+}
+
+/// A call-site redirect this executor has no realization for: an fd ≥ 3
+/// file target, or a `fd>&fd` dup shape other than the modeled `2>&1`.
+/// Named and loud, matching the in-process path's diagnostics, rather than
+/// the silent `_ => {}` this replaces.
+fn unmodeled_redirect(fd: u32, target: String) -> Break {
+    Break::Error(Error::new(
+        format!("redirect {fd}>{target} is not supported for external commands"),
+        1,
+    ))
 }
 
 /// Choose the stdin route for a single-command external job.
@@ -199,6 +229,13 @@ pub(super) fn wire_stdin(shell: &mut Shell) -> StdinRoute {
 /// optional `Stdio` handle to assign to the child's stderr — populated only on
 /// Windows when the redirect plan has `2>&1`, since Windows lacks `pre_exec`
 /// and the dup must be wired pre-spawn from a clone of the same handle.
+///
+/// A non-atomic target (`>>`, `>~`, or a `>` whose target fell out of the
+/// atomic recipe) has no later commit step, so its write door is already
+/// complete the moment the open succeeds — the event fires here, eagerly,
+/// the same way `< file`'s read event does. An atomic target's real outcome
+/// isn't known until the rename in [`super::run`]'s post-wait commit, so its
+/// event fires there instead.
 pub(super) fn wire_stdout_file(
     command: &mut crate::process::Launch,
     plan: &RedirectPlan,
@@ -208,8 +245,11 @@ pub(super) fn wire_stdout_file(
         return Ok((None, None));
     };
     let (file, commit) = open_file(path, mode, shell)?;
+    if commit.is_none() {
+        shell.emit_io(io_event::write(path, *mode, WriteOutcome::Committed, None));
+    }
     #[cfg(windows)]
-    let stderr_dup = if plan.stderr_to_stdout {
+    let stderr_dup = if matches!(plan.stderr_route, Some(StderrRoute::Stdout)) {
         Some(crate::process::StdioSpec::from_file(
             file.try_clone().map_err(pipe_err)?,
         ))
@@ -253,62 +293,72 @@ pub(super) fn wire_stderr(
     stdout_file_dup: Option<crate::process::StdioSpec>,
     shell: &mut Shell,
 ) -> Settled<bool> {
-    if plan.stderr_to_stdout {
-        #[cfg(unix)]
-        {
-            let _ = (inherit_tty, stdout_file_dup);
-            command.dup_stdout_to_stderr();
+    match &plan.stderr_route {
+        Some(StderrRoute::Stdout) => {
+            #[cfg(unix)]
+            {
+                let _ = (inherit_tty, stdout_file_dup);
+                command.dup_stdout_to_stderr();
+            }
+            #[cfg(windows)]
+            {
+                let stdio = if let Some(dup) = stdout_file_dup {
+                    dup
+                } else if inherit_tty || matches!(shell.turn.io.stdout, crate::io::Sink::Terminal)
+                {
+                    // The child inherits the helper's fd 1.  Duplicate fd 1 for
+                    // stderr so `2>&1` routes diagnostics to whatever fd 1 points
+                    // at — terminal, parent pipe, or a downstream pipeline stage
+                    // (the helper's own stdout was preset to a pipe writer by
+                    // `wire_ral_stdio` in that last case).  Without this, the
+                    // bare `Stdio::inherit()` fallback below would dup fd 2,
+                    // which silently routes diagnostics past `2>&1`.
+                    use std::os::windows::io::AsHandle;
+                    let owned = std::io::stdout()
+                        .as_handle()
+                        .try_clone_to_owned()
+                        .map_err(pipe_err)?;
+                    crate::process::StdioSpec::from_owned_handle(owned)
+                } else {
+                    match &shell.turn.io.stdout {
+                        crate::io::Sink::Pipe(w) => crate::process::StdioSpec::from_pipe_writer(
+                            w.try_clone().map_err(pipe_err)?,
+                        ),
+                        // Buffer / Tee / LineFramed sinks pump child.stdout via an
+                        // anonymous pipe allocated by `Stdio::piped()`; we cannot
+                        // reach into that pipe pre-spawn to share it with stderr.
+                        // Fall back to inherit so diagnostics still surface.
+                        _ => crate::process::StdioSpec::inherit(),
+                    }
+                };
+                command.stderr(stdio);
+            }
+            #[cfg(not(any(unix, windows)))]
+            {
+                let _ = (inherit_tty, stdout_file_dup);
+                command.stderr(crate::process::StdioSpec::inherit());
+            }
+            Ok(false)
         }
-        #[cfg(windows)]
-        {
-            let stdio = if let Some(dup) = stdout_file_dup {
-                dup
-            } else if inherit_tty || matches!(shell.turn.io.stdout, crate::io::Sink::Terminal) {
-                // The child inherits the helper's fd 1.  Duplicate fd 1 for
-                // stderr so `2>&1` routes diagnostics to whatever fd 1 points
-                // at — terminal, parent pipe, or a downstream pipeline stage
-                // (the helper's own stdout was preset to a pipe writer by
-                // `wire_ral_stdio` in that last case).  Without this, the
-                // bare `Stdio::inherit()` fallback below would dup fd 2,
-                // which silently routes diagnostics past `2>&1`.
-                use std::os::windows::io::AsHandle;
-                let owned = std::io::stdout()
-                    .as_handle()
-                    .try_clone_to_owned()
-                    .map_err(pipe_err)?;
-                crate::process::StdioSpec::from_owned_handle(owned)
-            } else {
-                match &shell.turn.io.stdout {
-                    crate::io::Sink::Pipe(w) => crate::process::StdioSpec::from_pipe_writer(
-                        w.try_clone().map_err(pipe_err)?,
-                    ),
-                    // Buffer / Tee / LineFramed sinks pump child.stdout via an
-                    // anonymous pipe allocated by `Stdio::piped()`; we cannot
-                    // reach into that pipe pre-spawn to share it with stderr.
-                    // Fall back to inherit so diagnostics still surface.
-                    _ => crate::process::StdioSpec::inherit(),
-                }
-            };
-            command.stderr(stdio);
+        Some(StderrRoute::File(path, mode)) => {
+            let effective_mode = stderr_mode(mode);
+            let (file, _) = open_file(path, &effective_mode, shell)?;
+            command.stderr(crate::process::StdioSpec::from_file(file));
+            // Stderr redirects are never atomic (`stderr_mode` coerces `>`
+            // to streaming), so the write door completes the moment the
+            // open succeeds — same reasoning as the non-atomic stdout case
+            // in `wire_stdout_file`.
+            shell.emit_io(io_event::write(path, effective_mode, WriteOutcome::Committed, None));
+            Ok(false)
         }
-        #[cfg(not(any(unix, windows)))]
-        {
-            let _ = (inherit_tty, stdout_file_dup);
-            command.stderr(crate::process::StdioSpec::inherit());
+        None if !matches!(shell.turn.io.stderr, crate::io::Sink::Stderr) => {
+            // Non-default stderr sink: dispatch-level audit Tee, §13.3 replay
+            // buffer, watch line-framer, etc.  Pipe the child's stderr; the
+            // caller pumps it into the sink.
+            command.stderr(crate::process::StdioSpec::piped());
+            Ok(true)
         }
-        Ok(false)
-    } else if let Some((path, mode)) = &plan.stderr_file {
-        let (file, _) = open_file(path, &stderr_mode(mode), shell)?;
-        command.stderr(crate::process::StdioSpec::from_file(file));
-        Ok(false)
-    } else if !matches!(shell.turn.io.stderr, crate::io::Sink::Stderr) {
-        // Non-default stderr sink: dispatch-level audit Tee, §13.3 replay
-        // buffer, watch line-framer, etc.  Pipe the child's stderr; the
-        // caller pumps it into the sink.
-        command.stderr(crate::process::StdioSpec::piped());
-        Ok(true)
-    } else {
-        Ok(false)
+        None => Ok(false),
     }
 }
 

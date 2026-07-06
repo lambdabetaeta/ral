@@ -276,15 +276,16 @@ impl Elaborator {
                 // which elaborate to `Return(Thunk(arc))`; project the thunk
                 // out, no hoisting possible.
                 let scope = self.current_scope_mut();
-                for (name, _) in &bindings {
+                for (name, _, _) in &bindings {
                     scope.insert(name.clone());
                 }
                 let elab: Vec<(String, Val)> = bindings
                     .iter()
-                    .map(|(name, value)| {
+                    .map(|(name, value, span)| {
                         let mut empty = Vec::new();
-                        let CompKind::Return(Val::Thunk(arc)) =
-                            self.elab_expr(value, &mut empty).item
+                        let CompKind::Return(Val::Thunk(arc)) = self
+                            .with_span(*span, |this| this.elab_expr(value, &mut empty))
+                            .item
                         else {
                             unreachable!(
                                 "group.rs only emits lambda/block LetRec RHS, \
@@ -417,6 +418,37 @@ impl Elaborator {
                 args,
                 redirects,
             } => {
+                // A `Head::Value` head is itself a sub-expression that may
+                // hoist effectful binds (`!{ ^echo HEAD; return … } !{ … }`).
+                // Source order says the head's effects precede the
+                // argument's, so a value-typed head is elaborated *before*
+                // the args/redirects below are lowered into hoisted binds —
+                // otherwise the head's binds would land after the
+                // arguments', inverting evaluation order.
+                let value_head_comp = if let Head::Value(value) = head {
+                    // Warn on `{ … } < file` and friends: a literal block
+                    // is `Return(Thunk(…))` — a value, not a command.  The
+                    // block does still execute (eval_app trampolines a
+                    // Thunk in head position so users with bound
+                    // wrappers like `let f = { … }; f < file` keep
+                    // working), but the redirect lands on a value-form
+                    // and is almost always inert.  If the author meant
+                    // "run this block under the redirect", the right
+                    // forms are `let f = { … }; f < file` (bind first)
+                    // or `!{ … } < file` (force).
+                    if matches!(value.as_ref(), Ast::Block(_)) && !redirects.is_empty() {
+                        crate::diagnostic::shell_warning(
+                            "redirect on a `{ … }` literal: the block is a \
+                             value, not a command — the redirect has no \
+                             consumer.  Bind first (`let f = { … }; f < file`) \
+                             or force (`!{ … } < file`).",
+                        );
+                    }
+                    Some(self.elab_expr(value, binds))
+                } else {
+                    None
+                };
+
                 // Lower args into the IR's positional-arg shape.
                 // Argument-position spread (`Ast::Spread`) becomes
                 // `ValListElem::Spread`; ordinary args become `Single`.
@@ -468,26 +500,9 @@ impl Elaborator {
                         redirect_vals,
                         false,
                     ),
-                    Head::Value(value) => {
-                        // Warn on `{ … } < file` and friends: a literal block
-                        // is `Return(Thunk(…))` — a value, not a command.  The
-                        // block does still execute (eval_app trampolines a
-                        // Thunk in head position so users with bound
-                        // wrappers like `let f = { … }; f < file` keep
-                        // working), but the redirect lands on a value-form
-                        // and is almost always inert.  If the author meant
-                        // "run this block under the redirect", the right
-                        // forms are `let f = { … }; f < file` (bind first)
-                        // or `!{ … } < file` (force).
-                        if matches!(value.as_ref(), Ast::Block(_)) && !redirect_vals.is_empty() {
-                            crate::diagnostic::shell_warning(
-                                "redirect on a `{ … }` literal: the block is a \
-                                 value, not a command — the redirect has no \
-                                 consumer.  Bind first (`let f = { … }; f < file`) \
-                                 or force (`!{ … } < file`).",
-                            );
-                        }
-                        let head_comp = self.elab_expr(value, binds);
+                    Head::Value(_) => {
+                        let head_comp =
+                            value_head_comp.expect("computed above for Head::Value");
                         self.apply_head(head_comp, arg_vals, redirect_vals)
                     }
                 }

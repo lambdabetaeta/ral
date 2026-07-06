@@ -193,7 +193,7 @@ impl AtomicCommit {
     reason = "[io-door:surface:atomic-eligible] Stat of the `>` write door's target to choose atomic vs. streaming semantics. A sub-step of the surfacing write door (open_file), not a model read; the write card is the operation's surface."
 )]
 fn atomic_eligible(path: &std::path::Path) -> bool {
-    match std::fs::symlink_metadata(path) {
+    match std::fs::metadata(path) {
         Ok(meta) => meta.file_type().is_file(),
         Err(_) => true,
     }
@@ -225,15 +225,27 @@ fn open_atomic(
         .tempfile_in(parent)
         .map_err(|e| io_error(path, e))?;
     // tempfile defaults to 0600 for security; redirects expect umask-style
-    // permissions.  Preserve the existing target's mode if it exists; else
-    // use 0644.
+    // permissions.  Preserve the existing target's mode if it exists; for a
+    // new file, mirror what a plain `open(2)` create would produce —
+    // `0o666 & !umask` — rather than a hardcoded mode that ignores the
+    // process umask.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(&target)
             .ok()
             .map(|m| m.permissions().mode() & 0o7777)
-            .unwrap_or(0o644);
+            .unwrap_or_else(|| {
+                // `libc::umask` is a combined getter/setter with no
+                // read-only variant: set a throwaway value to read the
+                // current mask, then restore it immediately.
+                let mask = unsafe {
+                    let prev = libc::umask(0o022);
+                    libc::umask(prev);
+                    prev
+                } as u32;
+                0o666 & !mask
+            });
         let mut perms = tmp
             .as_file()
             .metadata()
@@ -298,7 +310,7 @@ pub(crate) fn open_file(
     }
 }
 
-/// One backed-up file descriptor: `dup(fd) → backup`, taken before
+/// One backed-up file descriptor: `dup(fd) → backup` (`F_DUPFD_CLOEXEC`), taken before
 /// [`apply_redirects`]'s `dup2` overwrote `fd`.  `Drop` undoes the redirect
 /// by `dup2`-ing the backup back over `fd` and closing the backup.
 ///
@@ -477,7 +489,7 @@ pub(crate) fn apply_redirects(
 /// Redirect `dst_fd` onto `src_fd`, backing the prior `dst_fd` up first so the
 /// guard's `Drop` can restore it.
 ///
-/// The backup `dup(dst_fd)` is the redirect's only restore path.  When it
+/// The backup `dup(dst_fd)` (`F_DUPFD_CLOEXEC`) is the redirect's only restore path.  When it
 /// fails — `EBADF` for a `dst_fd` that was never opened, the normal state for
 /// an fd ≥ 3 — there is nothing to restore *to*, so installing the `dup2`
 /// would leak `dst_fd` pointing at the target for the life of the shell.  Skip
@@ -486,7 +498,12 @@ pub(crate) fn apply_redirects(
 /// restores it on unwind.
 #[cfg(unix)]
 fn install_dup2(src_fd: i32, dst_fd: u32, guard: &mut RedirectGuard) -> Settled<()> {
-    let backup = unsafe { libc::dup(dst_fd as i32) };
+    // `F_DUPFD_CLOEXEC` rather than a bare `dup`: this backup is internal
+    // bookkeeping for the redirect guard, not a descriptor meant for any
+    // child — a child spawned while the guard is live (a nested external
+    // launched from inside the redirected builtin body) must not inherit
+    // it.
+    let backup = unsafe { libc::fcntl(dst_fd as i32, libc::F_DUPFD_CLOEXEC, 0) };
     if backup < 0 {
         return Err(Break::Error(Error::new(
             format!(

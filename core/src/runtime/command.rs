@@ -96,7 +96,7 @@ pub(crate) fn run(
 
     let mut command = build_command(&rc, shell)?;
 
-    let plan = classify_redirects(redirects);
+    let plan = classify_redirects(redirects)?;
     command.stdin(wire_stdin(shell).into_stdio());
     let (mut atomic_commit, stdout_file_dup) = wire_stdout_file(&mut command, &plan, shell)?;
     let inherit_tty = inherit_tty(&plan, shell);
@@ -216,9 +216,52 @@ pub(crate) fn run(
     let waited: WaitedChild = running.wait()?;
     let outcome = waited.outcome;
 
-    if outcome.is_success() {
-        commit_atomics(atomic_commit.take().into_iter().collect())?;
-    }
+    // Settle the pending atomic commit (if any) and surface its write
+    // event now, but hold the result rather than `?`-propagating it here:
+    // the post-run bookkeeping below (drain the pumps, set `$?`, emit the
+    // exec event) must run on every exit path, including a commit failure
+    // — a straight-line `?` here would skip it for a command that did run.
+    let commit_result = if let Some(commit) = atomic_commit.take() {
+        let (path, mode) = plan
+            .stdout_file
+            .as_ref()
+            .expect("atomic_commit is only Some when plan.stdout_file is Some");
+        if outcome.is_success() {
+            let preview = commit.temp_preview();
+            match commit.commit() {
+                Ok(()) => {
+                    shell.emit_io(io_event::write(
+                        path,
+                        *mode,
+                        io_event::WriteOutcome::Committed,
+                        preview.as_deref(),
+                    ));
+                    Ok(())
+                }
+                Err(e) => {
+                    shell.emit_io(io_event::write(
+                        path,
+                        *mode,
+                        io_event::WriteOutcome::Failed,
+                        None,
+                    ));
+                    Err(Break::Error(Error::new(format!("atomic write: {e}"), 1)))
+                }
+            }
+        } else {
+            // The command did not succeed: the write door did not
+            // complete. `commit` drops here, discarding the staged temp.
+            shell.emit_io(io_event::write(
+                path,
+                *mode,
+                io_event::WriteOutcome::Aborted,
+                None,
+            ));
+            Ok(())
+        }
+    } else {
+        Ok(())
+    };
 
     // Join the pump threads. When audit is active, bytes are
     // captured by the dispatch-level `with_audit_capture` Tee on
@@ -232,6 +275,7 @@ pub(crate) fn run(
     // covers only the Host and spawned `BundledTool` images.  `code` is the
     // user-visible exit status; outcome is "ok" iff it is zero.
     shell.emit_io(io_event::exec(&cmd_name, &rc.args, code));
+    commit_result?;
     // A child whose `LaunchRole` is `PipelineStage` (pipeline stages, the
     // pipeline helper subprocess) forgives SIGPIPE — the reader ended the
     // pipe, not a real error.

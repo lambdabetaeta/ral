@@ -204,13 +204,26 @@ pub struct Winsize {
 // ── Terminal endpoint ─────────────────────────────────────────────────
 
 /// The terminal endpoint the front-end conveys at attach.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalEndpoint {
     /// The session lease, if the front-end owns a terminal.
     #[serde(skip)]
     pub lease: Option<crate::process::TerminalLease>,
     /// The terminal state for IO setup.
     pub state: crate::io::TerminalState,
+}
+
+/// `TerminalLease` is deliberately not `Clone` (its security argument rests
+/// on being unforgeable), so cloning an endpoint cannot duplicate the
+/// capability — only the terminal state comes along; the clone carries no
+/// lease.
+impl Clone for TerminalEndpoint {
+    fn clone(&self) -> Self {
+        Self {
+            lease: None,
+            state: self.state,
+        }
+    }
 }
 
 // ── The terminal frame ────────────────────────────────────────────────
@@ -316,7 +329,10 @@ impl crate::driver::TurnReport {
                     },
                     Err(break_) => Err(break_.into()),
                 },
-                status,
+                // Clamp here, at the single point a raw code becomes a
+                // transport code, so `status` and `Break::Exit` (clamped
+                // just above) always agree on the same fact.
+                status: status.clamp(0, 255),
                 single_command,
                 captured,
                 timed_out,
@@ -570,19 +586,31 @@ pub struct ControlSender {
     /// When `None`, acts directly on the in-process foreground scope.
     #[cfg(unix)]
     wire: Option<Arc<Mutex<crate::wire::WireChannel>>>,
+    /// The transport's own record of the in-flight dispatch id (`0` = none),
+    /// shared with whichever bookkeeping the transport already keeps for
+    /// event correlation — `cancel_current` names the dispatch it means
+    /// rather than a mintable sentinel.
+    current_dispatch: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl ControlSender {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(current_dispatch: Arc<std::sync::atomic::AtomicU64>) -> Self {
         ControlSender {
             #[cfg(unix)]
             wire: None,
+            current_dispatch,
         }
     }
 
     #[cfg(unix)]
-    pub(crate) fn new_wire(ch: Arc<Mutex<crate::wire::WireChannel>>) -> Self {
-        ControlSender { wire: Some(ch) }
+    pub(crate) fn new_wire(
+        ch: Arc<Mutex<crate::wire::WireChannel>>,
+        current_dispatch: Arc<std::sync::atomic::AtomicU64>,
+    ) -> Self {
+        ControlSender {
+            wire: Some(ch),
+            current_dispatch,
+        }
     }
 
     pub(crate) fn publish(self) {
@@ -591,7 +619,10 @@ impl ControlSender {
 
     pub fn cancel_current() {
         if let Some(ctrl) = CURRENT_CONTROL.get() {
-            ctrl.send(Control::Cancel(DispatchId(0)));
+            let id = ctrl
+                .current_dispatch
+                .load(std::sync::atomic::Ordering::Relaxed);
+            ctrl.send(Control::Cancel(DispatchId(id)));
         }
     }
 
@@ -781,7 +812,7 @@ impl IdentityTransport {
             event_tx: event_tx.clone(),
             current_dispatch: current_dispatch.clone(),
         });
-        let control = ControlSender::new();
+        let control = ControlSender::new(current_dispatch.clone());
         control.clone().publish();
 
         let engine = EngineInner {
@@ -958,9 +989,13 @@ pub struct WireTransport {
     /// Reader thread handle (never joined — the thread exits when the
     /// channel closes).  Wrapped in a `Mutex<Option<…>>` for `Sync`.
     _reader: Mutex<Option<std::thread::JoinHandle<()>>>,
-    /// Set when the engine dies (EPIPE on write).  The reader thread
+    /// Set when the engine dies (any write error).  The reader thread
     /// checks this to break early and close the event channel.
     death: Arc<AtomicBool>,
+    /// The in-flight dispatch id (`0` = none), stamped by `dispatch` and
+    /// shared with the published `ControlSender` so `cancel_current` names
+    /// the dispatch it means.
+    current_dispatch: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[cfg(unix)]
@@ -1033,7 +1068,8 @@ impl WireTransport {
         });
 
         let write_tx = Arc::new(Mutex::new(writer));
-        let control = ControlSender::new_wire(write_tx.clone());
+        let current_dispatch = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let control = ControlSender::new_wire(write_tx.clone(), current_dispatch.clone());
 
         Ok(WireTransport {
             events_recv: EventReceiver::new(event_rx),
@@ -1042,18 +1078,18 @@ impl WireTransport {
             _child: ChildHandle::from_std(child),
             _reader: Mutex::new(Some(reader)),
             death,
+            current_dispatch,
         })
     }
 
-    /// Write a frame to the wire channel.
+    /// Write a frame to the wire channel. Any write error is fatal: a
+    /// dropped dispatch (e.g. `ECONNRESET`, not only `BrokenPipe`) means no
+    /// `Report` will ever arrive on this connection, so the host's `recv`
+    /// must be told the transport is dead rather than blocking forever.
     fn write(&self, frame: &Frame) {
-        match self.write_tx.lock().unwrap().write_frame(frame) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
-                self.death.store(true, Ordering::SeqCst);
-                eprintln!("wire: engine process died (EPIPE)");
-            }
-            Err(_) => {} // other write errors are non-fatal
+        if let Err(e) = self.write_tx.lock().unwrap().write_frame(frame) {
+            self.death.store(true, Ordering::SeqCst);
+            eprintln!("wire: engine process died ({e})");
         }
     }
 }
@@ -1070,6 +1106,8 @@ impl Drop for WireTransport {
 #[cfg(unix)]
 impl Transport for WireTransport {
     fn dispatch(&self, id: DispatchId, turn: Turn) {
+        self.current_dispatch
+            .store(id.0, std::sync::atomic::Ordering::Relaxed);
         self.write(&Frame::Dispatch(id, Box::new(turn)));
     }
 

@@ -7,6 +7,12 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::io::{self, Read, Write};
 
+/// The largest frame body this codec will allocate for. A length prefix
+/// above this bound is a protocol fault — a corrupt or adversarial peer,
+/// never a legitimate frame — and is rejected before any allocation, so it
+/// can never become a multi-gigabyte allocator abort or stall.
+const MAX_FRAME_LEN: u32 = 256 * 1024 * 1024;
+
 pub fn write_frame<W: Write + ?Sized, T: Serialize>(w: &mut W, value: &T) -> io::Result<()> {
     let bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
     let len = u32::try_from(bytes.len())
@@ -135,8 +141,14 @@ fn read_body<R: Read + ?Sized>(r: &mut R) -> io::Result<Option<Vec<u8>>> {
             Ok(n) => got += n,
         }
     }
-    let len = u32::from_le_bytes(len_buf) as usize;
-    let mut body = vec![0u8; len];
+    let len = u32::from_le_bytes(len_buf);
+    if len > MAX_FRAME_LEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("subprocess: frame length {len} exceeds max {MAX_FRAME_LEN}"),
+        ));
+    }
+    let mut body = vec![0u8; len as usize];
     r.read_exact(&mut body)?;
     Ok(Some(body))
 }

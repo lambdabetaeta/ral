@@ -66,7 +66,11 @@ fn parse(text: &str) -> HashMap<(String, i32), String> {
             continue;
         };
         if !hint.is_empty() {
-            map.insert((cmd.to_string(), status), hint.to_string());
+            // Key on the basename, exactly as `lookup` does — a table entry
+            // written as a full path (`/usr/bin/foo`) must still match a
+            // lookup for that command, which is always basename-keyed.
+            let name = crate::path::basename(cmd);
+            map.insert((name.to_string(), status), hint.to_string());
         }
     }
     map

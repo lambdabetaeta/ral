@@ -13,7 +13,7 @@ use crate::transport::{
 use crate::types::{DeferredSink, EnquiryDesk, Error, Shell, SurfaceSink};
 use crate::wire::WireChannel;
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 
 /// One compiled-in shell-parity target the engine child can be told, at
@@ -187,6 +187,17 @@ fn resolve_installer<'a>(
 pub fn run_engine(installers: &[EngineInstaller]) -> ! {
     // SAFETY: fd 3 is the socket inherited from the front-end
     let stream = unsafe { UnixStream::from_raw_fd(3) };
+    // `dup2` (the front-end's pre_exec handoff) always clears CLOEXEC on
+    // the duplicate it creates, so fd 3 arrives here open-across-exec by
+    // necessity. Set it CLOEXEC now, the instant the engine owns it, so no
+    // external command any turn spawns inherits the protocol socket.
+    if unsafe { libc::fcntl(3, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+        eprintln!(
+            "engine: failed to set CLOEXEC on the wire fd: {}",
+            std::io::Error::last_os_error()
+        );
+        std::process::exit(1);
+    }
     let reader_ch = WireChannel::from_stream(stream);
     let writer_ch = reader_ch.try_clone().expect("try_clone engine channel");
     let writer = Arc::new(Mutex::new(writer_ch));
@@ -253,10 +264,18 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
         Probe(DispatchId, FOValue),
     }
 
-    // Rendezvous channel: try_send succeeds only when the worker is
-    // idle (blocked on recv).  While the worker runs a turn, try_send
-    // fails with Full → reply "engine busy".
-    let (turn_tx, turn_rx) = mpsc::sync_channel::<WorkItem>(0);
+    // Dispatch channel, gated by an explicit readiness flag rather than
+    // inferred from channel-parking state: `sync_channel(0)`'s try_send
+    // reports "full" the instant the worker picks an item off the channel,
+    // even though the worker is still mid-turn — but it *also* reports
+    // "full" (spuriously) in the thin window after the worker has finished
+    // writing its `Report` but before it has re-parked on `recv`, so a
+    // perfectly serialized next turn could be misclassified "busy". A
+    // dedicated flag names the true fact ("a turn is in flight") and is
+    // cleared by the worker itself only after its Report is written and it
+    // is about to re-park, closing that window.
+    let worker_ready = Arc::new(AtomicBool::new(true));
+    let (turn_tx, turn_rx) = mpsc::channel::<WorkItem>();
 
     // The engine's one desk, shared between the worker (which parks in it)
     // and the reader loop (whose `Answer` arm fills it).
@@ -271,6 +290,7 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
     // ── Worker thread: owns the Shell ──────────────────────────────
     let worker_writer = writer.clone();
     let worker_desk = desk.clone();
+    let ready_for_worker = worker_ready.clone();
     std::thread::spawn(move || {
         let mut shell = shell;
         while let Ok(item) = turn_rx.recv() {
@@ -295,7 +315,19 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
                         desk: Some(worker_desk.clone() as crate::types::Desk),
                         lifecycle: Box::new(()),
                     };
-                    let report = shell.run_turn(req).into_report();
+                    // The workspace pins `panic = "unwind"` so hosts can
+                    // recover a panicking turn; without this the panic
+                    // would tear down the worker thread silently, no
+                    // `Report` frame would ever be written, and the
+                    // front-end's `recv` would block forever.
+                    let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        shell.run_turn(req).into_report()
+                    }))
+                    .unwrap_or_else(|_| Report::Static {
+                        diagnostics: crate::transport::Diagnostics::Host(
+                            "engine: turn panicked".into(),
+                        ),
+                    });
 
                     worker_desk.current_dispatch.store(0, Ordering::Relaxed);
 
@@ -328,11 +360,17 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
                         .write_frame(&Frame::Event(id, Event::Report(report)));
                 }
             }
+            // The Report is written; only now — about to re-park on
+            // `recv` — is the worker actually ready for the next item.
+            ready_for_worker.store(true, Ordering::Release);
         }
     });
 
     // ── Reader loop (this thread) ──────────────────────────────────
-    loop {
+    // The exit code distinguishes a clean detach from a protocol fault: a
+    // parent that can no longer tell the two apart (both used to exit 0)
+    // cannot know whether the session ended on request or on corruption.
+    let exit_code = loop {
         match reader_ch.read_frame() {
             // A turn and a probe ride the same worker rendezvous, so a probe
             // sent while a turn runs gets the same "engine busy" answer a
@@ -343,23 +381,26 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
                     Frame::Probe(id, reading) => WorkItem::Probe(id, reading),
                     _ => unreachable!("the arm admits only Dispatch and Probe"),
                 };
-                match turn_tx.try_send(item) {
-                    Ok(()) => { /* worker accepted the work */ }
-                    Err(mpsc::TrySendError::Full(item)) => {
-                        let (WorkItem::Turn(id, _) | WorkItem::Probe(id, _)) = item;
-                        let report = crate::transport::Report::Static {
-                            diagnostics: crate::transport::Diagnostics::Host(
-                                "engine busy".into(),
-                            ),
-                        };
-                        let _ = writer
-                            .lock()
-                            .unwrap()
-                            .write_frame(&Frame::Event(id, Event::Report(report)));
+                // Claim the worker atomically: only the dispatch that flips
+                // `true → false` may hand it work, so "busy" reflects a
+                // turn genuinely in flight, never a worker that has merely
+                // not yet re-parked.
+                let claimed = worker_ready
+                    .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok();
+                if claimed {
+                    if turn_tx.send(item).is_err() {
+                        break 0; // worker died
                     }
-                    Err(mpsc::TrySendError::Disconnected(_)) => {
-                        break; // worker died
-                    }
+                } else {
+                    let (WorkItem::Turn(id, _) | WorkItem::Probe(id, _)) = item;
+                    let report = crate::transport::Report::Static {
+                        diagnostics: crate::transport::Diagnostics::Host("engine busy".into()),
+                    };
+                    let _ = writer
+                        .lock()
+                        .unwrap()
+                        .write_frame(&Frame::Event(id, Event::Report(report)));
                 }
             }
             Ok(Some(Frame::Answer(_, eid, answer))) => {
@@ -381,18 +422,18 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
             }
             Ok(Some(Frame::Detach)) | Ok(None) => {
                 crate::process::request_foreground_cancel(crate::process::CancelCause::Explicit);
-                break;
+                break 0;
             }
             Ok(Some(Frame::Event(..))) => {
                 eprintln!("engine: unexpected Event frame");
             }
             Err(e) => {
                 eprintln!("engine: read error: {e}");
-                break;
+                break 1;
             }
         }
-    }
-    std::process::exit(0);
+    };
+    std::process::exit(exit_code);
 }
 
 // ── Wire desk tests ───────────────────────────────────────────────────

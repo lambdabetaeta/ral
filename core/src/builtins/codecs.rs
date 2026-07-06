@@ -8,8 +8,9 @@
 //! Decoders and encoders are duals with definite arities.  A `from-X`
 //! decoder takes no argument: its bytes always come from the channel
 //! (stdin, a `< file` redirect, or a pipeline).  A `to-X` encoder takes
-//! exactly one value, writes its encoded form to stdout, and returns
-//! Bytes.  To decode a value already in hand, put it on the channel with
+//! exactly one value and writes its encoded form to stdout, returning
+//! Bytes — except `to-line`, which returns Unit.  To decode a value
+//! already in hand, put it on the channel with
 //! the matching encoder — `to-string $s | from-json`.  The cached-tty
 //! gate fires only when stdin is genuinely unset — see `read_stdin_bytes`.
 
@@ -144,6 +145,8 @@ pub(super) fn builtin_from_json(args: &[Value], shell: &mut Shell) -> Settled<Va
 /// the caller coerces with `int`/`float`.  Quoted fields, embedded commas,
 /// and embedded newlines are handled by the `csv` reader; a short row leaves
 /// the missing trailing columns empty.  The first line is always the header.
+/// A record can't faithfully represent two columns of the same name, so a
+/// duplicate header is an error rather than a silent last-write-wins.
 pub(super) fn builtin_from_csv(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let bytes = input_bytes(args, "from-csv", shell)?;
     let mut rdr = csv::ReaderBuilder::new()
@@ -156,6 +159,12 @@ pub(super) fn builtin_from_csv(args: &[Value], shell: &mut Shell) -> Settled<Val
         .iter()
         .map(str::to_owned)
         .collect();
+    let mut seen = std::collections::HashSet::with_capacity(headers.len());
+    for h in &headers {
+        if !seen.insert(h) {
+            return Err(sig(format!("from-csv: duplicate header column {h:?}")));
+        }
+    }
     let mut rows = Vec::new();
     for record in rdr.records() {
         let record = record.map_err(|e| sig(format!("from-csv: {e}")))?;

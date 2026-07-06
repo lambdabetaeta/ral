@@ -238,8 +238,37 @@ impl RunningChild {
         #[cfg(unix)]
         {
             let Some(pgid) = self.pgid else {
-                let _ = child.kill();
-                return None;
+                // No pgid tracked (an `Inherit`-placed child): the same
+                // TERM/INT-first grace ladder applies regardless of whether
+                // a group is tracked — degrading straight to SIGKILL here
+                // would deny this lone child the escalation every other
+                // path documents.
+                if cause == crate::process::CancelCause::RootAbort {
+                    let _ = child.kill();
+                    return None;
+                }
+                let signal = match cause {
+                    crate::process::CancelCause::Interrupt => libc::SIGINT,
+                    _ => libc::SIGTERM,
+                };
+                unsafe { libc::kill(child.id() as libc::pid_t, signal) };
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+                let mut reaped = None;
+                while std::time::Instant::now() < deadline {
+                    match child.try_wait_handling_stop(None, self.park_on_stop) {
+                        Ok(Some(o)) => {
+                            reaped = Some(o);
+                            break;
+                        }
+                        Err(_) => break,
+                        Ok(None) => {}
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                if reaped.is_none() {
+                    let _ = child.kill();
+                }
+                return reaped;
             };
             if cause == crate::process::CancelCause::RootAbort {
                 pgid.signal_group(crate::process::Signal::new(libc::SIGKILL));

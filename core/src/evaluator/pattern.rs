@@ -63,11 +63,41 @@ pub(crate) fn check_path_shadow(name: &str, shell: &Shell) -> Raw<()> {
     Ok(())
 }
 
+/// Destructure `value` against `pattern`, installing bindings into `shell`.
+///
+/// Destructuring is transactional: every binding the pattern would
+/// install is staged in a scratch buffer by [`stage_pattern`] and only
+/// installed here, once the whole pattern has matched. A pattern that
+/// fails partway through — `let [[p],[q,r]] = [[1],[2]]` binds `p` then
+/// finds `[2]` too short for `[q,r]` — therefore leaves no partial
+/// bindings visible, whether the caller is a REPL turn (which installs
+/// its mobile on every outcome) or a nested destructure.
 pub(crate) fn assign_pattern(
     pattern: &IrPattern,
     value: &Value,
     scheme: Option<&Scheme>,
     shell: &mut Shell,
+) -> Raw<()> {
+    let mut staged = Vec::new();
+    stage_pattern(pattern, value, scheme, shell, &mut staged)?;
+    for (name, binding) in staged {
+        shell.install_scope_binding(name, binding);
+    }
+    Ok(())
+}
+
+/// Recursive worker for [`assign_pattern`]: matches `pattern` against
+/// `value`, pushing each binding it would make onto `staged` rather than
+/// installing it immediately. Only evaluates map-pattern defaults (which
+/// may themselves have effects) — never installs a binding — so a
+/// caller can discard `staged` on error without having touched `shell`'s
+/// scope.
+fn stage_pattern(
+    pattern: &IrPattern,
+    value: &Value,
+    scheme: Option<&Scheme>,
+    shell: &mut Shell,
+    staged: &mut Vec<(String, Binding)>,
 ) -> Raw<()> {
     match pattern {
         IrPattern::Wildcard => Ok(()),
@@ -77,13 +107,13 @@ pub(crate) fn assign_pattern(
                     .err(format!("cannot assign to literal '{name}'"), 1)
                     .into());
             }
-            shell.install_scope_binding(
+            staged.push((
                 name.clone(),
                 Binding {
                     value: value.clone(),
                     scheme: scheme.cloned(),
                 },
-            );
+            ));
             Ok(())
         }
         IrPattern::List { elems, rest } => {
@@ -127,20 +157,20 @@ pub(crate) fn assign_pattern(
                     .into());
             }
             for (i, pat) in elems.iter().enumerate() {
-                assign_pattern(pat, &items[i], None, shell)?;
+                stage_pattern(pat, &items[i], None, shell, staged)?;
             }
             if let Some(name) = rest {
                 // `List::split_off` returns a tail that structurally shares
                 // with the source — O(log n), no element clones.
                 let mut whole = items.clone();
                 let tail = whole.split_off(elems.len());
-                shell.install_scope_binding(
+                staged.push((
                     name.clone(),
                     Binding {
                         value: Value::List(tail),
                         scheme: None,
                     },
-                );
+                ));
             }
             Ok(())
         }
@@ -174,7 +204,7 @@ pub(crate) fn assign_pattern(
                             .into());
                     }
                 };
-                assign_pattern(&entry.pattern, &val, None, shell)?;
+                stage_pattern(&entry.pattern, &val, None, shell, staged)?;
             }
             Ok(())
         }

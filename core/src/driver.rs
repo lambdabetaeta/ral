@@ -279,6 +279,25 @@ pub enum TurnReport {
     },
 }
 
+/// Resolve a turn's armed wall clock from every source that can bind it:
+/// the host's requested `turn_limit` and — for a hook turn — its
+/// registered budget. Both bind the same foreground scope, tightest wins
+/// (`min`, not `or`), so a host wall can never be silently widened by a
+/// hook's own budget or vice versa. `None` from both leaves the turn
+/// unarmed, exactly as before.
+fn arm_turn_wall(
+    turn_limit: Option<std::time::Duration>,
+    hook_budget: Option<std::time::Duration>,
+    foreground: &crate::process::ForegroundScope,
+) -> Option<crate::process::Deadline> {
+    let effective = match (turn_limit, hook_budget) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) | (None, Some(a)) => Some(a),
+        (None, None) => None,
+    };
+    effective.map(|d| crate::process::arm_lifetime(foreground.as_scope().clone(), d))
+}
+
 impl Shell {
     /// Run one whole [`Turn`] under `req`, synchronously, and return one
     /// flat [`TurnReport`]. The single turn door: the turn's
@@ -312,10 +331,7 @@ impl Shell {
                 // `Deadline` guard disarms when `wall` drops, so an early
                 // `Static` return leaves no pending reaper entry.
                 let foreground = self.durable_root().child();
-                let wall = req
-                    .turn
-                    .turn_limit
-                    .map(|d| crate::process::arm_lifetime(foreground.as_scope().clone(), d));
+                let wall = arm_turn_wall(req.turn.turn_limit, None, &foreground);
 
                 let (comp, single_command) = match crate::turn::compile_turn(self, src) {
                     Ok(parts) => parts,
@@ -351,10 +367,7 @@ impl Shell {
                 let args: Vec<Value> = args.iter().cloned().map(Value::from).collect();
 
                 let foreground = self.durable_root().child();
-                let wall = hook
-                    .policy
-                    .budget
-                    .map(|d| crate::process::arm_lifetime(foreground.as_scope().clone(), d));
+                let wall = arm_turn_wall(req.turn.turn_limit, hook.policy.budget, &foreground);
 
                 // Fold the hook's registered `DefaultPolicy` into the turn's
                 // conditions: capture, terminal authority, and budget are the

@@ -20,6 +20,14 @@ use super::util::{as_list, check_arity, value_ordering};
 /// while a range shorter than the chunk pays nothing.
 const INTERRUPT_POLL_CHUNK: usize = 1024;
 
+/// The most `range` will pre-size its output `Vec` to, regardless of the
+/// requested span.  A huge span (`range 0 1000000000000`) must not attempt a
+/// multi-terabyte `Vec::with_capacity` — that aborts the process rather than
+/// erroring — so the allocation is capped and the vector grows normally
+/// (amortized, and subject to the same cancellable, interrupt-polled loop)
+/// past this point.
+const RANGE_INITIAL_CAP: usize = 1 << 16;
+
 /// `each <fn> <list>` -- call `fn` on each element for side effects.
 /// Returns the result of the last application, or `Unit` for an empty list.
 pub(super) fn builtin_each(args: &[Value], shell: &mut Shell) -> Settled<Value> {
@@ -213,7 +221,7 @@ pub(super) fn builtin_range(args: &[Value], shell: &mut Shell) -> Settled<Value>
     } else {
         0
     };
-    let mut out = Vec::with_capacity(count);
+    let mut out = Vec::with_capacity(count.min(RANGE_INITIAL_CAP));
     let mut i = start;
     let mut since_poll = 0usize;
     while i < end {
