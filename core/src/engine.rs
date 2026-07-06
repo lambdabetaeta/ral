@@ -247,7 +247,9 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
     // serialises with dispatches for free — busy while a turn runs answers
     // "engine busy", the same arm a second dispatch gets.
     enum WorkItem {
-        Turn(DispatchId, Turn),
+        /// Boxed for the same reason `Frame::Dispatch` boxes it: a probe
+        /// must not be sized to `Turn`'s stack footprint.
+        Turn(DispatchId, Box<Turn>),
         Probe(DispatchId, FOValue),
     }
 
@@ -281,7 +283,7 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
                     // The live handles this turn runs under, joined with the
                     // protocol `Turn` in the request the engine door runs.
                     let req = crate::driver::TurnRequest {
-                        turn,
+                        turn: *turn,
                         surface: Some(Arc::new(ChannelSurfaceSink {
                             id,
                             writer: worker_writer.clone(),
@@ -332,11 +334,19 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
     // ── Reader loop (this thread) ──────────────────────────────────
     loop {
         match reader_ch.read_frame() {
-            Ok(Some(Frame::Dispatch(id, turn))) => {
-                match turn_tx.try_send(WorkItem::Turn(id, *turn)) {
-                    Ok(()) => { /* worker accepted the turn */ }
-                    Err(mpsc::TrySendError::Full(_)) => {
-                        // Worker is busy — reply with a static diagnostic.
+            // A turn and a probe ride the same worker rendezvous, so a probe
+            // sent while a turn runs gets the same "engine busy" answer a
+            // second dispatch would — one arm, by construction.
+            Ok(Some(frame @ (Frame::Dispatch(..) | Frame::Probe(..)))) => {
+                let item = match frame {
+                    Frame::Dispatch(id, turn) => WorkItem::Turn(id, turn),
+                    Frame::Probe(id, reading) => WorkItem::Probe(id, reading),
+                    _ => unreachable!("the arm admits only Dispatch and Probe"),
+                };
+                match turn_tx.try_send(item) {
+                    Ok(()) => { /* worker accepted the work */ }
+                    Err(mpsc::TrySendError::Full(item)) => {
+                        let (WorkItem::Turn(id, _) | WorkItem::Probe(id, _)) = item;
                         let report = crate::transport::Report::Static {
                             diagnostics: crate::transport::Diagnostics::Host(
                                 "engine busy".into(),
@@ -357,27 +367,6 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
                 // turn for the front-end's benefit, but the slot is the
                 // enquiry's. A late answer for a dead id drops in `fill`.
                 desk.fill(eid, answer);
-            }
-            Ok(Some(Frame::Probe(id, reading))) => {
-                match turn_tx.try_send(WorkItem::Probe(id, reading)) {
-                    Ok(()) => { /* worker accepted the probe */ }
-                    Err(mpsc::TrySendError::Full(_)) => {
-                        // Worker is busy running a turn — the same "engine
-                        // busy" answer a second dispatch would get.
-                        let report = crate::transport::Report::Static {
-                            diagnostics: crate::transport::Diagnostics::Host(
-                                "engine busy".into(),
-                            ),
-                        };
-                        let _ = writer
-                            .lock()
-                            .unwrap()
-                            .write_frame(&Frame::Event(id, Event::Report(report)));
-                    }
-                    Err(mpsc::TrySendError::Disconnected(_)) => {
-                        break; // worker died
-                    }
-                }
             }
             Ok(Some(Frame::Control(Control::Cancel(_)))) => {
                 crate::process::request_foreground_cancel(crate::process::CancelCause::Explicit);

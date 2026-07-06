@@ -410,8 +410,7 @@ pub fn dispatch_to_report(
     mut on_deferred: impl FnMut(Vec<FOValue>),
     mut on_enquiry: impl FnMut(FOValue) -> Result<FOValue, EnquiryError>,
 ) -> Option<Report> {
-    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    let id = DispatchId(NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let id = mint_dispatch_id();
 
     transport.dispatch(id, turn);
 
@@ -430,6 +429,15 @@ pub fn dispatch_to_report(
         }
     }
     None
+}
+
+/// Mint one correlation id for the Dispatch → Report rail. Dispatches and
+/// probes share the mint: both are answered by an [`Event::Report`]
+/// correlated by [`DispatchId`], so two counters would let a probe's Report
+/// be mistaken for a dispatch's.
+fn mint_dispatch_id() -> DispatchId {
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    DispatchId(NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 }
 
 // ── Probe decoder ─────────────────────────────────────────────────────
@@ -616,10 +624,25 @@ impl ControlSender {
 /// outstanding; `Surface` events are ordered before the `Report`.
 pub struct EventReceiver {
     rx: std::sync::Mutex<mpsc::Receiver<Frame>>,
+    /// Frames a probe's reply drain read past while waiting for its own
+    /// Report — e.g. a deferred worker's batch settling mid-probe. The
+    /// ordering law (§6.5) forbids dropping them, so they are handed back
+    /// to the next `recv`, in arrival order, ahead of the live channel.
+    stash: std::sync::Mutex<std::collections::VecDeque<Frame>>,
 }
 
 impl EventReceiver {
+    fn new(rx: mpsc::Receiver<Frame>) -> Self {
+        EventReceiver {
+            rx: std::sync::Mutex::new(rx),
+            stash: std::sync::Mutex::new(std::collections::VecDeque::new()),
+        }
+    }
+
     pub fn recv(&self) -> Option<Frame> {
+        if let Some(frame) = self.stash.lock().unwrap().pop_front() {
+            return Some(frame);
+        }
         self.rx.lock().unwrap().recv().ok()
     }
 }
@@ -774,9 +797,7 @@ impl IdentityTransport {
         IdentityTransport {
             engine: SessionLock::new(engine),
             control,
-            events_recv: EventReceiver {
-                rx: std::sync::Mutex::new(event_rx),
-            },
+            events_recv: EventReceiver::new(event_rx),
             dispatch_thread: std::sync::Mutex::new(None),
         }
     }
@@ -1015,9 +1036,7 @@ impl WireTransport {
         let control = ControlSender::new_wire(write_tx.clone());
 
         Ok(WireTransport {
-            events_recv: EventReceiver {
-                rx: Mutex::new(event_rx),
-            },
+            events_recv: EventReceiver::new(event_rx),
             control,
             write_tx,
             _child: ChildHandle::from_std(child),
@@ -1055,23 +1074,31 @@ impl Transport for WireTransport {
     }
 
     fn probe(&self, reading: FOValue) -> Result<FOValue, String> {
-        static NEXT_PROBE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let id = DispatchId(NEXT_PROBE_ID.fetch_add(1, Ordering::Relaxed));
+        let id = mint_dispatch_id();
         self.write(&Frame::Probe(id, reading));
         loop {
             match self.events_recv.recv() {
                 Some(Frame::Event(did, Event::Report(report))) if did == id => {
                     return match report {
+                        Report::Ran { result: Ok(v), .. } => Ok(v),
                         Report::Ran {
-                            result: Ok(v), ..
-                        } => Ok(v),
+                            result: Err(Break::Error(message)),
+                            ..
+                        } => Err(message),
                         Report::Ran {
                             result: Err(break_), ..
-                        } => Err(format!("{break_:?}")),
-                        Report::Static { diagnostics } => Err(format!("{diagnostics:?}")),
+                        } => Err(format!("probe answered abnormally: {break_:?}")),
+                        Report::Static { diagnostics } => Err(match diagnostics {
+                            Diagnostics::Host(msg) | Diagnostics::Parse(msg) => msg,
+                            Diagnostics::Types(errs) => errs.join("\n"),
+                        }),
                     };
                 }
-                Some(_) => continue,
+                // A frame that is not this probe's Report — another
+                // dispatch's event, a deferred worker's batch settling
+                // mid-probe — is stashed for the ordinary drain, never
+                // dropped (§6.5's ordering law).
+                Some(frame) => self.events_recv.stash.lock().unwrap().push_back(frame),
                 None => return Err("engine connection closed".into()),
             }
         }

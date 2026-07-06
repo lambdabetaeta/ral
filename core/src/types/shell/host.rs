@@ -238,15 +238,52 @@ impl Shell {
     /// at that call site, there is no live surface sink to push through
     /// either. It stays the one notice a host still composes itself from
     /// the polled return, an acknowledged residue of this migration.
+    ///
+    /// The pushed shapes — `` `notice [kind: `reap, cmd, cause] `` and
+    /// `` `notice [kind: `large-binding, name, bytes] `` — are what the
+    /// exarch host decodes back (`card::value_to_notice`); `cause` travels
+    /// as the same lowercase tag exarch's transcript writer already used, so
+    /// the wire word and the forensic-record word are one word.
     pub(crate) fn emit_ready_boundary_notices(&mut self) {
         if self.turn.surface.is_none() {
             return;
         }
         for notice in self.take_worker_reap_notices() {
-            self.surface(reap_notice_value(&notice));
+            let cause = match notice.cause {
+                ReapCause::Idle => "idle",
+                ReapCause::Backstop => "backstop",
+                ReapCause::Retention => "retention",
+            };
+            self.surface(Value::Variant {
+                label: "notice".into(),
+                payload: Some(Box::new(Value::map(vec![
+                    (
+                        "kind".into(),
+                        Value::Variant {
+                            label: "reap".into(),
+                            payload: None,
+                        },
+                    ),
+                    ("cmd".into(), Value::String(notice.cmd)),
+                    ("cause".into(), Value::String(cause.into())),
+                ]))),
+            });
         }
         for notice in self.take_large_binding_notices() {
-            self.surface(large_binding_notice_value(&notice));
+            self.surface(Value::Variant {
+                label: "notice".into(),
+                payload: Some(Box::new(Value::map(vec![
+                    (
+                        "kind".into(),
+                        Value::Variant {
+                            label: "large-binding".into(),
+                            payload: None,
+                        },
+                    ),
+                    ("name".into(), Value::String(notice.name)),
+                    ("bytes".into(), Value::Int(notice.bytes as i64)),
+                ]))),
+            });
         }
     }
 
@@ -457,53 +494,6 @@ impl Shell {
     /// [`Shell::has_active_capabilities`](Shell::has_active_capabilities).
     pub fn grant_depth(&self) -> usize {
         self.mobile.context.grants.iter().count()
-    }
-}
-
-/// Encode one [`ReapNotice`] as `` `notice [kind: `reap, cmd, cause] `` — the
-/// wire shape [`Self::emit_ready_boundary_notices`] pushes and the exarch
-/// host decodes back (`decisions/260706_enquiry-channel` §4.2). `cause`
-/// travels as the same lowercase tag exarch's own transcript writer already
-/// used for it, so the wire word and the forensic-record word are one word.
-fn reap_notice_value(notice: &ReapNotice) -> Value {
-    let cause = match notice.cause {
-        ReapCause::Idle => "idle",
-        ReapCause::Backstop => "backstop",
-        ReapCause::Retention => "retention",
-    };
-    Value::Variant {
-        label: "notice".into(),
-        payload: Some(Box::new(Value::map(vec![
-            (
-                "kind".into(),
-                Value::Variant {
-                    label: "reap".into(),
-                    payload: None,
-                },
-            ),
-            ("cmd".into(), Value::String(notice.cmd.clone())),
-            ("cause".into(), Value::String(cause.into())),
-        ]))),
-    }
-}
-
-/// Encode one [`LargeBindingNotice`] as
-/// `` `notice [kind: `large-binding, name, bytes] ``, the large-binding
-/// sibling of [`reap_notice_value`].
-fn large_binding_notice_value(notice: &LargeBindingNotice) -> Value {
-    Value::Variant {
-        label: "notice".into(),
-        payload: Some(Box::new(Value::map(vec![
-            (
-                "kind".into(),
-                Value::Variant {
-                    label: "large-binding".into(),
-                    payload: None,
-                },
-            ),
-            ("name".into(), Value::String(notice.name.clone())),
-            ("bytes".into(), Value::Int(notice.bytes as i64)),
-        ]))),
     }
 }
 

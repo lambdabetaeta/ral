@@ -52,7 +52,7 @@ use std::sync::{Arc, Mutex};
 pub(crate) struct ProbedWorker {
     pub(crate) id: u64,
     pub(crate) cmd: String,
-    pub(crate) class: String,
+    pub(crate) class: ral_core::types::LeaseClass,
     pub(crate) running: bool,
     pub(crate) up_secs: u64,
     pub(crate) idle_secs: u64,
@@ -739,7 +739,7 @@ impl Agent {
         let live: Vec<ProbedWorker> = self
             .probe_workers()
             .into_iter()
-            .filter(|entry| entry.class == "durable")
+            .filter(|entry| entry.class == ral_core::types::LeaseClass::Durable)
             .collect();
 
         if live.is_empty() {
@@ -877,8 +877,8 @@ impl Agent {
         let mut nearest_expiry: Option<u64> = None;
         for entry in &entries {
             if entry.running {
-                match entry.class.as_str() {
-                    "worker" => {
+                match entry.class {
+                    ral_core::types::LeaseClass::Worker => {
                         running_worker += 1;
                         // The nearer of the entry's two lease margins: idle
                         // remaining off the shared last-observed cell, and
@@ -892,7 +892,7 @@ impl Agent {
                         let left = idle_left.min(backstop_left);
                         nearest_reap = Some(nearest_reap.map_or(left, |m| m.min(left)));
                     }
-                    _ => running_durable += 1,
+                    ral_core::types::LeaseClass::Durable => running_durable += 1,
                 }
             } else {
                 settled += 1;
@@ -1717,7 +1717,13 @@ impl Agent {
                     other => unreachable!("`workers row `cmd must be a String, got {other:?}"),
                 };
                 let class = match field("class") {
-                    Some(FOValue::String { value }) => value,
+                    Some(FOValue::String { value }) => match value.as_str() {
+                        "worker" => ral_core::types::LeaseClass::Worker,
+                        "durable" => ral_core::types::LeaseClass::Durable,
+                        other => {
+                            unreachable!("`workers row `class must name a lease class, got {other}")
+                        }
+                    },
                     other => unreachable!("`workers row `class must be a String, got {other:?}"),
                 };
                 let running = match field("running") {

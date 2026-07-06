@@ -698,10 +698,15 @@ pub enum Notice {
 }
 
 /// Decode a `` `notice `` value into its [`Notice`]. The shape is
-/// `` `notice [kind: `reap|`prune|`large-binding, …fields] `` where `kind`
-/// selects the fields read below. Anything else — an unrecognised `kind`,
-/// a missing field, a value that is not this variant at all — returns
-/// `None`, the same graceful degradation as [`value_to_done`].
+/// `` `notice [kind: `reap|`large-binding, …fields] `` where `kind` selects
+/// the fields read below — exactly the two classes core's
+/// `emit_ready_boundary_notices` pushes. [`Notice::Prune`] deliberately has
+/// no decode arm: the idle-prune notice is host-composed from
+/// `prune_idle_bindings`'s polled return (the migration's acknowledged
+/// residue) and never rides the surface rail; its arm arrives with the
+/// migration that pushes it. Anything else — an unrecognised `kind`, a
+/// missing field, a value that is not this variant at all — returns `None`,
+/// the same graceful degradation as [`value_to_done`].
 pub fn value_to_notice(v: &RalValue) -> Option<Notice> {
     let RalValue::Variant { label, payload } = v else {
         return None;
@@ -722,10 +727,6 @@ pub fn value_to_notice(v: &RalValue) -> Option<Notice> {
                 "retention" => ral_core::types::ReapCause::Retention,
                 _ => return None,
             },
-        },
-        "prune" => Notice::Prune {
-            names: strings_field(m, "names"),
-            idle_calls: ints_field(m, "idle_calls"),
         },
         "large-binding" => Notice::LargeBinding {
             name: str_field(m, "name")?,
@@ -1186,21 +1187,6 @@ fn int_field(m: &ral_core::types::Map, field: &str) -> Option<i64> {
 /// empty.
 fn strings_field(m: &ral_core::types::Map, field: &str) -> Vec<String> {
     lines_field(m, field)
-}
-
-/// A list-of-integers field, unclamped; a missing or non-list field, or a
-/// non-integer element, is dropped from the result rather than failing it.
-fn ints_field(m: &ral_core::types::Map, field: &str) -> Vec<u64> {
-    match m.get(field) {
-        Some(RalValue::List(items)) => items
-            .iter()
-            .filter_map(|v| match v {
-                RalValue::Int(n) => Some((*n).max(0) as u64),
-                _ => None,
-            })
-            .collect(),
-        _ => Vec::new(),
-    }
 }
 
 /// A list-of-strings field; non-string elements render as their display so
