@@ -68,6 +68,12 @@ pub enum Frame {
         rc_path: Option<PathBuf>,
         /// Protocol version the front-end speaks (checked against PROTOCOL_VERSION).
         proto_version: u32,
+        /// Tag naming the compiled-in builtin installer the engine child
+        /// must apply after booting its shell — e.g. `"exarch-agent"` or
+        /// `"repl"`. Both halves of the single binary map this string to
+        /// their own compiled-in installer table; the tag is the only
+        /// thing that crosses, never the installer function itself.
+        installer: String,
     },
     /// Front-end drops: cancel in-flight dispatch, reap foreground
     /// subtree, restore terminal state.
@@ -327,12 +333,18 @@ pub trait Transport: Send + Sync {
     fn events(&self) -> &EventReceiver;
 
     /// Convey the session terminal endpoint and bootstrap state.
+    ///
+    /// `installer` names the compiled-in builtin installer the wire
+    /// engine child must apply once it boots its shell (§ `Frame::Attach`);
+    /// the identity transport ignores it — its shell is already booted and
+    /// dressed with the host's builtins by the caller before `attach`.
     fn attach(
         &self,
         endpoint: TerminalEndpoint,
         cwd: PathBuf,
         home: PathBuf,
         rc_path: Option<PathBuf>,
+        installer: String,
     );
 
     /// Detach: cancel in-flight dispatch, reap foreground subtree,
@@ -743,6 +755,7 @@ impl Transport for IdentityTransport {
         _cwd: PathBuf,
         _home: PathBuf,
         _rc_path: Option<PathBuf>,
+        _installer: String,
     ) {
         let mut engine = self.engine.lock();
         engine.terminal_lease = endpoint.lease;
@@ -916,6 +929,7 @@ impl Transport for WireTransport {
         cwd: PathBuf,
         home: PathBuf,
         rc_path: Option<PathBuf>,
+        installer: String,
     ) {
         self.write(&Frame::Attach {
             endpoint,
@@ -923,6 +937,7 @@ impl Transport for WireTransport {
             home,
             rc_path,
             proto_version: PROTOCOL_VERSION,
+            installer,
         });
     }
 

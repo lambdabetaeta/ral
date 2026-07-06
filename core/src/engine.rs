@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::os::unix::io::FromRawFd;
 use std::os::unix::net::UnixStream;
 
+use crate::driver::BakedPrelude;
 use crate::serial::FOValue;
 use crate::transport::{Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Turn};
 use crate::types::{DeferredSink, EnquiryDesk, Error, Shell, SurfaceSink};
@@ -12,6 +13,24 @@ use crate::wire::WireChannel;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
+
+/// One compiled-in shell-parity target the engine child can be told, at
+/// `Attach`, to become: the prelude to boot with and the host builtin
+/// installer to apply afterward. Both halves of the single binary
+/// (exarch, the REPL) pass their own table; the tag on the wire is the
+/// only thing that names one, never the installer function itself —
+/// code never crosses the seam.
+pub struct EngineInstaller {
+    /// The tag `Frame::Attach` carries — matched verbatim against the
+    /// installer table this process was started with.
+    pub tag: &'static str,
+    /// The prelude to boot the engine's shell with (identical source
+    /// across hosts today, but baked into each host's own binary).
+    pub prelude: &'static BakedPrelude,
+    /// The host builtin installer to run on the freshly booted shell.
+    /// `|_| {}` names "no host builtins" (the REPL's table).
+    pub install: fn(&mut Shell),
+}
 
 /// A surface sink that writes Event::Surface frames live to the wire
 /// as values are produced, rather than buffering.
@@ -133,17 +152,93 @@ impl EnquiryDesk for WireDesk {
     }
 }
 
+/// Validate the front-end's protocol version and resolve its installer tag
+/// against this binary's compiled-in table. Returned as a `Result` rather
+/// than exiting directly so the refusal path is unit-testable without a
+/// live wire child; `run_engine` is the only caller and turns an `Err`
+/// into the loud exit both refusals share.
+fn resolve_installer<'a>(
+    installers: &'a [EngineInstaller],
+    proto_version: u32,
+    installer: &str,
+) -> Result<&'a EngineInstaller, String> {
+    use crate::transport::PROTOCOL_VERSION;
+    if proto_version != PROTOCOL_VERSION {
+        return Err(format!(
+            "engine: protocol version mismatch (front-end {proto_version}, engine {PROTOCOL_VERSION})"
+        ));
+    }
+    installers
+        .iter()
+        .find(|i| i.tag == installer)
+        .ok_or_else(|| format!("engine: unknown builtin installer '{installer}'"))
+}
+
 /// Run the engine loop on an inherited socket (fd 3).
 /// The front-end passes the socket as fd 3 before exec.
-/// Never returns.
-pub fn run_engine() -> ! {
+///
+/// `installers` is this binary's compiled-in table of shell-parity
+/// targets; the tag `Attach` names is looked up here, never guessed —
+/// an unrecognised tag refuses the session as loudly as a protocol
+/// mismatch, since a wire engine speaking the wrong builtins is exactly
+/// the incoherence this rail exists to rule out. Never returns.
+pub fn run_engine(installers: &[EngineInstaller]) -> ! {
     // SAFETY: fd 3 is the socket inherited from the front-end
     let stream = unsafe { UnixStream::from_raw_fd(3) };
     let reader_ch = WireChannel::from_stream(stream);
     let writer_ch = reader_ch.try_clone().expect("try_clone engine channel");
     let writer = Arc::new(Mutex::new(writer_ch));
+    let mut reader_ch = reader_ch;
 
-    let shell = Shell::new(Default::default());
+    // ── Await Attach before anything else: the engine speaks no shell
+    // until the front-end has named its protocol version and its
+    // builtin installer. Nothing else is a legal first frame, so this is
+    // a single read, not a loop.
+    let shell = match reader_ch.read_frame() {
+        Ok(Some(Frame::Attach {
+            endpoint,
+            cwd,
+            home,
+            rc_path,
+            proto_version,
+            installer,
+        })) => {
+            let target = match resolve_installer(installers, proto_version, &installer) {
+                Ok(target) => target,
+                Err(msg) => {
+                    eprintln!("{msg}");
+                    std::process::exit(1);
+                }
+            };
+            // Restore the session environment.
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "engine cwd restore during Attach — sets engine process cwd, not Shell logical cwd"
+            )]
+            if let Err(e) = std::env::set_current_dir(&cwd) {
+                eprintln!("engine: failed to set cwd to {}: {e}", cwd.display());
+            }
+            // SAFETY: single-threaded engine startup, no other threads
+            unsafe {
+                std::env::set_var("HOME", &home);
+            }
+            let _ = endpoint; // TODO Phase 2 Task 6: pass terminal fds via SCM_RIGHTS
+            let _ = rc_path; // TODO: load rc_path — needs the host's RcCtx/plugin machinery, not a core-level concern yet
+
+            let mut shell = crate::driver::boot_shell(Default::default(), target.prelude);
+            (target.install)(&mut shell);
+            shell
+        }
+        Ok(Some(Frame::Detach)) | Ok(None) => std::process::exit(0),
+        Ok(Some(_)) => {
+            eprintln!("engine: expected Attach as the first frame");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("engine: read error awaiting attach: {e}");
+            std::process::exit(1);
+        }
+    };
 
     // Rendezvous channel: try_send succeeds only when the worker is
     // idle (blocked on recv).  While the worker runs a turn, try_send
@@ -198,7 +293,6 @@ pub fn run_engine() -> ! {
     });
 
     // ── Reader loop (this thread) ──────────────────────────────────
-    let mut reader_ch = reader_ch;
     loop {
         match reader_ch.read_frame() {
             Ok(Some(Frame::Dispatch(id, turn))) => {
@@ -235,36 +329,8 @@ pub fn run_engine() -> ! {
             }
             Ok(Some(Frame::Control(Control::Suspend))) => {}
             Ok(Some(Frame::Control(Control::Resume))) => {}
-            Ok(Some(Frame::Attach {
-                endpoint,
-                cwd,
-                home,
-                rc_path,
-                proto_version,
-            })) => {
-                // Check protocol version.
-                use crate::transport::PROTOCOL_VERSION;
-                if proto_version != PROTOCOL_VERSION {
-                    eprintln!(
-                        "engine: protocol version mismatch (front-end {}, engine {})",
-                        proto_version, PROTOCOL_VERSION
-                    );
-                    std::process::exit(1);
-                }
-                // Restore the session environment.
-                #[allow(
-                    clippy::disallowed_methods,
-                    reason = "engine cwd restore during Attach — sets engine process cwd, not Shell logical cwd"
-                )]
-                if let Err(e) = std::env::set_current_dir(&cwd) {
-                    eprintln!("engine: failed to set cwd to {}: {e}", cwd.display());
-                }
-                // SAFETY: single-threaded engine startup, no other threads
-                unsafe {
-                    std::env::set_var("HOME", &home);
-                }
-                let _ = endpoint; // TODO Phase 2 Task 6: pass terminal fds via SCM_RIGHTS
-                let _ = rc_path; // TODO: load rc_path with Shell::load_rc when available
+            Ok(Some(Frame::Attach { .. })) => {
+                eprintln!("engine: unexpected second Attach");
             }
             Ok(Some(Frame::Detach)) | Ok(None) => {
                 crate::process::request_foreground_cancel(crate::process::CancelCause::Explicit);
@@ -420,5 +486,52 @@ mod wire_desk_tests {
             desk.slots.lock().unwrap().is_empty(),
             "an unknown id must not mint a slot"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::PROTOCOL_VERSION;
+
+    fn stub_installers() -> Vec<EngineInstaller> {
+        vec![EngineInstaller {
+            tag: "exarch-agent",
+            prelude: {
+                static P: std::sync::OnceLock<BakedPrelude> = std::sync::OnceLock::new();
+                P.get_or_init(BakedPrelude::bake_runtime)
+            },
+            install: |_shell| {},
+        }]
+    }
+
+    #[test]
+    fn resolve_installer_matches_known_tag() {
+        let installers = stub_installers();
+        match resolve_installer(&installers, PROTOCOL_VERSION, "exarch-agent") {
+            Ok(target) => assert_eq!(target.tag, "exarch-agent"),
+            Err(msg) => panic!("known tag must resolve, got {msg}"),
+        }
+    }
+
+    #[test]
+    fn resolve_installer_refuses_unknown_tag() {
+        let installers = stub_installers();
+        match resolve_installer(&installers, PROTOCOL_VERSION, "no-such-installer") {
+            Ok(_) => panic!("unknown tag must be refused"),
+            Err(msg) => {
+                assert!(msg.contains("unknown builtin installer"));
+                assert!(msg.contains("no-such-installer"));
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_installer_refuses_protocol_mismatch_before_tag_lookup() {
+        let installers = stub_installers();
+        match resolve_installer(&installers, PROTOCOL_VERSION + 1, "exarch-agent") {
+            Ok(_) => panic!("a mismatched protocol version must be refused"),
+            Err(msg) => assert!(msg.contains("protocol version mismatch")),
+        }
     }
 }

@@ -17,6 +17,7 @@
 //! result is delivered up its parent's mailbox by the spawn site, not
 //! here, so `drive` itself is identical for all.
 
+use crate::agent_builtins;
 use crate::bootstrap::Scratch;
 use crate::bus::{
     AgentId, AgentOutcome, Emitter, Inbox, InboxMsg, Kind, Mailbox, ParkMode, Turn,
@@ -357,6 +358,7 @@ impl Agent {
             cwd,
             std::path::PathBuf::from(&home),
             None, // rc_path
+            agent_builtins::INSTALLER_TAG.to_string(),
         );
         // Every agent — the trunk and each fork, both modes — owns its trace,
         // born in the same dir as its `events.json`.

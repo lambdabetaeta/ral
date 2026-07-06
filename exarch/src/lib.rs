@@ -61,7 +61,11 @@ pub fn install_child_hooks_and_serve_helpers() -> Option<u8> {
     });
     #[cfg(unix)]
     if std::env::args().any(|a| a == "--engine") {
-        ral_core::engine::run_engine();
+        ral_core::engine::run_engine(&[ral_core::engine::EngineInstaller {
+            tag: agent_builtins::INSTALLER_TAG,
+            prelude: &shell_eval::PRELUDE,
+            install: agent_builtins::install_on,
+        }]);
     }
     if let Some(code) = ral_core::try_run_pipeline_stage_helper() {
         return Some(code);

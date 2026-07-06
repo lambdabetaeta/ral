@@ -33,6 +33,11 @@ use std::time::Duration;
 
 const AGENT_SOURCE: &str = include_str!("../data/agent.ral");
 
+/// The tag `Frame::Attach` carries to name this module's [`install_on`] as
+/// the wire engine child's builtin installer — see `core/src/engine.rs`'s
+/// installer table and the enquiry-channel ADR's shell-parity item.
+pub const INSTALLER_TAG: &str = "exarch-agent";
+
 /// Register the exarch builtins process-wide and install them into `shell`.
 /// Idempotent.
 ///

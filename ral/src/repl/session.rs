@@ -179,6 +179,7 @@ impl Session {
             cwd,
             std::path::PathBuf::from(&home),
             None, // rc_path
+            crate::ENGINE_INSTALLER_TAG.to_string(),
         );
         while let Flow::Continue = self.turn() {}
         ExitCode::from(self.exit_code)

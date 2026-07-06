@@ -22,6 +22,13 @@ pub(crate) use platform::{load_exit_hints, probe_terminal};
 /// The prelude baked into this binary at build time by `build.rs`.
 pub(crate) static PRELUDE: ral_core::driver::BakedPrelude = ral_core::baked_prelude!();
 
+/// The tag the REPL's `Transport::attach` names as its builtin installer.
+/// The REPL captures its host builtins (`jobs`/`fg`/`bg`/…) as boot-time
+/// closures over co-resident state (`repl::host_handlers`), which a wire
+/// engine child cannot construct — so this tag maps to "install nothing",
+/// the honest absence the bare REPL already gives every other host facility.
+pub(crate) const ENGINE_INSTALLER_TAG: &str = "repl";
+
 fn main() -> ExitCode {
     #[cfg(windows)]
     ral_core::io::enable_virtual_terminal_processing();
@@ -30,6 +37,15 @@ fn main() -> ExitCode {
     // pipeline helpers see the default disposition.
     #[cfg(unix)]
     ral_core::builtins::uutils::init_signal_dispositions();
+
+    #[cfg(unix)]
+    if std::env::args().any(|a| a == "--engine") {
+        ral_core::engine::run_engine(&[ral_core::engine::EngineInstaller {
+            tag: ENGINE_INSTALLER_TAG,
+            prelude: &PRELUDE,
+            install: |_shell| {},
+        }]);
+    }
 
     if let Some(code) = ral_core::try_run_pipeline_stage_helper() {
         return ExitCode::from(code);
