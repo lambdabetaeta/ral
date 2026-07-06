@@ -4,7 +4,6 @@
 use std::os::unix::io::FromRawFd;
 use std::os::unix::net::UnixStream;
 
-use crate::driver::TurnRequest;
 use crate::serial::FOValue;
 use crate::transport::{Control, DispatchId, Event, Frame, Turn, report_to_mirror};
 use crate::types::{Boundary, Shell, SurfaceSink};
@@ -76,41 +75,29 @@ pub fn run_engine() -> ! {
     std::thread::spawn(move || {
         let mut shell = shell;
         while let Ok((id, turn)) = turn_rx.recv() {
-            // Extract the request mirror
-            let req = match &turn {
-                Turn::Source { req, .. } | Turn::Hook { req, .. } => req,
-            };
-
-            // Build the TurnRequest
-            let script_name = req.script_name.clone();
-            let surface_sink: SurfaceSink = Arc::new(ChannelSurfaceSink {
+            // The live handles this turn runs under; the mirror's data fields
+            // join them in `into_request`.  Phase A installs no desk on the
+            // wire engine.
+            let surface: Option<SurfaceSink> = Some(Arc::new(ChannelSurfaceSink {
                 id,
                 writer: worker_writer.clone(),
-            });
-            let boundary_sink: Option<Boundary> = Some(Arc::new(ChannelBoundarySink {
+            }));
+            let boundary: Option<Boundary> = Some(Arc::new(ChannelBoundarySink {
                 id,
                 writer: worker_writer.clone(),
             }));
 
-            let turn_req = TurnRequest {
-                script_name: &script_name,
-                caps: req.caps.clone(),
-                turn_limit: req.turn_limit,
-                detached_lease: req.detached_lease,
-                worker_cap: req.worker_cap,
-                io: req.io,
-                terminal: req.terminal,
-                stdin: req.stdin,
-                surface: Some(surface_sink),
-                boundary: boundary_sink,
-                desk: None,
-                lifecycle: Box::new(()),
-            };
-
-            // Run the turn against the shell
+            // Run the turn against the shell.  `req` is moved out per arm so
+            // `into_request` can borrow its `script_name` while the body runs.
             let report = match turn {
-                Turn::Source { src, .. } => shell.run_source_turn(&src, turn_req),
-                Turn::Hook { name, args, .. } => shell.run_hook(&name, args, turn_req),
+                Turn::Source { src, req } => {
+                    let turn_req = req.into_request(surface, boundary, None, Box::new(()));
+                    shell.run_source_turn(&src, turn_req)
+                }
+                Turn::Hook { name, args, req } => {
+                    let turn_req = req.into_request(surface, boundary, None, Box::new(()));
+                    shell.run_hook(&name, args, turn_req)
+                }
             };
 
             // Convert and send the terminal Report frame.

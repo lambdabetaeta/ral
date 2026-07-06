@@ -164,6 +164,37 @@ pub struct ReqMirror {
     pub stdin: crate::driver::TurnStdin,
 }
 
+impl ReqMirror {
+    /// Assemble the [`TurnRequest`](crate::driver::TurnRequest) a dispatch
+    /// runs: the mirror's data fields, plus the live handles the caller owns.
+    /// Both request builders — the identity transport's `dispatch` and the
+    /// wire engine's worker — go through here, so a handle added to
+    /// `TurnRequest` is threaded once, on both paths, and forgetting one side
+    /// is unwritable.
+    pub fn into_request<'a>(
+        &'a self,
+        surface: Option<SurfaceSink>,
+        boundary: Option<Boundary>,
+        desk: Option<crate::types::Desk>,
+        lifecycle: Box<dyn crate::turn::TurnLifecycle + 'a>,
+    ) -> crate::driver::TurnRequest<'a> {
+        crate::driver::TurnRequest {
+            script_name: &self.script_name,
+            caps: self.caps.clone(),
+            turn_limit: self.turn_limit,
+            detached_lease: self.detached_lease,
+            worker_cap: self.worker_cap,
+            io: self.io,
+            terminal: self.terminal,
+            stdin: self.stdin,
+            surface,
+            boundary,
+            desk,
+            lifecycle,
+        }
+    }
+}
+
 /// Mirror of `TurnReport`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ReportMirror {
@@ -241,6 +272,48 @@ pub trait Transport: Send + Sync {
     fn detach(&self);
     /// Returns `self` as an `&dyn Any` for downcast support.
     fn as_any(&self) -> &dyn std::any::Any;
+}
+
+// ── Dispatch loop ─────────────────────────────────────────────────────
+
+/// Mint a dispatch id, send `turn` down `transport`, and drain the event
+/// stream to the turn's terminal [`Report`](Event::Report), handing each
+/// surface regime to its caller-supplied handler.
+///
+/// The two regimes stay distinct on purpose: `on_surface` sees each live
+/// [`Event::Surface`] value in order, while `on_boundary` sees a detached
+/// worker's [`Event::BoundarySurface`] batch flushed at the turn boundary. A
+/// host that tracks live pins (exarch) must update its mirror only from
+/// `on_surface` — the boundary batch does not touch the pin map — so
+/// flattening the two into one undistinguished stream would be a behaviour
+/// change, not a fold.
+///
+/// Returns the [`ReportMirror`], or `None` if the stream closed without a
+/// Report (impossible under the identity transport, which sends the Report
+/// synchronously before `dispatch` returns; each caller keeps its own
+/// no-Report handling).
+pub fn dispatch_to_report(
+    transport: &dyn Transport,
+    turn: Turn,
+    mut on_surface: impl FnMut(FOValue),
+    mut on_boundary: impl FnMut(Vec<FOValue>),
+) -> Option<ReportMirror> {
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let id = DispatchId(NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+
+    transport.dispatch(id, turn);
+
+    while let Some(frame) = transport.events().recv() {
+        match frame {
+            Frame::Event(did, event) if did == id => match event {
+                Event::Surface(val) => on_surface(val),
+                Event::BoundarySurface(batch) => on_boundary(batch),
+                Event::Report(report) => return Some(report),
+            },
+            _ => {}
+        }
+    }
+    None
 }
 
 // ── Senders and receivers ─────────────────────────────────────────────
@@ -337,32 +410,30 @@ impl EventReceiver {
 
 struct PerDispatchSink {
     event_tx: mpsc::Sender<Frame>,
-    current: std::sync::Mutex<Option<DispatchId>>,
+    /// The in-flight dispatch id (`0` = none), the one atomic `dispatch`
+    /// sets and the boundary sink also reads. A surface value emitted while
+    /// it reads `0` has no dispatch to correlate to and is dropped.
+    current_dispatch: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl PerDispatchSink {
-    fn new(event_tx: mpsc::Sender<Frame>) -> Self {
+    fn new(event_tx: mpsc::Sender<Frame>, current_dispatch: Arc<std::sync::atomic::AtomicU64>) -> Self {
         Self {
             event_tx,
-            current: std::sync::Mutex::new(None),
+            current_dispatch,
         }
-    }
-
-    fn set_dispatch(&self, id: DispatchId) {
-        *self.current.lock().unwrap() = Some(id);
-    }
-
-    fn clear_dispatch(&self) {
-        *self.current.lock().unwrap() = None;
     }
 }
 
 impl crate::types::EventSink for PerDispatchSink {
     fn emit(&self, ev: &FOValue) {
-        if let Some(id) = *self.current.lock().unwrap() {
+        let id = self
+            .current_dispatch
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if id != 0 {
             let _ = self
                 .event_tx
-                .send(Frame::Event(id, Event::Surface(ev.clone())));
+                .send(Frame::Event(DispatchId(id), Event::Surface(ev.clone())));
         }
     }
 }
@@ -454,8 +525,11 @@ impl IdentityTransport {
     /// Create a new identity transport that owns `shell`.
     pub fn new(shell: crate::types::Shell) -> Self {
         let (event_tx, event_rx) = mpsc::channel();
-        let surface_sink = Arc::new(PerDispatchSink::new(event_tx.clone()));
         let current_dispatch = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let surface_sink = Arc::new(PerDispatchSink::new(
+            event_tx.clone(),
+            current_dispatch.clone(),
+        ));
         let control = ControlSender::new();
         control.clone().publish();
 
@@ -554,45 +628,35 @@ impl Transport for IdentityTransport {
             slot: &self.dispatch_thread,
         };
 
-        // Install the per-dispatch surface sink.
-        engine.surface_sink.set_dispatch(id);
+        // Mark the in-flight dispatch: the one atomic both the surface and
+        // boundary sinks read to stamp and gate their frames.
         engine
             .current_dispatch
             .store(id.0, std::sync::atomic::Ordering::Relaxed);
 
-        // Extract the ReqMirror (same shape for both Source and Hook).
-        let req = match &turn {
-            Turn::Source { req, .. } | Turn::Hook { req, .. } => req,
-        };
+        // The live handles this dispatch lends the turn; the mirror's data
+        // fields join them in `into_request`.
+        let surface = Some(engine.surface_sink.clone() as SurfaceSink);
+        let boundary = engine.boundary_sink.clone();
+        let desk = engine.desk.clone();
 
-        // Build the TurnRequest from the mirror.  script_name is
-        // borrowed from the req which lives on our stack.
-        let script_name = req.script_name.clone();
-        let turn_req = crate::driver::TurnRequest {
-            script_name: &script_name,
-            caps: req.caps.clone(),
-            turn_limit: req.turn_limit,
-            detached_lease: req.detached_lease,
-            worker_cap: req.worker_cap,
-            io: req.io,
-            terminal: req.terminal,
-            stdin: req.stdin,
-            surface: Some(engine.surface_sink.clone() as SurfaceSink),
-            boundary: engine.boundary_sink.clone(),
-            desk: engine.desk.clone(),
-            lifecycle: Box::new(()),
-        };
-
-        // Run the turn against the shell.
+        // Run the turn against the shell.  `req` is moved out of the turn per
+        // arm so `into_request` can borrow its `script_name` while the body
+        // runs.
         let report = match turn {
-            Turn::Source { src, .. } => engine.shell.run_source_turn(&src, turn_req),
-            Turn::Hook { name, args, .. } => engine.shell.run_hook(&name, args, turn_req),
+            Turn::Source { src, req } => {
+                let turn_req = req.into_request(surface, boundary, desk, Box::new(()));
+                engine.shell.run_source_turn(&src, turn_req)
+            }
+            Turn::Hook { name, args, req } => {
+                let turn_req = req.into_request(surface, boundary, desk, Box::new(()));
+                engine.shell.run_hook(&name, args, turn_req)
+            }
         };
 
         // Convert TurnReport → ReportMirror.
         let report_mirror = report_to_mirror(report);
 
-        engine.surface_sink.clear_dispatch();
         engine
             .current_dispatch
             .store(0, std::sync::atomic::Ordering::Relaxed);

@@ -345,9 +345,7 @@ pub fn run_shell(
     let tool_start = std::time::Instant::now();
 
     // Build the transport-level Turn.
-    use ral_core::transport::{
-        DispatchId, Event, Frame, ReportMirror, ReqMirror, ResultMirror, Turn,
-    };
+    use ral_core::transport::{ReportMirror, ReqMirror, ResultMirror, Turn};
     use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
 
     let req = ReqMirror {
@@ -364,64 +362,51 @@ pub fn run_shell(
         stdin: TurnStdin::Empty,
     };
 
-    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let id = DispatchId(NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
-
     let turn = Turn::Source {
         src: cmd.to_string(),
         req,
     };
 
-    // Dispatch the turn synchronously.
-    transport.dispatch(id, turn);
-
-    // Drain events: surface values go to the bus, boundary batches go to
-    // the bus, the Report is the terminal frame.
-    let mut report: Option<ReportMirror> = None;
-    while let Some(frame) = transport.events().recv() {
-        match frame {
-            Frame::Event(did, event) if did == id => match event {
-                Event::Surface(val) => {
-                    let live_val = RalValue::from(val);
-                    if let Some(kind) = decode_surface(&live_val) {
-                        if reject_protected_pin(&kind, emit) {
-                            continue;
+    // Dispatch and drain to the Report, rendering surface classes to the bus.
+    // The live sink tracks pins; the boundary batch (a detached worker's
+    // deferred flush) renders identically but never touches the pin mirror.
+    let report = ral_core::transport::dispatch_to_report(
+        transport,
+        turn,
+        |val| {
+            let live_val = RalValue::from(val);
+            if let Some(kind) = decode_surface(&live_val) {
+                if reject_protected_pin(&kind, emit) {
+                    return;
+                }
+                if let Some(pins) = &pins
+                    && let Ok(mut m) = pins.lock()
+                {
+                    match &kind {
+                        Kind::Pin { key, card } => {
+                            m.insert(key.clone(), PinDigest::new(key, card.clone()));
                         }
-                        if let Some(pins) = &pins
-                            && let Ok(mut m) = pins.lock()
-                        {
-                            match &kind {
-                                Kind::Pin { key, card } => {
-                                    m.insert(key.clone(), PinDigest::new(key, card.clone()));
-                                }
-                                Kind::Unpin { key } => {
-                                    m.remove(key);
-                                }
-                                _ => {}
-                            }
+                        Kind::Unpin { key } => {
+                            m.remove(key);
                         }
-                        emit.emit(kind);
+                        _ => {}
                     }
                 }
-                Event::BoundarySurface(batch) => {
-                    for val in batch {
-                        let live_val = RalValue::from(val);
-                        if let Some(kind) = decode_surface(&live_val) {
-                            if reject_protected_pin(&kind, emit) {
-                                continue;
-                            }
-                            emit.emit(kind);
-                        }
+                emit.emit(kind);
+            }
+        },
+        |batch| {
+            for val in batch {
+                let live_val = RalValue::from(val);
+                if let Some(kind) = decode_surface(&live_val) {
+                    if reject_protected_pin(&kind, emit) {
+                        continue;
                     }
+                    emit.emit(kind);
                 }
-                Event::Report(r) => {
-                    report = Some(r);
-                    break;
-                }
-            },
-            _ => {}
-        }
-    }
+            }
+        },
+    );
 
     let report = match report {
         Some(r) => r,

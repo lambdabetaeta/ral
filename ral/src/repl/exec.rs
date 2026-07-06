@@ -11,8 +11,7 @@
 //! captured builtins installed at boot (see [`super::host_handlers`]).
 
 use ral_core::transport::{
-    self, DiagMirror, DispatchId, Event, Frame, IdentityTransport, ReportMirror, ReqMirror,
-    ResultMirror, Transport, Turn,
+    self, DiagMirror, IdentityTransport, ReportMirror, ReqMirror, ResultMirror, Turn,
 };
 use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
 use ral_core::{Value, builtins};
@@ -131,40 +130,15 @@ pub(super) fn execute_input(
         stdin: TurnStdin::Inherit,
     };
 
-    // Simple counter for dispatch ids.
-    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let id = DispatchId(NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
-
     let turn = Turn::Source {
         src: trimmed.to_string(),
         req,
     };
 
-    // Dispatch the turn synchronously.
-    transport.dispatch(id, turn);
-
-    // Drain events from the transport.  The REPL expects no Surface events
-    // (surface: None today), just the terminal Report.
-    let mut report: Option<ReportMirror> = None;
-    while let Some(frame) = transport.events().recv() {
-        match frame {
-            Frame::Event(did, event) if did == id => match event {
-                Event::Surface(_val) => {
-                    // REPL does not render surface events today; drop.
-                }
-                Event::BoundarySurface(_batch) => {
-                    // REPL has no detached workers with boundary; drop.
-                }
-                Event::Report(r) => {
-                    report = Some(r);
-                    break;
-                }
-            },
-            _ => {
-                // Stale or mismatched event; ignore.
-            }
-        }
-    }
+    // Dispatch and drain to the terminal Report.  The REPL renders neither
+    // live surface values nor detached-worker boundary batches today, so both
+    // regimes drop.
+    let report = transport::dispatch_to_report(transport, turn, |_val| {}, |_batch| {});
 
     let report = match report {
         Some(r) => r,
