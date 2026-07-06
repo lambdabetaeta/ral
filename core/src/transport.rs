@@ -81,6 +81,16 @@ pub enum Frame {
     /// One whole turn.  Boxed so every other `Frame` variant is not sized
     /// to `Turn`'s stack footprint.
     Dispatch(DispatchId, Box<Turn>),
+    /// A pure, boundary-time read of session state — no wall, no sinks, no
+    /// clock, absent by type, which is why it is a `Frame` and not a `Turn`
+    /// variant. Answered through the same `Event::Report` rail as a
+    /// dispatch and correlated by the same `DispatchId`; it serialises with
+    /// dispatches on the engine's single worker rendezvous, so a probe sent
+    /// while a turn runs gets the same "engine busy" answer a second
+    /// dispatch would. The `FOValue` names the reading class (a
+    /// `Variant` label, decoded by [`answer_probe`]); an unrecognised class
+    /// answers an error naming it, never a silent default.
+    Probe(DispatchId, FOValue),
     /// Engine → front-end. May arrive while a Dispatch is outstanding.
     Event(DispatchId, Event),
     /// Front-end → engine. Out-of-band: deliverable while a Dispatch is
@@ -324,6 +334,12 @@ pub trait Transport: Send + Sync {
     /// execution and may be drained concurrently.
     fn dispatch(&self, id: DispatchId, turn: Turn);
 
+    /// Run a pure, boundary-time read of session state synchronously and
+    /// return its answer. Serialises with `dispatch` on the same rendezvous
+    /// (busy → the same "engine busy" error a second dispatch would get);
+    /// an unrecognised reading class answers `Err` naming the class.
+    fn probe(&self, reading: FOValue) -> Result<FOValue, String>;
+
     /// The out-of-band control sender — writable while a dispatch is in
     /// flight.  Under the identity transport this writes directly to the
     /// foreground `CancelScope`.
@@ -414,6 +430,127 @@ pub fn dispatch_to_report(
         }
     }
     None
+}
+
+// ── Probe decoder ─────────────────────────────────────────────────────
+
+/// The one decoder for every probe reading, shared by `IdentityTransport`
+/// and the wire engine (`core/src/engine.rs`) so a new reading class costs
+/// one arm here, never a second copy per transport. Each class is an
+/// `FOValue::Variant` label, matching the accessor traffic
+/// `exarch/src/agent.rs` used to read straight through `shell_mut()`:
+/// `` `worker-count ``, `` `binding-count ``, `` `leased-binding-count ``,
+/// `` `env-var [name] ``, `` `cwd ``, `` `grant-depth ``, `` `workers ``. An
+/// unrecognised class answers `Err` naming it, never a silent default.
+pub fn answer_probe(shell: &mut crate::types::Shell, req: FOValue) -> Result<FOValue, String> {
+    let FOValue::Variant { label, payload } = &req else {
+        return Err(format!("probe request must be a variant, got {req:?}"));
+    };
+    match label.as_str() {
+        "worker-count" => Ok(FOValue::Int {
+            value: shell.worker_count() as i64,
+        }),
+        "binding-count" => Ok(FOValue::Int {
+            value: shell.binding_count() as i64,
+        }),
+        "leased-binding-count" => Ok(FOValue::Int {
+            value: shell.leased_binding_count() as i64,
+        }),
+        "env-var" => {
+            let name = match payload.as_deref() {
+                Some(FOValue::String { value }) => value.as_str(),
+                _ => return Err("`env-var probe requires a string payload".into()),
+            };
+            Ok(match shell.env_var(name) {
+                Some(value) => FOValue::Variant {
+                    label: "some".into(),
+                    payload: Some(Box::new(FOValue::String { value })),
+                },
+                None => FOValue::Variant {
+                    label: "none".into(),
+                    payload: None,
+                },
+            })
+        }
+        "cwd" => Ok(FOValue::String {
+            value: shell.cwd().display().to_string(),
+        }),
+        "grant-depth" => Ok(FOValue::Int {
+            value: shell.grant_depth() as i64,
+        }),
+        "workers" => {
+            use crate::types::{HandleState, LeaseClass};
+            let items = shell
+                .workers()
+                .into_iter()
+                .map(|entry| {
+                    let running =
+                        *entry.handle.state.lock().unwrap() == HandleState::Running;
+                    let up_secs = entry.started.elapsed().unwrap_or_default().as_secs();
+                    let idle_secs = entry
+                        .handle
+                        .last_observed
+                        .lock()
+                        .unwrap()
+                        .elapsed()
+                        .as_secs();
+                    FOValue::Map {
+                        entries: vec![
+                            (
+                                "id".into(),
+                                FOValue::Int {
+                                    value: entry.id.0 as i64,
+                                },
+                            ),
+                            (
+                                "cmd".into(),
+                                FOValue::String { value: entry.cmd },
+                            ),
+                            (
+                                "class".into(),
+                                FOValue::String {
+                                    value: match entry.class {
+                                        LeaseClass::Worker => "worker".into(),
+                                        LeaseClass::Durable => "durable".into(),
+                                    },
+                                },
+                            ),
+                            ("running".into(), FOValue::Bool { value: running }),
+                            (
+                                "up-secs".into(),
+                                FOValue::Int {
+                                    value: up_secs as i64,
+                                },
+                            ),
+                            (
+                                "idle-secs".into(),
+                                FOValue::Int {
+                                    value: idle_secs as i64,
+                                },
+                            ),
+                            (
+                                "settled-epoch".into(),
+                                match entry.settled_epoch {
+                                    Some(epoch) => FOValue::Variant {
+                                        label: "some".into(),
+                                        payload: Some(Box::new(FOValue::Int {
+                                            value: epoch as i64,
+                                        })),
+                                    },
+                                    None => FOValue::Variant {
+                                        label: "none".into(),
+                                        payload: None,
+                                    },
+                                },
+                            ),
+                        ],
+                    }
+                })
+                .collect();
+            Ok(FOValue::List { items })
+        }
+        other => Err(format!("unknown probe class `{other}")),
+    }
 }
 
 // ── Senders and receivers ─────────────────────────────────────────────
@@ -741,6 +878,12 @@ impl Transport for IdentityTransport {
             .send(Frame::Event(id, Event::Report(report)));
     }
 
+    fn probe(&self, reading: FOValue) -> Result<FOValue, String> {
+        self.check_not_reentrant();
+        let mut engine = self.engine.lock();
+        answer_probe(&mut engine.shell, reading)
+    }
+
     fn control(&self) -> &ControlSender {
         &self.control
     }
@@ -909,6 +1052,29 @@ impl Drop for WireTransport {
 impl Transport for WireTransport {
     fn dispatch(&self, id: DispatchId, turn: Turn) {
         self.write(&Frame::Dispatch(id, Box::new(turn)));
+    }
+
+    fn probe(&self, reading: FOValue) -> Result<FOValue, String> {
+        static NEXT_PROBE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let id = DispatchId(NEXT_PROBE_ID.fetch_add(1, Ordering::Relaxed));
+        self.write(&Frame::Probe(id, reading));
+        loop {
+            match self.events_recv.recv() {
+                Some(Frame::Event(did, Event::Report(report))) if did == id => {
+                    return match report {
+                        Report::Ran {
+                            result: Ok(v), ..
+                        } => Ok(v),
+                        Report::Ran {
+                            result: Err(break_), ..
+                        } => Err(format!("{break_:?}")),
+                        Report::Static { diagnostics } => Err(format!("{diagnostics:?}")),
+                    };
+                }
+                Some(_) => continue,
+                None => return Err("engine connection closed".into()),
+            }
+        }
     }
 
     fn control(&self) -> &ControlSender {
@@ -1137,5 +1303,163 @@ mod enquiry_tests {
             std::sync::Arc::ptr_eq(&desk, &installed),
             "the installed desk must be the same Arc set_desk was given"
         );
+    }
+}
+
+// ── Probe tests ───────────────────────────────────────────────────────
+//
+// Identity-only: engine-busy serialisation needs a second process racing
+// the wire engine's rendezvous, impractical to exercise as a unit test —
+// skipped, noted rather than faked.
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    use crate::types::Shell;
+
+    /// `` `worker-count `` on a freshly-built shell answers `0` — nothing has
+    /// been spawned.
+    #[test]
+    fn worker_count_answers_zero_on_a_fresh_shell() {
+        let transport = IdentityTransport::new(Shell::new(Default::default()));
+        let answer = transport
+            .probe(FOValue::Variant {
+                label: "worker-count".into(),
+                payload: None,
+            })
+            .expect("worker-count must answer");
+        assert_eq!(answer, FOValue::Int { value: 0 });
+    }
+
+    /// `` `binding-count `` and `` `leased-binding-count `` both answer
+    /// plain integers — a fresh shell has no leased bindings (the ledger is
+    /// unarmed).
+    #[test]
+    fn binding_probes_answer_integers() {
+        let transport = IdentityTransport::new(Shell::new(Default::default()));
+        match transport.probe(FOValue::Variant {
+            label: "binding-count".into(),
+            payload: None,
+        }) {
+            Ok(FOValue::Int { .. }) => {}
+            other => panic!("binding-count must answer an Int, got {other:?}"),
+        }
+        let leased = transport
+            .probe(FOValue::Variant {
+                label: "leased-binding-count".into(),
+                payload: None,
+            })
+            .expect("leased-binding-count must answer");
+        assert_eq!(leased, FOValue::Int { value: 0 });
+    }
+
+    /// `` `env-var `` answers `` `none `` for a name never set, and
+    /// `` `some [value] `` after `Shell::set_env_var` installs one.
+    #[test]
+    fn env_var_probe_round_trips_the_overlay() {
+        let mut shell = Shell::new(Default::default());
+        shell.set_env_var("PROBE_TEST_VAR", "42");
+        let transport = IdentityTransport::new(shell);
+
+        let absent = transport
+            .probe(FOValue::Variant {
+                label: "env-var".into(),
+                payload: Some(Box::new(FOValue::String {
+                    value: "PROBE_TEST_VAR_ABSENT".into(),
+                })),
+            })
+            .expect("env-var must answer");
+        assert_eq!(
+            absent,
+            FOValue::Variant {
+                label: "none".into(),
+                payload: None
+            }
+        );
+
+        let present = transport
+            .probe(FOValue::Variant {
+                label: "env-var".into(),
+                payload: Some(Box::new(FOValue::String {
+                    value: "PROBE_TEST_VAR".into(),
+                })),
+            })
+            .expect("env-var must answer");
+        assert_eq!(
+            present,
+            FOValue::Variant {
+                label: "some".into(),
+                payload: Some(Box::new(FOValue::String {
+                    value: "42".into()
+                }))
+            }
+        );
+    }
+
+    /// `` `cwd `` answers the shell's logical cwd as a string.
+    #[test]
+    fn cwd_probe_answers_a_string() {
+        let transport = IdentityTransport::new(Shell::new(Default::default()));
+        match transport.probe(FOValue::Variant {
+            label: "cwd".into(),
+            payload: None,
+        }) {
+            Ok(FOValue::String { .. }) => {}
+            other => panic!("cwd must answer a String, got {other:?}"),
+        }
+    }
+
+    /// `` `grant-depth `` answers the grant stack's frame count — at least
+    /// the ambient root frame on a fresh shell.
+    #[test]
+    fn grant_depth_probe_answers_at_least_one() {
+        let transport = IdentityTransport::new(Shell::new(Default::default()));
+        match transport.probe(FOValue::Variant {
+            label: "grant-depth".into(),
+            payload: None,
+        }) {
+            Ok(FOValue::Int { value }) => assert!(value >= 1),
+            other => panic!("grant-depth must answer an Int, got {other:?}"),
+        }
+    }
+
+    /// `` `workers `` on a fresh shell answers an empty list.
+    #[test]
+    fn workers_probe_answers_an_empty_list_on_a_fresh_shell() {
+        let transport = IdentityTransport::new(Shell::new(Default::default()));
+        let answer = transport
+            .probe(FOValue::Variant {
+                label: "workers".into(),
+                payload: None,
+            })
+            .expect("workers must answer");
+        assert_eq!(answer, FOValue::List { items: vec![] });
+    }
+
+    /// An unrecognised probe class answers `Err` naming the class, never a
+    /// silent default.
+    #[test]
+    fn unknown_probe_class_names_itself_in_the_error() {
+        let transport = IdentityTransport::new(Shell::new(Default::default()));
+        let err = transport
+            .probe(FOValue::Variant {
+                label: "not-a-real-class".into(),
+                payload: None,
+            })
+            .expect_err("an unrecognised class must not answer Ok");
+        assert!(
+            err.contains("not-a-real-class"),
+            "error must name the unrecognised class, got: {err}"
+        );
+    }
+
+    /// A probe request that is not a `Variant` at all — no class to read —
+    /// answers `Err` rather than panicking.
+    #[test]
+    fn non_variant_probe_request_is_an_honest_error() {
+        let transport = IdentityTransport::new(Shell::new(Default::default()));
+        let err = transport
+            .probe(FOValue::Unit)
+            .expect_err("a non-variant probe request must not answer Ok");
+        assert!(err.contains("variant"));
     }
 }

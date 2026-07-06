@@ -741,18 +741,15 @@ pub fn large_binding_card(name: &str, bytes: u64) -> Card {
 /// takes and valued by its birth description and age.  Host-authored only
 /// (`Agent::reconcile_service_pins`): a durable service's whole bound is
 /// legibility, and this pin is what makes the live set legible.
-pub fn services_pin_card(services: &[ral_core::types::WorkerEntry]) -> Card {
+pub(crate) fn services_pin_card(services: &[crate::agent::ProbedWorker]) -> Card {
     let rows = services
         .iter()
-        .map(|entry| {
-            let age = entry.started.elapsed().unwrap_or_default().as_secs();
-            Field {
-                label: format!("service {}", entry.id.0),
-                value: FieldVal::Inline(vec![span_plain(&format!(
-                    "{}  (up {age}s)",
-                    entry.cmd
-                ))]),
-            }
+        .map(|entry| Field {
+            label: format!("service {}", entry.id),
+            value: FieldVal::Inline(vec![span_plain(&format!(
+                "{}  (up {}s)",
+                entry.cmd, entry.up_secs
+            ))]),
         })
         .collect();
     Card(vec![Mark::Fields { rows }])

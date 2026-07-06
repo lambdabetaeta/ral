@@ -37,10 +37,27 @@ use crate::provider::{
 use crate::shell_eval;
 use crate::transcript::Transcript;
 use ral_core::Shell;
+use ral_core::serial::FOValue;
 use ral_core::transport::Transport;
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+/// A `` `workers `` probe row, decoded — the fields
+/// [`Agent::resource_rows`] and [`Agent::reconcile_service_pins`] actually
+/// read off the shell's worker registry, carried as data across the probe
+/// rail rather than the live core `WorkerEntry` (whose handle is not
+/// transportable). `pub(crate)` so [`crate::card::services_pin_card`] can
+/// render it without reaching back for the live core type.
+pub(crate) struct ProbedWorker {
+    pub(crate) id: u64,
+    pub(crate) cmd: String,
+    pub(crate) class: String,
+    pub(crate) running: bool,
+    pub(crate) up_secs: u64,
+    pub(crate) idle_secs: u64,
+    pub(crate) settled_epoch: Option<u64>,
+}
 
 pub struct Agent {
     pub id: AgentId,
@@ -740,13 +757,10 @@ impl Agent {
     /// the same shape as [`Self::set_commitment_pin`]/[`Self::
     /// unset_commitment_pin`] for `commitment:*`.
     fn reconcile_service_pins(&mut self, emit: &Emitter) {
-        let live: Vec<ral_core::types::WorkerEntry> = self
-            .transport
-            .shell_mut()
-            .shell
-            .workers()
+        let live: Vec<ProbedWorker> = self
+            .probe_workers()
             .into_iter()
-            .filter(|entry| entry.class == ral_core::types::LeaseClass::Durable)
+            .filter(|entry| entry.class == "durable")
             .collect();
 
         if live.is_empty() {
@@ -842,7 +856,7 @@ impl Agent {
         }
         self.disk_check_epoch = self.ral_epoch + DISK_WARN_CHECK_INTERVAL;
         let mut total = crate::resources::dir_size(self.log.dir());
-        if let Some(scratch) = self.transport.shell_mut().shell.env_var("EXARCH_SCRATCH") {
+        if let Some(scratch) = self.probe_env_var("EXARCH_SCRATCH") {
             total += crate::resources::dir_size(&std::path::PathBuf::from(&scratch));
         }
         if total > ceiling {
@@ -879,36 +893,34 @@ impl Agent {
     /// neither half reaches across a thread for the other's figures.
     fn resource_rows(&self) -> Vec<crate::resources::ProbeRow> {
         use crate::resources::{ProbeRow, terse_duration};
-        use ral_core::types::{HandleState, LeaseClass};
 
         let mut rows = Vec::new();
 
         // ── the worker registry: running and settled, by class ──────────
-        let entries = self.transport.shell_mut().shell.workers();
+        let entries = self.probe_workers();
         let mut running_worker = 0u64;
         let mut running_durable = 0u64;
         let mut settled = 0u64;
         let mut nearest_reap: Option<std::time::Duration> = None;
         let mut nearest_expiry: Option<u64> = None;
         for entry in &entries {
-            let running = *entry.handle.state.lock().unwrap() == HandleState::Running;
-            if running {
-                match entry.class {
-                    LeaseClass::Worker => {
+            if entry.running {
+                match entry.class.as_str() {
+                    "worker" => {
                         running_worker += 1;
                         // The nearer of the entry's two lease margins: idle
                         // remaining off the shared last-observed cell, and
                         // backstop remaining off its (display-only, close
                         // enough for a probe) wall-clock start.
                         let idle_left = shell_eval::DETACHED_WORKER_CEILING
-                            .saturating_sub(entry.handle.last_observed.lock().unwrap().elapsed());
-                        let age = entry.started.elapsed().unwrap_or_default();
+                            .saturating_sub(std::time::Duration::from_secs(entry.idle_secs));
+                        let age = std::time::Duration::from_secs(entry.up_secs);
                         let backstop_left =
                             shell_eval::DETACHED_WORKER_BACKSTOP.saturating_sub(age);
                         let left = idle_left.min(backstop_left);
                         nearest_reap = Some(nearest_reap.map_or(left, |m| m.min(left)));
                     }
-                    LeaseClass::Durable => running_durable += 1,
+                    _ => running_durable += 1,
                 }
             } else {
                 settled += 1;
@@ -998,16 +1010,23 @@ impl Agent {
         ));
 
         // ── the lexical scope ────────────────────────────────────────────
+        let probe_count = |label: &str| match self.transport.probe(FOValue::Variant {
+            label: label.into(),
+            payload: None,
+        }) {
+            Ok(FOValue::Int { value }) => value as u64,
+            other => unreachable!("`{label} probe must answer an Int, got {other:?}"),
+        };
         rows.push(ProbeRow::new(
             "bindings.count",
-            self.transport.shell_mut().shell.binding_count() as u64,
+            probe_count("binding-count"),
             None,
             "reap",
             Some("baseline (prelude, agent library, host seeds) never expires".to_string()),
         ));
         rows.push(ProbeRow::new(
             "bindings.leased",
-            self.transport.shell_mut().shell.leased_binding_count() as u64,
+            probe_count("leased-binding-count"),
             None,
             "reap",
             Some(format!(
@@ -1041,7 +1060,7 @@ impl Agent {
             "warn",
             Some(log_dir.display().to_string()),
         ));
-        if let Some(scratch) = self.transport.shell_mut().shell.env_var("EXARCH_SCRATCH") {
+        if let Some(scratch) = self.probe_env_var("EXARCH_SCRATCH") {
             rows.push(ProbeRow::new(
                 "disk.scratch",
                 crate::resources::dir_size(&std::path::PathBuf::from(&scratch)),
@@ -1678,7 +1697,111 @@ impl Agent {
     }
 
     pub(crate) fn cwd(&self) -> std::path::PathBuf {
-        self.transport.shell_mut().shell.cwd()
+        match self.transport.probe(FOValue::Variant {
+            label: "cwd".into(),
+            payload: None,
+        }) {
+            Ok(FOValue::String { value }) => std::path::PathBuf::from(value),
+            other => unreachable!("`cwd probe always answers a String, got {other:?}"),
+        }
+    }
+
+    /// The `` `workers `` probe, decoded — the fields
+    /// [`Self::resource_rows`] and [`Self::reconcile_service_pins`] actually
+    /// read, never the live core `WorkerEntry` (a probe answer is data, not
+    /// a handle: no live `Mutex`, no cancel scope).
+    fn probe_workers(&self) -> Vec<ProbedWorker> {
+        let items = match self.transport.probe(FOValue::Variant {
+            label: "workers".into(),
+            payload: None,
+        }) {
+            Ok(FOValue::List { items }) => items,
+            other => unreachable!("`workers probe must answer a List, got {other:?}"),
+        };
+        items
+            .into_iter()
+            .map(|item| {
+                let FOValue::Map { entries } = item else {
+                    unreachable!("`workers probe row must be a Map");
+                };
+                let field = |key: &str| {
+                    entries
+                        .iter()
+                        .find(|(k, _)| k == key)
+                        .map(|(_, v)| v.clone())
+                };
+                let id = match field("id") {
+                    Some(FOValue::Int { value }) => value as u64,
+                    other => unreachable!("`workers row `id must be an Int, got {other:?}"),
+                };
+                let cmd = match field("cmd") {
+                    Some(FOValue::String { value }) => value,
+                    other => unreachable!("`workers row `cmd must be a String, got {other:?}"),
+                };
+                let class = match field("class") {
+                    Some(FOValue::String { value }) => value,
+                    other => unreachable!("`workers row `class must be a String, got {other:?}"),
+                };
+                let running = match field("running") {
+                    Some(FOValue::Bool { value }) => value,
+                    other => unreachable!("`workers row `running must be a Bool, got {other:?}"),
+                };
+                let up_secs = match field("up-secs") {
+                    Some(FOValue::Int { value }) => value as u64,
+                    other => unreachable!("`workers row `up-secs must be an Int, got {other:?}"),
+                };
+                let idle_secs = match field("idle-secs") {
+                    Some(FOValue::Int { value }) => value as u64,
+                    other => unreachable!("`workers row `idle-secs must be an Int, got {other:?}"),
+                };
+                let settled_epoch = match field("settled-epoch") {
+                    Some(FOValue::Variant { label, payload }) if label == "some" => {
+                        match payload.as_deref() {
+                            Some(FOValue::Int { value }) => Some(*value as u64),
+                            other => unreachable!(
+                                "`workers row `settled-epoch's `some must carry an Int, got {other:?}"
+                            ),
+                        }
+                    }
+                    Some(FOValue::Variant { label, .. }) if label == "none" => None,
+                    other => unreachable!(
+                        "`workers row `settled-epoch must be a Variant, got {other:?}"
+                    ),
+                };
+                ProbedWorker {
+                    id,
+                    cmd,
+                    class,
+                    running,
+                    up_secs,
+                    idle_secs,
+                    settled_epoch,
+                }
+            })
+            .collect()
+    }
+
+    /// The `` `env-var `` probe, decoded: `` `some [value] `` / `` `none ``
+    /// back to `Option<String>`. Shared by [`Self::check_disk_warn`] and
+    /// [`Self::resource_rows`], the two pure reads of the dynamic env
+    /// overlay left after the notice family moved to pushes.
+    fn probe_env_var(&self, name: &str) -> Option<String> {
+        match self.transport.probe(FOValue::Variant {
+            label: "env-var".into(),
+            payload: Some(Box::new(FOValue::String {
+                value: name.to_string(),
+            })),
+        }) {
+            Ok(FOValue::Variant {
+                label,
+                payload: Some(payload),
+            }) if label == "some" => match *payload {
+                FOValue::String { value } => Some(value),
+                other => unreachable!("`env-var probe's `some must carry a String, got {other:?}"),
+            },
+            Ok(FOValue::Variant { label, .. }) if label == "none" => None,
+            other => unreachable!("`env-var probe answered unexpectedly: {other:?}"),
+        }
     }
 
     /// This session's ambient authority — read by the spawn site to compute a

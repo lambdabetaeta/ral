@@ -7,7 +7,9 @@ use std::os::unix::net::UnixStream;
 
 use crate::driver::BakedPrelude;
 use crate::serial::FOValue;
-use crate::transport::{Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Turn};
+use crate::transport::{
+    Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Report, Turn, answer_probe,
+};
 use crate::types::{DeferredSink, EnquiryDesk, Error, Shell, SurfaceSink};
 use crate::wire::WireChannel;
 
@@ -240,10 +242,19 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
         }
     };
 
+    // One item of work the rendezvous hands the worker: a whole turn, or a
+    // pure boundary-time probe. Both ride the same rendezvous so a probe
+    // serialises with dispatches for free — busy while a turn runs answers
+    // "engine busy", the same arm a second dispatch gets.
+    enum WorkItem {
+        Turn(DispatchId, Turn),
+        Probe(DispatchId, FOValue),
+    }
+
     // Rendezvous channel: try_send succeeds only when the worker is
     // idle (blocked on recv).  While the worker runs a turn, try_send
     // fails with Full → reply "engine busy".
-    let (turn_tx, turn_rx) = mpsc::sync_channel::<(crate::transport::DispatchId, Turn)>(0);
+    let (turn_tx, turn_rx) = mpsc::sync_channel::<WorkItem>(0);
 
     // The engine's one desk, shared between the worker (which parks in it)
     // and the reader loop (whose `Answer` arm fills it).
@@ -260,35 +271,61 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
     let worker_desk = desk.clone();
     std::thread::spawn(move || {
         let mut shell = shell;
-        while let Ok((id, turn)) = turn_rx.recv() {
-            // Stamp the in-flight dispatch so the desk's enquiry frames
-            // correlate to the turn that raised them.
-            worker_desk.current_dispatch.store(id.0, Ordering::Relaxed);
+        while let Ok(item) = turn_rx.recv() {
+            match item {
+                WorkItem::Turn(id, turn) => {
+                    // Stamp the in-flight dispatch so the desk's enquiry
+                    // frames correlate to the turn that raised them.
+                    worker_desk.current_dispatch.store(id.0, Ordering::Relaxed);
 
-            // The live handles this turn runs under, joined with the protocol
-            // `Turn` in the request the engine door runs.
-            let req = crate::driver::TurnRequest {
-                turn,
-                surface: Some(Arc::new(ChannelSurfaceSink {
-                    id,
-                    writer: worker_writer.clone(),
-                }) as SurfaceSink),
-                deferred: Some(Arc::new(ChannelDeferredSink {
-                    id,
-                    writer: worker_writer.clone(),
-                }) as Arc<dyn DeferredSink>),
-                desk: Some(worker_desk.clone() as crate::types::Desk),
-                lifecycle: Box::new(()),
-            };
-            let report = shell.run_turn(req).into_report();
+                    // The live handles this turn runs under, joined with the
+                    // protocol `Turn` in the request the engine door runs.
+                    let req = crate::driver::TurnRequest {
+                        turn,
+                        surface: Some(Arc::new(ChannelSurfaceSink {
+                            id,
+                            writer: worker_writer.clone(),
+                        }) as SurfaceSink),
+                        deferred: Some(Arc::new(ChannelDeferredSink {
+                            id,
+                            writer: worker_writer.clone(),
+                        }) as Arc<dyn DeferredSink>),
+                        desk: Some(worker_desk.clone() as crate::types::Desk),
+                        lifecycle: Box::new(()),
+                    };
+                    let report = shell.run_turn(req).into_report();
 
-            worker_desk.current_dispatch.store(0, Ordering::Relaxed);
+                    worker_desk.current_dispatch.store(0, Ordering::Relaxed);
 
-            // Send the terminal Report frame.
-            let _ = worker_writer
-                .lock()
-                .unwrap()
-                .write_frame(&Frame::Event(id, Event::Report(report)));
+                    // Send the terminal Report frame.
+                    let _ = worker_writer
+                        .lock()
+                        .unwrap()
+                        .write_frame(&Frame::Event(id, Event::Report(report)));
+                }
+                WorkItem::Probe(id, reading) => {
+                    let report = match answer_probe(&mut shell, reading) {
+                        Ok(v) => Report::Ran {
+                            result: Ok(v),
+                            status: 0,
+                            single_command: false,
+                            captured: None,
+                            timed_out: false,
+                        },
+                        Err(message) => Report::Ran {
+                            result: Err(crate::transport::Break::Error(message)),
+                            status: 1,
+                            single_command: false,
+                            captured: None,
+                            timed_out: false,
+                        },
+                    };
+                    let _ = worker_writer
+                        .lock()
+                        .unwrap()
+                        .write_frame(&Frame::Event(id, Event::Report(report)));
+                }
+            }
         }
     });
 
@@ -296,7 +333,7 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
     loop {
         match reader_ch.read_frame() {
             Ok(Some(Frame::Dispatch(id, turn))) => {
-                match turn_tx.try_send((id, *turn)) {
+                match turn_tx.try_send(WorkItem::Turn(id, *turn)) {
                     Ok(()) => { /* worker accepted the turn */ }
                     Err(mpsc::TrySendError::Full(_)) => {
                         // Worker is busy — reply with a static diagnostic.
@@ -320,6 +357,27 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
                 // turn for the front-end's benefit, but the slot is the
                 // enquiry's. A late answer for a dead id drops in `fill`.
                 desk.fill(eid, answer);
+            }
+            Ok(Some(Frame::Probe(id, reading))) => {
+                match turn_tx.try_send(WorkItem::Probe(id, reading)) {
+                    Ok(()) => { /* worker accepted the probe */ }
+                    Err(mpsc::TrySendError::Full(_)) => {
+                        // Worker is busy running a turn — the same "engine
+                        // busy" answer a second dispatch would get.
+                        let report = crate::transport::Report::Static {
+                            diagnostics: crate::transport::Diagnostics::Host(
+                                "engine busy".into(),
+                            ),
+                        };
+                        let _ = writer
+                            .lock()
+                            .unwrap()
+                            .write_frame(&Frame::Event(id, Event::Report(report)));
+                    }
+                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                        break; // worker died
+                    }
+                }
             }
             Ok(Some(Frame::Control(Control::Cancel(_)))) => {
                 crate::process::request_foreground_cancel(crate::process::CancelCause::Explicit);
