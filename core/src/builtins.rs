@@ -760,8 +760,8 @@ pub use misc::pretty_print;
 
 /// Apply a thunk (`Block` or `Lambda`) `val` to `args` while a turn frame is
 /// already installed.  Any other `Value` produces a descriptive error.  Used
-/// by builtins that accept function arguments and by the value turn door
-/// ([`crate::Shell::run_hook`]), which establishes the frame first.
+/// by builtins that accept function arguments and by the turn door's hook
+/// arm ([`crate::Shell::run_turn`]), which establishes the frame first.
 pub fn apply(val: &Value, args: &[Value], shell: &mut Shell) -> Settled<Value> {
     match val {
         Value::Lambda { .. } | Value::Block { .. } => {

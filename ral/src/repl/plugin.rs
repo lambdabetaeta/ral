@@ -25,6 +25,7 @@
 pub(super) mod load;
 pub(super) mod manifest;
 
+use ral_core::transport::{Program, Turn};
 use ral_core::types::{Break, Capabilities, Settled};
 use ral_core::{
     HookName, RequestedTerminalAccess, Shell, StaticDiagnostics, TurnIo, TurnReport, TurnRequest,
@@ -403,16 +404,25 @@ pub(super) fn call_plugin_hook(
         }) => {
             // Label the root context `kind:plugin` (e.g. `keybinding:fzf`).
             let label = format!("{kind}:{}", plugin.name);
-            let mut req = framed_turn_request(&label, terminal);
-            req.caps = caps;
-            req.turn_limit = budget;
             // Encode at this edge: a plugin hook call is not itself a
             // transport door, so a non-first-order argument is this call
-            // site's bug to report, not `run_hook`'s.
+            // site's bug to report, not `run_turn`'s.
             let fo_args: Result<Vec<_>, _> =
                 args.iter().map(ral_core::serial::FOValue::try_from).collect();
             let report = match fo_args {
-                Ok(fo_args) => shell.run_hook(hook, fo_args, req),
+                Ok(fo_args) => {
+                    let mut req = framed_turn_request(
+                        &label,
+                        terminal,
+                        Program::Hook {
+                            name: hook.clone(),
+                            args: fo_args,
+                        },
+                    );
+                    req.turn.caps = caps;
+                    req.turn.turn_limit = budget;
+                    shell.run_turn(req)
+                }
                 Err(e) => TurnReport::Static {
                     diagnostics: StaticDiagnostics::Host(ral_core::types::Error::new(
                         format!("hook '{hook}' argument is not first-order: {}", e.message),
@@ -468,22 +478,26 @@ pub(super) fn call_plugin_hook(
 /// factory: the session's live streams, host authority, no limits, no surface,
 /// no lifecycle. `script_name` labels the root source context; `terminal`
 /// varies (keybinding dispatch leases it; every other site denies it, never
-/// handing the terminal to a child).
-pub(super) fn framed_turn_request(
+/// handing the terminal to a child); `program` is the hook the turn runs.
+pub(super) fn framed_turn_request<'a>(
     script_name: &str,
     terminal: RequestedTerminalAccess,
-) -> TurnRequest<'_> {
+    program: Program,
+) -> TurnRequest<'a> {
     TurnRequest {
-        script_name,
-        caps: Capabilities::root(),
-        turn_limit: None,
-        detached_lease: None,
-        worker_cap: None,
-        io: TurnIo::Inherit,
-        terminal,
-        stdin: TurnStdin::Inherit,
+        turn: Turn {
+            program,
+            script_name: script_name.to_string(),
+            caps: Capabilities::root(),
+            turn_limit: None,
+            deferred_lease: None,
+            worker_cap: None,
+            io: TurnIo::Inherit,
+            terminal,
+            stdin: TurnStdin::Inherit,
+        },
         surface: None,
-        boundary: None,
+        deferred: None,
         desk: None,
         lifecycle: Box::new(()),
     }

@@ -7,6 +7,7 @@
 //! machine itself focused on the run/turn/eval loop.
 
 use ral_core::source::Span;
+use ral_core::transport::Program;
 use ral_core::types::{Break, DefaultPolicy, Escape, HookName, HookSig};
 use ral_core::{RequestedTerminalAccess, Shell, TurnReport, diagnostic, evaluator::evaluate};
 use rustyline::config::{BellStyle, EditMode};
@@ -349,11 +350,15 @@ fn source_config_inner(path: &str, ctx: &mut RcCtx<'_>) -> Result<(), String> {
         ) {
             return Err(format!("{path}: startup: {}", e));
         }
-        let req = framed_turn_request("<startup>", RequestedTerminalAccess::Denied);
-        match ctx
-            .shell
-            .run_hook(&HookName::session("startup"), vec![], req)
-        {
+        let req = framed_turn_request(
+            "<startup>",
+            RequestedTerminalAccess::Denied,
+            Program::Hook {
+                name: HookName::session("startup"),
+                args: vec![],
+            },
+        );
+        match ctx.shell.run_turn(req) {
             TurnReport::Ran { result, .. } => match result {
                 Ok(_) | Err(Break::Escape(Escape::Exit(_))) => {}
                 Err(Break::Error(e)) => return Err(format!("{path}: startup: {}", e.message)),

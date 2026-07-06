@@ -4,11 +4,12 @@
 //! `trunc` map a Float to the Int in their direction.  All four take a Float
 //! only (an Int is a static type error — it is already rounded).  The harness
 //! mirrors `comparison.rs`: bootstrap a prelude-registered `Shell` and drive
-//! each source string through the public `run_source_turn` door like a REPL
+//! each source string through the public `run_turn` door like a REPL
 //! turn.
 
 mod common;
 
+use ral_core::transport::{Program, Turn};
 use ral_core::types::{Break, Capabilities, Settled, Shell, Value};
 use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin, builtins};
 
@@ -20,23 +21,23 @@ fn fresh_shell() -> Shell {
 }
 
 fn eval(shell: &mut Shell, source: &str) -> Settled<Value> {
-    match shell.run_source_turn(
-        source,
-        TurnRequest {
-            script_name: "<test>",
+    match shell.run_turn(TurnRequest {
+        turn: Turn {
+            program: Program::Source(source.into()),
+            script_name: "<test>".into(),
             caps: Capabilities::root(),
             turn_limit: None,
-            detached_lease: None,
+            deferred_lease: None,
             worker_cap: None,
             io: TurnIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
             stdin: TurnStdin::Inherit,
-            surface: None,
-            boundary: None,
-            desk: None,
-            lifecycle: Box::new(()),
         },
-    ) {
+        surface: None,
+        deferred: None,
+        desk: None,
+        lifecycle: Box::new(()),
+    }) {
         TurnReport::Ran { result, .. } => result,
         TurnReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
     }
@@ -85,23 +86,23 @@ fn expect_error(source: &str, needle: &str) {
 /// ever runs (a `TurnReport::Static`).
 fn expect_static_reject(source: &str) {
     let mut shell = fresh_shell();
-    match shell.run_source_turn(
-        source,
-        TurnRequest {
-            script_name: "<test>",
+    match shell.run_turn(TurnRequest {
+        turn: Turn {
+            program: Program::Source(source.into()),
+            script_name: "<test>".into(),
             caps: Capabilities::root(),
             turn_limit: None,
-            detached_lease: None,
+            deferred_lease: None,
             worker_cap: None,
             io: TurnIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
             stdin: TurnStdin::Inherit,
-            surface: None,
-            boundary: None,
-            desk: None,
-            lifecycle: Box::new(()),
         },
-    ) {
+        surface: None,
+        deferred: None,
+        desk: None,
+        lifecycle: Box::new(()),
+    }) {
         TurnReport::Static { .. } => {}
         TurnReport::Ran { result, .. } => {
             panic!("{source:?}: expected a static type error, but it ran: {result:?}")

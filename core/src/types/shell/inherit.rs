@@ -324,7 +324,7 @@ impl Shell {
         R: Send + 'static,
     {
         let context = self.mobile.context.clone();
-        let detached_lease = self.turn.detached_lease;
+        let deferred_lease = self.turn.deferred_lease;
         let worker_cap = self.turn.worker_cap;
         let root = self.session.root.clone();
         let builtins = self.session.builtins.clone();
@@ -334,7 +334,7 @@ impl Shell {
         let handle = std::thread::spawn(move || {
             let mut child = Self::from_captured(&scopes);
             child.mobile.context = context;
-            child.turn.detached_lease = detached_lease;
+            child.turn.deferred_lease = deferred_lease;
             child.turn.worker_cap = worker_cap;
             child.turn.cancel = cancel;
             child.session.root = root;

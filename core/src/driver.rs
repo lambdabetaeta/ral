@@ -26,13 +26,13 @@ use crate::io::{Source, TerminalState};
 use crate::ir::Comp;
 use crate::process::CancelCause;
 use crate::source::Span;
+use crate::transport::{Program, Turn};
 use crate::turn::{StaticDiagnostics, TurnLifecycle};
 use crate::typecheck::Scheme;
-use crate::types::{Boundary, Capabilities, Desk, Settled, Shell, SurfaceSink, Value};
+use crate::types::{DeferredSink, Desk, Settled, Shell, SurfaceSink, Value};
 use crate::types::{DefaultPolicy, Hook, HookName, HookSig, RegisterError, TerminalPolicy};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
 
 /// A build-time-baked prelude: the two postcard blobs and their
 /// once-decoded forms.  `ir` is the annotated prelude [`Comp`] whose
@@ -163,22 +163,20 @@ pub fn bake_prelude_to_out_dir() {
         .expect("failed to write prelude_schemes.bin");
 }
 
-// ── The turn entries: three synchronous, runtime-agnostic host seams ─────────
+// ── The turn entry: one synchronous, runtime-agnostic host seam ──────────────
 //
-// Hosts start an evaluation through exactly one of three doors:
-// `Shell::run_source_turn(src, TurnRequest)` runs a turn from source text;
-// `Shell::register_hook(name, value, sig, policy, origin)` stores a
-// compiled hook by name in the session-lived hook table;
-// `Shell::run_hook(name, args, TurnRequest)` dispatches a registered
-// hook by name as the root of a fresh turn.  All three return one flat
-// `TurnReport`.  Hosts describe *policy* (`TurnRequest`, `TurnIo`,
-// `SurfaceSink`, lifecycle hooks); core owns *resources* (`Sink`, `Source`,
-// `TurnState`, guards, buffers, signal slots).  Completion is the call
-// returning — never a channel disconnecting — so a detached worker holding a
-// surface clone cannot keep a turn from ending.  These doors are the only
-// way into evaluation: the reduction primitive behind them is crate-private,
-// so a host cannot start an unframed evaluation that would foreground or
-// capture against a stale frame.
+// Hosts start an evaluation through exactly one door:
+// `Shell::run_turn(TurnRequest)` runs one whole `Turn` — its `Program` is
+// either source text or a registered hook applied to first-order arguments
+// (`Shell::register_hook` stores compiled hooks by name in the session-lived
+// hook table).  It returns one flat `TurnReport`.  Hosts describe *policy*
+// (the protocol `Turn`, `TurnIo`, `SurfaceSink`, lifecycle hooks); core owns
+// *resources* (`Sink`, `Source`, `TurnState`, guards, buffers, signal
+// slots).  Completion is the call returning — never a channel disconnecting
+// — so a deferred worker holding a surface clone cannot keep a turn from
+// ending.  This door is the only way into evaluation: the reduction
+// primitive behind it is crate-private, so a host cannot start an unframed
+// evaluation that would foreground or capture against a stale frame.
 
 /// The IO regime of a turn: intent, materialised into resources by the turn
 /// doors.
@@ -228,66 +226,35 @@ pub enum TurnStdin {
     Empty,
 }
 
-/// The host's per-turn policy. Everything a turn needs that is *not* a core
-/// resource: the script label, the capability ceiling, the wall and detached
-/// limits, the IO regime, the turn-local surface sink, and lifecycle hooks.
+/// The engine door for one turn: the protocol [`Turn`] plus the live,
+/// non-transportable handles the host lends it.  Composition, not
+/// mirroring — a field added to [`Turn`] crosses the seam and reaches the
+/// engine in one declaration.
 pub struct TurnRequest<'a> {
-    /// Label for the root source context (`"<stdin>"` for the REPL,
-    /// `"<tool>"` for exarch).
-    pub script_name: &'a str,
-    /// The capability ceiling pushed for the eval's dynamic extent.
-    /// `Capabilities::root()` is the ⊤ element — the identity on authority
-    /// (the REPL) — while a narrower profile attenuates the session's grant
-    /// (exarch).
-    pub caps: Capabilities,
-    /// The turn's foreground wall: `Some(d)` arms a `Deadline` cancel on the
-    /// turn's foreground scope `d` after it starts (exarch's per-tool wall);
-    /// `None` leaves the turn uncapped (the REPL).
-    pub turn_limit: Option<Duration>,
-    /// The lease for workers the turn detaches at the durable root. `None`
-    /// (the interactive ral host) leaves a worker until `cancel`, root
-    /// abort, or session exit; `Some(lease)` (an agent host) reaps a
-    /// still-running worker once unobserved for `lease.idle` — renewed by
-    /// every `poll`/`await`/`race` naming its handle — under the
-    /// `lease.backstop` absolute ceiling.
-    pub detached_lease: Option<crate::types::WorkerLease>,
-    /// Admission cap on concurrently running workers, enforced at the spawn
-    /// door: with `Some(cap)` a spawn is refused while `cap` workers of any
-    /// class are still running — settled entries lingering under retention
-    /// never block admission. `None` (the interactive ral host) admits
-    /// freely.
-    pub worker_cap: Option<usize>,
-    /// The byte IO regime; see [`TurnIo`].
-    pub io: TurnIo,
-    /// Whether this turn may hand the controlling terminal to a child; see
-    /// [`RequestedTerminalAccess`]. `Leased` for the interactive REPL and a
-    /// terminal-launched script, `Denied` for an exarch tool turn or any
-    /// launch that does not own the terminal foreground.
-    pub terminal: RequestedTerminalAccess,
-    /// The byte source for this turn's stdin; see [`TurnStdin`]. `Inherit` for
-    /// the REPL and batch (fall through to fd 0), `Empty` for an exarch tool
-    /// turn (no terminal read).
-    pub stdin: TurnStdin,
+    /// The turn, exactly as it crosses (or would cross) the host seam.
+    pub turn: Turn,
     /// The turn-local structured-event sink, installed only for this turn.
     /// `None` is the identity (a bare REPL). Same-thread children inherit it;
-    /// detached workers buffer into bounded deferred storage instead.
+    /// deferred workers buffer into bounded deferred storage instead.
     pub surface: Option<SurfaceSink>,
-    /// The session-lived destination a detached worker flushes its deferred
-    /// surface batch to at completion, rendered by the host at the next turn
-    /// boundary. `None` outside an agent host (a bare REPL): then a detached
+    /// The session-lived destination a deferred worker delivers its surface
+    /// batch to when it settles, rendered by the host at the next turn
+    /// boundary. `None` outside an agent host (a bare REPL): then a deferred
     /// worker's surface reaches a sink only via `await`/`race`.
-    pub boundary: Option<Boundary>,
+    pub deferred: Option<Arc<dyn DeferredSink>>,
     /// The turn-local enquiry desk, installed only for this turn. `None` is
     /// the honest absence a host that answers no enquiries reports (a bare
     /// REPL, and exarch until the migration installs its desk). Same-thread
-    /// children inherit it; detached workers never receive it.
+    /// children inherit it; deferred workers never receive it.
     pub desk: Option<Desk>,
     /// Per-turn lifecycle hooks; `Box::new(())` for a host with none.
     pub lifecycle: Box<dyn TurnLifecycle + 'a>,
 }
 
 /// The byte streams captured under [`TurnIo::Capture`], returned in
-/// [`TurnReport::Ran`].
+/// [`TurnReport::Ran`] and carried verbatim on the protocol
+/// [`Report`](crate::transport::Report).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Captured {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
@@ -313,55 +280,98 @@ pub enum TurnReport {
 }
 
 impl Shell {
-    /// Run one top-level turn of `src` under `req`, synchronously, and return
-    /// one flat [`TurnReport`]. The source door: it compiles and typechecks
-    /// against the live session, then runs the compiled program through the
-    /// shared framed scaffold ([`Self::run_built`]) — materialising the IO
-    /// regime, minting the turn's foreground scope and arming its wall,
-    /// installing the turn-local surface, evaluating under the capability
-    /// ceiling, and folding in the captured bytes and `timed_out`.
+    /// Run one whole [`Turn`] under `req`, synchronously, and return one
+    /// flat [`TurnReport`]. The single turn door: the turn's
+    /// [`Program`] is resolved here — source text compiles and typechecks
+    /// against the live session, a hook resolves in the session-lived hook
+    /// table — and either program then runs through the shared framed
+    /// scaffold ([`Self::run_built`]): materialising the IO regime, minting
+    /// the turn's foreground scope and arming its wall, installing the
+    /// turn-local surface, evaluating under the capability ceiling, and
+    /// folding in the captured bytes and `timed_out`.
     ///
     /// Turn completion is *this call returning* — never a channel
-    /// disconnecting. A detached worker may hold a clone of the surface sink
+    /// disconnecting. A deferred worker may hold a clone of the surface sink
     /// forever; it changes nothing, because nothing waits on that sink to
     /// decide the turn is over.
-    pub fn run_source_turn(&mut self, src: &str, req: TurnRequest<'_>) -> TurnReport {
-        // The binding-lease ledger's committed-turn clock: one tick per
-        // source-door dispatch, whether or not it goes on to compile —
-        // a failed turn ages the ledger's scratch without renewing it
-        // (`decisions/260629_agent-binding-reaping`). A no-op when unarmed,
-        // so the REPL/batch pay one branch and nothing else.
-        self.local.bindings.tick();
+    pub fn run_turn(&mut self, mut req: TurnRequest<'_>) -> TurnReport {
+        match req.turn.program {
+            Program::Source(ref src) => {
+                // The binding-lease ledger's committed-turn clock: one tick
+                // per source dispatch, whether or not it goes on to compile —
+                // a failed turn ages the ledger's scratch without renewing it
+                // (`decisions/260629_agent-binding-reaping`). A no-op when
+                // unarmed, so the REPL/batch pay one branch and nothing else.
+                self.local.bindings.tick();
 
-        // Mint the turn's foreground scope and arm its wall *before* compiling,
-        // so the limit bounds the whole turn — compile and typecheck included,
-        // not only evaluation. `compile_turn`'s `process::clear` touches only
-        // the signal count, never the reaper, so an entry armed here survives
-        // the compile. The `Deadline` guard disarms when `wall` drops, so an
-        // early `Static` return leaves no pending reaper entry.
-        let foreground = self.durable_root().child();
-        let wall = req
-            .turn_limit
-            .map(|d| crate::process::arm_lifetime(foreground.as_scope().clone(), d));
+                // Mint the turn's foreground scope and arm its wall *before*
+                // compiling, so the limit bounds the whole turn — compile and
+                // typecheck included, not only evaluation. `compile_turn`'s
+                // `process::clear` touches only the signal count, never the
+                // reaper, so an entry armed here survives the compile. The
+                // `Deadline` guard disarms when `wall` drops, so an early
+                // `Static` return leaves no pending reaper entry.
+                let foreground = self.durable_root().child();
+                let wall = req
+                    .turn
+                    .turn_limit
+                    .map(|d| crate::process::arm_lifetime(foreground.as_scope().clone(), d));
 
-        let (comp, single_command) = match crate::turn::compile_turn(self, src) {
-            Ok(parts) => parts,
-            Err(diagnostics) => return TurnReport::Static { diagnostics },
-        };
+                let (comp, single_command) = match crate::turn::compile_turn(self, src) {
+                    Ok(parts) => parts,
+                    Err(diagnostics) => return TurnReport::Static { diagnostics },
+                };
 
-        // "Committed" = reached evaluation: harvest the compiled program's
-        // referenced names and renew every one that is already leased.
-        // Gated on `armed()` so an unarmed host (REPL, batch) never pays for
-        // the walk.
-        if self.local.bindings.armed() {
-            self.local
-                .bindings
-                .renew(crate::ir::referenced_names(&comp));
+                // "Committed" = reached evaluation: harvest the compiled
+                // program's referenced names and renew every one that is
+                // already leased. Gated on `armed()` so an unarmed host
+                // (REPL, batch) never pays for the walk.
+                if self.local.bindings.armed() {
+                    self.local
+                        .bindings
+                        .renew(crate::ir::referenced_names(&comp));
+                }
+
+                self.run_built(req, foreground, wall, single_command, |s| {
+                    crate::evaluator::eval_top_level(&comp, s)
+                })
+            }
+            Program::Hook { ref name, ref args } => {
+                let Some(hook) = self.mobile.context.hooks.get(name).cloned() else {
+                    return TurnReport::Static {
+                        diagnostics: StaticDiagnostics::Host(crate::types::Error::new(
+                            format!("hook '{}' is not registered", name),
+                            1,
+                        )),
+                    };
+                };
+
+                // The host conveys data, not closures, across the dispatch
+                // boundary: hook args are first-order by type (`FOValue`).
+                let args: Vec<Value> = args.iter().cloned().map(Value::from).collect();
+
+                let foreground = self.durable_root().child();
+                let wall = hook
+                    .policy
+                    .budget
+                    .map(|d| crate::process::arm_lifetime(foreground.as_scope().clone(), d));
+
+                // Fold the hook's registered `DefaultPolicy` into the turn's
+                // conditions: capture, terminal authority, and budget are the
+                // hook's to decide, not the dispatching host's.
+                if hook.policy.capture {
+                    req.turn.io = TurnIo::Capture;
+                }
+                req.turn.terminal = match hook.policy.terminal {
+                    TerminalPolicy::Denied => RequestedTerminalAccess::Denied,
+                    TerminalPolicy::Leased => RequestedTerminalAccess::Leased,
+                };
+
+                self.run_built(req, foreground, wall, false, |s| {
+                    crate::builtins::apply(&hook.binding.value, &args, s)
+                })
+            }
         }
-
-        self.run_built(req, foreground, wall, single_command, src, |s| {
-            crate::evaluator::eval_top_level(&comp, s)
-        })
     }
 
     /// Register a host-held [`Value`] (a compiled `Block` or `Lambda`)
@@ -369,8 +379,8 @@ impl Shell {
     ///
     /// The hook is stored by `name`; it is never readable as `$name`
     /// and never invokable as a command — it fires only when the host
-    /// calls [`Self::run_hook`] at a lifecycle moment (prompt render,
-    /// startup, plugin hook, keybinding).
+    /// dispatches a [`Program::Hook`] turn at a lifecycle moment (prompt
+    /// render, startup, plugin hook, keybinding).
     ///
     /// Registration checks:
     /// 1. `value` is a `Block` or `Lambda`.
@@ -450,86 +460,40 @@ impl Shell {
         self.mobile.context.hooks.contains_key(name)
     }
 
-    /// Run a registered hook by name, applying `args` as its
-    /// arguments, through the shared framed scaffold
-    /// ([`Self::run_built`]).  Returns one flat [`TurnReport`].
-    ///
-    /// `args` are first-order by type ([`FOValue`]) — the host conveys
-    /// data, not closures, across the dispatch boundary.
-    ///
-    /// `req` supplies the script label, capability ceiling, lifecycle
-    /// hooks, and surface sink; terminal access, capture, and budget
-    /// are taken from the hook's registered [`DefaultPolicy`].
-    pub fn run_hook(
-        &mut self,
-        name: &HookName,
-        args: Vec<crate::serial::FOValue>,
-        req: TurnRequest<'_>,
-    ) -> TurnReport {
-        let Some(hook) = self.mobile.context.hooks.get(name).cloned() else {
-            return TurnReport::Static {
-                diagnostics: StaticDiagnostics::Host(crate::types::Error::new(
-                    format!("hook '{}' is not registered", name),
-                    1,
-                )),
-            };
-        };
-
-        let args: Vec<Value> = args.into_iter().map(Value::from).collect();
-
-        let foreground = self.durable_root().child();
-        let wall = hook
-            .policy
-            .budget
-            .map(|d| crate::process::arm_lifetime(foreground.as_scope().clone(), d));
-
-        let terminal = match hook.policy.terminal {
-            TerminalPolicy::Denied => RequestedTerminalAccess::Denied,
-            TerminalPolicy::Leased => RequestedTerminalAccess::Leased,
-        };
-
-        let merged_req = TurnRequest {
-            script_name: req.script_name,
-            caps: req.caps,
-            io: if hook.policy.capture {
-                TurnIo::Capture
-            } else {
-                req.io
-            },
-            terminal,
-            stdin: req.stdin,
-            surface: req.surface,
-            boundary: req.boundary,
-            desk: req.desk,
-            lifecycle: req.lifecycle,
-            turn_limit: hook.policy.budget.or(req.turn_limit),
-            detached_lease: req.detached_lease,
-            worker_cap: req.worker_cap,
-        };
-
-        self.run_built(merged_req, foreground, wall, false, "", |s| {
-            crate::builtins::apply(&hook.binding.value, &args, s)
-        })
-    }
-
-    /// The framed scaffold shared by both turn doors: materialise the IO
-    /// regime from `req`, build and install the turn frame on the pre-minted
-    /// `foreground`, evaluate `body` under the capability ceiling and lifecycle
-    /// hooks, then disarm the `wall` and fold the captured bytes and
-    /// `timed_out` into the report. `body` is the turn's program — the source
-    /// door's `eval_top_level`, the hook door's in-frame `apply`.
+    /// The framed scaffold behind the turn door: materialise the IO regime
+    /// from the turn's conditions, build and install the turn frame on the
+    /// pre-minted `foreground`, evaluate `body` under the capability ceiling
+    /// and lifecycle hooks, then disarm the `wall` and fold the captured
+    /// bytes and `timed_out` into the report. `body` is the turn's resolved
+    /// program — the source arm's `eval_top_level`, the hook arm's in-frame
+    /// `apply`.
     fn run_built(
         &mut self,
         req: TurnRequest<'_>,
         foreground: crate::process::ForegroundScope,
         wall: Option<crate::process::Deadline>,
         single_command: bool,
-        src: &str,
         body: impl FnOnce(&mut Shell) -> Settled<Value>,
     ) -> TurnReport {
+        let TurnRequest {
+            turn,
+            surface,
+            deferred,
+            desk,
+            lifecycle,
+        } = req;
+
+        // The source text the lifecycle hooks and root context see: the
+        // program itself for a source turn, empty for a hook turn (whose
+        // program is an already-compiled value, not text).
+        let src = match &turn.program {
+            Program::Source(src) => src.as_str(),
+            Program::Hook { .. } => "",
+        };
+
         // Materialise the IO regime: `Capture` mints buffers we read back,
         // `Inherit` leaves the ambient streams to flow through `build_turn`.
-        let (capture, capture_bufs) = match req.io {
+        let (capture, capture_bufs) = match turn.io {
             TurnIo::Inherit => (None, None),
             TurnIo::Capture => {
                 let (stdout_sink, stdout_buf) = crate::io::new_buffer();
@@ -544,11 +508,11 @@ impl Shell {
         // Stdin source and terminal authority are independent of the output
         // regime: `Capture` no longer implies `Source::Terminal`. A tool turn
         // is `Denied` + `Empty`; a piped `ral -c` is `Denied` + `Inherit`.
-        let stdin = match req.stdin {
+        let stdin = match turn.stdin {
             TurnStdin::Inherit => Source::Terminal,
             TurnStdin::Empty => Source::Empty,
         };
-        let terminal_access = match req.terminal {
+        let terminal_access = match turn.terminal {
             RequestedTerminalAccess::Leased => crate::types::TerminalAccess::Leased,
             RequestedTerminalAccess::Denied => crate::types::TerminalAccess::Denied,
         };
@@ -559,19 +523,19 @@ impl Shell {
             stdin,
             terminal_access,
             foreground.clone(),
-            req.detached_lease,
-            req.worker_cap,
-            req.surface,
-            req.boundary,
-            req.desk,
+            turn.deferred_lease,
+            turn.worker_cap,
+            surface,
+            deferred,
+            desk,
         );
         let (result, status) = crate::turn::run_framed(
             self,
             next,
-            req.script_name,
+            &turn.script_name,
             src,
-            req.caps,
-            req.lifecycle,
+            turn.caps.clone(),
+            lifecycle,
             body,
         );
 

@@ -54,6 +54,7 @@
 
 mod common;
 
+use ral_core::transport::{Program, Turn};
 use ral_core::types::{Break, Capabilities, FsPolicy, Settled, Shell, Value};
 use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
 
@@ -99,27 +100,27 @@ fn restrict_to(dir: &str) -> Capabilities {
     }
 }
 
-/// Route `src` through the public `run_source_turn` door under `caps`, mirroring
+/// Route `src` through the public `run_turn` door under `caps`, mirroring
 /// exarch's per-tool flow: the turn carries the attenuated capability
 /// ceiling in its request and compiles against the live bindings.
 fn top_level_under(shell: &mut Shell, caps: Capabilities, src: &str) -> Settled<Value> {
-    match shell.run_source_turn(
-        src,
-        TurnRequest {
-            script_name: "<test>",
+    match shell.run_turn(TurnRequest {
+        turn: Turn {
+            program: Program::Source(src.into()),
+            script_name: "<test>".into(),
             caps,
             turn_limit: None,
-            detached_lease: None,
+            deferred_lease: None,
             worker_cap: None,
             io: TurnIo::Inherit,
             terminal: RequestedTerminalAccess::Denied,
             stdin: TurnStdin::Empty,
-            surface: None,
-            boundary: None,
-            desk: None,
-            lifecycle: Box::new(()),
         },
-    ) {
+        surface: None,
+        deferred: None,
+        desk: None,
+        lifecycle: Box::new(()),
+    }) {
         TurnReport::Ran { result, .. } => result,
         TurnReport::Static { .. } => panic!("well-formed source must run: {src:?}"),
     }

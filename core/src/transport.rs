@@ -30,7 +30,7 @@ use std::sync::mpsc;
 #[cfg(unix)]
 use crate::process::ChildHandle;
 use crate::serial::FOValue;
-use crate::types::Boundary;
+use crate::types::DeferredSink;
 use crate::types::SurfaceSink;
 use std::sync::OnceLock;
 
@@ -81,30 +81,66 @@ pub enum Frame {
     Control(Control),
 }
 
-/// The program of one dispatch: either source text or a hook invocation.
+/// One whole turn: the program to run and the conditions it runs under.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Turn {
-    /// A top-level source turn: text compiled and typechecked against the
-    /// live session.
-    Source { src: String, req: ReqMirror },
-    /// A hook invocation: a registered named entry point applied to
-    /// first-order arguments.
+pub struct Turn {
+    /// What the turn runs.
+    pub program: Program,
+    /// Label for the root source context (`"<stdin>"` for the REPL,
+    /// `"<tool>"` for exarch).
+    pub script_name: String,
+    /// The capability ceiling pushed for the eval's dynamic extent.
+    /// `Capabilities::root()` is the ⊤ element — the identity on authority
+    /// (the REPL) — while a narrower profile attenuates the session's grant
+    /// (exarch).
+    pub caps: crate::types::Capabilities,
+    /// The turn's foreground wall: `Some(d)` arms a `Deadline` cancel on the
+    /// turn's foreground scope `d` after it starts (exarch's per-tool wall);
+    /// `None` leaves the turn uncapped (the REPL).
+    pub turn_limit: Option<std::time::Duration>,
+    /// The lease for workers the turn defers at the durable root. `None`
+    /// (the interactive ral host) leaves a worker until `cancel`, root
+    /// abort, or session exit; `Some(lease)` (an agent host) reaps a
+    /// still-running worker once unobserved for `lease.idle` — renewed by
+    /// every `poll`/`await`/`race` naming its handle — under the
+    /// `lease.backstop` absolute ceiling.
+    pub deferred_lease: Option<crate::types::WorkerLease>,
+    /// Admission cap on concurrently running workers, enforced at the spawn
+    /// door: with `Some(cap)` a spawn is refused while `cap` workers of any
+    /// class are still running — settled entries lingering under retention
+    /// never block admission. `None` (the interactive ral host) admits
+    /// freely.
+    pub worker_cap: Option<usize>,
+    /// The byte IO regime.
+    pub io: crate::driver::TurnIo,
+    /// Whether the turn may hand the controlling terminal to a child.
+    pub terminal: crate::driver::RequestedTerminalAccess,
+    /// Stdin source.
+    pub stdin: crate::driver::TurnStdin,
+}
+
+/// What a turn runs: source text compiled and typechecked against the live
+/// session, or a registered hook applied to first-order arguments.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Program {
+    Source(String),
     Hook {
         name: crate::types::HookName,
         args: Vec<FOValue>,
-        req: ReqMirror,
     },
 }
 
 /// Engine → front-end event frame.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Event {
-    /// A live surface value, ordered before this dispatch Report.
+    /// A live surface value from the foreground turn, ordered before this
+    /// dispatch's Report.
     Surface(FOValue),
-    /// A detached worker deferred batch, flushed at a turn boundary.
-    BoundarySurface(Vec<FOValue>),
-    /// The dispatch sole terminal frame.
-    Report(ReportMirror),
+    /// A deferred worker's surface batch, delivered when it settles and
+    /// rendered by the host at the next turn boundary.
+    DeferredSurface(Vec<FOValue>),
+    /// The dispatch's sole terminal frame.
+    Report(Report),
 }
 
 /// Front-end → engine out-of-band control frame.
@@ -139,98 +175,46 @@ pub struct TerminalEndpoint {
     pub state: crate::io::TerminalState,
 }
 
-// ── Protocol mirrors ──────────────────────────────────────────────────
+// ── The terminal frame ────────────────────────────────────────────────
 
-/// Mirror of `TurnRequest`: everything a turn needs that is *data*.
-/// The live handles `surface`, `boundary`, `lifecycle` are not here —
-/// they become Event frames and engine-side defaults.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReqMirror {
-    /// Label for the root source context.
-    pub script_name: String,
-    /// The capability ceiling.
-    pub caps: crate::types::Capabilities,
-    /// Foreground wall duration.
-    pub turn_limit: Option<std::time::Duration>,
-    /// The idle-observation lease for detached workers.
-    pub detached_lease: Option<crate::types::WorkerLease>,
-    /// Admission cap on concurrently running workers.
-    pub worker_cap: Option<usize>,
-    /// Byte IO regime.
-    pub io: crate::driver::TurnIo,
-    /// Whether the turn may hand the controlling terminal to a child.
-    pub terminal: crate::driver::RequestedTerminalAccess,
-    /// Stdin source.
-    pub stdin: crate::driver::TurnStdin,
-}
-
-impl ReqMirror {
-    /// Assemble the [`TurnRequest`](crate::driver::TurnRequest) a dispatch
-    /// runs: the mirror's data fields, plus the live handles the caller owns.
-    /// Both request builders — the identity transport's `dispatch` and the
-    /// wire engine's worker — go through here, so a handle added to
-    /// `TurnRequest` is threaded once, on both paths, and forgetting one side
-    /// is unwritable.
-    pub fn into_request<'a>(
-        &'a self,
-        surface: Option<SurfaceSink>,
-        boundary: Option<Boundary>,
-        desk: Option<crate::types::Desk>,
-        lifecycle: Box<dyn crate::turn::TurnLifecycle + 'a>,
-    ) -> crate::driver::TurnRequest<'a> {
-        crate::driver::TurnRequest {
-            script_name: &self.script_name,
-            caps: self.caps.clone(),
-            turn_limit: self.turn_limit,
-            detached_lease: self.detached_lease,
-            worker_cap: self.worker_cap,
-            io: self.io,
-            terminal: self.terminal,
-            stdin: self.stdin,
-            surface,
-            boundary,
-            desk,
-            lifecycle,
-        }
-    }
-}
-
-/// Mirror of `TurnReport`.
+/// The turn's terminal frame: the protocol projection of the engine's
+/// [`TurnReport`](crate::driver::TurnReport), produced by
+/// [`TurnReport::into_report`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ReportMirror {
-    Static {
-        diagnostics: DiagMirror,
-    },
+pub enum Report {
+    /// Parse/type/host failure: the turn never reached evaluation. The host
+    /// renders the diagnostics and treats the turn as status 1.
+    Static { diagnostics: Diagnostics },
+    /// The turn ran to a settled result. `status` is the transport status
+    /// computed once; `single_command` is whether the source compiled to a
+    /// single command (for runtime-error rendering); `captured` is `Some`
+    /// under [`TurnIo::Capture`](crate::driver::TurnIo); `timed_out` is
+    /// whether the wall fired.
     Ran {
-        /// The turn's settled result, `FOValue`-encoded for the wire.
-        result: ResultMirror,
+        /// The turn's settled result. `Ok` carries a [`FOValue`] so a
+        /// successful result crosses the wire; a non-transportable result
+        /// (e.g. a live `Handle`) is reported as an error instead.
+        result: Result<FOValue, Break>,
         status: i32,
         single_command: bool,
-        captured: Option<(Vec<u8>, Vec<u8>)>,
+        captured: Option<crate::driver::Captured>,
         timed_out: bool,
     },
 }
 
-/// Mirror of `StaticDiagnostics`.
+/// Rendered diagnostics from a turn that never ran: the protocol projection
+/// of [`StaticDiagnostics`](crate::turn::StaticDiagnostics).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DiagMirror {
+pub enum Diagnostics {
     Parse(String),
     Types(Vec<String>),
     Host(String),
 }
 
-/// Mirror of `Settled<Value>`.  `Ok` carries a `FOValue` so a
-/// successful result crosses the wire; a non-transportable result
-/// (e.g. a live `Handle`) is reported as an error instead.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ResultMirror {
-    Ok(FOValue),
-    Err(BreakMirror),
-}
-
-/// Mirror of `Break`.
+/// First-order projection of a settled turn's
+/// [`Break`](crate::types::Break).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BreakMirror {
+pub enum Break {
     Error(String),
     Exit(i32),
     #[cfg(unix)]
@@ -239,6 +223,68 @@ pub enum BreakMirror {
         signal: i32,
         signal_name: String,
     },
+}
+
+impl From<crate::types::Break> for Break {
+    fn from(break_: crate::types::Break) -> Break {
+        use crate::types::{Break as EngineBreak, Escape};
+        match break_ {
+            EngineBreak::Error(e) => Break::Error(e.message),
+            EngineBreak::Escape(esc) => match esc {
+                Escape::Exit(code) => Break::Exit(code.clamp(0, 255)),
+                #[cfg(unix)]
+                Escape::Stopped { pgid, signal, .. } => Break::Stopped {
+                    pgid: pgid.0,
+                    signal: signal.number(),
+                    signal_name: signal.name().unwrap_or("?").to_string(),
+                },
+            },
+        }
+    }
+}
+
+impl crate::driver::TurnReport {
+    /// Project into the protocol [`Report`]: the live `Value` becomes a
+    /// first-order [`FOValue`] (a non-transportable result — e.g. a live
+    /// `Handle` — is reported as an error rather than dropped silently),
+    /// and rich diagnostics render to strings.  The one lossy step between
+    /// the engine and the seam.
+    pub fn into_report(self) -> Report {
+        use crate::driver::TurnReport;
+        use crate::turn::StaticDiagnostics;
+        match self {
+            TurnReport::Static { diagnostics } => Report::Static {
+                diagnostics: match diagnostics {
+                    StaticDiagnostics::Parse(e) => Diagnostics::Parse(e.message),
+                    StaticDiagnostics::Types(errs) => {
+                        Diagnostics::Types(errs.iter().map(|e| e.to_string()).collect())
+                    }
+                    StaticDiagnostics::Host(e) => Diagnostics::Host(e.message),
+                },
+            },
+            TurnReport::Ran {
+                result,
+                status,
+                single_command,
+                captured,
+                timed_out,
+            } => Report::Ran {
+                result: match result {
+                    Ok(v) => match FOValue::try_from(&v) {
+                        Ok(fo) => Ok(fo),
+                        Err(_) => Err(Break::Error(
+                            "turn result is not transportable across the host seam".into(),
+                        )),
+                    },
+                    Err(break_) => Err(break_.into()),
+                },
+                status,
+                single_command,
+                captured,
+                timed_out,
+            },
+        }
+    }
 }
 
 // ── Transport trait ───────────────────────────────────────────────────
@@ -281,14 +327,14 @@ pub trait Transport: Send + Sync {
 /// surface regime to its caller-supplied handler.
 ///
 /// The two regimes stay distinct on purpose: `on_surface` sees each live
-/// [`Event::Surface`] value in order, while `on_boundary` sees a detached
-/// worker's [`Event::BoundarySurface`] batch flushed at the turn boundary. A
+/// [`Event::Surface`] value in order, while `on_deferred` sees a deferred
+/// worker's [`Event::DeferredSurface`] batch delivered at its settlement. A
 /// host that tracks live pins (exarch) must update its mirror only from
-/// `on_surface` — the boundary batch does not touch the pin map — so
+/// `on_surface` — the deferred batch does not touch the pin map — so
 /// flattening the two into one undistinguished stream would be a behaviour
 /// change, not a fold.
 ///
-/// Returns the [`ReportMirror`], or `None` if the stream closed without a
+/// Returns the [`Report`], or `None` if the stream closed without a
 /// Report (impossible under the identity transport, which sends the Report
 /// synchronously before `dispatch` returns; each caller keeps its own
 /// no-Report handling).
@@ -296,8 +342,8 @@ pub fn dispatch_to_report(
     transport: &dyn Transport,
     turn: Turn,
     mut on_surface: impl FnMut(FOValue),
-    mut on_boundary: impl FnMut(Vec<FOValue>),
-) -> Option<ReportMirror> {
+    mut on_deferred: impl FnMut(Vec<FOValue>),
+) -> Option<Report> {
     static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let id = DispatchId(NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
 
@@ -307,7 +353,7 @@ pub fn dispatch_to_report(
         match frame {
             Frame::Event(did, event) if did == id => match event {
                 Event::Surface(val) => on_surface(val),
-                Event::BoundarySurface(batch) => on_boundary(batch),
+                Event::DeferredSurface(batch) => on_deferred(batch),
                 Event::Report(report) => return Some(report),
             },
             _ => {}
@@ -373,13 +419,6 @@ impl ControlSender {
         }
     }
 
-    pub fn cancel(&self, _id: DispatchId) {
-        self.send(Control::Cancel(_id));
-    }
-
-    pub fn resize(&self, rows: u16, cols: u16) {
-        self.send(Control::Resize(Winsize { rows, cols }));
-    }
 }
 
 /// Event receiver.  The front-end drains this while a dispatch is
@@ -392,40 +431,25 @@ impl EventReceiver {
     pub fn recv(&self) -> Option<Frame> {
         self.rx.lock().unwrap().recv().ok()
     }
-
-    pub fn try_recv(&self) -> Option<Frame> {
-        self.rx.lock().unwrap().try_recv().ok()
-    }
-
-    pub fn drain(&self) -> Vec<Frame> {
-        let mut frames = Vec::new();
-        while let Some(f) = self.try_recv() {
-            frames.push(f);
-        }
-        frames
-    }
 }
 
-// ── Per-dispatch surface sink ─────────────────────────────────────────
+// ── Transport sink ────────────────────────────────────────────────────
 
-struct PerDispatchSink {
+/// The identity transport's sink for both surface regimes: a live value
+/// ([`EventSink`](crate::types::EventSink)) and a deferred worker's settled
+/// batch ([`DeferredSink`]), each forwarded onto the event channel stamped
+/// with the in-flight dispatch id.
+struct TransportSink {
     event_tx: mpsc::Sender<Frame>,
     /// The in-flight dispatch id (`0` = none), the one atomic `dispatch`
-    /// sets and the boundary sink also reads. A surface value emitted while
-    /// it reads `0` has no dispatch to correlate to and is dropped.
+    /// sets and both impls read. A live surface value emitted while it reads
+    /// `0` has no dispatch to correlate to and is dropped; a deferred batch
+    /// is stamped with whatever is in flight — `0` when it settles between
+    /// turns.  // Phase 2: correlate by DispatchId
     current_dispatch: Arc<std::sync::atomic::AtomicU64>,
 }
 
-impl PerDispatchSink {
-    fn new(event_tx: mpsc::Sender<Frame>, current_dispatch: Arc<std::sync::atomic::AtomicU64>) -> Self {
-        Self {
-            event_tx,
-            current_dispatch,
-        }
-    }
-}
-
-impl crate::types::EventSink for PerDispatchSink {
+impl crate::types::EventSink for TransportSink {
     fn emit(&self, ev: &FOValue) {
         let id = self
             .current_dispatch
@@ -435,6 +459,18 @@ impl crate::types::EventSink for PerDispatchSink {
                 .event_tx
                 .send(Frame::Event(DispatchId(id), Event::Surface(ev.clone())));
         }
+    }
+}
+
+impl crate::types::DeferredSink for TransportSink {
+    fn deliver(&self, batch: Vec<FOValue>) {
+        let _ = self.event_tx.send(Frame::Event(
+            DispatchId(
+                self.current_dispatch
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            Event::DeferredSurface(batch),
+        ));
     }
 }
 
@@ -491,17 +527,18 @@ pub struct EngineInner {
     pub shell: crate::types::Shell,
     /// Send events to the front-end.
     pub(crate) event_tx: mpsc::Sender<Frame>,
-    /// The per-dispatch surface sink.
-    surface_sink: Arc<PerDispatchSink>,
-    /// The session-lived boundary sink for detached workers.
-    boundary_sink: Option<Boundary>,
+    /// The transport sink, serving both surface regimes.
+    surface_sink: Arc<TransportSink>,
+    /// The session-lived deferred sink for deferred workers.  Seeded with
+    /// the transport sink; a host may install its own (`set_deferred_sink`).
+    deferred_sink: Option<Arc<dyn DeferredSink>>,
     /// The installed enquiry desk, if any host has set one. `None` in
     /// Phase A: no desk installed by any host, so `enquire` answers its
     /// honest absence error.
     desk: Option<crate::types::Desk>,
     /// The session terminal lease (set by Attach).
     terminal_lease: Option<crate::process::TerminalLease>,
-    /// Shared dispatch id for boundary-sink correlation.
+    /// Shared dispatch id for deferred-sink correlation.
     current_dispatch: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -526,25 +563,21 @@ impl IdentityTransport {
     pub fn new(shell: crate::types::Shell) -> Self {
         let (event_tx, event_rx) = mpsc::channel();
         let current_dispatch = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let surface_sink = Arc::new(PerDispatchSink::new(
-            event_tx.clone(),
-            current_dispatch.clone(),
-        ));
+        let sink = Arc::new(TransportSink {
+            event_tx: event_tx.clone(),
+            current_dispatch: current_dispatch.clone(),
+        });
         let control = ControlSender::new();
         control.clone().publish();
 
-        let boundary_tx = event_tx.clone();
         let engine = EngineInner {
             shell,
             event_tx,
-            surface_sink,
-            boundary_sink: Some(Arc::new(TransportBoundarySink {
-                event_tx: boundary_tx,
-                current_dispatch: current_dispatch.clone(),
-            })),
+            surface_sink: sink.clone(),
+            deferred_sink: Some(sink),
             desk: None,
             terminal_lease: None,
-            current_dispatch: current_dispatch.clone(),
+            current_dispatch,
         };
 
         IdentityTransport {
@@ -557,14 +590,15 @@ impl IdentityTransport {
         }
     }
 
-    /// Set the session boundary sink for deferred worker batches.
-    pub fn set_boundary(&self, boundary: Boundary) {
-        self.engine.lock().boundary_sink = Some(boundary);
+    /// Set the session deferred sink for deferred worker batches.
+    pub fn set_deferred_sink(&self, deferred: Arc<dyn DeferredSink>) {
+        self.engine.lock().deferred_sink = Some(deferred);
     }
 
     /// Install the session's enquiry desk. Per-turn hosts (e.g. exarch, once
     /// the migration lands) call this before each dispatch so whatever the
-    /// desk captures is fresh — the same reasoning `set_boundary` follows.
+    /// desk captures is fresh — the same reasoning `set_deferred_sink`
+    /// follows.
     pub fn set_desk(&self, desk: crate::types::Desk) {
         self.engine.lock().desk = Some(desk);
     }
@@ -629,40 +663,28 @@ impl Transport for IdentityTransport {
         };
 
         // Mark the in-flight dispatch: the one atomic both the surface and
-        // boundary sinks read to stamp and gate their frames.
+        // deferred sinks read to stamp and gate their frames.
         engine
             .current_dispatch
             .store(id.0, std::sync::atomic::Ordering::Relaxed);
 
-        // The live handles this dispatch lends the turn; the mirror's data
-        // fields join them in `into_request`.
-        let surface = Some(engine.surface_sink.clone() as SurfaceSink);
-        let boundary = engine.boundary_sink.clone();
-        let desk = engine.desk.clone();
-
-        // Run the turn against the shell.  `req` is moved out of the turn per
-        // arm so `into_request` can borrow its `script_name` while the body
-        // runs.
-        let report = match turn {
-            Turn::Source { src, req } => {
-                let turn_req = req.into_request(surface, boundary, desk, Box::new(()));
-                engine.shell.run_source_turn(&src, turn_req)
-            }
-            Turn::Hook { name, args, req } => {
-                let turn_req = req.into_request(surface, boundary, desk, Box::new(()));
-                engine.shell.run_hook(&name, args, turn_req)
-            }
+        // The live handles this dispatch lends the turn, joined with the
+        // protocol `Turn` in the request the engine door runs.
+        let req = crate::driver::TurnRequest {
+            turn,
+            surface: Some(engine.surface_sink.clone() as SurfaceSink),
+            deferred: engine.deferred_sink.clone(),
+            desk: engine.desk.clone(),
+            lifecycle: Box::new(()),
         };
-
-        // Convert TurnReport → ReportMirror.
-        let report_mirror = report_to_mirror(report);
+        let report = engine.shell.run_turn(req).into_report();
 
         engine
             .current_dispatch
             .store(0, std::sync::atomic::Ordering::Relaxed);
         let _ = engine
             .event_tx
-            .send(Frame::Event(id, Event::Report(report_mirror)));
+            .send(Frame::Event(id, Event::Report(report)));
     }
 
     fn control(&self) -> &ControlSender {
@@ -870,114 +892,13 @@ impl Transport for WireTransport {
     }
 }
 
-// ── Transport boundary sink ───────────────────────────────────────────
-
-/// A `BoundarySink` that forwards detached-worker surface batches to the
-/// event channel as `Event::BoundarySurface` frames.  Preserves the
-/// `joined` deliver-once latch: only the first caller to set the latch
-/// wins and has its batch forwarded.
-struct TransportBoundarySink {
-    event_tx: mpsc::Sender<Frame>,
-    /// The dispatch id of the turn that installed this boundary, or 0 if
-    /// installed between turns.  // Phase 2: correlate by DispatchId
-    current_dispatch: Arc<std::sync::atomic::AtomicU64>,
-}
-
-impl crate::types::BoundarySink for TransportBoundarySink {
-    fn deliver(&self, batch: Vec<FOValue>, joined: std::sync::Arc<std::sync::Mutex<bool>>) {
-        // Test-and-set: only the first deliverer forwards the batch.
-        let already = {
-            let mut guard = joined.lock().unwrap();
-            let was = *guard;
-            *guard = true;
-            was
-        };
-        if already {
-            return;
-        }
-        let _ = self.event_tx.send(Frame::Event(
-            DispatchId(
-                self.current_dispatch
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
-            Event::BoundarySurface(batch),
-        ));
-    }
-}
-
-// ── Report conversion ─────────────────────────────────────────────────
-
-pub(crate) fn report_to_mirror(report: crate::driver::TurnReport) -> ReportMirror {
-    match report {
-        crate::driver::TurnReport::Static { diagnostics } => {
-            use crate::turn::StaticDiagnostics;
-            ReportMirror::Static {
-                diagnostics: match diagnostics {
-                    StaticDiagnostics::Parse(e) => DiagMirror::Parse(e.message),
-                    StaticDiagnostics::Types(errs) => {
-                        DiagMirror::Types(errs.iter().map(|e| e.to_string()).collect())
-                    }
-                    StaticDiagnostics::Host(e) => DiagMirror::Host(e.message),
-                },
-            }
-        }
-        crate::driver::TurnReport::Ran {
-            result,
-            status,
-            single_command,
-            captured,
-            timed_out,
-        } => {
-            let result_mirror = match result {
-                Ok(v) => {
-                    // Encode the result so it crosses the wire.  A
-                    // non-transportable value (e.g. a live `Handle`) cannot
-                    // cross; surface it as a diagnostic rather than dropping
-                    // it silently.
-                    match FOValue::try_from(&v) {
-                        Ok(fo) => ResultMirror::Ok(fo),
-                        Err(_) => ResultMirror::Err(BreakMirror::Error(
-                            "turn result is not transportable across the host seam".into(),
-                        )),
-                    }
-                }
-                Err(break_) => ResultMirror::Err(break_to_mirror(break_)),
-            };
-            let captured_bytes = captured.map(|c| (c.stdout, c.stderr));
-            ReportMirror::Ran {
-                result: result_mirror,
-                status,
-                single_command,
-                captured: captured_bytes,
-                timed_out,
-            }
-        }
-    }
-}
-
-fn break_to_mirror(break_: crate::types::Break) -> BreakMirror {
-    use crate::types::{Break, Escape};
-    match break_ {
-        Break::Error(e) => BreakMirror::Error(e.message),
-        Break::Escape(esc) => match esc {
-            Escape::Exit(code) => BreakMirror::Exit(code.clamp(0, 255)),
-            #[cfg(unix)]
-            Escape::Stopped { pgid, signal, .. } => BreakMirror::Stopped {
-                pgid: pgid.0,
-                signal: signal.number(),
-                signal_name: signal.name().unwrap_or("?").to_string(),
-            },
-        },
-    }
-}
-
 // ── Enquiry desk tests ────────────────────────────────────────────────
 //
 // Phase A installs no desk anywhere in production (§"the exarch installation
 // point" of the enquiry-channel ADR): the rail is exercised only here, by a
 // stub desk. There is no `enquire` builtin yet, so a turn's body (parsed ral
 // source) has no way to call `Shell::enquire` itself; the round-trip test
-// below drives it the same way `Shell::run_source_turn`'s own lifecycle
+// below drives it the same way the turn door's own lifecycle
 // tests do — a `TurnLifecycle` given `&mut Shell` mid-turn, exactly the
 // shape the migration's first handler will run under.
 #[cfg(test)]
@@ -988,20 +909,24 @@ mod enquiry_tests {
     use crate::types::{Capabilities, Desk, EnquiryDesk, Error, Shell};
     use std::sync::Mutex;
 
-    /// The minimal capturing request under the ⊤ capability ceiling, no
-    /// surface, no boundary, no desk — mirrors `turn.rs`'s own `capture_req`.
-    fn capture_req<'a>() -> TurnRequest<'a> {
+    /// The minimal capturing request under the ⊤ capability ceiling: no
+    /// surface, no deferred sink, no desk — matches `turn.rs`'s own
+    /// `capture_req`.
+    fn capture_req<'a>(src: &str) -> TurnRequest<'a> {
         TurnRequest {
-            script_name: "<test>",
-            caps: Capabilities::root(),
-            turn_limit: None,
-            detached_lease: None,
-            worker_cap: None,
-            io: TurnIo::Capture,
-            terminal: RequestedTerminalAccess::Denied,
-            stdin: TurnStdin::Empty,
+            turn: Turn {
+                program: Program::Source(src.into()),
+                script_name: "<test>".into(),
+                caps: Capabilities::root(),
+                turn_limit: None,
+                deferred_lease: None,
+                worker_cap: None,
+                io: TurnIo::Capture,
+                terminal: RequestedTerminalAccess::Denied,
+                stdin: TurnStdin::Empty,
+            },
             surface: None,
-            boundary: None,
+            deferred: None,
             desk: None,
             lifecycle: Box::new(()),
         }
@@ -1054,14 +979,11 @@ mod enquiry_tests {
             answer: answer.clone(),
         };
 
-        match shell.run_source_turn(
-            "$[1 + 1]",
-            TurnRequest {
-                desk: Some(std::sync::Arc::new(IncrementDesk) as Desk),
-                lifecycle: Box::new(lifecycle),
-                ..capture_req()
-            },
-        ) {
+        match shell.run_turn(TurnRequest {
+            desk: Some(std::sync::Arc::new(IncrementDesk) as Desk),
+            lifecycle: Box::new(lifecycle),
+            ..capture_req("$[1 + 1]")
+        }) {
             TurnReport::Ran { .. } => {}
             TurnReport::Static { .. } => panic!("`$[1 + 1]` must reach evaluation"),
         }
@@ -1110,18 +1032,16 @@ mod enquiry_tests {
         fn enquire(&self, req: FOValue) -> Result<FOValue, Error> {
             self.0.dispatch(
                 DispatchId(0),
-                Turn::Source {
-                    src: String::new(),
-                    req: ReqMirror {
-                        script_name: "<test>".into(),
-                        caps: Capabilities::root(),
-                        turn_limit: None,
-                        detached_lease: None,
-                        worker_cap: None,
-                        io: TurnIo::Capture,
-                        terminal: RequestedTerminalAccess::Denied,
-                        stdin: TurnStdin::Empty,
-                    },
+                Turn {
+                    program: Program::Source(String::new()),
+                    script_name: "<test>".into(),
+                    caps: Capabilities::root(),
+                    turn_limit: None,
+                    deferred_lease: None,
+                    worker_cap: None,
+                    io: TurnIo::Capture,
+                    terminal: RequestedTerminalAccess::Denied,
+                    stdin: TurnStdin::Empty,
                 },
             );
             Ok(req)

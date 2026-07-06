@@ -38,7 +38,7 @@
 //!     the one counter every late-settle path in the fleet consults, not a
 //!     private counter of this registry's: an async agent's result admits
 //!     against it (`Agent::admits`), a detached worker's deferred surface
-//!     batch admits against it (`InboxBoundary`, `shell_eval.rs`), and a
+//!     batch admits against it (`InboxDeferred`, `shell_eval.rs`), and a
 //!     schedule takes the stronger route of unconditional removal
 //!     (`ScheduleRegistry::clear`, ordered before the inbox sweep) rather
 //!     than carrying the generation at all — nothing settles across a

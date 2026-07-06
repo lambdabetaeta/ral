@@ -13,6 +13,7 @@
 
 mod common;
 
+use ral_core::transport::{Program, Turn};
 use ral_core::types::{Capabilities, Shell, Value};
 use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin, builtins};
 
@@ -24,23 +25,23 @@ fn fresh_shell() -> Shell {
 }
 
 fn top_level(shell: &mut Shell, source: &str) -> Value {
-    match shell.run_source_turn(
-        source,
-        TurnRequest {
-            script_name: "<test>",
+    match shell.run_turn(TurnRequest {
+        turn: Turn {
+            program: Program::Source(source.into()),
+            script_name: "<test>".into(),
             caps: Capabilities::root(),
             turn_limit: None,
-            detached_lease: None,
+            deferred_lease: None,
             worker_cap: None,
             io: TurnIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
             stdin: TurnStdin::Inherit,
-            surface: None,
-            boundary: None,
-            desk: None,
-            lifecycle: Box::new(()),
         },
-    ) {
+        surface: None,
+        deferred: None,
+        desk: None,
+        lifecycle: Box::new(()),
+    }) {
         TurnReport::Ran { result, .. } => result.expect("evaluation succeeds"),
         TurnReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
     }

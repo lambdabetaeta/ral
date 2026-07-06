@@ -5,8 +5,8 @@ use std::os::unix::io::FromRawFd;
 use std::os::unix::net::UnixStream;
 
 use crate::serial::FOValue;
-use crate::transport::{Control, DispatchId, Event, Frame, Turn, report_to_mirror};
-use crate::types::{Boundary, Shell, SurfaceSink};
+use crate::transport::{Control, DispatchId, Event, Frame, Turn};
+use crate::types::{DeferredSink, Shell, SurfaceSink};
 use crate::wire::WireChannel;
 
 use std::sync::{Arc, Mutex, mpsc};
@@ -28,28 +28,19 @@ impl crate::types::EventSink for ChannelSurfaceSink {
     }
 }
 
-/// A boundary sink that writes Event::BoundarySurface frames to the wire.
-struct ChannelBoundarySink {
+/// A deferred sink that writes Event::DeferredSurface frames to the wire.
+struct ChannelDeferredSink {
     id: DispatchId,
     writer: Arc<Mutex<WireChannel>>,
 }
 
-impl crate::types::BoundarySink for ChannelBoundarySink {
-    fn deliver(&self, batch: Vec<FOValue>, joined: std::sync::Arc<std::sync::Mutex<bool>>) {
-        let already = {
-            let mut guard = joined.lock().unwrap();
-            let was = *guard;
-            *guard = true;
-            was
-        };
-        if already {
-            return;
-        }
+impl crate::types::DeferredSink for ChannelDeferredSink {
+    fn deliver(&self, batch: Vec<FOValue>) {
         let _ = self
             .writer
             .lock()
             .unwrap()
-            .write_frame(&Frame::Event(self.id, Event::BoundarySurface(batch)));
+            .write_frame(&Frame::Event(self.id, Event::DeferredSurface(batch)));
     }
 }
 
@@ -75,37 +66,29 @@ pub fn run_engine() -> ! {
     std::thread::spawn(move || {
         let mut shell = shell;
         while let Ok((id, turn)) = turn_rx.recv() {
-            // The live handles this turn runs under; the mirror's data fields
-            // join them in `into_request`.  Phase A installs no desk on the
-            // wire engine.
-            let surface: Option<SurfaceSink> = Some(Arc::new(ChannelSurfaceSink {
-                id,
-                writer: worker_writer.clone(),
-            }));
-            let boundary: Option<Boundary> = Some(Arc::new(ChannelBoundarySink {
-                id,
-                writer: worker_writer.clone(),
-            }));
-
-            // Run the turn against the shell.  `req` is moved out per arm so
-            // `into_request` can borrow its `script_name` while the body runs.
-            let report = match turn {
-                Turn::Source { src, req } => {
-                    let turn_req = req.into_request(surface, boundary, None, Box::new(()));
-                    shell.run_source_turn(&src, turn_req)
-                }
-                Turn::Hook { name, args, req } => {
-                    let turn_req = req.into_request(surface, boundary, None, Box::new(()));
-                    shell.run_hook(&name, args, turn_req)
-                }
+            // The live handles this turn runs under, joined with the protocol
+            // `Turn` in the request the engine door runs.  Phase A installs
+            // no desk on the wire engine.
+            let req = crate::driver::TurnRequest {
+                turn,
+                surface: Some(Arc::new(ChannelSurfaceSink {
+                    id,
+                    writer: worker_writer.clone(),
+                }) as SurfaceSink),
+                deferred: Some(Arc::new(ChannelDeferredSink {
+                    id,
+                    writer: worker_writer.clone(),
+                }) as Arc<dyn DeferredSink>),
+                desk: None,
+                lifecycle: Box::new(()),
             };
+            let report = shell.run_turn(req).into_report();
 
-            // Convert and send the terminal Report frame.
-            let report_mirror = report_to_mirror(report);
+            // Send the terminal Report frame.
             let _ = worker_writer
                 .lock()
                 .unwrap()
-                .write_frame(&Frame::Event(id, Event::Report(report_mirror)));
+                .write_frame(&Frame::Event(id, Event::Report(report)));
         }
     });
 
@@ -118,18 +101,15 @@ pub fn run_engine() -> ! {
                     Ok(()) => { /* worker accepted the turn */ }
                     Err(mpsc::TrySendError::Full(_)) => {
                         // Worker is busy — reply with a static diagnostic.
-                        use crate::driver::TurnReport;
-                        use crate::turn::StaticDiagnostics;
-                        let mirror = report_to_mirror(TurnReport::Static {
-                            diagnostics: StaticDiagnostics::Host(crate::types::Error::new(
-                                "engine busy",
-                                1,
-                            )),
-                        });
+                        let report = crate::transport::Report::Static {
+                            diagnostics: crate::transport::Diagnostics::Host(
+                                "engine busy".into(),
+                            ),
+                        };
                         let _ = writer
                             .lock()
                             .unwrap()
-                            .write_frame(&Frame::Event(id, Event::Report(mirror)));
+                            .write_frame(&Frame::Event(id, Event::Report(report)));
                     }
                     Err(mpsc::TrySendError::Disconnected(_)) => {
                         break; // worker died

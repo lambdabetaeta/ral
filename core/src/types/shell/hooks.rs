@@ -6,8 +6,9 @@
 //! A hook is a [`Value::Block`] / [`Value::Lambda`] the host already
 //! holds in compiled form.  **Registering** it = storing it by name in
 //! the session-lived [`Context::hooks`] table.  **Running** it =
-//! [`Shell::run_hook`], which looks up the hook and applies it through
-//! the shared framed scaffold ([`Shell::run_built`]).
+//! dispatching a [`Program::Hook`](crate::transport::Program) turn through
+//! [`Shell::run_turn`], which looks up the hook and applies it through
+//! the shared framed scaffold.
 //!
 //! The table is a separate namespace from both the user lexical scope
 //! ([`Env`]) and the handler stack ([`HandlerStack`]): a hook is a turn

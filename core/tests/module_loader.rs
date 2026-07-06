@@ -16,12 +16,13 @@
 //!
 //! The harness mirrors `top_level_vs_block.rs`: bootstrap a `Shell` with
 //! the prelude registered, then drive each source string through the
-//! public `run_source_turn` door like a REPL turn would.
+//! public `run_turn` door like a REPL turn would.
 
 mod common;
 
 use std::io::Write;
 
+use ral_core::transport::{Program, Turn};
 use ral_core::types::{Break, Capabilities, Settled, Shell};
 use ral_core::{
     RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin, Value, builtins,
@@ -37,27 +38,27 @@ fn fresh_shell() -> Shell {
     shell
 }
 
-/// Run one top-level turn of `source` through the public `run_source_turn` door
+/// Run one top-level turn of `source` through the public `run_turn` door
 /// and return the body's `Settled<Value>`.  Every test below picks source
 /// it expects to compile, so a static diagnostic is a test bug.
 fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
-    match shell.run_source_turn(
-        source,
-        TurnRequest {
-            script_name: "<test>",
+    match shell.run_turn(TurnRequest {
+        turn: Turn {
+            program: Program::Source(source.into()),
+            script_name: "<test>".into(),
             caps: Capabilities::root(),
             turn_limit: None,
-            detached_lease: None,
+            deferred_lease: None,
             worker_cap: None,
             io: TurnIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
             stdin: TurnStdin::Inherit,
-            surface: None,
-            boundary: None,
-            desk: None,
-            lifecycle: Box::new(()),
         },
-    ) {
+        surface: None,
+        deferred: None,
+        desk: None,
+        lifecycle: Box::new(()),
+    }) {
         TurnReport::Ran { result, .. } => result,
         TurnReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
     }

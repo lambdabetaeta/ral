@@ -5,7 +5,7 @@
 //! - [`eval_top_level`] (`pub(crate)`) — the turn-evaluation verb a
 //!   tool call, a REPL turn, or a script line settles through.  Hosts do
 //!   not call it directly; they enter through the framed
-//!   [`Shell::run_source_turn`](crate::Shell::run_source_turn) door, which drives it.
+//!   [`Shell::run_turn`](crate::Shell::run_turn) door, which drives it.
 //!   The post-run [`crate::types::Mobile`] is *installed* on the parent shell on
 //!   every outcome (Ok / Error / Exit); a top-level turn is a resume
 //!   point, so every persistable state change must survive.
@@ -18,8 +18,8 @@
 //! absorbing tail signals through the trampoline.  Blocks reach their
 //! contract through it: the trampoline pattern-matches `Value::Thunk`
 //! and delegates to the internal [`eval_block`].  It is reached from
-//! outside the evaluator only through the host turn doors
-//! ([`crate::Shell::run_hook`]) and the in-frame builtin wrapper
+//! outside the evaluator only through the host turn door
+//! ([`crate::Shell::run_turn`]) and the in-frame builtin wrapper
 //! [`crate::builtins::apply`], so a host cannot start an unframed
 //! reduction; the in-crate callers ([`crate::runtime`]) already hold a
 //! turn frame.
@@ -98,7 +98,7 @@ pub fn evaluate(comp: &Arc<Comp>, shell: &mut Shell) -> Settled<Value> {
 ///
 /// The turn's program is its sole computation, evaluated under a
 /// trivial continuation ([`Tail::Yes`]): its value is handed straight
-/// back to the [`Shell::run_source_turn`](crate::Shell::run_source_turn) door that
+/// back to the [`Shell::run_turn`](crate::Shell::run_turn) door that
 /// drove it, which relays it to the host.  `dispatch` absorbs any
 /// terminal tail call inside the swapped-in mobile.
 pub(crate) fn eval_top_level(comp: &Arc<Comp>, shell: &mut Shell) -> Settled<Value> {

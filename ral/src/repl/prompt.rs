@@ -1,10 +1,11 @@
 //! Prompt construction.
 //!
 //! The prompt body is a registered hook at `Session/"prompt"`,
-//! dispatched via [`Shell::run_hook`].  CWD, STATUS, and USER are
+//! dispatched via [`Shell::run_turn`].  CWD, STATUS, and USER are
 //! ambient pseudo-variables read by the prompt body directly.
 //! Plugins may transform the result via the `prompt` lifecycle hook.
 
+use ral_core::transport::{Program, Turn};
 use ral_core::types::{Break, Capabilities, HookName};
 #[cfg(test)]
 use ral_core::{DefaultPolicy, HookSig};
@@ -70,28 +71,32 @@ pub(super) fn eval_prompt(prompt: &Value, shell: &mut Shell) -> String {
     );
 
     let req = TurnRequest {
-        script_name: "<prompt>",
-        caps: Capabilities::root(),
-        io: TurnIo::Capture,
-        terminal: RequestedTerminalAccess::Denied,
-        stdin: TurnStdin::Inherit,
-        turn_limit: None,
-        detached_lease: None,
-        worker_cap: None,
+        turn: Turn {
+            program: Program::Hook {
+                name: HookName::session("__eval_prompt_test__"),
+                args: vec![],
+            },
+            script_name: "<prompt>".to_string(),
+            caps: Capabilities::root(),
+            turn_limit: None,
+            deferred_lease: None,
+            worker_cap: None,
+            io: TurnIo::Capture,
+            terminal: RequestedTerminalAccess::Denied,
+            stdin: TurnStdin::Inherit,
+        },
         surface: None,
-        boundary: None,
+        deferred: None,
         desk: None,
         lifecycle: Box::new(()),
     };
 
-    let (result, captured) = shell.with_preserved_status(|shell| {
-        match shell.run_hook(&HookName::session("__eval_prompt_test__"), vec![], req) {
-            TurnReport::Ran {
-                result, captured, ..
-            } => (result, captured),
-            TurnReport::Static { .. } => {
-                unreachable!("a thunk prompt body never compiles source")
-            }
+    let (result, captured) = shell.with_preserved_status(|shell| match shell.run_turn(req) {
+        TurnReport::Ran {
+            result, captured, ..
+        } => (result, captured),
+        TurnReport::Static { .. } => {
+            unreachable!("a thunk prompt body never compiles source")
         }
     });
 
@@ -146,21 +151,27 @@ pub(super) fn write_terminal_title(shell: &Shell) {
 /// overwritten by the rc `prompt:` key.
 pub(super) fn render(shell: &mut Shell, runtime: &Arc<Mutex<PluginRuntime>>) -> PromptText {
     let req = TurnRequest {
-        script_name: "<prompt>",
-        caps: Capabilities::root(),
-        io: TurnIo::Capture,
-        terminal: RequestedTerminalAccess::Denied,
-        stdin: TurnStdin::Inherit,
-        turn_limit: None,
-        detached_lease: None,
-        worker_cap: None,
+        turn: Turn {
+            program: Program::Hook {
+                name: HookName::session("prompt"),
+                args: vec![],
+            },
+            script_name: "<prompt>".to_string(),
+            caps: Capabilities::root(),
+            turn_limit: None,
+            deferred_lease: None,
+            worker_cap: None,
+            io: TurnIo::Capture,
+            terminal: RequestedTerminalAccess::Denied,
+            stdin: TurnStdin::Inherit,
+        },
         surface: None,
-        boundary: None,
+        deferred: None,
         desk: None,
         lifecycle: Box::new(()),
     };
 
-    let base = match shell.run_hook(&HookName::session("prompt"), vec![], req) {
+    let base = match shell.run_turn(req) {
         TurnReport::Ran {
             result, captured, ..
         } => match result {

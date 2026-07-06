@@ -1311,28 +1311,32 @@ mod tests {
         body: BuiltinBody::Static(builtin_test_block_forever),
     }];
 
-    /// Run `src` as one top-level turn with no detached lease (so nothing
-    /// races a reap during the test) and no boundary (the tests below
+    /// Run `src` as one top-level turn with no deferred lease (so nothing
+    /// races a reap during the test) and no deferred sink (the tests below
     /// never care where a deferred surface batch would land). Panics on a
     /// static (parse/type) failure or a runtime error — every source this
     /// helper runs is expected to compile and complete cleanly.
     fn run_top_level(shell: &mut Shell, src: &str) {
         use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
+        use ral_core::transport::{Program, Turn};
         let req = TurnRequest {
-            script_name: "<test>",
-            caps: ral_core::types::Capabilities::root(),
-            turn_limit: None,
-            detached_lease: None,
-            worker_cap: None,
-            io: TurnIo::Capture,
-            terminal: RequestedTerminalAccess::Denied,
-            stdin: TurnStdin::Empty,
+            turn: Turn {
+                program: Program::Source(src.to_string()),
+                script_name: "<test>".to_string(),
+                caps: ral_core::types::Capabilities::root(),
+                turn_limit: None,
+                deferred_lease: None,
+                worker_cap: None,
+                io: TurnIo::Capture,
+                terminal: RequestedTerminalAccess::Denied,
+                stdin: TurnStdin::Empty,
+            },
             surface: None,
-            boundary: None,
+            deferred: None,
             desk: None,
             lifecycle: Box::new(()),
         };
-        match shell.run_source_turn(src, req) {
+        match shell.run_turn(req) {
             TurnReport::Ran { result, .. } => {
                 result.expect("worker-registry fixture source must run cleanly");
             }

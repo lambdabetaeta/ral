@@ -39,7 +39,7 @@ use std::collections::{HashMap, HashSet};
 
 /// Host-stated per-agent policy: a leased name expires once it has gone
 /// `idle_calls` epochs without use. The epoch is the shell's committed-turn
-/// clock ([`Shell::run_source_turn`](super::Shell::run_source_turn)'s tick),
+/// clock ([`Shell::run_turn`](super::Shell::run_turn)'s source-arm tick),
 /// never wall time. `large_binding_bytes` is a separate, orthogonal axis —
 /// residency, not lifetime — read only by the install chokepoint's
 /// large-binding check: an install whose
@@ -359,9 +359,9 @@ mod tests {
 /// [`Shell::install_scope_binding`] and gets leased, while every
 /// deeper-scope write is recorded nowhere; a committed turn's referenced
 /// names renew already-leased entries at the three harvest seams
-/// (`run_source_turn`'s own compiled program, `check_source`'s
+/// (`run_turn`'s own compiled program, `check_source`'s
 /// runtime-compiled loads, `classify_command`'s `Resolution::Env` dispatch
-/// touch). Driven through the public `run_source_turn` door, no exarch
+/// touch). Driven through the public `run_turn` door, no exarch
 /// involved — the same harness shape as `core/tests/top_level_vs_block.rs`.
 #[cfg(test)]
 #[allow(
@@ -370,6 +370,7 @@ mod tests {
 )]
 mod chokepoint_tests {
     use crate::driver::BakedPrelude;
+    use crate::transport::{Program, Turn};
     use crate::types::{Capabilities, HandleState, Settled, Shell, Value};
     use crate::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
     use std::sync::OnceLock;
@@ -405,23 +406,23 @@ mod chokepoint_tests {
     /// Run one top-level turn through the public door. Every source below
     /// is expected to compile; a `Static` report is a test bug.
     fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
-        match shell.run_source_turn(
-            source,
-            TurnRequest {
-                script_name: "<test>",
+        match shell.run_turn(TurnRequest {
+            turn: Turn {
+                program: Program::Source(source.into()),
+                script_name: "<test>".into(),
                 caps: Capabilities::root(),
                 turn_limit: None,
-                detached_lease: None,
+                deferred_lease: None,
                 worker_cap: None,
                 io: TurnIo::Inherit,
                 terminal: RequestedTerminalAccess::Leased,
                 stdin: TurnStdin::Inherit,
-                surface: None,
-                boundary: None,
-                desk: None,
-                lifecycle: Box::new(()),
             },
-        ) {
+            surface: None,
+            deferred: None,
+            desk: None,
+            lifecycle: Box::new(()),
+        }) {
             TurnReport::Ran { result, .. } => result,
             TurnReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
         }
@@ -594,23 +595,23 @@ mod chokepoint_tests {
         let epoch_before = epoch(&shell);
         let stale = last_used_of(&shell, "static_x");
 
-        match shell.run_source_turn(
-            "$[1 + true]",
-            TurnRequest {
-                script_name: "<test>",
+        match shell.run_turn(TurnRequest {
+            turn: Turn {
+                program: Program::Source("$[1 + true]".into()),
+                script_name: "<test>".into(),
                 caps: Capabilities::root(),
                 turn_limit: None,
-                detached_lease: None,
+                deferred_lease: None,
                 worker_cap: None,
                 io: TurnIo::Inherit,
                 terminal: RequestedTerminalAccess::Leased,
                 stdin: TurnStdin::Inherit,
-                surface: None,
-                boundary: None,
-                desk: None,
-                lifecycle: Box::new(()),
             },
-        ) {
+            surface: None,
+            deferred: None,
+            desk: None,
+            lifecycle: Box::new(()),
+        }) {
             TurnReport::Static { .. } => {}
             TurnReport::Ran { .. } => panic!("ill-typed source must not run"),
         }
@@ -627,9 +628,9 @@ mod chokepoint_tests {
         );
     }
 
-    /// A registered hook run through `run_hook` is not a tool call: it ticks
-    /// no epoch and renews nothing, even though its body reads a name the
-    /// turn's own harvest would otherwise have caught.
+    /// A registered hook run through `run_turn`'s `Program::Hook` is not a
+    /// tool call: it ticks no epoch and renews nothing, even though its body
+    /// reads a name the turn's own harvest would otherwise have caught.
     #[test]
     fn hook_door_neither_ticks_nor_renews() {
         let mut shell = armed_shell(64);
@@ -657,24 +658,26 @@ mod chokepoint_tests {
             )
             .expect("register the hook");
 
-        let report = shell.run_hook(
-            &crate::types::HookName::session("test_prompt"),
-            vec![],
-            TurnRequest {
-                script_name: "<test>",
+        let report = shell.run_turn(TurnRequest {
+            turn: Turn {
+                program: Program::Hook {
+                    name: crate::types::HookName::session("test_prompt"),
+                    args: vec![],
+                },
+                script_name: "<test>".into(),
                 caps: Capabilities::root(),
                 turn_limit: None,
-                detached_lease: None,
+                deferred_lease: None,
                 worker_cap: None,
                 io: TurnIo::Inherit,
                 terminal: RequestedTerminalAccess::Leased,
                 stdin: TurnStdin::Inherit,
-                surface: None,
-                boundary: None,
-                desk: None,
-                lifecycle: Box::new(()),
             },
-        );
+            surface: None,
+            deferred: None,
+            desk: None,
+            lifecycle: Box::new(()),
+        });
         match report {
             TurnReport::Ran { result, .. } => {
                 result.expect("the hook body must run");
@@ -795,23 +798,23 @@ mod chokepoint_tests {
         assert_eq!(notices[0].kind, "Int");
         assert!(shell.scope_lookup("prune_x").is_none());
 
-        match shell.run_source_turn(
-            "return $prune_x",
-            TurnRequest {
-                script_name: "<test>",
+        match shell.run_turn(TurnRequest {
+            turn: Turn {
+                program: Program::Source("return $prune_x".into()),
+                script_name: "<test>".into(),
                 caps: Capabilities::root(),
                 turn_limit: None,
-                detached_lease: None,
+                deferred_lease: None,
                 worker_cap: None,
                 io: TurnIo::Inherit,
                 terminal: RequestedTerminalAccess::Leased,
                 stdin: TurnStdin::Inherit,
-                surface: None,
-                boundary: None,
-                desk: None,
-                lifecycle: Box::new(()),
             },
-        ) {
+            surface: None,
+            deferred: None,
+            desk: None,
+            lifecycle: Box::new(()),
+        }) {
             TurnReport::Ran { result, .. } => {
                 let err = result.expect_err("a pruned name must read as undefined");
                 let msg = match err {

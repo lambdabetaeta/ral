@@ -1,5 +1,6 @@
 //! Non-interactive execution for script, stdin, and `-c` modes.
 
+use ral_core::transport::{Program, Turn};
 use ral_core::types::{Break, Escape, Settled};
 use ral_core::{
     RequestedTerminalAccess, Shell, TurnIo, TurnReport, TurnRequest, TurnStdin, diagnostic,
@@ -206,23 +207,23 @@ pub(crate) fn run_batch(
     } else {
         RequestedTerminalAccess::Denied
     };
-    let result = match shell.run_source_turn(
-        source.as_str(),
-        TurnRequest {
-            script_name: name,
+    let result = match shell.run_turn(TurnRequest {
+        turn: Turn {
+            program: Program::Source(source.to_string()),
+            script_name: name.to_string(),
             caps: ral_core::types::Capabilities::root(),
             turn_limit: None,
-            detached_lease: None,
+            deferred_lease: None,
             worker_cap: None,
             io: TurnIo::Inherit,
             terminal: terminal_access,
             stdin: TurnStdin::Inherit,
-            surface: None,
-            boundary: None,
-            desk: None,
-            lifecycle: Box::new(()),
         },
-    ) {
+        surface: None,
+        deferred: None,
+        desk: None,
+        lifecycle: Box::new(()),
+    }) {
         TurnReport::Ran { result, .. } => result,
         // Batch already typechecked above, so a static report should not occur
         // here; treat it defensively as a fatal run (exit 1).

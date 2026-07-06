@@ -2,13 +2,14 @@
 
 //! Structural I/O events: core pushes a plain `Value` onto the turn's
 //! `surface` sink at every redirect read/write door and every exec
-//! completion door.  These tests drive the public `Shell::run_source_turn`
-//! boundary (exactly as `surface_effect.rs` does) with a recording sink
+//! completion door.  These tests drive the public `Shell::run_turn`
+//! door (exactly as `surface_effect.rs` does) with a recording sink
 //! and assert the emitted `{io: …}` maps.  Decoding these into cards is
 //! exarch's job and out of scope here — we only check the wire shape.
 
 mod common;
 
+use ral_core::transport::{Program, Turn};
 use ral_core::types::{Capabilities, Settled, Shell, Value};
 use ral_core::{
     EventSink, RequestedTerminalAccess, SurfaceSink, TurnIo, TurnReport, TurnRequest, TurnStdin,
@@ -47,23 +48,23 @@ fn recording() -> (Arc<Mutex<Vec<Value>>>, SurfaceSink) {
 /// error.
 fn run(shell: &mut Shell, source: &str) -> (Settled<Value>, Vec<Value>) {
     let (log, sink) = recording();
-    let result = match shell.run_source_turn(
-        source,
-        TurnRequest {
-            script_name: "<test>",
+    let result = match shell.run_turn(TurnRequest {
+        turn: Turn {
+            program: Program::Source(source.into()),
+            script_name: "<test>".into(),
             caps: Capabilities::root(),
             turn_limit: None,
-            detached_lease: None,
+            deferred_lease: None,
             worker_cap: None,
             io: TurnIo::Inherit,
             terminal: RequestedTerminalAccess::Leased,
             stdin: TurnStdin::Inherit,
-            surface: Some(sink),
-            boundary: None,
-            desk: None,
-            lifecycle: Box::new(()),
         },
-    ) {
+        surface: Some(sink),
+        deferred: None,
+        desk: None,
+        lifecycle: Box::new(()),
+    }) {
         TurnReport::Ran { result, .. } => result,
         TurnReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
     };

@@ -78,8 +78,8 @@ pub use shell::hooks::{
     DefaultPolicy, Hook, HookName, HookSig, Namespace, RegisterError, TerminalPolicy,
 };
 pub use shell::{
-    Boundary, BoundarySink, Context, DEFAULT_RECURSION_LIMIT, Desk, EnquiryDesk, EventSink,
-    LocalState, Mobile, MobileSnapshot, SessionState, Shell, SurfaceSink, TerminalLoan, TurnState,
+    Context, DEFAULT_RECURSION_LIMIT, DeferredSink, Desk, EnquiryDesk, EventSink, LocalState,
+    Mobile, MobileSnapshot, SessionState, Shell, SurfaceSink, TerminalLoan, TurnState,
 };
 pub(crate) use shell::{TerminalAccess, ThunkBody};
 

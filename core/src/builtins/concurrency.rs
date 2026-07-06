@@ -47,16 +47,16 @@ pub(super) enum ChildIoMode {
 /// itself a surface event; a host that does not know its tag drops it.
 const DEFERRED_SURFACE_CAP: usize = 4096;
 
-/// The surface a *detached* worker installs.  Unlike a same-thread thunk body,
-/// a detached worker may outlive the turn that spawned it, so it must not hold
+/// The surface a *deferred* worker installs.  Unlike a same-thread thunk body,
+/// a deferred worker may outlive the turn that spawned it, so it must not hold
 /// the turn's live sink: it buffers structured events into a bounded
 /// [`SurfaceBuffer`].  The buffer has two ways out — `await`/`race` replay it
 /// through the awaiting turn's surface (the live-frame pull), and at completion
-/// the worker flushes a clone to its [`Boundary`] sink (the un-awaited
+/// the worker delivers a clone to its [`DeferredSink`] (the un-awaited
 /// fallback) — gated to deliver exactly once by the handle's `joined` latch.
 struct DeferredSurface {
     buf: SurfaceBuffer,
-    boundary: Option<Boundary>,
+    deferred: Option<Arc<dyn DeferredSink>>,
 }
 
 impl EventSink for DeferredSurface {
@@ -104,19 +104,27 @@ fn done_event(cmd: &str, outcome: Value) -> FOValue {
 
 impl DeferredSurface {
     /// Flush this worker's deferred surface — the buffer plus a final
-    /// [`done_event`] — to its [`Boundary`] sink as one batch, gated to deliver
-    /// once by the shared `joined` latch.  A no-op when no boundary is installed
-    /// (a bare REPL): then the deferred surface reaches a sink only via
+    /// [`done_event`] — to its [`DeferredSink`] as one batch, gated to
+    /// deliver once by the shared `joined` latch.  The test-and-set lives
+    /// here, at the sink's sole call site, not in the sink itself: an
+    /// implementation only says where the batch goes and cannot forget the
+    /// deliver-once discipline.  A no-op when no sink is installed (a bare
+    /// REPL): then the deferred surface reaches a sink only via
     /// `await`/`race`.  The batch is a fresh clone so it is independent of
     /// whatever an eliminator later drains from the same buffer
     /// (`complete_handle`'s `mem::take`).
     fn flush(&self, joined: &Arc<Mutex<bool>>, cmd: &str, outcome: Value) {
-        let Some(boundary) = self.boundary.as_ref() else {
+        let Some(deferred) = self.deferred.as_ref() else {
             return;
         };
+        // Test-and-set: only the first of delivery and replay wins the latch.
+        let already = std::mem::replace(&mut *joined.lock().unwrap(), true);
+        if already {
+            return;
+        }
         let mut batch = self.buf.lock().unwrap().clone();
         batch.push(done_event(cmd, outcome));
-        boundary.deliver(batch, joined.clone());
+        deferred.deliver(batch);
     }
 }
 
@@ -227,19 +235,20 @@ where
     // stdout in `Sink::LineFramed` with a per-handle prefix.
     let (stdout_sink, stdout_buf) = new_buffer();
     let (stderr_sink, stderr_buf) = new_buffer();
-    // The detached worker buffers `surface` calls here rather than holding the
+    // The deferred worker buffers `surface` calls here rather than holding the
     // spawning turn's live sink; `await`/`race` replay it once and the worker
-    // flushes a clone to the boundary at completion.
+    // delivers a clone to the deferred sink at completion.
     let surface_buf: SurfaceBuffer = Arc::new(Mutex::new(Vec::new()));
-    // The session-lived boundary the worker flushes to at completion, captured
-    // from the spawning turn so it survives that turn's teardown and a nested
-    // `spawn` inside the worker inherits it.  The worker's `DeferredSurface`
-    // holds both the buffer and this destination; the `joined` latch is shared
-    // with the eliminators so whichever renders first wins the deliver-once test.
-    let boundary = shell.turn.boundary.clone();
+    // The session-lived deferred sink the worker delivers to at completion,
+    // captured from the spawning turn so it survives that turn's teardown and
+    // a nested `spawn` inside the worker inherits it.  The worker's
+    // `DeferredSurface` holds both the buffer and this destination; the
+    // `joined` latch is shared with the eliminators so whichever renders
+    // first wins the deliver-once test.
+    let deferred = shell.turn.deferred.clone();
     let worker_surface = Arc::new(DeferredSurface {
         buf: surface_buf.clone(),
-        boundary: boundary.clone(),
+        deferred: deferred.clone(),
     });
     let joined = Arc::new(Mutex::new(false));
     let worker_joined = joined.clone();
@@ -288,10 +297,10 @@ where
         // terminal and could `tcgetpgrp(stdin)` / `kill(-fg, …)` whoever owns
         // it.  `Empty` wires fd 0 to `/dev/null`.
         child_env.turn.io.stdin = crate::io::Source::Empty;
-        // The boundary flows onto the worker's turn so a nested `spawn` inside
-        // the body installs its own `DeferredSurface` with the same boundary
-        // and flushes at *its* own completion.
-        child_env.turn.boundary = boundary;
+        // The deferred sink flows onto the worker's turn so a nested `spawn`
+        // inside the body installs its own `DeferredSurface` with the same
+        // sink and delivers at *its* own completion.
+        child_env.turn.deferred = deferred;
         child_env.turn.surface = Some(worker_surface.clone());
 
         // Arm the flush guard before the body runs: a panicking body unwinds
@@ -382,7 +391,7 @@ where
     // no chain at all — no reaper entry ever exists for it, which is the
     // whole durable policy.
     if class == LeaseClass::Worker
-        && let Some(lease) = shell.turn.detached_lease
+        && let Some(lease) = shell.turn.deferred_lease
     {
         let chain = LeaseChain {
             scope: handle.cancel.clone(),
@@ -1230,7 +1239,7 @@ mod tests {
     #[test]
     fn unobserved_worker_is_reaped_at_its_idle_lease() {
         let mut shell = Shell::new(Default::default());
-        shell.turn.detached_lease = Some(lease_ms(40, 10_000));
+        shell.turn.deferred_lease = Some(lease_ms(40, 10_000));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
@@ -1364,7 +1373,7 @@ mod tests {
     #[test]
     fn polled_worker_survives_past_its_idle_lease() {
         let mut shell = Shell::new(Default::default());
-        shell.turn.detached_lease = Some(lease_ms(200, 10_000));
+        shell.turn.deferred_lease = Some(lease_ms(200, 10_000));
         let (gate_tx, gate_rx) = mpsc::channel::<()>();
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
@@ -1404,7 +1413,7 @@ mod tests {
     #[test]
     fn backstop_reaps_a_ritually_polled_worker() {
         let mut shell = Shell::new(Default::default());
-        shell.turn.detached_lease = Some(lease_ms(150, 400));
+        shell.turn.deferred_lease = Some(lease_ms(150, 400));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
@@ -1443,7 +1452,7 @@ mod tests {
     #[test]
     fn completed_unobserved_worker_is_not_reaped() {
         let mut shell = Shell::new(Default::default());
-        shell.turn.detached_lease = Some(lease_ms(100, 10_000));
+        shell.turn.deferred_lease = Some(lease_ms(100, 10_000));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
@@ -1487,7 +1496,7 @@ mod tests {
     #[test]
     fn listing_does_not_renew_the_lease() {
         let mut shell = Shell::new(Default::default());
-        shell.turn.detached_lease = Some(lease_ms(40, 10_000));
+        shell.turn.deferred_lease = Some(lease_ms(40, 10_000));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
@@ -1527,7 +1536,7 @@ mod tests {
     #[test]
     fn durable_worker_outlives_both_lease_bounds_while_its_sibling_reaps() {
         let mut shell = Shell::new(Default::default());
-        shell.turn.detached_lease = Some(lease_ms(40, 150));
+        shell.turn.deferred_lease = Some(lease_ms(40, 150));
 
         let snap = Arc::new(shell.mobile().scope);
         let durable = spawn_child(
@@ -1589,7 +1598,7 @@ mod tests {
     #[test]
     fn cancel_through_the_handle_ends_a_durable_worker() {
         let mut shell = Shell::new(Default::default());
-        shell.turn.detached_lease = Some(lease_ms(10_000, 20_000));
+        shell.turn.deferred_lease = Some(lease_ms(10_000, 20_000));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
@@ -1629,22 +1638,26 @@ mod tests {
     /// installed, returning the runtime result. Panics on a parse/type
     /// failure — every source these tests run is expected to compile.
     fn run_service_source(shell: &mut Shell, src: &str) -> Settled<Value> {
+        use crate::transport::{Program, Turn};
         use crate::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin};
         let req = TurnRequest {
-            script_name: "<test>",
-            caps: Capabilities::root(),
-            turn_limit: None,
-            detached_lease: None,
-            worker_cap: None,
-            io: TurnIo::Capture,
-            terminal: RequestedTerminalAccess::Denied,
-            stdin: TurnStdin::Empty,
+            turn: Turn {
+                program: Program::Source(src.into()),
+                script_name: "<test>".into(),
+                caps: Capabilities::root(),
+                turn_limit: None,
+                deferred_lease: None,
+                worker_cap: None,
+                io: TurnIo::Capture,
+                terminal: RequestedTerminalAccess::Denied,
+                stdin: TurnStdin::Empty,
+            },
             surface: None,
-            boundary: None,
+            deferred: None,
             desk: None,
             lifecycle: Box::new(()),
         };
-        match shell.run_source_turn(src, req) {
+        match shell.run_turn(req) {
             TurnReport::Ran { result, .. } => result,
             TurnReport::Static { .. } => {
                 panic!("well-formed source must run, not fail statically: {src:?}")
@@ -1760,27 +1773,22 @@ mod tests {
         );
     }
 
-    /// A boundary test double standing in for the agent host: it records each
-    /// delivered batch, but only the one that wins the shared `joined`
-    /// test-and-set — exactly as the host renders only the batch that beats the
-    /// eliminators' replay.
-    struct RecBoundary(Arc<Mutex<Vec<Vec<FOValue>>>>);
+    /// A deferred-sink test double standing in for the agent host: it records
+    /// every delivered batch.  The deliver-once test-and-set now lives at
+    /// `DeferredSurface::flush`'s call site, so the sink itself just records
+    /// whatever it is handed.
+    struct RecDeferred(Arc<Mutex<Vec<Vec<FOValue>>>>);
 
-    impl BoundarySink for RecBoundary {
-        fn deliver(&self, batch: Vec<FOValue>, joined: Arc<Mutex<bool>>) {
-            let mut won = joined.lock().unwrap();
-            if *won {
-                return;
-            }
-            *won = true;
+    impl DeferredSink for RecDeferred {
+        fn deliver(&self, batch: Vec<FOValue>) {
             self.0.lock().unwrap().push(batch);
         }
     }
 
-    /// Spin until the boundary has recorded a batch (the worker flushed) or the
-    /// budget elapses, returning the recorded batches.  A `spawn_child` worker
-    /// runs on its own thread, so its completion flush is observed by waiting on
-    /// the destination rather than on the result channel.
+    /// Spin until the deferred sink has recorded a batch (the worker flushed) or
+    /// the budget elapses, returning the recorded batches.  A `spawn_child`
+    /// worker runs on its own thread, so its completion flush is observed by
+    /// waiting on the destination rather than on the result channel.
     fn wait_for_batch(batches: &Arc<Mutex<Vec<Vec<FOValue>>>>) -> Vec<Vec<FOValue>> {
         for _ in 0..500 {
             {
@@ -1791,7 +1799,7 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
-        panic!("worker never flushed its batch to the boundary");
+        panic!("worker never flushed its batch to the deferred sink");
     }
 
     /// The `outcome` label inside a batch's trailing `` `done `` event.  Pins
@@ -1806,17 +1814,17 @@ mod tests {
         }
     }
 
-    /// Install a boundary and `spawn_child` a worker; on completion the worker
-    /// flushes its buffer plus a trailing `` `done `` event to the boundary as
-    /// one batch.  This is the un-awaited delivery the ADR adds: a fire-and-forget
+    /// Install a deferred sink and `spawn_child` a worker; on completion the
+    /// worker flushes its buffer plus a trailing `` `done `` event to the sink
+    /// as one batch.  This is the un-awaited delivery the ADR adds: a fire-and-forget
     /// worker reaches a sink with no eliminator at all.  Each outcome — clean
     /// return, raised `Err`, panic — stamps the matching `done` label.
     #[test]
-    fn detached_worker_flushes_done_to_boundary() {
+    fn detached_worker_flushes_done_to_deferred_sink() {
         fn run(work: impl FnOnce(&mut Shell) -> Raw<Value> + Send + 'static) -> Vec<FOValue> {
             let mut shell = Shell::new(Default::default());
             let batches = Arc::new(Mutex::new(Vec::new()));
-            shell.turn.boundary = Some(Arc::new(RecBoundary(batches.clone())));
+            shell.turn.deferred = Some(Arc::new(RecDeferred(batches.clone())));
             let snap = Arc::new(shell.mobile().scope);
             // Hold the handle (and its receiver) so the channel stays connected
             // until the worker has flushed; never observed, so no eliminator
@@ -1859,15 +1867,15 @@ mod tests {
     }
 
     /// The body's own `surface`/`io` values appear in the batch *before* the
-    /// trailing `` `done ``: the boundary carries the full deferred surface, not
-    /// only the completion notice.  Also pins that a panicking worker still
-    /// settles its handle as a panic through the existing `Disconnected` path —
-    /// the flush guard preserves that semantics.
+    /// trailing `` `done ``: the deferred batch carries the full deferred
+    /// surface, not only the completion notice.  Also pins that a panicking
+    /// worker still settles its handle as a panic through the existing
+    /// `Disconnected` path — the flush guard preserves that semantics.
     #[test]
-    fn boundary_batch_carries_body_surface_before_done() {
+    fn deferred_batch_carries_body_surface_before_done() {
         let mut shell = Shell::new(Default::default());
         let batches = Arc::new(Mutex::new(Vec::new()));
-        shell.turn.boundary = Some(Arc::new(RecBoundary(batches.clone())));
+        shell.turn.deferred = Some(Arc::new(RecDeferred(batches.clone())));
         let snap = Arc::new(shell.mobile().scope);
 
         // A worker that surfaces one card, then panics: the buffered card must
@@ -1915,13 +1923,13 @@ mod tests {
         }
     }
 
-    /// With no boundary installed (the bare REPL), a completed worker flushes
-    /// nothing: REPL behaviour is byte-for-byte unchanged, and the deferred
-    /// surface reaches a sink only via `await`/`race`.
+    /// With no deferred sink installed (the bare REPL), a completed worker
+    /// flushes nothing: REPL behaviour is byte-for-byte unchanged, and the
+    /// deferred surface reaches a sink only via `await`/`race`.
     #[test]
-    fn no_boundary_means_no_delivery() {
+    fn no_deferred_sink_means_no_delivery() {
         let mut shell = Shell::new(Default::default());
-        assert!(shell.turn.boundary.is_none(), "a bare REPL installs none");
+        assert!(shell.turn.deferred.is_none(), "a bare REPL installs none");
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
@@ -1941,10 +1949,10 @@ mod tests {
         )
         .unwrap();
 
-        // Join through `await`: the worker has run and (with no boundary) flushed
-        // nothing.  The `joined` latch was never set by a boundary, so the replay
-        // still surfaces the body's card through the awaiting turn — the existing
-        // pull-forward path.
+        // Join through `await`: the worker has run and (with no deferred sink)
+        // flushed nothing.  The `joined` latch was never set by a delivery, so
+        // the replay still surfaces the body's card through the awaiting turn
+        // — the existing pull-forward path.
         let log = Arc::new(Mutex::new(Vec::new()));
         struct Rec(Arc<Mutex<Vec<FOValue>>>);
         impl EventSink for Rec {
@@ -1961,19 +1969,19 @@ mod tests {
                 label: "card".into(),
                 payload: None,
             }],
-            "no boundary appends no `done; await replays only the body's card"
+            "no deferred sink appends no `done; await replays only the body's card"
         );
     }
 
-    /// Deliver-once across the two regimes: once the boundary has delivered a
-    /// batch (winning the `joined` test-and-set), a later `await` replays
-    /// nothing — the shared latch suppresses the duplicate render — yet `await`
-    /// still returns its cached result record.
+    /// Deliver-once across the two regimes: once the deferred sink has
+    /// delivered a batch (winning the `joined` test-and-set), a later `await`
+    /// replays nothing — the shared latch suppresses the duplicate render —
+    /// yet `await` still returns its cached result record.
     #[test]
-    fn boundary_delivery_suppresses_a_later_await_replay() {
+    fn deferred_delivery_suppresses_a_later_await_replay() {
         let mut shell = Shell::new(Default::default());
         let batches = Arc::new(Mutex::new(Vec::new()));
-        shell.turn.boundary = Some(Arc::new(RecBoundary(batches.clone())));
+        shell.turn.deferred = Some(Arc::new(RecDeferred(batches.clone())));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
@@ -1993,9 +2001,9 @@ mod tests {
         )
         .unwrap();
 
-        // The boundary wins the latch first, recording one batch.
+        // The deferred sink wins the latch first, recording one batch.
         wait_for_batch(&batches);
-        assert!(*handle.joined.lock().unwrap(), "the boundary set `joined");
+        assert!(*handle.joined.lock().unwrap(), "the deferred flush set `joined");
 
         // A later `await` reads the result but finds the latch set, so it
         // replays no card into the live turn.
@@ -2011,7 +2019,7 @@ mod tests {
         assert_eq!(
             log.lock().unwrap().len(),
             0,
-            "the boundary already delivered, so the replay is suppressed"
+            "the deferred sink already delivered, so the replay is suppressed"
         );
     }
 
@@ -2051,14 +2059,14 @@ mod tests {
     }
 
     /// The mechanism attaches no policy and is host-independent: a bare
-    /// `Shell::new(Default::default())` with no `detached_lease` granted
+    /// `Shell::new(Default::default())` with no `deferred_lease` granted
     /// (the REPL/interactive shape) registers exactly as the agent-framed
     /// case above does.
     #[test]
-    fn spawn_child_registers_with_no_detached_lease_granted() {
+    fn spawn_child_registers_with_no_deferred_lease_granted() {
         let mut shell = Shell::new(Default::default());
         assert!(
-            shell.turn.detached_lease.is_none(),
+            shell.turn.deferred_lease.is_none(),
             "precondition: no lease granted"
         );
         let snap = Arc::new(shell.mobile().scope);

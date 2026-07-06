@@ -258,21 +258,16 @@ pub enum InboxMsg {
     /// `/copy`, …) are handled frontend-side and never reach here.  Carries
     /// the raw command line.
     Command(String),
-    /// A detached `spawn` worker flushed its deferred `surface` batch at
-    /// completion — the un-awaited delivery path.  The batch is ordinary
+    /// A deferred `spawn` worker delivered its `surface` batch at
+    /// settlement — the un-awaited delivery path.  The batch is ordinary
     /// surface vocabulary (io maps, `` `card `` variants) terminated by a
-    /// `` `done `` event; the boundary sink posts it here, stamped with the
+    /// `` `done `` event; the deferred sink posts it here, stamped with the
     /// *root* session id so its cards render in the root viewport (a spawn
-    /// worker registers no tab of its own).  Drains at the tool boundary, like
-    /// a wakeup or an agent result.  `joined` is the worker's
-    /// deliver-once latch, shared with the eliminators (`await`/`race`): the
-    /// drain renders this batch only if it wins the test-and-set on the flag,
-    /// so a replay that already rendered the cards in-turn suppresses it.
-    Surface {
-        id: AgentId,
-        values: Vec<Value>,
-        joined: Arc<Mutex<bool>>,
-    },
+    /// worker registers no tab of its own).  Drains at the tool boundary,
+    /// like a wakeup or an agent result.  Already once-only when posted:
+    /// core's completion path wins the worker's deliver-once latch before
+    /// the sink ever sees the batch.
+    Surface { id: AgentId, values: Vec<Value> },
 }
 
 impl InboxMsg {
@@ -925,14 +920,7 @@ fn to_turn(msg: InboxMsg) -> Option<Turn> {
         InboxMsg::AgentMessage(m) => Turn::Message(m),
         InboxMsg::Nudge(s) => Turn::Nudge(s),
         InboxMsg::Command(s) => Turn::Command(s),
-        InboxMsg::Surface { id, values, joined } => {
-            let mut won = joined.lock().expect("surface joined latch poisoned");
-            if *won {
-                return None;
-            }
-            *won = true;
-            Turn::Surface { id, values }
-        }
+        InboxMsg::Surface { id, values } => Turn::Surface { id, values },
         InboxMsg::UserSteering(_) => {
             unreachable!("user steering coalesced by the caller")
         }
@@ -2401,9 +2389,9 @@ mod tests {
         assert!(inbox.is_empty());
     }
 
-    /// A detached `spawn` worker's flushed surface batch, terminated by the
-    /// `` `done `` event core appends, with a fresh deliver-once latch.
-    fn surface(joined: &Arc<Mutex<bool>>) -> InboxMsg {
+    /// A deferred `spawn` worker's delivered surface batch, terminated by
+    /// the `` `done `` event core appends.
+    fn surface() -> InboxMsg {
         use ral_core::Value;
         let done = Value::Variant {
             label: "done".into(),
@@ -2421,53 +2409,18 @@ mod tests {
         InboxMsg::Surface {
             id: 0,
             values: vec![done],
-            joined: joined.clone(),
         }
     }
 
-    /// Deliver-once at the drain: a `Surface` whose latch is already set (an
-    /// `await`/`race` rendered its cards in-turn) is dropped, and the drain
-    /// loops to the next deliverable rather than stalling on the suppressed
-    /// batch.  An un-joined `Surface` yields a [`Turn::Surface`] and sets the
-    /// latch, so a later replay would in turn be suppressed.
-    #[test]
-    fn inbox_surface_deliver_once_drops_joined_and_surfaces_unjoined() {
-        // A `Surface` already joined by an eliminator is dropped; the wakeup
-        // queued behind it still surfaces on the same drain.
-        let joined = Arc::new(Mutex::new(true));
-        let inbox = Inbox::new();
-        inbox.push(surface(&joined)).unwrap();
-        inbox.push(wakeup(1, "nightly", "@", "go")).unwrap();
-        assert!(
-            matches!(inbox.drain_turn(), Some(Turn::Wakeup(_))),
-            "a suppressed Surface does not short-circuit the next deliverable"
-        );
-        assert!(inbox.is_empty());
-
-        // An un-joined `Surface` surfaces and sets its latch.
-        let joined = Arc::new(Mutex::new(false));
-        let inbox = Inbox::new();
-        inbox.push(surface(&joined)).unwrap();
-        assert!(
-            matches!(inbox.drain_turn(), Some(Turn::Surface { id, .. }) if id == 0),
-            "an un-joined Surface yields a Turn::Surface in the root viewport"
-        );
-        assert!(
-            *joined.lock().unwrap(),
-            "draining the Surface sets its deliver-once latch"
-        );
-    }
-
-    /// A `Surface` drains at the tool boundary, like any other delivery, and
-    /// `clear` drops a queued batch for free (the deque is emptied), so a
-    /// `/clear` between flush and drain delivers nothing.
+    /// A `Surface` drains at the tool boundary as a [`Turn::Surface`] in the
+    /// root viewport, and `clear` drops a queued batch for free (the deque is
+    /// emptied), so a `/clear` between delivery and drain delivers nothing.
     #[test]
     fn inbox_surface_drains_at_tool_boundary_and_cleared() {
-        let joined = Arc::new(Mutex::new(false));
         let inbox = Inbox::new();
-        assert_eq!(surface(&joined).boundary(), Boundary::Tool);
+        assert_eq!(surface().boundary(), Boundary::Tool);
 
-        inbox.push(surface(&joined)).unwrap();
+        inbox.push(surface()).unwrap();
         inbox.clear();
         assert!(
             inbox.drain_tool().is_empty(),
@@ -2475,8 +2428,7 @@ mod tests {
         );
 
         // A fresh, un-cleared batch surfaces mid-turn.
-        let joined = Arc::new(Mutex::new(false));
-        inbox.push(surface(&joined)).unwrap();
+        inbox.push(surface()).unwrap();
         assert!(matches!(
             inbox.drain_tool().as_slice(),
             [Turn::Surface { id, .. }] if *id == 0

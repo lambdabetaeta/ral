@@ -167,7 +167,7 @@ pub struct Mobile {
 /// turn's sink", and is the identity when none is installed.  Core names no
 /// host runtime type — the host decides whether `emit` prints, blocks,
 /// coalesces, or crosses a channel.  `Send + Sync` so a same-thread thunk body
-/// may share it alongside the rest of the child subtree; a *detached* worker
+/// may share it alongside the rest of the child subtree; a *deferred* worker
 /// does not receive the live sink (it buffers into bounded deferred storage and
 /// replays on `await`) so a clone of it can never define turn completion.
 pub trait EventSink: Send + Sync {
@@ -182,8 +182,7 @@ impl EventSink for () {
 
 /// Shared handle to the turn-local structured-event sink.  Turn-scoped, not a
 /// persistent `Shell` capability: installed only by a turn door
-/// ([`Shell::run_source_turn`](crate::Shell::run_source_turn) /
-/// [`Shell::run_hook`](crate::Shell::run_hook)), it has no liveness
+/// ([`Shell::run_turn`](crate::Shell::run_turn)), it has no liveness
 /// role, so a clone can never decide that a turn is over.
 pub type SurfaceSink = Arc<dyn EventSink>;
 
@@ -201,25 +200,22 @@ pub trait EnquiryDesk: Send + Sync {
 /// no liveness role. `None` outside a host that answers enquiries.
 pub type Desk = std::sync::Arc<dyn EnquiryDesk>;
 
-/// Host-installed destination for a *detached* worker's deferred surface
-/// batch, delivered at the worker's completion and rendered by the host at
-/// the next turn boundary. `None` outside an agent host: a bare REPL installs
-/// none, so a detached worker's surface still reaches a sink only via
-/// `await`/`race`.
-pub trait BoundarySink: Send + Sync {
-    /// Deliver a completed detached worker's surfaced values as one batch.
-    /// `joined` is the worker's deliver-once latch, shared with the
-    /// eliminators (`await`/`race`): the host renders the batch only if it
-    /// wins the test-and-set on this flag, so a replay that already rendered
-    /// suppresses the batch and a rendered batch suppresses a later replay.
-    fn deliver(&self, batch: Vec<crate::serial::FOValue>, joined: std::sync::Arc<std::sync::Mutex<bool>>);
+/// Host-installed destination for a deferred worker's surface batch,
+/// delivered when the worker settles and rendered by the host at the next
+/// turn boundary. `None` outside an agent host: a bare REPL installs none,
+/// so a deferred worker's surface still reaches a sink only via
+/// `await`/`race`.  Carried on the turn beside [`SurfaceSink`] and cloned
+/// into spawned workers (so a nested `spawn` delivers at its own
+/// completion); unlike `surface` it is session-lived.
+pub trait DeferredSink: Send + Sync {
+    /// Deliver a settled deferred worker's surfaced values as one batch.
+    /// Deliver-once is the *caller's* discipline, not the sink's: the worker's
+    /// completion path wins the test-and-set on the `joined` latch it shares
+    /// with the eliminators (`await`/`race`) before invoking this, so an
+    /// implementation only says where the batch goes and cannot forget the
+    /// latch.
+    fn deliver(&self, batch: Vec<crate::serial::FOValue>);
 }
-
-/// Shared handle to the session-lived boundary sink.  Carried on the turn
-/// beside [`SurfaceSink`] and cloned into spawned workers (so a nested `spawn`
-/// flushes at its own completion); unlike `surface` it is session-lived, the
-/// destination the deferred regime delivers a completed worker's batch to.
-pub type Boundary = Arc<dyn BoundarySink>;
 
 /// This turn's authority to hand the controlling terminal to a child.
 ///
@@ -261,19 +257,19 @@ pub struct TurnState {
     /// `surface` is the identity.  Cloned into thunk bodies and spawned
     /// stages — the `Arc` is shared, never folded back.
     pub(crate) surface: Option<SurfaceSink>,
-    /// Host-installed destination for a detached worker's deferred surface
-    /// batch.  `None` outside an agent host (e.g. a bare REPL).  Cloned into
-    /// thunk bodies and spawned workers so a nested `spawn` flushes at its own
+    /// Host-installed destination for a deferred worker's surface batch.
+    /// `None` outside an agent host (e.g. a bare REPL).  Cloned into thunk
+    /// bodies and spawned workers so a nested `spawn` delivers at its own
     /// completion; like `surface` it never folds back.
-    pub(crate) boundary: Option<Boundary>,
+    pub(crate) deferred: Option<Arc<dyn DeferredSink>>,
     /// Host-installed desk answering this turn's enquiries (§3 of the
     /// enquiry-channel ADR).  Turn-local like `surface`: cloned into
     /// same-thread bodies so a nested call enquires through the same desk,
     /// `None` outside a host that answers enquiries (a bare REPL, or any
     /// host before the migration installs its desk) and left `None` on a
-    /// detached worker — a worker outlives its turn's Report, so a worker
-    /// that could enquire would break the ordering law and the boundary
-    /// attenuation.  Never folds back, like `surface`.
+    /// deferred worker — a worker outlives its turn's Report, so a worker
+    /// that could enquire would break the ordering law and the deferred
+    /// rail's attenuation.  Never folds back, like `surface`.
     pub(crate) desk: Option<Desk>,
     /// The turn's foreground work scope.  `signal::check` consults it between
     /// effectful steps; a foreground cancel (turn timeout, Ctrl-C) unwinds
@@ -284,7 +280,7 @@ pub struct TurnState {
     /// Read when building a [`SourceLoc`](crate::diagnostic::SourceLoc);
     /// resolved at render time against [`SessionState::sources`].
     pub(crate) loc: LocationCursor,
-    /// The lease governing workers this turn detaches at the durable root.
+    /// The lease governing workers this turn defers at the durable root.
     /// `None` (an interactive host) leaves a worker until `cancel`, root
     /// abort, or session exit; `Some(lease)` (an agent host) reaps a
     /// still-running worker once it has gone `lease.idle` unobserved —
@@ -292,12 +288,12 @@ pub struct TurnState {
     /// `lease.backstop` absolute ceiling no observation extends.  Supplied
     /// by the frame and flowed into same-thread bodies and spawned workers
     /// so a `spawn` nested in a thunk sees the same lease.
-    pub(crate) detached_lease: Option<WorkerLease>,
+    pub(crate) deferred_lease: Option<WorkerLease>,
     /// Admission cap on concurrently *running* workers, enforced at the
     /// spawn door: with `Some(cap)`, a birth is refused while `cap` entries
     /// of any class are still `Running` — settled entries lingering under
     /// retention never block admission.  `None` (an interactive host)
-    /// admits freely.  Flows exactly as `detached_lease` does — into
+    /// admits freely.  Flows exactly as `deferred_lease` does — into
     /// same-thread bodies and spawned workers — so a nested `spawn` cannot
     /// evade the cap its frame set.
     pub(crate) worker_cap: Option<usize>,
@@ -318,11 +314,11 @@ impl TurnState {
     pub fn inherit_from(&mut self, parent: &mut TurnState) {
         self.io.inherit_from(&mut parent.io);
         self.surface = parent.surface.clone();
-        self.boundary = parent.boundary.clone();
+        self.deferred = parent.deferred.clone();
         self.desk = parent.desk.clone();
         self.cancel = parent.cancel.clone();
         self.loc = parent.loc.clone();
-        self.detached_lease = parent.detached_lease;
+        self.deferred_lease = parent.deferred_lease;
         self.worker_cap = parent.worker_cap;
         // Terminal access flows in so a pipeline launched inside an `_ed-tui`
         // loan (or any same-thread body of a Leased turn) sees the parent's

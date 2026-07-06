@@ -42,11 +42,11 @@ impl Shell {
                     ..Default::default()
                 },
                 surface: None,
-                boundary: None,
+                deferred: None,
                 desk: None,
                 cancel: root.child(),
                 loc: LocationCursor::default(),
-                detached_lease: None,
+                deferred_lease: None,
                 worker_cap: None,
                 // The boot frame holds no terminal authority; a host states it
                 // per turn via `TurnRequest::terminal`. `Denied` is the safe

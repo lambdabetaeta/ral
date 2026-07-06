@@ -3,16 +3,14 @@
 //!
 //! [`step`] is the per-line entry point.  It dispatches a source turn
 //! through the [`IdentityTransport`] and drains the event stream for the
-//! terminal [`Report`](ral_core::transport::ReportMirror).  Lifecycle
+//! terminal [`Report`](ral_core::transport::Report).  Lifecycle
 //! hooks (`pre-exec`, `chpwd`, `post-exec`) fire around the dispatch
 //! through [`IdentityTransport::with_shell`].
 //!
 //! Job-control and plugin-lifecycle commands are still handled by the
 //! captured builtins installed at boot (see [`super::host_handlers`]).
 
-use ral_core::transport::{
-    self, DiagMirror, IdentityTransport, ReportMirror, ReqMirror, ResultMirror, Turn,
-};
+use ral_core::transport::{self, Diagnostics, IdentityTransport, Program, Report, Turn};
 use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
 use ral_core::{Value, builtins};
 use std::sync::{Arc, Mutex};
@@ -119,24 +117,20 @@ pub(super) fn execute_input(
     transport.with_shell(|shell| lifecycle.pre_exec(shell, trimmed));
 
     // Build the transport-level Turn from the source text.
-    let req = ReqMirror {
+    let turn = Turn {
+        program: Program::Source(trimmed.to_string()),
         script_name: "<stdin>".to_string(),
         caps: ral_core::types::Capabilities::root(),
         turn_limit: None,
-        detached_lease: None,
+        deferred_lease: None,
         worker_cap: None,
         io: TurnIo::Inherit,
         terminal: RequestedTerminalAccess::Leased,
         stdin: TurnStdin::Inherit,
     };
 
-    let turn = Turn::Source {
-        src: trimmed.to_string(),
-        req,
-    };
-
     // Dispatch and drain to the terminal Report.  The REPL renders neither
-    // live surface values nor detached-worker boundary batches today, so both
+    // live surface values nor deferred-worker surface batches today, so both
     // regimes drop.
     let report = transport::dispatch_to_report(transport, turn, |_val| {}, |_batch| {});
 
@@ -149,23 +143,23 @@ pub(super) fn execute_input(
     };
 
     match report {
-        ReportMirror::Static { diagnostics } => {
+        Report::Static { diagnostics } => {
             match diagnostics {
-                DiagMirror::Parse(msg) => {
+                Diagnostics::Parse(msg) => {
                     eprintln!("parse error: {msg}");
                 }
-                DiagMirror::Types(errs) => {
+                Diagnostics::Types(errs) => {
                     for e in &errs {
                         eprintln!("{e}");
                     }
                 }
-                DiagMirror::Host(msg) => {
+                Diagnostics::Host(msg) => {
                     eprintln!("{}", msg);
                 }
             }
             None
         }
-        ReportMirror::Ran {
+        Report::Ran {
             result,
             status,
             single_command: _single_command,
@@ -173,7 +167,7 @@ pub(super) fn execute_input(
             timed_out: _timed_out,
         } => {
             let exit_code = match result {
-                ResultMirror::Ok(sv) => {
+                Ok(sv) => {
                     print_result(&Value::from(sv));
                     // The turn installed its bindings: record their dependency
                     // edges and effect verdict into the worksheet model.
@@ -181,14 +175,14 @@ pub(super) fn execute_input(
                     transport.with_shell(|shell| worksheet.record(trimmed, shell));
                     None
                 }
-                ResultMirror::Err(break_mirror) => match break_mirror {
-                    transport::BreakMirror::Error(msg) => {
+                Err(break_) => match break_ {
+                    transport::Break::Error(msg) => {
                         eprint!("{}", msg);
                         None
                     }
-                    transport::BreakMirror::Exit(code) => Some(code.clamp(0, 255) as u8),
+                    transport::Break::Exit(code) => Some(code.clamp(0, 255) as u8),
                     #[cfg(unix)]
-                    transport::BreakMirror::Stopped {
+                    transport::Break::Stopped {
                         pgid,
                         signal: _,
                         signal_name,

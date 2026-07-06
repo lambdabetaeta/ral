@@ -16,7 +16,7 @@ use crate::bus::{AgentId, Emitter, InboxMsg, Kind, Mailbox};
 use crate::card::{done_card, io_card, value_to_card, value_to_done, value_to_io, value_to_pin};
 use crate::transcript::Transcript;
 use ral_core::Value as RalValue;
-use ral_core::types::{Boundary, BoundarySink};
+use ral_core::types::DeferredSink;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -167,8 +167,8 @@ pub(crate) fn is_service_pin(key: &str) -> bool {
 
 /// Decode one surfaced `Value` into the [`Kind`] it renders as — the single
 /// decoder both delivery regimes share.  The live foreground sink
-/// (the transport event loop) calls it to emit now; the deferred boundary's `commit_turn`
-/// arm calls the *same* function to mint the identical events at the turn
+/// (the transport event loop) calls it to emit now; the deferred sink's
+/// `deliver` calls the *same* function to mint the identical events at the turn
 /// boundary.  Three shapes arrive on the one `surface` channel:
 ///
 ///   * a structural I/O event core emits (a read, write, exec, or grep) — a
@@ -231,7 +231,7 @@ fn reject_protected_pin(kind: &Kind, emit: &Emitter) -> bool {
     true
 }
 
-/// The deferred half of `surface`: the session-lived [`BoundarySink`] a
+/// The deferred half of `surface`: the session-lived [`DeferredSink`] a
 /// detached `spawn` worker flushes its buffered batch to at completion.  It is
 /// surface's *deferred destination* — not a new channel — so it carries the
 /// same ordinary surface vocabulary the live sink does, posted through the
@@ -251,7 +251,7 @@ fn reject_protected_pin(kind: &Kind, emit: &Emitter) -> bool {
 /// the deque, so a batch already queued when `/clear` runs is dropped for free.
 ///
 /// [`Card`]: crate::card::Card
-struct InboxBoundary {
+struct InboxDeferred {
     /// The session's own inbox sender; a spawn worker flushes its deferred
     /// surface batch into the agent that ran the spawn.
     mailbox: Mailbox,
@@ -276,8 +276,8 @@ struct InboxBoundary {
     transcript: Transcript,
 }
 
-impl BoundarySink for InboxBoundary {
-    fn deliver(&self, batch: Vec<ral_core::serial::FOValue>, joined: Arc<Mutex<bool>>) {
+impl DeferredSink for InboxDeferred {
+    fn deliver(&self, batch: Vec<ral_core::serial::FOValue>) {
         // A `/clear` since this worker was spawned bumped the registry
         // generation; its batch belongs to a context that no longer exists, so
         // drop it rather than post it into the rebuilt session — the deferred
@@ -285,13 +285,12 @@ impl BoundarySink for InboxBoundary {
         if self.registry.generation() != self.generation {
             return;
         }
-        // Decode once, totally, at this door: the boundary carries
+        // Decode once, totally, at this door: the deferred batch carries
         // first-order values, the inbox renders `Value`s.
         let values = batch.into_iter().map(RalValue::from).collect();
         if let Err(reject) = self.mailbox.push(InboxMsg::Surface {
             id: self.root,
             values,
-            joined,
         }) {
             self.transcript.record(
                 self.root,
@@ -303,12 +302,17 @@ impl BoundarySink for InboxBoundary {
     }
 }
 
-/// Build the deferred [`Boundary`] a tool turn installs: an [`InboxBoundary`]
-/// over `emit`'s session inbox, stamping batches with `root` and guarding them
-/// with `registry`'s current generation.  Cloned into the worker's turn state
-/// by core, so a nested `spawn` inherits it and flushes at its own completion.
-pub fn boundary_sink(emit: &Emitter, root: AgentId, registry: &AgentRegistry) -> Boundary {
-    Arc::new(InboxBoundary {
+/// Build the [`Arc<dyn DeferredSink>`] a tool turn installs: an
+/// [`InboxDeferred`] over `emit`'s session inbox, stamping batches with `root`
+/// and guarding them with `registry`'s current generation.  Cloned into the
+/// worker's turn state by core, so a nested `spawn` inherits it and flushes at
+/// its own completion.
+pub fn deferred_sink(
+    emit: &Emitter,
+    root: AgentId,
+    registry: &AgentRegistry,
+) -> Arc<dyn DeferredSink> {
+    Arc::new(InboxDeferred {
         mailbox: emit.mailbox(),
         root,
         registry: registry.clone(),
@@ -325,9 +329,9 @@ pub fn boundary_sink(emit: &Emitter, root: AgentId, registry: &AgentRegistry) ->
 /// Evaluate `cmd` against `transport`, wrapped in `caps`, capturing
 /// stdout and stderr into buffers. Returns the result as an [`Outcome`].
 ///
-/// Routes through the transport seam: builds a [`ReqMirror`], dispatches
-/// a `Source` turn, drains surface events to the bus, and converts the
-/// terminal [`ReportMirror`] into the structured result.
+/// Routes through the transport seam: builds a `Source` [`Turn`], dispatches
+/// it, drains surface events to the bus, and converts the terminal
+/// [`Report`] into the structured result.
 pub fn run_shell(
     transport: &dyn ral_core::transport::Transport,
     caps: &ral_core::types::Capabilities,
@@ -345,14 +349,15 @@ pub fn run_shell(
     let tool_start = std::time::Instant::now();
 
     // Build the transport-level Turn.
-    use ral_core::transport::{ReportMirror, ReqMirror, ResultMirror, Turn};
+    use ral_core::transport::{Program, Report, Turn};
     use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
 
-    let req = ReqMirror {
+    let turn = Turn {
+        program: Program::Source(cmd.to_string()),
         script_name: name.to_string(),
         caps: caps.clone(),
         turn_limit: Some(Duration::from_secs(timeout_secs)),
-        detached_lease: Some(ral_core::types::WorkerLease {
+        deferred_lease: Some(ral_core::types::WorkerLease {
             idle: DETACHED_WORKER_CEILING,
             backstop: DETACHED_WORKER_BACKSTOP,
         }),
@@ -362,14 +367,9 @@ pub fn run_shell(
         stdin: TurnStdin::Empty,
     };
 
-    let turn = Turn::Source {
-        src: cmd.to_string(),
-        req,
-    };
-
     // Dispatch and drain to the Report, rendering surface classes to the bus.
-    // The live sink tracks pins; the boundary batch (a detached worker's
-    // deferred flush) renders identically but never touches the pin mirror.
+    // The live sink tracks pins; the deferred batch (a deferred worker's
+    // flush) renders identically but never touches the pin mirror.
     let report = ral_core::transport::dispatch_to_report(
         transport,
         turn,
@@ -423,32 +423,35 @@ pub fn run_shell(
     );
 
     match report {
-        ReportMirror::Static { diagnostics } => {
-            use ral_core::transport::DiagMirror;
+        Report::Static { diagnostics } => {
+            use ral_core::transport::Diagnostics;
             match diagnostics {
-                DiagMirror::Parse(msg) => Outcome::Static(msg),
-                DiagMirror::Types(errs) => Outcome::Static(errs.join("\n")),
-                DiagMirror::Host(msg) => Outcome::Static(msg),
+                Diagnostics::Parse(msg) => Outcome::Static(msg),
+                Diagnostics::Types(errs) => Outcome::Static(errs.join("\n")),
+                Diagnostics::Host(msg) => Outcome::Static(msg),
             }
         }
-        ReportMirror::Ran {
+        Report::Ran {
             result,
             status: _status,
             single_command: _single_command,
             captured,
             timed_out,
         } => {
-            let captured = captured.unwrap_or_default();
-            let stdout_bytes = captured.0;
-            let mut stderr_bytes = captured.1;
+            let captured = captured.unwrap_or(ral_core::driver::Captured {
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            });
+            let stdout_bytes = captured.stdout;
+            let mut stderr_bytes = captured.stderr;
 
             let (exit, value) = match &result {
-                ResultMirror::Ok(sv) => {
+                Ok(sv) => {
                     let v = Some(RalValue::from(sv.clone()));
                     (0, v)
                 }
-                ResultMirror::Err(break_mirror) => match break_mirror {
-                    ral_core::transport::BreakMirror::Error(msg) => {
+                Err(break_) => match break_ {
+                    ral_core::transport::Break::Error(msg) => {
                         let e = if timed_out {
                             let msg = format!(
                                 "ral tool: timed out after {timeout_secs}s. If the command is simply slow \
@@ -465,7 +468,7 @@ pub fn run_shell(
 
                         // When using WireTransport, the shell is remote; fall back
                         // to an empty source map for error formatting.
-                        // TODO Phase 2: include source map in ReportMirror.
+                        // TODO Phase 2: include source map in Report.
                         let sources = transport
                             .as_any()
                             .downcast_ref::<ral_core::transport::IdentityTransport>()
@@ -504,9 +507,9 @@ pub fn run_shell(
                         }
                         (exit, None)
                     }
-                    ral_core::transport::BreakMirror::Exit(code) => ((*code).clamp(0, 255), None),
+                    ral_core::transport::Break::Exit(code) => ((*code).clamp(0, 255), None),
                     #[cfg(unix)]
-                    ral_core::transport::BreakMirror::Stopped { .. } => (1, None),
+                    ral_core::transport::Break::Stopped { .. } => (1, None),
                 },
             };
 
@@ -703,7 +706,7 @@ mod tests {
     /// test path can never drift from what a live tool call does.  The only
     /// thing the helper owns that production does not is the `&mut Shell`: it
     /// moves the shell into a throwaway [`IdentityTransport`], routes the turn
-    /// through `run_shell` (which builds the `ReqMirror`, dispatches, drains the
+    /// through `run_shell` (which builds the `Turn`, dispatches, drains the
     /// surface stream into `emit`, and computes the exit code — including the
     /// timeout→124 mapping and the full error rendering), then moves the shell
     /// back out so the caller keeps its session across calls.
@@ -1134,7 +1137,7 @@ keep-bottom
     /// `Kind::Card`, the `` `done `` completion event to a `Kind::Card`, and a
     /// `` `pin ``/`` `unpin `` disposition to `Kind::Pin`/`Kind::Unpin` — and
     /// drops a junk value to `None`.  The foreground sink emits these now; the
-    /// boundary's `commit_turn` arm mints the identical ones at the turn
+    /// deferred sink's `deliver` mints the identical ones at the turn
     /// boundary.
     #[test]
     fn decode_surface_round_trips_each_class() {
@@ -1264,22 +1267,21 @@ keep-bottom
         );
     }
 
-    /// The `InboxBoundary` posts a detached worker's batch as an
+    /// The `InboxDeferred` posts a deferred worker's batch as an
     /// `InboxMsg::Surface` stamped with the root id — *unless* a `/clear` has
-    /// advanced the registry generation since the boundary was built, in which
+    /// advanced the registry generation since the sink was built, in which
     /// case the batch belongs to a context that no longer exists and is dropped
     /// (the deferred twin of the async agent's stale-result rejection).
     #[test]
-    fn inbox_boundary_pushes_then_drops_after_clear() {
+    fn inbox_deferred_pushes_then_drops_after_clear() {
         let registry = AgentRegistry::new();
         let inbox = Inbox::new();
         let (tx, _rx) = channel();
         let emit = Emitter::with_mailbox(tx, 7, inbox.mailbox());
-        let boundary = boundary_sink(&emit, 7, &registry);
-        let joined = Arc::new(Mutex::new(false));
+        let deferred = deferred_sink(&emit, 7, &registry);
 
         // A fresh batch reaches the inbox, stamped with the root id (7).
-        boundary.deliver(vec![ral_core::serial::FOValue::Unit], joined.clone());
+        deferred.deliver(vec![ral_core::serial::FOValue::Unit]);
         match inbox.drain_turn() {
             Some(crate::bus::Turn::Surface { id, .. }) => {
                 assert_eq!(id, 7, "the batch is stamped with the root session id")
@@ -1287,10 +1289,10 @@ keep-bottom
             other => panic!("a delivered batch surfaces as Turn::Surface, got {other:?}"),
         }
 
-        // A `/clear` bumps the registry generation; the boundary captured the
+        // A `/clear` bumps the registry generation; the sink captured the
         // old one, so a later flush is dropped rather than posted.
         registry.clear_subtree(7);
-        boundary.deliver(vec![ral_core::serial::FOValue::Unit], Arc::new(Mutex::new(false)));
+        deferred.deliver(vec![ral_core::serial::FOValue::Unit]);
         assert!(
             inbox.is_empty(),
             "a batch flushed after /clear advanced the generation is dropped"

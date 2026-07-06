@@ -516,8 +516,8 @@ impl Agent {
         // generation admission); no interleaving lets a pre-clear result
         // survive into the rebuilt context.  The workers themselves are
         // already cancelled above, on the shell being retired; what the
-        // generation bump guards against is a straggler's late boundary
-        // flush (`InboxBoundary`, shell_eval.rs) reaching the rebuilt
+        // generation bump guards against is a straggler's late deferred
+        // flush (`InboxDeferred`, shell_eval.rs) reaching the rebuilt
         // context before it notices the cancellation.  This agent itself
         // stays registered — `/clear` rebuilds its context, it does not
         // tear it down.
@@ -1736,7 +1736,7 @@ impl Agent {
         // own inbox (via `emit`'s mailbox) and guarded by the agent registry's
         // generation (so a `/clear` drops a stale batch).
         self.transport
-            .set_boundary(shell_eval::boundary_sink(emit, self.id, &self.agents));
+            .set_deferred_sink(shell_eval::deferred_sink(emit, self.id, &self.agents));
         let content = match shell_eval::run_shell(
             &self.transport,
             &self.caps,
@@ -2892,8 +2892,8 @@ mod tests {
     /// replacing it — the durable class included: explicit destruction
     /// outranks every lease — and the rebuilt shell starts with an empty
     /// registry.  A cancelled worker settling afterward still tries to
-    /// flush its deferred `done` batch through the boundary it captured
-    /// before the clear — the same `InboxBoundary` generation guard that
+    /// flush its deferred `done` batch through the deferred sink it captured
+    /// before the clear — the same `InboxDeferred` generation guard that
     /// already protects a stale agent result drops it, so no late
     /// `InboxMsg::Surface` reaches the rebuilt context.
     #[test]
@@ -2907,7 +2907,7 @@ mod tests {
             .shell
             .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
 
-        // `run_shell` wires the real boundary sink — captured with `emit`'s
+        // `run_shell` wires the real deferred sink — captured with `emit`'s
         // mailbox, which must be this session's own inbox for the late-surface
         // assertion below to mean anything.
         let (tx, _rx) = crate::bus::channel();
@@ -2952,7 +2952,7 @@ mod tests {
 
         // Let the cancelled workers actually settle: each `process::check`
         // loop observes the cancellation at its next poll, then flushes its
-        // deferred batch through the boundary captured before the clear.
+        // deferred batch through the deferred sink captured before the clear.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         for entry in &entries {
             loop {
@@ -3092,29 +3092,26 @@ mod tests {
     }
 
     /// Run `cmd` as one dispatched turn under a millisecond-scale
-    /// `detached_lease`, bypassing `shell_eval::run_shell`'s hardcoded 1 h/24 h
+    /// `deferred_lease`, bypassing `shell_eval::run_shell`'s hardcoded 1 h/24 h
     /// constants so a reap test doesn't need to wait out the real policy.
-    /// No boundary: a lease reap never tries to deliver anything to the
+    /// No deferred sink: a lease reap never tries to deliver anything to the
     /// inbox, so the tests using this only care about the registry side
     /// effect.
     fn dispatch_with_lease(session: &Agent, cmd: &str, lease: ral_core::types::WorkerLease) {
-        use ral_core::transport::{DispatchId, ReqMirror, Turn};
+        use ral_core::transport::{DispatchId, Program, Turn};
         use ral_core::{RequestedTerminalAccess, TurnIo, TurnStdin};
-        let req = ReqMirror {
-            script_name: "<test>".to_string(),
-            caps: ral_core::types::Capabilities::root(),
-            turn_limit: Some(std::time::Duration::from_secs(5)),
-            detached_lease: Some(lease),
-            worker_cap: None,
-            io: TurnIo::Capture,
-            terminal: RequestedTerminalAccess::Denied,
-            stdin: TurnStdin::Empty,
-        };
         session.transport.dispatch(
             DispatchId(0),
-            Turn::Source {
-                src: cmd.to_string(),
-                req,
+            Turn {
+                program: Program::Source(cmd.to_string()),
+                script_name: "<test>".to_string(),
+                caps: ral_core::types::Capabilities::root(),
+                turn_limit: Some(std::time::Duration::from_secs(5)),
+                deferred_lease: Some(lease),
+                worker_cap: None,
+                io: TurnIo::Capture,
+                terminal: RequestedTerminalAccess::Denied,
+                stdin: TurnStdin::Empty,
             },
         );
     }

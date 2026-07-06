@@ -7,6 +7,7 @@
 //! Unloading reverses the env installation and drops the record.
 
 use ral_core::source::Span;
+use ral_core::transport::Program;
 use ral_core::types::{Break, DefaultPolicy, Error, HookName, HookSig, Settled};
 use ral_core::{RequestedTerminalAccess, Shell, TurnReport, Value};
 use std::sync::{Arc, Mutex};
@@ -66,8 +67,8 @@ pub(crate) fn load_plugin(
     // thunks were compiled from, so a fault inside one renders against it.
     plugin.source = std::sync::Arc::from(source.as_str());
 
-    // Register hook and keybinding handlers in the hook table.
-    // Each fires via `run_hook` rather than the old `run_value_turn`.
+    // Register hook and keybinding handlers in the hook table. Each fires
+    // as a `Program::Hook` through `Shell::run_turn`.
     let origin = Span::new(ral_core::source::FileId(0), 0, 0);
     for (hook_event, handler) in &plugin.hooks {
         let sig = match hook_event.as_str() {
@@ -250,8 +251,15 @@ fn instantiate(
                     ))));
                 }
             };
-            let req = framed_turn_request("<plugin>", RequestedTerminalAccess::Denied);
-            let report = shell.run_hook(&factory_name, vec![fo_arg], req);
+            let req = framed_turn_request(
+                "<plugin>",
+                RequestedTerminalAccess::Denied,
+                Program::Hook {
+                    name: factory_name,
+                    args: vec![fo_arg],
+                },
+            );
+            let report = shell.run_turn(req);
             match report {
                 TurnReport::Ran { result, .. } => result,
                 TurnReport::Static { .. } => {
