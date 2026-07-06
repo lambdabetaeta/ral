@@ -21,6 +21,7 @@ use super::viewport::Viewport;
 use crate::bus::{AgentId, BusReceiver, Event, Inbox, Kind};
 use crate::card::IoEvent;
 use crate::provider::{self, Provider, Usage};
+use crate::resources::{BusFigures, ViewFigures, ViewportFigures};
 use ratatui::{
     crossterm::event::{
         KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -446,16 +447,22 @@ impl App {
                 let live_views = (self.tabs.len() as u64).saturating_sub(lingering);
                 let dead_views = (self.tabs.viewports().len() as u64).saturating_sub(live_views);
                 let frontend = crate::resources::frontend_rows(
-                    blocks,
-                    rows,
-                    bytes,
-                    live_views,
-                    dead_views,
-                    live_views,
-                    bus.depth() as u64,
-                    bus.bytes() as u64,
-                    super::viewport::VIEWPORT_MAX_BLOCKS as u64,
-                    super::viewport::VIEWPORT_MAX_ROWS as u64,
+                    ViewportFigures {
+                        blocks,
+                        rows,
+                        bytes,
+                        blocks_cap: super::viewport::VIEWPORT_MAX_BLOCKS as u64,
+                        rows_cap: super::viewport::VIEWPORT_MAX_ROWS as u64,
+                    },
+                    ViewFigures {
+                        live: live_views,
+                        dead: dead_views,
+                        agents: live_views,
+                    },
+                    BusFigures {
+                        depth: bus.depth() as u64,
+                        bytes: bus.bytes() as u64,
+                    },
                 );
                 card.0.push(crate::resources::section_mark("frontend"));
                 card.0.push(crate::resources::rows_mark(&frontend));

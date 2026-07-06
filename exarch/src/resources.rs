@@ -131,79 +131,106 @@ pub fn resources_card(rows: &[ProbeRow]) -> Card {
     Card(vec![section_mark("resources"), rows_mark(rows)])
 }
 
-/// The rows for the accumulators the frontend owns — viewport figures for
-/// the probed agent's view, the fleet's view counts, and the bus. Pure in
-/// its figures so the row shapes are unit-testable without a terminal:
-/// the caller (the TUI's `Kind::Resources` arm) reads the figures off the
-/// tabs/viewport structures it holds.
-///
-/// The bus contributes two rows, not one: `bus.depth` (entries — a merged
-/// run and a reserved kind each count as one) and `bus.bytes` (resident
-/// merged `Token`/`Thinking`/`Phase` text). Neither carries a `cap`: the
+/// The probed agent's viewport window, figures beside the caps that bound
+/// them — one accumulator, one struct, so a figure can never drift apart
+/// from the cap it is measured against.
+pub struct ViewportFigures {
+    /// Scrollback blocks currently retained in heap.
+    pub blocks: u64,
+    /// Rendered rows in the memoised flatten, as of the last paint.
+    pub rows: u64,
+    /// Those rows' summed text bytes. No cap of its own — bounded
+    /// indirectly by the blocks/rows caps.
+    pub bytes: u64,
+    /// The enforced block-count window cap (`tui::viewport::VIEWPORT_MAX_BLOCKS`).
+    pub blocks_cap: u64,
+    /// The enforced rendered-row window cap (`tui::viewport::VIEWPORT_MAX_ROWS`).
+    pub rows_cap: u64,
+}
+
+/// The fleet's view counts: how many per-agent views the frontend holds,
+/// split live/dead, plus the live-agent tab count — a distinct row
+/// (`fleet.agents`) even when its figure coincides with `live`, because
+/// the registry, not the tab bar, is the authority on agents.
+pub struct ViewFigures {
+    /// Views whose agent still runs — one per live agent, unbounded.
+    pub live: u64,
+    /// Views whose agent has died — lingering, or already tombstoned down
+    /// to (id, status, log path) once past `LINGER`.
+    pub dead: u64,
+    /// The frontend's live-agent tab count.
+    pub agents: u64,
+}
+
+/// The presentation bus's two probe figures. Neither carries a `cap`: the
 /// bounded transport's one enforced number is a *per-entry* text cap
-/// (`bus::MERGE_TEXT_CAP`), a different axis from either row's aggregate
-/// `current` figure, so cramming it into `cap` would read as a false
-/// ceiling on a count or a sum it does not bound — the cap is named in
-/// `bus.bytes`'s note instead, honest cap-less rows over a silently
-/// mismatched pair.
+/// (`bus::MERGE_TEXT_CAP`), a different axis from either figure's
+/// aggregate, so cramming it into `cap` would read as a false ceiling on a
+/// count or a sum it does not bound — the cap is named in `bus.bytes`'s
+/// note instead, honest cap-less rows over a silently mismatched pair.
+pub struct BusFigures {
+    /// Queue entries — a merged run and a reserved kind each count as one.
+    pub depth: u64,
+    /// Resident merged `Token`/`Thinking`/`Phase` text bytes.
+    pub bytes: u64,
+}
+
+/// The rows for the accumulators the frontend owns — the probed agent's
+/// viewport window, the fleet's view counts, and the bus. Pure in its
+/// figures so the row shapes are unit-testable without a terminal: the
+/// caller (the TUI's `Kind::Resources` arm) reads the figures off the
+/// tabs/viewport/bus structures it holds.
 pub fn frontend_rows(
-    viewport_blocks: u64,
-    viewport_rows: u64,
-    viewport_bytes: u64,
-    live_views: u64,
-    dead_views: u64,
-    live_agents: u64,
-    bus_depth: u64,
-    bus_bytes: u64,
-    viewport_blocks_cap: u64,
-    viewport_rows_cap: u64,
+    viewport: ViewportFigures,
+    views: ViewFigures,
+    bus: BusFigures,
 ) -> Vec<ProbeRow> {
     vec![
         ProbeRow::new(
             "viewport.blocks",
-            viewport_blocks,
-            Some(viewport_blocks_cap),
+            viewport.blocks,
+            Some(viewport.blocks_cap),
             "evict",
             Some("oldest evicted first; already durable in user.log".to_string()),
         ),
         ProbeRow::new(
             "viewport.rows",
-            viewport_rows,
-            Some(viewport_rows_cap),
+            viewport.rows,
+            Some(viewport.rows_cap),
             "evict",
             Some("oldest evicted first; already durable in user.log".to_string()),
         ),
         ProbeRow::new(
             "viewport.bytes",
-            viewport_bytes,
+            viewport.bytes,
             None,
             "evict",
             Some("no byte cap of its own; bounded indirectly by the blocks/rows caps".to_string()),
         ),
         ProbeRow::new(
             "views.live",
-            live_views,
+            views.live,
             None,
             "none (unbounded)",
             Some("one per live agent".to_string()),
         ),
         ProbeRow::new(
             "views.dead",
-            dead_views,
+            views.dead,
             None,
             "evict",
             Some("tombstoned (id, status, log path) once past LINGER".to_string()),
         ),
         ProbeRow::new(
             "bus.depth",
-            bus_depth,
+            bus.depth,
             None,
             "coalesce",
             Some("entries; a same-class run off one agent merges into its tail".to_string()),
         ),
         ProbeRow::new(
             "bus.bytes",
-            bus_bytes,
+            bus.bytes,
             None,
             "evict",
             Some(format!(
@@ -213,7 +240,7 @@ pub fn frontend_rows(
         ),
         ProbeRow::new(
             "fleet.agents",
-            live_agents,
+            views.agents,
             None,
             "reap",
             Some("the frontend's tab view; the registry is the authority".to_string()),
@@ -279,7 +306,24 @@ mod tests {
     /// say so honestly rather than faking one.
     #[test]
     fn frontend_rows_state_decided_policies_and_the_viewport_window_caps() {
-        let rows = frontend_rows(3, 120, 4096, 2, 1, 2, 5, 777, 500, 20_000);
+        let rows = frontend_rows(
+            ViewportFigures {
+                blocks: 3,
+                rows: 120,
+                bytes: 4096,
+                blocks_cap: 500,
+                rows_cap: 20_000,
+            },
+            ViewFigures {
+                live: 2,
+                dead: 1,
+                agents: 2,
+            },
+            BusFigures {
+                depth: 5,
+                bytes: 777,
+            },
+        );
         let by_name = |n: &str| {
             rows.iter()
                 .find(|r| r.name == n)

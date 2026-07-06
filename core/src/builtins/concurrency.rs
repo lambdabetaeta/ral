@@ -1170,7 +1170,7 @@ mod tests {
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<abandoned>",
-            |c| check_loop(c),
+            check_loop,
         )
         .expect("spawn must succeed");
         let entry = shell.local.workers.snapshot().pop().expect("registered");
@@ -1298,7 +1298,7 @@ mod tests {
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<immortal>",
-            |c| check_loop(c),
+            check_loop,
         )
         .expect("spawn must succeed");
         let scope = handle.cancel.clone();
@@ -1381,7 +1381,7 @@ mod tests {
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<listed>",
-            |c| check_loop(c),
+            check_loop,
         )
         .expect("spawn must succeed");
         let scope = handle.cancel.clone();
@@ -1422,7 +1422,7 @@ mod tests {
             ChildIoMode::Buffered,
             LeaseClass::Durable,
             "<service>",
-            |c| check_loop(c),
+            check_loop,
         )
         .expect("durable spawn must succeed");
         let born = std::time::Instant::now();
@@ -1433,7 +1433,7 @@ mod tests {
             ChildIoMode::Buffered,
             LeaseClass::Worker,
             "<sibling>",
-            |c| check_loop(c),
+            check_loop,
         )
         .expect("ordinary spawn must succeed");
 
@@ -1483,7 +1483,7 @@ mod tests {
             ChildIoMode::Buffered,
             LeaseClass::Durable,
             "<service>",
-            |c| check_loop(c),
+            check_loop,
         )
         .expect("durable spawn must succeed");
 
