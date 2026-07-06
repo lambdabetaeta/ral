@@ -165,10 +165,14 @@ impl Drop for FlushGuard {
 /// [`LeaseClass::Durable`] birth registers and arms nothing — the absent
 /// chain *is* the durable policy, not an exemption the chain checks.
 ///
-/// Under a frame that supplies a `worker_cap`, admission is checked first:
-/// a birth of any class is refused while `cap` registered workers are
-/// still running, with an error naming the remedies (`await`, `cancel`,
-/// `workers`).
+/// Under a frame that supplies a `worker_cap`, admission is reserved
+/// first: a birth of any class is refused while `cap` workers are already
+/// running or reserved, with an error naming the remedies (`await`,
+/// `cancel`, `workers`). The reservation is held across the thread spawn
+/// and handle construction below and only released — into the registered
+/// entry it was reserved for — at the `register` call, so a sibling birth
+/// racing this one on another thread can never observe the seat this one
+/// is still filling as free.
 pub(super) fn spawn_child<F>(
     snap: Arc<Env>,
     shell: &mut Shell,
@@ -180,19 +184,27 @@ pub(super) fn spawn_child<F>(
 where
     F: FnOnce(&mut Shell) -> Raw<Value> + Send + 'static,
 {
-    // Admission: under a frame that caps live workers, the birth is refused
-    // at the door — before any thread exists or any entry registers, so a
-    // rejected spawn leaves no trace.  Only still-running entries count,
-    // durable services included (live work is live work); settled entries
-    // lingering under retention never block admission.
-    if let Some(cap) = shell.turn.worker_cap
-        && shell.local.workers.running_count() >= cap
-    {
-        return Err(sig(format!(
-            "spawn: {cap} workers already live on this agent; \
-             await or cancel one, or list them with workers"
-        )));
-    }
+    // Admission: under a frame that caps live workers, the birth reserves
+    // its seat at the door — before any thread exists or any entry
+    // registers, so a rejected spawn leaves no trace, and a granted
+    // reservation counts toward the cap the instant it is granted, closing
+    // the gap a plain check-then-register would leave for a sibling spawn
+    // racing this one on another thread.  Only still-running entries (and
+    // other reservations in flight) count, durable services included (live
+    // work is live work); settled entries lingering under retention never
+    // block admission.  The reservation travels with this call from here
+    // to the `register` call near the end; every early return in between —
+    // the `Watch` arm's clone failure included — releases it through
+    // `Reservation`'s own drop.
+    let reservation = match shell.local.workers.reserve(shell.turn.worker_cap) {
+        Ok(reservation) => reservation,
+        Err(CapReached(cap)) => {
+            return Err(sig(format!(
+                "spawn: {cap} workers already live on this agent; \
+                 await or cancel one, or list them with workers"
+            )));
+        }
+    };
 
     let (tx, rx) = std::sync::mpsc::channel();
 
@@ -328,18 +340,23 @@ where
         cmd: cmd.clone(),
         cancel,
     };
-    // Every spawn registers, unconditionally — the mechanism is universal
-    // and attaches no policy; affordances (listing, reaping, caps) are the
-    // host's and the lease layer's concern, not this door's.
+    // Every admitted spawn registers, unconditionally — the mechanism is
+    // universal and attaches no further policy; affordances (listing,
+    // reaping) are the host's and the lease layer's concern, not this
+    // door's.  Consuming `reservation` here is what turns the seat
+    // `reserve` held into the entry it was held for.
     let id = WorkerId::mint();
-    shell.local.workers.register(WorkerEntry {
-        id,
-        cmd,
-        started: std::time::SystemTime::now(),
-        class,
-        settled_epoch: None,
-        handle: handle.clone(),
-    });
+    shell.local.workers.register(
+        reservation,
+        WorkerEntry {
+            id,
+            cmd,
+            started: std::time::SystemTime::now(),
+            class,
+            settled_epoch: None,
+            handle: handle.clone(),
+        },
+    );
 
     // For an ordinary worker under a frame that grants a lease (exarch),
     // arm the idle-observation chain on the freshly registered entry.  The

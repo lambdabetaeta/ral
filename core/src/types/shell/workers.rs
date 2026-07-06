@@ -201,18 +201,29 @@ impl Resident for WorkerEntry {
     }
 }
 
-/// The two ledgers behind [`WorkerRegistry`]'s one lock: the live entries,
-/// and the reap notices awaiting the host's next drain. One lock for both
-/// so a reap is atomic — the entry leaves and its notice lands in the same
-/// critical section, never one without the other.
+/// The three ledgers behind [`WorkerRegistry`]'s one lock: the live
+/// entries, the reap notices awaiting the host's next drain, and the count
+/// of seats reserved for a birth still in flight. One lock for all three,
+/// which is what makes a reap atomic (the entry leaves and its notice
+/// lands in the same critical section, never one without the other) and
+/// what makes admission honest (a reservation is counted the instant
+/// [`WorkerRegistry::reserve`] grants it, so a sibling `reserve` racing the
+/// same free seat never gets to read it as available).
 #[derive(Default)]
 struct RegistryInner {
     entries: Vec<WorkerEntry>,
     reap_notices: Vec<ReapNotice>,
+    /// Seats held by a [`Reservation`] not yet fulfilled by
+    /// [`WorkerRegistry::register`] or released by its drop. Counted
+    /// alongside running entries in [`WorkerRegistry::reserve`]'s
+    /// admission measure, so a birth-in-progress occupies its seat before
+    /// it has anything registered to show for it.
+    reserved: usize,
 }
 
 /// Cheap-clonable, per-[`Shell`](super::Shell) directory of every worker
-/// spawned from it, plus the reap notices the lease chain leaves behind.
+/// spawned from it, plus the reap notices the lease chain leaves behind
+/// and the seats reserved for a birth still in flight.
 ///
 /// A newtype over `Arc<Mutex<RegistryInner>>`: cloning shares the same
 /// underlying store, which is how the flow rule above lets a nested
@@ -220,16 +231,94 @@ struct RegistryInner {
 /// copy — and how the lease chain, firing on the reaper daemon thread,
 /// reaps into the same store the shell reads. Lock discipline is trivial by
 /// construction: every operation locks, acts on the inner ledgers directly,
-/// and unlocks — none ever calls out while holding the lock.
+/// and unlocks — none ever calls out while holding the lock. Admission and
+/// registration are the one apparent exception: [`Self::reserve`] and
+/// [`Self::register`] are still two separate locked steps, but the
+/// [`Reservation`] bridging them holds the seat counted the instant
+/// admission is granted, so nothing a sibling birth does in the gap
+/// between the two calls can make the cap dishonest.
 #[derive(Clone, Default)]
 pub(crate) struct WorkerRegistry(Arc<Mutex<RegistryInner>>);
 
+/// Refusal handed back by [`WorkerRegistry::reserve`] when `cap`
+/// running-or-reserved workers already fill every seat the frame allows.
+/// Carries the cap it was refused against, so the caller can compose the
+/// user-facing remedy message without re-deriving the number that caused
+/// the refusal.
+pub(crate) struct CapReached(pub(crate) usize);
+
+/// A seat held between [`WorkerRegistry::reserve`] granting admission and
+/// [`WorkerRegistry::register`] filing the entry it was granted for — the
+/// bridge that makes the two one atomic transaction even though a thread
+/// spawn and a handle construction happen in between. Consuming a
+/// `Reservation` is `register`'s only way to accept a [`WorkerEntry`], so
+/// registering without ever having been admitted is not a thing the types
+/// allow.
+///
+/// RAII covers every other exit: a `Reservation` dropped without reaching
+/// `register` — an early return on the way to a handle, or any other error
+/// before registration — releases its seat under the same lock. The
+/// `armed` flag is the standard defusal: `register` clears it before the
+/// consumed value's drop runs, so the seat is released exactly once either
+/// way.
+pub(crate) struct Reservation {
+    registry: WorkerRegistry,
+    armed: bool,
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut inner = self.registry.0.lock().unwrap();
+            inner.reserved = inner.reserved.saturating_sub(1);
+        }
+    }
+}
+
 impl WorkerRegistry {
-    /// File a freshly-spawned worker. `spawn_child` calls this exactly
-    /// once per spawn, unconditionally — every spawn registers, and no
-    /// policy attaches here.
-    pub(crate) fn register(&self, entry: WorkerEntry) {
-        self.0.lock().unwrap().entries.push(entry);
+    /// Measure admission and hold a seat in one locked step, so a birth
+    /// that only registers later — after spawning its thread and building
+    /// its handle — cannot be raced by a sibling `reserve` reading the same
+    /// free seat in the gap before it does. The measure is running entries
+    /// (`handle.state` still [`HandleState::Running`], each briefly locked
+    /// under the registry lock — the order [`Self::advance_epoch`]
+    /// documents) plus every seat already reserved and not yet filed or
+    /// released. Under `cap = Some(c)` a reservation is refused once that
+    /// count reaches `c`; under `cap = None` (an uncapped frame — the
+    /// interactive REPL) it always succeeds. On success, `reserved` is
+    /// incremented and a [`Reservation`] handed back for the caller to
+    /// fulfil ([`Self::register`]) or abandon.
+    pub(crate) fn reserve(&self, cap: Option<usize>) -> Result<Reservation, CapReached> {
+        let mut inner = self.0.lock().unwrap();
+        if let Some(cap) = cap {
+            let running = inner
+                .entries
+                .iter()
+                .filter(|entry| *entry.handle.state.lock().unwrap() == HandleState::Running)
+                .count();
+            if running + inner.reserved >= cap {
+                return Err(CapReached(cap));
+            }
+        }
+        inner.reserved += 1;
+        Ok(Reservation {
+            registry: self.clone(),
+            armed: true,
+        })
+    }
+
+    /// File a freshly-spawned worker, consuming the [`Reservation`]
+    /// `reserve` minted for it. One locked operation: the seat leaves
+    /// `reserved` and the entry joins `entries` together, so nothing ever
+    /// observes an entry whose seat is still counted as reserved, or a
+    /// reservation whose entry has already appeared. `spawn_child` calls
+    /// this exactly once per admitted spawn — every admitted spawn
+    /// registers, and no further policy attaches here.
+    pub(crate) fn register(&self, mut reservation: Reservation, entry: WorkerEntry) {
+        reservation.armed = false;
+        let mut inner = self.0.lock().unwrap();
+        inner.reserved = inner.reserved.saturating_sub(1);
+        inner.entries.push(entry);
     }
 
     /// Remove the entry carrying `handle`, matched by [`HandleInner`]'s own
@@ -283,9 +372,9 @@ impl WorkerRegistry {
     /// observed; this sweep only catches what nobody claimed.
     ///
     /// Lock order: the registry lock may take an entry's `state` lock (the
-    /// brief read here and in [`Self::running_count`]), never the reverse —
-    /// no code path acquires the registry lock while holding a `state`
-    /// lock. Verified at the three state-lock sites outside this module:
+    /// brief read here and in [`Self::reserve`]), never the reverse — no
+    /// code path acquires the registry lock while holding a `state` lock.
+    /// Verified at the three state-lock sites outside this module:
     /// `lease_fire`'s if-condition temporary, `builtin_cancel`'s copied-out
     /// read, and the worker exit mark each drop their guard before any
     /// registry call.
@@ -311,21 +400,6 @@ impl WorkerRegistry {
                 _ => i += 1,
             }
         }
-    }
-
-    /// Number of entries whose worker is still `Running` — the admission
-    /// cap's measure. Settled entries lingering under retention never block
-    /// a new birth, while a durable service counts like any other live
-    /// work. Takes each entry's `state` lock briefly under the registry
-    /// lock; see [`Self::advance_epoch`] for the lock order this relies on.
-    pub(crate) fn running_count(&self) -> usize {
-        self.0
-            .lock()
-            .unwrap()
-            .entries
-            .iter()
-            .filter(|entry| *entry.handle.state.lock().unwrap() == HandleState::Running)
-            .count()
     }
 
     /// Drain every accumulated [`ReapNotice`], leaving the ledger empty.
@@ -442,5 +516,65 @@ mod tests {
         assert!(!entry.handle.cancel.is_cancelled());
         entry.cancel();
         assert!(entry.handle.cancel.is_cancelled());
+    }
+
+    // ── reservation (the admission/registration TOCTOU close) ───────────
+
+    /// Eight threads race `reserve` against `cap = Some(2)`, each holding
+    /// whatever it was granted for a moment before reporting back — so a
+    /// racy over-admission would have to show up as more than two
+    /// reservations alive at once, not merely more than two successful
+    /// calls that happened not to overlap. Exactly two of the eight ever
+    /// succeed: the one locked measurement `reserve` performs is what a
+    /// plain check-then-register could not guarantee.
+    #[test]
+    fn reserve_admits_at_most_cap_under_concurrent_racing() {
+        let registry = WorkerRegistry::default();
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let registry = registry.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let reservation = registry.reserve(Some(2));
+                    std::thread::sleep(Duration::from_millis(20));
+                    reservation.is_ok()
+                })
+            })
+            .collect();
+
+        let admitted = threads
+            .into_iter()
+            .map(|t| t.join().unwrap())
+            .filter(|&ok| ok)
+            .count();
+        assert_eq!(
+            admitted, 2,
+            "cap 2 must admit exactly 2 of the 8 racing reservations"
+        );
+    }
+
+    /// A `Reservation` dropped without ever reaching `register` releases
+    /// its seat immediately: under `cap = Some(1)`, a second `reserve` is
+    /// refused while the first is held and admitted the instant the first
+    /// drops. This is the RAII path `spawn_child`'s `clone_parent()?` early
+    /// return (and any other error on the way to registration) relies on.
+    #[test]
+    fn dropping_an_unconsumed_reservation_frees_the_slot() {
+        let registry = WorkerRegistry::default();
+        let first = registry
+            .reserve(Some(1))
+            .unwrap_or_else(|_| panic!("the first reservation must be admitted"));
+        assert!(
+            registry.reserve(Some(1)).is_err(),
+            "the seat is held: a second reservation must be refused"
+        );
+        drop(first);
+        assert!(
+            registry.reserve(Some(1)).is_ok(),
+            "dropping the unconsumed reservation must free the slot"
+        );
     }
 }

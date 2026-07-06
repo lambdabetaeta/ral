@@ -85,7 +85,7 @@ pub(crate) use shell::{TerminalAccess, ThunkBody};
 
 // Per-shell worker registry: id, lease class, entry, the frame lease, and
 // the reap-notice record.  See types/shell/workers.rs.
-pub(crate) use shell::workers::WorkerRegistry;
+pub(crate) use shell::workers::{CapReached, WorkerRegistry};
 pub use shell::workers::{LeaseClass, ReapCause, ReapNotice, WorkerEntry, WorkerId, WorkerLease};
 
 // Per-shell binding-lease ledger: the idle-call policy and its prune
