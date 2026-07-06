@@ -91,3 +91,8 @@ pub use shell::workers::{LeaseClass, ReapCause, ReapNotice, WorkerEntry, WorkerI
 // Per-shell binding-lease ledger: the idle-call policy and its prune
 // notices.  See types/shell/bindings.rs.
 pub use shell::bindings::{BindingLease, BindingPruneNotice, LargeBindingNotice};
+
+// The resident signature every session-lived, capability-reachable chapter
+// answers through its own representation.  See types/resident.rs.
+mod resident;
+pub use resident::Resident;

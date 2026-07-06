@@ -42,7 +42,7 @@
 //! matching the per-agent binding-lease ledger this module sits beside on
 //! [`LocalState`](super::LocalState).
 
-use crate::types::{HandleInner, HandleState};
+use crate::types::{HandleInner, HandleState, Resident};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -149,6 +149,56 @@ pub struct WorkerEntry {
     /// next call, never retroactively.
     pub settled_epoch: Option<u64>,
     pub handle: HandleInner,
+}
+
+/// The worker chapter's resident signature (`decisions/260705_session-ledger`,
+/// `types/resident.rs`): a `[wN]` designator distinct from a pgid job's, a
+/// handle-typed capability, and a state word that already carries this
+/// population's own `"(worker)"` qualifier — the REPL's `jobs` fold and its
+/// exit-time survivor warning read every facet here rather than
+/// hand-formatting a `WorkerEntry` themselves.
+impl Resident for WorkerEntry {
+    fn designator(&self) -> String {
+        format!("w{}", self.id.0)
+    }
+
+    fn population(&self) -> &'static str {
+        "worker"
+    }
+
+    fn capability_kind(&self) -> &'static str {
+        "handle"
+    }
+
+    /// Core knows only the *class*, not a specific frame's `WorkerLease`
+    /// bounds (those are a host policy, never stored on the entry) — so a
+    /// `Worker` names the mechanism honestly rather than fabricating
+    /// numbers it does not have; a host with the bounds in hand (exarch's
+    /// `/resources` fold) renders its own sharper row from them instead of
+    /// reading this one.
+    fn lease_row(&self) -> String {
+        match self.class {
+            LeaseClass::Worker => {
+                "idle-observation lease — idle bound under an absolute backstop, both host-configured".to_string()
+            }
+            LeaseClass::Durable => "none — durable; dies by cancel, /clear, or process exit".to_string(),
+        }
+    }
+
+    fn state_label(&self) -> String {
+        let running = *self.handle.state.lock().unwrap() == HandleState::Running;
+        if running {
+            "running (worker)".to_string()
+        } else {
+            "done (worker)".to_string()
+        }
+    }
+
+    fn cancel(&self) {
+        self.handle
+            .cancel
+            .cancel(crate::process::CancelCause::Explicit);
+    }
 }
 
 /// The two ledgers behind [`WorkerRegistry`]'s one lock: the live entries,
@@ -313,5 +363,84 @@ impl WorkerRegistry {
                 .cancel(crate::process::CancelCause::Explicit);
         }
         taken.entries.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal registered-worker fixture — the same construction core's
+    /// own concurrency tests use, every `HandleInner` field legitimately
+    /// public this side of `decisions/260615_no-core-repr-leak-into-exarch`.
+    fn fake_entry(id: u64, cmd: &str, class: LeaseClass, running: bool) -> WorkerEntry {
+        let state = if running {
+            HandleState::Running
+        } else {
+            HandleState::Completed
+        };
+        WorkerEntry {
+            id: WorkerId(id),
+            cmd: cmd.to_string(),
+            started: SystemTime::now(),
+            class,
+            settled_epoch: None,
+            handle: HandleInner {
+                result: Arc::new(Mutex::new(None)),
+                cached: Arc::new(Mutex::new(None)),
+                state: Arc::new(Mutex::new(state)),
+                stdout_buf: Arc::new(Mutex::new(Vec::new())),
+                stderr_buf: Arc::new(Mutex::new(Vec::new())),
+                surface_buf: Arc::new(Mutex::new(Vec::new())),
+                joined: Arc::new(Mutex::new(false)),
+                last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
+                cmd: cmd.to_string(),
+                cancel: crate::process::CancelScope::default(),
+            },
+        }
+    }
+
+    /// Every facet a running `spawn`/`watch` worker answers through
+    /// [`Resident`]: a `wN` designator (unbracketed — a fold brackets it
+    /// uniformly), the `"worker"` population, a `"handle"` capability, and
+    /// a state word that already carries this population's own qualifier.
+    #[test]
+    fn resident_facets_for_a_running_worker() {
+        let entry = fake_entry(3, "spawn { x }", LeaseClass::Worker, true);
+        assert_eq!(entry.designator(), "w3");
+        assert_eq!(entry.population(), "worker");
+        assert_eq!(entry.capability_kind(), "handle");
+        assert_eq!(entry.state_label(), "running (worker)");
+        assert!(entry.lease_row().contains("idle"));
+    }
+
+    /// A settled-but-unclaimed worker reads `done`, not `running` — the
+    /// POSIX-`Done` analogue the REPL's `jobs` fold relies on.
+    #[test]
+    fn resident_state_label_for_a_settled_worker() {
+        let entry = fake_entry(7, "watch { x }", LeaseClass::Worker, false);
+        assert_eq!(entry.state_label(), "done (worker)");
+    }
+
+    /// A durable (`service`) worker's lease row names the degenerate case
+    /// honestly: no idle bound, no backstop — it dies by cancel, `/clear`,
+    /// or process exit, never by an unobserved timeout.
+    #[test]
+    fn resident_lease_row_names_the_durable_degenerate_case() {
+        let entry = fake_entry(9, "service { x }", LeaseClass::Durable, true);
+        let row = entry.lease_row();
+        assert!(row.contains("durable"));
+        assert!(row.contains("/clear"));
+    }
+
+    /// `cancel` fires the worker's own cooperative cancel scope — the same
+    /// edge [`WorkerRegistry::cancel_all`] already fires per entry, reached
+    /// here through the resident signature instead.
+    #[test]
+    fn resident_cancel_fires_the_handles_cancel_scope() {
+        let entry = fake_entry(1, "spawn { x }", LeaseClass::Worker, true);
+        assert!(!entry.handle.cancel.is_cancelled());
+        entry.cancel();
+        assert!(entry.handle.cancel.is_cancelled());
     }
 }

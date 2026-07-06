@@ -6,7 +6,9 @@
 
 use ral_core::diagnostic;
 use ral_core::typecheck::builtins::{BuiltinTypeRule, sig};
-use ral_core::types::{Break, BuiltinBody, BuiltinEntry, Error, HandleState, WorkerEntry};
+use ral_core::types::{
+    Break, BuiltinBody, BuiltinEntry, Error, HandleState, Resident, WorkerEntry,
+};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
@@ -70,25 +72,30 @@ const NOT_A_PGID_JOB: &str = "no such job — fg/bg/disown are pgid-only; a work
 /// retention state lives here, and no lease is renewed by listing
 /// (`Shell::workers()` already guarantees both).
 fn render_jobs(jt: &crate::jobs::JobTable, workers: &[WorkerEntry]) -> Vec<String> {
+    // The designator and state word come from the resident signature — the
+    // one thing every population answers alike; `pgid`/`cmd` stay direct
+    // field reads, the honest per-chapter variance the trait deliberately
+    // leaves unflattened.
     let mut lines: Vec<String> = jt
         .list()
         .into_iter()
         .map(|job| {
-            let state = match job.state {
-                crate::jobs::JobState::Running => "running",
-                crate::jobs::JobState::Stopped => "stopped",
-            };
-            format!("[{}] {} {}\t{}", job.id, state, job.pgid, job.cmd)
+            format!(
+                "[{}] {} {}\t{}",
+                job.designator(),
+                job.state_label(),
+                job.pgid,
+                job.cmd
+            )
         })
         .collect();
     lines.extend(workers.iter().map(|entry| {
-        let running = *entry.handle.state.lock().unwrap() == HandleState::Running;
-        let state = if running {
-            "running (worker)"
-        } else {
-            "done (worker)"
-        };
-        format!("[w{}] {}\t{}", entry.id.0, state, entry.cmd)
+        format!(
+            "[{}] {}\t{}",
+            entry.designator(),
+            entry.state_label(),
+            entry.cmd
+        )
     }));
     lines
 }
@@ -106,7 +113,7 @@ pub(crate) fn survivor_warning(workers: &[WorkerEntry]) -> Option<String> {
     let running: Vec<String> = workers
         .iter()
         .filter(|entry| *entry.handle.state.lock().unwrap() == HandleState::Running)
-        .map(|entry| format!("[w{}] {}", entry.id.0, entry.cmd))
+        .map(|entry| format!("[{}] {}", entry.designator(), entry.cmd))
         .collect();
     if running.is_empty() {
         return None;

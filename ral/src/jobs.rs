@@ -35,6 +35,7 @@
 //!     downstream caller (and the pipeline lifecycle) cfg-free.
 
 use ral_core::Shell;
+use ral_core::types::Resident;
 use std::collections::HashMap;
 
 #[cfg(unix)]
@@ -55,6 +56,54 @@ pub struct Job {
 pub enum JobState {
     Running,
     Stopped,
+}
+
+/// The job-table chapter's resident signature
+/// (`decisions/260705_session-ledger`, `core/src/types/resident.rs`): a
+/// bare numeric designator (a fold brackets it uniformly, matching a
+/// worker's `[wN]` at the listing layer without either chapter agreeing on
+/// bracketing itself), a pgid-typed capability, and no lease at all —
+/// a pgid job drifts toward reclamation only by the exit sweep, never an
+/// idle-observation clock, so it is "human-owned" whether running or
+/// stopped.
+impl Resident for Job {
+    fn designator(&self) -> String {
+        self.id.to_string()
+    }
+
+    fn population(&self) -> &'static str {
+        "job"
+    }
+
+    fn capability_kind(&self) -> &'static str {
+        "pgid"
+    }
+
+    fn lease_row(&self) -> String {
+        "none — human-owned".to_string()
+    }
+
+    fn state_label(&self) -> String {
+        match self.state {
+            JobState::Running => "running".to_string(),
+            JobState::Stopped => "stopped".to_string(),
+        }
+    }
+
+    /// The cooperative-signal analogue of a worker's cancel scope: `SIGTERM`
+    /// to the whole pgid, the same first step [`JobTable::cleanup`] takes for
+    /// every group at exit, letting the process decide how to wind down
+    /// rather than reaching for `SIGKILL` directly.
+    fn cancel(&self) {
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(-self.pgid, libc::SIGTERM);
+        }
+        #[cfg(windows)]
+        {
+            ral_core::process::kill_pipeline_group(ral_core::process::Pgid(self.pgid));
+        }
+    }
 }
 
 pub struct JobTable {
@@ -553,5 +602,34 @@ mod tests {
                 && self.cmd == other.cmd
                 && self.state == other.state
         }
+    }
+
+    /// Every facet a pgid job answers through [`Resident`]: a bare numeric
+    /// designator (a fold brackets it uniformly, matching a worker's own
+    /// `[wN]` without either chapter agreeing on bracketing itself), the
+    /// `"job"` population, a `"pgid"` capability, and no lease at all —
+    /// "human-owned" regardless of running or stopped, since nothing here
+    /// reclaims a pgid job on an idle clock the way the worker lease chain
+    /// does.  (`cancel` is not exercised here: like `resume_in_background`,
+    /// it signals a real pgid, and this file's own idiom is to keep a fake
+    /// pgid unsignalled in these tests — see `resume_flips_stopped_to_
+    /// running_and_returns_pgid`'s note above.)
+    #[test]
+    fn resident_facets_for_a_running_job() {
+        let j = job(4, 1234, "sleep 100", JobState::Running);
+        assert_eq!(j.designator(), "4");
+        assert_eq!(j.population(), "job");
+        assert_eq!(j.capability_kind(), "pgid");
+        assert_eq!(j.state_label(), "running");
+        assert_eq!(j.lease_row(), "none — human-owned");
+    }
+
+    /// A stopped job's state label and lease row — the ADR's own degenerate
+    /// example, "none; a human owns it (a stopped job)".
+    #[test]
+    fn resident_facets_for_a_stopped_job() {
+        let j = job(5, 1234, "vim", JobState::Stopped);
+        assert_eq!(j.state_label(), "stopped");
+        assert_eq!(j.lease_row(), "none — human-owned");
     }
 }
