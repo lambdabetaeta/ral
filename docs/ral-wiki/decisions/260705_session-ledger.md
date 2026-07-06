@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: active
 ---
 
 # A session is a ledger of residents

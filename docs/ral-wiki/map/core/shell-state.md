@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d744648
-generated_at_date: 2026-07-05
+generated_at_commit: b91043e
+generated_at_date: 2026-07-06
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
 
@@ -86,6 +86,11 @@ field name *is* the invariant** — joined by `Shell`
   pending notices alike — since explicit destruction outranks every lease,
   the durable class included
   ([[decisions/260705_leases-and-budgets|leases-and-budgets]]).
+  `WorkerEntry` also implements the small `Resident` signature
+  (`types/resident.rs`, [[design/residency|residency]]) — designator,
+  population, capability kind, lease row, state label, cancel — so the
+  REPL's `jobs` listing and its exit-time survivor warning read a worker's
+  facets through it instead of hand-formatting per population.
 
   The binding-lease ledger (`shell/bindings.rs`,
   [[decisions/260629_agent-binding-reaping|agent-binding-reaping]]) sits

@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 1baac6d
-generated_at_date: 2026-06-22
-covers_paths: [ral/src/jobs.rs]
+generated_at_commit: b91043e
+generated_at_date: 2026-07-06
+covers_paths: [ral/src/jobs.rs, ral/src/repl/host_handlers.rs]
 ---
 
 # Map: repl / jobs
@@ -43,3 +43,31 @@ the [[map/core/io-process|ForegroundGuard]] acquires `tcsetpgrp` + the termios
 snapshot only on that borrow. Without a lease — a non-interactive resume — there
 is no tty dance to do, so `fg` still SIGCONTs the whole `-pgid` and waits but
 skips the handoff.
+
+## The wart heals at the listing layer
+
+`sleep 10 &` desugars to `spawn` — an in-process handle, invisible to `jobs`
+until now. `host_handlers.rs::render_jobs` folds *both* populations into one
+listing: `JobTable`'s pgid groups exactly as above, then `shell.workers()`'s
+registered handles, marked `[wN]` — a designator namespace of its own so it
+can never collide with a pgid's `[n]`. A worker reads `running (worker)`
+while live and `done (worker)` once settled but unclaimed (the POSIX-`Done`
+analogue); once an eliminator observes it away it is simply absent from the
+next `shell.workers()` snapshot, so the fold keeps no retention state of its
+own. `fg`/`bg`/`disown` stay strictly pgid-typed — a numeric id that
+resolves no pgid job answers with the correspondence (`await` is a handle's
+`fg`, `cancel` its kill) rather than a bare "no such job". Both `Job`
+(here) and core's `WorkerEntry` implement the small `Resident` signature
+([[design/residency|residency]], `core/src/types/resident.rs`); `render_jobs`
+reads `designator`/`state_label` off it for both populations rather than
+hand-formatting per chapter, while `pgid`/`cmd` stay direct field reads —
+the honest variance the signature leaves unflattened.
+
+`host_handlers.rs::survivor_warning` is the other half of the same fold, the
+deferred survivor warning finally landing as a registry consumer
+([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]): at
+session `Drop`, before `JobTable::cleanup` sweeps undisowned pgid groups
+exactly as before, it composes one compact line naming every worker handle
+still running — they die with the process, with no pgid to sweep, so this
+is their only farewell. `None` when nothing is running; it never gates or
+delays the exit it announces.

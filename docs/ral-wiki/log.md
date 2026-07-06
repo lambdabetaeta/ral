@@ -3707,3 +3707,18 @@ binding pin (amendment note added; same logic as the durable-job pins).
 Updated [[decisions/260705_leases-and-budgets|leases-and-budgets]],
 [[decisions/260705_session-ledger|session-ledger]], and
 `dev/docs/260705_leases_ledger_plan.md`.
+
+## [2026-07-06] ingest | session-ledger goes active; design/residency lands
+
+Parcel 9 built the folds the ADR promised: the REPL's `jobs` gained the
+worker-handle population and an exit-time survivor warning
+([[map/repl/jobs|repl/jobs]]); the generation-and-cascade audit found the
+subtree cascade already reaching a cancelled agent's own workers through its
+shell's durable root, and closed the one real gap it found — a
+settled-but-never-cancelled agent's own workers and armed schedules, now
+cleared unconditionally in `Agent`'s `Drop`
+([[map/exarch/agent|agent]]). The resident signature was extracted into
+`core/src/types/resident.rs`, implemented for `WorkerEntry` and the REPL's
+`Job`, with exarch's agent/schedule/binding chapters refusing per the ADR's
+own license — recorded as [[design/residency|residency]]. Flipped
+[[decisions/260705_session-ledger|session-ledger]] to `active`.

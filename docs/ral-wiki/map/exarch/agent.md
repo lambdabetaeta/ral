@@ -1,6 +1,6 @@
 ---
-generated_at_commit: cde158a
-generated_at_date: 2026-07-05
+generated_at_commit: b91043e
+generated_at_date: 2026-07-06
 covers_paths: [exarch/src/agent.rs, exarch/src/agent_registry.rs, exarch/src/event.rs, exarch/src/fleet.rs, exarch/src/nudge.rs, exarch/src/digest.rs, exarch/src/config.rs]
 ---
 
@@ -257,6 +257,18 @@ carries the cancel down. This generalises
 [[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]] from one root-turn
 token to a per-focus token over a subtree.
 
+Cancelling `eval_root` already reaches a cancelled node's own detached `ral`
+workers with no edge of its own: a worker's cancel scope is a child of its
+shell's durable root, and every `CancelScope::is_cancelled` walks its
+ancestors. What the cascade does *not* reach is a node that ends without
+ever being cancelled — the ordinary `reply`/settle path, or the trunk's own
+end-of-`drive` `deregister` — since neither touches the registry's cascade
+primitive at all. `Agent`'s `Drop` closes that gap in one place: it cancels
+every worker still registered on its own shell and clears its own armed
+schedules unconditionally, the same law `clear` already applies explicitly
+below, so a settled-but-never-cancelled agent leaks neither
+([[design/residency|residency]], [[decisions/260705_session-ledger|session-ledger]]).
+
 ## The provider is per-agent and hot-swappable
 
 `ProviderHandle` is owned by the `Agent`, not threaded through `drive`'s
@@ -371,4 +383,6 @@ predicate, the conversing trunk vs returning agents),
 split this page maps), [[map/exarch/tools|tools]] (the registry and gates the
 provider sees), [[map/exarch/frontend|frontend]] (the bus, the inbox, the
 registry, and the two frontends), [[map/exarch/provider|provider]],
-[[map/exarch/policy|policy]], [[map/exarch|exarch]].
+[[map/exarch/policy|policy]], [[map/exarch|exarch]],
+[[design/residency|residency]] (the resident ledger this cascade and the
+worker/schedule teardown edge are chapters of).
