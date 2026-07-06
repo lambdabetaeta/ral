@@ -43,12 +43,13 @@ pub(super) fn rule_line(
     let bar = wait_bar(elapsed);
     left_w += bar.iter().map(|s| s.width()).sum::<usize>();
     spans.extend(bar);
-    if let Some(p) = phase {
-        let label = Span::styled(format!("{p}… "), Style::default().fg(SLATE));
-        left_w += label.width();
-        spans.push(label);
-    }
-
+    // ── phase label (fixed-width slot) ─────────────────────────────────
+    let mut label = match phase {
+        Some(p) => format!("{p}… "),
+        None => String::new(),
+    };
+    label.push_str(&" ".repeat(PHASE_SLOT_W.saturating_sub(label.len())));
+    left_w += PHASE_SLOT_W; spans.push(Span::styled(label, Style::default().fg(SLATE)));
     // ── status model ──────────────────────────────────────────────────
     {
         // always show model
@@ -81,7 +82,7 @@ pub(super) fn rule_line(
         let bar = ctx_ramp(pct, CTX_BAR_W);
         left_w += bar.iter().map(|s| s.width()).sum::<usize>();
         spans.extend(bar);
-        let readout = Span::styled(format!(" {pct}% "), Style::default().fg(SLATE));
+        let readout = Span::styled(format!(" {pct}%"), Style::default().fg(SLATE));
         left_w += readout.width();
         spans.push(readout);
     }
@@ -93,9 +94,9 @@ pub(super) fn rule_line(
     // when the whole buffer fits.
     if let Some(pct) = scroll_pct {
         let text = if pct >= 100 {
-            "⇣ end ".to_string()
+            " · ⇣ end ".to_string()
         } else {
-            format!("⇣ {pct}% ")
+            format!(" · ⇣ {pct}% ")
         };
         let seg = Span::styled(text, Style::default().fg(SLATE));
         left_w += seg.width();
@@ -140,7 +141,7 @@ pub(super) fn ctx_ramp(pct: u64, bar_w: usize) -> Vec<Span<'static>> {
 
 /// Width of the elapsed-wait bar, in cells.
 pub(super) const WAIT_BAR_W: usize = 10;
-
+pub(super) const PHASE_SLOT_W: usize = 16; // fixed phase-label slot: stops status-line jitter
 /// Bucket whole seconds of elapsed phase time into a `0..=3` value step
 /// for the wait bar's colour: a normal sub-10s phase stays dim, a
 /// dragging one flares toward white past ~30s. Deliberately distinct

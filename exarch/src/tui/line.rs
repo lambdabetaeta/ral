@@ -1124,10 +1124,9 @@ pub(super) fn stop_reason(raw: &str) -> Vec<Line<'static>> {
 }
 
 /// Spans for the permanent usage status bar
-/// (`total 46.6k in / 459 out · $0.1466`).  Styles the pieces
-/// [`provider::Usage::parts`] yields — the one renderer the plain
-/// [`provider::Usage`] `Display` shares — so the chrome and the logs never
-/// disagree on what a turn cost (X9).
+/// (`[46.6k in/459 out] · $0.1466`, or `[46.6k in/459 out/1.2k wr/3.4k rd] · $0.1466`
+/// with cache).  Styles the pieces [`provider::Usage::parts`] yields.
+/// (the plain [`provider::Usage`] `Display` uses a long-form log format).
 pub(super) fn usage_text(usage: &provider::Usage) -> Vec<Span<'static>> {
     let p = usage.parts();
     let s = |b: &str| Span::styled(b.to_string(), Style::default().fg(SLATE));
@@ -1135,16 +1134,16 @@ pub(super) fn usage_text(usage: &provider::Usage) -> Vec<Span<'static>> {
     let db =
         |b: String, c: Color| Span::styled(b, Style::default().fg(c).add_modifier(Modifier::BOLD));
     let mut sp = vec![
-        s("total "),
+        s("["),
         db(p.input, LIME),
-        s(" in / "),
+        s(" in/"),
         db(p.output, LIME),
         s(" out"),
     ];
     if let Some((wr, rd)) = p.cache {
-        sp.extend([s(" ["), n(wr, LIME), s(" wr/"), n(rd, LIME), s(" rd]")]);
+        sp.extend([s("/"), n(wr, LIME), s(" wr/"), n(rd, LIME), s(" rd")]);
     }
-    sp.extend([s(" · "), db(p.cost, LIME)]);
+    sp.extend([s("] · "), db(p.cost, LIME)]);
     sp
 }
 
