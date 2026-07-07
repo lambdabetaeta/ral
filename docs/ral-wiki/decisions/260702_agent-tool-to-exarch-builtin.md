@@ -13,6 +13,15 @@ requires, an outline plan, and the costs that make it a product choice rather
 than a purely mechanical one. It does *not* decide to make the move; it argues
 that the move is possible and states what it would take.
 
+> **Amended 2026-07-06.** The seam this ADR left open is decided: it is the
+> **enquiry channel** of [[decisions/260706_enquiry-channel|enquiry-channel]]
+> (`Enquiry → Answer`, an `EnquiryDesk` on `TurnRequest`), not a turn-local
+> spawn context — and the scope widens from the spawn family to every
+> remaining stateful tool except `reply`. The full migration plan lives in
+> the amendment at the end of this ADR. The move itself remains deferred: the
+> rail lands first (enquiry-channel Phase A), the migration follows on its
+> own bench-gated schedule.
+
 The affordance under discussion is the one fixed by
 [[decisions/260617_async-agent-tool|async-agent-tool]]: launch-only, always
 asynchronous, forks a child from a value-snapshot of the parent shell, runs it on
@@ -120,6 +129,11 @@ detached worker that runs `Agent::drive` lives on the spawned thread exactly as
 today — the builtin only launches it.
 
 ## Proposed shape
+
+> Superseded by the 2026-07-06 amendment below: the turn-local spawn context
+> becomes the enquiry desk of
+> [[decisions/260706_enquiry-channel|enquiry-channel]]. Kept for the record —
+> and the `Agent::fork` decomposition survives unchanged.
 
 - **A turn-local spawn seam.** `run_shell` populates, for the extent of the
   turn, a spawn context carrying the parent-snapshot pieces — `Emitter`, parent
@@ -245,8 +259,179 @@ today — the builtin only launches it.
   difference, to be settled against
   [[decisions/260628_host-seam-transport-parametric|host-seam-transport-parametric]].
 
+## Amendment (2026-07-06): the seam is the enquiry desk; the migration plan
+
+*Written alongside [[decisions/260706_enquiry-channel|enquiry-channel]], which
+builds the rail this plan rides. The stance of the original ADR stands — the
+move is possible, deliberately not yet decided, and gated on measurement —
+but the mechanism, the scope, and the plan are updated here.*
+
+### The seam is decided, and it is not the spawn context
+
+The "Proposed shape" above reached host state through a turn-local spawn
+context read by `BuiltinBody::Captured` closures. That shape is superseded,
+for the reason enquiry-channel argues in full: a captured closure welds the
+engine to the front-end process. Under `WireTransport` the shell lives in the
+`--engine` child, where a closure over front-end `Arc`s cannot be
+constructed — the engine's vocabulary would silently depend on which
+transport booted it. The enquiry desk is the same capture, named once, on the
+rail turn-local state already rides: the builtin's body validates its
+arguments and calls `shell.enquire(…)`; exarch answers at an `EnquiryDesk` it
+installs per turn (`transport.set_desk(…)`, beside `set_boundary`) — a direct
+trait object under the identity transport, `Event::Enquiry`/`Frame::Answer`
+frames under the wire. This also settles the open question "where the seam
+lives": neither `ReplScratch` nor a purpose-built scratch slot — the desk on
+`TurnRequest`.
+
+Two pieces of the original analysis survive verbatim:
+
+- **The `Agent::fork` decomposition — and the shell fork moves engine-side.**
+  The desk handler runs on the dispatching thread, inside `Agent::run_shell`'s
+  own stack frame, so it can hold shared handles but never `&mut Agent` — and,
+  by enquiry-channel's reentrancy law, never the session lock, which rules out
+  reaching the parent shell from the handler at all (under identity that is a
+  self-deadlock on the lock the handler's own stack holds). The shell fork
+  therefore happens in the *builtin body* — the one place that lawfully holds
+  `&mut Shell` mid-turn — which keeps today's semantics: `export FOO=1;
+  agent-start …` in one turn forks a child that sees `FOO`, exactly as the
+  two-tool-call sequence does now. The forked session is parked engine-side
+  and *adopted by id*: under the identity transport a turn-local **nursery**
+  slot installed beside the desk (the turn guard drops an unadopted fork);
+  under the wire, the engine's session table — enquiry-channel §5's
+  multi-session direction, which `agent-start` therefore requires before it
+  rides the wire (the Phase B coherence gate makes that dependency loud). The
+  *host half* — registry entry, mailbox, provider loop — is assembled in the
+  handler from `HostServices` plus the adopted session.
+- **Registry, inbox, and reaper untouched.** The child still parents at the
+  durable root, delivery is still an `InboxMsg` at the turn boundary,
+  `/clear` still rejects stale generations. The desk changes where the launch
+  verb lives, not what launching is.
+
+### Scope widens: every operation migrates; `reply` does not
+
+The original ADR scoped itself to the spawn family. The desk makes the
+boundary principled instead of enumerated: **an operation** — something a
+script computes with, taking values and returning values — **belongs in the
+language**; `message`, the `schedule` family, and `commit`/`verify_commitment`
+are operations exactly as the spawn family is. **`reply` is protocol, not an
+operation**: it terminates the episode and feeds the nudge logic, and nothing
+downstream ever computes with it — folding it into ral would buy nothing and
+cost clean loop-termination semantics. It stays a provider tool. The end
+state of the full migration is therefore a **two-tool provider surface:
+`ral` + `reply`**.
+
+The litmus for anything future, inherited from enquiry-channel: *surface*
+says "the host may look at this"; an *enquiry* says "this script cannot take
+its next step without the host's answer"; "I want it eventually" is the
+inbox. Only promote a tool whose caller genuinely consumes the answer.
+
+### The class vocabulary
+
+Each class is an `FOValue` variant, validated on both ends — the builtin's
+type rule engine-side, the desk host-side; never trust one end:
+
+| enquiry class | payload | answer |
+| --- | --- | --- |
+| `` `agent-start `` | `[session, kind: `` `amnemon ``\|`` `mnemon ``, prompt, title, permissions]` (`session`: the engine-forked child's nursery id) | `` `started [id, title, log-dir] `` |
+| `` `agent-list `` | `[]` | list of `[id, title, elapsed-s, log-dir]` |
+| `` `agent-cancel `` | `[id]` | `` `cancelled `` / error |
+| `` `message `` | `[id, text]` | `` `delivered `` / error |
+| `` `schedule `` | `[prompt, cron?\|after?, label?]` | `` `scheduled [id] `` |
+| `` `schedule-list `` | `[]` | list of `[id, label, trigger, next]` |
+| `` `unschedule `` | `[id]` | `` `removed `` / error |
+| `` `commit-open `` | `[key, description]` | `` `started [id, …] `` (writer child receipt) |
+| `` `commit-verify `` | `[key]` | `` `started [id, …] `` (verifier child receipt) |
+
+Receipts and listings are ral records — the structured values the Benefits
+section wanted — and a launch stays launch-only and asynchronous: the answer
+is the receipt, the child's reply arrives later through the inbox as today.
+
+### The desk: `HostServices` and handlers
+
+New `exarch/src/desk.rs`:
+
+```rust
+pub struct HostServices {          // the parent-snapshot step, named:
+    registry: AgentRegistry,       // everything dispatch_spawn already
+    parent: AgentId,               // captures off &mut Agent before the
+    mailbox: Mailbox,              // worker thread takes over
+    provider: ProviderHandle,
+    caps: Capabilities,            // parent ceiling, for policy::narrow
+    fuel: SpawnFuel,               // the Spawns gate, enforced here
+    schedules: ScheduleRegistry,   // the Schedules gate, enforced here
+    transcript: Transcript,
+    nursery: Nursery,              // adoption end of the engine-side fork
+    generation: u64,               // registry generation at install
+}
+pub struct ExarchDesk(HostServices);
+impl EnquiryDesk for ExarchDesk { /* match class label → handler */ }
+```
+
+Installed per turn in `Agent::run_shell` beside `set_boundary`, so the
+generation guard and the current fuel/caps are fresh — the same reasoning
+`boundary_sink` documents. Handlers are refactorings of the existing
+`tools/` bodies, not rewrites:
+
+- `` `agent-start `` is `dispatch_spawn` split at the seam: the builtin body
+  validates the record, forks the child session from the `&mut Shell` *it*
+  holds, parks it in the nursery, and enquires with the nursery id; the
+  handler runs `policy::narrow` against the snapshot's ceiling (caps ride
+  every dispatch's `ReqMirror`, so narrowing stays host-enforced even though
+  the shell forked engine-side), adopts the parked session, and runs the
+  detach-register mechanics verbatim; answer = the receipt record.
+- `` `agent-list `` / `` `agent-cancel `` / `` `message `` wrap the registry
+  ops the `AgentsTool`/`AgentCancelTool`/`MessageTool` bodies perform.
+- The schedule family wraps `ScheduleRegistry` as `schedule.rs` does.
+- The commitment pair builds the host-owned writer/verifier prompts exactly
+  as `commitment.rs` does, tagging `CommitmentIntent` unchanged — the
+  protected-pin register stays host-side.
+
+**Authority moves from visibility to refusal.** Today `tools_for` gates by
+omission (`Gate::Spawns`, `Gate::Schedules`); a visibility filter is not an
+authority check once the engine is a different machine. The desk refuses —
+fuel exhausted, no schedule grant, protected key — with the tools' own
+didactic texts. Builtins may additionally be installed conditionally at fork
+time for visibility parity, but the desk is the wall.
+
+### The builtins
+
+`exarch/src/agent_builtins.rs` (the layer that owns model-facing
+affordances): one `BuiltinEntry` per verb, its type rule fixing the record
+shape, its body validating arguments, calling `shell.enquire(…)`, and
+returning the answer's record. The prompt-embedding cost and its raw-string
+mitigation stand as written in Costs — unchanged by where the answer comes
+from.
+
+### Sequencing and gating
+
+1. **Prerequisite**: enquiry-channel Phase A (the rail) is landed and tested.
+   Nothing here starts before it.
+2. **`agent` first** — the verb that motivated the design. The
+   `amnemon`/`mnemon` JSON tools *stay installed beside it* during
+   measurement: the "both surfaces" alternative rejected above is accepted
+   temporarily as a measurement configuration, never as a product state.
+3. **The bench decides.** exarch is benchmarked per-commit; terminal-bench
+   and swebench run against the tool baseline (the Surface-prompt-benchmarks
+   bullet above). If task success and tokens-per-task favour the builtin,
+   the JSON pair retires and the migration proceeds family by family —
+   `agents`/`message`/`agent_cancel`, then the schedule family, then the
+   commitment pair — with `exarch/data/system.md` rewritten per family as it
+   lands. If the ral-fluency tax eats the gains, the tools stay and the desk
+   still earns its keep as the seam every other host facility rides.
+4. **Tests**: builtin round-trip against a stub desk; the generation guard
+   (a desk installed before a `/clear` refuses `` `agent-start `` after it,
+   mirroring `inbox_boundary_pushes_then_drops_after_clear`); refusal texts
+   for fuel/grant/protected-key at the desk.
+
+Of the original open questions: *where the seam lives* is answered (the
+desk); *child chrome from a builtin* and *does the model reach for a raw
+string* remain open — and are exactly what step 2's measurement
+configuration exists to answer.
+
 ## See also
 
+[[decisions/260706_enquiry-channel|enquiry-channel]] (the rail this plan
+rides: the `EnquiryDesk` seam, `FOValue` payloads, and the wire encoding),
 [[decisions/260617_async-agent-tool|async-agent-tool]] (the affordance this
 relocates, and the "No ral surface" position it revisits),
 [[map/exarch/tools|tools]] (the `Tool` trait, `registry`, and the

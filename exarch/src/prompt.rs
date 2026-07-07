@@ -98,17 +98,20 @@ pub fn assemble(
 /// the whole surface at a glance, then `help <name>`s any one for its signature
 /// and docs on demand — baking every help string into the prompt proved far too
 /// long.  The set is fixed at build time and does not vary per agent, so it is
-/// assembled from the static tables, never a live shell.  Exarch's builtins are
-/// chained in explicitly because they are not yet in the process registry that
-/// `builtin_names` reads when the prompt is assembled (the session shell, which
-/// installs them, is booted afterwards).
+/// assembled from the static tables, never a live shell.  The host builtin
+/// sets ([`HOST_BUILTIN_SETS`](crate::agent_builtins::HOST_BUILTIN_SETS) —
+/// exarch's own surface and core's host-installed `service`) are chained in
+/// explicitly because they are not yet in the process registry that
+/// `builtin_names` reads when the prompt is assembled (the session shell,
+/// which installs them, is booted afterwards).
 fn builtin_index() -> String {
     let builtins = ral_core::builtins::builtin_names()
         .into_iter()
         .map(str::to_string)
         .chain(
-            crate::agent_builtins::EXARCH_BUILTINS
+            crate::agent_builtins::HOST_BUILTIN_SETS
                 .iter()
+                .flat_map(|set| set.iter())
                 .map(|e| e.name.to_string()),
         );
     let prelude = ral_core::builtins::misc::prelude_names()

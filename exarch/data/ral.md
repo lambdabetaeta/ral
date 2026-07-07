@@ -190,6 +190,12 @@ Like `audit`, deferred blocks turn errors into data. They are idempotent, so you
 
 Use `cancel $h` to stop a thread thread that is no longer required.
 
+For work that is meant to run indefinitely, use `service`:
+
+    let h = service #'watch the test log'# { tail -f test.log }
+
+The first argument is a mandatory single-line description of the task; the second is a block to run as a server. `service-handle ID` can be used to acquire a durable worker's handle by its id, so you can `await` or `cancel` it in a if you have forgotten the binding.
+
 ## Within
 
 `within` is an effect handler that runs a block with a changed directory, environment, or handling of a command call:

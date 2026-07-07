@@ -38,20 +38,25 @@ const AGENT_SOURCE: &str = include_str!("../data/agent.ral");
 /// installer table and the enquiry-channel ADR's shell-parity item.
 pub const INSTALLER_TAG: &str = "exarch-agent";
 
-/// Register the exarch builtins process-wide and install them into `shell`.
-/// Idempotent.
-///
-/// `service` rides along here: core implements it but keeps it out of
-/// `CORE_BUILTINS` (the `watch` mechanism with the hosts swapped —
-/// [`ral_core::builtins::SERVICE_BUILTIN`]), and the agent host is the one
-/// that installs it, because only under exarch's worker lease does a
-/// durable birth distinguish anything. The REPL and batch hosts never call
-/// this, so they never gain `service`.
+/// The builtin sets the exarch agent host installs on top of core's
+/// `CORE_BUILTINS`: exarch's own surface ([`EXARCH_BUILTINS`]) and core's
+/// host-selected `service` ([`ral_core::builtins::SERVICE_BUILTIN`] — the
+/// `watch` mechanism with the hosts swapped, kept out of `CORE_BUILTINS` so
+/// that only the agent host, under whose worker lease a durable birth means
+/// anything, gains it). This is the one source of truth: [`install_on`]
+/// installs these sets and the prompt's builtin index names them, so the two
+/// cannot drift.
+pub static HOST_BUILTIN_SETS: &[&[BuiltinEntry]] =
+    &[EXARCH_BUILTINS, ral_core::builtins::SERVICE_BUILTIN];
+
+/// Register the exarch host builtins process-wide and install them into
+/// `shell`. Idempotent. The REPL and batch hosts never call this, so they
+/// never gain `service`.
 pub fn install_on(shell: &mut ral_core::Shell) {
-    ral_core::builtins::register_builtins(EXARCH_BUILTINS);
-    ral_core::builtins::register_builtins(ral_core::builtins::SERVICE_BUILTIN);
-    shell.install_builtins(EXARCH_BUILTINS);
-    shell.install_builtins(ral_core::builtins::SERVICE_BUILTIN);
+    for &set in HOST_BUILTIN_SETS {
+        ral_core::builtins::register_builtins(set);
+        shell.install_builtins(set);
+    }
 }
 
 /// Source the embedded agent helper library into the live shell.
