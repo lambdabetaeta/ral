@@ -246,7 +246,13 @@ pub(super) fn wire_stdout_file(
     };
     let (file, commit) = open_file(path, mode, shell)?;
     if commit.is_none() {
-        shell.emit_io(io_event::write(path, *mode, WriteOutcome::Committed, None));
+        shell.emit_io(io_event::write(
+            path,
+            *mode,
+            WriteOutcome::Committed,
+            None,
+            None,
+        ));
     }
     #[cfg(windows)]
     let stderr_dup = if matches!(plan.stderr_route, Some(StderrRoute::Stdout)) {
@@ -348,7 +354,13 @@ pub(super) fn wire_stderr(
             // to streaming), so the write door completes the moment the
             // open succeeds — same reasoning as the non-atomic stdout case
             // in `wire_stdout_file`.
-            shell.emit_io(io_event::write(path, effective_mode, WriteOutcome::Committed, None));
+            shell.emit_io(io_event::write(
+                path,
+                effective_mode,
+                WriteOutcome::Committed,
+                None,
+                None,
+            ));
             Ok(false)
         }
         None if !matches!(shell.turn.io.stderr, crate::io::Sink::Stderr) => {

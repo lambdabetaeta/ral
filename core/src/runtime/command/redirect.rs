@@ -163,6 +163,30 @@ impl AtomicCommit {
         Some(buf)
     }
 
+    /// The pre-existing target's whole content, read before `commit()` — the
+    /// atomic recipe leaves `target` completely untouched until the rename,
+    /// so this is a free look at "what was there before", the same snapshot
+    /// `edit`/`edit-str` read explicitly to build their diff card.  `None`
+    /// for a new file (nothing to diff against) or when either side would
+    /// exceed [`PREVIEW_CAP`]: diffing only ever a truncated prefix of one
+    /// side would describe a change that doesn't match what actually
+    /// landed, which is worse than the plain write-preview fallback.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:surface:atomic-old-read] Sub-step of the atomic `>` write door's diff-eligibility check: stat and read the target's pre-existing content before the rename commits it, exactly mirroring temp_preview's read of the new side. Not a separate model operation — the write/diff card surfaces when the redirect frame settles."
+    )]
+    pub(crate) fn old_snapshot_for_diff(&self) -> Option<Vec<u8>> {
+        let old_meta = std::fs::metadata(&self.target).ok()?;
+        if old_meta.len() > PREVIEW_CAP {
+            return None;
+        }
+        let new_meta = self.tmp.as_file().metadata().ok()?;
+        if new_meta.len() > PREVIEW_CAP {
+            return None;
+        }
+        std::fs::read(&self.target).ok()
+    }
+
     #[allow(
         clippy::disallowed_methods,
         reason = "[io-door:surface:atomic-commit] The atomic `>` write door's commit step: re-open the target's parent directory only to fsync the rename durable. The write surface fires when the redirect frame settles (committed once this returns Ok); this open carries written bytes to disk, it is not a separate model read."

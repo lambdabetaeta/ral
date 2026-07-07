@@ -213,6 +213,7 @@ fn emit_writes_failed(shell: &Shell, intents: Vec<WriteIntent>) {
             intent.mode,
             WriteOutcome::Failed,
             None,
+            None,
         ));
     }
 }
@@ -278,10 +279,12 @@ impl<'a> RedirectFrame<'a> {
         for intent in std::mem::take(&mut self.write_intents) {
             let outcome;
             let new_bytes;
+            let mut old_bytes = None;
             if !body_ok {
                 outcome = WriteOutcome::Aborted;
                 new_bytes = None;
             } else if let Some(commit) = intent.commit {
+                old_bytes = commit.old_snapshot_for_diff();
                 new_bytes = commit.temp_preview();
                 match commit.commit() {
                     Ok(()) => outcome = WriteOutcome::Committed,
@@ -302,6 +305,7 @@ impl<'a> RedirectFrame<'a> {
                 intent.mode,
                 outcome,
                 new_bytes.as_deref(),
+                old_bytes.as_deref(),
             ));
         }
         commit_err

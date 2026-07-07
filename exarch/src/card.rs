@@ -304,6 +304,12 @@ pub enum IoEvent {
         // TUI's `user.log`.
         #[serde(skip)]
         new_bytes: Option<Vec<u8>>,
+        // The pre-existing target's whole content, present only when the
+        // write was atomic, overwrote an existing file, and neither side
+        // exceeded core's read cap — input to the write card's diff-vs-
+        // preview choice only.  Same `#[serde(skip)]` reasoning as `new_bytes`.
+        #[serde(skip)]
+        old_bytes: Option<Vec<u8>>,
     },
     Exec {
         argv: Vec<String>,
@@ -346,6 +352,7 @@ pub fn value_to_io(v: &RalValue) -> Option<IoEvent> {
             mode: WriteMode::parse(&str_field(m, "mode")?)?,
             outcome: WriteOutcome::parse(&str_field(m, "outcome")?)?,
             new_bytes: bytes_field(m, "new_bytes"),
+            old_bytes: bytes_field(m, "old_bytes"),
         },
         "exec" => IoEvent::Exec {
             argv: strings_field(m, "argv"),
@@ -365,7 +372,9 @@ pub fn value_to_io(v: &RalValue) -> Option<IoEvent> {
 /// by a word rather than a mirror-orientation glyph) followed by the path or
 /// program as the subject — lifted by [`Role::Path`]'s hue against the muted
 /// label — and the outcome roled by its level.  A committed write appends a
-/// [`write_preview`] of what it wrote below that heading.
+/// [`write_preview`] below that heading: a diff against the prior content
+/// when there was one to diff against, otherwise a plain listing of what it
+/// wrote.
 pub fn io_card(event: &IoEvent) -> Card {
     let mut body: Vec<Mark> = Vec::new();
     let spans = match event {
@@ -374,10 +383,11 @@ pub fn io_card(event: &IoEvent) -> Card {
             path,
             outcome,
             new_bytes,
+            old_bytes,
             ..
         } => {
             if *outcome == WriteOutcome::Committed {
-                body.extend(write_preview(new_bytes.as_deref()));
+                body.extend(write_preview(path, old_bytes.as_deref(), new_bytes.as_deref()));
             }
             write_spans(path, *outcome)
         }
@@ -474,28 +484,47 @@ fn write_spans(path: &str, outcome: WriteOutcome) -> Vec<Span> {
     ]
 }
 
-/// The number of leading lines a write card previews of the file it wrote.
+/// The number of leading lines a write card previews of the file it wrote,
+/// when it falls back to a listing rather than a diff.
 const WRITE_PREVIEW_LINES: usize = 10;
 
-/// Preview a committed write's content: the first [`WRITE_PREVIEW_LINES`] lines
-/// of `new` as one [`Mark::Listing`] — a numbered source listing — its `more`
-/// flag set when the content continues past them.  `new` is a bounded prefix
-/// (the host caps the read), so the flag signals *there is more* without
-/// claiming an exact remaining count.  A write card shows *what was written* —
-/// its head, not a diff and not a one-line receipt.  Absent or empty content
-/// yields no marks, so the `write <path> <outcome>` heading stands alone (a
-/// zero-byte write).
-fn write_preview(new: Option<&[u8]>) -> Option<Mark> {
-    let text = String::from_utf8_lossy(new?);
+/// Preview a committed write: a whole-file [`Mark::Diff`] against the prior
+/// content when `old` is present (core supplies it only for an atomic write
+/// that overwrote an existing file with neither side exceeding its read cap)
+/// and both sides are valid UTF-8 — the same diff `edit`/`edit-str` surface
+/// explicitly, here computed directly from the two snapshots since this
+/// already sits in the rendering layer.  Otherwise, the first
+/// [`WRITE_PREVIEW_LINES`] lines of `new` as one [`Mark::Listing`], `more` set
+/// when content continues past them — a plain preview of *what was written*,
+/// for a new file or content this can't safely diff (binary, or too large on
+/// either side).  Absent or empty `new` yields no marks, so the
+/// `write <path> <outcome>` heading stands alone (a zero-byte write).
+fn write_preview(path: &str, old: Option<&[u8]>, new: Option<&[u8]>) -> Vec<Mark> {
+    let new = match new {
+        Some(b) if !b.is_empty() => b,
+        _ => return Vec::new(),
+    };
+    if let Some(old) = old
+        && let (Ok(old_text), Ok(new_text)) = (std::str::from_utf8(old), std::str::from_utf8(new))
+    {
+        let hunks = crate::bus::whole_file_hunks(old_text, new_text);
+        if !hunks.is_empty() {
+            return vec![Mark::Diff {
+                path: path.to_string(),
+                hunks,
+            }];
+        }
+    }
+    let text = String::from_utf8_lossy(new);
     let mut lines = text.lines();
     let head: Vec<&str> = lines.by_ref().take(WRITE_PREVIEW_LINES).collect();
     if head.is_empty() {
-        return None;
+        return Vec::new();
     }
-    Some(Mark::Listing {
+    vec![Mark::Listing {
         bytes: head.join("\n").into_bytes(),
         more: lines.next().is_some(),
-    })
+    }]
 }
 
 /// Compose a run of buffered observation surfaces — even interleaved, grouped
@@ -1398,6 +1427,7 @@ mod tests {
                 mode: WriteMode::Append,
                 outcome: WriteOutcome::Committed,
                 new_bytes: None,
+                old_bytes: None,
             })
         );
         assert_eq!(
@@ -1501,6 +1531,7 @@ mod tests {
             mode: WriteMode::Append,
             outcome: WriteOutcome::Failed,
             new_bytes: None,
+            old_bytes: None,
         })
         .expect("an io event serialises");
         assert_eq!(v["io"], "write");

@@ -8,7 +8,8 @@
 //! ```text
 //! read:  {io:"read",  path:<string>}
 //! write: {io:"write", path:<string>, mode:<"write"|"append"|"stream">,
-//!         outcome:<"committed"|"aborted"|"failed">}
+//!         outcome:<"committed"|"aborted"|"failed">,
+//!         new_bytes:<bytes?>, old_bytes:<bytes?>}
 //! exec:  {io:"exec",  argv:<list<string>>, outcome:<"ok"|"bad">, status:<int>}
 //! ```
 
@@ -58,15 +59,20 @@ pub(crate) fn read(path: &str) -> Value {
     ])
 }
 
-/// `{io:"write", path:<path>, mode:…, outcome:…, new_bytes:<bytes|null>}` — an
-/// fd 1/2 file write target, settled at frame teardown.  `new_bytes` is a
-/// bounded prefix of the committed content — the head the host previews in the
-/// write card, not the whole file.
+/// `{io:"write", path:<path>, mode:…, outcome:…, new_bytes:<bytes|null>,
+/// old_bytes:<bytes|null>}` — an fd 1/2 file write target, settled at frame
+/// teardown.  `new_bytes` is a bounded prefix of the committed content — the
+/// head the host previews in the write card, not the whole file.  `old_bytes`
+/// is the pre-existing target's whole content, present only when the write
+/// was atomic and overwrote an existing file no larger than the same bound on
+/// either side — the host diffs `old_bytes`/`new_bytes` into a diff card
+/// instead of a plain preview when both are present and differ.
 pub(crate) fn write(
     path: &str,
     mode: RedirectMode,
     outcome: WriteOutcome,
     new_bytes: Option<&[u8]>,
+    old_bytes: Option<&[u8]>,
 ) -> Value {
     let mut fields = vec![
         ("io".to_string(), Value::String("write".into())),
@@ -79,6 +85,9 @@ pub(crate) fn write(
     ];
     if let Some(b) = new_bytes {
         fields.push(("new_bytes".to_string(), Value::Bytes(b.to_vec())));
+    }
+    if let Some(b) = old_bytes {
+        fields.push(("old_bytes".to_string(), Value::Bytes(b.to_vec())));
     }
     Value::map(fields)
 }

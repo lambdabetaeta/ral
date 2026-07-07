@@ -1848,8 +1848,114 @@ return !{{length $hits}}"#
                 // The committed content rides as `new_bytes`, seeding the write
                 // card's content preview.
                 new_bytes: Some(b"x".to_vec()),
+                // `b` is a fresh path — nothing existed to diff against.
+                old_bytes: None,
             },
             "the one io event is a committed write of the redirect path"
+        );
+    }
+
+    /// Coverage — the WRITE door overwriting an *existing* file: the atomic
+    /// recipe leaves the target untouched until the rename, so core reads it
+    /// for free and threads it through as `old_bytes` alongside the usual
+    /// `new_bytes` preview.  The card layer turns that pair into a whole-file
+    /// diff — the same `Mark::Diff` `edit`/`edit-str` surface explicitly, here
+    /// for any `>` redirect with no builtin required.
+    #[test]
+    fn bare_write_redirect_over_existing_file_surfaces_a_diff_card() {
+        use crate::card::{IoEvent, WriteMode, WriteOutcome, io_card};
+        let mut shell = fresh_shell();
+        let (dir, path) = scratch_file("cov-write-diff", "b", "hello\nworld\n");
+
+        let (r, kinds) = run_capturing(
+            &mut shell,
+            &format!("to-string \"hello\\nfriend\\n\" > '{path}'"),
+        );
+        let wrote = std::fs::read_to_string(dir.join("b")).ok();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            r.exit,
+            0,
+            "the write redirect must succeed; stderr was {:?}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        assert_eq!(
+            wrote.as_deref(),
+            Some("hello\nfriend\n"),
+            "the write committed to disk"
+        );
+
+        let ios = io_events(&kinds);
+        assert_eq!(
+            ios.len(),
+            1,
+            "a bare `to-string > b` raises exactly one io card, got {ios:?}"
+        );
+        assert_eq!(
+            ios[0],
+            &IoEvent::Write {
+                path: path.clone(),
+                mode: WriteMode::Write,
+                outcome: WriteOutcome::Committed,
+                new_bytes: Some(b"hello\nfriend\n".to_vec()),
+                // `b` pre-existed: the atomic commit reads it before the
+                // rename and threads it through as the diff's "before" side.
+                old_bytes: Some(b"hello\nworld\n".to_vec()),
+            },
+            "old_bytes carries the pre-existing content, new_bytes the committed one"
+        );
+
+        let card = io_card(ios[0]);
+        assert!(
+            card.has_diff(),
+            "overwriting an existing file renders a diff card, not a write-preview listing; got {card:?}"
+        );
+    }
+
+    /// Coverage — the WRITE door overwriting an existing file too large to
+    /// diff safely: core's `old_snapshot_for_diff` gates on both sides
+    /// fitting its read cap (64KiB), so a bigger pre-existing file must not
+    /// produce a partial, misleading diff — `old_bytes` stays absent and the
+    /// card falls back to the plain listing preview, exactly as a brand-new
+    /// write would.
+    #[test]
+    fn bare_write_redirect_over_oversized_existing_file_falls_back_to_listing() {
+        use crate::card::{IoEvent, WriteOutcome, io_card};
+        let mut shell = fresh_shell();
+        // Comfortably past core's 64KiB (65536-byte) read cap.
+        let big = "x".repeat(70_000);
+        let (dir, path) = scratch_file("cov-write-oversized", "b", &big);
+
+        let (r, kinds) = run_capturing(&mut shell, &format!("to-string 'short' > '{path}'"));
+        let wrote = std::fs::read_to_string(dir.join("b")).ok();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            r.exit,
+            0,
+            "the write redirect must succeed; stderr was {:?}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        assert_eq!(wrote.as_deref(), Some("short"), "the write committed to disk");
+
+        let ios = io_events(&kinds);
+        assert_eq!(ios.len(), 1, "a bare `to-string > b` raises exactly one io card, got {ios:?}");
+        match ios[0] {
+            IoEvent::Write {
+                outcome, old_bytes, ..
+            } => {
+                assert_eq!(*outcome, WriteOutcome::Committed);
+                assert!(
+                    old_bytes.is_none(),
+                    "an oversized pre-existing file must not be diffed"
+                );
+            }
+            other => panic!("expected a Write event, got {other:?}"),
+        }
+
+        let card = io_card(ios[0]);
+        assert!(
+            !card.has_diff(),
+            "an oversized pre-existing file falls back to the listing preview; got {card:?}"
         );
     }
 
@@ -2022,6 +2128,7 @@ return !{{length $hits}}"#
             mode: crate::card::WriteMode::Append,
             outcome: crate::card::WriteOutcome::Committed,
             new_bytes: None,
+            old_bytes: None,
         };
         let card = io_card(&event);
         let kind = Kind::Io {

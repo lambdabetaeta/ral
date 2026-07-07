@@ -101,6 +101,10 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ),
     (
         "core/src/runtime/command/redirect.rs",
+        "io-door:surface:atomic-old-read",
+    ),
+    (
+        "core/src/runtime/command/redirect.rs",
         "io-door:surface:atomic-temp-read",
     ),
     (

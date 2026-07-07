@@ -227,6 +227,7 @@ pub(crate) fn run(
             .as_ref()
             .expect("atomic_commit is only Some when plan.stdout_file is Some");
         if outcome.is_success() {
+            let old_bytes = commit.old_snapshot_for_diff();
             let preview = commit.temp_preview();
             match commit.commit() {
                 Ok(()) => {
@@ -235,6 +236,7 @@ pub(crate) fn run(
                         *mode,
                         io_event::WriteOutcome::Committed,
                         preview.as_deref(),
+                        old_bytes.as_deref(),
                     ));
                     Ok(())
                 }
@@ -243,6 +245,7 @@ pub(crate) fn run(
                         path,
                         *mode,
                         io_event::WriteOutcome::Failed,
+                        None,
                         None,
                     ));
                     Err(Break::Error(Error::new(format!("atomic write: {e}"), 1)))
@@ -255,6 +258,7 @@ pub(crate) fn run(
                 path,
                 *mode,
                 io_event::WriteOutcome::Aborted,
+                None,
                 None,
             ));
             Ok(())
