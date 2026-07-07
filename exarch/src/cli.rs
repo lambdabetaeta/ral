@@ -108,6 +108,13 @@ pub struct Cli {
     /// insert mode; Esc drops to normal mode for motions and operators.
     #[arg(long = "vi")]
     pub vi: bool,
+
+    /// Drop the line-hash editing scheme (`view-text`/`view-text-around`/`edit`)
+    /// from the system prompt, teaching the read/`string-replace`/write idiom
+    /// instead. The builtins themselves stay registered either way — this
+    /// only swaps which editing scheme the model is taught.
+    #[arg(long = "no-hashline")]
+    pub no_hashline: bool,
 }
 
 /// An out-of-band action that runs and exits instead of starting a session.
