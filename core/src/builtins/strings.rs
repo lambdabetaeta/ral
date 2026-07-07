@@ -156,8 +156,10 @@ pub(super) fn builtin_replace(args: &[Value]) -> Settled<Value> {
 /// the target is unique, and silently
 /// accepting a 0- or many-match request would be a footgun.  No regex
 /// involvement — `from` and `to` are taken verbatim, so braces,
-/// dollars, and backslashes carry no special meaning.
-pub(super) fn builtin_string_replace(args: &[Value]) -> Settled<Value> {
+/// dollars, and backslashes carry no special meaning.  `pub` (not
+/// `pub(super)`) so exarch's `edit-str` builtin can share this exact
+/// match/error logic rather than duplicating it.
+pub fn builtin_string_replace(args: &[Value]) -> Settled<Value> {
     check_arity(args, 3, "string-replace")?;
     let from = args[0].to_string();
     let to = args[1].to_string();

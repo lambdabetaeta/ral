@@ -38,7 +38,7 @@ pub mod misc;
 pub mod modules;
 mod predicates;
 mod shell;
-mod strings;
+pub mod strings;
 pub use util::{value_to_json, value_to_json_lossy_bytes};
 pub mod util;
 pub mod uutils;

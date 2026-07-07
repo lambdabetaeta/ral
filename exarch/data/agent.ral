@@ -1,10 +1,10 @@
 # exarch agent helper library — sourced into the shell at boot
 
-## `view-text`, `grep-files`, and `edit` are exarch host builtins
+## `view-text`, `grep-files`, `edit`, and `edit-str` are exarch host builtins
 ## (`exarch/src/agent_builtins.rs`): each reads the whole file in Rust, below the
-## redirect frame, and is a single logical surface.  They all share one witness
-## algorithm, so the hash a read shows is exactly the handle `edit` checks.
-## `view-text-around` is the one thin ral helper over them.
+## redirect frame, and is a single logical surface.  `view-text`/`edit` share one
+## witness algorithm, so the hash a read shows is exactly the handle `edit`
+## checks.  `view-text-around` is the one thin ral helper over them.
 
 ## Around a file, show `peek` hashed lines on each side of `line`
 ## (`2*peek + 1` total), clamped at the top of the file.  Reads `path` the way
@@ -12,15 +12,6 @@
 let view-text-around = { |path line peek|
     let lo = if $[$line > $peek] { return $[$line - $peek] } else { return 1 }
     view-text $path $lo $[$line + $peek + 1]
-}
-
-## The file-editing counterpart of `string-replace`: read `path`, replace the
-## one literal occurrence of `from` with `to`, and write the result back.
-## Same contract as `string-replace` — errors on 0 or >1 matches — composed
-## over `from-string`/`to-string` rather than a witness, for callers not
-## using the hash-addressed scheme: `edit-str foo.rs #'old text'# #'new text'#`.
-let edit-str = { |path from to|
-    to-string !{string-replace $from $to !{from-string < $path}} > $path
 }
 
 # --- task management ---------------------------------------------------------

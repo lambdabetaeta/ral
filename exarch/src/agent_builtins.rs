@@ -77,7 +77,6 @@ pub fn install_agent_library(shell: &mut Shell) -> Settled<Value> {
 pub(crate) fn agent_library_docs() -> Vec<(String, String)> {
     [
         ("view-text-around", "view-text-around PATH LINE PEEK  — show the 2*PEEK+1 lines of PATH centred on LINE, tagged like `view-text`, clamped at the top of the file."),
-        ("edit-str", "edit-str PATH FROM TO  — read PATH, replace the one literal occurrence of FROM with TO, write the result back. Errors on 0 or >1 matches, same contract as string-replace."),
         ("empty-tasks", "empty-tasks  — an empty task list; clears the pinned gauge.  Canonical initialiser."),
         ("add-task", "add-task $exarch-tasks <desc>  — allocate fresh id, append task, update pinned gauge"),
         ("remove-task", "remove-task $exarch-tasks <id>  — drop task by id, update pinned gauge"),
@@ -522,7 +521,7 @@ fn builtin_edit(args: &[Value], shell: &mut Shell) -> Settled<Value> {
         }
     }
     let final_text = out.join("\n");
-    write_file_atomic(shell, &path, final_text.as_bytes())?;
+    write_file_atomic(shell, &path, final_text.as_bytes(), "edit")?;
 
     // One canonical whole-file diff (original vs final), grouped into hunks by
     // `similar` with ±2 lines of context.  A no-op edit yields no hunks and so
@@ -660,11 +659,12 @@ fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<String> 
 
 /// Write `bytes` to `path` atomically — a temp file in the target's directory,
 /// flushed and renamed into place — gating the write through the active grant
-/// the way a `> path` redirect would.  This is `edit`'s write door: in Rust, so
-/// it raises no write io card.  The rename is atomic on the same filesystem, so
-/// a reader never sees a half-written file and a failed write leaves the
-/// original untouched.
-fn write_file_atomic(shell: &mut Shell, path: &str, bytes: &[u8]) -> Settled<()> {
+/// the way a `> path` redirect would.  This is the write door shared by
+/// `edit` and `edit-str`: in Rust, so it raises no write io card.  The rename
+/// is atomic on the same filesystem, so a reader never sees a half-written
+/// file and a failed write leaves the original untouched.  `tool` puts the
+/// calling builtin's name on the error, as it does in [`read_text_file`].
+fn write_file_atomic(shell: &mut Shell, path: &str, bytes: &[u8], tool: &str) -> Settled<()> {
     let rp = shell.resolve(path);
     shell.check_fs_write(&rp)?;
     let target = rp.into_inner();
@@ -673,20 +673,45 @@ fn write_file_atomic(shell: &mut Shell, path: &str, bytes: &[u8]) -> Settled<()>
     // parent-less path is the filesystem root, which is not an editable file.
     let parent = target.parent().ok_or_else(|| {
         sig(format!(
-            "edit: {path} has no parent directory to write into"
+            "{tool}: {path} has no parent directory to write into"
         ))
     })?;
     let mut tmp = tempfile::Builder::new()
         .prefix(".ral-edit-")
         .tempfile_in(parent)
-        .map_err(|e| sig(format!("edit: cannot stage write to {path}: {e}")))?;
+        .map_err(|e| sig(format!("{tool}: cannot stage write to {path}: {e}")))?;
     tmp.write_all(bytes)
-        .map_err(|e| sig(format!("edit: cannot write {path}: {e}")))?;
+        .map_err(|e| sig(format!("{tool}: cannot write {path}: {e}")))?;
     tmp.flush()
-        .map_err(|e| sig(format!("edit: cannot write {path}: {e}")))?;
+        .map_err(|e| sig(format!("{tool}: cannot write {path}: {e}")))?;
     tmp.persist(&target)
-        .map_err(|e| sig(format!("edit: cannot commit write to {path}: {e}")))?;
+        .map_err(|e| sig(format!("{tool}: cannot commit write to {path}: {e}")))?;
     Ok(())
+}
+
+/// `edit-str <path> <from> <to>` — read `path`, replace the one literal
+/// occurrence of `from` with `to` via the same match/error logic as
+/// `string-replace` (0 or >1 matches errors, leaving the file untouched),
+/// and write the result back.  Composed over the same read/write doors as
+/// `edit`, so it stays below the redirect frame and surfaces a whole-file
+/// diff card instead of a write io card.
+fn builtin_edit_str(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 3, "edit-str")?;
+    let path = args[0].to_string();
+    let body = read_text_file(shell, &path, "edit-str")?;
+    let replaced = ral_core::builtins::strings::builtin_string_replace(&[
+        args[1].clone(),
+        args[2].clone(),
+        Value::String(body.clone()),
+    ])?;
+    let final_text = replaced.to_string();
+    write_file_atomic(shell, &path, final_text.as_bytes(), "edit-str")?;
+
+    let hunks = whole_file_hunks(&body, &final_text);
+    if !hunks.is_empty() {
+        shell.surface(diff_card_value(&path, hunks));
+    }
+    Ok(Value::Unit)
 }
 
 fn builtin_explore_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
@@ -807,6 +832,20 @@ fn scheme_edit(_u: &mut Unifier) -> Scheme {
                 ]))),
                 pure(Ty::Unit),
             ),
+        )),
+    )
+}
+
+/// `edit-str :: Str → Str → Str → F Unit` — `path`, `from`, `to`.  Returns
+/// Unit: `edit-str` writes and surfaces, it does not yield a value.
+fn scheme_edit_str(_u: &mut Unifier) -> Scheme {
+    scheme(
+        &[],
+        &[],
+        &[],
+        thunk(fun(
+            Ty::String,
+            fun(Ty::String, fun(Ty::String, pure(Ty::Unit))),
         )),
     )
 }
@@ -1098,7 +1137,7 @@ pub static EXARCH_BUILTINS: &[BuiltinEntry] = &[
     BuiltinEntry {
         name: Cow::Borrowed("view-text"),
         type_rule: BuiltinTypeRule::Scheme(Some(3), scheme_view_text),
-        doc: "view-text <path> <start> <end>  — show the half-open line range [start, end) of PATH, each line tagged `<line-no>\\t<hash>\\t<text>`. Returns a list of records [{line: Int, hash: String, text: String}]. The hash is the witness `edit` checks; copy it, never recompute it. Reads the whole file (the witness depends on file-wide uniqueness) and surfaces one read card.",
+        doc: "view-text <path> <start> <end>  — show the half-open line range [start, end) of PATH, each line tagged `<line-no>\\t<hash>\\t<text>`. Returns a list of records [{line: Int, hash: String, text: String}]. The hash is the witness `edit` checks; copy it, never recompute it. Reads the whole file (the witness depends on file-wide uniqueness).",
         body: BuiltinBody::Static(builtin_view_text),
     },
     BuiltinEntry {
@@ -1110,8 +1149,14 @@ pub static EXARCH_BUILTINS: &[BuiltinEntry] = &[
     BuiltinEntry {
         name: Cow::Borrowed("edit"),
         type_rule: BuiltinTypeRule::Scheme(Some(2), scheme_edit),
-        doc: "edit <path> <edits>  — apply a batch of [hash: HASH, line: TEXT] records in one read/write pass: each replaces the line whose witness is HASH with TEXT verbatim (a real newline inside '…' splits the line into several, \\n does not; empty deletes). Atomic — all hashes resolve against the file as read, so edits never interfere; fails writing nothing unless every hash picks exactly one line and no two records name the same one. Surfaces one whole-file diff card.",
+        doc: "edit <path> <edits>  — apply a batch of [hash: HASH, line: TEXT] records in one read/write pass: each replaces the line whose witness is HASH with TEXT verbatim (a real newline inside '…' splits the line into several, \\n does not; empty deletes). Atomic — all hashes resolve against the file as read, so edits never interfere; fails writing nothing unless every hash picks exactly one line and no two records name the same one.",
         body: BuiltinBody::Static(builtin_edit),
+    },
+    BuiltinEntry {
+        name: Cow::Borrowed("edit-str"),
+        type_rule: BuiltinTypeRule::Scheme(Some(3), scheme_edit_str),
+        doc: "edit-str <path> <from> <to>  — read PATH, replace the one literal occurrence of FROM with TO, write the result back. Errors, leaving the file untouched, if FROM matches zero times or more than once.",
+        body: BuiltinBody::Static(builtin_edit_str),
     },
     BuiltinEntry {
         name: Cow::Borrowed("explore-dir"),
