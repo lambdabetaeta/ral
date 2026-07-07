@@ -1678,6 +1678,56 @@ return !{{length $hits}}"#
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// `edit-str` (`data/agent.ral`) — the read/`string-replace`/write idiom
+    /// collapsed into one call, kept honest by running it. A unique match
+    /// rewrites the file; 0 or >1 matches error and leave it untouched.
+    #[test]
+    fn edit_str_replaces_unique_match_and_rejects_ambiguity() {
+        let mut shell = fresh_shell();
+        let tmp = std::env::temp_dir().join(format!("exarch-edit-str-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let file = tmp.join("config.txt");
+        std::fs::write(&file, "USE_OPENCV := 0\nUSE_LEVELDB := 1\n").expect("write fixture");
+        let file_str = display_no_trailing_sep(&file);
+
+        let r = run_once(
+            &mut shell,
+            &format!("edit-str '{file_str}' 'USE_OPENCV := 0' 'USE_OPENCV := 1'"),
+        );
+        assert_eq!(
+            r.exit,
+            0,
+            "a unique match must rewrite the file; stderr was: {}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("read after edit"),
+            "USE_OPENCV := 1\nUSE_LEVELDB := 1\n"
+        );
+
+        let r = run_once(
+            &mut shell,
+            &format!("edit-str '{file_str}' 'USE_MISSING := 0' 'x'"),
+        );
+        assert_ne!(r.exit, 0, "0 matches must error, not write");
+        assert!(
+            String::from_utf8_lossy(&r.stderr).contains("not found"),
+            "stderr should explain the 0-match failure, got {:?}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+
+        let r = run_once(&mut shell, &format!("edit-str '{file_str}' ':=' '='"));
+        assert_ne!(r.exit, 0, "a repeated match must error, not guess which one");
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("read after failed edit"),
+            "USE_OPENCV := 1\nUSE_LEVELDB := 1\n",
+            "a rejected batch must leave the file untouched"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// Drive one tool call through `run_shell` with a real bus `Emitter`,
     /// returning the result alongside every `Kind` event captured off the
     /// channel.  The end-to-end coverage harness: it exercises the whole

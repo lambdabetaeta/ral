@@ -77,6 +77,7 @@ pub fn install_agent_library(shell: &mut Shell) -> Settled<Value> {
 pub(crate) fn agent_library_docs() -> Vec<(String, String)> {
     [
         ("view-text-around", "view-text-around PATH LINE PEEK  — show the 2*PEEK+1 lines of PATH centred on LINE, tagged like `view-text`, clamped at the top of the file."),
+        ("edit-str", "edit-str PATH FROM TO  — read PATH, replace the one literal occurrence of FROM with TO, write the result back. Errors on 0 or >1 matches, same contract as string-replace."),
         ("empty-tasks", "empty-tasks  — an empty task list; clears the pinned gauge.  Canonical initialiser."),
         ("add-task", "add-task $exarch-tasks <desc>  — allocate fresh id, append task, update pinned gauge"),
         ("remove-task", "remove-task $exarch-tasks <id>  — drop task by id, update pinned gauge"),

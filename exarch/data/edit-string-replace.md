@@ -1,14 +1,13 @@
-There is no line-hash edit tool in this build. Edit files by reading the whole content, transforming it as a `String`, and writing it back:
+There is no line-hash edit tool in this build. `edit-str PATH FROM TO` is the file-editing affordance: it reads PATH, replaces the one literal occurrence of FROM with TO, and writes the result back — failing on 0 or >1 matches, same contract as `string-replace`.
 
-    let body = from-string < #'src/lib.rs'#
-    let body = string-replace #'let m = f 41;'# #'let m = f 42;'# $body
-    to-string $body > #'src/lib.rs'#
+    edit-str #'src/lib.rs'# #'let m = f 41;'# #'let m = f 42;'#
 
-`string-replace FROM TO S` replaces the one literal occurrence of `FROM` in `S`, failing on 0 or >1 matches — widen `FROM` with more surrounding context rather than reaching for a regex. `re-replace-all #'…'# #'…'# $s` replaces every match at once (Rust regex syntax).
+When a target can repeat, or the edit is to a structured value rather than plain text, compose the primitives `edit-str` is built from — `from-string`, `string-replace`/`re-replace-all`, `to-string` — directly:
 
-To sweep a tree, `grep-files` locates hits and each touched file is read, replaced, and written in turn:
+    let cfg = from-json < #'config.json'#
+    to-json [...$cfg, token: !{string-replace #'old-token'# #'new-token'# $cfg[token]}] > #'config.json'#
+
+To sweep a tree, `grep-files` locates hits and every match in each touched file is replaced at once with `re-replace-all` (Rust regex syntax):
 
     let files = nub !{map { |h| $h[file] } !{grep-files #'\[TODO\]'#}}
-    each { |f|
-      to-string !{re-replace-all #'\[TODO\]'# #'[DONE]'# !{from-string < $f}} > $f
-    } $files
+    each { |f| to-string !{re-replace-all #'\[TODO\]'# #'[DONE]'# !{from-string < $f}} > $f } $files

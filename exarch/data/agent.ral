@@ -14,6 +14,15 @@ let view-text-around = { |path line peek|
     view-text $path $lo $[$line + $peek + 1]
 }
 
+## The file-editing counterpart of `string-replace`: read `path`, replace the
+## one literal occurrence of `from` with `to`, and write the result back.
+## Same contract as `string-replace` — errors on 0 or >1 matches — composed
+## over `from-string`/`to-string` rather than a witness, for callers not
+## using the hash-addressed scheme: `edit-str foo.rs #'old text'# #'new text'#`.
+let edit-str = { |path from to|
+    to-string !{string-replace $from $to !{from-string < $path}} > $path
+}
+
 # --- task management ---------------------------------------------------------
 # Schema: { id: Int, desc: String, status: `open|`doing|`blocked|`done, tags: [String], notes: String }
 # Statuses: open | doing | blocked | done
