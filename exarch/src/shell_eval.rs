@@ -1728,6 +1728,88 @@ return !{{length $hits}}"#
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// `edit-str` writes through core's atomic door and surfaces the SAME
+    /// structural `write` io event a committed `>` raises: the old and new
+    /// snapshots ride as `old_bytes`/`new_bytes`, so the write card renders a
+    /// whole-file diff.  This is the forensic parity the old bare-diff-card
+    /// surface lacked — the effect (a committed write to PATH) is recorded, not
+    /// only its rendered diff — and the shared write door is what preserves the
+    /// target's mode/symlink/durability that a hand-rolled temp-file persist dropped.
+    #[test]
+    fn edit_str_surfaces_a_write_io_event_with_diff() {
+        use crate::card::{IoEvent, WriteMode, WriteOutcome, io_card};
+        let mut shell = fresh_shell();
+        let (dir, path) = scratch_file("edit-str-io", "b", "hello\nworld\n");
+
+        let (r, kinds) = run_capturing(&mut shell, &format!("edit-str '{path}' 'world' 'friend'"));
+        let wrote = std::fs::read_to_string(dir.join("b")).ok();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            r.exit,
+            0,
+            "edit-str must succeed; stderr was {:?}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        assert_eq!(
+            wrote.as_deref(),
+            Some("hello\nfriend\n"),
+            "the edit committed to disk"
+        );
+
+        let ios = io_events(&kinds);
+        assert_eq!(
+            ios.len(),
+            1,
+            "edit-str raises exactly one write io event, got {ios:?}"
+        );
+        assert_eq!(
+            ios[0],
+            &IoEvent::Write {
+                path: path.clone(),
+                mode: WriteMode::Write,
+                outcome: WriteOutcome::Committed,
+                new_bytes: Some(b"hello\nfriend\n".to_vec()),
+                old_bytes: Some(b"hello\nworld\n".to_vec()),
+            },
+            "old/new snapshots ride the write event so the card can diff them"
+        );
+        let card = io_card(ios[0]);
+        assert!(
+            card.has_diff(),
+            "the write card renders a diff, not a plain listing; got {card:?}"
+        );
+    }
+
+    /// The Diamond half of the atomic fix: `edit-str` writes through core's
+    /// mode-preserving atomic door, so editing an executable file leaves its
+    /// `0o755` mode intact — where a hand-rolled temp-file persist silently
+    /// narrowed it to tempfile's `0o600`, stripping the exec bit off a script.
+    #[cfg(unix)]
+    #[test]
+    fn edit_str_preserves_the_target_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut shell = fresh_shell();
+        let (dir, path) = scratch_file("edit-str-mode", "run.sh", "#!/bin/sh\necho old\n");
+        std::fs::set_permissions(dir.join("run.sh"), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod the fixture executable");
+
+        let r = run_once(&mut shell, &format!("edit-str '{path}' 'old' 'new'"));
+        let mode = std::fs::metadata(dir.join("run.sh")).map(|m| m.permissions().mode() & 0o777);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            r.exit,
+            0,
+            "edit-str must succeed; stderr was {:?}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        assert_eq!(
+            mode.ok(),
+            Some(0o755),
+            "the executable mode must survive the edit, not narrow to 0o600"
+        );
+    }
+
     /// Drive one tool call through `run_shell` with a real bus `Emitter`,
     /// returning the result alongside every `Kind` event captured off the
     /// channel.  The end-to-end coverage harness: it exercises the whole

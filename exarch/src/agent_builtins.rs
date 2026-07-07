@@ -5,7 +5,6 @@
 //! plugins remain source/alias/hook loaders; this module only publishes
 //! the resident agent surface that core should not own.
 
-use crate::bus::{Hunk, Row};
 use crate::skill;
 use fff_search::file_picker::FilePicker;
 use fff_search::{
@@ -235,8 +234,8 @@ fn rows_of(body: &str) -> Vec<String> {
 /// Surface the one `{io:"read", path}` card for a whole-file read.  `view-text`
 /// and `witnesses` read in Rust below the ral line (no `< path` redirect), so
 /// they raise their own read card — one logical surface per read, matching the
-/// shape the redirect frame would have pushed.  `edit` is the exception: it
-/// reads silently and speaks only its diff.
+/// shape the redirect frame would have pushed.  `edit`/`edit-str` are the
+/// exception: they read silently and speak only their `write` event.
 fn surface_read(shell: &mut Shell, path: &str) {
     shell.surface(Value::map(vec![
         ("io".into(), Value::String("read".into())),
@@ -413,10 +412,12 @@ struct ResolvedEdit {
 }
 
 /// `edit PATH EDITS` — apply a batch of `[hash: …, line: …]` records in one
-/// read/rebuild/write pass, then surface one whole-file diff card.  All of it
-/// runs in Rust — the read is not a redirect and the write is atomic — so `edit`
-/// is a single logical surface emitting only its diff card, never a read or
-/// write io card.
+/// read/rebuild/write pass, then surface one write io event carrying the
+/// whole-file diff.  The read runs in Rust (not a redirect), so it raises no
+/// read card; the write goes through core's atomic write door
+/// ([`Shell::atomic_write`]) below the redirect frame, so `edit` owns its
+/// surface — one committed `write` event whose old/new snapshots the write card
+/// renders as a diff, exactly like a committed `>` over the same file.
 ///
 /// Each `hash` resolves against the file as read, before anything is written, so
 /// the edits never interfere (adjacent lines included) and the batch is atomic:
@@ -521,79 +522,52 @@ fn builtin_edit(args: &[Value], shell: &mut Shell) -> Settled<Value> {
         }
     }
     let final_text = out.join("\n");
-    write_file_atomic(shell, &path, final_text.as_bytes(), "edit")?;
-
-    // One canonical whole-file diff (original vs final), grouped into hunks by
-    // `similar` with ±2 lines of context.  A no-op edit yields no hunks and so
-    // surfaces nothing; otherwise the rail draws a single card for the file.
-    let hunks = crate::bus::whole_file_hunks(&body, &final_text);
-    if !hunks.is_empty() {
-        shell.surface(diff_card_value(&path, hunks));
-    }
+    shell.atomic_write(&path, final_text.as_bytes())?;
+    surface_write(shell, &path, &body, &final_text);
     Ok(Value::Unit)
 }
 
-/// Build the `` `card [`diff …] `` value `edit` surfaces for the whole-file
-/// diff: the `path` and the grouped `hunks`, each hunk a `start` line and a
-/// `rows` list of `{ tag, text }` records the card decoder lifts back into
-/// [`Row`]s.
-fn diff_card_value(path: &str, hunks: Vec<Hunk>) -> Value {
-    let hunk_values: Vec<Value> = hunks
-        .into_iter()
-        .map(|h| {
-            let rows: Vec<Value> = h
-                .rows
-                .into_iter()
-                .map(|row| {
-                    let (tag, segs) = match row {
-                        Row::Context(s) => ("context", s),
-                        Row::Del(s) => ("del", s),
-                        Row::Add(s) => ("add", s),
-                    };
-                    let seg_values: Vec<Value> = segs
-                        .into_iter()
-                        .map(|seg| {
-                            Value::map(vec![
-                                ("emph".into(), Value::Bool(seg.emph)),
-                                ("text".into(), Value::String(seg.text)),
-                            ])
-                        })
-                        .collect();
-                    Value::map(vec![
-                        ("tag".into(), Value::String(tag.into())),
-                        ("segs".into(), Value::list(seg_values)),
-                    ])
-                })
-                .collect();
-            Value::map(vec![
-                ("start".into(), Value::Int(h.start as i64)),
-                ("rows".into(), Value::list(rows)),
-            ])
-        })
-        .collect();
-    let diff = Value::Variant {
-        label: "diff".into(),
-        payload: Some(Box::new(Value::map(vec![
-            ("path".into(), Value::String(path.to_string())),
-            ("hunks".into(), Value::list(hunk_values)),
-        ]))),
-    };
-    Value::Variant {
-        label: "card".into(),
-        payload: Some(Box::new(Value::list(vec![diff]))),
+/// The largest either snapshot of an edit may reach before its `write` card
+/// falls back to a plain listing instead of a whole-file diff — mirrors core's
+/// write-preview cap (`PREVIEW_CAP` in `runtime/command/redirect.rs`), so an
+/// `edit`/`edit-str` write and a committed `>` over the same file make the
+/// identical diff-vs-listing choice.
+const DIFF_SNAPSHOT_CAP: usize = 64 * 1024;
+
+/// Surface the structural `write` io event an `edit`/`edit-str` commit raises —
+/// the same event a committed `>` redirect emits, so the write card renders
+/// `old` vs `new` as a whole-file diff below its `write <path> committed`
+/// heading.  Both snapshots ride as `old_bytes`/`new_bytes`; `old_bytes` is
+/// withheld when either side exceeds [`DIFF_SNAPSHOT_CAP`], so a large edit
+/// falls back to a listing preview rather than an unwieldy diff — the same gate
+/// core's `old_snapshot_for_diff` applies to the redirect path.  `new_bytes` is
+/// capped to that prefix too, since past the cap it only ever seeds the listing.
+fn surface_write(shell: &mut Shell, path: &str, old: &str, new: &str) {
+    let fits = old.len() <= DIFF_SNAPSHOT_CAP && new.len() <= DIFF_SNAPSHOT_CAP;
+    let new_prefix = new.as_bytes()[..new.len().min(DIFF_SNAPSHOT_CAP)].to_vec();
+    let mut fields = vec![
+        ("io".into(), Value::String("write".into())),
+        ("path".into(), Value::String(path.to_string())),
+        ("mode".into(), Value::String("write".into())),
+        ("outcome".into(), Value::String("committed".into())),
+        ("new_bytes".into(), Value::Bytes(new_prefix)),
+    ];
+    if fits {
+        fields.push(("old_bytes".into(), Value::Bytes(old.as_bytes().to_vec())));
     }
+    shell.surface(Value::map(fields));
 }
 
 /// Read a file as a UTF-8 string for the witness layer, gating the read through
 /// the active grant the way a `< path` redirect would.  The shared read door of
 /// `view-text`, `witnesses`, and `edit`: in Rust, below the ral line, so it
 /// never reaches the redirect frame.  Each caller decides its own surface —
-/// `view-text`/`witnesses` raise one read card, `edit` stays silent and speaks
-/// only its diff.  A non-UTF-8 file is named (the witness layer cannot address
-/// it); `tool` puts the calling builtin's name on the error.
+/// `view-text`/`witnesses` raise one read card, `edit`/`edit-str` read silently
+/// and speak only their `write` event.  A non-UTF-8 file is named (the witness
+/// layer cannot address it); `tool` puts the calling builtin's name on the error.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:surface:witness-read] The witness layer's read door (view-text/witnesses/edit), in Rust below the ral line so it never reaches the redirect frame. view-text and witnesses surface their own read card; edit emits only its diff. The grant is still checked, as a `< path` redirect would."
+    reason = "[io-door:surface:witness-read] The witness layer's read door (view-text/witnesses/edit), in Rust below the ral line so it never reaches the redirect frame. view-text and witnesses surface their own read card; edit/edit-str read silently and emit only their write event. The grant is still checked, as a `< path` redirect would."
 )]
 fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<String> {
     let rp = shell.resolve(path);
@@ -607,44 +581,13 @@ fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<String> 
     })
 }
 
-/// Write `bytes` to `path` atomically — a temp file in the target's directory,
-/// flushed and renamed into place — gating the write through the active grant
-/// the way a `> path` redirect would.  This is the write door shared by
-/// `edit` and `edit-str`: in Rust, so it raises no write io card.  The rename
-/// is atomic on the same filesystem, so a reader never sees a half-written
-/// file and a failed write leaves the original untouched.  `tool` puts the
-/// calling builtin's name on the error, as it does in [`read_text_file`].
-fn write_file_atomic(shell: &mut Shell, path: &str, bytes: &[u8], tool: &str) -> Settled<()> {
-    let rp = shell.resolve(path);
-    shell.check_fs_write(&rp)?;
-    let target = rp.into_inner();
-    // `resolve` returns a cwd-anchored, collapsed path, so a regular file
-    // always has a parent directory to stage the temp file in; the only
-    // parent-less path is the filesystem root, which is not an editable file.
-    let parent = target.parent().ok_or_else(|| {
-        sig(format!(
-            "{tool}: {path} has no parent directory to write into"
-        ))
-    })?;
-    let mut tmp = tempfile::Builder::new()
-        .prefix(".ral-edit-")
-        .tempfile_in(parent)
-        .map_err(|e| sig(format!("{tool}: cannot stage write to {path}: {e}")))?;
-    tmp.write_all(bytes)
-        .map_err(|e| sig(format!("{tool}: cannot write {path}: {e}")))?;
-    tmp.flush()
-        .map_err(|e| sig(format!("{tool}: cannot write {path}: {e}")))?;
-    tmp.persist(&target)
-        .map_err(|e| sig(format!("{tool}: cannot commit write to {path}: {e}")))?;
-    Ok(())
-}
-
 /// `edit-str <path> <from> <to>` — read `path`, replace the one literal
 /// occurrence of `from` with `to` via the same match/error logic as
 /// `string-replace` (0 or >1 matches errors, leaving the file untouched),
 /// and write the result back.  Composed over the same read/write doors as
-/// `edit`, so it stays below the redirect frame and surfaces a whole-file
-/// diff card instead of a write io card.
+/// `edit`: the read is silent and the write goes through core's atomic door
+/// ([`Shell::atomic_write`]), so it surfaces one committed `write` io event
+/// whose old/new snapshots the write card renders as a whole-file diff.
 fn builtin_edit_str(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 3, "edit-str")?;
     let path = args[0].to_string();
@@ -655,12 +598,8 @@ fn builtin_edit_str(args: &[Value], shell: &mut Shell) -> Settled<Value> {
         Value::String(body.clone()),
     ])?;
     let final_text = replaced.to_string();
-    write_file_atomic(shell, &path, final_text.as_bytes(), "edit-str")?;
-
-    let hunks = crate::bus::whole_file_hunks(&body, &final_text);
-    if !hunks.is_empty() {
-        shell.surface(diff_card_value(&path, hunks));
-    }
+    shell.atomic_write(&path, final_text.as_bytes())?;
+    surface_write(shell, &path, &body, &final_text);
     Ok(Value::Unit)
 }
 

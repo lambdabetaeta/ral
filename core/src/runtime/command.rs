@@ -44,7 +44,7 @@ pub(crate) use child::{ExternalPlumbing, GroupOwner, RunningChild};
 pub(crate) use identity::CommandIdentity;
 pub(crate) use process::{build_command, spawn_error};
 pub(crate) use redirect::{
-    AtomicCommit, RedirectGuard, StdinRedirectGuard, apply_redirects, commit_atomics,
+    AtomicCommit, RedirectGuard, StdinRedirectGuard, apply_redirects, atomic_write, commit_atomics,
     install_stdin_redirect, open_file, restore_redirects,
 };
 use stdio::classify_redirects;

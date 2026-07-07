@@ -440,8 +440,8 @@ impl Shell {
 
     /// Forward any structured-event [`Value`] onto this turn's surface sink, if
     /// one is installed; inert when none is.  The public door host builtins use
-    /// to surface their own events — a Rust exarch `edit` raising a diff card, a
-    /// `grep-files` announcing its search — since `turn.surface` is `pub(crate)`
+    /// to surface their own events — a Rust exarch `edit` raising its write
+    /// card, a `grep-files` announcing its search — since `turn.surface` is `pub(crate)`
     /// and so unreachable from a host crate.  Core names no event shape here: the
     /// caller hands a fully-formed `Value`, encoded once at this door into the
     /// first-order [`FOValue`](crate::serial::FOValue) the sink actually
@@ -483,6 +483,18 @@ impl Shell {
     /// names no card type.
     pub(crate) fn emit_io(&self, ev: Value) {
         self.surface(ev);
+    }
+
+    /// Atomically overwrite `path` with `bytes` through core's full
+    /// `>`-redirect write recipe — symlink-resolved, mode-preserving,
+    /// fsync-durable — while emitting no io event.  The public write door for a
+    /// host builtin (exarch's `edit`/`edit-str`) that must write *below* the
+    /// redirect frame and speak its own surface: it shares the one atomic
+    /// recipe instead of forking a weaker temp-file write that silently narrows
+    /// the target's mode, follows symlinks by replacing them, and skips the
+    /// durability flush.
+    pub fn atomic_write(&mut self, path: &str, bytes: &[u8]) -> crate::types::Settled<()> {
+        crate::runtime::command::atomic_write(path, bytes, self)
     }
 
     /// Install a script context: set the active script name on both the

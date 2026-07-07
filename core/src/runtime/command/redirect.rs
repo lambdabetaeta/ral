@@ -334,6 +334,27 @@ pub(crate) fn open_file(
     }
 }
 
+/// Atomically write `bytes` to `path` through the full `>`-redirect recipe —
+/// symlink-resolved, mode-preserving, fsync-durable ([`open_atomic`] then
+/// [`AtomicCommit::commit`]) — while emitting no io event: the caller owns the
+/// surface.  The shared write door for a host builtin that must write *below*
+/// the redirect frame (exarch's `edit`/`edit-str`, which speak their own write
+/// card) rather than fork a weaker temp-file recipe that drops the mode,
+/// symlink, and fsync steps.  A non-regular target (a TTY, `/dev/null`, a pipe)
+/// takes the streaming truncating write [`open_file`] already picks for it,
+/// exactly as a bare `>` would.
+pub(crate) fn atomic_write(path: &str, bytes: &[u8], shell: &mut Shell) -> Settled<()> {
+    use std::io::Write as _;
+    let (mut file, commit) = open_file(path, &RedirectMode::Write, shell)?;
+    file.write_all(bytes).map_err(|e| io_error(path, e))?;
+    match commit {
+        Some(commit) => commit
+            .commit()
+            .map_err(|e| Break::Error(Error::new(format!("atomic write: {e}"), 1))),
+        None => Ok(()),
+    }
+}
+
 /// One backed-up file descriptor: `dup(fd) → backup` (`F_DUPFD_CLOEXEC`), taken before
 /// [`apply_redirects`]'s `dup2` overwrote `fd`.  `Drop` undoes the redirect
 /// by `dup2`-ing the backup back over `fd` and closing the backup.
