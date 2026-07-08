@@ -37,10 +37,10 @@ struct RalArgs {
 /// across turns.
 const CALL_TIMEOUT_SECS: u64 = 60;
 
-/// Hard cap on `description` length.  The field is a one-line label
-/// for the user-facing rail, not a paragraph; oversize inputs are
-/// rejected at parse time so the model fixes the call rather than
-/// silently flooding the transcript.
+/// Soft cap on `description` length.  The field is a one-line label
+/// for the user-facing rail, not a paragraph; an oversize input is
+/// truncated to this many characters with a trailing `...` rather than
+/// rejected, so a verbose call still succeeds.
 const DESCRIPTION_MAX: usize = 60;
 
 /// Read the JSON object the model emitted into a [`RalArgs`], or a
@@ -63,12 +63,11 @@ fn parse_args(input: &Value) -> Result<RalArgs, String> {
     if description.is_empty() {
         return Err("`description` must be non-empty".to_string());
     }
-    if description.chars().count() > DESCRIPTION_MAX {
-        return Err(format!(
-            "`description` must be ≤{DESCRIPTION_MAX} characters (got {})",
-            description.chars().count()
-        ));
-    }
+    let description = if description.chars().count() > DESCRIPTION_MAX {
+        description.chars().take(DESCRIPTION_MAX).collect::<String>() + "..."
+    } else {
+        description
+    };
     if description.contains('\n') {
         return Err("`description` must be a single line (no newlines)".to_string());
     }
@@ -200,14 +199,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_oversize_description() {
+    fn parse_truncates_oversize_description() {
         let big = "x".repeat(DESCRIPTION_MAX + 1);
-        let e = parse_args(&json!({
+        let a = parse_args(&json!({
             "cmd": "pwd",
             "description": big,
         }))
-        .unwrap_err();
-        assert!(e.contains("`description`"));
+        .unwrap();
+        assert_eq!(a.description, "x".repeat(DESCRIPTION_MAX) + "...");
     }
 
     #[test]
