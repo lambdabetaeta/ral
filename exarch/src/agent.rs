@@ -1203,15 +1203,22 @@ impl Agent {
                 must_reply: self.returns() && !waiting_on_children,
                 pinned: self.pinned_digest(),
                 waiting_on_children,
+                is_headless_root: self.parent.is_none() && !self.interactive,
             };
-            if let Some(msg) = self.nudges.react(&outcome, ctx, emit, &mut self.log) {
+            let replied = matches!(outcome, Ok(TurnOutcome::Replied(_)));
+            let nudge_msg = self.nudges.react(&outcome, ctx, emit, &mut self.log);
+            if let Some(msg) = &nudge_msg {
                 self.inbox
-                    .push(InboxMsg::Nudge(msg))
+                    .push(InboxMsg::Nudge(msg.clone()))
                     .expect("Nudge is idempotent and never rejects");
             }
             // `reply` hard-terminates: end the drive loop regardless of focus or
             // a self-armed schedule — the agent returns its value and is gone.
-            if matches!(outcome, Ok(TurnOutcome::Replied(_))) {
+            // Unless the nudge layer just turned this very `reply` back for
+            // self-verification (a headless root's first call), in which case
+            // `nudge_msg` carries that reminder and the loop must keep running
+            // to deliver it.
+            if replied && nudge_msg.is_none() {
                 break;
             }
         }
@@ -2958,12 +2965,20 @@ mod tests {
                 commitment_settle: None,
             }))
             .unwrap();
+        // This root session is a headless root (`parent: None`, non-interactive),
+        // so its first `reply` is turned back once for self-verification; the
+        // second is what actually delivers the result.
         session.provider = ProviderHandle::new(scripted(
             "test-model",
-            Script::new().then(Reply::tool_calls(vec![reply_call(
-                "r1",
-                serde_json::json!("done"),
-            )])),
+            Script::new()
+                .then(Reply::tool_calls(vec![reply_call(
+                    "r1",
+                    serde_json::json!("done"),
+                )]))
+                .then(Reply::tool_calls(vec![reply_call(
+                    "r2",
+                    serde_json::json!("done"),
+                )])),
         ));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);

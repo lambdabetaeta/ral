@@ -65,6 +65,13 @@ pub(crate) struct NudgeCtx {
     /// next actionable fact.  In that state the pin register stays live, but
     /// pin/no-pin reminders wait until the descendants settle.
     pub waiting_on_children: bool,
+    /// True for the headless root (`parent.is_none() && !interactive`), false
+    /// for everyone else — an interactive root never reaches `reply`, and a
+    /// sub-agent peer's `reply` is read by a parent that can push back on it.
+    /// The headless root's `reply` instead reaches an external caller with
+    /// nobody left to scrutinize it, so [`Registry::react`] turns its first
+    /// `reply` back once for self-verification before honouring the next one.
+    pub is_headless_root: bool,
 }
 
 /// Per-session nudge state.  Lives on the [`Agent`](crate::agent::Agent)
@@ -81,6 +88,13 @@ pub(crate) struct Registry {
     /// One-shot latch for the "nothing is pinned" reminder: at most once per
     /// turn.
     no_pins_reminded: bool,
+    /// One-shot latch for the headless root's self-verification nudge: once
+    /// its first `reply` has been turned back, every later `reply` — from
+    /// this same run, regardless of turn boundaries — is honoured.  Unlike
+    /// [`Self::used`] and [`Self::no_pins_reminded`] this is never cleared by
+    /// [`Self::reset`]: the obligation is "verify once before the run's
+    /// result stands", not a per-turn accounting.
+    reply_verified: bool,
 }
 
 impl Registry {
@@ -89,6 +103,7 @@ impl Registry {
             used: 0,
             turns_since_no_pins_reminder: 0,
             no_pins_reminded: false,
+            reply_verified: false,
         }
     }
 
@@ -118,6 +133,22 @@ impl Registry {
         emit: &Emitter,
         log: &mut AgentLog,
     ) -> Option<String> {
+        // A headless root's first `reply` is intercepted here, before it ever
+        // reaches the rules below: its result is the run's entire externally
+        // visible output, with no parent left to read it and push back. Turn
+        // it back once, budget-free, for self-verification; [`Self::reply_verified`]
+        // latches so the very next `reply` — whatever it carries — is honoured
+        // and [`Agent::drive`](crate::agent::Agent::drive) lets it terminate.
+        if matches!(attempt, Ok(TurnOutcome::Replied(_))) {
+            if ctx.is_headless_root && !self.reply_verified {
+                self.reply_verified = true;
+                record_nudge(emit, log, self.used, "reply verification".into());
+                return Some(format!(
+                    "{EXARCH_REMINDER_OPEN}{VERIFY_REPLY_MESSAGE}{EXARCH_REMINDER_CLOSE}"
+                ));
+            }
+            return None;
+        }
         let Some((cause, message)) = RULES.iter().find_map(|&r| r(attempt)) else {
             // (No RULE matched.)  Only a clean completion reaches the two
             // nudges below; every other outcome here (a provider error the
@@ -225,6 +256,12 @@ fn surface_provider_error(
     }
 }
 
+/// The headless root's one-shot reply-verification nudge
+/// ([`NudgeCtx::is_headless_root`]) — see [`Registry::react`].
+const VERIFY_REPLY_MESSAGE: &str = "Before this run ends: verify your work — rerun tests, \
+    re-check the diff, or otherwise confirm the result is correct. Once you have, call \
+    `reply` again with your result; this next call ends the run.";
+
 // ── Rules ────────────────────────────────────────────────────────────
 
 /// The no-reply reminder (gated by [`NudgeCtx::must_reply`], so it fires for a
@@ -312,6 +349,7 @@ mod tests {
                 &attempt,
                 NudgeCtx {
                     must_reply: false,
+                    is_headless_root: false,
                     pinned: None,
                     waiting_on_children: false,
                 },
@@ -340,6 +378,7 @@ mod tests {
         };
         let ctx = || NudgeCtx {
             must_reply: false,
+            is_headless_root: false,
             pinned: None,
             waiting_on_children: false,
         };
@@ -366,6 +405,7 @@ mod tests {
         };
         let ctx = || NudgeCtx {
             must_reply: false,
+            is_headless_root: false,
             pinned: None,
             waiting_on_children: false,
         };
@@ -387,6 +427,7 @@ mod tests {
             &Ok(TurnOutcome::Empty),
             NudgeCtx {
                 must_reply: false,
+                is_headless_root: false,
                 pinned: None,
                 waiting_on_children: false,
             },
@@ -410,6 +451,7 @@ mod tests {
                     &Ok(TurnOutcome::Empty),
                     NudgeCtx {
                         must_reply: false,
+                        is_headless_root: false,
                         pinned: None,
                         waiting_on_children: false,
                     },
@@ -424,6 +466,7 @@ mod tests {
                 &Ok(TurnOutcome::Empty),
                 NudgeCtx {
                     must_reply: false,
+                    is_headless_root: false,
                     pinned: None,
                     waiting_on_children: false,
                 },
@@ -444,6 +487,7 @@ mod tests {
                 &Ok(TurnOutcome::Complete("done".into())),
                 NudgeCtx {
                     must_reply: false,
+                    is_headless_root: false,
                     pinned: None,
                     waiting_on_children: false,
                 },
@@ -465,6 +509,7 @@ mod tests {
         let mut log = fresh_log("no-reply");
         let ctx = || NudgeCtx {
             must_reply: true,
+            is_headless_root: false,
             pinned: None,
             waiting_on_children: false,
         };
@@ -512,6 +557,7 @@ mod tests {
                 &Ok(TurnOutcome::Complete("answer to the user".into())),
                 NudgeCtx {
                     must_reply: false,
+                    is_headless_root: false,
                     pinned: None,
                     waiting_on_children: false,
                 },
@@ -519,6 +565,91 @@ mod tests {
                 &mut log,
             )
             .is_none()
+        );
+    }
+
+    /// A headless root's first `reply` is turned back for self-verification
+    /// rather than accepted outright — its result reaches an external caller
+    /// with nobody left to scrutinize it.
+    #[test]
+    fn headless_root_first_reply_is_turned_back_for_verification() {
+        let mut reg = Registry::new();
+        let mut log = fresh_log("verify-first");
+        let ctx = || NudgeCtx {
+            must_reply: true,
+            is_headless_root: true,
+            pinned: None,
+            waiting_on_children: false,
+        };
+        let msg = reg
+            .react(
+                &Ok(TurnOutcome::Replied(serde_json::json!("done"))),
+                ctx(),
+                &emit(),
+                &mut log,
+            )
+            .expect("a headless root's first reply must be turned back");
+        assert!(msg.contains("verify"), "{msg}");
+        assert_eq!(reg.used, 0, "the verify nudge is budget-free");
+    }
+
+    /// Once turned back, the headless root's *next* `reply` — regardless of
+    /// what it carries — is honoured: the latch is one-shot for the run, not
+    /// re-armed by the pinned/must-reply state.
+    #[test]
+    fn headless_root_second_reply_is_honoured() {
+        let mut reg = Registry::new();
+        let mut log = fresh_log("verify-second");
+        let ctx = || NudgeCtx {
+            must_reply: true,
+            is_headless_root: true,
+            pinned: None,
+            waiting_on_children: false,
+        };
+        assert!(
+            reg.react(
+                &Ok(TurnOutcome::Replied(serde_json::json!("first"))),
+                ctx(),
+                &emit(),
+                &mut log,
+            )
+            .is_some(),
+            "the first reply is turned back"
+        );
+        assert!(
+            reg.react(
+                &Ok(TurnOutcome::Replied(serde_json::json!("second, verified"))),
+                ctx(),
+                &emit(),
+                &mut log,
+            )
+            .is_none(),
+            "the second reply must be accepted so the run can terminate"
+        );
+    }
+
+    /// A sub-agent peer's `reply` is never intercepted, even though it is
+    /// also a returning agent (`must_reply`): its parent reads the result and
+    /// can push back, so only the headless root needs the self-verification
+    /// nudge.
+    #[test]
+    fn peer_reply_is_never_verify_nudged() {
+        let mut reg = Registry::new();
+        let mut log = fresh_log("verify-peer");
+        assert!(
+            reg.react(
+                &Ok(TurnOutcome::Replied(serde_json::json!("findings"))),
+                NudgeCtx {
+                    must_reply: true,
+                    is_headless_root: false,
+                    pinned: None,
+                    waiting_on_children: false,
+                },
+                &emit(),
+                &mut log,
+            )
+            .is_none(),
+            "a sub-agent peer's reply is accepted at once"
         );
     }
 
@@ -535,6 +666,7 @@ mod tests {
         let mut log = fresh_log("commitment-pin");
         let ctx = || NudgeCtx {
             must_reply: false,
+            is_headless_root: false,
             pinned: Some("commitment:abc: criteria 0/1".into()),
             waiting_on_children: false,
         };
@@ -564,6 +696,7 @@ mod tests {
                 &Ok(TurnOutcome::Complete("waiting on verifier".into())),
                 NudgeCtx {
                     must_reply: false,
+                    is_headless_root: false,
                     pinned: Some("commitment:abc: criteria 0/1".into()),
                     waiting_on_children: true,
                 },
@@ -587,6 +720,7 @@ mod tests {
         let mut log = fresh_log("returning-agent-both");
         let ctx = || NudgeCtx {
             must_reply: true,
+            is_headless_root: false,
             pinned: Some("commitment:abc: criteria 0/1".into()),
             waiting_on_children: false,
         };
@@ -617,6 +751,7 @@ mod tests {
         let mut log = fresh_log("reset");
         let ctx = || NudgeCtx {
             must_reply: false,
+            is_headless_root: false,
             pinned: None,
             waiting_on_children: false,
         };
@@ -637,6 +772,7 @@ mod tests {
         let mut log = fresh_log("no-pin-reminder");
         let ctx = || NudgeCtx {
             must_reply: false,
+            is_headless_root: false,
             pinned: None,
             waiting_on_children: false,
         };
