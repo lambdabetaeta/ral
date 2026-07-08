@@ -149,7 +149,8 @@ fn install_sink_redirects(
 
     for EvalRedirectV { fd, mode, target } in redirects {
         match (*fd, target) {
-            (0, EvalRedirect::File(_)) if matches!(mode, RedirectMode::Read) => {}
+            (0, EvalRedirect::File(_))
+                if matches!(mode, RedirectMode::Read | RedirectMode::HereString) => {}
             (1, EvalRedirect::File(path)) => {
                 stdout = open_redirect_sink(path, *mode, shell, intents)?;
                 stdout_changed = true;

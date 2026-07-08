@@ -60,5 +60,16 @@ if $[not !{equal $s2 "foo\nbar"}] { fail [status: 1] }
 let s3 = printf "no-newline" | from-line
 if $[not !{equal $s3 "no-newline"}] { fail [status: 1] }
 
+# Here-string: `<< str` feeds the string to stdin; one newline at the
+# very front of the value is dropped so the body starts below the command
+let h1 = cat << #'
+alpha
+beta
+'# | from-string
+if $[not !{equal $h1 "alpha\nbeta\n"}] { fail [status: 1] }
+let body = "\ngamma"
+let h2 = from-string << $body
+if $[not !{equal $h2 "gamma"}] { fail [status: 1] }
+
 # Cleanup
 rm /tmp/al-test-out.txt /tmp/al-test-err.txt /tmp/al-test-append.txt

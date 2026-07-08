@@ -773,7 +773,7 @@ structural rules — no word splitting, no mutation.
 | `a && b` (then, on success) | `a` newline `b`, or `a; b` — failure halts the rest |
 | `a \|\| b` (else, on failure) | `a ? b` |
 | `set -e` | always in effect — failure propagation is never off |
-| heredoc `<<EOF` | hash-bumped literal `#'…'#` (multiline, verbatim) |
+| heredoc `<<EOF` | `cmd << #'…'#` — the raw string is the body; one leading newline is dropped |
 | `$@` / `$*` | `$args`; forward with the spread `...$args` |
 | `$0` / `BASH_SOURCE` | `$script` |
 | `export VAR=…` / env mutation | `within [env: [VAR: …]] { … }` |

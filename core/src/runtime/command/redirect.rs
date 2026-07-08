@@ -321,6 +321,11 @@ pub(crate) fn open_file(
         RedirectMode::Read => std::fs::File::open(rp.as_path())
             .map(|f| (f, None))
             .map_err(|e| io_error(path, e)),
+        // A here-string carries its payload in the redirect itself; it is
+        // routed by `install_stdin_redirect` and never opens a file.
+        RedirectMode::HereString => {
+            unreachable!("here-string redirects never reach the file-open door")
+        }
         RedirectMode::Write => {
             if atomic_eligible(rp.as_path()) {
                 let (file, commit) = open_atomic(path, &rp)?;
@@ -449,17 +454,17 @@ impl Drop for RedirectGuard {
     }
 }
 
-/// Read+File redirects to fd 0 are owned by `shell.turn.io.stdin` (set up by
-/// [`install_stdin_redirect`]); `apply_redirects` and `wire_stdin` must agree
-/// to leave them alone.  This predicate is the single point where that rule
-/// is named.
+/// Stdin redirects to fd 0 — `< file` and the here-string `<< str` — are
+/// owned by `shell.turn.io.stdin` (set up by [`install_stdin_redirect`]);
+/// `apply_redirects` and `wire_stdin` must agree to leave them alone.  This
+/// predicate is the single point where that rule is named.
 #[cfg(any(unix, windows))]
 fn is_stdin_file_redirect(r: &EvalRedirectV) -> bool {
     matches!(
         r,
         EvalRedirectV {
             fd: 0,
-            mode: RedirectMode::Read,
+            mode: RedirectMode::Read | RedirectMode::HereString,
             target: EvalRedirect::File(_)
         }
     )
@@ -674,15 +679,25 @@ pub(crate) fn commit_atomics(commits: Vec<AtomicCommit>) -> Settled<()> {
     Ok(())
 }
 
-/// Open `<file` redirects to fd 0 and park the file in `shell.turn.io.stdin`.
+/// Install the fd-0 redirect — `< file` or the here-string `<< str` — as
+/// `shell.turn.io.stdin`.
 ///
 /// Returns a [`StdinRedirectGuard`] whose `restore` puts back whatever Source
 /// was previously installed (a pipeline pipe, an outer redirect, or
-/// Terminal).  When several `<file` redirects target fd 0, the last one wins
-/// — same as POSIX shells.  No-op when no such redirect is present, in which
-/// case `shell.turn.io.stdin` is left untouched.
+/// Terminal).  When several redirects target fd 0, the last one wins — same
+/// as POSIX shells.  No-op when no such redirect is present, in which case
+/// `shell.turn.io.stdin` is left untouched.
 ///
-/// Routing `<file` through `Source` rather than `dup2` is what keeps the
+/// `< file` opens the path and emits a read event.  `<< str` feeds the
+/// payload string itself: one newline at its very front is dropped (so a
+/// multiline body can start on the line below the command), and the bytes
+/// are pushed through an anonymous pipe by a detached writer thread — no
+/// filesystem involvement, no read event (the payload is already visible in
+/// the command), and no pipe-buffer deadlock for payloads past the kernel
+/// buffer.  A body the consumer abandons early ends the writer with a
+/// broken-pipe error it deliberately ignores.
+///
+/// Routing both through `Source` rather than `dup2` is what keeps the
 /// cached `startup_stdin_tty` from lying to downstream consumers (codecs,
 /// `lines`): they consult the cache only when `Source` is `Terminal`, and
 /// `Terminal` truly does mean "fall through to the inherited fd 0".
@@ -694,24 +709,50 @@ pub(crate) fn install_stdin_redirect(
     redirects: &[EvalRedirectV],
     shell: &mut Shell,
 ) -> Settled<StdinRedirectGuard> {
-    let Some(path) = redirects.iter().rev().find_map(|r| match r {
+    let Some((mode, word)) = redirects.iter().rev().find_map(|r| match r {
         EvalRedirectV {
             fd: 0,
-            mode: RedirectMode::Read,
-            target: EvalRedirect::File(p),
-        } => Some(p),
+            mode: mode @ (RedirectMode::Read | RedirectMode::HereString),
+            target: EvalRedirect::File(w),
+        } => Some((mode, w)),
         _ => None,
     }) else {
         return Ok(StdinRedirectGuard::Untouched);
     };
-    let rp = shell.resolve(path);
-    shell.check_fs_read(&rp)?;
-    let f = std::fs::File::open(rp.as_path()).map_err(|e| io_error(path, e))?;
-    let prior = std::mem::replace(&mut shell.turn.io.stdin, crate::io::Source::File(f));
-    // Door 1 — READ: announce the open eagerly so the read event precedes the
-    // body/exec it feeds (e.g. the read card before exec in `cat < a`).  Read
-    // has no outcome: a failed open returns above before this point.
-    shell.emit_io(io_event::read(path));
+    let source = match mode {
+        RedirectMode::Read => {
+            let rp = shell.resolve(word);
+            shell.check_fs_read(&rp)?;
+            let f = std::fs::File::open(rp.as_path()).map_err(|e| io_error(word, e))?;
+            // Door 1 — READ: announce the open eagerly so the read event
+            // precedes the body/exec it feeds (e.g. the read card before
+            // exec in `cat < a`).  Read has no outcome: a failed open
+            // returns above before this point.
+            shell.emit_io(io_event::read(word));
+            crate::io::Source::File(f)
+        }
+        RedirectMode::HereString => {
+            let body = word
+                .strip_prefix("\r\n")
+                .or_else(|| word.strip_prefix('\n'))
+                .unwrap_or(word);
+            let (reader, mut writer) = os_pipe::pipe()
+                .map_err(|e| Break::Error(Error::new(format!("here-string: {e}"), 1)))?;
+            let bytes = body.as_bytes().to_vec();
+            std::thread::Builder::new()
+                .name("ral-here-string".into())
+                .spawn(move || {
+                    use std::io::Write;
+                    // Broken pipe just means the consumer stopped reading;
+                    // the remaining payload is deliberately dropped.
+                    let _ = writer.write_all(&bytes);
+                })
+                .map_err(|e| Break::Error(Error::new(format!("here-string: {e}"), 1)))?;
+            crate::io::Source::Pipe(reader)
+        }
+        _ => unreachable!("find_map above only yields Read or HereString"),
+    };
+    let prior = std::mem::replace(&mut shell.turn.io.stdin, source);
     Ok(StdinRedirectGuard::Installed(prior))
 }
 

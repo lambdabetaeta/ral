@@ -258,9 +258,8 @@ fn surface_provider_error(
 
 /// The headless root's one-shot reply-verification nudge
 /// ([`NudgeCtx::is_headless_root`]) — see [`Registry::react`].
-const VERIFY_REPLY_MESSAGE: &str = "Before this run ends: verify your work — rerun tests, \
-    re-check the diff, or otherwise confirm the result is correct. Once you have, call \
-    `reply` again with your result; this next call ends the run.";
+const VERIFY_REPLY_MESSAGE: &str = "Recall the original prompt, and ensure that you
+    have correctly responded to it, completing any tasks. Then call `reply` again.";
 
 // ── Rules ────────────────────────────────────────────────────────────
 
@@ -589,7 +588,7 @@ mod tests {
                 &mut log,
             )
             .expect("a headless root's first reply must be turned back");
-        assert!(msg.contains("verify"), "{msg}");
+        assert!(msg.contains("call `reply` again"), "{msg}");
         assert_eq!(reg.used, 0, "the verify nudge is budget-free");
     }
 

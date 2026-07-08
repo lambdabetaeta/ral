@@ -1020,11 +1020,51 @@ impl Parser {
                 kind: mode,
                 target_fd,
             } => {
+                let op_span = self.span();
                 self.advance();
-                let default_fd = if mode == RedirectMode::Read { 0 } else { 1 };
+                if mode == RedirectMode::HereString && fd.is_some_and(|n| n != 0) {
+                    return Err(ParseError {
+                        message: "`<<` always feeds stdin — drop the file-descriptor prefix"
+                            .into(),
+                        span: Some(op_span),
+                        lex_kind: None,
+                        incompleteness: None,
+                    });
+                }
+                let default_fd = if matches!(mode, RedirectMode::Read | RedirectMode::HereString) {
+                    0
+                } else {
+                    1
+                };
                 let target = match target_fd {
                     Some(tfd) => RedirectTarget::Fd(tfd),
-                    None => RedirectTarget::File(Box::new(self.parse_word()?)),
+                    None => {
+                        let (word_span, word) = self.capture_span(Self::parse_word)?;
+                        if mode == RedirectMode::HereString
+                            && let Ast::Word(w) = &word
+                        {
+                            let message = match w {
+                                Word::Plain(_) => {
+                                    "ral has no heredocs: `<<` feeds a string to \
+                                     stdin. Use a raw string: `cmd << #' ... '#`, \
+                                     which may use newlines"
+                                        .into()
+                                }
+                                Word::Slash(_) | Word::Tilde(_) => {
+                                    "`<<` feeds a string to stdin, not a file — \
+                                     to read a file into stdin, use `< path`"
+                                        .into()
+                                }
+                            };
+                            return Err(ParseError {
+                                message,
+                                span: Some(word_span),
+                                lex_kind: None,
+                                incompleteness: None,
+                            });
+                        }
+                        RedirectTarget::File(Box::new(word))
+                    }
                 };
                 Ok(Redirect {
                     fd: fd.unwrap_or(default_fd),
@@ -2724,6 +2764,85 @@ mod tests {
             }
             _ => panic!("expected command"),
         }
+    }
+
+    #[test]
+    fn parse_herestring_redirect() {
+        let ast = unwrap_stmts(parse("cat << #'body'#").unwrap());
+        match &ast[0] {
+            Ast::Call { redirects, .. } => {
+                assert_eq!(redirects.len(), 1);
+                assert_eq!(redirects[0].fd, 0);
+                assert_eq!(redirects[0].mode, RedirectMode::HereString);
+                assert_eq!(
+                    redirects[0].target,
+                    RedirectTarget::File(Box::new(Ast::Literal("body".into())))
+                );
+            }
+            other => panic!("expected command, got {other:?}"),
+        }
+    }
+
+    /// `<< $var` feeds a stored string; the payload word admits the same
+    /// value forms as any other redirect operand.
+    #[test]
+    fn parse_herestring_variable_payload() {
+        let ast = unwrap_stmts(parse("cat << $body").unwrap());
+        match &ast[0] {
+            Ast::Call { redirects, .. } => {
+                assert_eq!(redirects[0].mode, RedirectMode::HereString);
+                assert_eq!(
+                    redirects[0].target,
+                    RedirectTarget::File(Box::new(Ast::Variable("body".into())))
+                );
+            }
+            other => panic!("expected command, got {other:?}"),
+        }
+    }
+
+    /// The bash-heredoc reflex `<<EOF` (and `<< EOF`) is a targeted parse
+    /// error naming the raw-string form, not a silent feed of the literal
+    /// word `EOF`.
+    #[test]
+    fn herestring_bare_word_is_rejected() {
+        for src in ["cat <<EOF", "cat << EOF"] {
+            let err = parse(src).expect_err("bare word after `<<` must not parse");
+            assert!(
+                err.message.contains("ral has no heredocs")
+                    && err.message.contains("#' ... '#"),
+                "for {src:?} got: {}",
+                err.message
+            );
+        }
+    }
+
+    /// A path after `<<` gets the `< path` correction instead of the
+    /// heredoc message.
+    #[test]
+    fn herestring_path_word_is_rejected() {
+        let err = parse("cat << ./body.txt").expect_err("path after `<<` must not parse");
+        assert!(
+            err.message.contains("use `< path`"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    /// `<<` always feeds stdin: fd 0 may be spelled explicitly, anything
+    /// else is an error.
+    #[test]
+    fn herestring_fd_prefix() {
+        let ast = unwrap_stmts(parse("cat 0<< #'x'#").unwrap());
+        match &ast[0] {
+            Ast::Call { redirects, .. } => assert_eq!(redirects[0].fd, 0),
+            other => panic!("expected command, got {other:?}"),
+        }
+        let err = parse("cat 3<< #'x'#").expect_err("fd 3 herestring must not parse");
+        assert!(
+            err.message.contains("always feeds stdin"),
+            "got: {}",
+            err.message
+        );
     }
 
     #[test]

@@ -38,15 +38,15 @@ impl WriteOutcome {
     }
 }
 
-/// `RedirectMode` -> the `mode` field string.  `Read` has no write door,
-/// so it is not representable here.
+/// `RedirectMode` -> the `mode` field string.  The stdin modes (`Read`,
+/// `HereString`) have no write door, so they are not representable here.
 fn mode_str(mode: RedirectMode) -> &'static str {
     match mode {
         RedirectMode::Write => "write",
         RedirectMode::Append => "append",
         RedirectMode::StreamWrite => "stream",
-        RedirectMode::Read => {
-            unreachable!("Read is a stdin door, never a write event")
+        RedirectMode::Read | RedirectMode::HereString => {
+            unreachable!("stdin doors never produce write events")
         }
     }
 }

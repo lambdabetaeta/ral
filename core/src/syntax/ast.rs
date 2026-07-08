@@ -469,10 +469,17 @@ pub enum RedirectMode {
     StreamWrite,
     Append,
     Read,
+    /// `<< str` — feed a string value to stdin (fd 0). The target word
+    /// is the payload itself, not a file path; at evaluation one newline
+    /// immediately at the front of the value is dropped, so a multiline
+    /// body may start on the line below the command.
+    HereString,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RedirectTarget {
+    /// The redirect's word operand: a file path for the file modes, the
+    /// payload string for [`RedirectMode::HereString`].
     File(Box<Ast>),
     Fd(u32),
 }

@@ -1765,7 +1765,7 @@ from the pipeline, and `glob` returns the matching paths as a sorted
 list, empty when nothing matches.
 
 **Redirects.** The redirect operators are `>`, `>~`, `>>`, `2>`,
-`2>&1`, and `<`.  They are stage modifiers rather than values, and
+`2>&1`, `<`, and `<<`.  They are stage modifiers rather than values, and
 they apply only to the pipeline they decorate; persistent directory
 changes are scoped through `within [dir: …]` (§3.2) and `cd` exists
 only in the interactive layer, while the current directory is read by
@@ -1782,6 +1782,19 @@ and a concurrent reader may observe a half-written file.  Use `>~`
 when streaming visibility is part of the contract (logs, FIFOs that
 must not be replaced) or when `>` would refuse the target.  `>>`
 appends, and `<` reads.
+
+The here-string `<< str` feeds a string value to stdin.  Its operand
+is the payload itself, not a path, and admits the same value forms as
+any other redirect operand — a raw string, an interpolating string, or
+a dereference.  The payload must be separated from the operator by
+whitespace: a glued payload (`<<EOF`, `<<'EOF'`) is rejected at the
+lexer as a heredoc attempt, and a bare word after `<< ` is a parse
+error.  One newline
+at the very front of the value is dropped at evaluation, so a
+multiline raw-string body may start on the line below the command;
+raw-string literals themselves remain verbatim in every position.
+When several stdin redirects decorate one stage, the last of `< file`
+/ `<< str` wins, as in POSIX.
 
 **File I/O.** File reads and writes are redirect-and-codec: a decoder
 on `< $path` for reads, an encoder on `> $path` for writes.

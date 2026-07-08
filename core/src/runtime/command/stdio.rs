@@ -170,7 +170,8 @@ pub(crate) fn classify_redirects(redirects: &[EvalRedirectV]) -> Settled<Redirec
                 }
             }
             EvalRedirect::File(filename) => match fd {
-                // fd 0 is handled by install_stdin_redirect upstream.
+                // fd 0 (`< file` and `<< str`) is handled by
+                // install_stdin_redirect upstream.
                 0 => {}
                 1 => plan.stdout_file = Some((filename.clone(), *mode)),
                 2 => plan.stderr_route = Some(StderrRoute::File(filename.clone(), *mode)),

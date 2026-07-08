@@ -264,11 +264,6 @@ pub enum LexErrorKind {
     },
     /// A `$(...)` dereference was opened and never closed.
     UnclosedDeref { opened: Span },
-    /// A heredoc / here-string attempt (`<<`). ral's lexer is context-free
-    /// and has no heredoc, so `<<` can never form a valid token; rejecting it
-    /// here surfaces the mistake at its cause instead of letting the body
-    /// mis-lex into stray commands.
-    HeredocAttempt { span: Span },
     /// Free-form lexer errors — invalid escapes, unexpected characters,
     /// expected-X-found-Y, redirect parse errors, and so on.
     Other(String),
@@ -308,7 +303,6 @@ impl LexErrorKind {
                 format!("unterminated '{open}…{close}'")
             }
             Self::UnclosedDeref { .. } => "unclosed `$(…)` dereference".into(),
-            Self::HeredocAttempt { .. } => "ral has no heredocs".into(),
             Self::Other(s) => s.clone(),
         }
     }
@@ -1380,8 +1374,28 @@ impl Lexer {
         self.bump();
         if self.peek() == Some('<') {
             self.bump();
-            let span = self.finish(span);
-            return Err(self.typed_error(span, LexErrorKind::HeredocAttempt { span }));
+            if self.peek() == Some('<') {
+                self.bump();
+                return Err(self.error(
+                    self.finish(span),
+                    "`<<<` is bash's here-string operator — ral's `<<` already \
+                     feeds a string to stdin, so drop one `<`",
+                ));
+            }
+            // A payload glued to `<<` is near-certainly the bash heredoc
+            // reflex (`<<EOF`, `<<'EOF'`); a genuine here-string is spelled
+            // with a space. Rejecting the glued form here keeps the quoted
+            // heredoc delimiter from silently becoming stdin while the
+            // intended body lines run as stray commands.
+            if self.peek().is_some_and(|ch| !ch.is_whitespace()) {
+                return Err(self.error(
+                    self.finish(span),
+                    "ral has no heredocs: `<<` feeds a string to stdin and \
+                     takes a space before its payload — `cmd << #' ... '#` \
+                     (a raw string, which may use newlines)",
+                ));
+            }
+            return Ok(self.finish_redirect(fd, RedirectMode::HereString, None, span));
         }
         Ok(self.finish_redirect(fd, RedirectMode::Read, None, span))
     }
@@ -2185,17 +2199,64 @@ mod tests {
         );
     }
 
-    /// A POSIX heredoc / here-string attempt (`<<`) is a hard lexer error,
-    /// not a silently mis-lexed redirect followed by stray commands.
+    /// `<<` lexes as the here-string redirect, fd-prefixable like the
+    /// other redirect operators.
     #[test]
-    fn heredoc_attempt_is_rejected() {
-        let err = lex("cat <<EOF").expect_err("expected lex error");
+    fn herestring_redirect() {
+        let tokens = lex("cat << x").unwrap();
         assert!(
-            matches!(err.kind, LexErrorKind::HeredocAttempt { .. }),
-            "got {:?}",
-            err.kind
+            tokens.iter().any(|(t, _)| matches!(
+                t,
+                Token::Redirect {
+                    fd: None,
+                    kind: RedirectMode::HereString,
+                    target_fd: None,
+                }
+            )),
+            "got {tokens:?}"
         );
-        assert!(err.message().contains("heredoc"));
+        let tokens = lex("cat 0<< x").unwrap();
+        assert!(
+            tokens.iter().any(|(t, _)| matches!(
+                t,
+                Token::Redirect {
+                    fd: Some(0),
+                    kind: RedirectMode::HereString,
+                    target_fd: None,
+                }
+            )),
+            "got {tokens:?}"
+        );
+    }
+
+    /// A payload glued to `<<` is the bash heredoc reflex (`<<EOF`,
+    /// `<<'EOF'`); a genuine here-string takes a space before its
+    /// payload, so the glued form is a targeted lex error.
+    #[test]
+    fn glued_herestring_payload_is_rejected() {
+        for src in ["cat <<EOF", "cat <<'EOF'", "cat <<\"EOF\"", "cat 0<<$x"] {
+            let err = lex(src).expect_err("glued `<<` payload must not lex");
+            assert!(
+                err.message().contains("ral has no heredocs"),
+                "for {src:?} got: {}",
+                err.message()
+            );
+        }
+    }
+
+    /// `<<<` is the bash-herestring reflex; ral's `<<` already does that
+    /// job, so a third `<` is a targeted lex error rather than a stray
+    /// `Read` redirect token that would confuse the parser downstream.
+    #[test]
+    fn triple_lt_is_rejected() {
+        for src in ["cat <<< x", "cat 0<<< x"] {
+            let err = lex(src).expect_err("`<<<` must not lex");
+            assert!(
+                err.message().contains("here-string operator"),
+                "for {src:?} got: {}",
+                err.message()
+            );
+        }
     }
 
     #[test]

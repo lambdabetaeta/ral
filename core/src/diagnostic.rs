@@ -387,7 +387,6 @@ fn describe_inner(source: &str, kind: &LexErrorKind) -> String {
                 None => head,
             }
         }
-        LexErrorKind::HeredocAttempt { .. } => "a heredoc attempt (`<<`)".into(),
         LexErrorKind::Other(_) => "an unrelated lexer error".into(),
     }
 }
@@ -464,21 +463,8 @@ fn lex_error_report(source: &str, kind: &LexErrorKind) -> Option<LexErrorReport>
             hint: Some("expected closing `)` before end of input".into()),
         }),
         // L0004 is reserved for the proposed raw-delimiter near-miss (260608).
-        LexErrorKind::HeredocAttempt { span } => Some(LexErrorReport {
-            code: "L0005",
-            message: "ral has no heredocs".into(),
-            primary: LabelRange {
-                range: byte_span_to_char_range(source, *span),
-                label: "`<<` is not an operator".into(),
-            },
-            secondary: None,
-            hint: Some(
-                "Raw strings `#'…'#` are multiline. Write a file with \
-                 `echo #'…'# > path`, or feed a program's stdin with \
-                 `echo #'…'# | cmd`."
-                    .into(),
-            ),
-        }),
+        // L0005 is retired: it rejected `<<`, which is now the here-string
+        // redirect; the `<<EOF` near-miss is a parser diagnostic instead.
         LexErrorKind::Other(_) => None,
     }
 }
@@ -780,16 +766,6 @@ mod tests {
         assert!(output.contains("L0001"));
         assert!(output.contains("nested"));
         assert!(output.contains("`{…}`"), "got:\n{output}");
-    }
-
-    #[test]
-    fn lex_error_ariadne_renders_heredoc_attempt_as_l0005() {
-        let err = parse_error_from(LexErrorKind::HeredocAttempt {
-            span: ByteSpan::new(crate::source::FileId::DUMMY, 4, 6),
-        });
-        let output = format_parse_error_ariadne("test.al", "cat <<EOF", &err);
-        assert!(output.contains("L0005"), "got:\n{output}");
-        assert!(output.contains("ral has no heredocs"));
     }
 
     /// Register one source in a fresh db and return the db plus the id.
