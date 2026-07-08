@@ -569,88 +569,20 @@ pub(crate) fn json_to_text(json: &serde_json::Value) -> Option<String> {
 /// windows, markdown reports, and captured byte text keep their exact lines.
 /// Structured values print in ral surface syntax instead of detouring through
 /// JSON, so variants stay variants and records stay records.
+const VALUE_PRINT_PARAMS: ral_core::builtins::PrintParams = ral_core::builtins::PrintParams {
+    max_width: 120,
+    max_string: 72,
+    max_depth: 2,
+    min_quote_hashes: 1,
+};
+
 fn ral_value_to_text(value: &RalValue) -> Option<String> {
     match value {
         RalValue::Unit => None,
         RalValue::String(s) => Some(s.clone()),
         RalValue::Bytes(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
-        other => Some(ral_value(other, 0)),
+        other => Some(ral_core::builtins::pretty_print(other, 0, &VALUE_PRINT_PARAMS)),
     }
-}
-
-fn ral_value(value: &RalValue, indent: usize) -> String {
-    match value {
-        RalValue::Unit => "unit".into(),
-        RalValue::Bool(b) => b.to_string(),
-        RalValue::Int(n) => n.to_string(),
-        RalValue::Float(f) => f.to_string(),
-        RalValue::String(s) => quote_ral_string(s),
-        RalValue::Bytes(bytes) => quote_ral_string(&String::from_utf8_lossy(bytes)),
-        RalValue::List(items) => {
-            if items.is_empty() {
-                return "[]".into();
-            }
-            let parts = items
-                .iter()
-                .map(|item| ral_value(item, indent + 1))
-                .collect::<Vec<_>>();
-            bracketed(parts, indent, "[", "]")
-        }
-        RalValue::Map(pairs) => {
-            if pairs.is_empty() {
-                return "[:]".into();
-            }
-            let parts = pairs
-                .iter()
-                .map(|(key, value)| format!("{key}: {}", ral_value(value, indent + 1)))
-                .collect::<Vec<_>>();
-            bracketed(parts, indent, "[", "]")
-        }
-        RalValue::Variant { label, payload } => match payload {
-            None => format!("`{label}"),
-            Some(payload) => format!("`{label} {}", ral_value(payload, indent)),
-        },
-        RalValue::Lambda { .. } | RalValue::Block { .. } | RalValue::Handle(_) => value.to_string(),
-    }
-}
-
-fn bracketed(parts: Vec<String>, indent: usize, open: &str, close: &str) -> String {
-    let inline = format!("{open}{}{close}", parts.join(", "));
-    if inline.len() <= 120 && !inline.contains('\n') {
-        return inline;
-    }
-
-    let pad = "  ".repeat(indent + 1);
-    let end_pad = "  ".repeat(indent);
-    format!(
-        "{open}\n{pad}{}\n{end_pad}{close}",
-        parts.join(&format!(",\n{pad}"))
-    )
-}
-
-fn quote_ral_string(body: &str) -> String {
-    let level = quote_bump_level(body).max(1);
-    let hashes = "#".repeat(level);
-    format!("{hashes}'{body}'{hashes}")
-}
-
-fn quote_bump_level(body: &str) -> usize {
-    let bytes = body.as_bytes();
-    let mut best = 0;
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\'' {
-            i += 1;
-            let start = i;
-            while i < bytes.len() && bytes[i] == b'#' {
-                i += 1;
-            }
-            best = best.max(i - start + 1);
-        } else {
-            i += 1;
-        }
-    }
-    best
 }
 
 #[cfg(test)]

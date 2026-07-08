@@ -756,7 +756,7 @@ pub fn register(shell: &mut Shell, prelude_comp: &Arc<crate::ir::Comp>) {
     shell.mobile.scope.push_scope();
 }
 
-pub use misc::pretty_print;
+pub use misc::{PrintParams, REPL_PRINT_PARAMS, pretty_print};
 
 /// Apply a thunk (`Block` or `Lambda`) `val` to `args` while a turn frame is
 /// already installed.  Any other `Value` produces a descriptive error.  Used

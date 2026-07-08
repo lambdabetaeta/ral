@@ -348,22 +348,33 @@ fn which_line(name: &str, shell: &Shell) -> Option<String> {
     }
 }
 
-pub fn pretty_print(val: &Value, indent: usize) -> String {
+/// Tuning knobs for [`pretty_print`]. Two callers, two shapes: the REPL wants
+/// narrow, `'`-quoted output for a terminal; exarch's tool-result `VALUE`
+/// section wants wider, always-`#`-fenced output because its system prompt
+/// only teaches the model the hash-quoted string form.
+pub struct PrintParams {
+    /// Inline-vs-multiline threshold for a bracketed `List`/`Map`, in chars.
+    pub max_width: usize,
+    /// Clip leaf strings longer than this many chars; `0` disables clipping.
+    pub max_string: usize,
+    /// Structural nesting cap on `List`/`Map` bodies; deeper ones collapse to
+    /// an `[...N items]` / `[:...N pairs]` marker instead of recursing.
+    pub max_depth: usize,
+    /// Floor on the `#` fence count around a quoted string. `0` allows the
+    /// minimal (possibly unfenced) form; `1` always emits at least one `#`.
+    pub min_quote_hashes: usize,
+}
+
+pub const REPL_PRINT_PARAMS: PrintParams = PrintParams {
+    max_width: 80,
+    max_string: 72,
+    max_depth: 6,
+    min_quote_hashes: 0,
+};
+
+pub fn pretty_print(val: &Value, indent: usize, params: &PrintParams) -> String {
     match val {
-        Value::String(s) => {
-            let body = if s.chars().count() > 80 || s.contains('\n') {
-                let first_line = s.lines().next().unwrap_or("");
-                // Truncate by chars — slicing by byte offset can split a UTF-8
-                // multibyte sequence and panic.
-                let truncated: String = first_line.chars().take(72).collect();
-                format!("{truncated}...")
-            } else {
-                s.clone()
-            };
-            let level = quote_bump_level(&body);
-            let hashes: String = "#".repeat(level);
-            format!("{hashes}'{body}'{hashes}")
-        }
+        Value::String(s) => quote_string(s, params),
         Value::Unit => "unit".into(),
         Value::Bool(b) => {
             if *b {
@@ -382,42 +393,61 @@ pub fn pretty_print(val: &Value, indent: usize) -> String {
             if items.is_empty() {
                 return "[]".into();
             }
-            if items.iter().all(is_simple) {
-                let parts: Vec<String> = items.iter().map(|v| pretty_print(v, 0)).collect();
-                return format!("[{}]", parts.join(", "));
+            if indent >= params.max_depth {
+                return format!("[...{} items]", items.len());
             }
-            let pad = "  ".repeat(indent + 1);
-            let end_pad = "  ".repeat(indent);
             let parts: Vec<String> = items
                 .iter()
-                .map(|v| format!("{pad}{}", pretty_print(v, indent + 1)))
+                .map(|v| pretty_print(v, indent + 1, params))
                 .collect();
-            format!("[\n{}\n{end_pad}]", parts.join(",\n"))
+            bracketed(parts, indent, "[", "]", params)
         }
         Value::Map(pairs) => {
             if pairs.is_empty() {
                 return "[:]".into();
             }
-            if pairs.iter().all(|(_, v)| is_simple(v)) {
-                let parts: Vec<String> = pairs
-                    .iter()
-                    .map(|(k, v)| format!("{k}: {}", pretty_print(v, 0)))
-                    .collect();
-                return format!("[{}]", parts.join(", "));
+            if indent >= params.max_depth {
+                return format!("[:...{} pairs]", pairs.len());
             }
-            let pad = "  ".repeat(indent + 1);
-            let end_pad = "  ".repeat(indent);
             let parts: Vec<String> = pairs
                 .iter()
-                .map(|(k, v)| format!("{pad}{k}: {}", pretty_print(v, indent + 1)))
+                .map(|(k, v)| format!("{k}: {}", pretty_print(v, indent + 1, params)))
                 .collect();
-            format!("[\n{}\n{end_pad}]", parts.join(",\n"))
+            bracketed(parts, indent, "[", "]", params)
         }
         Value::Variant { label, payload } => match payload {
             None => format!("`{label}"),
-            Some(p) => format!("`{label} {}", pretty_print(p, indent)),
+            Some(p) => format!("`{label} {}", pretty_print(p, indent, params)),
         },
     }
+}
+
+fn quote_string(s: &str, params: &PrintParams) -> String {
+    let body = if params.max_string > 0 && (s.chars().count() > params.max_string || s.contains('\n')) {
+        let first_line = s.lines().next().unwrap_or("");
+        // Truncate by chars — slicing by byte offset can split a UTF-8
+        // multibyte sequence and panic.
+        let truncated: String = first_line.chars().take(params.max_string).collect();
+        format!("{truncated}...")
+    } else {
+        s.to_string()
+    };
+    let level = quote_bump_level(&body).max(params.min_quote_hashes);
+    let hashes: String = "#".repeat(level);
+    format!("{hashes}'{body}'{hashes}")
+}
+
+fn bracketed(parts: Vec<String>, indent: usize, open: &str, close: &str, params: &PrintParams) -> String {
+    let inline = format!("{open}{}{close}", parts.join(", "));
+    if inline.chars().count() <= params.max_width && !inline.contains('\n') {
+        return inline;
+    }
+    let pad = "  ".repeat(indent + 1);
+    let end_pad = "  ".repeat(indent);
+    format!(
+        "{open}\n{pad}{}\n{end_pad}{close}",
+        parts.join(&format!(",\n{pad}"))
+    )
 }
 
 /// Smallest hash-bump level that lets `body` round-trip inside
@@ -440,19 +470,6 @@ fn quote_bump_level(body: &str) -> usize {
         }
     }
     max_run.map_or(0, |m| m + 1)
-}
-
-fn is_simple(val: &Value) -> bool {
-    matches!(
-        val,
-        Value::Unit
-            | Value::Bool(_)
-            | Value::Int(_)
-            | Value::Float(_)
-            | Value::Handle(_)
-            | Value::Lambda { .. }
-            | Value::Block { .. }
-    ) || matches!(val, Value::String(s) if s.chars().count() < 60)
 }
 const CLEAR_SEQ: &[u8] = b"\x1b[H\x1b[2J\x1b[3J";
 // touch stty modes the way ncurses `reset` does; `^reset` reaches the real
@@ -630,5 +647,37 @@ mod tests {
             par_doc, "Parallel map over `items` with at most `jobs` concurrent blocks.",
             "only the lead paragraph is the summary, got {par_doc:?}"
         );
+    }
+
+    /// A `List`/`Map` nested past `max_depth` collapses to a count marker
+    /// instead of unfolding, so a deeply nested value can't blow up output.
+    #[test]
+    fn pretty_print_elides_past_max_depth() {
+        let params = PrintParams {
+            max_depth: 1,
+            ..REPL_PRINT_PARAMS
+        };
+        let nested = Value::List(vec![Value::List(vec![Value::Int(1), Value::Int(2)].into())].into());
+        let out = pretty_print(&nested, 0, &params);
+        assert_eq!(out, "[[...2 items]]");
+    }
+
+    /// The depth cap only counts `List`/`Map` nesting; a `Variant` wrapper
+    /// doesn't consume a depth level on its own.
+    #[test]
+    fn pretty_print_variant_does_not_consume_depth() {
+        let params = PrintParams {
+            max_depth: 1,
+            ..REPL_PRINT_PARAMS
+        };
+        let val = Value::List(
+            vec![Value::Variant {
+                label: "some".into(),
+                payload: Some(Box::new(Value::Int(1))),
+            }]
+            .into(),
+        );
+        let out = pretty_print(&val, 0, &params);
+        assert_eq!(out, "[`some 1]");
     }
 }

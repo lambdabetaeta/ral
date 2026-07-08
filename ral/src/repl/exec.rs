@@ -31,7 +31,9 @@ fn print_result(val: &Value) {
         }
         _ => {
             let s = match val {
-                Value::List(_) | Value::Map(_) => builtins::pretty_print(val, 0),
+                Value::List(_) | Value::Map(_) => {
+                    builtins::pretty_print(val, 0, &builtins::REPL_PRINT_PARAMS)
+                }
                 _ => val.to_string(),
             };
             let theme = super::theme::output_theme();
