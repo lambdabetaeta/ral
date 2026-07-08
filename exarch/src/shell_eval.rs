@@ -1063,6 +1063,85 @@ keep-bottom
         );
     }
 
+    /// A committed `edit` notes what it changed on stderr, for the model:
+    /// `[EXARCH] Changed line(s) … of PATH.`, singular for one line and
+    /// plural with a comma-joined list for a batch — plus a trailing warning
+    /// when a replacement looks like it carries an unintended `\n`/`\t`-style
+    /// escape rather than the real character.
+    #[test]
+    fn edit_notes_changed_lines_on_stderr() {
+        let mut shell = fresh_shell();
+        let (dir, path) = scratch_file("edit-note", "f.txt", "a\nb\nc\n");
+
+        let one = run_once(
+            &mut shell,
+            &format!(
+                "let rows = view-text '{path}' 1 4\n\
+                 edit '{path}' [[hash: $rows[0][hash], line: 'A']]"
+            ),
+        );
+        assert_eq!(one.exit, 0, "single edit must succeed");
+        assert_eq!(
+            String::from_utf8_lossy(&one.stderr),
+            format!("[EXARCH] Changed line 1 of {path}.\n"),
+            "a single-line edit notes the singular form with no warning"
+        );
+
+        let batch = run_once(
+            &mut shell,
+            &format!(
+                "let rows = view-text '{path}' 1 4\n\
+                 edit '{path}' [[hash: $rows[1][hash], line: 'B'], [hash: $rows[2][hash], line: 'C\\n']]"
+            ),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(batch.exit, 0, "batch edit must succeed");
+        assert_eq!(
+            String::from_utf8_lossy(&batch.stderr),
+            format!(
+                "[EXARCH] Changed lines 2, 3 of {path}. \
+                 [WARNING: replacements contain escapes, did you mean to do that?]\n"
+            ),
+            "a multi-line batch notes the plural form, sorted, with an escape warning"
+        );
+    }
+
+    /// `edit-str` notes the line(s) it changed the same way `edit` does,
+    /// computed from where its unique match starts: a single line reads
+    /// `line n`, a match spanning a real newline in `from` reads `lines n-m`.
+    #[test]
+    fn edit_str_notes_changed_line_range_on_stderr() {
+        let mut shell = fresh_shell();
+        let (dir, path) = scratch_file("edit-str-note", "f.txt", "x\nhello world\ny\n");
+        let r = run_once(
+            &mut shell,
+            &format!("edit-str '{path}' 'hello world' 'hi\\tthere'"),
+        );
+        assert_eq!(r.exit, 0, "edit-str must succeed");
+        assert_eq!(
+            String::from_utf8_lossy(&r.stderr),
+            format!(
+                "[EXARCH] Changed line 2 of {path}. \
+                 [WARNING: replacements contain escapes, did you mean to do that?]\n"
+            ),
+            "a single-line match notes the singular form with an escape warning"
+        );
+
+        let (dir2, path2) = scratch_file("edit-str-note-span", "g.txt", "one\ntwo\nthree\n");
+        let spanning = run_once(
+            &mut shell,
+            &format!("edit-str '{path2}' 'two\nthree' 'TWO\nTHREE'"),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
+        assert_eq!(spanning.exit, 0, "a match spanning a real newline must succeed");
+        assert_eq!(
+            String::from_utf8_lossy(&spanning.stderr),
+            format!("[EXARCH] Changed lines 2-3 of {path2}.\n"),
+            "a match spanning two lines notes the plural range, no escapes here"
+        );
+    }
+
     /// Regression: a witness hash that happens to read as a number must
     /// still round-trip from `view-text` into `edit`. The agent copies the hash
     /// out of a `view-text` result and types it as a *bare* `edit` argument, so

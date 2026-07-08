@@ -411,6 +411,38 @@ struct ResolvedEdit {
     new: String,
 }
 
+/// Backslash letters that read as a C/Python-style escape but are not one:
+/// `edit`/`edit-str` take their replacement text verbatim, with no escaping
+/// of their own, so a literal `\n` in a replacement lands as two characters
+/// — backslash, n — not a newline.  A model reaching for a familiar escape
+/// syntax here almost always meant the real character; `has_suspicious_escapes`
+/// flags that so `edit`'s stderr note can ask.
+const SUSPECT_ESCAPE_LETTERS: [char; 7] = ['n', 't', 'r', '0', '\\', '\'', '"'];
+
+fn has_suspicious_escapes(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    (0..bytes.len().saturating_sub(1))
+        .any(|i| bytes[i] == b'\\' && SUSPECT_ESCAPE_LETTERS.contains(&(bytes[i + 1] as char)))
+}
+
+/// Note a completed edit on stderr for the model: `[EXARCH] Changed line(s)
+/// … of PATH.`, with a trailing warning if any replacement looks like it
+/// carries an unintended escape sequence.  Surfaced separately from the
+/// `write` io event (which stays the forensic record of the commit) since
+/// this is a plain status line, not structured data for the card layer.
+fn note_edit(shell: &mut Shell, path: &str, lines: &str, plural: bool, any_escapes: bool) {
+    let word = if plural { "lines" } else { "line" };
+    let warning = if any_escapes {
+        " [WARNING: replacements contain escapes, did you mean to do that?]"
+    } else {
+        ""
+    };
+    let _ = writeln!(
+        shell.stderr_mut(),
+        "[EXARCH] Changed {word} {lines} of {path}.{warning}"
+    );
+}
+
 /// `edit PATH EDITS` — apply a batch of `[hash: …, line: …]` records in one
 /// read/rebuild/write pass, then surface one write io event carrying the
 /// whole-file diff.  The read runs in Rust (not a redirect), so it raises no
@@ -425,6 +457,11 @@ struct ResolvedEdit {
 /// or now-ambiguous hash means the file moved) and no two records name the same
 /// line.  The `line` field is the replacement text, taken verbatim: empty
 /// deletes the line; a real newline inside it splits the line into several.
+///
+/// A commit also notes what changed on stderr — `[EXARCH] Changed line(s) …
+/// of PATH.` — with a warning if a `line` looks like it carries an unintended
+/// `\n`/`\t`-style escape rather than the literal character (see
+/// [`has_suspicious_escapes`]).
 fn builtin_edit(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 2, "edit")?;
     let path = args[0].to_string();
@@ -524,6 +561,17 @@ fn builtin_edit(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let final_text = out.join("\n");
     shell.atomic_write(&path, final_text.as_bytes())?;
     surface_write(shell, &path, &body, &final_text);
+
+    let mut line_nums: Vec<usize> = resolved.iter().map(|r| r.at + 1).collect();
+    line_nums.sort_unstable();
+    let lines = line_nums
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let any_escapes = resolved.iter().any(|r| has_suspicious_escapes(&r.new));
+    note_edit(shell, &path, &lines, line_nums.len() > 1, any_escapes);
+
     Ok(Value::Unit)
 }
 
@@ -587,19 +635,43 @@ fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<String> 
 /// and write the result back.  Composed over the same read/write doors as
 /// `edit`: the read is silent and the write goes through core's atomic door
 /// ([`Shell::atomic_write`]), so it surfaces one committed `write` io event
-/// whose old/new snapshots the write card renders as a whole-file diff.
+/// whose old/new snapshots the write card renders as a whole-file diff.  It
+/// notes the change on stderr the same way `edit` does, with the line range
+/// computed from where the match started (see [`note_edit`]).
 fn builtin_edit_str(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 3, "edit-str")?;
     let path = args[0].to_string();
+    let from = args[1].to_string();
+    let to = args[2].to_string();
     let body = read_text_file(shell, &path, "edit-str")?;
     let replaced = ral_core::builtins::strings::builtin_string_replace(&[
-        args[1].clone(),
-        args[2].clone(),
+        Value::String(from.clone()),
+        Value::String(to.clone()),
         Value::String(body.clone()),
     ])?;
     let final_text = replaced.to_string();
     shell.atomic_write(&path, final_text.as_bytes())?;
     surface_write(shell, &path, &body, &final_text);
+
+    // `string_replace` above already proved `from` matches exactly once, so
+    // the same offset it used is the one match here — safe to relocate for
+    // the line-range note without re-validating uniqueness.
+    let start = body.find(&from).expect("edit-str: match vanished after string_replace confirmed it");
+    let start_line = body[..start].matches('\n').count() + 1;
+    let end_line = start_line + from.matches('\n').count();
+    let lines = if start_line == end_line {
+        start_line.to_string()
+    } else {
+        format!("{start_line}-{end_line}")
+    };
+    note_edit(
+        shell,
+        &path,
+        &lines,
+        start_line != end_line,
+        has_suspicious_escapes(&to),
+    );
+
     Ok(Value::Unit)
 }
 
