@@ -4,7 +4,7 @@
 //! focus handle, and the linger/age-out clock.  Extracted from [`super::App`]
 //! (Phase 4 of the TUI modularisation).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -57,6 +57,10 @@ pub(super) struct Tabs {
     /// focus can fall back to the parent — recursing toward the trunk — when a
     /// focused agent ends.
     parents: HashMap<AgentId, AgentId>,
+    /// The tabs born as a `/branch` — a conversing fork of their parent, which
+    /// `/close` may kill (a returning sub-agent tab may not).  Recorded from
+    /// `Kind::Born`'s `branch` flag and cleaned when a tab is finally retired.
+    branches: HashSet<AgentId>,
     /// Frame counter incremented each tick, driving the terminal tab-title
     /// spinner.
     title_frame: u64,
@@ -88,6 +92,7 @@ impl Tabs {
             // handle; `focused()` resolves the no-focus sentinel to root.
             focus: Arc::new(AtomicU64::new(NO_FOCUS)),
             parents: HashMap::new(),
+            branches: HashSet::new(),
             title_frame: 0,
             focused_steerable: true,
         }
@@ -144,6 +149,7 @@ impl Tabs {
                 self.focused_steerable = fallback == self.root;
             }
             self.parents.remove(&id);
+            self.branches.remove(&id);
             if let Some(vp) = self.viewports.get_mut(&id) {
                 vp.evict_to_tombstone(id);
             }
@@ -165,6 +171,7 @@ impl Tabs {
         log_dir: &Path,
         title: String,
         parent: AgentId,
+        branch: bool,
         agent_slot: AgentSlot,
     ) {
         if let std::collections::hash_map::Entry::Vacant(slot) = self.viewports.entry(id) {
@@ -173,9 +180,18 @@ impl Tabs {
         }
         self.titles.insert(id, title);
         self.parents.insert(id, parent);
+        if branch {
+            self.branches.insert(id);
+        }
         if !self.tabs.contains(&id) {
             self.tabs.push(id);
         }
+    }
+
+    /// Whether `id` is a `/branch` tab — a conversing fork the `/close` command
+    /// may kill, as opposed to a returning sub-agent's tab.
+    pub(super) fn is_branch(&self, id: AgentId) -> bool {
+        self.branches.contains(&id)
     }
 
     /// Mark a sub-agent as died: enter the linger window and fall back focus if needed.
@@ -340,6 +356,7 @@ mod tests {
             std::path::Path::new("/tmp/test-child"),
             "child".into(),
             root,
+            false,
             AgentSlot(1),
         );
         if let Some(vp) = tabs.viewport_mut(child) {

@@ -105,6 +105,12 @@ budget is too low to seat both"
             }
             return ControlFlow::Continue;
         }
+        if head == "/branch" {
+            let prompt = (!rest.is_empty()).then_some(rest);
+            let receipt = crate::tools::spawn_branch(session, prompt, emit);
+            session.note(format!("branch started: {receipt}"), emit);
+            return ControlFlow::Continue;
+        }
         match trimmed {
             "/clear" => {
                 let _ = session.clear(self.scratch);

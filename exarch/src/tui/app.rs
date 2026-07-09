@@ -282,9 +282,11 @@ impl App {
                 log_dir,
                 title,
                 parent,
+                branch,
             } => {
                 let agent_slot = AgentSlot((self.tabs.len() as u8) % AGENT_HUES.len() as u8);
-                self.tabs.born(id, &log_dir, title, parent, agent_slot);
+                self.tabs
+                    .born(id, &log_dir, title, parent, branch, agent_slot);
             }
             Kind::Died => {
                 self.surface.flush_surfaces(self.tabs.viewports_mut());

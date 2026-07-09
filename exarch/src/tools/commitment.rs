@@ -170,7 +170,7 @@ fn commit(id: String, input: Value, session: &mut Agent, emit: &Emitter) -> Sess
         super::agent::AsyncSpawn {
             tool: "commit",
             title,
-            prompt,
+            prompt: Some(prompt),
             commitment: Some(CommitmentIntent::Write(key)),
         },
         emit,
@@ -236,7 +236,7 @@ fn verify_commitment(
         super::agent::AsyncSpawn {
             tool: "verify_commitment",
             title,
-            prompt,
+            prompt: Some(prompt),
             commitment: Some(CommitmentIntent::Verify(key)),
         },
         emit,

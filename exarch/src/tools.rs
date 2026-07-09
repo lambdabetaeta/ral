@@ -137,6 +137,7 @@ pub(crate) fn tools_for(returns: bool, schedules: bool, can_spawn: bool) -> Vec<
         .collect()
 }
 
+pub(crate) use agent::spawn_branch;
 pub(crate) use agent::spawn_discussion;
 
 /// The placeholder a malformed call passes for `display` when the JSON did

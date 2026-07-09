@@ -72,6 +72,18 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         help: "Start a two-agent discussion and report back.",
     },
     SlashCommand {
+        name: "/branch",
+        aliases: &[],
+        arg: Some("[prompt]"),
+        help: "Fork this conversation into a new tab (same context).",
+    },
+    SlashCommand {
+        name: "/close",
+        aliases: &[],
+        arg: None,
+        help: "Close this branch (its tab and any agents it spawned).",
+    },
+    SlashCommand {
         name: "/compact",
         aliases: &[],
         arg: None,
@@ -274,6 +286,20 @@ pub(super) fn route_submit(
     let focused = tui.app.tabs.focused();
     let unrecognized = unrecognized_command(trimmed);
     match lookup_command(trimmed) {
+        // The one command admitted off the trunk: `/close` kills the focused
+        // branch and its subtree.  It must be matched before the "not available
+        // on this tab" refusal below, which would otherwise swallow it.
+        Some((cmd, _)) if cmd.name == "/close" => {
+            if focused == root {
+                tui.app
+                    .push_error(root, "nothing to close here; /quit ends the session".into());
+            } else if !tui.app.tabs.is_branch(focused) {
+                tui.app
+                    .push_error(focused, "/close closes a branch, not this tab".into());
+            } else {
+                ctx.agents.remove_subtree(focused);
+            }
+        }
         Some((cmd, _)) if focused != root => {
             tui.app
                 .push_error(focused, format!("{} is not available on this tab", cmd.name));
@@ -394,6 +420,17 @@ mod tests {
             Some(("/discuss", "should we add a new channel?".to_string()))
         );
         assert_eq!(dispatch("/discuss"), Some(("/discuss", String::new())));
+    }
+
+    #[test]
+    fn branch_matches_bare_and_with_prompt_and_close_resolves() {
+        // `/branch` takes an optional prompt, so it matches both alone and with
+        // trailing text — unlike an argument-less command, which declines the
+        // latter.
+        assert_eq!(dispatch("/branch"), Some(("/branch", String::new())));
+        assert_eq!(dispatch("/branch hi"), Some(("/branch", "hi".to_string())));
+        // `/close` is argument-less and resolves on its own.
+        assert_eq!(dispatch("/close"), Some(("/close", String::new())));
     }
 
     #[test]

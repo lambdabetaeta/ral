@@ -274,6 +274,25 @@ The final report should be concise and include:
     )
 }
 
+/// Fork the trunk's conversation into a new tab.  A branch converses (parks
+/// for the human), so it registers without a ceiling and pushes no result
+/// upward; `prompt` seeds a first turn, or `None` parks and waits.
+pub(crate) fn spawn_branch(session: &mut Agent, prompt: Option<&str>, emit: &Emitter) -> String {
+    let title = format!("branch-{}", DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed));
+    match session.branch() {
+        Ok(child) => {
+            let spec = AsyncSpawn {
+                tool: "/branch",
+                title,
+                prompt: prompt.map(str::to_string),
+                commitment: None,
+            };
+            spawn_async(session, "/branch".to_string(), child, spec, emit).content
+        }
+        Err(e) => format!("could not fork this conversation: {e}"),
+    }
+}
+
 fn dispatch_spawn(
     kind: SpawnKind,
     id: String,
@@ -313,7 +332,7 @@ fn dispatch_spawn(
         AsyncSpawn {
             tool: kind.tool(),
             title,
-            prompt,
+            prompt: Some(prompt),
             commitment: None,
         },
         emit,
@@ -337,7 +356,9 @@ pub(super) enum CommitmentIntent {
 pub(super) struct AsyncSpawn {
     pub tool: &'static str,
     pub title: String,
-    pub prompt: String,
+    /// The child's launch prompt, or `None` to park and wait — a branch, which
+    /// converses for the human rather than running a seeded turn.
+    pub prompt: Option<String>,
     /// Set only for a `commit`/`verify_commitment` spawn. `None` for every
     /// ordinary spawn, which can never tag a result for the pin register.
     pub commitment: Option<CommitmentIntent>,
@@ -390,10 +411,13 @@ pub(super) fn spawn_async(
     // current provider), registered so a `/model` on this tab swaps the
     // child's provider alone.
     let child_provider = child.provider_handle();
+    // A returning sub-agent holds `reply`; a conversing branch does not.  This
+    // one fact gates the reaper ceiling, the tab kind, and the settle epilogue.
+    let delivers = child.returns();
     let generation = session.agents.register(
         agent_id,
         Some(session.id),
-        true, // a detached worker must be reaped if abandoned
+        delivers, // a returning worker is reaped if abandoned; a branch keeps no ceiling
         title.clone(),
         log_dir.clone(),
         cancel,
@@ -421,13 +445,15 @@ pub(super) fn spawn_async(
     let born_parent = session.id;
     let worker_title = title.clone();
     // Seed the launch turn into the child's own inbox: the only downward
-    // edge is this one write.
-    child.seed(prompt.clone());
+    // edge is this one write.  A branch has no prompt — it parks for the human.
+    if let Some(p) = &prompt {
+        child.seed(p.clone());
+    }
     // The dispatch shows on the rail before the spawn, so the user can see
     // exactly what the child was asked to do.
     emit.emit(Kind::ToolCall {
         tool,
-        cmd: prompt,
+        cmd: prompt.unwrap_or_else(|| "(waiting for you)".to_string()),
         summary: Some(format!("Agent {title} spawned ({tool}).")),
     });
     thread::Builder::new()
@@ -442,6 +468,7 @@ pub(super) fn spawn_async(
                 log_dir: log_dir.clone(),
                 title: born_title,
                 parent: born_parent,
+                branch: !delivers,
             });
             let (outcome, payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 // The child drives on its own provider handle, seeded at
@@ -451,47 +478,52 @@ pub(super) fn spawn_async(
             }))
             .unwrap_or_else(|_| (AgentOutcome::Failed("sub-agent panicked".into()), None));
             child_emit.emit(Kind::Died);
-            // A model parent reads the reply as prose in its context, so the
-            // peer edge renders the faithful payload to text here.
-            let text = payload
-                .as_ref()
-                .map(crate::agent::render_reply)
-                .unwrap_or_default();
-            // A commitment writer/verifier's structured reply decides here,
-            // on the worker thread, while the raw payload is still in hand —
-            // the parent only ever sees the tag, never the payload itself.
-            let commitment_settle = commitment
-                .and_then(|i| super::commitment::commitment_settle(i, &outcome, &payload));
-            // Deliver, then retire.  The parent's park verdict reads child
-            // liveness (the registry) and delivery (its inbox) under two
-            // different locks, and pops its queue only after the verdict —
-            // so the push must come first: a parent that observes this
-            // entry gone is then guaranteed to find the result already
-            // queued, and cannot quiesce between the two facts and drop it.
-            // Staleness (this worker settling across a `/clear`) is decided
-            // at the consuming edge instead: the drive loop's generation
-            // admission reads the birth `generation` stamped here.
-            let rejected = parent_mailbox.push(InboxMsg::AgentResult(AgentResult {
-                id: agent_id,
-                title: worker_title,
-                outcome,
-                text,
-                log_dir,
-                elapsed: started.elapsed(),
-                generation,
-                commitment_settle,
-            }));
-            // No synchronous caller to return this to — the spawn's own
-            // tool_result already returned the "started" receipt — so the
-            // drop is reported through the child's own error vocabulary
-            // instead of silently vanishing
-            // (`decisions/260705_leases-and-budgets`).
-            if let Err(reject) = rejected {
-                child_emit.emit(Kind::Error(format!(
-                    "the parent's inbox rejected this result: {reject}"
-                )));
+            // A returning sub-agent delivers its one result upward and then
+            // self-settles; a branch converses, pushes nothing, and leaves its
+            // entry to outlive this worker (dropped by `/clear`/`/close`).
+            if delivers {
+                // A model parent reads the reply as prose in its context, so
+                // the peer edge renders the faithful payload to text here.
+                let text = payload
+                    .as_ref()
+                    .map(crate::agent::render_reply)
+                    .unwrap_or_default();
+                // A commitment writer/verifier's structured reply decides here,
+                // on the worker thread, while the raw payload is still in hand —
+                // the parent only ever sees the tag, never the payload itself.
+                let commitment_settle = commitment
+                    .and_then(|i| super::commitment::commitment_settle(i, &outcome, &payload));
+                // Deliver, then retire.  The parent's park verdict reads child
+                // liveness (the registry) and delivery (its inbox) under two
+                // different locks, and pops its queue only after the verdict —
+                // so the push must come first: a parent that observes this
+                // entry gone is then guaranteed to find the result already
+                // queued, and cannot quiesce between the two facts and drop it.
+                // Staleness (this worker settling across a `/clear`) is decided
+                // at the consuming edge instead: the drive loop's generation
+                // admission reads the birth `generation` stamped here.
+                let rejected = parent_mailbox.push(InboxMsg::AgentResult(AgentResult {
+                    id: agent_id,
+                    title: worker_title,
+                    outcome,
+                    text,
+                    log_dir,
+                    elapsed: started.elapsed(),
+                    generation,
+                    commitment_settle,
+                }));
+                // No synchronous caller to return this to — the spawn's own
+                // tool_result already returned the "started" receipt — so the
+                // drop is reported through the child's own error vocabulary
+                // instead of silently vanishing
+                // (`decisions/260705_leases-and-budgets`).
+                if let Err(reject) = rejected {
+                    child_emit.emit(Kind::Error(format!(
+                        "the parent's inbox rejected this result: {reject}"
+                    )));
+                }
+                registry.settle(agent_id, generation);
             }
-            registry.settle(agent_id, generation);
         })
         .expect("spawn async agent worker");
     let receipt = json!({

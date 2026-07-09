@@ -961,6 +961,10 @@ pub enum Kind {
         /// that when a focused agent ends (`reply`), focus falls back to its
         /// parent, recursing toward the trunk.
         parent: AgentId,
+        /// A `/branch` tab (a conversing fork of its parent) rather than a
+        /// returning sub-agent.  The TUI records it so `/close` admits only a
+        /// branch tab.
+        branch: bool,
     },
     Died,
     Token(String),
@@ -2676,6 +2680,7 @@ mod tests {
                 log_dir: PathBuf::new(),
                 title: "a".into(),
                 parent: 0,
+                branch: false,
             },
         })
         .unwrap();

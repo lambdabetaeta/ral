@@ -96,9 +96,10 @@ pub(crate) fn event_record(t_ms: u128, id: AgentId, kind: &Kind) -> Option<serde
             log_dir,
             title,
             parent,
+            branch,
         } => (
             "born",
-            json!({ "log_dir": log_dir.to_string_lossy(), "title": title, "parent": parent }),
+            json!({ "log_dir": log_dir.to_string_lossy(), "title": title, "parent": parent, "branch": branch }),
         ),
         Kind::Died => ("died", json!({})),
         Kind::Usage(u) => (

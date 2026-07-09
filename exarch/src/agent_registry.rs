@@ -161,7 +161,7 @@ impl AgentRegistry {
 
     /// True while `id` is a live registered agent — the fleet still lists it.
     /// A conversing agent reads this at each park: once its entry is reaped
-    /// (`/clear`, `agent_cancel`), it must quiesce rather than park Held as a
+    /// (`/clear`, `/close`), it must quiesce rather than park Held as a
     /// zombie.
     pub fn is_live(&self, id: AgentId) -> bool {
         self.lock().entries.contains_key(&id)
@@ -357,6 +357,23 @@ impl AgentRegistry {
         g.generation += 1;
     }
 
+    /// Close `root` and its whole subtree: cancel each entry's in-flight turn and
+    /// eval, then drop the entries.  The inclusive twin of the `/clear` reap
+    /// (`remove_descendants` leaves the root); no generation bump — a branch
+    /// pushes no result, so there is nothing to fence.  `/close` routes here.
+    pub fn remove_subtree(&self, root: AgentId) {
+        let mut g = self.lock();
+        let subtree = descendants(&g.entries, root, true);
+        for d in &subtree {
+            if let Some(e) = g.entries.get(d) {
+                cancel_entry(e, CancelCause::Explicit);
+            }
+        }
+        for d in subtree {
+            g.entries.remove(&d);
+        }
+    }
+
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -537,6 +554,56 @@ mod tests {
             eval_root.as_scope().is_cancelled(),
             "the reap cancels the worker's eval layer, not just its token"
         );
+    }
+
+    /// `/close` routes to `remove_subtree`, the inclusive twin of the `/clear`
+    /// reap: it cancels and drops the whole subtree *including* its root — a
+    /// branch and any agents it spawned — where `remove_descendants` would have
+    /// left the root live.  The trunk above the closed subtree is untouched.
+    #[test]
+    fn remove_subtree_cancels_and_removes_the_root_too() {
+        let reg = AgentRegistry::new();
+        entry(&reg, 0, None); // the trunk
+        let branch_token = Token::new();
+        let branch_root = DurableRoot::default();
+        let child_token = Token::new();
+        reg.register(
+            1,
+            Some(0),
+            false, // a branch carries no ceiling
+            "branch".into(),
+            PathBuf::from("/tmp/branch"),
+            branch_token.clone(),
+            Some(branch_root.clone()),
+            mb(),
+            provider(),
+        );
+        reg.register(
+            2,
+            Some(1),
+            true,
+            "grandchild".into(),
+            PathBuf::from("/tmp/gc"),
+            child_token.clone(),
+            Some(DurableRoot::default()),
+            mb(),
+            provider(),
+        );
+
+        reg.remove_subtree(1);
+
+        assert!(branch_token.is_cancelled(), "the closed branch's token is set");
+        assert!(
+            branch_root.as_scope().is_cancelled(),
+            "close reaches the branch's eval layer, not just its token"
+        );
+        assert!(child_token.is_cancelled(), "a spawned descendant cascades");
+        assert!(
+            !reg.is_live(1),
+            "the branch itself is gone, unlike a /clear reap"
+        );
+        assert!(!reg.is_live(2), "and so is its descendant");
+        assert!(reg.is_live(0), "the trunk above the closed subtree survives");
     }
 
     #[test]

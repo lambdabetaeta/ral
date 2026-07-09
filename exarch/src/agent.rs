@@ -619,9 +619,6 @@ impl Agent {
     /// verbatim, but `reply` withheld so it parks for the human (a /branch tab)
     /// instead of returning a value.  Mnemon-style context import, like
     /// `fork_remembering`.
-    // Wired by the `/branch` command in a later package; the fork primitive
-    // lands now so the registry ceiling knob it relies on ships in one change.
-    #[allow(dead_code)]
     pub(crate) fn branch(&self) -> io::Result<Agent> {
         let mut child = self.fork_with(self.caps.clone(), false)?;
         self.inherit_context(&mut child)?;
