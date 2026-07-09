@@ -12,7 +12,7 @@
 //!     (`agent_cancel`);
 //!   * the **subtree cascade**: [`AgentRegistry::cancel`] cancels an agent
 //!     *and every descendant*, the single primitive behind `agent_cancel`,
-//!     the per-agent ceiling, and an `Esc` on the focused subtree.  Each
+//!     the per-agent ceiling, and `/clear`.  Each
 //!     node is cancelled across both layers — the cooperative [`Token`] its
 //!     drive loop polls, and its own session's durable root, so an
 //!     in-flight `ral` eval unwinds at ral's poll points instead of
@@ -282,18 +282,30 @@ impl AgentRegistry {
 
     /// Cancel an agent **and its whole subtree** by id; `true` if the agent
     /// existed.  The single cascade primitive: `agent_cancel`, the ceiling,
-    /// and an `Esc` on the focused subtree all route here.  Each cancelled
-    /// worker observes its token, settles `Cancelled`, and removes its own
-    /// entry through [`Self::settle`].
+    /// and `/clear` all route here.  Each cancelled worker observes its token,
+    /// settles `Cancelled`, and removes its own entry through [`Self::settle`].
     pub fn cancel(&self, id: AgentId) -> bool {
         let g = self.lock();
         let existed = g.entries.contains_key(&id);
         for d in descendants(&g.entries, id, true) {
             if let Some(e) = g.entries.get(&d) {
-                cancel_entry(e);
+                cancel_entry(e, CancelCause::Explicit);
             }
         }
         existed
+    }
+
+    /// A per-tab turn interrupt: unwind exactly this entry's in-flight turn and
+    /// eval, without cascading to descendants or removing the entry. Esc/Ctrl-C
+    /// on a focused sub-agent tab route here; the agent drops its turn and re-parks.
+    pub fn interrupt(&self, id: AgentId) {
+        let g = self.lock();
+        if let Some(e) = g.entries.get(&id) {
+            e.cancel.cancel(CancelCause::Interrupt);
+            if let Some(root) = &e.eval_root {
+                root.cancel(CancelCause::Interrupt);
+            }
+        }
     }
 
     /// Snapshot the live agents in `ancestor`'s subtree (its proper
@@ -378,7 +390,7 @@ fn remove_descendants(g: &mut Inner, root: AgentId) {
     let desc = descendants(&g.entries, root, false);
     for d in &desc {
         if let Some(e) = g.entries.get(d) {
-            cancel_entry(e);
+            cancel_entry(e, CancelCause::Explicit);
         }
     }
     for d in desc {
@@ -390,10 +402,10 @@ fn remove_descendants(g: &mut Inner, root: AgentId) {
 /// loop polls between steps, and — for a parented agent — its session's
 /// durable root, so an in-flight eval unwinds at the evaluator's poll points
 /// rather than running to its timeout wall.
-fn cancel_entry(e: &Entry) {
-    e.cancel.cancel();
+fn cancel_entry(e: &Entry, cause: CancelCause) {
+    e.cancel.cancel(cause);
     if let Some(root) = &e.eval_root {
-        root.cancel(CancelCause::Explicit);
+        root.cancel(cause);
     }
 }
 

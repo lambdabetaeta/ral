@@ -282,7 +282,8 @@ pub struct CommandCtx<'a> {
 /// ~60 FPS, and routes the user's keystrokes: scrollback / picker keys edit the
 /// App, a submitted line is routed by [`route_submit`] (view commands run here;
 /// agent commands and plain prompts go onto the focused agent's inbox), and Esc
-/// / Ctrl-C cancel the focused agent's turn and its subtree.  A `TAB` that moves
+/// / Ctrl-C interrupt the focused tab's current turn (never a cascade, never a
+/// kill).  A `TAB` that moves
 /// focus `wake`s the de-focused and newly-focused agents so each re-evaluates
 /// its park verdict.  Returns when the worker finishes (a `/quit`), draining its
 /// final events for one last frame.
@@ -406,20 +407,23 @@ fn ui_loop(
                         focused == tui.app.tabs.root() || ctx.agents.mailbox(focused).is_some();
                     tui.app.tabs.set_steerable(steerable);
                     match key_action(KeyMode::Running, &k, steerable) {
-                        // Esc / Ctrl-C cancel the *focused* agent's turn and its
-                        // subtree.  On the trunk that is the published-slot path
-                        // (the token and the ral foreground); the cascade then
-                        // reaps any descendants.  On a focused sub-agent only the
-                        // registry cascade fires — a sub-agent never publishes
-                        // the slots, so the slot/foreground path would target
-                        // the trunk by mistake.  The cascade reaches each
-                        // agent's own session root alongside its token, so an
-                        // eval already in flight unwinds at ral's poll points.
+                        // Esc / Ctrl-C interrupt the *focused* tab's current
+                        // turn — never a cascade, never a kill.  On the trunk
+                        // `raise_interrupt()` unwinds the trunk's own turn via
+                        // the published slot and the ral foreground.  On any
+                        // other focused tab `interrupt(id)` unwinds that agent's
+                        // turn alone through its registered token and eval-root;
+                        // a sub-agent never publishes the slots, so the
+                        // slot/foreground path would target the trunk by
+                        // mistake.  Neither reaches descendants, and neither
+                        // ends the agent — lifecycle death stays with `/quit`,
+                        // `/clear`, the ceiling, and `agent_cancel`.
                         KeyAction::Cancel => {
                             if focused == tui.app.tabs.root() {
                                 cancel::raise_interrupt();
+                            } else {
+                                ctx.agents.interrupt(focused);
                             }
-                            ctx.agents.cancel(focused);
                         }
                         KeyAction::Submit => {
                             if let Some(text) = tui.app.prompt_state.submit() {

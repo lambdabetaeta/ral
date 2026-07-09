@@ -824,10 +824,13 @@ impl Inbox {
         loop {
             let mode = park();
             // A non-`Held` park (schedule-only, or quiescent) terminates the
-            // instant the token trips — `agent_cancel`/ceiling means stop now,
-            // dropping any queued messages.  A `Held` park ignores it: the
-            // human is present, and an Esc cancels a turn, not the agent.
-            if mode != ParkMode::Held && cancel.is_cancelled() {
+            // instant a *terminate*-cause cancel trips — `agent_cancel`, the
+            // ceiling, or `/clear` means stop now, dropping any queued
+            // messages.  An *interrupt*-cause cancel is not a terminate: it
+            // drops the in-flight turn but the agent re-parks.  A `Held` park
+            // ignores cancellation entirely: the human is present, and an Esc
+            // interrupts a turn, not the agent.
+            if mode != ParkMode::Held && cancel.terminated() {
                 return None;
             }
             if let Some(turn) = pop_turn(&mut q) {
@@ -2110,7 +2113,7 @@ mod tests {
             "waiting on children is still work, not a human-input yield"
         );
 
-        token.cancel();
+        token.cancel(ral_core::process::CancelCause::Explicit);
         assert!(
             handle.join().expect("cancelled worker joins").is_none(),
             "non-human parks terminate on cancellation"

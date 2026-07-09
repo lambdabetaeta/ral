@@ -9,27 +9,31 @@
 //! live turn), and the drive loop [`reset`](Token::reset)s its flag at each
 //! genuine turn boundary so a prior turn's Esc never bleeds into the next.
 //! The token is threaded down through `apply` → dispatch → tools, cancelled
-//! by the chained signal handler, by the registry cascade (`agent_cancel`,
-//! the ceiling, an Esc on the focused subtree), and raced by the HTTP
-//! request future, so one signal stops the turn and returns to the prompt.
+//! by the chained signal handler, by a per-tab turn interrupt
+//! (`AgentRegistry::interrupt`), by the registry cascade (`agent_cancel`, the
+//! ceiling, `/clear`), and raced by the HTTP request future, so one
+//! cancellation stops the turn and returns to the prompt.  The cause a token
+//! carries decides how far it reaches: an
+//! [`Interrupt`](ral_core::process::CancelCause) unwinds only the in-flight
+//! turn and the agent re-parks; any stronger cause terminates the agent.
 //!
-//! Ctrl-C and Esc route through [`raise_interrupt`], which cancels
-//! the trunk's published token and asks ral to cancel the current turn's
-//! foreground scope with [`CancelCause::Interrupt`](ral_core::process::CancelCause):
-//! the foreground evaluation unwinds at its next poll, while detached
-//! workers — parented at the durable root, not the foreground — are
-//! cancelled instead through the registry's subtree cascade, which cancels
-//! each agent's token *and* its own session's durable root (only the
-//! trunk's session publishes the process signal slots; a sub-agent's eval
-//! is reached through that per-session handle).  No global counter is
-//! ticked on the Esc path, so there is nothing to escalate toward a
-//! force-exit.
+//! Ctrl-C and Esc are a *per-tab turn interrupt* — they unwind the focused
+//! tab's current turn, never cascade to descendants, never end the agent.  On
+//! the trunk they route through [`raise_interrupt`], which cancels the trunk's
+//! published token and asks ral to cancel the current turn's foreground scope
+//! with [`CancelCause::Interrupt`](ral_core::process::CancelCause), so the
+//! foreground evaluation unwinds at its next poll; on any other focused tab
+//! they route through `AgentRegistry::interrupt`, which cancels that agent's
+//! own token *and* its session's durable root with the same cause (only the
+//! trunk's session publishes the process signal slots; a sub-agent's eval is
+//! reached through that per-session handle).  No global counter is ticked on
+//! the interrupt path, so there is nothing to escalate toward a force-exit.
 //!
 //! The signal handler cannot hold a token by value, so the trunk
 //! [`publish`]es its token's flag into a process-global *slot* (an
 //! `AtomicPtr`, the lock-free ArcSwap analogue — a signal handler must
 //! not lock) for the handler to set.  The slot points into the trunk's
-//! own sticky [`Token`]'s `Arc<AtomicBool>`; [`publish`] leaks one strong
+//! own sticky [`Token`]'s `Arc<AtomicU8>`; [`publish`] leaks one strong
 //! share of that `Arc` so the pointee outlives every guard and every other
 //! share, making the published pointer safe for a handler to dereference
 //! at any time, including one that loaded it just before the slot was
@@ -55,31 +59,42 @@
 //! [`crate::bootstrap::boot_shell`] owns that ceremony for exarch session
 //! shells, including `/clear` rebuilds.
 
+use ral_core::process::CancelCause;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 
-/// An agent's cancellation handle.  Cloning shares the same flag
-/// (an `Arc<AtomicBool>`), so the registry entry's clone and the drive
-/// loop's clone are one token — cancelling either halts the agent's turn.
+/// An agent's cancellation handle.  Cloning shares the same flag (an
+/// `Arc<AtomicU8>`, holding the [`CancelCause`] a cancel was raised with, `0`
+/// while un-cancelled), so the registry entry's clone and the drive loop's
+/// clone are one token — cancelling either halts the agent's turn.
 #[derive(Clone, Default)]
-pub struct Token(Arc<AtomicBool>);
+pub struct Token(Arc<AtomicU8>);
 
 impl Token {
     /// A fresh, un-cancelled token.  Each agent owns one for its life; the
     /// trunk additionally [`publish`]es its token to the signal slot.
     pub fn new() -> Self {
-        Token(Arc::new(AtomicBool::new(false)))
+        Token(Arc::new(AtomicU8::new(0)))
     }
 
     /// True once this token (or, since clones share the flag, any of its
-    /// shares) has been cancelled.
+    /// shares) has been cancelled — for *any* cause.  The `apply` loop and the
+    /// provider poll this to unwind whatever turn is in flight.
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+        self.0.load(Ordering::Relaxed) != 0
     }
 
-    /// Cancel this token and every share of it.
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::Relaxed);
+    /// True when a *terminate*-cause cancel is in force — any cause but an
+    /// [`Interrupt`](CancelCause).  A non-`Held` park ends the agent on this;
+    /// a bare interrupt only drops the in-flight turn and the agent re-parks.
+    pub fn terminated(&self) -> bool {
+        let flag = self.0.load(Ordering::Relaxed);
+        flag != 0 && flag != CancelCause::Interrupt as u8
+    }
+
+    /// Cancel this token and every share of it, recording `cause`.
+    pub fn cancel(&self, cause: CancelCause) {
+        self.0.store(cause as u8, Ordering::Relaxed);
     }
 
     /// Clear the cancellation flag — the per-turn reset the drive loop runs
@@ -88,7 +103,7 @@ impl Token {
     /// subtree cascade always reaches the live turn); the boundary clears its
     /// flag rather than swapping the `Arc`.
     pub fn reset(&self) {
-        self.0.store(false, Ordering::Relaxed);
+        self.0.store(0, Ordering::Relaxed);
     }
 }
 
@@ -96,7 +111,7 @@ impl Token {
 /// trunk is publishing.  Holds a pointer into the [`Token`]'s `Arc`, made
 /// immortal by [`publish`]'s deliberate leak so the pointee outlives every
 /// guard.
-static CURRENT: AtomicPtr<AtomicBool> = AtomicPtr::new(std::ptr::null_mut());
+static CURRENT: AtomicPtr<AtomicU8> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Publish an existing token to the signal slot for as long as the returned
 /// guard lives.  The trunk (the parent-less agent) calls it once, holding the
@@ -114,8 +129,8 @@ static CURRENT: AtomicPtr<AtomicBool> = AtomicPtr::new(std::ptr::null_mut());
 /// from tests.
 pub fn publish(token: &Token) -> SlotGuard {
     std::mem::forget(token.0.clone());
-    let flag: *const AtomicBool = Arc::as_ptr(&token.0);
-    CURRENT.store(flag as *mut AtomicBool, Ordering::Release);
+    let flag: *const AtomicU8 = Arc::as_ptr(&token.0);
+    CURRENT.store(flag as *mut AtomicU8, Ordering::Release);
     SlotGuard
 }
 
@@ -142,11 +157,13 @@ pub(crate) fn is_set() -> bool {
     // deliberately leaked, so the pointee is live for the rest of the
     // process — the guard's null-on-drop only bounds when the slot fires,
     // not the pointee's lifetime.
-    !p.is_null() && unsafe { (*p).load(Ordering::Relaxed) }
+    !p.is_null() && unsafe { (*p).load(Ordering::Relaxed) } != 0
 }
 
-/// Set the trunk's published token (signal-handler safe: a single atomic load
-/// of the slot plus an atomic store).  A no-op when no trunk is publishing.
+/// Raise an [`Interrupt`](CancelCause) on the trunk's published token
+/// (signal-handler safe: a single atomic load of the slot plus an atomic
+/// store) — the frontend interrupt is always an interrupt, never a terminate.
+/// A no-op when no trunk is publishing.
 fn raise() {
     let p = CURRENT.load(Ordering::Acquire);
     if !p.is_null() {
@@ -154,7 +171,7 @@ fn raise() {
         // deliberately leaked, so the pointee is live for the rest of the
         // process — the guard's null-on-drop only bounds when the slot fires,
         // not the pointee's lifetime.
-        unsafe { (*p).store(true, Ordering::Relaxed) };
+        unsafe { (*p).store(CancelCause::Interrupt as u8, Ordering::Relaxed) };
     }
 }
 
