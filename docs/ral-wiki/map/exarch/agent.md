@@ -357,7 +357,7 @@ amnemon path uses plain `fork`; both spawn modes seed the launch prompt into
 the child's inbox.
 
 Routing the fork through core matters because the builtin table is the easiest
-thing to drop. The exarch host builtins — `window-hash`, `grep-files`, `edit`,
+thing to drop. The exarch host builtins — `window-hash`, `grep-files`, `edit-hash`,
 `explore-dir`, `line-hash` ([[map/exarch/shell-eval|agent_builtins]]) — live in
 the agent's dispatch table, *outside* `Mobile`, and the `view-text` /
 `view-text-around` helpers in `agent.ral` call `window-hash`. A fork that copied

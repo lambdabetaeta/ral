@@ -142,7 +142,7 @@ return [
 
     # Version control.  `git` is denied — the agent edits files
     # directly; committing is a human decision.  Use ral builtins
-    # (`grep-files`, `view-text`, `edit`) for code exploration and
+    # (`grep-files`, `view-text`, `edit-hash`) for code exploration and
     # modification; use `gh pr view` or `curl` to fetch remote context.
     # `gh` remains admitted for PR review and issue fetching.
     git: 'deny',

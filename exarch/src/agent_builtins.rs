@@ -97,13 +97,13 @@ pub(crate) fn agent_library_docs() -> Vec<(String, String)> {
 /// Content hash of a line for witnessed editing: the letter `h` followed
 /// by six hex characters of a Blake3 digest, trailing whitespace ignored.
 /// The `h` prefix keeps the witness un-lexable as a number — a bare
-/// all-digit token in `edit`'s hash position would otherwise elaborate to
+/// all-digit token in `edit-hash`'s hash position would otherwise elaborate to
 /// `Val::Int` and never compare equal to the recomputed `String` hash.
 ///
 /// Private: the witness is never something the model constructs, only one it
 /// copies out of a `view-text` read, so neither this nor the
 /// window hash is exposed to ral — `view-text`, `view-text-around`,
-/// and `edit` are the whole surface.
+/// and `edit-hash` are the whole surface.
 fn line_hash(line: &str) -> String {
     let stripped = line.trim_end();
     let hex = blake3::hash(stripped.as_bytes()).to_hex();
@@ -149,7 +149,7 @@ enum Witness {
 /// by the total size of collision classes across radii — linear on real files,
 /// where almost every line is unique at the floor.
 ///
-/// Shared verbatim by `view-text` and `edit`, so a read and the
+/// Shared verbatim by `view-text` and `edit-hash`, so a read and the
 /// edit that follows it derive identical witnesses from identical content.
 fn window_hashes(rows: &[String]) -> Vec<String> {
     let n = rows.len();
@@ -158,7 +158,7 @@ fn window_hashes(rows: &[String]) -> Vec<String> {
     }
     let lh: Vec<String> = rows.iter().map(|line| line_hash(line)).collect();
 
-    // The signature `edit` and `view-text` agree on: two lines share a radius-`r`
+    // The signature `edit-hash` and `view-text` agree on: two lines share a radius-`r`
     // witness exactly when their signatures here are equal — the target's offset
     // within its clamped window, then that window's line-hashes in order.
     let signature = |i: usize, r: usize| -> String {
@@ -234,7 +234,7 @@ fn rows_of(body: &str) -> Vec<String> {
 /// Surface the one `{io:"read", path}` card for a whole-file read.  `view-text`
 /// and `witnesses` read in Rust below the ral line (no `< path` redirect), so
 /// they raise their own read card — one logical surface per read, matching the
-/// shape the redirect frame would have pushed.  `edit`/`edit-str` are the
+/// shape the redirect frame would have pushed.  `edit-hash`/`edit-str` are the
 /// exception: they read silently and speak only their `write` event.
 fn surface_read(shell: &mut Shell, path: &str) {
     shell.surface(Value::map(vec![
@@ -412,11 +412,11 @@ struct ResolvedEdit {
 }
 
 /// Backslash letters that read as a C/Python-style escape but are not one:
-/// `edit`/`edit-str` take their replacement text verbatim, with no escaping
+/// `edit-hash`/`edit-str` take their replacement text verbatim, with no escaping
 /// of their own, so a literal `\n` in a replacement lands as two characters
 /// — backslash, n — not a newline.  A model reaching for a familiar escape
 /// syntax here almost always meant the real character; `has_suspicious_escapes`
-/// flags that so `edit`'s stderr note can ask.
+/// flags that so `edit-hash`'s stderr note can ask.
 const SUSPECT_ESCAPE_LETTERS: [char; 7] = ['n', 't', 'r', '0', '\\', '\'', '"'];
 
 fn has_suspicious_escapes(text: &str) -> bool {
@@ -425,11 +425,11 @@ fn has_suspicious_escapes(text: &str) -> bool {
         .any(|i| bytes[i] == b'\\' && SUSPECT_ESCAPE_LETTERS.contains(&(bytes[i + 1] as char)))
 }
 
-/// Note a completed edit on stderr for the model: `[EXARCH] Changed line(s)
-/// … of PATH.`, with a trailing warning if any replacement looks like it
-/// carries an unintended escape sequence.  Surfaced separately from the
-/// `write` io event (which stays the forensic record of the commit) since
-/// this is a plain status line, not structured data for the card layer.
+/// Note a completed edit on stderr for the model, with a trailing warning if
+/// any replacement looks like it carries an unintended escape sequence.
+/// Surfaced separately from the `write` io event (which stays the forensic
+/// record of the commit) since this is a plain status line, not structured
+/// data for the card layer.
 fn note_edit(shell: &mut Shell, path: &str, lines: &str, plural: bool, any_escapes: bool) {
     let word = if plural { "lines" } else { "line" };
     let warning = if any_escapes {
@@ -439,15 +439,15 @@ fn note_edit(shell: &mut Shell, path: &str, lines: &str, plural: bool, any_escap
     };
     let _ = writeln!(
         shell.stderr_mut(),
-        "[EXARCH] Changed {word} {lines} of {path}.{warning}"
+        "[EXARCH] Replaced {word} {lines} of {path}.{warning}"
     );
 }
 
-/// `edit PATH EDITS` — apply a batch of `[hash: …, line: …]` records in one
+/// `edit-hash PATH EDITS` — apply a batch of `[hash: …, line: …]` records in one
 /// read/rebuild/write pass, then surface one write io event carrying the
 /// whole-file diff.  The read runs in Rust (not a redirect), so it raises no
 /// read card; the write goes through core's atomic write door
-/// ([`Shell::atomic_write`]) below the redirect frame, so `edit` owns its
+/// ([`Shell::atomic_write`]) below the redirect frame, so `edit-hash` owns its
 /// surface — one committed `write` event whose old/new snapshots the write card
 /// renders as a diff, exactly like a committed `>` over the same file.
 ///
@@ -458,29 +458,28 @@ fn note_edit(shell: &mut Shell, path: &str, lines: &str, plural: bool, any_escap
 /// line.  The `line` field is the replacement text, taken verbatim: empty
 /// deletes the line; a real newline inside it splits the line into several.
 ///
-/// A commit also notes what changed on stderr — `[EXARCH] Changed line(s) …
-/// of PATH.` — with a warning if a `line` looks like it carries an unintended
-/// `\n`/`\t`-style escape rather than the literal character (see
-/// [`has_suspicious_escapes`]).
-fn builtin_edit(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    check_arity(args, 2, "edit")?;
+/// A commit also notes what changed on stderr (see [`note_edit`]), with a
+/// warning if a `line` looks like it carries an unintended `\n`/`\t`-style
+/// escape rather than the literal character (see [`has_suspicious_escapes`]).
+fn builtin_edit_hash(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    check_arity(args, 2, "edit-hash")?;
     let path = args[0].to_string();
     let edits = match &args[1] {
         Value::List(items) => items,
         other => {
             return Err(sig(format!(
-                "edit: expected a List of [hash: …, line: …] records, got {}",
+                "edit-hash: expected a List of [hash: …, line: …] records, got {}",
                 other.type_name()
             )));
         }
     };
     if edits.is_empty() {
         return Err(sig(
-            "edit: no edits given — pass a list of [hash: …, line: …] records.".to_string(),
+            "edit-hash: no edits given — pass a list of [hash: …, line: …] records.".to_string(),
         ));
     }
 
-    let body = read_text_file(shell, &path, "edit")?;
+    let body = read_text_file(shell, &path, "edit-hash")?;
     let rows = rows_of(&body);
     let n = rows.len();
     let hashes = window_hashes(&rows);
@@ -494,7 +493,7 @@ fn builtin_edit(args: &[Value], shell: &mut Shell) -> Settled<Value> {
             Value::Map(m) => m,
             other => {
                 return Err(sig(format!(
-                    "edit: each edit must be a [hash: …, line: …] record, got {}",
+                    "edit-hash: each edit must be a [hash: …, line: …] record, got {}",
                     other.type_name()
                 )));
             }
@@ -503,7 +502,7 @@ fn builtin_edit(args: &[Value], shell: &mut Shell) -> Settled<Value> {
             Some(v) => v.to_string(),
             None => {
                 return Err(sig(
-                    "edit: each edit needs a `hash` field — the witness from view-text/witnesses."
+                    "edit-hash: each edit needs a `hash` field — the witness from view-text/witnesses."
                         .to_string(),
                 ));
             }
@@ -512,7 +511,7 @@ fn builtin_edit(args: &[Value], shell: &mut Shell) -> Settled<Value> {
             Some(v) => v.to_string(),
             None => {
                 return Err(sig(
-                    "edit: each edit needs a `line` field — the replacement text.".to_string(),
+                    "edit-hash: each edit needs a `line` field — the replacement text.".to_string(),
                 ));
             }
         };
@@ -520,7 +519,7 @@ fn builtin_edit(args: &[Value], shell: &mut Shell) -> Settled<Value> {
         match idxs.len() {
             0 => {
                 return Err(sig(format!(
-                    "edit: no line in {path} hashes to {want} — did the file change? Re-read with view-text/view-text-around before editing."
+                    "edit-hash: no line in {path} hashes to {want} — did the file change? Re-read with view-text/view-text-around before editing."
                 )));
             }
             1 => resolved.push(ResolvedEdit { at: idxs[0], new }),
@@ -528,7 +527,7 @@ fn builtin_edit(args: &[Value], shell: &mut Shell) -> Settled<Value> {
                 let at: Vec<String> = idxs.iter().map(|i| (i + 1).to_string()).collect();
                 let r#where = at.join(", ");
                 return Err(sig(format!(
-                    "edit: hash {want} matches lines {} in {path} — re-read; the witness has gone stale.",
+                    "edit-hash: hash {want} matches lines {} in {path} — re-read; the witness has gone stale.",
                     r#where
                 )));
             }
@@ -540,7 +539,7 @@ fn builtin_edit(args: &[Value], shell: &mut Shell) -> Settled<Value> {
         for v in (w + 1)..resolved.len() {
             if resolved[w].at == resolved[v].at {
                 return Err(sig(format!(
-                    "edit: two edits name line {} in {path}.",
+                    "edit-hash: two edits name line {} in {path}.",
                     resolved[w].at + 1
                 )));
             }
@@ -578,11 +577,11 @@ fn builtin_edit(args: &[Value], shell: &mut Shell) -> Settled<Value> {
 /// The largest either snapshot of an edit may reach before its `write` card
 /// falls back to a plain listing instead of a whole-file diff — mirrors core's
 /// write-preview cap (`PREVIEW_CAP` in `runtime/command/redirect.rs`), so an
-/// `edit`/`edit-str` write and a committed `>` over the same file make the
+/// `edit-hash`/`edit-str` write and a committed `>` over the same file make the
 /// identical diff-vs-listing choice.
 const DIFF_SNAPSHOT_CAP: usize = 64 * 1024;
 
-/// Surface the structural `write` io event an `edit`/`edit-str` commit raises —
+/// Surface the structural `write` io event an `edit-hash`/`edit-str` commit raises —
 /// the same event a committed `>` redirect emits, so the write card renders
 /// `old` vs `new` as a whole-file diff below its `write <path> committed`
 /// heading.  Both snapshots ride as `old_bytes`/`new_bytes`; `old_bytes` is
@@ -608,14 +607,14 @@ fn surface_write(shell: &mut Shell, path: &str, old: &str, new: &str) {
 
 /// Read a file as a UTF-8 string for the witness layer, gating the read through
 /// the active grant the way a `< path` redirect would.  The shared read door of
-/// `view-text`, `witnesses`, and `edit`: in Rust, below the ral line, so it
+/// `view-text`, `witnesses`, and `edit-hash`: in Rust, below the ral line, so it
 /// never reaches the redirect frame.  Each caller decides its own surface —
-/// `view-text`/`witnesses` raise one read card, `edit`/`edit-str` read silently
+/// `view-text`/`witnesses` raise one read card, `edit-hash`/`edit-str` read silently
 /// and speak only their `write` event.  A non-UTF-8 file is named (the witness
 /// layer cannot address it); `tool` puts the calling builtin's name on the error.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:surface:witness-read] The witness layer's read door (view-text/witnesses/edit), in Rust below the ral line so it never reaches the redirect frame. view-text and witnesses surface their own read card; edit/edit-str read silently and emit only their write event. The grant is still checked, as a `< path` redirect would."
+    reason = "[io-door:surface:witness-read] The witness layer's read door (view-text/witnesses/edit-hash), in Rust below the ral line so it never reaches the redirect frame. view-text and witnesses surface their own read card; edit-hash/edit-str read silently and emit only their write event. The grant is still checked, as a `< path` redirect would."
 )]
 fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<String> {
     let rp = shell.resolve(path);
@@ -633,10 +632,10 @@ fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<String> 
 /// occurrence of `from` with `to` via the same match/error logic as
 /// `string-replace` (0 or >1 matches errors, leaving the file untouched),
 /// and write the result back.  Composed over the same read/write doors as
-/// `edit`: the read is silent and the write goes through core's atomic door
+/// `edit-hash`: the read is silent and the write goes through core's atomic door
 /// ([`Shell::atomic_write`]), so it surfaces one committed `write` io event
 /// whose old/new snapshots the write card renders as a whole-file diff.  It
-/// notes the change on stderr the same way `edit` does, with the line range
+/// notes the change on stderr the same way `edit-hash` does, with the line range
 /// computed from where the match started (see [`note_edit`]).
 fn builtin_edit_str(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     check_arity(args, 3, "edit-str")?;
@@ -776,10 +775,10 @@ fn scheme_view_text(_u: &mut Unifier) -> Scheme {
     )
 }
 
-/// `edit :: Str → [{hash: Str, line: Str}] → F Unit` — `path` then a list of
-/// `[hash: …, line: …]` records.  Returns Unit: `edit` writes and surfaces, it
-/// does not yield a value.
-fn scheme_edit(_u: &mut Unifier) -> Scheme {
+/// `edit-hash :: Str → [{hash: Str, line: Str}] → F Unit` — `path` then a list
+/// of `[hash: …, line: …]` records.  Returns Unit: `edit-hash` writes and
+/// surfaces, it does not yield a value.
+fn scheme_edit_hash(_u: &mut Unifier) -> Scheme {
     scheme(
         &[],
         &[],
@@ -1098,7 +1097,7 @@ pub static EXARCH_BUILTINS: &[BuiltinEntry] = &[
     BuiltinEntry {
         name: Cow::Borrowed("view-text"),
         type_rule: BuiltinTypeRule::Scheme(Some(3), scheme_view_text),
-        doc: "view-text <path> <start> <end>  — show the half-open line range [start, end) of PATH, each line tagged `<line-no>\\t<hash>\\t<text>`. Returns a list of records [{line: Int, hash: String, text: String}]. The hash is the witness `edit` checks; copy it, never recompute it. Reads the whole file (the witness depends on file-wide uniqueness).",
+        doc: "view-text <path> <start> <end>  — show the half-open line range [start, end) of PATH, each line tagged `<line-no>\\t<hash>\\t<text>`. Returns a list of records [{line: Int, hash: String, text: String}]. The hash is the witness `edit-hash` checks; copy it, never recompute it. Reads the whole file (the witness depends on file-wide uniqueness).",
         body: BuiltinBody::Static(builtin_view_text),
     },
     BuiltinEntry {
@@ -1108,10 +1107,10 @@ pub static EXARCH_BUILTINS: &[BuiltinEntry] = &[
         body: BuiltinBody::Static(builtin_grep_files),
     },
     BuiltinEntry {
-        name: Cow::Borrowed("edit"),
-        type_rule: BuiltinTypeRule::Scheme(Some(2), scheme_edit),
-        doc: "edit <path> <edits>  — apply a batch of [hash: HASH, line: TEXT] records in one read/write pass: each replaces the line whose witness is HASH with TEXT verbatim (a real newline inside '…' splits the line into several, \\n does not; empty deletes). Atomic — all hashes resolve against the file as read, so edits never interfere; fails writing nothing unless every hash picks exactly one line and no two records name the same one.",
-        body: BuiltinBody::Static(builtin_edit),
+        name: Cow::Borrowed("edit-hash"),
+        type_rule: BuiltinTypeRule::Scheme(Some(2), scheme_edit_hash),
+        doc: "edit-hash <path> <edits>  — apply a batch of [hash: HASH, line: TEXT] records in one read/write pass: each replaces the line whose witness is HASH with TEXT verbatim (a real newline inside '…' splits the line into several, \\n does not; empty deletes). Atomic — all hashes resolve against the file as read, so edits never interfere; fails writing nothing unless every hash picks exactly one line and no two records name the same one.",
+        body: BuiltinBody::Static(builtin_edit_hash),
     },
     BuiltinEntry {
         name: Cow::Borrowed("edit-str"),
@@ -1229,7 +1228,7 @@ mod tests {
     /// a long run of byte-identical lines — where every fixed-radius window
     /// repeats — yields all-distinct witnesses, because each line grows its
     /// context to the run's boundary, and the residual interior folds in its
-    /// index.  No two lines share a witness, so `edit` never faces ambiguity.
+    /// index.  No two lines share a witness, so `edit-hash` never faces ambiguity.
     #[test]
     fn window_hashes_are_unique_across_a_long_identical_run() {
         let mut rows: Vec<String> = vec!["head".to_string()];

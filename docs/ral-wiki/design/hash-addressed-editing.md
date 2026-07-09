@@ -77,7 +77,7 @@ context is what exarch adds to it.
 
 ## The surface: three tools, one witness, one door
 
-`view-text`, `view-text-around`, and `edit` are the whole editing
+`view-text`, `view-text-around`, and `edit-hash` are the whole editing
 surface. All three are **path-based**: each takes a path and reads the *whole*
 file in Rust, through one grant-checked read door, and computes witnesses with
 the same `window_hashes`. Nothing in the surface takes a line list or a stream.
@@ -86,28 +86,28 @@ the same `window_hashes`. Nothing in the surface takes a line list or a stream.
   `<line-no>\t<hash>\t<text>`. The human read.
 - `view-text-around PATH LINE PEEK` — the `2*PEEK + 1` lines centred on `LINE`,
   tagged the same way. A thin ral helper over `view-text`.
-- `edit PATH EDITS` — apply the batch.
+- `edit-hash PATH EDITS` — apply the batch.
 
 This shape is forced, and it is what makes the witness trustworthy:
 
 - **A witness is only valid for the bytes it was computed over.** Because every
   tool reads the same whole on-disk file through the same door, the hash a read
-  shows is *always* a valid handle for the `edit` that follows. A rows-taking or
+  shows is *always* a valid handle for the `edit-hash` that follows. A rows-taking or
   stdin-taking witness function would let a caller hash a *slice* (or a different
   version, via a pipe) and get witnesses that look like handles but resolve
   against nothing — a quiet, confusing footgun. Path-based reads close it: there
   is no slice to get wrong.
 - **Each tool is one logical surface.** The reads sink below the ral line;
-  `view-text` and `witnesses` raise exactly one `read` card, and `edit` raises
-  exactly one diff card — never a separate read or write card. This is why `edit`
+  `view-text` and `witnesses` raise exactly one `read` card, and `edit-hash` raises
+  exactly one diff card — never a separate read or write card. This is why `edit-hash`
   is a path builtin and not a `< file > file` stream filter: a filter's read and
   write would each ride the redirect frame and surface their own card, fracturing
-  one conceptual edit into three rail surfaces, and `edit` would lose the path it
+  one conceptual edit into three rail surfaces, and `edit-hash` would lose the path it
   needs to label its diff.
 
 ## Properties
 
-**The witness lexes as a string.** A bare `edit` argument that parses as an
+**The witness lexes as a string.** A bare `edit-hash` argument that parses as an
 integer elaborates to `Val::Int`, not `Val::String`, before the type checker
 runs; an all-digit digest at the hash position would then fail its `equal`
 against the recomputed string hash. `line_hash` — and therefore every witness,
@@ -131,7 +131,7 @@ read hands back handles that each name exactly one line. The only residual is a
 boundary — the actual authority is ral's [[design/grant|grant]] frame) or the
 deep interior of a verbatim run, which the index floor still makes unique.
 
-**Editing is one atomic, named pass.** `edit PATH EDITS` takes `EDITS` as a list
+**Editing is one atomic, named pass.** `edit-hash PATH EDITS` takes `EDITS` as a list
 of `[hash: HASH, line: NEWTEXT]` records.
 
 - **Replacement** names a line by its witness and gives its new text.
@@ -157,7 +157,7 @@ location into an edit handle is a deliberate second step — `view-text-around` 
 are private Rust — the witness is never something the model constructs, only one
 it copies out of a read — and `_search-files` (the ignore-aware ripgrep walk) is
 `_`-prefixed so `help` hides it. `view-text`, `grep-files`, and
-`edit` are the host builtins; `view-text-around` is the one thin ral helper. This
+`edit-hash` are the host builtins; `view-text-around` is the one thin ral helper. This
 keeps exarch's [[design/exarch-architecture|thin architecture]]: editing is a few
 host atoms reading whole files below the ral line, not a separate edit protocol.
 
@@ -230,7 +230,7 @@ reconciler, no state to drift. The price is a wider anchor (`h`+6 hex ≈ 3–4 
 tokens vs. Dirac's single token) and no cross-edit stability — editing a line
 shifts its neighbours' witnesses — which exarch absorbs *within* a batch, where
 every hash resolves against one snapshot before any write, so a multi-line change
-needs no re-read; only *separate* `edit` calls require a fresh read.
+needs no re-read; only *separate* `edit-hash` calls require a fresh read.
 
 Net: exarch takes hashline's witnessed-anchor idea, drops the brittle line number
 for a context fold that *grows to uniqueness*, and reaches Dirac's

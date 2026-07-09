@@ -120,17 +120,17 @@ frame:
   already needs), `window-hash` stamped on each hit from the same rows, and **one**
   `{io:"grep", scope:".", pattern}` surface for the whole logical search — not one
   read card per file. A matched file that is not valid UTF-8 (un-editable, so
-  `edit` can never touch it) is *flagged* with an empty-string witness — a value
+  `edit-hash` can never touch it) is *flagged* with an empty-string witness — a value
   no `window-hash` ever produces, unmistakably "no witness" — rather than failing
   the whole search.
 - **`window-hash`** is now a Rust fold over the resident `line-hash`, shared by
-  `grep-files` and `edit` — one implementation across the boundary, not a WET
+  `grep-files` and `edit-hash` — one implementation across the boundary, not a WET
   copy.
-- **`edit`** ([[design/hash-addressed-editing|hash-addressed editing]]) reads,
+- **`edit-hash`** ([[design/hash-addressed-editing|hash-addressed editing]]) reads,
   resolves witnesses, atomically rebuilds, and writes entirely in Rust, then
   surfaces its `diff` card directly — its single read and write are sub-steps of
   one logical operation, so no read/write card appears beside the diff. With
-  `edit` below the line, **no** ral helper does internal I/O and no suppression
+  `edit-hash` below the line, **no** ral helper does internal I/O and no suppression
   mechanism exists anywhere.
 
 `view-text` stays in ral: its `<` is the model's own read at the call site, and

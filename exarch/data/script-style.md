@@ -32,7 +32,7 @@ Survey a symbol: locate, drop tests, deduplicate files, and sample in one turn:
     let files = fold { |acc h| if !{elem $h[file] $acc} { $acc } else { [...$acc, $h[file]] } } [] $live
     [total: !{length $hits}, live: !{length $live}, files: $files, sample: !{take 3 $live}]
 
-Grep and read together: a `grep-files` hit carries its file and line; a `view-text-around` over the hit shows the place with the witness `edit` checks. Sample before reading context so output stays bounded:
+Grep and read together: a `grep-files` hit carries its file and line; a `view-text-around` over the hit shows the place with the witness `edit-hash` checks. Sample before reading context so output stays bounded:
 
     let hits = grep-files #'fn parse_'#
     let few  = take 5 $hits

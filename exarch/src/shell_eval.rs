@@ -848,7 +848,7 @@ mod tests {
     /// two lines with the same text but different surroundings get distinct
     /// witnesses — what a bare line hash could not do — and even a line deep in
     /// a run of identical lines grows its window to the run's edge and stays
-    /// addressable, so `edit` always picks exactly one line.
+    /// addressable, so `edit-hash` always picks exactly one line.
     #[test]
     fn edit_window_hash_addresses_repeated_lines() {
         let mut shell = fresh_shell();
@@ -874,7 +874,7 @@ target
             &format!(
                 "let n = line-count '{repeated_str}'\n\
                  let rows = view-text '{repeated_str}' 1 $[$n + 1]\n\
-                 edit '{repeated_str}' [[hash: $rows[1][hash], line: 'FIRST']]"
+                 edit-hash '{repeated_str}' [[hash: $rows[1][hash], line: 'FIRST']]"
             ),
         );
         assert_eq!(
@@ -909,7 +909,7 @@ target
             &format!(
                 "let n = line-count '{run_str}'\n\
                  let rows = view-text '{run_str}' 1 $[$n + 1]\n\
-                 edit '{run_str}' [[hash: $rows[5][hash], line: 'Z']]"
+                 edit-hash '{run_str}' [[hash: $rows[5][hash], line: 'Z']]"
             ),
         );
         let after_run = std::fs::read_to_string(&run).expect("read run fixture after edit");
@@ -955,7 +955,7 @@ keep-bottom
             &format!(
                 "let n = line-count '{path_str}'\n\
                  let rows = view-text '{path_str}' 1 $[$n + 1]\n\
-                 edit '{path_str}' [[hash: $rows[1][hash], line: 'X'], [hash: 'hzzzzzz', line: 'Y']]"
+                 edit-hash '{path_str}' [[hash: $rows[1][hash], line: 'X'], [hash: 'hzzzzzz', line: 'Y']]"
             ),
         );
         assert_ne!(poisoned.exit, 0, "a batch with a stale hash must fail");
@@ -972,7 +972,7 @@ keep-bottom
             &format!(
                 "let n = line-count '{path_str}'\n\
                  let rows = view-text '{path_str}' 1 $[$n + 1]\n\
-                 edit '{path_str}' [[hash: $rows[1][hash], line: 'REPLACED'], [hash: $rows[2][hash], line: ''], [hash: $rows[3][hash], line: 'X\nY']]"
+                 edit-hash '{path_str}' [[hash: $rows[1][hash], line: 'REPLACED'], [hash: $rows[2][hash], line: ''], [hash: $rows[3][hash], line: 'X\nY']]"
             ),
         );
         let after = std::fs::read_to_string(&path).expect("read after clean batch");
@@ -996,11 +996,10 @@ keep-bottom
         );
     }
 
-    /// A committed `edit` notes what it changed on stderr, for the model:
-    /// `[EXARCH] Changed line(s) … of PATH.`, singular for one line and
-    /// plural with a comma-joined list for a batch — plus a trailing warning
-    /// when a replacement looks like it carries an unintended `\n`/`\t`-style
-    /// escape rather than the real character.
+    /// A committed `edit-hash` notes what it changed on stderr, for the model:
+    /// singular for one line and plural with a comma-joined list for a batch —
+    /// plus a trailing warning when a replacement looks like it carries an
+    /// unintended `\n`/`\t`-style escape rather than the real character.
     #[test]
     fn edit_notes_changed_lines_on_stderr() {
         let mut shell = fresh_shell();
@@ -1010,13 +1009,13 @@ keep-bottom
             &mut shell,
             &format!(
                 "let rows = view-text '{path}' 1 4\n\
-                 edit '{path}' [[hash: $rows[0][hash], line: 'A']]"
+                 edit-hash '{path}' [[hash: $rows[0][hash], line: 'A']]"
             ),
         );
         assert_eq!(one.exit, 0, "single edit must succeed");
         assert_eq!(
             String::from_utf8_lossy(&one.stderr),
-            format!("[EXARCH] Changed line 1 of {path}.\n"),
+            format!("[EXARCH] Replaced line 1 of {path}.\n"),
             "a single-line edit notes the singular form with no warning"
         );
 
@@ -1024,7 +1023,7 @@ keep-bottom
             &mut shell,
             &format!(
                 "let rows = view-text '{path}' 1 4\n\
-                 edit '{path}' [[hash: $rows[1][hash], line: 'B'], [hash: $rows[2][hash], line: 'C\\n']]"
+                 edit-hash '{path}' [[hash: $rows[1][hash], line: 'B'], [hash: $rows[2][hash], line: 'C\\n']]"
             ),
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -1032,14 +1031,14 @@ keep-bottom
         assert_eq!(
             String::from_utf8_lossy(&batch.stderr),
             format!(
-                "[EXARCH] Changed lines 2, 3 of {path}. \
+                "[EXARCH] Replaced lines 2, 3 of {path}. \
                  [WARNING: replacements contain escapes, did you mean to do that?]\n"
             ),
             "a multi-line batch notes the plural form, sorted, with an escape warning"
         );
     }
 
-    /// `edit-str` notes the line(s) it changed the same way `edit` does,
+    /// `edit-str` notes the line(s) it changed the same way `edit-hash` does,
     /// computed from where its unique match starts: a single line reads
     /// `line n`, a match spanning a real newline in `from` reads `lines n-m`.
     #[test]
@@ -1054,7 +1053,7 @@ keep-bottom
         assert_eq!(
             String::from_utf8_lossy(&r.stderr),
             format!(
-                "[EXARCH] Changed line 2 of {path}. \
+                "[EXARCH] Replaced line 2 of {path}. \
                  [WARNING: replacements contain escapes, did you mean to do that?]\n"
             ),
             "a single-line match notes the singular form with an escape warning"
@@ -1070,19 +1069,19 @@ keep-bottom
         assert_eq!(spanning.exit, 0, "a match spanning a real newline must succeed");
         assert_eq!(
             String::from_utf8_lossy(&spanning.stderr),
-            format!("[EXARCH] Changed lines 2-3 of {path2}.\n"),
+            format!("[EXARCH] Replaced lines 2-3 of {path2}.\n"),
             "a match spanning two lines notes the plural range, no escapes here"
         );
     }
 
     /// Regression: a witness hash that happens to read as a number must
-    /// still round-trip from `view-text` into `edit`. The agent copies the hash
-    /// out of a `view-text` result and types it as a *bare* `edit` argument, so
+    /// still round-trip from `view-text` into `edit-hash`. The agent copies the hash
+    /// out of a `view-text` result and types it as a *bare* `edit-hash` argument, so
     /// an all-digit hash like `152347` lexes as an `Int` while the hash
-    /// `edit` recomputes is a `String`; the witness check then rejects a
+    /// `edit-hash` recomputes is a `String`; the witness check then rejects a
     /// correct hash and the agent loops forever re-issuing the same edit.
     /// The leading-zero case (`012345`) is the sharper one: its integer
-    /// reading drops the zero, so no string coercion inside `edit` could
+    /// reading drops the zero, so no string coercion inside `edit-hash` could
     /// recover the original — only an un-numeric witness format can.
     #[cfg(unix)]
     #[test]
@@ -1146,7 +1145,7 @@ keep-bottom
             // agent copies it out of the read.
             let er = run_once(
                 &mut shell,
-                &format!("edit '{path_str}' [[hash: {witness}, line: 'REPLACED']]"),
+                &format!("edit-hash '{path_str}' [[hash: {witness}, line: 'REPLACED']]"),
             );
             let after = std::fs::read_to_string(&path).unwrap_or_default();
             let _ = std::fs::remove_dir_all(&tmp);
@@ -1633,8 +1632,8 @@ keep-bottom
     /// The programmatic bulk-edit pipeline, end to end and entirely in ral:
     /// `grep-files` finds every `[TODO]` across the tree, the hits fold into a
     /// per-file list, and each file's matching lines are rewritten in one atomic
-    /// `edit`.  The hashes come from `view-text`, reading the whole file so
-    /// its handles match what `edit` recomputes — no hash is ever read by eye.
+    /// `edit-hash`.  The hashes come from `view-text`, reading the whole file so
+    /// its handles match what `edit-hash` recomputes — no hash is ever read by eye.
     /// A regex `re-replace` turns
     /// each `[TODO]` into `[DONE]` in place.  This is the sweep example in
     /// `data/ral.md`, kept honest by running it.
@@ -1660,7 +1659,7 @@ each {{ |f|
     let lc = line-count $f
     let rows = view-text $f 1 $[$lc + 1]
     let mine = filter {{ |h| equal $h[file] $f }} $hits
-    edit $f !{{map {{ |h|
+    edit-hash $f !{{map {{ |h|
         [ hash: $rows[$[$h[line] - 1]][hash], line: !{{re-replace #'\[TODO\]'# '[DONE]' $h[text]}} ]
     }} $mine}}
 }} $files
@@ -1953,7 +1952,7 @@ return !{{length $hits}}"#
     /// recipe leaves the target untouched until the rename, so core reads it
     /// for free and threads it through as `old_bytes` alongside the usual
     /// `new_bytes` preview.  The card layer turns that pair into a whole-file
-    /// diff — the same `Mark::Diff` `edit`/`edit-str` surface explicitly, here
+    /// diff — the same `Mark::Diff` `edit-hash`/`edit-str` surface explicitly, here
     /// for any `>` redirect with no builtin required.
     #[test]
     fn bare_write_redirect_over_existing_file_surfaces_a_diff_card() {
@@ -2091,7 +2090,7 @@ return !{{length $hits}}"#
     /// `view-text` is a host builtin that reads its path in Rust, NOT an
     /// external image: `view-text a 1 2` reads the whole file below the ral line
     /// and surfaces exactly one READ card itself — one logical read surface, no
-    /// exec card, like `grep-files` and `edit`.
+    /// exec card, like `grep-files` and `edit-hash`.
     #[cfg(unix)]
     #[test]
     fn view_is_a_helper_not_an_exec_image() {

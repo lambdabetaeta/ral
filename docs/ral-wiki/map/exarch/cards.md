@@ -55,7 +55,7 @@ lifted into a one-mark card for convenience; any other top-level value returns
 unknown mark label or role degrades to plain `text`, because a card is a
 deliberate user-facing act, not a sentinel that might be malformed. The `diff`
 mark reads a `path` and a `hunks` list — each hunk a `start` line and a `rows`
-list of `{tag, text}` records — the whole-file shape the `edit` builtin emits;
+list of `{tag, text}` records — the whole-file shape the `edit-hash` builtin emits;
 a missing `hunks` lifts to empty so a bare diff still renders.
 
 `AgentSink::emit` ([[map/exarch/shell-eval|shell-eval]]) is a two-decoder sink: an
@@ -141,10 +141,10 @@ grammar lives in one ral place: `task-card`/`meter-card` in `exarch/data/agent.r
 kit owns the status→role mapping, since the host knows only the closed role set),
 surfaced per transition through `transition`/`add-task`/`surface-progress`.
 
-The agent library's surfacing constructors are gone: `edit`, `grep-files`, and
+The agent library's surfacing constructors are gone: `edit-hash`, `grep-files`, and
 `window-hash` are Rust host builtins ([[map/exarch/io-surface|io-surface]]),
 their file I/O sunk below the redirect frame so each is one logical surface.
-`edit` builds its whole-file `diff` card Rust-side (one canonical original-vs-
+`edit-hash` builds its whole-file `diff` card Rust-side (one canonical original-vs-
 final diff grouped into hunks by `similar`); the read/write redirect and exec
 cards are likewise composed from core's I/O events. `agent.ral` now carries only
 the `view`/`view-around` line readers over the `window-hash` builtin and the

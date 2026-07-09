@@ -36,12 +36,12 @@ read or write io card ([[map/exarch/io-surface|io-surface]]).
   the row list: the `line-hash` of the ±3 neighbours' own `line-hash`es, prefixed
   by the target's offset within the (edge-clamped) window. Context distinguishes
   repeated lines; the offset distinguishes lines in a file too short for the
-  window to shift. Shared by `view`, `grep-files`, and `edit`, so a read and an
+  window to shift. Shared by `view`, `grep-files`, and `edit-hash`, so a read and an
   edit always compute the same hash.
 - `grep-files <pattern>` → `[{ file, line, text, hash }]`. An ignore-aware Rust
   regex walk of the cwd (`search_tree`, binary detection quits at NUL, each file
   gated by `check_fs_read`), reading every matched file once and stamping each hit
-  with its `window-hash` from those same rows — the very row list `edit` will
+  with its `window-hash` from those same rows — the very row list `edit-hash` will
   rebuild, so a search result feeds straight into a batch. A non-UTF-8 match
   carries an empty-string witness, a value no `window-hash` produces, so it
   resolves to no line. Emits exactly one `{io:"grep", scope, pattern}` surface
@@ -53,7 +53,7 @@ read or write io card ([[map/exarch/io-surface|io-surface]]).
   the original rows (a real newline in `new-text` splits the line, an empty string
   deletes it), and write back atomically. Resolving against one snapshot makes the
   batch atomic and non-interfering. The read door and the atomic write door both
-  run in Rust below the redirect frame, so `edit` raises no read or write io card;
+  run in Rust below the redirect frame, so `edit-hash` raises no read or write io card;
   it surfaces only one whole-file `diff` card — the original-vs-final line-level
   diff grouped into hunks by the `similar` crate with ±2 lines of context, built
   by `diff_card_value` and handed to the core `surface` builtin
@@ -61,7 +61,7 @@ read or write io card ([[map/exarch/io-surface|io-surface]]).
 - `explore-dir <n>` → `[String]`. List directory entries to depth `n`,
   ignore-aware (`git_global(false)`), skipping the root and any denied path.
 
-Reads resolve through `checked_read_path` / `check_fs_read`; the `edit` write
+Reads resolve through `checked_read_path` / `check_fs_read`; the `edit-hash` write
 goes through `check_fs_write` under the turn's pushed [[design/grant|grant]]
 frame ([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]]).
 

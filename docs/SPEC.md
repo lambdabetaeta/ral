@@ -1873,10 +1873,8 @@ names, call function, computation hint, arity, documentation, and
 optional type scheme together.  Registration rejects collisions with
 core names or earlier host names, while re-registering the same static
 table is a no-op.  The `ral` REPL uses this for `_ed-*`; `exarch` uses
-it for agent search atoms such as `grep-files`, `line-hash`, and
-`explore-dir`.  Exarch's `edit` helper is sourced ral code over those
-atoms and ordinary redirects.  Those exarch names are not core ral
-features.
+it for agent atoms such as `grep-files`, `line-hash`, `explore-dir`, and
+`edit-hash`.  Those exarch names are not core ral features.
 
 ### 16.1  User-facing
 

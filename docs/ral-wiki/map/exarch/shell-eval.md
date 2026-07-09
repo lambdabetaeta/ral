@@ -130,7 +130,7 @@ parent's sink ([[map/core/capabilities|carried on the IPC response]]), so they
 are batched rather than live under the sandbox.
 
 `agent_builtins.rs` registers exarch's resident host atoms — the line/window
-witnesses and the `grep-files` search and hash-addressed `edit` whose file I/O
+witnesses and the `grep-files` search and hash-addressed `edit-hash` whose file I/O
 happens in Rust, below the redirect frame ([[map/exarch/io-surface|io-surface]]) —
 and sources the small embedded `data/agent.ral` helper library (`view-text`,
 `view-text-around`) into the shell at boot ([[map/exarch/builtins|builtins]]). The

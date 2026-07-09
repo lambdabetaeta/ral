@@ -2408,7 +2408,7 @@ mod tests {
         let child = session
             .fork(session.caps().clone())
             .expect("fork child session");
-        for name in ["view-text", "grep-files", "edit", "explore-dir"] {
+        for name in ["view-text", "grep-files", "edit-hash", "explore-dir"] {
             assert!(
                 child
                     .transport
