@@ -606,6 +606,63 @@ mod tests {
         assert!(reg.is_live(0), "the trunk above the closed subtree survives");
     }
 
+    /// `interrupt` is the per-tab turn interrupt, not the subtree cascade: it
+    /// trips exactly one entry's token and eval-root with an `Interrupt` cause,
+    /// walks no descendants, and deregisters nothing.  So the child's token is
+    /// `is_cancelled` but not `terminated` (an interrupt drops the turn, it
+    /// does not end the agent), the interrupt reaches the child's eval layer,
+    /// the grandchild is untouched, and both entries stay live.  Contrast
+    /// `cancel(1)`, which would trip the grandchild too and with a terminate
+    /// cause (`Explicit`), settling the whole subtree.
+    #[test]
+    fn interrupt_unwinds_exactly_one_entry() {
+        let reg = AgentRegistry::new();
+        entry(&reg, 0, None); // the trunk
+        let child_token = Token::new();
+        let child_root = DurableRoot::default();
+        let grandchild_token = Token::new();
+        reg.register(
+            1,
+            Some(0),
+            false,
+            "child".into(),
+            PathBuf::from("/tmp/child"),
+            child_token.clone(),
+            Some(child_root.clone()),
+            mb(),
+            provider(),
+        );
+        reg.register(
+            2,
+            Some(1),
+            true,
+            "grandchild".into(),
+            PathBuf::from("/tmp/gc"),
+            grandchild_token.clone(),
+            Some(DurableRoot::default()),
+            mb(),
+            provider(),
+        );
+
+        reg.interrupt(1);
+
+        assert!(child_token.is_cancelled(), "interrupt trips the child's token");
+        assert!(
+            !child_token.terminated(),
+            "an interrupt is not a terminate cause"
+        );
+        assert!(
+            child_root.as_scope().is_cancelled(),
+            "the interrupt reaches the child's eval layer, not just its token"
+        );
+        assert!(
+            !grandchild_token.is_cancelled(),
+            "no descendant walk: the grandchild is untouched"
+        );
+        assert!(reg.is_live(1), "interrupt never deregisters the entry");
+        assert!(reg.is_live(2), "nor its descendant");
+    }
+
     #[test]
     fn cancel_sets_the_token_and_list_reports_the_subtree() {
         let reg = AgentRegistry::new();

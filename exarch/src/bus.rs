@@ -2124,6 +2124,60 @@ mod tests {
         );
     }
 
+    /// The complement of the test above: a non-`Held` park ignores an
+    /// *interrupt*-cause cancel — an interrupt drops the in-flight turn, it does
+    /// not end the agent — where a *terminate* cause ends it.
+    ///
+    /// "Still parked" is proved without a timing race by making the release a
+    /// real turn: after `cancel(Interrupt)`, the only exit `next_or_idle` has
+    /// left is a pushed turn.  It cannot return `None` — `terminated()` never
+    /// trips for an interrupt, and the park is not `Quiesce` — so it stays
+    /// parked until the push wakes it, then pops the turn and returns `Some`.  A
+    /// terminate cancel would instead have returned `None`, dropping the turn;
+    /// observing the turn come back through the join is therefore exactly the
+    /// evidence the interrupt was ignored.  No sleep gates the assertion.
+    #[test]
+    fn non_human_park_survives_an_interrupt() {
+        let inbox = Inbox::new();
+        inbox.push_user("work".into());
+        assert!(matches!(inbox.drain_turn(), Some(Turn::Human(_))));
+
+        let observed = Arc::new(AtomicBool::new(false));
+        let worker_observed = observed.clone();
+        let worker_inbox = inbox.clone();
+        let token = cancel::Token::new();
+        let worker_token = token.clone();
+        let handle = std::thread::spawn(move || {
+            worker_inbox.next_or_idle(
+                || {
+                    worker_observed.store(true, Ordering::Release);
+                    ParkMode::HeldByChildren
+                },
+                &worker_token,
+            )
+        });
+
+        assert!(
+            eventually(Duration::from_secs(1), || observed.load(Ordering::Acquire)),
+            "the worker reached the park predicate"
+        );
+
+        // An interrupt is not a terminate: the park re-checks `cancel` each
+        // PARK_POLL and stays, because `terminated()` stays false.
+        token.cancel(ral_core::process::CancelCause::Interrupt);
+
+        // The only remaining exit is a real turn.  Getting it back proves the
+        // interrupt did not end the park (which would have dropped it, `None`).
+        inbox.mailbox().push_user("resume".into());
+        assert!(
+            matches!(
+                handle.join().expect("parked worker joins"),
+                Some(Turn::Human(s)) if s == "resume"
+            ),
+            "the interrupt was ignored; the pushed turn released the park"
+        );
+    }
+
     /// The headless default [`Sink::drive`] and the TUI's `drive_events` share
     /// one completion contract: [`drain_pass`]. It stops when the worker is
     /// *done*, never when the channel empties or disconnects — so a detached

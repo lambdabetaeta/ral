@@ -2583,6 +2583,48 @@ mod tests {
         );
     }
 
+    /// A trunk built through the production `Agent::root` path, parameterised on
+    /// `interactive` — the one bit that decides whether the trunk converses.
+    fn trunk(dir: &std::path::Path, interactive: bool) -> Agent {
+        let scratch = Scratch::new().expect("scratch dir");
+        Agent::root(
+            "system".into(),
+            ral_core::types::Capabilities::default(),
+            &scratch,
+            dir,
+            "test-model",
+            "test",
+            false,
+            interactive,
+            scripted("test-model", Script::new()),
+            None,
+        )
+        .expect("root trunk")
+    }
+
+    /// `returns()` reads the tool view — true iff the agent holds `reply`
+    /// (`Gate::Returns`) — the single source of truth the nudge layer, parking,
+    /// and the advertised tools all consult, so they cannot disagree.  The crux
+    /// of the trunk refactor is the interactive/headless contrast: an
+    /// interactive trunk converses and withholds `reply`, a headless trunk is an
+    /// ordinary returning agent, and a `fork` returns like any sub-agent.  (The
+    /// `branch()` case — a returning-withheld child — is pinned in
+    /// `branch_imports_context_and_withholds_reply`, so it is not repeated here.)
+    #[test]
+    fn returns_tracks_the_tool_view_across_node_kinds() {
+        let dir = tmp("returns-parity");
+        assert!(
+            !trunk(&dir, true).returns(),
+            "an interactive trunk converses and withholds `reply`"
+        );
+        let headless = trunk(&dir, false);
+        assert!(headless.returns(), "a headless trunk is a returning agent");
+        let child = headless
+            .fork(headless.caps().clone())
+            .expect("fork child");
+        assert!(child.returns(), "an ordinary fork holds `reply`");
+    }
+
     /// A `reply` tool call carrying `result`.
     fn reply_call(id: &str, result: serde_json::Value) -> ToolCall {
         ToolCall {
