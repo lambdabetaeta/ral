@@ -177,16 +177,20 @@ impl AgentRegistry {
         remove_descendants(&mut g, root);
     }
 
-    /// Register an agent under its `parent` (`None` for the trunk).  A child
-    /// (`parent` set) arms a ceiling on the reaper that cancels its whole
-    /// subtree when it elapses, and carries its `eval_root` so the cascade
-    /// reaches its running eval; the trunk gets neither.  Returns the birth
-    /// generation the worker carries into its result.
+    /// Register an agent under its `parent` (`None` for the trunk).  `ceiling`
+    /// states whether to arm a reaper deadline that cancels this agent's whole
+    /// subtree when it elapses: a child no longer *implies* one — the caller
+    /// says so.  A worker gets one (an abandoned detached worker must be
+    /// reaped); a branch is a parented child *without* one (a conversation must
+    /// not lose a turn at the hour mark); a root never had one.  A `parent`-set
+    /// agent still carries its `eval_root` so the cascade reaches its running
+    /// eval.  Returns the birth generation the worker carries into its result.
     #[allow(clippy::too_many_arguments)] // an agent's registration record, threaded once at birth
     pub fn register(
         &self,
         id: AgentId,
         parent: Option<AgentId>,
+        ceiling: bool,
         title: String,
         log_dir: PathBuf,
         cancel: Token,
@@ -194,7 +198,7 @@ impl AgentRegistry {
         mailbox: Mailbox,
         provider: ProviderHandle,
     ) -> u64 {
-        let ceiling = parent.map(|_| {
+        let ceiling = ceiling.then(|| {
             let reg = self.clone();
             process::arm_callback(AGENT_CEILING, move || {
                 reg.cancel(id);
@@ -434,6 +438,7 @@ mod tests {
         reg.register(
             id,
             parent,
+            parent.is_some(),
             format!("a{id}"),
             PathBuf::from("/tmp"),
             Token::new(),
@@ -449,6 +454,45 @@ mod tests {
         let g = entry(&reg, 1, None);
         assert!(reg.settle(1, g), "a current-generation worker delivers");
         assert!(!reg.settle(1, g), "a settled entry is gone");
+    }
+
+    /// The ceiling is an explicit knob, not a consequence of being parented:
+    /// two children of the same parent arm a reaper deadline iff their
+    /// `ceiling` flag is set (a branch passes `false`, a worker `true`).
+    #[test]
+    fn register_arms_a_ceiling_only_when_asked() {
+        let reg = AgentRegistry::new();
+        reg.register(
+            1,
+            Some(0),
+            false,
+            "branch".into(),
+            PathBuf::from("/tmp"),
+            Token::new(),
+            Some(DurableRoot::default()),
+            mb(),
+            provider(),
+        );
+        reg.register(
+            2,
+            Some(0),
+            true,
+            "worker".into(),
+            PathBuf::from("/tmp"),
+            Token::new(),
+            Some(DurableRoot::default()),
+            mb(),
+            provider(),
+        );
+        let g = reg.lock();
+        assert!(
+            g.entries[&1]._ceiling.is_none(),
+            "ceiling = false arms no reaper deadline"
+        );
+        assert!(
+            g.entries[&2]._ceiling.is_some(),
+            "ceiling = true arms a reaper deadline"
+        );
     }
 
     #[test]
@@ -479,6 +523,7 @@ mod tests {
         reg.register(
             1,
             Some(0),
+            true,
             "worker".into(),
             PathBuf::from("/tmp/worker"),
             token.clone(),
@@ -503,6 +548,7 @@ mod tests {
         reg.register(
             7,
             Some(0),
+            true,
             "lint".into(),
             PathBuf::from("/log/7"),
             token.clone(),
@@ -533,6 +579,7 @@ mod tests {
         reg.register(
             1,
             None,
+            false,
             "r".into(),
             "/l".into(),
             r.clone(),
@@ -543,6 +590,7 @@ mod tests {
         reg.register(
             2,
             Some(1),
+            true,
             "c".into(),
             "/l".into(),
             c.clone(),
@@ -553,6 +601,7 @@ mod tests {
         reg.register(
             3,
             Some(2),
+            true,
             "g".into(),
             "/l".into(),
             g.clone(),
@@ -563,6 +612,7 @@ mod tests {
         reg.register(
             4,
             Some(1),
+            true,
             "s".into(),
             "/l".into(),
             sibling.clone(),
@@ -600,6 +650,7 @@ mod tests {
         reg.register(
             2,
             Some(1),
+            true,
             "worker".into(),
             PathBuf::from("/tmp/worker"),
             Token::new(),

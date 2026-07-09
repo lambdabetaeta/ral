@@ -393,6 +393,7 @@ pub(super) fn spawn_async(
     let generation = session.agents.register(
         agent_id,
         Some(session.id),
+        true, // a detached worker must be reaped if abandoned
         title.clone(),
         log_dir.clone(),
         cancel,

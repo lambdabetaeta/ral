@@ -417,6 +417,7 @@ impl Agent {
         self.agents.register(
             self.id,
             self.parent,
+            false, // a root (trunk or headless) is never abandoned: no ceiling
             TRUNK_TITLE.to_string(),
             self.log.dir().to_path_buf(),
             self.cancel.clone(),
@@ -556,6 +557,18 @@ impl Agent {
     }
 
     pub(crate) fn fork(&self, caps: ral_core::types::Capabilities) -> io::Result<Agent> {
+        self.fork_with(caps, true)
+    }
+
+    /// The shared fork core: an independent child of this agent capped at
+    /// `caps`, whose tool view holds `reply` iff `returns`.  [`Self::fork`]
+    /// passes `true` (an ordinary returning sub-agent); [`Self::branch`] passes
+    /// `false` (a conversing child that parks for the human, holding no `reply`).
+    fn fork_with(
+        &self,
+        caps: ral_core::types::Capabilities,
+        returns: bool,
+    ) -> io::Result<Agent> {
         // The child is an independent fork of the parent: it snapshots the
         // parent's scope (prelude, agent library, accumulated bindings),
         // dynamic context (cwd, env, grants), and installed builtin table (the
@@ -588,11 +601,11 @@ impl Agent {
             // a child becomes parkable the instant the human `TAB`s to it.
             focus: self.focus.clone(),
             interactive: self.interactive,
-            // Every agent spawns while its fuel lasts; a sub-agent returns
-            // through `reply`.  Self-scheduling authority is inherited: a
-            // `--allow-schedule` trunk grants its descendants the same right
+            // Every agent spawns while its fuel lasts; `returns` decides whether
+            // this child holds `reply`.  Self-scheduling authority is inherited:
+            // a `--allow-schedule` trunk grants its descendants the same right
             // to wake themselves.
-            tools: crate::tools::tools_for(true, self.grants_schedule(), fuel > 0),
+            tools: crate::tools::tools_for(returns, self.grants_schedule(), fuel > 0),
             // One shared fleet registry: the child registers into the same map,
             // so the tree is whole at any depth.
             agents: self.agents.clone(),
@@ -600,6 +613,19 @@ impl Agent {
             // trunk's ceiling verbatim.
             disk_warn_bytes: self.disk_warn_bytes,
         })
+    }
+
+    /// Fork a conversing child: the creator's context and capabilities
+    /// verbatim, but `reply` withheld so it parks for the human (a /branch tab)
+    /// instead of returning a value.  Mnemon-style context import, like
+    /// `fork_remembering`.
+    // Wired by the `/branch` command in a later package; the fork primitive
+    // lands now so the registry ceiling knob it relies on ships in one change.
+    #[allow(dead_code)]
+    pub(crate) fn branch(&self) -> io::Result<Agent> {
+        let mut child = self.fork_with(self.caps.clone(), false)?;
+        self.inherit_context(&mut child)?;
+        Ok(child)
     }
 
     /// A child that inherits this agent's model-visible context.  The launch
@@ -612,11 +638,17 @@ impl Agent {
         caps: ral_core::types::Capabilities,
     ) -> io::Result<Agent> {
         let mut child = self.fork(caps)?;
+        self.inherit_context(&mut child)?;
+        Ok(child)
+    }
+
+    /// Import the creator's model-visible context into `child`, mnemon-style —
+    /// the shared step behind `fork_remembering` and `branch()`.
+    fn inherit_context(&self, child: &mut Agent) -> io::Result<()> {
         child
             .log
             .import_context(self.log.inherited_context_messages())
-            .map_err(io::Error::other)?;
-        Ok(child)
+            .map_err(io::Error::other)
     }
 
     pub(crate) fn log_dir(&self) -> &std::path::Path {
@@ -2514,6 +2546,46 @@ mod tests {
         );
     }
 
+    /// A branch imports the creator's context mnemon-style but withholds
+    /// `reply`: it parks for the human rather than returning a value, and is
+    /// otherwise an ordinary fork (creator's caps verbatim, one less fuel).
+    #[test]
+    fn branch_imports_context_and_withholds_reply() {
+        let dir = tmp("branch-child");
+        let mut parent = Agent::for_test(&dir, "system").unwrap();
+        parent.log.append_user("what did we learn?".into()).unwrap();
+        parent
+            .log
+            .append_assistant(
+                genai::chat::ChatMessage::assistant("the invariant matters"),
+                vec![],
+                None,
+            )
+            .unwrap();
+
+        let child = parent.branch().expect("branch child");
+
+        let view = serde_json::to_string(&child.log.history_messages()).unwrap();
+        assert!(view.contains("what did we learn?"));
+        assert!(view.contains("the invariant matters"));
+        assert!(
+            view.rfind("the invariant matters") > view.rfind("what did we learn?"),
+            "the creator's context is imported in mnemon order: {view}"
+        );
+
+        assert!(!child.returns(), "a branch withholds `reply` and never returns");
+        assert_eq!(
+            child.caps(),
+            parent.caps(),
+            "a branch inherits the creator's capabilities verbatim"
+        );
+        assert_eq!(
+            child.fuel,
+            parent.fuel - 1,
+            "a branch is a fork: it spends one unit of spawn fuel"
+        );
+    }
+
     /// A `reply` tool call carrying `result`.
     fn reply_call(id: &str, result: serde_json::Value) -> ToolCall {
         ToolCall {
@@ -2587,6 +2659,7 @@ mod tests {
         child.agents.register(
             direct,
             Some(child.id),
+            true,
             "direct".into(),
             dir.join("direct"),
             direct_token.clone(),
@@ -2597,6 +2670,7 @@ mod tests {
         child.agents.register(
             grandchild,
             Some(direct),
+            true,
             "grandchild".into(),
             dir.join("grandchild"),
             grandchild_token.clone(),
@@ -2607,6 +2681,7 @@ mod tests {
         let sibling_generation = child.agents.register(
             sibling,
             Some(parent.id),
+            true,
             "sibling".into(),
             dir.join("sibling"),
             sibling_token.clone(),
@@ -3133,6 +3208,7 @@ mod tests {
         parent.agents.register(
             child.id,
             Some(parent.id),
+            true,
             "child".into(),
             child.log_dir().to_path_buf(),
             child.cancel_token().clone(),
