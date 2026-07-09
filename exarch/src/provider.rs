@@ -1645,7 +1645,9 @@ impl Engine {
             cancel,
             async |attempt| {
                 let mut req = req_template.clone();
-                req.tools = Some(tool_defs.clone());
+                // Chat mode advertises no tools; send no `tools` field at all
+                // rather than an empty array, which some backends reject.
+                req.tools = (!tool_defs.is_empty()).then(|| tool_defs.clone());
                 let mut seen_streamed_content = false;
                 // Mirrors what `on_text` rendered, so a committed stall can
                 // commit exactly the prefix the user already saw.

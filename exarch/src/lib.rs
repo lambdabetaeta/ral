@@ -204,15 +204,21 @@ pub fn run() -> Result<(), String> {
     let run_dir = bootstrap::log_run_dir(&cwd).map_err(|e| format!("log dir: {e}"))?;
     let config_dir = bootstrap::xdg_app_dir(ral_core::path::basedir::XdgKind::Config);
     let cwd_path = std::path::PathBuf::from(&cwd);
-    let system = prompt::assemble(
-        &c.system_files,
-        &caps,
-        scratch.path(),
-        &cwd_path,
-        &config_dir,
-        c.headless,
-        c.edit,
-    )?;
+    // Chat mode registers no tools, so there is nothing for a system prompt to
+    // describe: it is skipped entirely in favour of the minimal placeholder.
+    let system = if c.chat {
+        prompt::CHAT_SYSTEM.to_string()
+    } else {
+        prompt::assemble(
+            &c.system_files,
+            &caps,
+            scratch.path(),
+            &cwd_path,
+            &config_dir,
+            c.headless,
+            c.edit,
+        )?
+    };
     let system_size = system.len();
 
     // One shared runtime for the whole fleet; per-credential transports warm
@@ -238,6 +244,7 @@ pub fn run() -> Result<(), String> {
         // The interactive (TUI) trunk converses and parks for the human; a
         // headless trunk terminates once its seeded work is idle.
         !c.headless,
+        c.chat,
         std::sync::Arc::clone(&provider),
         disk_warn_bytes,
     )

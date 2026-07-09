@@ -117,6 +117,17 @@ pub struct Cli {
     /// unadvertised one still works if named.
     #[arg(long = "edit", value_enum, default_value_t = EditScheme::Hash)]
     pub edit: EditScheme,
+
+    /// Chat mode: obliterate the system prompt and register no tools,
+    /// leaving a bare back-and-forth with the model — no ral shell, no
+    /// spawns, no editing, none of the agent scaffolding.  The prompt is
+    /// not assembled at all; a single-space placeholder stands in only
+    /// because some provider backends reject an empty system prompt.
+    /// Interactive only: it conflicts with `--headless` (which returns its
+    /// result via the `reply` tool chat withholds) and with `--system`
+    /// (whose persona chat obliterates).
+    #[arg(long = "chat", conflicts_with_all = ["headless", "system_files"])]
+    pub chat: bool,
 }
 
 /// The file-editing scheme the system prompt advertises — see the `--edit`
@@ -203,6 +214,18 @@ mod tests {
             .expect("seed is present");
 
         assert_eq!(seed, "Recover the model\n- keep weights unchanged");
+    }
+
+    #[test]
+    fn chat_conflicts_with_headless_and_system() {
+        // Chat withholds `reply`, so a headless trunk could never return.
+        Cli::try_parse_from(["exarch", "--chat", "--headless", "-p", "hi"])
+            .expect_err("chat is interactive-only");
+        // Chat obliterates the persona `--system` would set.
+        Cli::try_parse_from(["exarch", "--chat", "--system", "persona.md"])
+            .expect_err("chat has no system prompt to override");
+        // On its own it parses.
+        Cli::try_parse_from(["exarch", "--chat"]).expect("chat alone is fine");
     }
 
     #[test]

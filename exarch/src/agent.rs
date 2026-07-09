@@ -457,6 +457,7 @@ impl Agent {
         provider_label: &str,
         allow_schedule: bool,
         interactive: bool,
+        chat: bool,
         provider: Arc<Provider>,
         disk_warn_bytes: Option<u64>,
     ) -> io::Result<Self> {
@@ -478,10 +479,15 @@ impl Agent {
             // itself here.
             focus: Arc::new(AtomicU64::new(NO_FOCUS)),
             interactive,
-            // The interactive trunk converses and never returns, so it withholds
-            // `reply`; a headless trunk is a returning agent.  Either way the
-            // session's self-wakeup grant shapes the view.
-            tools: crate::tools::tools_for(!interactive, allow_schedule, SPAWN_FUEL > 0),
+            // Chat mode registers no tools at all: a bare conversation, nothing
+            // to call.  Otherwise the interactive trunk converses and never
+            // returns, so it withholds `reply`; a headless trunk is a returning
+            // agent.  Either way the session's self-wakeup grant shapes the view.
+            tools: if chat {
+                Vec::new()
+            } else {
+                crate::tools::tools_for(!interactive, allow_schedule, SPAWN_FUEL > 0)
+            },
             agents: crate::agent_registry::AgentRegistry::new(),
             disk_warn_bytes,
         })?;
@@ -2596,6 +2602,7 @@ mod tests {
             "test",
             false,
             interactive,
+            false,
             scripted("test-model", Script::new()),
             None,
         )

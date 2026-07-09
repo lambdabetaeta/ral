@@ -52,6 +52,13 @@ use std::path::{Path, PathBuf};
 ///    readable under the grant: `name: description` per skill, plus a
 ///    note telling the agent to call `skill <name>` to load and
 ///    `skill-list` to refresh mid-session.
+/// The stand-in system prompt for `--chat` mode ([`crate::cli::Cli::chat`]).
+/// Chat obliterates the assembled prompt entirely; this is not a persona but
+/// the minimal non-empty string, present only because some provider backends
+/// (the Codex/Responses adapter) reject an empty system prompt outright.  One
+/// space, uniform across every provider — chat does not branch on the adapter.
+pub const CHAT_SYSTEM: &str = " ";
+
 pub fn assemble(
     files: &[PathBuf],
     caps: &Capabilities,
