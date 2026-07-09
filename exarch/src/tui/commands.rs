@@ -243,14 +243,25 @@ fn push_command(tui: &mut Tui, mailbox: &Mailbox, cmd: String) {
     }
 }
 
-/// Route a submitted prompt line.  A view command (`/help`, `/legend`, `/copy`,
-/// `/export`, `/model`) touches only the App, clipboard, file, or picker, so it
-/// runs here on the UI thread.  A session command (`/clear`, `/compact`,
-/// `/resources`, `/discuss`, `/quit`) and a plain prompt go onto the session inbox, where
-/// the worker's drive loop drains them — `/clear` *also* clears the viewport
-/// UI-side so the screen blanks immediately, before the worker rebuilds the
-/// session.  A slash token naming no registered command ([`unrecognized_command`])
-/// prints an error instead of mailing the typo to the model as a prompt.
+/// The one submit path, shared by every tab: it parses the line once and then
+/// decides what to do from the parse and the focused tab, so nothing upstream
+/// forks root-vs-non-root before parsing.  A view command (`/help`, `/legend`,
+/// `/copy`, `/export`, `/model`) touches only the App, clipboard, file, or
+/// picker, so it runs here on the UI thread.  A session command (`/clear`,
+/// `/compact`, `/resources`, `/discuss`, `/quit`) and a plain prompt on the
+/// trunk go onto the session inbox, where the worker's drive loop drains them —
+/// `/clear` *also* clears the viewport UI-side so the screen blanks immediately,
+/// before the worker rebuilds the session.  A slash token naming no registered
+/// command ([`unrecognized_command`]) prints an error instead of mailing the
+/// typo to the model as a prompt.
+///
+/// Commands act on the trunk session alone.  On a sub-agent tab a recognized
+/// command cannot be serviced — sub-agents run under `NoControl`, and routing
+/// to the trunk's inbox would act on the wrong session — so it is refused on
+/// the focused tab rather than misfired.  A plain line instead steers the
+/// focused tab: the trunk's session inbox, or the focused sub-agent's mailbox
+/// (dropped if that agent died between focus and submit).  Errors and notes
+/// target the focused tab so they appear where the user typed.
 pub(super) fn route_submit(
     text: String,
     tui: &mut Tui,
@@ -259,8 +270,14 @@ pub(super) fn route_submit(
 ) -> io::Result<()> {
     let info = ctx.info;
     let trimmed = text.trim();
+    let root = tui.app.tabs.root();
+    let focused = tui.app.tabs.focused();
     let unrecognized = unrecognized_command(trimmed);
     match lookup_command(trimmed) {
+        Some((cmd, _)) if focused != root => {
+            tui.app
+                .push_error(focused, format!("{} is not available on this tab", cmd.name));
+        }
         Some((cmd, arg)) => match cmd.name {
             "/help" => cmd_help(&mut tui.app),
             "/legend" => cmd_legend(&mut tui.app),
@@ -281,10 +298,8 @@ pub(super) fn route_submit(
             // clear-drain guard `root_clear_drain` arms.  Then the `/clear`
             // itself reaches the worker's drive loop and rebuilds the session.
             "/clear" => {
-                let root = tui.app.tabs.root();
                 crate::cancel::raise_interrupt();
                 ctx.agents.cancel(root);
-                let focused = tui.app.tabs.focused();
                 // Read the focused agent's provider for the banner redraw.
                 // If the focused agent has settled (no provider), fall back to
                 // the root's provider.  If neither is available, use a
@@ -305,8 +320,7 @@ pub(super) fn route_submit(
             }
             "/discuss" => {
                 if arg.is_empty() {
-                    tui.app
-                        .push_error(tui.app.tabs.root(), "usage: /discuss <prompt>".into());
+                    tui.app.push_error(focused, "usage: /discuss <prompt>".into());
                     return Ok(());
                 }
                 push_command(tui, mailbox, text.clone());
@@ -315,16 +329,22 @@ pub(super) fn route_submit(
             _ => push_command(tui, mailbox, text.clone()),
         },
         // A bare typo like `/bogus` is not a prompt in disguise — say so
-        // rather than silently mailing it to the model as one.
+        // rather than silently mailing it to the model as one, on any tab.
         None if unrecognized.is_some() => {
             let head = unrecognized.expect("checked Some above");
-            tui.app.push_error(
-                tui.app.tabs.root(),
-                format!("unknown command: {head} (see /help)"),
-            );
+            tui.app
+                .push_error(focused, format!("unknown command: {head} (see /help)"));
         }
-        // A plain prompt: onto the session inbox for the worker to drain.
-        None => mailbox.push_user(text),
+        // A plain prompt steers the focused tab: the trunk's session inbox, or
+        // the focused sub-agent's mailbox.  An agent that died between focus and
+        // submit has no mailbox, so its line is dropped rather than reviving it.
+        None => {
+            if focused == root {
+                mailbox.push_user(text);
+            } else if let Some(mb) = ctx.agents.mailbox(focused) {
+                mb.push_user(text);
+            }
+        }
     }
     Ok(())
 }

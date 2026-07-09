@@ -414,15 +414,11 @@ fn ui_loop(
                         }
                         KeyAction::Submit => {
                             if let Some(text) = tui.app.prompt_state.submit() {
-                                if focused == tui.app.tabs.root() {
-                                    commands::route_submit(text, tui, &mailbox, ctx)?;
-                                } else if let Some(mb) = ctx.agents.mailbox(focused) {
-                                    // Steer the focused agent: the whole line is
-                                    // its next turn — no slash, no revival.
-                                    mb.push_user(text);
-                                }
-                                // The agent died between focus and submit: its
-                                // mailbox is gone, so the line is dropped.
+                                // Every tab funnels through the one submit path;
+                                // it owns the parse-once decision and targets the
+                                // focused tab, so there is no root/non-root fork
+                                // here that could mail a slash line to the model.
+                                commands::route_submit(text, tui, &mailbox, ctx)?;
                             }
                         }
                         KeyAction::Edit => {
