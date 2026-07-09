@@ -168,12 +168,18 @@ pub fn run() -> Result<(), String> {
         .unwrap_or_else(|_| ".".into());
     let state_dir = bootstrap::project_dir(&cwd);
 
-    // Resolve the initial selection: an explicit `--model` override, else
-    // the persisted selection (when its provider is available),
-    // else the first available provider's default model.
+    // Resolve the initial selection: an explicit `--provider` pin, else an
+    // explicit `--model` override, else the persisted selection (when its
+    // provider is available), else the first available provider's default model.
     let mut catalog = models::ModelCatalog::new(models::LiveSource::new(&store));
     let (id, model, mut tuning, route) =
-        resolve_initial_selection(c.model.as_deref(), &state_dir, &available, &mut catalog)?;
+        resolve_initial_selection(
+            c.provider.as_deref(),
+            c.model.as_deref(),
+            &state_dir,
+            &available,
+            &mut catalog,
+        )?;
     if let Some(keyword) = c.effort.as_deref() {
         tuning.effort = Some(provider::ReasoningEffort::from_keyword(keyword).ok_or_else(
             || format!("invalid effort '{keyword}' — expected none|low|medium|high|xhigh|max"),
@@ -285,17 +291,24 @@ pub fn run() -> Result<(), String> {
 }
 
 /// Resolve the initial provider+model from, in priority order: an explicit
-/// `--model` override (its provider resolved by [`models::resolve_model_provider`]);
-/// the persisted selection, when its provider is still available;
-/// else the first available provider's default model. The selection always
-/// names an *available* provider — a saved selection naming a provider whose
-/// key is no longer set falls through to the default rather than failing.
+/// `--provider` pin; an explicit `--model` override (its provider resolved by
+/// [`models::resolve_model_provider`]); the persisted selection, when its
+/// provider is still available; else the first available provider's default
+/// model. The selection always names an *available* provider — a saved
+/// selection naming a provider whose key is no longer set falls through to the
+/// default rather than failing.
 ///
-/// A custom provider has no built-in default model (its `config.ral` declares
-/// only the endpoint, key, and protocol), so when the default would fall to a
-/// custom provider with no saved selection and no `--model`, the user is
-/// asked to name a model — there is nothing to assume.
+/// `--provider` pins the identity with no model-listing lookup and no
+/// saved-state consult: with `--model` it takes the pair verbatim (the way to
+/// reach a model the provider does not advertise), and alone it takes the
+/// provider's default model.
+///
+/// A custom provider (or a ChatGPT account) has no built-in default model, so
+/// when the selection would fall to one with no saved selection and no
+/// `--model` — whether pinned by `--provider` or defaulted to — the user is
+/// asked to name a model, since there is nothing to assume.
 fn resolve_initial_selection(
+    provider_override: Option<&str>,
     model_override: Option<&str>,
     state_dir: &std::path::Path,
     available: &[provider::ProviderId],
@@ -309,6 +322,21 @@ fn resolve_initial_selection(
     ),
     String,
 > {
+    if let Some(pname) = provider_override {
+        let id = models::resolve_pinned_provider(pname, available)?;
+        let model = match model_override {
+            Some(m) => m.to_string(),
+            None => match id.famous() {
+                Some(kind) => kind.info().1.to_string(),
+                None => {
+                    return Err(format!(
+                        "provider '{pname}' has no default model — also pass --model NAME",
+                    ));
+                }
+            },
+        };
+        return Ok((id, model, provider::Tuning::initial(), None));
+    }
     if let Some(name) = model_override {
         let id = models::resolve_model_provider(name, available, catalog)?;
         return Ok((id, name.to_string(), provider::Tuning::initial(), None));

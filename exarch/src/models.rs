@@ -438,6 +438,33 @@ pub fn resolve_model_provider<S: ModelSource>(
     ))
 }
 
+/// Resolve an explicit `--provider` label to the matching available provider,
+/// pinning it verbatim. No model-listing lookup happens here — that is the
+/// whole point of pinning — so the caller may then name a model the provider
+/// does not advertise. Errors clearly when the label matches no available
+/// provider.
+pub fn resolve_pinned_provider(
+    name: &str,
+    available: &[ProviderId],
+) -> Result<ProviderId, String> {
+    if let Some(id) = available.iter().find(|id| id.label() == name) {
+        return Ok(id.clone());
+    }
+    if available.is_empty() {
+        return Err(
+            "no provider available — set a provider API key (e.g. ANTHROPIC_API_KEY)".into(),
+        );
+    }
+    Err(format!(
+        "provider '{name}' is not available ({}); set its API key or name one that is",
+        available
+            .iter()
+            .map(|id| id.label())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -680,6 +707,45 @@ mod tests {
     fn resolve_with_no_providers_errors() {
         let mut cat = ModelCatalog::in_memory(FakeSource::new(BTreeMap::new()));
         let err = resolve_model_provider("anything", &[], &mut cat).unwrap_err();
+        assert!(err.contains("no provider available"), "got: {err}");
+    }
+
+    /// `--provider` pins by label with no catalog lookup — the point being to
+    /// reach a model the provider does not advertise.
+    #[test]
+    fn pin_provider_matches_by_label() {
+        let available = [fam(ProviderKind::Anthropic), fam(ProviderKind::Deepseek)];
+        assert_eq!(
+            resolve_pinned_provider("deepseek", &available).unwrap(),
+            fam(ProviderKind::Deepseek)
+        );
+    }
+
+    /// A pin matches a custom provider by its config-map label just the same.
+    #[test]
+    fn pin_provider_matches_custom_label() {
+        let llama = custom("local-llama");
+        let available = [fam(ProviderKind::Anthropic), llama.clone()];
+        assert_eq!(
+            resolve_pinned_provider("local-llama", &available).unwrap(),
+            llama
+        );
+    }
+
+    /// Pinning an unavailable provider names the available ones rather than
+    /// silently falling back.
+    #[test]
+    fn pin_unavailable_provider_errors() {
+        let available = [fam(ProviderKind::Anthropic)];
+        let err = resolve_pinned_provider("openai", &available).unwrap_err();
+        assert!(err.contains("not available"), "got: {err}");
+        assert!(err.contains("anthropic"), "got: {err}");
+    }
+
+    /// Pinning with no providers at all is a clear error, not a panic.
+    #[test]
+    fn pin_with_no_providers_errors() {
+        let err = resolve_pinned_provider("anthropic", &[]).unwrap_err();
         assert!(err.contains("no provider available"), "got: {err}");
     }
 }

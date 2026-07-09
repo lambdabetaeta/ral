@@ -26,6 +26,15 @@ pub struct Cli {
     /// normal way to choose a model.
     #[arg(long)]
     pub model: Option<String>,
+    /// Pin the provider by label — `anthropic`, `openai`, `openrouter`, …, a
+    /// custom `config.ral` key, or a signed-in ChatGPT account handle —
+    /// bypassing the model-listing resolution `--model` performs on its own.
+    /// With `--model` it pins the pair verbatim, so you can reach a model the
+    /// provider does not advertise; alone it takes the provider's default
+    /// model. Either way the pin overrides any saved selection until the
+    /// `/model` picker changes it.
+    #[arg(long)]
+    pub provider: Option<String>,
     #[arg(long, conflicts_with = "file")]
     pub prompt: Option<String>,
     #[arg(long)]
