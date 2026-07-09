@@ -99,6 +99,11 @@ pub(crate) struct App {
     /// streaming select notices the flag (at most one `wait_for_cancel` poll).
     /// Disarmed when the next `UserPromptEcho` arrives.
     root_clear_drain: bool,
+    /// The focused tab's `waiting_for_input` bit, resampled by the UI loop each
+    /// iteration so the spinner follows the tab in view, not the trunk. The
+    /// loop owns the sample (it also needs it for the dirty-flip); `animating`,
+    /// with no registry access, reads this stored copy.
+    focused_waiting: bool,
 }
 
 impl App {
@@ -122,6 +127,7 @@ impl App {
             gesture: GestureState::new(),
             matrix_sort: MatrixSort::default(),
             root_clear_drain: false,
+            focused_waiting: true,
         }
     }
 
@@ -182,7 +188,12 @@ impl App {
             .tabs
             .viewport(self.tabs.focused())
             .is_some_and(|vp| vp.phase_label().is_some());
-        phase_live || self.gesture.toast_live(margin) || !self.inbox.waiting_for_input()
+        phase_live || self.gesture.toast_live(margin) || !self.focused_waiting
+    }
+
+    /// Record the focused tab's `waiting_for_input` bit for [`Self::animating`].
+    pub(super) fn set_focused_waiting(&mut self, waiting: bool) {
+        self.focused_waiting = waiting;
     }
 
     /// Age out sub-session tabs, reset root scrollback, zero cost, redraw the

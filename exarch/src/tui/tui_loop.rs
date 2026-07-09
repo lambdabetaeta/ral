@@ -310,10 +310,16 @@ fn ui_loop(
     // a drained bus event, a consumed keystroke, a focus change, or a probe
     // flip. Seeded true so the first frame always paints.
     let mut dirty = true;
-    // Sampled once per iteration: flips when the trunk's drive loop parks or
-    // unparks, which repaints the tab title and the prompt chrome but raises
-    // no bus event of its own to report the change.
-    let mut waiting_for_input = tui.app.inbox.waiting_for_input();
+    // Sampled once per iteration from the focused tab's mailbox: flips when
+    // that agent's drive loop parks or unparks, which repaints the tab title
+    // and prompt chrome but raises no bus event of its own. A tab with no live
+    // agent has no queue to be busy on, so it reads as idle (waiting).
+    let focused_waiting = |ctx: &CommandCtx<'_>, focused| {
+        ctx.agents
+            .mailbox(focused)
+            .map_or(true, |mb| mb.waiting_for_input())
+    };
+    let mut waiting_for_input = focused_waiting(ctx, tui.app.tabs.focused());
     loop {
         // Focus as of the start of this iteration; compared at the end so a
         // `TAB`, or a focused agent ending mid-drain, wakes the agents whose
@@ -352,9 +358,12 @@ fn ui_loop(
             Pass::Idle => false,
         };
         dirty |= handled_any;
-        let now_waiting = tui.app.inbox.waiting_for_input();
+        let now_waiting = focused_waiting(ctx, tui.app.tabs.focused());
         dirty |= now_waiting != waiting_for_input;
         waiting_for_input = now_waiting;
+        // Hand the sole sample to `App` so `animating`'s spinner test follows
+        // the focused tab without re-reading the flag.
+        tui.app.set_focused_waiting(now_waiting);
         // Paint only when a frame is due, so a multi-batch backlog still drains
         // at full throughput but redraws at most once per interval.  `tick`
         // always runs on the due frame, painted or not: it ages dying tabs out

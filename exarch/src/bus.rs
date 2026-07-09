@@ -584,6 +584,13 @@ impl Mailbox {
     pub fn wake(&self) {
         self.shared.signal.notify_all();
     }
+
+    /// Whether this queue's consumer is parked at a human-input boundary. The
+    /// TUI reads the focused tab's bit through its registry mailbox to drive
+    /// the prompt chrome and tab-title spinner.
+    pub fn waiting_for_input(&self) -> bool {
+        self.shared.waiting_for_input.load(Ordering::Acquire)
+    }
 }
 
 /// A session's inbox: the owned **consumer** of the typed, multi-producer
@@ -642,9 +649,10 @@ impl Inbox {
             .is_empty()
     }
 
-    /// Whether the consumer is parked at a human-input boundary.  The TUI uses
-    /// the root inbox's bit to drive the terminal tab title: spinner while the
-    /// root has not yielded, idle block once it is genuinely waiting for input.
+    /// Whether the consumer is parked at a human-input boundary — true once it
+    /// yields on an empty queue, cleared the moment a producer enqueues work.
+    /// The chrome reads the focused tab's bit through its [`Mailbox`], not this
+    /// consumer handle.
     pub fn waiting_for_input(&self) -> bool {
         self.shared.waiting_for_input.load(Ordering::Acquire)
     }
