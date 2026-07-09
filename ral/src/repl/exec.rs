@@ -159,7 +159,7 @@ pub(super) fn execute_input(
                     }
                 }
                 Diagnostics::Host(msg) => {
-                    eprintln!("{}", msg);
+                    eprintln!("{msg}");
                 }
             }
             None
@@ -182,7 +182,7 @@ pub(super) fn execute_input(
                 }
                 Err(break_) => match break_ {
                     transport::Break::Error(msg) => {
-                        eprint!("{}", msg);
+                        eprint!("{msg}");
                         None
                     }
                     transport::Break::Exit(code) => Some(code.clamp(0, 255) as u8),

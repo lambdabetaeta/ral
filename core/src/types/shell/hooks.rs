@@ -192,7 +192,7 @@ impl Hook {
                 return Err(RegisterError::NotCallable {
                     name: name.clone(),
                     origin: self.origin,
-                    actual: format!("{}", other),
+                    actual: format!("{other}"),
                 });
             }
         };
@@ -236,9 +236,8 @@ impl fmt::Display for RegisterError {
             RegisterError::NotCallable { name, actual, .. } => {
                 write!(
                     f,
-                    "cannot register '{}' as a hook: \
-                     expected a Block or Lambda, got {}",
-                    name, actual
+                    "cannot register '{name}' as a hook: \
+                     expected a Block or Lambda, got {actual}"
                 )
             }
             RegisterError::ArityMismatch {
@@ -260,7 +259,7 @@ impl fmt::Display for RegisterError {
                 )
             }
             RegisterError::AlreadyRegistered { name, .. } => {
-                write!(f, "hook '{}' is already registered", name)
+                write!(f, "hook '{name}' is already registered")
             }
         }
     }

@@ -902,7 +902,7 @@ impl Inferencer<'_> {
                             actual,
                             &Ty::List(Box::new(Ty::Int)),
                             Reason::BuiltinTypedArg,
-                        )
+                        );
                     }
                     Ty::Var(_)
                         if options
@@ -910,7 +910,7 @@ impl Inferencer<'_> {
                             .any(|o| matches!(o, ArgTemplate::Ty(TyTemplate::Bytes))) =>
                     {
                         self.ctx
-                            .unify_ty(actual, &Ty::Bytes, Reason::BuiltinTypedArg)
+                            .unify_ty(actual, &Ty::Bytes, Reason::BuiltinTypedArg);
                     }
                     _ => {
                         if let Some(ArgTemplate::Ty(ty)) = options.first() {
@@ -1450,7 +1450,7 @@ impl Inferencer<'_> {
 
             let inp = self.comp_input_mode(&stage_tys[i + 1]);
             self.with_span(edge_span, |this| {
-                this.ctx.unify_mode(&out, &inp, Reason::PipelineEdge)
+                this.ctx.unify_mode(&out, &inp, Reason::PipelineEdge);
             });
         }
 

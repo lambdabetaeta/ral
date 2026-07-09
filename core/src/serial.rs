@@ -590,7 +590,7 @@ mod tests {
         // A `Bind` (the `let y` RHS records a ground output mode) followed
         // by a two-stage `Pipeline` (each stage records a ground wire),
         // both interior to the lambda body — the shape the ADR names.
-        let src = r#"let f = { |x| let y = /bin/echo $x; /bin/cat | /bin/cat }"#;
+        let src = r"let f = { |x| let y = /bin/echo $x; /bin/cat | /bin/cat }";
         let ast = crate::parse(src).expect("parse");
         let comp = crate::elaborate(&ast, HashSet::default());
         let annotated =

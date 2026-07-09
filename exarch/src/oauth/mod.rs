@@ -543,7 +543,7 @@ mod tests {
         let jwt = format!("hdr.{payload}.sig");
         assert_eq!(account_id_from_jwt(&jwt).as_deref(), Some("acc_123"));
         assert_eq!(email_from_jwt(&jwt).as_deref(), Some("alex@work"));
-        assert_eq!(jwt_exp(&jwt), Some(1893456000));
+        assert_eq!(jwt_exp(&jwt), Some(1_893_456_000));
     }
 
     /// An account labels by its email, falling back to the opaque account id

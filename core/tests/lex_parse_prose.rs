@@ -161,13 +161,13 @@ struct SplitMix64(u64);
 
 impl SplitMix64 {
     fn new(seed: u64) -> Self {
-        Self(seed.wrapping_add(0x9E3779B97F4A7C15))
+        Self(seed.wrapping_add(0x9E37_79B9_7F4A_7C15))
     }
     fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E3779B97F4A7C15);
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^ (z >> 31)
     }
     fn pick<T: Copy>(&mut self, xs: &[T]) -> T {
@@ -187,7 +187,7 @@ impl SplitMix64 {
 /// iterations on UTF-8-error handling we already cover elsewhere.
 #[test]
 fn random_ascii_never_panics_and_messages_are_friendly() {
-    let alphabet: Vec<u8> = (b' '..=b'~').chain([b'\n', b'\t', b'\0']).collect();
+    let alphabet: Vec<u8> = (b' '..=b'~').chain(*b"\n\t\0").collect();
     for i in 0..4096u64 {
         let mut rng = SplitMix64::new(i);
         let len = rng.range(0, 96);

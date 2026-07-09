@@ -20,11 +20,11 @@ fn run_io(script: &str) -> common::Output {
 #[test]
 fn await_does_not_auto_replay() {
     let out = run_io(
-        r#"
+        r"
         let h = spawn { echo from-child }
         let r = await $h
         echo marker-after
-        "#,
+        ",
     );
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     assert!(
@@ -60,13 +60,13 @@ fn record_value_and_stdout_both_accessible() {
 #[test]
 fn await_record_cached_across_calls() {
     let out = run_io(
-        r#"
+        r"
         let h = spawn { echo just-once }
         let r1 = await $h
         let r2 = await $h
         echo !{to-bytes $r1[stdout] | from-string}
         echo !{to-bytes $r2[stdout] | from-string}
-        "#,
+        ",
     );
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     assert_eq!(
@@ -82,12 +82,12 @@ fn await_record_cached_across_calls() {
 #[test]
 fn unawaited_spawns_do_not_leak() {
     let out = run_io(
-        r#"
+        r"
         let a = spawn { echo alpha }
         let bb = spawn { echo bravo }
         sleep 0.1
         echo only-this
-        "#,
+        ",
     );
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     assert!(out.stdout.contains("only-this"), "stdout: {:?}", out.stdout);
@@ -109,12 +109,12 @@ fn unawaited_spawns_do_not_leak() {
 fn redirect_bypasses_record() {
     let logfile = fresh_tmp_path("ral_spawn_io_redir", "log");
     let script = format!(
-        r#"
+        r"
         let h = spawn {{ /bin/echo written-to-file > {path} }}
         let r = await $h
         echo !{{to-bytes $r[stdout] | from-string}}
         echo after
-        "#,
+        ",
         path = logfile.to_str().unwrap(),
     );
     let out = run_io(&script);
@@ -123,8 +123,7 @@ fn redirect_bypasses_record() {
     std::fs::remove_file(&logfile).ok();
     assert!(
         contents.contains("written-to-file"),
-        "file contents: {:?}",
-        contents
+        "file contents: {contents:?}"
     );
     assert!(
         !out.stdout.contains("written-to-file"),

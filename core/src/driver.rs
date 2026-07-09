@@ -356,7 +356,7 @@ impl Shell {
                 let Some(hook) = self.mobile.context.hooks.get(name).cloned() else {
                     return TurnReport::Static {
                         diagnostics: StaticDiagnostics::Host(crate::types::Error::new(
-                            format!("hook '{}' is not registered", name),
+                            format!("hook '{name}' is not registered"),
                             1,
                         )),
                     };

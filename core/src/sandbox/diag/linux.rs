@@ -36,11 +36,10 @@ pub(super) fn read_window(elapsed: Duration) -> Option<String> {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .output();
-    if let Ok(out) = journal {
-        if out.status.success() {
+    if let Ok(out) = journal
+        && out.status.success() {
             return Some(String::from_utf8_lossy(&out.stdout).into_owned());
         }
-    }
     let dmesg = std::process::Command::new("dmesg")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())

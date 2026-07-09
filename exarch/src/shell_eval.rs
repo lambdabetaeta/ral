@@ -1337,7 +1337,7 @@ keep-bottom
         deferred.deliver(vec![ral_core::serial::FOValue::Unit]);
         match inbox.drain_turn() {
             Some(crate::bus::Turn::Surface { id, .. }) => {
-                assert_eq!(id, 7, "the batch is stamped with the root session id")
+                assert_eq!(id, 7, "the batch is stamped with the root session id");
             }
             other => panic!("a delivered batch surfaces as Turn::Surface, got {other:?}"),
         }
@@ -1648,7 +1648,7 @@ keep-bottom
         let tmp_str = display_no_trailing_sep(&tmp);
 
         let src = format!(
-            r#"cd '{tmp_str}'
+            r"cd '{tmp_str}'
 let hits = grep-files #'\[TODO\]'#
 let files = nub !{{map {{ |h| $h[file] }} $hits}}
 each {{ |f|
@@ -1659,7 +1659,7 @@ each {{ |f|
         [ hash: $rows[$[$h[line] - 1]][hash], line: !{{re-replace #'\[TODO\]'# '[DONE]' $h[text]}} ]
     }} $mine}}
 }} $files
-return !{{length $hits}}"#
+return !{{length $hits}}"
         );
         let r = run_once(&mut shell, &src);
         assert_eq!(

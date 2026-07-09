@@ -239,7 +239,7 @@ fn instantiate(
                 DefaultPolicy::denied(),
                 origin,
             ) {
-                return Err(Break::Error(load_err(format!("plugin '{name}': {}", e))));
+                return Err(Break::Error(load_err(format!("plugin '{name}': {e}"))));
             }
             let arg = options.cloned().unwrap_or(empty);
             let fo_arg = match ral_core::serial::FOValue::try_from(&arg) {

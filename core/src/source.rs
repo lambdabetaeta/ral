@@ -30,7 +30,7 @@ impl Span {
     /// Construct a span covering `[start, end)` in `file`.
     /// Panics (debug) if `start > end`.
     pub fn new(file: FileId, start: u32, end: u32) -> Self {
-        debug_assert!(start <= end, "span start {} > end {}", start, end);
+        debug_assert!(start <= end, "span start {start} > end {end}");
         Self { start, end, file }
     }
 

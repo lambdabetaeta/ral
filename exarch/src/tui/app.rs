@@ -354,7 +354,7 @@ impl App {
                     // boundary (`None`): present only so its result attaches there,
                     // never reaching back to clobber an earlier call's size bar.
                     None => {
-                        vp.push_plain_call(tool, (cmd != crate::tools::INVALID_INPUT).then_some(cmd))
+                        vp.push_plain_call(tool, (cmd != crate::tools::INVALID_INPUT).then_some(cmd));
                     }
                 });
             }
@@ -366,17 +366,17 @@ impl App {
             // size-bar.
             Kind::ToolResult(text) => self.with_viewport(id, |vp| vp.set_result_size(&text)),
             Kind::UserPromptEcho(text) => {
-                self.push_chrome(id, RailShape::Prompt, line::user_prompt(&text))
+                self.push_chrome(id, RailShape::Prompt, line::user_prompt(&text));
             }
             Kind::StopReason(raw) => {
-                self.push_chrome(id, RailShape::Plain, line::stop_reason(&raw))
+                self.push_chrome(id, RailShape::Plain, line::stop_reason(&raw));
             }
             Kind::Error(msg) => self.push_chrome(id, RailShape::Error, line::error(&msg)),
             Kind::SystemNote(text) => self.push_chrome(id, RailShape::Plain, line::note(&text)),
             // Quiet on the rail; recorded in the trace at the emit seam.
             Kind::Nudge { .. } => {}
             Kind::ProviderError(error) => {
-                self.push_chrome(id, RailShape::Error, line::provider_error(&error))
+                self.push_chrome(id, RailShape::Error, line::provider_error(&error));
             }
             Kind::SubagentDone {
                 title,
@@ -399,7 +399,7 @@ impl App {
                 // delegated work.
                 let root = self.tabs.root();
                 self.with_viewport(root, |vp| {
-                    vp.push_subagent(title, text, error, elapsed, fidelity)
+                    vp.push_subagent(title, text, error, elapsed, fidelity);
                 });
             }
             // A surfaced render document: a kit raised a card through the
@@ -419,7 +419,7 @@ impl App {
                 match card.into_single_diff() {
                     Ok((path, hunks)) => {
                         self.surface
-                            .absorb_patch(self.tabs.viewports_mut(), id, path, hunks)
+                            .absorb_patch(self.tabs.viewports_mut(), id, path, hunks);
                     }
                     Err(card) => self.with_viewport(id, |vp| vp.push_card(card)),
                 }
@@ -504,7 +504,7 @@ impl App {
             // handler, so nothing is lost.
             Kind::Io { event, .. } => {
                 self.surface
-                    .absorb_observation(self.tabs.viewports_mut(), id, event)
+                    .absorb_observation(self.tabs.viewports_mut(), id, event);
             }
             // Pinned state: write or drop a register slot in place.  Routed
             // directly, *not* through `with_viewport` — a pin is ambient state
@@ -676,7 +676,7 @@ impl App {
                 if !me.modifiers.contains(KeyModifiers::SHIFT) =>
             {
                 let f = self.tabs.focused();
-                self.gesture.press(me, self.tabs.viewports(), f)
+                self.gesture.press(me, self.tabs.viewports(), f);
             }
             MouseEventKind::Drag(MouseButton::Left) => self.gesture.drag(me),
             MouseEventKind::Up(MouseButton::Left) => {

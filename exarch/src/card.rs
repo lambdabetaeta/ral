@@ -548,7 +548,7 @@ pub fn observation_group_card(reads: &[String], execs: &[IoEvent], greps: &[IoEv
     if !reads.is_empty() {
         let mut spans = Vec::new();
         join_spans(&mut spans, reads, |spans, path| {
-            spans.extend(read_spans(path))
+            spans.extend(read_spans(path));
         });
         cards.push(Card(vec![Mark::Text { spans }]));
     }

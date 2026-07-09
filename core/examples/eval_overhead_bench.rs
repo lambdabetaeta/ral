@@ -55,7 +55,7 @@ fn main() {
 
         let dt = time_thunk_bracket(&mut shell, &captured, ITERS);
         let ns_per = dt.as_nanos() as f64 / f64::from(ITERS);
-        println!("{:>9}  {:>14.3?}  {:>12.1}", n, dt, ns_per);
+        println!("{n:>9}  {dt:>14.3?}  {ns_per:>12.1}");
     }
     println!();
     println!("Expectation post-imbl::HashMap: ns/iter is roughly flat across N");

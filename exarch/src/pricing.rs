@@ -192,7 +192,7 @@ fn deepseek_price(model: &str) -> Option<ModelPricing> {
     const PRO: DeepSeekRates = DeepSeekRates {
         input: 0.435,
         output: 0.87,
-        cache_read: 0.003625,
+        cache_read: 0.003_625,
     };
     const PRO_PEAK: DeepSeekRates = DeepSeekRates {
         input: 0.87,

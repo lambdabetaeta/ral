@@ -198,7 +198,7 @@ fn fmt_row_with_sep(row: &Row, ctx: &FmtCtx, sep: &str) -> String {
             Row::Empty => break,
             Row::Var(v) => {
                 tail = Some(match ctx.row_name(*v) {
-                    Some(name) => format!("...{}", name),
+                    Some(name) => format!("...{name}"),
                     None => "...".into(),
                 });
                 break;
@@ -228,10 +228,10 @@ pub fn fmt_comp_ty_ctx(cty: &CompTy, ctx: &FmtCtx) -> String {
         CompTy::Return(spec, a) => {
             let mut fields: Vec<String> = Vec::new();
             if let Some(s) = fmt_mode_field_ctx(spec.input) {
-                fields.push(format!("stdin: {}", s));
+                fields.push(format!("stdin: {s}"));
             }
             if let Some(s) = fmt_mode_field_ctx(spec.output) {
-                fields.push(format!("stdout: {}", s));
+                fields.push(format!("stdout: {s}"));
             }
             if fields.is_empty() {
                 format!("Command {}", fmt_ty_ctx(a, ctx))
@@ -337,7 +337,7 @@ pub fn fmt_scheme(scheme: &Scheme) -> String {
         other => fmt_ty_ctx(other, &ctx),
     };
 
-    format!("{}{}", prefix, body)
+    format!("{prefix}{body}")
 }
 
 #[cfg(test)]

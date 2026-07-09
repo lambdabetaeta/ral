@@ -32,8 +32,7 @@ fn ok(src: &str) {
     let errs = errors(src);
     assert!(
         errs.is_empty(),
-        "expected no errors in {src:?}, got: {:?}",
-        errs
+        "expected no errors in {src:?}, got: {errs:?}"
     );
 }
 
@@ -41,8 +40,7 @@ fn has_error(src: &str, fragment: &str) {
     let errs = errors(src);
     assert!(
         errs.iter().any(|e| e.contains(fragment)),
-        "expected an error containing {fragment:?} in {src:?}, got: {:?}",
-        errs
+        "expected an error containing {fragment:?} in {src:?}, got: {errs:?}"
     );
 }
 
@@ -715,8 +713,7 @@ fn stream_piped_whole_into_element_consumer_is_static_error() {
     assert!(
         errs.iter()
             .any(|e| e.hint().is_some_and(|h| h.contains("lazy Step stream"))),
-        "expected a stream-eliminator hint, got: {:?}",
-        errs
+        "expected a stream-eliminator hint, got: {errs:?}"
     );
 }
 
@@ -767,19 +764,19 @@ fn grant_exec_string_policy_typechecks() {
 
 #[test]
 fn grant_exec_subpath_allow_typechecks() {
-    ok(r#"grant [exec: ['/usr/bin/': 'allow']] { echo hi }"#);
+    ok(r"grant [exec: ['/usr/bin/': 'allow']] { echo hi }");
 }
 
 #[test]
 fn grant_exec_mixed_policy_shapes_typecheck() {
     // The TUTORIAL §16 example: a subcommand list, an empty list, and an
     // inline string policy in one map.
-    ok(r#"grant [exec: [git: ['status', 'log'], make: [], '/usr/bin/': 'allow']] { echo hi }"#);
+    ok(r"grant [exec: [git: ['status', 'log'], make: [], '/usr/bin/': 'allow']] { echo hi }");
 }
 
 #[test]
 fn grant_fs_read_write_typechecks() {
-    ok(r#"grant [fs: [read: ['/home/project'], write: ['/tmp/build']], net: false] { echo hi }"#);
+    ok(r"grant [fs: [read: ['/home/project'], write: ['/tmp/build']], net: false] { echo hi }");
 }
 
 #[test]
@@ -788,7 +785,7 @@ fn grant_inner_value_errors_still_surface() {
     // still inferred — a genuine type error inside a policy value is a static
     // error rather than being masked by the (now removed) outer schema clash.
     has_error(
-        r#"grant [exec: [git: $[true + 1]]] { echo hi }"#,
+        r"grant [exec: [git: $[true + 1]]] { echo hi }",
         "couldn't match type Bool with type Integer",
     );
 }
@@ -839,24 +836,24 @@ fn is_mode_mismatch(src: &str) -> bool {
 #[test]
 fn within_handler_value_output_pipes_byte_consumer_is_mismatch() {
     assert!(
-        is_mode_mismatch(r#"within [handlers: [foo: { |args| return 3 }]] { foo | from-json }"#),
+        is_mode_mismatch(r"within [handlers: [foo: { |args| return 3 }]] { foo | from-json }"),
         "expected a ModeMismatch where the value-output handler arm feeds the from-json decoder"
     );
-    ok(r#"within [handlers: [foo: { |args| return 3 }]] { foo }"#);
+    ok(r"within [handlers: [foo: { |args| return 3 }]] { foo }");
 }
 
 /// A byte-output `within` handler arm defines the unknown head as
 /// byte-output and typechecks.
 #[test]
 fn within_handler_byte_output_arm_ok() {
-    ok(r#"within [handlers: [foo: { |args| echo hi }]] { foo }"#);
+    ok(r"within [handlers: [foo: { |args| echo hi }]] { foo }");
 }
 
 /// A byte-output forwarding alias defines the unknown head as byte-output and
 /// typechecks.
 #[test]
 fn alias_byte_output_forwarder_typechecks() {
-    ok(r#"alias myecho { |a| /bin/echo ...$a }; myecho hi"#);
+    ok(r"alias myecho { |a| /bin/echo ...$a }; myecho hi");
 }
 
 /// A value-output alias body defines the unknown head's modes, so the
@@ -882,7 +879,7 @@ fn alias_value_output_piped_into_byte_consumer_is_mismatch() {
 /// byte output.
 #[test]
 fn alias_over_mode_preserving_alias_typechecks() {
-    ok(r#"alias one { |args| echo one }; alias two { |args| one }; two"#);
+    ok(r"alias one { |args| echo one }; alias two { |args| one }; two");
 }
 
 /// The catch-all `handler: { comp }` names no specific head, so the
@@ -890,13 +887,13 @@ fn alias_over_mode_preserving_alias_typechecks() {
 /// arm is not rejected.
 #[test]
 fn catch_all_handler_arm_is_not_mode_pinned() {
-    ok(r#"within [handler: { |n a| return 'x' }] { return unit }"#);
+    ok(r"within [handler: { |n a| return 'x' }] { return unit }");
 }
 
 #[test]
 fn local_binding_beats_handler() {
     ok(
-        r#"within [handlers: [foo: { |args| echo handler }]] { let foo = { return 41 }; let r = !{foo}; return $[$r + 1] }"#,
+        r"within [handlers: [foo: { |args| echo handler }]] { let foo = { return 41 }; let r = !{foo}; return $[$r + 1] }",
     );
 }
 
@@ -929,7 +926,7 @@ fn within_handler_arity_mismatch_is_static_error() {
 /// type is assigned).
 #[test]
 fn within_handler_non_literal_value_falls_through() {
-    ok(r#"let h = { |x| return $[$x + 1] }; within [handlers: [foo: $h]] { foo 1 }"#);
+    ok(r"let h = { |x| return $[$x + 1] }; within [handlers: [foo: $h]] { foo 1 }");
 }
 
 /// Existing within env/dir fields still typecheck correctly after the refactor.
@@ -1000,7 +997,7 @@ fn value_lookup_does_not_reify_aliases_or_command_only_builtins() {
 #[test]
 fn alias_parameter_receives_argv_list() {
     has_error(
-        r#"alias add1 { |n| return $[$n + 1] }; add1 5"#,
+        r"alias add1 { |n| return $[$n + 1] }; add1 5",
         "couldn't match",
     );
 }
@@ -1013,11 +1010,11 @@ fn alias_parameter_receives_argv_list() {
 #[test]
 fn alias_argument_checked_against_arm_parameter() {
     has_error(
-        r#"alias inc { |a| return $[$a[0] + 1] }; inc hello"#,
+        r"alias inc { |a| return $[$a[0] + 1] }; inc hello",
         "couldn't match",
     );
     // The same arm called with an Integer argument is well-typed.
-    ok(r#"alias inc { |a| return $[$a[0] + 1] }; inc 5"#);
+    ok(r"alias inc { |a| return $[$a[0] + 1] }; inc 5");
 }
 
 /// Last-pushed alias shadows earlier alias at typecheck: the second
@@ -1096,11 +1093,11 @@ fn alias_ir_shape_round_trips() {
 #[test]
 fn unalias_removes_only_static_alias_binding() {
     has_error(
-        r#"alias greet { |args| echo 41; return 41 }; unalias greet; let r = !{greet}; return $[$r + 0]"#,
+        r"alias greet { |args| echo 41; return 41 }; unalias greet; let r = !{greet}; return $[$r + 0]",
         "couldn't match",
     );
     ok(
-        r#"within [handlers: [greet: { |args| echo 41; return 41 }]] { unalias greet; let r = !{greet}; return $[$r + 1] }"#,
+        r"within [handlers: [greet: { |args| echo 41; return 41 }]] { unalias greet; let r = !{greet}; return $[$r + 1] }",
     );
 }
 
@@ -1119,9 +1116,9 @@ fn type_probe_threads_argument_type() {
     // `_type` is `α → F α`: the argument's type flows through to the
     // result, so a String probed by `_type` is still rejected in
     // arithmetic. A fresh, decoupled result type would mask this.
-    ok(r#"let x = !{_type 41}; return $[$x + 1]"#);
+    ok(r"let x = !{_type 41}; return $[$x + 1]");
     has_error(
-        r#"let x = !{_type hello}; return $[$x + 1]"#,
+        r"let x = !{_type hello}; return $[$x + 1]",
         "couldn't match",
     );
 }
@@ -1176,7 +1173,7 @@ fn all_pipeline_stage_types(comp: &Comp) -> Vec<(usize, Vec<Ty>)> {
 
 #[test]
 fn top_level_pipeline_retains_per_stage_value_types() {
-    let comp = annotated(r#"/bin/echo hi | /bin/cat"#);
+    let comp = annotated(r"/bin/echo hi | /bin/cat");
     let pipelines = all_pipeline_stage_types(&comp);
     assert_eq!(pipelines.len(), 1, "expected exactly one pipeline node");
     let (stage_count, types) = &pipelines[0];
@@ -1191,7 +1188,7 @@ fn top_level_pipeline_retains_per_stage_value_types() {
 
 #[test]
 fn top_level_pipeline_carries_ground_wires() {
-    let comp = annotated(r#"/bin/echo hi | /bin/cat"#);
+    let comp = annotated(r"/bin/echo hi | /bin/cat");
     let pipelines = all_pipeline_wires(&comp);
     assert_eq!(pipelines.len(), 1, "expected exactly one pipeline node");
     let (stage_count, wires) = &pipelines[0];
@@ -1219,7 +1216,7 @@ fn top_level_pipeline_carries_ground_wires() {
 fn pipeline_inside_thunk_body_carries_wires() {
     // The pipeline lives in a lambda body under a `let`; the pass must
     // descend past the spine to reach it.
-    let comp = annotated(r#"let f = { |x| /bin/echo $x | /bin/cat }"#);
+    let comp = annotated(r"let f = { |x| /bin/echo $x | /bin/cat }");
     let pipelines = all_pipeline_wires(&comp);
     assert_eq!(
         pipelines.len(),
@@ -1235,7 +1232,7 @@ fn pipeline_inside_thunk_body_carries_wires() {
 fn bind_rhs_output_mode_is_ground() {
     // A byte-producing RHS (`echo`, `F[μ, Bytes]`) records `Bytes`; a
     // pure value RHS (`return 42`, `F[∅, ∅]`) records `Empty`.
-    let comp = annotated(r#"let x = echo hi; let y = return 42; return unit"#);
+    let comp = annotated(r"let x = echo hi; let y = return 42; return unit");
     let mut binds = Vec::new();
     common::walk_comp(&comp, &mut |c| {
         if let CompKind::Bind {
@@ -1298,7 +1295,7 @@ fn nested_binds_carry_no_scheme_while_spine_does() {
     // The spine `let g` carries a scheme; a `let inner` under the lambda
     // body evaluates in a block scope and never installs, so it stays
     // `scheme: None`.
-    let comp = annotated(r#"let g = { |x| let inner = return $x; return $inner }; return unit"#);
+    let comp = annotated(r"let g = { |x| let inner = return $x; return $inner }; return unit");
     let mut spine_named = None;
     let mut nested_named = None;
     common::walk_comp(&comp, &mut |c| {

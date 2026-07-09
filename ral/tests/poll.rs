@@ -49,7 +49,7 @@ fn poll_settled_carries_value_and_stdout() {
 #[test]
 fn poll_pending_while_running() {
     let out = run_poll(
-        r#"
+        r"
         let h = spawn { sleep 2; return 1 }
         let polled = poll $h
         case $polled [
@@ -57,7 +57,7 @@ fn poll_pending_while_running() {
             `pending: { |_| echo pending }
         ]
         cancel $h
-        "#,
+        ",
     );
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     assert!(out.stdout.contains("pending"), "stdout: {:?}", out.stdout);
@@ -71,7 +71,7 @@ fn poll_pending_while_running() {
 #[test]
 fn poll_pending_carries_partial_stdout() {
     let out = run_poll(
-        r#"
+        r"
         let h = spawn { echo partial-line; sleep 2; return 1 }
         sleep 0.3
         let polled = poll $h
@@ -80,7 +80,7 @@ fn poll_pending_carries_partial_stdout() {
             `pending: { |s| echo !{to-bytes $s[stdout] | from-string} }
         ]
         cancel $h
-        "#,
+        ",
     );
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     assert!(

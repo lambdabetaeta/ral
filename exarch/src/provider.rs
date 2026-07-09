@@ -2700,7 +2700,7 @@ mod tests {
             dollars: 0.0,
             unmetered: false,
         };
-        assert_eq!(acc.cache_creation, Some(42), "None + Some promotes to Some",);
+        assert_eq!(acc.cache_creation, Some(42), "None + Some promotes to Some");
         assert_eq!(
             acc.cache_read,
             Some(2_000),
@@ -2732,7 +2732,7 @@ mod tests {
         assert_eq!(calls.get(), MAX_ATTEMPTS, "exhausts the transient budget");
         match out {
             Err(ProviderError::Transient { attempts, .. }) => {
-                assert_eq!(attempts, MAX_ATTEMPTS, "surfaced with the attempt count")
+                assert_eq!(attempts, MAX_ATTEMPTS, "surfaced with the attempt count");
             }
             other => panic!("expected Transient after the budget, got {other:?}"),
         }

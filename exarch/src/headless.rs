@@ -296,7 +296,7 @@ impl Sink for Headless {
                 let secs = elapsed.as_secs_f64();
                 match outcome.breadcrumb(&text).1 {
                     Some(reason) => {
-                        eprintln!("[agent: {title} failed in {secs:.1}s — {reason}]")
+                        eprintln!("[agent: {title} failed in {secs:.1}s — {reason}]");
                     }
                     None => eprintln!("[agent: {title} done in {secs:.1}s]"),
                 }

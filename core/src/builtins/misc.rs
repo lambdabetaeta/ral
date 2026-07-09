@@ -159,7 +159,7 @@ pub(super) fn builtin_help(_args: &[Value], shell: &mut Shell) -> Value {
     let line_colors = (cyan, dim, reset);
 
     let out = {
-        let mut s = format!("{bold}Builtins:{reset}\n", bold = bold, reset = reset);
+        let mut s = format!("{bold}Builtins:{reset}\n");
         let mut builtin_names: Vec<&str> = super::builtin_names()
             .iter()
             .copied()
@@ -171,23 +171,21 @@ pub(super) fn builtin_help(_args: &[Value], shell: &mut Shell) -> Value {
                 s.push_str(&fmt_line(name, doc, line_colors));
             }
         }
-        let _ = writeln!(s, "{bold}Prelude:{reset}", bold = bold, reset = reset);
+        let _ = writeln!(s, "{bold}Prelude:{reset}");
         for (name, doc) in prelude_all_docs() {
             s.push_str(&fmt_line(&name, &doc, line_colors));
         }
         let library = library_all_docs();
         if !library.is_empty() {
-            let _ = writeln!(s, "{bold}Library:{reset}", bold = bold, reset = reset);
+            let _ = writeln!(s, "{bold}Library:{reset}");
             for (name, doc) in library {
                 s.push_str(&fmt_line(&name, &doc, line_colors));
             }
         }
-        let _ = writeln!(s, "{dim}──{reset}", dim = dim, reset = reset);
+        let _ = writeln!(s, "{dim}──{reset}");
         let _ = writeln!(
             s,
-            "{dim}Use `explain <name>` for the full type signature and source location of any entry.{reset}",
-            dim = dim,
-            reset = reset
+            "{dim}Use `explain <name>` for the full type signature and source location of any entry.{reset}"
         );
         s
     };
@@ -637,7 +635,7 @@ pub(super) fn builtin_ask(args: &[Value]) -> Result<Value, Error> {
         .write(true)
         .open(CON_OUT)
         .map_err(|e| Error::new(format!("ask: {e}"), 1))?;
-    write!(out, "{}", prompt).ok();
+    write!(out, "{prompt}").ok();
     out.flush().ok();
     drop(out);
     let inp = std::fs::File::open(CON_IN).map_err(|e| Error::new(format!("ask: {e}"), 1))?;

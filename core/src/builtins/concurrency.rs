@@ -1124,7 +1124,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let (_idle_join, sibling) = shell.spawn_thread(Arc::new(shell.mobile().scope), |_| ());
         let (observed, worker_scope) = spawn_polling_worker(&mut shell, |c| {
-            c.cancel(crate::process::CancelCause::Explicit)
+            c.cancel(crate::process::CancelCause::Explicit);
         });
         assert!(
             worker_scope.is_cancelled(),
@@ -1146,7 +1146,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let root = shell.session.root.clone();
         let (observed, worker_scope) = spawn_polling_worker(&mut shell, move |_| {
-            root.cancel(crate::process::CancelCause::RootAbort)
+            root.cancel(crate::process::CancelCause::RootAbort);
         });
         assert!(
             worker_scope.is_cancelled(),

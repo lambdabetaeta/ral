@@ -226,7 +226,7 @@ fn stalled_stream_commits_partial_and_truncates() {
     let (outcome, kinds) = drive_apply(&mut session, &provider, Some("answer at length"));
     match outcome {
         Err(ProviderError::Truncated { reason }) => {
-            assert_eq!(reason, "Web stream error: operation timed out")
+            assert_eq!(reason, "Web stream error: operation timed out");
         }
         other => panic!("a committed stall must surface as Truncated, got {other:?}"),
     }

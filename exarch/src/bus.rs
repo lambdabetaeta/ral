@@ -2491,7 +2491,7 @@ mod tests {
     fn inbox_pop_back_user_all_no_user_prompts() {
         let inbox = Inbox::new();
         inbox.push(wakeup(1, "x", "@", "p")).unwrap();
-        assert_eq!(inbox.pop_back_user_all(), None, "no user prompts to recall",);
+        assert_eq!(inbox.pop_back_user_all(), None, "no user prompts to recall");
         assert!(matches!(inbox.drain_turn(), Some(Turn::Wakeup(_))));
     }
 
@@ -2940,7 +2940,7 @@ mod tests {
                 assert_eq!(
                     text, "first line\n\nsecond line",
                     "both texts survive in order"
-                )
+                );
             }
             _ => panic!("expected a merged Human turn"),
         }

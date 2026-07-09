@@ -342,7 +342,7 @@ fn ui_loop(
         let mut handled_any = false;
         let more = match drain_pass(rx, done, Some(BATCH), |ev| {
             handled_any = true;
-            tui.app.handle(ev, rx)
+            tui.app.handle(ev, rx);
         }) {
             Pass::Stop => {
                 // The capped pass can report `Stop` with events still buffered

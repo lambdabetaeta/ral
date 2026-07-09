@@ -92,7 +92,7 @@ where
     let t = Instant::now();
     let _ = body();
     let dt = t.elapsed();
-    println!("  {label:<40} n={n:>7}  {:>10.3?}", dt);
+    println!("  {label:<40} n={n:>7}  {dt:>10.3?}");
     if dt > cap { None } else { Some(dt) }
 }
 

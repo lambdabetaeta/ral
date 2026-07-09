@@ -1220,7 +1220,7 @@ fn render_field_rows(rows: &[FieldRow], width: usize) -> Vec<Line<'static>> {
     for r in rows {
         match &r.value {
             FieldValue::Wrapped { text, style } => {
-                push_field(&mut ls, &r.label, text, *style, label_w, width)
+                push_field(&mut ls, &r.label, text, *style, label_w, width);
             }
             FieldValue::Inline(spans) => {
                 let mut line = vec![field_label(&r.label, label_w)];

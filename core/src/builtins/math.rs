@@ -18,7 +18,7 @@ use super::util::check_arity;
 /// `2^63`: the half-open upper bound an `f64` magnitude must stay under to be
 /// representable as `i64`.  `i64::MAX` (`2^63 - 1`) rounds up to `2^63` as an
 /// `f64`, so the comparison is strict against this value (mirrors `int`).
-const I64_BOUND: f64 = 9223372036854775808.0;
+const I64_BOUND: f64 = 9_223_372_036_854_775_808.0;
 
 /// The most decimal places `f64` can carry before `10^places` overflows to
 /// infinity; beyond ~15 significant digits the extra places are noise.

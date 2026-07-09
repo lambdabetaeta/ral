@@ -2286,7 +2286,7 @@ mod tests {
 
     #[test]
     fn bumped_string_level1_contains_double_quote() {
-        let toks = tok_types(r##"#'say "hi" please'#"##);
+        let toks = tok_types(r#"#'say "hi" please'#"#);
         assert_eq!(
             toks,
             vec![Token::SingleQuoted(r#"say "hi" please"#.into()), Token::Eof]

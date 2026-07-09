@@ -518,7 +518,7 @@ fn is_empty_on_int_is_type_error() {
 fn exists_on_real_path() {
     let dir = std::env::temp_dir();
     let path = dir.to_string_lossy().replace('\\', "/");
-    let script = format!("!{{exists '{}'}}", path);
+    let script = format!("!{{exists '{path}'}}");
     assert_eq!(must_succeed(&script), Value::Bool(true));
 }
 
@@ -534,7 +534,7 @@ fn exists_on_nonexistent() {
 fn is_dir_on_dir() {
     let dir = std::env::temp_dir();
     let path = dir.to_string_lossy().replace('\\', "/");
-    let script = format!("!{{is-dir '{}'}}", path);
+    let script = format!("!{{is-dir '{path}'}}");
     assert_eq!(must_succeed(&script), Value::Bool(true));
 }
 
@@ -1432,12 +1432,12 @@ let assert_eq = { |name expected actual|
 
 #[test]
 fn assert_eq_passes() {
-    must_succeed(&format!("{}\nassert_eq 'test' 42 42", ASSERT_EQ_DEF));
+    must_succeed(&format!("{ASSERT_EQ_DEF}\nassert_eq 'test' 42 42"));
 }
 
 #[test]
 fn assert_eq_fails() {
-    must_fail(&format!("{}\nassert_eq 'test' 42 99", ASSERT_EQ_DEF));
+    must_fail(&format!("{ASSERT_EQ_DEF}\nassert_eq 'test' 42 99"));
 }
 
 // ── failure propagation ─────────────────────────────────────────────────
@@ -1852,7 +1852,7 @@ fn spawn_passes_block_as_arg() {
     // Spawn a block that itself spawns — nested concurrency.
     assert_eq!(
         must_succeed(
-            r#"
+            r"
             let h = !{spawn {
                 let inner = !{spawn { return 100 }}
                 let base = await $inner
@@ -1860,7 +1860,7 @@ fn spawn_passes_block_as_arg() {
             }}
             let r = await $h
             return $r[value]
-        "#
+        "
         ),
         Value::Int(101)
     );
@@ -1891,10 +1891,10 @@ fn par_returns_closures() {
     // par where each worker returns a value — results cross thread boundaries.
     assert_eq!(
         must_succeed(
-            r#"
+            r"
             let results = !{par { |n| return $[$n * 10] } [2, 3, 5] 3}
             return $[$results[0] + $results[1] + $results[2]]
-        "#
+        "
         ),
         Value::Int(100) // 20 + 30 + 50
     );
@@ -1905,12 +1905,12 @@ fn race_first_wins() {
     // Two spawns: one returns immediately, one sleeps. Race picks the fast one.
     assert_eq!(
         must_succeed(
-            r#"
+            r"
             let fast = !{spawn { return winner }}
             let slow = !{spawn { sleep 10; return loser }}
             let r = race [$fast, $slow]
             return $r[value]
-        "#
+        "
         ),
         Value::String("winner".into())
     );
@@ -1920,23 +1920,23 @@ fn race_first_wins() {
 fn race_cancelled_await() {
     // After race, awaiting the loser returns an error (cancelled).
     must_fail(
-        r#"
+        r"
         let fast = !{spawn { return ok }}
         let slow = !{spawn { sleep 10; return late }}
         race [$fast, $slow]
         !{await $slow}
-    "#,
+    ",
     );
 }
 
 #[test]
 fn cancel_makes_await_fail() {
     must_fail(
-        r#"
+        r"
         let h = !{spawn { sleep 1; return ok }}
         cancel $h
         !{await $h}
-    "#,
+    ",
     );
 }
 
@@ -1944,12 +1944,12 @@ fn cancel_makes_await_fail() {
 fn cancel_completed_handle_is_noop() {
     assert_eq!(
         must_succeed(
-            r#"
+            r"
             let h = !{spawn { return 7 }}
             let r = await $h
             cancel $h
             return $r[value]
-        "#
+        "
         ),
         Value::Int(7)
     );
@@ -1966,7 +1966,7 @@ fn spawn_deep_recursion_in_thread() {
     // TCO works inside spawned threads.
     assert_eq!(
         must_succeed(
-            r#"
+            r"
             let h = !{spawn {
                 let count = { |n acc|
                     if $[$n <= 0] { return $acc } else {
@@ -1977,9 +1977,9 @@ fn spawn_deep_recursion_in_thread() {
             }}
             let r = await $h
             return $r[value]
-        "#
+        "
         ),
-        Value::Int(50005000)
+        Value::Int(50_005_000)
     );
 }
 
@@ -2086,7 +2086,7 @@ fn spawn_tree_fan_out_fan_in() {
     // 3 levels deep = 8 leaf nodes, each returning its index.
     assert_eq!(
         must_succeed(
-            r#"
+            r"
             let leaf = { |n| spawn { return $n } }
             let branch = { |a b|
                 spawn {
@@ -2112,7 +2112,7 @@ fn spawn_tree_fan_out_fan_in() {
             let root = branch $c0 $c1
             let r = await $root
             return $r[value]
-        "#
+        "
         ),
         Value::Int(36) // 1+2+3+4+5+6+7+8
     );
@@ -2123,7 +2123,7 @@ fn par_of_spawns() {
     // par where each worker itself spawns sub-tasks and awaits them.
     assert_eq!(
         must_succeed(
-            r#"
+            r"
             let work = { |n|
                 let a = !{spawn { return $[$n * 10] }}
                 let b = !{spawn { return $[$n * 100] }}
@@ -2132,7 +2132,7 @@ fn par_of_spawns() {
                 return $[$ra[value] + $rb[value]]
             }
             par $work !{range 1 6} 3
-        "#
+        "
         ),
         Value::list(vec![
             Value::Int(110), // 10+100
@@ -2150,7 +2150,7 @@ fn spawn_pipeline_chain() {
     // Each stage transforms the value. Tests serial dependency across threads.
     assert_eq!(
         must_succeed(
-            r#"
+            r"
             let a = !{spawn { return [1, 2, 3] }}
             let bb = !{spawn {
                 let r = await $a
@@ -2164,7 +2164,7 @@ fn spawn_pipeline_chain() {
             }}
             let r = await $c
             return $r[value]
-        "#
+        "
         ),
         Value::Int(12) // (1*2)+(2*2)+(3*2) = 2+4+6
     );
@@ -2175,10 +2175,10 @@ fn par_returning_closures_composed() {
     // par produces a list of results, then we fold them.
     assert_eq!(
         must_succeed(
-            r#"
+            r"
             let offsets = !{par { |n| return $n } !{range 1 4} 3}
             return $[$offsets[0] + $offsets[1] + $offsets[2]]
-        "#
+        "
         ),
         Value::Int(6) // 1+2+3
     );
@@ -2189,7 +2189,7 @@ fn race_with_spawn_inside() {
     // Each racer itself spawns internal work.
     assert_eq!(
         must_succeed(
-            r#"
+            r"
             let fast = !{spawn {
                 let inner = !{spawn { return 42 }}
                 let r = await $inner; return $r[value]
@@ -2197,7 +2197,7 @@ fn race_with_spawn_inside() {
             let slow = !{spawn { sleep 10; return 0 }}
             let r = race [$fast, $slow]
             return $r[value]
-        "#
+        "
         ),
         Value::Int(42)
     );
@@ -2208,11 +2208,11 @@ fn spawn_map_reduce() {
     // Classic map-reduce: spawn workers for map phase, reduce results.
     assert_eq!(
         must_succeed(
-            r#"
+            r"
             let items = range 1 11
             let mapped = !{par { |n| return $[$n * $n] } $items 5}
             !{reduce { |a b| return $[$a + $b] } $mapped}
-        "#
+        "
         ),
         Value::Int(385) // sum of squares 1..10
     );
@@ -2223,7 +2223,7 @@ fn spawn_passes_closure_that_spawns() {
     // Pass a closure to a spawned thread; that closure itself spawns.
     assert_eq!(
         must_succeed(
-            r#"
+            r"
             let go = { |f n|
                 spawn { let out = $f $n; return $out }
             }
@@ -2234,7 +2234,7 @@ fn spawn_passes_closure_that_spawns() {
             let h = go $double_async 21
             let r = await $h
             return $r[value]
-        "#
+        "
         ),
         Value::Int(42)
     );
@@ -2396,8 +2396,7 @@ fn audit_exec_allowed_recorded() {
     let children = children_of(&tree);
     assert!(
         has_cap_check(&children, "exec", "allowed"),
-        "expected allowed exec capability-check in audit tree; children: {:?}",
-        children
+        "expected allowed exec capability-check in audit tree; children: {children:?}"
     );
 }
 
@@ -2409,8 +2408,7 @@ fn audit_exec_denied_recorded() {
     let children = children_of(&tree);
     assert!(
         has_cap_check(&children, "exec", "denied"),
-        "expected denied exec capability-check in audit tree; children: {:?}",
-        children
+        "expected denied exec capability-check in audit tree; children: {children:?}"
     );
 }
 
@@ -2420,8 +2418,7 @@ fn audit_no_flag_no_recording() {
     let children = children_of(&tree);
     assert!(
         !has_cap_check(&children, "exec", "allowed"),
-        "expected no capability-check nodes without audit: true; children: {:?}",
-        children
+        "expected no capability-check nodes without audit: true; children: {children:?}"
     );
 }
 
@@ -2436,8 +2433,7 @@ fn audit_nested_grant_outeraudit_propagates() {
     let children = children_of(&tree);
     assert!(
         has_cap_check(&children, "exec", "allowed"),
-        "expected exec event when inner grant lacks audit: true; children: {:?}",
-        children
+        "expected exec event when inner grant lacks audit: true; children: {children:?}"
     );
 }
 
@@ -2512,8 +2508,7 @@ fn audit_fs_write_denied_recorded() {
     let children = children_of(&tree);
     assert!(
         has_cap_check(&children, "fs", "denied"),
-        "expected denied fs capability-check in audit tree; children: {:?}",
-        children
+        "expected denied fs capability-check in audit tree; children: {children:?}"
     );
 }
 
@@ -2564,8 +2559,7 @@ fn audit_grant_owns_exec_capability_allowed_child() {
     let grant_children = children_of(grant);
     assert!(
         has_cap_check(&grant_children, "exec", "allowed"),
-        "exec/allowed capability-check must be a child of `grant`, not the root: {:?}",
-        grant_children
+        "exec/allowed capability-check must be a child of `grant`, not the root: {grant_children:?}"
     );
 }
 
@@ -2586,8 +2580,7 @@ fn audit_grant_owns_exec_capability_denied_child() {
     let grant_children = children_of(grant);
     assert!(
         has_cap_check(&grant_children, "exec", "denied"),
-        "exec/denied capability-check must be a child of `grant`: {:?}",
-        grant_children
+        "exec/denied capability-check must be a child of `grant`: {grant_children:?}"
     );
 }
 
@@ -2607,8 +2600,7 @@ fn audit_grant_owns_sandboxed_fs_allowed_child() {
     let grant_children = children_of(grant);
     assert!(
         has_cap_check(&grant_children, "fs", "allowed"),
-        "fs/allowed event must be under `grant`, not loose at the root: outer={:?}",
-        outer_children
+        "fs/allowed event must be under `grant`, not loose at the root: outer={outer_children:?}"
     );
 }
 
@@ -2645,13 +2637,11 @@ fn audit_guard_owns_body_and_cleanup_children() {
         .collect();
     assert!(
         cmd_names.iter().any(|n| n == "/bin/true"),
-        "guard body must appear under the guard node: {:?}",
-        cmd_names
+        "guard body must appear under the guard node: {cmd_names:?}"
     );
     assert!(
         cmd_names.iter().any(|n| n == "/bin/echo"),
-        "guard cleanup must appear under the guard node: {:?}",
-        cmd_names
+        "guard cleanup must appear under the guard node: {cmd_names:?}"
     );
 }
 
@@ -2702,8 +2692,7 @@ fn audit_nested_audit_records_one_audit_node_and_returns_it() {
     assert_eq!(
         inner.len(),
         1,
-        "exactly one inner `audit` node expected: {:?}",
-        outer_children
+        "exactly one inner `audit` node expected: {outer_children:?}"
     );
     // Inner audit owns /bin/true: the body's command node is a child
     // of the inner scope, not a sibling of it in the outer tree.
@@ -2717,8 +2706,7 @@ fn audit_nested_audit_records_one_audit_node_and_returns_it() {
         .collect();
     assert!(
         names.iter().any(|n| n.contains("/bin/true")),
-        "inner audit's children must include /bin/true: {:?}",
-        names
+        "inner audit's children must include /bin/true: {names:?}"
     );
     // And the outer scope must NOT see /bin/true as a direct child —
     // the inner audit absorbs ownership.
@@ -2731,8 +2719,7 @@ fn audit_nested_audit_records_one_audit_node_and_returns_it() {
         .collect();
     assert!(
         !outer_names.iter().any(|n| n.contains("/bin/true")),
-        "outer audit must not directly own /bin/true: {:?}",
-        outer_names
+        "outer audit must not directly own /bin/true: {outer_names:?}"
     );
 }
 
@@ -2751,8 +2738,7 @@ fn audit_direct_external_pipeline_stage_appears_in_tree() {
         .collect();
     assert!(
         cmds.iter().any(|c| c.contains("echo")),
-        "direct-spawn echo stage must appear in audit tree: {:?}",
-        cmds
+        "direct-spawn echo stage must appear in audit tree: {cmds:?}"
     );
 }
 

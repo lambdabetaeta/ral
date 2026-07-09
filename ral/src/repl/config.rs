@@ -141,7 +141,7 @@ pub(crate) fn apply_rc_config(
                     DefaultPolicy::denied_capture(),
                     origin,
                 ) {
-                    eprintln!("ralrc: {}", e);
+                    eprintln!("ralrc: {e}");
                 }
             }
             "aliases" => {
@@ -153,10 +153,10 @@ pub(crate) fn apply_rc_config(
                         if let Err(err) = ctx.shell.install_alias(name, value) {
                             match err {
                                 ral_core::types::Break::Error(e) => {
-                                    eprintln!("ralrc: {}", e.message)
+                                    eprintln!("ralrc: {}", e.message);
                                 }
                                 ral_core::types::Break::Escape(_) => {
-                                    eprintln!("ralrc: alias installation escaped")
+                                    eprintln!("ralrc: alias installation escaped");
                                 }
                             }
                         }
@@ -440,13 +440,13 @@ mod tests {
         // a no-op keybinding keeps the manifest minimal and valid.
         std::fs::write(
             &path,
-            r#"return { |options|
+            r"return { |options|
     let k = get $options key 'default'
     return [
         name: $k,
     ]
 }
-"#,
+",
         )
         .unwrap();
 
@@ -468,11 +468,11 @@ mod tests {
         let path = tmp.path().join("echo-key.ral");
         std::fs::write(
             &path,
-            r#"return { |options|
+            r"return { |options|
     let k = get $options key 'fallback'
     return [name: $k]
 }
-"#,
+",
         )
         .unwrap();
 

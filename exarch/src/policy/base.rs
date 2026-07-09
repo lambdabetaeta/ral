@@ -363,8 +363,7 @@ mod tests {
         };
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
         let cargo = format!(
-            "{}/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
-            home
+            "{home}/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo"
         );
         let mut shell = Shell::default();
         shell
@@ -385,7 +384,7 @@ mod tests {
             cwd: Path::new("/"),
         };
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
-        let gobin = format!("{}/go/bin/goimports", home);
+        let gobin = format!("{home}/go/bin/goimports");
         for (name, abs) in [
             ("go", "/usr/local/go/bin/go"),
             ("goimports", gobin.as_str()),
@@ -410,7 +409,7 @@ mod tests {
             cwd: Path::new("/"),
         };
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
-        let node = format!("{}/.nvm/versions/node/v22.0.0/bin/node", home);
+        let node = format!("{home}/.nvm/versions/node/v22.0.0/bin/node");
         let mut shell = Shell::default();
         shell
             .with_capabilities(caps, |sh| sh.check_exec_args("node", &["node", &node], &[]))
@@ -428,8 +427,8 @@ mod tests {
             cwd: Path::new("/"),
         };
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
-        let versioned = format!("{}/.pyenv/versions/3.12.0/bin/python3", home);
-        let shim = format!("{}/.pyenv/shims/python3", home);
+        let versioned = format!("{home}/.pyenv/versions/3.12.0/bin/python3");
+        let shim = format!("{home}/.pyenv/shims/python3");
         for (name, abs) in [("python3", versioned.as_str()), ("python3", shim.as_str())] {
             let mut shell = Shell::default();
             shell

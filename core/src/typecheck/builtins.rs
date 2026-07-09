@@ -1083,9 +1083,7 @@ pub fn builtin_arity(name: &str) -> Option<usize> {
     let registry_arity = crate::builtins::builtin_arity(name);
     debug_assert!(
         check_arity_consistency(name, registry_arity),
-        "builtin '{}': registry arity ({:?}) ≠ scheme-derived arity",
-        name,
-        registry_arity,
+        "builtin '{name}': registry arity ({registry_arity:?}) ≠ scheme-derived arity",
     );
     registry_arity
 }

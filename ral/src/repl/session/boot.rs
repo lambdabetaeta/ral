@@ -349,7 +349,7 @@ fn source_config_inner(path: &str, ctx: &mut RcCtx<'_>) -> Result<(), String> {
             DefaultPolicy::denied(),
             origin,
         ) {
-            return Err(format!("{path}: startup: {}", e));
+            return Err(format!("{path}: startup: {e}"));
         }
         let req = framed_turn_request(
             "<startup>",

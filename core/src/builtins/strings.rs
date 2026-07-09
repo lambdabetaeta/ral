@@ -300,7 +300,7 @@ pub(super) fn builtin_to_int(args: &[Value]) -> Settled<Value> {
         // bound is `2^63`: i64::MAX (`2^63 - 1`) rounds up to `2^63` as an
         // f64, so the comparison must be strict against `2^63`.
         Value::Float(f) if f.fract() == 0.0 => {
-            if *f >= 9223372036854775808.0 || *f < -9223372036854775808.0 {
+            if *f >= 9_223_372_036_854_775_808.0 || *f < -9_223_372_036_854_775_808.0 {
                 Err(sig(format!("int: {f} is outside the integer range")))
             } else {
                 Ok(Value::Int(*f as i64))

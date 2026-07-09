@@ -33,13 +33,13 @@ fn spawn_inherits_within_handlers() {
 fn spawn_inherits_within_env() {
     let out = run(
         "ral_spawn_dyn",
-        r#"
+        r"
         within [env: [MY_DYN_VAR: hello-from-dyn]] {
             let h = spawn { printenv MY_DYN_VAR }
             let r = await $h
             echo !{to-bytes $r[stdout] | from-string}
         }
-    "#,
+    ",
     );
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     assert!(
@@ -54,13 +54,13 @@ fn spawn_inherits_within_env() {
 fn spawn_inherits_within_dir() {
     let out = run(
         "ral_spawn_dyn",
-        r#"
+        r"
         within [dir: /tmp] {
             let h = spawn { pwd }
             let r = await $h
             echo !{to-bytes $r[stdout] | from-string}
         }
-    "#,
+    ",
     );
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     // macOS resolves /tmp -> /private/tmp; match the common suffix.

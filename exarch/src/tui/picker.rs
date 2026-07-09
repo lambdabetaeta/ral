@@ -1134,7 +1134,7 @@ impl Picker {
         }
 
         let readout = match value {
-            Some(t) => format!("  {t:.*}", places),
+            Some(t) => format!("  {t:.places$}"),
             None => "  auto".to_string(),
         };
         let readout_style = if focused {
@@ -1406,7 +1406,7 @@ mod tests {
         p.key(KeyCode::Down);
         match p.key(KeyCode::Enter) {
             PickAction::Selected(id, m, _, _) if id.famous() == Some(ProviderKind::Anthropic) => {
-                assert_eq!(m, "claude-haiku-4")
+                assert_eq!(m, "claude-haiku-4");
             }
             _ => panic!("expected Selected(anthropic, claude-haiku-4)"),
         }

@@ -403,7 +403,7 @@ mod tests {
                 assert_eq!(
                     s,
                     &BTreeSet::from(["build".to_string(), "test".to_string()])
-                )
+                );
             }
             other => panic!("unexpected: {other:?}"),
         }

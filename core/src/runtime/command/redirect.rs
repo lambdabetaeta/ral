@@ -261,6 +261,7 @@ fn open_atomic(
                 // `libc::umask` is a combined getter/setter with no
                 // read-only variant: set a throwaway value to read the
                 // current mask, then restore it immediately.
+                #[allow(clippy::useless_conversion)] // libc::mode_t is u16 on macOS/BSD
                 let mask = u32::from(unsafe {
                     let prev = libc::umask(0o022);
                     libc::umask(prev);

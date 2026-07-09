@@ -523,8 +523,7 @@ fn builtin_edit_hash(args: &[Value], shell: &mut Shell) -> Settled<Value> {
                 let at: Vec<String> = idxs.iter().map(|i| (i + 1).to_string()).collect();
                 let r#where = at.join(", ");
                 return Err(sig(format!(
-                    "edit-hash: hash {want} matches lines {} in {path} — re-read; the witness has gone stale.",
-                    r#where
+                    "edit-hash: hash {want} matches lines {where} in {path} — re-read; the witness has gone stale."
                 )));
             }
         }

@@ -301,7 +301,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         if let Some((n, ts)) = app.gesture.copy_toast()
             && ts.elapsed() < COPY_TOAST_TTL
         {
-            let msg = format!("[{} characters copied]", n);
+            let msg = format!("[{n} characters copied]");
             let w = (msg.len() as u16).min(footer_row.width);
             let r = Rect {
                 x: footer_row.x + footer_row.width.saturating_sub(w),

@@ -321,7 +321,7 @@ mod tests {
 
     #[test]
     fn denied_paths_are_overlaid_after_rw_binds() {
-        let dir = std::env::temp_dir().join(format!("ral-bwrap-deny-test-{}", std::process::id(),));
+        let dir = std::env::temp_dir().join(format!("ral-bwrap-deny-test-{}", std::process::id()));
         let denied = dir.join(".exarch.toml");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&denied, "capabilities").unwrap();

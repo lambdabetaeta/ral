@@ -193,7 +193,7 @@ fn external_pipeline_argument_errors_are_not_dropped() {
 
 #[test]
 fn audited_external_command_large_stderr_does_not_deadlock() {
-    let script = r#"/bin/sh -c 'head -c 131072 /dev/zero >&2'"#;
+    let script = r"/bin/sh -c 'head -c 131072 /dev/zero >&2'";
     let o = run_with_timeout(&["--audit"], script, Duration::from_secs(5))
         .expect("audited external command timed out — probable stdout/stderr pipe deadlock");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
@@ -560,7 +560,7 @@ fn spawned_pipelines_run_concurrently() {
     // All must complete and produce the right values.  `await` returns a
     // record; the block's stdout sits in `[stdout]` as Bytes, decoded for
     // printing.
-    let script = r#"
+    let script = r"
 let handles = !{ map { |i|
     let v = $[$i * $i]
     !{spawn { /bin/echo $v | cat }}
@@ -570,7 +570,7 @@ let handles = !{ map { |i|
     echo !{to-bytes $r[stdout] | from-string}
 } $handles }
 echo done
-"#;
+";
     let o = run(script);
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert!(o.stdout.contains("done"));
@@ -595,11 +595,11 @@ echo done
 
 #[test]
 fn spawned_pipeline_result_is_awaitable() {
-    let script = r#"
+    let script = r"
 let h = !{spawn { /bin/echo 42 | cat }}
 let r = await $h
 echo !{to-bytes $r[stdout] | from-string}
-"#;
+";
     let o = run(script);
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert!(o.stdout.contains("42"));
@@ -651,7 +651,7 @@ fn many_sequential_pipelines_no_leak() {
     // terminal handoff.  It still allocates byte pipes and process-group
     // state each iteration, so the test catches fd/pgid leaks without
     // exercising helper-evaluated stages.
-    let script = r#"
+    let script = r"
 let _go = { |n|
     if $[$n <= 0] {} else {
         /bin/echo $n | cat | grep . > /dev/null
@@ -660,7 +660,7 @@ let _go = { |n|
 }
 _go 50
 echo done
-"#;
+";
     let o = run_with_timeout(&[], script, Duration::from_mins(1))
         .expect("sequential pipeline stress timed out");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
@@ -1001,7 +1001,7 @@ echo $n
 "#);
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     let lines: Vec<&str> = o.stdout.trim().lines().collect();
-    assert_eq!(lines.len(), 2, "expected two count lines, got: {:?}", lines);
+    assert_eq!(lines.len(), 2, "expected two count lines, got: {lines:?}");
     assert_eq!(
         lines[0], lines[1],
         "direct len {} != via_map len {}",
@@ -1039,8 +1039,8 @@ fn block_as_stage_returns_value_via_let() {
 fn pure_value_pipeline_chains_compose_data_last() {
     // [1,2,3] | map { |x| x*2 } | map { |y| y+1 } → [3,5,7]
     let o = run(
-        r#"let r = [1, 2, 3] | map { |x| return $[$x * 2] } | map { |y| return $[$y + 1] }
-echo !{length $r} $r[0] $r[1] $r[2]"#,
+        r"let r = [1, 2, 3] | map { |x| return $[$x * 2] } | map { |y| return $[$y + 1] }
+echo !{length $r} $r[0] $r[1] $r[2]",
     );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "3 3 5 7");
@@ -1049,10 +1049,10 @@ echo !{length $r} $r[0] $r[1] $r[2]"#,
 #[test]
 fn pure_value_pipeline_matches_explicit_data_last_call() {
     let o = run(
-        r#"let lhs = [1, 2, 3] | fold { |acc x| return $[$acc + $x] } 0
+        r"let lhs = [1, 2, 3] | fold { |acc x| return $[$acc + $x] } 0
 let rhs = !{fold { |acc x| return $[$acc + $x] } 0 [1, 2, 3]}
 echo $lhs
-echo $rhs"#,
+echo $rhs",
     );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "6\n6");
@@ -1786,7 +1786,7 @@ mod pty_helper {
     /// cast lets the request argument coerce to whatever `ioctl`
     /// expects on the target.
     pub unsafe fn become_controlling(fd: RawFd) -> std::io::Result<()> {
-        if unsafe { libc::ioctl(fd, libc::TIOCSCTTY.into(), 0) } < 0 {
+        if unsafe { libc::ioctl(fd, libc::TIOCSCTTY as _, 0) } < 0 {
             return Err(std::io::Error::last_os_error());
         }
         Ok(())
@@ -1961,10 +1961,10 @@ fn ral_helper_returns_large_final_value_through_report() {
     //
     // `length` of a 200 KiB Bytes value confirms we got the whole
     // value out without truncation or deadlock.
-    let script = r#"
+    let script = r"
 let bs = !{ /usr/bin/yes | head -c 200000 | from-bytes }
 echo !{length $bs}
-"#;
+";
     let o = run_with_timeout(&[], script, Duration::from_secs(15))
         .expect("large-value pipeline hung — report-channel deadlock?");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
@@ -2085,7 +2085,7 @@ fn value_edge_send_failure_is_structured() {
     // stage (`printf hi | from-string`); the next ral helper builds
     // a `Handle` and returns it, exercising the producer→consumer
     // value edge.
-    let script = r#"
+    let script = r"
 let r = !{
   printf hi
   | from-string
@@ -2093,7 +2093,7 @@ let r = !{
   | { |_x| echo got }
 }
 echo done
-"#;
+";
     let o = run_with_timeout(&[], script, Duration::from_secs(5))
         .expect("value-edge send-failure test hung");
     assert_ne!(o.status, 0, "expected failure: {}", o.stdout);
