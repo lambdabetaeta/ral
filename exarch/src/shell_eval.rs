@@ -574,6 +574,7 @@ const VALUE_PRINT_PARAMS: ral_core::builtins::PrintParams = ral_core::builtins::
     max_string: 72,
     max_depth: 2,
     min_quote_hashes: 1,
+    quote_bytes: true,
 };
 
 fn ral_value_to_text(value: &RalValue) -> Option<String> {
