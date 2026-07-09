@@ -110,7 +110,7 @@ pub struct Agent {
     nudges: nudge::Registry,
     /// This agent's cancellation token — one sticky token for its life,
     /// registered in the fleet so the subtree cascade (`agent_cancel`, the
-    /// ceiling, an Esc on the focused subtree) always reaches the live turn.
+    /// ceiling, and `/clear`) always reaches the live turn.
     /// The drive loop [`reset`](cancel::Token::reset)s its flag at each genuine
     /// turn boundary, so an Esc on one turn never bleeds into the next; the
     /// trunk additionally [`publish`](cancel::publish)es it for OS signals.
@@ -1615,32 +1615,43 @@ impl Agent {
         }
     }
 
-    /// A returning agent — every node but the *conversing* (interactive) trunk
-    /// — hands a value back through `reply` and terminates.  Only the conversing
-    /// trunk converses across turns and never returns.  Read in one place from
-    /// position: the inverse of `parent = None ∧ interactive`.
-    fn returns(&self) -> bool {
-        !(self.parent.is_none() && self.interactive)
+    /// A returning agent holds `reply`; a conversing one had it withheld at
+    /// construction.  The tool view is the single source of truth, so the nudge
+    /// layer, parking, and the advertised tools cannot disagree.
+    pub(crate) fn returns(&self) -> bool {
+        self.tools
+            .iter()
+            .any(|t| matches!(t.gate(), crate::tools::Gate::Returns))
     }
 
     /// The `should_park` predicate ([`ParkMode`]), recomputed on every wake.  A
-    /// present human holds this agent parked — the *conversing* trunk (`parent
-    /// = None ∧ interactive`) or the agent the human has `TAB`bed to (`focus =
-    /// id`); live children it launched hold it until they settle
-    /// ([`ParkMode::HeldByChildren`]) so a headless root waiting on its fleet
-    /// stays alive to receive their results; a live self-schedule holds it
+    /// present human holds this agent parked — a *conversing* agent (interactive
+    /// and holding no `reply`, so it never returns) or the agent the human has
+    /// `TAB`bed to (`focus = id`); live children it launched hold it until they
+    /// settle ([`ParkMode::HeldByChildren`]) so a headless root waiting on its
+    /// fleet stays alive to receive their results; a live self-schedule holds it
     /// until cancelled; otherwise it terminates at quiescence.
     fn park_mode(&self) -> ParkMode {
-        let conversing = self.parent.is_none() && self.interactive;
-        if conversing || self.focus.load(Ordering::Relaxed) == self.id {
-            ParkMode::Held
-        } else if self.has_live_children() {
-            ParkMode::HeldByChildren
-        } else if self.schedules.armed() {
-            ParkMode::UntilCancelled
-        } else {
-            ParkMode::Quiesce
+        let conversing = self.interactive && !self.returns();
+        if conversing {
+            // A conversing agent lives exactly as long as the fleet lists it:
+            // /clear reaps its entry, and an unlisted agent is unreachable (its
+            // mailbox resolves to None), so parking Held would be a zombie.
+            if !self.agents.is_live(self.id) {
+                return ParkMode::Quiesce;
+            }
+            return ParkMode::Held;
         }
+        if self.focus.load(Ordering::Relaxed) == self.id {
+            return ParkMode::Held;
+        }
+        if self.has_live_children() {
+            return ParkMode::HeldByChildren;
+        }
+        if self.schedules.armed() {
+            return ParkMode::UntilCancelled;
+        }
+        ParkMode::Quiesce
     }
 
     /// Whether this agent has a live child still running — an async child it

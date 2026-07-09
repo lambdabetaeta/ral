@@ -159,6 +159,14 @@ impl AgentRegistry {
             .any(|e| e.parent == Some(parent))
     }
 
+    /// True while `id` is a live registered agent — the fleet still lists it.
+    /// A conversing agent reads this at each park: once its entry is reaped
+    /// (`/clear`, `agent_cancel`), it must quiesce rather than park Held as a
+    /// zombie.
+    pub fn is_live(&self, id: AgentId) -> bool {
+        self.lock().entries.contains_key(&id)
+    }
+
     /// Cancel and reap `root`'s proper descendants, leaving `root` live.
     /// A settling parent (`reply`) uses this to abandon live children without
     /// declaring a new context generation for unrelated agents. Late results
