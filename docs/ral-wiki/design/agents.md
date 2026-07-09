@@ -9,30 +9,38 @@ and a `parent: Option<AgentId>` link. The thin `Fleet` holds what every node
 shares — the registry, the one event bus, the focused-agent handle, and whether a
 human is attached ([[decisions/260624_uniform-agent-nodes|uniform-agent-nodes]]).
 
-## One predicate, read through position
+## One predicate, read through the tool view
 
-There is no `is_root`, no `spawns`/`returns` axis pair. Every asymmetry reduces
-to one structural fact — `parent = None` (the **trunk**) — read together with the
-fleet's `interactive` and `focus`:
+There is no `is_root`, no `spawns`/`returns` axis pair. Whether an agent returns a
+value or converses with a human is read from **its tool view**: `returns()` is
+true iff the agent holds `reply` (the `Gate::Returns` tool). The tool view is the
+single source of truth, so parking, the reply-nudge, and the advertised tools
+cannot disagree
+([[decisions/260705_branch-minimal|branch-minimal]]). Position still does two jobs
+— it fixes the registry edge (`parent`) and the signal path (only the trunk
+publishes the process cancel slots,
+[[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]]) — but it no
+longer decides who returns.
 
-- **The conversing trunk** is the parent-less node of an interactive fleet
-  (`parent = None ∧ fleet.interactive`). It is the *sole distinguished agent*: it
-  converses with a human across turns, so it has nowhere to return a value and
-  **withholds `reply`**, and it parks unconditionally because its writer is
-  ever-present.
-- **Everyone else returns.** `returns(a) ⟺ ¬(a.parent = None ∧ fleet.interactive)`
-  — a peer at any depth, *and* a headless trunk (`parent = None`,
-  `interactive = false`) seeded once to produce one result — advertises `reply`.
-  This is exactly
+- **A returning agent holds `reply`.** A peer at any depth, *and* a headless trunk
+  (`parent = None`, `interactive = false`) seeded once to produce one result, both
+  advertise it and terminate at quiescence. This is
   [[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]]'s
-  `is_root && interactive`, with `is_root` re-read as `parent = None`.
+  reply gate, now read off the tools rather than off `is_root && interactive`.
+- **A conversing agent had `reply` withheld at construction** and parks for a human
+  instead of returning. The interactive trunk is one such agent — parent-less, its
+  writer ever-present — but no longer the *only* one: a **branch** is interactive,
+  `reply`-withheld, and *parented*
+  ([[decisions/260705_branch-minimal|branch-minimal]]). "Parent-less trunk" and
+  "converses" are no longer the same set, which is exactly why the derivation moved
+  to the tool view.
 
-"Returns a value" and "does not park for a human" are the *same fact*, read in
-one place ([[map/exarch/agent|agent]]): a peer and a headless trunk both terminate
-at quiescence, while the conversing trunk and the human's currently-focused agent
-park. Parking is **computed, not stored** — the deleted `park_when_idle` flag
-becomes a `ParkMode` (`Held` / `UntilCancelled` / `Quiesce`) derived from
-`parent`/`interactive`/`focus`/`schedules` on every wake.
+"Returns a value" and "does not park for a human" remain the *same fact*, read in
+one place ([[map/exarch/agent|agent]]). Parking is **computed, not stored** — a
+`ParkMode` (`Held` / `HeldByChildren` / `UntilCancelled` / `Quiesce`) derived on
+every wake: a conversing agent parks `Held` while its registry entry lives, a
+focused agent parks because the human is attached to it, and everyone else
+quiesces.
 
 ## Uniform spawning: bounded by spawn fuel
 
@@ -121,17 +129,22 @@ coordination, not a return edge: it does not share shell state, does not grant
 authority, and does not wait for an answer. The durable result path remains
 `reply`; the durable cancellation path remains `agent_cancel`.
 
-## Cancellation cascades the subtree
+## Cancellation: a key interrupts one turn; a terminator cascades the subtree
 
-`Esc` and `agent_cancel` cancel the focused agent **and its whole subtree** through
-one registry cascade — the same cascade the per-agent ceiling reaper uses. The
-registry is the spawn *tree* (`AgentRegistry::Entry` carries the `parent` link),
-so cancelling a mid-tree agent reaps everything below it. A settling `reply`
-cancels only the returning node's proper descendants, while `/clear` cascades
-cancel to the focused agent's subtree and bumps the generation, dropping a late
-result or deferred surface batch from a cleared generation. This generalises
-[[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]] from one root-turn
-token to a per-focus token over a subtree.
+`Esc` and `Ctrl-C` are a **per-tab turn interrupt** — they unwind only the focused
+tab's current turn, never a subtree and never an agent
+([[decisions/260705_cancel-per-tab|cancel-per-tab]]). The subtree cascade survives,
+but only behind the **lifecycle terminators**: the `agent_cancel` tool, the
+per-agent ceiling reaper, and `/clear`. They share one registry cascade — the
+registry is the spawn *tree* (`AgentRegistry::Entry` carries the `parent` link), so
+terminating a mid-tree agent reaps everything below it; `/clear` additionally bumps
+the generation, dropping a late result or deferred surface batch from a cleared
+generation. A settling `reply` still cancels only the returning node's proper
+descendants — a parent may abandon unfinished children, but never leave live agents
+registered beneath a settled node. This refines
+[[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]]: the per-focus turn
+token now interrupts one turn in place, while the subtree cascade is the
+terminators' alone.
 
 ## Self-scheduling is inherited
 
@@ -183,4 +196,8 @@ over one shell tool), [[decisions/260624_uniform-agent-nodes|uniform-agent-nodes
 [[decisions/260617_async-agent-tool|async-agent-tool]],
 [[decisions/260622_agent-reply-tool|agent-reply-tool]],
 [[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]],
-[[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]].
+[[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]],
+[[decisions/260705_cancel-per-tab|cancel-per-tab]] (Esc/Ctrl-C are a per-tab turn
+interrupt, not a subtree cascade),
+[[decisions/260705_branch-minimal|branch-minimal]] (the conversing parented child
+that reads `returns()` from the tool view).
