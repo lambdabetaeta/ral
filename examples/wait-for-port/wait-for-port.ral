@@ -1,0 +1,19 @@
+#!/usr/bin/env ral
+# Footgun: `until nc -z host port; do sleep 1; done` has no cap — if the
+# service never binds, it spins forever and wedges the pipeline. A
+# bounded recursion over `succeeds` caps the attempts and exits nonzero
+# on timeout, so the wait can never hang.
+
+let [host, port, tries] = $args
+let probe = { |left|
+    if !{succeeds { nc -z $host $port }} {
+        echo "$host:$port is accepting connections"
+    } elsif $[$left <= 0] {
+        echo "$host:$port never came up" 1>&2
+        exit 1
+    } else {
+        sleep 1
+        probe $[$left - 1]
+    }
+}
+probe !{int $tries}

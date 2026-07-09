@@ -1,0 +1,12 @@
+#!/usr/bin/env ral
+# Footgun: `cp $(find src -name '*.ext') dst` word-splits the substitution
+# on any space in a path, and if nothing matches, `cp` is called with just
+# the destination and fails obscurely.  Here `glob` returns `[]` on no
+# match and every matched path stays one atom into `cp`.
+
+let [src, dst, ext] = $args
+mkdir -p $dst
+
+for !{glob "$src/**/*.$ext"} { |p|
+    cp $p $dst
+}

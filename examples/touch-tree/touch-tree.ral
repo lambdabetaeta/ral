@@ -1,0 +1,17 @@
+#!/usr/bin/env ral
+# Footgun: `for rel in $(cat manifest)` word-splits the file on every
+# run of whitespace, so a path like `my dir/notes.txt` fractures into
+# two entries and the wrong skeleton appears.  Here each manifest line
+# is one String, whitespace and all.
+
+let [root, manifest] = $args
+
+for !{from-lines-list $manifest} { |rel|
+    let full = "$root/$rel"
+    if !{re-match '/$' $rel} {
+        mkdir -p $full
+    } else {
+        mkdir -p !{dirname $full}
+        touch $full
+    }
+}

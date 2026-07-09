@@ -1,0 +1,9 @@
+#!/usr/bin/env ral
+# Footgun: `comm -23` needs both inputs pre-sorted or it silently drops
+# real differences, and the `sort` it demands reorders the output and
+# imposes locale collation.  Here it is a set difference: lines of A whose
+# value is not a key of B, in A's own order, no sorting required.
+
+let [a, b] = $args
+let seen = fold { |m l| return [...$m, $l: true] } [:] !{from-lines-list $b}
+for !{from-lines-list $a} { |l| if $[not !{has $seen $l}] { echo $l } }

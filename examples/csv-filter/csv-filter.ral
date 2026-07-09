@@ -1,0 +1,18 @@
+#!/usr/bin/env ral
+# Footgun: `awk -F, '$3 > t'` tests a column by position, so inserting a
+# column upstream silently retargets the comparison to the wrong field.
+# Here the column is a named record field and the threshold test is a
+# genuine Float `>`.
+
+let [path, col, threshold] = $args
+
+let [hdr, ...rows] = !{from-lines-list $path}
+let header = re-split ',' $hdr
+let records = map { |line|
+    fold { |m p| let k = $p[0]; return [...$m, $k: $p[1]] } [:] !{zip $header !{re-split ',' $line}}
+} $rows
+
+let keep = filter { |r| return $[!{float $r[$col]} > !{float $threshold}] } $records
+
+echo $hdr
+for $keep { |r| echo !{intercalate ',' !{map { |c| return $r[$c] } $header}} }

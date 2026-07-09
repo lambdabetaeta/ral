@@ -1,0 +1,24 @@
+#!/usr/bin/env ral
+# Footgun: awk's `-F','` splits on every comma, so one quoted field with an
+# embedded comma shifts every later column, and the columns survive only as
+# `$col[...]` index arithmetic.  Here `from-csv` is a real RFC-4180 parse
+# into records, so a quoted comma stays put and columns are keys by name.
+
+let [path, group_col, value_col] = $args
+
+let rows = from-csv < $path
+
+let buckets = fold { |acc r|
+    let k = $r[$group_col]
+    let v = float $r[$value_col]
+    let prev = !{get $acc $k [count: 0, total: 0.0]}
+    return [...$acc, $k: [count: $[$prev[count] + 1], total: $[$prev[total] + $v]]]
+} [:] $rows
+
+echo "$group_col\tavg($value_col)\tn"
+for !{keys $buckets} { |k|
+    let b = $buckets[$k]
+    let n = float $b[count]
+    let avg = $[$b[total] / $n]
+    echo "$k\t$avg\t$b[count]"
+}

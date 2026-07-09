@@ -1,0 +1,23 @@
+#!/usr/bin/env ral
+# Footgun: `sha256sum … | sort | awk '{print $2}'` splits each line on
+# whitespace, so a path containing a space is truncated at its first
+# blank and the wrong files get grouped.  Here each hash pairs with its
+# whole path as a value; `group-by` buckets on the hash, never on a
+# re-split line.
+
+let [root] = $args
+
+let files = filter { |p| is-file $p } !{glob "$root/**/*"}
+
+let hashed = par { |p|
+    return [hash: !{words !{sha256sum $p | from-string}}[0], path: $p]
+} $files $nproc
+
+let buckets = group-by { |r| return $r[hash] } $hashed
+let dupes = filter { |h| $[!{length $buckets[$h]} > 1] } !{keys $buckets}
+
+for $dupes { |h|
+    let set = $buckets[$h]
+    echo "$h  (!{length $set} copies)"
+    for $set { |r| echo "  $r[path]" }
+}

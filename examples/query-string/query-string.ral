@@ -1,0 +1,35 @@
+#!/usr/bin/env ral
+# Footgun: the bash splits each pair with `IFS='='` into an array, so a value
+# holding '=' is truncated at the next one, and its `printf '%b' "${v//%/\\x}"`
+# leaves '+' untouched while mangling stray backslashes.  Here re-split keeps
+# the key at the first '=' and rejoins the rest as the value, then '+' and
+# every %XX decode through the byte channel.
+
+let [query] = $args
+let hd = '0123456789ABCDEF'
+
+let hex-val = { |c|
+    fold { |acc i| if !{equal !{upper $c} !{slice $hd $i 1}} { return $i } else { return $acc } } 0 !{range 0 16}
+}
+
+let decode = { |s0|
+    let s = re-replace-all '\+' ' ' $s0
+    let go = { |i acc|
+        if $[$i >= !{length $s}] { return $acc } else {
+            let c = slice $s $i 1
+            if !{equal $c '%'} {
+                let n  = $[!{hex-val !{slice $s $[$i + 1] 1}} * 16 + !{hex-val !{slice $s $[$i + 2] 1}}]
+                let ch = to-bytes [$n] | from-string
+                return !{go $[$i + 3] "$acc$ch"}
+            } else { return !{go $[$i + 1] "$acc$c"} }
+        }
+    }
+    go 0 ''
+}
+
+let pairs = map { |p|
+    let parts = re-split '=' $p
+    return [key: !{decode $parts[0]}, value: !{decode !{intercalate '=' !{drop 1 $parts}}}]
+} !{re-split '&' $query}
+
+to-json $pairs

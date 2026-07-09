@@ -1,0 +1,27 @@
+#!/usr/bin/env ral
+# Footgun: `split -d` uses two-digit numeric suffixes by default, so a
+# file that needs 100 or more chunks aborts with "output file suffixes
+# exhausted", and split reports nothing.  Here suffixes grow as needed
+# and each chunk announces its line count.
+
+let [src, n] = $args
+
+let pad = { |x|
+    let go = { |s| if $[!{length $s} >= 4] { return $s } else { return !{go "0$s"} } }
+    return !{go !{str $x}}
+}
+
+let chunk = { |size xs|
+    if !{is-empty $xs} { return [] } else {
+        return [!{take $size $xs}, ...!{chunk $size !{drop $size $xs}}]
+    }
+}
+
+let parts = chunk !{int $n} !{from-lines-list $src}
+
+for !{enumerate $parts} { |g|
+    let part = "$src.!{pad $[$g[index] + 1]}"
+    let body = intercalate "\n" $g[item]
+    to-string "$body\n" > $part
+    echo "$part (!{length $g[item]} lines)"
+}

@@ -1,0 +1,20 @@
+#!/usr/bin/env ral
+# Footgun: bash polls with `grep '"state": "ready"'`, which breaks on a
+# reformatted line, reordered keys, or a nested field, and can report
+# "not ready" forever. `from-json` decodes to a typed value and reads the
+# field structurally, so the match can't be fooled by layout.
+
+let [url, field, target, tries] = $args
+let probe = { |left|
+    let doc = curl -fsS --max-time 10 $url | from-json
+    if !{equal !{str $doc[$field]} $target} {
+        echo "$field reached $target"
+    } elsif $[$left <= 0] {
+        echo "gave up waiting for $field=$target" 1>&2
+        exit 1
+    } else {
+        sleep 2
+        probe $[$left - 1]
+    }
+}
+probe !{int $tries}

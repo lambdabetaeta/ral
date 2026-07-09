@@ -1,0 +1,16 @@
+#!/usr/bin/env ral
+# Footgun: `tail -f a b c` interleaves its `==> file <==` banners with the
+# lines they label once two files write at once; the &-and-sed fix needs a
+# manual pid array plus a trap to clean up.  Here `watch LABEL { … }`
+# line-frames each stream, so every line emerges whole and prefixed.
+
+if !{is-empty $args} {
+    echo 'usage: tail-multi.ral FILE...' 1>&2
+    exit 2
+}
+
+let handles = map { |f|
+    return !{watch !{basename $f} { tail -f $f }}
+} $args
+
+for $handles { |h| await $h }

@@ -1,0 +1,16 @@
+#!/usr/bin/env ral
+# Footgun: `cut -d, -f2,4` addresses columns by number and always emits
+# them in file order — it cannot reorder, and the numbers must be
+# recounted whenever a column moves.  Here columns are named record
+# fields, selected in exactly the requested order.
+
+let [path, ...cols] = $args
+
+let [hdr, ...rows] = !{from-lines-list $path}
+let header = re-split ',' $hdr
+let records = map { |line|
+    fold { |m p| let k = $p[0]; return [...$m, $k: $p[1]] } [:] !{zip $header !{re-split ',' $line}}
+} $rows
+
+echo !{intercalate ',' $cols}
+for $records { |r| echo !{intercalate ',' !{map { |c| return $r[$c] } $cols}} }

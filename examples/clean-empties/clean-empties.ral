@@ -1,0 +1,15 @@
+#!/usr/bin/env ral
+# Footgun: `for f in $(find . -type f -empty)` — the classic when you
+# want to log each removal — word-splits the command substitution, so a
+# zero-byte file named "old log" is deleted as two nonexistent paths.
+# Here each empty file is a value, filtered by its `size` and removed whole.
+
+let [root] = $args
+
+let files   = filter { |p| is-file $p } !{glob "$root/**/*"}
+let empties = filter { |p| file-empty $p } $files
+
+for $empties { |p|
+    echo "removing $p"
+    rm $p
+}

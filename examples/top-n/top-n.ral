@@ -1,0 +1,17 @@
+#!/usr/bin/env ral
+# Footgun: `sort -t, -k2 -rn | head -n N` keys by column position, so a
+# column inserted upstream silently ranks on the wrong field.  Here the
+# ordering key is `float` of a named field and `take` bounds the result.
+
+let [path, col, n] = $args
+
+let [hdr, ...rows] = !{from-lines-list $path}
+let header = re-split ',' $hdr
+let records = map { |line|
+    fold { |m p| let k = $p[0]; return [...$m, $k: $p[1]] } [:] !{zip $header !{re-split ',' $line}}
+} $rows
+
+let ranked = reverse !{sort-list-by { |r| return !{float $r[$col]} } $records}
+
+echo $hdr
+for !{take !{int $n} $ranked} { |r| echo !{intercalate ',' !{map { |c| return $r[$c] } $header}} }

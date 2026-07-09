@@ -1,0 +1,25 @@
+#!/usr/bin/env ral
+# Footgun: `jq '.count+=1' state.json > state.json` truncates the file
+# before jq reads it — you must hand-roll tmp-then-rename for atomicity,
+# and remember it every time.  In ral `>` *is* rename-on-close: a reader
+# sees the old file or the new, never a torn write.
+
+let [path] = $args
+
+let state = if !{is-file $path} {
+    return !{from-json < $path}
+} else {
+    return [count: 0, history: []]
+}
+
+let stamp = !{date -u +%Y-%m-%dT%H:%M:%SZ | from-string}
+
+let next = [
+    ...$state,
+    count:   $[$state[count] + 1],
+    history: [...$state[history], $stamp],
+]
+
+to-json $next > $path
+
+echo "tick $next[count] at $stamp"

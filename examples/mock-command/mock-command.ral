@@ -1,0 +1,17 @@
+#!/usr/bin/env ral
+# Footgun: to test a deploy offline in bash you shadow `curl` with a shell
+# function or a PATH shim — global, and forgotten between tests, so a real curl
+# later slips through.  `within [handlers: [curl: …]]` scopes the mock to one
+# block and restores it at the brace; self-masking keeps a forwarding handler
+# from recursing.
+
+let deploy = { |host|
+    let resp = curl -s -X POST "https://$host/api/deploy" | from-json
+    if !{equal $resp[status] 'ok'} { echo "deployed to $host (rev $resp[rev])" }
+    else { fail [status: 1, message: "deploy to $host rejected"] }
+}
+
+within [handlers: [curl: { |args| echo #'{"status": "ok", "rev": "abc123"}'# }]] {
+    deploy 'prod.example.com'
+    deploy 'staging.example.com'
+}

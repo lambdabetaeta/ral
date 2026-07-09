@@ -1,0 +1,13 @@
+#!/usr/bin/env ral
+# Footgun: `cut` cannot reorder — `-f3,1` emits fields in file order, not
+# the order you asked — and an out-of-range field is silently blank.
+# Here columns are indexed explicitly, so `3 1` really means 3 then 1,
+# and a missing column fails loudly instead of vanishing into a blank.
+
+let [path, delim, ...cols] = $args
+let idxs = map { |c| return $[!{int $c} - 1] } $cols
+
+for !{from-lines-list $path} { |line|
+    let cells = re-split $delim $line
+    echo !{intercalate $delim !{map { |i| return $cells[$i] } $idxs}}
+}

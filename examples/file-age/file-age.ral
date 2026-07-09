@@ -1,0 +1,14 @@
+#!/usr/bin/env ral
+# Footgun: `mtime=$(stat -c %Y "$f")` uses GNU's `-c` syntax (BSD wants
+# `-f %m`), and if it yields nothing the arithmetic `(( now - mtime ))`
+# treats the blank as 0 and prints a bogus 50-year age.  Here `mtime`
+# is a typed Int from `file-info`; a bad file fails loudly instead.
+
+let [root] = $args
+let now = int !{date +%s | from-line}
+
+for !{filter { |p| is-file $p } !{glob "$root/*"}} { |f|
+    let mtime = !{file-info $f}[mtime]
+    let days  = $[($now - $mtime) / 86400]
+    echo "$days\t$f"
+}

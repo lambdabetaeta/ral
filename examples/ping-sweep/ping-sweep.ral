@@ -1,0 +1,13 @@
+#!/usr/bin/env ral
+# Footgun: `for h in $hosts; do ping -c1 $h & done; wait` throws away the
+# host→result mapping — you get a jumble of ping output and `wait` yields
+# only the last job's exit code. `par` returns one up/down record per
+# host, in input order, however the pings interleave.
+
+let results = par { |h|
+    return [host: $h, up: !{succeeds { ping -c1 -W1 $h }}]
+} $args $nproc
+for $results { |r|
+    let mark = if $r[up] { return 'up  ' } else { return 'down' }
+    echo "$mark  $r[host]"
+}

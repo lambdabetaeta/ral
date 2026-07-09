@@ -1,0 +1,11 @@
+#!/usr/bin/env ral
+# Footgun: backgrounding `curl -o /dev/null -w '%{http_code}'` per URL and
+# `wait`-ing yields a heap of bare status numbers with no URL attached,
+# and `wait`'s single exit code hides which probe errored. `par` pairs
+# each URL with its code in input order.
+
+let results = par { |u|
+    let code = curl -s -o /dev/null -w '%{http_code}' --max-time 15 $u | from-string
+    return [url: $u, code: $code]
+} $args $nproc
+for $results { |r| echo "$r[code]  $r[url]" }

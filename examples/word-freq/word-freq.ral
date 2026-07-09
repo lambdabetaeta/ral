@@ -1,0 +1,14 @@
+#!/usr/bin/env ral
+# Footgun: `tr -cs A-Za-z` and `sort` both consult the locale — the
+# character ranges and the collation shift with $LANG — so the same text
+# ranks differently on two machines.  Here words fold into a count map and
+# sort by a projection: deterministic, and free of any locale at all.
+
+let [path, n] = $args
+let counts = fold { |m w|
+    return [...$m, $w: $[!{get $m $w 0} + 1]]
+} [:] !{map $lower !{words !{from-string < $path}}}
+
+let ranked = reverse !{sort-list-by { |k| return $counts[$k] } !{keys $counts}}
+
+for !{take !{int $n} $ranked} { |w| echo "$counts[$w]\t$w" }

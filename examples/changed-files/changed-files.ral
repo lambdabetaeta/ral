@@ -1,0 +1,13 @@
+#!/usr/bin/env ral
+# Footgun: `for f in $(git diff --name-only base...HEAD)` word-splits on
+# the spaces inside a path, turning "src/my file.c" into two bogus
+# entries.  A pipeline reads each name as one line, so a path with
+# spaces stays a single String — no re-lexing, no lost files.
+
+let [repo, base] = $args
+
+let files = within [dir: $repo] {
+    git diff --name-only "$base...HEAD" | from-lines | stream-to-list
+}
+
+for $files { |f| echo $f }

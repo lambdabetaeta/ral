@@ -1,0 +1,11 @@
+#!/usr/bin/env ral
+# Footgun: jq's `*` is a *deep* merge, so a nested object the user
+# meant to replace wholesale instead inherits stray default keys.
+# `union` is a flat "present wins", which is exactly what "fill the
+# missing top-level keys" means — the loaded config overrides, and
+# any key it omits falls back to the default.
+
+let [path] = $args
+let defaults = to-string '{"host": "localhost", "port": 8080, "verbose": false}' | from-json
+let config = from-json < $path
+to-json !{union $defaults $config}

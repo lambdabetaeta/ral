@@ -1,0 +1,15 @@
+#!/usr/bin/env ral
+# Footgun: `uniq` only collapses *adjacent* duplicates, so it is meaningless
+# without the leading `sort`; drop it and every count silently reads 1.
+# Here the tally is a fold into a map keyed by the line itself — order of
+# arrival is irrelevant, so there is nothing to forget to sort.
+
+let counts = fold-lines { |acc l|
+    return [...$acc, $l: $[!{get $acc $l 0} + 1]]
+} [:]
+
+let rows = map { |k| return [line: $k, n: $counts[$k]] } !{keys $counts}
+
+for !{reverse !{sort-list-by { |r| return $r[n] } $rows}} { |r|
+    echo "$r[n]\t$r[line]"
+}

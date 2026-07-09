@@ -1,0 +1,13 @@
+#!/usr/bin/env ral
+# Footgun: `grep -c` exits 1 when a file has zero matches, so under
+# `set -e` the `$(grep -c …)` substitution kills the whole run on the
+# first file that happens to match nothing — a count of 0 read as an
+# error.  Here matching is a Bool predicate; the count is `length` of a
+# filtered list, and 0 is just 0.
+
+let [pat, ...files] = $args
+
+for $files { |f|
+    let n = length !{filter { |l| re-match $pat $l } !{from-lines-list $f}}
+    echo "$f:$n"
+}

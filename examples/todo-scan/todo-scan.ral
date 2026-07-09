@@ -1,0 +1,15 @@
+#!/usr/bin/env ral
+# Footgun: `grep -rn 'TODO\|FIXME' .` exits 1 when nothing matches, so
+# under `set -euo pipefail` an empty scan aborts the whole script; it also
+# descends into .git.  Here the file set is an explicit glob that skips
+# dotfiles, a match-free file is simply empty, and the line number is a
+# real Int — no exit-status surprise.
+
+let [root] = $args
+
+let files = filter { |p| return !{is-file $p} } !{glob "$root/**/*"}
+
+for $files { |f|
+    let hits = filter { |e| return !{re-match 'TODO|FIXME' $e[item]} } !{enumerate !{from-lines-list $f}}
+    for $hits { |e| echo "$f:$[$e[index] + 1]: $e[item]" }
+}

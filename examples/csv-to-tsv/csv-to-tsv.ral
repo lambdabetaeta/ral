@@ -1,0 +1,20 @@
+#!/usr/bin/env ral
+# Footgun: `sed 's/,/\t/g'` rewrites every comma, including the ones
+# *inside* a quoted field — `"Doe, Jane",42` becomes three columns, not
+# two, and the corruption is silent.  Here a line is parsed into fields
+# that respect quotes, so a comma within a field never splits it.
+
+let fields-of = { |line|
+    let chars = filter { |c| $[not !{equal $c ''}] } !{re-split '' $line}
+    let end = fold { |s c|
+        let q   = $s[q]
+        let cur = $s[cur]
+        let out = $s[out]
+        if !{equal $c '"'} { return [q: $[not $q], cur: $cur, out: $out] }
+        elsif $[!{equal $c ','} && not $q] { return [q: $q, cur: '', out: [...$out, $cur]] }
+        else { return [q: $q, cur: "$cur$c", out: $out] }
+    } [q: false, cur: '', out: []] $chars
+    return [...$end[out], $end[cur]]
+}
+
+map-lines { |l| intercalate "\t" !{fields-of $l} }

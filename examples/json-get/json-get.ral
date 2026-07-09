@@ -1,0 +1,11 @@
+#!/usr/bin/env ral
+# Footgun: the bash builds jq's program by splicing the path in —
+# `jq ".$2"` — so a path holding a quote or bracket becomes jq code,
+# not a lookup.  Here the path is data: we split it and descend the
+# decoded value key by key, and a missing key fails loudly rather
+# than printing null.
+
+let [path, dotted] = $args
+let doc = from-json < $path
+let leaf = fold { |node key| return $node[$key] } $doc !{re-split '\.' $dotted}
+to-json $leaf

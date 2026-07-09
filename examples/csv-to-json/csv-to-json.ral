@@ -1,0 +1,10 @@
+#!/usr/bin/env ral
+# Footgun: the jq pipeline splits every line on a bare `,`, so a
+# quoted field containing a comma or newline is torn apart and every
+# later column shifts.  from-csv is a real RFC-4180 reader — quoted
+# commas, embedded newlines, and short rows are all handled — yielding
+# a record per row keyed by the header.
+
+let [path] = $args
+let rows = from-csv < $path
+to-json $rows

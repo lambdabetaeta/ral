@@ -1,0 +1,18 @@
+#!/usr/bin/env ral
+# Footgun: `sort -t, -k3 -rn` counts the key column by position, so a
+# column inserted upstream silently sorts on the wrong field — the `3`
+# names a place, not a value.  Here the sort key is `float` of a named
+# field: addressed by name, immune to a column moving.
+
+let [path, col] = $args
+
+let [hdr, ...rows] = !{from-lines-list $path}
+let header = re-split ',' $hdr
+let records = map { |line|
+    fold { |m p| let k = $p[0]; return [...$m, $k: $p[1]] } [:] !{zip $header !{re-split ',' $line}}
+} $rows
+
+let sorted = reverse !{sort-list-by { |r| return !{float $r[$col]} } $records}
+
+echo $hdr
+for $sorted { |r| echo !{intercalate ',' !{map { |c| return $r[$c] } $header}} }

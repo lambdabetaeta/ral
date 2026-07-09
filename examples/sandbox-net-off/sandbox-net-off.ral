@@ -1,0 +1,15 @@
+#!/usr/bin/env ral
+# Footgun: to deny a build step the network in bash you reach for `unshare -rn`
+# or a transient firewall rule — a separate, privileged tool, easy to invert so
+# the "deny" silently no-ops.  `grant [net: false]` is one in-language clause;
+# the fetch is refused and the failure is catchable, right where the code lives.
+
+let deps = temp-file
+grant [net: false] {
+    echo 'building offline (network denied)...'
+    try { curl -s https://registry.example.com/latest > $deps ; echo 'fetched remote deps' } { |_|
+        echo 'network denied by grant — falling back to vendored deps'
+    }
+    echo "compiled at !{date +%s}"
+}
+rm -f $deps

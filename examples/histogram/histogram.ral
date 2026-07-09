@@ -1,0 +1,19 @@
+#!/usr/bin/env ral
+# Footgun: `(( count * 40 / max ))` in bash treats an empty or non-numeric
+# count as 0, so a malformed line draws an empty bar and slips by unnoticed.
+# Here `int` converts the count and *fails loudly* on anything that is not
+# a number, so bad data stops the chart instead of quietly distorting it.
+
+let [path] = $args
+let rows = map { |l|
+    let parts = words $l
+    return [cat: $parts[0], n: !{int $parts[1]}]
+} !{from-lines-list $path}
+
+let max = fold { |m r| if $[$r[n] > $m] { $r[n] } else { $m } } 1 $rows
+
+for $rows { |r|
+    let width = $[$r[n] * 40 / $max]
+    let bar = fold { |acc _| "$acc#" } '' !{range 0 $width}
+    echo "$r[cat]\t$bar $r[n]"
+}

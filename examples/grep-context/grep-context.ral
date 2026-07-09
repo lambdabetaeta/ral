@@ -1,0 +1,20 @@
+#!/usr/bin/env ral
+# Footgun: a pattern that starts with `-` (say `-v` or `-i`) is parsed by
+# grep as an option, silently inverting or altering the search — argument
+# injection, fixable only with `-e "$pattern" --`.  Here the pattern only
+# ever reaches `re-match` as data; it can never become a flag.
+
+let [pat, n, path] = $args
+let radius = int $n
+
+let indexed = enumerate !{from-lines-list $path}
+let hits = filter { |e| re-match $pat $e[item] } $indexed
+
+for $hits { |h|
+    let lo = if $[$h[index] - $radius < 0] { return 0 } else { return $[$h[index] - $radius] }
+    let hi = $[$h[index] + $radius + 1]
+    for !{take $[$hi - $lo] !{drop $lo $indexed}} { |e|
+        echo "$[$e[index] + 1]:$e[item]"
+    }
+    echo '--'
+}

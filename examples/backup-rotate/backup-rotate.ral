@@ -1,0 +1,16 @@
+#!/usr/bin/env ral
+# Footgun: `ls -t | tail -n +N | while read -r f` parses `ls` output as
+# text — a backup whose name holds a newline splits into two lines, and
+# `read` trims surrounding whitespace, so a wrong or nonexistent path is
+# handed to `rm`.  Here entries are sorted by their mtime value and each
+# doomed path stays one atom through `rm`.
+
+let [folder, keep] = $args
+
+let backups = filter { |p| is-file $p } !{glob "$folder/*"}
+let newest-first = reverse !{sort-list-by { |p| return !{file-info $p}[mtime] } $backups}
+
+for !{drop !{int $keep} $newest-first} { |p|
+    echo "removing $p"
+    rm $p
+}

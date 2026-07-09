@@ -1,0 +1,13 @@
+#!/usr/bin/env ral
+# Footgun: `for b in $(git branch --merged main)` sees the `* ` current
+# marker as a word, then the shell glob-expands the bare `*` against the
+# cwd — and it lists `main` itself, so a delete loop can wipe the wrong
+# refs.  `--format` gives bare names; we filter `main` out explicitly.
+
+let [repo] = $args
+
+let merged = within [dir: $repo] {
+    git branch --merged main '--format=%(refname:short)' | from-lines | stream-to-list
+}
+
+for !{filter { |b| return $[not !{equal $b 'main'}] } $merged} { |b| echo $b }

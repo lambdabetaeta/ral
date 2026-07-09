@@ -1,0 +1,15 @@
+#!/usr/bin/env ral
+# Footgun: piping `find -type d` into `while read -r d` strips leading and
+# trailing whitespace from each name and breaks on embedded newlines, so an
+# oddly-named directory is probed under the wrong path.  Here each directory
+# is a path value, empty exactly when `glob "$d/**/*"` yields no file beneath.
+
+let [root] = $args
+
+let dirs = filter { |p| is-dir $p } !{glob "$root/**/*"}
+
+let empties = filter { |d|
+    is-empty !{filter { |p| is-file $p } !{glob "$d/**/*"}}
+} $dirs
+
+for $empties { |d| echo $d }

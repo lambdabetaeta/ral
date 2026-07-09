@@ -1,0 +1,23 @@
+#!/usr/bin/env ral
+# Footgun: the bash habit is `source app.env`, which runs the config file
+# as shell — any command substitution or side effect in it executes on the
+# way in.  Configuration is data; reading it should not run it.  Here it
+# stays data: lines are split, never evaluated.
+
+let [path] = $args
+
+let kv-of = { |line|
+    let parts = re-split '=' $line
+    let key   = $parts[0]
+    let val   = intercalate '=' !{drop 1 $parts}
+    return [$key: $val]
+}
+
+let result = fold { |acc line|
+    let l = re-replace-all '^\s+|\s+$' '' $line
+    if $[!{equal $l ''} || !{re-match '^#' $l}] { return $acc } else {
+        return !{union $acc !{kv-of $l}}
+    }
+} [:] !{from-lines-list $path}
+
+echo !{to-json $result | from-string}

@@ -1,0 +1,9 @@
+#!/usr/bin/env ral
+# Footgun: in bash the loop `for name in $@` word-splits "carol smith"
+# into two names unless every expansion is quoted just so.  Here `$args`
+# is a list of String values, never a re-lexed token soup, so a name
+# with spaces cannot fracture.
+
+let names = if !{is-empty $args} { return [world] } else { return $args }
+
+for $names { |n| echo "hello, $n" }

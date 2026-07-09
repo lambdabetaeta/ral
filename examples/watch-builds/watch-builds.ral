@@ -1,0 +1,8 @@
+#!/usr/bin/env ral
+# Footgun: `make -C a & make -C b & wait` interleaves both builds' lines
+# raw, so one target's message lands spliced mid-line of another and you
+# can't tell which build spoke — or which failed. `watch "label"` line-
+# frames each job's stdout, prefixing every whole line with its dir.
+
+let jobs = map { |d| return !{watch $d { make -C $d }} } $args
+for $jobs { |h| await $h }

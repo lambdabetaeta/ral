@@ -1,0 +1,23 @@
+#!/usr/bin/env ral
+# Footgun: `timeout 30 make -C dir` reports exit 124 on timeout, but that
+# same 124 is indistinguishable from make's own failure at second 29 — a
+# slow build and a broken build look identical. Counting down against
+# `is-done` makes the timeout its own branch, with `cancel` reaping the
+# runaway job explicitly.
+
+let [secs, target] = $args
+let job = spawn { make -C $target }
+let wait = { |left|
+    if !{is-done $job} {
+        let r = await $job
+        echo $r[stdout]
+    } elsif $[$left <= 0] {
+        cancel $job
+        echo "timed out: $target exceeded its $(secs)-second deadline" 1>&2
+        exit 1
+    } else {
+        sleep 1
+        wait $[$left - 1]
+    }
+}
+wait !{int $secs}

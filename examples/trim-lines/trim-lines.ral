@@ -1,0 +1,9 @@
+#!/usr/bin/env ral
+# Footgun: the `while read -r line` idiom trims via `$IFS` as a side effect,
+# but silently drops a final line with no trailing newline — the last
+# record of many hand-edited files just disappears.  Here `from-lines-list`
+# reads every line, and the trim is an explicit anchored regex.
+
+let [path] = $args
+
+for !{from-lines-list $path} { |l| echo !{re-replace-all '^\s+|\s+$' '' $l} }

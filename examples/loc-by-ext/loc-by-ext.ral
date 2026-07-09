@@ -1,0 +1,28 @@
+#!/usr/bin/env ral
+# Footgun: `find … | while read -r f` still splits a filename containing
+# a newline, and `${f##*.}` on a dotless path returns whole directory
+# components as the "extension".  Here `glob` yields a real list of
+# paths and the extension is taken from the basename alone, so nothing
+# is re-lexed and no directory leaks into a bucket.
+
+let [root] = $args
+
+let ext-of = { |p|
+    let name = basename $p
+    if !{re-match '.\.' $name} { return !{re-replace '^.*\.' '' $name} } else { return '(none)' }
+}
+
+let nonblank = { |p|
+    length !{filter { |l| return !{re-match '\S' $l} } !{from-lines-list $p}}
+}
+
+let files  = filter { |p| return !{is-file $p} } !{glob "$root/**/*"}
+let by-ext = group-by $ext-of $files
+
+let rows = map { |k|
+    return [ext: $k, loc: !{sum !{map $nonblank $by-ext[$k]}}]
+} !{keys $by-ext}
+
+for !{reverse !{sort-list-by { |r| return $r[loc] } $rows}} { |r|
+    echo "$r[loc]\t$r[ext]"
+}

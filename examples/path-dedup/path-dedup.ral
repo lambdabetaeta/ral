@@ -1,0 +1,11 @@
+#!/usr/bin/env ral
+# Footgun: the awk `!seen[$0]++` dedup preserves empty PATH entries, and
+# an empty entry — a stray '::' or a leading/trailing ':' — means the
+# current directory to the shell, quietly putting the cwd on your PATH.
+# Here the split is explicit, empties are filtered out, and `nub` keeps
+# the first occurrence of each directory.
+
+let parts = re-split ':' $env[PATH]
+let clean = nub !{filter { |p| return $[not !{is-empty $p}] } $parts}
+
+echo !{intercalate ':' $clean}

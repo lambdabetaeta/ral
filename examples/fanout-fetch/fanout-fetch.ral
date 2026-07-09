@@ -1,0 +1,34 @@
+#!/usr/bin/env ral
+# Footgun: `xargs -P8 curl -o out/$(basename {})` swallows every per-URL
+# failure — a 404 vanishes into the exit-status noise — and two URLs with
+# the same basename clobber one file.  Here `par` returns a structured
+# result per input, so failures land in the manifest and "what broke?" is
+# one `filter`.
+
+let [list_file, out_dir] = $args
+
+let urls = from-lines-list $list_file
+
+mkdir -p $out_dir
+
+let fetch = { |url|
+    let dst = "$out_dir/!{re-replace-all '[^a-zA-Z0-9.]+' '_' $url}"
+    try {
+        curl -fsSL --max-time 15 $url > $dst
+        return [url: $url, path: $dst, ok: true, status: 0]
+    } { |err|
+        return [url: $url, path: '', ok: false, status: $err[status]]
+    }
+}
+
+let results = par $fetch $urls 8
+
+to-json $results > "$out_dir/manifest.json"
+
+let ok  = filter { |r| return $r[ok] }       $results
+let bad = filter { |r| return $[not $r[ok]] } $results
+echo "fetched: !{length $ok} ok, !{length $bad} failed"
+
+for $bad { |r|
+    echo "!{styled $ansi-red '  fail'} status=$r[status]  $r[url]" 1>&2
+}

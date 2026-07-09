@@ -1,0 +1,18 @@
+#!/usr/bin/env ral
+# Footgun: `cut -d, -f2 | sort | uniq -c` only counts correctly when the
+# data is pre-sorted, pads a count-first column, and cuts the field by
+# position.  Here `group-by` buckets on the named value directly, in one
+# pass, no pre-sort.
+
+let [path, col] = $args
+
+let [hdr, ...rows] = !{from-lines-list $path}
+let header = re-split ',' $hdr
+let records = map { |line|
+    fold { |m p| let k = $p[0]; return [...$m, $k: $p[1]] } [:] !{zip $header !{re-split ',' $line}}
+} $rows
+
+let buckets = group-by { |r| return $r[$col] } $records
+
+echo "$col\tcount"
+for !{keys $buckets} { |k| echo "$k\t!{length $buckets[$k]}" }

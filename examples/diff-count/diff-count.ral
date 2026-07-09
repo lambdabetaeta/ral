@@ -1,0 +1,15 @@
+#!/usr/bin/env ral
+# Footgun: the bash idiom dies under `set -e` twice — `diff` exits 1 when
+# the files differ, and `grep -c` exits 1 on a zero count — so identical
+# files, or a file with nothing added, abort the script.  Here a count is
+# `length` of a filtered list; no exit status ever enters the reckoning.
+
+let [old, new] = $args
+let in-old = fold { |m l| return [...$m, $l: true] } [:] !{from-lines-list $old}
+let in-new = fold { |m l| return [...$m, $l: true] } [:] !{from-lines-list $new}
+
+let added   = filter { |l| $[not !{has $in-old $l}] } !{from-lines-list $new}
+let removed = filter { |l| $[not !{has $in-new $l}] } !{from-lines-list $old}
+
+echo "added:   !{length $added}"
+echo "removed: !{length $removed}"

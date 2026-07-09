@@ -1,0 +1,22 @@
+#!/usr/bin/env ral
+# Footgun: awk has no median — you sort into an array and index it by
+# hand ((NR+1)/2, with an even-length special case), reading the column
+# by position throughout.  Here the field is named and `median` is a
+# prelude builtin.
+
+let [path, col] = $args
+
+let [hdr, ...rows] = !{from-lines-list $path}
+let header = re-split ',' $hdr
+let records = map { |line|
+    fold { |m p| let k = $p[0]; return [...$m, $k: $p[1]] } [:] !{zip $header !{re-split ',' $line}}
+} $rows
+
+let nums = map { |r| return !{float $r[$col]} } $records
+let sorted = sort-list $nums
+let total = fold { |acc x| return $[$acc + $x] } 0.0 $nums
+
+echo "mean\t$[$total / !{float !{length $nums}}]"
+echo "median\t!{median $nums}"
+echo "min\t$sorted[0]"
+echo "max\t!{last $sorted}"

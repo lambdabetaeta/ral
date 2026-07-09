@@ -1,0 +1,23 @@
+#!/usr/bin/env ral
+# Footgun: bash `expr $1 $2 $3` and `$(( $* ))` re-parse the arguments as code —
+# `*` globs against the cwd, and `$(( ))` will happily evaluate an argument like
+# `x[$(reboot)]`.  Here operands go through `int` (a real failure on non-numbers)
+# and each operator is matched explicitly; nothing is re-lexed or eval'd.
+
+let [first, ...rest] = $args
+let step = { |a op b|
+    if    !{equal $op '+'} { return $[$a + $b] }
+    elsif !{equal $op '-'} { return $[$a - $b] }
+    elsif !{equal $op 'x'} { return $[$a * $b] }
+    elsif !{equal $op '*'} { return $[$a * $b] }
+    elsif !{equal $op '/'} { return $[$a / $b] }
+    elsif !{equal $op '%'} { return $[$a % $b] }
+    else { fail [status: 2, message: "unknown operator: $op"] }
+}
+let go = { |acc toks|
+    if !{is-empty $toks} { return $acc } else {
+        let [op, n, ...more] = $toks
+        return !{go !{step $acc $op !{int $n}} $more}
+    }
+}
+echo !{go !{int $first} $rest}

@@ -1,0 +1,24 @@
+#!/usr/bin/env ral
+# Footgun: bash's `wc -c` is bytes while `-m` is chars — a one-letter slip
+# conflates them — and the counts arrive as a whitespace blob to re-split
+# into fields.  Here `length` is one polymorphic name over Strings/Lists/
+# Bytes, and bytes come from `file-info`, keeping octet-vs-scalar honest.
+
+if !{is-empty $args} {
+    echo 'usage: wc.ral FILE...' 1>&2
+    exit 2
+}
+
+let count = { |path|
+    let body = !{from-string < $path}
+    return [
+        path:  $path,
+        lines: !{length !{lines $body}},
+        words: !{length !{words $body}},
+        bytes: !{file-info $path}[size],
+    ]
+}
+
+for !{map $count $args} { |s|
+    echo "$s[lines]\t$s[words]\t$s[bytes]\t$s[path]"
+}

@@ -1,0 +1,10 @@
+#!/usr/bin/env ral
+# Footgun: `jq keys[]` prints each key quoted unless you remember
+# `-r`, and pointed at a JSON array it silently lists numeric indices
+# instead of failing.  `keys` here is typed — it accepts only a map —
+# so an array or scalar is a loud error, and it returns real String
+# keys, sorted, that echo emits raw.
+
+let [path] = $args
+let doc = from-json < $path
+for !{keys $doc} { |key| echo $key }

@@ -1,0 +1,22 @@
+#!/usr/bin/env ral
+# Footgun: with no `*.JPEG` match, bash leaves the glob unexpanded, so the
+# loop runs once with `f` set to the literal string `*.JPEG` and `mv` fails
+# on a file that isn't there — you need `shopt -s nullglob` to remember.
+# Here `glob` returns `[]` on no match, and the `is-empty` guard makes
+# "nothing to do" a clean exit.
+
+let [folder, from, to] = $args
+
+let targets = glob "$folder/*.$from"
+
+if !{is-empty $targets} {
+    echo "no *.$from files in $folder"
+    exit 0
+}
+
+for $targets { |old|
+    let stem = basename $old ".$from"
+    let new  = "!{dirname $old}/$stem.$to"
+    echo "$old  ->  $new"
+    mv $old $new
+}

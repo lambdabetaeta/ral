@@ -1,0 +1,18 @@
+#!/usr/bin/env ral
+# Footgun: `find src -exec cp {} dst \;` silently clobbers when two
+# nested files share a basename — the second copy overwrites the first
+# and data is lost with no warning.  Here a `fold` threads the set of
+# seen names, so a clash is copied under a numbered prefix instead.
+
+let [src, dst] = $args
+mkdir -p $dst
+
+let files = filter { |p| is-file $p } !{glob "$src/**/*"}
+
+fold { |seen p|
+    let name = !{file-info $p}[name]
+    let n    = get $seen $name 0
+    let dest = if $[$n == 0] { return "$dst/$name" } else { return "$dst/$(n)-$name" }
+    cp $p $dest
+    return [...$seen, $name: $[$n + 1]]
+} [:] $files

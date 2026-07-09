@@ -1,0 +1,20 @@
+#!/usr/bin/env ral
+# Footgun: `awk '{s+=$2; print $0","s}'` reads the summed column by
+# position, so the recipe silently tracks the wrong column once one is
+# inserted.  Here the running sum folds over a named field and the new
+# column is named too.
+
+let [path, col] = $args
+
+let [hdr, ...rows] = !{from-lines-list $path}
+let header = re-split ',' $hdr
+let records = map { |line|
+    fold { |m p| let k = $p[0]; return [...$m, $k: $p[1]] } [:] !{zip $header !{re-split ',' $line}}
+} $rows
+
+echo "$hdr,cumulative"
+fold { |total r|
+    let t = $[$total + !{float $r[$col]}]
+    echo "!{intercalate ',' !{map { |c| return $r[$c] } $header}},$t"
+    return $t
+} 0.0 $records

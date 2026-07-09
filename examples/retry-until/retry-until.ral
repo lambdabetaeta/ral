@@ -1,0 +1,8 @@
+#!/usr/bin/env ral
+# Footgun: the hand-rolled `for i in {1..5}; do … done` retry ends in a
+# bare `exit 1`, discarding curl's real status and error — you learn it
+# failed, not why. `retry n { }` re-runs on failure and, once attempts
+# run out, re-raises the last error verbatim (status, message, line).
+
+let [url] = $args
+retry 5 { curl -fsS --max-time 10 $url }

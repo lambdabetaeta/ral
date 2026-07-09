@@ -1,0 +1,23 @@
+#!/usr/bin/env ral
+# Footgun: `cp -u` is a GNU extension — BSD/macOS `cp` rejects `-u`, so
+# the "portable" script dies elsewhere — and even where it works it
+# copies silently, telling you nothing about whether it acted.  Here
+# the mtime test is explicit over typed records, and each branch says
+# what it did.
+
+let [src, dst] = $args
+
+let newer = if !{is-file $dst} {
+    let s = !{file-info $src}[mtime]
+    let d = !{file-info $dst}[mtime]
+    return $[$s > $d]
+} else {
+    return true
+}
+
+if $newer {
+    cp $src $dst
+    echo "copied $src -> $dst"
+} else {
+    echo "up to date: $dst"
+}

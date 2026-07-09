@@ -1,0 +1,19 @@
+#!/usr/bin/env ral
+# Footgun: `git shortlog -sn` with no revision reads the commit list
+# from *stdin* whenever stdout is not a terminal — so in a script or a
+# pipeline it silently hangs or emits nothing.  Here we tally `git log`
+# ourselves: a real list of [name, count] records, no tty-dependent
+# behaviour and nothing to re-parse from padded columns.
+
+let [repo] = $args
+
+let names = within [dir: $repo] {
+    git log --format=%an | from-lines | stream-to-list
+}
+
+let counts = group-by $id $names
+let rows = map { |k| return [name: $k, n: !{length $counts[$k]}] } !{keys $counts}
+
+for !{reverse !{sort-list-by { |r| return $r[n] } $rows}} { |r|
+    echo "$r[n]\t$r[name]"
+}

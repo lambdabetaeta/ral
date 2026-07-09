@@ -1,0 +1,12 @@
+#!/usr/bin/env ral
+# Footgun: bash reaches for `awk '!seen[$0]++'` — print-on-falsy-post-
+# increment, legible only with the K&R paper open — because `sort -u`
+# reorders.  Here the shape is the obvious one: a fold over stdin lines
+# whose accumulator is the set of already-seen lines.
+
+fold-lines { |seen line|
+    if !{has $seen $line} { return $seen } else {
+        echo $line
+        return [...$seen, $line: true]
+    }
+} [:]

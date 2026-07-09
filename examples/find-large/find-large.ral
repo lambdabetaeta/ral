@@ -1,0 +1,18 @@
+#!/usr/bin/env ral
+# Footgun: `find -printf '%s\t%p\n' | sort -rn | head` trusts filenames to
+# hold no newline — one that does forges an extra line `sort` mis-ranks —
+# while a tab in a name shifts size and path apart for any later field-cut.
+# Here each `file-info` record is a typed value; sorting and slicing operate
+# on records, not delimited text.
+
+let [root] = $args
+
+let stats = map { |p|
+    return [path: $p, size: !{file-info $p}[size]]
+} !{filter { |p| is-file $p } !{glob "$root/**/*"}}
+
+let biggest = take 10 !{reverse !{sort-list-by { |s| return $s[size] } $stats}}
+
+for $biggest { |s|
+    echo "$s[size]\t$s[path]"
+}

@@ -1,0 +1,27 @@
+#!/usr/bin/env ral
+# Footgun: bash has no in-language sandbox — you reach for chroot + setuid
+# + seccomp, or bwrap, each a separate process-scoped layer where one wrong
+# bind-mount silently leaves a hole.  Here `grant` attenuates authority
+# in-language: deny-by-default, one expression around the code.
+
+let sandbox = temp-dir
+
+let try-op = { |label body|
+    let outcome = try { !$body ; return 'allowed' } { |_| return 'blocked' }
+    echo "  $outcome  $label"
+}
+
+echo 'outside the grant block:'
+try-op 'write inside  /tmp'      { to-string 'ok' > "$sandbox/scratch" }
+try-op 'read  /etc/hosts'        { let _ = !{from-string < /etc/hosts} ; return unit }
+
+echo ''
+echo 'inside grant [exec: [:], fs: [read+write only the sandbox]]:'
+grant [exec: [:], fs: [read: [$sandbox], write: [$sandbox]]] {
+    try-op 'write inside  sandbox'   { to-string 'ok' > "$sandbox/inside"  }
+    try-op 'write outside sandbox'   { to-string 'no' > "/tmp/escape"      }
+    try-op 'read  /etc/hosts'        { let _ = !{from-string < /etc/hosts} ; return unit }
+    try-op 'exec  curl'              { curl http://example.com 2> /dev/null }
+}
+
+rm -rf $sandbox

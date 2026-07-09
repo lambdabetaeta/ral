@@ -1,0 +1,16 @@
+#!/usr/bin/env ral
+# Footgun: `find -printf '%T@ %p' | sort -n | tail -1 | cut` recovers the
+# newest path positionally from one text line, so a filename containing a
+# newline is split across lines and comes back truncated.  Here mtime is an
+# Int key and the file is the value that `sort-list-by` carries whole.
+
+let [root] = $args
+
+let files = filter { |p| is-file $p } !{glob "$root/**/*"}
+
+if !{is-empty $files} {
+    echo "no files under $root"
+    exit 0
+}
+
+echo !{last !{sort-list-by { |p| return !{file-info $p}[mtime] } $files}}

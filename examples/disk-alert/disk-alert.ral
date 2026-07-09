@@ -1,0 +1,23 @@
+#!/usr/bin/env ral
+# Footgun: `df -P | awk '$5+0 > t {print $6}'` reads the mount point as a
+# single field, so a mount path containing a space (a removable volume, an
+# SMB share) is truncated at its first word.  Here the capacity comes from
+# a fixed early column and the mount tail is rejoined intact, so a spaced
+# path survives whole.
+
+let [pct] = $args
+let threshold = int $pct
+
+let rows = df -P | from-lines | stream-drop 1 | stream-to-list
+
+let stats = map { |line|
+    let cols = words $line
+    return [
+        use:   !{int !{string-replace '%' '' $cols[4]}},
+        mount: !{intercalate ' ' !{drop 5 $cols}},
+    ]
+} $rows
+
+for !{filter { |r| return $[$r[use] > $threshold] } $stats} { |r|
+    echo "$r[use]%\t$r[mount]"
+}

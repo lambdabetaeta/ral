@@ -1,0 +1,18 @@
+#!/usr/bin/env ral
+# Footgun: when `$root` has no subdirectories the glob `"$root"/*/`
+# never expands (nullglob is off), so `du` runs on the literal string
+# `$root/*/` and the script dies with a confusing error.  Here `glob`
+# returns an empty list and the loop simply does nothing.
+
+let [root, n] = $args
+
+let sized = map { |d|
+    let total = sum !{map { |p|
+        return !{file-info $p}[size]
+    } !{filter { |p| is-file $p } !{glob "$d/**/*"}}}
+    return [dir: $d, size: $total]
+} !{filter { |p| is-dir $p } !{glob "$root/*"}}
+
+let ranked = take !{int $n} !{reverse !{sort-list-by { |s| return $s[size] } $sized}}
+
+for $ranked { |s| echo "$s[size]\t$s[dir]" }

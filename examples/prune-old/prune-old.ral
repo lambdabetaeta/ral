@@ -1,0 +1,18 @@
+#!/usr/bin/env ral
+# Footgun: `for f in $(find ...)` word-splits the results, so a stale
+# file named `old report.log` becomes the two arguments `old` and
+# `report.log` — and `rm` deletes whatever those happen to name.  Here
+# every matched path is one String, passed to `rm` intact.
+
+let [root, days] = $args
+let cutoff = $[!{int !{date +%s | from-line}} - !{int $days} * 86400]
+
+let old = filter { |f|
+    let m = !{file-info $f}[mtime]
+    return $[$m < $cutoff]
+} !{filter { |p| is-file $p } !{glob "$root/**/*"}}
+
+for $old { |f|
+    rm $f
+    echo "removed $f"
+}

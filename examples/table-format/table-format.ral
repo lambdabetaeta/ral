@@ -1,0 +1,22 @@
+#!/usr/bin/env ral
+# Footgun: `column -t` splits every row on runs of whitespace, so a field with
+# an embedded space becomes two columns and every row after it slides out of
+# alignment.  Here each row is split on the tab delimiter into a typed field
+# list, and the widths are measured over those lists — a space in a field never
+# fractures it, and the split that measures is the split that prints.
+
+let rows = from-lines | stream-to-list
+let cells = map { |r| re-split '\t' $r } $rows
+
+let ncols = fold { |m r| if $[!{length $r} > $m] { return !{length $r} } else { return $m } } 0 $cells
+let at = { |r c| if $[$c < !{length $r}] { return $r[$c] } else { return '' } }
+let pad = { |s w| return "$s!{fold { |a _| return "$a " } '' !{range !{length $s} $w}}" }
+
+let widths = map { |c|
+    fold { |w r| let n = !{length !{at $r $c}} ; if $[$n > $w] { return $n } else { return $w } } 0 $cells
+} !{range 0 $ncols}
+
+for $cells { |r|
+    let line = intercalate '  ' !{map { |c| return !{pad !{at $r $c} $widths[$c]} } !{range 0 $ncols}}
+    echo !{re-replace-all '\s+$' '' $line}
+}

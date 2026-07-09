@@ -1,0 +1,19 @@
+#!/usr/bin/env ral
+# Footgun: bash often reaches for jq's `+`, a shallow merge that
+# silently drops the first object's nested keys wherever the second
+# also has that key.  Deep merge means recursing where both sides
+# hold objects; we do exactly that, so nested defaults survive.
+
+let [left, right] = $args
+
+let deep = { |x y|
+    fold { |acc key|
+        let merged = if $[!{succeeds { keys $acc[$key] }} && !{succeeds { keys $y[$key] }}] {
+            return !{deep $acc[$key] $y[$key]}
+        } else { return $y[$key] }
+        return !{union $acc [$key: $merged]}
+    } $x !{keys $y}
+}
+
+let out = deep !{from-json < $left} !{from-json < $right}
+to-json $out

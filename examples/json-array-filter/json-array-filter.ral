@@ -1,0 +1,10 @@
+#!/usr/bin/env ral
+# Footgun: the field name and the wanted value are spliced straight
+# into jq's program string, so a value with a quote breaks the filter
+# and one with jq syntax runs as code.  Here both are data: we index
+# each element by the field name and compare values as strings.
+
+let [path, field, want] = $args
+let rows = from-json < $path
+let kept = filter { |row| return !{equal !{str $row[$field]} $want} } $rows
+to-json $kept

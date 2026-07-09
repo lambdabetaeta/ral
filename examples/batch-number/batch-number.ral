@@ -1,0 +1,28 @@
+#!/usr/bin/env ral
+# Footgun: bash extracts the extension with `${f##*.}`, which for a
+# file that has no dot returns the *entire* name — so an extensionless
+# file is renamed with a garbage ".name" suffix.  Here `ext` inspects
+# the split parts and yields '' when there is no extension.
+
+let [root, prefix] = $args
+
+let pad = { |n|
+    let go = { |s| if $[!{length $s} >= 4] { return $s } else { return !{go "0$s"} } }
+    return !{go !{str $n}}
+}
+
+let ext = { |name|
+    let parts = re-split '\.' $name
+    if $[!{length $parts} > 1] { return ".!{last $parts}" } else { return '' }
+}
+
+let files = sort-list !{filter { |p| is-file $p } !{glob "$root/*"}}
+
+for !{enumerate $files} { |e|
+    let src  = $e[item]
+    let name = !{file-info $src}[name]
+    let num  = !{pad $[$e[index] + 1]}
+    let dst  = "$root/$(prefix)-$num!{ext $name}"
+    mv $src $dst
+    echo "$src -> $dst"
+}

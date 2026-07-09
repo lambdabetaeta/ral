@@ -1,0 +1,15 @@
+#!/usr/bin/env ral
+# Footgun: `for l in $(find . -type l); do [ -e "$l" ] || echo "$l"; done`
+# word-splits the substitution, so a symlink whose name holds a space is
+# tested and reported as two broken fragments.  Here each link is a value;
+# a dangling one is exactly a link that resolves to neither file nor dir.
+
+let [root] = $args
+
+let links  = filter { |p| is-link $p } !{glob "$root/**/*"}
+let broken = filter { |p| $[not !{is-file $p} && not !{is-dir $p}] } $links
+
+for $broken { |p|
+    let target = !{file-info $p}[target]
+    echo "$p -> $target"
+}

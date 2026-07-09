@@ -1,0 +1,23 @@
+#!/usr/bin/env ral
+# Footgun: `diff -rq A B` reports in human prose — "Only in A: x",
+# "Files A/x and B/x differ" — so a name holding ": ", " and ", or a
+# newline derails the `case`/`read` parse, and "Only in A: sub" hides a
+# whole subtree behind one line.  Here each tree is a map from relative
+# path to content hash; set algebra and value compare need no parsing.
+
+let [a, b] = $args
+
+let scan = { |root|
+    within [dir: $root] {
+        fold { |m p|
+            if !{is-file $p} { return [...$m, $p: !{words !{sha256sum $p | from-string}}[0]] } else { return $m }
+        } [:] !{glob '**/*'}
+    }
+}
+
+let old = scan $a
+let new = scan $b
+
+for !{keys !{difference $new $old}} { |p| echo "+ $p" }
+for !{keys !{difference $old $new}} { |p| echo "- $p" }
+for !{filter { |p| return $[not !{equal $old[$p] $new[$p]}] } !{keys !{intersection $old $new}}} { |p| echo "~ $p" }

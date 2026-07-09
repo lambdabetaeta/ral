@@ -1,0 +1,20 @@
+#!/usr/bin/env ral
+# Footgun: `find -printf '%f\n' | sort | uniq -c` counts lines, so a single
+# filename containing a newline is tallied as two separate files under two
+# bogus extensions.  Here each file is one glob value and `group-by` buckets
+# it by an extension derived from the whole basename, dotless files in `(none)`.
+
+let [root] = $args
+
+let files = filter { |p| is-file $p } !{glob "$root/**/*"}
+
+let buckets = group-by { |p|
+    let parts = re-split '\.' !{file-info $p}[name]
+    if $[!{length $parts} > 1] { return !{last $parts} } else { return '(none)' }
+} $files
+
+let rows = map { |k| return [ext: $k, n: !{length $buckets[$k]}] } !{keys $buckets}
+
+for !{reverse !{sort-list-by { |r| return $r[n] } $rows}} { |r|
+    echo "$r[n]\t$r[ext]"
+}

@@ -1,0 +1,14 @@
+#!/usr/bin/env ral
+# Footgun: `echo "$new" > VERSION` truncates the file to zero *before*
+# writing, so a crash — or a concurrent reader — can catch VERSION empty
+# or half-written.  In ral `>` is rename-on-close: the new contents are
+# staged and swapped atomically, so a reader sees the old string or the
+# new one, never a torn file.
+
+let [path] = $args
+
+let [major, minor, pat] = re-split '\.' !{from-line < $path}
+let next = "$major.$minor.$[!{int $pat} + 1]"
+
+to-string $next > $path
+echo $next

@@ -1,0 +1,10 @@
+#!/usr/bin/env ral
+# Footgun: `jq -S .` treats its input as a *stream*, so a file that is
+# accidentally two concatenated objects ({...}{...} from a botched write
+# or double-append) prints as two documents and passes CI unnoticed.
+# from-json demands exactly one JSON value — trailing content is a hard
+# error — and to-json re-emits the canonical compact, key-sorted form.
+
+let [path] = $args
+let doc = from-json < $path
+to-json $doc

@@ -1,0 +1,27 @@
+#!/usr/bin/env ral
+# Footgun: parsing `env` dumps with `cut -d= -f2` truncates any value
+# that itself contains '=' (URLs, flags, base64), so a real difference
+# is silently mangled or missed.  Here each line is split once — the key
+# is the head, the value is the '='-rejoined tail — so `A=x=y` round-trips.
+
+let [old-file, new-file] = $args
+
+let parse = { |path|
+    fold { |m line|
+        let [k, ...rest] = re-split '=' $line
+        return [...$m, $k: !{intercalate '=' $rest}]
+    } [:] !{from-lines-list $path}
+}
+
+let old = parse $old-file
+let new = parse $new-file
+
+for !{filter { |k| return $[not !{has $old $k}] } !{keys $new}} { |k|
+    echo "+ $k=$new[$k]"
+}
+for !{filter { |k| return $[not !{has $new $k}] } !{keys $old}} { |k|
+    echo "- $k=$old[$k]"
+}
+for !{filter { |k| return $[!{has $new $k} && not !{equal $old[$k] $new[$k]}] } !{keys $old}} { |k|
+    echo "~ $k: $old[$k] -> $new[$k]"
+}

@@ -1,0 +1,10 @@
+#!/usr/bin/env ral
+# Footgun: `jq -r '.[].field'` prints the literal `null` for every
+# object that lacks the field, so a typo or a hole in the data blends
+# into the output as just one more line.  Indexing by the field name
+# fails on the first object that is missing it — the mistake surfaces
+# instead of hiding.
+
+let [path, field] = $args
+let rows = from-json < $path
+for $rows { |row| echo !{str $row[$field]} }

@@ -1,0 +1,9 @@
+#!/usr/bin/env ral
+# Footgun: `xargs -P4` re-splits its input on whitespace, so "my log.txt"
+# reaches gzip as two nonexistent files; and any one gzip's failure is
+# swallowed into xargs's lumped exit 123, naming nothing. `par` maps over
+# path *values* — no splitting — with a fixed worker count, returning one
+# result per file in input order.
+
+let done = par { |f| gzip -kf $f; return $f } $args 4
+echo "gzipped !{length $done} files"
