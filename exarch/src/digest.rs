@@ -93,11 +93,11 @@ pub fn suffix_keep_budget(history_bytes: usize) -> usize {
     history_bytes / 2
 }
 
-/// Appended to an elision banner.  The elided bytes are gone, so the
-/// model's recourse is to narrow what it asked for — scope the query at
-/// its source, or read the result in slices.  Re-running the command,
-/// or `$x`-dumping the whole binding, only reproduces the same cut.
-const ELISION_NUDGE: &str = "; complete but clamped — narrow it (within/filter to scope, take/view-text/tail to slice); re-running repeats the cut";
+/// The elided bytes are gone, so the model's recourse is to narrow what
+/// it asked for — scope the query at its source, or read the result in
+/// slices.  Re-running the command, or `$x`-dumping the whole binding,
+/// only reproduces the same cut.
+const ELISION_NUDGE: &str = "; narrow the output by using within/filter/take/view-text/tail";
 
 /// Cap `text` at `cap` bytes for the model's history and the transcript.
 ///
@@ -329,7 +329,7 @@ mod tests {
         // Elided in place with the narrow-it nudge; nothing is written
         // to disk to recover later.
         assert!(out.contains("elided"));
-        assert!(out.contains("clamped"));
+        assert!(out.contains("narrow the output"));
         assert!(!out.contains("full at "));
         assert!(out.len() <= STDOUT_CAP + ELISION_NUDGE.len() + 64);
     }
