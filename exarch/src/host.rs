@@ -13,26 +13,27 @@
 /// `exarch logs`, and (when cwd is inside a repo) `git`.  Stable for
 /// the process lifetime, so safe inside the cached system prefix.
 pub fn snapshot(exarch_state: &std::path::Path) -> String {
+    use std::fmt::Write;
     let mut out = String::new();
-    out.push_str(&format!("- os: {}\n", os_line()));
+    let _ = writeln!(out, "- os: {}", os_line());
     if let Some(d) = ral_core::host::now() {
-        out.push_str(&format!("- now: {d}\n"));
+        let _ = writeln!(out, "- now: {d}");
     }
     if let Some(cwd) = ral_core::host::cwd() {
-        out.push_str(&format!("- cwd: {}\n", cwd.display()));
+        let _ = writeln!(out, "- cwd: {}", cwd.display());
     }
     let user = ral_core::host::user();
     if user != "?" {
-        out.push_str(&format!("- user: {user}\n"));
+        let _ = writeln!(out, "- user: {user}");
     }
     let home = ral_core::host::home();
     if !home.is_empty() {
-        out.push_str(&format!("- home: {home}\n"));
+        let _ = writeln!(out, "- home: {home}");
     }
     if let Some(g) = git_line() {
-        out.push_str(&format!("- git: {g}\n"));
+        let _ = writeln!(out, "- git: {g}");
     }
-    out.push_str(&format!("- exarch logs: {}\n", exarch_state.display()));
+    let _ = writeln!(out, "- exarch logs: {}", exarch_state.display());
     out
 }
 

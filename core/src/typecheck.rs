@@ -159,7 +159,7 @@ fn annotate(comp: &Comp, ctx: &mut InferCtx, spine: bool) -> Comp {
             ..
         } => {
             let scheme = spine
-                .then(|| ctx.bind_tys.get(&(comp as *const Comp as usize)).cloned())
+                .then(|| ctx.bind_tys.get(&(std::ptr::from_ref::<Comp>(comp) as usize)).cloned())
                 .flatten()
                 .map(|ty| {
                     let scheme = generalize(&mut ctx.unifier, &TyEnv::new(), &ty);
@@ -173,7 +173,7 @@ fn annotate(comp: &Comp, ctx: &mut InferCtx, spine: bool) -> Comp {
             // placeholder; every other node takes the checker's verdict.
             let rhs_output = ctx
                 .bind_outputs
-                .get(&(comp as *const Comp as usize))
+                .get(&(std::ptr::from_ref::<Comp>(comp) as usize))
                 .copied()
                 .map_or(*rhs_output, |m| ctx.ground(m));
             CompKind::Bind {
@@ -194,7 +194,7 @@ fn annotate(comp: &Comp, ctx: &mut InferCtx, spine: bool) -> Comp {
                 .zip(wires)
                 .map(|(stage, placeholder)| {
                     ctx.stage_specs
-                        .get(&(stage.as_ref() as *const Comp as usize))
+                        .get(&(std::ptr::from_ref::<Comp>(stage.as_ref()) as usize))
                         .copied()
                         .map_or(*placeholder, |spec| Wire {
                             input: ctx.ground(spec.input),
@@ -210,7 +210,7 @@ fn annotate(comp: &Comp, ctx: &mut InferCtx, spine: bool) -> Comp {
                 .zip(stage_types)
                 .map(|(stage, placeholder)| {
                     ctx.stage_types
-                        .get(&(stage.as_ref() as *const Comp as usize))
+                        .get(&(std::ptr::from_ref::<Comp>(stage.as_ref()) as usize))
                         .cloned()
                         .map_or_else(|| placeholder.clone(), |ty| ctx.unifier.resolve_ty(&ty))
                 })
@@ -446,7 +446,7 @@ pub fn bake_prelude(comp: &Comp) -> (Comp, Vec<(String, Scheme)>) {
     let annotated = match typecheck(comp, SessionSchemes::default()) {
         Ok(a) => a,
         Err(errs) => {
-            let msgs: Vec<String> = errs.iter().map(|e| e.to_string()).collect();
+            let msgs: Vec<String> = errs.iter().map(ToString::to_string).collect();
             panic!("prelude type errors:\n{}", msgs.join("\n"));
         }
     };

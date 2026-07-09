@@ -62,10 +62,10 @@ pub fn get_user_home(username: &str) -> String {
         let rc = unsafe {
             libc::getpwnam_r(
                 c_name.as_ptr(),
-                &mut pwd,
+                &raw mut pwd,
                 buf.as_mut_ptr().cast(),
                 buf.len(),
-                &mut result,
+                &raw mut result,
             )
         };
         if rc == libc::ERANGE {

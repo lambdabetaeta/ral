@@ -203,8 +203,7 @@ schedule ids after a context compaction, then `unschedule` to remove one."
                 .map(|s| {
                     let next = s
                         .next_in
-                        .map(|d| format!("{}s", d.as_secs()))
-                        .unwrap_or_else(|| "never".into());
+                        .map_or_else(|| "never".into(), |d| format!("{}s", d.as_secs()));
                     format!(
                         "{}  {}  [{}]  next in {}  fired {}",
                         s.id, s.label, s.trigger, next, s.fires
@@ -258,17 +257,14 @@ no schedule has that id."
         _provider: &Arc<Provider>,
         emit: &Emitter,
     ) -> SessionToolResult {
-        let sid = match u64_field(&input, "id") {
-            Some(n) => n,
-            None => {
-                return invalid_input(
-                    id,
-                    "unschedule",
-                    INVALID_INPUT,
-                    "missing required integer field `id`",
-                    emit,
-                );
-            }
+        let Some(sid) = u64_field(&input, "id") else {
+            return invalid_input(
+                id,
+                "unschedule",
+                INVALID_INPUT,
+                "missing required integer field `id`",
+                emit,
+            );
         };
         emit.emit(Kind::ToolCall {
             tool: "unschedule",

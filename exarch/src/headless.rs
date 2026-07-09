@@ -207,6 +207,7 @@ fn result_json(h: &Headless, r: &Result<(), String>, elapsed: std::time::Duratio
 }
 
 impl Sink for Headless {
+    #[allow(clippy::match_same_arms)]
     fn handle(&mut self, e: Event) {
         let id = e.id;
         match e.kind {

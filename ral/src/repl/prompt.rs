@@ -219,17 +219,16 @@ pub(super) fn render(shell: &mut Shell, runtime: &Arc<Mutex<PluginRuntime>>) -> 
                     budget: None,
                 }),
             );
-            match hr.result {
-                Ok(Value::String(s)) => s,
-                _ => {
-                    // No readline escape is pending at render time, so the
-                    // source-mapped fault (rendered while its registry was live)
-                    // prints immediately above the prompt.
-                    if let Some(rendered) = hr.rendered_error {
-                        eprintln!("{rendered}");
-                    }
-                    prompt
+            if let Ok(Value::String(s)) = hr.result {
+                s
+            } else {
+                // No readline escape is pending at render time, so the
+                // source-mapped fault (rendered while its registry was live)
+                // prints immediately above the prompt.
+                if let Some(rendered) = hr.rendered_error {
+                    eprintln!("{rendered}");
                 }
+                prompt
             }
         },
     );
@@ -252,10 +251,10 @@ mod tests {
     /// Parse and evaluate `src` to a thunk against a prelude-loaded shell.
     /// Returns `(shell, prompt_thunk)`.
     fn evaluate_prompt_src(src: &str) -> (Shell, Value) {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(ral_core::io::TerminalState::default());
         ral_core::builtins::register(&mut shell, crate::PRELUDE.comp());
         let ast = ral_core::syntax::parser::parse(src).unwrap();
-        let comp = std::sync::Arc::new(ral_core::elaborator::elaborate(&ast, Default::default()));
+        let comp = std::sync::Arc::new(ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default()));
         let prompt = ral_core::evaluator::evaluate(&comp, &mut shell).unwrap();
         assert!(
             matches!(prompt, Value::Lambda { .. } | Value::Block { .. }),
@@ -285,7 +284,7 @@ mod tests {
         let source = "return { return \"$USER:$CWD:$STATUS\" }";
         let (mut shell, prompt) = evaluate_prompt_src(source);
         let result = eval_prompt(&prompt, &mut shell);
-        let parts: Vec<&str> = result.split(":").collect();
+        let parts: Vec<&str> = result.split(':').collect();
 
         assert_eq!(parts.len(), 3, "expected user:cwd:status, got {result:?}");
         assert!(
@@ -304,7 +303,7 @@ mod tests {
 
     #[test]
     fn string_prompt_renders_as_itself() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(ral_core::io::TerminalState::default());
         let prompt = Value::String("abc $ ".into());
         assert_eq!(eval_prompt(&prompt, &mut shell), "abc $ ");
     }

@@ -80,7 +80,7 @@ pub fn load() -> Result<Vec<CustomProvider>, String> {
     };
     let source = ral_core::source::normalize_source_text(source);
     let display = path.to_string_lossy().into_owned();
-    let mut shell = Shell::new(Default::default());
+    let mut shell = Shell::new(ral_core::io::TerminalState::default());
     decode(
         evaluate_no_authority(&mut shell, &source, &display)?,
         &display,
@@ -113,7 +113,7 @@ fn evaluate_no_authority(shell: &mut Shell, source: &str, display: &str) -> Resu
         })
         .map_err(|e| match e {
             Break::Error(err) => format!("exarch config {display}: {}", err.message),
-            other => format!("exarch config {display}: {other:?}"),
+            other @ Break::Escape(_) => format!("exarch config {display}: {other:?}"),
         })
 }
 
@@ -129,7 +129,7 @@ fn decode(value: Value, display: &str) -> Result<Vec<CustomProvider>, String> {
         ));
     };
     let mut providers = Vec::with_capacity(map.len());
-    for (name, decl) in map.iter() {
+    for (name, decl) in &map {
         providers.push(decode_one(name, decl, display)?);
     }
     Ok(providers)
@@ -196,7 +196,7 @@ mod tests {
     /// shared core under the no-authority grant, in a fresh throwaway shell —
     /// and decode it.
     fn parse(source: &str) -> Result<Vec<CustomProvider>, String> {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(ral_core::io::TerminalState::default());
         let source = ral_core::source::normalize_source_text(source.to_string());
         decode(
             evaluate_no_authority(&mut shell, &source, "<test:config>")?,

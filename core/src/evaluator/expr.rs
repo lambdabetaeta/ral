@@ -9,7 +9,7 @@
 use super::val::eval_val;
 use crate::ir::Val;
 use crate::syntax::ast::{ArithOp, BinaryOp, BinaryOpKind, CompareOp, EqOp};
-use crate::types::*;
+use crate::types::{Break, Error, Settled, Shell, Value};
 
 // ── Indexing ─────────────────────────────────────────────────────────────
 
@@ -61,7 +61,7 @@ pub(crate) fn index_value(val: &Value, key: &Value, shell: &Shell) -> Result<Val
                 }
             };
             m.get(key_str).cloned().ok_or_else(|| {
-                let ks: Vec<&str> = m.keys().map(|k| k.as_str()).collect();
+                let ks: Vec<&str> = m.keys().map(String::as_str).collect();
                 let hint = if ks.is_empty() {
                     "the map is empty".into()
                 } else {
@@ -163,33 +163,30 @@ fn arithmetic(l: &Value, op: ArithOp, r: &Value, shell: &Shell) -> Result<Value,
     let mod_zero = || shell.err("modulo by zero", 1);
     let lv = require_numeric(l, shell)?;
     let rv = require_numeric(r, shell)?;
-    match (&lv, &rv) {
-        (Value::Int(a), Value::Int(b)) => {
-            let overflow =
-                || shell.err(format!("integer overflow: {a} and {b} exceed i64 range"), 1);
-            Ok(match op {
-                ArithOp::Add => a.checked_add(*b).map(Value::Int).ok_or_else(overflow)?,
-                ArithOp::Sub => a.checked_sub(*b).map(Value::Int).ok_or_else(overflow)?,
-                ArithOp::Mul => a.checked_mul(*b).map(Value::Int).ok_or_else(overflow)?,
-                ArithOp::Div if *b == 0 => return Err(div_zero()),
-                ArithOp::Div => a.checked_div(*b).map(Value::Int).ok_or_else(overflow)?,
-                ArithOp::Mod if *b == 0 => return Err(mod_zero()),
-                ArithOp::Mod => a.checked_rem(*b).map(Value::Int).ok_or_else(overflow)?,
-            })
-        }
-        _ => {
-            let a = lv.as_float().unwrap();
-            let b = rv.as_float().unwrap();
-            Ok(match op {
-                ArithOp::Add => Value::Float(a + b),
-                ArithOp::Sub => Value::Float(a - b),
-                ArithOp::Mul => Value::Float(a * b),
-                ArithOp::Div if b == 0.0 => return Err(div_zero()),
-                ArithOp::Div => Value::Float(a / b),
-                ArithOp::Mod => {
-                    return Err(shell.err_hint("% requires Int operands", "use int to convert", 1));
-                }
-            })
-        }
+    if let (Value::Int(a), Value::Int(b)) = (&lv, &rv) {
+        let overflow =
+            || shell.err(format!("integer overflow: {a} and {b} exceed i64 range"), 1);
+        Ok(match op {
+            ArithOp::Add => a.checked_add(*b).map(Value::Int).ok_or_else(overflow)?,
+            ArithOp::Sub => a.checked_sub(*b).map(Value::Int).ok_or_else(overflow)?,
+            ArithOp::Mul => a.checked_mul(*b).map(Value::Int).ok_or_else(overflow)?,
+            ArithOp::Div if *b == 0 => return Err(div_zero()),
+            ArithOp::Div => a.checked_div(*b).map(Value::Int).ok_or_else(overflow)?,
+            ArithOp::Mod if *b == 0 => return Err(mod_zero()),
+            ArithOp::Mod => a.checked_rem(*b).map(Value::Int).ok_or_else(overflow)?,
+        })
+    } else {
+        let a = lv.as_float().unwrap();
+        let b = rv.as_float().unwrap();
+        Ok(match op {
+            ArithOp::Add => Value::Float(a + b),
+            ArithOp::Sub => Value::Float(a - b),
+            ArithOp::Mul => Value::Float(a * b),
+            ArithOp::Div if b == 0.0 => return Err(div_zero()),
+            ArithOp::Div => Value::Float(a / b),
+            ArithOp::Mod => {
+                return Err(shell.err_hint("% requires Int operands", "use int to convert", 1));
+            }
+        })
     }
 }

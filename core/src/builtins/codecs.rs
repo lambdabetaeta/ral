@@ -17,7 +17,7 @@
 use crate::ir::{CompKind, Val};
 use crate::source::Spanned;
 use crate::stream::{DONE_LABEL, HEAD_FIELD, MORE_LABEL, TAIL_FIELD};
-use crate::types::*;
+use crate::types::{Shell, Settled, sig, Value, sig_hint, Env};
 use std::sync::Arc;
 
 use super::apply;
@@ -196,7 +196,7 @@ pub(super) fn builtin_to_csv(args: &[Value], shell: &mut Shell) -> Settled<Value
         let headers: Vec<String> = as_map(first, "to-csv")?.keys().cloned().collect();
         wtr.write_record(&headers)
             .map_err(|e| sig(format!("to-csv: {e}")))?;
-        for row in rows.iter() {
+        for row in &rows {
             let map = as_map(row, "to-csv")?;
             let fields: Vec<String> = headers
                 .iter()
@@ -247,7 +247,7 @@ pub(super) fn builtin_to_lines(args: &[Value], shell: &mut Shell) -> Settled<Val
     let items = as_list(&args[0], "to-lines")?;
     let joined = items
         .iter()
-        .map(|v| v.to_string())
+        .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
     write_encoded("to-lines", joined.into_bytes(), shell)

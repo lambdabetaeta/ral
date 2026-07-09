@@ -275,7 +275,7 @@ mod tests {
     }
 
     fn frozen(paths: &[&str], ctx: &FreezeCtx<'_>) -> Result<Vec<String>, String> {
-        freeze_path_list(paths.iter().map(|s| s.to_string()).collect(), ctx)
+        freeze_path_list(paths.iter().map(std::string::ToString::to_string).collect(), ctx)
             .map(|v| v.iter().map(|p| p.as_str().to_string()).collect())
     }
 

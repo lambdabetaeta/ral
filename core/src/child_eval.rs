@@ -424,7 +424,7 @@ pub(crate) fn break_response(signal: Break) -> ChildEvalResponse {
     // signal falls back to `1`.
     let last_status = match &signal {
         Break::Error(err) => err.exit_code(),
-        _ => 1,
+        Break::Escape(_) => 1,
     };
     ChildEvalResponse {
         scope_table: ScopeTable::default(),
@@ -496,7 +496,7 @@ mod tests {
 
     fn compile_one(source: &str) -> Arc<Comp> {
         let ast = parse(source).expect("parse");
-        Arc::new(elaborate(&ast, Default::default()))
+        Arc::new(elaborate(&ast, std::collections::HashSet::default()))
     }
 
     fn eval_value(source: &str, shell: &mut Shell) -> Value {

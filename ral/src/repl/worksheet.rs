@@ -116,8 +116,7 @@ impl Worksheet {
             let effectful = effects
                 .iter()
                 .find(|(n, _)| n == name)
-                .map(|(_, e)| *e)
-                .unwrap_or(false);
+                .is_some_and(|(_, e)| *e);
             self.upsert(name, free_refs, effectful);
         }
     }
@@ -200,7 +199,7 @@ mod tests {
     /// A shell seeded with the prelude, so `compile_and_typecheck` resolves
     /// builtin heads (`map`, …) as the live session would.
     fn shell() -> Shell {
-        Shell::new(Default::default())
+        Shell::new(ral_core::io::TerminalState::default())
     }
 
     /// The names of every recorded entry, in order.

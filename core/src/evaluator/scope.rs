@@ -18,7 +18,10 @@
 //!     `deeply_nested_calls`).
 
 use crate::ir::Val;
-use crate::types::*;
+use crate::types::{
+    as_map, sig, validate_handler_arity, BodyResult, Break, CapturePolicy, ExecNode, HandlerEntry,
+    HandlerRole, Map, Raw, Settled, Shell, Value,
+};
 
 use crate::evaluator::val::eval_val;
 use crate::evaluator::{apply, audit};
@@ -52,7 +55,7 @@ pub(crate) fn error_record(
 ) -> Value {
     Value::map(vec![
         ("cmd".into(), Value::String(cmd.to_string())),
-        ("status".into(), Value::Int(status as i64)),
+        ("status".into(), Value::Int(i64::from(status))),
         ("message".into(), Value::String(message.to_string())),
         ("line".into(), Value::Int(line as i64)),
         ("col".into(), Value::Int(col as i64)),
@@ -82,11 +85,9 @@ pub(crate) fn classify(
                 status: e.exit_code(),
                 value: Value::Unit,
                 message: e.message.clone(),
-                cmd: failing
-                    .map(|n| n.cmd.clone())
-                    .unwrap_or_else(|| "<runtime>".into()),
-                line: e.loc.as_ref().map(|l| l.line).unwrap_or(call_line),
-                col: e.loc.as_ref().map(|l| l.col).unwrap_or(call_col),
+                cmd: failing.map_or_else(|| "<runtime>".into(), |n| n.cmd.clone()),
+                line: e.loc.as_ref().map_or(call_line, |l| l.line),
+                col: e.loc.as_ref().map_or(call_col, |l| l.col),
             }
         }
     }

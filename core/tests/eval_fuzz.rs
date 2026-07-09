@@ -14,12 +14,13 @@ use ral_core::{
 };
 #[cfg(unix)]
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write;
 
 fn eval(input: &str) -> ral_core::types::Settled<Value> {
     let ast = parse(input).map_err(|e: ral_core::syntax::parser::ParseError| {
         Break::Error(Error::new(e.to_string(), 2))
     })?;
-    let comp = elaborate(&ast, Default::default());
+    let comp = elaborate(&ast, std::collections::HashSet::default());
     // The evaluator reads its mode wires off the annotated comp, so it
     // must run the checked IR, not the bare elaboration whose wires are
     // still the elaborator's placeholder.
@@ -37,7 +38,7 @@ fn eval(input: &str) -> ral_core::types::Settled<Value> {
             return Err(Break::Error(Error::new(format!("type error: {msg}"), 2)));
         }
     };
-    let mut shell = Shell::new(Default::default());
+    let mut shell = Shell::new(ral_core::io::TerminalState::default());
     builtins::register(&mut shell, common::prelude_comp());
     evaluate(&comp, &mut shell)
 }
@@ -47,9 +48,7 @@ fn must_succeed(input: &str) -> Value {
 }
 
 fn must_fail(input: &str) {
-    if eval(input).is_ok() {
-        panic!("should fail: {input:?}");
-    }
+    assert!(eval(input).is_err(), "should fail: {input:?}");
 }
 
 fn must_not_panic(input: &str) {
@@ -690,7 +689,7 @@ fn with_does_not_leak() {
 #[cfg(unix)]
 #[test]
 fn grant_exec_subcommand_allows_listed_subcommand() {
-    let mut shell = Shell::new(Default::default());
+    let mut shell = Shell::new(ral_core::io::TerminalState::default());
     let grant = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::from([(
@@ -962,7 +961,7 @@ fn glob_relative_pattern_returns_relative_paths() {
         Value::List(xs) => xs,
         other => panic!("glob list: unexpected {other:?}"),
     };
-    let names: Vec<String> = items.iter().map(|v| v.to_string()).collect();
+    let names: Vec<String> = items.iter().map(std::string::ToString::to_string).collect();
     assert_eq!(names, vec!["a.txt".to_string(), "b.txt".to_string()]);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -986,7 +985,7 @@ fn glob_excludes_dotfiles_from_wildcard_matches() {
         Value::List(xs) => xs,
         other => panic!("glob list: unexpected {other:?}"),
     };
-    let names: Vec<String> = star.iter().map(|v| v.to_string()).collect();
+    let names: Vec<String> = star.iter().map(std::string::ToString::to_string).collect();
     assert_eq!(names, vec!["a.txt".to_string()]);
 
     let script_literal = format!("within [dir: '{}'] {{ glob '.hidden.txt' }}", dir.display());
@@ -994,7 +993,7 @@ fn glob_excludes_dotfiles_from_wildcard_matches() {
         Value::List(xs) => xs,
         other => panic!("glob list: unexpected {other:?}"),
     };
-    let names: Vec<String> = lit.iter().map(|v| v.to_string()).collect();
+    let names: Vec<String> = lit.iter().map(std::string::ToString::to_string).collect();
     assert_eq!(names, vec![".hidden.txt".to_string()]);
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -1015,7 +1014,7 @@ fn glob_absolute_pattern_returns_absolute_paths() {
         other => panic!("glob list: unexpected {other:?}"),
     };
     let expected = dir.join("a.txt").display().to_string();
-    let names: Vec<String> = items.iter().map(|v| v.to_string()).collect();
+    let names: Vec<String> = items.iter().map(std::string::ToString::to_string).collect();
     assert_eq!(names, vec![expected]);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1048,7 +1047,7 @@ fn glob_expands_tilde_in_pattern() {
         Ok(Value::List(xs)) => xs,
         other => panic!("glob with ~ pattern: unexpected {other:?}"),
     };
-    let names: Vec<String> = items.iter().map(|v| v.to_string()).collect();
+    let names: Vec<String> = items.iter().map(std::string::ToString::to_string).collect();
     assert!(
         names.iter().any(|n| n.ends_with("/a.txt")),
         "expected /a.txt in {names:?}"
@@ -1176,7 +1175,7 @@ fn value_output_alias_installs() {
 #[test]
 fn grant_exec_attenuation_subcommand_intersection_permits_common() {
     // Intersection of [-c, -s] and [-c] permits -c.
-    let mut shell = Shell::new(Default::default());
+    let mut shell = Shell::new(ral_core::io::TerminalState::default());
     let outer = Capabilities {
         exec: Some(ExecMap {
             literals: BTreeMap::from([(
@@ -1245,13 +1244,13 @@ fn deeply_nested_calls() {
 
 #[test]
 fn script_args_are_not_polluted_by_runner_argv() {
-    let mut shell = Shell::new(Default::default());
+    let mut shell = Shell::new(ral_core::io::TerminalState::default());
     shell.set_args(vec!["alpha".into(), "beta".into()]);
     builtins::register(&mut shell, common::prelude_comp());
     let result = evaluate(
         &std::sync::Arc::new(elaborate(
             &parse("return $args").unwrap(),
-            Default::default(),
+            std::collections::HashSet::default(),
         )),
         &mut shell,
     )
@@ -1267,13 +1266,13 @@ fn script_args_are_not_polluted_by_runner_argv() {
 
 #[test]
 fn env_overrides_shadow_process_env_in_dollar_env() {
-    let mut shell = Shell::new(Default::default());
+    let mut shell = Shell::new(ral_core::io::TerminalState::default());
     shell.set_env_var("RAL_TEST_ENV", "override");
     builtins::register(&mut shell, common::prelude_comp());
     let result = evaluate(
         &std::sync::Arc::new(elaborate(
             &parse("return $env[RAL_TEST_ENV]").unwrap(),
-            Default::default(),
+            std::collections::HashSet::default(),
         )),
         &mut shell,
     )
@@ -1285,7 +1284,7 @@ fn env_overrides_shadow_process_env_in_dollar_env() {
 fn many_variables() {
     let mut script = String::new();
     for i in 0..100 {
-        script.push_str(&format!("let x{i} = {i}\n"));
+        let _ = writeln!(script, "let x{i} = {i}");
     }
     script.push_str("echo $x99\n");
     must_succeed(&script);
@@ -3111,7 +3110,7 @@ fn elaborator_never_wraps_exec_in_redirect() {
     for src in sources {
         let ast =
             ral_core::syntax::parser::parse(src).unwrap_or_else(|e| panic!("parse {src:?}: {e}"));
-        let comp = Arc::new(ral_core::elaborator::elaborate(&ast, Default::default()));
+        let comp = Arc::new(ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default()));
         let mut saw = false;
         walk(&comp, &mut saw);
         assert!(

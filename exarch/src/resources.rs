@@ -399,7 +399,7 @@ mod tests {
     fn terse_duration_picks_the_coarsest_fitting_unit() {
         assert_eq!(terse_duration(Duration::from_secs(12)), "12s");
         assert_eq!(terse_duration(Duration::from_secs(69)), "1m09s");
-        assert_eq!(terse_duration(Duration::from_secs(7500)), "2h05m");
+        assert_eq!(terse_duration(Duration::from_mins(125)), "2h05m");
     }
 
     /// The disk probe sums regular files recursively and returns zero for

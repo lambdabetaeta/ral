@@ -29,7 +29,7 @@ use crate::evaluator::comp::{eval_comp, with_scope};
 use crate::evaluator::scope::error_record;
 use crate::io::{Sink, new_buffer, peek_buffer, take_buffer};
 use crate::serial::FOValue;
-use crate::types::*;
+use crate::types::{SurfaceBuffer, DeferredSink, EventSink, Value, Shell, Raw, Env, LeaseClass, Settled, HandleInner, CapReached, sig, HandleState, WorkerId, WorkerEntry, WorkerLease, WorkerRegistry, ReapCause, Tail, Break, Error, CompletedHandle, Escape};
 use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex};
 
@@ -402,7 +402,7 @@ where
             registry: shell.local.workers.clone(),
             id,
         };
-        crate::process::arm_callback(lease.idle, move || lease_fire(chain)).keep();
+        crate::process::arm_callback(lease.idle, move || lease_fire(&chain)).keep();
     }
     Ok(handle)
 }
@@ -446,7 +446,7 @@ struct LeaseChain {
 /// — only the registry entry (plus its notice) records the reap.  Cheap
 /// and non-blocking per the reaper's contract: it takes only the handle
 /// cells and, briefly, the registry lock.
-fn lease_fire(chain: LeaseChain) {
+fn lease_fire(chain: &LeaseChain) {
     if *chain.state.lock().unwrap() != HandleState::Running {
         return;
     }
@@ -459,9 +459,12 @@ fn lease_fire(chain: LeaseChain) {
         chain.registry.reap(chain.id, ReapCause::Idle);
         chain.scope.cancel(crate::process::CancelCause::Deadline);
     } else {
-        let next = std::cmp::min(chain.lease.idle - idle, chain.lease.backstop - age);
+        let next = std::cmp::min(
+            chain.lease.idle.checked_sub(idle).unwrap(),
+            chain.lease.backstop.checked_sub(age).unwrap(),
+        );
         let rearm = chain.clone();
-        crate::process::arm_callback(next, move || lease_fire(rearm)).keep();
+        crate::process::arm_callback(next, move || lease_fire(&rearm)).keep();
     }
 }
 
@@ -803,38 +806,35 @@ pub(super) fn builtin_poll(args: &[Value], shell: &mut Shell) -> Settled<Value> 
         label: label.into(),
         payload,
     };
-    let result = match try_settle(handle, shell) {
-        Some(completed) => {
-            // A settled poll is an observation like `await`'s, so it
-            // removes the entry too; a `pending` sample below must not.
-            shell.local.workers.remove(handle);
-            let outcome = match completed.outcome {
-                Ok(value) => variant("ok", Some(Box::new(value))),
-                Err(e) => variant("err", Some(Box::new(break_record(&e)))),
-            };
-            let settled = Value::map(vec![
-                ("stdout".into(), Value::Bytes(completed.stdout)),
-                ("stderr".into(), Value::Bytes(completed.stderr)),
-                ("outcome".into(), outcome),
-            ]);
-            variant("settled", Some(Box::new(settled)))
-        }
-        None => {
-            // A cumulative, non-destructive snapshot of what the running
-            // worker has written so far: `peek_buffer` clones, leaving the
-            // buffers for `complete_handle`'s one-shot `take_buffer` drain.
-            let pending = Value::map(vec![
-                (
-                    "stdout".into(),
-                    Value::Bytes(peek_buffer(&handle.stdout_buf)),
-                ),
-                (
-                    "stderr".into(),
-                    Value::Bytes(peek_buffer(&handle.stderr_buf)),
-                ),
-            ]);
-            variant("pending", Some(Box::new(pending)))
-        }
+    let result = if let Some(completed) = try_settle(handle, shell) {
+        // A settled poll is an observation like `await`'s, so it
+        // removes the entry too; a `pending` sample below must not.
+        shell.local.workers.remove(handle);
+        let outcome = match completed.outcome {
+            Ok(value) => variant("ok", Some(Box::new(value))),
+            Err(e) => variant("err", Some(Box::new(break_record(&e)))),
+        };
+        let settled = Value::map(vec![
+            ("stdout".into(), Value::Bytes(completed.stdout)),
+            ("stderr".into(), Value::Bytes(completed.stderr)),
+            ("outcome".into(), outcome),
+        ]);
+        variant("settled", Some(Box::new(settled)))
+    } else {
+        // A cumulative, non-destructive snapshot of what the running
+        // worker has written so far: `peek_buffer` clones, leaving the
+        // buffers for `complete_handle`'s one-shot `take_buffer` drain.
+        let pending = Value::map(vec![
+            (
+                "stdout".into(),
+                Value::Bytes(peek_buffer(&handle.stdout_buf)),
+            ),
+            (
+                "stderr".into(),
+                Value::Bytes(peek_buffer(&handle.stderr_buf)),
+            ),
+        ]);
+        variant("pending", Some(Box::new(pending)))
     };
     // `poll` itself succeeded: the block's status (if any) is data inside
     // `outcome.err.status`, never a failure of `poll`.
@@ -897,7 +897,7 @@ fn escape_exit_code(esc: &Escape) -> i32 {
 fn break_record(e: &Break) -> Value {
     match e {
         Break::Error(err) => {
-            let (line, col) = err.loc.as_ref().map(|l| (l.line, l.col)).unwrap_or((0, 0));
+            let (line, col) = err.loc.as_ref().map_or((0, 0), |l| (l.line, l.col));
             error_record("<runtime>", err.exit_code(), &err.message, line, col)
         }
         Break::Escape(esc) => {
@@ -959,12 +959,13 @@ fn detach_handle(handle: &HandleInner) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{Capabilities, Map};
     use std::sync::mpsc;
 
     fn status(b: Break) -> i32 {
         match b {
             Break::Error(e) => e.exit_code(),
-            other => panic!("expected Break::Error, got {other:?}"),
+            other @ Break::Escape(_) => panic!("expected Break::Error, got {other:?}"),
         }
     }
 
@@ -1040,7 +1041,7 @@ mod tests {
     /// blocking-path panic text.
     #[test]
     fn try_settle_reports_disconnected_worker_as_failed() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let handle = handle_with_disconnected_worker(b"", b"");
         match try_settle(&handle, &mut shell) {
             Some(CompletedHandle {
@@ -1060,7 +1061,7 @@ mod tests {
     /// exit code.  A successful `poll` leaves `$status` at 0.
     #[test]
     fn poll_reports_disconnected_worker_as_settled_err() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let handle = handle_with_disconnected_worker(b"out", b"err");
         let args = [Value::Handle(handle)];
         let poll1 = builtin_poll(&args, &mut shell).expect("poll must not re-raise a panic");
@@ -1120,7 +1121,7 @@ mod tests {
     /// actually unwound.
     #[test]
     fn worker_scope_cancel_stops_the_worker() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let (_idle_join, sibling) = shell.spawn_thread(Arc::new(shell.mobile().scope), |_| ());
         let (observed, worker_scope) = spawn_polling_worker(&mut shell, |c| {
             c.cancel(crate::process::CancelCause::Explicit)
@@ -1142,7 +1143,7 @@ mod tests {
     /// worker's next poll.
     #[test]
     fn root_cancel_reaches_the_worker() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let root = shell.session.root.clone();
         let (observed, worker_scope) = spawn_polling_worker(&mut shell, move |_| {
             root.cancel(crate::process::CancelCause::RootAbort)
@@ -1162,7 +1163,7 @@ mod tests {
     /// the turn.
     #[test]
     fn foreground_cancel_spares_detached_worker() {
-        let shell = Shell::new(Default::default());
+        let shell = Shell::new(crate::io::TerminalState::default());
         let snap = Arc::new(shell.mobile().scope);
         let (_join, worker_scope) = shell.spawn_thread(snap, |_| ());
         shell
@@ -1183,7 +1184,7 @@ mod tests {
     /// produced: the past-the-wall hang and the collateral kill, both gone.
     #[test]
     fn await_unwinds_on_foreground_cancel_sparing_the_worker() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
 
         // A still-running worker: its result channel never receives, and
         // its cancel scope is a child of the durable root, exactly as a
@@ -1260,7 +1261,7 @@ mod tests {
     /// `process::check` loop, so the reap actually unwinds the thread.
     #[test]
     fn unobserved_worker_is_reaped_at_its_idle_lease() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.turn.deferred_lease = Some(lease_ms(40, 10_000));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
@@ -1308,7 +1309,7 @@ mod tests {
     /// sweep), and no notice of any cause is ever recorded.
     #[test]
     fn spawn_under_interactive_frame_arms_no_lease() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
@@ -1361,7 +1362,7 @@ mod tests {
     /// park.
     #[test]
     fn spawned_worker_never_receives_the_enquiry_desk() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.turn.desk = Some(Arc::new(EchoDesk) as crate::types::Desk);
         let snap = Arc::new(shell.mobile().scope);
         let (tx, rx) = mpsc::channel::<Result<crate::serial::FOValue, crate::types::Error>>();
@@ -1394,7 +1395,7 @@ mod tests {
     /// reaping — and is then gated to completion and awaited normally.
     #[test]
     fn polled_worker_survives_past_its_idle_lease() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.turn.deferred_lease = Some(lease_ms(200, 10_000));
         let (gate_tx, gate_rx) = mpsc::channel::<()>();
         let snap = Arc::new(shell.mobile().scope);
@@ -1434,7 +1435,7 @@ mod tests {
     /// the `Backstop` cause — once its age crosses the line.
     #[test]
     fn backstop_reaps_a_ritually_polled_worker() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.turn.deferred_lease = Some(lease_ms(150, 400));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
@@ -1473,7 +1474,7 @@ mod tests {
     /// result, and no notice is recorded.
     #[test]
     fn completed_unobserved_worker_is_not_reaped() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.turn.deferred_lease = Some(lease_ms(100, 10_000));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
@@ -1517,7 +1518,7 @@ mod tests {
     /// touch nothing — so the lease is renewed only by the eliminators.
     #[test]
     fn listing_does_not_renew_the_lease() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.turn.deferred_lease = Some(lease_ms(40, 10_000));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
@@ -1557,7 +1558,7 @@ mod tests {
     /// sibling, never the durable worker.
     #[test]
     fn durable_worker_outlives_both_lease_bounds_while_its_sibling_reaps() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.turn.deferred_lease = Some(lease_ms(40, 150));
 
         let snap = Arc::new(shell.mobile().scope);
@@ -1619,7 +1620,7 @@ mod tests {
     /// chain, never the eliminators.
     #[test]
     fn cancel_through_the_handle_ends_a_durable_worker() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.turn.deferred_lease = Some(lease_ms(10_000, 20_000));
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
@@ -1688,7 +1689,7 @@ mod tests {
     }
 
     fn service_test_shell() -> Shell {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         crate::builtins::register_builtins(crate::builtins::SERVICE_BUILTIN);
         shell.install_builtins(crate::builtins::SERVICE_BUILTIN);
         shell
@@ -1745,7 +1746,7 @@ mod tests {
             }
         }
 
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let log = Arc::new(Mutex::new(Vec::new()));
         shell.turn.surface = Some(Arc::new(Rec(log.clone())));
 
@@ -1831,7 +1832,7 @@ mod tests {
     fn done_outcome_label(done: &FOValue) -> String {
         let done = fo_expect_variant(done, "done");
         match fo_map_get(done, "outcome").expect("outcome field") {
-            FOValue::Variant { label, .. } => label.to_string(),
+            FOValue::Variant { label, .. } => label.clone(),
             other => panic!("outcome must be a variant, got {other:?}"),
         }
     }
@@ -1844,7 +1845,7 @@ mod tests {
     #[test]
     fn detached_worker_flushes_done_to_deferred_sink() {
         fn run(work: impl FnOnce(&mut Shell) -> Raw<Value> + Send + 'static) -> Vec<FOValue> {
-            let mut shell = Shell::new(Default::default());
+            let mut shell = Shell::new(crate::io::TerminalState::default());
             let batches = Arc::new(Mutex::new(Vec::new()));
             shell.turn.deferred = Some(Arc::new(RecDeferred(batches.clone())));
             let snap = Arc::new(shell.mobile().scope);
@@ -1895,7 +1896,7 @@ mod tests {
     /// `Disconnected` path — the flush guard preserves that semantics.
     #[test]
     fn deferred_batch_carries_body_surface_before_done() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let batches = Arc::new(Mutex::new(Vec::new()));
         shell.turn.deferred = Some(Arc::new(RecDeferred(batches.clone())));
         let snap = Arc::new(shell.mobile().scope);
@@ -1950,7 +1951,7 @@ mod tests {
     /// deferred surface reaches a sink only via `await`/`race`.
     #[test]
     fn no_deferred_sink_means_no_delivery() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         assert!(shell.turn.deferred.is_none(), "a bare REPL installs none");
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
@@ -2001,7 +2002,7 @@ mod tests {
     /// yet `await` still returns its cached result record.
     #[test]
     fn deferred_delivery_suppresses_a_later_await_replay() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let batches = Arc::new(Mutex::new(Vec::new()));
         shell.turn.deferred = Some(Arc::new(RecDeferred(batches.clone())));
         let snap = Arc::new(shell.mobile().scope);
@@ -2053,7 +2054,7 @@ mod tests {
     /// (`Arc::ptr_eq` on `result`) proves it, not a field-by-field copy.
     #[test]
     fn spawn_child_registers_one_entry_with_matching_handle() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let snap = Arc::new(shell.mobile().scope);
         let handle = spawn_child(
             snap,
@@ -2081,12 +2082,12 @@ mod tests {
     }
 
     /// The mechanism attaches no policy and is host-independent: a bare
-    /// `Shell::new(Default::default())` with no `deferred_lease` granted
+    /// `Shell::new(crate::io::TerminalState::default())` with no `deferred_lease` granted
     /// (the REPL/interactive shape) registers exactly as the agent-framed
     /// case above does.
     #[test]
     fn spawn_child_registers_with_no_deferred_lease_granted() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         assert!(
             shell.turn.deferred_lease.is_none(),
             "precondition: no lease granted"
@@ -2112,7 +2113,7 @@ mod tests {
     /// of a finished (or explicitly cancelled) worker may.
     #[test]
     fn eliminators_remove_the_entry_except_a_pending_poll() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
 
         // `await` removes.
         let snap = Arc::new(shell.mobile().scope);
@@ -2205,7 +2206,7 @@ mod tests {
     /// returns.
     #[test]
     fn race_removes_winner_and_cancelled_losers() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let snap = Arc::new(shell.mobile().scope);
         let winner = spawn_child(
             snap,
@@ -2282,7 +2283,7 @@ mod tests {
     /// parent and nested registrations are deliberately unordered.
     #[test]
     fn nested_spawn_registers_into_the_owning_shells_registry() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let snap = Arc::new(shell.mobile().scope);
         let (go_tx, go_rx) = mpsc::channel::<()>();
         let (ready_tx, ready_rx) = mpsc::channel::<usize>();
@@ -2336,7 +2337,7 @@ mod tests {
     /// carrying its facts — at the call the bound is met.
     #[test]
     fn retention_stamps_then_expires_an_unclaimed_settled_entry() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let handle = spawn_child(
             Arc::new(shell.mobile().scope),
             &mut shell,
@@ -2380,7 +2381,7 @@ mod tests {
     /// the bound finds nothing to expire and records no notice.
     #[test]
     fn observation_beats_retention() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let handle = spawn_child(
             Arc::new(shell.mobile().scope),
             &mut shell,
@@ -2415,7 +2416,7 @@ mod tests {
     /// workers.
     #[test]
     fn running_entries_are_never_stamped_or_expired() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let (gate_tx, gate_rx) = mpsc::channel::<()>();
         let handle = spawn_child(
             Arc::new(shell.mobile().scope),
@@ -2453,7 +2454,7 @@ mod tests {
     /// admitted.
     #[test]
     fn worker_cap_rejects_at_the_door_and_frees_on_cancel() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.turn.worker_cap = Some(2);
 
         let mut gates = Vec::new();
@@ -2524,7 +2525,7 @@ mod tests {
     /// entries of every class.
     #[test]
     fn durable_birth_counts_toward_the_cap() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.turn.worker_cap = Some(2);
 
         let mut gates = Vec::new();
@@ -2571,7 +2572,7 @@ mod tests {
     /// is admitted — the cap counts running workers, not registry entries.
     #[test]
     fn settled_entries_do_not_block_admission() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.turn.worker_cap = Some(1);
         let first = spawn_child(
             Arc::new(shell.mobile().scope),

@@ -222,11 +222,12 @@ fn value_carries_handle(value: &Value) -> bool {
         Value::Variant {
             payload: Some(p), ..
         } => value_carries_handle(p),
-        Value::Variant { payload: None, .. } => false,
         // Closures carry their own captured env, sanitized separately by
         // `intern_scope`, so we do not descend into them here.
-        Value::Lambda { .. } | Value::Block { .. } => false,
-        Value::Unit
+        Value::Variant { payload: None, .. }
+        | Value::Lambda { .. }
+        | Value::Block { .. }
+        | Value::Unit
         | Value::Bool(_)
         | Value::Int(_)
         | Value::Float(_)
@@ -327,8 +328,8 @@ fn collect_scope_deps(value: &SerialValue, out: &mut HashSet<u32>) {
         } => {
             collect_scope_deps(p, out);
         }
-        SerialValue::Variant { payload: None, .. } => {}
-        SerialValue::Unit
+        SerialValue::Variant { payload: None, .. }
+        | SerialValue::Unit
         | SerialValue::Bool { .. }
         | SerialValue::Int { .. }
         | SerialValue::Float { .. }
@@ -553,7 +554,7 @@ impl SerialEnvSnapshot {
             .into_iter()
             .map(|id| {
                 arcs.get(id as usize)
-                    .and_then(|o| o.clone())
+                    .and_then(std::clone::Clone::clone)
                     .ok_or_else(|| {
                         Error::new(
                             format!("serial: scope ref {id} out of range or unresolved"),
@@ -591,7 +592,7 @@ mod tests {
         // both interior to the lambda body — the shape the ADR names.
         let src = r#"let f = { |x| let y = /bin/echo $x; /bin/cat | /bin/cat }"#;
         let ast = crate::parse(src).expect("parse");
-        let comp = crate::elaborate(&ast, Default::default());
+        let comp = crate::elaborate(&ast, HashSet::default());
         let annotated =
             crate::typecheck(&comp, crate::SessionSchemes::default()).expect("typecheck");
         let mut body = None;

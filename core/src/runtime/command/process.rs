@@ -4,7 +4,7 @@
 //! lives in [`super::stdio`] and [`super::redirect`] and is layered on
 //! top before spawn.
 
-use crate::types::*;
+use crate::types::{Break, Error, Settled, Shell};
 
 use super::vet::{ExecImage, SpawnPlan};
 

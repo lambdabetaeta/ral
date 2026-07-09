@@ -110,7 +110,7 @@ fn wrap(virtual_path: &str, e: Break) -> Break {
             format!("capability file {virtual_path}: {}", err.message),
             err.exit_code(),
         )),
-        other => other,
+        other @ Break::Escape(_) => other,
     }
 }
 
@@ -121,7 +121,7 @@ mod tests {
     use crate::types::ExecPolicy;
 
     fn shell() -> Shell {
-        Shell::new(Default::default())
+        Shell::new(crate::io::TerminalState::default())
     }
 
     fn ctx() -> crate::path::sigil::FreezeCtx<'static> {
@@ -191,7 +191,7 @@ mod tests {
             .unwrap_err();
         let msg = match err {
             Break::Error(e) => e.message,
-            other => panic!("unexpected: {other:?}"),
+            other @ Break::Escape(_) => panic!("unexpected: {other:?}"),
         };
         assert!(msg.contains("<test:nonmap>"), "should name the file: {msg}");
     }
@@ -211,7 +211,7 @@ mod tests {
         .unwrap_err();
         let msg = match err {
             Break::Error(e) => e.message,
-            other => panic!("unexpected: {other:?}"),
+            other @ Break::Escape(_) => panic!("unexpected: {other:?}"),
         };
         assert!(msg.contains("unknown key 'fss'"), "{msg}");
     }

@@ -12,7 +12,7 @@
 //! against the OS cwd instead, returning false for files written via
 //! redirects inside a within-scoped directory.
 
-use crate::types::*;
+use crate::types::{Value, Settled, as_map_ref, Shell, Break, Error};
 use std::fs;
 use std::path::Path;
 
@@ -67,11 +67,11 @@ pub(super) fn builtin_equal(args: &[Value], shell: &mut Shell) -> Settled<Value>
 }
 
 pub(super) fn builtin_lt(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    order_cmp(args, shell, "lt", |o| o.is_lt())
+    order_cmp(args, shell, "lt", std::cmp::Ordering::is_lt)
 }
 
 pub(super) fn builtin_gt(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    order_cmp(args, shell, "gt", |o| o.is_gt())
+    order_cmp(args, shell, "gt", std::cmp::Ordering::is_gt)
 }
 
 /// Shared probe: resolve `path` through `shell.resolve_path` (which honours
@@ -133,19 +133,19 @@ pub(super) fn builtin_exists(args: &[Value], shell: &mut Shell) -> Settled<Value
 
 pub(super) fn builtin_is_file(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     fs_probe_follow(args, shell, "is-file", |m| {
-        m.map(|m| m.is_file()).unwrap_or(false)
+        m.is_some_and(|m| m.is_file())
     })
 }
 
 pub(super) fn builtin_is_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     fs_probe_follow(args, shell, "is-dir", |m| {
-        m.map(|m| m.is_dir()).unwrap_or(false)
+        m.is_some_and(|m| m.is_dir())
     })
 }
 
 pub(super) fn builtin_is_link(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     fs_probe(args, shell, "is-link", |m| {
-        m.map(|m| m.file_type().is_symlink()).unwrap_or(false)
+        m.is_some_and(|m| m.file_type().is_symlink())
     })
 }
 

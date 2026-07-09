@@ -10,7 +10,7 @@ use super::super::command::CommandIdentity;
 use super::super::command_call;
 use crate::evaluator::call;
 use crate::ir::{Comp, CompKind};
-use crate::types::*;
+use crate::types::{Settled, Shell, TerminalAccess, Value};
 use std::sync::Arc;
 
 // ── TerminalPlan ────────────────────────────────────────────────────────

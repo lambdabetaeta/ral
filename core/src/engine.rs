@@ -232,11 +232,11 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
             let _ = endpoint; // TODO Phase 2 Task 6: pass terminal fds via SCM_RIGHTS
             let _ = rc_path; // TODO: load rc_path — needs the host's RcCtx/plugin machinery, not a core-level concern yet
 
-            let mut shell = crate::driver::boot_shell(Default::default(), target.prelude);
+            let mut shell = crate::driver::boot_shell(crate::io::TerminalState::default(), target.prelude);
             (target.install)(&mut shell);
             shell
         }
-        Ok(Some(Frame::Detach)) | Ok(None) => std::process::exit(0),
+        Ok(Some(Frame::Detach) | None) => std::process::exit(0),
         Ok(Some(_)) => {
             eprintln!("engine: expected Attach as the first frame");
             std::process::exit(1);
@@ -409,12 +409,11 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
             Ok(Some(Frame::Control(Control::Resize(_winsize)))) => {
                 // no-op for now, TODO task 7
             }
-            Ok(Some(Frame::Control(Control::Suspend))) => {}
-            Ok(Some(Frame::Control(Control::Resume))) => {}
+            Ok(Some(Frame::Control(Control::Suspend | Control::Resume))) => {}
             Ok(Some(Frame::Attach { .. })) => {
                 eprintln!("engine: unexpected second Attach");
             }
-            Ok(Some(Frame::Detach)) | Ok(None) => {
+            Ok(Some(Frame::Detach) | None) => {
                 crate::process::request_foreground_cancel(crate::process::CancelCause::Explicit);
                 break 0;
             }

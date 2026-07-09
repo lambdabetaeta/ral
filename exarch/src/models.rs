@@ -24,7 +24,7 @@ use std::time::Duration;
 /// How long a cached model list stays fresh. A provider's catalog changes
 /// on the order of weeks; a day keeps the picker snappy on repeat opens
 /// while still picking up new models within a session or two.
-const TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const TTL: Duration = Duration::from_hours(24);
 
 /// One upstream provider OpenRouter can route a given model to — a row of the
 /// `/model` overlay's provider control. OpenRouter fronts several serving
@@ -432,7 +432,7 @@ pub fn resolve_model_provider<S: ModelSource>(
          pass a model that one of them serves",
         available
             .iter()
-            .map(|id| id.label())
+            .map(ProviderId::label)
             .collect::<Vec<_>>()
             .join(", ")
     ))
@@ -459,7 +459,7 @@ pub fn resolve_pinned_provider(
         "provider '{name}' is not available ({}); set its API key or name one that is",
         available
             .iter()
-            .map(|id| id.label())
+            .map(ProviderId::label)
             .collect::<Vec<_>>()
             .join(", ")
     ))
@@ -533,7 +533,7 @@ mod tests {
 
     fn one(id: ProviderId, models: &[&str]) -> BTreeMap<ProviderId, Result<Vec<String>, String>> {
         let mut m = BTreeMap::new();
-        m.insert(id, Ok(models.iter().map(|s| s.to_string()).collect()));
+        m.insert(id, Ok(models.iter().map(ToString::to_string).collect()));
         m
     }
 

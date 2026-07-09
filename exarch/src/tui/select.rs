@@ -40,10 +40,11 @@ pub(super) fn plain_slice(line: &Line<'_>, start_cell: u16, end_cell: u16) -> St
 /// splitting any span that straddles the boundary so the highlight stays
 /// granular.  The rail glyph (first [`RAIL_W`] columns) is excluded.
 pub(super) fn highlight_range(line: &mut Line<'static>, start_cell: u16, end_cell: u16) {
-    let skip = line
-        .spans
-        .first()
-        .is_some_and(|s| RAIL_GLYPHS.contains(&s.content.as_ref())) as usize;
+    let skip = usize::from(
+        line.spans
+            .first()
+            .is_some_and(|s| RAIL_GLYPHS.contains(&s.content.as_ref())),
+    );
     let lo = start_cell.saturating_sub(RAIL_W as u16);
     let hi = end_cell.saturating_sub(RAIL_W as u16);
     let (lo, hi) = (lo.min(hi), lo.max(hi));

@@ -45,13 +45,15 @@ impl ResolvedPath {
     pub(super) fn from_lexed(path: PathBuf) -> Self {
         debug_assert!(
             path.is_absolute(),
-            "ResolvedPath must be absolute, got {path:?}"
+            "ResolvedPath must be absolute, got {}",
+            path.display()
         );
         debug_assert!(
             !path
                 .components()
                 .any(|c| matches!(c, Component::CurDir | Component::ParentDir)),
-            "ResolvedPath must be `.`/`..`-collapsed, got {path:?}"
+            "ResolvedPath must be `.`/`..`-collapsed, got {}",
+            path.display()
         );
         debug_assert!(
             !path.as_os_str().is_empty(),

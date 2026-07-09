@@ -95,8 +95,7 @@ pub struct HighlightSpan {
 pub fn char_to_byte(text: &str, cursor: usize) -> usize {
     text.char_indices()
         .nth(cursor)
-        .map(|(i, _)| i)
-        .unwrap_or(text.len())
+        .map_or(text.len(), |(i, _)| i)
 }
 
 /// Convert a byte offset in `text` into the character offset of the same

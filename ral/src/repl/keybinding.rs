@@ -144,7 +144,7 @@ pub(super) fn dispatch_keybinding(
     {
         let mut rt = lock(runtime);
         if let Some(p) = rt.plugins.get_mut(idx) {
-            p.state_cell = ctx.state_cell.clone();
+            p.state_cell.clone_from(&ctx.state_cell);
         }
     }
 
@@ -180,7 +180,7 @@ mod tests {
             bindings: Vec::new(),
             state_cell: None,
             source: std::sync::Arc::from(""),
-            buffer_change_health: Default::default(),
+            buffer_change_health: crate::repl::plugin::HookHealth::default(),
         }
     }
 

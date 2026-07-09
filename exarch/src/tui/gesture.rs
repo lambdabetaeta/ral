@@ -194,8 +194,7 @@ impl GestureState {
     ) {
         let page = self
             .frame
-            .map(|f| f.text.height.saturating_sub(1).max(1) as isize)
-            .unwrap_or(10);
+            .map_or(10, |f| f.text.height.saturating_sub(1).max(1) as isize);
         self.scroll(viewports, focused, dir * page);
     }
     pub(super) fn clear_selection(&mut self) {

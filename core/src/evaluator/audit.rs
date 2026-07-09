@@ -15,7 +15,10 @@
 //! All functions are no-ops when `shell.local.audit.active()` is `false`, so
 //! the dispatcher path can call them unconditionally.
 
-use crate::types::*;
+use crate::types::{
+    epoch_us, AuditIo, AuditTime, BodyResult, Break, CallSite, CapturePolicy, Control, Escape,
+    ExecNode, Map, Raw, Settled, Shell, Value, STDERR_CAP_BYTES,
+};
 
 /// Stamp captured at the start of a command, paired with
 /// [`finish_command`] which reads it back as the node's `start` plus
@@ -91,7 +94,7 @@ pub(crate) fn finish_command(
     if shell.local.audit.captures_bytes() {
         cap_stderr(&mut node_stderr);
     }
-    let arg_strs: Vec<String> = args.iter().map(|v| v.to_string()).collect();
+    let arg_strs: Vec<String> = args.iter().map(std::string::ToString::to_string).collect();
     let node = ExecNode::command(
         cmd,
         arg_strs,

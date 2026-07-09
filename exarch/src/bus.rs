@@ -756,9 +756,8 @@ impl Inbox {
                     if s.trim_start().starts_with('/') {
                         break;
                     }
-                    let s = match q.pop_front() {
-                        Some(InboxMsg::UserSteering(s)) => s,
-                        _ => unreachable!("front just checked to be user steering"),
+                    let Some(InboxMsg::UserSteering(s)) = q.pop_front() else {
+                        unreachable!("front just checked to be user steering")
                     };
                     if !text.is_empty() {
                         text.push_str("\n\n");
@@ -885,30 +884,24 @@ impl Inbox {
 /// short-circuits a later deliverable).
 fn pop_turn(q: &mut VecDeque<InboxMsg>) -> Option<Turn> {
     loop {
-        match q.front()? {
-            InboxMsg::UserSteering(_) => {
-                let mut text = String::new();
-                while matches!(q.front(), Some(InboxMsg::UserSteering(_))) {
-                    let s = match q.pop_front() {
-                        Some(InboxMsg::UserSteering(s)) => s,
-                        _ => unreachable!("front just checked to be user steering"),
-                    };
-                    if !text.is_empty() {
-                        text.push_str("\n\n");
-                    }
-                    text.push_str(&s);
+        if let InboxMsg::UserSteering(_) = q.front()? {
+            let mut text = String::new();
+            while matches!(q.front(), Some(InboxMsg::UserSteering(_))) {
+                let Some(InboxMsg::UserSteering(s)) = q.pop_front() else {
+                    unreachable!("front just checked to be user steering")
+                };
+                if !text.is_empty() {
+                    text.push_str("\n\n");
                 }
-                return Some(Turn::Human(text));
+                text.push_str(&s);
             }
-            _ => {
-                let msg = q.pop_front().expect("front checked present");
-                match to_turn(msg) {
-                    Some(turn) => return Some(turn),
-                    // A suppressed `Surface` yields nothing; try the next
-                    // message rather than return an empty turn.
-                    None => continue,
-                }
-            }
+            return Some(Turn::Human(text));
+        }
+        let msg = q.pop_front().expect("front checked present");
+        // A suppressed `Surface` yields nothing; the loop tries the next
+        // message rather than return an empty turn.
+        if let Some(turn) = to_turn(msg) {
+            return Some(turn);
         }
     }
 }
@@ -2895,8 +2888,7 @@ mod tests {
             .source_depths()
             .into_iter()
             .find(|(s, _)| *s == source)
-            .map(|(_, n)| n)
-            .unwrap_or(0)
+            .map_or(0, |(_, n)| n)
     }
 
     /// A newer wakeup for the same schedule id replaces a still-queued older

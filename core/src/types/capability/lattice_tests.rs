@@ -34,7 +34,7 @@ fn strs(items: &[&str]) -> Value {
 fn break_msg(b: Break) -> String {
     match b {
         Break::Error(e) => e.message,
-        other => panic!("unexpected: {other:?}"),
+        other @ Break::Escape(_) => panic!("unexpected: {other:?}"),
     }
 }
 

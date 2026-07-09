@@ -11,7 +11,7 @@ fn main() -> std::process::ExitCode {
     // pipeline-stage / test helper dispatch, then the OS-sandbox stage.
     // A re-exec child exits here before any further setup.
     if let Some(code) = exarch::dispatch_pre_main() {
-        std::process::exit(code as i32);
+        std::process::exit(i32::from(code));
     }
     match exarch::run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -30,6 +30,6 @@ fn main() -> std::process::ExitCode {
 #[ctor::ctor(unsafe)]
 fn init_test_binary() {
     if let Some(code) = exarch::dispatch_pre_main() {
-        std::process::exit(code as i32);
+        std::process::exit(i32::from(code));
     }
 }

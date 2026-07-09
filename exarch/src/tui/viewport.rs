@@ -693,9 +693,9 @@ impl Viewport {
         // Find the most recent Thinking block. If found and no Prompt
         // separates it from the end (i.e. it belongs to the current turn),
         // append to it. Otherwise insert before the trailing markdown run.
-        let existing = self.blocks.iter().rposition(|b| b.is_thinking());
+        let existing = self.blocks.iter().rposition(Block::is_thinking);
         if let Some(idx) = existing {
-            let blocked = self.blocks[idx..].iter().any(|b| b.is_prompt());
+            let blocked = self.blocks[idx..].iter().any(Block::is_prompt);
             if !blocked {
                 self.blocks[idx].append_thinking(&text, answer_chars);
                 self.rewrite_log();
@@ -1009,7 +1009,7 @@ impl Viewport {
         self.flat.virtual_think_at = think_at;
         self.flat.virtual_think_len = think.len();
         self.flat.virtual_think_widths = think.iter().map(Line::width).collect();
-        let total = committed + think.len() + seat.is_some() as usize;
+        let total = committed + think.len() + usize::from(seat.is_some());
         let max_off = total.saturating_sub(height);
         if self.sticky {
             self.offset = max_off;

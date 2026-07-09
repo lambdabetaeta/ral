@@ -1,6 +1,6 @@
 //! Filesystem query and temporary-path builtins.
 
-use crate::types::*;
+use crate::types::{Break, Settled, Shell, Value, sig};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -30,8 +30,7 @@ fn classify(ft: fs::FileType) -> &'static str {
 fn secs_since_epoch(t: std::io::Result<SystemTime>) -> i64 {
     t.ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 #[allow(
@@ -42,8 +41,8 @@ pub(super) fn builtin_list_dir(args: &[Value], shell: &mut Shell) -> Settled<Val
     check_arity(args, 1, "list-dir")?;
     let path = checked_read_path(shell, &args[0].to_string())?;
     let mut entries: Vec<(String, Value)> = Vec::new();
-    for entry in fs::read_dir(&path).map_err(|e| io_err("list-dir", &path, e))? {
-        let entry = entry.map_err(|e| io_err("list-dir", &path, e))?;
+    for entry in fs::read_dir(&path).map_err(|e| io_err("list-dir", &path, &e))? {
+        let entry = entry.map_err(|e| io_err("list-dir", &path, &e))?;
         // `checked_read_path` admitted the directory, but each entry is
         // a distinct path whose metadata (size/mtime/type) this stats and
         // returns, so a deny on a subpath must drop that entry.  Skip a
@@ -53,7 +52,7 @@ pub(super) fn builtin_list_dir(args: &[Value], shell: &mut Shell) -> Settled<Val
         if shell.check_fs_read(&rp).is_err() {
             continue;
         }
-        entries.push(dir_entry_value(entry)?);
+        entries.push(dir_entry_value(&entry)?);
     }
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(Value::list(entries.into_iter().map(|(_, v)| v).collect()))
@@ -135,7 +134,7 @@ pub(super) fn builtin_glob(args: &[Value], shell: &mut Shell) -> Settled<Value> 
         }
         Err(e) => return Err(sig(format!("glob: {e}"))),
     }
-    results.sort_by_key(|a| a.to_string());
+    results.sort_by_key(std::string::ToString::to_string);
     Ok(Value::list(results))
 }
 
@@ -149,19 +148,19 @@ fn checked_read_path(shell: &mut Shell, path: &str) -> Settled<PathBuf> {
 /// triggered it.  Stand-in for `fs-err`: every fs call here knows the
 /// path it was acting on, so we attach it explicitly rather than relying
 /// on a wrapper type.
-fn io_err(ctx: &str, path: &Path, e: std::io::Error) -> Break {
+fn io_err(ctx: &str, path: &Path, e: &std::io::Error) -> Break {
     sig(format!("{ctx}: {}: {e}", path.display()))
 }
 
 /// One `list-dir` entry as `(sort_key, value_for_caller)`.  The sort
 /// key is the filename; the value is the public map shape ral exposes.
-fn dir_entry_value(entry: fs::DirEntry) -> Settled<(String, Value)> {
+fn dir_entry_value(entry: &fs::DirEntry) -> Settled<(String, Value)> {
     let name = entry.file_name().to_string_lossy().into_owned();
     let path = entry.path();
     let file_type = entry
         .file_type()
-        .map_err(|e| io_err("list-dir", &path, e))?;
-    let meta = entry.metadata().map_err(|e| io_err("list-dir", &path, e))?;
+        .map_err(|e| io_err("list-dir", &path, &e))?;
+    let meta = entry.metadata().map_err(|e| io_err("list-dir", &path, &e))?;
     let v = Value::map(vec![
         ("name".into(), Value::String(name.clone())),
         ("type".into(), Value::String(classify(file_type).into())),
@@ -188,7 +187,7 @@ pub(super) fn builtin_file_info(args: &[Value], shell: &mut Shell) -> Settled<Va
     check_arity(args, 1, "file-info")?;
     let path_arg = args[0].to_string();
     let path = checked_read_path(shell, &path_arg)?;
-    let meta = fs::symlink_metadata(&path).map_err(|e| io_err("file-info", &path, e))?;
+    let meta = fs::symlink_metadata(&path).map_err(|e| io_err("file-info", &path, &e))?;
     let ft = meta.file_type();
     let target = if ft.is_symlink() {
         fs::read_link(&path)
@@ -199,8 +198,7 @@ pub(super) fn builtin_file_info(args: &[Value], shell: &mut Shell) -> Settled<Va
     };
     let name = path
         .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+        .map_or_else(|| path.to_string_lossy().into_owned(), |s| s.to_string_lossy().into_owned());
     Ok(Value::map(vec![
         ("name".into(), Value::String(name)),
         ("type".into(), Value::String(classify(ft).into())),

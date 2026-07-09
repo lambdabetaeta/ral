@@ -17,7 +17,7 @@ use crate::ir::{RedirectV, ValRedirectTarget};
 use crate::runtime::command::io_event::{self, WriteOutcome};
 use crate::runtime::command::{self, EvalRedirect, EvalRedirectV};
 use crate::syntax::ast::RedirectMode;
-use crate::types::*;
+use crate::types::{Break, Control, Error, Raw, Settled, Shell, Value};
 
 /// Evaluates redirect targets to their concrete forms — file paths
 /// or numeric fds. Used by [`super::call::eval_call_parts`] for

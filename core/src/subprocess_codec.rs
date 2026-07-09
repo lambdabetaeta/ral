@@ -57,11 +57,11 @@ mod sigpipe {
             // local `set` / `old` masks; no signal handler is run here.
             unsafe {
                 let mut set: libc::sigset_t = std::mem::zeroed();
-                libc::sigemptyset(&mut set);
-                libc::sigaddset(&mut set, libc::SIGPIPE);
+                libc::sigemptyset(&raw mut set);
+                libc::sigaddset(&raw mut set, libc::SIGPIPE);
                 let mut old: libc::sigset_t = std::mem::zeroed();
-                libc::pthread_sigmask(libc::SIG_BLOCK, &set, &mut old);
-                let was_blocked = libc::sigismember(&old, libc::SIGPIPE) == 1;
+                libc::pthread_sigmask(libc::SIG_BLOCK, &raw const set, &raw mut old);
+                let was_blocked = libc::sigismember(&raw const old, libc::SIGPIPE) == 1;
                 Self { was_blocked }
             }
         }
@@ -85,17 +85,17 @@ mod sigpipe {
             // disposition.
             unsafe {
                 let mut set: libc::sigset_t = std::mem::zeroed();
-                libc::sigemptyset(&mut set);
-                libc::sigaddset(&mut set, libc::SIGPIPE);
+                libc::sigemptyset(&raw mut set);
+                libc::sigaddset(&raw mut set, libc::SIGPIPE);
                 let mut pending: libc::sigset_t = std::mem::zeroed();
-                libc::sigemptyset(&mut pending);
-                if libc::sigpending(&mut pending) == 0
-                    && libc::sigismember(&pending, libc::SIGPIPE) == 1
+                libc::sigemptyset(&raw mut pending);
+                if libc::sigpending(&raw mut pending) == 0
+                    && libc::sigismember(&raw const pending, libc::SIGPIPE) == 1
                 {
                     let mut sig: libc::c_int = 0;
-                    libc::sigwait(&set, &mut sig);
+                    libc::sigwait(&raw const set, &raw mut sig);
                 }
-                libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+                libc::pthread_sigmask(libc::SIG_UNBLOCK, &raw const set, std::ptr::null_mut());
             }
         }
     }
@@ -129,7 +129,7 @@ fn read_body<R: Read + ?Sized>(r: &mut R) -> io::Result<Option<Vec<u8>>> {
             // signal before any byte moved, so retry rather than abandon
             // the channel (latent under `libc::signal` BSD restart
             // semantics).
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(e) => return Err(e),
             Ok(0) if got == 0 => return Ok(None),
             Ok(0) => {
@@ -167,8 +167,7 @@ fn decode_body<T>(
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0),
+                    .map_or(0, |d| d.as_nanos()),
             ));
             let _ = dump_frame(&path, body);
             Err(io::Error::other(format!(

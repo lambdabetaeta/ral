@@ -130,7 +130,7 @@ static CURRENT: AtomicPtr<AtomicU8> = AtomicPtr::new(std::ptr::null_mut());
 pub fn publish(token: &Token) -> SlotGuard {
     std::mem::forget(token.0.clone());
     let flag: *const AtomicU8 = Arc::as_ptr(&token.0);
-    CURRENT.store(flag as *mut AtomicU8, Ordering::Release);
+    CURRENT.store(flag.cast_mut(), Ordering::Release);
     SlotGuard
 }
 

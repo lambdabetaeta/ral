@@ -40,6 +40,7 @@
 //! the same surface a `--capabilities <path>.ral` flag at the ral CLI
 //! consumes.  Two surfaces, one model.
 
+use ral_core::io::TerminalState;
 use ral_core::types::{Capabilities, FsPolicy, Shell};
 
 const MINIMAL_RAL: &str = include_str!("../../data/minimal.exarch.ral");
@@ -72,7 +73,7 @@ pub(super) fn resolve_base(
             ));
         }
     };
-    let mut shell = Shell::new(Default::default());
+    let mut shell = Shell::new(TerminalState::default());
     let virtual_path = format!("<built-in:{name}>");
     ral_core::capability::load_capabilities_from_str(&mut shell, text, &virtual_path, ctx).map_err(
         |e| match e {
@@ -80,7 +81,9 @@ pub(super) fn resolve_base(
                 "exarch: built-in base '{name}' failed to parse: {}",
                 err.message
             ),
-            other => format!("exarch: built-in base '{name}' failed: {other:?}"),
+            other @ ral_core::types::Break::Escape(_) => {
+                format!("exarch: built-in base '{name}' failed: {other:?}")
+            }
         },
     )
 }
@@ -111,7 +114,7 @@ mod tests {
     /// sigil — a failure here is a malformed profile, an unknown `xdg:`
     /// token, or an xdg-escape violation.
     fn load(name: &str, text: &str, ctx: &FreezeCtx<'_>) -> Capabilities {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(TerminalState::default());
         ral_core::capability::load_capabilities_from_str(
             &mut shell,
             text,

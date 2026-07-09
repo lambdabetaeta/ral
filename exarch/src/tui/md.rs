@@ -147,7 +147,7 @@ fn drain_span(span: &mut Span<'static>, context: u8, echo: u8) {
         span.style.fg = Some(desaturate(fg, drain));
     }
     if echo > 0 {
-        span.style.bg = Some(mix(Color::Rgb(0, 0, 0), ECHO_WASH, echo as f32 / 2.0));
+        span.style.bg = Some(mix(Color::Rgb(0, 0, 0), ECHO_WASH, f32::from(echo) / 2.0));
     }
 }
 
@@ -251,11 +251,14 @@ impl Composer {
         match ev {
             Event::Start(t) => self.start(t, p),
             Event::End(e) => self.end(e),
-            Event::Text(t) => self.text(&t),
+            Event::Text(t)
+            | Event::Html(t)
+            | Event::InlineHtml(t)
+            | Event::InlineMath(t)
+            | Event::DisplayMath(t) => self.text(&t),
             Event::Code(t) => {
                 self.push_span(Span::styled(t.into_string(), Style::default().fg(LIME)))
             }
-            Event::Html(t) | Event::InlineHtml(t) => self.text(&t),
             Event::SoftBreak => self.push_space(),
             Event::HardBreak => self.flush_line(),
             Event::Rule => self.rule(),
@@ -271,7 +274,6 @@ impl Composer {
                 };
                 self.push_span(Span::styled(text.to_string(), Style::default().fg(color)));
             }
-            Event::InlineMath(t) | Event::DisplayMath(t) => self.text(&t),
         }
     }
 
@@ -346,7 +348,7 @@ impl Composer {
             }
             Tag::Table(aligns) => {
                 self.block_break();
-                let lines = render_table(p, aligns, self.budget());
+                let lines = render_table(p, &aligns, self.budget());
                 self.append_rendered(lines);
                 self.blank_separator();
             }
@@ -394,7 +396,11 @@ impl Composer {
                 self.rail_depth = self.rail_depth.saturating_sub(1);
                 self.blank_separator();
             }
-            TagEnd::CodeBlock => {}
+            TagEnd::CodeBlock
+            | TagEnd::Table
+            | TagEnd::TableHead
+            | TagEnd::TableRow
+            | TagEnd::TableCell => {}
             TagEnd::List(_) => {
                 self.flush_line();
                 self.list_stack.pop();
@@ -426,8 +432,6 @@ impl Composer {
             | TagEnd::Superscript
             | TagEnd::Subscript
             | TagEnd::Image => self.pop_style(),
-
-            TagEnd::Table | TagEnd::TableHead | TagEnd::TableRow | TagEnd::TableCell => {}
         }
     }
 
@@ -643,7 +647,7 @@ fn heading_style(level: HeadingLevel) -> Style {
 /// than being clipped, so no content is lost to a budget squeeze.
 fn render_table<'a, I: Iterator<Item = Event<'a>>>(
     p: &mut I,
-    aligns: Vec<Alignment>,
+    aligns: &[Alignment],
     budget: usize,
 ) -> Vec<Line<'static>> {
     let mut head_cells: Vec<Vec<Span<'static>>> = Vec::new();
@@ -708,12 +712,11 @@ fn render_table<'a, I: Iterator<Item = Event<'a>>>(
 
     let nat_w = |row: &[Vec<Span<'static>>], i: usize| -> usize {
         row.get(i)
-            .map(|c| {
+            .map_or(0, |c| {
                 c.iter()
                     .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
                     .sum()
             })
-            .unwrap_or(0)
     };
     let mut widths: Vec<usize> = (0..n_cols)
         .map(|i| {
@@ -746,11 +749,11 @@ fn render_table<'a, I: Iterator<Item = Event<'a>>>(
 
     let mut out = Vec::with_capacity(2 + body_rows.len());
     if !head_cells.is_empty() {
-        out.extend(render_table_row(&head_cells, &widths, &aligns));
+        out.extend(render_table_row(&head_cells, &widths, aligns));
     }
     out.push(render_table_rule(&widths));
     for r in &body_rows {
-        out.extend(render_table_row(r, &widths, &aligns));
+        out.extend(render_table_row(r, &widths, aligns));
     }
     out
 }
@@ -936,7 +939,7 @@ mod tests {
         let Color::Rgb(r, g, b) = c else {
             unreachable!("test colours are RGB")
         };
-        0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32
+        0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)
     }
 
     /// The non-blank content spans of a rendered block, flattened across

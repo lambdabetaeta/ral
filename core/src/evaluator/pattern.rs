@@ -12,7 +12,7 @@
 use super::comp::eval_comp;
 use crate::ir::IrPattern;
 use crate::typecheck::Scheme;
-use crate::types::*;
+use crate::types::{Shell, Raw, Value, Binding, Tail};
 
 /// Refuse each name a `let` pattern binds that would shadow a PATH command.
 /// Driven from `eval_bind` only: lambda parameters bind through
@@ -194,7 +194,7 @@ fn stage_pattern(
                     // ([`Tail::No`]) by construction (review finding E4).
                     (None, Some(default_comp)) => eval_comp(default_comp, shell, Tail::No)?,
                     (None, None) => {
-                        let ks: Vec<&str> = m.keys().map(|k| k.as_str()).collect();
+                        let ks: Vec<&str> = m.keys().map(std::string::String::as_str).collect();
                         return Err(shell
                             .err_hint(
                                 format!("key '{key_label}' not found"),
@@ -214,6 +214,7 @@ fn stage_pattern(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{Break, Control};
 
     fn list_pat(elems: &[&str], rest: Option<&str>) -> IrPattern {
         IrPattern::List {
@@ -230,7 +231,7 @@ mod tests {
     /// evaluator must error rather than silently skip `b`.
     #[test]
     fn rest_pattern_errors_when_list_shorter_than_elems() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let pat = list_pat(&["a", "b"], Some("rest"));
         let value = Value::list(vec![Value::String("x".into())]);
         let result = assign_pattern(&pat, &value, None, &mut shell);
@@ -252,7 +253,7 @@ mod tests {
     /// `[a, b] = [x, y, z]` would otherwise drop `z` silently, so it errors.
     #[test]
     fn list_pattern_errors_when_list_longer_than_elems() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let pat = list_pat(&["a", "b"], None);
         let value = Value::list(vec![
             Value::String("x".into()),
@@ -277,7 +278,7 @@ mod tests {
     /// When the list covers every element pattern, the tail binds to `rest`.
     #[test]
     fn rest_pattern_binds_tail_when_list_long_enough() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let pat = list_pat(&["a", "b"], Some("rest"));
         let value = Value::list(vec![
             Value::String("x".into()),

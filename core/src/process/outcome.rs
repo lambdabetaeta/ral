@@ -290,8 +290,7 @@ impl WaitOutcome {
     pub fn to_user_exit_code(self) -> i32 {
         match self {
             Self::Exited(code) | Self::NativeCode(code) => code,
-            Self::Signaled(sig) => sig.user_exit_code(),
-            Self::Stopped(sig) => sig.user_exit_code(),
+            Self::Signaled(sig) | Self::Stopped(sig) => sig.user_exit_code(),
             Self::StoppedThenKilled { stopped_by, .. } => stopped_by.user_exit_code(),
         }
     }
@@ -404,7 +403,7 @@ impl CommandFailure {
     /// Return a default hint when one is useful.
     pub fn default_hint(&self, cmd: &str) -> Option<String> {
         match self {
-            Self::ExitCode(_) | Self::Spawn(SpawnFailure::NotFound) => None,
+            Self::ExitCode(_) | Self::Spawn(SpawnFailure::NotFound | _) => None,
             Self::Signal(sig) if sig.is_sigkill() => Some(
                 "the process was killed with SIGKILL; the kernel or another process may have terminated it"
                     .to_string(),
@@ -427,7 +426,6 @@ impl CommandFailure {
                 "ral's job control doesn't reach inside a pipeline; stopping one stage still tears the whole pipeline down."
                     .to_string(),
             ),
-            Self::Spawn(_) => None,
         }
     }
 
@@ -437,9 +435,8 @@ impl CommandFailure {
             Self::ExitCode(code) => *code,
             Self::Signal(sig) => sig.user_exit_code(),
             Self::StoppedByJobControl { stop_signal, .. } => stop_signal.user_exit_code(),
-            Self::Spawn(SpawnFailure::NotFound) => 127,
+            Self::Spawn(SpawnFailure::NotFound | SpawnFailure::Io(_)) => 127,
             Self::Spawn(SpawnFailure::PermissionDenied) => 126,
-            Self::Spawn(SpawnFailure::Io(_)) => 127,
         }
     }
 }

@@ -7,9 +7,9 @@
 //! because they are pure value transformations.
 
 use crate::diagnostic;
-use crate::ir::*;
+use crate::ir::{Val, ValListElem, ValMapEntry};
 use crate::path::tilde::expand_tilde_path;
-use crate::types::*;
+use crate::types::{Error, List, Shell, Value};
 
 /// Renders one piece of a string interpolation as text. Only scalar
 /// types (`Unit`, `String`, `Int`, `Float`, `Bool`) are interpolable;

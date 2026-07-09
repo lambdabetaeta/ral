@@ -221,7 +221,7 @@ impl Tool for SpawnTool {
         _provider: &Arc<Provider>,
         emit: &Emitter,
     ) -> SessionToolResult {
-        dispatch_spawn(self.kind, id, input, session, emit)
+        dispatch_spawn(self.kind, id, &input, session, emit)
     }
 }
 
@@ -241,7 +241,7 @@ pub(crate) fn spawn_discussion(session: &mut Agent, topic: &str, emit: &Emitter)
     dispatch_spawn(
         SpawnKind::Mnemon,
         "/discuss".to_string(),
-        input,
+        &input,
         session,
         emit,
     )
@@ -296,7 +296,7 @@ pub(crate) fn spawn_branch(session: &mut Agent, prompt: Option<&str>, emit: &Emi
 fn dispatch_spawn(
     kind: SpawnKind,
     id: String,
-    input: Value,
+    input: &Value,
     session: &mut Agent,
     emit: &Emitter,
 ) -> SessionToolResult {
@@ -304,7 +304,7 @@ fn dispatch_spawn(
         prompt,
         title,
         permissions,
-    } = match parse_args(&input) {
+    } = match parse_args(input) {
         Ok(a) => a,
         Err(reason) => return invalid_input(id, kind.tool(), INVALID_INPUT, &reason, emit),
     };
@@ -644,17 +644,14 @@ answer; use `reply` for a returning agent's final result."
         _provider: &Arc<Provider>,
         emit: &Emitter,
     ) -> SessionToolResult {
-        let recipient_id = match u64_field(&input, "id") {
-            Some(n) => n,
-            None => {
-                return invalid_input(
-                    id,
-                    "message",
-                    INVALID_INPUT,
-                    "missing required integer field `id`",
-                    emit,
-                );
-            }
+        let Some(recipient_id) = u64_field(&input, "id") else {
+            return invalid_input(
+                id,
+                "message",
+                INVALID_INPUT,
+                "missing required integer field `id`",
+                emit,
+            );
         };
         let Some(message) = input
             .as_object()
@@ -739,17 +736,14 @@ A no-op if no live agent has that id."
         _provider: &Arc<Provider>,
         emit: &Emitter,
     ) -> SessionToolResult {
-        let agent_id = match u64_field(&input, "id") {
-            Some(n) => n,
-            None => {
-                return invalid_input(
-                    id,
-                    "agent_cancel",
-                    INVALID_INPUT,
-                    "missing required integer field `id`",
-                    emit,
-                );
-            }
+        let Some(agent_id) = u64_field(&input, "id") else {
+            return invalid_input(
+                id,
+                "agent_cancel",
+                INVALID_INPUT,
+                "missing required integer field `id`",
+                emit,
+            );
         };
         let agent_title = session.agents.title_for(agent_id);
         emit.emit(Kind::ToolCall {

@@ -12,9 +12,9 @@
 //! reach user-visible callers.
 
 use crate::io::strip_trailing_newline;
-use crate::ir::*;
+use crate::ir::{Comp, CompKind, IrPattern, ScopeOp, Val};
 use crate::source::Spanned;
-use crate::types::*;
+use crate::types::{Binding, Break, Control, Error, Raw, Shell, Tail, Value};
 use std::sync::Arc;
 
 use super::pattern::assign_pattern;

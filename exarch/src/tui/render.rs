@@ -60,7 +60,7 @@ pub(super) fn tab_bar(
         if i > 0 {
             spans.push(Span::raw("  "));
         }
-        let title = titles.get(&id).map(String::as_str).unwrap_or("?");
+        let title = titles.get(&id).map_or("?", String::as_str);
         let label: String = if id == focused {
             format!("[{title}]")
         } else {
@@ -266,37 +266,34 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         // centre), so it never displaces the input. Input lives in main
         // only; a subagent tab shows a watch-only hint in the prompt slot,
         // and the textarea keeps its draft for when the user tabs home.
-        match prompt_hint {
-            Some(line) => {
-                let block = ratatui::widgets::Block::default()
-                    .borders(ratatui::widgets::Borders::ALL)
-                    .border_type(ratatui::widgets::BorderType::Rounded)
-                    .border_style(Style::default().fg(SLATE).add_modifier(Modifier::DIM))
-                    .padding(ratatui::widgets::Padding::horizontal(PROMPT_PAD_H));
-                f.render_widget(Paragraph::new(line).block(block), prompt_row);
-            }
-            None => {
-                // The prompt's rounded border is exarch chrome, not the
-                // editor's: the facade renders bare text, so the box is
-                // drawn here and the editor fills its padded interior.
-                let block = ratatui::widgets::Block::default()
-                    .borders(ratatui::widgets::Borders::ALL)
-                    .border_type(ratatui::widgets::BorderType::Rounded)
-                    .border_style(Style::default().fg(PINK))
-                    .padding(ratatui::widgets::Padding::horizontal(PROMPT_PAD_H));
-                let inner = block.inner(prompt_row);
-                f.render_widget(block, prompt_row);
-                app.prompt_state.render(f, inner);
-                // Show the terminal's native cursor at the edit point —
-                // but not while the picker overlay owns the keyboard, or
-                // the cursor would peek out beneath the modal.
-                if picker.is_none()
-                    && let Some(pos) = app.prompt_state.cursor_screen_position()
-                {
-                    let x = inner.x + pos.0.min(inner.width.saturating_sub(1));
-                    let y = inner.y + pos.1.min(inner.height.saturating_sub(1));
-                    f.set_cursor_position(Position::new(x, y));
-                }
+        if let Some(line) = prompt_hint {
+            let block = ratatui::widgets::Block::default()
+                .borders(ratatui::widgets::Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .border_style(Style::default().fg(SLATE).add_modifier(Modifier::DIM))
+                .padding(ratatui::widgets::Padding::horizontal(PROMPT_PAD_H));
+            f.render_widget(Paragraph::new(line).block(block), prompt_row);
+        } else {
+            // The prompt's rounded border is exarch chrome, not the
+            // editor's: the facade renders bare text, so the box is
+            // drawn here and the editor fills its padded interior.
+            let block = ratatui::widgets::Block::default()
+                .borders(ratatui::widgets::Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .border_style(Style::default().fg(PINK))
+                .padding(ratatui::widgets::Padding::horizontal(PROMPT_PAD_H));
+            let inner = block.inner(prompt_row);
+            f.render_widget(block, prompt_row);
+            app.prompt_state.render(f, inner);
+            // Show the terminal's native cursor at the edit point —
+            // but not while the picker overlay owns the keyboard, or
+            // the cursor would peek out beneath the modal.
+            if picker.is_none()
+                && let Some(pos) = app.prompt_state.cursor_screen_position()
+            {
+                let x = inner.x + pos.0.min(inner.width.saturating_sub(1));
+                let y = inner.y + pos.1.min(inner.height.saturating_sub(1));
+                f.set_cursor_position(Position::new(x, y));
             }
         }
         f.render_widget(Paragraph::new(footer_hint()), footer_row);
@@ -408,7 +405,7 @@ fn prompt_hint(
     if focused == root || focused_steerable {
         return None;
     }
-    let title = titles.get(&focused).map(String::as_str).unwrap_or("?");
+    let title = titles.get(&focused).map_or("?", String::as_str);
     Some(Line::from(Span::styled(
         format!(" watching {title} — tab to main to steer "),
         Style::default()

@@ -150,7 +150,7 @@ mod tests {
     fn set(ps: &[&str]) -> PrefixSet {
         PrefixSet(ps.iter().map(|s| p(s)).collect())
     }
-    fn surface(set: PrefixSet) -> Vec<String> {
+    fn surface(set: &PrefixSet) -> Vec<String> {
         set.surface()
             .into_iter()
             .map(NormalizedPrefix::into_string)
@@ -161,7 +161,7 @@ mod tests {
     fn meet_keeps_the_deeper_prefix_of_each_overlapping_pair() {
         // {/a,/b} ∩ {/a/x,/c} admits only /a/x (covered by /a on the left, itself on the right).
         assert_eq!(
-            surface(set(&["/a", "/b"]).meet(set(&["/a/x", "/c"]))),
+            surface(&set(&["/a", "/b"]).meet(set(&["/a/x", "/c"]))),
             vec!["/a/x".to_string()]
         );
     }
@@ -182,7 +182,7 @@ mod tests {
     #[test]
     fn union_accumulates_and_dedups() {
         assert_eq!(
-            surface(set(&["/a", "/b"]).union(set(&["/b", "/c"]))),
+            surface(&set(&["/a", "/b"]).union(set(&["/b", "/c"]))),
             vec!["/a".to_string(), "/b".to_string(), "/c".to_string()]
         );
     }
@@ -249,7 +249,7 @@ mod tests {
         let inner = PrefixSet::resolve(&r, std::slice::from_ref(&sub_surface));
 
         assert_eq!(
-            surface(base.meet(inner)),
+            surface(&base.meet(inner)),
             vec![sub_surface],
             "a genuinely-nested deeper grant must survive the intersection"
         );

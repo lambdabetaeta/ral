@@ -342,8 +342,7 @@ fn allow_attrs(text: &str) -> Vec<String> {
         // Find the end of the enclosing attribute: the next `)]` after `start`.
         let end = text[start..]
             .find(")]")
-            .map(|e| start + e + 2)
-            .unwrap_or(text.len());
+            .map_or(text.len(), |e| start + e + 2);
         out.push(text[start..end].to_string());
         search_from = end;
     }

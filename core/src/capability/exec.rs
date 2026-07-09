@@ -147,9 +147,8 @@ pub(super) fn layer_exec_verdict(exec: &ExecMap, names: ExecNames) -> LayerExec 
         };
     }
     match longest_dir_match(exec, names.allow) {
-        Some(ExecDir::Deny) => LayerExec::Denied,
         Some(ExecDir::Allow) => LayerExec::Allowed(Admit::Any),
-        None => LayerExec::Denied,
+        Some(ExecDir::Deny) | None => LayerExec::Denied,
     }
 }
 

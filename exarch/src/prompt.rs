@@ -9,7 +9,17 @@ use crate::cli::EditScheme;
 use crate::host;
 use crate::skill;
 use ral_core::types::{Capabilities, ExecDir};
+use std::fmt::Write;
 use std::path::{Path, PathBuf};
+
+/// The stand-in system prompt for `--chat` mode ([`crate::cli::Cli::chat`]).
+/// Chat obliterates the assembled prompt entirely; this is not a persona but
+/// the minimal non-empty string, present only because some provider backends
+/// (the Codex/Responses adapter) reject an empty system prompt, and Anthropic
+/// rejects a whitespace-only one ("text content blocks must contain
+/// non-whitespace text").  A single period satisfies both, uniform across every
+/// provider — chat does not branch on the adapter.
+pub const CHAT_SYSTEM: &str = ".";
 
 /// Build the full system prompt, in order:
 ///
@@ -49,18 +59,9 @@ use std::path::{Path, PathBuf};
 ///    `reply` exactly once, the contract a headless root and every sub-agent
 ///    share.  Appended last, where its recency carries.
 /// 10. **Skills** (optional) — present whenever any skill is discovered and
-///    readable under the grant: `name: description` per skill, plus a
-///    note telling the agent to call `skill <name>` to load and
-///    `skill-list` to refresh mid-session.
-/// The stand-in system prompt for `--chat` mode ([`crate::cli::Cli::chat`]).
-/// Chat obliterates the assembled prompt entirely; this is not a persona but
-/// the minimal non-empty string, present only because some provider backends
-/// (the Codex/Responses adapter) reject an empty system prompt, and Anthropic
-/// rejects a whitespace-only one ("text content blocks must contain
-/// non-whitespace text").  A single period satisfies both, uniform across every
-/// provider — chat does not branch on the adapter.
-pub const CHAT_SYSTEM: &str = ".";
-
+///     readable under the grant: `name: description` per skill, plus a
+///     note telling the agent to call `skill <name>` to load and
+///     `skill-list` to refresh mid-session.
 pub fn assemble(
     files: &[PathBuf],
     caps: &Capabilities,
@@ -274,34 +275,32 @@ the sandbox is the trust boundary.\n\n- scratch: `$EXARCH_SCRATCH` = {}\n",
     }
     let mut s = String::from(include_str!("../data/grant-legend.md").trim_end());
     s.push_str("\n\n");
-    s.push_str(&format!("- exec: {}\n", exec_line(caps)));
+    let _ = writeln!(s, "- exec: {}", exec_line(caps));
     let dirs = exec_dirs_line(caps);
     if !dirs.is_empty() {
-        s.push_str(&format!("- exec dirs: {dirs}\n"));
+        let _ = writeln!(s, "- exec dirs: {dirs}");
     }
     let denies = exec_denies(caps);
     if !denies.is_empty() {
-        s.push_str(&format!("- exec deny: {}\n", denies.join(", ")));
+        let _ = writeln!(s, "- exec deny: {}", denies.join(", "));
     }
     if let Some(fs) = &caps.fs {
-        s.push_str(&format!("- fs read: {}\n", or_none(&fs.read_prefixes)));
-        s.push_str(&format!("- fs write: {}\n", or_none(&fs.write_prefixes)));
+        let _ = writeln!(s, "- fs read: {}", or_none(&fs.read_prefixes));
+        let _ = writeln!(s, "- fs write: {}", or_none(&fs.write_prefixes));
         if !fs.deny_paths.is_empty() {
-            s.push_str(&format!("- fs deny: {}\n", join_str(&fs.deny_paths)));
+            let _ = writeln!(s, "- fs deny: {}", join_str(&fs.deny_paths));
         }
     }
-    s.push_str(&format!(
-        "- net: {}\n",
+    let _ = writeln!(
+        s,
+        "- net: {}",
         match caps.net {
             None => "inherit",
             Some(true) => "allow",
             Some(false) => "deny",
         }
-    ));
-    s.push_str(&format!(
-        "- scratch: `$EXARCH_SCRATCH` = {}\n",
-        scratch.display()
-    ));
+    );
+    let _ = writeln!(s, "- scratch: `$EXARCH_SCRATCH` = {}", scratch.display());
     s
 }
 
@@ -381,7 +380,7 @@ fn skills_section(skills: &[skill::Skill]) -> String {
     let mut body =
         String::from("Available skills (call `skill <name>` to load, `skill-list` to refresh):\n");
     for s in skills {
-        body.push_str(&format!("- {}: {}\n", s.name, s.description));
+        let _ = writeln!(body, "- {}: {}", s.name, s.description);
     }
     body
 }

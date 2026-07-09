@@ -161,12 +161,11 @@ pub(crate) fn check_fs_op(
                 break;
             }
         }
-        match hit {
-            Some(p) => granted_prefix = Some(p.to_string()),
-            None => {
-                denied = true;
-                break;
-            }
+        if let Some(p) = hit {
+            granted_prefix = Some(p.to_string());
+        } else {
+            denied = true;
+            break;
         }
     }
 

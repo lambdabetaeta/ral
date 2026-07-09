@@ -36,6 +36,8 @@ pub(crate) struct RunOpts {
 
 /// Flags valid only in batch (script / `-c`) modes.
 #[derive(Default, Clone)]
+// Distinct batch-mode flags, not a bundle-able group.
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct BatchOpts {
     pub audit: bool,
     pub pretty: bool,
@@ -108,6 +110,7 @@ AUDIT
 handed to execve(2) for external commands. Use --audit to emit the execution \
 tree as JSON.",
 )]
+#[allow(clippy::struct_excessive_bools)] // clap flag struct: each bool is a distinct CLI switch.
 pub(crate) struct Cli {
     /// Start as a login shell; sources login profiles
     #[arg(long, short = 'l')]
@@ -355,7 +358,7 @@ mod tests {
     /// Parse argv (without the leading program name) the same way `main` does:
     /// terminator injection, then clap, then distil to a [`Mode`].
     fn mode_of(args: &[&str]) -> Mode {
-        let raw: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let raw: Vec<String> = args.iter().map(std::string::ToString::to_string).collect();
         Cli::parse_from(std::iter::once("ral".to_string()).chain(inject_arg_terminator(raw)))
             .into_mode()
     }
@@ -415,7 +418,7 @@ mod tests {
     }
 
     fn inject(args: &[&str]) -> Vec<String> {
-        inject_arg_terminator(args.iter().map(|s| s.to_string()).collect())
+        inject_arg_terminator(args.iter().map(std::string::ToString::to_string).collect())
     }
 
     #[test]

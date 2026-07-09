@@ -15,6 +15,7 @@
 //!       'cd /work && cargo run --release --example eval_overhead_bench'
 
 use ral_core::Shell;
+use ral_core::io::TerminalState;
 use ral_core::types::Env;
 use std::time::Instant;
 
@@ -46,14 +47,14 @@ fn main() {
 
     for &n in &sizes {
         // Fresh shell per row so prior populations don't leak.
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(TerminalState::default());
         populate_env(&mut shell, n);
 
         // One warm-up pass to settle the page cache and avoid first-iter noise.
         let _ = time_thunk_bracket(&mut shell, &captured, 1_000);
 
         let dt = time_thunk_bracket(&mut shell, &captured, ITERS);
-        let ns_per = dt.as_nanos() as f64 / ITERS as f64;
+        let ns_per = dt.as_nanos() as f64 / f64::from(ITERS);
         println!("{:>9}  {:>14.3?}  {:>12.1}", n, dt, ns_per);
     }
     println!();

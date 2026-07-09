@@ -123,7 +123,7 @@ pub fn builtin_ed_set(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     require_interactive("_ed-set", shell)?;
     shell.check_editor_write("set")?;
     let map = as_map(&args[0], "_ed-set")?;
-    let text = map.get("text").map(|v| v.to_string());
+    let text = map.get("text").map(std::string::ToString::to_string);
     let cursor = match map.get("cursor") {
         Some(Value::Int(n)) => Some(*n),
         Some(_) => return Err(sig("_ed-set: cursor must be Int")),
@@ -271,7 +271,7 @@ pub fn builtin_ed_tui(args: &[Value], shell: &mut Shell) -> Settled<Value> {
         }
         Err(Break::Error(e)) => Ok(Value::map(vec![
             ("output".into(), Value::String(e.message.clone())),
-            ("status".into(), Value::Int(e.exit_code() as i64)),
+            ("status".into(), Value::Int(i64::from(e.exit_code()))),
         ])),
         Err(other) => Err(other),
     }
@@ -785,7 +785,7 @@ pub static ED_BUILTINS: &[BuiltinEntry] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repl::plugin_editor::EditorState;
+    use crate::repl::plugin_editor::{EditorState, PluginInputs, PluginOutputs};
 
     /// Every `_ed-*` entry must carry all static facets directly.
     #[test]
@@ -809,12 +809,12 @@ mod tests {
     /// An interactive shell carrying a plugin context whose buffer holds
     /// `text`, ready to drive `builtin_ed_set`.
     fn shell_with_buffer(text: &str) -> Shell {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(ral_core::io::TerminalState::default());
         shell.set_interactive(true);
         let mut pc = PluginContext {
-            inputs: Default::default(),
-            outputs: Default::default(),
-            editor_state: Default::default(),
+            inputs: PluginInputs::default(),
+            outputs: PluginOutputs::default(),
+            editor_state: EditorState::default(),
             state_cell: None,
             state_default_used: false,
         };

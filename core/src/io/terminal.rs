@@ -43,8 +43,8 @@ impl InteractiveMode {
     /// `Auto` and set `warn` so the caller can emit a one-time diagnostic.
     pub fn parse(raw: Option<&str>) -> (Self, Option<String>) {
         match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
-            None | Some("") | Some("auto") => (Self::Auto, None),
-            Some("minimal") | Some("dumb") | Some("plain") => (Self::Minimal, None),
+            None | Some("" | "auto") => (Self::Auto, None),
+            Some("minimal" | "dumb" | "plain") => (Self::Minimal, None),
             Some("full") => (Self::Full, None),
             Some(other) => (
                 Self::Auto,
@@ -87,6 +87,9 @@ impl InteractiveMode {
 /// inside.  Population happens once via `TerminalState::probe_with_mode`;
 /// nothing re-queries the OS mid-session.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+// A flat record of independent terminal-capability facts, not a state machine;
+// bundling the flags into sub-structs would obscure, not clarify.
+#[allow(clippy::struct_excessive_bools)]
 pub struct TerminalState {
     pub startup_stdin_tty: bool,
     pub startup_stdout_tty: bool,
@@ -378,7 +381,7 @@ impl TerminalEnv {
     /// `COLORTERM` advertises 24-bit color.  This is the de-facto signal
     /// every major terminal honours.
     fn advertises_truecolor(&self) -> bool {
-        matches!(self.colorterm.as_deref(), Some("truecolor") | Some("24bit"))
+        matches!(self.colorterm.as_deref(), Some("truecolor" | "24bit"))
     }
 
     /// The host terminal is one of the known cohort that recognises both

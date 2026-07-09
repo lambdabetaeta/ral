@@ -152,10 +152,10 @@ pub(super) const RAIL_GLYPHS: [&str; 9] = ["▎ ", "▸ ", "▽ ", "· ", "∴ "
 /// One scrollback line as the plain text a reader would copy: span
 /// contents joined, with a leading rail glyph dropped.
 pub(super) fn plain(line: &Line<'_>) -> String {
-    let skip = line
+    let skip = usize::from(line
         .spans
         .first()
-        .is_some_and(|s| RAIL_GLYPHS.contains(&s.content.as_ref())) as usize;
+        .is_some_and(|s| RAIL_GLYPHS.contains(&s.content.as_ref())));
     line.spans[skip..]
         .iter()
         .map(|s| s.content.as_ref())
@@ -760,8 +760,7 @@ fn role_style(role: Role) -> Style {
 /// [`role_style`]; a roleless one — and the degradation target of an
 /// unknown role — renders as plain content ink (white).
 fn span_style(role: Option<Role>) -> Style {
-    role.map(role_style)
-        .unwrap_or_else(|| Style::default().fg(Color::White))
+    role.map_or_else(|| Style::default().fg(Color::White), role_style)
 }
 
 /// Render a [`Card`] — the one generic interpreter the `surface` builtin
@@ -888,19 +887,16 @@ fn render_framed(
 
     // Top rule, with the heading set into it.
     let mut top = vec![Span::raw(indent.clone())];
-    match &title {
-        Some(spans) => {
-            top.push(Span::styled("╭─ ", border));
-            top.extend(spans.iter().cloned());
-            let fill = interior.saturating_sub(3 + title_w); // "─ " + title + " "
-            top.push(Span::styled(format!(" {}", "─".repeat(fill)), border));
-            top.push(Span::styled("╮", border));
-        }
-        None => {
-            top.push(Span::styled("╭", border));
-            top.push(Span::styled("─".repeat(interior), border));
-            top.push(Span::styled("╮", border));
-        }
+    if let Some(spans) = &title {
+        top.push(Span::styled("╭─ ", border));
+        top.extend(spans.iter().cloned());
+        let fill = interior.saturating_sub(3 + title_w); // "─ " + title + " "
+        top.push(Span::styled(format!(" {}", "─".repeat(fill)), border));
+        top.push(Span::styled("╮", border));
+    } else {
+        top.push(Span::styled("╭", border));
+        top.push(Span::styled("─".repeat(interior), border));
+        top.push(Span::styled("╮", border));
     }
     out.push(Line::from(top));
 
@@ -939,7 +935,7 @@ pub(super) fn render_register(
 
 /// Total display width of a span run, unicode-aware.
 fn span_run_width(spans: &[Span<'static>]) -> usize {
-    spans.iter().map(|s| s.width()).sum()
+    spans.iter().map(ratatui::prelude::Span::width).sum()
 }
 
 /// Render a `text` mark — a run of optionally-roled spans into one or more
@@ -986,26 +982,23 @@ fn render_measure(m: &Measure) -> Line<'static> {
 /// one reads as `value[unit]` with a `log2` [`size_bar`].
 fn measure_value_spans(m: &Measure) -> Vec<Span<'static>> {
     let white = Style::default().fg(Color::White);
-    match m.max {
-        Some(max) => {
-            let mut spans = vec![
-                Span::styled(format!("{}/{}", m.value, max), white),
-                Span::raw("  "),
-            ];
-            spans.extend(progress_bar(m.value, max));
-            spans
-        }
-        None => {
-            let readout = match &m.unit {
-                Some(u) => format!("{}{u}", m.value),
-                None => m.value.to_string(),
-            };
-            vec![
-                Span::styled(readout, white),
-                Span::raw("  "),
-                size_bar(m.value),
-            ]
-        }
+    if let Some(max) = m.max {
+        let mut spans = vec![
+            Span::styled(format!("{}/{}", m.value, max), white),
+            Span::raw("  "),
+        ];
+        spans.extend(progress_bar(m.value, max));
+        spans
+    } else {
+        let readout = match &m.unit {
+            Some(u) => format!("{}{u}", m.value),
+            None => m.value.to_string(),
+        };
+        vec![
+            Span::styled(readout, white),
+            Span::raw("  "),
+            size_bar(m.value),
+        ]
     }
 }
 
@@ -1018,7 +1011,7 @@ fn progress_bar(done: u32, total: u32) -> Vec<Span<'static>> {
     let filled = if total == 0 {
         0
     } else {
-        ((done as u64 * W as u64) / total as u64).min(W as u64) as u32
+        ((u64::from(done) * u64::from(W)) / u64::from(total)).min(u64::from(W)) as u32
     };
     vec![
         Span::styled("█".repeat(filled as usize), Style::default().fg(LIME)),

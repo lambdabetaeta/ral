@@ -20,7 +20,7 @@ use ral_core::typecheck::fmt_scheme;
 fn rebake() -> (ral_core::ir::Comp, Vec<(String, ral_core::Scheme)>) {
     let src = include_str!("../src/prelude.ral");
     let ast = ral_core::syntax::parser::parse(src).expect("prelude parse");
-    let comp = ral_core::elaborator::elaborate(&ast, Default::default());
+    let comp = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default());
     ral_core::bake_prelude(&comp)
 }
 
@@ -122,7 +122,7 @@ fn bake_annotates_interior_pipeline_wires() {
     use ral_core::mode::ByteMode;
     let ast =
         ral_core::syntax::parser::parse("let tag = { cat -n | head -n 1 }").expect("fixture parse");
-    let comp = ral_core::elaborator::elaborate(&ast, Default::default());
+    let comp = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default());
     let (annotated, _) = ral_core::bake_prelude(&comp);
     let mut wires = false;
     common::walk_comp(&annotated, &mut |c| {

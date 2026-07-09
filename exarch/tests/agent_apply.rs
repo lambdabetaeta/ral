@@ -33,7 +33,7 @@ fn scripted(model: &str, script: Script) -> Arc<Provider> {
 #[ctor::ctor(unsafe)]
 fn init_test_binary() {
     if let Some(code) = exarch::dispatch_pre_main() {
-        std::process::exit(code as i32);
+        std::process::exit(i32::from(code));
     }
 }
 
@@ -314,7 +314,7 @@ fn malformed_tool_arguments_are_normalised_to_object() {
 
     // Every committed tool call's arguments must be a JSON object.
     for m in session.rendered_messages() {
-        for part in m.content.iter() {
+        for part in &m.content {
             if let ContentPart::ToolCall(tc) = part {
                 assert!(
                     tc.fn_arguments.is_object(),

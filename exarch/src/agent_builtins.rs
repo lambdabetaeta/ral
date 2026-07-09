@@ -24,6 +24,7 @@ use ral_core::{Shell, Value};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
+use std::fmt::Write as _;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -63,7 +64,7 @@ pub fn install_agent_library(shell: &mut Shell) -> Settled<Value> {
     ral_core::builtins::modules::evaluate_source(shell, AGENT_SOURCE, "<exarch:agent>").map_err(
         |e| match e {
             Break::Error(err) => sig(format!("exarch agent library: {}", err.message)),
-            other => other,
+            other @ Break::Escape(_) => other,
         },
     )
 }
@@ -352,10 +353,7 @@ fn search_tree(shell: &mut Shell, pattern: &str) -> Settled<Vec<SearchHit>> {
             continue;
         }
         // One read per file: the search runs over these bytes directly.
-        let bytes = match fs::read(abs) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
+        let Ok(bytes) = fs::read(abs) else { continue };
         if searcher
             .search_slice(
                 &matcher,
@@ -370,9 +368,7 @@ fn search_tree(shell: &mut Shell, pattern: &str) -> Settled<Vec<SearchHit>> {
                 }),
             )
             .is_err()
-        {
-            continue;
-        }
+        {}
     }
     Ok(results)
 }
@@ -488,7 +484,7 @@ fn builtin_edit_hash(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     // against the original snapshot.  A stale hash fails here, before the write —
     // the failure messages are user-facing and pinned by tests.
     let mut resolved = Vec::with_capacity(edits.len());
-    for e in edits.iter() {
+    for e in edits {
         let m = match e {
             Value::Map(m) => m,
             other => {
@@ -988,11 +984,8 @@ fn builtin_skill(args: &[Value], shell: &mut Shell) -> Settled<Value> {
         let sk_md = dir.join("SKILL.md");
         let rp = shell.resolve(&sk_md.to_string_lossy());
         if shell.check_fs_read(&rp).is_ok() {
-            let body = match skill::read_skill_body(&dir) {
-                Ok(body) => body,
-                Err(_) => {
-                    return Settled::Ok(Value::String(format!("could not read skill: {name}")));
-                }
+            let Ok(body) = skill::read_skill_body(&dir) else {
+                return Settled::Ok(Value::String(format!("could not read skill: {name}")));
             };
             // Surface only once the body is in hand, so the card never claims
             // a load that did not happen.
@@ -1033,7 +1026,7 @@ fn builtin_skill_list(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
             if !out.is_empty() {
                 out.push('\n');
             }
-            out.push_str(&format!("{}: {}", s.name, s.description));
+            let _ = write!(out, "{}: {}", s.name, s.description);
         }
     }
     shell.surface(Value::map(vec![
@@ -1157,7 +1150,7 @@ mod tests {
     fn status(b: Break) -> i32 {
         match b {
             Break::Error(e) => e.exit_code(),
-            other => panic!("expected Break::Error, got {other:?}"),
+            other @ Break::Escape(_) => panic!("expected Break::Error, got {other:?}"),
         }
     }
 
@@ -1172,7 +1165,10 @@ mod tests {
     /// within it, each resolved at the floor radius.
     #[test]
     fn window_hashes_floor_at_min_radius() {
-        let rows: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| s.to_string()).collect();
+        let rows: Vec<String> = ["a", "b", "c", "d"]
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         let hashes = window_hashes(&rows);
         assert_eq!(hashes.len(), rows.len());
         // The window clamps to the whole file, so every witness folds in the
@@ -1249,7 +1245,7 @@ mod tests {
     /// `grep-files` builtin now owns that walk (`search_tree`).
     #[test]
     fn search_files_honours_a_cancelled_scope() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(ral_core::io::TerminalState::default());
         shell
             .foreground()
             .cancel(ral_core::process::CancelCause::Interrupt);
@@ -1262,7 +1258,7 @@ mod tests {
     /// scope, surfacing status 130 before listing any entry.
     #[test]
     fn explore_dir_honours_a_cancelled_scope() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(ral_core::io::TerminalState::default());
         shell
             .foreground()
             .cancel(ral_core::process::CancelCause::Interrupt);
@@ -1334,7 +1330,7 @@ mod tests {
     /// `class: Durable`, `cmd` the description verbatim.
     #[test]
     fn service_registers_as_durable_with_its_description() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(ral_core::io::TerminalState::default());
         install_on(&mut shell);
         ral_core::builtins::register_builtins(WORKER_TEST_BUILTINS);
         shell.install_builtins(WORKER_TEST_BUILTINS);
@@ -1357,7 +1353,7 @@ mod tests {
     /// as the only way back.
     #[test]
     fn service_handle_reacquires_a_durable_service_and_await_round_trips() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(ral_core::io::TerminalState::default());
         install_on(&mut shell);
         run_top_level(&mut shell, r#"service "answer" { 42 }"#);
 
@@ -1388,7 +1384,7 @@ mod tests {
     /// reacquired handle then delivers the cached result, never blocking.
     #[test]
     fn service_handle_reacquires_a_settled_but_unclaimed_service() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(ral_core::io::TerminalState::default());
         install_on(&mut shell);
         run_top_level(&mut shell, r#"service "answer" { 42 }"#);
 
@@ -1430,7 +1426,7 @@ mod tests {
     /// An id naming no registered worker at all is refused.
     #[test]
     fn service_handle_errors_on_an_unknown_id() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(ral_core::io::TerminalState::default());
         install_on(&mut shell);
         let err = match builtin_service_handle(&[Value::Int(999_999)], &mut shell) {
             Err(Break::Error(e)) => e,
@@ -1445,7 +1441,7 @@ mod tests {
     /// ledger's job, not this verb's.
     #[test]
     fn service_handle_refuses_an_ephemeral_worker_id() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(ral_core::io::TerminalState::default());
         install_on(&mut shell);
         ral_core::builtins::register_builtins(WORKER_TEST_BUILTINS);
         shell.install_builtins(WORKER_TEST_BUILTINS);
@@ -1512,7 +1508,7 @@ mod tests {
                 .any(|e| e.name.as_ref() == "service"),
             "the REPL's host surface (watch) must not smuggle service in"
         );
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(ral_core::io::TerminalState::default());
         assert!(
             shell.lookup_builtin("service").is_none(),
             "a bare shell (the REPL's baseline) must not dispatch service"

@@ -76,9 +76,8 @@ impl Error {
     /// Exit code to append in compact formatting, if any.
     pub fn status_code_for_display(&self) -> Option<i32> {
         match &self.status {
-            Status::Code(0) => None,
+            Status::Code(0) | Status::Process(_) => None,
             Status::Code(code) => Some(*code),
-            Status::Process(_) => None,
         }
     }
 }

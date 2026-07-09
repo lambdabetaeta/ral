@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn arm_does_not_fire_before_the_ceiling() {
         let scope = CancelScope::default();
-        let _d = arm_lifetime(scope.clone(), Duration::from_secs(3600));
+        let _d = arm_lifetime(scope.clone(), Duration::from_hours(1));
         std::thread::sleep(Duration::from_millis(50));
         assert!(
             !scope.is_cancelled(),
@@ -432,16 +432,16 @@ mod tests {
     fn callback_can_rearm_itself() {
         let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-        fn rearm(count: Arc<std::sync::atomic::AtomicUsize>) {
+        fn rearm(count: &Arc<std::sync::atomic::AtomicUsize>) {
             let n = count.fetch_add(1, Ordering::AcqRel) + 1;
             if n < 3 {
                 let next = count.clone();
-                arm_callback(Duration::from_millis(15), move || rearm(next)).keep();
+                arm_callback(Duration::from_millis(15), move || rearm(&next)).keep();
             }
         }
 
         let first = count.clone();
-        arm_callback(Duration::from_millis(15), move || rearm(first)).keep();
+        arm_callback(Duration::from_millis(15), move || rearm(&first)).keep();
 
         let mut reached = false;
         for _ in 0..200 {

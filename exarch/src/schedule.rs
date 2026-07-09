@@ -459,7 +459,7 @@ impl ScheduleRegistry {
     fn arm_deadline(&self, id: ScheduleId, mailbox: &Mailbox, delay: Duration) -> Deadline {
         let reg = self.clone();
         let mailbox = mailbox.clone();
-        arm_callback(delay, move || reg.fire(id, mailbox))
+        arm_callback(delay, move || reg.fire(id, &mailbox))
     }
 
     /// The reaper fired this schedule's deadline.  Posts a wakeup (unless a
@@ -470,7 +470,7 @@ impl ScheduleRegistry {
     /// drops: a park verdict reads `armed()` under the consumer's inbox
     /// mutex, so the process-wide lock order is inbox → registry (see
     /// `bus`'s module docs) and a push must never run under this lock.
-    fn fire(&self, id: ScheduleId, mailbox: Mailbox) {
+    fn fire(&self, id: ScheduleId, mailbox: &Mailbox) {
         let mut g = self.lock();
         let Some(entry) = g.entries.get_mut(&id) else {
             return; // unscheduled or cleared between arming and firing
@@ -490,12 +490,11 @@ impl ScheduleRegistry {
             })
         };
         if recurring {
-            match entry.trigger.next_delay() {
-                Some(delay) => entry.deadline = self.arm_deadline(id, &mailbox, delay),
-                None => {
-                    let _ = entry;
-                    g.entries.remove(&id);
-                }
+            if let Some(delay) = entry.trigger.next_delay() {
+                entry.deadline = self.arm_deadline(id, mailbox, delay);
+            } else {
+                let _ = entry;
+                g.entries.remove(&id);
             }
         } else {
             let _ = entry;
@@ -510,7 +509,7 @@ impl ScheduleRegistry {
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -609,9 +608,9 @@ mod tests {
 
     #[test]
     fn parse_duration_units() {
-        assert_eq!(parse_duration("30m").unwrap(), Duration::from_secs(1800));
-        assert_eq!(parse_duration("2h").unwrap(), Duration::from_secs(7200));
-        assert_eq!(parse_duration("1d").unwrap(), Duration::from_secs(86_400));
+        assert_eq!(parse_duration("30m").unwrap(), Duration::from_mins(30));
+        assert_eq!(parse_duration("2h").unwrap(), Duration::from_hours(2));
+        assert_eq!(parse_duration("1d").unwrap(), Duration::from_hours(24));
         assert_eq!(parse_duration("45s").unwrap(), Duration::from_secs(45));
         assert!(parse_duration("2x").is_err());
         assert!(parse_duration("0m").is_err());

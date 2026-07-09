@@ -128,7 +128,7 @@ pub(super) fn setup_panic_hook() {
             let home = crate::platform::home_dir();
             std::panic::set_hook(Box::new(move |info| {
                 unsafe {
-                    libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &t);
+                    libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw const t);
                 }
                 let dir = ral_core::path::basedir::resolve_xdg(
                     ral_core::path::basedir::XdgKind::State,

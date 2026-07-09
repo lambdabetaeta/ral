@@ -536,7 +536,7 @@ impl Shell {
     pub(crate) fn install_remote_context(&mut self, name: String, file: FileId, text: &str) {
         let source = Source::from_text(&name, text);
         self.turn.loc.current = file;
-        self.turn.loc.script = name.clone();
+        self.turn.loc.script.clone_from(&name);
         self.turn.loc.call_site.script = name;
         self.turn.loc.source = Some(source);
     }
@@ -586,8 +586,7 @@ impl Shell {
             },
             "nproc" => Some(Value::Int(
                 std::thread::available_parallelism()
-                    .map(|n| n.get() as i64)
-                    .unwrap_or(1),
+                    .map_or(1, |n| n.get() as i64),
             )),
             "CWD" => {
                 let p = self.cwd();
@@ -627,7 +626,7 @@ impl Shell {
     /// Set `last_status` from a boolean (`true` → 0, `false` → 1).
     #[inline]
     pub fn set_status_from_bool(&mut self, ok: bool) {
-        self.mobile.control.last_status = if ok { 0 } else { 1 };
+        self.mobile.control.last_status = i32::from(!ok);
     }
 
     /// Write `bytes` to the current stdout sink.
@@ -660,7 +659,7 @@ impl Shell {
 
 impl Default for Shell {
     fn default() -> Self {
-        Self::new(Default::default())
+        Self::new(crate::io::TerminalState::default())
     }
 }
 
@@ -670,7 +669,7 @@ mod tests {
 
     #[test]
     fn pseudo_var_cwd_is_live() {
-        let shell = Shell::new(Default::default());
+        let shell = Shell::new(crate::io::TerminalState::default());
         let val = shell.pseudo_var("CWD").expect("$CWD must resolve");
         match val {
             Value::String(s) => assert!(!s.is_empty(), "$CWD must be non-empty"),
@@ -680,7 +679,7 @@ mod tests {
 
     #[test]
     fn pseudo_var_status_reflects_last_status() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.set_status_from_bool(false);
         let val = shell.pseudo_var("STATUS").expect("$STATUS must resolve");
         assert_eq!(val, Value::Int(1));
@@ -691,7 +690,7 @@ mod tests {
 
     #[test]
     fn pseudo_var_user_is_live() {
-        let shell = Shell::new(Default::default());
+        let shell = Shell::new(crate::io::TerminalState::default());
         let val = shell.pseudo_var("USER").expect("$USER must resolve");
         match val {
             Value::String(s) => assert!(!s.is_empty(), "$USER must be non-empty"),
@@ -701,13 +700,13 @@ mod tests {
 
     #[test]
     fn pseudo_var_unknown_returns_none() {
-        let shell = Shell::new(Default::default());
+        let shell = Shell::new(crate::io::TerminalState::default());
         assert!(shell.pseudo_var("NOSUCHVAR").is_none());
     }
 
     #[test]
     fn lookup_value_name_sees_pseudo_vars() {
-        let shell = Shell::new(Default::default());
+        let shell = Shell::new(crate::io::TerminalState::default());
         assert!(shell.lookup_value_name("CWD").is_some());
         assert!(shell.lookup_value_name("STATUS").is_some());
         assert!(shell.lookup_value_name("USER").is_some());

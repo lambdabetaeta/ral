@@ -8,7 +8,10 @@
 //! live user, so every malformed shape is a strict error carrying a
 //! shape-specific hint.
 
-use crate::types::*;
+use crate::types::{
+    Capabilities, EditorPolicy, ExecDir, ExecMap, ExecPolicy, FsPolicy, Settled, ShellPolicy,
+    Value, as_map, as_map_ref, sig,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 // ── Dimension decoders ────────────────────────────────────────────────────
@@ -30,7 +33,7 @@ fn decode_fs(
     let mut fp = FsPolicy::default();
     for (sub, paths) in entries {
         let raw: Vec<String> = match paths {
-            Value::List(items) => items.iter().map(|i| i.to_string()).collect(),
+            Value::List(items) => items.iter().map(std::string::ToString::to_string).collect(),
             other => {
                 return Err(sig(format!(
                     "{err_prefix}: '{sub}' must be a list of paths, got {} (use [\"/path\"])",
@@ -215,7 +218,7 @@ fn freeze_exec_map(
             let verdict = match policy {
                 ExecPolicy::Allow => ExecDir::Allow,
                 ExecPolicy::Deny => ExecDir::Deny,
-                _ => {
+                ExecPolicy::Subcommands(_) => {
                     return Err(format!(
                         "{err_prefix}: 'path:' only takes 'allow' or 'deny', not a subcommand list"
                     ));
@@ -326,7 +329,8 @@ fn decode_exec_grant(value: &Value, err_prefix: &str) -> Settled<ExecMap> {
                 )));
             }
             Value::List(items) => {
-                let subs: BTreeSet<String> = items.iter().map(|i| i.to_string()).collect();
+                let subs: BTreeSet<String> =
+                    items.iter().map(std::string::ToString::to_string).collect();
                 if subs.is_empty() {
                     ExecPolicy::Allow
                 } else {
@@ -414,7 +418,7 @@ mod tests {
         let err = decode_exec_grant(&v, "test").unwrap_err();
         let msg = match err {
             crate::types::Break::Error(e) => e.message,
-            other => panic!("unexpected: {other:?}"),
+            other @ crate::types::Break::Escape(_) => panic!("unexpected: {other:?}"),
         };
         assert!(msg.contains("'allow'"), "expected lowercase hint: {msg}");
         assert!(msg.contains("Allow"), "expected offending token: {msg}");
@@ -428,7 +432,7 @@ mod tests {
         let err = decode_exec_grant(&v, "test").unwrap_err();
         let msg = match err {
             crate::types::Break::Error(e) => e.message,
-            other => panic!("unexpected: {other:?}"),
+            other @ crate::types::Break::Escape(_) => panic!("unexpected: {other:?}"),
         };
         assert!(
             msg.contains("'allow'") && msg.contains("'deny'") && msg.contains("[]"),

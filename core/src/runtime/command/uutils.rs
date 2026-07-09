@@ -15,7 +15,10 @@
     any(unix, windows),
     any(feature = "coreutils", feature = "diffutils", feature = "ripgrep")
 ))]
-use {crate::types::*, std::io::Write};
+use {
+    crate::types::{Break, Error, Settled, Shell, Value},
+    std::io::Write,
+};
 
 #[cfg(all(
     any(unix, windows),
@@ -110,7 +113,9 @@ pub(crate) fn run_uutils_in_process(
     // caught below, and `reset_exit_code` immediately clears the cell),
     // so proceed under the poisoned guard exactly as the other
     // process-local serialisation mutexes in the tree do.
-    let _exit_code_guard = INLINE_UUTILS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _exit_code_guard = INLINE_UUTILS_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     uutils::reset_exit_code();
 
@@ -145,23 +150,20 @@ pub(crate) fn run_uutils_in_process(
     std::io::stdout().flush().ok();
     std::io::stderr().flush().ok();
 
-    let exit_code = match result {
-        Ok(code) => {
-            let global = uutils::get_exit_code();
-            if global == 0 { code } else { global }
-        }
-        Err(_) => {
-            // Door 3 — EXEC (inline bundled, panic branch): a panicking tool
-            // surfaces as status 1, outcome "bad".  Emit before propagating
-            // so this completion door fires exactly once, like the normal
-            // branch below.
-            drop(_exit_code_guard);
-            shell.emit_io(super::io_event::exec(tool, arg_strs, 1));
-            return Err(Break::Error(
-                Error::new(format!("bundled tool '{tool}' panicked"), 1)
-                    .at_loc(shell.turn.loc.source_loc(0)),
-            ));
-        }
+    let exit_code = if let Ok(code) = result {
+        let global = uutils::get_exit_code();
+        if global == 0 { code } else { global }
+    } else {
+        // Door 3 — EXEC (inline bundled, panic branch): a panicking tool
+        // surfaces as status 1, outcome "bad".  Emit before propagating
+        // so this completion door fires exactly once, like the normal
+        // branch below.
+        drop(_exit_code_guard);
+        shell.emit_io(super::io_event::exec(tool, arg_strs, 1));
+        return Err(Break::Error(
+            Error::new(format!("bundled tool '{tool}' panicked"), 1)
+                .at_loc(shell.turn.loc.source_loc(0)),
+        ));
     };
 
     // The exit-code cell has been read; release the lock before the
@@ -224,7 +226,9 @@ mod tests {
                 s.spawn(move || {
                     start.wait();
                     for _ in 0..2_000 {
-                        let _g = INLINE_UUTILS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                        let _g = INLINE_UUTILS_LOCK
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         cell.0.set(code);
                         // A sibling permitted into this window would
                         // overwrite `code` before we read it back.

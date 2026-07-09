@@ -80,7 +80,7 @@ impl PromptEditor {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.state.lines.iter_row().all(|l| l.is_empty())
+        self.state.lines.iter_row().all(std::vec::Vec::is_empty)
     }
 
     pub fn row(&self) -> usize {
@@ -109,14 +109,11 @@ impl PromptEditor {
         let col = self.state.cursor.col;
         let prior: usize = (0..row)
             .map(|r| {
-                row_to_string(&self.state.lines, r)
-                    .map(|s| s.len() + 1)
-                    .unwrap_or(0)
+                row_to_string(&self.state.lines, r).map_or(0, |s| s.len() + 1)
             })
             .sum();
-        let byte_col = row_to_string(&self.state.lines, row)
-            .map(|s| char_to_byte(&s, col))
-            .unwrap_or(0);
+        let byte_col =
+            row_to_string(&self.state.lines, row).map_or(0, |s| char_to_byte(&s, col));
         prior + byte_col
     }
 
@@ -349,7 +346,9 @@ fn shell_line_edit_edtui(state: &mut EditorState, key: &KeyEvent) -> bool {
 /// panicking `From` is only ever reached for codes it accepts. An unmatched key
 /// is one the editor has no binding for; ignoring it is the correct behaviour.
 fn key_to_edtui(key: crossterm::event::KeyEvent) -> Option<edtui::events::KeyInput> {
-    use crossterm::event::KeyCode::*;
+    use crossterm::event::KeyCode::{
+        Backspace, Char, Delete, Down, End, Enter, Esc, Home, Left, PageDown, PageUp, Right, Tab, Up,
+    };
     match key.code {
         Char(_) | Enter | Esc | Backspace | Delete | Tab | Left | Right | Up | Down | Home
         | End | PageUp | PageDown => Some(edtui::events::KeyInput::from(key)),
@@ -360,8 +359,7 @@ fn key_to_edtui(key: crossterm::event::KeyEvent) -> Option<edtui::events::KeyInp
 fn char_to_byte(text: &str, cursor: usize) -> usize {
     text.char_indices()
         .nth(cursor)
-        .map(|(i, _)| i)
-        .unwrap_or(text.len())
+        .map_or(text.len(), |(i, _)| i)
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────

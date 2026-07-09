@@ -41,12 +41,12 @@
 //! pre-pass to detect mutually recursive binding groups, then elaborates
 //! each group.
 
-use crate::ir::*;
+use crate::ir::{IrPattern, CommandName, Args, RedirectV, Comp, CommandWord, CompKind, Exec, Val, ValListElem, ScopeOp, ValMapEntry, ValRedirectTarget};
 use crate::prelude_manifest;
 use crate::source::Span;
 use crate::source::Spanned;
 use crate::source::WithSpan;
-use crate::syntax::ast::*;
+use crate::syntax::ast::{Pattern, MapPatternEntry, Stmt, Ast, Word, Head, ScopeAst, ListElem, MapEntry, IfBranch, Redirect, RedirectTarget, Expr};
 use crate::syntax::group::{StmtGroup, group_stmts};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -358,7 +358,7 @@ impl Elaborator {
     /// boundary to produce the final `Comp::Bind` chain.
     fn elab_expr(&mut self, ast: &Ast, binds: &mut Vec<(IrPattern, Comp)>) -> Comp {
         match ast {
-            Ast::Word(Word::Plain(s)) | Ast::Word(Word::Slash(s)) => {
+            Ast::Word(Word::Plain(s) | Word::Slash(s)) => {
                 comp!(self, CompKind::Return(Val::from_word(s)))
             }
             Ast::Literal(s) => comp!(self, CompKind::Return(Val::String(s.clone()))),
@@ -699,7 +699,7 @@ impl Elaborator {
                 }
             ),
 
-            Ast::If { branches, else_ } => self.elab_if(branches, else_, binds),
+            Ast::If { branches, else_ } => self.elab_if(branches, else_.as_ref(), binds),
 
             Ast::Case { scrutinee, table } => comp!(
                 self,
@@ -744,7 +744,7 @@ impl Elaborator {
     fn elab_if(
         &mut self,
         branches: &[IfBranch],
-        else_: &Option<Spanned<Box<Ast>>>,
+        else_: Option<&Spanned<Box<Ast>>>,
         binds: &mut Vec<(IrPattern, Comp)>,
     ) -> Comp {
         let (first, rest) = branches
@@ -857,13 +857,12 @@ impl Elaborator {
     /// Hoist a `Comp` into `binds` and yield the `Val` the parent consumes.
     /// `Return(v)` passes through; anything else is bound to a fresh `_gN`.
     fn hoist(&mut self, comp: Comp, binds: &mut Vec<(IrPattern, Comp)>) -> Val {
-        match comp.item {
-            CompKind::Return(v) => v,
-            _ => {
-                let name = self.gensym();
-                binds.push((IrPattern::Name(name.clone()), comp));
-                Val::Variable(name)
-            }
+        if let CompKind::Return(v) = comp.item {
+            v
+        } else {
+            let name = self.gensym();
+            binds.push((IrPattern::Name(name.clone()), comp));
+            Val::Variable(name)
         }
     }
 
@@ -1130,7 +1129,7 @@ fn prelude_scope() -> HashSet<String> {
         .get_or_init(|| {
             prelude_manifest::PRELUDE_EXPORTS
                 .iter()
-                .map(|s| s.to_string())
+                .map(std::string::ToString::to_string)
                 .collect()
         })
         .clone()

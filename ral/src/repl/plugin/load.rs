@@ -214,7 +214,7 @@ fn tag_load_error(e: Break) -> Break {
             }
             Break::Error(err)
         }
-        other => other,
+        other @ Break::Escape(_) => other,
     }
 }
 

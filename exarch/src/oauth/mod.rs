@@ -106,6 +106,8 @@ impl OAuthToken {
 
 /// The token-endpoint success body shared by both interactive flows.
 #[derive(Deserialize)]
+// The `_token` suffix is the token-endpoint wire format; renaming would break serde.
+#[allow(clippy::struct_field_names)]
 pub(super) struct RawTokens {
     pub id_token: String,
     pub access_token: String,
@@ -221,15 +223,12 @@ fn load_all_at(path: &std::path::Path) -> Vec<OAuthToken> {
 
 fn save_one_at(path: &std::path::Path, token: &OAuthToken) -> Result<bool, String> {
     let mut all = load_all_at(path);
-    let replaced = match all.iter_mut().find(|t| t.account_id == token.account_id) {
-        Some(existing) => {
-            *existing = token.clone();
-            true
-        }
-        None => {
-            all.push(token.clone());
-            false
-        }
+    let replaced = if let Some(existing) = all.iter_mut().find(|t| t.account_id == token.account_id) {
+        *existing = token.clone();
+        true
+    } else {
+        all.push(token.clone());
+        false
     };
     write_all_at(path, &all)?;
     Ok(replaced)
@@ -287,6 +286,8 @@ fn clear_at(path: &std::path::Path) -> Result<(), String> {
 /// Exchange the refresh token for a fresh [`OAuthToken`].
 pub(crate) async fn refresh(current: &OAuthToken) -> Result<OAuthToken, String> {
     #[derive(Deserialize)]
+    // The `_token` suffix is the token-endpoint wire format; renaming would break serde.
+    #[allow(clippy::struct_field_names)]
     struct RefreshResponse {
         id_token: Option<String>,
         access_token: Option<String>,

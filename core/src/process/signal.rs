@@ -481,7 +481,7 @@ impl CancelScope {
     /// signal-reachable slot. The flag lives in the scope's `Arc`; the
     /// caller must keep the scope alive for the slot's tenure.
     pub(crate) fn flag_ptr(&self) -> *const AtomicU8 {
-        &self.0.flag
+        &raw const self.0.flag
     }
 }
 
@@ -525,7 +525,7 @@ pub struct ForegroundCancelSlot {
 /// marked by `SessionState::publishes_signal_slots`.  A forked session's
 /// turns never publish; hosts cancel them through their own scope handles.
 pub fn publish_foreground(scope: &CancelScope) -> ForegroundCancelSlot {
-    let prev = FOREGROUND_SCOPE.swap(scope.flag_ptr() as *mut AtomicU8, Ordering::Release);
+    let prev = FOREGROUND_SCOPE.swap(scope.flag_ptr().cast_mut(), Ordering::Release);
     ForegroundCancelSlot { prev }
 }
 
@@ -545,7 +545,7 @@ pub struct RootCancelSlot {
 /// Publish `scope`'s flag as the durable-root-cancel target for the returned
 /// guard's lifetime, saving and restoring the prior publication on drop.
 pub fn publish_durable_root(scope: &CancelScope) -> RootCancelSlot {
-    let prev = DURABLE_ROOT_SCOPE.swap(scope.flag_ptr() as *mut AtomicU8, Ordering::Release);
+    let prev = DURABLE_ROOT_SCOPE.swap(scope.flag_ptr().cast_mut(), Ordering::Release);
     RootCancelSlot { prev }
 }
 

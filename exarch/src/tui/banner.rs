@@ -58,7 +58,7 @@ pub(super) fn session_card(s: &SessionInfo<'_>, p: &Provider) -> Card {
     let max_t = match (p.max_tokens_override(), caps.max_output_tokens) {
         (Some(n), _) => n.to_string(),
         (None, Some(catalog)) => {
-            format!("auto (≤{})", provider::humanize_tokens(catalog as u64))
+            format!("auto (≤{})", provider::humanize_tokens(u64::from(catalog)))
         }
         (None, None) => "auto".into(),
     };

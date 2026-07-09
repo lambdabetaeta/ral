@@ -5,8 +5,10 @@
 //! reaches in here.  Resolution is env → builtins → handlers → external;
 //! the `^name` form skips env and builtins; path heads skip all three.
 
-use crate::ir::*;
-use crate::types::*;
+use crate::ir::{CommandName, CommandWord};
+use crate::types::{
+    Break, BuiltinEntry, HandlerArity, HandlerEntry, HandlerFrame, Map, Raw, Settled, Shell, Value,
+};
 
 use super::command::{self, CommandIdentity, EvalRedirectV};
 use crate::evaluator::audit;
@@ -160,9 +162,9 @@ pub(crate) fn run_call(
         Resolution::Env(value) => with_redirects(redirects, shell, |shell| {
             crate::evaluator::apply(value, args.to_vec(), shell).map_err(Into::into)
         }),
-        Resolution::Builtin(entry) => run_builtin(entry, args, redirects, shell),
+        Resolution::Builtin(entry) => run_builtin(&entry, args, redirects, shell),
         Resolution::Handler { entry, depth } => with_redirects(redirects, shell, |shell| {
-            run_handler(*entry, depth, args, shell)
+            run_handler(&entry, depth, args, shell)
         }),
         Resolution::External(id) => run_external(id, args, redirects, shell),
     }
@@ -170,7 +172,7 @@ pub(crate) fn run_call(
 
 /// Run a builtin command binding under the host-call envelope.
 fn run_builtin(
-    entry: BuiltinEntry,
+    entry: &BuiltinEntry,
     args: &[Value],
     redirects: &[EvalRedirectV],
     shell: &mut Shell,
@@ -216,7 +218,7 @@ impl Drop for MaskedHandler<'_> {
 /// Run a user handler entry.  The matched frame is lifted from the
 /// stack for the dynamic extent of the body so a same-name call from
 /// inside reaches the next outer match.
-fn run_handler(entry: HandlerEntry, depth: usize, args: &[Value], shell: &mut Shell) -> Raw<Value> {
+fn run_handler(entry: &HandlerEntry, depth: usize, args: &[Value], shell: &mut Shell) -> Raw<Value> {
     let thunk = entry.thunk.clone();
     let name = entry.name.clone();
     let call_args = match entry.arity {

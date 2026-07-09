@@ -401,7 +401,7 @@ impl Agent {
             agents,
             schedules: crate::schedule::ScheduleRegistry::new(),
             last_input: 0,
-            pins: Default::default(),
+            pins: Arc::default(),
             ral_epoch: 0,
             disk_warn_bytes,
             disk_check_epoch: 0,
@@ -1294,13 +1294,13 @@ impl Agent {
         if let Some(p) = prompt {
             self.log
                 .append_user(p)
-                .map_err(|e| ProviderError::Other(e.to_string()))?;
+                .map_err(|e| ProviderError::Other(e.clone()))?;
         }
         let mut n = 0u32;
         loop {
             n += 1;
             if n > MAX_STEPS {
-                return self.capped(emit);
+                return Ok(self.capped(emit));
             }
             self.log
                 .record_step(n, provider.tuning().clone())
@@ -1315,7 +1315,7 @@ impl Agent {
             let messages = self
                 .log
                 .render_messages()
-                .map_err(|e| ProviderError::Other(e.to_string()))?;
+                .map_err(|e| ProviderError::Other(e.clone()))?;
             ral_core::dbg_trace!(
                 "turn",
                 "render_messages: {} msgs in {:?}",
@@ -1355,7 +1355,7 @@ impl Agent {
             );
             if token.is_cancelled() {
                 emit.emit(Kind::Boundary);
-                return self.cancelled(emit);
+                return Ok(self.cancelled(emit));
             }
             let StepOut {
                 mut assistant_message,
@@ -1368,7 +1368,7 @@ impl Agent {
                 Ok(s) => s,
                 Err(ProviderError::Cancelled(_)) => {
                     emit.emit(Kind::Boundary);
-                    return self.cancelled(emit);
+                    return Ok(self.cancelled(emit));
                 }
                 Err(e) => {
                     emit.emit(Kind::Boundary);
@@ -1416,7 +1416,7 @@ impl Agent {
                     tool_ids,
                     stop_reason.as_ref().map(|r| r.raw().to_string()),
                 )
-                .map_err(|e| ProviderError::Other(e.to_string()))?;
+                .map_err(|e| ProviderError::Other(e.clone()))?;
             let truncated = cut_short.is_some();
             // The assistant turn was cut short — the output cap or a
             // mid-stream stall.  With no captured tool call there is nothing
@@ -1435,8 +1435,7 @@ impl Agent {
                     CutShort::OutputCap => {
                         let reason = stop_reason
                             .as_ref()
-                            .map(|r| r.raw().to_string())
-                            .unwrap_or_else(|| "max_tokens".into());
+                            .map_or_else(|| "max_tokens".into(), |r| r.raw().to_string());
                         self.note_error(
                             format!(
                                 "turn truncated (stop_reason={reason}): output cap reached. \
@@ -1483,7 +1482,7 @@ impl Agent {
             let Dispatch { results, injected } = self.dispatch(provider, tool_calls, token, emit);
             self.log
                 .append_tool_results(results)
-                .map_err(|e| ProviderError::Other(e.to_string()))?;
+                .map_err(|e| ProviderError::Other(e.clone()))?;
             // Everything that arrived during the batch lands now, mid-turn:
             // each source renders its own chrome (a `↘` block for a subagent, a
             // marked wakeup, a `spawn`'s cards), and their texts coalesce into
@@ -1499,16 +1498,16 @@ impl Agent {
                 }
                 self.log
                     .append_steering(text)
-                    .map_err(|e| ProviderError::Other(e.to_string()))?;
+                    .map_err(|e| ProviderError::Other(e.clone()))?;
             }
             if token.is_cancelled() {
-                return self.cancelled(emit);
+                return Ok(self.cancelled(emit));
             }
             // The batch has fully drained — every call dispatched, every
             // `call_id` answered.  If one of them was `reply`, end the run now
             // with its payload rather than looping for another round-trip.
             if let Some(payload) = self.reply.take() {
-                return self.replied(payload);
+                return Ok(self.replied(payload));
             }
         }
     }
@@ -1709,20 +1708,19 @@ impl Agent {
         // withheld tool (`reply` on the conversing trunk, the self-wakeup family
         // without `--allow-schedule`) is also unadvertised, so a well-behaved
         // model never names one here.
-        match self
+        if let Some(t) = self
             .tools
             .iter()
             .find(|t| t.name() == call.fn_name)
             .copied()
         {
-            Some(t) => t.dispatch(call.call_id, call.fn_arguments, self, provider, emit),
-            None => {
-                let msg = format!("unknown tool `{}`", call.fn_name);
-                self.note_error(msg.clone(), emit);
-                SessionToolResult {
-                    id: call.call_id,
-                    content: msg,
-                }
+            t.dispatch(call.call_id, call.fn_arguments, self, provider, emit)
+        } else {
+            let msg = format!("unknown tool `{}`", call.fn_name);
+            self.note_error(msg.clone(), emit);
+            SessionToolResult {
+                id: call.call_id,
+                content: msg,
             }
         }
     }
@@ -2010,7 +2008,7 @@ impl Agent {
     /// says actually changed to the viewport (the rendering half).
     fn settle_commitment(&mut self, turn: &Turn, emit: &Emitter) {
         let Turn::Agent(r) = turn else { return };
-        if let Some(kind) = self.apply_commitment_settle(&r.commitment_settle) {
+        if let Some(kind) = self.apply_commitment_settle(r.commitment_settle.as_ref()) {
             emit.emit(kind);
         }
     }
@@ -2023,7 +2021,7 @@ impl Agent {
     /// clear of a key that was not actually live both report `None`.
     fn apply_commitment_settle(
         &mut self,
-        settle: &Option<shell_eval::CommitmentSettle>,
+        settle: Option<&shell_eval::CommitmentSettle>,
     ) -> Option<Kind> {
         match settle {
             Some(shell_eval::CommitmentSettle::Open { key, card }) => {
@@ -2094,18 +2092,18 @@ impl Agent {
     /// the protocol sits in `AwaitingAssistantAfterToolResults`), cancel any
     /// live descendants, and return the payload.  `drive` then breaks the loop
     /// — `reply` hard-terminates.
-    fn replied(&mut self, payload: serde_json::Value) -> Result<TurnOutcome, ProviderError> {
+    fn replied(&mut self, payload: serde_json::Value) -> TurnOutcome {
         self.agents.cancel_descendants(self.id);
         self.log.quiesce(QuiesceReason::Replied);
-        Ok(TurnOutcome::Replied(payload))
+        TurnOutcome::Replied(payload)
     }
 
-    fn cancelled(&mut self, emit: &Emitter) -> Result<TurnOutcome, ProviderError> {
+    fn cancelled(&mut self, emit: &Emitter) -> TurnOutcome {
         self.log.quiesce(QuiesceReason::Cancelled);
         // The canonical log already carries `Cancelled` from quiesce;
         // this is the user-facing companion only.
         emit.emit(Kind::Error("cancelled".into()));
-        Ok(TurnOutcome::Cancelled)
+        TurnOutcome::Cancelled
     }
 
     /// Reached at the top of the round-trip loop once the step count
@@ -2115,13 +2113,13 @@ impl Agent {
     /// the forensic breadcrumb; the `StopReason` surfaces in the headless
     /// JSON result so a benchmark harness can tell a capped run from a
     /// completed one.
-    fn capped(&mut self, emit: &Emitter) -> Result<TurnOutcome, ProviderError> {
+    fn capped(&mut self, emit: &Emitter) -> TurnOutcome {
         self.note_error(
             format!("step cap reached ({MAX_STEPS} provider round-trips); ending turn"),
             emit,
         );
         emit.emit(Kind::StopReason("step_cap".into()));
-        Ok(TurnOutcome::Capped)
+        TurnOutcome::Capped
     }
 }
 
@@ -2212,7 +2210,7 @@ fn agent_digest(
         // never replied did not complete its contract, so it fails honestly
         // rather than handing up a trailing fragment that masquerades as the
         // answer.  Re-nudged within budget first (see [`nudge`]).
-        Ok(TurnOutcome::Complete(_)) | Ok(TurnOutcome::Empty) => (
+        Ok(TurnOutcome::Complete(_) | TurnOutcome::Empty) => (
             AgentOutcome::Failed("ended without calling `reply`".into()),
             None,
         ),
@@ -2286,7 +2284,7 @@ const EMPTY_ASSISTANT_STUB: &str = "(no content)";
 ///   empty.
 fn admit_assistant(msg: &mut genai::chat::ChatMessage) {
     use genai::chat::ContentPart;
-    for part in msg.content.iter_mut() {
+    for part in &mut msg.content {
         if let ContentPart::ToolCall(tc) = part
             && !tc.fn_arguments.is_object()
         {
@@ -2633,7 +2631,7 @@ mod tests {
     }
 
     /// A `reply` tool call carrying `result`.
-    fn reply_call(id: &str, result: serde_json::Value) -> ToolCall {
+    fn reply_call(id: &str, result: &serde_json::Value) -> ToolCall {
         ToolCall {
             call_id: id.into(),
             fn_name: "reply".into(),
@@ -2667,7 +2665,7 @@ mod tests {
             "test-model",
             Script::new().then(Reply::tool_calls(vec![reply_call(
                 "r1",
-                serde_json::json!("# Report\nline one\nline two"),
+                &serde_json::json!("# Report\nline one\nline two"),
             )])),
         );
         let (outcome, text) = drive_peer(&mut child, provider);
@@ -2740,7 +2738,7 @@ mod tests {
             "test-model",
             Script::new().then(Reply::tool_calls(vec![reply_call(
                 "r1",
-                serde_json::json!("done"),
+                &serde_json::json!("done"),
             )])),
         );
         let (outcome, text) = drive_peer(&mut child, provider);
@@ -2782,7 +2780,7 @@ mod tests {
             "test-model",
             Script::new().then(Reply::tool_calls(vec![reply_call(
                 "r1",
-                serde_json::json!({ "files": ["a.rs", "b.rs"] }),
+                &serde_json::json!({ "files": ["a.rs", "b.rs"] }),
             )])),
         );
         let (outcome, text) = drive_peer(&mut child, provider);
@@ -3007,7 +3005,7 @@ mod tests {
             }],
         }]);
 
-        match session.apply_commitment_settle(&Some(shell_eval::CommitmentSettle::Open {
+        match session.apply_commitment_settle(Some(&shell_eval::CommitmentSettle::Open {
             key: key.clone(),
             card: card.clone(),
         })) {
@@ -3022,7 +3020,7 @@ mod tests {
 
         assert!(
             session
-                .apply_commitment_settle(&Some(shell_eval::CommitmentSettle::Clear(
+                .apply_commitment_settle(Some(&shell_eval::CommitmentSettle::Clear(
                     "commitment:never-opened".into()
                 )))
                 .is_none(),
@@ -3030,7 +3028,7 @@ mod tests {
         );
 
         match session
-            .apply_commitment_settle(&Some(shell_eval::CommitmentSettle::Clear(key.clone())))
+            .apply_commitment_settle(Some(&shell_eval::CommitmentSettle::Clear(key.clone())))
         {
             Some(Kind::Unpin { key: k }) => assert_eq!(k, key),
             Some(_) => panic!("expected an Unpin event for a live clear, got some other Kind"),
@@ -3105,11 +3103,11 @@ mod tests {
             Script::new()
                 .then(Reply::tool_calls(vec![reply_call(
                     "r1",
-                    serde_json::json!("done"),
+                    &serde_json::json!("done"),
                 )]))
                 .then(Reply::tool_calls(vec![reply_call(
                     "r2",
-                    serde_json::json!("done"),
+                    &serde_json::json!("done"),
                 )])),
         ));
         let (tx, _rx) = crate::bus::channel();
@@ -3333,7 +3331,7 @@ mod tests {
         let schedules = agent.schedules.clone();
         schedules
             .schedule(
-                crate::schedule::Trigger::After(std::time::Duration::from_secs(3600)),
+                crate::schedule::Trigger::After(std::time::Duration::from_hours(1)),
                 "ping".into(),
                 None,
                 agent.inbox.mailbox(),

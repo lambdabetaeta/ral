@@ -29,8 +29,7 @@ fn fresh_tmp_script_path(prefix: &str) -> PathBuf {
     let id = NEXT_TMP_ID.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     tmp.push(format!("{prefix}_{pid}_{id}_{nanos}.ral"));
     tmp
 }
@@ -338,8 +337,7 @@ fn pipeline_stage_redirect_to_file_is_honored() {
     let pid = std::process::id();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     let path = std::env::temp_dir().join(format!("ral_pipe_redir_{pid}_{nanos}.txt"));
     let path_str = path.display().to_string();
     let _ = std::fs::remove_file(&path);
@@ -663,7 +661,7 @@ let _go = { |n|
 _go 50
 echo done
 "#;
-    let o = run_with_timeout(&[], script, Duration::from_secs(60))
+    let o = run_with_timeout(&[], script, Duration::from_mins(1))
         .expect("sequential pipeline stress timed out");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert!(o.stdout.contains("done"));
@@ -1236,8 +1234,7 @@ fn bwrap_functional() -> bool {
         .stderr(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 #[cfg(target_os = "macos")]
@@ -1253,8 +1250,7 @@ fn macos_sandbox_functional() -> bool {
         .stderr(Stdio::null())
         .stdout(Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 #[test]
@@ -1414,8 +1410,7 @@ fn grant_fs_write_through_symlinked_prefix_to_nonexistent_target() {
     let pid = std::process::id();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     let real = std::env::temp_dir().join(format!("ral_grant_real_{pid}_{nanos}"));
     let link = std::env::temp_dir().join(format!("ral_grant_link_{pid}_{nanos}"));
     std::fs::create_dir_all(&real).unwrap();
@@ -1775,7 +1770,7 @@ mod pty_helper {
         use std::os::unix::ffi::OsStrExt;
         let mut bytes = path.as_os_str().as_bytes().to_vec();
         bytes.push(0);
-        let fd = unsafe { libc::open(bytes.as_ptr() as *const _, libc::O_RDWR | libc::O_NOCTTY) };
+        let fd = unsafe { libc::open(bytes.as_ptr().cast(), libc::O_RDWR | libc::O_NOCTTY) };
         if fd < 0 {
             return Err(std::io::Error::last_os_error());
         }
@@ -1791,7 +1786,7 @@ mod pty_helper {
     /// cast lets the request argument coerce to whatever `ioctl`
     /// expects on the target.
     pub unsafe fn become_controlling(fd: RawFd) -> std::io::Result<()> {
-        if unsafe { libc::ioctl(fd, libc::TIOCSCTTY as _, 0) } < 0 {
+        if unsafe { libc::ioctl(fd, libc::TIOCSCTTY.into(), 0) } < 0 {
             return Err(std::io::Error::last_os_error());
         }
         Ok(())
@@ -2129,8 +2124,7 @@ fn audited_stdout_redirect_does_not_panic() {
     let pid = std::process::id();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     let path = std::env::temp_dir().join(format!("ral_audit_redir_stdout_{pid}_{nanos}.txt"));
     let path_str = path.display().to_string();
     let _ = std::fs::remove_file(&path);
@@ -2154,8 +2148,7 @@ fn audited_stderr_redirect_does_not_panic() {
     let pid = std::process::id();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     let path = std::env::temp_dir().join(format!("ral_audit_redir_stderr_{pid}_{nanos}.txt"));
     let path_str = path.display().to_string();
     let _ = std::fs::remove_file(&path);
@@ -2181,8 +2174,7 @@ fn audited_stdout_and_stderr_redirect_does_not_panic() {
     let pid = std::process::id();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     let path = std::env::temp_dir().join(format!("ral_audit_redir_both_{pid}_{nanos}.txt"));
     let path_str = path.display().to_string();
     let _ = std::fs::remove_file(&path);
@@ -2195,7 +2187,7 @@ fn audited_stdout_and_stderr_redirect_does_not_panic() {
     let _ = std::fs::remove_file(&path);
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     let body = body.unwrap_or_default();
-    assert!(body.contains("o") && body.contains("e"), "body: {body}");
+    assert!(body.contains('o') && body.contains('e'), "body: {body}");
 }
 
 // ── Audit survives helper errors ─────────────────────────────────────────────
@@ -2240,8 +2232,7 @@ fn write_tmp_lines(prefix: &str, lines: &[&str]) -> PathBuf {
     let id = NEXT_TMP_ID.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     tmp.push(format!("{prefix}_{pid}_{id}_{nanos}.txt"));
     let body = lines.join("\n") + "\n";
     std::fs::write(&tmp, body).unwrap();

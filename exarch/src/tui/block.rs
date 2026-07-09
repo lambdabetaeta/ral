@@ -848,7 +848,6 @@ impl Block {
             BlockKind::DiallableTool { tool, .. } if *tool != "agents" => {
                 Some(RailKind::ToolCall(level >= Reveal::Context))
             }
-            BlockKind::DiallableTool { .. } => None,
             // A summary-less query is a tool call still — the shut triangle
             // `▸`, inert (nothing to dial open).  Only the per-block log tee
             // renders a query alone and reaches this; on screen the coalesced
@@ -856,7 +855,7 @@ impl Block {
             BlockKind::PlainTool { tool, .. } if *tool != "agents" => {
                 Some(RailKind::ToolCall(false))
             }
-            BlockKind::PlainTool { .. } => None,
+            BlockKind::DiallableTool { .. } | BlockKind::PlainTool { .. } => None,
             BlockKind::Markdown { .. } => Some(RailKind::Markdown),
             BlockKind::Thinking(_) => Some(RailKind::Thinking),
             // The `↘` keeps the delegated-result identity even on error; the
@@ -972,9 +971,11 @@ pub(super) fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>
     // contract still strips a leading rail glyph), and continuations re-indent
     // to their summed width.
     let spans = line.spans.as_slice();
-    let rail = spans
-        .first()
-        .is_some_and(|s| RAIL_GLYPHS.contains(&s.content.as_ref())) as usize;
+    let rail = usize::from(
+        spans
+            .first()
+            .is_some_and(|s| RAIL_GLYPHS.contains(&s.content.as_ref())),
+    );
     let mut head_len = rail;
     while spans
         .get(head_len)

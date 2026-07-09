@@ -227,10 +227,10 @@ pub fn fmt_comp_ty_ctx(cty: &CompTy, ctx: &FmtCtx) -> String {
         CompTy::Fun(a, b) => format!("{} → {}", fmt_ty_ctx(a, ctx), fmt_comp_ty_ctx(b, ctx)),
         CompTy::Return(spec, a) => {
             let mut fields: Vec<String> = Vec::new();
-            if let Some(s) = fmt_mode_field_ctx(&spec.input) {
+            if let Some(s) = fmt_mode_field_ctx(spec.input) {
                 fields.push(format!("stdin: {}", s));
             }
-            if let Some(s) = fmt_mode_field_ctx(&spec.output) {
+            if let Some(s) = fmt_mode_field_ctx(spec.output) {
                 fields.push(format!("stdout: {}", s));
             }
             if fields.is_empty() {
@@ -242,7 +242,7 @@ pub fn fmt_comp_ty_ctx(cty: &CompTy, ctx: &FmtCtx) -> String {
     }
 }
 
-fn fmt_mode_field_ctx(mode: &PipeMode) -> Option<String> {
+fn fmt_mode_field_ctx(mode: PipeMode) -> Option<String> {
     match mode {
         PipeMode::None | PipeMode::Var(_) => None,
         PipeMode::Bytes => Some("Bytes".into()),

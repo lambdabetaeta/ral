@@ -395,7 +395,7 @@ mod chokepoint_tests {
     /// [`armed_shell`], with an explicit `large_binding_bytes` threshold for
     /// the large-binding tests below.
     fn armed_shell_with(idle_calls: u64, large_binding_bytes: u64) -> Shell {
-        let mut shell = crate::driver::boot_shell(Default::default(), prelude());
+        let mut shell = crate::driver::boot_shell(crate::io::TerminalState::default(), prelude());
         shell.arm_binding_lease(BindingLease {
             idle_calls,
             large_binding_bytes,
@@ -548,7 +548,7 @@ mod chokepoint_tests {
     /// — visible at arm time, so never lease candidates.
     #[test]
     fn prelude_and_host_seeds_are_baseline() {
-        let mut shell = crate::driver::boot_shell(Default::default(), prelude());
+        let mut shell = crate::driver::boot_shell(crate::io::TerminalState::default(), prelude());
         let (prelude_name, _) = shell
             .bindings()
             .into_iter()
@@ -819,7 +819,9 @@ mod chokepoint_tests {
                 let err = result.expect_err("a pruned name must read as undefined");
                 let msg = match err {
                     crate::types::Break::Error(e) => e.message,
-                    other => panic!("expected an Error break, got {other:?}"),
+                    other @ crate::types::Break::Escape(_) => {
+                        panic!("expected an Error break, got {other:?}")
+                    }
                 };
                 assert!(
                     msg.contains("undefined variable: $prune_x"),

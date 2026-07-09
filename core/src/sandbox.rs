@@ -322,7 +322,7 @@ pub(crate) fn apply_resource_limits(cmd: &mut Command) {
                 rlim_cur: 0,
                 rlim_max: 0,
             };
-            libc::setrlimit(libc::RLIMIT_CORE, &zero);
+            libc::setrlimit(libc::RLIMIT_CORE, &raw const zero);
             #[cfg(not(target_os = "macos"))]
             {
                 let nproc = libc::rlimit {

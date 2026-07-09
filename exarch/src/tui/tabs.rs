@@ -25,6 +25,7 @@ use super::{LINGER, ROOT_TITLE};
 /// The currently focused tab is resolved via the shared [`AtomicU64`]
 /// handle; when it is stale (an expired tab, or the no-focus sentinel),
 /// focus resolves to root.
+#[allow(clippy::struct_field_names)] // `tabs` is the natural name for the tab list.
 pub(super) struct Tabs {
     /// Per-session scrollback.  Populated by `Born`, retained across
     /// `Died` and across tab-bar expiry so [`super::App::flush_logs`] can
@@ -368,8 +369,12 @@ mod tests {
         tabs.died(child);
         // Force the linger window to have already elapsed rather than
         // waiting LINGER (90s) out in a test.
-        tabs.dying
-            .insert(child, Instant::now() - LINGER - Duration::from_secs(1));
+        tabs.dying.insert(
+            child,
+            Instant::now()
+                .checked_sub(LINGER + Duration::from_secs(1))
+                .unwrap(),
+        );
 
         tabs.tick();
 

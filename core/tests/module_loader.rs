@@ -133,7 +133,7 @@ fn use_self_reference_is_a_cycle() {
             "expected circular dependency, got: {}",
             e.message
         ),
-        other => panic!("expected Break::Error, got {other:?}"),
+        other @ Break::Escape(_) => panic!("expected Break::Error, got {other:?}"),
     }
 
     std::fs::remove_file(&path).ok();
@@ -155,7 +155,7 @@ fn source_self_reference_is_a_cycle() {
             "expected circular dependency, got: {}",
             e.message
         ),
-        other => panic!("expected Break::Error, got {other:?}"),
+        other @ Break::Escape(_) => panic!("expected Break::Error, got {other:?}"),
     }
 
     std::fs::remove_file(&path).ok();

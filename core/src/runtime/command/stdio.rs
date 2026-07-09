@@ -4,7 +4,7 @@
 //! plumbing for `> file` is delegated to [`super::redirect::open_file`].
 
 use crate::syntax::ast::RedirectMode;
-use crate::types::*;
+use crate::types::{Shell, Settled, Break, Error};
 
 #[cfg(windows)]
 use super::process::pipe_err;
@@ -166,7 +166,7 @@ pub(crate) fn classify_redirects(redirects: &[EvalRedirectV]) -> Settled<Redirec
                 if *fd == 2 && *target_fd == 1 {
                     plan.stderr_route = Some(StderrRoute::Stdout);
                 } else {
-                    return Err(unmodeled_redirect(*fd, format!("&{target_fd}")));
+                    return Err(unmodeled_redirect(*fd, &format!("&{target_fd}")));
                 }
             }
             EvalRedirect::File(filename) => match fd {
@@ -175,7 +175,7 @@ pub(crate) fn classify_redirects(redirects: &[EvalRedirectV]) -> Settled<Redirec
                 0 => {}
                 1 => plan.stdout_file = Some((filename.clone(), *mode)),
                 2 => plan.stderr_route = Some(StderrRoute::File(filename.clone(), *mode)),
-                other => return Err(unmodeled_redirect(*other, filename.clone())),
+                other => return Err(unmodeled_redirect(*other, filename)),
             },
         }
     }
@@ -186,7 +186,7 @@ pub(crate) fn classify_redirects(redirects: &[EvalRedirectV]) -> Settled<Redirec
 /// file target, or a `fd>&fd` dup shape other than the modeled `2>&1`.
 /// Named and loud, matching the in-process path's diagnostics, rather than
 /// the silent `_ => {}` this replaces.
-fn unmodeled_redirect(fd: u32, target: String) -> Break {
+fn unmodeled_redirect(fd: u32, target: &str) -> Break {
     Break::Error(Error::new(
         format!("redirect {fd}>{target} is not supported for external commands"),
         1,

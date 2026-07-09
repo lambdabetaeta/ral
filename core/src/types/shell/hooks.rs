@@ -108,9 +108,8 @@ impl HookSig {
     pub fn label(&self) -> &str {
         match self {
             HookSig::Prompt => "prompt body",
-            HookSig::Hook { kind } => kind.as_str(),
+            HookSig::Hook { kind } | HookSig::Lifecycle { kind } => kind.as_str(),
             HookSig::PluginFactory => "plugin factory",
-            HookSig::Lifecycle { kind } => kind.as_str(),
         }
     }
 }

@@ -1,6 +1,7 @@
 //! Model picker overlay orchestration — the `/model` command handler and its
 //! event loop.
 
+use std::fmt::Write;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,7 +35,10 @@ pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) -> io::Result<
     let subscription = available
         .iter()
         .filter_map(|id| {
-            let kind = if store.get(id).is_some_and(|c| c.is_subscription()) {
+            let kind = if store
+                .get(id)
+                .is_some_and(super::super::credential::Credential::is_subscription)
+            {
                 crate::oauth::Subscription::ChatGpt
             } else if id.flat_rate() {
                 crate::oauth::Subscription::FlatRate
@@ -64,10 +68,13 @@ pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) -> io::Result<
         .loading_providers()
         .into_iter()
         .filter(|id| {
-            if store.get(id).is_some_and(|c| c.is_subscription()) {
+            if store
+                .get(id)
+                .is_some_and(super::super::credential::Credential::is_subscription)
+            {
                 let models = crate::oauth::PLAN_MODELS
                     .iter()
-                    .map(|s| s.to_string())
+                    .map(std::string::ToString::to_string)
                     .collect();
                 picker.set_models(id, picker::ModelsState::Loaded(models));
                 return false;
@@ -94,10 +101,10 @@ pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) -> io::Result<
         rx = Some(recv);
     }
     tui.app.picker = Some(picker);
-    let outcome = drive_picker(tui, store, ctx.catalog, rx);
+    let outcome = drive_picker(tui, store, ctx.catalog, rx.as_ref());
     tui.app.picker = None;
     if let Some((id, model, tuning, route)) = outcome {
-        apply_model_switch(tui, ctx, id, model, tuning, route);
+        apply_model_switch(tui, ctx, &id, &model, &tuning, route);
     }
     Ok(())
 }
@@ -109,7 +116,7 @@ fn drive_picker(
     tui: &mut Tui,
     store: &CredentialStore,
     catalog: &mut ModelCatalog<LiveSource>,
-    rx: Option<FetchRx>,
+    rx: Option<&FetchRx>,
 ) -> Option<(
     provider::ProviderId,
     String,
@@ -124,7 +131,7 @@ fn drive_picker(
     loop {
         // Fold any landed fetch results into the picker (and the catalog's
         // caches), on this thread, so the disk write stays single-threaded.
-        if let Some(rx) = &rx {
+        if let Some(rx) = rx {
             while let Ok((id, result)) = rx.try_recv() {
                 let state = match result {
                     Ok(models) => {
@@ -172,7 +179,7 @@ fn drive_picker(
                 let endpoint_tx = endpoint_tx.clone();
                 std::thread::spawn(move || {
                     let result = source.endpoints(&model);
-                    let _ = endpoint_tx.send((model.to_string(), result));
+                    let _ = endpoint_tx.send((model.clone(), result));
                 });
             }
         }
@@ -227,16 +234,16 @@ fn drive_picker(
 fn apply_model_switch(
     tui: &mut Tui,
     ctx: &CommandCtx<'_>,
-    provider_id: provider::ProviderId,
-    model: String,
-    tuning: provider::Tuning,
+    provider_id: &provider::ProviderId,
+    model: &str,
+    tuning: &provider::Tuning,
     route: Option<String>,
 ) {
     let store = ctx.store;
     let info = ctx.info;
     let emit = ctx.emit;
     let id = tui.app.tabs.root();
-    let Some(cred) = store.get(&provider_id).cloned() else {
+    let Some(cred) = store.get(provider_id).cloned() else {
         tui.app.push_error(
             id,
             format!("{} has no resolved credential", provider_id.label()),
@@ -257,8 +264,8 @@ fn apply_model_switch(
     let engine = ctx.engine.clone();
     let new_provider = Arc::new(Provider::build(
         engine,
-        &provider_id,
-        model.clone(),
+        provider_id,
+        model.to_string(),
         &cred,
         current_override,
         tuning.clone(),
@@ -272,14 +279,14 @@ fn apply_model_switch(
     let state_dir = crate::bootstrap::project_dir(info.cwd);
     if let Err(e) = state::save(
         &state_dir,
-        &state::State::new(&provider_id, &model, &tuning, route.as_deref()),
+        &state::State::new(provider_id, model, tuning, route.as_deref()),
     ) {
         tui.app
             .push_error(id, format!("could not persist selection: {e}"));
     }
     emit.emit(Kind::SystemNote(format!(
         "[Switched to {label} {model}{}]",
-        tuning_suffix(&tuning, route.as_deref())
+        tuning_suffix(tuning, route.as_deref())
     )));
 }
 
@@ -289,13 +296,13 @@ fn apply_model_switch(
 fn tuning_suffix(tuning: &provider::Tuning, route: Option<&str>) -> String {
     let mut parts = String::new();
     if let Some(effort) = &tuning.effort {
-        parts.push_str(&format!(" · effort {}", effort.variant_name()));
+        let _ = write!(parts, " · effort {}", effort.variant_name());
     }
     if let Some(temperature) = tuning.temperature {
-        parts.push_str(&format!(" · temp {temperature:.1}"));
+        let _ = write!(parts, " · temp {temperature:.1}");
     }
     if let Some(slug) = route {
-        parts.push_str(&format!(" · via {slug}"));
+        let _ = write!(parts, " · via {slug}");
     }
     parts
 }

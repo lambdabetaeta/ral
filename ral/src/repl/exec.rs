@@ -142,12 +142,9 @@ pub(super) fn execute_input(
             })
         });
 
-    let report = match report {
-        Some(r) => r,
-        None => {
-            eprintln!("ral: internal error: dispatch completed without a Report");
-            return None;
-        }
+    let Some(report) = report else {
+        eprintln!("ral: internal error: dispatch completed without a Report");
+        return None;
     };
 
     match report {

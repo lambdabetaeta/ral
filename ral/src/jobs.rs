@@ -133,7 +133,7 @@ impl JobTable {
     /// REPL path that registers jobs is `cfg(unix)`-gated.
     #[cfg_attr(not(unix), allow(dead_code))]
     pub fn add(&mut self, pgid: i32, cmd: String, state: JobState) -> usize {
-        let id = self.jobs.keys().max().map(|n| n + 1).unwrap_or(1);
+        let id = self.jobs.keys().max().map_or(1, |n| n + 1);
         self.jobs.insert(
             id,
             Job {

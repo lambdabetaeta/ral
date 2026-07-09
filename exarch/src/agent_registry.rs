@@ -63,7 +63,7 @@ use std::time::{Duration, Instant};
 /// long-running-work's open regime question, surfacing here for a tool
 /// rather than a ral verb — but a uniform ceiling keeps an abandoned worker
 /// from running unbounded.
-pub const AGENT_CEILING: Duration = Duration::from_secs(3600);
+pub const AGENT_CEILING: Duration = Duration::from_hours(1);
 
 /// One live agent, by id, for the `agents` listing.
 pub struct AgentInfo {
@@ -375,7 +375,7 @@ impl AgentRegistry {
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -405,7 +405,7 @@ fn descendants(
     };
     let mut frontier = vec![ancestor];
     while let Some(cur) = frontier.pop() {
-        for (id, e) in entries.iter() {
+        for (id, e) in entries {
             if e.parent == Some(cur) && !out.contains(id) {
                 out.push(*id);
                 frontier.push(*id);

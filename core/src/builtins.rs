@@ -14,7 +14,9 @@
 //! environment via [`register`].
 
 use crate::diagnostic;
-use crate::types::*;
+use crate::types::{
+    Binding, Break, BuiltinBody, BuiltinEntry, Env, Error, Escape, Settled, Shell, Value,
+};
 // `BuiltinTypeRule` is brought into scope via `use ... ::*` below so registry
 // entries can write `ty: Scheme(None, scheme::length)` or `ty: Sig(sig::RANGE)`
 // without the `BuiltinTypeRule::` prefix on every line.
@@ -607,7 +609,7 @@ pub fn builtin_doc(name: &str) -> Option<&'static str> {
 /// Fixed value-arg count; `None` for variadic / command-only entries
 /// and for unknown names.
 pub fn builtin_arity(name: &str) -> Option<usize> {
-    with_entry(name, |e| e.fixed_arity())?
+    with_entry(name, BuiltinEntry::fixed_arity)?
 }
 
 /// Type-checker rule for a registered name.
@@ -712,7 +714,7 @@ pub fn register(shell: &mut Shell, prelude_comp: &Arc<crate::ir::Comp>) {
     // Evaluate the prelude once per process, then clone the resulting
     // top-level bindings into each fresh environment.
     let bindings = PRELUDE_BINDINGS.get_or_init(|| {
-        let mut prelude_env = Shell::new(Default::default());
+        let mut prelude_env = Shell::new(crate::io::TerminalState::default());
 
         // Bare-word `true`/`false` are already classified by
         // `Val::from_word` in the elaborator, but `$true` / `$false`

@@ -127,7 +127,7 @@ fn registry() -> &'static [Box<dyn Tool>] {
 pub(crate) fn tools_for(returns: bool, schedules: bool, can_spawn: bool) -> Vec<&'static dyn Tool> {
     registry()
         .iter()
-        .map(|b| b.as_ref())
+        .map(std::convert::AsRef::as_ref)
         .filter(|t| match t.gate() {
             Gate::Always => true,
             Gate::Returns => returns,

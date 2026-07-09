@@ -48,7 +48,7 @@ pub struct Resolver<'a> {
     pub mode: CanonMode,
 }
 
-impl<'a> Resolver<'a> {
+impl Resolver<'_> {
     /// Stage 1 + 2: expand `~` / `xdg:` sigils, then lexically
     /// resolve against `cwd`, minting a [`ResolvedPath`].  Pure: no
     /// filesystem access.  The sole constructor of a `ResolvedPath`.

@@ -431,7 +431,7 @@ impl ExecNode {
             kind: ExecNodeKind::CapabilityCheck,
             cmd: resource.into(),
             args: Vec::new(),
-            status: if decision == "denied" { 1 } else { 0 },
+            status: i32::from(decision == "denied"),
             script: site.script,
             line: site.line,
             col: site.col,
@@ -451,12 +451,12 @@ impl ExecNode {
     /// and the resource-specific fields appear alongside `cmd`/`status`.
     pub fn to_value(&self) -> Value {
         let args_list: Vec<Value> = self.args.iter().map(|a| Value::String(a.clone())).collect();
-        let children_list: Vec<Value> = self.children.iter().map(|c| c.to_value()).collect();
+        let children_list: Vec<Value> = self.children.iter().map(ExecNode::to_value).collect();
         let mut pairs = vec![
             ("kind".into(), Value::String(self.kind.to_string())),
             ("cmd".into(), Value::String(self.cmd.clone())),
             ("args".into(), Value::list(args_list)),
-            ("status".into(), Value::Int(self.status as i64)),
+            ("status".into(), Value::Int(i64::from(self.status))),
             ("script".into(), Value::String(self.script.clone())),
             ("line".into(), Value::Int(self.line as i64)),
             ("col".into(), Value::Int(self.col as i64)),

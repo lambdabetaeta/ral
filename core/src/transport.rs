@@ -308,7 +308,7 @@ impl crate::driver::TurnReport {
                 diagnostics: match diagnostics {
                     StaticDiagnostics::Parse(e) => Diagnostics::Parse(e.message),
                     StaticDiagnostics::Types(errs) => {
-                        Diagnostics::Types(errs.iter().map(|e| e.to_string()).collect())
+                        Diagnostics::Types(errs.iter().map(std::string::ToString::to_string).collect())
                     }
                     StaticDiagnostics::Host(e) => Diagnostics::Host(e.message),
                 },
@@ -742,7 +742,7 @@ impl SessionLock {
     /// same way `lock` does — a turn that unwound mid-mutation must not wedge
     /// the move-out.
     fn into_inner(self) -> EngineInner {
-        self.0.into_inner().unwrap_or_else(|e| e.into_inner())
+        self.0.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -1229,7 +1229,7 @@ mod enquiry_tests {
     /// honest absence error, verbatim.
     #[test]
     fn absent_desk_answers_the_honest_error() {
-        let shell = Shell::new(Default::default());
+        let shell = Shell::new(crate::io::TerminalState::default());
         let err = shell
             .enquire(FOValue::Unit)
             .expect_err("no desk is installed");
@@ -1265,7 +1265,7 @@ mod enquiry_tests {
     /// caller of `enquire`, not just to the desk.
     #[test]
     fn enquire_round_trips_through_a_stub_desk() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let answer = std::sync::Arc::new(Mutex::new(None));
         let lifecycle = AskDuringTurn {
             req: FOValue::Int { value: 41 },
@@ -1310,9 +1310,9 @@ mod enquiry_tests {
     #[test]
     #[should_panic(expected = "reentrant session access")]
     fn desk_reentering_shell_mut_panics_never_hangs() {
-        let transport = std::sync::Arc::new(IdentityTransport::new(Shell::new(Default::default())));
+        let transport = std::sync::Arc::new(IdentityTransport::new(Shell::new(crate::io::TerminalState::default())));
         *transport.dispatch_thread.lock().unwrap() = Some(std::thread::current().id());
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.turn.desk = Some(std::sync::Arc::new(ReentrantShellMutDesk(transport)) as Desk);
         let _ = shell.enquire(FOValue::Unit);
     }
@@ -1344,9 +1344,9 @@ mod enquiry_tests {
     #[test]
     #[should_panic(expected = "reentrant session access")]
     fn desk_reentering_dispatch_panics_never_hangs() {
-        let transport = std::sync::Arc::new(IdentityTransport::new(Shell::new(Default::default())));
+        let transport = std::sync::Arc::new(IdentityTransport::new(Shell::new(crate::io::TerminalState::default())));
         *transport.dispatch_thread.lock().unwrap() = Some(std::thread::current().id());
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.turn.desk = Some(std::sync::Arc::new(ReentrantDispatchDesk(transport)) as Desk);
         let _ = shell.enquire(FOValue::Unit);
     }
@@ -1356,7 +1356,7 @@ mod enquiry_tests {
     /// `EngineInner.desk`.
     #[test]
     fn set_desk_installs_onto_engine_inner() {
-        let transport = IdentityTransport::new(Shell::new(Default::default()));
+        let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
         let desk: Desk = std::sync::Arc::new(IncrementDesk);
         transport.set_desk(desk.clone());
         let installed = transport
@@ -1385,7 +1385,7 @@ mod probe_tests {
     /// been spawned.
     #[test]
     fn worker_count_answers_zero_on_a_fresh_shell() {
-        let transport = IdentityTransport::new(Shell::new(Default::default()));
+        let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
         let answer = transport
             .probe(FOValue::Variant {
                 label: "worker-count".into(),
@@ -1400,7 +1400,7 @@ mod probe_tests {
     /// unarmed).
     #[test]
     fn binding_probes_answer_integers() {
-        let transport = IdentityTransport::new(Shell::new(Default::default()));
+        let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
         match transport.probe(FOValue::Variant {
             label: "binding-count".into(),
             payload: None,
@@ -1421,7 +1421,7 @@ mod probe_tests {
     /// `` `some [value] `` after `Shell::set_env_var` installs one.
     #[test]
     fn env_var_probe_round_trips_the_overlay() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.set_env_var("PROBE_TEST_VAR", "42");
         let transport = IdentityTransport::new(shell);
 
@@ -1463,7 +1463,7 @@ mod probe_tests {
     /// `` `cwd `` answers the shell's logical cwd as a string.
     #[test]
     fn cwd_probe_answers_a_string() {
-        let transport = IdentityTransport::new(Shell::new(Default::default()));
+        let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
         match transport.probe(FOValue::Variant {
             label: "cwd".into(),
             payload: None,
@@ -1477,7 +1477,7 @@ mod probe_tests {
     /// the ambient root frame on a fresh shell.
     #[test]
     fn grant_depth_probe_answers_at_least_one() {
-        let transport = IdentityTransport::new(Shell::new(Default::default()));
+        let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
         match transport.probe(FOValue::Variant {
             label: "grant-depth".into(),
             payload: None,
@@ -1490,7 +1490,7 @@ mod probe_tests {
     /// `` `workers `` on a fresh shell answers an empty list.
     #[test]
     fn workers_probe_answers_an_empty_list_on_a_fresh_shell() {
-        let transport = IdentityTransport::new(Shell::new(Default::default()));
+        let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
         let answer = transport
             .probe(FOValue::Variant {
                 label: "workers".into(),
@@ -1504,7 +1504,7 @@ mod probe_tests {
     /// silent default.
     #[test]
     fn unknown_probe_class_names_itself_in_the_error() {
-        let transport = IdentityTransport::new(Shell::new(Default::default()));
+        let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
         let err = transport
             .probe(FOValue::Variant {
                 label: "not-a-real-class".into(),
@@ -1521,7 +1521,7 @@ mod probe_tests {
     /// answers `Err` rather than panicking.
     #[test]
     fn non_variant_probe_request_is_an_honest_error() {
-        let transport = IdentityTransport::new(Shell::new(Default::default()));
+        let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
         let err = transport
             .probe(FOValue::Unit)
             .expect_err("a non-variant probe request must not answer Ok");

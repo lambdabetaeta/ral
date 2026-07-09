@@ -21,7 +21,7 @@
 //! stages consume, so the vetting rules live in exactly one place.
 
 use crate::ir::CommandName;
-use crate::types::*;
+use crate::types::{Break, Context, Error, Settled, Shell, Value};
 
 use super::identity::CommandIdentity;
 
@@ -105,7 +105,7 @@ fn validate_argv(id: &CommandIdentity, args: &[Value], shell: &Shell) -> Settled
             return Err(sig);
         }
     }
-    Ok(args.iter().map(|v| v.to_string()).collect())
+    Ok(args.iter().map(std::string::ToString::to_string).collect())
 }
 
 /// Per-argument shape gate.  Lists / maps / lambdas / blocks /

@@ -296,8 +296,8 @@ impl SubstMap {
             }
             CompTy::Return(spec, a) => CompTy::Return(
                 PipeSpec {
-                    input: self.mode(&spec.input),
-                    output: self.mode(&spec.output),
+                    input: self.mode(spec.input),
+                    output: self.mode(spec.output),
                 },
                 Box::new(self.ty(a)),
             ),
@@ -305,10 +305,10 @@ impl SubstMap {
         }
     }
 
-    fn mode(&self, mode: &PipeMode) -> PipeMode {
+    fn mode(&self, mode: PipeMode) -> PipeMode {
         match mode {
-            PipeMode::None | PipeMode::Bytes => *mode,
-            PipeMode::Var(v) => self.mm.get(v).map_or(*mode, |&f| PipeMode::Var(f)),
+            PipeMode::None | PipeMode::Bytes => mode,
+            PipeMode::Var(v) => self.mm.get(&v).map_or(mode, |&f| PipeMode::Var(f)),
         }
     }
 }

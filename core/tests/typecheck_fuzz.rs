@@ -16,16 +16,17 @@
 
 mod common;
 
+use std::collections::HashSet;
+
 use ral_core::diagnostic::format_type_error_ariadne;
 use ral_core::typecheck::TypeError;
 use ral_core::{elaborator::elaborate, syntax::parser::parse, typecheck};
 
 fn raw_errors(src: &str) -> Vec<TypeError> {
-    let ast = match parse(src) {
-        Ok(a) => a,
-        Err(_) => return Vec::new(),
+    let Ok(ast) = parse(src) else {
+        return Vec::new();
     };
-    let comp = elaborate(&ast, Default::default());
+    let comp = elaborate(&ast, HashSet::default());
     typecheck(
         &comp,
         ral_core::SessionSchemes::from_schemes(common::prelude_schemes()),

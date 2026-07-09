@@ -175,11 +175,10 @@ fn scripts() {
         failures.len()
     );
 
-    if !failures.is_empty() {
-        panic!(
-            "{} script(s) failed:\n\n{}",
-            failures.len(),
-            failures.join("\n\n")
-        );
-    }
+    assert!(
+        failures.is_empty(),
+        "{} script(s) failed:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
 }

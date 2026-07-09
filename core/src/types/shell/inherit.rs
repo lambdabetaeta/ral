@@ -230,7 +230,7 @@ impl Shell {
     /// since a defaulted shell has no inherited grants, env vars, or
     /// call-site location.
     fn from_captured(captured: &Env) -> Self {
-        let mut shell = Self::new(Default::default());
+        let mut shell = Self::new(crate::io::TerminalState::default());
         shell.mobile.scope = captured.clone();
         shell
     }

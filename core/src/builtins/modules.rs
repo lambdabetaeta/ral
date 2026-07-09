@@ -26,7 +26,7 @@ use std::path::Path;
 use crate::diagnostic::Source;
 use crate::ir::Comp;
 use crate::source::FileId;
-use crate::types::*;
+use crate::types::{Shell, Settled, Value, sig, Break};
 
 use super::util::arg0_str;
 
@@ -108,7 +108,7 @@ pub fn evaluate_checked(
             .modules
             .stack
             .iter()
-            .map(|s| s.as_str())
+            .map(std::string::String::as_str)
             .collect();
         return Err(sig(format!(
             "circular dependency: {} -> {key}",
@@ -222,7 +222,7 @@ fn tag_loader_error(who: &str, e: Break) -> Break {
             }
             Break::Error(err)
         }
-        other => other,
+        other @ Break::Escape(_) => other,
     }
 }
 
@@ -232,8 +232,10 @@ pub(super) fn builtin_source(args: &[Value], shell: &mut Shell) -> Settled<Value
     let abs_path = shell
         .resolve(&resolved.to_string_lossy())
         .canonicalise_strict()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| resolved.to_string_lossy().into_owned());
+        .map_or_else(
+            |_| resolved.to_string_lossy().into_owned(),
+            |p| p.to_string_lossy().into_owned(),
+        );
     let source = read_and_normalize(&resolved, &abs_path, "source", shell)?;
     evaluate_source(shell, &source, &abs_path).map_err(|e| tag_loader_error("source", e))
 }
@@ -246,8 +248,7 @@ pub(crate) fn builtin_use(args: &[Value], shell: &mut Shell) -> Settled<Value> {
         .canonicalise_strict()
         .ok()
         .or_else(|| crate::path::ral_path::find_file(&path))
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.clone());
+        .map_or_else(|| path.clone(), |p| p.to_string_lossy().into_owned());
 
     let source = read_and_normalize(abs_path.as_ref(), &abs_path, "use", shell)?;
 

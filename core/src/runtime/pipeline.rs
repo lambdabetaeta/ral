@@ -29,7 +29,7 @@ mod route;
 mod stage;
 
 use crate::ir::Comp;
-use crate::types::*;
+use crate::types::{Error, Raw, Settled, Shell, Tail, Value};
 use std::sync::Arc;
 
 use launch::launch_pipeline;

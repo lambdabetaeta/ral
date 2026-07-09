@@ -289,14 +289,12 @@ fn build_snapshot(data: Vec<ModelEntry>) -> Snapshot {
                 .pricing
                 .input_cache_read
                 .as_deref()
-                .map(parse_price)
-                .unwrap_or(0.0),
+                .map_or(0.0, parse_price),
             cache_write: entry
                 .pricing
                 .input_cache_write
                 .as_deref()
-                .map(parse_price)
-                .unwrap_or(0.0),
+                .map_or(0.0, parse_price),
         };
         // Skip entries whose base rates failed to parse — they'd just
         // bill at $0 and produce misleading display.  Falling through

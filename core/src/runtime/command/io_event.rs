@@ -103,6 +103,6 @@ pub(crate) fn exec(program: &str, args: &[String], status: i32) -> Value {
         ("io".to_string(), Value::String("exec".into())),
         ("argv".to_string(), Value::list(argv)),
         ("outcome".to_string(), Value::String(outcome.into())),
-        ("status".to_string(), Value::Int(status as i64)),
+        ("status".to_string(), Value::Int(i64::from(status))),
     ])
 }

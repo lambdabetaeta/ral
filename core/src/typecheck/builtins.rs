@@ -1149,7 +1149,6 @@ pub fn grant_field_ty(key: &str, _u: &mut Unifier) -> Option<Ty> {
     match key {
         "net" | "audit" => Some(Ty::Bool),
         "editor" | "shell" => Some(bool_map()),
-        "exec" | "fs" => None,
         _ => None,
     }
 }

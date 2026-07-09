@@ -11,12 +11,13 @@
 
 mod common;
 
+use ral_core::io::TerminalState;
 use ral_core::transport::{Program, Turn};
 use ral_core::types::{Capabilities, Settled, Shell};
 use ral_core::{RequestedTerminalAccess, TurnIo, TurnReport, TurnRequest, TurnStdin, Value};
 
 fn fresh_shell() -> Shell {
-    ral_core::driver::boot_shell(Default::default(), common::prelude())
+    ral_core::driver::boot_shell(TerminalState::default(), common::prelude())
 }
 
 fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {

@@ -1,4 +1,4 @@
-use crate::types::*;
+use crate::types::{Settled, Shell, Value, sig};
 
 /// `alias NAME BODY` — install a per-name handler frame for `NAME`
 /// that runs `BODY` when the name is invoked.  Replaces any prior alias

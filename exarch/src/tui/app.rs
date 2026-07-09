@@ -450,8 +450,7 @@ impl App {
                 let (blocks, rows, bytes) = self
                     .tabs
                     .viewport(id)
-                    .map(|vp| vp.probe_figures())
-                    .unwrap_or((0, 0, 0));
+                    .map_or((0, 0, 0), super::viewport::Viewport::probe_figures);
                 let lingering = self.tabs.dying_map().len() as u64;
                 let live_views = (self.tabs.len() as u64).saturating_sub(lingering);
                 let dead_views = (self.tabs.viewports().len() as u64).saturating_sub(live_views);

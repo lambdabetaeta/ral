@@ -38,8 +38,7 @@ pub fn try_run_test_helper() -> Option<u8> {
         }
         let tag = args
             .next()
-            .map(|t| t.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "stage".into());
+            .map_or_else(|| "stage".into(), |t| t.to_string_lossy().into_owned());
         let pgid = unsafe { libc::getpgrp() };
         let stderr_fd = libc::STDERR_FILENO;
 

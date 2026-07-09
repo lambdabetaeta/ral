@@ -111,7 +111,7 @@ fn run_mode(mode: Mode) -> ExitCode {
             path,
             script_args,
             batch,
-        } => run_script(path, script_args, batch),
+        } => run_script(&path, script_args, batch),
         Mode::Command {
             code,
             script_args,
@@ -152,8 +152,8 @@ fn run_stdin_script(opts: InteractiveOpts) -> ExitCode {
     clippy::disallowed_methods,
     reason = "[io-door:silent:script-read] startup read of the script file path; not turn-time model I/O"
 )]
-fn run_script(path: String, script_args: Vec<String>, batch: BatchOpts) -> ExitCode {
-    let source = match std::fs::read_to_string(&path) {
+fn run_script(path: &str, script_args: Vec<String>, batch: BatchOpts) -> ExitCode {
+    let source = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
             diagnostic::cmd_error("ral", &format!("{path}: {e}"));
@@ -161,5 +161,5 @@ fn run_script(path: String, script_args: Vec<String>, batch: BatchOpts) -> ExitC
         }
     };
     let source = ral_core::source::normalize_source_text(source);
-    run_batch(&path, source, script_args, batch)
+    run_batch(path, source, script_args, batch)
 }

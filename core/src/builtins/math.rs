@@ -11,7 +11,7 @@
 //! rather than silently corrupted: `NaN as i64` is `0` and an out-of-range
 //! cast saturates, both of which would misreport the input.
 
-use crate::types::*;
+use crate::types::{Settled, Value, sig, sig_hint};
 
 use super::util::check_arity;
 
@@ -42,10 +42,10 @@ fn to_int(name: &str, args: &[Value], op: fn(f64) -> f64) -> Settled<Value> {
     check_arity(args, 1, name)?;
     let x = finite_float(name, &args[0])?;
     let r = op(x);
-    if !(-I64_BOUND..I64_BOUND).contains(&r) {
-        Err(sig(format!("{name}: {x} is outside the integer range")))
-    } else {
+    if (-I64_BOUND..I64_BOUND).contains(&r) {
         Ok(Value::Int(r as i64))
+    } else {
+        Err(sig(format!("{name}: {x} is outside the integer range")))
     }
 }
 

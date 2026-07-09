@@ -7,7 +7,7 @@
 //! `use crate::types::*` without either layer importing the other's
 //! helper module.
 
-use super::*;
+use super::{Break, Error, Value, Settled, Map};
 
 pub fn sig(message: impl Into<String>) -> Break {
     Break::Error(Error::new(message, 1))

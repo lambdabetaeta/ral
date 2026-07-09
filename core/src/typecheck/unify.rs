@@ -696,7 +696,6 @@ impl Unifier {
             return Ok(false);
         }
         match self.resolve_ty(ty) {
-            Ty::Var(_) => Ok(false),
             Ty::List(a) | Ty::Map(a) | Ty::Handle(a) => {
                 self.ty_occurs_row(v, &a, visited, deeper(depth)?)
             }
@@ -707,7 +706,9 @@ impl Unifier {
             // type that could) fails the build here and is consciously routed,
             // not silently skipped — an under-checked occurs check would let a
             // cyclic row install undetected.
-            Ty::Unit | Ty::Bytes | Ty::Bool | Ty::Int | Ty::Float | Ty::String => Ok(false),
+            Ty::Var(_) | Ty::Unit | Ty::Bytes | Ty::Bool | Ty::Int | Ty::Float | Ty::String => {
+                Ok(false)
+            }
         }
     }
 
@@ -861,16 +862,18 @@ impl Unifier {
             | (Ty::Float, Ty::Float)
             | (Ty::String, Ty::String)
             | (Ty::Bytes, Ty::Bytes) => Ok(()),
-            (Ty::List(a1), Ty::List(b1)) => self.unify_ty_inner(&a1, &b1, pairs, depth),
-            (Ty::Map(a1), Ty::Map(b1)) => self.unify_ty_inner(&a1, &b1, pairs, depth),
-            (Ty::Handle(a1), Ty::Handle(b1)) => self.unify_ty_inner(&a1, &b1, pairs, depth),
-            (Ty::Record(r1), Ty::Record(r2)) => self.unify_row_inner(&r1, &r2, pairs, depth),
-            (Ty::Variant(r1), Ty::Variant(r2)) => self.unify_row_inner(&r1, &r2, pairs, depth),
+            (Ty::List(a1), Ty::List(b1))
+            | (Ty::Map(a1), Ty::Map(b1))
+            | (Ty::Handle(a1), Ty::Handle(b1)) => self.unify_ty_inner(&a1, &b1, pairs, depth),
+            (Ty::Record(r1), Ty::Record(r2)) | (Ty::Variant(r1), Ty::Variant(r2)) => {
+                self.unify_row_inner(&r1, &r2, pairs, depth)
+            }
             (Ty::Thunk(a1), Ty::Thunk(b1)) => self.unify_comp_ty_inner(&a1, &b1, pairs, depth),
             // Record ↔ Map coercion: a record can be used where a homogeneous map
             // is expected if all its field types unify to the map's element type.
-            (Ty::Map(elem), Ty::Record(row)) => self.unify_map_record(&elem, &row, pairs, depth),
-            (Ty::Record(row), Ty::Map(elem)) => self.unify_map_record(&elem, &row, pairs, depth),
+            (Ty::Map(elem), Ty::Record(row)) | (Ty::Record(row), Ty::Map(elem)) => {
+                self.unify_map_record(&elem, &row, pairs, depth)
+            }
             (a, b) => Err(TypeErrorKind::TyMismatch {
                 expected: a,
                 actual: b,

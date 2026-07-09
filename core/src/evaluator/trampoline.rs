@@ -7,7 +7,7 @@
 use super::comp::eval_comp;
 use super::pattern::assign_pattern;
 use crate::ir::{CompKind, IrPattern};
-use crate::types::*;
+use crate::types::{Env, Value, Shell, Raw, ThunkBody, Settled, Break, Error, Tail, Control, TailCall};
 
 /// One lambda call frame: evaluate the body *in place* on the caller's
 /// shell via [`Shell::with_thunk_body`] — the body shares the caller's
@@ -190,6 +190,7 @@ fn step(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::TerminalState;
 
     /// When `call_depth` has already reached the configured limit,
     /// entering `apply` raises a clean error instead of recursing
@@ -199,7 +200,7 @@ mod tests {
     /// counter trips.
     #[test]
     fn cap_fires_at_limit() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(TerminalState::default());
         shell.mobile.control.recursion_limit = 8;
         shell.mobile.control.call_depth = 8;
         let result = apply(Value::Unit, vec![Value::Unit], &mut shell);
@@ -221,7 +222,7 @@ mod tests {
     /// `call_depth` cleanly, leaving it at its original value.
     #[test]
     fn cap_not_fired_below_limit() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(TerminalState::default());
         shell.mobile.control.recursion_limit = 8;
         shell.mobile.control.call_depth = 7;
         // Value::Unit with no args returns Ok(Unit) without recursing.

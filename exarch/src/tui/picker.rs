@@ -245,7 +245,7 @@ const NUCLEUS: Color = Color::Rgb(140, 196, 150);
 
 /// Linear RGB interpolation between two colours at `t ∈ [0, 1]`.
 fn lerp(a: (u8, u8, u8), b: (u8, u8, u8), t: f64) -> Color {
-    let mix = |x: u8, y: u8| (x as f64 + (y as f64 - x as f64) * t).round() as u8;
+    let mix = |x: u8, y: u8| (f64::from(x) + (f64::from(y) - f64::from(x)) * t).round() as u8;
     Color::Rgb(mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2))
 }
 
@@ -556,10 +556,8 @@ impl Picker {
                 self.query.pop();
                 self.selected = 0;
             }
-            KeyCode::Up => self.move_in_focus(false),
-            KeyCode::Down => self.move_in_focus(true),
-            KeyCode::Left => self.move_in_focus(false),
-            KeyCode::Right => self.move_in_focus(true),
+            KeyCode::Up | KeyCode::Left => self.move_in_focus(false),
+            KeyCode::Down | KeyCode::Right => self.move_in_focus(true),
             _ => {}
         }
         PickAction::None
@@ -1041,7 +1039,7 @@ impl Picker {
             };
             spans.push(Span::styled(provider_tag(endpoint), style));
         }
-        let total: usize = spans.iter().map(|s| s.width()).sum();
+        let total: usize = spans.iter().map(Span::width).sum();
         if total <= width as usize {
             return Line::from(spans);
         }
@@ -1564,7 +1562,7 @@ mod tests {
         match p.key(KeyCode::Enter) {
             PickAction::Selected(_, _, tuning, _) => {
                 assert_eq!(
-                    tuning.effort.as_ref().map(|e| e.variant_name()),
+                    tuning.effort.as_ref().map(ReasoningEffort::variant_name),
                     Some("high")
                 );
                 assert_eq!(tuning.temperature, Some(0.1));
@@ -1630,7 +1628,7 @@ mod tests {
         p.key(KeyCode::Right); // auto → 0.0
         p.key(KeyCode::Right); // 0.0 → 0.1
         let live = p.tuning();
-        assert_eq!(live.effort.as_ref().map(|e| e.variant_name()), Some("high"));
+        assert_eq!(live.effort.as_ref().map(ReasoningEffort::variant_name), Some("high"));
         assert_eq!(live.temperature, Some(0.1));
 
         // Highlight the chat-only model: effort masked out, temperature kept.
@@ -1652,7 +1650,7 @@ mod tests {
         p.key(KeyCode::Tab); // Search
         p.key(KeyCode::Up); // → reasoner
         assert_eq!(
-            p.tuning().effort.as_ref().map(|e| e.variant_name()),
+            p.tuning().effort.as_ref().map(ReasoningEffort::variant_name),
             Some("high")
         );
     }

@@ -75,7 +75,7 @@ fn iter_map_slice(xs: &[V]) -> Vec<V> {
 // ── D: iterative one-pass over imbl::Vector<V> ──────────────────────────────
 fn iter_map_imbl(v: &Vector<V>) -> Vector<V> {
     let mut out = Vector::new();
-    for x in v.iter() {
+    for x in v {
         out.push_back(upper_v(x));
     }
     out
@@ -115,7 +115,7 @@ fn iter_fold_slice(xs: &[V]) -> i64 {
 // F. Same fold over imbl::Vector — iteration via the persistent cursor.
 fn iter_fold_imbl(v: &Vector<V>) -> i64 {
     let mut acc: i64 = 0;
-    for x in v.iter() {
+    for x in v {
         if let V::Int(i) = x {
             acc = acc.wrapping_add(*i);
         }

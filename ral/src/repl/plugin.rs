@@ -637,7 +637,7 @@ pub(super) fn run_buffer_change_hooks(runtime: &Arc<Mutex<PluginRuntime>>, line:
             {
                 let mut rt = lock(runtime);
                 if let Some(p) = rt.plugins.get_mut(idx) {
-                    p.state_cell = ctx_out.state_cell.clone();
+                    p.state_cell.clone_from(&ctx_out.state_cell);
                 }
             }
             if let Some(g) = ctx_out.outputs.ghost_text {

@@ -245,16 +245,15 @@ impl Inferencer<'_> {
     }
 
     pub(super) fn extract_return(&mut self, cty: &CompTy) -> (Ty, PipeMode, PipeMode) {
-        match self.ctx.unifier.resolve_comp_ty(cty) {
-            CompTy::Return(spec, ty) => (*ty, spec.input, spec.output),
-            _ => {
-                let ty = self.ctx.unifier.fresh_ty();
-                let input = self.ctx.unifier.fresh_mode();
-                let output = self.ctx.unifier.fresh_mode();
-                let expected = CompTy::Return(PipeSpec { input, output }, Box::new(ty.clone()));
-                self.ctx.unify_comp_ty(cty, &expected, Reason::ReturnShape);
-                (ty, input, output)
-            }
+        if let CompTy::Return(spec, ty) = self.ctx.unifier.resolve_comp_ty(cty) {
+            (*ty, spec.input, spec.output)
+        } else {
+            let ty = self.ctx.unifier.fresh_ty();
+            let input = self.ctx.unifier.fresh_mode();
+            let output = self.ctx.unifier.fresh_mode();
+            let expected = CompTy::Return(PipeSpec { input, output }, Box::new(ty.clone()));
+            self.ctx.unify_comp_ty(cty, &expected, Reason::ReturnShape);
+            (ty, input, output)
         }
     }
 
@@ -370,30 +369,27 @@ impl Inferencer<'_> {
     /// pipeline I/O modes are *unioned* via [`Self::union_mode`], not
     /// equated, since only one branch runs.  A non-`Return` branch (a
     /// bare lambda arm) falls back to strict computation-type unification.
-    fn merge_branches(&mut self, branches: Vec<CompTy>, why: Reason) -> CompTy {
+    fn merge_branches(&mut self, branches: Vec<CompTy>, why: &Reason) -> CompTy {
         let mut iter = branches.into_iter();
         let Some(mut acc) = iter.next() else {
             return CompTy::pure(self.ctx.unifier.fresh_ty());
         };
         for branch in iter {
-            acc = match (
+            acc = if let (CompTy::Return(sa, ta), CompTy::Return(sb, tb)) = (
                 self.ctx.unifier.resolve_comp_ty(&acc),
                 self.ctx.unifier.resolve_comp_ty(&branch),
             ) {
-                (CompTy::Return(sa, ta), CompTy::Return(sb, tb)) => {
-                    self.ctx.unify_ty(&ta, &tb, why.clone());
-                    CompTy::Return(
-                        PipeSpec {
-                            input: self.union_mode(sa.input, sb.input),
-                            output: self.union_mode(sa.output, sb.output),
-                        },
-                        ta,
-                    )
-                }
-                _ => {
-                    self.ctx.unify_comp_ty(&acc, &branch, why.clone());
-                    acc
-                }
+                self.ctx.unify_ty(&ta, &tb, why.clone());
+                CompTy::Return(
+                    PipeSpec {
+                        input: self.union_mode(sa.input, sb.input),
+                        output: self.union_mode(sa.output, sb.output),
+                    },
+                    ta,
+                )
+            } else {
+                self.ctx.unify_comp_ty(&acc, &branch, why.clone());
+                acc
             };
         }
         acc
@@ -514,7 +510,7 @@ impl Inferencer<'_> {
         }
     }
 
-    fn apply_piped_value(&mut self, cty: CompTy, piped_ty: Ty) -> CompTy {
+    fn apply_piped_value(&mut self, cty: CompTy, piped_ty: &Ty) -> CompTy {
         let cty = self.autoderef_thunk_return(cty);
         let result = self.ctx.unifier.fresh_comp_ty();
         let expected = CompTy::Fun(Box::new(piped_ty.clone()), Box::new(result.clone()));
@@ -522,7 +518,7 @@ impl Inferencer<'_> {
         // `Fun`/`Var` consumers here; a `Return` stage takes the channel
         // edge instead), so the produced value must fit its first
         // parameter.  A clash here is a genuine arg-shape error.
-        let step_stream = self.piped_ty_is_step_shaped(&piped_ty);
+        let step_stream = self.piped_ty_is_step_shaped(piped_ty);
         self.ctx
             .unify_comp_ty(&cty, &expected, Reason::PipedValue { step_stream });
         result
@@ -1150,18 +1146,17 @@ impl Inferencer<'_> {
         if !emits_bytes {
             return last;
         }
-        match self.ctx.unifier.resolve_comp_ty(&last) {
-            CompTy::Fun(..) => last,
-            _ => {
-                let (ret, input, _) = self.extract_return(&last);
-                CompTy::Return(
-                    PipeSpec {
-                        input,
-                        output: PipeMode::Bytes,
-                    },
-                    Box::new(ret),
-                )
-            }
+        if let CompTy::Fun(..) = self.ctx.unifier.resolve_comp_ty(&last) {
+            last
+        } else {
+            let (ret, input, _) = self.extract_return(&last);
+            CompTy::Return(
+                PipeSpec {
+                    input,
+                    output: PipeMode::Bytes,
+                },
+                Box::new(ret),
+            )
         }
     }
 
@@ -1205,9 +1200,8 @@ impl Inferencer<'_> {
 
     fn infer_map_val(&mut self, entries: &[ValMapEntry]) -> Ty {
         let all_literal_keys = entries.iter().all(|entry| match entry {
-            ValMapEntry::Entry(Val::String(_), _) => true,
+            ValMapEntry::Entry(Val::String(_), _) | ValMapEntry::Spread(_) => true,
             ValMapEntry::Entry(_, _) => false,
-            ValMapEntry::Spread(_) => true,
         });
 
         if all_literal_keys && !entries.is_empty() {
@@ -1307,8 +1301,7 @@ impl Inferencer<'_> {
     pub(super) fn infer_val(&mut self, val: &Val) -> Ty {
         match val {
             Val::Unit => Ty::Unit,
-            Val::TildePath(_) => Ty::String,
-            Val::String(_) => Ty::String,
+            Val::TildePath(_) | Val::String(_) => Ty::String,
             Val::Int(_) => Ty::Int,
             Val::Float(_) => Ty::Float,
             Val::Bool(_) => Ty::Bool,
@@ -1450,7 +1443,7 @@ impl Inferencer<'_> {
                 let piped_ty = self.deref_forced_producer(piped_ty);
                 let next = stage_tys[i + 1].clone();
                 stage_tys[i + 1] =
-                    self.with_span(edge_span, |this| this.apply_piped_value(next, piped_ty));
+                    self.with_span(edge_span, |this| this.apply_piped_value(next, &piped_ty));
                 consumed_as_value[i + 1] = true;
                 continue;
             }
@@ -1498,7 +1491,7 @@ impl Inferencer<'_> {
         for (i, (stage, ty)) in stages.iter().zip(&stage_tys).enumerate() {
             let spec = self.stage_own_spec(ty, consumed_as_value[i]);
             let value_ty = self.comp_return_ty(ty);
-            let key = stage.as_ref() as *const Comp as usize;
+            let key = std::ptr::from_ref::<Comp>(stage.as_ref()) as usize;
             self.ctx.stage_specs.insert(key, spec);
             self.ctx.stage_types.insert(key, value_ty);
         }
@@ -1869,7 +1862,7 @@ impl Inferencer<'_> {
     pub(super) fn final_output_of_comp(&mut self, comp: &Comp, fallback: &CompTy) -> PipeMode {
         self.ctx
             .final_outputs
-            .get(&(comp as *const Comp as usize))
+            .get(&(std::ptr::from_ref::<Comp>(comp) as usize))
             .copied()
             .unwrap_or_else(|| self.comp_output_mode(fallback))
     }
@@ -1888,13 +1881,14 @@ impl Inferencer<'_> {
                 .and_then(|last| {
                     self.ctx
                         .final_outputs
-                        .get(&(last.as_ref() as *const Comp as usize))
+                        .get(&(std::ptr::from_ref::<Comp>(last.as_ref()) as usize))
                         .copied()
                 })
                 .unwrap_or(PipeMode::None),
             CompKind::Bind { rest, .. } => self.final_output_of_comp(rest, cty),
-            CompKind::Lam { body, .. } => self.final_output_of_comp(body, cty),
-            CompKind::Force(Val::Thunk(body)) => self.final_output_of_comp(body, cty),
+            CompKind::Lam { body, .. }
+            | CompKind::Force(Val::Thunk(body))
+            | CompKind::Scope(ScopeOp::Redirect { body, .. }) => self.final_output_of_comp(body, cty),
             CompKind::If { then, else_, .. } => {
                 let then_out = self.final_output_of_comp(then, cty);
                 let else_out = self.final_output_of_comp(else_, cty);
@@ -1904,24 +1898,21 @@ impl Inferencer<'_> {
                 let out = self.final_output_of_comp(part, cty);
                 self.join_byte_output(acc, out)
             }),
-            CompKind::Scope(ScopeOp::Within { body, .. })
-            | CompKind::Scope(ScopeOp::Grant { body, .. }) => {
-                self.final_output_of_thunk_value(body, cty)
-            }
-            CompKind::Scope(ScopeOp::Redirect { body, .. }) => self.final_output_of_comp(body, cty),
+            CompKind::Scope(
+                ScopeOp::Within { body, .. }
+                | ScopeOp::Grant { body, .. }
+                | ScopeOp::Guard { body, .. },
+            ) => self.final_output_of_thunk_value(body, cty),
             CompKind::Scope(ScopeOp::Try { body, handler }) => {
                 let body_out = self.final_output_of_thunk_value(body, cty);
                 let handler_out = self.final_output_of_thunk_value(handler, cty);
                 self.join_byte_output(body_out, handler_out)
             }
-            CompKind::Scope(ScopeOp::Guard { body, .. }) => {
-                self.final_output_of_thunk_value(body, cty)
-            }
             _ => self.comp_output_mode(cty),
         };
         self.ctx
             .final_outputs
-            .insert(comp as *const Comp as usize, final_output);
+            .insert(std::ptr::from_ref::<Comp>(comp) as usize, final_output);
     }
 
     pub(super) fn infer_comp(&mut self, comp: &Comp) -> CompTy {
@@ -1965,23 +1956,23 @@ impl Inferencer<'_> {
                 // the value"; value-returning byte computations (`hostname`:
                 // String, `to-json`: Bytes, `echo log; length xs`: Int) keep
                 // their proper return value.
-                let (bound_ty, rhs_output) = match self.ctx.unifier.resolve_comp_ty(&inner_ty) {
-                    CompTy::Fun(..) => (Ty::Thunk(Box::new(inner_ty)), PipeMode::None),
-                    _ => {
+                let (bound_ty, rhs_output) =
+                    if let CompTy::Fun(..) = self.ctx.unifier.resolve_comp_ty(&inner_ty) {
+                        (Ty::Thunk(Box::new(inner_ty)), PipeMode::None)
+                    } else {
                         let (ty, _, _) = self.extract_return(&inner_ty);
                         let final_output = self.final_output_of_comp(inner, &inner_ty);
                         (self.observed_value_ty(ty, final_output), final_output)
-                    }
-                };
+                    };
                 self.ctx
                     .bind_outputs
-                    .insert(comp as *const Comp as usize, rhs_output);
+                    .insert(std::ptr::from_ref::<Comp>(comp) as usize, rhs_output);
 
                 match pattern {
                     IrPattern::Name(name) => {
                         self.ctx
                             .bind_tys
-                            .insert(comp as *const Comp as usize, bound_ty.clone());
+                            .insert(std::ptr::from_ref::<Comp>(comp) as usize, bound_ty.clone());
                         let scheme = generalize(&mut self.ctx.unifier, self.env, &bound_ty);
                         self.env.bind(name.clone(), scheme);
                     }
@@ -2071,7 +2062,7 @@ impl Inferencer<'_> {
                 });
                 let then_cty = self.infer_comp(then);
                 let else_cty = self.infer_comp(else_);
-                self.merge_branches(vec![then_cty, else_cty], Reason::IfBranches)
+                self.merge_branches(vec![then_cty, else_cty], &Reason::IfBranches)
             }
             CompKind::Case { scrutinee, table } => self.infer_case(scrutinee, table),
             CompKind::Scope(op) => match op {

@@ -316,7 +316,7 @@ impl WireContext {
             dir: self.dir,
             grants: self.grants,
             handlers: HandlerStack::from(handlers),
-            hooks: Default::default(),
+            hooks: std::collections::HashMap::default(),
             args: self.args,
             modules: self.modules.into_modules(arcs)?,
             cwd: self.cwd,
@@ -361,7 +361,7 @@ pub(crate) fn install_shell_mobile(
 /// preserves the receiver's builtin table, so the hook's entries
 /// survive the overlay.
 pub(crate) fn reexec_child_shell(state: WireMobile, arcs: &ScopeArcs) -> Result<Shell, Error> {
-    let mut shell = Shell::new(Default::default());
+    let mut shell = Shell::new(crate::io::TerminalState::default());
     crate::sandbox::run_child_shell_extension(&mut shell);
     install_shell_mobile(state, &mut shell, arcs)?;
     Ok(shell)

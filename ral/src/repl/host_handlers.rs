@@ -43,7 +43,7 @@ fn type_err(msg: &'static str) -> Break {
 /// Int argument when given, otherwise the most recent job (SPEC §18's
 /// "current job" default).  `None` means there is no job to act on.
 fn job_id_arg(args: &[Value], jobs: &crate::jobs::JobTable) -> Option<usize> {
-    match args.first().and_then(|v| v.as_int()) {
+    match args.first().and_then(ral_core::Value::as_int) {
         Some(n) => Some(n as usize),
         None => jobs.most_recent_id(),
     }

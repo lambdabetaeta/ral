@@ -31,6 +31,7 @@
 use crate::path::{match_variants_list, proper_ancestors};
 use crate::types::{ExecProjection, FsProjection, SandboxProjection};
 use std::ffi::{CStr, CString};
+use std::fmt::Write;
 use std::os::raw::{c_char, c_int};
 
 pub(super) fn apply_current_process_policy(policy: &SandboxProjection) -> std::io::Result<()> {
@@ -71,7 +72,7 @@ fn apply_profile<'a>(
             profile_cstr.as_ptr(),
             0,
             parameter_ptrs.as_ptr(),
-            &mut errorbuf,
+            &raw mut errorbuf,
         )
     };
     if rc != 0 {
@@ -231,10 +232,10 @@ fn emit_exec_rules(lines: &mut Vec<String>, exec: &ExecProjection) {
                 .map(|s| s.exec_path.to_string_lossy().into_owned());
             let mut clauses = String::new();
             for path in allow_paths.iter().chain(self_exec.as_ref()) {
-                clauses.push_str(&format!("\n  (literal \"{}\")", escape_path(path)));
+                let _ = write!(clauses, "\n  (literal \"{}\")", escape_path(path));
             }
             for dir in user_dirs.iter().chain(system_dirs.iter()) {
-                clauses.push_str(&format!("\n  (subpath \"{}\")", escape_path(dir)));
+                let _ = write!(clauses, "\n  (subpath \"{}\")", escape_path(dir));
             }
             // An operand-less `(allow file-read* process-exec)` is an
             // unconditional allow under SBPL — emit the rule only when a
@@ -311,7 +312,7 @@ enum SystemAccess {
 /// User temp/workspace paths are deliberately absent; they must
 /// arrive via the active fs grant.
 fn system_paths() -> &'static [(&'static str, SystemAccess)] {
-    use SystemAccess::*;
+    use SystemAccess::{Exec, Read};
     &[
         ("/bin", Exec),
         ("/usr", Exec),

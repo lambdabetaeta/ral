@@ -377,9 +377,8 @@ fn unterminated_string_with_inner_unclosed_anchors_on_outer_string() {
         ("inner_index", "\"foo $name[k"),
     ];
     for (tag, src) in cases {
-        let err = match parse(src) {
-            Ok(_) => panic!("{tag}: should reject {src:?}"),
-            Err(e) => e,
+        let Err(err) = parse(src) else {
+            panic!("{tag}: should reject {src:?}")
         };
         assert!(
             err.message.contains("unterminated double-quoted string"),
@@ -406,9 +405,8 @@ fn spread_in_control_op_operand_is_a_parse_error_not_a_panic() {
         ("audit_only", "audit ...$b"),
     ];
     for (tag, src) in cases {
-        let err = match parse(src) {
-            Ok(_) => panic!("{tag}: a spread operand should be rejected: {src:?}"),
-            Err(e) => e,
+        let Err(err) = parse(src) else {
+            panic!("{tag}: a spread operand should be rejected: {src:?}")
         };
         assert!(
             err.message.contains("spread"),
@@ -579,7 +577,7 @@ const REACHABLE: &[Reachable] = &[
 #[test]
 fn every_diagnostic_is_reachable() {
     let mut silent: Vec<&str> = Vec::new();
-    for r in REACHABLE.iter() {
+    for r in REACHABLE {
         if parse(r.src).is_ok() {
             silent.push(r.tag);
         }
@@ -594,11 +592,8 @@ fn every_diagnostic_is_reachable() {
 #[test]
 fn every_diagnostic_contains_its_english_anchor() {
     let mut drifted: Vec<(String, String)> = Vec::new();
-    for r in REACHABLE.iter() {
-        let err = match parse(r.src) {
-            Ok(_) => continue,
-            Err(e) => e,
-        };
+    for r in REACHABLE {
+        let Err(err) = parse(r.src) else { continue };
         let rendered = strip_ansi(&format_parse_error_ariadne("fuzz.ral", r.src, &err));
         if !err.message.contains(r.must_contain) && !rendered.contains(r.must_contain) {
             drifted.push((r.tag.to_string(), err.message.clone()));
@@ -612,7 +607,7 @@ fn every_diagnostic_contains_its_english_anchor() {
 
 #[test]
 fn every_diagnostic_is_friendly() {
-    for r in REACHABLE.iter() {
+    for r in REACHABLE {
         let Err(err) = parse(r.src) else { continue };
         assert_friendly(r.tag, r.src, &err);
     }

@@ -140,8 +140,8 @@ fn free_comp_inner(u: &mut Unifier, cty: &CompTy, out: &mut FreeVars, visited: &
             out.comps.insert(v);
         }
         CompTy::Return(spec, a) => {
-            free_mode_inner(u, &spec.input, out);
-            free_mode_inner(u, &spec.output, out);
+            free_mode_inner(u, spec.input, out);
+            free_mode_inner(u, spec.output, out);
             free_ty_inner(u, &a, out, visited);
         }
         CompTy::Fun(a, b) => {
@@ -151,8 +151,8 @@ fn free_comp_inner(u: &mut Unifier, cty: &CompTy, out: &mut FreeVars, visited: &
     }
 }
 
-fn free_mode_inner(u: &mut Unifier, mode: &PipeMode, out: &mut FreeVars) {
-    if let PipeMode::Var(v) = u.resolve_mode(mode) {
+fn free_mode_inner(u: &mut Unifier, mode: PipeMode, out: &mut FreeVars) {
+    if let PipeMode::Var(v) = u.resolve_mode(&mode) {
         out.modes.insert(v);
     }
 }

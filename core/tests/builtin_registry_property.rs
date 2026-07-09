@@ -83,23 +83,23 @@ fn inhabitant(ty: &Ty) -> Option<Value> {
 /// return is polymorphic — any value inhabits it.
 fn inhabits(value: &Value, ty: &Ty) -> bool {
     match (ty, value) {
-        (Ty::Var(_), _) => true,
-        (Ty::Unit, Value::Unit) => true,
-        (Ty::Bool, Value::Bool(_)) => true,
-        (Ty::Int, Value::Int(_)) => true,
-        // The checker promotes Int to Float at use sites; an Int result for
-        // a Float position still inhabits it.
-        (Ty::Float, Value::Float(_) | Value::Int(_)) => true,
-        (Ty::String, Value::String(_)) => true,
-        (Ty::Bytes, Value::Bytes(_)) => true,
         (Ty::List(elem), Value::List(items)) => items.iter().all(|v| inhabits(v, elem)),
         (Ty::Map(val), Value::Map(m)) => m.iter().all(|(_, v)| inhabits(v, val)),
-        (Ty::Handle(_), Value::Handle(_)) => true,
+        (Ty::Var(_), _)
+        | (Ty::Unit, Value::Unit)
+        | (Ty::Bool, Value::Bool(_))
+        | (Ty::Int, Value::Int(_))
+        // The checker promotes Int to Float at use sites; an Int result for
+        // a Float position still inhabits it.
+        | (Ty::Float, Value::Float(_) | Value::Int(_))
+        | (Ty::String, Value::String(_))
+        | (Ty::Bytes, Value::Bytes(_))
+        | (Ty::Handle(_), Value::Handle(_))
         // Record/Variant returns carry a row; a Map/Variant runtime value is
         // the honest first-order witness and the dedicated builtin tests
         // check the field shapes.
-        (Ty::Record(_), Value::Map(_)) => true,
-        (Ty::Variant(_), Value::Variant { .. }) => true,
+        | (Ty::Record(_), Value::Map(_))
+        | (Ty::Variant(_), Value::Variant { .. }) => true,
         _ => false,
     }
 }

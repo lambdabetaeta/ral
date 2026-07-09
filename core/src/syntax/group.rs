@@ -127,7 +127,7 @@ pub fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup> {
         return stmts.iter().map(|s| StmtGroup::Single(s.clone())).collect();
     }
 
-    let candidate_names: HashSet<String> = defs.keys().map(|s| s.to_string()).collect();
+    let candidate_names: HashSet<String> = defs.keys().map(std::string::ToString::to_string).collect();
 
     // Build a directed dependency graph over def_list indices.
     // Edge i→j: binding i's RHS has a free reference to binding j's name.
@@ -418,6 +418,7 @@ fn strongconnect(v: usize, adj: &[Vec<usize>], st: &mut TarjanState) {
 mod tests {
     use super::*;
     use crate::syntax::parser::parse;
+    use std::fmt::Write;
 
     /// Summarise the grouping of `src` as a list of group descriptors: a
     /// `Single` carries its statement's shape via a one-char tag, a
@@ -506,9 +507,9 @@ mod tests {
         const N: usize = 50_000;
         let mut src = String::new();
         for i in 0..N {
-            src.push_str(&format!("let f{i} = {{ f{} }}\n", i + 1));
+            let _ = writeln!(src, "let f{i} = {{ f{} }}", i + 1);
         }
-        src.push_str(&format!("let f{N} = {{ return 0 }}\nreturn 0\n"));
+        let _ = write!(src, "let f{N} = {{ return 0 }}\nreturn 0\n");
         let stmts = parse(&src).expect("parse");
         let groups = group_stmts(&stmts);
         // N+1 thunk bindings (all acyclic singletons) + the trailing

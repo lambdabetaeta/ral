@@ -1,7 +1,8 @@
 use crate::ansi::{self, BOLD, CYAN, DIM, RESET};
 use crate::typecheck::{builtin_type_hint, fmt_scheme};
-use crate::types::*;
+use crate::types::{Value, Shell, Break, sig, Error, Settled, Escape};
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::sync::OnceLock;
 
 /// Register prelude type hints from the baked schemes so that `builtin_help`
@@ -140,9 +141,9 @@ fn fmt_entry(
     (cyan, dim, reset): (&str, &str, &str),
 ) -> String {
     let mut s = format!("  {cyan}{name}{reset}{dim}:{reset} {doc}\n");
-    s.push_str(&format!("  {dim}{type_hint}{reset}\n"));
+    let _ = writeln!(s, "  {dim}{type_hint}{reset}");
     if let Some(src) = source {
-        s.push_str(&format!("  {dim}{src}{reset}\n"));
+        let _ = writeln!(s, "  {dim}{src}{reset}");
     }
     s.push('\n');
     s
@@ -170,31 +171,24 @@ pub(super) fn builtin_help(_args: &[Value], shell: &mut Shell) -> Value {
                 s.push_str(&fmt_line(name, doc, line_colors));
             }
         }
-        s.push_str(&format!(
-            "{bold}Prelude:{reset}\n",
-            bold = bold,
-            reset = reset
-        ));
+        let _ = writeln!(s, "{bold}Prelude:{reset}", bold = bold, reset = reset);
         for (name, doc) in prelude_all_docs() {
             s.push_str(&fmt_line(&name, &doc, line_colors));
         }
         let library = library_all_docs();
         if !library.is_empty() {
-            s.push_str(&format!(
-                "{bold}Library:{reset}\n",
-                bold = bold,
-                reset = reset
-            ));
+            let _ = writeln!(s, "{bold}Library:{reset}", bold = bold, reset = reset);
             for (name, doc) in library {
                 s.push_str(&fmt_line(&name, &doc, line_colors));
             }
         }
-        s.push_str(&format!("{dim}──{reset}\n", dim = dim, reset = reset));
-        s.push_str(&format!(
-            "{dim}Use `explain <name>` for the full type signature and source location of any entry.{reset}\n",
+        let _ = writeln!(s, "{dim}──{reset}", dim = dim, reset = reset);
+        let _ = writeln!(
+            s,
+            "{dim}Use `explain <name>` for the full type signature and source location of any entry.{reset}",
             dim = dim,
             reset = reset
-        ));
+        );
         s
     };
     let _ = shell.write_stdout(out.as_bytes());
@@ -283,12 +277,6 @@ fn type_for(name: &str) -> String {
         use crate::typecheck::builtins::{BuiltinTypeRule, CompTemplate, ModeTemplate};
         match crate::builtins::builtin_type_rule(name) {
             Some(BuiltinTypeRule::Sig(sig)) => match sig.result {
-                CompTemplate::Pure(_)
-                | CompTemplate::Return {
-                    input: ModeTemplate::None,
-                    output: ModeTemplate::None,
-                    ..
-                } => "F[none, none] Value".into(),
                 CompTemplate::Return {
                     input: ModeTemplate::None,
                     output: ModeTemplate::Bytes,
@@ -298,15 +286,21 @@ fn type_for(name: &str) -> String {
                     input: ModeTemplate::Bytes,
                     output: ModeTemplate::None,
                     ..
-                } => "F[bytes, none] Value".into(),
+                }
+                | CompTemplate::LinesStep => "F[bytes, none] Value".into(),
                 CompTemplate::Return {
                     input: ModeTemplate::Bytes,
                     output: ModeTemplate::Bytes,
                     ..
                 } => "F[bytes, bytes]".into(),
-                CompTemplate::Return { .. } => "F[none, none] Value".into(),
+                CompTemplate::Pure(_)
+                | CompTemplate::Return {
+                    input: ModeTemplate::None,
+                    output: ModeTemplate::None,
+                    ..
+                }
+                | CompTemplate::Return { .. } => "F[none, none] Value".into(),
                 CompTemplate::Never => "∀ types. F[I, O] Type".into(),
-                CompTemplate::LinesStep => "F[bytes, none] Value".into(),
             },
             _ => "—".into(),
         }
@@ -412,7 +406,7 @@ pub fn pretty_print(val: &Value, indent: usize, params: &PrintParams) -> String 
                 .iter()
                 .map(|v| pretty_print(v, indent + 1, params))
                 .collect();
-            bracketed(parts, indent, "[", "]", params)
+            bracketed(&parts, indent, "[", "]", params)
         }
         Value::Map(pairs) => {
             if pairs.is_empty() {
@@ -439,7 +433,7 @@ pub fn pretty_print(val: &Value, indent: usize, params: &PrintParams) -> String 
                     format!("{k}: {rendered}")
                 })
                 .collect();
-            bracketed(parts, indent, "[", "]", params)
+            bracketed(&parts, indent, "[", "]", params)
         }
         Value::Variant { label, payload } => match payload {
             None => format!("`{label}"),
@@ -477,7 +471,7 @@ fn elide(s: &str, budget: usize) -> String {
     format!("{head} […elided {elided} characters…] {tail}")
 }
 
-fn bracketed(parts: Vec<String>, indent: usize, open: &str, close: &str, params: &PrintParams) -> String {
+fn bracketed(parts: &[String], indent: usize, open: &str, close: &str, params: &PrintParams) -> String {
     let inline = format!("{open}{}{close}", parts.join(", "));
     if inline.chars().count() <= params.max_width && !inline.contains('\n') {
         return inline;

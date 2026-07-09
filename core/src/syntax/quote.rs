@@ -112,8 +112,8 @@ mod tests {
             "expected one non-Eof token, got {payloads:?} from {src:?}"
         );
         let body = match payloads[0] {
-            Token::SingleQuoted(s) => s.clone(),
-            Token::Word(
+            Token::SingleQuoted(s)
+            | Token::Word(
                 crate::syntax::ast::Word::Plain(s) | crate::syntax::ast::Word::Slash(s),
             ) => s.clone(),
             other => panic!("unexpected token kind for {src:?}: {other:?}"),

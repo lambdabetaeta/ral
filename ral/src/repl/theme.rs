@@ -57,7 +57,6 @@ pub(crate) fn output_theme() -> OutputTheme {
 /// Unrecognised names also return `None`.
 pub(crate) fn named_color(name: &str) -> Option<String> {
     match name.to_ascii_lowercase().as_str() {
-        "none" | "off" => None,
         "black" => Some(BLACK.into()),
         "red" => Some(RED.into()),
         "green" => Some(GREEN.into()),

@@ -80,7 +80,7 @@ impl BakedPrelude {
     pub fn bake_runtime() -> Self {
         let src = include_str!("prelude.ral");
         let ast = crate::parse(src).expect("prelude parse");
-        let comp = crate::elaborate(&ast, Default::default());
+        let comp = crate::elaborate(&ast, std::collections::HashSet::default());
         let (annotated, schemes) = crate::bake_prelude(&comp);
         let this = Self::from_blobs(&[], &[]);
         let _ = this.comp.set(Arc::new(annotated));
@@ -149,7 +149,7 @@ pub fn bake_prelude_to_out_dir() {
         eprintln!("build: prelude parse error: {e}");
         std::process::exit(1);
     });
-    let comp = crate::elaborate(&ast, Default::default());
+    let comp = crate::elaborate(&ast, std::collections::HashSet::default());
 
     let (annotated, schemes) = crate::bake_prelude(&comp);
     let ir_bytes = postcard::to_allocvec(&annotated).expect("prelude IR serialization failed");
@@ -348,7 +348,7 @@ impl Shell {
                         .renew(crate::ir::referenced_names(&comp));
                 }
 
-                self.run_built(req, foreground, wall, single_command, |s| {
+                self.run_built(req, &foreground, wall, single_command, |s| {
                     crate::evaluator::eval_top_level(&comp, s)
                 })
             }
@@ -380,7 +380,7 @@ impl Shell {
                     TerminalPolicy::Leased => RequestedTerminalAccess::Leased,
                 };
 
-                self.run_built(req, foreground, wall, false, |s| {
+                self.run_built(req, &foreground, wall, false, |s| {
                     crate::builtins::apply(&hook.binding.value, &args, s)
                 })
             }
@@ -483,7 +483,7 @@ impl Shell {
     fn run_built(
         &mut self,
         req: TurnRequest<'_>,
-        foreground: crate::process::ForegroundScope,
+        foreground: &crate::process::ForegroundScope,
         wall: Option<crate::process::Deadline>,
         single_command: bool,
         body: impl FnOnce(&mut Shell) -> Settled<Value>,

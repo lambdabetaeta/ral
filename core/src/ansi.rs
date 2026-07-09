@@ -132,7 +132,7 @@ pub fn escape_seq_len(bytes: &[u8], at: usize) -> usize {
             i += usize::from(i < bytes.len());
             i - at
         }
-        Some(b']') | Some(b'P') | Some(b'X') | Some(b'^') | Some(b'_') => {
+        Some(b']' | b'P' | b'X' | b'^' | b'_') => {
             let mut i = at + 2;
             while i < bytes.len() {
                 if bytes[i] == 0x07 {
@@ -221,7 +221,7 @@ pub fn use_color() -> bool {
 /// Checks `ui_ansi_ok()` — stdout tty + TERM + NO_COLOR — rather than the
 /// stderr-oriented `stderr_ansi_ok()` used by `use_color`.
 pub fn use_ui_color() -> bool {
-    CACHED_TERMINAL.get().is_some_and(|t| t.ui_ansi_ok())
+    CACHED_TERMINAL.get().is_some_and(TerminalState::ui_ansi_ok)
 }
 
 /// Return `code` when `enabled` is true, otherwise the empty string.

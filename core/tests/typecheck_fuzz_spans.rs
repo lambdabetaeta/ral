@@ -13,15 +13,16 @@
 
 mod common;
 
+use std::collections::HashSet;
+
 use ral_core::typecheck::TypeError;
 use ral_core::{elaborator::elaborate, syntax::parser::parse, typecheck};
 
 fn raw_errors(src: &str) -> Vec<TypeError> {
-    let ast = match parse(src) {
-        Ok(a) => a,
-        Err(_) => return Vec::new(),
+    let Ok(ast) = parse(src) else {
+        return Vec::new();
     };
-    let comp = elaborate(&ast, Default::default());
+    let comp = elaborate(&ast, HashSet::default());
     typecheck(
         &comp,
         ral_core::SessionSchemes::from_schemes(common::prelude_schemes()),
@@ -189,15 +190,12 @@ fn first_error_span_matches_expected() {
             ));
             continue;
         };
-        let actual = match slice_span(case.src, err) {
-            Some(s) => s,
-            None => {
-                failures.push(format!(
-                    "{}: error has no span (kind: {:?})",
-                    case.tag, err.kind
-                ));
-                continue;
-            }
+        let Some(actual) = slice_span(case.src, err) else {
+            failures.push(format!(
+                "{}: error has no span (kind: {:?})",
+                case.tag, err.kind
+            ));
+            continue;
         };
         if actual != case.expected {
             failures.push(format!(

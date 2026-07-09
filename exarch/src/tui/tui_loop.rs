@@ -311,7 +311,7 @@ fn ui_loop(
     // fast events drain — a token/tool flood coalesces into one coherent frame
     // per interval instead of a full-screen rewrite per 64-event batch (the
     // jitter that churn caused).
-    let mut last_draw = Instant::now() - frame;
+    let mut last_draw = Instant::now().checked_sub(frame).unwrap();
     // Whether the next due frame must actually repaint. Set below by
     // anything the frame can show that isn't already covered by `animating`:
     // a drained bus event, a consumed keystroke, a focus change, or a probe
@@ -324,7 +324,7 @@ fn ui_loop(
     let focused_waiting = |ctx: &CommandCtx<'_>, focused| {
         ctx.agents
             .mailbox(focused)
-            .map_or(true, |mb| mb.waiting_for_input())
+            .is_none_or(|mb| mb.waiting_for_input())
     };
     let mut waiting_for_input = focused_waiting(ctx, tui.app.tabs.focused());
     loop {

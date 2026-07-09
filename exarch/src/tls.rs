@@ -26,7 +26,7 @@ use std::time::Duration;
 /// see [`MAX_ATTEMPTS`]).
 ///
 /// [`MAX_ATTEMPTS`]: crate::provider::MAX_ATTEMPTS
-pub(crate) const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
+pub(crate) const STREAM_IDLE_TIMEOUT: Duration = Duration::from_mins(3);
 
 /// rustls config validating against the bundled Mozilla webpki roots.
 pub(crate) fn config() -> rustls::ClientConfig {

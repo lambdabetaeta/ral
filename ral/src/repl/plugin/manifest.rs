@@ -61,7 +61,7 @@ impl LoadedPlugin {
         }
         let name = map
             .and_then(|m| m.get("name"))
-            .map(|v| v.to_string())
+            .map(std::string::ToString::to_string)
             .ok_or_else(|| load_err("manifest missing required 'name' field"))?;
         let aliases = match map.and_then(|m| m.get("aliases")) {
             Some(Value::Map(m)) => parse_aliases(m)?,
@@ -133,7 +133,7 @@ where
         };
         let key = map
             .get("key")
-            .map(|v| v.to_string())
+            .map(std::string::ToString::to_string)
             .ok_or_else(|| load_err("keybinding entry missing 'key' field"))?;
         let handler = map
             .get("handler")

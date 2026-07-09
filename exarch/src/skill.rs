@@ -73,9 +73,8 @@ pub fn discover_metadata(
         if !dir_readable(&dir, caps) {
             continue;
         }
-        let raw = match std::fs::read_to_string(dir.join("SKILL.md")) {
-            Ok(r) => r,
-            Err(_) => continue,
+        let Ok(raw) = std::fs::read_to_string(dir.join("SKILL.md")) else {
+            continue;
         };
         if let Some(skill) = skill_from_frontmatter(&raw, &name) {
             skills.push(skill);
@@ -158,9 +157,8 @@ pub(crate) fn read_skill_body(dir: &Path) -> Result<String, String> {
 )]
 fn scan_dir(root: &Path) -> Vec<(String, PathBuf)> {
     let mut skills = Vec::new();
-    let entries = match std::fs::read_dir(root) {
-        Ok(d) => d,
-        Err(_) => return skills,
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return skills;
     };
     for entry in entries.flatten() {
         let path = entry.path();

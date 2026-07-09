@@ -1,6 +1,6 @@
 //! Shared builtin argument, IO, and conversion helpers.
 
-use crate::types::*;
+use crate::types::{Value, Settled, sig, HandleInner, Break, Error, Env, sig_hint, List, Shell};
 use std::sync::Arc;
 
 /// Return an error if `args` has fewer than `min` elements.
@@ -123,9 +123,7 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> Settled<bool> {
         (Value::String(x), Value::String(y)) => x == y,
         (Value::Bytes(x), Value::Bytes(y)) => x == y,
         (Value::List(xs), Value::List(ys)) => {
-            if xs.len() != ys.len() {
-                false
-            } else {
+            if xs.len() == ys.len() {
                 // Comparability is checked pairwise before equality is
                 // decided, so every pair's error surfaces regardless of
                 // what an earlier (unrelated) pair happened to compare to.
@@ -135,6 +133,8 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> Settled<bool> {
                     .map(|(a, b)| values_equal(a, b))
                     .collect::<Settled<Vec<bool>>>()?;
                 pairwise.into_iter().all(|eq| eq)
+            } else {
+                false
             }
         }
         (Value::Map(xs), Value::Map(ys)) => {
@@ -142,9 +142,7 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> Settled<bool> {
             // either the key streams agree pointwise or the maps differ.
             // As with List, each pair's comparability is checked
             // independently of the others before equality is decided.
-            if xs.len() != ys.len() {
-                false
-            } else {
+            if xs.len() == ys.len() {
                 let pairwise = xs
                     .iter()
                     .zip(ys.iter())
@@ -153,6 +151,8 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> Settled<bool> {
                     })
                     .collect::<Settled<Vec<bool>>>()?;
                 pairwise.into_iter().all(|eq| eq)
+            } else {
+                false
             }
         }
         (
@@ -265,8 +265,7 @@ pub fn regex_err(ctx: &str, pattern: &str, full: &str) -> String {
         .rev()
         .find(|l| l.trim_start().starts_with("error:"))
         .and_then(|l| l.trim_start().strip_prefix("error:"))
-        .map(|s| s.trim())
-        .unwrap_or("invalid pattern");
+        .map_or("invalid pattern", str::trim);
     format!("{ctx}: invalid pattern '{pattern}': {cause}")
 }
 

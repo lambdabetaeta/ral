@@ -427,9 +427,6 @@ impl PartialEq for Value {
                 },
             ) => la == lb && pa == pb,
             // Closures and handles are never structurally equal.
-            (Value::Lambda { .. }, Value::Lambda { .. }) => false,
-            (Value::Block { .. }, Value::Block { .. }) => false,
-            (Value::Handle(_), Value::Handle(_)) => false,
             _ => false,
         }
     }
@@ -914,8 +911,7 @@ impl HandlerStack {
             .frames
             .iter()
             .rposition(|f| f.handle.0 < frame.handle.0)
-            .map(|i| i + 1)
-            .unwrap_or(0);
+            .map_or(0, |i| i + 1);
         self.frames.insert(insert_at, frame);
     }
 }

@@ -12,6 +12,7 @@ use crate::source::{FileId, Span as ByteSpan};
 use crate::syntax::lexer::{LexErrorKind, StringForm};
 use crate::syntax::parser::ParseError;
 use crate::typecheck::TypeError;
+use std::fmt::Write;
 use std::sync::Arc;
 
 use crate::text::floor_char_boundary;
@@ -150,7 +151,7 @@ pub fn byte_to_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
     let prefix = &source[..safe];
     let line = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
     let last_nl = prefix.rfind('\n');
-    let line_start = last_nl.map(|i| i + 1).unwrap_or(0);
+    let line_start = last_nl.map_or(0, |i| i + 1);
     let col = source[line_start..safe].chars().count() + 1;
     (line, col)
 }
@@ -201,8 +202,7 @@ fn line_col_to_byte(source: &str, line: usize, col: usize) -> usize {
             let in_line = ln
                 .char_indices()
                 .nth(col.saturating_sub(1))
-                .map(|(b, _)| b)
-                .unwrap_or(ln.len());
+                .map_or(ln.len(), |(b, _)| b);
             return byte_offset + in_line;
         }
         byte_offset += ln.len();
@@ -226,11 +226,15 @@ fn render_messageless(code: Option<&str>, message: &str, hint: Option<&str>) -> 
     let mut out = String::new();
     let (head, cyan, reset) = error_palette();
     match code {
-        Some(c) => out.push_str(&format!("{head}[{c}] Error{reset}: {message}\n")),
-        None => out.push_str(&format!("{head}Error{reset}: {message}\n")),
+        Some(c) => {
+            let _ = writeln!(out, "{head}[{c}] Error{reset}: {message}");
+        }
+        None => {
+            let _ = writeln!(out, "{head}Error{reset}: {message}");
+        }
     }
     if let Some(h) = hint {
-        out.push_str(&format!("  {cyan}help{reset}: {h}\n"));
+        let _ = writeln!(out, "  {cyan}help{reset}: {h}");
     }
     out
 }
@@ -323,8 +327,7 @@ pub fn format_parse_error_ariadne(file: &str, source: &str, err: &ParseError) ->
     }
     let range = err
         .span
-        .map(|s| byte_span_to_char_range(source, s))
-        .unwrap_or_else(|| eof_char_range(source));
+        .map_or_else(|| eof_char_range(source), |s| byte_span_to_char_range(source, s));
     render_ariadne(
         file,
         source,
@@ -653,11 +656,11 @@ pub fn format_runtime_error_compact(err: &crate::types::Error) -> String {
     let (red, cyan, reset) = error_palette();
     let mut out = format!("{red}error{reset}: {}", err.message);
     if let Some(code) = err.status_code_for_display() {
-        out.push_str(&format!(" (exit status {code})"));
+        let _ = write!(out, " (exit status {code})");
     }
     out.push('\n');
     if let Some(hint) = err.hint.as_deref() {
-        out.push_str(&format!("{cyan}hint{reset}: {hint}\n"));
+        let _ = writeln!(out, "{cyan}hint{reset}: {hint}");
     }
     out
 }

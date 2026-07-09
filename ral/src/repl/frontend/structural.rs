@@ -522,7 +522,7 @@ impl Frontend for StructuralFrontend {
         #[cfg(unix)] jobs: &Arc<Mutex<JobTable>>,
         #[cfg(feature = "structural")] worksheet: &Worksheet,
     ) -> Read {
-        match self.compose(
+        if let Ok(r) = self.compose(
             shell,
             prompt,
             pending,
@@ -530,13 +530,12 @@ impl Frontend for StructuralFrontend {
             jobs,
             worksheet,
         ) {
-            Ok(r) => r,
-            Err(_) => {
-                // A terminal IO failure mid-session: leave raw mode and end
-                // cleanly rather than spin.
-                let _ = disable_raw_mode();
-                Read::Eof
-            }
+            r
+        } else {
+            // A terminal IO failure mid-session: leave raw mode and end
+            // cleanly rather than spin.
+            let _ = disable_raw_mode();
+            Read::Eof
         }
     }
 
@@ -573,17 +572,17 @@ fn key_matches(k: &KeyEvent, chord: &KeyChord) -> bool {
     }
     match (chord.name, k.code) {
         (KeyName::Char(a), KeyCode::Char(b)) => a == b,
-        (KeyName::Tab, KeyCode::Tab) => true,
-        (KeyName::Enter, KeyCode::Enter) => true,
-        (KeyName::Escape, KeyCode::Esc) => true,
-        (KeyName::Up, KeyCode::Up) => true,
-        (KeyName::Down, KeyCode::Down) => true,
-        (KeyName::Left, KeyCode::Left) => true,
-        (KeyName::Right, KeyCode::Right) => true,
-        (KeyName::Home, KeyCode::Home) => true,
-        (KeyName::End, KeyCode::End) => true,
-        (KeyName::Delete, KeyCode::Delete) => true,
-        (KeyName::Backspace, KeyCode::Backspace) => true,
+        (KeyName::Tab, KeyCode::Tab)
+        | (KeyName::Enter, KeyCode::Enter)
+        | (KeyName::Escape, KeyCode::Esc)
+        | (KeyName::Up, KeyCode::Up)
+        | (KeyName::Down, KeyCode::Down)
+        | (KeyName::Left, KeyCode::Left)
+        | (KeyName::Right, KeyCode::Right)
+        | (KeyName::Home, KeyCode::Home)
+        | (KeyName::End, KeyCode::End)
+        | (KeyName::Delete, KeyCode::Delete)
+        | (KeyName::Backspace, KeyCode::Backspace) => true,
         (KeyName::F(a), KeyCode::F(b)) => a == b,
         _ => false,
     }
@@ -605,9 +604,8 @@ fn accept_completion(prompt: &mut PromptEditor, menu: &Menu) {
     if row != menu.row {
         return;
     }
-    let line = match prompt.line(row) {
-        Some(l) => l,
-        None => return,
+    let Some(line) = prompt.line(row) else {
+        return;
     };
     let end = char_to_byte(&line, prompt.col());
     let replacement = menu.candidates[menu.selected].replacement.clone();
@@ -890,8 +888,7 @@ fn worksheet_rows(user: &[(String, Value)], shell: &Shell, model: &Worksheet) ->
             let ty = schemes
                 .get(name)
                 .and_then(|s| s.as_ref())
-                .map(fmt_scheme)
-                .unwrap_or_else(|| "?".into());
+                .map_or_else(|| "?".into(), fmt_scheme);
             rows.push(WsRow {
                 name: name.to_string(),
                 ty,
@@ -918,7 +915,7 @@ fn matrix_rows(user: &[(String, Value)], mut job_rows: Vec<MxRow>) -> Vec<MxRow>
         .filter_map(|(name, value)| match value {
             Value::Handle(h) => Some(MxRow {
                 name: name.clone(),
-                state: (*h.state.lock().unwrap_or_else(|e| e.into_inner())).into(),
+                state: (*h.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)).into(),
                 cmd: h.cmd.clone(),
             }),
             _ => None,
@@ -935,7 +932,7 @@ fn matrix_rows(user: &[(String, Value)], mut job_rows: Vec<MxRow>) -> Vec<MxRow>
 /// Labelled `%id` after the shell's job-spec syntax.
 #[cfg(unix)]
 fn job_rows(jobs: &Arc<Mutex<JobTable>>) -> Vec<MxRow> {
-    let guard = jobs.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     guard
         .list()
         .into_iter()
@@ -1421,8 +1418,7 @@ fn render_projections(
             let (glyph, hue) = match r.state {
                 MxState::Running => ("●", HANDLE_RUN),
                 MxState::Completed => ("✓", NAME_HUE),
-                MxState::Cancelled => ("○", SLATE),
-                MxState::Stopped => ("○", SLATE),
+                MxState::Cancelled | MxState::Stopped => ("○", SLATE),
             };
             mx_lines.push(Line::from(vec![
                 Span::styled(format!("{glyph} {}", r.name), Style::default().fg(hue)),
@@ -1525,7 +1521,7 @@ mod tests {
     /// `String` against the expected `Bool`, pointing at the `"x"` literal.
     #[test]
     fn build_spine_locates_type_error() {
-        let shell = Shell::new(Default::default());
+        let shell = Shell::new(ral_core::io::TerminalState::default());
         let spine = build_spine("if \"x\" { 1 } else { 2 }", &shell);
         let Spine::TypeError {
             span, label, code, ..
@@ -1591,7 +1587,7 @@ mod tests {
     /// from the `user` list (the live env stand-in); edges from the model.
     #[test]
     fn worksheet_rows_nest_dependents_under_dependencies() {
-        let shell = Shell::new(Default::default());
+        let shell = Shell::new(ral_core::io::TerminalState::default());
         let mut model = Worksheet::default();
         model.record("let a = 1", &shell);
         model.record("let b = $a", &shell);
@@ -1610,7 +1606,7 @@ mod tests {
     /// its row; a pure one does not — the marker the render distinguishes.
     #[test]
     fn worksheet_rows_carry_the_effect_verdict() {
-        let shell = Shell::new(Default::default());
+        let shell = Shell::new(ral_core::io::TerminalState::default());
         let mut model = Worksheet::default();
         model.record("let n = $[1 + 2]", &shell);
         model.record("let p = /bin/echo hi", &shell);
@@ -1633,7 +1629,7 @@ mod tests {
     /// the projection.
     #[test]
     fn worksheet_row_without_a_model_entry_renders_as_a_pure_root() {
-        let shell = Shell::new(Default::default());
+        let shell = Shell::new(ral_core::io::TerminalState::default());
         let model = Worksheet::default();
         let user = vec![("legacy".to_string(), Value::Int(7))];
         let rows = worksheet_rows(&user, &shell, &model);

@@ -26,12 +26,12 @@ use std::time::Duration;
 /// `poll`/`await`/`race` — so an abandoned worker cannot become an
 /// immortal zombie while a babysat one stays alive.  `pub(crate)` so the
 /// `/resources` fold reads the same constant its lease rows describe.
-pub(crate) const DETACHED_WORKER_CEILING: Duration = Duration::from_secs(60 * 60);
+pub(crate) const DETACHED_WORKER_CEILING: Duration = Duration::from_hours(1);
 
 /// Absolute backstop of the same lease, measured from spawn: no amount
 /// of ritual polling extends a worker past a day.  Observation renews
 /// idleness, never age.
-pub(crate) const DETACHED_WORKER_BACKSTOP: Duration = Duration::from_secs(24 * 60 * 60);
+pub(crate) const DETACHED_WORKER_BACKSTOP: Duration = Duration::from_hours(24);
 
 /// Admission cap on concurrently *running* workers per agent, enforced by
 /// core at the spawn door: the 65th spawn is refused with an error naming
@@ -428,11 +428,8 @@ pub fn run_shell(
         },
     );
 
-    let report = match report {
-        Some(r) => r,
-        None => {
-            return Outcome::Static("internal error: dispatch completed without a Report".into());
-        }
+    let Some(report) = report else {
+        return Outcome::Static("internal error: dispatch completed without a Report".into());
     };
 
     ral_core::dbg_trace!(
@@ -446,9 +443,8 @@ pub fn run_shell(
         Report::Static { diagnostics } => {
             use ral_core::transport::Diagnostics;
             match diagnostics {
-                Diagnostics::Parse(msg) => Outcome::Static(msg),
                 Diagnostics::Types(errs) => Outcome::Static(errs.join("\n")),
-                Diagnostics::Host(msg) => Outcome::Static(msg),
+                Diagnostics::Parse(msg) | Diagnostics::Host(msg) => Outcome::Static(msg),
             }
         }
         Report::Ran {
@@ -635,7 +631,7 @@ mod tests {
     /// signal-handler installation (which is global, racey under
     /// `cargo test`, and not under test here).
     fn fresh_shell() -> Shell {
-        let mut shell = ral_core::driver::boot_shell(Default::default(), &PRELUDE);
+        let mut shell = ral_core::driver::boot_shell(ral_core::io::TerminalState::default(), &PRELUDE);
         agent_builtins::install_on(&mut shell);
         agent_builtins::install_agent_library(&mut shell).expect("embedded agent library");
         crate::bootstrap::seed_no_color(&mut shell);

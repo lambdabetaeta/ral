@@ -179,7 +179,7 @@ fn snapshot_inherited_ignored() {
     let mut mask: u64 = 0;
     for &sig in MANAGED_SIGNALS {
         let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
-        let rc = unsafe { libc::sigaction(sig, std::ptr::null(), &mut old) };
+        let rc = unsafe { libc::sigaction(sig, std::ptr::null(), &raw mut old) };
         if rc == 0 && old.sa_sigaction == libc::SIG_IGN {
             mask |= 1u64 << sig;
         }
@@ -403,7 +403,7 @@ pub(super) fn try_wait_handling_stop(
 ) -> std::io::Result<Option<crate::process::WaitOutcome>> {
     let pid = child.id() as libc::pid_t;
     let mut status: libc::c_int = 0;
-    let r = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG | libc::WUNTRACED) };
+    let r = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG | libc::WUNTRACED) };
     if r < 0 {
         let err = std::io::Error::last_os_error();
         if err.raw_os_error() == Some(libc::EINTR) {
@@ -523,7 +523,7 @@ fn reap_killed(
 pub fn termios_snapshot() -> Option<libc::termios> {
     unsafe {
         let mut t = std::mem::zeroed::<libc::termios>();
-        (libc::tcgetattr(libc::STDIN_FILENO, &mut t) == 0).then_some(t)
+        (libc::tcgetattr(libc::STDIN_FILENO, &raw mut t) == 0).then_some(t)
     }
 }
 
@@ -612,9 +612,9 @@ impl SigttouBlock {
         let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
         let mut old: libc::sigset_t = unsafe { std::mem::zeroed() };
         let active = unsafe {
-            libc::sigemptyset(&mut set);
-            libc::sigaddset(&mut set, libc::SIGTTOU);
-            libc::pthread_sigmask(libc::SIG_BLOCK, &set, &mut old) == 0
+            libc::sigemptyset(&raw mut set);
+            libc::sigaddset(&raw mut set, libc::SIGTTOU);
+            libc::pthread_sigmask(libc::SIG_BLOCK, &raw const set, &raw mut old) == 0
         };
         Self { old, active }
     }
@@ -624,7 +624,7 @@ impl Drop for SigttouBlock {
     fn drop(&mut self) {
         if self.active {
             unsafe {
-                libc::pthread_sigmask(libc::SIG_SETMASK, &self.old, std::ptr::null_mut());
+                libc::pthread_sigmask(libc::SIG_SETMASK, &raw const self.old, std::ptr::null_mut());
             }
         }
     }
@@ -741,9 +741,9 @@ mod tests {
     fn sigttou_is_blocked() -> bool {
         let mut current: libc::sigset_t = unsafe { std::mem::zeroed() };
         let rc =
-            unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, std::ptr::null(), &mut current) };
+            unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, std::ptr::null(), &raw mut current) };
         assert_eq!(rc, 0, "pthread_sigmask query failed");
-        unsafe { libc::sigismember(&current, libc::SIGTTOU) == 1 }
+        unsafe { libc::sigismember(&raw const current, libc::SIGTTOU) == 1 }
     }
 
     #[test]

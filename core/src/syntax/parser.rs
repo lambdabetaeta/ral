@@ -27,7 +27,10 @@
 //! bare-word logical operators it would outside any nesting.
 
 use crate::source::{Span, Spanned};
-use crate::syntax::ast::*;
+use crate::syntax::ast::{
+    Ast, BinaryOp, Expr, Head, IfBranch, ListElem, MapEntry, MapKey, MapPatternEntry, Pattern,
+    Redirect, RedirectMode, RedirectTarget, ScopeAst, ScopeKeyword, Stmt, Word, WordLiteral,
+};
 use crate::syntax::lexer::{self, LexError, LexErrorKind, StringPart, Token};
 use crate::types;
 use std::fmt;
@@ -220,8 +223,7 @@ impl Parser {
     fn peek(&self) -> &Token {
         self.tokens
             .get(self.pos)
-            .map(|(t, _)| t)
-            .unwrap_or(&Token::Eof)
+            .map_or(&Token::Eof, |(t, _)| t)
     }
 
     /// Span of the current token, or — once the cursor has run past the
@@ -232,16 +234,14 @@ impl Parser {
         self.tokens
             .get(self.pos)
             .or_else(|| self.tokens.last())
-            .map(|(_, s)| *s)
-            .unwrap_or_else(|| Span::point(crate::source::FileId::DUMMY, 0))
+            .map_or_else(|| Span::point(crate::source::FileId::DUMMY, 0), |(_, s)| *s)
     }
 
     fn advance(&mut self) -> &Token {
         let tok = self
             .tokens
             .get(self.pos)
-            .map(|(t, _)| t)
-            .unwrap_or(&Token::Eof);
+            .map_or(&Token::Eof, |(t, _)| t);
         if self.pos < self.tokens.len() {
             self.pos += 1;
         }
@@ -336,12 +336,12 @@ impl Parser {
     /// "map pattern", …) for the error message on a missing separator.
     fn parse_separated_until(
         &mut self,
-        end: Token,
+        end: &Token,
         label: &str,
         mut item: impl FnMut(&mut Self) -> Result<SepFlow, ParseError>,
     ) -> Result<(), ParseError> {
         loop {
-            if self.peek() == &end {
+            if self.peek() == end {
                 self.advance();
                 return Ok(());
             }
@@ -349,7 +349,7 @@ impl Parser {
                 SepFlow::Cont => {
                     if self.peek() == &Token::Comma {
                         self.advance();
-                    } else if self.peek() != &end {
+                    } else if self.peek() != end {
                         return Err(self.error(format!("expected ',' or '{end}' in {label}")));
                     }
                 }
@@ -357,7 +357,7 @@ impl Parser {
                     if self.peek() == &Token::Comma {
                         self.advance();
                     }
-                    self.expect(&end)?;
+                    self.expect(end)?;
                     return Ok(());
                 }
             }
@@ -813,7 +813,7 @@ impl Parser {
         let mut elems = Vec::new();
         let mut rest = None;
 
-        self.parse_separated_until(Token::RBracket, "list pattern", |p| {
+        self.parse_separated_until(&Token::RBracket, "list pattern", |p| {
             // Rest pattern: ...name — terminal, must be the last element.
             if p.peek() == &Token::Spread {
                 p.advance();
@@ -847,7 +847,7 @@ impl Parser {
         // Mirror the literal side: bare and tag alphabets cannot mix.
         let mut alphabet: Option<bool> = None;
 
-        self.parse_separated_until(Token::RBracket, "map pattern", |p| {
+        self.parse_separated_until(&Token::RBracket, "map pattern", |p| {
             let key = p.parse_static_key()?;
             p.check_key_alphabet(
                 &mut alphabet,
@@ -1031,40 +1031,36 @@ impl Parser {
                         incompleteness: None,
                     });
                 }
-                let default_fd = if matches!(mode, RedirectMode::Read | RedirectMode::HereString) {
-                    0
+                let default_fd =
+                    u32::from(!matches!(mode, RedirectMode::Read | RedirectMode::HereString));
+                let target = if let Some(tfd) = target_fd {
+                    RedirectTarget::Fd(tfd)
                 } else {
-                    1
-                };
-                let target = match target_fd {
-                    Some(tfd) => RedirectTarget::Fd(tfd),
-                    None => {
-                        let (word_span, word) = self.capture_span(Self::parse_word)?;
-                        if mode == RedirectMode::HereString
-                            && let Ast::Word(w) = &word
-                        {
-                            let message = match w {
-                                Word::Plain(_) => {
-                                    "ral has no heredocs: `<<` feeds a string to \
-                                     stdin. Use a raw string: `cmd << #' ... '#`, \
-                                     which may use newlines"
-                                        .into()
-                                }
-                                Word::Slash(_) | Word::Tilde(_) => {
-                                    "`<<` feeds a string to stdin, not a file — \
-                                     to read a file into stdin, use `< path`"
-                                        .into()
-                                }
-                            };
-                            return Err(ParseError {
-                                message,
-                                span: Some(word_span),
-                                lex_kind: None,
-                                incompleteness: None,
-                            });
-                        }
-                        RedirectTarget::File(Box::new(word))
+                    let (word_span, word) = self.capture_span(Self::parse_word)?;
+                    if mode == RedirectMode::HereString
+                        && let Ast::Word(w) = &word
+                    {
+                        let message = match w {
+                            Word::Plain(_) => {
+                                "ral has no heredocs: `<<` feeds a string to \
+                                 stdin. Use a raw string: `cmd << #' ... '#`, \
+                                 which may use newlines"
+                                    .into()
+                            }
+                            Word::Slash(_) | Word::Tilde(_) => {
+                                "`<<` feeds a string to stdin, not a file — \
+                                 to read a file into stdin, use `< path`"
+                                    .into()
+                            }
+                        };
+                        return Err(ParseError {
+                            message,
+                            span: Some(word_span),
+                            lex_kind: None,
+                            incompleteness: None,
+                        });
                     }
+                    RedirectTarget::File(Box::new(word))
                 };
                 Ok(Redirect {
                     fd: fd.unwrap_or(default_fd),
@@ -1100,7 +1096,7 @@ impl Parser {
                     self.advance();
                     Ok(Head::ExternalName(name))
                 }
-                Token::Word(Word::Slash(_)) | Token::Word(Word::Tilde(_)) => {
+                Token::Word(Word::Slash(_) | Word::Tilde(_)) => {
                     Err(self.error("'^' expects a bare command name, not a path"))
                 }
                 _ => Err(self.error("expected bare command name after '^'")),
@@ -1159,8 +1155,7 @@ impl Parser {
     fn prev_byte_span(&self) -> Span {
         self.tokens
             .get(self.pos.saturating_sub(1))
-            .map(|(_, s)| *s)
-            .unwrap_or_else(|| self.span())
+            .map_or_else(|| self.span(), |(_, s)| *s)
     }
 
     /// Check if we've reached the end of a command's argument list.
@@ -1181,7 +1176,7 @@ impl Parser {
             }
             Token::DoubleQuoted(parts) => {
                 self.advance();
-                self.parse_interpolation_parts(&parts)
+                Self::parse_interpolation_parts(&parts)
             }
             Token::Deref(part) => {
                 self.advance();
@@ -1360,7 +1355,7 @@ impl Parser {
                 match self.tokens.get(i).map(|(t, _)| t) {
                     Some(Token::LBracket | Token::LBrace) => depth += 1,
                     Some(Token::RBracket | Token::RBrace) if depth > 0 => depth -= 1,
-                    Some(Token::Comma) | Some(Token::RBracket) | None if depth == 0 => break,
+                    Some(Token::Comma | Token::RBracket) | None if depth == 0 => break,
                     _ => {}
                 }
                 i += 1;
@@ -1395,7 +1390,7 @@ impl Parser {
     fn parse_list_elems(&mut self) -> Result<Ast, ParseError> {
         let mut elems = Vec::new();
 
-        self.parse_separated_until(Token::RBracket, "list", |p| {
+        self.parse_separated_until(&Token::RBracket, "list", |p| {
             if p.peek() == &Token::Spread {
                 p.advance();
                 let (sp, a) = p.capture_span(Self::parse_atom)?;
@@ -1417,7 +1412,7 @@ impl Parser {
         // Dynamic `$var` keys do not contribute to the alphabet decision.
         let mut alphabet: Option<bool> = None;
 
-        self.parse_separated_until(Token::RBracket, "map", |p| {
+        self.parse_separated_until(&Token::RBracket, "map", |p| {
             if p.peek() == &Token::Spread {
                 p.advance();
                 let (sp, a) = p.capture_span(Self::parse_atom)?;
@@ -1450,10 +1445,7 @@ impl Parser {
     /// `scan_double_quoted`); we transfer that range onto the
     /// surrounding `Spanned<Ast>`, and on `Force` segments also onto
     /// the inner block so the forced body has a real span of its own.
-    fn parse_interpolation_parts(
-        &mut self,
-        parts: &[Spanned<StringPart>],
-    ) -> Result<Ast, ParseError> {
+    fn parse_interpolation_parts(parts: &[Spanned<StringPart>]) -> Result<Ast, ParseError> {
         if parts.len() == 1
             && let StringPart::Literal(s) = &parts[0].item
         {

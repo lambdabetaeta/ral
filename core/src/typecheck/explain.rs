@@ -137,7 +137,7 @@ impl TypeErrorKind {
 /// component, and this returns a generic note that one computation is a
 /// function and the other is not.
 fn fmt_comp_mismatch(diffs: &[CompDiff]) -> String {
-    use CompDiff::*;
+    use CompDiff::{ReturnType, Stdin, Stdout};
     if diffs.is_empty() {
         return "two computations have incompatible shapes — one is a function, the other is not"
             .into();

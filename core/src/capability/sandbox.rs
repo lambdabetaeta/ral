@@ -153,8 +153,7 @@ fn reduce_exec(ctx: &Context) -> ExecProjection {
     let path_env = ctx
         .env_overrides()
         .get("PATH")
-        .map(String::as_str)
-        .unwrap_or("");
+        .map_or("", String::as_str);
     let mut deny_paths = Vec::new();
     let mut deny_basenames = Vec::new();
     for name in &denied_names {

@@ -172,6 +172,7 @@ pub(super) fn apply_highlights(line: &str, spans: &[HighlightSpan]) -> String {
 /// Map a highlight style name to its ANSI escape, or `None` if the name is not
 /// a known style.  The single source of truth for the legal style vocabulary —
 /// `_ed-highlight` derives its validation from this.
+#[allow(clippy::match_same_arms)]
 pub(super) fn style_ansi(style: &str) -> Option<&'static str> {
     Some(match style {
         "command" => ansi::BOLD_GREEN,
@@ -200,6 +201,7 @@ pub(super) fn style_ansi(style: &str) -> Option<&'static str> {
 /// stay in lockstep: a style added to the vocabulary must be given both an
 /// escape and a cell style.
 #[cfg(feature = "structural")]
+#[allow(clippy::match_same_arms)]
 pub(super) fn style_ratatui(style: &str) -> Option<ratatui::style::Style> {
     use ratatui::style::{Color, Modifier, Style};
     let s = Style::default();

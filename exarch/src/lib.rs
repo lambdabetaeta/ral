@@ -94,7 +94,7 @@ pub fn dispatch_pre_main() -> Option<u8> {
 #[ctor::ctor(unsafe)]
 fn init_lib_test_binary() {
     if let Some(code) = dispatch_pre_main() {
-        std::process::exit(code as i32);
+        std::process::exit(i32::from(code));
     }
 }
 
@@ -164,8 +164,7 @@ pub fn run() -> Result<(), String> {
 
     #[allow(clippy::disallowed_methods)]
     let cwd = std::env::current_dir()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| ".".into());
+        .map_or_else(|_| ".".into(), |p| p.to_string_lossy().into_owned());
     let state_dir = bootstrap::project_dir(&cwd);
 
     // Resolve the initial selection: an explicit `--provider` pin, else an
@@ -200,7 +199,7 @@ pub fn run() -> Result<(), String> {
     // launcher will install for an external child under this projection.
     // A throwaway shell mirrors the stack.
     {
-        let mut probe = ral_core::Shell::new(Default::default());
+        let mut probe = ral_core::Shell::new(ral_core::io::TerminalState::default());
         probe.push_session_capabilities(caps.clone());
         if let Some(projection) = probe.sandbox_projection() {
             ral_core::sandbox::dump_profile_if_requested(&projection);

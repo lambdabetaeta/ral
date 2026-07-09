@@ -41,7 +41,7 @@ pub(super) fn rule_line(
     // and the bar ceasing to grow means the turn has wedged.
     let elapsed = wait_elapsed.unwrap_or(Duration::ZERO);
     let bar = wait_bar(elapsed);
-    left_w += bar.iter().map(|s| s.width()).sum::<usize>();
+    left_w += bar.iter().map(Span::width).sum::<usize>();
     spans.extend(bar);
     // ── phase label (fixed-width slot) ─────────────────────────────────
     let mut label = match phase {
@@ -64,7 +64,7 @@ pub(super) fn rule_line(
             ),
             Span::styled(" · ", Style::default().fg(SLATE)),
         ];
-        left_w += segment.iter().map(|s| s.width()).sum::<usize>();
+        left_w += segment.iter().map(Span::width).sum::<usize>();
         spans.extend(segment);
     }
 
@@ -80,7 +80,7 @@ pub(super) fn rule_line(
         let pct = ((last_input as f64 / cap as f64) * 100.0).round() as u64;
         let pct = pct.min(999);
         let bar = ctx_ramp(pct, CTX_BAR_W);
-        left_w += bar.iter().map(|s| s.width()).sum::<usize>();
+        left_w += bar.iter().map(Span::width).sum::<usize>();
         spans.extend(bar);
         let readout = Span::styled(format!(" {pct}%"), Style::default().fg(SLATE));
         left_w += readout.width();

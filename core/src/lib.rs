@@ -96,7 +96,7 @@ pub(crate) use syntax::parser::{ParseError, parse, parse_with};
 /// typecheck and eval.  Bundled so each call site says "compile this
 /// source" rather than re-spelling the ladder.
 pub fn compile(source: &str) -> Result<Comp, ParseError> {
-    parse(source).map(|ast| elaborate(&ast, Default::default()))
+    parse(source).map(|ast| elaborate(&ast, std::collections::HashSet::default()))
 }
 
 /// Outcome of [`compile_and_typecheck`]: either a compiled program, a parse
@@ -193,6 +193,6 @@ fn init_lib_test_binary() {
     #[cfg(unix)]
     builtins::uutils::init_signal_dispositions();
     if let Some(code) = try_run_pipeline_stage_helper().or_else(sandbox::serve_sandbox_early_init) {
-        std::process::exit(code as i32);
+        std::process::exit(i32::from(code));
     }
 }

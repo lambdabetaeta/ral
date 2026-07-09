@@ -121,7 +121,7 @@ pub(super) fn mix(from: Color, to: Color, t: f32) -> Color {
     };
     let t = t.clamp(0.0, 1.0);
     let lerp = |a: u8, b: u8| -> u8 {
-        (a as f32 + (b as f32 - a as f32) * t)
+        (f32::from(a) + (f32::from(b) - f32::from(a)) * t)
             .round()
             .clamp(0.0, 255.0) as u8
     };
@@ -133,7 +133,7 @@ pub(super) fn mix(from: Color, to: Color, t: f32) -> Color {
 /// unchanged. Brighter = larger magnitude; hue is preserved on the way,
 /// so agent identity never collides with the value ramp.
 pub(super) fn lighten(c: Color, step: u8) -> Color {
-    mix(c, Color::Rgb(255, 255, 255), step as f32 / 3.0)
+    mix(c, Color::Rgb(255, 255, 255), f32::from(step) / 3.0)
 }
 
 /// Drain an RGB colour's saturation toward grey by `t` (clamped to
@@ -147,7 +147,7 @@ pub(super) fn desaturate(c: Color, t: f32) -> Color {
     let Color::Rgb(r, g, b) = c else {
         return c;
     };
-    let luma = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32).round() as u8;
+    let luma = (0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)).round() as u8;
     mix(c, Color::Rgb(luma, luma, luma), t)
 }
 
@@ -175,7 +175,7 @@ mod tests {
         let Color::Rgb(r, g, b) = c else {
             unreachable!("test colours are RGB")
         };
-        0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32
+        0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)
     }
 
     /// The drain holds luminance — the property that keeps the fidelity

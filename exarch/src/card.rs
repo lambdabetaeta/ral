@@ -20,6 +20,7 @@ use crate::bus::{Hunk, Row, Seg};
 use ral_core::Value as RalValue;
 use serde::Serialize;
 use std::borrow::Cow;
+use std::fmt::Write;
 
 /// The closed nominal role set — the *selective* (identity) channel a
 /// [`Span`] may carry.  The renderer holds the one binding table mapping
@@ -678,7 +679,7 @@ pub fn done_card(outcome: &DoneOutcome) -> Card {
             spans.push(span(Role::Bad, &format!("failed ({status})")));
             let mut body = String::from("  Background block error");
             if !message.is_empty() {
-                body.push_str(&format!(": {message}"));
+                let _ = write!(body, ": {message}");
             }
             spans.push(span_plain(&body));
         }
@@ -686,7 +687,7 @@ pub fn done_card(outcome: &DoneOutcome) -> Card {
             spans.push(span(Role::Bad, "panicked"));
             let mut body = String::from("  Background block error");
             if !message.is_empty() {
-                body.push_str(&format!(": {message}"));
+                let _ = write!(body, ": {message}");
             }
             spans.push(span_plain(&body));
         }
@@ -901,8 +902,9 @@ pub fn summary_line(card: &Card) -> String {
                 .collect::<Vec<_>>()
                 .join(", "),
             Mark::Diff { path, .. } => format!("diff {path}"),
-            Mark::Listing { bytes, .. } => collapse(&String::from_utf8_lossy(bytes)),
-            Mark::Raw { bytes } => collapse(&String::from_utf8_lossy(bytes)),
+            Mark::Listing { bytes, .. } | Mark::Raw { bytes } => {
+                collapse(&String::from_utf8_lossy(bytes))
+            }
         };
         if !part.is_empty() {
             parts.push(part);
@@ -995,8 +997,7 @@ fn decode_mark(v: &RalValue) -> Mark {
         },
         "measure" => rec
             .and_then(decode_measure)
-            .map(Mark::Measure)
-            .unwrap_or_else(|| plain_text(label)),
+            .map_or_else(|| plain_text(label), Mark::Measure),
         "fields" => Mark::Fields {
             rows: rec.map(decode_rows).unwrap_or_default(),
         },
@@ -1197,7 +1198,7 @@ fn bytes_field(m: &ral_core::types::Map, field: &str) -> Option<Vec<u8>> {
 /// An integer-typed field clamped into `u32` (negatives floor to 0).
 fn count_field(m: &ral_core::types::Map, field: &str) -> Option<u32> {
     match m.get(field) {
-        Some(RalValue::Int(n)) => Some((*n).clamp(0, u32::MAX as i64) as u32),
+        Some(RalValue::Int(n)) => Some((*n).clamp(0, i64::from(u32::MAX)) as u32),
         _ => None,
     }
 }
@@ -1475,7 +1476,7 @@ mod tests {
         // The rendered command, without the `$ ` prompt and ` → status` tail.
         let cmd = |argv: &[&str]| -> String {
             let full = line(&io_card(&IoEvent::Exec {
-                argv: argv.iter().map(|s| s.to_string()).collect(),
+                argv: argv.iter().map(ToString::to_string).collect(),
                 outcome: ExecOutcome::Ok,
                 status: 0,
             }));

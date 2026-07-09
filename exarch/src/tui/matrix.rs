@@ -140,7 +140,7 @@ impl MatrixRow {
             .unwrap_or(AGENT_HUES[0]);
         let dim = dying.contains_key(&id);
 
-        let title = titles.get(&id).map(String::as_str).unwrap_or("?");
+        let title = titles.get(&id).map_or("?", String::as_str);
         let truncated: String = title.chars().take(MATRIX_LABEL_W).collect();
         let label = if id == focused {
             format!("[{truncated}]")
@@ -199,16 +199,16 @@ impl MatrixRow {
             Modifier::empty()
         });
         Line::from(vec![
-            Span::styled(pad_right(self.label, widths.label), self.label_style),
+            Span::styled(pad_right(&self.label, widths.label), self.label_style),
             Span::raw("  "),
             Span::styled(
-                pad_right(self.steps, widths.steps),
+                pad_right(&self.steps, widths.steps),
                 Style::default().fg(self.hue),
             ),
             Span::raw("  "),
-            Span::styled(pad_left(self.tokens, widths.tokens), self.token_style),
+            Span::styled(pad_left(&self.tokens, widths.tokens), self.token_style),
             Span::raw("  "),
-            Span::styled(pad_right(self.bar, widths.bar), slate),
+            Span::styled(pad_right(&self.bar, widths.bar), slate),
         ])
     }
 }
@@ -246,11 +246,11 @@ fn width(s: &str) -> usize {
     s.chars().count()
 }
 
-fn pad_left(s: String, cols: usize) -> String {
-    format!("{}{}", " ".repeat(cols.saturating_sub(width(&s))), s)
+fn pad_left(s: &str, cols: usize) -> String {
+    format!("{}{}", " ".repeat(cols.saturating_sub(width(s))), s)
 }
 
-fn pad_right(s: String, cols: usize) -> String {
-    let pad = cols.saturating_sub(width(&s));
+fn pad_right(s: &str, cols: usize) -> String {
+    let pad = cols.saturating_sub(width(s));
     format!("{s}{}", " ".repeat(pad))
 }

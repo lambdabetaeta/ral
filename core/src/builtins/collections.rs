@@ -7,7 +7,7 @@
 //! other combinators run their per-element applications directly, so those
 //! children land in the enclosing trail without a wrapping combinator node.
 
-use crate::types::*;
+use crate::types::{Value, Shell, Settled, Break, ExecNode, AuditIo, AuditTime, sig};
 
 use super::apply;
 use super::util::{as_list, check_arity, value_ordering};
@@ -271,7 +271,7 @@ mod tests {
     fn status(b: Break) -> i32 {
         match b {
             Break::Error(e) => e.exit_code(),
-            other => panic!("expected Break::Error, got {other:?}"),
+            other @ Break::Escape(_) => panic!("expected Break::Error, got {other:?}"),
         }
     }
 
@@ -281,7 +281,7 @@ mod tests {
     /// so it is built without `range`'s poll masking the combinator's.
     #[test]
     fn map_polls_cancellation_within_its_loop() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let func = lambda(&mut shell, "{ |x| $x }");
         shell
             .turn
@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn filter_polls_cancellation_within_its_loop() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let func = lambda(&mut shell, "{ |x| $[0 == 0] }");
         shell
             .turn
@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn fold_polls_cancellation_within_its_loop() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let func = lambda(&mut shell, "{ |acc x| $x }");
         shell
             .turn
@@ -320,7 +320,7 @@ mod tests {
 
     #[test]
     fn each_polls_cancellation_within_its_loop() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let func = lambda(&mut shell, "{ |x| $x }");
         shell
             .turn
@@ -335,7 +335,7 @@ mod tests {
     /// longer than the chunk observes the cancel and aborts.
     #[test]
     fn long_range_polls_past_the_chunk() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         shell
             .turn
             .cancel
@@ -350,7 +350,7 @@ mod tests {
     /// guarantee that keeps the common case free.
     #[test]
     fn short_range_pays_no_poll() {
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         shell
             .turn
             .cancel

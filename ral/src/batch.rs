@@ -147,7 +147,7 @@ pub(crate) fn run_batch(
     }
 
     if check {
-        let comp = elaborate(&ast, Default::default());
+        let comp = elaborate(&ast, std::collections::HashSet::default());
         if let Err(errors) = run_check(&comp) {
             eprint!(
                 "{}",
@@ -187,7 +187,7 @@ pub(crate) fn run_batch(
         shell.enable_audit();
     }
 
-    let bare = elaborate(&ast, Default::default());
+    let bare = elaborate(&ast, std::collections::HashSet::default());
     tick!("elaborate");
 
     let comp = match run_check(&bare) {
@@ -209,7 +209,7 @@ pub(crate) fn run_batch(
     };
     let result = match shell.run_turn(TurnRequest {
         turn: Turn {
-            program: Program::Source(source.to_string()),
+            program: Program::Source(source.clone()),
             script_name: name.to_string(),
             caps: ral_core::types::Capabilities::root(),
             turn_limit: None,

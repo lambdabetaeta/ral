@@ -8,9 +8,11 @@ use serde::Deserializer;
 use std::time::Duration;
 use std::time::Instant;
 
-const MAX_WAIT: Duration = Duration::from_secs(15 * 60);
+const MAX_WAIT: Duration = Duration::from_mins(15);
 
 #[derive(Deserialize)]
+// Field names are fixed by the device-authorization wire format (serde aliases).
+#[allow(clippy::struct_field_names)]
 struct UserCode {
     device_auth_id: String,
     #[serde(alias = "user_code", alias = "usercode")]

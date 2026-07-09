@@ -35,7 +35,7 @@ pub(super) fn load_capabilities_ral(
     }
     ral_core::capability::load_capabilities_from_path(shell, path, ctx).map_err(|e| match e {
         Break::Error(err) => format!("exarch: {flag} {}: {}", path.display(), err.message),
-        other => format!("exarch: {flag} {}: {other:?}", path.display()),
+        other @ Break::Escape(_) => format!("exarch: {flag} {}: {other:?}", path.display()),
     })
 }
 

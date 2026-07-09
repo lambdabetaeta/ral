@@ -52,9 +52,7 @@ impl Ast {
         match self {
             Ast::Variable(n) => note_free(n, candidates, scopes, out),
             Ast::Literal(_)
-            | Ast::Word(Word::Plain(_))
-            | Ast::Word(Word::Slash(_))
-            | Ast::Word(Word::Tilde(_))
+            | Ast::Word(Word::Plain(_) | Word::Slash(_) | Word::Tilde(_))
             | Ast::Return(None) => {}
             Ast::Lambda { param, body } => {
                 param
@@ -89,7 +87,10 @@ impl Ast {
                     .collect_default_free_refs(candidates, scopes, out);
                 value.item.collect_free_refs(candidates, scopes, out);
             }
-            Ast::Return(Some(value)) => {
+            Ast::Return(Some(value))
+            | Ast::Background(value)
+            | Ast::Spread(value)
+            | Ast::Force(value) => {
                 value.item.collect_free_refs(candidates, scopes, out);
             }
             Ast::Call {
@@ -111,21 +112,10 @@ impl Ast {
                     r.collect_free_refs(candidates, scopes, out);
                 }
             }
-            Ast::Pipeline(stages) => {
+            Ast::Pipeline(stages) | Ast::Chain(stages) | Ast::Interpolation(stages) => {
                 for s in stages {
                     s.item.collect_free_refs(candidates, scopes, out);
                 }
-            }
-            Ast::Chain(stages) | Ast::Interpolation(stages) => {
-                for s in stages {
-                    s.item.collect_free_refs(candidates, scopes, out);
-                }
-            }
-            Ast::Background(value) | Ast::Spread(value) => {
-                value.item.collect_free_refs(candidates, scopes, out);
-            }
-            Ast::Force(value) => {
-                value.item.collect_free_refs(candidates, scopes, out);
             }
             Ast::Tag { payload, .. } => {
                 if let Some(p) = payload {
@@ -294,7 +284,7 @@ mod tests {
     use std::collections::HashSet;
 
     fn candidates(names: &[&str]) -> HashSet<String> {
-        names.iter().map(|s| s.to_string()).collect()
+        names.iter().map(std::string::ToString::to_string).collect()
     }
 
     /// Parse `let _ = RHS`, return the free references of `RHS` among

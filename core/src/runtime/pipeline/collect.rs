@@ -10,7 +10,10 @@
 
 use super::super::command;
 use super::launch::StageHandle;
-use crate::types::*;
+use crate::types::{
+    AuditFragment, AuditIo, AuditTime, Break, Error, Escape, ExecNode, Settled, Shell, Value,
+    epoch_us,
+};
 
 /// Wait on a direct-spawn external stage and reduce to a [`StageObservation`].
 ///
@@ -32,7 +35,7 @@ fn observe_external_stage(
     };
     let effective = if failure.is_none() { 0 } else { code };
 
-    let audit = synth_external_stage_audit(shell, &name, &failure, effective);
+    let audit = synth_external_stage_audit(shell, &name, failure.as_ref(), effective);
 
     if let Some(failure) = failure {
         let loc = shell.turn.loc.source_loc(name.len());
@@ -49,7 +52,7 @@ fn observe_external_stage(
 fn synth_external_stage_audit(
     shell: &Shell,
     name: &str,
-    failure: &Option<crate::process::CommandFailure>,
+    failure: Option<&crate::process::CommandFailure>,
     status: i32,
 ) -> AuditFragment {
     if !shell.local.audit.active() {

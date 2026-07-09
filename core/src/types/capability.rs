@@ -712,7 +712,7 @@ impl Meet for ExecMap {
                     .meet(PrefixSet::from_frozen(&b_allow))
                     .surface()
             }),
-            literals: meet_literal_exec(self.literals, other.literals),
+            literals: meet_literal_exec(&self.literals, &other.literals),
         }
     }
 }
@@ -729,7 +729,7 @@ impl Join for ExecMap {
     fn join(self, other: Self) -> Self {
         Self {
             dirs: combine_exec_dirs(&self.dirs, &other.dirs, union_prefixes),
-            literals: join_literal_exec(self.literals, other.literals),
+            literals: join_literal_exec(&self.literals, &other.literals),
         }
     }
 }
@@ -788,11 +788,11 @@ fn partition_exec_dirs(
 /// keys must appear on both sides (uses `ExecPolicy::meet`); `Deny`
 /// propagates from either side even when absent on the other.
 fn meet_literal_exec(
-    a: BTreeMap<String, ExecPolicy>,
-    b: BTreeMap<String, ExecPolicy>,
+    a: &BTreeMap<String, ExecPolicy>,
+    b: &BTreeMap<String, ExecPolicy>,
 ) -> BTreeMap<String, ExecPolicy> {
     let mut out = BTreeMap::new();
-    for (name, pa) in &a {
+    for (name, pa) in a {
         match b.get(name) {
             Some(pb) => {
                 out.insert(name.clone(), pa.clone().meet(pb.clone()));
@@ -803,7 +803,7 @@ fn meet_literal_exec(
             None => {}
         }
     }
-    for (name, pb) in &b {
+    for (name, pb) in b {
         if a.contains_key(name) {
             continue;
         }
@@ -820,11 +820,11 @@ fn meet_literal_exec(
 /// survive verbatim: an absent key is the join identity (`p ⊔ ⊥ = p`),
 /// so silence on one side lifts neither a base's grant nor its veto.
 fn join_literal_exec(
-    a: BTreeMap<String, ExecPolicy>,
-    b: BTreeMap<String, ExecPolicy>,
+    a: &BTreeMap<String, ExecPolicy>,
+    b: &BTreeMap<String, ExecPolicy>,
 ) -> BTreeMap<String, ExecPolicy> {
     let mut out = BTreeMap::new();
-    for (name, pa) in &a {
+    for (name, pa) in a {
         match b.get(name) {
             Some(pb) => {
                 out.insert(name.clone(), pa.clone().join(pb.clone()));
@@ -834,7 +834,7 @@ fn join_literal_exec(
             }
         }
     }
-    for (name, pb) in &b {
+    for (name, pb) in b {
         if !a.contains_key(name) {
             out.insert(name.clone(), pb.clone());
         }

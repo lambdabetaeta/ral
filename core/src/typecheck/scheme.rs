@@ -339,8 +339,9 @@ impl TypeErrorKind {
             TypeErrorKind::RecursiveRow => "T0002",
             TypeErrorKind::TypeTooDeep => "T0003",
             TypeErrorKind::TyMismatch { .. } => "T0010",
-            TypeErrorKind::CompTyMismatch { .. } => "T0011",
-            TypeErrorKind::CommandNotCallable { .. } => "T0011",
+            TypeErrorKind::CompTyMismatch { .. } | TypeErrorKind::CommandNotCallable { .. } => {
+                "T0011"
+            }
             TypeErrorKind::ModeMismatch { .. } => "T0012",
             TypeErrorKind::RowExtraField { .. } => "T0020",
             TypeErrorKind::RowMissingField { .. } => "T0021",

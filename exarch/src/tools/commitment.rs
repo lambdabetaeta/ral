@@ -72,7 +72,7 @@ and disappears once that budget is exhausted."
         _provider: &Arc<Provider>,
         emit: &Emitter,
     ) -> SessionToolResult {
-        commit(id, input, session, emit)
+        commit(id, &input, session, emit)
     }
 }
 
@@ -122,12 +122,12 @@ exhausted."
         _provider: &Arc<Provider>,
         emit: &Emitter,
     ) -> SessionToolResult {
-        verify_commitment(id, input, session, emit)
+        verify_commitment(id, &input, session, emit)
     }
 }
 
-fn commit(id: String, input: Value, session: &mut Agent, emit: &Emitter) -> SessionToolResult {
-    let (key, description) = match parse_commit_args(&input) {
+fn commit(id: String, input: &Value, session: &mut Agent, emit: &Emitter) -> SessionToolResult {
+    let (key, description) = match parse_commit_args(input) {
         Ok(v) => v,
         Err(reason) => return invalid_input(id, "commit", INVALID_INPUT, &reason, emit),
     };
@@ -179,11 +179,11 @@ fn commit(id: String, input: Value, session: &mut Agent, emit: &Emitter) -> Sess
 
 fn verify_commitment(
     id: String,
-    input: Value,
+    input: &Value,
     session: &mut Agent,
     emit: &Emitter,
 ) -> SessionToolResult {
-    let key = match parse_key(&input) {
+    let key = match parse_key(input) {
         Ok(key) => key,
         Err(reason) => {
             return invalid_input(id, "verify_commitment", INVALID_INPUT, &reason, emit);
@@ -413,8 +413,7 @@ fn writer_card(key: &str, value: &Value) -> Option<Card> {
             .get("id")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| (i + 1).to_string());
+            .map_or_else(|| (i + 1).to_string(), str::to_string);
         rows.push(Field {
             label,
             value: FieldVal::Inline(vec![Span {
@@ -496,7 +495,7 @@ mod tests {
         }])
     }
 
-    fn reply_call(result: Value) -> ToolCall {
+    fn reply_call(result: &Value) -> ToolCall {
         ToolCall {
             call_id: "reply-1".into(),
             fn_name: "reply".into(),
@@ -778,7 +777,7 @@ mod tests {
         let provider = Arc::new(Provider::scripted(
             "test-model",
             ProviderKind::Openai,
-            Script::new().then(Reply::tool_calls(vec![reply_call(json!({
+            Script::new().then(Reply::tool_calls(vec![reply_call(&json!({
                 "kind": "commitment_verdict",
                 "commitment_key": key,
                 "verdict": "pass",
@@ -827,7 +826,7 @@ mod tests {
         let provider = Arc::new(Provider::scripted(
             "test-model",
             ProviderKind::Openai,
-            Script::new().then(Reply::tool_calls(vec![reply_call(json!({
+            Script::new().then(Reply::tool_calls(vec![reply_call(&json!({
                 "kind": "commitment_verdict",
                 "commitment_key": key,
                 "verdict": "fail",
@@ -897,7 +896,7 @@ mod tests {
         let provider = Arc::new(Provider::scripted(
             "test-model",
             ProviderKind::Openai,
-            Script::new().then(Reply::tool_calls(vec![reply_call(json!({
+            Script::new().then(Reply::tool_calls(vec![reply_call(&json!({
                 "kind": "commitment_card",
                 "commitment_key": key,
                 "summary": "ship the thing",

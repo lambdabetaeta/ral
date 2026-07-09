@@ -20,7 +20,7 @@ use super::route::{ByteIn, ByteOut, FinalValue, StageRoute, open_stage_routes};
 use super::stage::{HelperStageHandle, launch_helper_stage};
 use crate::child_eval::pack_request;
 use crate::io::Sink;
-use crate::types::*;
+use crate::types::{Break, Settled, Shell};
 use std::collections::VecDeque;
 use std::sync::Arc;
 

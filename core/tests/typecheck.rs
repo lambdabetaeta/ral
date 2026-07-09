@@ -12,7 +12,7 @@ use ral_core::{TypeError, elaborator::elaborate, syntax::parser::parse, typechec
 
 fn raw_errors(src: &str) -> Vec<TypeError> {
     let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
-    let comp = elaborate(&ast, Default::default());
+    let comp = elaborate(&ast, std::collections::HashSet::default());
     typecheck(
         &comp,
         ral_core::SessionSchemes::from_schemes(common::prelude_schemes()),
@@ -167,7 +167,7 @@ fn map_int_variable_key_is_typecheck_error() {
     );
     let hint = errs
         .iter()
-        .find_map(|e| e.hint())
+        .find_map(ral_core::TypeError::hint)
         .expect("expected a hint on the map-key mismatch");
     assert!(
         hint.contains("map keys must be Strings"),
@@ -522,7 +522,7 @@ let m = "sh -c 'bat --pager="$(p)" --width=80'""#;
     let errs = raw_errors(src);
     let hint = errs
         .iter()
-        .find_map(|e| e.hint())
+        .find_map(ral_core::TypeError::hint)
         .expect("expected a hint on the head-not-callable diagnostic");
     assert!(
         hint.contains("nested double quotes"),
@@ -537,7 +537,7 @@ fn head_not_callable_bare_args_keeps_generic_hint() {
     let errs = raw_errors("'foo' bar baz");
     let hint = errs
         .iter()
-        .find_map(|e| e.hint())
+        .find_map(ral_core::TypeError::hint)
         .expect("expected a hint on the head-not-callable diagnostic");
     assert!(
         hint.contains("function or a thunk"),
@@ -555,7 +555,7 @@ fn index_on_thunk_hint_is_followable() {
     let errs = raw_errors("let f = { return [a: 1] }\necho !$f[a]");
     let hint = errs
         .iter()
-        .find_map(|e| e.hint())
+        .find_map(ral_core::TypeError::hint)
         .expect("expected a hint on the index-on-thunk diagnostic");
     assert!(
         hint.contains("!{!$t}[field]"),
@@ -1139,7 +1139,7 @@ use ral_core::mode::{ByteMode, Wire};
 /// Compile `src` to an annotated comp, asserting it type-checks.
 fn annotated(src: &str) -> Comp {
     let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
-    let comp = elaborate(&ast, Default::default());
+    let comp = elaborate(&ast, std::collections::HashSet::default());
     typecheck(
         &comp,
         ral_core::SessionSchemes::from_schemes(common::prelude_schemes()),

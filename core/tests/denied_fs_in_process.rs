@@ -41,7 +41,7 @@ fn eval(input: &str) -> ral_core::types::Settled<Value> {
     let ast = parse(input).map_err(|e: ral_core::syntax::parser::ParseError| {
         Break::Error(Error::new(e.to_string(), 2))
     })?;
-    let comp = elaborate(&ast, Default::default());
+    let comp = elaborate(&ast, std::collections::HashSet::default());
     let comp = match typecheck(
         &comp,
         ral_core::SessionSchemes::from_schemes(common::prelude_schemes()),
@@ -56,7 +56,7 @@ fn eval(input: &str) -> ral_core::types::Settled<Value> {
             return Err(Break::Error(Error::new(format!("type error: {msg}"), 2)));
         }
     };
-    let mut shell = Shell::new(Default::default());
+    let mut shell = Shell::new(ral_core::io::TerminalState::default());
     builtins::register(&mut shell, common::prelude_comp());
     evaluate(&comp, &mut shell)
 }

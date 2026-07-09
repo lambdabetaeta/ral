@@ -320,7 +320,7 @@ mod tests {
     #[test]
     fn clean_turn_runs_with_zero_status() {
         let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         match shell.run_turn(capture_req("$[1 + 1]")) {
             TurnReport::Ran { result, status, .. } => {
                 assert_eq!(status, 0);
@@ -335,7 +335,7 @@ mod tests {
     #[test]
     fn parse_failure_is_static() {
         let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         match shell.run_turn(capture_req("let = ")) {
             TurnReport::Static { diagnostics } => {
                 assert!(
@@ -351,7 +351,7 @@ mod tests {
     #[test]
     fn type_failure_is_static() {
         let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         match shell.run_turn(capture_req("$[1 + true]")) {
             TurnReport::Static { diagnostics } => {
                 assert!(
@@ -368,7 +368,7 @@ mod tests {
     #[test]
     fn exit_escape_reports_code() {
         let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         match shell.run_turn(capture_req("exit 3")) {
             TurnReport::Ran { result, status, .. } => {
                 assert_eq!(status, 3);
@@ -385,7 +385,7 @@ mod tests {
     #[test]
     fn capture_returns_stdout_bytes() {
         let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         match shell.run_turn(capture_req("echo hi")) {
             TurnReport::Ran { captured, .. } => {
                 let captured = captured.expect("Capture must return buffers");
@@ -407,7 +407,7 @@ mod tests {
     #[test]
     fn frame_restores_state_on_return() {
         let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         assert!(
             shell.turn.surface.is_none(),
             "no surface sink before the turn"
@@ -453,7 +453,7 @@ mod tests {
     #[test]
     fn desk_is_restored_to_its_pre_turn_value() {
         let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         assert!(shell.turn.desk.is_none(), "no desk before the turn");
 
         let _ = shell.run_turn(TurnRequest {
@@ -476,7 +476,7 @@ mod tests {
     #[test]
     fn ready_boundary_notice_surfaces_a_pending_worker_reap() {
         let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
 
         // Spawn a worker under a millisecond-scale idle lease and never
         // poll it, so the background lease chain reaps it quickly.
@@ -552,7 +552,7 @@ mod tests {
             }
         }
 
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let spy = Spy {
             pre: Arc::new(Mutex::new(false)),
             post_status: Arc::new(Mutex::new(None)),
@@ -585,7 +585,7 @@ mod tests {
             }
         }
 
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         match shell.run_turn(TurnRequest {
             lifecycle: Box::new(CancelInPreExec),
             ..capture_req("let x = 42\nreturn $x")
@@ -621,7 +621,7 @@ mod tests {
             }
         }
 
-        let trunk = Shell::new(Default::default());
+        let trunk = Shell::new(crate::io::TerminalState::default());
         let mut forked = trunk.fork_session();
         match forked.run_turn(TurnRequest {
             lifecycle: Box::new(CancelInPreExec),
@@ -681,7 +681,7 @@ mod tests {
             }
         }
 
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         match shell.run_turn(TurnRequest {
             lifecycle: Box::new(AbortInPreExec),
             ..capture_req("let x = 42\nreturn $x")
@@ -711,7 +711,7 @@ mod tests {
             }
         }
 
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let req = capture_req("let x = 42\nreturn $x");
         match shell.run_turn(TurnRequest {
             turn: Turn {
@@ -739,7 +739,7 @@ mod tests {
     #[test]
     fn inherit_leaves_session_streams_untouched() {
         let _slot_guard = crate::process::signal::SLOT_SERIAL.lock().unwrap();
-        let mut shell = Shell::new(Default::default());
+        let mut shell = Shell::new(crate::io::TerminalState::default());
         let marker: ByteBuffer = Arc::new(Mutex::new(Vec::new()));
         shell.turn.io.stdout = Sink::Buffer(marker.clone());
 

@@ -51,8 +51,7 @@ impl CommandName {
     pub fn bare(&self) -> Option<&str> {
         match self {
             CommandName::Bare(name) => Some(name),
-            CommandName::Path(_) => None,
-            CommandName::TildePath(_) => None,
+            CommandName::Path(_) | CommandName::TildePath(_) => None,
         }
     }
 }
@@ -252,12 +251,10 @@ pub(crate) fn referenced_names(comp: &Comp) -> Vec<&str> {
 
 fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
     match &comp.item {
-        CompKind::Force(v) => walk_val(v, out),
         CompKind::Lam { param, body } => {
             walk_pattern_defaults(param, out);
             walk_comp(body, out);
         }
-        CompKind::Return(v) => walk_val(v, out),
         CompKind::Bind {
             comp,
             pattern,
@@ -291,14 +288,14 @@ fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
             walk_val(a, out);
             walk_val(b, out);
         }
-        CompKind::Not(v) => walk_val(v, out),
+        CompKind::Force(v) | CompKind::Return(v) | CompKind::Not(v) => walk_val(v, out),
         CompKind::Index { target, keys } => {
             walk_val(target, out);
             for key in keys {
                 walk_val(&key.item, out);
             }
         }
-        CompKind::Chain(comps) => {
+        CompKind::Chain(comps) | CompKind::Seq(comps) => {
             for c in comps {
                 walk_comp(c, out);
             }
@@ -306,11 +303,6 @@ fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
         CompKind::Interpolation(vals) => {
             for v in vals {
                 walk_val(v, out);
-            }
-        }
-        CompKind::Seq(comps) => {
-            for c in comps {
-                walk_comp(c, out);
             }
         }
         CompKind::LetRec { slot: _, bindings } => {

@@ -14,7 +14,7 @@
 //! Reading the two side-by-side is the documentation: same shape,
 //! different policy.
 use crate::io::{Sink, new_buffer, take_buffer, tee_with_buffer};
-use crate::types::*;
+use crate::types::Shell;
 /// RAII guard for [`with_capture`]: swaps `shell.turn.io.stdout` for an
 /// in-memory buffer sink and restores it on `Drop` — including on panic.
 struct CaptureScope<'a> {

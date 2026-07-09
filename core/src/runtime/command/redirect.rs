@@ -5,7 +5,7 @@
 //! through the same `Source` channel.
 
 use crate::syntax::ast::RedirectMode;
-use crate::types::*;
+use crate::types::{Break, Error, Settled, Shell};
 
 use super::io_event;
 use super::process::io_error;
@@ -256,20 +256,20 @@ fn open_atomic(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&target)
-            .ok()
-            .map(|m| m.permissions().mode() & 0o7777)
-            .unwrap_or_else(|| {
+        let mode = std::fs::metadata(&target).ok().map_or_else(
+            || {
                 // `libc::umask` is a combined getter/setter with no
                 // read-only variant: set a throwaway value to read the
                 // current mask, then restore it immediately.
-                let mask = unsafe {
+                let mask = u32::from(unsafe {
                     let prev = libc::umask(0o022);
                     libc::umask(prev);
                     prev
-                } as u32;
+                });
                 0o666 & !mask
-            });
+            },
+            |m| m.permissions().mode() & 0o7777,
+        );
         let mut perms = tmp
             .as_file()
             .metadata()
@@ -813,7 +813,7 @@ mod tests {
     /// `dup2` with no restore path.  The fd stays unopened afterward.
     #[test]
     fn file_redirect_to_unopened_fd_errors_and_leaks_nothing() {
-        let _serial = FD_TABLE.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = FD_TABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let (fd, _barrier) = pinned_unopened_fd();
         let mut shell = Shell::default();
         let dir = tempfile::tempdir().unwrap();
@@ -837,7 +837,7 @@ mod tests {
     /// for the same reason — no backup, no restore path.
     #[test]
     fn fd_dup_redirect_to_unopened_fd_errors_and_leaks_nothing() {
-        let _serial = FD_TABLE.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = FD_TABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let (fd, _barrier) = pinned_unopened_fd();
         let mut shell = Shell::default();
         let redirects = [EvalRedirectV {

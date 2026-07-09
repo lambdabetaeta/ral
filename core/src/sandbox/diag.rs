@@ -24,6 +24,7 @@
 
 use crate::types::{Error, Shell};
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write;
 use std::time::Instant;
 
 #[cfg(target_os = "macos")]
@@ -112,7 +113,7 @@ fn build_hint(denials: &[&str]) -> String {
         out.push_str(line.trim());
     }
     if denials.len() > MAX_DENIAL_LINES {
-        out.push_str(&format!("\n  ({} more)", denials.len() - MAX_DENIAL_LINES));
+        let _ = write!(out, "\n  ({} more)", denials.len() - MAX_DENIAL_LINES);
     }
 
     // Prefer a concrete path from the first parseable denial; macOS
@@ -122,12 +123,13 @@ fn build_hint(denials: &[&str]) -> String {
         .find_map(|l| platform::parse_denial(l).and_then(|(_, p)| p));
     match path {
         Some(path) => {
-            out.push_str(&format!(
+            let _ = write!(
+                out,
                 "\n\nthe path `{path}` is outside the active grant's fs.read, so the access was \
                  denied. To allow it, add this path (or a parent directory) to the grant's read \
                  set: the `grant [ fs: [read: ['{path}']] ] {{ … }}` block in ral, or \
                  `--extend-base` for exarch."
-            ));
+            );
             out.push_str(
                 "\n\nNote: the sandbox matches fully-resolved paths. If this path was reached \
                  through a symlink inside a granted directory (e.g. ~/.config), granting the \

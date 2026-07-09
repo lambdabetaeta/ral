@@ -21,6 +21,7 @@ mod load;
 use base::{resolve_base, root_fs_policy};
 use load::{absolute_in, load_capabilities_ral};
 use ral_core::path::{home_from_env, sigil::FreezeCtx, sigil::freeze_path_list};
+use ral_core::io::TerminalState;
 use ral_core::types::{Capabilities, Shell};
 use std::path::{Path, PathBuf};
 
@@ -51,7 +52,7 @@ pub fn for_invocation(
     // state never reaches the runtime — for_invocation hands a frozen
     // Capabilities back to its caller, which builds the actual session
     // shell separately.
-    let mut load_shell = Shell::new(Default::default());
+    let mut load_shell = Shell::new(TerminalState::default());
 
     let cwd_path = PathBuf::from(cwd);
     let home = home_from_env();

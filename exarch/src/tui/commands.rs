@@ -1,5 +1,6 @@
 //! Prompt-box slash commands — registry, routing, and handlers.
 
+use std::fmt::Write;
 use std::io;
 use std::path::PathBuf;
 
@@ -168,7 +169,7 @@ pub(super) fn cmd_help(app: &mut App) {
                 s.push_str(arg);
             }
             if !c.aliases.is_empty() {
-                s.push_str(&format!(" ({})", c.aliases.join(", ")));
+                let _ = write!(s, " ({})", c.aliases.join(", "));
             }
             s
         })

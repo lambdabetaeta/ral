@@ -25,7 +25,7 @@ pub(super) async fn run(client: &reqwest::Client) -> Result<super::RawTokens, St
 
     eprintln!("Waiting for sign-in to complete...");
     let expected_state = state.clone();
-    let code = tokio::task::spawn_blocking(move || accept_callback(listener, expected_state))
+    let code = tokio::task::spawn_blocking(move || accept_callback(&listener, &expected_state))
         .await
         .map_err(|e| format!("callback listener panicked: {e}"))??;
 
@@ -138,7 +138,7 @@ fn launch_browser(_url: &str) -> Result<(), String> {
 
 /// Accept one connection, parse the authorization code from the callback
 /// request, reply with a small confirmation page, and return the code.
-fn accept_callback(listener: TcpListener, expected_state: String) -> Result<String, String> {
+fn accept_callback(listener: &TcpListener, expected_state: &str) -> Result<String, String> {
     let (mut stream, _) = listener
         .accept()
         .map_err(|e| format!("could not accept callback connection: {e}"))?;
@@ -167,7 +167,7 @@ fn accept_callback(listener: TcpListener, expected_state: String) -> Result<Stri
         write_page(&mut stream, "Sign-in failed. You can close this tab.");
         return Err(format!("sign-in failed: {error}"));
     }
-    if state.as_deref() != Some(expected_state.as_str()) {
+    if state.as_deref() != Some(expected_state) {
         write_page(&mut stream, "Sign-in failed. You can close this tab.");
         return Err("state mismatch".to_string());
     }

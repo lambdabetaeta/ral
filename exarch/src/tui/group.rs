@@ -28,6 +28,8 @@
 //!   bar.
 //! - **L3, everything** — L2 plus each call's full ral `cmd` source.
 
+use std::fmt::Write;
+
 use super::block::{Reveal, wrap_line};
 use super::highlight::highlight_ral;
 use super::line::{self, CODE_BG, RAIL_W, SLATE, push_wrapped, wash};
@@ -238,19 +240,13 @@ fn census(calls: &[Call], width: usize) -> Vec<Line<'static>> {
 fn census_line(scripts: u32, tally: Tally) -> String {
     let mut s = format!("Ran {}", count(scripts, "script", "scripts"));
     if tally.binaries > 0 {
-        s.push_str(&format!(
-            ", {}",
-            count(tally.binaries, "binary", "binaries")
-        ));
+        let _ = write!(s, ", {}", count(tally.binaries, "binary", "binaries"));
     }
     if tally.files > 0 {
-        s.push_str(&format!(", read {}", count(tally.files, "file", "files")));
+        let _ = write!(s, ", read {}", count(tally.files, "file", "files"));
     }
     if tally.searches > 0 {
-        s.push_str(&format!(
-            ", searched {}",
-            count(tally.searches, "time", "times")
-        ));
+        let _ = write!(s, ", searched {}", count(tally.searches, "time", "times"));
     }
     s.push('.');
     s
@@ -365,8 +361,7 @@ fn source_rows(call: &Call, width: usize) -> Vec<Line<'static>> {
 fn head_span(calls: &[Call]) -> Span<'static> {
     let tool = calls
         .last()
-        .map(|c| c.tool.as_str())
-        .unwrap_or("ral")
+        .map_or("ral", |c| c.tool.as_str())
         .to_string();
     Span::styled(tool, Style::default().fg(SLATE))
 }
@@ -468,7 +463,7 @@ mod tests {
         let rows = source_rows(&c, 60);
         assert_eq!(rows.len(), 2);
         for r in &rows {
-            let w: usize = r.spans.iter().map(|s| s.width()).sum();
+            let w: usize = r.spans.iter().map(ratatui::prelude::Span::width).sum();
             assert_eq!(w, 60, "panel row padded to full width");
             assert!(
                 r.spans.iter().any(|s| s.style.bg == Some(CODE_BG)),

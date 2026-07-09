@@ -210,7 +210,7 @@ fn dir_entries(dir: &Path, needle: &str) -> Vec<Entry> {
         .filter_map(|e| {
             let name = e.file_name().into_string().ok()?;
             dotfile_visible(&name, needle).then(|| {
-                let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
                 Entry { name, is_dir }
             })
         })
@@ -361,8 +361,8 @@ mod tests {
     /// ranking tests, with a throwaway cwd path completion never reads.
     fn sources(commands: &[&str], variables: &[&str]) -> Sources {
         Sources {
-            commands: commands.iter().map(|s| s.to_string()).collect(),
-            variables: variables.iter().map(|s| s.to_string()).collect(),
+            commands: commands.iter().map(ToString::to_string).collect(),
+            variables: variables.iter().map(ToString::to_string).collect(),
             cwd: PathBuf::from("/"),
         }
     }
@@ -497,7 +497,7 @@ mod tests {
 
         let (_, cands) = complete_path("", 0, tmp.path());
         let mut names: Vec<&str> = cands.iter().map(|c| c.display.as_str()).collect();
-        names.sort();
+        names.sort_unstable();
         assert_eq!(names, vec!["alpha", "beta"]);
     }
 

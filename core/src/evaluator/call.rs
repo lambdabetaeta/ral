@@ -26,7 +26,7 @@
 //! carries the enclosing computation's tail-ness.
 
 use crate::ir::{Args, Comp, CompKind, RedirectV, ScopeOp, ValListElem};
-use crate::types::*;
+use crate::types::{Error, Raw, Shell, Tail, TailCall, Value};
 use std::sync::Arc;
 
 use super::comp::eval_comp;

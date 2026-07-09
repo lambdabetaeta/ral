@@ -8,6 +8,8 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(about = "Exarch — a delegate driving ral under a grant", long_about = None)]
+// clap flag struct: each bool is a distinct CLI switch, not a bundle-able group.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Cli {
     /// A subcommand runs an out-of-band action and exits.  Absent — the
     /// normal case — exarch starts a session governed by the flags below.

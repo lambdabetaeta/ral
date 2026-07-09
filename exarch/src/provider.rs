@@ -60,7 +60,7 @@ pub(crate) const MAX_ATTEMPTS: u32 = 3;
 /// first event quickly, so a retry that is silent for a whole minute is
 /// almost certainly stalled again.  Cuts the worst-case per-turn idle burn
 /// from `3 × 180s` to `180s + 2 × 60s`.
-const RETRY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const RETRY_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// The stream-idle bound for the given 1-based attempt: the full
 /// [`STREAM_IDLE_TIMEOUT`] on the first try, [`RETRY_IDLE_TIMEOUT`] on
@@ -145,12 +145,12 @@ impl ProviderKind {
         match self {
             Self::Anthropic => AdapterKind::Anthropic,
             Self::Openai => AdapterKind::OpenAIResp,
-            Self::Openrouter => AdapterKind::OpenAI,
+            Self::Openrouter | Self::OpencodeZen | Self::OpencodeGo | Self::Qwen => {
+                AdapterKind::OpenAI
+            }
             Self::Deepseek => AdapterKind::DeepSeek,
             Self::Gemini => AdapterKind::Gemini,
-            Self::OpencodeZen | Self::OpencodeGo => AdapterKind::OpenAI,
             Self::Xai => AdapterKind::Xai,
-            Self::Qwen => AdapterKind::OpenAI,
         }
     }
 
@@ -922,7 +922,7 @@ fn parse_retry_after(msg: &str) -> Option<Duration> {
     let digits: String = tail
         .chars()
         .skip_while(|c| !c.is_ascii_digit())
-        .take_while(|c| c.is_ascii_digit())
+        .take_while(char::is_ascii_digit)
         .collect();
     let secs: u64 = digits.parse().ok()?;
     Some(Duration::from_secs(secs))
@@ -1017,8 +1017,8 @@ async fn retry_with_backoff<T>(
         };
         tokio::select! {
             biased;
-            _ = wait_for_cancel(cancel) => return Err(ProviderError::Cancelled(cancel_site)),
-            _ = backoff_sleep(attempt, retry_after, max_delay_ms) => {}
+            () = wait_for_cancel(cancel) => return Err(ProviderError::Cancelled(cancel_site)),
+            () = backoff_sleep(attempt, retry_after, max_delay_ms) => {}
         }
     }
 }
@@ -1062,7 +1062,7 @@ impl Tuning {
 /// (the overlay never constructs the value-carrying `Budget`).
 impl PartialEq for Tuning {
     fn eq(&self, other: &Self) -> bool {
-        let key = |e: &Option<ReasoningEffort>| e.as_ref().map(|e| e.variant_name());
+        let key = |e: &Option<ReasoningEffort>| e.as_ref().map(genai::chat::ReasoningEffort::variant_name);
         key(&self.effort) == key(&other.effort)
             && self.temperature == other.temperature
             && self.top_p == other.top_p
@@ -1268,35 +1268,32 @@ fn build_client(id: &ProviderId, model: &str, cred: &Credential) -> (Client, Ada
         }
     };
     let adapter = adapter_for_provider_model(id, model);
-    let client = match id.endpoint() {
-        Some(base_url) => {
-            let endpoint = Endpoint::from_owned(base_url);
-            let resolver = ServiceTargetResolver::from_resolver_fn(move |t: ServiceTarget| {
-                Ok(ServiceTarget {
-                    endpoint: endpoint.clone(),
-                    auth: AuthData::from_single(key.clone()),
-                    model: ModelIden::new(adapter, t.model.model_name),
-                })
-            });
-            Client::builder()
-                .with_reqwest(crate::tls::client())
-                .with_service_target_resolver(resolver)
-                .build()
-        }
-        None => {
-            let auth = AuthResolver::from_resolver_fn(move |iden: ModelIden| {
-                if iden.adapter_kind == adapter {
-                    Ok(Some(AuthData::from_single(key.clone())))
-                } else {
-                    Ok(None)
-                }
-            });
-            Client::builder()
-                .with_reqwest(crate::tls::client())
-                .with_adapter_kind(adapter)
-                .with_auth_resolver(auth)
-                .build()
-        }
+    let client = if let Some(base_url) = id.endpoint() {
+        let endpoint = Endpoint::from_owned(base_url);
+        let resolver = ServiceTargetResolver::from_resolver_fn(move |t: ServiceTarget| {
+            Ok(ServiceTarget {
+                endpoint: endpoint.clone(),
+                auth: AuthData::from_single(key.clone()),
+                model: ModelIden::new(adapter, t.model.model_name),
+            })
+        });
+        Client::builder()
+            .with_reqwest(crate::tls::client())
+            .with_service_target_resolver(resolver)
+            .build()
+    } else {
+        let auth = AuthResolver::from_resolver_fn(move |iden: ModelIden| {
+            if iden.adapter_kind == adapter {
+                Ok(Some(AuthData::from_single(key.clone())))
+            } else {
+                Ok(None)
+            }
+        });
+        Client::builder()
+            .with_reqwest(crate::tls::client())
+            .with_adapter_kind(adapter)
+            .with_auth_resolver(auth)
+            .build()
     };
     (client, adapter)
 }
@@ -1309,7 +1306,7 @@ fn build_client(id: &ProviderId, model: &str, cred: &Credential) -> (Client, Ada
 fn build_oauth_client(cell: Arc<Mutex<oauth::OAuthToken>>) -> Client {
     let auth = AuthResolver::from_resolver_fn(move |iden: ModelIden| {
         if iden.adapter_kind == AdapterKind::OpenAIResp {
-            let token = cell.lock().unwrap_or_else(|e| e.into_inner());
+            let token = cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             Ok(Some(AuthData::RequestOverride {
                 url: oauth::RESPONSES_URL.to_string(),
                 headers: Headers::from(oauth::request_headers(&token)),
@@ -1554,7 +1551,7 @@ impl Engine {
     fn transport_for(&self, id: &ProviderId, model: &str, cred: &Credential) -> Arc<Transport> {
         self.transports
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entry(TransportKey::for_selection(id, model, cred))
             .or_insert_with(|| Transport::build(id, model, cred))
             .clone()
@@ -1571,7 +1568,7 @@ impl Engine {
         // Copy the token out only when a refresh is actually due — the common
         // case finds it fresh and returns under the lock without cloning.
         let current = {
-            let token = cell.lock().unwrap_or_else(|e| e.into_inner());
+            let token = cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if !token.is_stale() {
                 return;
             }
@@ -1582,7 +1579,7 @@ impl Engine {
                 // Upsert this account's token, leaving any other signed-in
                 // account untouched — a whole-file overwrite would drop them.
                 let _ = oauth::save_one(&fresh);
-                *cell.lock().unwrap_or_else(|e| e.into_inner()) = fresh;
+                *cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = fresh;
             }
             Err(e) => eprintln!("exarch: ChatGPT token refresh failed: {e}"),
         }
@@ -1660,7 +1657,7 @@ impl Engine {
                 let attempt_result: Result<StreamEnd, ProviderError> = async {
                     let mut resp = tokio::select! {
                         biased;
-                        _ = wait_for_cancel(cancel) => {
+                        () = wait_for_cancel(cancel) => {
                             return Err(ProviderError::Cancelled("before request"));
                         }
                         // A fresh `sleep` per select entry bounds the connect
@@ -1669,7 +1666,7 @@ impl Engine {
                         // transient transport error so the retry budget
                         // re-issues it (no token has streamed yet).  Retries
                         // get the shorter bound — see [`idle_timeout`].
-                        _ = tokio::time::sleep(idle_timeout(attempt)) => {
+                        () = tokio::time::sleep(idle_timeout(attempt)) => {
                             return Err(ProviderError::Transient {
                                 cause: "stream idle: no response within timeout".into(),
                                 attempts: 1,
@@ -1691,7 +1688,7 @@ impl Engine {
                         // which genai surfaces as a stream error below.
                         let event = tokio::select! {
                             biased;
-                            _ = wait_for_cancel(cancel) => {
+                            () = wait_for_cancel(cancel) => {
                                 return Err(ProviderError::Cancelled("mid-stream"));
                             }
                             ev = resp.stream.next() => match ev {
@@ -1703,7 +1700,6 @@ impl Engine {
                             }
                         };
                         match event {
-                            ChatStreamEvent::Start => {}
                             ChatStreamEvent::Chunk(c) => {
                                 seen_streamed_content |= !c.content.is_empty();
                                 streamed.push_str(&c.content);
@@ -1724,7 +1720,8 @@ impl Engine {
                             // explicitly rather than with a wildcard so a
                             // new genai stream variant fails the build
                             // instead of vanishing (X10).
-                            ChatStreamEvent::ThoughtSignatureChunk(_)
+                            ChatStreamEvent::Start
+                            | ChatStreamEvent::ThoughtSignatureChunk(_)
                             | ChatStreamEvent::ToolCallChunk(_) => {}
                         }
                     }
@@ -1795,7 +1792,7 @@ impl Engine {
                 let req = req_template.clone();
                 let r = tokio::select! {
                     biased;
-                    _ = wait_for_cancel(cancel) => {
+                    () = wait_for_cancel(cancel) => {
                         return Attempt::Failed(ProviderError::Cancelled("during summary"));
                     }
                     // `summarize` is non-streaming, so there are no
@@ -1810,7 +1807,7 @@ impl Engine {
                     // rendered, so it is `Failed` (retryable), never
                     // `Committed`.  Retries get the shorter bound — see
                     // [`idle_timeout`].
-                    _ = tokio::time::sleep(idle_timeout(attempt)) => {
+                    () = tokio::time::sleep(idle_timeout(attempt)) => {
                         return Attempt::Failed(ProviderError::Transient {
                             cause: "summary request: no response within timeout".into(),
                             attempts: 1,
@@ -2013,7 +2010,7 @@ fn usage_from(model: &str, raw: &genai::chat::Usage, metered: bool, adapter: Ada
         .map(|n| n as u64);
     let dollars = if metered {
         crate::pricing::lookup_for(model, adapter)
-            .map(|p| {
+            .map_or(0.0, |p| {
                 p.dollars(
                     input,
                     output,
@@ -2021,7 +2018,6 @@ fn usage_from(model: &str, raw: &genai::chat::Usage, metered: bool, adapter: Ada
                     cache_read.unwrap_or(0),
                 )
             })
-            .unwrap_or(0.0)
     } else {
         0.0
     };
@@ -2836,7 +2832,7 @@ mod tests {
     fn idle_timeout_budget_stays_bounded() {
         let worst_case: Duration = (1..=MAX_ATTEMPTS).map(idle_timeout).sum();
         assert!(
-            worst_case < Duration::from_secs(600),
+            worst_case < Duration::from_mins(10),
             "a stalled stream must fail in minutes, not appear hung; idle budget is {worst_case:?}"
         );
         assert_eq!(

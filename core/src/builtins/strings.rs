@@ -1,6 +1,6 @@
 //! String, regex, shell-word, and value-coercion builtins.
 
-use crate::types::*;
+use crate::types::{Settled, Shell, Value, sig, sig_hint};
 use std::borrow::Cow;
 
 #[cfg(feature = "grep")]
@@ -64,7 +64,7 @@ pub(super) fn builtin_join(args: &[Value]) -> Settled<Value> {
     Ok(Value::String(
         items
             .iter()
-            .map(|v| v.to_string())
+            .map(std::string::ToString::to_string)
             .collect::<Vec<_>>()
             .join(&sep),
     ))

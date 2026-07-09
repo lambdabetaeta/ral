@@ -162,8 +162,6 @@ pub enum Token {
 impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Token::Word(Word::Plain(s)) => write!(f, "'{s}'"),
-            Token::Word(Word::Slash(s)) => write!(f, "'{s}'"),
             Token::Word(Word::Tilde(path)) => {
                 let mut rendered = "~".to_string();
                 if let Some(user) = &path.user {
@@ -174,7 +172,9 @@ impl fmt::Display for Token {
                 }
                 write!(f, "{rendered}")
             }
-            Token::SingleQuoted(s) => write!(f, "'{s}'"),
+            Token::Word(Word::Plain(s) | Word::Slash(s)) | Token::SingleQuoted(s) => {
+                write!(f, "'{s}'")
+            }
             Token::DoubleQuoted(_) => write!(f, "\"...\""),
             Token::Dollar => write!(f, "$"),
             Token::Caret => write!(f, "^"),
@@ -410,8 +410,7 @@ impl Lexer {
     fn byte_pos(&self) -> u32 {
         self.chars
             .get(self.pos)
-            .map(|(b, _)| *b as u32)
-            .unwrap_or(self.source_len)
+            .map_or(self.source_len, |(b, _)| *b as u32)
     }
 
     /// Zero-width span at the current cursor; the byte range is extended
@@ -426,10 +425,10 @@ impl Lexer {
     }
 
     fn error(&self, span: Span, message: impl Into<String>) -> LexError {
-        self.typed_error(span, LexErrorKind::Other(message.into()))
+        Self::typed_error(span, LexErrorKind::Other(message.into()))
     }
 
-    fn typed_error(&self, span: Span, kind: LexErrorKind) -> LexError {
+    fn typed_error(span: Span, kind: LexErrorKind) -> LexError {
         LexError { kind, span }
     }
 
@@ -441,7 +440,7 @@ impl Lexer {
         form: StringForm,
         inner: Option<Box<LexErrorKind>>,
     ) -> LexError {
-        self.typed_error(
+        Self::typed_error(
             span,
             LexErrorKind::UnterminatedString {
                 form,
@@ -537,7 +536,7 @@ impl Lexer {
     fn eof_or_unterminated(&self, span: Span) -> Result<(Token, Span), LexError> {
         if let Some(open) = self.delim_stack.last().copied() {
             let (o, c) = open.kind.chars();
-            return Err(self.typed_error(
+            return Err(Self::typed_error(
                 open.opened,
                 LexErrorKind::UnterminatedBalanced {
                     open: o,
@@ -1151,7 +1150,7 @@ impl Lexer {
                 // double-quoted string can re-anchor it.
                 if self.peek().is_none() {
                     return Err(
-                        self.typed_error(span, LexErrorKind::UnclosedDeref { opened: span })
+                        Self::typed_error(span, LexErrorKind::UnclosedDeref { opened: span })
                     );
                 }
                 if name.is_empty() {
@@ -2273,7 +2272,7 @@ mod tests {
     #[test]
     fn bumped_string_level1_empty() {
         let toks = tok_types("#''#");
-        assert_eq!(toks, vec![Token::SingleQuoted("".into()), Token::Eof]);
+        assert_eq!(toks, vec![Token::SingleQuoted(String::new()), Token::Eof]);
     }
 
     #[test]

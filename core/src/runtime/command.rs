@@ -28,7 +28,7 @@
 //! the same `build_command` / `spawn` primitives directly through
 //! [`super::pipeline::run_pipeline`].
 
-use crate::types::*;
+use crate::types::{Break, Control, Error, Raw, Shell, Value};
 
 mod child;
 mod foreground;
@@ -155,7 +155,7 @@ pub(crate) fn run(
             let failure = spawn_error(&cmd_name, e);
             let status = match &failure {
                 Break::Error(err) => err.exit_code(),
-                _ => 127,
+                Break::Escape(_) => 127,
             };
             shell.emit_io(io_event::exec(&cmd_name, &rc.args, status));
             return Err(failure.into());
